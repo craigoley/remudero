@@ -45,7 +45,7 @@ function spec(inv: Inv, overrides: Partial<GardenSpec<C, Inv, GardenAction<C>, G
   };
 }
 
-function checkout(landed: Array<{ title: string; body: string; review?: "operator" }>): () => GardenCheckout {
+function checkout(landed: Array<{ title: string; body: string; }>): () => GardenCheckout {
   return () => ({
     root: "/nowhere",
     land: (opts) => {
@@ -88,30 +88,32 @@ test("W1-T4110: a spec's class is judged by its own metric", () => {
   // The baseline a new PR is judged against is the ACTING class's metric at landing.
   const fresh = stateDir();
   writeFileSync(join(fresh, "DEMO_OFF-a"), "");
-  const landed: Array<{ title: string; body: string; review?: "operator" }> = [];
+  const landed: Array<{ title: string; body: string; }> = [];
   const first = runGarden(spec(inv), { stateDir: fresh, repoRoot: fresh, openWorkspace: checkout(landed), log: () => {}, seed: 1 });
   assert.deepEqual(first.plan?.acting, ["b"]);
   assert.deepEqual(readGardenState(gardenStatePath(fresh, "demo"), ["a", "b"]).pending?.baseline, { trials: 400, successes: 390 });
 });
 
-test("W1-T4110: an operator-review class opens its PR without auto-merge", () => {
+// The title is W1-T4110's acceptance proof (a grep of this literal), so it stays; the behaviour it
+// named is SUPERSEDED by operator ruling 2026-09-24 — a reviewed class's PR is never held or drafted.
+test("W1-T4110: an operator-review class opens its PR without auto-merge — superseded: it now opens ready for review and flows through the fleet's review and auto-merge", () => {
   const inv: Inv = { version: 1, metrics: { a: { trials: 1, successes: 1 }, b: { trials: 1, successes: 1 } } };
   const reserved = spec(inv, { review: { b: "doctrine reserves rule changes to a person." } });
 
   const heldDir = stateDir();
   writeFileSync(join(heldDir, "DEMO_OFF-a"), "");
-  const held: Array<{ title: string; body: string; review?: "operator" }> = [];
+  const held: Array<{ title: string; body: string; }> = [];
   const r = runGarden(reserved, { stateDir: heldDir, repoRoot: heldDir, openWorkspace: checkout(held), log: () => {}, seed: 1 });
   assert.equal(r.prUrl, "https://github.com/acme/demo/pull/1");
-  assert.equal(held[0]!.review, "operator");
-  assert.match(held[0]!.body, /^\*\*Held for operator review\.\*\* The demo gardener's `b` changes are yours to approve: doctrine reserves rule changes to a person\. It is not queued for auto-merge\.\n\nthe body$/);
+  assert.equal("review" in held[0]!, false, "nothing asks the checkout to hold or draft the PR");
+  assert.match(held[0]!.body, /^\*\*Judged by its outcome\.\*\* The demo gardener's `b` changes are judged by whether this PR merges: doctrine reserves rule changes to a person\. It is reviewed and auto-merges like every fleet PR; close it to decline — a merge credits the class, a close debits it\.\n\nthe body$/);
 
   // A class the spec does not reserve lands for the fleet as usual.
   const fleetDir = stateDir();
   writeFileSync(join(fleetDir, "DEMO_OFF-b"), "");
-  const plain: Array<{ title: string; body: string; review?: "operator" }> = [];
+  const plain: Array<{ title: string; body: string; }> = [];
   runGarden(reserved, { stateDir: fleetDir, repoRoot: fleetDir, openWorkspace: checkout(plain), log: () => {}, seed: 1 });
-  assert.equal(plain[0]!.review, undefined);
+  assert.equal("review" in plain[0]!, false);
   assert.equal(plain[0]!.body, "the body");
 });
 

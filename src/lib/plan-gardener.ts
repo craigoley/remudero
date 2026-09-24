@@ -18,8 +18,9 @@ import { loadCreditStore } from "./status.js";
  *     aside) and that declares the same files is withdrawn in favour of the older one.
  *   - RETIRE: a queued task whose every acceptance proof already holds is closed; one that depends
  *     on a retired task is retired.
- * Both write `retirement:`, which doctrine reserves to a person, so both are `review: "operator"`
- * (gardener.ts): the PR opens as a draft and the class is judged by the operator's decision.
+ * Both write `retirement:`, a judgement call, so both are `review` classes (gardener.ts): each is judged
+ * by whether its PR merges. The PR opens ready for review — never a draft — and flows through the
+ * fleet's review and auto-merge like every other PR; closing it is how a person declines it.
  *
  * REPRIORITIZE is deliberately absent: dispatch already orders the queue by measured value
  * (dispatch-value.ts, W1-T3412), so writing `priority:` from the same evidence would count it twice.
@@ -163,7 +164,7 @@ export function applyPlanActions(repoRoot: string, shards: Map<string, string>, 
 
 function prBody(actions: PlanGardenAction[], shards: Map<string, string>): string {
   const lines = [
-    "The plan gardener (W1-T4111) proposes retiring queued tasks. A retirement is a person's call, so this PR is a draft and will not merge itself: mark it ready and merge to accept, or close it to decline — the gardener learns from either.",
+    "The plan gardener (W1-T4111) proposes retiring queued tasks. This PR is reviewed and auto-merges like every fleet PR; close it to decline a retirement — the gardener learns from whether it merges.",
     "",
     ...actions.map((a) => `- **${a.class}** \`${a.target}\`${a.into ? ` into \`${a.into}\`` : ""} (\`retirement: ${a.retirement}\`): ${a.reason}`),
     "",
@@ -186,8 +187,8 @@ export function planGardenSpec(deps: GardenerDeps): GardenSpec<PlanGardenClass, 
     name: "plan",
     classes: PLAN_GARDEN_CLASSES,
     review: {
-      merge: "folding a duplicate writes `retirement:`, which doctrine reserves to a person.",
-      retire: "a retirement is a judgement call, which doctrine reserves to a person.",
+      merge: "folding a duplicate writes `retirement:`, a judgement call.",
+      retire: "a retirement is a judgement call.",
     },
     cheapFingerprint: () => planCheapFingerprint(deps.repoRoot, deps.stateDir),
     inventory: () => planInventory(deps.repoRoot, deps.stateDir),

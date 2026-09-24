@@ -1,7 +1,8 @@
 /**
  * W1-T4111: the plan queue tends itself. A plan gardener (a gardener.ts spec) folds queued
- * duplicates and proposes retiring tasks that are done or can never run — always as a draft PR a
- * person decides, and each class is judged by that decision.
+ * duplicates and proposes retiring tasks that are done or can never run — as a PR that opens ready
+ * for review (never a draft, operator ruling 2026-09-24) and flows through the fleet's review and
+ * auto-merge; each class is judged by whether that PR merges.
  */
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -25,7 +26,10 @@ import {
   retirementCandidates,
 } from "../src/lib/plan-gardener.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { daemonCommand, gardenCheckout, type RunResult } from "../src/run-task.js";
+import { armAutoMergeDetailed } from "../src/lib/arm-auto-merge.js";
+import { loadDefaultPolicy } from "../src/lib/policy.js";
+import { decideSweepArm, DEFAULT_SWEEP_POLICY, deriveDisposition, sweepArmTaskId, type OpenPrView } from "../src/lib/sweep.js";
+import { daemonCommand, GARDEN_BRANCH_RE, gardenCheckout, type RunResult } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 interface ShardSpec {
@@ -67,7 +71,7 @@ function planRepo(tasks: ShardSpec[]): string {
   return root;
 }
 
-function checkout(root: string, landed: Array<{ paths: string[]; title: string; body: string; review?: "operator" }>): () => GardenCheckout {
+function checkout(root: string, landed: Array<{ paths: string[]; title: string; body: string }>): () => GardenCheckout {
   return () => ({
     root,
     land: (opts) => {
@@ -78,7 +82,7 @@ function checkout(root: string, landed: Array<{ paths: string[]; title: string; 
   });
 }
 
-const deps = (root: string, landed: Array<{ paths: string[]; title: string; body: string; review?: "operator" }>, prState?: () => "open" | "merged" | "closed") => ({
+const deps = (root: string, landed: Array<{ paths: string[]; title: string; body: string }>, prState?: () => "open" | "merged" | "closed") => ({
   stateDir: join(root, "state"),
   repoRoot: root,
   openWorkspace: checkout(root, landed),
@@ -102,7 +106,7 @@ test("W1-T4111: a duplicate queued task is folded into the older one", () => {
     { id: "W1-T12", title: lesson("ci-gate", 12), files: ["src/x.ts"] },
   ]);
   writeFileSync(join(root, "state", "PLAN_OFF-retire"), "");
-  const landed: Array<{ paths: string[]; title: string; body: string; review?: "operator" }> = [];
+  const landed: Array<{ paths: string[]; title: string; body: string }> = [];
   const pass = runGarden(planGardenSpec(deps(root, landed)), deps(root, landed));
   assert.deepEqual(pass.plan?.acting, ["merge"]);
   assert.deepEqual(pass.plan?.actions.map((a) => [a.target, (a as { into?: string }).into]), [["W1-T10", "W1-T9"]]);
@@ -123,14 +127,17 @@ test("W1-T4111: a retirement is only ever proposed for operator review", () => {
     { id: "W1-T4", title: "still to do" },
   ]);
   writeFileSync(join(root, "state", "PLAN_OFF-merge"), "");
-  const landed: Array<{ paths: string[]; title: string; body: string; review?: "operator" }> = [];
+  const landed: Array<{ paths: string[]; title: string; body: string }> = [];
   const spec = planGardenSpec(deps(root, landed));
   // Every class this gardener has writes `retirement:`, so every class is a person's call.
   assert.deepEqual(Object.keys(spec.review ?? {}).sort(), [...PLAN_GARDEN_CLASSES].sort());
   const pass = runGarden(spec, deps(root, landed));
   assert.deepEqual(pass.plan?.actions.map((a) => a.target).sort(), ["W1-T2", "W1-T3"]);
-  assert.equal(landed[0]!.review, "operator", "the PR opens for a person, never for auto-merge");
-  assert.match(landed[0]!.body, /^\*\*Held for operator review\.\*\*/);
+  // Operator ruling 2026-09-24: the PR is never held or drafted — it flows through the fleet's review
+  // and auto-merge, and the person's decision is whether it merges or is closed.
+  assert.equal("review" in landed[0]!, false, "nothing asks the checkout to hold or draft the PR");
+  assert.match(landed[0]!.body, /^\*\*Judged by its outcome\.\*\* The plan gardener's `retire` changes are judged by whether this PR merges: /);
+  assert.doesNotMatch(landed[0]!.body, /draft|held for|not queued for auto-merge/i);
   assert.match(readFileSync(join(root, "plan", "tasks.d", "W1-T2-x.yaml"), "utf8"), /retirement: retired\n {2}# plan gardener: retire W1-T2 — It depends on W1-T1/);
   assert.match(readFileSync(join(root, "plan", "tasks.d", "W1-T3-x.yaml"), "utf8"), /retirement: closed/);
   // The class is judged by the operator's decision alone: open waits, merged credits.
@@ -164,51 +171,57 @@ test("W1-T4111: the inventory skips credited and shared-shard tasks, and a proof
   assert.throws(() => planInventory(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4111-empty-`)), "/nowhere"), /cannot read plan file/);
 });
 
-test("W1-T4111: an operator-review PR opens as a draft and a fleet PR does not", () => {
-  const origin = gitRepo({ bare: true, kind: "w1t4111-origin" });
-  const seed = gitRepo({ kind: "w1t4111-seed" });
-  writeFileSync(join(seed.dir, "a.txt"), "a\n");
+test("no garden PR is ever opened as a draft, a reviewed retirement included", () => {
+  // Operator ruling 2026-09-24: a draft sits like a stuck PR. The whole path — the plan gardener's
+  // reviewed `retire` class, landed through the real gardenCheckout — opens a PR ready for review.
+  const seed = gitRepo({ kind: "nodraft-seed" });
+  mkdirSync(join(seed.dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "[]\n");
+  writeFileSync(join(seed.dir, "plan", "tasks.d", "W1-T1-x.yaml"), shard({ id: "W1-T1", title: "gone", status: "blocked", retirement: "withdrawn" }));
+  writeFileSync(join(seed.dir, "plan", "tasks.d", "W1-T2-x.yaml"), shard({ id: "W1-T2", title: "waits on it", depends_on: ["W1-T1"] }));
   seed.git("add", "-A");
   seed.git("commit", "-q", "-m", "seed");
+  const origin = gitRepo({ bare: true, kind: "nodraft-origin" });
   seed.addRemote("origin", origin.dir);
   seed.git("push", "-q", "origin", "HEAD:main");
-  const clone = gitRepo({ cloneFrom: origin.dir, kind: "w1t4111-clone" });
+  const clone = gitRepo({ cloneFrom: origin.dir, kind: "nodraft-clone" });
   clone.git("config", "user.email", "g@example.invalid");
   clone.git("config", "user.name", "g");
-  const worktrees = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4111-wt-`));
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}nodraft-state-`));
+  writeFileSync(join(stateDir, "PLAN_OFF-merge"), "");
+  const worktrees = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}nodraft-wt-`));
   const calls: string[][] = [];
-  const open = (now: number) =>
-    gardenCheckout({
-      name: "plan",
-      repoDir: clone.dir,
-      worktreesRoot: worktrees,
-      owner: "acme",
-      repo: "remudero",
-      log: () => {},
-      clock: fixedClock(now),
-      fetcher: (args) => {
-        calls.push(args);
-        return { html_url: "https://github.com/acme/remudero/pull/5", number: 5 };
-      },
-    });
-  const held = open(1790000000001);
-  const fleet = open(1790000000002);
-  try {
-    writeFileSync(join(held.root, "a.txt"), "held\n");
-    withLiveWritesAllowed(() => held.land({ paths: ["a.txt"], title: "chore(plan): held", body: "b", review: "operator" }));
-    writeFileSync(join(fleet.root, "a.txt"), "fleet\n");
-    withLiveWritesAllowed(() => fleet.land({ paths: ["a.txt"], title: "chore(plan): fleet", body: "b" }));
-    assert.ok(calls[0]!.includes("draft=true"), "held for a person: a draft GitHub will not merge");
-    assert.ok(!calls[1]!.includes("draft=true"));
-    assert.match(origin.git("log", "--oneline", "plan-garden-1790000000001"), /chore\(plan\): held/);
-  } finally {
-    held.dispose();
-    fleet.dispose();
-    assert.equal(existsSync(held.root), false);
-    origin.cleanup();
-    seed.cleanup();
-    clone.cleanup();
-  }
+  const gardenDeps = {
+    stateDir,
+    repoRoot: clone.dir,
+    log: () => {},
+    seed: 1,
+    openWorkspace: () =>
+      gardenCheckout({
+        name: "plan",
+        repoDir: clone.dir,
+        worktreesRoot: worktrees,
+        owner: "acme",
+        repo: "remudero",
+        log: () => {},
+        clock: fixedClock(1790000000001),
+        fetcher: (args) => {
+          calls.push(args);
+          return { html_url: "https://github.com/acme/remudero/pull/5", number: 5 };
+        },
+      }),
+  };
+  const spec = planGardenSpec(gardenDeps);
+  assert.ok(spec.review?.retire, "retire is a reviewed class — the one that used to open as a draft");
+  const pass = withLiveWritesAllowed(() => runGarden(spec, gardenDeps));
+  assert.equal(pass.prUrl, "https://github.com/acme/remudero/pull/5");
+  assert.equal(calls.length, 1, "exactly one PR is created");
+  assert.equal(calls[0]!.some((arg) => /^draft=/.test(arg)), false, `no draft field in ${JSON.stringify(calls[0])}`);
+  assert.match(origin.git("log", "--oneline", "plan-garden-1790000000001"), /chore\(plan\): the plan gardener proposes to retire 1 queued task/);
+  assert.equal(existsSync(join(worktrees, "plan-garden-1790000000001")), false, "the checkout is disposed");
+  origin.cleanup();
+  seed.cleanup();
+  clone.cleanup();
 });
 
 test("W1-T4111: the daemon starts every garden and stops them when it ends", async () => {
@@ -276,4 +289,44 @@ test("a task whose proofs only grep its own shard is never proposed as already d
   ]);
   const actions = retirementCandidates(planInventory(root, join(root, "state")), root);
   assert.deepEqual(actions.map((a) => a.target), ["W1-T2"]);
+});
+
+test("a garden PR opened ready for review is armed by the sweep once its review posts success", () => {
+  // The path a garden PR takes now that it is never a draft (verified end to end, not added): the sweep
+  // reviews it off its PR body's Acceptance block under the synthetic `PR-<n>` id, then its `mergeable`
+  // row arms it under that same id — the path every trailer-less fleet PR takes.
+  const head = "9a7bd00dcafebabe9a7bd00dcafebabe9a7bd00d";
+  const pr: OpenPrView = {
+    prNumber: 6885,
+    prUrl: "https://github.com/acme/remudero/pull/6885",
+    headRefName: "plan-garden-1790197666988",
+    reviewState: "success",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    lastActivityAt: "2026-09-24T11:00:00Z",
+    headSha: head,
+    autoMergeArmed: false,
+    isDraft: false,
+    isPlanFiling: true,
+  };
+  const now = Date.parse("2026-09-24T12:00:00Z");
+  assert.match(pr.headRefName!, GARDEN_BRANCH_RE, "the head identity gate admits it");
+  assert.equal(deriveDisposition(pr, DEFAULT_SWEEP_POLICY, now).disposition, "mergeable");
+  assert.equal(deriveDisposition({ ...pr, isDraft: true }, DEFAULT_SWEEP_POLICY, now).disposition, "held-draft", "the draft it used to open as is what held it");
+  const posted = [{ step: "review.posted", task_id: "PR-6885", head_sha: head, state: "success", capped: true, plan_only: true }];
+  assert.equal(decideSweepArm(pr, posted).arm, true);
+  const armId = sweepArmTaskId(pr, loadDefaultPolicy().values.sweep.armSessionPrs);
+  assert.equal(armId, "PR-6885", "the sweep arms a trailer-less PR under the id its review was posted under");
+  const armed: string[] = [];
+  const result = armAutoMergeDetailed(pr.prUrl, armId, {
+    headSha: () => head,
+    ledgerLines: () => posted,
+    armAuto: (url) => void armed.push(url),
+    mergeDirect: () => assert.fail("an arm that succeeds never falls back to a direct merge"),
+    disableAuto: () => {},
+    say: () => {},
+  });
+  assert.equal(result.outcome, "armed");
+  assert.deepEqual(armed, [pr.prUrl]);
 });

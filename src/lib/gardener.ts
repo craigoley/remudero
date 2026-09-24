@@ -18,8 +18,10 @@ import { sampleBeta, seededRandom } from "./knowledge-value.js";
  * A class is judged by ITS OWN metric ({@link GardenSpec.metric}), never one shared scalar: a closed PR
  * is a debit; after a merge, only a change in that metric beyond one standard error credits or debits
  * it. Each class has an off switch, `state/<NAME>_OFF-<class>`. A class that doctrine reserves to a
- * person declares `review` and its PR is landed for operator review, never for auto-merge; such a class
- * is judged by the person's decision alone ({@link judgeGardenDecision}), not by a metric.
+ * person declares `review`: such a class is judged by its PR's outcome alone — merged credits, closed
+ * debits ({@link judgeGardenDecision}) — not by a metric. EVERY garden PR, reviewed class or not, opens
+ * ready for review and flows through the fleet's review and auto-merge; none is ever a draft or held
+ * (operator ruling, 2026-09-24: a draft sits like a stuck PR).
  */
 
 /** Successes out of trials: the evidence a class is judged on. */
@@ -60,8 +62,8 @@ export interface GardenPlan<C extends string, A extends GardenAction<C>> {
 /** A place to make a pass's changes and land them as one PR. */
 export interface GardenCheckout {
   root: string;
-  /** Commit the paths and open the PR; `review: "operator"` opens it for a person, never for auto-merge. */
-  land: (opts: { paths: string[]; title: string; body: string; review?: "operator" }) => string | undefined;
+  /** Commit the paths and open the PR — always ready for review, never a draft. */
+  land: (opts: { paths: string[]; title: string; body: string }) => string | undefined;
   dispose: () => void;
 }
 
@@ -82,7 +84,7 @@ export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W ex
   /** Ledger prefix, state-file stem and off-switch prefix (upper-cased). */
   name: string;
   classes: readonly C[];
-  /** Classes whose changes a person must review, with the reason the PR says. */
+  /** Classes judged by their PR's outcome rather than a metric, with the reason the PR says. */
   review?: Partial<Record<C, string>>;
   cheapFingerprint: () => string;
   inventory: () => I;
@@ -179,9 +181,10 @@ export function planGarden<C extends string, A extends GardenAction<C>>(opts: {
   return { actions: chosen ? all.filter((a) => a.class === chosen) : [], acting: chosen ? [chosen] : [] };
 }
 
-/** The note an operator-review PR opens with, so a reader sees why it will not merge itself. */
-export function operatorReviewNote(name: string, actionClass: string, why: string): string {
-  return `**Held for operator review.** The ${name} gardener's \`${actionClass}\` changes are yours to approve: ${why} It is not queued for auto-merge.\n\n`;
+/** The note a reviewed class's PR opens with: why its outcome is the verdict. It is never held — it
+ *  is reviewed and auto-merges like every fleet PR, and closing it is how a person declines it. */
+export function judgedByOutcomeNote(name: string, actionClass: string, why: string): string {
+  return `**Judged by its outcome.** The ${name} gardener's \`${actionClass}\` changes are judged by whether this PR merges: ${why} It is reviewed and auto-merges like every fleet PR; close it to decline — a merge credits the class, a close debits it.\n\n`;
 }
 
 /** Where a landed PR stands, read over REST with the given fetcher. */
@@ -240,9 +243,7 @@ export function runGarden<C extends string, I, A extends GardenAction<C>, W exte
       const landing = spec.apply(ws, plan, scorecard);
       if (landing) {
         const why = spec.review?.[acting];
-        prUrl = why
-          ? ws.land({ ...landing, body: operatorReviewNote(spec.name, acting, why) + landing.body, review: "operator" })
-          : ws.land(landing);
+        prUrl = ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing);
       }
     } finally {
       ws.dispose();
