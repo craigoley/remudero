@@ -17,6 +17,8 @@ import type { Route, SseRoute, SseSend } from "../src/lib/service.js";
 const BOOT = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEW = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const SEND: SseSend = () => {};
+/** W1-T4463: every move in this suite touches code serve loads. */
+const SRC_MOVED = () => ({ changedPaths: ["src/lib/serve.ts"] });
 const REQ = {} as IncomingMessage;
 const CTX = { params: {} };
 
@@ -68,6 +70,7 @@ function recorder(bootSha: string, extra: Partial<StaleCodeExitDeps> = {}) {
   let currentSha = bootSha;
   const gate = gateStaleCodeExit({
     bootSha,
+    changedPathsSince: SRC_MOVED,
     resolveCurrentSha: () => {
       shaCalls.push(shaCalls.length);
       return currentSha;

@@ -120,6 +120,7 @@ import {
   type IncidentInvariantRow,
 } from "./incident-invariants.js";
 import { checkServiceFreshness } from "./self-sync.js";
+import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
 import {
@@ -2728,7 +2729,7 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
     checkedAt: clock.iso(),
   };
   // NEVER DIRTY: the entrypoint refuses to sync it, so the restart would loop on the same sha.
-  return { state, restartDue: !svc.dirty && svc.behind !== null && behindBy !== 0 };
+  return { state, restartDue: !svc.dirty && svc.behind !== null && behindBy !== 0 && serveRestartRelevant(svc.behind.changedPaths) };
 }
 
 /** W1-T4229 BACKSTOP: fires only on a connection that never ends by itself (SSE, a hung client). */
@@ -2803,6 +2804,7 @@ export interface StaleCodeExitDeps {
   assessCheckout?: () => Promise<GatewayCheckoutAssessment>;
   /** W1-T4229: {@link drainServer}; absent, the exit is immediate as before. */
   drain?: () => Promise<void>;
+  changedPathsSince?: ChangedPathsReader;
 }
 /** What {@link gateStaleCodeExit} hands back — a wrapper for the console's ONE SSE route and a
  *  wrapper for each HIGH-tier write route, both feeding the SAME internal decision. */
@@ -2884,13 +2886,36 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   let checkout: GatewayCheckoutAssessment | undefined;
   let exiting = false;
   let dirtyReported: string | undefined;
+  const readChangedPaths = deps.changedPathsSince ?? ((boot, target) => changedPathsSince(boot, target, serveRepoDir()));
+  const relevance = new Map<string, boolean | "pending">();
+  const settleRelevance = (currentSha: string, read: ChangedPathsRead): void => {
+    const relevant = serveRestartRelevant(read.diffUnreadable === undefined ? read.changedPaths : undefined);
+    relevance.set(currentSha, relevant);
+    if (!relevant) log("serve.stale_code_not_loaded", { bootSha: deps.bootSha, currentSha, changedPaths: read.changedPaths });
+    else if (read.diffUnreadable !== undefined) log("serve.restart_diff_unreadable", { bootSha: deps.bootSha, currentSha, reason: read.diffUnreadable });
+  };
+  const movedRelevantly = (currentSha: string): boolean => {
+    const known = relevance.get(currentSha);
+    if (known !== undefined) return known === true;
+    relevance.set(currentSha, "pending");
+    const read = readChangedPaths(deps.bootSha, currentSha);
+    if (!(read instanceof Promise)) {
+      settleRelevance(currentSha, read);
+      return relevance.get(currentSha) === true;
+    }
+    read.then(
+      (landed) => settleRelevance(currentSha, landed),
+      (err: unknown) => settleRelevance(currentSha, { diffUnreadable: err instanceof Error ? err.message : String(err) }),
+    ).then(maybeExit);
+    return false;
+  };
 
   const maybeExit = (): void => {
     if (exiting) return;
     // NEVER NEGOTIABLE: an exit mid-write drops the request, and a drain's bound could cut one.
     if (inFlightWrites !== 0) return;
     const currentSha = resolveCurrentSha();
-    const codeStale = isConsoleCodeStale(deps.bootSha, currentSha);
+    const codeStale = isConsoleCodeStale(deps.bootSha, currentSha) && movedRelevantly(currentSha);
     const checkoutBehind = checkout?.restartDue === true;
     if (!codeStale && !checkoutBehind) {
       staleSince = undefined;
