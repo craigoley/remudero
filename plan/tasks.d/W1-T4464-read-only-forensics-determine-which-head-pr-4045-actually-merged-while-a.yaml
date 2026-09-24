@@ -1,0 +1,97 @@
+- id: W1-T4464
+  title: "READ-ONLY FORENSICS — determine which head PR #4045 actually merged while a review-gate fix was in flight, locate the linearization gap between fix ownership and merge authority, and measure whether the race is systemic"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 100.00
+  risk: high
+  status: queued
+  attempts: 0
+  origin: "followup#DAEMON-1788584618629:2026-09-05T05:18:27.429Z:2"
+  plan_refs: ["§12.3B", "W1-T230", "W1-T1215", "W1-T2677", "W1-T2722", "W1-T2851", "W1-T2855"]
+  files:
+    - docs/audits/pr-4045-stale-head-fix-race-2026-09.md
+    - docs/docs-index.json
+  rationale: |
+    FOLLOW-UP HARVEST from run W1-T2866 (DAEMON-1788584618629, PR #4045) reports that
+    `remudero-fleet[bot]` merged a stale head while a review-gate fix worker was actively in flight.
+    That report names a merge-safety race but does not yet establish what "stale" means. GitHub may
+    have merged an obsolete remote head, the current remote head while a newer fix existed only
+    locally, a head whose checks described an older base or PR body, or a head carrying a verdict
+    superseded by an in-flight repair. Those are different mechanisms with different remedies.
+
+    THE NEAR NEIGHBOURS ARE ALREADY DECIDED AND MUST NOT BE RE-FILED BY TITLE. W1-T230 binds an arm
+    to the orchestrator's exact-head ledger verdict. W1-T1215 records a best-effort withdrawal losing
+    to GitHub's merge queue. W1-T2677 gives repairs an atomic cross-agent claim but explicitly makes
+    that claim evidence rather than a lock and does not connect it to merge admission. W1-T2722 owns
+    contradictory semantic verdicts for one decision input. W1-T2851 owns a success status certifying
+    an older PR body, and W1-T2855 owns direct merge against checks computed on an older base. The
+    reported overlap is new work only if its mechanism survives those dispositions.
+
+    MASTER-PLAN §12.3B says an armed auto-merge is safe because GitHub's required-check contract,
+    rather than runner timing, decides the merge. PR #4045 either exposes a missing input to that
+    contract, a runner-side merge path outside it, or imprecise incident language. Guessing which
+    would turn a research proposal into an ungrounded merge-gate change.
+  design: |
+    Run one bounded, read-only forensic pass and write
+    `docs/audits/pr-4045-stale-head-fix-race-2026-09.md`. Reconstruct a single UTC event timeline
+    from immutable GitHub PR commits/events, status and check attempts, auto-merge enablement and
+    merge records, joined to the complete ledger union for the originating run, sweep disposition,
+    fix dispatch, worker lifecycle, review posts, arm/disarm attempts, pushes and terminal outcome.
+    Every row carries the PR number, remote head SHA where available, actor or run id, timestamp and
+    evidence source. An unavailable source is marked UNREAD, never treated as an empty history.
+
+    Classify the incident into exactly one evidence-supported stale-head meaning: obsolete remote
+    head merged; current remote head merged while a newer fix was only local; stale base; stale PR
+    body; stale review verdict; or NOT DETERMINABLE. State the remote head immediately before merge,
+    the resulting merge SHA, every fix-worker observed/base/result SHA, and whether any claimed
+    newer commit was ever successfully pushed. Do not call an unpushed local commit the PR head.
+
+    Trace every production path capable of arming, directly merging, withdrawing an arm, dispatching
+    the relevant fix and pushing its result. For each candidate mechanism, mark RULED IN, RULED OUT
+    or UNDECIDED with the source symbol and event that decides it. Explicitly test whether an active
+    fix dispatch or W1-T2677 repair claim is visible to the mergeable disposition, whether the fix
+    path posts a required pending state before spending, whether a previously armed PR can become
+    mergeable during the repair, and whether a direct-merge fallback participated.
+
+    Measure recurrence over a named, bounded ledger/GitHub window: count same-PR intervals where a
+    fix worker was active while auto-merge was armed or a merge completed, partitioned into confirmed
+    safe, confirmed race and NOT DETERMINABLE. Prove each query can see its corpus with a positive
+    control and report the newest timestamp in each corpus so an old archive cannot manufacture zero.
+
+    Ship no source change and preselect no remedy. The audit maps its finding to W1-T230, W1-T1215,
+    W1-T2677, W1-T2722, W1-T2851 and W1-T2855 criterion by criterion. If none owns the ruled-in
+    mechanism, record one narrowly scoped SUCCESSOR FILING with the required invariant and production
+    insertion point; if an existing task owns it completely, name that task and file nothing.
+  acceptance:
+    - claim: "the audit reconstructs one UTC evidence timeline joining PR #4045 GitHub events and the complete ledger union, with head SHAs, actors or run ids and unread sources named"
+      proof: "grep: EVIDENCE TIMELINE in docs/audits/pr-4045-stale-head-fix-race-2026-09.md"
+    - claim: "the report distinguishes an obsolete remote head from a current remote head with an unpushed local fix, stale base, stale body and stale verdict, and assigns the incident one supported classification or NOT DETERMINABLE"
+      proof: "grep: STALE HEAD CLASSIFICATION in docs/audits/pr-4045-stale-head-fix-race-2026-09.md"
+    - claim: "every candidate arm, merge, withdrawal, fix-dispatch and push mechanism is marked RULED IN, RULED OUT or UNDECIDED with its deciding source symbol and event"
+      proof: "grep: CANDIDATE MECHANISMS in docs/audits/pr-4045-stale-head-fix-race-2026-09.md"
+    - claim: "recurrence is measured over a named window as confirmed-safe, confirmed-race and NOT DETERMINABLE overlaps, with positive controls and each corpus newest timestamp reported"
+      proof: "grep: RECURRENCE CENSUS in docs/audits/pr-4045-stale-head-fix-race-2026-09.md"
+    - claim: "the finding is compared criterion by criterion with W1-T230, W1-T1215, W1-T2677, W1-T2722, W1-T2851 and W1-T2855, so an already-owned mechanism is cited rather than re-filed"
+      proof: "grep: OWNERSHIP DISPOSITION in docs/audits/pr-4045-stale-head-fix-race-2026-09.md"
+    - claim: "any unowned code change is emitted only as a narrowly scoped successor filing in the audit; this diagnostic task edits no source"
+      proof: "grep: SUCCESSOR FILING in docs/audits/pr-4045-stale-head-fix-race-2026-09.md"
+    - claim: "the forensic artifact is discoverable through the generated documentation index"
+      proof: "grep: pr-4045-stale-head-fix-race-2026-09.md in docs/docs-index.json"
+  falsifier: |
+    File no implementation successor if the timeline proves no stale merge occurred, or if the
+    ruled-in mechanism is already fully owned by an existing task above. The diagnostic artifact
+    still records that negative result because it resolves the proposal without turning an ambiguous
+    incident into merge-path code.
+  note: |
+    `depends_on` is deliberately empty. W1-T2866 is a run/amendment label, not a task record in the
+    current merged plan, and the six existing tasks cited above are comparison owners rather than
+    prerequisites for reading the incident. A hard edge would delay the evidence needed to determine
+    whether any of them already closes the class.
+
+    The grep proofs establish the forensic report's required structure, not the truth of its
+    conclusions. Truth comes from the source-linked timeline, candidate disposal, positive controls
+    and explicit NOT DETERMINABLE bucket; that is the appropriate verification shape for a read-only
+    diagnosis with no code deliverable.
