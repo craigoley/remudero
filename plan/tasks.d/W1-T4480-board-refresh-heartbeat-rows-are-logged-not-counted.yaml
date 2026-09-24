@@ -1,0 +1,75 @@
+- id: W1-T4480
+  title: "EVERY BOARD REFRESH WRITES THE SAME THREE HEARTBEATS — `board_gateway.fetch_ok`, `board_gateway.fetch_bytes` and `board_snapshot.unchanged` are ~4.6% of ledger bytes and say nothing changed; write them when something changes and count the rest in a periodic rollup, as W1-T4394 did for webhook wakes"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-24 operator session: core ledger volume census"
+  plan_refs: ["W1-T4394", "W1-T155", "W1-T2919", "W1-T2370", "W1-T2440"]
+  files:
+    - src/lib/status.ts
+    - src/lib/board-snapshot-cache.ts
+    - src/lib/board.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24: the `board_gateway.fetch_bytes` / `board_gateway.fetch_ok` pairs and
+    `board_snapshot.unchanged` rows are about 4.6% of ledger bytes together. Serve refreshes the board every
+    few seconds and each refresh writes them, so they are heartbeats. W1-T4394 (#6936) and #6987 cut the same
+    kind of row by counting it and writing a periodic summary.
+    OVERLAP WITH W1-T155, RULED ON. W1-T155 also names status.ts and board.ts, but it built the board's status
+    taxonomy. This task changes only which gateway and snapshot telemetry rows are written, and touches no
+    projection field.
+    THE EMITTERS, ON MAIN (9aa0dd61e). src/lib/status.ts buildBatchedGithub: attemptFetch's record logs
+    `board_gateway.fetch_ok` {prCount, channel}; restFetchHalf logs `board_gateway.fetch_bytes` {bytes,
+    restCalls, mode, truncated, half}; applyOpenOutcome and applyMergedOutcome log both for the prewarm path.
+    src/lib/board-snapshot-cache.ts commit logs `board_snapshot.unchanged` {channel, rows} when the rows equal
+    the stored snapshot. The daemon uses the same gateway, so it writes these rows too.
+    THE READERS, SWEPT ON MAIN OVER src/, scripts/, .github/ AND the remudero-console checkout:
+      - src/lib/board.ts BOARD_IRRELEVANT_STEPS names `board_gateway.fetch_bytes` so the board cache key ignores
+        it. `board_gateway.fetch_ok` and `board_snapshot.unchanged` are NOT in that set, so today every refresh
+        also changes the board cache key. The rollup step must join the set, or it will do the same.
+      - No src code reads `fetch_ok`, `fetch_bytes` or `unchanged` to make a decision. The other mentions are
+        comments that cite ledger measurements: run-task.ts (the warm-gateway note counts `fetch_bytes` by
+        `mode`, and ALREADY_SATISFIED_VERIFY_ATTEMPTS derives from `fetch_failed` runs) and
+        console-shell-client.ts (a timestamp note). The rollup must keep what those measurements need: counts by
+        mode, rest calls and bytes, and the failure rows unchanged.
+      - remudero-console, scripts/, .github/: none.
+      - test/: status.test.ts, board-gateway-truncation.test.ts, recent-operator-refusals.test.ts,
+        drain-gateway-batched.test.ts, console-shell-unknowns.test.ts, board-snapshot-cache-ignores-heartbeats.test.ts
+        and sweep-gateway-warm.test.ts name these steps. The builder checks each one and moves any per-fetch
+        assertion to the first-of-a-change row or the rollup.
+  design: |
+    (i) KEEP A FULL ROW WHEN SOMETHING CHANGED. Per channel, write `board_gateway.fetch_ok` when prCount
+    differs from that channel's last written row, on the first success after a `board_gateway.fetch_failed`,
+    and on the first fetch after boot. Write `board_gateway.fetch_bytes` when `mode` or `truncated` changes or
+    on a first fetch, and always when `truncated` is true. Write `board_snapshot.unchanged` for a channel only
+    on the first unchanged commit after a `committed`, a refusal or boot.
+    (ii) COUNT THE REST. Keep in-memory counters and flush one `board_gateway.rollup` row per 5 minutes and at
+    shutdown: {window_start, window_end, fetch_ok: {<channel>: n}, fetch: {<half>/<mode>: {n, rest_calls, bytes,
+    truncated}}, snapshot_unchanged: {<channel>: n}}. The counters never drop a fetch. A failed flush keeps the
+    counts for the next window.
+    (iii) Failures and refusals stay one row each: `board_gateway.fetch_failed`, `issue_fetch_failed`,
+    `board_snapshot.commit_refused`, `load_refused`, `committed` and `loaded`.
+    (iv) Add `board_gateway.rollup`, `board_gateway.fetch_ok` and `board_snapshot.unchanged` to
+    BOARD_IRRELEVANT_STEPS (board.ts), after confirming nothing in the board projection reads them.
+    (v) The `board_gateway.issue_fetch_*` rows are out of scope. Add no new `interface XxxDeps`.
+  acceptance:
+    - claim: "a refresh whose pull request count is unchanged writes no fetch_ok row and is counted in the rollup"
+      proof: "unit test: an unchanged board fetch is counted in the rollup and writes no fetch_ok row"
+    - claim: "the first success after a fetch failure still writes a full fetch_ok row"
+      proof: "unit test: the first board fetch after a failure still writes a full fetch_ok row"
+    - claim: "a repeated unchanged snapshot commit is counted, not logged"
+      proof: "unit test: a repeated unchanged board snapshot is counted and not logged"
+    - claim: "the rollup totals equal the fetches made, split by half and mode"
+      proof: "unit test: the board rollup totals every fetch by half and mode"
+    - claim: "the rollup row does not change the board cache key"
+      proof: 'grep: board_gateway\.rollup in src/lib/board.ts'
+  falsifier: |
+    CLOSE IF serve's ledger already shows fewer than one `board_gateway.fetch_ok` row per minute over an hour of
+    steady refreshes.
