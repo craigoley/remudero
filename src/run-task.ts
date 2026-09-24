@@ -10495,13 +10495,14 @@ export async function runFixRung(opts: {
     // so a commit the worker made itself is pushed, not re-read as "the worker changed nothing".
     let harnessCommitRefusalReason: string | undefined;
     let harnessCommitUndeclared: readonly string[] = [];
-    const harnessCommit = (report: string) =>
+    const harnessCommit = (report: string, options: Pick<Parameters<typeof harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit"> = {}) =>
       (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
         harnessOwnsGit: fixHarnessOwnsGit,
         commitCount: roundStartSha === undefined ? 0 : (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha),
         report,
         worktreePath: opts.worktreePath,
         declaredPaths: opts.task.files ?? [],
+        ...options,
         log: deps.log,
         say: deps.say,
         onRefusal: (reason, undeclared = []) => {
@@ -10522,7 +10523,18 @@ export async function runFixRung(opts: {
       deps.say("fix rung: no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
       const asked = await spawnFixWorkerBounded(
         deps,
-        { ...fixArgs, prompt: COMMIT_LINE_RESUME_PROMPT, resumeSessionId: fixResult.sessionId },
+        {
+          ...fixArgs,
+          prompt: missingCommitLinePrompt({
+            provider: fixResult.provider ?? fixArgs.mountProvider,
+            tools: fixArgs.tools,
+            title: opts.task.title,
+            report: workerTranscript(fixResult),
+            worktreePath: opts.worktreePath,
+            declaredPaths: opts.task.files ?? [],
+          }),
+          resumeSessionId: fixResult.sessionId,
+        },
         { runId: opts.runId, taskId: opts.taskId, snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) } },
       );
       const answer = asked.kind === "spawned" ? deps.account(asked.result) : undefined;
@@ -10534,7 +10546,16 @@ export async function runFixRung(opts: {
       if (answer) {
         harnessCommitRefusalReason = undefined;
         harnessCommitUndeclared = [];
-        harnessCommitCount = harnessCommit(`${workerTranscript(fixResult)}\n${workerTranscript(answer)}`);
+        const answeredReport = `${workerTranscript(fixResult)}\n${workerTranscript(answer)}`;
+        const check = priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason;
+        const derivedCommit = writerCannotResume(fixResult.provider ?? fixArgs.mountProvider, fixArgs.tools)
+          && parseReport(answeredReport)?.commitMessage === undefined
+          ? derivedFixCommit(check, opts.prUrl)
+          : undefined;
+        harnessCommitCount = harnessCommit(answeredReport, {
+          subjectSource: derivedCommit ? "harness-derived" : "re-asked",
+          derivedCommit,
+        });
       }
     }
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && harnessCommitCount === 0;
@@ -15499,9 +15520,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // turning that into a pull request would change a long-standing verdict rather than enable a
     // new lane.
     //
-    // THE MESSAGE IS THE WORKER'S, AND ONLY EVER DATA. It arrives as an anchored REPORT line and
-    // travels into an argv array; the harness never runs a command the worker composed. No message,
-    // no commit — an invented subject would attribute work to a run that never asked for it.
+    // The first attempt uses the worker's anchored subject. A non-resumable writer that still omits
+    // it after one contextual re-ask may use the task-record fallback below.
     // CALLED UNCONDITIONALLY, and it owns its own precondition. Guarding here instead would put the
     // decision on lines no test can reach without driving this entire dispatch — which is what
     // `diff-coverage` refused, and rightly: the branch deciding whether a run produces a pull
@@ -15521,13 +15541,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // W1-T4052: A MISSING COMMIT_MESSAGE LINE IS ASKED FOR, NOT DISCARDED. `resumeForMissingCommitLine`
     // owns its own precondition (called unconditionally, exactly like the helper above) — it no-ops
     // for every refusal EXCEPT the exact missing-line one, and only when the worktree still holds
-    // uncommitted changes. The resumed reply asks the SAME session for nothing but the line, and the
-    // recommit runs through the unchanged `harnessCommitForShellLessWorker`, so no other refusal path
-    // changes shape.
+    // uncommitted changes. A Codex writer gets its own diff and report because its resumed spawn
+    // starts fresh. A still-missing line may use the task record, through the same commit guard.
     const commitLineRecovery = await resumeForMissingCommitLine({
       commitCount,
       refusalReason: harnessCommitRefusalState.reason,
       report: fullText(impl),
+      task: writerCannotResume(impl.provider ?? implementMount.provider, implementTools) ? task : undefined,
       worktreePath,
       declaredPaths: task.files ?? [],
       log,
@@ -15546,7 +15566,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         tools: implementTools === undefined ? undefined : [...implementTools],
         ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
         ...cashTrialSpawn,
-      }),
+      }, { provider: impl.provider ?? implementMount.provider, title: task.title, report: fullText(impl), declaredPaths: task.files ?? [] }),
     });
     commitCount = commitLineRecovery.commitCount;
     harnessCommitRefusalState.reason = commitLineRecovery.refusalReason;
@@ -36572,6 +36592,8 @@ export function harnessCommitForShellLessWorker(
     report: string;
     worktreePath: string;
     declaredPaths: readonly string[];
+    subjectSource?: "worker-authored" | "re-asked" | "harness-derived";
+    derivedCommit?: { subject: string; reason: string };
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
     /** Receives the helper's exact refusal reason so a fix lane can record its own outcome row,
@@ -36584,7 +36606,7 @@ export function harnessCommitForShellLessWorker(
   const commit = deps.commit ?? commitWorkerEdits;
   const ahead = deps.ahead ?? commitsAhead;
   const asked = parseReport(input.report)?.commitMessage;
-  if (asked === undefined) {
+  if (asked === undefined && input.derivedCommit === undefined) {
     const reason = MISSING_COMMIT_MESSAGE_REASON;
     // W1-T4450: the tail of the report that was parsed, so the next diagnosis has evidence instead
     // of a transcript a later round overwrote.
@@ -36592,10 +36614,13 @@ export function harnessCommitForShellLessWorker(
     input.onRefusal?.(reason, []);
     return input.commitCount;
   }
-  const committed = commit(input.worktreePath, input.declaredPaths, asked);
+  const message = asked ?? `${input.derivedCommit!.subject}\n\nHarness-derived subject: ${input.derivedCommit!.reason}`;
+  const subjectSource = asked === undefined ? "harness-derived" : input.subjectSource ?? "worker-authored";
+  const committed = commit(input.worktreePath, input.declaredPaths, message);
   const refusalReason = committed.reason ?? "harness commit refused";
   input.log(committed.committed ? "implement.harness_commit" : "implement.harness_commit_refused", {
     ...(committed.sha ? { sha: committed.sha } : {}),
+    subject_source: subjectSource,
     ...(committed.regenerable && committed.regenerable.length > 0 ? { regenerable: committed.regenerable } : {}),
     ...(!committed.committed ? { reason: refusalReason } : {}),
     ...(committed.undeclared.length > 0 ? { undeclared: committed.undeclared } : {}),
@@ -36633,26 +36658,25 @@ export function worktreeHasUncommittedChanges(worktreePath: string): boolean {
  *
  * 188 harness-commit refusals across 82 runs and 112 tasks (since 2026-09-17) carried this exact
  * reason: the worker did the work, saved it to the worktree, and one REPORT line was absent — the
- * single largest way a shell-less implement run ended with nothing. The refusal itself stays
- * correct: `harnessCommitForShellLessWorker` above still refuses to invent a subject, unchanged.
+ * single largest way a shell-less implement run ended with nothing. The first refusal stays in
+ * place; a bounded task-record fallback applies after the one re-ask.
  * But the run that DID the work is still addressable — the implement lane already resumes the SAME
  * worker session for a DECISION_REQUEST follow-up (`implement.resumed`, W1-T3573/W1-T3696); this
- * reuses that mechanism ONCE, asking for nothing but the missing line.
+ * reuses that mechanism ONCE, asking for the missing line and work context when needed.
  *
  * OWNS ITS OWN PRECONDITION, called unconditionally like its sibling above: it no-ops unless the
  * refusal was EXACTLY the missing-line reason (every other refusal — no files declared, outside the
  * declared surface, changed nothing — is left untouched) AND the worktree actually holds
  * uncommitted changes (a worker that changed nothing is left to that refusal rather than resumed to
- * relearn it). ONE resume: a second report still lacking the line is refused with a reason naming
- * that the resume was tried, never looped and never a synthesized subject — the resumed text is
- * merely APPENDED to the original report and handed back through the unchanged
- * `harnessCommitForShellLessWorker`, so every other refusal it can produce still applies.
+ * relearn it). ONE resume: a second report still lacking the line is refused when there is no
+ * task-record fallback; otherwise that fallback passes through the same commit and scope guards.
  */
 export async function resumeForMissingCommitLine(
   input: {
     commitCount: number;
     refusalReason: string | undefined;
     report: string;
+    task?: Pick<Task, "id" | "title" | "type">;
     worktreePath: string;
     declaredPaths: readonly string[];
     log: (step: string, extra?: Record<string, unknown>) => void;
@@ -36695,7 +36719,10 @@ export async function resumeForMissingCommitLine(
   // learnings-used, the worker's own narrative) survives; only the anchored COMMIT_MESSAGE line
   // the resumed reply carries is new, and `parseReport`'s own "last one wins" rule picks it up.
   const combinedReport = `${input.report}\n${resumed.text}`;
-  if (parseReport(combinedReport)?.commitMessage === undefined) {
+  const derivedCommit = parseReport(combinedReport)?.commitMessage === undefined && input.task
+    ? derivedImplementCommit(input.task, input.declaredPaths)
+    : undefined;
+  if (parseReport(combinedReport)?.commitMessage === undefined && derivedCommit === undefined) {
     const reason = `${MISSING_COMMIT_MESSAGE_REASON} (asked the worker's own session once; still absent)`;
     input.log("implement.harness_commit_refused", { reason });
     return { commitCount: input.commitCount, refusalReason: reason, report: combinedReport, resumed: true };
@@ -36709,6 +36736,8 @@ export async function resumeForMissingCommitLine(
       report: combinedReport,
       worktreePath: input.worktreePath,
       declaredPaths: input.declaredPaths,
+      subjectSource: derivedCommit ? "harness-derived" : "re-asked",
+      derivedCommit,
       log: input.log,
       say: input.say,
       onRefusal: createHarnessCommitRefusalRecorder(refusalState),
@@ -36726,17 +36755,72 @@ export const COMMIT_LINE_RESUME_PROMPT =
   "`COMMIT_MESSAGE: <type>(<scope>): <subject>` (Conventional Commits, lower-case " +
   "subject, at most 100 characters).";
 
-/** W1-T4052: build `resumeForMissingCommitLine`'s `resume` from the implement lane's own `spawn`
- *  and `account`. `spawnArgs` is the original spawn's mount (it names `resumeSessionId`); the
- *  prompt is always {@link COMMIT_LINE_RESUME_PROMPT}, and the resumed turn is accounted like any
- *  other so its cost rides the run's budget. */
+/** Codex's write-capable `exec resume` starts a fresh session; cash workers also have no session
+ * continuation. The result's provider is authoritative when an auction chose the mount. */
+function writerCannotResume(provider: WorkerResult["provider"], tools?: readonly string[]): boolean {
+  const readOnly = Array.isArray(tools) && !tools.some((tool) =>
+    ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
+  return !readOnly && (provider === "codex" || provider === "cash");
+}
+
+export function missingCommitLinePrompt(input: {
+  provider?: WorkerResult["provider"];
+  tools?: readonly string[];
+  title: string;
+  report: string;
+  worktreePath: string;
+  declaredPaths?: readonly string[];
+}): string {
+  if (!writerCannotResume(input.provider, input.tools)) return COMMIT_LINE_RESUME_PROMPT;
+  const diffStat = execFileSync("git", ["-C", input.worktreePath, "diff", "HEAD", "--stat"], {
+    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+  const untracked = execFileSync("git", ["-C", input.worktreePath, "ls-files", "--others", "--exclude-standard", "-z"], {
+    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+  }).split("\0").filter((path) => path && (input.declaredPaths === undefined ||
+    input.declaredPaths.some((declared) => pathIsUnderDeclaredSurface(path, [declared])))).join("\n");
+  return `Task: ${input.title}\n\n` +
+    `git diff --stat (HEAD):\n${diffStat || "(no tracked changes)"}\n` +
+    `Untracked files:\n${untracked.slice(0, 1200) || "(none)"}\n\n` +
+    `Tail of your previous report:\n${input.report.slice(-REFUSED_REPORT_TAIL_CHARS)}\n\n` +
+    COMMIT_LINE_RESUME_PROMPT;
+}
+
+function derivedImplementCommit(task: Pick<Task, "id" | "title" | "type">, paths: readonly string[]): { subject: string; reason: string } | undefined {
+  if (task.type !== "implement" || !task.title.trim() || !paths[0]) return undefined;
+  const parts = paths[0].split("/");
+  const area = (parts.length > 1 ? parts[parts.length - 2] : parts[0].replace(/\.[^.]+$/, ""))
+    .toLowerCase().replace(/[^a-z0-9-]/g, "");
+  if (!area || area.length > 60) return undefined;
+  const clause = task.title.split(/\s+[—–-]\s+|[;:.!?]\s+/)[0].trim().toLowerCase().replace(/\s+/g, " ");
+  const prefix = `feat(${area}): `;
+  const subject = prefix + Array.from(clause).slice(0, 100 - prefix.length).join("").trimEnd().replace(/[^\p{L}\p{N}]$/u, "");
+  if (subject === prefix) return undefined;
+  return { subject, reason: `no COMMIT_MESSAGE after one re-ask; ${task.id} title and ${paths[0]}` };
+}
+
+function derivedFixCommit(check: string | undefined, prUrl: string): { subject: string; reason: string } | undefined {
+  const pr = prUrl.match(/\/pull\/(\d+)(?:\/|$)/)?.[1];
+  if (check === undefined || check.trim().length === 0 || pr === undefined) return undefined;
+  const prefix = "fix: repair ";
+  const suffix = ` on #${pr}`;
+  if (prefix.length + suffix.length >= 100) return undefined;
+  const name = Array.from(check.trim().toLowerCase().replace(/\s+/g, " "))
+    .slice(0, 100 - prefix.length - suffix.length).join("").trimEnd();
+  return { subject: `${prefix}${name}${suffix}`, reason: `no COMMIT_MESSAGE after one re-ask; failing check ${check} on #${pr}` };
+}
+
+/** Build the re-ask from the implement lane's own spawn and account. The original mount and
+ *  session id stay in place; a non-resumable writer also receives its own work context. */
 export function commitLineResume(
   spawn: typeof spawnWorker,
   account: (r: WorkerResult) => WorkerResult,
   spawnArgs: Omit<SpawnWorkerArgs, "prompt">,
+  context?: { provider?: WorkerResult["provider"]; title: string; report: string; declaredPaths?: readonly string[] },
 ): () => Promise<{ text: string; costUsd: number; sessionId: string; numTurns: number; subtype: string }> {
   return async () => {
-    const resumed = account(await spawn({ ...spawnArgs, prompt: COMMIT_LINE_RESUME_PROMPT }));
+    const prompt = context ? missingCommitLinePrompt({ ...context, tools: spawnArgs.tools, worktreePath: spawnArgs.cwd }) : COMMIT_LINE_RESUME_PROMPT;
+    const resumed = account(await spawn({ ...spawnArgs, prompt }));
     return {
       text: workerTranscript(resumed),
       costUsd: resumed.costUsd,
