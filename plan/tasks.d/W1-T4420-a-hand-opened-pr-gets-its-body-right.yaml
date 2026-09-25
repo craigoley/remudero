@@ -1,5 +1,5 @@
 - id: W1-T4420
-  title: "HAND-OPENED PRS KEEP FAILING THE SAME GATES — a run branch without a body Remudero-Task line, a body Acceptance block that diverges from the plan, a draft; give sessions `rmd pr open` that writes the body the gates need and refuses what they would refuse"
+  title: "AUTOMATED PR OPENERS MUST CHECK THE BODY BEFORE POST — use one shared library seam for existing openers so task credit and acceptance proofs are valid before the REST write, without adding a CLI verb"
   repo: remudero
   depends_on: []
   priority: 2
@@ -14,27 +14,38 @@
   files:
     - src/lib/pr-open.ts
     - src/run-task.ts
+    - test/a-pr-opens-with-a-judgeable-body.test.ts
   status: queued
   attempts: 0
   rationale: |
     OBSERVED 2026-09-24: three operator-session PRs (#6915, #6916, #6917) failed acceptance-author-gate `no-header`
     because the Remudero-Task trailer was only in the commit, and each needed a body PATCH plus a close and reopen
-    (the gate replays the event payload). The same sessions hand-assemble `gh api POST pulls` bodies for every
-    filing and build, and the gates' rules (trailer in the body for run branches, no Acceptance block that diverges
-    from the plan, discriminating proofs, never a draft) live only in doctrine and memory.
+    (the gate replays the event payload). The PRs also hand-assembled REST create bodies, leaving plan agreement and
+    proof discrimination to later gates. The current implementation of this task added a new `rmd pr open` command,
+    a CLI-only parity entry, and a new `PrOpenDeps` shape; the operator explicitly declined that surface and chose a
+    shared checked library function called by existing PR openers instead (PR #7165 operator comment, 2026-09-25).
+    Research found four existing automated open sites in `src/run-task.ts` (implement, retro, triage, plan), all
+    already pass through `ghPrCreateFillCommand` before the REST writer. That common builder is the bounded seam:
+    validate/derive the body there, then retain the existing REST transport. This keeps author-time checks before
+    the irreversible create event, avoids close/reopen repair, and adds no new command or dependency interface.
   design: |
-    `rmd pr open --head <branch> --title <t> --body-file <f>` (src/lib/pr-open.ts, wired in run-task.ts) derives what
-    the branch needs: a run-<ID>-<epoch> branch gets `Remudero-Task: <ID>` appended to the body if absent, and a
-    body Acceptance block is refused when it diverges from the task's plan criteria. A file/ or run-unfiled branch
-    must carry an Acceptance block, and every grep proof in it is checked to discriminate against origin/main
-    before opening. It never opens a draft. It runs the same predicate acceptance-author-gate runs, before the PR
-    exists, then creates the PR via the REST writer. --dry-run prints the final body.
+    `ghPrCreateFillCommand` is the existing shared pre-POST seam used by all four automated openers. Add a library
+    function in `src/lib/pr-open.ts` that prepares and validates the exact body this seam will send: run branches get
+    their `Remudero-Task: <ID>` trailer before the POST; the Acceptance block must agree with the filed task; and
+    proofs that can be checked locally must discriminate against the merge base. Refuse before any REST call when
+    the body is absent, divergent, or non-discriminating; do not rely on the later event-driven gate to repair it.
+    Keep the existing REST writer and route every current opener through the shared library check. Keep the no-draft
+    invariant. Do NOT add `rmd pr open`, a `COMMANDS` row, generated-help/console-parity changes, a CLI-only baseline
+    entry, or a new `*Deps`/dependency-object type; reuse the existing opener inputs and narrow positional seams.
+    Operator constraint, 2026-09-25: Do not add a new CLI verb or dependency-object interface.
   acceptance:
-    - claim: "a run branch body gains its Remudero-Task line before the pull request opens"
-      proof: "unit test: a run branch body gains its Remudero-Task line before the pull request opens"
-    - claim: "a body whose acceptance proof passes at the base is refused before opening"
-      proof: "unit test: a body whose acceptance proof passes at the base is refused before opening"
-    - claim: "the CLI opens pull requests through the shared helper"
-      proof: 'grep: openPullRequestChecked( in src/run-task.ts'
+    - claim: "a run branch receives its task trailer before the existing REST create is called"
+      proof: "grep: run branches receive the Remudero-Task body trailer before REST pull creation in test/a-pr-opens-with-a-judgeable-body.test.ts"
+    - claim: "a plan-divergent or non-discriminating Acceptance block is refused before any REST POST"
+      proof: "grep: the shared PR opener refuses a stale or plan-divergent acceptance block before POST in test/a-pr-opens-with-a-judgeable-body.test.ts"
+    - claim: "every existing automated PR opener uses the same checked library seam, without adding a CLI or dependency object type"
+      proof: "grep: openPullRequestChecked( in src/run-task.ts"
   falsifier: |
-    CLOSE IF sessions already open PRs through a command that applies the author-time gates first.
+    CLOSE WITHOUT IMPLEMENTATION IF all four existing opener paths already invoke the same library validator before
+    the REST POST and the validator rejects a body that the acceptance-author gate would reject. A new command is
+    not an acceptable substitute: it does not protect the existing automated openers and was explicitly declined.
