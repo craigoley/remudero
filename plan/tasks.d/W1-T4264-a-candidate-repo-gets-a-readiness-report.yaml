@@ -14,7 +14,7 @@
   files:
     - src/lib/onboarding-readiness.ts
     - src/lib/serve.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The operator wants Wild Trails (craigoley/wild-trails) and later repos onboarded from the console

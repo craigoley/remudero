@@ -2205,13 +2205,34 @@ function ledgerStringArray(value: unknown): string[] {
 /** Reduce every `review.posted` line to the LATEST posting per run_id. A run that never posted has
  *  no entry: there is nothing to mine. */
 export function latestReviewPostedByRun(records: LedgerRecord[]): Map<string, ReviewPostedSummary> {
+  return latestReviewPostedBy(records, (r) => (r.run_id ? String(r.run_id) : undefined));
+}
+
+/** Each run's latest review: by its PR, else by its own run_id. Since 2026-09-13 the review lane keys
+ *  `review.posted` by its own run id (`review-PR<n>-…`), so a run_id join alone matched nothing. */
+export function latestReviewPostedForRuns(runs: RunSummary[], records: LedgerRecord[]): Map<string, ReviewPostedSummary> {
+  const byPr = latestReviewPostedBy(records, (r) => (typeof r.pr_url === "string" && r.pr_url ? r.pr_url : undefined));
+  const byRun = latestReviewPostedByRun(records);
+  const out = new Map<string, ReviewPostedSummary>();
+  for (const run of runs) {
+    const summary = (run.prUrl ? byPr.get(run.prUrl) : undefined) ?? byRun.get(run.runId);
+    if (summary) out.set(run.runId, summary);
+  }
+  return out;
+}
+
+function latestReviewPostedBy(
+  records: LedgerRecord[],
+  keyOf: (r: LedgerRecord) => string | undefined,
+): Map<string, ReviewPostedSummary> {
   const out = new Map<string, ReviewPostedSummary>();
   for (const r of records) {
-    if (r.step !== "review.posted" || !r.run_id) continue;
+    const key = r.step === "review.posted" ? keyOf(r) : undefined;
+    if (!key) continue;
     const proofExec = Array.isArray(r.proof_exec) ? (r.proof_exec as unknown[]) : [];
     const executed = proofExec.filter((p) => p === "executed_pass" || p === "executed_fail").length;
-    out.set(String(r.run_id), {
-      runId: String(r.run_id),
+    out.set(key, {
+      runId: String(r.run_id ?? ""),
       taskId: String(r.task_id ?? ""),
       ...(typeof r.state === "string" ? { state: r.state } : {}),
       executed,
@@ -2247,7 +2268,7 @@ export function reviewReasonClassifierKey(reason: string): string | undefined {
 /** Failed review feedback for the runs this retro is allowed to reason about. Pure projection:
  *  no LLM, no filesystem, no corpus write. */
 export function failedReviewFeedbackForRuns(runs: RunSummary[], records: LedgerRecord[]): FailedReviewFeedback[] {
-  const posted = latestReviewPostedByRun(records);
+  const posted = latestReviewPostedForRuns(runs, records);
   const feedback: FailedReviewFeedback[] = [];
   for (const r of runs) {
     const summary = posted.get(r.runId);
@@ -2397,7 +2418,7 @@ export function mineDegradedSuccess(
   records: LedgerRecord[],
   signals: ReadonlyArray<DegradedSuccessSignal> = DEGRADED_SUCCESS_SIGNALS,
 ): DegradedSuccessFinding[] {
-  const posted = latestReviewPostedByRun(records);
+  const posted = latestReviewPostedForRuns(runs, records);
   const findings: DegradedSuccessFinding[] = [];
   for (const r of runs) {
     if (r.verdict !== "merged") continue;
@@ -2508,7 +2529,7 @@ export function mineProceduralCandidates(
   const threshold = opts.threshold ?? 2;
   const signals = opts.signals ?? PROCEDURAL_SUCCESS_SIGNALS;
   const fixCounts = fixDispatchCountByRun(records);
-  const reviewByRun = latestReviewPostedByRun(records);
+  const reviewByRun = latestReviewPostedForRuns(runs, records);
 
   const byShape = new Map<string, RunSummary[]>();
   const shapeSignals = new Map<string, string[]>();

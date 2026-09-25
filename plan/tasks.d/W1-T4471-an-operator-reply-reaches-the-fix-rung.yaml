@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-24: 'address the needs-human issue and let me know how I can answer' (#7033)"
   plan_refs: [W1-T78, W1-T435, W1-T2496, W1-T2696, W1-T57]
   files: [src/lib/escalation-answers.ts, src/lib/escalate.ts, src/lib/panel-actions.ts, src/run-task.ts, test/an-operator-reply-reaches-the-fix-rung.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-24:

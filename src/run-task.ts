@@ -560,6 +560,7 @@ import {
   censusSuiteMembershipFor,
   detectRunContext,
   peekPinnedBase,
+  pinnedBase,
   runContextLine,
   FAST_GATE_STEPS,
   CENSUS_MEMBERSHIP_SUITES,
@@ -570,9 +571,16 @@ import {
   runPreflightCoverage,
   runPreflightFast,
   runTreeAdvisoryLine,
+  shellOut,
   type CiParityStepResult,
+  type PreflightFastDeps,
   type RemedyFileForGate,
 } from "./lib/ci-parity.js";
+// W1-T4108 — the same suite selector CI's shadow selector and `--coverage`'s report-only step
+// already share (affectedSuitesStep, lib/ci-parity.ts), reused here so the new scoped-coverage
+// default step can never independently derive a second notion of "which suites reach a changed
+// src module".
+import { readAffectedSuitesInput, selectAffectedSuites, type AffectedSuitesInput } from "./lib/affected-suites.js";
 import {
   consumeSourceSizeFollowup,
   classifySourceSizeSummary,
@@ -2152,6 +2160,8 @@ import {
   resolveGenericRouteToolBound,
   harnessOwnsGitFor,
   IMPLEMENT_CASH_TOOLS,
+  IMPLEMENT_CLAUDE_TOOLS,
+  WORKER_RULE_TOOL_NAME,
   implementToolBound,
   resolveDispatchLaneToolBound,
   cashDivertSpawnFields,
@@ -2196,6 +2206,7 @@ import {
   WorkerAbandonedError,
 } from "./lib/worker.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
+import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
 
 /** Preserve the watchdog's measured abandonment evidence when the advisory reviewer fails.
  * The catch arm must publish the values captured by the worker, rather than re-reading policy
@@ -12972,9 +12983,8 @@ function readRuleSourceFileOrUndefined(path: string): string | undefined {
  * file). `readFile` is injectable — default a real `readFileSync` — so a test can simulate an
  * unreadable source (the retrieval path failing) without touching disk.
  *
- * STILL NOT WIRED INTO A LIVE CALL SITE, even after W1-T2761: this resolves ONE headline's body
- * by name, for a future mid-run retrieval a worker asks for explicitly — that call site remains
- * unbuilt, per W1-T2508's own "NOT IN SCOPE: any change to what a worker is permitted to do".
+ * This older single-headline helper remains available to readers; implement workers use
+ * `lookupWorkerRule` through their rule tool to accept stable ids and phrases as well.
  * What W1-T2761 DOES wire in is this function's SIBLING primitive, {@link
  * retrieveRuleBodyOrDegrade}: {@link buildRuleHeadlinesPart} (below) reuses it to degrade the
  * WHOLE headline index to a synthetic full-rule line when CLAUDE.md is unreadable, the same
@@ -13988,6 +13998,8 @@ async function runTask(
   const spawn: typeof spawnWorker = (spawnArgs) => {
     const effectiveSpawnArgs = cashContainmentState.contained ? forceCashContainedRunSpawn(spawnArgs, config) : spawnArgs;
     const stopPolling = workerStateSensor.startPolling();
+    let selectionAssignment: Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0] | undefined;
+    const baseStreamObserver = effectiveSpawnArgs.streamObserver ?? workerStateSensor.observer;
     return rawSpawn({
       ...effectiveSpawnArgs,
       // Every dispatch-phase worker inherits the run identity at the ONE wrapper that already owns its state/error telemetry, so the
@@ -13995,6 +14007,7 @@ async function runTask(
       runId: effectiveSpawnArgs.runId ?? runId,
       taskId: effectiveSpawnArgs.taskId ?? taskId,
       onSelectionAssignment: (assignment) => {
+        selectionAssignment = assignment;
         log("worker.assignment", { worker_assignment: assignment });
         effectiveSpawnArgs.onSelectionAssignment?.(assignment);
       },
@@ -14009,7 +14022,10 @@ async function runTask(
             path: err.path ?? null,
             error: String(err.message ?? err),
           })),
-      streamObserver: effectiveSpawnArgs.streamObserver ?? workerStateSensor.observer,
+      // Keep provider/model attribution specific to THIS spawn, not the run's initial mount.
+      // The selected assignment is authoritative for provider + requested model; the selected
+      // model is deliberately not promoted to a served-model receipt.
+      streamObserver: (event) => baseStreamObserver(enrichWorkerStreamEvent(event, effectiveSpawnArgs, selectionAssignment)),
       // W1-T1045: every real dispatch spawn gets the clock bound BY CONSTRUCTION — the SAME
       // wrap-once rationale as `onSpawnError`/`streamObserver` above. A caller that already set
       // its own `clockBound` (none exist today) is respected; every future dispatch call site
@@ -15205,6 +15221,16 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       },
       budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     });
+    // W1-T4094: only the Claude implement bound gets the rule tool; cash and review/manual keep theirs.
+    const ruleLookup = implementTools === IMPLEMENT_CLAUDE_TOOLS
+      ? {
+          onPulled: (id: string, status: "found" | "missing" | "error") => log("knowledge.pulled", { id, status }),
+          learningLookup: {
+            homes: { projectDir: learningsDir, userOverallDir: userOverallLearningsHome(config), globalArtifactPath: globalArtifactPath(config) },
+            allowedIds: learningsResult.selectedIds,
+          },
+        }
+      : undefined;
     // VOLATILE (Tier 1) — deliberately NOT combined with the stable doctrine
     // preamble here: renderImplementPrompt places this LAST in the CONTEXT
     // block (cache-aware ordering, W1-T35) so a growing corpus can never bust
@@ -15268,7 +15294,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // This is an output-only contract, deliberately outside `# CONTEXT`; the provenance manifest
     // still hashes the exact prompt sent to the worker below. The companion anchor append keeps a
     // compaction from deleting the only syntax the deterministic judge is allowed to honour.
-    const prompt = `${renderedImplementPrompt}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
+    const ruleToolPointer = ruleLookup
+      ? `\nTo read a doctrine rule by id or phrase, or a learning's evidence by learnings#id, call ${WORKER_RULE_TOOL_NAME}.`
+      : "";
+    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -15345,6 +15374,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // W1-T3573: `undefined` for `implement`/`diagnose`/`recon` — byte-identical
           // unrestricted behavior. Only `review`/`manual` carry a declared bound (above).
           tools: implementTools === undefined ? undefined : [...implementTools],
+          ...(ruleLookup === undefined ? {} : { ruleLookup }),
           ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
           ...(attemptMount === implementMount ? cashTrialSpawn : {}),
           // W1-T7B: a diagnose-informed attempt gets the SAME task prompt, plus the prior
@@ -15611,6 +15641,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // W1-T3573: same declared bound as the initial spawn above — a resumed session is
           // still the SAME lane, so it must not regain unrestricted tools on resume.
           tools: implementTools === undefined ? undefined : [...implementTools],
+          ...(ruleLookup === undefined ? {} : { ruleLookup }),
           ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
           ...cashTrialSpawn,
           // W1-T3696: the RESUMED turn must restate the SAME contract the initial spawn was given.
@@ -15726,6 +15757,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         maxBudgetUsd: budgetUsd,
         config: implementConfig,
         tools: implementTools === undefined ? undefined : [...implementTools],
+        ...(ruleLookup === undefined ? {} : { ruleLookup }),
         ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
         ...cashTrialSpawn,
       }, { provider: impl.provider ?? implementMount.provider, title: task.title, report: fullText(impl), declaredPaths: task.files ?? [] }),
@@ -24776,6 +24808,293 @@ export function renderFastGateScriptList(steps: readonly { readonly script: stri
   return steps.map((step) => step.script).join(", ");
 }
 
+// ── W1-T4108: PREFLIGHT RUNS WHAT CI RUNS — two more local, GitHub-free checks CI red on in one
+// day (2026-09-23, #6677/#6687/#6690/#6693) while `rmd preflight` reported PASS ────────────────
+//
+// Both live HERE rather than in lib/ci-parity.ts's FAST_GATE_STEPS/CENSUS_POPULATION registries:
+// console-parity has no entry anywhere in that file at all, and REGISTRY_CENSUS_SUITES's own
+// comment records that admitting a registry-shaped census (command-registry-census among them)
+// into the fast gate "is a measured COST decision" deliberately NOT taken there. Revisiting
+// either belongs to that file's own registries, not to a rider on this task's declared scope —
+// so this stays a SEPARATE, additive mechanism that predicts a CI job by name on every failure
+// (design iii) rather than a silent extra entry in a table this task does not own.
+
+/**
+ * MEASURED (W1-T4108, same trap W1-T2478 named in lib/ci-parity.ts's own private
+ * `withoutNodeTestContext`, not exported and so re-stated here rather than imported): a real
+ * `rmd preflight` run with no injected spawn is itself sometimes invoked FROM INSIDE a `node
+ * --test` process (test/preflight-summary-containment.test.ts's own "a real preflight with no
+ * injected spawn" acceptance does exactly this). `node --test`'s recursion guard reads
+ * `NODE_TEST_CONTEXT`/`NODE_OPTIONS` from the CHILD's inherited environment, and
+ * `defaultPreflightSpawn` passes `process.env` through untouched — so a `node --test` CHILD this
+ * function spawns (the two census entries below, and scripts/diff-coverage-local.mjs's OWN nested
+ * `node --test` call) silently misbehaves rather than running its file, hanging this task's own
+ * acceptance test past a five-minute bound instead of completing in seconds. Deleted here, in
+ * THIS process, immediately before the spawn and restored immediately after — never left cleared,
+ * which would instead break every OTHER site in this same process still expecting it present. */
+function withoutNodeTestContextEnv<T>(fn: () => T): T {
+  const savedContext = process.env.NODE_TEST_CONTEXT;
+  const savedOptions = process.env.NODE_OPTIONS;
+  delete process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_OPTIONS;
+  try {
+    return fn();
+  } finally {
+    if (savedContext !== undefined) process.env.NODE_TEST_CONTEXT = savedContext;
+    else delete process.env.NODE_TEST_CONTEXT;
+    if (savedOptions !== undefined) process.env.NODE_OPTIONS = savedOptions;
+    else delete process.env.NODE_OPTIONS;
+  }
+}
+
+/** One local, GitHub-free CI check `rmd preflight` did not run before W1-T4108: `console-parity`
+ *  (ci.yml's "commitlint" job, "Console-parity ratchet" step — no lib/ci-parity.ts entry existed
+ *  for it at all) and the two census-shaped suites #6687 caught only in CI: the command-name
+ *  inventory (REGISTRY_CENSUS_SUITES names it, deliberately excluded from the fast gate) and the
+ *  deps-interface census (test/deps-interface-census.test.ts, not in any census registry yet). */
+const PREFLIGHT_CI_CHECKS: readonly {
+  readonly name: string;
+  readonly predictsCiJob: string;
+  readonly argv: (repoRoot: string) => { file: string; args: string[] };
+}[] = [
+  {
+    name: "console-parity",
+    predictsCiJob: 'ci.yml "commitlint" job, "Console-parity ratchet" step (npm run --silent console-parity)',
+    argv: () => ({ file: "npm", args: ["run", "--silent", "console-parity"] }),
+  },
+  {
+    name: "command-registry-census",
+    predictsCiJob:
+      '"ci" job\'s test:ci suite (test/help-renders-a-summary-not-a-paragraph.test.ts) — REGISTRY_CENSUS_SUITES names it but ' +
+      "the fast gate's own step table deliberately excludes it as a cost decision",
+    argv: (repoRoot) => ({
+      file: process.execPath,
+      args: ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", join(repoRoot, "test", "help-renders-a-summary-not-a-paragraph.test.ts")],
+    }),
+  },
+  {
+    name: "deps-interface-census",
+    predictsCiJob: '"ci" job\'s test:ci suite (test/deps-interface-census.test.ts) — not in any census registry yet',
+    argv: (repoRoot) => ({
+      file: process.execPath,
+      args: ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", join(repoRoot, "test", "deps-interface-census.test.ts")],
+    }),
+  },
+];
+
+export interface PreflightCiChecksResult {
+  steps: CiParityStepResult[];
+  ok: boolean;
+}
+
+/** A launcher may throw before a child exists (notably a deliberately narrow injected test
+ *  launcher). Keep that refusal in preflight's result and summary instead of aborting the verb. */
+function preflightCheckResult(name: string, run: () => PreflightCiChecksResult): PreflightCiChecksResult {
+  try {
+    return run();
+  } catch (error) {
+    return {
+      steps: [{ name, ok: false, detail: `${name}: FAIL — could not run local CI check: ${String(error)}` }],
+      ok: false,
+    };
+  }
+}
+
+/** Runs every {@link PREFLIGHT_CI_CHECKS} entry, each its own step, each naming the CI job it
+ *  predicts on failure (design iii) so an author knows which red it just prevented.
+ *  DELIBERATELY NO NEW `*Deps` SHAPE (test/deps-interface-census.test.ts's own ceiling, at its
+ *  measured 160/112 zero-headroom on both counters at once): `Pick<PreflightFastDeps, "spawn">`
+ *  reuses the ALREADY-COUNTED sibling type this function's needs are a strict subset of, rather
+ *  than adding a shape the census exists to refuse — exactly the remedy its own failure names. */
+export function runPreflightCiChecks(repoRoot: string, deps: Pick<PreflightFastDeps, "spawn"> = {}): PreflightCiChecksResult {
+  const spawn = deps.spawn ?? defaultPreflightSpawn;
+  const steps: CiParityStepResult[] = PREFLIGHT_CI_CHECKS.map((entry) => {
+    const name = `ci-checks:${entry.name}`;
+    const { file, args } = entry.argv(repoRoot);
+    const r = withoutNodeTestContextEnv(() => shellOut(spawn, `${name} (predicts CI: ${entry.predictsCiJob})`, file, args, { cwd: repoRoot }));
+    return {
+      name,
+      ok: r.ok,
+      detail: r.ok ? `${name}: ${r.detail}` : `${name}: FAIL — predicts CI: ${entry.predictsCiJob}\n${r.detail}`,
+    };
+  });
+  return { steps, ok: steps.every((s) => s.ok) };
+}
+
+/**
+ * W1-T4108 design (ii) — `rmd preflight`'s own diff-coverage, SCOPED to the suites the import
+ * graph says reach a changed src module (never the whole instrumented suite `--coverage` shells),
+ * so it is cheap enough to run BY DEFAULT rather than sit behind a flag nobody remembers to pass.
+ * The actual instrumented run and the diff-coverage.mjs verdict are delegated to
+ * scripts/diff-coverage-local.mjs (W1-T4084): it reads its node flags — including
+ * `--enable-source-maps`, the flag two earlier hand-rolled local coverage attempts measurably
+ * omitted, mis-locating `DA:` lines against tsx-transpiled JS instead of the `.ts` `SF:` name —
+ * straight out of ci.yml's own `coverage-ratchet` job, so this can never independently drift from
+ * what CI runs the way those two attempts did.
+ *
+ * SCOPE, NEVER THE FULL SUITE: `selectAffectedSuites` (lib/affected-suites.ts, shared with CI's own
+ * shadow selector) decides which suites import a changed src file. A change the selector cannot
+ * model (config, the lockfile, a workflow, a test helper) forces `fullRun`, and this mode SKIPS
+ * rather than pay that cost here — `rmd preflight --coverage` remains the full, unscoped mirror.
+ */
+export interface PreflightScopedDiffCoverageResult {
+  steps: CiParityStepResult[];
+  ok: boolean;
+}
+
+/** PRIMARY CONTROL (W1-T4108) — this, not a timing measurement, is what normally decides whether
+ *  the scoped run proceeds: suites above this count are SKIPPED from the default tier (design ii:
+ *  "when the set is large it says so and how long it will take, and `--fast` skips it") rather
+ *  than risk turning the ~29s fast tier into a multi-minute one; `rmd preflight --coverage` stays
+ *  the full, slow-by-construction mirror for exactly that case. */
+export const PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING = 40;
+
+/** A STATED GUESS, not a measured bound (unlike `FAST_GATE_CENSUS_BOUND_MS`, which times its own
+ *  run): an instrumented suite's real cost varies with what it does, so this exists only to give
+ *  the size-based skip line a number an operator can see and discount, never to gate on directly. */
+export const PREFLIGHT_SCOPED_COVERAGE_PER_SUITE_ESTIMATE_MS = 300;
+
+/** A "source file" for this mode's scope, same predicate `runPreflightCoverage`'s own
+ *  `isChangedSourceFile` uses (lib/ci-parity.ts, not exported) — duplicated locally per this
+ *  task's declared file scope rather than widening that module's exports for one caller. */
+function isPreflightScopedCoverageSourceFile(path: string): boolean {
+  if (!path.startsWith("src/")) return false;
+  if (/(^|\/)test(s)?\//.test(path)) return false;
+  if (/\.test\.[cm]?[jt]sx?$/.test(path)) return false;
+  if (/\.spec\./.test(path)) return false;
+  return true;
+}
+
+export function runPreflightScopedDiffCoverage(
+  repoRoot: string,
+  // DELIBERATELY NO NEW `*Deps` SHAPE AND NO BARE-OBJECT PARAMETER TYPE FOR THIS PARAMETER — see
+  // runPreflightCiChecks's own comment just above: test/deps-interface-census.test.ts's named-
+  // declaration counter and its inline-seam counter (this parameter's own name followed by a
+  // colon and an open brace, with nothing between) both sit at ZERO headroom (160/160, 112/112,
+  // measured on this branch). `Pick<PreflightFastDeps, "spawn">` reuses the already-counted
+  // sibling shape; intersecting the one extra field in keeps the type after the colon starting
+  // with `Pick<`, never a bare brace, so this reads as neither counted population.
+  deps: Pick<PreflightFastDeps, "spawn"> & {
+    /** Test seam — production reads {@link readAffectedSuitesInput} for real. */
+    readAffectedInput?: (repoRoot: string, changed: readonly string[]) => AffectedSuitesInput;
+  } = {},
+): PreflightScopedDiffCoverageResult {
+  const spawn = deps.spawn ?? defaultPreflightSpawn;
+  const steps: CiParityStepResult[] = [];
+  const CI_JOB = 'ci.yml "coverage-ratchet" job (diff-coverage.mjs over an instrumented, source-mapped lcov)';
+
+  const pin = pinnedBase(repoRoot, spawn);
+  if ("failure" in pin) {
+    // SKIPPED, NEVER REFUSED — unlike `--coverage` (an explicit, opt-in ask for a coverage
+    // verdict, where an unresolvable base rightly REFUSES per runPreflightCoverage's own
+    // discipline), this step is an ADDITIVE, always-on member of the default tier alongside every
+    // other FAST_GATE_STEPS entry that treats an unmet precondition as a skip (`skipWhenAbsent`)
+    // rather than a hard stop. Blocking the whole default push gate over one convenience step's
+    // inability to resolve a ref would be disproportionate; a genuinely broken checkout still
+    // surfaces through the hand-route steps and `runContextLine`'s own behind-count reporting.
+    steps.push({
+      name: "fast-coverage:base-pin",
+      ok: true,
+      detail: `fast-coverage:base-pin: SKIPPED — ${pin.failure}; predicts CI: ${CI_JOB} — run \`rmd preflight --coverage\` once origin/main resolves for the full local mirror`,
+    });
+    return { steps, ok: true };
+  }
+  const base = pin.sha;
+
+  const changedRes = spawn("git", ["diff", "--name-only", `${base}...HEAD`], { cwd: repoRoot });
+  const changed = (changedRes.stdout ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const sourceFiles = changed.filter(isPreflightScopedCoverageSourceFile);
+  if (sourceFiles.length === 0) {
+    steps.push({
+      name: "fast-coverage:scope",
+      ok: true,
+      detail: `fast-coverage:scope: PASS — no changed src/**/*.ts file against ${base.slice(0, 9)}...HEAD; nothing for diff-coverage to prove`,
+    });
+    return { steps, ok: true };
+  }
+
+  let selection: ReturnType<typeof selectAffectedSuites>;
+  try {
+    const input = (deps.readAffectedInput ?? readAffectedSuitesInput)(repoRoot, changed);
+    selection = selectAffectedSuites(changed, input);
+  } catch (e) {
+    steps.push({
+      name: "fast-coverage:scope",
+      ok: true,
+      detail:
+        `fast-coverage:scope: SKIPPED — could not derive the affected-suite scope (${String((e as Error)?.message ?? e)}); ` +
+        `predicts CI: ${CI_JOB} — run \`rmd preflight --coverage\` for the full local mirror`,
+    });
+    return { steps, ok: true };
+  }
+
+  if (selection.fullRun) {
+    steps.push({
+      name: "fast-coverage:scope",
+      ok: true,
+      detail:
+        `fast-coverage:scope: SKIPPED — ${selection.reasons[0] ?? "a changed file forces the full suite"}; ` +
+        `the default tier never shells the full instrumented suite; predicts CI: ${CI_JOB} — run \`rmd preflight --coverage\` for the full local mirror`,
+    });
+    return { steps, ok: true };
+  }
+
+  const suites = selection.suites;
+  if (suites.length === 0) {
+    steps.push({
+      name: "fast-coverage:scope",
+      ok: false,
+      detail:
+        `fast-coverage:scope: FAIL — ${sourceFiles.length} changed src file(s) reach no test suite the import graph can find ` +
+        `(${sourceFiles.join(", ")}); predicts CI: ${CI_JOB} will report these UNPROVEN — add a test that imports the changed module`,
+    });
+    return { steps, ok: false };
+  }
+
+  if (suites.length > PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING) {
+    const estimateSec = Math.round((suites.length * PREFLIGHT_SCOPED_COVERAGE_PER_SUITE_ESTIMATE_MS) / 1000);
+    steps.push({
+      name: "fast-coverage:scope",
+      ok: true,
+      detail:
+        `fast-coverage:scope: SKIPPED — ${suites.length} suite(s) import a changed src file, an estimated ~${estimateSec}s ` +
+        `instrumented run (~${PREFLIGHT_SCOPED_COVERAGE_PER_SUITE_ESTIMATE_MS}ms/suite, a stated guess, not a measurement); too ` +
+        `large for the default tier; predicts CI: ${CI_JOB} — run \`rmd preflight --coverage\` for the full local mirror`,
+    });
+    return { steps, ok: true };
+  }
+
+  steps.push({
+    name: "fast-coverage:scope",
+    ok: true,
+    detail: `fast-coverage:scope: PASS — ${suites.length} suite(s) import ${sourceFiles.length} changed src file(s) against ${base.slice(0, 9)}...HEAD`,
+  });
+
+  const lcovRelPath = "coverage/fast-coverage-lcov.info";
+  // withoutNodeTestContextEnv (see its own doc above): diff-coverage-local.mjs shells its OWN
+  // nested `node --test` internally, so this outer spawn must clear the recursion-guard env vars
+  // exactly like the census entries just above, or that nested run silently misbehaves.
+  const run = withoutNodeTestContextEnv(() =>
+    shellOut(
+      spawn,
+      `diff-coverage-local.mjs --base ${base} --lcov ${lcovRelPath} (${suites.length} scoped suite(s), source-mapped; predicts CI: ${CI_JOB})`,
+      process.execPath,
+      [join(repoRoot, "scripts", "diff-coverage-local.mjs"), "--base", base, "--lcov", lcovRelPath, ...suites],
+      { cwd: repoRoot },
+    ),
+  );
+  steps.push({
+    name: "fast-coverage:diff-coverage",
+    ok: run.ok,
+    detail: run.ok ? `fast-coverage:diff-coverage: ${run.detail}` : `fast-coverage:diff-coverage: FAIL — predicts CI: ${CI_JOB}\n${run.detail}`,
+  });
+
+  return { steps, ok: steps.every((s) => s.ok) };
+}
+
 /**
  * W1-T2810 — `preflightCommand`'s OWN seams, declared here rather than widened onto
  * {@link PreflightDeps}, which `runPreflight`, `runPreflightFast`, `runCiParity` and
@@ -24817,6 +25136,17 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // call site and worker prompt is byte-identical; `--no-fast` is the escape, because a bound with
   // no escape is a wall and an operator on a slow host must still be able to push.
   const fast = rest.includes("--no-fast") ? undefined : runPreflightFast(repoRoot, { spawn: deps.spawn });
+  // W1-T4108 — RIDE THE SAME `--no-fast` ESCAPE AS `fast` ABOVE. Both are further, GitHub-free
+  // additions to the same default tier that #6677/#6687/#6690/#6693 (2026-09-23) show CI, not
+  // preflight, was catching: console-parity/the two census suites cost seconds like every other
+  // fast-tier member, and the scoped diff-coverage step names its own size-based skip rather than
+  // needing a second flag to stay fast — see runPreflightScopedDiffCoverage's own doc.
+  const ciChecks = rest.includes("--no-fast")
+    ? undefined
+    : preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(repoRoot, { spawn: deps.spawn }));
+  const scopedCoverage = rest.includes("--no-fast")
+    ? undefined
+    : preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn: deps.spawn }));
   const ciParity = rest.includes("--ci-parity") ? runCiParity(repoRoot, { spawn: deps.spawn }) : undefined;
   const coverage = rest.includes("--coverage") ? runPreflightCoverage(repoRoot, { spawn: deps.spawn }) : undefined;
   // W1-T3738: opt-in, because each proof spawns a real base worktree and a real test — the
@@ -24828,6 +25158,16 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   }
   if (fast) {
     for (const step of fast.steps) {
+      console.log(step.detail);
+    }
+  }
+  if (ciChecks) {
+    for (const step of ciChecks.steps) {
+      console.log(step.detail);
+    }
+  }
+  if (scopedCoverage) {
+    for (const step of scopedCoverage.steps) {
       console.log(step.detail);
     }
   }
@@ -24846,7 +25186,14 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
       console.log(step.detail);
     }
   }
-  const ok = result.ok && (fast?.ok ?? true) && (ciParity?.ok ?? true) && (coverage?.ok ?? true) && (proofs?.ok ?? true);
+  const ok =
+    result.ok &&
+    (fast?.ok ?? true) &&
+    (ciChecks?.ok ?? true) &&
+    (scopedCoverage?.ok ?? true) &&
+    (ciParity?.ok ?? true) &&
+    (coverage?.ok ?? true) &&
+    (proofs?.ok ?? true);
   // W1-T2810 — THE STAMP, ON BOTH BRANCHES AND ON THE LINE ITSELF.
   //
   // ON BOTH: a stale RED gets investigated anyway, because the reader is already suspicious. The
@@ -24873,11 +25220,21 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     cpuCount: deps.cpuCount ?? osCpus().length,
     ...(pin !== undefined && "sha" in pin ? { baseSha: pin.sha } : {}),
   });
-  const steps = [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? []), ...(proofs?.steps ?? [])];
+  const steps = [
+    ...result.steps,
+    ...(fast?.steps ?? []),
+    ...(ciChecks?.steps ?? []),
+    ...(scopedCoverage?.steps ?? []),
+    ...(ciParity?.steps ?? []),
+    ...(coverage?.steps ?? []),
+    ...(proofs?.steps ?? []),
+  ];
   const treeAdvisory = runTreeAdvisoryLine(runContext, steps);
   const tiers: PreflightTier[] = [
     { name: "commitlint/typecheck/emitter", enableWith: "always runs", ran: true },
     { name: "the fast gate", enableWith: "drop --no-fast", ran: fast !== undefined },
+    { name: "console-parity + census suites (W1-T4108)", enableWith: "drop --no-fast", ran: ciChecks !== undefined },
+    { name: "scoped diff-coverage, source-mapped (W1-T4108)", enableWith: "drop --no-fast", ran: scopedCoverage !== undefined },
     { name: "ci-parity", enableWith: "--ci-parity", ran: ciParity !== undefined },
     { name: "coverage", enableWith: "--coverage", ran: coverage !== undefined },
     { name: "proof discrimination", enableWith: "--proofs", ran: proofs !== undefined },
@@ -39333,6 +39690,9 @@ export async function wipeTestCommand(
 
   const config = deps.config ?? loadConfig();
   const runTaskFn = deps.runTaskFn ?? runTask;
+  const ablationRunTaskFn: typeof runTask = factor === "rules"
+    ? (id, options) => runTaskFn(id, { ...options, workerRuleHeadlinesEnabled: true })
+    : runTaskFn;
   const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
   const self = resolveOwnerRepo();
   const resolveMergedState = deps.resolveMergedState ?? ((tid, pp, cfg) => defaultWipeTestMergedState(tid, pp, cfg, self.owner));
@@ -39346,7 +39706,7 @@ export async function wipeTestCommand(
       owner: self.owner,
       selfRepo: self.repo,
       targetArgs: rest.slice(1),
-      runTaskFn,
+      runTaskFn: ablationRunTaskFn,
       execFileSyncFn,
       ledgerPath: ledgerPathFor(config),
       resolveMergedState,
