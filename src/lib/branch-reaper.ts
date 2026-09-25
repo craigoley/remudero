@@ -21,6 +21,8 @@
  * the landing identity predicate, so the reaper guards that family by calling the owner module
  * rather than retyping the branch pattern here.
  */
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { isLandingRef } from "./feedback-landing.js";
 
 /**
@@ -278,6 +280,153 @@ export function readOrphanedHeadCount(
 }
 
 
+// ── BATCHED LOCAL FACTS (W1-T4476 design (ii)) ──────────────────────────────────────────────────
+//
+// `reapBranchesCommand` used to spend a `git merge-base --is-ancestor`, a `git grep -l -F` and (for
+// every deletable/screened head) a `git rev-parse`/`git log -1` PER BRANCH — O(branches) blocking
+// spawns on the caller's own thread. The functions below read the SAME facts with a constant
+// number of git calls, whatever the branch count: one `git for-each-ref` for every tip sha and
+// committer time, one ancestry read against `origin/main`, and one `git grep` over every name.
+
+/** One remote branch's local tip, from a single `git for-each-ref` read. A name ABSENT from the
+ *  map this produces was never fetched onto this checkout — `git merge-base --is-ancestor
+ *  origin/<name> origin/main`'s `fatal: Not a valid object name` case (W1-T2246 rationale §6) —
+ *  and every caller below must read that as unresolved, never as "no tip". */
+export interface RemoteBranchTip {
+  readonly sha: string;
+  /** `undefined` when the committer-date field itself did not parse — an unreadable age, same as
+   *  the per-branch `git log -1 --format=%ct` read failing outright. */
+  readonly committedAtMs: number | undefined;
+}
+
+const REMOTE_BRANCH_TIP_FORMAT = "%(refname:short)\t%(objectname)\t%(committerdate:unix)";
+
+/** Parse `git for-each-ref --format='${REMOTE_BRANCH_TIP_FORMAT}' refs/remotes/origin` output into
+ *  a name -> tip map. `origin/HEAD` — the symbolic default-branch pointer, not a real branch — is
+ *  dropped; every other ref's `origin/` prefix is stripped to match the plain names
+ *  `remoteBranchNames`'s `git ls-remote --heads` already returns. */
+export function parseRemoteBranchTips(raw: string): Map<string, RemoteBranchTip> {
+  const tips = new Map<string, RemoteBranchTip>();
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    const [ref, sha, committerSecs] = line.split("\t");
+    if (!ref || !ref.startsWith("origin/") || !sha) continue;
+    const name = ref.slice("origin/".length);
+    if (!name || name === "HEAD") continue;
+    const secs = Number(committerSecs);
+    tips.set(name, { sha, committedAtMs: Number.isFinite(secs) && secs > 0 ? secs * 1000 : undefined });
+  }
+  return tips;
+}
+
+/** ONE `git for-each-ref` read for the WHOLE remote branch corpus — the manifest sha
+ *  (`pruneDeletableBranches`'s restore line) and the active-branch screen's tip age both come from
+ *  this single map, never a `git rev-parse`/`git log -1` per branch. An unreadable local ref
+ *  namespace resolves to an EMPTY map — every name reads "no local tip", the same conservative
+ *  reading a single ref's own resolve failure already produced. */
+export function readRemoteBranchTips(exec: (cmd: string, args: string[]) => string): Map<string, RemoteBranchTip> {
+  let raw: string;
+  try {
+    raw = exec("git", ["for-each-ref", `--format=${REMOTE_BRANCH_TIP_FORMAT}`, "refs/remotes/origin"]);
+  } catch {
+    return new Map(); // an unreadable local ref namespace — every name reads "no local tip"
+  }
+  return parseRemoteBranchTips(raw);
+}
+
+/** Every remote-tracking branch name `git for-each-ref --merged=origin/main` reports (i.e. an
+ *  ancestor of `origin/main`) — ONE ancestry read for the whole corpus, replacing a `git merge-base
+ *  --is-ancestor` PER branch. `undefined` means the read itself failed (an unresolvable
+ *  `origin/main`, most often), which callers must read as "cannot determine", never as an empty —
+ *  and therefore all-false — merged set: that collapse is the exact §6 defect W1-T2246 fixed for
+ *  the per-branch read, and a batched read must not reintroduce it. */
+export function readTipInMainMembership(exec: (cmd: string, args: string[]) => string): Set<string> | undefined {
+  let raw: string;
+  try {
+    raw = exec("git", ["for-each-ref", "--format=%(refname:short)", "--merged=origin/main", "refs/remotes/origin"]);
+  } catch {
+    return undefined; // the ancestry read itself failed (e.g. an unresolvable origin/main) —
+    // "cannot determine", never an empty (and therefore all-false) merged set
+  }
+  const merged = new Set<string>();
+  for (const line of raw.split("\n")) {
+    const name = line.trim();
+    if (!name.startsWith("origin/")) continue;
+    merged.add(name.slice("origin/".length));
+  }
+  return merged;
+}
+
+/** `tipInMain` for one branch given the batched tip map and membership set — the same
+ *  true/false/"unknown" trichotomy the per-branch `git merge-base --is-ancestor` read produced:
+ *  unresolved locally, or the ancestry read itself failed, both read `"unknown"`; otherwise
+ *  membership in `merged` decides it. */
+export function tipInMainFor(
+  name: string,
+  tips: ReadonlyMap<string, RemoteBranchTip>,
+  merged: ReadonlySet<string> | undefined,
+): boolean | "unknown" {
+  if (!tips.has(name)) return "unknown";
+  if (merged === undefined) return "unknown";
+  return merged.has(name);
+}
+
+/**
+ * `namedInSource` for EVERY branch from one `git grep -F` read over every name at once, never one
+ * call per branch. `-F` (fixed strings) with one `-e <name>` per branch preserves the exact
+ * per-branch semantics a `-l -F -- <name>` call had — an unanchored literal SUBSTRING match, not a
+ * word-boundary one — including the case the per-branch read could also produce: a name that only
+ * appears INSIDE a longer name's match (`foo` inside `foobar`). Git's multi-pattern match is
+ * leftmost-LONGEST (POSIX, confirmed for both `-F -e/-e` and `-E` alternation), so a hit's own
+ * matched text can be the LONGER neighbor rather than the shorter name itself; testing
+ * `hit.name.includes(queriedName)` rather than exact equality recovers that shorter name without a
+ * second read, because the longer match trivially contains it as a substring.
+ */
+export function readNamedInSource(
+  exec: (cmd: string, args: string[]) => string,
+  names: readonly string[],
+): Set<string> {
+  const found = new Set<string>();
+  if (names.length === 0) return found;
+  const args = ["grep", "-n", "-o", "-F"];
+  for (const name of names) args.push("-e", name);
+  args.push("--", "src/", "scripts/", "deploy/", ".github/");
+  let raw: string;
+  try {
+    raw = exec("git", args);
+  } catch {
+    return found; // git grep exits 1 on no match anywhere — a real "nothing named", not a failure
+  }
+  const hits = parseBranchCitationHits(raw);
+  for (const name of names) {
+    if (hits.some((hit) => hit.name.includes(name))) found.add(name);
+  }
+  return found;
+}
+
+/**
+ * Design (iii): the persisted (branch name -> tip sha) cache after one classification pass. ONLY
+ * `"merged"` is ever written — the one PR state GitHub cannot take back (`foldPrState`'s own doc).
+ * `"open"`/`"closed"`/`"none"` are never cached: a closed PR can be reopened and a `"none"` can gain
+ * one, so caching either would let a stale read stand in for a fact that can still change. A
+ * branch whose tip sha this pass could not resolve (deleted mid-run, or never fetched locally) is
+ * dropped rather than cached under `"unknown"` — the manifest sha is exactly what makes a later
+ * cache hit's identity check (design (iv): a new tip sha misses the cache) meaningful at all.
+ */
+export function nextMergedHeadCache(
+  facts: readonly { readonly name: string; readonly prState: string }[],
+  tipShaByName: ReadonlyMap<string, string>,
+): Record<string, string> {
+  const next: Record<string, string> = {};
+  for (const f of facts) {
+    if (f.prState !== "merged") continue;
+    const sha = tipShaByName.get(f.name);
+    if (!sha || sha === "unknown") continue;
+    next[f.name] = sha;
+  }
+  return next;
+}
+
 // ── the PRUNE (W1-T3020) ─────────────────────────────────────────────────────────────────────────
 
 /** One deletable branch, the sha that makes its deletion reversible, and WHY `planBranchReap` put
@@ -313,6 +462,54 @@ export const AUTOMATIC_BRANCH_REAP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 export interface AutomaticBranchReapState {
   lastRunAtMs?: number;
   lastBranchFingerprint?: string;
+  /** Design (iii): (branch name -> tip sha) for every head this process has itself PROVEN merged —
+   *  the one PR state GitHub cannot take back. Never "open"/"closed"/"none": see
+   *  {@link nextMergedHeadCache}'s own doc for why only this one verdict is safe to persist. */
+  mergedHeadShas?: Record<string, string>;
+}
+
+/** `<config.root>/state/<this>` — ONE cadence-and-cache file per repository (design (i)), so a
+ *  fleet target managing several repos never collides its restarts across them. */
+export function automaticBranchReapStateFileName(repo: string): string {
+  return `branch-reap-state.${repo.replace(/[^A-Za-z0-9._-]/g, "_")}.json`;
+}
+
+/**
+ * Load the persisted cadence state a restart would otherwise lose (design (i)). UNREADABLE OR
+ * MALFORMED MEANS "NO STATE" — an empty object, which {@link decideAutomaticBranchReap} reads as
+ * `lastRunAtMs === undefined` and therefore a first pass, EXACTLY today's cold-boot behavior. It
+ * must never be read as "skip": a state file this process cannot parse carries no evidence that a
+ * pass ever happened, and treating it as one would silently disarm the classifier.
+ */
+export function readAutomaticBranchReapState(path: string): AutomaticBranchReapState {
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<AutomaticBranchReapState>;
+    const state: AutomaticBranchReapState = {};
+    if (typeof raw.lastRunAtMs === "number" && Number.isFinite(raw.lastRunAtMs)) state.lastRunAtMs = raw.lastRunAtMs;
+    if (typeof raw.lastBranchFingerprint === "string") state.lastBranchFingerprint = raw.lastBranchFingerprint;
+    if (raw.mergedHeadShas && typeof raw.mergedHeadShas === "object") {
+      const shas: Record<string, string> = {};
+      for (const [name, sha] of Object.entries(raw.mergedHeadShas)) {
+        if (typeof sha === "string") shas[name] = sha;
+      }
+      state.mergedHeadShas = shas;
+    }
+    return state;
+  } catch {
+    return {}; // absent, unreadable, or malformed — a first pass, NEVER a skip
+  }
+}
+
+/** Best-effort write: a state file this process cannot persist costs the next restart a first
+ *  pass, never a wrong answer now — the same posture {@link writeRefusalStreak}'s sibling in
+ *  `object-reaper.ts` takes for the same reason. */
+export function writeAutomaticBranchReapState(path: string, state: AutomaticBranchReapState): void {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(state));
+  } catch {
+    // best-effort — losing this file costs a first-pass reclassification, never a wrong verdict
+  }
 }
 
 export interface AutomaticBranchReapDecision {

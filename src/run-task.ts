@@ -2322,15 +2322,23 @@ import {
   startInstallationTokenRefresh,
 } from "./lib/github-app.js";
 import {
+  automaticBranchReapStateFileName,
   branchCitationPattern,
   branchNamesFingerprint,
   decideAutomaticBranchReap,
   DECLARED_BRANCH_GUARDS,
   declaredGuardsBlockSpan,
+  nextMergedHeadCache,
   parseBranchCitationHits,
   planReverseBranchDrift,
   pruneDeletableBranches,
+  readAutomaticBranchReapState,
+  readNamedInSource,
+  readRemoteBranchTips,
+  readTipInMainMembership,
   remoteBranchNames,
+  tipInMainFor,
+  writeAutomaticBranchReapState,
   type AutomaticBranchReapState,
   withholdActiveBranches,
   type BranchManifestEntry,
@@ -20199,6 +20207,14 @@ export function reapBranchesCommand(
     readMergeCreditedTaskIds?: typeof readMergeCreditedTaskIds;
     /** Overrides only the merge-credit source. `ledgerPath` remains the optional report sink. */
     creditLedgerPath?: string;
+    /** W1-T4476 design (iii): (branch name -> tip sha) already PROVEN merged by an earlier pass.
+     *  A hit at the SAME tip sha skips `perHeadPrState` for that branch entirely; a miss (absent
+     *  name, or a sha that has since moved) falls through to the per-head read exactly as before. */
+    mergedHeadShaCache?: ReadonlyMap<string, string>;
+    /** Fired ONCE, after this pass's facts are known, with the cache design (iii) wants persisted
+     *  ({@link nextMergedHeadCache}) — never written by this function itself, which takes every
+     *  other effect as an injected read too. Omitted ⇒ no caller wants the update. */
+    onMergedHeadCacheUpdate?: (next: Readonly<Record<string, string>>) => void;
   } = {},
 ): number {
   const print = opts.quiet ? (..._args: unknown[]) => {} : console.log;
@@ -20292,7 +20308,22 @@ export function reapBranchesCommand(
     if (lines.length < 100) break;
   }
 
+  // W1-T4476 design (ii): the three reads below each cost ONE `exec` for the WHOLE corpus —
+  // never one per branch — and every branch's `tipInMain`/`namedInSource`/manifest sha comes from
+  // these three maps/sets from here on. See branch-reaper.ts's own doc on each for the exact
+  // per-branch semantics they preserve (including the "name inside a longer name's match" case).
+  const remoteTips = readRemoteBranchTips(exec);
+  const tipInMainMembership = readTipInMainMembership(exec);
+  const namedInSourceSet = readNamedInSource(exec, names);
+  const mergedHeadCache = opts.mergedHeadShaCache;
+
   const facts: BranchFacts[] = names.map((name) => {
+    const tipSha = remoteTips.get(name)?.sha;
+    // W1-T4476 design (iii): a cached "merged" verdict at the SAME tip sha stands in for
+    // `perHeadPrState`'s own call — a stale-sha cache entry (the branch moved) or an absent one
+    // falls straight through to the per-head read exactly as before this cache existed.
+    const cachedMerged =
+      tipSha !== undefined && mergedHeadCache?.get(name) === tipSha ? ("merged" as const) : undefined;
     // W1-T119: a FAILED PR read is not "no PR". If the fetch broke, every branch reads OPEN — the
     // conservative direction, since an open PR is never deletable, so the run can only under-reap.
     // W1-T2246: a bulk `"none"` is NOT "no PR" either — the bulk walk above is a bounded,
@@ -20301,30 +20332,9 @@ export function reapBranchesCommand(
     // head's own history directly rather than trusting how far the bulk walk got.
     const state: BranchFacts["prState"] = prReadFailed
       ? "open"
-      : (prState.get(name) ?? perHeadPrState(exec, owner, repo, name));
-    let tipInMain: BranchFacts["tipInMain"] = false;
-    try {
-      exec("git", ["merge-base", "--is-ancestor", `origin/${name}`, "origin/main"]);
-      tipInMain = true;
-    } catch (err) {
-      // `--is-ancestor` exits 1 with NO stderr when the ref resolves and simply is not an
-      // ancestor — a real, decided "not in main". It fails with `fatal: Not a valid object name`
-      // when `origin/<name>` was never fetched on THIS checkout — indistinguishable from the
-      // first case by "it threw" alone, but not by what it printed: `execFileSync` folds the
-      // child's stderr into the thrown error's message, so that fatal is visible right here
-      // (W1-T2246 rationale §6 — this is the "unreadable ref silently became commits not in
-      // main" defect; `"unknown"` is neither `true` nor `false` and planBranchReap treats it as
-      // NOT satisfying the third disjunct, same as a decided `false` would, but reports it apart).
-      const msg = err instanceof Error ? err.message : String(err);
-      tipInMain = /not a valid object|fatal:/i.test(msg) ? "unknown" : false;
-    }
-    let namedInSource = false;
-    try {
-      const hit = exec("git", ["grep", "-l", "-F", "--", name, "--", "src/", "scripts/", "deploy/", ".github/"]);
-      namedInSource = hit.trim().length > 0;
-    } catch {
-      namedInSource = false; // git grep exits 1 on no match — a real "not named", not a failure
-    }
+      : (prState.get(name) ?? cachedMerged ?? perHeadPrState(exec, owner, repo, name));
+    const tipInMain = tipInMainFor(name, remoteTips, tipInMainMembership);
+    const namedInSource = namedInSourceSet.has(name);
     const namedTaskId = namedTaskByBranch.get(name);
     return {
       name,
@@ -20337,6 +20347,15 @@ export function reapBranchesCommand(
         : { namedTaskCredited: creditedTaskIds.has(namedTaskId) }),
     };
   });
+
+  // W1-T4476 design (iii): report this pass's own confirmed-merged verdicts back to the caller
+  // that wants them persisted (the automatic rung), computed from `facts` and the same tip map
+  // above — never written to disk by this function itself.
+  if (opts.onMergedHeadCacheUpdate) {
+    const tipShaByName = new Map<string, string>();
+    for (const [name, tip] of remoteTips) tipShaByName.set(name, tip.sha);
+    opts.onMergedHeadCacheUpdate(nextMergedHeadCache(facts, tipShaByName));
+  }
 
   const plan = planBranchReap(facts, DECLARED_BRANCH_GUARDS);
 
@@ -20393,12 +20412,10 @@ export function reapBranchesCommand(
   print(`deletable: ${plan.deletable.length}`);
   const manifest: BranchManifestEntry[] = [];
   for (const b of plan.deletable) {
-    let sha = "unknown";
-    try {
-      sha = exec("git", ["rev-parse", `origin/${b}`]).trim();
-    } catch {
-      /* a branch that vanished mid-run reports `unknown` rather than aborting the report */
-    }
+    // W1-T4476 design (ii): the same batched `remoteTips` map every branch's facts came from —
+    // a branch that vanished mid-run (or was never fetched locally) has no entry and reports
+    // `unknown` rather than aborting the report, exactly as a failed `git rev-parse` did before.
+    const sha = remoteTips.get(b)?.sha ?? "unknown";
     const reason = plan.reasons[b] ?? "unknown";
     manifest.push({ name: b, sha, reason });
     print(`  ${sha}\t${b}\t${reason}`);
@@ -20487,13 +20504,12 @@ export function reapBranchesCommand(
       `the deletable set below is NOT screened, and --prune would refuse until this read succeeds`);
   }
 
+  // W1-T4476 design (ii): the same batched `remoteTips` map, never a `git log -1` per screened
+  // branch — `withholdActiveBranches` treats a missing/unreadable age as a reason to withhold,
+  // exactly as a failed per-branch read did.
   const tipAgeMs = (name: string): number | undefined => {
-    try {
-      const secs = Number(exec("git", ["log", "-1", "--format=%ct", `origin/${name}`]).trim());
-      return Number.isFinite(secs) && secs > 0 ? Date.now() - secs * 1000 : undefined;
-    } catch {
-      return undefined; // withholdActiveBranches treats an unreadable age as a reason to withhold
-    }
+    const committedAtMs = remoteTips.get(name)?.committedAtMs;
+    return committedAtMs === undefined ? undefined : Date.now() - committedAtMs;
   };
 
   const screen = openHeads ? withholdActiveBranches(manifest, openHeads, tipAgeMs) : undefined;
@@ -38660,6 +38676,14 @@ export function runAutomaticBranchReapRung(
       quiet: true,
       runId,
       creditLedgerPath: ledgerPath,
+      // W1-T4476 design (iii)/(iv): the cache this state carries in from the LAST pass, and the
+      // update this pass hands back — `state` is the one object the caller (buildSweepHook)
+      // persists to disk right after this function returns, so the cache and the cadence fields
+      // land in the same write.
+      mergedHeadShaCache: state.mergedHeadShas ? new Map(Object.entries(state.mergedHeadShas)) : undefined,
+      onMergedHeadCacheUpdate: (next) => {
+        state.mergedHeadShas = next;
+      },
     });
   } catch (e) {
     log("branch_reap.sweep.failed", {
@@ -38987,7 +39011,12 @@ export function buildSweepHook(
   if (!github && snapshotCache) boardGithub.seedBoardSnapshot?.(snapshotCache);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
-  const branchReapState: AutomaticBranchReapState = {};
+  // W1-T4476 design (i): loaded ONCE, at daemon-start construction time — the same lifetime as
+  // `boardGithub` above — from THIS repository's own file, so a restart with an unchanged branch
+  // set and an unexpired interval reads "unchanged" instead of every boot re-judging every remote
+  // branch as a fresh first pass. Unreadable/absent reads as `{}`, i.e. today's cold-boot behavior.
+  const branchReapStatePath = join(config.root, "state", automaticBranchReapStateFileName(repo));
+  const branchReapState: AutomaticBranchReapState = readAutomaticBranchReapState(branchReapStatePath);
   return async (continueReviewAdmissions = () => true) => {
     try {
       await mainHealthRung?.();
@@ -39099,6 +39128,10 @@ export function buildSweepHook(
         runAutomaticBranchReapRung(owner, repo, config, ledgerPath, runId, log, branchReapState, {
           root: targetCheckoutRoot,
         });
+        // W1-T4476 design (i)/(iii): persist the cadence fields AND the merged-head cache
+        // `runAutomaticBranchReapRung` just mutated in place, so the NEXT daemon boot loads
+        // exactly what this one left off with instead of starting every restart cold.
+        writeAutomaticBranchReapState(branchReapStatePath, branchReapState);
       }
       // W1-T320 — the tmp-dir backstop's PER-POLL rung (design clause ii): rides this SAME
       // composite so it re-fires on a long-running healthy daemon, not only at boot. Own
