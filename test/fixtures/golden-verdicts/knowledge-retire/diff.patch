@@ -1,21 +1,152 @@
 diff --git a/docs/knowledge-garden-log.md b/docs/knowledge-garden-log.md
-index ccaa41b205..2efe2d1a5b 100644
+index 2efe2d1a5b..55612b23ad 100644
 --- a/docs/knowledge-garden-log.md
 +++ b/docs/knowledge-garden-log.md
-@@ -9,0 +10,6 @@
+@@ -15,0 +16,19 @@ Learnings used when offered: 13%. Dangling Why pointers: 0.
 +
-+## Pass 2026-09-25T00:31:36.191Z
++## Pass 2026-09-25T14:46:35.608Z
 +
-+- retire websearch-serverside-webfetch-unverified: Workers offered it have rarely used it, compared with other learnings.
++- retire claude-code-hybrid-retrieval: Workers offered it have rarely used it, compared with other learnings.
++- retire compaction-recall-first: Workers offered it have rarely used it, compared with other learnings.
++- retire cache-prefix-bytes: Workers offered it have rarely used it, compared with other learnings.
++- retire docs-are-a-gated-artifact: Workers offered it have rarely used it, compared with other learnings.
++- retire daemon-split-logic-from-live-commissioning: Workers offered it have rarely used it, compared with other learnings.
++- retire task-quality-gates-before-dispatch: Workers offered it have rarely used it, compared with other learnings.
++- retire daemon-repo-targeting-explicit: Workers offered it have rarely used it, compared with other learnings.
++- retire task-credit-needs-an-anchored-trailer: Workers offered it have rarely used it, compared with other learnings.
++- retire implement-lane-model-lives-on-the-run-not-the-verdict-row: Workers offered it have rarely used it, compared with other learnings.
++- retire body-fetch-guards-on-http-not-size: Workers offered it have rarely used it, compared with other learnings.
++- retire no-live-operator-in-headless-worker: Workers offered it have rarely used it, compared with other learnings.
++- retire control-surface-fail-loud-stop-one-shot: Workers offered it have rarely used it, compared with other learnings.
++- retire sdk-builtin-tools-are-the-boundary: Workers offered it have rarely used it, compared with other learnings.
++- retire askuserquestion-auto-resolves-empty-headless: Workers offered it have rarely used it, compared with other learnings.
 +
 +Learnings used when offered: 13%. Dangling Why pointers: 0.
+diff --git a/learnings/architecture.yaml b/learnings/architecture.yaml
+index a46e9adb19..787655fa2f 100644
+--- a/learnings/architecture.yaml
++++ b/learnings/architecture.yaml
+@@ -23,5 +23,6 @@
+ - id: claude-code-hybrid-retrieval
+   subsystem: knowledge
+-  lifecycle: active
++  # knowledge gardener: retire claude-code-hybrid-retrieval
++  lifecycle: superseded
+   files: [ src/lib/learnings.ts, src/run-task.ts ]
+   fact: >-
+@@ -33,5 +34,6 @@
+ - id: compaction-recall-first
+   subsystem: context
+-  lifecycle: active
++  # knowledge gardener: retire compaction-recall-first
++  lifecycle: superseded
+   files: [ src/lib/retro.ts, src/run-task.ts ]
+   fact: >-
+@@ -44,5 +46,6 @@
+ - id: cache-prefix-bytes
+   subsystem: context
+-  lifecycle: active
++  # knowledge gardener: retire cache-prefix-bytes
++  lifecycle: superseded
+   files: [ src/lib/learnings.ts, src/run-task.ts ]
+   fact: >-
+@@ -66,5 +69,6 @@
+ - id: docs-are-a-gated-artifact
+   subsystem: docs
+-  lifecycle: active
++  # knowledge gardener: retire docs-are-a-gated-artifact
++  lifecycle: superseded
+   files: [ src/run-task.ts, "docs/**" ]
+   fact: >-
+@@ -80,5 +84,6 @@
+ - id: daemon-split-logic-from-live-commissioning
+   subsystem: architecture
+-  lifecycle: active
++  # knowledge gardener: retire daemon-split-logic-from-live-commissioning
++  lifecycle: superseded
+   files: [ src/lib/daemon.ts, src/lib/launchd.ts, src/run-task.ts ]
+   fact: >-
+@@ -99,5 +104,6 @@
+ - id: task-quality-gates-before-dispatch
+   subsystem: architecture
+-  lifecycle: active
++  # knowledge gardener: retire task-quality-gates-before-dispatch
++  lifecycle: superseded
+   files: [ src/lib/task-linter.ts, src/run-task.ts, src/lib/retro.ts ]
+   fact: >-
+@@ -116,5 +122,6 @@
+ - id: daemon-repo-targeting-explicit
+   subsystem: cli
+-  lifecycle: active
++  # knowledge gardener: retire daemon-repo-targeting-explicit
++  lifecycle: superseded
+   files: [ src/run-task.ts, src/lib/launchd.ts ]
+   fact: >-
+@@ -178,5 +185,6 @@
+ - id: task-credit-needs-an-anchored-trailer
+   subsystem: plan
+-  lifecycle: active
++  # knowledge gardener: retire task-credit-needs-an-anchored-trailer
++  lifecycle: superseded
+   files: [ plan/tasks.yaml, "plan/tasks.d/**", src/run-task.ts ]
+   fact: >-
+@@ -561,5 +569,6 @@
+ - id: implement-lane-model-lives-on-the-run-not-the-verdict-row
+   subsystem: retro
+-  lifecycle: active
++  # knowledge gardener: retire implement-lane-model-lives-on-the-run-not-the-verdict-row
++  lifecycle: superseded
+   files: [ src/lib/retro.ts, src/run-task.ts ]
+   fact: >-
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 2b6ba40682..f8892e8638 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -69,5 +69,6 @@
+ - id: body-fetch-guards-on-http-not-size
+   subsystem: review
+-  lifecycle: active
++  # knowledge gardener: retire body-fetch-guards-on-http-not-size
++  lifecycle: superseded
+   files: [src/run-task.ts, src/lib/review.ts]
+   fact: >-
+diff --git a/learnings/failures.yaml b/learnings/failures.yaml
+index d493d438c4..bb3698020c 100644
+--- a/learnings/failures.yaml
++++ b/learnings/failures.yaml
+@@ -68,5 +68,6 @@
+ - id: no-live-operator-in-headless-worker
+   subsystem: cli
+-  lifecycle: active
++  # knowledge gardener: retire no-live-operator-in-headless-worker
++  lifecycle: superseded
+   operator_impact: true
+   files: [src/lib/init.ts, src/run-task.ts, bin/rmd]
+@@ -101,5 +102,6 @@
+ - id: control-surface-fail-loud-stop-one-shot
+   subsystem: cli
+-  lifecycle: active
++  # knowledge gardener: retire control-surface-fail-loud-stop-one-shot
++  lifecycle: superseded
+   operator_impact: true
+   files: [src/run-task.ts, src/lib/fleet-control.ts]
 diff --git a/learnings/platform.yaml b/learnings/platform.yaml
-index 1a8041d321..7433433d60 100644
+index 7433433d60..9bf103bd70 100644
 --- a/learnings/platform.yaml
 +++ b/learnings/platform.yaml
-@@ -170,3 +170,4 @@
- - id: websearch-serverside-webfetch-unverified
+@@ -135,5 +135,6 @@
+ - id: sdk-builtin-tools-are-the-boundary
    subsystem: sdk-tools
 -  lifecycle: active
-+  # knowledge gardener: retire websearch-serverside-webfetch-unverified
++  # knowledge gardener: retire sdk-builtin-tools-are-the-boundary
 +  lifecycle: superseded
+   files: [src/lib/worker.ts, src/run-task.ts]
+   fact: >-
+@@ -156,5 +157,6 @@
+ - id: askuserquestion-auto-resolves-empty-headless
+   subsystem: feedback
+-  lifecycle: active
++  # knowledge gardener: retire askuserquestion-auto-resolves-empty-headless
++  lifecycle: superseded
+   files: [src/run-task.ts, src/lib/triage.ts, src/lib/escalate.ts]
+   fact: >-

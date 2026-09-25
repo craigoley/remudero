@@ -113,8 +113,7 @@
 
 - id: sdk-result-envelope
   subsystem: ledger
-  # knowledge gardener: retire sdk-result-envelope
-  lifecycle: superseded
+  lifecycle: active
   files: [src/lib/ledger.ts, src/lib/worker.ts, src/run-task.ts]
   fact: >-
     The Agent SDK yields the type:"result" envelope (num_turns, total_cost_usd, subtype) and THEN
@@ -237,8 +236,7 @@
 # sdk.d.ts (SDK 0.3.209), not the prompt. This is the ground truth ~33 turns were spent re-discovering. ──
 - id: sdk-result-fields
   subsystem: ledger
-  # knowledge gardener: retire sdk-result-fields
-  lifecycle: superseded
+  lifecycle: active
   files: [src/lib/worker.ts, src/lib/ledger.ts, src/run-task.ts]
   fact: >-
     The SDK type:"result" envelope carries the telemetry to log: num_turns, total_cost_usd, usage
