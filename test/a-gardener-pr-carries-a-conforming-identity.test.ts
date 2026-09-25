@@ -82,7 +82,8 @@ test("a garden PR that writes a docs log lands a fresh docs index", () => {
   const seed = gitRepo({ kind: "garden-docs-seed" });
   // The checkout's OWN generator is what `land` runs, so the fixture carries the real one.
   mkdirSync(join(seed.dir, "scripts", "lib"), { recursive: true });
-  copyFileSync(join(REPO_ROOT, "scripts", "generate-docs-index.mjs"), join(seed.dir, "scripts", "generate-docs-index.mjs"));
+  copyFileSync(join(REPO_ROOT, "scripts", "generate-docs-index.mjs"), join(seed.dir, "scripts", "generate-docs-index-target.mjs"));
+  symlinkSync("generate-docs-index-target.mjs", join(seed.dir, "scripts", "generate-docs-index.mjs"));
   copyFileSync(join(REPO_ROOT, "scripts", "lib", "argv.mjs"), join(seed.dir, "scripts", "lib", "argv.mjs"));
   mkdirSync(join(seed.dir, "docs"), { recursive: true });
   writeFileSync(join(seed.dir, "docs", "guide.md"), "# Guide\n\nHow the fleet works.\n");
