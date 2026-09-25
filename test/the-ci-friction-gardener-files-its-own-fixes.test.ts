@@ -168,4 +168,8 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
   assert.match(log, /\| pass \| total PR minutes \| costliest cause \|/);
   // 90 (ci) + 30 (main_merge) = 120 total priced this pass, topped by the check gate-fire-rate priced higher.
   assert.match(log, /\| 2026-.*\| 120 \| check:ci \(90m\) \|/);
+  // The PR body's OWN proof line names a row that really landed in the log — not just a heading
+  // this pass never writes.
+  const row = log.trim().split("\n").at(-1)!;
+  assert.ok(landed[0]!.body.includes(`proof: grep: ${row} in ${CI_FRICTION_GARDEN_LOG}`));
 });

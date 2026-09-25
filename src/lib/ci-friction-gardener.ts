@@ -355,7 +355,6 @@ export function ciFrictionGardenSpec(deps: CiFrictionGardenerDeps): GardenSpec<C
       mkdirSync(join(ws.root, "plan", "tasks.d"), { recursive: true });
       writeFileSync(join(ws.root, relPath), contents);
 
-      const heading = `## Pass ${clock.iso()}`;
       const priced = (scorecard.priced as CiFrictionCausePrice[] | undefined) ?? [action.price];
       const row = ciFrictionTrendRow(clock.iso(), priced);
       const logPath = join(ws.root, CI_FRICTION_GARDEN_LOG);
@@ -371,7 +370,7 @@ export function ciFrictionGardenSpec(deps: CiFrictionGardenerDeps): GardenSpec<C
         "",
         "## Acceptance",
         `- claim: this pass is recorded in the ci-friction garden log`,
-        `  proof: grep: ^${heading}$|${row.replace(/[|]/g, "\\|")} in ${CI_FRICTION_GARDEN_LOG}`,
+        `  proof: grep: ${row} in ${CI_FRICTION_GARDEN_LOG}`,
         `- claim: the costliest untracked cause is filed as a parked task`,
         `  proof: grep: ${action.origin} in ${relPath}`,
       ].join("\n");
