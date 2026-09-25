@@ -52,12 +52,13 @@ export const INCIDENT_VERIFY_WINDOW_MS = 24 * 60 * 60_000;
 // ── the fix PR's trailer ─────────────────────────────────────────────────────────────────────
 
 /** Mirrors `Remudero-Task:`'s own anchored, one-per-line trailer grammar (status.ts, board.ts) —
- *  never a second convention for "a PR names something". */
-const FIXES_INCIDENT_TRAILER_RE = /^Fixes-Incident:\s*(\S+)\s*$/m;
+ *  never a second convention for "a PR names something". Named `_PATTERN`, not `_RE`, to match
+ *  this same subsystem's own sibling patterns (incident-events.ts's `UUID_PATTERN` et al.). */
+const FIXES_INCIDENT_TRAILER_PATTERN = /^Fixes-Incident:\s*(\S+)\s*$/m;
 
 /** The fingerprint a fix PR's body names, if any — `undefined` for a PR that names none. */
 export function fixesIncidentFingerprint(prBody: string): string | undefined {
-  return FIXES_INCIDENT_TRAILER_RE.exec(prBody)?.[1];
+  return FIXES_INCIDENT_TRAILER_PATTERN.exec(prBody)?.[1];
 }
 
 /**
