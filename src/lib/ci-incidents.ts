@@ -21,8 +21,8 @@ import type { LedgerLine } from "./ledger.js";
 // TAP output (verified against a real failing run), and its diagnostic block's `location:` field
 // is the one place the FILE — never inferable from the title alone — is named.
 
-const TAP_NOT_OK_RE = /^not ok \d+ - (.+)$/;
-const TAP_LOCATION_RE = /location:\s*['"](.+?\.test\.(?:[cm]?[jt]s))(?::\d+:\d+)?['"]/;
+const TAP_NOT_OK_PATTERN = /^not ok \d+ - (.+)$/;
+const TAP_LOCATION_PATTERN = /location:\s*['"](.+?\.test\.(?:[cm]?[jt]s))(?::\d+:\d+)?['"]/;
 
 /** One failing test, as TAP names it: the exact file `location:` points at, and the title on its
  *  `not ok` line. Titles alone are not identities (two files may share one), which is why every
@@ -41,14 +41,14 @@ export function parseCiFailingTests(log: string): CiFailingTest[] {
   let pendingTitle: string | undefined;
   let inFailure = false;
   for (const rawLine of log.split(/\r?\n/)) {
-    const notOk = rawLine.match(TAP_NOT_OK_RE);
+    const notOk = rawLine.match(TAP_NOT_OK_PATTERN);
     if (notOk) {
       pendingTitle = notOk[1].trim();
       inFailure = true;
       continue;
     }
     if (inFailure) {
-      const location = rawLine.match(TAP_LOCATION_RE);
+      const location = rawLine.match(TAP_LOCATION_PATTERN);
       if (location && pendingTitle !== undefined) {
         let file = location[1];
         if (file.startsWith("file://")) file = fileURLToPath(file);
