@@ -13,7 +13,7 @@
   files:
     - src/lib/status.ts
     - test/status.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-24: /v1/status projected W1-T4052 and W1-T4384 in phase `fix-rung` from 01:46Z until their

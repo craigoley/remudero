@@ -12,7 +12,7 @@
   plan_refs: [W1-T4110]
   files: [src/lib/export-gardener.ts, src/run-task.ts, test/dead-exports-are-pruned.test.ts]
   priority: 2
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-23 (research): state/adoption-latest.json lists unreferenced exports and the matching proposals retire

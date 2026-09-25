@@ -7,7 +7,9 @@
   principles: {tdd: strict}
   risk: medium
   budget_usd: 12.00
-  files: [test/a-risk-judge-predicate-nothing-calls.test.ts]
+  files:
+    - src/lib/risk-judge.ts
+    - test/a-risk-judge-predicate-nothing-calls.test.ts
   origin: "operator-session#follow-up-2026-09-07"
   plan_refs: ["W1-T2371", "W1-T2735", "W1-T454", "W1-T1031"]
   status: queued
