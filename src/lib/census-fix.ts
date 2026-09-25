@@ -128,6 +128,7 @@ function baselineRows(text: string | undefined): Record<string, number> {
   try {
     parsed = JSON.parse(text);
   } catch {
+    // Malformed JSON is not this module's to repair -- it reads as "no rows", same as absent.
     return {};
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
