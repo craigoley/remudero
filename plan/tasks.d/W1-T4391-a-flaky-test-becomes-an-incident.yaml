@@ -14,8 +14,10 @@
   files:
     - src/lib/ci-incidents.ts
     - src/lib/github-event-wake.ts
+    - src/lib/github-transport.ts
     - src/lib/serve.ts
     - test/ci-incidents.test.ts
+    - test/github-transport.test.ts
     - test/github-event-sweep-wake.test.ts
   status: queued
   attempts: 0
