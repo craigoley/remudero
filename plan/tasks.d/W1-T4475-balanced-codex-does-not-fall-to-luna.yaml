@@ -20,7 +20,7 @@
     - test/frontier-work-prefers-opus-and-gpt-6-leads-codex.test.ts
     - test/mounts-wiring.test.ts
     - test/sol-and-sonnet-split-mid-tier-work-as-an-ab-test.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The current table maps Sonnet-class requests to Codex Luna at balanced low and medium effort,

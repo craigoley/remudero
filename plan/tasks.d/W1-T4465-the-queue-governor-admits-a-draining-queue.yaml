@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-24: no stuck PRs — automated flow and self-improvement, no hard thresholds; dispatch-starvation investigation"
   plan_refs: [W1-T121, W1-T321, W1-T3144]
   files: [src/lib/sweep.ts, src/lib/daemon.ts, src/run-task.ts, test/the-queue-governor-admits-a-draining-queue.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-24: no run.start between 11:27Z and 15:55Z. Six daemon passes (12:14-14:56) each logged 1-4 idle ticks and

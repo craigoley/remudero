@@ -14,7 +14,7 @@
   files:
     - src/lib/serve-restart-relevance.ts
     - src/lib/serve.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-24 against origin/main: 10 serve.start rows in 3 h, one per merge the host checkout
