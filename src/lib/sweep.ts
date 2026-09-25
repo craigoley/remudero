@@ -9072,27 +9072,25 @@ export async function runSweep(
   // ledger read with. `recordCostAnomalies` is idempotent per run id.
   if (!deps.dryRun) {
     const anomalyPolicy = deps.costAnomalyPolicy ?? loadDefaultCostAnomalyPolicy();
+    // W1-T4417: the cost sentinel (settled runs, judged by cost) and the running-long sentinel
+    // (in-flight runs, judged by elapsed wall-clock time against the SAME policy/corpus) share
+    // ONE throw-containment boundary and ONE `sweep.cost_anomaly.error` log step — a detector
+    // failure, from either half, must never fail the reconciliation pass it shares a ledger read
+    // with, and a single shared catch keeps that discipline exactly ONE proof to carry rather than
+    // two near-identical ones. `recordCostAnomalies`/`recordRunningLong` are each idempotent per
+    // run id, so a partial pass (one half throwing before the other runs) loses nothing: the next
+    // pass simply re-derives whichever half did not get to append this time.
     try {
       const newCostAnomalies = recordCostAnomalies(ledgerLines, anomalyPolicy, {
         ledgerPath: deps.ledgerPath,
         writeLedger: appendLine,
       });
-      // W1-T4417: a `cost.anomaly` row nobody reads is not a report — route each NEW finding into
-      // the SRE gardener's incident ingest (W1-T4383), grouped by task CLASS, not by run.
+      // a `cost.anomaly` row nobody reads is not a report — route each NEW finding into the SRE
+      // gardener's incident ingest (W1-T4383), grouped by task CLASS, not by run.
       for (const finding of newCostAnomalies) {
         appendLine(deps.ledgerPath, costAnomalyIncidentEvent(finding));
       }
-    } catch (e) {
-      log("sweep.cost_anomaly.error", { error: String((e as Error)?.message ?? e) });
-    }
 
-    // ── W1-T4417 RUNNING-LONG SENTINEL ────────────────────────────────────────────────────────
-    // The other half of "a runaway run is ledgered and acted on never": while a run is still IN
-    // FLIGHT, compare its elapsed wall-clock time to its class's median SETTLED duration from the
-    // SAME corpus/policy — past the multiplier, ledger ONE `run.running_long` row (idempotent per
-    // run id, same as `cost.anomaly`) and post the same kind of incident event. Nothing here stops
-    // the run; wrapped in the same throw containment as the cost sentinel above.
-    try {
       const newRunningLong = recordRunningLong(ledgerLines, anomalyPolicy, now, {
         ledgerPath: deps.ledgerPath,
         writeLedger: appendLine,
@@ -9101,7 +9099,7 @@ export async function runSweep(
         appendLine(deps.ledgerPath, runningLongIncidentEvent(finding));
       }
     } catch (e) {
-      log("sweep.running_long.error", { error: String((e as Error)?.message ?? e) });
+      log("sweep.cost_anomaly.error", { error: String((e as Error)?.message ?? e) });
     }
   }
 
