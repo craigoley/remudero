@@ -123,7 +123,8 @@
   },
   "_dependencyRationale": {
     "@swc/core": "Required by .dependency-cruiser.cjs parser: \"swc\"; src never imports it, but depcruise loads it for TypeScript 7 extraction.",
-    "playwright": "Runtime dependency for rmd review's browser proof path; src/lib/review.ts resolves node_modules/playwright/cli.js to install Chromium."
+    "playwright": "Runtime dependency for rmd review's browser proof path; src/lib/review.ts resolves node_modules/playwright/cli.js to install Chromium.",
+    "zod": "Peer dependency of @anthropic-ai/claude-agent-sdk (^4.0.0), declared directly so tool() input schemas in src (W1-T4094's worker rule lookup) resolve a pinned zod rather than an undeclared transitive one."
   },
   "overrides": {
     "qs": "^6.16.0",
