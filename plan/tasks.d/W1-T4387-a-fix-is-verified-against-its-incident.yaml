@@ -14,7 +14,7 @@
   files:
     - src/lib/incident-lifecycle.ts
     - src/lib/serve.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The operator's goal: "the resolution might already be in progress automatically" — visible, not assumed.
