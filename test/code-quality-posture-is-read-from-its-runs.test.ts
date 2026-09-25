@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 import {
   checkGithubPosture,
@@ -186,4 +189,106 @@ test("W1-T4070: the posture read issues no write", () => {
     }
   }
   assert.ok(calls.some((args) => args.some((arg) => arg.includes("created=%3E%3D2026-09-24T12%3A00%3A00.000Z"))));
+});
+
+test("W1-T4070: an unexpected primary CodeQL workflow state reads unknown", () => {
+  const gateway = ghPostureGateway((args) => {
+    const endpoint = args.at(-1) ?? "";
+    if (endpoint.endsWith("/actions/workflows?per_page=100")) {
+      return JSON.stringify([
+        {
+          total_count: 1,
+          workflows: [{ id: 1, path: ".github/workflows/codeql.yml", state: "unexpected" }],
+        },
+      ]);
+    }
+    throw new Error(`unexpected GitHub read: ${args.join(" ")}`);
+  });
+
+  assert.equal(gateway.getCodeQualityRuns?.(OWNER, REPO, SINCE), undefined);
+});
+
+test("W1-T4070: a Code Quality run with an invalid creation time reads unknown", () => {
+  const gateway = ghPostureGateway((args) => {
+    const endpoint = args.at(-1) ?? "";
+    if (endpoint.endsWith("/actions/workflows?per_page=100")) {
+      return JSON.stringify([
+        {
+          total_count: 1,
+          workflows: [{ id: 1, path: ".github/workflows/codeql.yml", state: "active" }],
+        },
+      ]);
+    }
+    if (endpoint === `repos/${OWNER}/${REPO}/actions/workflows/${CODE_QUALITY_WORKFLOW_ID}`) {
+      return JSON.stringify({ id: CODE_QUALITY_WORKFLOW_ID, path: "dynamic/github-code-quality/codeql" });
+    }
+    if (endpoint.includes(`/actions/workflows/${CODE_QUALITY_WORKFLOW_ID}/runs`)) {
+      return JSON.stringify([
+        {
+          total_count: 1,
+          workflow_runs: [{ path: CODE_QUALITY_PATH, created_at: "not-a-date" }],
+        },
+      ]);
+    }
+    throw new Error(`unexpected GitHub read: ${args.join(" ")}`);
+  });
+
+  assert.equal(gateway.getCodeQualityRuns?.(OWNER, REPO, SINCE), undefined);
+});
+
+test("W1-T4070: a throwing Code Quality read leaves the posture baseline untouched", () => {
+  let saved: GithubPostureBaseline | undefined;
+  const findings = checkGithubPosture({
+    owner: OWNER,
+    repo: REPO,
+    configRoot: "/unused",
+    now: NOW,
+    minIntervalMinutes: 0,
+    loadBaseline: () => baselineWithoutCodeQuality,
+    saveBaseline: (_path, baseline) => {
+      saved = baseline;
+    },
+    gateway: {
+      getRepo: () => enabledRepoSettings,
+      getEnforceAdmins: () => ({ enabled: true }),
+      getCodeQualityRuns: () => {
+        throw new Error("Actions API unavailable");
+      },
+    },
+  });
+
+  assert.deepEqual(findings, []);
+  assert.equal(saved, undefined);
+});
+
+test("W1-T4070: the default Code Quality gateway really shells out through gh", () => {
+  const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}github-posture-gh-`));
+  const ghPath = join(bin, "gh");
+  writeFileSync(
+    ghPath,
+    [
+      "#!/bin/sh",
+      'endpoint=""',
+      'for arg in "$@"; do endpoint="$arg"; done',
+      'case "$endpoint" in',
+      '  *actions/workflows\\?per_page=100) printf \'%s\\n\' \'[{"total_count":1,"workflows":[{"id":1,"path":".github/workflows/codeql.yml","state":"active"}]}]\' ;;',
+      `  repos/${OWNER}/${REPO}/actions/workflows/${CODE_QUALITY_WORKFLOW_ID}) printf '%s\\n' '{"id":${CODE_QUALITY_WORKFLOW_ID},"path":"dynamic/github-code-quality/codeql"}' ;;`,
+      `  *actions/workflows/${CODE_QUALITY_WORKFLOW_ID}/runs\\?created=*) printf '%s\\n' '[{"total_count":0,"workflow_runs":[]}]' ;;`,
+      "  *) exit 9 ;;",
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  chmodSync(ghPath, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  try {
+    const activity = ghPostureGateway().getCodeQualityRuns?.(OWNER, REPO, SINCE);
+    assert.deepEqual(activity, { codeqlWorkflowActive: true, workflow_runs: [] });
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    rmSync(bin, { recursive: true, force: true });
+  }
 });
