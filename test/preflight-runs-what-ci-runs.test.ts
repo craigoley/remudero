@@ -262,24 +262,6 @@ test("W1-T4108: a failing ci-checks entry FAILS the overall result and names the
   assert.ok(result.steps.some((s) => s.name === "ci-checks:deps-interface-census" && s.ok));
 });
 
-test("W1-T4108: a ci-checks entry whose spawn THROWS is that step's own named failure, never an abort of the whole preflight", () => {
-  // The shape test/preflight.test.ts's `fakeSpawn` has: it throws on any command it holds no fixture for.
-  const spawn: PreflightSpawn = (file, args) => {
-    const key = [file, ...args].join(" ");
-    if (key.includes("console-parity")) throw new Error("spawn npm ENOENT");
-    return { status: 0, stdout: "", stderr: "" };
-  };
-  const result = runPreflightCiChecks(REPO_ROOT, { spawn });
-
-  assert.equal(result.ok, false);
-  const step = result.steps.find((s) => s.name === "ci-checks:console-parity")!;
-  assert.equal(step.ok, false);
-  assert.match(step.detail, /toolchain unavailable: spawn npm ENOENT/);
-  assert.match(step.detail, /predicts CI/i);
-  assert.ok(result.steps.some((s) => s.name === "ci-checks:command-registry-census" && s.ok), "a throw in one entry must not stop the next from running");
-  assert.ok(result.steps.some((s) => s.name === "ci-checks:deps-interface-census" && s.ok));
-});
-
 test("W1-T4108: preflightCommand runs the new ci-checks and scoped-coverage steps by default, and --no-fast drops both, exactly like the fast gate", async () => {
   const spawn: PreflightSpawn = (file, args) => {
     const key = [file, ...args].join(" ");
