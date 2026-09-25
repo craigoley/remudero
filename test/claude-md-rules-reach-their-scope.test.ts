@@ -135,7 +135,10 @@ test("selectLearnings' matching/ranking/budget behavior is untouched by this mig
     "matching by files: glob and excluding superseded lifecycle must still hold",
   );
   assert.deepEqual(dropped, []);
-  assert.equal(DEFAULT_KNOWLEDGE_BUDGET_CHARS, 8148, "the per-task injection budget must be unchanged by this task");
+  // Pinned to the recorded derivation, not a literal, so a priced cap move in
+  // scripts/knowledge-budget-baseline.json does not read as this task's regression.
+  const { capChars } = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "knowledge-budget-baseline.json"), "utf8")) as { capChars: number };
+  assert.equal(DEFAULT_KNOWLEDGE_BUDGET_CHARS, capChars, "the per-task injection budget must match its recorded baseline");
 });
 
 test("the learnings corpus this task edited still parses cleanly through the real loader with no id collisions", () => {
