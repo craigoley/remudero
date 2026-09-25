@@ -158,7 +158,7 @@ import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "
 import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
-import { daemonSreRunbookDeps, daemonSreRunbookHost, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
+import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
@@ -32439,16 +32439,16 @@ export async function daemonCommand(
                       mergedLastDay: () => mergedInLastDay(repoRoot),
                       log,
                       // W1-T4386: the allowlisted, reversible runbooks each incident meets first.
-                      runbooks: daemonSreRunbookDeps({
-                        runbooks: sreRunbookCatalog({
-                          host: daemonSreRunbookHost({ root: config.root, repoDir: repoRoot, owner: self.owner, repo: self.repo }),
-                          receipts: () => readRunbookReceipts(ledgerPath),
-                        }),
+                      runbookPass: daemonSreRunbookPass(
+                        sreRunbookCatalog(
+                          daemonSreRunbookHost({ root: config.root, repoDir: repoRoot, owner: self.owner, repo: self.repo }),
+                          () => readRunbookReceipts(ledgerPath),
+                        ),
                         ledgerPath,
-                        owner: self.owner,
-                        repo: self.repo,
+                        self.owner,
+                        self.repo,
                         log,
-                      }),
+                      ),
                     }),
                   ),
                 ].filter(() => process.env.RMD_SRE_LANE === "1"),

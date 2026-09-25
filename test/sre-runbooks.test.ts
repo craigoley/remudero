@@ -24,13 +24,13 @@ import {
   isFastBurn,
   readRunbookReceipts,
   receiptFromLedgerRow,
-  runMatchingRunbook,
+  runMatchingRunbook as runMatchingRunbookWithPorts,
   sreOperatorEscalation,
   sreRunbookCatalog,
   type RunbookObservation,
   type SreGovernorTier,
+  type SreGovernorVerdict,
   type SreRunbook,
-  type SreRunbookDeps,
   type SreRunbookHost,
   type SreRunbookReceipt,
 } from "../src/lib/sre-runbooks.js";
@@ -84,9 +84,31 @@ function scripted(opts: {
   return { runbook, calls };
 }
 
-/** Deps whose `log` feeds `receipts()` back, exactly as the ledger does in production. */
+type RunbookHarness = {
+  runbooks: readonly SreRunbook[];
+  governorVerdict: (runbookId: string, incident: IncidentEvidence) => SreGovernorVerdict;
+  receipts: () => SreRunbookReceipt[];
+  escalate: (e: Escalation) => string | null;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  nowMs: () => number;
+};
+
+/** Test adapter: the production runner takes the narrow existing callbacks positionally. */
+function runMatchingRunbook(incident: IncidentEvidence, harness: RunbookHarness) {
+  return runMatchingRunbookWithPorts(
+    incident,
+    harness.runbooks,
+    harness.governorVerdict,
+    harness.receipts,
+    harness.escalate,
+    harness.log,
+    harness.nowMs,
+  );
+}
+
+/** Harness whose `log` feeds `receipts()` back, exactly as the ledger does in production. */
 function deps(runbooks: SreRunbook[], tier: SreGovernorTier = "live"): {
-  deps: SreRunbookDeps;
+  deps: RunbookHarness;
   receipts: SreRunbookReceipt[];
   escalations: Escalation[];
 } {
@@ -146,6 +168,10 @@ test("a matching runbook runs only after its precheck and records a before-and-a
   mkdirSync(join(root, "state"), { recursive: true });
   const ledger: Array<Record<string, unknown>> = [];
   const lane = scripted({});
+  const harness = deps([lane.runbook]);
+  const laneLog = (step: string, extra?: Record<string, unknown>) => ledger.push({ step, ...extra });
+  harness.deps.receipts = () => ledger.map((row) => receiptFromLedgerRow(row)).filter((x): x is SreRunbookReceipt => !!x);
+  harness.deps.log = laneLog;
   const laneDeps: SreLaneInput = {
     stateDir: join(root, "state"),
     root,
@@ -154,8 +180,8 @@ test("a matching runbook runs only after its precheck and records a before-and-a
     framesFor: () => [],
     mergedPrsSince: () => [],
     mergedLastDay: () => 5,
-    log: (step, extra) => ledger.push({ step, ...extra }),
-    runbooks: { ...deps([lane.runbook]).deps, receipts: () => ledger.map((row) => receiptFromLedgerRow(row)).filter((x): x is SreRunbookReceipt => !!x) },
+    log: laneLog,
+    runbookPass: (evidence) => runMatchingRunbook(evidence, harness.deps),
   };
   const pass = await runSreLanePass(laneDeps);
   assert.equal(pass.filed, undefined);
@@ -310,7 +336,7 @@ test("the catalog's four runbooks answer their own incidents through an injected
     requestReview: async (pr) => { acted.push(`review ${pr}`); reviewRequested = true; },
   };
   const receipts: SreRunbookReceipt[] = [];
-  const catalog = sreRunbookCatalog({ host, receipts: () => receipts });
+  const catalog = sreRunbookCatalog(host, () => receipts);
   assert.deepEqual(catalog.map((r) => r.id), ["rerun-failed-ci-once", "catch-up-managed-checkout", "recycle-stale-container", "clear-stale-lock-or-nudge"]);
   assert.ok(catalog.every((r) => r.reversible));
 

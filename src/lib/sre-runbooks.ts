@@ -116,17 +116,6 @@ export interface SreRunbookReceipt {
   seen_ms?: number;
 }
 
-export interface SreRunbookDeps {
-  runbooks: readonly SreRunbook[];
-  governorVerdict: (runbookId: string, incident: IncidentEvidence) => SreGovernorVerdict;
-  /** Every `sre.runbook` receipt so far — the ledger, never lane memory. */
-  receipts: () => SreRunbookReceipt[];
-  /** Opens the needs-human issue assigned to the operator; returns its url, or null when it could not. */
-  escalate: (e: Escalation) => string | null;
-  log: (step: string, extra?: Record<string, unknown>) => void;
-  nowMs: () => number;
-}
-
 export interface RunbookPassResult {
   runbook?: string;
   outcome: SreRunbookOutcome | "no_match" | "no_new_evidence";
@@ -173,18 +162,19 @@ function escalateOnce(
   incident: IncidentEvidence,
   runbookId: string,
   why: string,
-  deps: SreRunbookDeps,
+  escalate: (e: Escalation) => string | null,
+  log: (step: string, extra?: Record<string, unknown>) => void,
   history: readonly SreRunbookReceipt[],
 ): string | undefined {
   if (history.some((r) => r.outcome === "escalated")) return undefined;
-  const url = deps.escalate(sreEscalation(incident, why, history)) ?? undefined;
+  const url = escalate(sreEscalation(incident, why, history)) ?? undefined;
   // No receipt for an issue that did not open, so the next pass asks again rather than going quiet.
-  if (url !== undefined) record(deps, { id: runbookId, fingerprint: incident.fingerprint, mode: "live", outcome: "escalated", reason: why, issue_url: url });
+  if (url !== undefined) record(log, { id: runbookId, fingerprint: incident.fingerprint, mode: "live", outcome: "escalated", reason: why, issue_url: url });
   return url;
 }
 
-function record(deps: SreRunbookDeps, receipt: SreRunbookReceipt): void {
-  deps.log(SRE_RUNBOOK_STEP, { ...receipt });
+function record(log: (step: string, extra?: Record<string, unknown>) => void, receipt: SreRunbookReceipt): void {
+  log(SRE_RUNBOOK_STEP, { ...receipt });
 }
 
 /** A precheck or verify that throws reads as not-ok, carrying why — never as a thrown pass that
@@ -202,11 +192,19 @@ async function observe(phase: string, read: () => Promise<RunbookObservation>): 
 /** Hand one incident to the first reversible runbook that matches it: precheck, governor, act,
  *  verify, receipt — and escalate only on a fast burn or the {@link SRE_RUNBOOK_FAILURE_LIMIT}th
  *  failure. Returns whether the lane should still file the incident as feedback. */
-export async function runMatchingRunbook(incident: IncidentEvidence, deps: SreRunbookDeps): Promise<RunbookPassResult> {
-  const fastBurn = isFastBurn(incident, deps.nowMs());
-  const history = deps.receipts().filter((r) => r.fingerprint === incident.fingerprint);
-  const runbook = deps.runbooks.find((r) => r.reversible && r.matches(incident));
-  const burnUrl = () => (fastBurn ? escalateOnce(incident, runbook?.id ?? FAST_BURN_RECEIPT_ID, "user-visible fast burn", deps, history) : undefined);
+export async function runMatchingRunbook(
+  incident: IncidentEvidence,
+  runbooks: readonly SreRunbook[],
+  governorVerdict: (runbookId: string, incident: IncidentEvidence) => SreGovernorVerdict,
+  receipts: () => SreRunbookReceipt[],
+  escalate: (e: Escalation) => string | null,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  nowMs: () => number,
+): Promise<RunbookPassResult> {
+  const fastBurn = isFastBurn(incident, nowMs());
+  const history = receipts().filter((r) => r.fingerprint === incident.fingerprint);
+  const runbook = runbooks.find((r) => r.reversible && r.matches(incident));
+  const burnUrl = () => (fastBurn ? escalateOnce(incident, runbook?.id ?? FAST_BURN_RECEIPT_ID, "user-visible fast burn", escalate, log, history) : undefined);
   if (!runbook) return { outcome: "no_match", fileFeedback: true, escalatedUrl: burnUrl() };
 
   const own = history.filter((r) => r.id === runbook.id);
@@ -217,24 +215,24 @@ export async function runMatchingRunbook(incident: IncidentEvidence, deps: SreRu
     return { runbook: runbook.id, outcome: "no_new_evidence", fileFeedback: !stillOwned || failures >= SRE_RUNBOOK_FAILURE_LIMIT, escalatedUrl: burnUrl() };
   }
   if (failures >= SRE_RUNBOOK_FAILURE_LIMIT) {
-    const url = escalateOnce(incident, runbook.id, `runbook ${runbook.id} failed ${failures} times`, deps, history);
+    const url = escalateOnce(incident, runbook.id, `runbook ${runbook.id} failed ${failures} times`, escalate, log, history);
     return { runbook: runbook.id, outcome: "escalated", fileFeedback: true, escalatedUrl: url };
   }
 
   const before = await observe("precheck", () => runbook.precheck(incident));
   const base = { id: runbook.id, fingerprint: incident.fingerprint, subject: before.subject, before: before.observed, seen_ms: incident.lastSeenMs };
   if (!before.ok) {
-    record(deps, { ...base, mode: "live", outcome: "precheck_refused" });
+    record(log, { ...base, mode: "live", outcome: "precheck_refused" });
     return { runbook: runbook.id, outcome: "precheck_refused", fileFeedback: true, escalatedUrl: burnUrl() };
   }
 
-  const verdict = deps.governorVerdict(runbook.id, incident);
+  const verdict = governorVerdict(runbook.id, incident);
   if (verdict.tier === "shadow") {
-    record(deps, { ...base, mode: "shadow", outcome: "would_act", reason: verdict.reason });
+    record(log, { ...base, mode: "shadow", outcome: "would_act", reason: verdict.reason });
     return { runbook: runbook.id, outcome: "would_act", fileFeedback: true, escalatedUrl: burnUrl() };
   }
   if (verdict.tier !== "live") {
-    record(deps, { ...base, mode: verdict.tier, outcome: "held", reason: verdict.reason });
+    record(log, { ...base, mode: verdict.tier, outcome: "held", reason: verdict.reason });
     // `slow` is a backoff: the runbook still owns the incident. `stopped` hands it to the fleet.
     return { runbook: runbook.id, outcome: "held", fileFeedback: verdict.tier === "stopped", escalatedUrl: burnUrl() };
   }
@@ -249,11 +247,11 @@ export async function runMatchingRunbook(incident: IncidentEvidence, deps: SreRu
   const after = actError === undefined ? await observe("verify", () => runbook.verify(incident)) : { ok: false, observed: `act threw: ${actError}` };
   const outcome: SreRunbookOutcome = after.ok ? "cleared" : "failed";
   const receipt: SreRunbookReceipt = { ...base, mode: "live", outcome, after: after.observed };
-  record(deps, receipt);
+  record(log, receipt);
   if (outcome === "cleared") return { runbook: runbook.id, outcome, fileFeedback: false };
 
   if (failures + 1 >= SRE_RUNBOOK_FAILURE_LIMIT) {
-    const url = escalateOnce(incident, runbook.id, `runbook ${runbook.id} failed ${failures + 1} times`, deps, [...history, receipt]);
+    const url = escalateOnce(incident, runbook.id, `runbook ${runbook.id} failed ${failures + 1} times`, escalate, log, [...history, receipt]);
     return { runbook: runbook.id, outcome: "escalated", fileFeedback: true, escalatedUrl: url };
   }
   return { runbook: runbook.id, outcome, fileFeedback: false, escalatedUrl: burnUrl() };
@@ -297,20 +295,17 @@ export function shadowUntilGoverned(): SreGovernorVerdict {
 /** The daemon's runbook gates around a catalog (src/run-task.ts builds the catalog, so a test can
  *  inject its own): receipts from this daemon's ledger, shadow until governed, and the operator's
  *  assigned needs-human issue. */
-export function daemonSreRunbookDeps(opts: {
-  runbooks: readonly SreRunbook[];
-  ledgerPath: string;
-  owner: string;
-  repo: string;
-  log: (step: string, extra?: Record<string, unknown>) => void;
-}): Omit<SreRunbookDeps, "log"> {
-  return {
-    runbooks: opts.runbooks,
-    governorVerdict: shadowUntilGoverned,
-    receipts: () => readRunbookReceipts(opts.ledgerPath),
-    escalate: sreOperatorEscalation(opts),
-    nowMs: () => systemClock.now(),
-  };
+export function daemonSreRunbookPass(
+  runbooks: readonly SreRunbook[],
+  ledgerPath: string,
+  owner: string,
+  repo: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): (incident: IncidentEvidence) => Promise<RunbookPassResult> {
+  const receipts = () => readRunbookReceipts(ledgerPath);
+  const escalate = sreOperatorEscalation({ owner, repo, ledgerPath, log });
+  const nowMs = () => systemClock.now();
+  return (incident) => runMatchingRunbook(incident, runbooks, shadowUntilGoverned, receipts, escalate, log, nowMs);
 }
 
 /** The needs-human issue path, each issue assigned to the repo's owner — the operator — so GitHub
@@ -396,8 +391,7 @@ function answers(id: keyof typeof SRE_RUNBOOK_INCIDENTS): (incident: IncidentEvi
 }
 
 /** The allowlisted, reversible runbooks the daemon hands the SRE lane (the design's initial four). */
-export function sreRunbookCatalog(deps: { host: SreRunbookHost; receipts: () => SreRunbookReceipt[] }): SreRunbook[] {
-  const { host } = deps;
+export function sreRunbookCatalog(host: SreRunbookHost, receipts: () => SreRunbookReceipt[]): SreRunbook[] {
   return [
     {
       id: "rerun-failed-ci-once",
@@ -409,7 +403,7 @@ export function sreRunbookCatalog(deps: { host: SreRunbookHost; receipts: () => 
         if (pr === undefined) return refused("incident names no pr=<n>");
         const ci = await host.failedCi(pr);
         const subject = `${pr}@${ci.headSha}`;
-        const rerun = deps.receipts().some((r) => r.id === "rerun-failed-ci-once" && r.subject === subject && r.mode === "live" && (r.outcome === "cleared" || r.outcome === "failed"));
+        const rerun = receipts().some((r) => r.id === "rerun-failed-ci-once" && r.subject === subject && r.mode === "live" && (r.outcome === "cleared" || r.outcome === "failed"));
         if (rerun) return { ok: false, observed: `already re-ran once at ${subject}`, subject };
         return { ok: ci.unrelated && ci.jobIds.length > 0, observed: ci.observed, subject };
       },

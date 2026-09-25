@@ -7,10 +7,8 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
 import {
-  runMatchingRunbook,
   type IncidentEvidence,
   type RunbookPassResult,
-  type SreRunbookDeps,
 } from "./sre-runbooks.js";
 import { readLedgerLines } from "./status.js";
 
@@ -285,8 +283,8 @@ export type SreLaneInput = Pick<FleetLaneDeps, "stateDir" | "mergedLastDay" | "c
   /** Merged PRs (with files) since a deploy sha — `undefined` sha reads the last 24 hours. */
   mergedPrsSince: (sinceSha: string | undefined) => MergedPrFiles[];
   log: (step: string, extra?: Record<string, unknown>) => void;
-  /** W1-T4386: the runbook catalog and its gates. Absent, every incident is filed as before. */
-  runbooks?: Omit<SreRunbookDeps, "log">;
+  /** W1-T4386: the runbook pass is composed at the daemon boundary. Absent, incidents file as before. */
+  runbookPass?: (incident: IncidentEvidence) => Promise<RunbookPassResult>;
 };
 
 export interface SreLanePass {
@@ -311,14 +309,14 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   const withinDay = (ts: string) => now - Date.parse(ts) < DAY_MS;
   const filedToday = Object.values(store).filter((d) => withinDay(d.ts)).length;
   const room = sreLaneRoom(deps.mergedLastDay(), filedToday);
-  if (room <= 0 && !deps.runbooks) return { room };
+  if (room <= 0 && !deps.runbookPass) return { room };
 
   const openOrigins = openIncidentFeedbackOrigins(deps.root);
   const evidence = aggregateIncidents(deps.readEvents());
   const worst = worstOpenIncident(evidence, (fp) => fingerprintAlreadyOpen(fp, openOrigins, deps.hasOpenTask));
   if (!worst) return { room };
 
-  const runbook = deps.runbooks ? await runMatchingRunbook(worst, { ...deps.runbooks, log: deps.log }) : undefined;
+  const runbook = deps.runbookPass ? await deps.runbookPass(worst) : undefined;
   if (room <= 0 || (runbook && !runbook.fileFeedback)) return { room, runbook };
 
   const frameFiles = deps.framesFor(worst.fingerprint).map((f) => f.file);
@@ -368,7 +366,7 @@ export function startSreLane(deps: SreLaneInput): (pollIntervalMs: number) => { 
 /** The daemon's lane input (src/run-task.ts): `readEvents` reads only this daemon's own ledger and
  *  `hasOpenTask`/`framesFor` answer nothing yet — the module doc's TRAP. */
 export function daemonSreLaneInput(
-  input: Pick<SreLaneInput, "stateDir" | "root" | "mergedLastDay" | "log" | "runbooks"> & { ledgerPath: string; owner: string; repo: string },
+  input: Pick<SreLaneInput, "stateDir" | "root" | "mergedLastDay" | "log" | "runbookPass"> & { ledgerPath: string; owner: string; repo: string },
 ): SreLaneInput {
   return {
     stateDir: input.stateDir,
@@ -383,6 +381,6 @@ export function daemonSreLaneInput(
     mergedPrsSince: (sinceSha) => mergedPrsSince(input.root, input.owner, input.repo, sinceSha),
     mergedLastDay: input.mergedLastDay,
     log: input.log,
-    runbooks: input.runbooks,
+    runbookPass: input.runbookPass,
   };
 }
