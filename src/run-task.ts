@@ -43359,7 +43359,10 @@ export async function approveCommand(
       if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
       worktreePath = join(worktreesDir(config), branch);
       worktreeAdd(dir, worktreePath, branch, `origin/${branch}`, { log });
-      writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+      // Reads through the shared Clock port (systemClock.iso()), never a bare `new Date()` —
+      // clock-signature-census.test.ts tracks every new legacy-shaped call site added to this
+      // file, and every OTHER `startedAt` in this function already predates that gate.
+      writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
       materializeAndCommitApproveFragment(worktreePath, payload, `joined ${branch}`);
       gitPushRunBranch(worktreePath);
       log("approve.joined", { proposal_id: payload.proposalId, branch });
