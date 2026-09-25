@@ -200,18 +200,26 @@ test("W1-T2715 (acceptance 4a): with git unreadable the check is SILENT — it n
   }
 });
 
-test("W1-T2715 (acceptance 4b): the check WRITES NOTHING — its own source spawns one read-only git and creates no fixture", () => {
+test("W1-T2715 (acceptance 4b): the observer uses read-only git and creates no fixture", () => {
   const src = readFileSync(WRAPPER, "utf8");
-  const added = src.slice(src.indexOf("W1-T2715"));
-  // W1-T2907 moved the spawn itself into scripts/lib/git.mjs's `gitOrThrow`, so the wrapper now
-  // NAMES the git it runs rather than spawning it inline. The claim is unchanged and still the
-  // point of this test: exactly one git call, and it is `status --porcelain`, which writes
-  // nothing. `gitOrThrow` itself only reads — it runs the argv it is given and throws on a
-  // non-zero exit.
-  assert.match(added, /gitOrThrow\(\["status", "--porcelain"\]/, "one read-only git call");
-  assert.doesNotMatch(added, /execFileSync\("git"/, "and the inline spawn it replaced is gone, not merely unused");
-  assert.doesNotMatch(added, /writeFileSync|mkdirSync|renameSync|rmSync/, "and no write of any kind");
-  assert.doesNotMatch(added, /"-uno"/, "and NOT -uno, which would be blind to instance 2's untracked leak");
+  const sourceOf = (name: string): string => {
+    const start = src.indexOf(`function ${name}(`);
+    assert.notEqual(start, -1, `${name} must remain in the wrapper`);
+    const end = src.indexOf("\n}", start);
+    assert.notEqual(end, -1, `${name} must have a bounded function body`);
+    return src.slice(start, end + 2);
+  };
+  // Keep this proof on the observer itself. The wrapper also owns retry-evidence writers; scanning
+  // to EOF would misattribute those independent writes to the read-only tree check.
+  const observer = ["readTrackedTreeState", "defaultStatusReader", "reportTrackedTreeDirt"]
+    .map(sourceOf)
+    .join("\n");
+  // W1-T2907 moved the spawn into gitOrThrow. The observer names the one read-only command; the
+  // tracked-tree dirt report may record evidence, but it creates no fixture or file itself.
+  assert.match(observer, /gitOrThrow\(\["status", "--porcelain"\]/, "one read-only git call");
+  assert.doesNotMatch(observer, /execFileSync\("git"/, "the old inline spawn is gone");
+  assert.doesNotMatch(observer, /writeFileSync|mkdirSync|renameSync|rmSync|appendFileSync/, "no direct file mutation");
+  assert.doesNotMatch(observer, /"-uno"/, "and NOT -uno, which would be blind to instance 2's untracked leak");
 });
 
 test("W1-T2715: the attribution is a SET difference — an unchanged tree attributes nothing, a vanished line is not dirt", () => {

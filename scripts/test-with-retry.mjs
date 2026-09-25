@@ -34,6 +34,13 @@
 // break. TEST_RETRY=0 disables the retry entirely (the first attempt's exit code is final) -- a
 // kill switch for when the retry mechanism itself is suspected of hiding something real.
 //
+// W1-T4112: A FLAKE WAS PRINTED, NEVER RECORDED. `recordFlakeEvidence`'s FLAKE-RETRY line has
+// always been stdout-only (plus $GITHUB_STEP_SUMMARY in CI), so nothing could ever ask "which
+// file flakes the most" without hand-reading logs. Every FLAKE-RETRY headline now ALSO appends one
+// `test.flake_retry` row per named `{file, test}` pair into the fleet's own ledger (`appendFlakeLedger`,
+// default `<root>/state/ledger.ndjson`) -- the same ledger `src/lib/test-gardener.ts` reads back
+// through the union resolver to retier a repeat flaker into the slow tier.
+//
 // W1-T2433: DO NOT START A PASS YOU CANNOT FINISH. The wrapper already knows how long pass 1
 // took, because it waited for it. When $TEST_RETRY_BUDGET_SECONDS is set, pass 2 is spawned only
 // when the remaining budget (budget minus pass 1's elapsed time) is at least what pass 1 itself
@@ -45,9 +52,9 @@
 // task (the retry always fires on a non-zero first attempt, same as today).
 
 import { spawn } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { gitOrThrow } from "./lib/git.mjs";
 
 /**
@@ -169,6 +176,78 @@ export function parseFailingTestFiles(output, cwd = process.cwd()) {
     if (inFailure && rawLine.trim() === "...") inFailure = false;
   }
   return [...files].sort();
+}
+
+/**
+ * W1-T4112 (design note i) — the SAME TAP scan as {@link parseFailingTestFiles}, but paired with
+ * the failing test's own title, so each failure becomes one `{ file, test }` pair the ledger can
+ * carry. Kept as its own function rather than folded into `parseFailingTestFiles`/
+ * `parseFailingTestNames`: those two are already relied on independently (file retry scoping,
+ * console/step-summary evidence) and neither needs the other's shape.
+ */
+export function parseFailingTestEntries(output, cwd = process.cwd()) {
+  const entries = [];
+  let currentTest;
+  let inFailure = false;
+  for (const rawLine of output.split(/\r?\n/)) {
+    const notOk = rawLine.match(/^not ok \d+ - (.+)$/);
+    if (notOk) {
+      inFailure = true;
+      currentTest = notOk[1].trim();
+      continue;
+    }
+    if (inFailure) {
+      const match = rawLine.match(/location:\s*['"](.+?\.test\.(?:[cm]?[jt]s))(?::\d+:\d+)?['"]/);
+      if (match && currentTest !== undefined) {
+        let path = match[1];
+        if (path.startsWith("file://")) path = fileURLToPath(path);
+        const rel = (isAbsolute(path) ? relative(cwd, path) : path).split(sep).join("/");
+        if (rel !== ".." && !rel.startsWith("../")) entries.push({ test: currentTest, file: rel });
+      }
+    }
+    if (inFailure && rawLine.trim() === "...") {
+      inFailure = false;
+      currentTest = undefined;
+    }
+  }
+  return entries;
+}
+
+/**
+ * W1-T4112 (design note i) — THE SAME LEDGER EVERY OTHER FLEET STEP WRITES INTO, not a bespoke
+ * file this wrapper invents. `test.flake_retry` is a step name like any other (grep it from
+ * source with `git grep -oh '"test\\.[a-z_.]+"'`, per this repo's own "step names come from
+ * source" lesson), so `src/lib/test-gardener.ts` reads it back through the ledger UNION resolver
+ * (`readLedgerUnionRecordsSync`), never a glob over `state/ledger.*` that only names one rotation
+ * form. Defaults to `ledgerPathFor`'s own path (`<root>/state/ledger.ndjson`) under this
+ * process's own cwd, which is the repo root in every caller (package.json's `test:ci`, ci.yml's
+ * direct invocations) -- overridable for a fixture that must not touch a real checkout's state.
+ * `state/` is gitignored, so a run with nothing to retry never dirties the tracked tree.
+ */
+export function flakeLedgerPath(env = process.env, cwd = process.cwd()) {
+  return env.RMD_TEST_FLAKE_LEDGER ?? join(cwd, "state", "ledger.ndjson");
+}
+
+/** One ledger row per failing `{ file, test }` pair -- a RECORD, not only the console/step-summary
+ *  line `recordFlakeEvidence` already prints. `headline` carries which attempt produced it (first
+ *  attempt failed / retry ALSO failed), so a reader can tell a healed flake from one still red on
+ *  its own retry, matching `recordFlakeEvidence`'s own two headlines. */
+export function flakeLedgerLines(entries, headline) {
+  return entries.map((e) => JSON.stringify({ ts: new Date().toISOString(), step: "test.flake_retry", file: e.file, test: e.test, headline }));
+}
+
+/** Appends one ledger line per entry. Best-effort, matching `recordFlakeEvidence`'s own posture:
+ *  a ledger write that cannot be made must never fail the suite it is only recording evidence
+ *  about, so a failure here is reported to stderr and otherwise swallowed. A run with no named
+ *  failing file (no TAP `location:` evidence) writes nothing rather than a placeholder row. */
+export function appendFlakeLedger(entries, headline, { path = flakeLedgerPath(), append = appendFileSync, mkdir = mkdirSync } = {}) {
+  if (entries.length === 0) return;
+  try {
+    mkdir(dirname(path), { recursive: true });
+    for (const line of flakeLedgerLines(entries, headline)) append(path, line + "\n");
+  } catch (error) {
+    console.error(`test-with-retry: warning: could not append the flake ledger (${error.message})`);
+  }
 }
 
 function isNodeCommand(cmd) {
@@ -323,6 +402,7 @@ export async function main(argv) {
   const firstNames = parseFailingTestNames(first.output);
   const failedFiles = parseFailingTestFiles(first.output);
   recordFlakeEvidence("first attempt failed", firstNames);
+  appendFlakeLedger(parseFailingTestEntries(first.output), "first attempt failed");
 
   const budgetSeconds = parseBudgetSeconds(process.env.TEST_RETRY_BUDGET_SECONDS);
   if (!shouldAttemptRetry({ budgetSeconds, firstPassElapsedMs })) {
@@ -348,6 +428,7 @@ export async function main(argv) {
   // break the retry did NOT paper over is just as countable as one it did.
   if (second.code !== 0) {
     recordFlakeEvidence("retry ALSO failed", parseFailingTestNames(second.output));
+    appendFlakeLedger(parseFailingTestEntries(second.output), "retry ALSO failed");
   }
   return reportTrackedTreeDirt(treeBefore, second.code);
 }
@@ -362,6 +443,7 @@ async function coverageRetry(treeBefore, firstCode, retry, failedFiles, firstNam
   const second = await runOnce(retry.cmd, retry.args, retry.env);
   if (second.code !== 0) {
     recordFlakeEvidence("retry ALSO failed", parseFailingTestNames(second.output));
+    appendFlakeLedger(parseFailingTestEntries(second.output), "retry ALSO failed");
   } else {
     const line = `FLAKE-RETRY-RECOVERED: a flake, not a pass — coverage figures are pass one's — ${firstNames.join(", ") || "(no test name parsed from output)"}`;
     console.log(line);

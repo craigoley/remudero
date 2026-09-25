@@ -17,6 +17,15 @@ name: CI gate
 # so no runner waits out the CI run; the job here re-aggregates only on an `edited` event.
 # Why: the synthwatch #102 replay, the class-bug argument and the branch-protection flip are in
 # docs/forensics/ci-gate-yml.md (W1-T24).
+#
+# W1-T4406: this CONTRACT's REQUIRED list is a `pull_request`-time list — most of its ~17
+# one-runner entries are steps of ci.yml's `commitlint` job, itself `if: github.event_name ==
+# 'pull_request'`, so they never register on a GitHub merge queue's `merge_group` commit. ci.yml's
+# own embedded `ci-gate` job (the one that runs this contract on every non-`edited` event)
+# deliberately stays `pull_request`-only for exactly that reason — see its own comment. The merge
+# queue's ruleset is expected to require the underlying check names ci.yml's `ci`, `coverage-
+# ratchet` and `test-slow` jobs already post unconditionally (they gained a `merge_group` trigger
+# in that same task), not this aggregate; nothing in THIS file needed to change for that.
 
 on:
   pull_request:
