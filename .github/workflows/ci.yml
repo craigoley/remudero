@@ -17,6 +17,16 @@
 # prophylactic: 13x the 46s maximum observed over 440 sampled job-runs of that class. The two
 # Playwright-carrying HEAVY jobs derive their own bounds below.
 #
+# W1-T4406 — `merge_group` (the GitHub merge queue's own event, W1-T4405 made auto-merge
+# queue-aware) is a THIRD trigger alongside `pull_request` and `push`. `coverage-ratchet` and
+# `test-slow` already run their real work on any non-push event reaching their shell guards
+# (`test-slow` carries no job-level `if:` at all — W1-T4396 — and already treats "not
+# pull_request" as the full-suite lane), so both pick up `merge_group` for free: the merge queue's
+# own synthetic commit gets the full instrumented suite AND the slow tier, on the exact tree that
+# is about to land, with no separate wiring. `coverage-ratchet`'s few PR-scoped shell guards are
+# widened (never replaced — pull_request keeps every byte of its existing, separately-tested
+# behavior) to also treat `merge_group` as real work; see that job's own comments.
+#
 # Why: the measurements, incidents and design arguments compacted out of this file are archived
 # verbatim in docs/forensics/ci-yml.md, per docs/comment-standard.md.
 name: CI
@@ -27,18 +37,31 @@ on:
   # TRAP: `ci-gate.yml` must not gain this trigger; test/push-ci-on-main.test.ts pins why.
   push:
     branches: [main]
+  # W1-T4406: the merge queue's own event — GitHub creates a temporary merge commit and runs every
+  # workflow that declares this trigger against it before the queue lets a PR land. No `types:`
+  # filter, for the same INVARIANT 2 reason `pull_request` and `push` above carry none.
+  merge_group:
 
 permissions:
   actions: read
   contents: read
 
+# W1-T4406: ONE FLAG — the pull_request-time switch design note (iv) calls for, so flipping it (or
+# reverting it) is a one-line, one-PR change. "0" until the W1-T4404 shadow record shows two weeks
+# with no missed real failure: every existing pull_request behavior below stays byte-for-byte
+# unchanged while it reads "0" (see the `ci` job's Test step, the one reader of this flag).
+env:
+  RMD_AFFECTED_SUITE_LIVE: "0"
+
 # R-50: a force-push mid-run left the superseded PR run competing for the same CI-minute budget as
 # its replacement, so group by PR number and let a PR's own runs cancel their predecessor.
 #
-# INVARIANT: `cancel-in-progress` is true only on `pull_request`. A push to `main` groups by
-# `github.ref` (always `refs/heads/main` here) so those runs share one FIFO queue and are never
-# cancelled — this is the only lane running the full suite and the coverage aggregate against
-# `main`, and cancelling a slower in-flight run would drop coverage data for a merged commit.
+# INVARIANT: `cancel-in-progress` is true only on `pull_request`. A push to `main` (or a
+# `merge_group` run — W1-T4406, matched by the same `|| github.ref` fallback since it has no PR
+# number either) groups by `github.ref` so those runs share one FIFO queue and are never
+# cancelled — this is the lane running the full suite and the coverage aggregate against `main` or
+# the queue's own merge commit, and cancelling a slower in-flight run would drop coverage data for
+# a tree about to land.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -204,10 +227,36 @@ jobs:
           if [ -n "${GITHUB_BASE_REF}" ]; then
             TIER_BASE="origin/${GITHUB_BASE_REF}"
           fi
+          # W1-T4406: ONE FLAG (this workflow's own top-level env; default "0"). Until the W1-T4404
+          # shadow record earns the flip, this block never fires and a pull_request SOURCE diff
+          # takes the unchanged W1-T3207 skip below, byte-for-byte. Flipped to "1", it runs the
+          # live W1-T4404 selector (src/lib/affected-suites.ts — the SAME pure function `rmd
+          # preflight` shares) instead of deferring to coverage-ratchet, which is the mechanism
+          # that actually moves the run off every PR push. A fullRun verdict (a config, lockfile,
+          # workflow or test-helper change the selector does not model) leaves CLASS untouched, so
+          # it falls through to the ordinary full fast tier below, unmodified.
+          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "$TEST_ONLY_RUN" != "full" ] && [ "${RMD_AFFECTED_SUITE_LIVE:-0}" = "1" ]; then
+            node --import tsx -e '
+              import { readFileSync, writeFileSync } from "node:fs";
+              const root = process.env.GITHUB_WORKSPACE || process.cwd();
+              const changed = readFileSync(process.argv[1], "utf8").split("\n").map((l) => l.trim()).filter(Boolean);
+              const mod = await import(root + "/src/lib/affected-suites.ts");
+              const sel = mod.affectedSelectionOrFull(changed, () => mod.readAffectedSuitesInput(root, changed));
+              writeFileSync(process.argv[2], sel.fullRun ? "full\n" : sel.suites.map((s) => s + "\n").join(""));
+              console.log("W1-T4406: live selection for " + changed.length + " changed file(s) -> " + (sel.fullRun ? "FULL: " + sel.reasons[0] : sel.suites.length + " suite(s)"));
+            ' changed-files.txt affected-suites-selected.txt || echo "full" > affected-suites-selected.txt
+            if [ "$(head -n 1 affected-suites-selected.txt 2>/dev/null || true)" != "full" ]; then
+              CLASS="AFFECTED"
+            fi
+          fi
           if [ "$CLASS" != "SOURCE" ]; then
             COUNT=0
             if [ "$CLASS" = "TEST_ONLY" ]; then
               SUITES="$(tail -n +2 test-only-run.txt)"
+            elif [ "$CLASS" = "AFFECTED" ]; then
+              # W1-T4406: the live selector's own suite list, run through the exact same
+              # duration-balanced candidate-shard machinery the plan-reading lane below uses.
+              SUITES="$(cat affected-suites-selected.txt 2>/dev/null || true)"
             else
               SUITES="$(node --import tsx scripts/diff-class.mjs --list-plan-reading-suites --changed-files changed-files.txt)" || SUITES=""
             fi
@@ -246,7 +295,7 @@ jobs:
           # names the tokens; this comment must not, because a comment inside a run body IS part of
           # the body the census reads.) It was briefly written as two adjacent string literals to
           # dodge the census by text, which is what prompted narrowing the rule instead.
-          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "$TEST_ONLY_RUN" != "full" ]; then
+          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "$TEST_ONLY_RUN" != "full" ] && [ "${RMD_AFFECTED_SUITE_LIVE:-0}" != "1" ]; then
             echo "W1-T3207: coverage-ratchet owns the single instrumented full-suite run; ci skips the quieter second harness on PR source diffs."
             echo "- W1-T3207: skipped the quieter ci test harness on SOURCE; coverage-ratchet owns the single instrumented full-suite run for this PR." >> "$GITHUB_STEP_SUMMARY"
             exit 0
@@ -1013,7 +1062,10 @@ jobs:
         # TRAP: step-level bash, never a YAML `if:` — the class is READ by the bash guards below.
         id: classify
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+          # W1-T4406: `merge_group` joins `pull_request` here — its own synthetic commit's first
+          # parent is the target branch's tip, exactly like a PR's, so HEAD^1...HEAD is the diff
+          # that is about to land, not a shallow guess.
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
             git diff --name-only HEAD^1...HEAD > changed-files.txt || true
           else
             : > changed-files.txt
@@ -1087,7 +1139,10 @@ jobs:
         # W1-T255's WHOLE-SUITE retry is gone from this job (the operator rulings of 2026-08-28 —
         # docs/forensics/ci-yml.md); W1-T4398's failed-file, uninstrumented retry replaces it.
         run: |
-          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping the real test-with-coverage run on a ${GITHUB_EVENT_NAME} event (see this job's own comment above)."; exit 0; }
+          # W1-T4406: `merge_group` widens this guard alongside `pull_request` — never replaces it;
+          # every pull_request behavior below is untouched. The merge queue's own commit is the
+          # exact tree about to land, so it earns the same real instrumented run a PR gets.
+          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ] || { echo "W1-T1033: coverage-ratchet only runs its real work on pull_request/merge_group; skipping the real test-with-coverage run on a ${GITHUB_EVENT_NAME} event (see this job's own comment above)."; exit 0; }
           CLASS="${{ steps.classify.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
             echo "W1-T2428 fast-lane: class=${CLASS} — skipping Test with coverage (no src/**/test/** path in this diff, so coverage cannot newly move)."
@@ -1350,7 +1405,9 @@ jobs:
             fi
             VALUE="$(cat "$CLASS_FILE")"
             case "$VALUE" in
-              pull_request:PLAN_ONLY|pull_request:DOCS_ONLY|pull_request:TEST_ONLY|pull_request:SOURCE|push:SOURCE) ;;
+              # W1-T4406: merge_group:* joins the whitelist alongside pull_request:* — the classify
+              # step above now computes a real class for a merge_group run too.
+              pull_request:PLAN_ONLY|pull_request:DOCS_ONLY|pull_request:TEST_ONLY|pull_request:SOURCE|merge_group:PLAN_ONLY|merge_group:DOCS_ONLY|merge_group:TEST_ONLY|merge_group:SOURCE|push:SOURCE) ;;
               *)
                 echo "coverage-ratchet: coverage-shard-${SHARD} carried unrecognised class metadata '${VALUE}'."
                 exit 1
@@ -1369,7 +1426,8 @@ jobs:
           echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
       - name: Merge raw V8 coverage shards before assigning LCOV branch indexes
         run: |
-          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "coverage-ratchet: push event — no PR coverage merge required."; exit 0; }
+          # W1-T4406: merge_group widens this guard alongside pull_request (never replaces it).
+          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ] || { echo "coverage-ratchet: push event — no PR coverage merge required."; exit 0; }
           CLASS="${{ steps.coverage-artifact.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
             echo "W1-T2428 fast-lane: class=${CLASS} — no coverage shards were collected."
@@ -1397,7 +1455,9 @@ jobs:
       # have preserved.
       - name: Compute this PR's base...head diff (for the per-diff coverage check below)
         run: |
-          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event — HEAD is no merge commit here and HEAD^1 would not resolve."; exit 0; }
+          # W1-T4406: merge_group widens this guard alongside pull_request (never replaces it) —
+          # its own synthetic commit IS a merge commit, so HEAD^1 resolves there too.
+          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ] || { echo "W1-T1033: coverage-ratchet only runs its real work on pull_request/merge_group; skipping on a ${GITHUB_EVENT_NAME} event — HEAD is no merge commit here and HEAD^1 would not resolve."; exit 0; }
           CLASS="${{ steps.coverage-artifact.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
             echo "W1-T2428 fast-lane: class=${CLASS} — skipping the base...head diff computation (Diff coverage below has nothing to check)."
@@ -1413,7 +1473,8 @@ jobs:
         env:
           RMD_CI_REPORT: "1"
         run: |
-          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event (no pr.diff was computed above)."; exit 0; }
+          # W1-T4406: merge_group widens this guard alongside pull_request (never replaces it).
+          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ] || { echo "W1-T1033: coverage-ratchet only runs its real work on pull_request/merge_group; skipping on a ${GITHUB_EVENT_NAME} event (no pr.diff was computed above)."; exit 0; }
           CLASS="${{ steps.coverage-artifact.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
             echo "W1-T2428 fast-lane: class=${CLASS} — skipping Diff coverage (no pr.diff was computed above; no src/**/test/** path in this diff to check)."
@@ -1425,7 +1486,8 @@ jobs:
         env:
           RMD_CI_REPORT: "1"
         run: |
-          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event (no coverage/lcov.info was collected above)."; exit 0; }
+          # W1-T4406: merge_group widens this guard alongside pull_request (never replaces it).
+          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ] || { echo "W1-T1033: coverage-ratchet only runs its real work on pull_request/merge_group; skipping on a ${GITHUB_EVENT_NAME} event (no coverage/lcov.info was collected above)."; exit 0; }
           CLASS="${{ steps.coverage-artifact.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
             echo "W1-T2428 fast-lane: class=${CLASS} — skipping Coverage ratchet (no coverage/lcov.info was collected above; no src/** path in this diff can move the aggregate)."
@@ -1714,6 +1776,16 @@ jobs:
     #
     # `always()` IS LOAD-BEARING: without it a failing needed job SKIPS this job, and GitHub counts a
     # skipped required check as passing. FALSIFIER: test/the-ci-gate-does-not-hold-a-runner.test.ts.
+    #
+    # W1-T4406: DELIBERATELY STAYS `pull_request`-only, unlike every job it `needs:`. This gate's
+    # own REQUIRED list (ci-gate.yml) names ~26 checks, most of them ~17 one-runner gates the
+    # `commitlint` job posts (commitlint, lint-plan, jscpd-gate, claims, ...) that are themselves
+    # `if: github.event_name == 'pull_request'` and would never register on a `merge_group` commit
+    # — so waiting on the full list there would time out and deadlock the queue on every entry
+    # (the exact skipped/absent-required-check class INVARIANT 2 above exists to avoid). The merge
+    # queue's own ruleset is expected to require the underlying check NAMES this file's `ci`,
+    # `coverage-ratchet` and `test-slow` jobs already post unconditionally — not this aggregate —
+    # exactly as W1-T4405's design note keeps `remudero-review` off the queue's own requirements.
     name: ci-gate
     runs-on: ubuntu-latest
     needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow, commitlint, leak-grep, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, dashboard, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
