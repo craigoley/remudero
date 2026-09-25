@@ -6,21 +6,17 @@
  * `chore(gates)` subject is not filing-shaped, and a ratchet-baseline edit is code, so the non-code
  * route never applies (the plan gardener only passed because `chore(plan)` IS filing-shaped). And the
  * garden log it wrote under docs/ left docs/docs-index.json stale, which docs-index-check refuses.
- * A gardener's head is now its own conforming form, and `land` regenerates the index it changed.
+ * A gardener's head is now its own conforming form, and `land` regenerates the index it changed;
+ * that end-to-end case lives in test/a-garden-pr-through-a-symlinked-checkout-lands-a-fresh-docs-index.test.ts.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { GARDEN_BRANCH_RE, gardenCheckout } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { GARDEN_BRANCH_RE } from "../src/run-task.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const { isMainModule } = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "lib", "argv.mjs")).href)) as {
@@ -74,62 +70,5 @@ test("a gardener's own head is admitted by the head-identity gate", () => {
     const refused = evaluateHeadIdentityGate({ ...GATE_GARDEN_HEAD, headRef });
     assert.equal(refused.ok, false, headRef);
     assert.match(refused.message, /matches neither conforming form/);
-  }
-});
-
-test("a garden PR that writes a docs log lands a fresh docs index", () => {
-  const origin = gitRepo({ bare: true, kind: "garden-docs-origin" });
-  const seed = gitRepo({ kind: "garden-docs-seed" });
-  // The checkout's OWN generator is what `land` runs, so the fixture carries the real one.
-  mkdirSync(join(seed.dir, "scripts", "lib"), { recursive: true });
-  copyFileSync(join(REPO_ROOT, "scripts", "generate-docs-index.mjs"), join(seed.dir, "scripts", "generate-docs-index-target.mjs"));
-  symlinkSync("generate-docs-index-target.mjs", join(seed.dir, "scripts", "generate-docs-index.mjs"));
-  copyFileSync(join(REPO_ROOT, "scripts", "lib", "argv.mjs"), join(seed.dir, "scripts", "lib", "argv.mjs"));
-  mkdirSync(join(seed.dir, "docs"), { recursive: true });
-  writeFileSync(join(seed.dir, "docs", "guide.md"), "# Guide\n\nHow the fleet works.\n");
-  seed.git("add", "-A");
-  seed.git("commit", "-q", "-m", "seed");
-  seed.addRemote("origin", origin.dir);
-  seed.git("push", "-q", "origin", "HEAD:main");
-  const clone = gitRepo({ cloneFrom: origin.dir, kind: "garden-docs-clone" });
-  clone.git("config", "user.email", "g@example.invalid");
-  clone.git("config", "user.name", "g");
-  const worktrees = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-docs-wt-`));
-  const aliasRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-docs-alias-`));
-  const aliasedWorktrees = join(aliasRoot, "worktrees");
-  // Reproduce the macOS /var -> /private/var spelling split on Linux too, so the canonical
-  // end-to-end acceptance proof fails on base everywhere rather than only on this host.
-  symlinkSync(worktrees, aliasedWorktrees, "dir");
-  const garden = gardenCheckout({
-    name: "gate",
-    repoDir: clone.dir,
-    worktreesRoot: aliasedWorktrees,
-    owner: "acme",
-    repo: "remudero",
-    log: () => {},
-    clock: fixedClock(1790195325864),
-    fetcher: () => ({ html_url: "https://github.com/acme/remudero/pull/7", number: 7 }),
-  });
-  try {
-    writeFileSync(join(garden.root, "docs", "gate-garden-log.md"), "# Gate garden log\n\nRefreshed 2 gate rows.\n");
-    withLiveWritesAllowed(() => garden.land({ paths: ["docs/gate-garden-log.md"], title: "chore(gates): refresh", body: "b" }));
-    const branch = "gate-garden-1790195325864";
-    assert.ok(GARDEN_BRANCH_RE.test(branch));
-    const landed = origin.git("show", "--name-only", "--format=", branch).split("\n").filter(Boolean).sort();
-    assert.deepEqual(landed, ["docs/docs-index.json", "docs/gate-garden-log.md"], "the index rides with the log that changed it");
-    const index = origin.git("show", `${branch}:docs/docs-index.json`);
-    assert.match(index, /gate-garden-log\.md/);
-    // What CI checks: the committed index equals a fresh regeneration.
-    const check = gitRepo({ cloneFrom: origin.dir, kind: "garden-docs-check" });
-    check.git("checkout", "-q", branch);
-    execFileSync(process.execPath, [join(check.dir, "scripts", "generate-docs-index.mjs"), "--check"], { cwd: check.dir, stdio: "pipe" });
-    check.cleanup();
-  } finally {
-    garden.dispose();
-    origin.cleanup();
-    seed.cleanup();
-    clone.cleanup();
-    rmSync(aliasRoot, { recursive: true, force: true });
-    rmSync(worktrees, { recursive: true, force: true });
   }
 });
