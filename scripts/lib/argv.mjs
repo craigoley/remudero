@@ -27,7 +27,6 @@ export function isMainModule(moduleUrl, argv1 = process.argv[1]) {
   try {
     return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(argv1);
   } catch {
-    // A missing path or non-file URL cannot identify the process entry point.
     return false;
   }
 }
