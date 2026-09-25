@@ -20,6 +20,8 @@ import { runSreLanePass, type IncidentEvidence, type SreLaneInput } from "../src
 import {
   FAST_BURN_PER_HOUR,
   SRE_RUNBOOK_STEP,
+  daemonSreRunbookHost,
+  daemonSreRunbookPass,
   incidentSubject,
   isFastBurn,
   readRunbookReceipts,
@@ -190,6 +192,26 @@ test("a matching runbook runs only after its precheck and records a before-and-a
   assert.deepEqual(ledger.map((row) => row.step), [SRE_RUNBOOK_STEP]);
 });
 
+test("a throwing precheck or verifier becomes a readable failed observation", async () => {
+  const precheckRunbook = {
+    ...scripted({}).runbook,
+    precheck: async () => { throw new Error("precheck offline"); },
+  };
+  const precheckHarness = deps([precheckRunbook]);
+  const refused = await runMatchingRunbook(incident(), precheckHarness.deps);
+  assert.equal(refused.outcome, "precheck_refused");
+  assert.equal(precheckHarness.receipts[0].before, "precheck threw: precheck offline");
+
+  const verifyRunbook = {
+    ...scripted({}).runbook,
+    verify: async () => { throw new Error("verify unavailable"); },
+  };
+  const verifyHarness = deps([verifyRunbook]);
+  const failed = await runMatchingRunbook(incident(), verifyHarness.deps);
+  assert.equal(failed.outcome, "failed");
+  assert.equal(verifyHarness.receipts[0].after, "verify threw: verify unavailable");
+});
+
 test("a runbook that fails twice stops and escalates with the evidence", async () => {
   const { runbook, calls } = scripted({ verify: [{ ok: false, observed: "still behind=3" }, { ok: false, observed: "still behind=2" }] });
   const d = deps([runbook]);
@@ -265,6 +287,7 @@ test("an escalation opens the needs-human issue assigned to the operator", () =>
     calls.push(args);
     if (args[0] === "api") return "[]";
     if (args[0] === "issue" && args[1] === "create") return "https://github.com/craigoley/remudero/issues/9\n";
+    if (args[0] === "issue" && args[1] === "edit") throw new Error("assignment unavailable");
     return "";
   };
   const logged: string[] = [];
@@ -290,8 +313,56 @@ test("an escalation opens the needs-human issue assigned to the operator", () =>
     const body = create[create.indexOf("--body") + 1];
     assert.ok(body.includes("dispatch-stall") && body.includes("fast burn"), "the issue carries the incident's evidence");
     assert.ok(readFileSync(ledgerPath, "utf8").includes("escalation.issue_opened"));
-    assert.deepEqual(logged, []);
+    assert.deepEqual(logged, ["sre.escalation_assign_failed"], "a delivered issue stays delivered when assignment fails");
   });
+});
+
+test("the daemon runbook pass remains in shadow until a governor is wired", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-sre-daemon-pass-"));
+  const ledgerPath = join(root, "ledger.jsonl");
+  writeFileSync(ledgerPath, "");
+  const { runbook, calls } = scripted({});
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const pass = daemonSreRunbookPass([runbook], ledgerPath, "craigoley", "remudero", (step, extra) => logged.push({ step, extra }));
+
+  const result = await pass(incident());
+  assert.equal(result.outcome, "would_act");
+  assert.equal(result.fileFeedback, true);
+  assert.deepEqual(calls, ["precheck"], "the production daemon does not act before its governor exists");
+  assert.equal(logged[0]?.extra?.reason, "no governor yet (W1-T4390): a new runbook starts in shadow");
+});
+
+test("failed escalation delivery is logged and returns null instead of escaping the daemon", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-sre-escalation-failure-"));
+  const ledgerPath = join(root, "ledger.jsonl");
+  writeFileSync(ledgerPath, "");
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const escalateToOperator = sreOperatorEscalation({
+    owner: "craigoley",
+    repo: "remudero",
+    ledgerPath,
+    gh: (args) => {
+      if (args[0] === "api") return "[]";
+      if (args[0] === "issue" && args[1] === "create") throw new Error("GitHub unavailable");
+      return "";
+    },
+    log: (step, extra) => logged.push({ step, extra }),
+    nowMs: () => NOW,
+  });
+  const e = {
+    taskId: "W1-T4386",
+    class: "BLOCKED",
+    summary: "SRE runbook failed",
+    detail: "The incident remains unresolved",
+    recommendation: "Inspect the failure receipt",
+    consequence: "The incident stays visible to the fleet",
+    options: [{ label: "inspect", detail: "Review the recorded evidence" }],
+  } satisfies Escalation;
+
+  const result = withLiveWritesAllowed(() => escalateToOperator(e));
+  assert.equal(result, null);
+  assert.deepEqual(logged.map((row) => row.step), ["sre.escalation_failed"]);
+  assert.match(String(logged[0]?.extra?.reason), /GitHub unavailable/);
 });
 
 test("a runbook the governor holds in shadow records its action without taking it", async () => {
@@ -379,4 +450,16 @@ test("receipts are read back from the ledger, and a torn row is skipped", () => 
   assert.deepEqual(readRunbookReceipts(ledgerPath), [
     { id: "a", fingerprint: FP, mode: "live", outcome: "failed", subject: undefined, before: "b", after: "x", seen_ms: 5 },
   ]);
+});
+
+test("an unreadable lock path is treated as unknown rather than a dead holder", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-sre-unreadable-lock-"));
+  const lockPath = join(root, "not-a-readable-file");
+  mkdirSync(lockPath);
+  const host = daemonSreRunbookHost({ root, repoDir: root, owner: "craigoley", repo: "remudero" });
+
+  const result = await host.lock(lockPath);
+  assert.equal(result.present, true);
+  assert.equal(result.holderDead, false, "unreadable must not be interpreted as stale and deleted");
+  assert.match(result.observed, /pid unknown/);
 });
