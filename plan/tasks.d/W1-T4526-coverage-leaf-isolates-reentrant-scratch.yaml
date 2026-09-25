@@ -11,7 +11,7 @@
   plan_refs: [W1-T4422, W1-T4443]
   files: [src/lib/ci-parity.ts, test/coverage-leaf-isolates-reentrant-scratch.test.ts, test/the-local-gate-writes-coverage-where-ci-does.test.ts]
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on 2026-09-24: `coverage-ratchet:test-with-coverage` sets every shard's TMPDIR to
