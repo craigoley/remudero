@@ -16,7 +16,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
@@ -48,14 +48,23 @@ function coverageCall(repoRoot = REPO_ROOT): { args: string[]; env?: NodeJS.Proc
   return call!;
 }
 
-test("the coverage leaf points TMPDIR at a bounded sibling scratch, outside the checkout", () => {
-  const repoRoot = mkdtempSync(join(tmpdir(), "rmd-gate-coverage-path-"));
+test("coverage shards use canonical TMPDIR paths when the sibling scratch parent is symlinked", () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), "rmd-gate-coverage-path-"));
+  const repoRoot = join(tempRoot, "repo");
+  const physicalScratchParent = join(tempRoot, "physical-coverage");
+  const scratchParentAlias = join(tempRoot, ".remudero-coverage");
+  mkdirSync(repoRoot);
+  mkdirSync(physicalScratchParent);
+  symlinkSync(physicalScratchParent, scratchParentAlias, "dir");
   const scratch = coverageScratchDir(repoRoot);
   try {
     assert.equal(coverageCall(repoRoot).env?.TMPDIR, realpathSync(scratch));
   } finally {
     rmSync(scratch, { recursive: true, force: true });
+    rmSync(scratchParentAlias, { force: true });
+    rmSync(physicalScratchParent, { recursive: true, force: true });
     rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(tempRoot, { recursive: true, force: true });
   }
 });
 
