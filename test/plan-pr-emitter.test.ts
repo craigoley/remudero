@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -13,8 +12,6 @@ import {
   createPlanPrRest,
   ensureJudgeableBody,
   filingAcceptanceCriteria,
-  regeneratePlanIndexAndCommit,
-  regeneratePlanIndexFile,
   renderAcceptanceBlock,
 } from "../src/lib/plan-pr-emitter.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
@@ -230,137 +227,6 @@ test("createPlanPrRest: a malformed create response throws naming what is missin
 });
 
 // ── 6. Plan-index regeneration — the #287 falsifier ──────────────────────────────────────────
-
-const MASTER_PLAN_V1 = "# MASTER-PLAN\n\n## Section One\n\nOriginal prose about section one.\n";
-const MASTER_PLAN_V2 =
-  "# MASTER-PLAN\n\n## Section One\n\nEDITED prose that no longer matches the committed index.\n\n## Section Two\n\nA brand new section.\n";
-
-function gitEnv() {
-  return { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
-}
-
-/** A real temp git repo seeded with MASTER-PLAN.md, a copy of the REAL generator script, and
- *  an empty `plan/` dir (no committed index — the "no prior index" starting state). */
-function makeBareWorktree(masterPlanText: string): string {
-  // realpathSync: on macOS, os.tmpdir() lives under a `/tmp` -> `/private/tmp` symlink.
-  // generate-plan-index.mjs's `import.meta.url === pathToFileURL(process.argv[1]).href`
-  // "run as main" guard compares a RESOLVED (real) URL against argv[1]'s literal path —
-  // an unresolved `/tmp/...` script path never matches, so `main()` silently never runs
-  // (exit 0, does nothing). Resolving here once, up front, is the fix.
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "rmd-plan-pr-emitter-")));
-  const env = gitEnv();
-  execFileSync("git", ["init", "--quiet", "-b", "main", dir], { encoding: "utf8", env });
-  const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env });
-  git("config", "user.email", "t@t");
-  git("config", "user.name", "t");
-  mkdirSync(join(dir, "scripts"), { recursive: true });
-  copyFileSync(GENERATE_PLAN_INDEX_SCRIPT, join(dir, "scripts", "generate-plan-index.mjs"));
-  // W1-T2907: the script now imports `./lib/argv.mjs`, so the fixture must carry scripts/lib with
-  // it. Copying the script alone leaves a temp tree where the import cannot resolve, and the whole
-  // FILE fails to load — which reads as four unrelated plan-index tests breaking at once.
-  cpSync(join(REPO_ROOT, "scripts", "lib"), join(dir, "scripts", "lib"), { recursive: true });
-  mkdirSync(join(dir, "plan"), { recursive: true });
-  writeFileSync(join(dir, "MASTER-PLAN.md"), masterPlanText);
-  git("add", "-A");
-  git("commit", "--quiet", "-m", "seed");
-  return dir;
-}
-
-/** A worktree with an INITIAL, correct plan/plan-index.json already committed (generated for
- *  real via the script) — the starting state for "edit MASTER-PLAN.md, then regenerate". */
-function makeSeededWorktree(masterPlanText: string): string {
-  const dir = makeBareWorktree(masterPlanText);
-  const gen = spawnSync(process.execPath, [join(dir, "scripts", "generate-plan-index.mjs"), "--source", "MASTER-PLAN.md", "--out", "plan/plan-index.json"], {
-    cwd: dir,
-    encoding: "utf8",
-  });
-  assert.equal(gen.status, 0, gen.stdout + gen.stderr);
-  const env = gitEnv();
-  execFileSync("git", ["-C", dir, "add", "-A"], { encoding: "utf8", env });
-  execFileSync("git", ["-C", dir, "commit", "--quiet", "-m", "seed plan-index"], { encoding: "utf8", env });
-  return dir;
-}
-
-function freshCheck(dir: string) {
-  return spawnSync(
-    process.execPath,
-    [join(dir, "scripts", "generate-plan-index.mjs"), "--source", "MASTER-PLAN.md", "--out", "plan/plan-index.json", "--check"],
-    { cwd: dir, encoding: "utf8" },
-  );
-}
-
-test("regeneratePlanIndexFile: after editing MASTER-PLAN.md, the regenerated index matches a fresh independent --check run", () => {
-  const dir = makeSeededWorktree(MASTER_PLAN_V1);
-  writeFileSync(join(dir, "MASTER-PLAN.md"), MASTER_PLAN_V2);
-
-  const result = regeneratePlanIndexFile({ worktreePath: dir });
-  assert.equal(result.changed, true);
-  assert.equal(result.relPath, "plan/plan-index.json");
-
-  const check = freshCheck(dir);
-  assert.equal(check.status, 0, check.stdout + check.stderr);
-});
-
-test("#287 falsifier: SKIPPING the regen step after editing MASTER-PLAN.md leaves plan-index.json STALE", () => {
-  const dir = makeSeededWorktree(MASTER_PLAN_V1);
-  writeFileSync(join(dir, "MASTER-PLAN.md"), MASTER_PLAN_V2);
-  // Deliberately never call regeneratePlanIndexFile — reproduces #287.
-  const check = freshCheck(dir);
-  assert.notEqual(check.status, 0, "the FALSIFIER: an un-regenerated index must fail --check");
-  assert.match(check.stdout + check.stderr, /STALE/);
-});
-
-test("regeneratePlanIndexFile: content unchanged when MASTER-PLAN.md hasn't changed", () => {
-  const dir = makeSeededWorktree(MASTER_PLAN_V1);
-  const result = regeneratePlanIndexFile({ worktreePath: dir });
-  assert.equal(result.changed, false);
-});
-
-// ── regenerate-and-commit-if-changed wrapper (mirrors test/orientation.test.ts) ──────────────
-
-test("regeneratePlanIndexAndCommit: with no prior index, a pass regenerates AND commits it, with a commitlint-clean message", () => {
-  const dir = makeBareWorktree(MASTER_PLAN_V1);
-  const result = regeneratePlanIndexAndCommit({ worktreePath: dir });
-  assert.equal(result.committed, true);
-  assert.ok(result.diff);
-  assert.match(result.diff!, /plan\/plan-index\.json/);
-
-  const log = execFileSync("git", ["-C", dir, "log", "--oneline", "-1"], { encoding: "utf8" });
-  assert.match(log, /chore\(plan\): regenerate plan\/plan-index\.json/);
-
-  const message = execFileSync("git", ["-C", dir, "log", "-1", "--format=%B"], { encoding: "utf8" });
-  const result2 = lint(message);
-  assert.equal(result2.status, 0, `plan-index commit message must pass commitlint:\n${message}\n${result2.stdout}${result2.stderr}`);
-
-  const check = freshCheck(dir);
-  assert.equal(check.status, 0, check.stdout + check.stderr);
-});
-
-test("regeneratePlanIndexAndCommit: idempotent — a SECOND pass with no further MASTER-PLAN.md change commits NOTHING", () => {
-  const dir = makeBareWorktree(MASTER_PLAN_V1);
-  const first = regeneratePlanIndexAndCommit({ worktreePath: dir });
-  assert.equal(first.committed, true);
-
-  const second = regeneratePlanIndexAndCommit({ worktreePath: dir });
-  assert.equal(second.committed, false);
-  assert.equal(second.diff, undefined);
-
-  const log = execFileSync("git", ["-C", dir, "log", "--oneline"], { encoding: "utf8" }).trim().split("\n");
-  assert.equal(log.filter((l) => l.includes("chore(plan): regenerate plan/plan-index.json")).length, 1, "no spurious second commit");
-});
-
-test("regeneratePlanIndexAndCommit: a real SECOND MASTER-PLAN.md edit commits AGAIN (two distinct commits)", () => {
-  const dir = makeBareWorktree(MASTER_PLAN_V1);
-  const first = regeneratePlanIndexAndCommit({ worktreePath: dir });
-  assert.equal(first.committed, true);
-
-  writeFileSync(join(dir, "MASTER-PLAN.md"), MASTER_PLAN_V2);
-  const second = regeneratePlanIndexAndCommit({ worktreePath: dir });
-  assert.equal(second.committed, true);
-
-  const log = execFileSync("git", ["-C", dir, "log", "--oneline"], { encoding: "utf8" }).trim().split("\n");
-  assert.equal(log.filter((l) => l.includes("chore(plan): regenerate plan/plan-index.json")).length, 2);
-});
 
 // ── Light integration: the retro Acceptance-repair pass, logic only (no real `gh`) ───────────
 

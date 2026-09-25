@@ -229,10 +229,11 @@ test("every CENSUS_ADMITTED_MEMBERS entry has a corresponding FAST_GATE_STEPS st
   for (const job of stepJobs) assert.ok(memberJobs.has(job), `FAST_GATE_STEPS step ${job} has no ADMITTED population member`);
 });
 
-test("CENSUS_POPULATION: exactly five ADMITTED members today, each under FAST_GATE_CENSUS_BOUND_MS", () => {
+test("CENSUS_POPULATION: exactly seven ADMITTED members today, each under FAST_GATE_CENSUS_BOUND_MS", () => {
   // W1-T2695: `authority-census` is the fifth, joining the four W1-T2478 admitted.
   // W1-T2898: `ledger-literal-census` joins on the same terms — clause (a) satisfied (it asserts a property EVERY enumerated src/ file must hold) and MEASURED at a 452ms median, well under the bound. Named rather than counted, so the addition stays a reviewed one.
-  assert.equal(CENSUS_ADMITTED_MEMBERS.length, 6);
+  // W1-T4422: `no-draft-pr-census` is the seventh, MEASURED at a 1296ms median.
+  assert.equal(CENSUS_ADMITTED_MEMBERS.length, 7);
   for (const m of CENSUS_ADMITTED_MEMBERS) {
     assert.equal(m.verdict.status, "ADMITTED");
     if (m.verdict.status === "ADMITTED") {
@@ -269,14 +270,15 @@ test("the census suites admitted so far are still admitted, by job name, unchang
       "catch-erasure-census",
       "ledger-literal-census",
       "negative-reachability-census",
+      "no-draft-pr-census",
       "no-shallowing-census",
     ].sort(),
   );
 });
 
-test("runPreflightFast: run for real (unmocked, real spawn, real package.json) over ONLY the six census entries, every one measures under the bound and passes on this HEAD", () => {
+test("runPreflightFast: run for real (unmocked, real spawn, real package.json) over ONLY the seven census entries, every one measures under the bound and passes on this HEAD", () => {
   const result = runPreflightFast(REPO_ROOT, { steps: CENSUS_STEPS });
-  assert.equal(result.steps.length, 6);
+  assert.equal(result.steps.length, 7);
   for (const step of result.steps) {
     assert.equal(step.ok, true, `expected ${step.name} to pass on a clean HEAD: ${step.detail}`);
     assert.doesNotMatch(step.detail, /BOUND EXCEEDED/, `${step.name} must not report BOUND EXCEEDED on a clean, fast run`);
@@ -332,7 +334,7 @@ test("runPreflightFast: mocked timings reproducing PR #5087's shape — a health
 
 test("runPreflightFast: mocked timings — an entry costing several times the run's median is still refused as RUNAWAY, so the fix does not merely delete the guard", () => {
   const steps = CENSUS_STEPS.map((s) => ({ ...s, boundMs: 999_999 }));
-  const elapsedMsList = [900, 1600, 1700, 1750, 1800, 10_000, 10_000]; // the last is the runaway's one re-measure
+  const elapsedMsList = [900, 1600, 1700, 1750, 1800, 1850, 10_000, 10_000]; // one healthy entry per non-runaway member; the last is the runaway's one re-measure
   const { spawn } = recordingSpawn();
   const result = runPreflightFast(REPO_ROOT, {
     spawn,

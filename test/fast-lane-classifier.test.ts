@@ -73,11 +73,10 @@ test("acceptance 1: diff-class.mjs imports isInPlanScope/outOfPlanScopeFiles fro
   assert.match(source, /\bisInPlanScope\b|\boutOfPlanScopeFiles\b/, "the classifier must call the real predicate by name");
 });
 
-test("acceptance 1: the #3131 control — [MASTER-PLAN.md, docs/ORIENTATION.md, plan/plan-index.json] is PLAN_ONLY per the real predicate", () => {
-  // Measured in this task's rationale (Q1): isInPlanScope returns true for all three of #3131's
-  // real file list, and outOfPlanScopeFilesInDiff returns [] — this is the POSITIVE control that
+test("acceptance 1: plan sources and orientation are PLAN_ONLY per the real predicate", () => {
+  // isInPlanScope returns true for both plan sources and outOfPlanScopeFilesInDiff returns [] — this is the POSITIVE control that
   // the classifier's PLAN_ONLY verdict traces to that exact predicate, not a looser stand-in.
-  const result = classify(["MASTER-PLAN.md", "docs/ORIENTATION.md", "plan/plan-index.json"]);
+  const result = classify(["MASTER-PLAN.md", "docs/ORIENTATION.md"]);
   assert.equal(result.class, CLASSES.PLAN_ONLY);
 });
 

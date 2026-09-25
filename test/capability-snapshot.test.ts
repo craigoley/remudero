@@ -1,20 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { loadPlanIndex } from "../src/lib/plan-index.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // ── W1-T383: the MASTER-PLAN.md CAPABILITY SNAPSHOT generator + drift gate ─────────────────────
 //
 // MASTER-PLAN's hand-written "lanes sentence" changed truth FOUR TIMES in one day
 // (2026-08-05) and was still false the next morning. This suite proves the generate-cli-
 // reference.mjs mold (W1-T48) closes that class of drift for a first four-claim tranche: a FRESH
-// regeneration matches the committed MASTER-PLAN.md block + plan/plan-index.json byte-for-byte
-// (this IS the byte-compare CI runs, via `npm test` -> the `ci` job, already a REQUIRED check,
-// same discipline as test/cli-reference.test.ts / test/plan-index.test.ts); a hand edit inside
-// the markers turns `--check` red and names the fix; an unresolvable claim renders
+// regeneration matches the committed MASTER-PLAN.md block; a hand edit inside the markers turns
+// `--check` red and names the fix; an unresolvable claim renders
 // `UNDETERMINED(<reason>)` rather than being silently dropped (LAW-1/P48).
 //
 // (scripts/generate-capability-snapshot.mjs is a plain .mjs file outside tsconfig's `include`
@@ -29,8 +29,7 @@ const SCRIPT = join(REPO_ROOT, "scripts", "generate-capability-snapshot.mjs");
 
 const CLAIM_LABELS = ["Daemon dispatch lanes", "Daily cost ceiling", "Recon turn cap", "ci-gate REQUIRED checks"];
 
-// A minimal fixture carrying the markers this generator owns, plus a second heading so
-// plan-index co-regeneration (design note ii) has something to shift.
+// A minimal fixture carrying the markers this generator owns, plus a second heading for read-time indexing.
 const FIXTURE_MASTER_PLAN = `# Title
 
 ## NET STATE
@@ -59,27 +58,18 @@ function extractBlock(masterPlanText: string) {
 }
 
 test("generate-capability-snapshot: two independent regenerations are byte-identical (content-only, no timestamp)", () => {
-  // cwd stays REPO_ROOT (both `--import tsx` and the four claim resolvers need it) -- only the
-  // --master-plan/--plan-index OUTPUT paths differ between the two runs, which means plan-
-  // index.json's embedded `source` field (the exact --master-plan string) legitimately differs
-  // too; that is the same input-echoing behavior generate-plan-index.mjs's own `--source` already
-  // has; it is compared separately from (and excluded from) the byte-identity check below, whose
-  // job is proving the two runs' CONTENT -- MASTER-PLAN.md verbatim, plan-index.json's `entries`
-  // -- agree, not that two different file paths render as the same string.
   const dir = mkdtempSync(join(tmpdir(), "capability-snapshot-roundtrip-"));
   try {
     const mpA = join(dir, "a.md");
-    const idxA = join(dir, "a-index.json");
     const mpB = join(dir, "b.md");
-    const idxB = join(dir, "b-index.json");
     writeFileSync(mpA, FIXTURE_MASTER_PLAN);
     writeFileSync(mpB, FIXTURE_MASTER_PLAN);
-    const genA = run(["--master-plan", mpA, "--plan-index", idxA]);
-    const genB = run(["--master-plan", mpB, "--plan-index", idxB]);
+    const genA = run(["--master-plan", mpA]);
+    const genB = run(["--master-plan", mpB]);
     assert.equal(genA.status, 0, genA.stdout + genA.stderr);
     assert.equal(genB.status, 0, genB.stdout + genB.stderr);
     assert.equal(readFileSync(mpA, "utf8"), readFileSync(mpB, "utf8"));
-    assert.deepEqual(JSON.parse(readFileSync(idxA, "utf8")).entries, JSON.parse(readFileSync(idxB, "utf8")).entries);
+    assert.equal(existsSync(join(dir, "plan-index.json")), false, "capability snapshot must not create a plan index");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -89,9 +79,8 @@ test("generate-capability-snapshot: the generated block carries exactly the four
   const dir = mkdtempSync(join(tmpdir(), "capability-snapshot-claims-"));
   try {
     const mp = join(dir, "MASTER-PLAN.md");
-    const idx = join(dir, "plan-index.json");
     writeFileSync(mp, FIXTURE_MASTER_PLAN);
-    const gen = run(["--master-plan", mp, "--plan-index", idx]);
+    const gen = run(["--master-plan", mp]);
     assert.equal(gen.status, 0, gen.stdout + gen.stderr);
     const block = extractBlock(readFileSync(mp, "utf8"));
     for (const label of CLAIM_LABELS) {
@@ -105,23 +94,23 @@ test("generate-capability-snapshot: the generated block carries exactly the four
   }
 });
 
-test("generate-capability-snapshot: regenerating the block shifts later section line numbers, and plan/plan-index.json is co-regenerated to match (design note ii)", () => {
-  const dir = mkdtempSync(join(tmpdir(), "capability-snapshot-index-coregen-"));
+test("generate-capability-snapshot: block regeneration shifts derived reader line numbers without writing JSON", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}capability-snapshot-derived-index-`));
   try {
     const mp = join(dir, "MASTER-PLAN.md");
-    const idx = join(dir, "plan-index.json");
     writeFileSync(mp, FIXTURE_MASTER_PLAN);
-    const gen = run(["--master-plan", mp, "--plan-index", idx]);
+    const gen = run(["--master-plan", mp]);
     assert.equal(gen.status, 0, gen.stdout + gen.stderr);
 
     const masterPlanLines = readFileSync(mp, "utf8").split("\n");
     const expectedLine = masterPlanLines.findIndex((l) => l === "## Other Section") + 1;
     assert.ok(expectedLine > 0, "fixture setup: expected an '## Other Section' heading to exist");
 
-    const writtenIndex = JSON.parse(readFileSync(idx, "utf8"));
-    const otherSection = writtenIndex.entries.find((e: { heading: string }) => e.heading === "Other Section");
-    assert.ok(otherSection, "plan-index.json is missing the 'Other Section' entry");
-    assert.equal(otherSection.line, expectedLine, "plan-index.json's line number was not co-regenerated with the block");
+    const derivedIndex = loadPlanIndex(mp);
+    const otherSection = derivedIndex?.entries.find((e) => e.heading === "Other Section");
+    assert.ok(otherSection, "the read-time index is missing the 'Other Section' entry");
+    assert.equal(otherSection.line, expectedLine, "the read-time index has a stale source line number");
+    assert.equal(existsSync(join(dir, "plan-index.json")), false, "the generator flow must not write an index file");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -136,10 +125,9 @@ test("generate-capability-snapshot: an unresolvable claim renders UNDETERMINED(<
     mkdirSync(join(dir, "plan"), { recursive: true });
     writeFileSync(join(dir, "plan", "policy.yaml"), readFileSync(join(REPO_ROOT, "plan", "policy.yaml"), "utf8"));
     const mp = join(dir, "MASTER-PLAN.md");
-    const idx = join(dir, "plan-index.json");
     writeFileSync(mp, FIXTURE_MASTER_PLAN);
 
-    const result = run(["--root", dir, "--master-plan", mp, "--plan-index", idx]);
+    const result = run(["--root", dir, "--master-plan", mp]);
     assert.equal(result.status, 0, result.stdout + result.stderr);
 
     const block = extractBlock(readFileSync(mp, "utf8"));
@@ -160,7 +148,7 @@ test("generate-capability-snapshot: a MASTER-PLAN.md with no BEGIN/END markers -
   try {
     const mp = join(dir, "MASTER-PLAN.md");
     writeFileSync(mp, "# Title\n\n## NET STATE\n\nNo markers here at all.\n");
-    const result = run(["--master-plan", mp, "--plan-index", join(dir, "plan-index.json")]);
+    const result = run(["--master-plan", mp]);
     const output = result.stdout + result.stderr;
     assert.notEqual(result.status, 0, output);
     assert.match(output, /is missing the/);
@@ -175,9 +163,8 @@ test("generate-capability-snapshot --check: a hand edit INSIDE the markers -> no
   const dir = mkdtempSync(join(tmpdir(), "capability-snapshot-stale-"));
   try {
     const mp = join(dir, "MASTER-PLAN.md");
-    const idx = join(dir, "plan-index.json");
     writeFileSync(mp, FIXTURE_MASTER_PLAN);
-    const gen = run(["--master-plan", mp, "--plan-index", idx]);
+    const gen = run(["--master-plan", mp]);
     assert.equal(gen.status, 0, gen.stdout + gen.stderr);
 
     const original = readFileSync(mp, "utf8");
@@ -185,7 +172,7 @@ test("generate-capability-snapshot --check: a hand edit INSIDE the markers -> no
     assert.notEqual(tampered, original, "fixture setup: the dispatch-lanes claim line must actually exist to tamper");
     writeFileSync(mp, tampered);
 
-    const result = run(["--check", "--master-plan", mp, "--plan-index", idx]);
+    const result = run(["--check", "--master-plan", mp]);
     const output = result.stdout + result.stderr;
     assert.notEqual(result.status, 0, output);
     assert.match(output, /is STALE/);
@@ -202,8 +189,6 @@ test("generate-capability-snapshot --check: a MISSING MASTER-PLAN.md -> non-zero
       "--check",
       "--master-plan",
       join(dir, "does-not-exist.md"),
-      "--plan-index",
-      join(dir, "plan-index.json"),
     ]);
     const output = result.stdout + result.stderr;
     assert.notEqual(result.status, 0, output);
@@ -213,11 +198,11 @@ test("generate-capability-snapshot --check: a MISSING MASTER-PLAN.md -> non-zero
   }
 });
 
-test("generate-capability-snapshot --check: the REAL committed MASTER-PLAN.md block and plan/plan-index.json are NOT stale (this is what CI checks on every PR via `npm test`)", () => {
+test("generate-capability-snapshot --check: the REAL committed MASTER-PLAN.md block is fresh", () => {
   const result = run(["--check"]);
   const output = result.stdout + result.stderr;
   assert.equal(result.status, 0, output);
-  assert.match(output, /OK -- MASTER-PLAN\.md and plan\/plan-index\.json match a fresh regeneration/);
+  assert.match(output, /OK -- MASTER-PLAN\.md block matches a fresh regeneration/);
 });
 
 test("the REAL committed MASTER-PLAN.md carries the CAPABILITY SNAPSHOT block, and the generated block replaced the hand-written lane-count literals it used to carry", () => {
@@ -253,9 +238,8 @@ function rootWithCiGate(dir: string, ciGateYaml: string): string {
 
 function generateInto(dir: string, rootArgs: string[]) {
   const mp = join(dir, "MASTER-PLAN.md");
-  const idx = join(dir, "plan-index.json");
   writeFileSync(mp, FIXTURE_MASTER_PLAN);
-  return { mp, idx, res: run([...rootArgs, "--master-plan", mp, "--plan-index", idx]) };
+  return { mp, res: run([...rootArgs, "--master-plan", mp]) };
 }
 
 test("ci-gate claim: a ci-gate.yml with no jobs.ci-gate.env.REQUIRED string renders UNDETERMINED naming that key, never a silent omission", () => {
@@ -316,7 +300,7 @@ test("FALSIFIER: a master plan carrying TWO marker pairs is refused, naming the 
   try {
     const mp = join(dir, "MASTER-PLAN.md");
     writeFileSync(mp, `${FIXTURE_MASTER_PLAN}\n${FIXTURE_MASTER_PLAN}`);
-    const res = run(["--master-plan", mp, "--plan-index", join(dir, "plan-index.json")]);
+    const res = run(["--master-plan", mp]);
     assert.equal(res.status, 1, res.stdout + res.stderr);
     assert.match(res.stderr, /must carry exactly one BEGIN\/END marker pair, found 2\/2/);
   } finally {
@@ -329,38 +313,9 @@ test("FALSIFIER: an END marker preceding its BEGIN is refused rather than slicin
   try {
     const mp = join(dir, "MASTER-PLAN.md");
     writeFileSync(mp, "# Title\n\n<!-- CAPABILITY SNAPSHOT:END -->\n\n<!-- CAPABILITY SNAPSHOT:BEGIN -->\n");
-    const res = run(["--master-plan", mp, "--plan-index", join(dir, "plan-index.json")]);
+    const res = run(["--master-plan", mp]);
     assert.equal(res.status, 1, res.stdout + res.stderr);
     assert.match(res.stderr, /END marker precedes its BEGIN marker/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("--check: an ABSENT plan index is red and names the command that creates it, never silently green", () => {
-  const dir = mkdtempSync(join(tmpdir(), "capability-snapshot-noindex-"));
-  try {
-    const { mp, idx, res: gen } = generateInto(dir, []);
-    assert.equal(gen.status, 0, gen.stdout + gen.stderr);
-    rmSync(idx, { force: true });
-    const res = run(["--master-plan", mp, "--plan-index", idx, "--check"]);
-    assert.equal(res.status, 1, res.stdout + res.stderr);
-    assert.match(res.stderr, /does not exist -- run 'npm run capability-snapshot'/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("--check: a STALE plan index is red and names it as stale relative to a fresh regeneration", () => {
-  const dir = mkdtempSync(join(tmpdir(), "capability-snapshot-staleindex-"));
-  try {
-    const { mp, idx, res: gen } = generateInto(dir, []);
-    assert.equal(gen.status, 0, gen.stdout + gen.stderr);
-    // A committed index that parses but no longer matches what a fresh run would emit.
-    writeFileSync(idx, JSON.stringify({ source: "MASTER-PLAN.md", entries: [] }, null, 2));
-    const res = run(["--master-plan", mp, "--plan-index", idx, "--check"]);
-    assert.equal(res.status, 1, res.stdout + res.stderr);
-    assert.match(res.stderr, /is STALE relative to a fresh/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

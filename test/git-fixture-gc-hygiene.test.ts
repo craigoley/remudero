@@ -34,6 +34,10 @@ const TEST_DIR = join(REPO_ROOT, "test");
 const HYGIENE_IMPORT = join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts");
 const THIS_FILE = "git-fixture-gc-hygiene.test.ts";
 
+// @host-capability isolated-git: real git proves the setup setting without reading user config.
+process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+process.env.GIT_CONFIG_NOSYSTEM = "1";
+
 function git(dir: string, ...args: string[]): string {
   return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim();
 }

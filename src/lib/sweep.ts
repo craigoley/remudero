@@ -3338,7 +3338,6 @@ export const REGENERABLE_ARTIFACT_GENERATORS: Readonly<Record<string, string>> =
   // violation), so this inherits an admitted member's semantics and introduces no new class of
   // non-determinism. It is not pure over the tree alone, and neither is its twin.
   "scripts/comment-load-baseline.json": "comment-load-ratchet",
-  "plan/plan-index.json": "plan-index",
   "docs/docs-index.json": "docs-index",
   "learnings/index.json": "learnings-index",
   "docs/cli-reference.md": "cli-reference",
