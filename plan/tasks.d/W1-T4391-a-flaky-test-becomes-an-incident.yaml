@@ -19,7 +19,9 @@
     - test/ci-incidents.test.ts
     - test/github-transport.test.ts
     - test/github-event-sweep-wake.test.ts
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4391 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     2026-09-23: #6870's coverage shard failed on a knowledge-gardener timer test unrelated to its diff (91 ms
