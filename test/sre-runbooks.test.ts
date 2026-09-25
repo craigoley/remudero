@@ -8,6 +8,7 @@
 //   - a runbook the governor holds in shadow records its action without taking it
 
 import assert from "node:assert/strict";
+import type { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,11 +21,13 @@ import { runSreLanePass, type IncidentEvidence, type SreLaneInput } from "../src
 import {
   FAST_BURN_PER_HOUR,
   SRE_RUNBOOK_STEP,
+  daemonSreRunbookHost,
   incidentSubject,
   isFastBurn,
   readRunbookReceipts,
   receiptFromLedgerRow,
   runMatchingRunbook as runMatchingRunbookWithPorts,
+  shadowUntilGoverned,
   sreOperatorEscalation,
   sreRunbookCatalog,
   type RunbookObservation,
@@ -366,6 +369,187 @@ test("the catalog's four runbooks answer their own incidents through an injected
 
   assert.equal(incidentSubject(incident({ sampleMessages: ["pr=1", "x pr=2"] }), "pr"), "2", "the newest sample names the subject");
   assert.equal(incidentSubject(incident({ sampleMessages: ["nothing"] }), "pr"), undefined);
+});
+
+test("shadowUntilGoverned holds every runbook in shadow until W1-T4390's governor lands", () => {
+  assert.deepEqual(shadowUntilGoverned(), {
+    tier: "shadow",
+    reason: "no governor yet (W1-T4390): a new runbook starts in shadow",
+  });
+});
+
+test("a precheck or verify that throws reads as not-ok, never as a thrown pass", async () => {
+  const throwingPrecheck: SreRunbook = {
+    id: "catch-up-managed-checkout",
+    reversible: true,
+    blastRadius: "checkout",
+    matches: (i) => i.name === "stale-managed-checkout",
+    precheck: async () => { throw new Error("disk full"); },
+    act: async () => {},
+    verify: async () => ({ ok: true, observed: "n/a" }),
+  };
+  const p = deps([throwingPrecheck]);
+  const precheckResult = await runMatchingRunbook(incident(), p.deps);
+  assert.equal(precheckResult.outcome, "precheck_refused");
+  assert.equal(p.receipts[0].before, "precheck threw: disk full");
+
+  const throwingVerify: SreRunbook = {
+    ...throwingPrecheck,
+    precheck: async () => ({ ok: true, observed: "behind=3" }),
+    verify: async () => { throw new Error("network down"); },
+  };
+  const v = deps([throwingVerify]);
+  const verifyResult = await runMatchingRunbook(incident(), v.deps);
+  assert.equal(verifyResult.outcome, "failed");
+  assert.equal(v.receipts[0].after, "verify threw: network down");
+});
+
+test("a catalog precheck refuses when the incident names no subject for it to act on", async () => {
+  const host: SreRunbookHost = {
+    failedCi: async () => { throw new Error("must not be called"); },
+    rerunJob: async () => {},
+    checkout: async () => ({ clean: true, behind: 0, borrowed: false, observed: "" }),
+    fastForward: async () => {},
+    reinstall: async () => {},
+    canRecycle: async () => { throw new Error("must not be called"); },
+    recycle: async () => {},
+    lock: async () => { throw new Error("must not be called"); },
+    removeLock: async () => {},
+    reviewRequested: async () => false,
+    requestReview: async () => {},
+  };
+  const catalog = sreRunbookCatalog(host, () => []);
+  const rerun = catalog.find((r) => r.id === "rerun-failed-ci-once") as SreRunbook;
+  assert.deepEqual(await rerun.precheck(incident({ name: "ci-red-unrelated", sampleMessages: ["no subject here"] })), {
+    ok: false,
+    observed: "incident names no pr=<n>",
+  });
+  const recycle = catalog.find((r) => r.id === "recycle-stale-container") as SreRunbook;
+  assert.deepEqual(await recycle.precheck(incident({ name: "stale-container", sampleMessages: ["no subject here"] })), {
+    ok: false,
+    observed: "incident names no container=<name>",
+  });
+  const lockOrNudge = catalog.find((r) => r.id === "clear-stale-lock-or-nudge") as SreRunbook;
+  assert.deepEqual(await lockOrNudge.precheck(incident({ name: "stale-lock", sampleMessages: ["no subject here"] })), {
+    ok: false,
+    observed: "incident names no lock=<path> or pr=<n>",
+  });
+});
+
+test("an unassignable escalation still opens, logged; a throwing escalate() never throws out", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-sre-escalate-fail-"));
+  const ledgerPath = join(root, "ledger.jsonl");
+  writeFileSync(ledgerPath, "");
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const gh = (args: string[]) => {
+    if (args[0] === "api") return "[]";
+    if (args[0] === "issue" && args[1] === "create") return "https://github.com/craigoley/remudero/issues/11\n";
+    if (args[0] === "issue" && args[1] === "edit") throw new Error("assignee not found");
+    return "";
+  };
+  const escalateToOperator = sreOperatorEscalation({ owner: "craigoley", repo: "remudero", ledgerPath, gh, log: (step, extra) => logged.push({ step, extra }), nowMs: () => NOW });
+  const valid: Escalation = {
+    class: "BLOCKED",
+    taskId: "SRE-test",
+    summary: "test incident",
+    detail: "detail text",
+    options: [{ label: "Remediate by hand", detail: "fix it" }],
+    recommendation: "Remediate by hand",
+  };
+
+  const url = withLiveWritesAllowed(() => escalateToOperator(valid));
+  assert.equal(url, "https://github.com/craigoley/remudero/issues/11", "an unassignable issue still opens");
+  const assignFailed = logged.find((l) => l.step === "sre.escalation_assign_failed");
+  assert.ok(assignFailed && String(assignFailed.extra?.reason).includes("assignee not found"));
+
+  const failedUrl = withLiveWritesAllowed(() => escalateToOperator({ ...valid, options: [] }));
+  assert.equal(failedUrl, null, "an escalate() throw degrades to null, never a thrown pass");
+  const escalationFailed = logged.find((l) => l.step === "sre.escalation_failed");
+  assert.ok(escalationFailed && String(escalationFailed.extra?.reason).includes("no options"));
+});
+
+test("the daemon host spawns git/gh/npm/bash through injectable ports, and reads the real lock file", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-sre-host-"));
+  const repoDir = join(root, "repo");
+  mkdirSync(repoDir, { recursive: true });
+  const calls: Array<{ kind: string; args: unknown[] }> = [];
+  const git = (args: string[]) => {
+    calls.push({ kind: "git", args });
+    if (args[0] === "status") return "";
+    if (args[0] === "rev-list") return "3";
+    return "";
+  };
+  const gh = (args: string[]) => {
+    calls.push({ kind: "gh", args });
+    if (args[0] === "pr" && args[1] === "view") return JSON.stringify({ headRefOid: "abc123", statusCheckRollup: [{ name: "build", conclusion: "FAILURE", detailsUrl: "https://x/job/42" }] });
+    if (args[0] === "api" && String(args[1]).includes("check-runs")) return JSON.stringify([{ name: "build", conclusion: "success" }]);
+    return "";
+  };
+  const execFile = ((...args: unknown[]) => {
+    calls.push({ kind: "execFile", args });
+    return "";
+  }) as unknown as typeof execFileSync;
+  const host = daemonSreRunbookHost({
+    root,
+    repoDir,
+    owner: "craigoley",
+    repo: "remudero",
+    git,
+    gh,
+    execFile,
+    inContainer: () => false,
+  });
+
+  const ci = await host.failedCi(7);
+  assert.equal(ci.headSha, "abc123");
+  assert.equal(ci.unrelated, true);
+  assert.deepEqual(ci.jobIds, [42]);
+
+  await host.rerunJob(42);
+  assert.ok(calls.some((c) => c.kind === "gh" && c.args[0] === "api" && c.args[1] === "-X"));
+
+  const checkout = await host.checkout();
+  assert.equal(checkout.clean, true);
+  assert.equal(checkout.behind, 3);
+  assert.equal(checkout.borrowed, false);
+
+  await host.fastForward();
+  await host.reinstall();
+  assert.ok(calls.some((c) => c.kind === "execFile" && c.args[0] === "npm"));
+
+  const notInContainer = await host.canRecycle("remudero-daemon");
+  assert.equal(notInContainer.ok, true);
+  const inContainerHost = daemonSreRunbookHost({ root, repoDir, owner: "craigoley", repo: "remudero", git, gh, execFile, inContainer: () => true });
+  const refusedInContainer = await inContainerHost.canRecycle("remudero-daemon");
+  assert.equal(refusedInContainer.ok, false);
+
+  await host.recycle("remudero-daemon");
+  assert.ok(calls.some((c) => c.kind === "execFile" && c.args[0] === "bash"));
+
+  // A lock file that is present and unreadable (a directory, not a file) reads as no valid holder.
+  const dirLock = join(root, "dir.lock");
+  mkdirSync(dirLock);
+  const unreadable = await host.lock(dirLock);
+  assert.equal(unreadable.present, true);
+  assert.equal(unreadable.holderDead, false);
+
+  // A lock file that is present, readable, and names a dead pid.
+  const lockPath = join(root, "real.lock");
+  writeFileSync(lockPath, JSON.stringify({ pid: 999_999_999, run_id: "r1" }));
+  const dead = await host.lock(lockPath);
+  assert.equal(dead.present, true);
+  assert.equal(dead.holderDead, true);
+  await host.removeLock(lockPath);
+  const gone = await host.lock(lockPath);
+  assert.equal(gone.present, false);
+
+  // No lock at all.
+  const absent = await host.lock(join(root, "nope.lock"));
+  assert.deepEqual([absent.present, absent.holderDead], [false, false]);
+
+  assert.equal(await host.reviewRequested(9), false);
+  await host.requestReview(9);
+  assert.equal(await host.reviewRequested(9), true);
 });
 
 test("receipts are read back from the ledger, and a torn row is skipped", () => {

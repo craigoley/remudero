@@ -493,11 +493,26 @@ interface RollupCheck {
   detailsUrl?: string;
 }
 
-/** The real host: git in the managed checkout, `gh` against `owner/repo`, files under `root/state`. */
-export function daemonSreRunbookHost(opts: { root: string; repoDir: string; owner: string; repo: string }): SreRunbookHost {
+/** The real host: git in the managed checkout, `gh` against `owner/repo`, files under `root/state`.
+ *  `git`/`gh`/`execFile`/`inContainer` are each injectable, defaulted to the genuine transport and
+ *  appended LAST — so a test drives every arm (including the two real external-binary spawns,
+ *  `npm ci` and `deploy/recycle-container.sh`) without an existing caller's construction changing,
+ *  and asserts the recorded call rather than exempting the line via a process-boundary directive. */
+export function daemonSreRunbookHost(opts: {
+  root: string;
+  repoDir: string;
+  owner: string;
+  repo: string;
+  git?: (args: string[]) => string;
+  gh?: (args: string[]) => string;
+  execFile?: typeof execFileSync;
+  inContainer?: () => boolean;
+}): SreRunbookHost {
   const repoArg = `${opts.owner}/${opts.repo}`;
-  const git = (args: string[]) => execFileSync("git", ["-C", opts.repoDir, ...args], { encoding: "utf8" }).trim();
-  const gh = (args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const git = opts.git ?? ((args: string[]) => execFileSync("git", ["-C", opts.repoDir, ...args], { encoding: "utf8" }).trim());
+  const gh = opts.gh ?? ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  const execFile = opts.execFile ?? execFileSync;
+  const inContainer = opts.inContainer ?? defaultInContainer;
   const failed = (checks: RollupCheck[]) => checks.filter((c) => c.conclusion === "FAILURE");
   return {
     async failedCi(pr) {
@@ -525,15 +540,15 @@ export function daemonSreRunbookHost(opts: { root: string; repoDir: string; owne
       git(["merge", "--ff-only", "origin/main"]);
     },
     async reinstall() {
-      execFileSync("npm", ["ci"], { cwd: opts.repoDir, stdio: "ignore" });
+      execFile("npm", ["ci"], { cwd: opts.repoDir, stdio: "ignore" });
     },
     // recycle-container.sh must never run inside the container it replaces (its own header).
     async canRecycle(container) {
-      if (defaultInContainer()) return { ok: false, observed: `recycle of ${container} refused: this daemon runs inside a container` };
+      if (inContainer()) return { ok: false, observed: `recycle of ${container} refused: this daemon runs inside a container` };
       return { ok: true, observed: `${container} reported drifted` };
     },
     async recycle(container) {
-      execFileSync("bash", [join(opts.repoDir, "deploy", "recycle-container.sh"), "--container", container], { stdio: "ignore" });
+      execFile("bash", [join(opts.repoDir, "deploy", "recycle-container.sh"), "--container", container], { stdio: "ignore" });
     },
     async lock(path) {
       if (!existsSync(path)) return { present: false, holderDead: false, observed: `${path} absent` };
