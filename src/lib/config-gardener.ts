@@ -22,7 +22,9 @@ import { gardenStatePath, judgeGardenDecision, readGardenState, runGarden, type 
 import { buildEntryWeightIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLearningsCorpus } from "./learnings.js";
 import type { LedgerLine } from "./ledger.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
-import type { MountRecommendation } from "./mount-recommender.js";
+import type { BillingMode } from "./env.js";
+import { recommendMounts, type MountHeadroomCell, type MountRecommendation } from "./mount-recommender.js";
+import { loadMounts } from "./mounts.js";
 import { loadPlan } from "./plan.js";
 import { planShards } from "./plan-gardener.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -260,6 +262,27 @@ export function configInventory(deps: GardenerDeps, sources: ConfigGardenSources
     cap: { current: DEFAULT_KNOWLEDGE_BUDGET_CHARS, derivation: capDerivation(rows, weights, DEFAULT_KNOWLEDGE_BUDGET_CHARS) },
     active: canaries.filter((c) => isPromotionActive(c.promotion.state)),
     cooling: canaries.filter((c) => c.promotion.state === "rolled_back" && nowMs - Date.parse(c.promotion.createdAt) < CANARY_TTL_MS).map((c) => c.promotion.scope.policyScope),
+  };
+}
+
+/** Mount recommendations as the gardener reads them: the recommender's own gates over the headroom
+ *  sweep, kept to the recommendations. A sweep that cannot be built (no runs yet) is logged and reads as
+ *  none, so the other classes still act. */
+export function mountRecommendationSource(opts: {
+  build: (stateDir: string) => { cells: MountHeadroomCell[] };
+  stateDir: string;
+  mountsFile: string;
+  billingMode: BillingMode;
+  log: GardenerDeps["log"];
+}): () => MountRecommendation[] {
+  return () => {
+    try {
+      const outcomes = recommendMounts(opts.build(opts.stateDir).cells, loadMounts(opts.mountsFile), { billingMode: opts.billingMode });
+      return outcomes.filter((o): o is MountRecommendation => o.kind === "recommendation");
+    } catch (e) {
+      opts.log(`${CONFIG_GARDEN_NAME}.mount_recommendations_unread`, { error: String((e as Error)?.message ?? e) });
+      return [];
+    }
   };
 }
 

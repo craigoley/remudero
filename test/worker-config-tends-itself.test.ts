@@ -4,7 +4,7 @@
  * (experiment-promotion.ts) that it judges on the cohort against the rest, rolling a breach back.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -24,7 +24,9 @@ import {
 } from "../src/lib/config-gardener.js";
 import { cohortGuardMetrics, cohortGuardObservations, enterCanary, stepCanary } from "../src/lib/experiment-promotion.js";
 import { gardenStatePath, readGardenState, type GardenCheckout, type PrState } from "../src/lib/gardener.js";
+import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { daemonCommand } from "../src/run-task.js";
 
 const T0 = Date.parse("2026-09-25T00:00:00Z");
 const HOUR = 3600 * 1000;
@@ -249,4 +251,39 @@ test("W1-T4113: budgets come from the observed distribution with no floor; mount
   assert.deepEqual(cap.cohort, { kind: "all" });
   assert.equal(capCandidate({ ...inv, cap: { ...inv.cap!, derivation: { ...inv.cap!.derivation, changed: false } } }), undefined);
   assert.ok(configCanariesPath("/s").endsWith("config-gardener-canaries.json"));
+});
+
+test("W1-T4113: a self-hosting daemon wires the config gardener", async () => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4113-home-`));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  // Every class off: the wired garden reads this repo's real plan and mounts but never opens a worktree.
+  for (const c of CONFIG_GARDEN_CLASSES) writeFileSync(join(root, "state", `CONFIG_OFF-${c}`), "");
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  let captured: DaemonDeps | undefined;
+  try {
+    await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan, d): Promise<DaemonSummary> => {
+        captured = d;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    const start = captured?.gardens?.[2];
+    assert.ok(start, "the config gardener is wired after the plan and gate gardeners");
+    const stateFile = gardenStatePath(join(root, "state"), "config");
+    const garden = start!(60_000);
+    for (let waited = 0; !existsSync(stateFile) && waited < 20_000; waited += 100) await new Promise((r) => setTimeout(r, 100));
+    garden.stop();
+    assert.ok(readGardenState(stateFile, CONFIG_GARDEN_CLASSES).lastPass, "the wired garden ran a pass over this repo's configuration");
+    // Stopped before the headroom sweep loads, it never starts.
+    start!(60_000).stop();
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+  }
 });
