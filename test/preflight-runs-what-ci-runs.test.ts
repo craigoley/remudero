@@ -165,6 +165,28 @@ test("W1-T4108: a changed src file the import graph reaches from NO suite is a n
   assert.match(step.detail, /UNPROVEN/i);
 });
 
+test("W1-T4108: an import graph that cannot be READ SKIPS the scoped run, names why, and points at the full --coverage mirror", () => {
+  const { spawn, calls } = recordingSpawn({
+    [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
+  });
+  const result = runPreflightScopedDiffCoverage(REPO_ROOT, {
+    spawn,
+    readAffectedInput: () => {
+      throw new Error("EACCES: permission denied, open 'src/lib/example.ts'");
+    },
+  });
+
+  assert.equal(result.ok, true, "a SKIP must never read as a failure");
+  assert.equal(result.steps.length, 1);
+  const step = result.steps[0]!;
+  assert.equal(step.name, "fast-coverage:scope");
+  assert.match(step.detail, /SKIPPED — could not derive the affected-suite scope \(EACCES/);
+  assert.match(step.detail, /predicts CI/i);
+  assert.match(step.detail, /--coverage/);
+  const diffCoverageCalled = calls.some((c) => c.args.some((a) => a.includes("diff-coverage-local.mjs")));
+  assert.equal(diffCoverageCalled, false, "no scope means no scoped run");
+});
+
 test("W1-T4108: too many affected suites SKIPS the default-tier run and states the size and a stated (never measured) time estimate", () => {
   const tooMany = PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING + 5;
   const { spawn, calls } = recordingSpawn({
