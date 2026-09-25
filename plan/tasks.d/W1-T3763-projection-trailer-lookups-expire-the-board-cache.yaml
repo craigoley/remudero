@@ -13,7 +13,9 @@
   files:
     - src/lib/status.ts
     - test/project-plan-trailer-lookup.test.ts
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T3763 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     OBSERVED on the live Azure daemon while diagnosing the missing current-head review for PR #6005
