@@ -126,6 +126,8 @@ const execFileAsync = promisify(execFile) as (
   opts: { encoding: BufferEncoding; maxBuffer: number; timeout: number },
 ) => Promise<{ stdout: string; stderr: string }>;
 
+export type GhAsyncExecutor = typeof execFileAsync;
+
 /**
  * ONE IN-FLIGHT READ PER EXACT REQUEST. The daemon, review lane, and console can all wake for the
  * same head at once; without this map each caller reaches the cadence gate independently and the
@@ -192,6 +194,39 @@ export async function ghJsonAsync(args: string[], execAsync: typeof execFileAsyn
     timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
   });
   return parseGhJsonBody(args, stdout);
+}
+
+/** Bounded, paced async `gh` transport for endpoints whose response is plain text (for example
+ * Actions job logs). Unlike {@link ghJsonAsync}, this deliberately preserves the response as text
+ * and never attempts JSON parsing. */
+export async function ghTextAsync(
+  args: string[],
+  opts: { maxBuffer?: number; timeout?: number } = {},
+  execAsync: GhAsyncExecutor = execFileAsync,
+): Promise<string> {
+  const maxBuffer = opts.maxBuffer ?? DEFAULT_GH_MAX_BUFFER;
+  const timeout = opts.timeout ?? DEFAULT_GH_CALL_TIMEOUT_MS;
+  const read = async (): Promise<string> => {
+    const { stdout } = await execAsync("gh", args, { encoding: "utf8", maxBuffer, timeout });
+    return stdout;
+  };
+
+  // An injected executor is an offline seam; only the real `gh` process spends cadence and joins
+  // same-request reads. Prefix the key so a concurrent JSON reader can never receive raw text.
+  if (execAsync !== execFileAsync) return read();
+  const key = `text:${JSON.stringify(args)}:${maxBuffer}:${timeout}`;
+  const existing = asyncReadInFlight.get(key) as Promise<string> | undefined;
+  if (existing) return existing;
+  const request = (async (): Promise<string> => {
+    applyGhReadCadence(args);
+    return read();
+  })();
+  asyncReadInFlight.set(key, request);
+  try {
+    return await request;
+  } finally {
+    if (asyncReadInFlight.get(key) === request) asyncReadInFlight.delete(key);
+  }
 }
 
 export const DEFAULT_GH_PACE_MIN_GAP_MS = 1_500;

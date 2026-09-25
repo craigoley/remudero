@@ -47,6 +47,20 @@ async function withRoute<T>(route: Route, run: (url: string) => Promise<T>): Pro
   }
 }
 
+async function within<T>(promise: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out`)), 2_000);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 function webhookHeaders(body: string, deliveryId: string, event = "check_run"): Record<string, string> {
   return {
     "content-type": "application/json",
@@ -66,6 +80,157 @@ test("pull-request review changes that alter merge eligibility all wake reconcil
   assert.equal(isAllowlistedGithubEvent("pull_request_review", "submitted"), true);
   assert.equal(isAllowlistedGithubEvent("pull_request_review", "edited"), true);
   assert.equal(isAllowlistedGithubEvent("pull_request_review", "dismissed"), true);
+});
+
+test("the gateway forwards each verified completed check run through its typed callback exactly once", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-github-check-run-callback-"));
+  const delivered: Array<{ id: number; sha: string; branch?: string; name: string; conclusion: string }> = [];
+  const route = createGitHubEventWakeHandler({
+    secret: SECRET,
+    repository: REPOSITORY,
+    markerPath: sweepWakeMarkerPath(root),
+    dedup: createDeliveryDedupStore(10),
+    onCheckRunCompleted: (info) => {
+      delivered.push(info);
+    },
+  });
+  const body = JSON.stringify({
+    action: "completed",
+    repository: { full_name: REPOSITORY },
+    check_run: {
+      id: 107926850523,
+      name: "ci-shard (1/8)",
+      head_sha: "same-head",
+      head_branch: "feature",
+      conclusion: "failure",
+    },
+  });
+  try {
+    await withRoute(route, async (url) => {
+      const accepted = await fetch(url, { method: "POST", headers: webhookHeaders(body, "ci-check-run"), body });
+      assert.equal(accepted.status, 202);
+      assert.deepEqual(await accepted.json(), { accepted: true });
+
+      const duplicate = await fetch(url, { method: "POST", headers: webhookHeaders(body, "ci-check-run"), body });
+      assert.equal(duplicate.status, 202);
+      assert.deepEqual(await duplicate.json(), { duplicate: true });
+    });
+
+    assert.deepEqual(delivered, [{
+      id: 107926850523,
+      sha: "same-head",
+      branch: "feature",
+      name: "ci-shard (1/8)",
+      conclusion: "failure",
+    }]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("check-run callbacks serialize same-check outcomes without holding webhook acknowledgements", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-github-check-run-order-"));
+  const delivered: number[] = [];
+  let releaseFirst!: () => void;
+  let markFirstStarted!: () => void;
+  let markSecondStarted!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const firstStarted = new Promise<void>((resolve) => {
+    markFirstStarted = resolve;
+  });
+  const secondStarted = new Promise<void>((resolve) => {
+    markSecondStarted = resolve;
+  });
+  const route = createGitHubEventWakeHandler({
+    secret: SECRET,
+    repository: REPOSITORY,
+    markerPath: sweepWakeMarkerPath(root),
+    dedup: createDeliveryDedupStore(10),
+    onCheckRunCompleted: async (info) => {
+      delivered.push(info.id);
+      if (info.id === 1) {
+        markFirstStarted();
+        await firstBlocked;
+      } else {
+        markSecondStarted();
+      }
+    },
+  });
+  try {
+    await withRoute(route, async (url) => {
+      const send = (id: number, deliveryId: string) => {
+        const body = JSON.stringify({
+          action: "completed",
+          repository: { full_name: REPOSITORY },
+          check_run: {
+            id,
+            name: "ci-shard",
+            head_sha: "same-head",
+            head_branch: "feature",
+            conclusion: id === 1 ? "failure" : "success",
+          },
+        });
+        return fetch(url, { method: "POST", headers: webhookHeaders(body, deliveryId), body });
+      };
+      const firstResponse = await within(send(1, "check-run-failure"), "first webhook acknowledgement");
+      assert.equal(firstResponse.status, 202);
+      await within(firstStarted, "first callback start");
+
+      const secondResponse = await within(send(2, "check-run-success"), "second webhook acknowledgement");
+      assert.equal(secondResponse.status, 202);
+      assert.deepEqual(delivered, [1], "the same check's pass waits behind its failed-log processing");
+
+      releaseFirst();
+      await within(secondStarted, "second callback start");
+      assert.deepEqual(delivered, [1, 2]);
+    });
+  } finally {
+    releaseFirst();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a check-run callback that throws is logged by name and never fails the acknowledged delivery", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-github-check-run-throw-"));
+  const logged: Array<{ step: string } & Record<string, unknown>> = [];
+  let markLogged!: () => void;
+  const loggedOnce = new Promise<void>((resolve) => {
+    markLogged = resolve;
+  });
+  const route = createGitHubEventWakeHandler({
+    secret: SECRET,
+    repository: REPOSITORY,
+    markerPath: sweepWakeMarkerPath(root),
+    dedup: createDeliveryDedupStore(10),
+    log: (step, extra) => {
+      logged.push({ step, ...extra });
+      if (step === "github.wake.check_run_callback_failed") markLogged();
+    },
+    onCheckRunCompleted: () => {
+      throw new Error("fixture consumer failure");
+    },
+  });
+  const body = JSON.stringify({
+    action: "completed",
+    repository: { full_name: REPOSITORY },
+    check_run: { id: 9, name: "ci-shard", head_sha: "same-head", head_branch: "feature", conclusion: "failure" },
+  });
+  try {
+    await withRoute(route, async (url) => {
+      const res = await fetch(url, { method: "POST", headers: webhookHeaders(body, "check-run-throws"), body });
+      assert.equal(res.status, 202);
+      await res.arrayBuffer();
+      await within(loggedOnce, "callback failure row");
+    });
+    assert.deepEqual(
+      logged.filter((row) => row.step === "github.wake.check_run_callback_failed"),
+      [{ step: "github.wake.check_run_callback_failed", check_run_id: 9, reason: "fixture consumer failure" }],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("the bounded delivery set survives a serve-process restart", async () => {
