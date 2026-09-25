@@ -22553,6 +22553,7 @@ export function mergedTriageSubjects(worktreePath: string, limit = 500): string[
  *  holder read, and the holder classifier. Real callers pass none of them; a test drives every arm
  *  (created / taken-then-created / unreachable) without a git remote. */
 export interface NextTaskIdReserveDeps {
+  repoRoot?: string;
   reserver?: RemoteRefReserver;
   runGit?: (args: string[]) => { status: number | null; stdout: string; stderr: string };
   holderOf?: (taskId: string, run: (args: string[]) => { status: number | null; stdout: string; stderr: string }) => ReservationHolder;
@@ -22912,7 +22913,8 @@ export async function nextTaskIdCommand(
     console.error("### rmd next-task-id: --audit and --reserve are contradictory — the audit is read-only\n" + USAGE);
     return 2;
   }
-  const planPath = flagValue(rest, "--plan") ?? join(repoRoot, "plan", "tasks.yaml");
+  const mintRepoRoot = deps.repoRoot ?? repoRoot;
+  const planPath = flagValue(rest, "--plan") ?? join(mintRepoRoot, "plan", "tasks.yaml");
   const offline = rest.includes("--offline");
   const self = resolveOwnerRepo();
   if (rest.includes("--audit")) {
@@ -22928,7 +22930,7 @@ export async function nextTaskIdCommand(
   try {
     mint = mintNextTaskIdWithHistory({
       planPath,
-      repoRoot,
+      repoRoot: mintRepoRoot,
       openPrTexts: offline ? undefined : (deps.openPrTexts ?? (() => openPrMintTexts(self.owner, self.repo))),
     });
   } catch (e) {
