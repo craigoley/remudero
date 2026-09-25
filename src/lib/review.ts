@@ -8365,7 +8365,6 @@ type ReviewerCodeFreshness =
 
 export interface PostReviewStatusGuardedResult {
   posted: boolean;
-  /** Present only when the guarded lifecycle read refused the post for a merged or closed PR. */
   lifecycle?: "merged" | "closed";
   conflict?: boolean;
   replayed?: boolean;
