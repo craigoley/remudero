@@ -1,0 +1,36 @@
+- id: W1-T4535
+  title: "THE WORKER-SCRATCH TEST EXPECTS SLASH-ONLY NORMALIZATION, BUT THE HELPER NORMALIZES EVERY UNSAFE CHARACTER — punctuation in a real TMPDIR makes the full preflight reject a valid helper"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  band_meaning: blast-radius
+  budget_usd: 1.00
+  files:
+    - test/worker-scratch.test.ts
+  origin: "operator-session#local-preflight-worker-scratch-slug-2026-09-25"
+  plan_refs: []
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED in the final full local preflight for W1-T3574 (head ebed4d05, measured base 6bc5f0615b65):
+    `coverage-ratchet:test-with-coverage` failed only `test/worker-scratch.test.ts`'s realpath
+    slug assertion. The test converts `/` to `-` and preserves `.`, while the existing shared
+    `scratchSlugForCwd` implementation correctly converts every character outside
+    `[A-Za-z0-9_-]` to `-`. The operator's real temporary path contains `.remudero-coverage`,
+    so the test's expected slug differs from the helper's actual safe slug. This is a false-red
+    test expectation, not a production defect; the helper and its CLI callers must remain
+    unchanged, and the test must not be skipped or weakened.
+  design: |
+    Make the fixture path include a dot even on hosts whose default TMPDIR has none. Assert that
+    positive control, derive the expected slug from the realpath using the documented safe
+    character set `[A-Za-z0-9_-]`, and compare it to `scratchSlugForCwd`. Keep the change confined
+    to `test/worker-scratch.test.ts`; rerun that test and the full `rmd preflight --ci-parity`.
+  acceptance:
+    - claim: "the worker-scratch test proves punctuation in a dotted real cwd is normalized into the same safe slug as the shared helper"
+      proof: "grep: scratchSlugForCwd(d), expectedSlugFromRealPath in test/worker-scratch.test.ts"
+  falsifier: |
+    Revert the expected slug to slash-only replacement while keeping the dotted fixture. The
+    new test must fail on the dot; if it passes, the test is not exercising the reported mismatch.
