@@ -182,11 +182,16 @@ test("a reservation minted with --branch names that branch as its holder", async
 test("W1-T4414: a default-family mint with --branch records that branch too", async () => {
   const { bare } = consoleReview({});
   const clone = gitRepo({ cloneFrom: bare.dir, kind: "own-reservation-w1" });
+  // Keep the mint's plan in this fixture. The checkout running this test may
+  // legitimately trail origin/main, which makes a real-plan mint return a
+  // degraded freshness code unrelated to the branch reservation under test.
+  const fixturePlan = join(clone.dir, "plan", "tasks.yaml");
+  writeFileSync(fixturePlan, "- id: W1-T1\n");
   const log = console.log;
   console.log = () => {};
   let code: number;
   try {
-    code = await nextTaskIdCommand(["--branch", HEAD], {}, {
+    code = await nextTaskIdCommand(["--plan", fixturePlan, "--branch", HEAD], {}, {
       runGit: (args: string[]) => {
         try {
           return { status: 0, stdout: clone.git(...args), stderr: "" };
