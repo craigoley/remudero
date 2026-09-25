@@ -17,7 +17,54 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { instanceMode, parseInstanceRegistry, type InstanceRegistry } from "./lib/instance-registry.js";
 const GIT_UNTRACKED_FILES_ALL = "--untracked-files=all";
+
+/** Resolve the instance from the registry's unique active owner/repo identity. */
+export function instanceModeForRepo(
+  owner: string,
+  repo: string,
+  registryPath = process.env.RMD_INSTANCE_REGISTRY ?? join(repoRoot, ".remudero", "daemon-instances.yaml"),
+): "shadow" | "live" {
+  if (!existsSync(registryPath)) {
+    if (process.env.RMD_INSTANCE_REGISTRY) throw new Error(`instance registry is unreadable: ${registryPath}`);
+    return "live";
+  }
+  const registry: InstanceRegistry = parseInstanceRegistry(readFileSync(registryPath, "utf8"));
+  const instance = registry.instances.find((row) => row.live && row.repo.toLowerCase() === `${owner}/${repo}`.toLowerCase());
+  return instance ? instanceMode(registry, instance.name) : "live";
+}
+
+function shadowPr(prUrl: string): boolean {
+  const target = mergeTargetFromPrUrl(prUrl);
+  return !!target && instanceModeForRepo(target.owner, target.repo) === "shadow";
+}
+
+/** A worker may have opened its own PR before the harness sees it; convert it before review. */
+export function ensureShadowDraft(
+  prUrl: string,
+  readDraft: (url: string) => unknown = (url) => (ghJson(["pr", "view", url, "--json", "isDraft"]) as { isDraft?: unknown }).isDraft,
+  markDraft: (url: string) => void = (url) => { ghExec(["pr", "ready", url, "--undo"], { encoding: "utf8", stdio: "pipe" }); },
+): void {
+  if (!shadowPr(prUrl)) return;
+  const draft = readDraft(prUrl);
+  if (typeof draft !== "boolean") throw new Error(`cannot verify draft state for shadow PR ${prUrl}`);
+  if (!draft) {
+    markDraft(prUrl);
+    if (readDraft(prUrl) !== true) throw new Error(`shadow PR did not become a draft: ${prUrl}`);
+  }
+}
+
+export function recordShadowVerdict(
+  prUrl: string,
+  reviewVerdict: string,
+  outcome: "would_merge" | "would_block",
+  reason: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): void {
+  if (!shadowPr(prUrl)) return;
+  log("shadow.verdict", { pr_url: prUrl, review_verdict: reviewVerdict, outcome, reason });
+}
 import {
   architectModel,
   configPath as instanceConfigPath,
@@ -1756,13 +1803,18 @@ export function readyDraftViaGh(
   log: (step: string, extra?: Record<string, unknown>) => void,
   exec: typeof ghExec = ghExec,
 ): (pr: OpenPrView) => void {
-  return (pr) =>
+  return (pr) => {
+    if (instanceModeForRepo(owner, repo) === "shadow") {
+      log("shadow.ready_refused", { pr_url: pr.prUrl, reason: "instance is shadow" });
+      return;
+    }
     readyDraftPullRequest(pr, {
       markReady: (prNumber) => {
         exec(["pr", "ready", String(prNumber), "--repo", `${owner}/${repo}`], { encoding: "utf8", stdio: "pipe" });
       },
       log,
     });
+  };
 }
 
 export function buildSweepEffects(
@@ -2132,6 +2184,9 @@ export function buildSweepEffects(
     fixRungCheckoutRefusedErrorImpl: FixRungCheckoutRefusedError,
     defaultBudgetUsd: DEFAULT_BUDGET_USD,
     ...libDeps,
+    armImpl: (prUrl, taskId) => shadowPr(prUrl)
+      ? { outcome: "draft-refused" }
+      : (libDeps.armImpl ?? armAutoMergeDetailed)(prUrl, taskId),
   });
   // W1-T2890 holds this surface key-identical to the lib-built one, so the accessor is INJECTED
   // above rather than bolted on here: returning the lib's object unchanged makes that identity
@@ -3733,6 +3788,7 @@ export function ghPrCreateFillCommand(
     "-f",
     "base=main",
   ];
+  if (instanceModeForRepo(owner, repo) === "shadow") args.push("-F", "draft=true");
   return {
     command: "gh",
     args,
@@ -4327,6 +4383,10 @@ export function armAndLogOutcome(
   lane: ArmLane = "operator",
   headSha?: string,
 ): ArmOutcome {
+  if (shadowPr(prUrl)) {
+    log("automerge.arm_skipped", { pr_url: prUrl, task_id: taskId, lane, head_sha: headSha, reason: "instance is shadow" });
+    return "draft-refused";
+  }
   const result = arm(prUrl, taskId);
   const outcome = typeof result === "string" ? result : result.outcome;
   const error = typeof result === "string" ? undefined : result.error;
@@ -6903,7 +6963,7 @@ async function runReview(args: {
   // compares it to the head this verdict was written against, so a push landing between the
   // verdict and this call is still refused. No `posted.posted` guard is needed: the `if
   // (!posted.posted)` branch above already returned.
-  const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log };
+  const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, isDraft: shadowPr(prUrl), log };
   armIfVerdictPermits(verdict, armCtx, { arm: args.arm });
   if (verdict.capped) {
     // W1-T1085: the annotation gets the SAME `planOnly` fact the status three-ways on, so one run
@@ -14342,6 +14402,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     workerAbandonMs,
     workerStateSensor,
   } = ctx;
+  const runMode = instanceModeForRepo(owner, task.repo);
   // Direct callers of the exported body retain ordinary routing.  Production runTask always
   // supplies the shared object so the preflight and its spawn wrapper observe the same decision.
   const cashContainmentState = ctx.cashContainmentState ?? { contained: false };
@@ -14374,6 +14435,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   );
   log("run.start", {
     repo: task.repo,
+    instance_mode: runMode,
     type: task.type,
     risk: task.risk,
     // W1-T167: the task's routing class (docs / plan-lint / src) and the class
@@ -15297,7 +15359,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const ruleToolPointer = ruleLookup
       ? `\nTo read a doctrine rule by id or phrase, or a learning's evidence by learnings#id, call ${WORKER_RULE_TOOL_NAME}.`
       : "";
-    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
+    const shadowInstruction = runMode === "shadow"
+      ? "\nSHADOW INSTANCE: open your pull request as a DRAFT. Never mark it ready, arm auto-merge, or merge it."
+      : "";
+    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}${shadowInstruction}`;
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -15329,7 +15394,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // drill will send. `ruleHeadlinesPart` is the SAME string the turn-0 prompt above just
     // carried (design (iii)) — never re-derived, so a compaction can never re-inject a
     // headline index that drifted from what turn 0 actually said.
-    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
+    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}${shadowInstruction}`;
     log("anchor.built", { anchor });
 
     // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
@@ -16050,6 +16115,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       );
       return { taskId, runId, merged: false, costUsd, verdict: "pr_attribution_failed" };
     }
+    ensureShadowDraft(prUrl);
     // Stamp the provenance trailer (deriveStatus source (c)) before gating.
     ensureTaskTrailer(prUrl, taskId, log);
     recordHeadProviderAfterPush(
@@ -16090,6 +16156,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       const reason =
         `daemon code advanced ${ci.oldSha.slice(0, 7)}..${ci.newSha.slice(0, 7)} while CI was pending; ` +
         "yielded at the recorded external-wait boundary so the next daemon lifetime can review this PR";
+      recordShadowVerdict(prUrl, "not_run", "would_block", reason, log);
       say("daemon freshness handoff: CI is pending; leaving PR open for the refreshed daemon");
       log("verdict", {
         verdict: "blocked_transient",
@@ -16108,6 +16175,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const ciState = ciGateState(ci);
     if (ciState !== "green") {
       const reason = ciGateBlockReason(ci);
+      recordShadowVerdict(prUrl, "not_run", "would_block", reason, log);
       say("fallback: pushing branch already done; ci not green — skipping review, leaving PR open");
       log("verdict", {
         verdict: "blocked_ci",
@@ -16190,6 +16258,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     });
 
     if (review.verdictWithheld) {
+      recordShadowVerdict(prUrl, review.state, "would_block", review.verdictWithheld, log);
       log("verdict", {
         verdict: "blocked",
         pr_url: prUrl,
@@ -16212,6 +16281,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // drain/daemon path and the manual `rmd run-task` path both reach it, so both
     // get the rung for free (no duplicated fix-dispatch logic).
     if (review.state !== "success") {
+      recordShadowVerdict(prUrl, review.state, "would_block", "review did not pass; fix rung pending", log);
       const rung = await runFixRung({
         taskId,
         runId,
@@ -16474,6 +16544,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // W1-T919 ruling exactly like the at-open one just did.
     const armDecision = resolveAutoMergeArm(review, tddStrict, cappedOverride, (s, extra) => log(s, extra), irreversible);
     if (!armDecision.arm) {
+      recordShadowVerdict(prUrl, review.state, "would_block", armDecision.reason, log);
       // W1-T125 primitive, retargeted by W1-T975: this run itself never arms until
       // AFTER this check passes (see the deferred arm call further down, right
       // before pollToGate), so there is usually nothing here to withdraw. Kept as
@@ -16658,6 +16729,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       confidenceThreshold: riskPolicy.confidenceThreshold,
     });
     if (riskJudgeResult.action.kind === "escalate") {
+      recordShadowVerdict(prUrl, review.state, "would_block", "risk judge escalated", log);
       log("verdict", {
         verdict: "blocked",
         pr_url: prUrl,
@@ -16702,6 +16774,21 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // `armAutoMergeAtOpen` outright when it refuses, so a wipe-test PR is never armed and can
     // never merge out from under the pair it belongs to.
     const wipeTestArmDecision = resolveWipeTestArmPermission(!!opts.noMerge);
+    if (runMode === "shadow") {
+      recordShadowVerdict(
+        prUrl, review.state, wipeTestArmDecision.armed ? "would_merge" : "would_block",
+        wipeTestArmDecision.reason ?? armDecision.reason, log,
+      );
+      log("automerge.arm_skipped", { pr_url: prUrl, reason: "instance is shadow", head_sha: review.headSha });
+      log("verdict", {
+        verdict: "blocked",
+        pr_url: prUrl,
+        reason: "shadow instance held draft PR for operator judgment",
+        cost_usd: costUsd,
+        ...terminalVerdictFields(impl),
+      });
+      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
+    }
     const armOutcome: ArmOutcome | "no-merge-boundary-refused" = wipeTestArmDecision.armed
       ? armAutoMergeAtOpen(prUrl, undefined, irreversible)
       : "no-merge-boundary-refused";
@@ -31467,6 +31554,7 @@ export async function daemonCommand(
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
   log("daemon.target", {
     repo: target.repo,
+    instance_mode: instanceModeForRepo(target.owner, target.repo),
     gateway: `${target.owner}/${target.repo}`,
     plan_path: target.planPath,
     self_host: target.isSelf,

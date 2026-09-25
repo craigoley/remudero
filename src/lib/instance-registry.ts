@@ -37,6 +37,7 @@ export type InstanceRegistryErrorCode =
   | "invalid_repo"
   | "invalid_project"
   | "invalid_retired"
+  | "invalid_mode"
   | "duplicate_live_repo";
 
 /** A registry the parser refuses. `code` is stable for callers; `message` names the line/instance. */
@@ -57,6 +58,8 @@ export interface RegistryInstance {
   repo: string;
   /** False only when the row says `retired: true`; a retired row may reuse a live row's repo. */
   live: boolean;
+  /** Shadow instances execute work but may not make a pull request mergeable. */
+  mode?: "shadow" | "live";
 }
 
 export interface InstanceRegistry {
@@ -149,7 +152,11 @@ export function parseInstanceRegistry(text: string): InstanceRegistry {
     if (retired !== undefined && retired !== "true" && retired !== "false") {
       throw new InstanceRegistryError("invalid_retired", `instance '${row.name}' retired must be true or false`);
     }
-    return { name: row.name, project, repo: declared, live: retired !== "true" };
+    const mode = row.fields.get("mode");
+    if (mode !== undefined && mode !== "shadow" && mode !== "live") {
+      throw new InstanceRegistryError("invalid_mode", `instance '${row.name}' mode must be shadow or live`);
+    }
+    return { name: row.name, project, repo: declared, live: retired !== "true", ...(mode ? { mode } : {}) };
   });
   const liveRepos = new Map<string, string>();
   for (const instance of instances) {
@@ -165,6 +172,13 @@ export function parseInstanceRegistry(text: string): InstanceRegistry {
     liveRepos.set(key, instance.name);
   }
   return { instances };
+}
+
+/** Resolve a named instance, refusing unknown names rather than silently treating them as live. */
+export function instanceMode(registry: InstanceRegistry, name: string): "shadow" | "live" {
+  const instance = registry.instances.find((row) => row.name === name);
+  if (!instance) throw new InstanceRegistryError("malformed_line", `instance '${name}' is not declared`);
+  return instance.mode ?? "live";
 }
 
 export interface RegistryProjection {
