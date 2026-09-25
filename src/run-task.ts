@@ -832,6 +832,7 @@ import {
   renderAcceptanceBlock,
   replaceAcceptanceBlock,
 } from "./lib/plan-pr-emitter.js";
+import { openPullRequestChecked } from "./lib/pr-open.js";
 import {
   findTaskShard,
   parseProofAmendmentProposal,
@@ -16035,8 +16036,29 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       gitPushRunBranch(worktreePath, { force: true });
     }
     if (!prUrl) {
-      const prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
-      prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
+      // W1-T4420: the shared checked seam — the trailer is already stamped above (unconditionally,
+      // ahead of both PR paths), so this call carries no `ensureTrailerOnCommit`; it exists here for
+      // the fallback-body check (a non-discriminating open-time Acceptance block, refused rather
+      // than opened) that `ghPrCreateFillCommand` alone cannot perform.
+      const checked = openPullRequestChecked(
+        taskId,
+        {
+          buildCreate: (title, bodyOverride) => ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, title, bodyOverride),
+          pushRunBranch: (o) => gitPushRunBranch(worktreePath, o),
+          localDiff: () =>
+            execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "HEAD"], {
+              encoding: "utf8",
+              maxBuffer: 1 << 26,
+            }),
+        },
+        { title: lastCommitSubject(worktreePath) },
+      );
+      if (!checked.ok) {
+        log("pr_open.refused", { reason: checked.refused });
+        say(`PR open refused before the REST create: ${checked.refused}`);
+      } else {
+        prUrl = runGhPrCreate(checked.create, branch, log, say).prUrl;
+      }
     }
     if (!prUrl) {
       log("verdict", {
@@ -28271,8 +28293,27 @@ async function retroCommand(
     }
 
     if (!prUrl) {
-      const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, lastCommitSubject(worktreePath));
-      prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
+      // W1-T4420: same shared checked seam as the implement lane — the trailer is already stamped
+      // above, so no `ensureTrailerOnCommit` here; this guards the fallback body only.
+      const checked = openPullRequestChecked(
+        runId,
+        {
+          buildCreate: (title, bodyOverride) => ghPrCreateFillCommand(worktreePath, owner, repo, branch, title, bodyOverride),
+          pushRunBranch: (o) => gitPushRunBranch(worktreePath, o),
+          localDiff: () =>
+            execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "HEAD"], {
+              encoding: "utf8",
+              maxBuffer: 1 << 26,
+            }),
+        },
+        { title: lastCommitSubject(worktreePath) },
+      );
+      if (!checked.ok) {
+        log("pr_open.refused", { reason: checked.refused });
+        say(`PR open refused before the REST create: ${checked.refused}`);
+      } else {
+        prUrl = runGhPrCreate(checked.create, branch, log, say).prUrl;
+      }
     }
     if (!prUrl) {
       log("retro.error", { error: "no PR opened" });
@@ -40939,8 +40980,34 @@ async function triageCommandLocked(
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
-    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0]);
-    const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
+    //
+    // W1-T4420: routed through the shared checked seam, with `ensureTrailerOnCommit` — unlike the
+    // implement/retro lanes above, triage previously stamped the `Remudero-Task:` trailer only
+    // AFTER this create (`ensureTaskTrailer(prUrl, taskId, log)`, below), via a PATCH. The
+    // commit's own harness-authored message (`triageCommitMessage`) already carries the trailer,
+    // so this amend is normally a no-op — but the guarantee now holds at the seam itself, not by
+    // construction of one caller's commit message.
+    const checked = openPullRequestChecked(
+      taskId,
+      {
+        buildCreate: (title, bodyOverride) => ghPrCreateFillCommand(worktreePath, owner, repo, branch, title, bodyOverride),
+        ensureTrailerOnCommit: (id) => appendTaskTrailerToCommit(worktreePath, id),
+        pushRunBranch: (o) => gitPushRunBranch(worktreePath, o),
+        localDiff: () =>
+          execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "HEAD"], {
+            encoding: "utf8",
+            maxBuffer: 1 << 26,
+          }),
+      },
+      { title: commitMessage.split("\n")[0] },
+    );
+    if (!checked.ok) {
+      log("triage.error", { error: "PR open refused", reason: checked.refused });
+      say(`PR open refused before the REST create: ${checked.refused}`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+    const prUrl = runGhPrCreate(checked.create, branch, log, say).prUrl;
     if (!prUrl) {
       log("triage.error", { error: "no PR opened" });
       worktreeRemove(repoDir, worktreePath);
@@ -41415,8 +41482,31 @@ export async function planCommand(
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
-    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], planPrBody);
-    const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
+    //
+    // W1-T4420: routed through the shared checked seam — no `ensureTrailerOnCommit` (a filing PR
+    // carries no `Remudero-Task:` trailer, by design). `planPrBody` (`opts.bodyOverride`) is
+    // checked instead for PLAN-DIVERGENCE: its own claimed ids must actually be filed by this
+    // diff's `plan/` additions, refused before the REST create when they are not.
+    const checked = openPullRequestChecked(
+      undefined,
+      {
+        buildCreate: (title, bodyOverride) => ghPrCreateFillCommand(worktreePath, owner, repo, branch, title, bodyOverride),
+        pushRunBranch: (o) => gitPushRunBranch(worktreePath, o),
+        localDiff: () =>
+          execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "HEAD"], {
+            encoding: "utf8",
+            maxBuffer: 1 << 26,
+          }),
+      },
+      { title: commitMessage.split("\n")[0], bodyOverride: planPrBody },
+    );
+    if (!checked.ok) {
+      log("plan.error", { error: "PR open refused", reason: checked.refused });
+      say(`PR open refused before the REST create: ${checked.refused}`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+    const prUrl = runGhPrCreate(checked.create, branch, log, say).prUrl;
     if (!prUrl) {
       log("plan.error", { error: "no PR opened" });
       worktreeRemove(repoDir, worktreePath);

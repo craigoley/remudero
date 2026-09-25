@@ -5,10 +5,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { acceptanceGateBodyRepair, ghPrCreateFillCommand } from "../src/run-task.js";
+import { acceptanceGateBodyRepair, appendTaskTrailerToCommit, ghPrCreateFillCommand } from "../src/run-task.js";
 import { bodyNeedsAcceptanceRepair } from "../src/lib/plan-pr-emitter.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { openPullRequestChecked, type OpenPullRequestCheckedDeps } from "../src/lib/pr-open.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const GATE_URL = pathToFileURL(join(REPO_ROOT, "scripts", "acceptance-author-gate.mjs")).href;
@@ -145,4 +146,106 @@ test("an author's RECOVERABLE criteria beat the generic fallback rather than bei
   const body = bodyOf(dir);
   assert.equal(bodyNeedsAcceptanceRepair(body), false, "the repaired body must parse");
   assert.match(body, /the reaper withholds an active branch/, "the author's own claim must be carried into the repair");
+});
+
+// ── W1-T4420 — the shared checked seam every automated opener now routes through ────────────
+
+const BRANCH = "run-W1-T1-1";
+
+/** `openPullRequestChecked`'s deps, bound to a fixture — `pushRunBranch` records whether it was
+ *  called rather than pushing for real (the fixture has no reachable remote). */
+function checkedDeps(dir: string, pushed: { count: number } = { count: 0 }): OpenPullRequestCheckedDeps {
+  return {
+    buildCreate: (title, bodyOverride) =>
+      withLiveWritesAllowed(() => ghPrCreateFillCommand(dir, "o", "r", BRANCH, title, bodyOverride)),
+    ensureTrailerOnCommit: (id) => appendTaskTrailerToCommit(dir, id),
+    pushRunBranch: () => {
+      pushed.count += 1;
+    },
+    localDiff: () => git(dir, "diff", "origin/main", "HEAD"),
+  };
+}
+
+function bodyOfChecked(create: ReturnType<typeof ghPrCreateFillCommand>): string {
+  const at = create.args.findIndex((a) => a.startsWith("body="));
+  assert.notEqual(at, -1, "the create argv must carry a body");
+  return create.args[at].slice("body=".length);
+}
+
+test("run branches receive the Remudero-Task body trailer before REST pull creation", () => {
+  const dir = fixture();
+  commit(dir, "feat(x): a subject", "no Acceptance block in this commit message");
+  const pushed = { count: 0 };
+  const result = openPullRequestChecked("W1-T9001", checkedDeps(dir, pushed), { title: "feat(x): a subject" });
+  assert.ok(result.ok, "a healthy, trailered build PR must not be refused");
+  // The trailer landed on the branch's tip commit BEFORE the create argv (what a REST pull-create
+  // call would actually POST) was ever read back — never only in the PR body afterward.
+  const tip = git(dir, "log", "-1", "--format=%B");
+  assert.match(tip, /^Remudero-Task: W1-T9001\s*$/m, "the tip commit must carry the trailer before the create argv is built");
+  assert.equal(pushed.count, 1, "an amended tip must be re-pushed before the create argv is trusted");
+});
+
+test("an already-trailered commit is left alone and the create argv is still built", () => {
+  const dir = fixture();
+  commit(dir, "feat(x): a subject", "Acceptance:\n- carries a real block | grep: real in x.ts\n\nRemudero-Task: W1-T9002");
+  const pushed = { count: 0 };
+  const result = openPullRequestChecked("W1-T9002", checkedDeps(dir, pushed), { title: "feat(x): a subject" });
+  assert.ok(result.ok);
+  assert.equal(pushed.count, 0, "an already-trailered tip must not be re-amended or re-pushed");
+});
+
+test("the shared PR opener refuses a stale or plan-divergent acceptance block before POST — stale generic fallback, no diff-derived proof available", () => {
+  const dir = fixture();
+  // An EMPTY commit: no file changed at all, so the diff against origin/main carries no line a
+  // proof could ever be derived from. `fillDerivedBody` derives nothing from the commit body
+  // either, so `ghPrCreateFillCommand` installs the generic open-time fallback, whose own proof
+  // predates this diff and so cannot discriminate it.
+  git(dir, "commit", "--allow-empty", "-q", "-m", "chore: touch nothing");
+  const result = openPullRequestChecked(undefined, checkedDeps(dir), {});
+  assert.equal(result.ok, false, "a body carrying only the non-discriminating fallback must be refused before POST");
+  if (!result.ok) {
+    assert.match(result.refused, /discriminates nothing/, "the refusal must name why: the fallback proof cannot discriminate this diff");
+  }
+});
+
+test("the shared PR opener refuses a stale or plan-divergent acceptance block before POST — plan-divergent bodyOverride", () => {
+  const dir = fixture();
+  // The diff below files NOTHING under plan/ at all — a bare README touch — so the bodyOverride's
+  // own claimed id (W1-T9999) can never be one this diff actually files.
+  commit(dir, "chore(plan): file a task");
+  const bodyOverride = ["Acceptance:", "- W1-T9999 is filed as a well-formed plan task shard by this PR | grep: id: W1-T9999 in plan/tasks.d/W1-T9999-x.yaml"].join("\n");
+  const result = openPullRequestChecked(undefined, checkedDeps(dir), { bodyOverride });
+  assert.equal(result.ok, false, "a bodyOverride citing an id this diff's plan/ additions never file must be refused");
+  if (!result.ok) {
+    assert.match(result.refused, /plan-divergent/, "the refusal must name the plan-divergent defect");
+  }
+});
+
+test("a bodyOverride whose cited id genuinely IS filed by this diff's plan/ additions is not refused", () => {
+  const dir = fixture();
+  execFileSync("mkdir", ["-p", join(dir, "plan", "tasks.d")]);
+  writeFileSync(join(dir, "plan", "tasks.d", "W1-T9999-x.yaml"), "- id: W1-T9999\n  title: x\n");
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "chore(plan): file W1-T9999");
+  const bodyOverride = ["Acceptance:", "- W1-T9999 is filed as a well-formed plan task shard by this PR | grep: id: W1-T9999 in plan/tasks.d/W1-T9999-x.yaml"].join("\n");
+  const result = openPullRequestChecked(undefined, checkedDeps(dir), { bodyOverride });
+  assert.ok(result.ok, "a bodyOverride whose cited id the diff genuinely files must not be refused");
+});
+
+test("openPullRequestChecked substitutes a diff-derived proof when the diff itself can supply one", () => {
+  const dir = fixture();
+  writeFileSync(join(dir, "new-file.ts"), "export const marker = \"a genuinely new line\";\n");
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "feat(x): a subject");
+  const result = openPullRequestChecked(undefined, checkedDeps(dir), { title: "feat(x): a subject" });
+  assert.ok(result.ok, "a diff that adds a groppable line must not be refused");
+  if (result.ok) {
+    const body = bodyOfChecked(result.create);
+    assert.doesNotMatch(
+      body,
+      /grep: \^export function acceptanceAuthorTimeCheck in src\/lib\/review\.ts/,
+      "the stale generic proof must be replaced, not left in place",
+    );
+    assert.match(body, /grep: .*new-file\.ts/, "the substituted proof must cite the diff's own added file");
+  }
 });
