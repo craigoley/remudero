@@ -1,0 +1,58 @@
+- id: W1-T4555
+  title: "Serve a versioned, read-only operator-agent answer with scoped evidence and explicit gaps"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 55.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-25 operator request: agent answers console, fleet, daemon, and repository questions while respecting the active repository"
+  plan_refs: ["CONSOLE-T75", "W1-T3896", "W1-T3898"]
+  files:
+    - src/lib/operator-agent-answer.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - test/operator-agent-answer-contract.test.ts
+    - test/operator-agent-answer-route.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The daemon has durable proposal, decision, and outcome routes, but no answer endpoint.
+    The console's CONSOLE-T75 conversation must not invent a browser-authorized repository
+    set, claim a partial answer is complete, or promote a proposal into action authority.
+    Each authenticated daemon instance owns evidence for one repository; the console
+    can fan out only to its server-allowlisted instances and label the effective lens.
+  design: |
+    Add POST /v1/operator-agent/ask with a bounded question and an answer-v1 envelope.
+    The route is authenticated and read-only despite POST: no proposal, task, ledger,
+    settings, or fleet mutation. Resolve the served repository and instance identity
+    on the server; a request cannot select another repository by naming it in JSON.
+    Retrieve bounded, cited observations from existing ledger/task/fleet/inbox read
+    surfaces with source IDs, observation time, and freshness. Return typed verified,
+    partial, unavailable, and unsupported states, with missing-source reasons. A
+    fluent sentence is not a substitute for evidence: only evidence-backed claims
+    appear as answers; unknown or unsupported questions receive an explicit gap.
+    Bound source count, question length, answer length, and history/scan work. Do not
+    send credentials, private raw ledger rows, or arbitrary URLs to a model. This
+    contract is one-instance/one-repository; CONSOLE-T75 owns cross-repository
+    aggregation and the current/all/selected lens. Navigation is a separate local
+    allowlist in the console. Write-side actions remain behind W1-T3855 and
+    W1-T3898 and are not authorized by this answer route.
+  acceptance:
+    - claim: "a question returns an answer-v1 envelope with server-owned repository scope, bounded citations, freshness, and typed coverage"
+      proof: "unit test: test/operator-agent-answer-contract.test.ts"
+    - claim: "an unavailable source produces partial or unavailable coverage rather than a confident complete answer"
+      proof: 'grep: unavailable evidence never produces a verified operator answer in test/operator-agent-answer-contract.test.ts'
+    - claim: "the authenticated route refuses an oversized question and cannot be pointed at another repository by request JSON"
+      proof: 'grep: agent ask route rejects oversized and forged repository scope in test/operator-agent-answer-route.test.ts'
+    - claim: "the answer route has no write-side effect and never treats an answer as approval or execution"
+      proof: 'grep: agent ask route leaves proposal task and ledger writes unchanged in test/operator-agent-answer-route.test.ts'
+    - claim: "the served route calls the answer projector and the OpenAPI contract names answer-v1 and its unavailable states"
+      proof: 'grep: buildOperatorAgentAnswer( in src/lib/serve.ts'
+  falsifier: |
+    Answer a question about a different repository from one instance, label partial
+    evidence verified, omit a source timestamp, or append an action/approval receipt
+    while answering. The respective tests must fail.

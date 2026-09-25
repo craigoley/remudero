@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import type { ExecFileSyncOptions, ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
+import type { ChildProcess, ExecFileSyncOptions, ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { mkdirSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
@@ -79,13 +79,17 @@ export function splitGhHeaderBlock(out: string): { headers: string; body: string
   return { headers: out.slice(0, sep.index), body: out.slice(sep.index + sep[0].length) };
 }
 
+// SIGKILL not SIGTERM: a sync spawn's one `timeout` cannot escalate (W1-T4446, cf. review.ts).
+export const DEFAULT_GH_SYNC_KILL_SIGNAL: NodeJS.Signals = "SIGKILL";
+
 export function ghOptionsWithDefaultTimeout<T extends object>(
-  opts: T & { timeout?: number; maxBuffer?: number },
-): T & { timeout: number; maxBuffer: number } {
+  opts: T & { timeout?: number; maxBuffer?: number; killSignal?: NodeJS.Signals | number },
+): T & { timeout: number; maxBuffer: number; killSignal: NodeJS.Signals | number } {
   return {
     ...opts,
     maxBuffer: opts.maxBuffer ?? DEFAULT_GH_MAX_BUFFER,
     timeout: opts.timeout ?? DEFAULT_GH_CALL_TIMEOUT_MS,
+    killSignal: opts.killSignal ?? DEFAULT_GH_SYNC_KILL_SIGNAL,
   };
 }
 
@@ -106,14 +110,23 @@ export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptio
 export function ghJson(
   args: string[],
   onRateLimit?: (reading: GhRateLimitReading) => void,
-  exec: (file: string, execArgs: string[], opts: { encoding: "utf8"; maxBuffer: number; timeout: number }) => string = execFileSync,
+  exec: (
+    file: string,
+    execArgs: string[],
+    opts: { encoding: "utf8"; maxBuffer: number; timeout: number; killSignal?: NodeJS.Signals | number },
+  ) => string = execFileSync,
 ): unknown {
   // W1-T3297: an injected `exec` reaches no network, so pacing it would spend a shared window
   // on a call that never touched the limiter.
   if (exec === execFileSync) applyGhReadCadence(args);
   const isApiCall = args[0] === "api";
   const execArgs = isApiCall ? [...args, "-i"] : args;
-  const out = exec("gh", execArgs, { encoding: "utf8", maxBuffer: DEFAULT_GH_MAX_BUFFER, timeout: DEFAULT_GH_CALL_TIMEOUT_MS });
+  const out = exec("gh", execArgs, {
+    encoding: "utf8",
+    maxBuffer: DEFAULT_GH_MAX_BUFFER,
+    timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
+    killSignal: DEFAULT_GH_SYNC_KILL_SIGNAL,
+  });
   if (!isApiCall) return parseGhJsonBody(args, out);
   const { headers, body } = splitGhHeaderBlock(out);
   if (onRateLimit) onRateLimit(parseGhRateLimitHeaders(headers));
@@ -127,6 +140,39 @@ const execFileAsync = promisify(execFile) as (
 ) => Promise<{ stdout: string; stderr: string }>;
 
 export type GhAsyncExecutor = typeof execFileAsync;
+
+/** Grace past a wedged `gh` child's SIGTERM before SIGKILL (W1-T4446). */
+export const DEFAULT_GH_KILL_GRACE_MS = 5_000;
+
+function logGhKillEscalated(args: readonly string[], warn: (line: string) => void): void {
+  warn(
+    `gh.kill_escalated (W1-T4446): gh ${args[0] ?? ""} ignored SIGTERM and was sent SIGKILL ` +
+      `${DEFAULT_GH_KILL_GRACE_MS}ms after its timeout elapsed`,
+  );
+}
+
+/** Escalates a `gh` child surviving `execAsync`'s SIGTERM to SIGKILL, via `promisify(execFile)`'s `.child` (W1-T4446). */
+export function withGhKillEscalation<T extends { stdout: string; stderr: string }>(
+  execPromise: Promise<T> & { child?: ChildProcess },
+  args: readonly string[],
+  timeoutMs: number,
+  opts: { graceMs?: number; warn?: (line: string) => void } = {},
+): Promise<T> {
+  const child = execPromise.child;
+  if (child === undefined || !(timeoutMs > 0)) return execPromise;
+  const graceMs = opts.graceMs ?? DEFAULT_GH_KILL_GRACE_MS;
+  const warn = opts.warn ?? ((line: string) => void process.stderr.write(`${line}\n`));
+  const timer = setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      logGhKillEscalated(args, warn);
+      child.kill("SIGKILL");
+    }
+  }, timeoutMs + graceMs);
+  if (typeof timer.unref === "function") timer.unref();
+  const clearEscalation = (): void => clearTimeout(timer);
+  execPromise.then(clearEscalation, clearEscalation);
+  return execPromise;
+}
 
 /**
  * ONE IN-FLIGHT READ PER EXACT REQUEST. The daemon, review lane, and console can all wake for the
@@ -174,11 +220,15 @@ export async function ghJsonAsync(args: string[], execAsync: typeof execFileAsyn
       // review handlers enforce RMD_GH_TRANSPORT_FLOOR for their lifetime, but without this call the
       // CI/review wait loops bypassed that boundary entirely and could emit a rapid read burst.
       applyGhReadCadence(args);
-      const { stdout } = await execAsync("gh", args, {
-        encoding: "utf8",
-        maxBuffer: DEFAULT_GH_MAX_BUFFER,
-        timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
-      });
+      const { stdout } = await withGhKillEscalation(
+        execAsync("gh", args, {
+          encoding: "utf8",
+          maxBuffer: DEFAULT_GH_MAX_BUFFER,
+          timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
+        }),
+        args,
+        DEFAULT_GH_CALL_TIMEOUT_MS,
+      );
       return parseGhJsonBody(args, stdout);
     })();
     asyncReadInFlight.set(key, request);
@@ -188,11 +238,15 @@ export async function ghJsonAsync(args: string[], execAsync: typeof execFileAsyn
       if (asyncReadInFlight.get(key) === request) asyncReadInFlight.delete(key);
     }
   }
-  const { stdout } = await execAsync("gh", args, {
-    encoding: "utf8",
-    maxBuffer: DEFAULT_GH_MAX_BUFFER,
-    timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
-  });
+  const { stdout } = await withGhKillEscalation(
+    execAsync("gh", args, {
+      encoding: "utf8",
+      maxBuffer: DEFAULT_GH_MAX_BUFFER,
+      timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
+    }),
+    args,
+    DEFAULT_GH_CALL_TIMEOUT_MS,
+  );
   return parseGhJsonBody(args, stdout);
 }
 
@@ -207,7 +261,7 @@ export async function ghTextAsync(
   const maxBuffer = opts.maxBuffer ?? DEFAULT_GH_MAX_BUFFER;
   const timeout = opts.timeout ?? DEFAULT_GH_CALL_TIMEOUT_MS;
   const read = async (): Promise<string> => {
-    const { stdout } = await execAsync("gh", args, { encoding: "utf8", maxBuffer, timeout });
+    const { stdout } = await withGhKillEscalation(execAsync("gh", args, { encoding: "utf8", maxBuffer, timeout }), args, timeout);
     return stdout;
   };
 
