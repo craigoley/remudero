@@ -238,3 +238,18 @@ test("W1-T4117: only a symbol-no-caller id with a plain name is read as a deleta
   assert.equal(IDENT_RE.test("$dead"), false, "grep -w cannot bound a `$` name, so the reference check cannot vouch for it");
   assert.equal(exportDeclarationSpan("export const $dead = 1;\n", "$dead"), undefined);
 });
+
+test("W1-T4117: this measured deletion batch removes its five exact exports", async () => {
+  const [configSchema, contextControls, operatorAgent, replyInterpreter] = await Promise.all([
+    import("../src/lib/config-schema.js"),
+    import("../src/lib/context-controls.js"),
+    import("../src/lib/operator-agent.js"),
+    import("../src/lib/reply-interpreter.js"),
+  ]);
+
+  assert.equal(Object.hasOwn(configSchema, "CONFIG_SCHEMA_VERSION"), false);
+  assert.equal(Object.hasOwn(contextControls, "CONTEXT_CONTROLS_VERSION"), false);
+  assert.equal(Object.hasOwn(operatorAgent, "EMERGENCY_STOP_CANCELLATION_STEP"), false);
+  assert.equal(Object.hasOwn(operatorAgent, "readPersonalContext"), false);
+  assert.equal(Object.hasOwn(replyInterpreter, "isInterpreterMessage"), false);
+});

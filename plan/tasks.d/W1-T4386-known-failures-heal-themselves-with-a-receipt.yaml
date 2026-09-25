@@ -15,6 +15,7 @@
     - src/run-task.ts
     - src/lib/sre-runbooks.ts
     - src/lib/sre-lane.ts
+    - src/lib/authority.ts
   status: queued
   attempts: 0
   rationale: |

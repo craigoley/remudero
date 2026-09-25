@@ -140,13 +140,6 @@ export function formatExhaustionReport(unresolved: readonly ClarifyingQuestion[]
   return `${EXHAUSTED_TAG} ${unresolved.length} round(s) exhausted; still unresolved:\n${list}`;
 }
 
-/** `true` for any message this module itself produced (a clarifying question OR an exhaustion
- *  report) — the complement of "the original escalation / a human's reply", useful for a caller
- *  that wants to render or filter a thread without re-deriving both tags itself. */
-export function isInterpreterMessage(body: string): boolean {
-  return CLARIFY_TAG.test(body) || body.startsWith(EXHAUSTED_TAG);
-}
-
 // ── The predicate itself ─────────────────────────────────────────────────────────────────────
 
 /**
