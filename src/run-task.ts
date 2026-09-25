@@ -16042,15 +16042,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // than opened) that `ghPrCreateFillCommand` alone cannot perform.
       const checked = openPullRequestChecked(
         taskId,
-        {
-          buildCreate: (title, bodyOverride) => ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, title, bodyOverride),
-          pushRunBranch: (o) => gitPushRunBranch(worktreePath, o),
-          localDiff: () =>
-            execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "HEAD"], {
-              encoding: "utf8",
-              maxBuffer: 1 << 26,
-            }),
-        },
+        () => ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath)),
+        (o) => gitPushRunBranch(worktreePath, o),
+        () => execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "HEAD"], {
+          encoding: "utf8",
+          maxBuffer: 1 << 26,
+        }),
         { title: lastCommitSubject(worktreePath) },
       );
       if (!checked.ok) {
@@ -28292,27 +28289,24 @@ async function retroCommand(
       gitPushRunBranch(worktreePath, { force: true });
     }
 
+    // W1-T4420: same shared checked seam as the implement lane — the trailer is already stamped
+    // above, so no `ensureTrailerOnCommit` here; this guards the fallback body only.
     if (!prUrl) {
-      // W1-T4420: same shared checked seam as the implement lane — the trailer is already stamped
-      // above, so no `ensureTrailerOnCommit` here; this guards the fallback body only.
-      const checked = openPullRequestChecked(
+      const prCreate = openPullRequestChecked(
         runId,
-        {
-          buildCreate: (title, bodyOverride) => ghPrCreateFillCommand(worktreePath, owner, repo, branch, title, bodyOverride),
-          pushRunBranch: (o) => gitPushRunBranch(worktreePath, o),
-          localDiff: () =>
-            execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "HEAD"], {
-              encoding: "utf8",
-              maxBuffer: 1 << 26,
-            }),
-        },
+        () => ghPrCreateFillCommand(worktreePath, owner, repo, branch, lastCommitSubject(worktreePath)),
+        (o) => gitPushRunBranch(worktreePath, o),
+        () => execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "HEAD"], {
+          encoding: "utf8",
+          maxBuffer: 1 << 26,
+        }),
         { title: lastCommitSubject(worktreePath) },
       );
-      if (!checked.ok) {
-        log("pr_open.refused", { reason: checked.refused });
-        say(`PR open refused before the REST create: ${checked.refused}`);
+      if (!prCreate.ok) {
+        log("pr_open.refused", { reason: prCreate.refused });
+        say(`PR open refused before the REST create: ${prCreate.refused}`);
       } else {
-        prUrl = runGhPrCreate(checked.create, branch, log, say).prUrl;
+        prUrl = runGhPrCreate(prCreate.create, branch, log, say).prUrl;
       }
     }
     if (!prUrl) {
@@ -40989,17 +40983,14 @@ async function triageCommandLocked(
     // construction of one caller's commit message.
     const checked = openPullRequestChecked(
       taskId,
-      {
-        buildCreate: (title, bodyOverride) => ghPrCreateFillCommand(worktreePath, owner, repo, branch, title, bodyOverride),
-        ensureTrailerOnCommit: (id) => appendTaskTrailerToCommit(worktreePath, id),
-        pushRunBranch: (o) => gitPushRunBranch(worktreePath, o),
-        localDiff: () =>
-          execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "HEAD"], {
-            encoding: "utf8",
-            maxBuffer: 1 << 26,
-          }),
-      },
+      () => ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0]),
+      (o) => gitPushRunBranch(worktreePath, o),
+      () => execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "HEAD"], {
+        encoding: "utf8",
+        maxBuffer: 1 << 26,
+      }),
       { title: commitMessage.split("\n")[0] },
+      (id) => appendTaskTrailerToCommit(worktreePath, id),
     );
     if (!checked.ok) {
       log("triage.error", { error: "PR open refused", reason: checked.refused });
@@ -41489,15 +41480,12 @@ export async function planCommand(
     // diff's `plan/` additions, refused before the REST create when they are not.
     const checked = openPullRequestChecked(
       undefined,
-      {
-        buildCreate: (title, bodyOverride) => ghPrCreateFillCommand(worktreePath, owner, repo, branch, title, bodyOverride),
-        pushRunBranch: (o) => gitPushRunBranch(worktreePath, o),
-        localDiff: () =>
-          execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "HEAD"], {
-            encoding: "utf8",
-            maxBuffer: 1 << 26,
-          }),
-      },
+      () => ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], planPrBody),
+      (o) => gitPushRunBranch(worktreePath, o),
+      () => execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "HEAD"], {
+        encoding: "utf8",
+        maxBuffer: 1 << 26,
+      }),
       { title: commitMessage.split("\n")[0], bodyOverride: planPrBody },
     );
     if (!checked.ok) {

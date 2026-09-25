@@ -3,7 +3,7 @@
  * `src/run-task.ts`) routes through, so a defective body is refused before the irreversible REST
  * create rather than patched afterward. Operator declined a `rmd pr open` CLI + `PrOpenDeps`
  * surface (PR #7165, 2026-09-25); this narrows the same inputs those four call sites already hold
- * into one checked function instead — no command, no `COMMANDS` row, no new dependency type.
+ * into one checked function with positional callbacks — no command or dependency-object type.
  *
  * Refuses TWO defect classes before the POST:
  * 1. NON-DISCRIMINATING — `ghPrCreateFillCommand`'s generic open-time fallback Acceptance block
@@ -25,28 +25,6 @@ export interface PrCreateArgv {
   command: "gh";
   args: string[];
   options: { cwd: string; encoding: "utf8" };
-}
-
-/** Every side effect {@link openPullRequestChecked} needs, injected — the real bindings live in
- *  `run-task.ts`, already bound to one worktree/owner/repo/branch. No new `*Deps` shape reaches a
- *  worker or a CLI surface; this is an internal parameter object for one already-internal function. */
-export interface OpenPullRequestCheckedDeps {
-  /** Builds the REST create argv exactly as `ghPrCreateFillCommand(worktreePath, owner, repo,
-   *  branch, title, bodyOverride)` already does — called AFTER the trailer step below, so a
-   *  fresh trailer amend is reflected in the body/title this reads back. */
-  buildCreate: (title?: string, bodyOverride?: string) => PrCreateArgv;
-  /** `appendTaskTrailerToCommit(worktreePath, taskId)` — stamps the branch's tip commit with the
-   *  `Remudero-Task: <id>` trailer BEFORE the create argv is built, returning whether it amended
-   *  anything. Omit for a filing PR that carries no trailer by design (`rmd plan`). */
-  ensureTrailerOnCommit?: (taskId: string) => boolean;
-  /** `gitPushRunBranch(worktreePath, { force: true })` — called only when `ensureTrailerOnCommit`
-   *  reports it amended the tip, so a fresh trailer actually reaches the branch the PR is about to
-   *  cite before the create call reads it. */
-  pushRunBranch: (opts?: { force?: boolean }) => void;
-  /** The worktree's own diff against its merge base — read lazily (only when a substitute or
-   *  divergence proof might be needed), never over the network, so this stays available before the
-   *  PR exists and costs nothing on the common path where the body already carries a real block. */
-  localDiff: () => string;
 }
 
 /** The verdict {@link openPullRequestChecked} reports: either the create argv is safe to POST, or a
@@ -120,7 +98,7 @@ function idsReferencedInBody(body: string): Set<string> {
   return ids;
 }
 
-/** `id:` keys a diff ADDS under `plan/tasks.yaml` or a `plan/tasks.d/*.yaml` shard — the ids this
+/** `id:` keys a diff ADDS under the plan's monolith or a task shard — the ids this
  *  diff actually files, read from the `+` lines alone so a REMOVED id (a renumber, a retirement)
  *  never counts as filed. */
 function idsFiledInDiff(diff: string): Set<string> {
@@ -160,13 +138,16 @@ function idsFiledInDiff(diff: string): Set<string> {
  */
 export function openPullRequestChecked(
   taskId: string | undefined,
-  deps: OpenPullRequestCheckedDeps,
+  buildCreate: (title?: string, bodyOverride?: string) => PrCreateArgv,
+  pushRunBranch: (opts?: { force?: boolean }) => void,
+  localDiff: () => string,
   opts: { title?: string; bodyOverride?: string } = {},
+  ensureTrailerOnCommit?: (taskId: string) => boolean,
 ): OpenPullRequestCheckedResult {
-  if (taskId !== undefined && deps.ensureTrailerOnCommit?.(taskId)) {
-    deps.pushRunBranch({ force: true });
+  if (taskId !== undefined && ensureTrailerOnCommit?.(taskId)) {
+    pushRunBranch({ force: true });
   }
-  const create = deps.buildCreate(opts.title, opts.bodyOverride);
+  const create = buildCreate(opts.title, opts.bodyOverride);
   const bodyIdx = create.args.findIndex((a) => a.startsWith("body="));
   const body = bodyIdx === -1 ? "" : create.args[bodyIdx].slice("body=".length);
   if (body.trim().length === 0) {
@@ -175,7 +156,7 @@ export function openPullRequestChecked(
   if (opts.bodyOverride !== undefined) {
     const claimed = idsReferencedInBody(body);
     if (claimed.size > 0) {
-      const filed = idsFiledInDiff(deps.localDiff());
+      const filed = idsFiledInDiff(localDiff());
       const divergent = [...claimed].filter((id) => !filed.has(id));
       if (divergent.length > 0) {
         return {
@@ -188,7 +169,7 @@ export function openPullRequestChecked(
     }
   }
   if (bodyOnlyCarriesOpenTimeFallback(body)) {
-    const derived = diffDerivedAcceptanceProof(deps.localDiff());
+    const derived = diffDerivedAcceptanceProof(localDiff());
     if (derived === undefined) {
       return {
         ok: false,
