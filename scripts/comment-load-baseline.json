@@ -157,7 +157,6 @@
   "src/lib/ledger.ts": 750,
   "src/lib/live-write-guard.ts": 123,
   "src/lib/log-rotation.ts": 50,
-  "src/lib/main-health-rung.ts": 10,
   "src/lib/managed-repos.ts": 20,
   "src/lib/measurement-cadence.ts": 750,
   "src/lib/model-gate.ts": 16,

@@ -11,10 +11,12 @@ import { readLedgerLines } from "./status.js";
 import {
   CHECK_REQUEUE_STEP,
   classifyCiInfrastructureFailure,
+  dedupeRollupByLatestAttempt,
   enrichMainHealthObservation,
   mainHealthEscalationDecision,
   mainHealthFromRollup,
   requeuedCheckKeysFromLedger,
+  REQUIRED_CHECK_FAIL,
   type CiFailure,
   type MainHealthObservation,
   type MainHealthRunHistoryEntry,
@@ -23,6 +25,48 @@ import {
 
 /** Stable referent for the one repo-wide default-branch health incident. */
 export const MAIN_HEALTH_TASK_ID = "MAIN-HEALTH";
+
+/** W1-T4472 — the stable, NON-REQUIRED check name `.github/workflows/main-tripwire.yml` posts once
+ *  per merged commit on `main` (see that workflow's own header for why: ci.yml's push lane groups
+ *  every push under one concurrency key, so a red can sit superseded-then-live for the better part
+ *  of an hour). It is never added to `readRequiredChecks()` — ci-gate's REQUIRED list stays the
+ *  sole BLOCKING authority for a merge — so it is read separately, below, from the gate-required
+ *  judgment {@link mainHealthFromRollup} already performs. */
+export const MAIN_TRIPWIRE_CHECK_NAME = "main-tripwire";
+
+/** True when the deduped rollup carries a {@link MAIN_TRIPWIRE_CHECK_NAME} entry for this head that
+ *  concluded with a failing conclusion. An absent or still-running tripwire reads `false` here —
+ *  this predicate only ever fires on a genuinely concluded red. */
+function tripwireIsRed(rollup: readonly RollupCheckEntry[]): boolean {
+  const entry = dedupeRollupByLatestAttempt(rollup).find((c) => (c.name ?? c.context) === MAIN_TRIPWIRE_CHECK_NAME);
+  if (!entry) return false;
+  const state = (entry.state ?? entry.conclusion ?? entry.status ?? "").toUpperCase();
+  return REQUIRED_CHECK_FAIL.has(state);
+}
+
+/** W1-T4472 design (ii) — a RED main-tripwire on main's newest head reads main red AT ONCE, layered
+ *  onto whatever {@link mainHealthFromRollup} already found rather than replacing its reasoning: the
+ *  full required run may still be minutes away from its own verdict. The asymmetry is deliberate and
+ *  one-directional — a GREEN or absent tripwire never touches `observation`, because a fast check
+ *  over a SUBSET of the suite is never evidence the whole tree is healthy; only the full required
+ *  run may report green. Idempotent: a second call once `main-tripwire` is already named in
+ *  `failingChecks` (main-tripwire is itself in the required set) changes nothing. */
+export function withTripwireOverride(
+  observation: MainHealthObservation,
+  rollup: readonly RollupCheckEntry[],
+): MainHealthObservation {
+  if (!tripwireIsRed(rollup) || observation.failingChecks.includes(MAIN_TRIPWIRE_CHECK_NAME)) return observation;
+  return {
+    ...observation,
+    state: "red",
+    reason:
+      observation.state === "red"
+        ? `${observation.reason} (the per-commit main-tripwire is also red on this head)`
+        : "the per-commit main-tripwire is red on main's head (a fast check over this merge's own " +
+          `affected suites, run ahead of the full required check concluding): ${observation.reason}`,
+    failingChecks: [...observation.failingChecks, MAIN_TRIPWIRE_CHECK_NAME],
+  };
+}
 
 export interface MainHealthRungDeps {
   fetch: GhApiFetcher;
@@ -175,6 +219,11 @@ export function buildMainHealthRung(
       const rollup = rollupFor(owner, repo, sha, deps.fetch);
       const required = new Set(deps.readRequiredChecks?.() ?? []);
       let observation = mainHealthFromRollup(sha, rollup, required.size > 0 ? required : undefined);
+      // W1-T4472 (ii): applied BEFORE `advisoryFailing` is derived below, so a red main-tripwire
+      // (never itself in `required`) is counted once, as a genuine failing check, rather than also
+      // spilling into the advisory list `mainHealthFromRollup(sha, rollup, undefined)` would
+      // otherwise place it on.
+      observation = withTripwireOverride(observation, rollup);
       const advisoryFailing =
         required.size === 0
           ? []
@@ -200,8 +249,17 @@ export function buildMainHealthRung(
         }
         let failures: CiFailure[] | undefined;
         let ciFailuresUnavailable: string | undefined;
+        // W1-T4472: `main-tripwire` is never in `required` (it is not a ci-gate-required check),
+        // so `judgedRollup(rollup, required)` alone would filter its entry out and the evidence
+        // reader below would never fetch its job log — the "named failing suites" design (ii)
+        // calls for. Widened ONLY when the tripwire is actually part of this red verdict, and
+        // ONLY when `required` is non-empty (an empty `required` already reads every check).
+        const evidenceRequired =
+          required.size > 0 && observation.failingChecks.includes(MAIN_TRIPWIRE_CHECK_NAME)
+            ? new Set([...required, MAIN_TRIPWIRE_CHECK_NAME])
+            : required;
         try {
-          failures = deps.readCiFailures ? await deps.readCiFailures(judgedRollup(rollup, required)) : undefined;
+          failures = deps.readCiFailures ? await deps.readCiFailures(judgedRollup(rollup, evidenceRequired)) : undefined;
           if (!deps.readCiFailures) ciFailuresUnavailable = "no CI failure reader configured";
           if (deps.readCiFailures && failures === undefined) ciFailuresUnavailable = "the CI failure reader returned no evidence";
         } catch (error) {
