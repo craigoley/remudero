@@ -1,29 +1,21 @@
 diff --git a/docs/knowledge-garden-log.md b/docs/knowledge-garden-log.md
-new file mode 100644
-index 00000000..ccaa41b2
---- /dev/null
+index ccaa41b205..2efe2d1a5b 100644
+--- a/docs/knowledge-garden-log.md
 +++ b/docs/knowledge-garden-log.md
-@@ -0,0 +1,9 @@
-+# Knowledge garden log
+@@ -9,0 +10,6 @@
 +
-+Each section is one pass of the knowledge gardener (W1-T4095): what it changed and how the knowledge base scored.
++## Pass 2026-09-25T00:31:36.191Z
 +
-+## Pass 2026-09-24T21:47:59.074Z
-+
-+- retire ls-remote-grep-matches-the-sha-column: Workers offered it have rarely used it, compared with other learnings.
++- retire websearch-serverside-webfetch-unverified: Workers offered it have rarely used it, compared with other learnings.
 +
 +Learnings used when offered: 13%. Dangling Why pointers: 0.
-diff --git a/learnings/failures.yaml b/learnings/failures.yaml
-index 2693fd4c..d493d438 100644
---- a/learnings/failures.yaml
-+++ b/learnings/failures.yaml
-@@ -200,7 +200,8 @@
-   cited: "2026-09-07"
- - id: ls-remote-grep-matches-the-sha-column
-   subsystem: dispatch
+diff --git a/learnings/platform.yaml b/learnings/platform.yaml
+index 1a8041d321..7433433d60 100644
+--- a/learnings/platform.yaml
++++ b/learnings/platform.yaml
+@@ -170,3 +170,4 @@
+ - id: websearch-serverside-webfetch-unverified
+   subsystem: sdk-tools
 -  lifecycle: active
-+  # knowledge gardener: retire ls-remote-grep-matches-the-sha-column
++  # knowledge gardener: retire websearch-serverside-webfetch-unverified
 +  lifecycle: superseded
-   files: [ src/lib/status.ts, src/lib/sweep.ts, src/lib/drain.ts, src/run-task.ts ]
-   fact: >-
-     git ls-remote prints TWO columns, sha then ref, so piping it through a bare

@@ -1,0 +1,3 @@
+- id: websearch-serverside-webfetch-unverified
+  # knowledge gardener: retire websearch-serverside-webfetch-unverified
+  lifecycle: superseded
