@@ -478,6 +478,97 @@ export function findScopeConflict(activePromotions: PromotionScopeCandidate[], c
   return conflict ? { promotionId: conflict.promotionId } : null;
 }
 
+// --- Cohort canaries (W1-T4113) -----------------------------------------------------------------
+//
+// A configuration change applied to a bounded COHORT is judged against the REST: the cohort's merge
+// rate and cost per merged task, each against the rest's. Two guard metrics, both "max": how far the
+// cohort's merge rate fell below the rest's, and the cohort's cost per merged task as a multiple of
+// the rest's. The denominator is the SMALLER side, so neither a thin cohort nor a thin control can
+// clear the floor alone. src/lib/config-gardener.ts is the producer; this section stays pure.
+
+/** One side of a cohort comparison: distinct settled tasks, how many of them merged, what they cost. */
+export interface CohortOutcome {
+  tasks: number;
+  merged: number;
+  costUsd: number;
+}
+
+export const CANARY_MERGE_RATE_DROP = "merge_rate_drop";
+export const CANARY_COST_PER_MERGED_RATIO = "cost_per_merged_ratio";
+
+/** A cohort breaches when its merge rate falls this far below the rest's… */
+export const DEFAULT_CANARY_MAX_MERGE_RATE_DROP = 0.15;
+/** …or when a merged task costs this many times what one costs in the rest. */
+export const DEFAULT_CANARY_MAX_COST_RATIO = 1.25;
+
+export function cohortGuardMetrics(opts: { maxMergeRateDrop?: number; maxCostRatio?: number } = {}): PromotionGuardMetric[] {
+  return [
+    { metricName: CANARY_MERGE_RATE_DROP, unit: "fraction", direction: "max", abortThreshold: opts.maxMergeRateDrop ?? DEFAULT_CANARY_MAX_MERGE_RATE_DROP },
+    { metricName: CANARY_COST_PER_MERGED_RATIO, unit: "ratio", direction: "max", abortThreshold: opts.maxCostRatio ?? DEFAULT_CANARY_MAX_COST_RATIO },
+  ];
+}
+
+/** A task that never merged still spent: with no merge, the whole cost is charged to one. */
+function costPerMerged(o: CohortOutcome): number {
+  return o.costUsd / Math.max(o.merged, 1);
+}
+
+/** The two cohort guard observations, verified and dated `observedAt`, over `comparisonPopulation`. */
+export function cohortGuardObservations(canary: CohortOutcome, rest: CohortOutcome, comparisonPopulation: string, observedAt: string): GuardObservation[] {
+  const denominator = Math.min(canary.tasks, rest.tasks);
+  const rate = (o: CohortOutcome) => (o.tasks > 0 ? o.merged / o.tasks : 0);
+  const restCost = costPerMerged(rest);
+  const base = { denominator, freshness: "verified" as const, comparisonPopulation, observedAt };
+  return [
+    { metricName: CANARY_MERGE_RATE_DROP, value: rate(rest) - rate(canary), ...base },
+    { metricName: CANARY_COST_PER_MERGED_RATIO, value: restCost > 0 ? costPerMerged(canary) / restCost : 1, ...base },
+  ];
+}
+
+export type CanaryVerdict = "waiting" | "advanced" | "promoted" | "rolled_back" | "expired" | "refused";
+
+export interface CanaryStep {
+  state: ExperimentPromotionState;
+  verdict: CanaryVerdict;
+  reason?: string;
+}
+
+type CanaryRecord = Pick<PromotionRecord, "guardMetrics" | "denominatorFloor" | "comparisonPopulation" | "observationWindow" | "expiresAt" | "maxExposure" | "state">;
+
+/**
+ * Take an approved promotion through shadow into canary on its SHADOW evidence — the evidence the
+ * candidate was chosen on, read before anything is exposed. Shadow entry needs only the approval;
+ * canary entry needs `shadowMetrics` to be ready. A breach or a gap refuses exposure: the promotion
+ * never enters canary, and the regressed/unmeasurable state it lands in is the reason.
+ */
+export function enterCanary(record: CanaryRecord, shadowMetrics: PromotionGuardMetric[], shadowObservations: GuardObservation[], nowIso: string): CanaryStep {
+  const shadow = record.state === "shadow" ? { state: "shadow" as const } : advancePromotionState({ currentState: record.state, target: "shadow", guard: { state: "ready", reasons: [], breachedMetrics: [] }, maxExposure: record.maxExposure });
+  if (shadow.state !== "shadow") return { state: shadow.state, verdict: "refused", reason: shadow.reason };
+  const guard = evaluateGuardrails({ ...record, guardMetrics: shadowMetrics }, shadowObservations, nowIso);
+  const canary = advancePromotionState({ currentState: "shadow", target: "canary", guard, maxExposure: record.maxExposure });
+  return canary.state === "canary" ? { state: "canary", verdict: "advanced" } : { state: canary.state, verdict: "refused", reason: canary.reason };
+}
+
+/**
+ * One guarded step of an exposed canary on its COHORT evidence. Past its expiry it is `expired`. While
+ * the cohort is short of its floor it waits — never entering `unmeasurable`, which would close it on
+ * missing evidence rather than on a result. Otherwise it advances ONE step (canary → observing →
+ * promoted), and a guardrail breach at either step is `regressed` and immediately rolled back.
+ */
+export function stepCanary(record: CanaryRecord, observations: GuardObservation[], nowIso: string): CanaryStep {
+  const due = expirePromotionIfDue(record.state, record.expiresAt, nowIso);
+  if (due === "expired" && record.state !== "expired") return { state: "expired", verdict: "expired", reason: "the canary expired before its cohort cleared the floor" };
+  if (record.state !== "canary" && record.state !== "observing") return { state: record.state, verdict: "waiting", reason: `a ${record.state} promotion has no canary step` };
+  const guard = evaluateGuardrails(record, observations, nowIso);
+  if (guard.state === "unmeasurable") return { state: record.state, verdict: "waiting", reason: guard.reasons.join("; ") };
+  const next = advancePromotionState({ currentState: record.state, target: record.state === "canary" ? "observing" : "promoted", guard, maxExposure: record.maxExposure });
+  if (next.state === "regressed") {
+    const rolled = rollbackPromotion("regressed");
+    return rolled.ok ? { state: rolled.state, verdict: "rolled_back", reason: next.reason } : { state: "regressed", verdict: "refused", reason: rolled.error };
+  }
+  return { state: next.state, verdict: next.state === "promoted" ? "promoted" : "advanced", reason: next.reason };
+}
+
 // --- Assistant trust evaluation (W1-T3882) ------------------------------------------------------
 //
 // The evaluation layer above the guarded-promotion engine above: completion rate alone rewards an
