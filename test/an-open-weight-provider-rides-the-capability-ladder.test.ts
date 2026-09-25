@@ -468,7 +468,7 @@ test("the capability ladder resolves an open-weight provider by table lookup", (
   assert.equal(selected.effort, "low");
 
   const squeezed = selectOpenWeightModel(capabilities, "sonnet", "low", 4_000, { cashSqueezed: true });
-  assert.equal(squeezed.model, "gpt-5.6-luna", "a cash squeeze promotes the independently available Luna deployment");
+  assert.equal(squeezed.model, "gpt-6-luna", "a cash squeeze promotes the independently available Luna deployment");
 
   const renamed = selectOpenWeightModel({
     ladder: { economy: 1, balanced: 2, frontier: 3 },
@@ -533,7 +533,7 @@ test("the real cash mount passes the squeeze promotion without reading subscript
       providerRouting: { spawnOpenWeight },
     } as never);
 
-    assert.deepEqual(selections, ["gpt-5.6-luna", "gpt-5-nano"], "only the squeeze cash spawn promotes Luna");
+    assert.deepEqual(selections, ["gpt-6-luna", "gpt-5-nano"], "only the squeeze cash spawn promotes Luna");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

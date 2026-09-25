@@ -24,7 +24,7 @@ import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js"
 import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
 import { workerLedgerFields, type WorkerResult } from "./worker.js";
 import type { InterpretReplyResult } from "./reply-interpreter.js";
-import { parse as parseYaml } from "yaml";
+import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument } from "yaml";
 import { RmdError } from "./errors.js";
 
 /**
@@ -2316,8 +2316,8 @@ export function draftedDuplicateRefusal(proposalId: string, dup: DraftedDuplicat
 // mirroring escalate.ts's `IssueGateway` split. W1-T2456 correction: this used to cite a §12 rule 15 the doctrine
 // does not carry — rule 27 permits automatic filing outright. The approve bit initiates; the gate still reviews.
 
-/** The exact fragment and stamp a READY classification carries, shipped VERBATIM and never re-derived at approve
- *  time: the operator approves the same draft `rmd inbox` showed them. */
+/** The fragment and stamp a READY classification carries. The shard writer re-lints the materialized
+ *  fragment and applies only mechanical repairs before filing. */
 export interface RatificationPayload {
   proposalId: string;
   fragmentYaml: string;
@@ -2429,7 +2429,8 @@ export interface RatifyLedgerDeps {
 /**
  * `rmd approve <P##>` — valid ONLY for a READY classification. Anything else is REFUSED, naming the state, with ZERO
  * gateway calls: a bit on a non-ready item initiates NOTHING. On a READY classification with no prior push,
- * `createRatificationBranch` then `openPlanPr` run exactly once each, carrying the cached draft verbatim. W1-T903
+ * `createRatificationBranch` then `openPlanPr` run exactly once each, carrying the cached draft for
+ * post-materialization re-lint at the shard writer. W1-T903
  * (iii): when `findPushedBranch` names a prior run's branch, an existing PR is checked for FIRST, so a found PR is
  * ADOPTED and a branch without one is COMPLETED. Exactly one `ratify.*` line per outcome, and `ratify.approved` only
  * after a pull request is confirmed to exist — never on a thrown gateway error.
@@ -2619,6 +2620,87 @@ export interface ShardWriteFs {
   writeFileSync: (path: string, data: string, enc: "utf8") => void;
 }
 
+/** Repair only the two mechanical filing failures. Scalar ranges keep all other authored YAML bytes intact. */
+export function relintRatificationFragment(fragmentYaml: string, proposalId: string):
+  | { ok: true; fragmentYaml: string }
+  | { ok: false; reason: string } {
+  const document = parseDocument(fragmentYaml);
+  const tasks = isSeq(document.contents) ? document.contents.items : [];
+  const parsed = (() => {
+    try { return parseTasksFromYaml(fragmentYaml, `approve ${proposalId}`); }
+    catch (error) { return { error: String((error as Error)?.message ?? error) }; }
+  })();
+  if (!Array.isArray(parsed)) return { ok: false, reason: `draft-parse: ${parsed.error}` };
+
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  for (const [taskIndex, task] of parsed.entries()) {
+    const node = tasks[taskIndex];
+    if (!isMap(node)) return { ok: false, reason: `draft-parse: ${task.id} has no YAML mapping` };
+    const fields = node;
+    const acceptance = fields.get("acceptance", true);
+    const proofs = task.acceptance ?? [];
+    const counts = new Map<string, number>();
+    const claimCounts = new Map<string, number>();
+    for (const criterion of proofs) {
+      const proof = criterion.proof?.trim() ?? "";
+      counts.set(proof, (counts.get(proof) ?? 0) + 1);
+      const claim = criterion.claim?.trim() ?? "";
+      claimCounts.set(claim, (claimCounts.get(claim) ?? 0) + 1);
+    }
+    if (isSeq(acceptance)) {
+      for (const [index, criterion] of proofs.entries()) {
+        const proof = criterion.proof?.trim() ?? "";
+        if ((counts.get(proof) ?? 0) < 2 || !/^unit test: test\/[^\s]+\.test\.[cm]?[jt]s$/.test(proof)) continue;
+        const criterionNode = acceptance.items[index];
+        const proofNode = isMap(criterionNode) ? criterionNode.get("proof", true) : undefined;
+        if (!isScalar(proofNode) || !proofNode.range || criterion.claim.trim().length === 0) continue;
+        const claim = criterion.claim.trim();
+        const title = (claimCounts.get(claim) ?? 0) > 1 ? `${claim} (${task.id} criterion ${index + 1})` : claim;
+        edits.push({ start: proofNode.range[0], end: proofNode.range[1], text: JSON.stringify(`unit test: ${title}`) });
+      }
+    }
+
+    if (filingBlockers(lintTask(task).violations, undefined, true).some((v) => v.check === "sizing" && task.risk !== "high")) {
+      const risk = fields.get("risk", true);
+      const band = fields.get("band_meaning", true);
+      if (isScalar(risk) && risk.range) {
+        edits.push({ start: risk.range[0], end: risk.range[1], text: "high" });
+        if (isScalar(band) && band.range) {
+          edits.push({ start: band.range[0], end: band.range[1], text: "span" });
+        } else {
+          const endOfLine = fragmentYaml.indexOf("\n", risk.range[1]);
+          const insertAt = endOfLine < 0 ? fragmentYaml.length : endOfLine + 1;
+          edits.push({ start: insertAt, end: insertAt, text: "  band_meaning: span\n" });
+        }
+      } else {
+        const insertAt = node.range?.[1];
+        if (insertAt === undefined) return { ok: false, reason: `draft-parse: ${task.id} has no writable YAML range` };
+        edits.push({ start: insertAt, end: insertAt, text: "\n  risk: high\n  band_meaning: span\n" });
+      }
+    }
+  }
+
+  let repaired = fragmentYaml;
+  for (const edit of edits.sort((a, b) => b.start - a.start)) {
+    repaired = repaired.slice(0, edit.start) + edit.text + repaired.slice(edit.end);
+  }
+  const violations: DraftLintViolation[] = [];
+  try {
+    for (const task of parseTasksFromYaml(repaired, `approve ${proposalId}`)) {
+      violations.push(...filingBlockers(lintTask(task, {
+        riskTransition: { baseTask: undefined },
+        proofSelfPath: "block",
+      }).violations, undefined, true));
+    }
+  } catch (error) {
+    return { ok: false, reason: `draft-parse: ${String((error as Error)?.message ?? error)}` };
+  }
+  if (violations.length) {
+    return { ok: false, reason: violations.map((v) => `[${v.check}] ${v.message}`).join("; ") };
+  }
+  return { ok: true, fragmentYaml: repaired };
+}
+
 /** Compose {@link ratificationShardFiles} and WRITE them under `worktreePath`. THROWS on a refusal rather than
  *  returning a partial result: a ratification that cannot name its own shard must write nothing and open no PR.
  *  EXTRACTED FROM THE GATEWAY so it is reachable by a test — an untestable write is what let the monolith append
@@ -2630,7 +2712,9 @@ export function writeRatificationShards(
   fs: ShardWriteFs,
   joinPath: (...parts: string[]) => string,
 ): string[] {
-  const shards = ratificationShardFiles(fragmentYaml);
+  const relinted = relintRatificationFragment(fragmentYaml, proposalId);
+  if (!relinted.ok) throw new Error(`rmd approve: refusing to file ${proposalId} — ${relinted.reason}`);
+  const shards = ratificationShardFiles(relinted.fragmentYaml);
   if (!shards.ok) throw new Error(`rmd approve: refusing to file ${proposalId} — ${shards.reason}`);
   fs.mkdirSync(joinPath(worktreePath, "plan", "tasks.d"), { recursive: true });
   for (const file of shards.files) fs.writeFileSync(joinPath(worktreePath, file.relPath), file.contents, "utf8");
@@ -2817,7 +2901,8 @@ export type BatchApproveResult =
  * one batch-level precondition: two accepted members colliding on one shard path, which refuses the WHOLE batch
  * before either gateway call. ONE gateway call each for the WHOLE set, and one ledger line per member, so a reader
  * sees the same one-line-per-proposal receipt either way. A batch of exactly ONE READY classification produces output
- * BYTE-IDENTICAL to {@link approveProposal}'s — test/ratify-batch.test.ts pins it.
+ * BYTE-IDENTICAL to {@link approveProposal}'s — test/ratify-batch.test.ts pins it. Both gateway
+ * paths use {@link writeRatificationShards} after id materialization.
  */
 export function approveBatch(
   classifications: readonly InboxClassification[],

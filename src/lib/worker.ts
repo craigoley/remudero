@@ -121,6 +121,8 @@ import {
   selectOpenWeightModel,
   spawnCodexWorker,
   spawnOpenWeightWorker,
+  FOUNDRY_CLAUDE_API_KEY_ENV,
+  FOUNDRY_CLAUDE_ENDPOINT_ENV,
   type CodexCapacityDeps,
   type CodexModelTier,
   type ProviderCapacity,
@@ -372,6 +374,7 @@ export type RoutingRule =
   | "operator-preference"
   | "preference-bypassed"
   | "cash-fallback"
+  | "cash-opus-fallback"
   | "overflow-fallback"
   | "cash-trial";
 
@@ -951,9 +954,11 @@ export interface SpawnWorkerArgs {
    *  by that fallback alone -- routine mount-affinity cash work must never carry it, or the raised
    *  ceiling becomes the everyday one. */
   cashSqueezed?: boolean;
+  /** Only the blocked-subscription frontier fallback may select paid Foundry Opus. */
+  cashOpusEmergency?: boolean;
   /** Set only by the two blocked-auction fallbacks, so the retried spawn records the rule and the
    *  subscription readings that sent it there rather than claiming plain mount affinity. */
-  routingFallback?: { rule: "cash-fallback" | "overflow-fallback"; capacities: ProviderCapacity[] };
+  routingFallback?: { rule: "cash-fallback" | "cash-opus-fallback" | "overflow-fallback"; capacities: ProviderCapacity[] };
   /** The cash-simple trial's decision for this run; the cash arm also restricts the cash ladder. */
   routingTrial?: { id: string; arm: string; reason: string; models?: readonly string[] };
   /** Reasoning effort (mount-resolved, §9): 'low'|'medium'|'high'|'xhigh'|'max'. */
@@ -2091,8 +2096,26 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // it, and a spawn that already carries one never reached this auction in the first place --
       // so the fallback can fire at most once per spawn, by construction rather than by a counter.
       if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && subscriptionOnly) {
-        // Ruling 2026-09-24: frontier work waits for a subscription rather than paying cash or API.
-        console.error(JSON.stringify({ event: "worker.provider.subscription_only_hold", requested_model: args.model }));
+        const divertTools = args.cashTools ?? args.tools;
+        const env = args.env ?? process.env;
+        const bothSubscriptionsObserved = capacities.some((row) => row.provider === "claude") &&
+          capacities.some((row) => row.provider === "codex");
+        const refusal = (!bothSubscriptionsObserved ? "both subscription capacities were not observed" : undefined) ??
+          cashFallbackRefusal(config, divertTools) ??
+          (!env[FOUNDRY_CLAUDE_API_KEY_ENV] || !env[FOUNDRY_CLAUDE_ENDPOINT_ENV]
+            ? "Foundry Opus endpoint or daemon key is absent" : undefined);
+        if (refusal === undefined) {
+          console.error(JSON.stringify({ event: "worker.provider.cash_opus_fallback", reason: "both subscriptions blocked", requested_model: args.model }));
+          return await spawnWorker({
+            ...args,
+            mountProvider: "cash",
+            cashSqueezed: true,
+            cashOpusEmergency: true,
+            routingFallback: { rule: "cash-opus-fallback", capacities },
+            ...(divertTools === undefined ? {} : { tools: [...divertTools] }),
+          });
+        }
+        console.error(JSON.stringify({ event: "worker.provider.subscription_only_hold", requested_model: args.model, reason: refusal }));
       } else if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined) {
         // The surface the DIVERTED spawn would actually run, which is what eligibility must be
         // judged on -- asking about `tools` here would refuse a lane that declared a perfectly
@@ -2302,7 +2325,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     }
   }
   if (args.mountProvider === "cash") {
-    if (subscriptionOnly) throw new SubscriptionOnlyRefusedError(args.model!);
+    if (subscriptionOnly && !(args.cashOpusEmergency === true && args.cashSqueezed === true && args.routingFallback?.rule === "cash-opus-fallback")) {
+      throw new SubscriptionOnlyRefusedError(args.model!);
+    }
     const runOpenWeight = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
     if (args.providerRouting?.spawnOpenWeight === undefined) {
       assertLiveSpawnAllowed(`spawnOpenWeightWorker for task ${args.taskId ?? "<no taskId>"}`);
@@ -2316,7 +2341,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // body -- the tool schemas and the output contract add a bounded preamble -- and the estimate
     // deliberately OVER-states tokens, so using it rather than the fully serialized body can only
     // make the gate stricter.
-    const openWeight = selectOpenWeightModel(
+    const openWeight: OpenWeightModelSelection = args.cashOpusEmergency === true
+      ? { model: "claude-opus-5-5", effort: args.effort ?? "medium", capability: "frontier", alternatives: [] }
+      : selectOpenWeightModel(
       capabilities,
       args.model,
       args.effort,
