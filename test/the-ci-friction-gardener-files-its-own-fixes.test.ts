@@ -21,6 +21,7 @@ import {
   ciFrictionShardYaml,
   costliestUntrackedCause,
   priceCiFrictionCauses,
+  PR_URL_RE,
   runPrIndex,
   type CiFrictionGardenerDeps,
 } from "../src/lib/ci-friction-gardener.js";
@@ -86,6 +87,13 @@ test("W1-T4435: the gardener prices each cause in PR minutes", () => {
 
   // A run this cannot attribute to a pull request contributes no round, never a guess.
   assert.equal(runPrIndex([{ step: "pr.opened", run_id: "orphan", ts: "2026-09-24T00:00:00.000Z" }]).size, 0);
+});
+
+test("W1-T4435: PR_URL_RE accepts a pull request URL and rejects everything else", () => {
+  // unhealthy arm: a GitHub URL with no `/pull/<n>` suffix names no pull request.
+  assert.equal(PR_URL_RE.test("https://github.com/acme/remudero/issues/2"), false);
+  // healthy arm, distinguishable: the very same host, matched once the suffix is a pull request.
+  assert.equal(PR_URL_RE.test("https://github.com/acme/remudero/pull/2"), true);
 });
 
 test("W1-T4435: the costliest untracked cause becomes a drafted task", async () => {

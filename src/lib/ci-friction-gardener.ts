@@ -99,7 +99,10 @@ export function priceCiFrictionCauses(
 
 // ── Loading rounds from the ledger union ────────────────────────────────────────────────────
 
-const PR_URL_RE = /\/pull\/(\d+)(?:[/?#].*)?$/;
+/** Exported so a fixture can exercise its unhealthy arm by name (negative-reachability-ratchet,
+ *  W1-T2317) — a pull-request URL's `/pull/<n>` suffix, matched, versus any other GitHub URL
+ *  shape, rejected. */
+export const PR_URL_RE = /\/pull\/(\d+)(?:[/?#].*)?$/;
 
 function prNumberFromUrl(url: unknown): number | undefined {
   if (typeof url !== "string") return undefined;
