@@ -68,6 +68,7 @@ import {
   INCIDENT_INGEST_ROUTE_METHOD,
   INCIDENT_INGEST_ROUTE_PATH,
 } from "./incident-events.js";
+import { buildIncidentsRoute, type IncidentsRouteInput } from "./incident-lifecycle.js";
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
@@ -444,6 +445,13 @@ export interface ServeDeps {
    * real state dir — the same seam `replay`/`peek` above both use.
    */
   selfMeasurement?: { stateDir?: string; n?: number; ledgerUnion?: (stateDir: string, pattern: RegExp) => LedgerUnionResult };
+  /**
+   * W1-T4387: `GET /v1/incidents`'s inputs. `stateDir` defaults to `dirname(deps.ledgerPath)` —
+   * the SAME derivation `replay`/`selfMeasurement` above already use, never a second root.
+   * `readStore` is injectable so a test drives the "unreadable" (`ok: false`) path without a real
+   * state dir — the same seam those two fields already use.
+   */
+  incidents?: Omit<IncidentsRouteInput, "stateDir"> & { stateDir?: string };
   /** W1-T4227: `GET /v1/registry`'s inputs; the repo path defaults via `daemonInstanceRegistryPath`. */
   registry?: {
     /** The repo-tracked `.remudero/daemon-instances.yaml` — the one registry. */
@@ -4139,6 +4147,14 @@ function assembleServeRoutes(
       log: deps.log,
     }),
     buildIncidentEventsRoute({ ledgerPath: deps.ledgerPath }),
+    // W1-T4387: the fix-verification lifecycle's own read surface, beside the ingest route above.
+    // `stateDir` defaults to `dirname(deps.ledgerPath)` -- the SAME derivation `replay` and
+    // `selfMeasurement` already use, never a second root.
+    buildIncidentsRoute({
+      stateDir: deps.incidents?.stateDir ?? dirname(deps.ledgerPath),
+      clock: deps.incidents?.clock,
+      readStore: deps.incidents?.readStore,
+    }),
   ];
   const routes = boundConsoleReadRoutes(rawRoutes, deps);
   routes.push(
