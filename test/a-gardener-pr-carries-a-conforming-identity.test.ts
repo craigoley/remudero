@@ -94,10 +94,15 @@ test("a garden PR that writes a docs log lands a fresh docs index", () => {
   clone.git("config", "user.email", "g@example.invalid");
   clone.git("config", "user.name", "g");
   const worktrees = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-docs-wt-`));
+  const aliasRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-docs-alias-`));
+  const aliasedWorktrees = join(aliasRoot, "worktrees");
+  // Reproduce the macOS /var -> /private/var spelling split on Linux too, so the canonical
+  // end-to-end acceptance proof fails on base everywhere rather than only on this host.
+  symlinkSync(worktrees, aliasedWorktrees, "dir");
   const garden = gardenCheckout({
     name: "gate",
     repoDir: clone.dir,
-    worktreesRoot: worktrees,
+    worktreesRoot: aliasedWorktrees,
     owner: "acme",
     repo: "remudero",
     log: () => {},
@@ -123,5 +128,7 @@ test("a garden PR that writes a docs log lands a fresh docs index", () => {
     origin.cleanup();
     seed.cleanup();
     clone.cleanup();
+    rmSync(aliasRoot, { recursive: true, force: true });
+    rmSync(worktrees, { recursive: true, force: true });
   }
 });
