@@ -16,6 +16,11 @@ import type { LearningEntry } from "../src/lib/learnings.js";
 const entry = (id: string, fact: string, files: string[]): LearningEntry =>
   ({ id, subsystem: "t", lifecycle: "active", files, fact } as unknown as LearningEntry);
 
+// Enough entries of one fact size that together they outweigh `multiple` budgets, so a priced cap
+// raise cannot quietly shrink these fixtures below the budget they exist to overflow.
+const countOver = (fact: string, multiple: number): number =>
+  Math.ceil((DEFAULT_KNOWLEDGE_BUDGET_CHARS * multiple) / entryBudgetWeight(entry("probe", fact, ["src/a.ts"]))) + 1;
+
 test("an entry that matches NO task costs that task nothing, however big the corpus grows", () => {
   const relevant = entry("relevant", "x".repeat(200), ["src/a.ts"]);
   const irrelevant = Array.from({ length: 50 }, (_, i) => entry(`noise${i}`, "y".repeat(400), ["src/elsewhere.ts"]));
@@ -26,7 +31,7 @@ test("an entry that matches NO task costs that task nothing, however big the cor
 });
 
 test("no task can inject more than the per-task budget, whatever the corpus totals", () => {
-  const many = Array.from({ length: 80 }, (_, i) => entry(`e${i}`, "z".repeat(500), ["src/a.ts"]));
+  const many = Array.from({ length: countOver("z".repeat(500), 4) }, (_, i) => entry(`e${i}`, "z".repeat(500), ["src/a.ts"]));
   const { selected } = selectLearnings(many, ["src/a.ts"]);
   const injected = selected.reduce((s, e) => s + entryBudgetWeight(e), 0);
   assert.ok(injected <= DEFAULT_KNOWLEDGE_BUDGET_CHARS, `injected ${injected} must not exceed the budget`);
@@ -35,9 +40,9 @@ test("no task can inject more than the per-task budget, whatever the corpus tota
 });
 
 test("the pressure measure counts TASKS LOSING MATCHES, not corpus size", () => {
-  const fat = Array.from({ length: 40 }, (_, i) => entry(`f${i}`, "q".repeat(600), ["src/a.ts"]));
+  const fat = Array.from({ length: countOver("q".repeat(600), 2) }, (_, i) => entry(`f${i}`, "q".repeat(600), ["src/a.ts"]));
   const p = measureTaskDropPressure(fat, [
-    { id: "OVER", files: ["src/a.ts"] },      // matches all 40, cannot carry them
+    { id: "OVER", files: ["src/a.ts"] },      // matches all of them, cannot carry them
     { id: "UNDER", files: ["src/other.ts"] }, // matches none
   ]);
   assert.equal(p.tasksMeasured, 2);
