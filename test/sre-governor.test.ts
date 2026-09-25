@@ -41,6 +41,7 @@ import {
   type SreRunbook,
 } from "../src/lib/sre-runbooks.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -71,16 +72,16 @@ function earned(id: string, fingerprint: string, atMs: number): { receipts: SreG
   return { receipts: [receipt(id, fingerprint, "would_act", atMs, "shadow")], incidents: [event(fingerprint, atMs - MIN)] };
 }
 
-function ledgerRow(step: string, tsMs: number, extra: Record<string, unknown>): Record<string, unknown> {
+function stampedRow(step: string, tsMs: number, extra: Record<string, unknown>): Record<string, unknown> {
   return { ts: new Date(tsMs).toISOString(), step, task_id: "SRE", ...extra };
 }
 
 function receiptRow(r: SreGovernorReceipt): Record<string, unknown> {
-  return ledgerRow("sre.runbook", r.ts_ms as number, { id: r.id, fingerprint: r.fingerprint, mode: r.mode, outcome: r.outcome, ...(r.seen_ms ? { seen_ms: r.seen_ms } : {}) });
+  return stampedRow("sre.runbook", r.ts_ms as number, { id: r.id, fingerprint: r.fingerprint, mode: r.mode, outcome: r.outcome, ...(r.seen_ms ? { seen_ms: r.seen_ms } : {}) });
 }
 
 function incidentRow(e: SreGovernorIncident): Record<string, unknown> {
-  return ledgerRow("incident.event", e.ts, { task_id: "INCIDENT", fingerprint: e.fingerprint, kind: e.kind, name: e.name });
+  return stampedRow("incident.event", e.ts, { task_id: "INCIDENT", fingerprint: e.fingerprint, kind: e.kind, name: e.name });
 }
 
 /** An in-memory enforcer whose `log` appends to the same ledger it reads — two ticks agree on "from". */
@@ -104,7 +105,7 @@ function memoryEnforcer(rows: Record<string, unknown>[], opts: { escalate?: bool
             return `https://github.com/craigoley/remudero/issues/${escalations.length}`;
           },
   };
-  const logAt = (nowMs: number) => (step: string, extra: Record<string, unknown> = {}) => rows.push(ledgerRow(step, nowMs, extra));
+  const logAt = (nowMs: number) => (step: string, extra: Record<string, unknown> = {}) => rows.push(stampedRow(step, nowMs, extra));
   return { enforcer, escalations, logAt, off: () => off };
 }
 
@@ -288,9 +289,7 @@ test("the emergency stop, a pause or quiet hours stop every runbook", () => {
 
   // The lane reads those holds from the files fleet-control.ts writes beside the ledger.
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}sre-governor-controls-`));
-  mkdirSync(join(root, "state"));
-  const ledgerPath = join(root, "state", "ledger.jsonl");
-  writeFileSync(ledgerPath, JSON.stringify(receiptRow(receipt(A, FA, "would_act", NOW - DAY, "shadow"))) + "\n");
+  const ledgerPath = writeLedger([receiptRow(receipt(A, FA, "would_act", NOW - DAY, "shadow"))], { dir: join(root, "state") }).path;
   assert.deepEqual(fleetControlsBesideLedger(ledgerPath), { emergencyStop: undefined, pause: undefined, quietHours: undefined });
   writeFileSync(join(root, "state", "QUIET_HOURS"), "{}");
   writeFileSync(join(root, "state", "PAUSE"), JSON.stringify({ requestedAt: "2026-09-25T00:00:00Z", reason: "deploy" }));
@@ -425,11 +424,8 @@ test("the core daemon evaluates the governor every tick, and a governor that thr
 // ── the real ports ───────────────────────────────────────────────────────────────────────────
 
 test("the daemon's governor port reads the real ledger and flips the real pause switch", () => {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}sre-governor-port-`));
-  const ledgerPath = join(root, "ledger.jsonl");
+  const { dir: root, path: ledgerPath } = writeLedger([receiptRow(receipt(A, FA, "cleared", NOW - HOUR))]);
   const laneOffPath = join(root, "SRE_LANE_OFF");
-  const row = receiptRow(receipt(A, FA, "cleared", NOW - HOUR));
-  writeFileSync(ledgerPath, JSON.stringify(row) + "\n");
   const port = daemonSreGovernorEnforcer({ ledgerPath, laneOffPath });
   assert.equal(port.readLedger().length, 1);
   assert.equal(receiptFromLedgerRow(port.readLedger()[0])?.ts_ms, NOW - HOUR, "a receipt carries its ledger instant");
@@ -452,11 +448,11 @@ test("ledger rows the governor reads: incidents, and the tier each runbook last 
   assert.equal(governorIncidentFromLedgerRow({ step: "daemon.tick" }), undefined);
 
   const tiers = governorTiersFromLedger([
-    ledgerRow("sre.governor", NOW - HOUR, { runbook: A, from: "none", to: "shadow" }),
-    ledgerRow("sre.governor", NOW, { runbook: A, from: "shadow", to: "stopped", global: true }),
+    stampedRow("sre.governor", NOW - HOUR, { runbook: A, from: "none", to: "shadow" }),
+    stampedRow("sre.governor", NOW, { runbook: A, from: "shadow", to: "stopped", global: true }),
     { step: "sre.governor", runbook: B, to: "live" },
-    ledgerRow("sre.governor", NOW, { runbook: B, to: "bogus" }),
-    ledgerRow("sre.runbook", NOW, { runbook: A, to: "live" }),
+    stampedRow("sre.governor", NOW, { runbook: B, to: "bogus" }),
+    stampedRow("sre.runbook", NOW, { runbook: A, to: "live" }),
   ]);
   assert.deepEqual(tiers.get(A), { tier: "stopped", atMs: NOW, global: true });
   assert.deepEqual(tiers.get(B), { tier: "live", atMs: 0, global: false });
