@@ -1222,6 +1222,71 @@ test("W1-T155: a verdict line ends the in-flight run — no phase/startedAt/elap
   assert.equal(proj.elapsedMs, undefined);
 });
 
+test("a run that ended in a run error row is not projected in flight", () => {
+  const url = "https://github.com/craigoley/remudero/pull/7001";
+  const github = fakeGitHub({ byRef: { [url]: { number: 7001, url, state: "OPEN" } } });
+  const ledgerPath = ledgerFile([
+    { ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { ts: "2026-07-20T10:01:00.000Z", run_id: "r1", task_id: "W1-TX", step: "pr.opened", pr_url: url },
+    { ts: "2026-07-20T10:02:00.000Z", run_id: "r1", task_id: "W1-TX", step: "run.error" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github, now: () => Date.parse("2026-07-20T10:05:00.000Z") });
+  assert.equal(proj.status, "running", "the open-PR status word remains GitHub-backed");
+  assert.equal(proj.phase, undefined, "a failed run must not carry its old review phase");
+  assert.equal(proj.startedAt, undefined);
+  assert.equal(proj.elapsedMs, undefined);
+});
+
+test("sweep rows naming a task do not refresh its dead run's liveness", () => {
+  const ledgerPath = ledgerFile([
+    { ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { ts: "2026-07-20T10:45:00.000Z", run_id: "DAEMON-1", task_id: "W1-TX", step: "sweep.disposed" },
+    { ts: "2026-07-20T10:50:00.000Z", run_id: "DAEMON-2", task_id: "W1-TX", step: "automerge.armed" },
+    { ts: "2026-07-20T10:55:00.000Z", run_id: "DAEMON-3", task_id: "W1-TX", step: "verdict.merged" },
+    { ts: "2026-07-20T10:59:00.000Z", run_id: "DAEMON-4", task_id: "W1-TX", step: "review.posted" },
+  ]);
+  const proj = deriveStatus(task(), {
+    ledgerPath,
+    github: fakeGitHub({}),
+    now: () => Date.parse("2026-07-20T11:00:00.000Z"),
+  });
+  assert.equal(proj.orphaned, true);
+  assert.notEqual(proj.status, "running");
+  assert.equal(proj.phase, undefined);
+});
+
+test("fix-lane rows between dispatch and terminal refresh a run's liveness", () => {
+  const ledgerPath = ledgerFile([
+    { ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { ts: "2026-07-20T10:40:00.000Z", run_id: "FIX-1", task_id: "W1-TX", lane: "fix", step: "fix.dispatch" },
+    { ts: "2026-07-20T10:50:00.000Z", run_id: "FIX-1", task_id: "W1-TX", lane: "fix", step: "fix.done" },
+  ]);
+  const proj = deriveStatus(task(), {
+    ledgerPath,
+    github: fakeGitHub({}),
+    now: () => Date.parse("2026-07-20T10:55:00.000Z"),
+  });
+  assert.equal(proj.status, "running");
+  assert.equal(proj.phase, "fix-rung");
+  assert.equal(proj.orphaned, undefined);
+});
+
+test("fix-lane rows after their terminal do not refresh a run's liveness", () => {
+  const ledgerPath = ledgerFile([
+    { ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { ts: "2026-07-20T10:40:00.000Z", run_id: "FIX-1", task_id: "W1-TX", step: "fix.dispatch" },
+    { ts: "2026-07-20T10:50:00.000Z", run_id: "FIX-1", task_id: "W1-TX", step: "fix.done" },
+    { ts: "2026-07-20T11:25:00.000Z", run_id: "FIX-1", task_id: "W1-TX", step: "fix.review" },
+  ]);
+  const proj = deriveStatus(task(), {
+    ledgerPath,
+    github: fakeGitHub({}),
+    now: () => Date.parse("2026-07-20T11:26:00.000Z"),
+  });
+  assert.equal(proj.orphaned, true);
+  assert.notEqual(proj.status, "running");
+});
+
 test("W1-T155: blocked (a CLOSED PR) is never overridden by a phase, even if the ledger also shows an unresolved run.start", () => {
   const url = "https://github.com/craigoley/remudero/pull/52";
   const github = fakeGitHub({ byRef: { [url]: { number: 52, url, state: "CLOSED" } } });
