@@ -198,6 +198,15 @@ test("two runbooks that re-fire each other are both stopped and the operator is 
   assert.deepEqual(mem.escalations.map((e) => e.taskId).sort(), [`SRE-GOVERNOR-${A}`, `SRE-GOVERNOR-${B}`]);
   assert.match(mem.escalations[0].detail, /re-fire each other/);
   assert.equal(mem.escalations[0].recommendation, mem.escalations[0].options[0].label);
+
+  // The same flap read from receipts alone — each incident instant carried as a receipt's seen_ms.
+  const fromReceipts = sreGovernorVerdict(
+    [...receipts.slice(0, 1), receipt(B, FB, "cleared", t1 + 10 * MIN, "live", t1 + 5 * MIN), receipt(A, FA, "precheck_refused", t1 + 20 * MIN, "live", t1 + 15 * MIN)],
+    [],
+    {},
+    NOW,
+  );
+  assert.deepEqual([fromReceipts[A].tier, fromReceipts[B].tier], ["stopped", "stopped"]);
 });
 
 test("a new fast burn after an act shadows the runbook that acted", () => {
