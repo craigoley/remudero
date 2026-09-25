@@ -3,6 +3,10 @@
  * deletes, in a small batch, an export the scan has reported unreferenced in two scans — unless a
  * grep finds its name anywhere else (a string lookup, a registry, a test) — and judges the class
  * by whether the deletions stay deleted.
+ *
+ * @source-text-subject — this gardener's OUTPUT is source text: it deletes declarations from a
+ * `src/lib/` file. Every read below is of a throwaway fixture checkout the gardener itself rewrote,
+ * never this repository's own `src/`, so reading that text back IS asserting on its behaviour.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -16,6 +20,9 @@ import {
   exportGardenCandidates,
   exportGardenSpec,
   exportInventory,
+  IDENT_RE,
+  parseSymbolFinding,
+  SYMBOL_ID_RE,
 } from "../src/lib/export-gardener.js";
 import { gardenStatePath, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
 import { adoptionLatestPath, adoptionProposalId } from "../src/lib/measurement-cadence.js";
@@ -178,4 +185,15 @@ test("W1-T4117: a declaration span covers its comment and body, and refuses an o
   assert.deepEqual(exportDeclarationSpan(text, "a"), { start: 0, end: 5 });
   assert.equal(exportDeclarationSpan(text, "b"), undefined, "an overloaded export is left alone");
   assert.equal(exportDeclarationSpan(text, "c"), undefined);
+});
+
+test("W1-T4117: only a symbol-no-caller id with a plain name is read as a deletable export", () => {
+  assert.equal(SYMBOL_ID_RE.test("adoption:symbol-no-caller:src/lib/a.ts:deadA"), true);
+  assert.equal(SYMBOL_ID_RE.test("adoption:field-no-writer:src/lib/plan.ts:deadA"), false, "another shape is not an export");
+  assert.equal(SYMBOL_ID_RE.test("adoption:symbol-no-caller:src/lib/a.ts:"), false, "no name");
+  assert.deepEqual(parseSymbolFinding("adoption:symbol-no-caller:src/lib/a.ts:deadA"), { file: "src/lib/a.ts", name: "deadA" });
+  assert.equal(parseSymbolFinding("adoption:script-no-invoker:scripts/x.mjs:x"), undefined);
+  assert.equal(IDENT_RE.test("deadA"), true);
+  assert.equal(IDENT_RE.test("$dead"), false, "grep -w cannot bound a `$` name, so the reference check cannot vouch for it");
+  assert.equal(exportDeclarationSpan("export const $dead = 1;\n", "$dead"), undefined);
 });

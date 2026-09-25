@@ -87,8 +87,10 @@ export interface ExportInventory {
   tally: Outcome;
 }
 
-const SYMBOL_ID_RE = /^adoption:symbol-no-caller:(.+):([A-Za-z_$][\w$]*)$/;
-const IDENT_RE = /^[A-Za-z_][\w]*$/;
+/** An adoption `symbol-no-caller` proposal id: its file and export name. */
+export const SYMBOL_ID_RE = /^adoption:symbol-no-caller:(.+):([A-Za-z_$][\w$]*)$/;
+/** A name `git grep -w` reads as one word — the only names the reference check can vouch for. */
+export const IDENT_RE = /^[A-Za-z_][\w]*$/;
 
 /** The file and export an adoption `symbol-no-caller` proposal id names, or undefined for any other id. */
 export function parseSymbolFinding(id: string): { file: string; name: string } | undefined {
