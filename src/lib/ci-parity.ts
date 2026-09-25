@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { availableParallelism, tmpdir } from "node:os";
@@ -799,9 +799,14 @@ export function coverageScratchDir(repoRoot: string): string {
 }
 
 function pathIsWithin(parent: string, candidate: string): boolean {
-  const root = resolve(parent);
-  const path = resolve(candidate);
-  return path === root || path.startsWith(`${root}${sep}`);
+  const isWithin = (root: string, path: string) => path === root || path.startsWith(`${root}${sep}`);
+  if (isWithin(resolve(parent), resolve(candidate))) return true;
+  try {
+    return isWithin(realpathSync(parent), realpathSync(candidate));
+  } catch {
+    // An unreadable/unresolvable TMPDIR must not authorize clearing the stable scratch.
+    return true;
+  }
 }
 
 function coverageShardRoot(repoRoot: string): string {
@@ -952,21 +957,24 @@ function testWithCoverageShards(
 function testWithCoverageLeaf(repoRoot: string, spawn: PreflightSpawn, lcovPath: string): CiParityLeafResult {
   const stableScratch = coverageScratchDir(repoRoot);
   const activeTmp = process.env.TMPDIR;
-  const nested = activeTmp !== undefined && pathIsWithin(stableScratch, activeTmp);
   mkdirSync(join(repoRoot, "coverage"), { recursive: true });
+  mkdirSync(stableScratch, { recursive: true });
+  const nested = activeTmp !== undefined && pathIsWithin(stableScratch, activeTmp);
 
   let scratchDir = stableScratch;
   let ownedNestedScratch: string | undefined;
   if (nested) {
     // The `env` passed to spawn affects only the child; re-entrancy belongs to this process's
-    // actual environment. Give the nested leaf a child directory so it can never clear its caller.
+    // actual environment. Resolve aliases before making the child so shard fixtures and Git see
+    // the same path, then give the nested leaf a child it can never clear out from under its caller.
     mkdirSync(activeTmp, { recursive: true });
-    scratchDir = mkdtempSync(join(activeTmp, "nested-coverage-"));
+    scratchDir = mkdtempSync(join(realpathSync(activeTmp), "nested-coverage-"));
     ownedNestedScratch = scratchDir;
   } else {
     // CLEARED, NOT JUST CREATED: the runner clears its scratch on a normal exit, so this bounds the abnormal one.
     rmSync(stableScratch, { recursive: true, force: true });
     mkdirSync(stableScratch, { recursive: true });
+    scratchDir = realpathSync(stableScratch);
   }
 
   try {
