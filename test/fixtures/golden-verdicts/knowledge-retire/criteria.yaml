@@ -1,33 +1,9 @@
-# The knowledge gardener's (W1-T4095) RETIRE pass from fleet PR #7205 (the operator kept the five
-# learnings a test requires active, so 14 items retire). Each proof executes
+# The knowledge gardener's (W1-T4095) RETIRE pass from fleet PR #7245 (the operator kept the three
+# learnings a test requires active, so 2 items retire). Each proof executes
 # for real against the post-pass checkout/.
 - claim: this pass is recorded in the garden log
-  proof: "grep: ^## Pass 2026-09-25T14:46:35.608Z$ in docs/knowledge-garden-log.md"
-- claim: the gardener's retire of claude-code-hybrid-retrieval is marked in its entry
-  proof: "grep: knowledge gardener: retire claude-code-hybrid-retrieval$ in learnings/architecture.yaml"
-- claim: the gardener's retire of compaction-recall-first is marked in its entry
-  proof: "grep: knowledge gardener: retire compaction-recall-first$ in learnings/architecture.yaml"
-- claim: the gardener's retire of cache-prefix-bytes is marked in its entry
-  proof: "grep: knowledge gardener: retire cache-prefix-bytes$ in learnings/architecture.yaml"
-- claim: the gardener's retire of docs-are-a-gated-artifact is marked in its entry
-  proof: "grep: knowledge gardener: retire docs-are-a-gated-artifact$ in learnings/architecture.yaml"
-- claim: the gardener's retire of daemon-split-logic-from-live-commissioning is marked in its entry
-  proof: "grep: knowledge gardener: retire daemon-split-logic-from-live-commissioning$ in learnings/architecture.yaml"
-- claim: the gardener's retire of task-quality-gates-before-dispatch is marked in its entry
-  proof: "grep: knowledge gardener: retire task-quality-gates-before-dispatch$ in learnings/architecture.yaml"
-- claim: the gardener's retire of daemon-repo-targeting-explicit is marked in its entry
-  proof: "grep: knowledge gardener: retire daemon-repo-targeting-explicit$ in learnings/architecture.yaml"
-- claim: the gardener's retire of task-credit-needs-an-anchored-trailer is marked in its entry
-  proof: "grep: knowledge gardener: retire task-credit-needs-an-anchored-trailer$ in learnings/architecture.yaml"
-- claim: the gardener's retire of implement-lane-model-lives-on-the-run-not-the-verdict-row is marked in its entry
-  proof: "grep: knowledge gardener: retire implement-lane-model-lives-on-the-run-not-the-verdict-row$ in learnings/architecture.yaml"
-- claim: the gardener's retire of body-fetch-guards-on-http-not-size is marked in its entry
-  proof: "grep: knowledge gardener: retire body-fetch-guards-on-http-not-size$ in learnings/ci.yaml"
-- claim: the gardener's retire of no-live-operator-in-headless-worker is marked in its entry
-  proof: "grep: knowledge gardener: retire no-live-operator-in-headless-worker$ in learnings/failures.yaml"
-- claim: the gardener's retire of control-surface-fail-loud-stop-one-shot is marked in its entry
-  proof: "grep: knowledge gardener: retire control-surface-fail-loud-stop-one-shot$ in learnings/failures.yaml"
-- claim: the gardener's retire of sdk-builtin-tools-are-the-boundary is marked in its entry
-  proof: "grep: knowledge gardener: retire sdk-builtin-tools-are-the-boundary$ in learnings/platform.yaml"
-- claim: the gardener's retire of askuserquestion-auto-resolves-empty-headless is marked in its entry
-  proof: "grep: knowledge gardener: retire askuserquestion-auto-resolves-empty-headless$ in learnings/platform.yaml"
+  proof: "grep: ^## Pass 2026-09-25T20:17:12.931Z$ in docs/knowledge-garden-log.md"
+- claim: the gardener's retire of rerun-the-job-not-the-run is marked in its entry
+  proof: "grep: knowledge gardener: retire rerun-the-job-not-the-run$ in learnings/ci.yaml"
+- claim: the gardener's retire of maxbudget-between-turns is marked in its entry
+  proof: "grep: knowledge gardener: retire maxbudget-between-turns$ in learnings/platform.yaml"
