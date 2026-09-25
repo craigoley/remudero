@@ -298,10 +298,9 @@ export function exportGardenCandidates(inv: ExportInventory, repoRoot: string): 
 export function applyExportDeletions(
   root: string,
   actions: ExportGardenAction[],
-  deps: { writeAtomic?: typeof writeAtomic } = {},
+  atomicWrite: typeof writeAtomic = writeAtomic,
 ): ExportGardenAction[] {
   const done: ExportGardenAction[] = [];
-  const atomicWrite = deps.writeAtomic ?? writeAtomic;
   for (const a of actions) {
     const path = join(root, a.file);
     const text = readFileIfExists(path);
