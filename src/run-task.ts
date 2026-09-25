@@ -158,6 +158,7 @@ import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "
 import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { startCiFrictionGardener, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
+import { readSelectorShadowChangedPaths, readSelectorShadowRuns, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
 import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
@@ -243,7 +244,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export", "ci-friction"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export", "ci-friction", "selector-shadow"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -32452,6 +32453,17 @@ export async function daemonCommand(
                   };
                   return startCiFrictionGardener(ciFrictionGarden, sources, intervalMs);
                 },
+                // W1-T4439: aggregate complete coverage-shard shadow records before W1-T4406
+                // may narrow CI. A real miss opens a parked task naming the observed edge.
+                (intervalMs: number) => startSelectorShadowGardener({
+                  stateDir: join(config.root, "state"),
+                  repoRoot,
+                  readRuns: () => readSelectorShadowRuns(self.owner, self.repo),
+                  readChangedPaths: (miss) => readSelectorShadowChangedPaths(self.owner, self.repo, miss),
+                  openWorkspace: () => gardenCheckout({ name: "selector-shadow", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                  mintTaskId: ciLearningTaskIdMinter(repoRoot),
+                  log,
+                }, intervalMs),
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
                 // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
                 // registry instance" has no selector yet -- `RegistryInstance` carries no role or
