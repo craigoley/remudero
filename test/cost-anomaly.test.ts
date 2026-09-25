@@ -521,7 +521,7 @@ test("loadCostAnomalyPolicy: a file that is not valid YAML is refused, naming th
 // ── W1-T4417: a runaway run's finding is ledgered EIGHT TIMES and acted on NEVER — route cost
 // and duration anomalies into the SRE gardener's incident ingest (W1-T4383) ──────────────────────
 
-test("runSweep: a new cost anomaly posts one incident.event row grouped by task class, not by run", async () => {
+test("runSweep: a new cost anomaly posts one incident event grouped by task class — one incident.event row, not one per run", async () => {
   const path = ledgerTmpPath();
   const ndjson = [
     runLines({ runId: "W1-A1", taskId: "W1-A", taskClass: "src", costUsd: 1, ts: "2026-08-01T00:00:00.000Z" }),
@@ -618,7 +618,7 @@ function settledSrcSpans(): string {
     .join("\n");
 }
 
-test("runSweep: a run past its class's median duration band is reported ONCE, while it still runs", async () => {
+test("runSweep: a run past its class duration band is reported once while it still runs — past its class's median, ONCE", async () => {
   const path = ledgerTmpPath();
   const settledSpans = settledSrcSpans();
   // A run STILL IN FLIGHT, started 45 minutes before "now" -- 4.5x the 10m median, over POLICY's
