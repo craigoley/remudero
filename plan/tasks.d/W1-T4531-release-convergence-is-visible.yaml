@@ -1,0 +1,40 @@
+- id: W1-T4531
+  title: "NO ONE CAN SEE WHICH RELEASE EACH INSTANCE RUNS — record a GitHub Deployment status per instance for every release it adopts, and serve release convergence and lead time from rmd serve"
+  repo: remudero
+  depends_on: [W1-T4530]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "session: 2026-09-24 release-tag design"
+  note: |
+    reservation hand-off: run-W1-T4527-1790294141611 -> plan-file-W1-T4527-1790294141611
+  plan_refs: ["W1-T4528", "W1-T4530"]
+  files: [src/lib/release-tags.ts, src/lib/deployer.ts, src/lib/serve.ts, test/release-convergence-is-visible.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-24 at origin/main 9aa0dd61. Names are symbols; re-verify at your head.
+
+    OBSERVED: scripts/fleet-heartbeat.sh publishes image_build_sha and install_head_sha per instance, but no
+    surface joins them to a release, so "is the fleet on the same version" needs a host recon to answer.
+    Phase 5 of the release-tag plan: observability only. The console's own view is a separate
+    remudero-console task, built against the endpoint this task pins.
+  design: |
+    (i) When an instance's deploy.ok lands on a release's source_sha, it records a GitHub Deployment for that ref
+        with environment = its registry instance name, and a `success` status (`failure` on a rollback). A failed
+        API write is logged `release.deployment_unrecorded` and never affects the deploy.
+    (ii) `GET /v1/releases` on rmd serve returns the newest releases, each with id, source_sha, decided_at,
+         promoted_at, revoked_at, and per live instance: adopted_at or null. It also returns lead_time_s
+         (merge to release, release to last adoption) and change_fail_rate (revoked / released over the window).
+    (iii) The response shape is pinned by the test so the console task can build against it.
+    (wiring) the /v1/releases route calls releaseConvergence from release-tags.ts.
+  acceptance:
+    - claim: "an adopted release records a deployment status for that instance"
+      proof: 'grep: test("W1-T4531: an adopted release records a deployment status" in test/release-convergence-is-visible.test.ts'
+    - claim: "the releases endpoint reports per-instance convergence"
+      proof: 'grep: test("W1-T4531: the releases endpoint reports convergence" in test/release-convergence-is-visible.test.ts'
+    - claim: "the releases route calls the convergence reader"
+      proof: 'grep: releaseConvergence( in src/lib/serve.ts'

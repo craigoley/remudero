@@ -1,0 +1,42 @@
+- id: W1-T4529
+  title: "NOTHING HOLDS A BAD RELEASE BACK FROM THE FLEET — the primary adopts a release and every other instance would follow at once: the primary bakes each release for 30 minutes, then promotes it with ring/fleet/<id> or revokes it with revoked/<id>"
+  repo: remudero
+  depends_on: [W1-T4528]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "session: 2026-09-24 release-tag design (operator ruling: 30-minute bake to start)"
+  note: |
+    reservation hand-off: run-W1-T4527-1790294141611 -> plan-file-W1-T4527-1790294141611
+  plan_refs: ["W1-T4528"]
+  files: [src/lib/release-tags.ts, src/lib/deployer.ts, test/the-primary-bakes-a-release-before-the-fleet.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-24 at origin/main 9aa0dd61. Names are symbols; re-verify at your head.
+
+    OBSERVED (operator recon 2026-09-23): remudero-console-daemon was crash-looping after a recreate at
+    23:44Z and remudero-serve had 46 restarts. Once satellites converge to a release (W1-T4530), a release
+    that crash-loops the primary would reach every instance unless something holds it back.
+    OBSERVED: runDeployCycle already logs `deploy.ok` ("fresh boot observed, no crash-loop") after a verified
+    recycle, and the launcher clears state/DAEMON_CRASH_LOOP only when it observes the daemon healthy.
+    Phase 3 of the release-tag plan: canary ring. Primary-side only; nothing consumes the ring tag until W1-T4530.
+  design: |
+    (i) RELEASE_BAKE_MS = 30 * 60_000, a recorded constant with a reason, like DEPLOY_RESTART_SCORE_THRESHOLD.
+    (ii) After the primary's own `deploy.ok` on a release's source_sha, each later primary deploy-run tick checks
+         the bake: healthy means no DAEMON_CRASH_LOOP flag and an unchanged container restart count since deploy.ok.
+    (iii) Healthy for RELEASE_BAKE_MS: mint annotated `ring/fleet/<release-id>` (logged `release.promoted`).
+          Unhealthy at any tick: mint `revoked/<release-id>` with the failing signal in its message (logged
+          `release.revoked`); the primary's existing rollback path handles its own recovery.
+    (iv) Promotion and revocation are each minted at most once per release, and never both.
+    (wiring) runDeployCycle calls checkReleaseBake from release-tags.ts on each primary tick.
+  acceptance:
+    - claim: "a release healthy for the bake window is promoted to the fleet ring"
+      proof: 'grep: test("W1-T4529: a healthy bake promotes the release" in test/the-primary-bakes-a-release-before-the-fleet.test.ts'
+    - claim: "an unhealthy bake revokes the release and never promotes it"
+      proof: 'grep: test("W1-T4529: an unhealthy bake revokes the release" in test/the-primary-bakes-a-release-before-the-fleet.test.ts'
+    - claim: "the deploy cycle calls the bake check"
+      proof: 'grep: checkReleaseBake( in src/lib/deployer.ts'
