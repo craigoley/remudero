@@ -12,7 +12,9 @@
   origin: "operator ask 2026-09-24: automated flow and self-improvement — main-red detection latency"
   plan_refs: [W1-T4396, W1-T4439, W1-T4462, W1-T4056]
   files: [.github/workflows/main-tripwire.yml, src/lib/main-health-rung.ts, test/every-merge-to-main-gets-a-fast-verdict.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4472 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     OBSERVED 2026-09-24 (the actions/runs API, ci.yml push runs on main since 09:00Z): 40 runs; 25 cancelled, 11 success,

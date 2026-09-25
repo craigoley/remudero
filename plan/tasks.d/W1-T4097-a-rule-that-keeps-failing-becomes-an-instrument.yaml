@@ -12,7 +12,9 @@
   plan_refs: [W1-T3323, W1-T4095]
   files: [test/fixtures/doctrine-pre-migration-W1-T3323.json, src/lib/rule-efficacy.ts, src/lib/doctrine-lifecycle.ts, test/the-doctrine-index-points-at-every-body.test.ts, test/a-rule-that-keeps-failing-becomes-an-instrument.test.ts]
   priority: 2
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4097 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     READ 2026-09-22.
