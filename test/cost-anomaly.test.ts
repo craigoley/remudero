@@ -592,11 +592,10 @@ function inFlightRunLine(opts: { runId: string; taskId: string; taskClass: strin
   return JSON.stringify({ ts: opts.ts, run_id: opts.runId, task_id: opts.taskId, step: "run.start", type: "implement", task_class: opts.taskClass });
 }
 
-test("runSweep: a run past its class's median duration band is reported ONCE, while it still runs", async () => {
-  const path = ledgerTmpPath();
-  // class "src": 5 SETTLED runs, each exactly 10 minutes (start -> verdict) -- median is 10m.
-  // `runLines` stamps an identical start/verdict ts (0-duration), so each span is built by hand.
-  const settledSpans = [1, 2, 3, 4, 5]
+/** class "src": 5 SETTLED runs, each exactly 10 minutes (start -> verdict) -- median is 10m.
+ *  `runLines` stamps an identical start/verdict ts (0-duration), so each span is built by hand. */
+function settledSrcSpans(): string {
+  return [1, 2, 3, 4, 5]
     .map((n) => {
       const start = JSON.stringify({
         ts: `2026-08-01T0${n}:00:00.000Z`,
@@ -617,6 +616,11 @@ test("runSweep: a run past its class's median duration band is reported ONCE, wh
       return `${start}\n${verdict}`;
     })
     .join("\n");
+}
+
+test("runSweep: a run past its class's median duration band is reported ONCE, while it still runs", async () => {
+  const path = ledgerTmpPath();
+  const settledSpans = settledSrcSpans();
   // A run STILL IN FLIGHT, started 45 minutes before "now" -- 4.5x the 10m median, over POLICY's
   // 3x multiplier, and it carries NO verdict line at all (it has not settled).
   const runningLine = inFlightRunLine({ runId: "W1-RUNAWAY", taskId: "W1-RUNAWAY", taskClass: "src", ts: "2026-08-01T06:00:00.000Z" });
@@ -661,4 +665,49 @@ test("runningLongIncidentEvent: two findings in the same class fingerprint ident
   assert.notEqual(a.fingerprint, c.fingerprint, "different class -> different fingerprint");
   assert.equal(a.task_id, "INCIDENT");
   assert.equal(a.step, "incident.event");
+});
+
+test("runSweep contains a running-long detector throw rather than failing the reconciliation pass it shares a ledger read with", async () => {
+  const path = ledgerTmpPath();
+  // Five settled "src" spans plus ONE in-flight run: `detectRunningLong` only reads the policy once
+  // a class has settled durations AND an in-flight candidate, so without the in-flight row the
+  // exploding policy below would never be touched and the running-long catch arm would stay dead.
+  const runningLine = inFlightRunLine({ runId: "W1-RUNAWAY", taskId: "W1-RUNAWAY", taskClass: "src", ts: "2026-08-01T06:00:00.000Z" });
+  writeFileSync(path, `${settledSrcSpans()}\n${runningLine}\n`);
+
+  const exploding: CostAnomalyPolicy = {
+    get multiplier(): number {
+      throw new Error("running-long policy read exploded");
+    },
+    get minSamples(): number {
+      throw new Error("running-long policy read exploded");
+    },
+  };
+
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const deps = fakeSweepDeps(path, {
+    costAnomalyPolicy: exploding,
+    now: () => Date.parse("2026-08-01T06:45:00.000Z"),
+    log: (step, extra) => {
+      logged.push({ step, extra });
+    },
+  });
+
+  // Containment means the pass RETURNS, so awaiting it is itself the first assertion.
+  const summary = await runSweep([mergeableTestPr()], deps);
+
+  // The running-long throw was caught and named ONCE under its OWN step, carrying the original message.
+  const errors = logged.filter((l) => l.step === "sweep.running_long.error");
+  assert.equal(errors.length, 1);
+  assert.match(String(errors[0]?.extra?.error), /running-long policy read exploded/);
+
+  // A detector that threw wrote nothing — no running-long row and no incident event for it.
+  const lines = parseLedger(readFileSync(path, "utf8"));
+  assert.equal(lines.filter((r) => r.step === RUNNING_LONG_STEP).length, 0);
+  assert.equal(lines.filter((r) => r.step === "incident.event").length, 0);
+
+  // And the reconciliation it shares the pass with still arms the PR exactly once.
+  assert.equal(deps.armed.length, 1);
+  assert.equal(summary.actionsTaken, 1);
+  assert.equal(summary.actionsFailed, 0);
 });
