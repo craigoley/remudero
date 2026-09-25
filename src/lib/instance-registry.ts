@@ -73,7 +73,7 @@ export interface RegistryInstance {
    * proven through before it goes live (W1-T4266 flips this field, through a reviewed pull
    * request, never a direct write).
    */
-  mode: "shadow" | "live";
+  mode?: "shadow" | "live";
 }
 
 export interface InstanceRegistry {
@@ -173,7 +173,15 @@ export function parseInstanceRegistry(text: string): InstanceRegistry {
     if (mode !== undefined && mode !== "shadow" && mode !== "live") {
       throw new InstanceRegistryError("invalid_mode", `instance '${row.name}' mode '${mode}' is not "shadow" or "live"`);
     }
-    return { name: row.name, project, repo: declared, live: retired !== "true", mode: mode ?? "live" };
+    // Preserve the shape of pre-mode registry rows as well as their live behavior. Callers
+    // resolve an absent mode to live at the decision boundary.
+    return {
+      name: row.name,
+      project,
+      repo: declared,
+      live: retired !== "true",
+      ...(mode === undefined ? {} : { mode }),
+    };
   });
   const liveRepos = new Map<string, string>();
   for (const instance of instances) {

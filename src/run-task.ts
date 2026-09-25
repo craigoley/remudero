@@ -16801,6 +16801,15 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // facts that makes a live instance's own arm-at-verdict unconditional, so a shadow instance's
     // own `shadow.verdict` row here always names `would_merge`: this is the one point in the run
     // where its own behaviour actually diverges from what a live instance would have done.
+    if (shadowInstance) {
+      const shadowVerdict = shadowLiveWouldHaveDone(true);
+      log("shadow.verdict", {
+        pr_url: prUrl,
+        task_id: taskId,
+        review_verdict: review.state,
+        ...shadowVerdict,
+      });
+    }
     const shadowArmDecision = resolveShadowInstanceArmPermission(shadowInstance);
     const wipeTestArmDecision = resolveWipeTestArmPermission(!!opts.noMerge);
     const armOutcome: ArmOutcome | "no-merge-boundary-refused" | "shadow-instance-refused" = !shadowArmDecision.armed
@@ -16818,16 +16827,6 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       head_sha: review.headSha,
       ...(wipeTestArmDecision.reason ? { reason: wipeTestArmDecision.reason } : {}),
     });
-    if (shadowInstance) {
-      const shadowVerdict = shadowLiveWouldHaveDone(true);
-      log("shadow.verdict", {
-        pr_url: prUrl,
-        task_id: taskId,
-        review_verdict: review.state,
-        ...shadowVerdict,
-      });
-    }
-
     // ── POLL to the gate (W1-T1B).
     // Auto-merge was armed immediately above, now that this run has a verdict it
     // stands behind — this block only observes. The runner NEVER force-merges:
