@@ -949,6 +949,24 @@ export function priorApproveRunBranch(ledgerLines: { run_id?: unknown; task_id?:
   return best === undefined ? undefined : approveRunBranch(best);
 }
 
+/** W1-T4437: the branch/PR of the MOST RECENT `ratify.approved` row in the ledger — evidence only,
+ *  of a PRIOR approve run's own filing, from ANY proposal (this is the candidate to JOIN, not to
+ *  resume: {@link priorApproveRunBranch} above stays the one-proposal-only resume lookup). Ledger
+ *  lines are append-ordered, so the last matching row wins over an earlier one whose PR has since
+ *  merged and been superseded by a fresh pass. Confirming the PR is STILL OPEN and not already
+ *  queued to merge is the caller's job — a live GitHub read, never derivable from the ledger alone. */
+export function mostRecentApprovePr(
+  ledgerLines: { step?: unknown; branch?: unknown; pr_url?: unknown; pr_number?: unknown }[],
+): { branch: string; prUrl: string; prNumber?: number } | undefined {
+  let best: { branch: string; prUrl: string; prNumber?: number } | undefined;
+  for (const line of ledgerLines) {
+    if (line.step !== "ratify.approved") continue;
+    if (typeof line.branch !== "string" || typeof line.pr_url !== "string") continue;
+    best = { branch: line.branch, prUrl: line.pr_url, prNumber: typeof line.pr_number === "number" ? line.pr_number : undefined };
+  }
+  return best;
+}
+
 /** Parse a fragment's tasks WITHOUT requiring every `depends_on` to resolve inside it — {@link unmetOutsideDeps}
  *  checks that separately. A schema problem is draft-unclean, not a crash. */
 function safeParseFragment(fragmentYaml: string, proposalId: string): { plan: Plan } | { error: string } {
@@ -2406,6 +2424,23 @@ export interface RatifyGateway {
   /** W1-T4338. Write `.claude/skills/<name>/SKILL.md` on a fresh branch, commit and push it, and return the branch —
    *  the skill-draft twin of {@link createRatificationBranch}. A gateway without it cannot approve a skill draft. */
   writeSkillFile?(proposalId: string, skillFile: SkillFilePayload): string;
+
+  /** OPTIONAL (W1-T4437 design i/ii). An OPEN plan PR from a DIFFERENT approve run of this SAME PASS,
+   *  not yet queued to merge — consulted ONLY when this proposal has no push of its OWN to resume
+   *  ({@link findPushedBranch} above answered `undefined`), so resuming a proposal's own prior push
+   *  always wins over joining someone else's. Six ratify PRs opening together and conflicting with each
+   *  other pairwise is the defect this exists to close: while one approve's PR is still open and not
+   *  already queued to merge, every OTHER approval in the same pass lands on it instead of starting its
+   *  own. Returning `undefined` (or omitting this method) is exactly today's behaviour — PROCEED to
+   *  {@link createRatificationBranch}. */
+  findJoinablePr?(): { branch: string; prUrl: string; prNumber?: number } | undefined;
+
+  /** OPTIONAL, called ONLY when {@link findJoinablePr} found a branch: add this ONE proposal's shard(s)
+   *  plus its folded stamp as a NEW COMMIT on that already-pushed, still-open branch — never a new
+   *  branch, never a new PR. Returns the SAME branch name it was given. Each approval keeps its own
+   *  commit (design iii): this writes ONE more commit onto the shared branch, never squashes or amends
+   *  a prior approval's own. */
+  joinRatificationBranch?(branch: string, payload: RatificationPayload): string;
 }
 
 export type ApproveResult =
@@ -2421,6 +2456,10 @@ export type ApproveResult =
       /** W1-T903: true when this PR was ADOPTED from a prior run rather than opened by this one —
        *  `createRatificationBranch`/`openPlanPr` were both skipped. */
       adopted?: boolean;
+      /** W1-T4437: true when this proposal's payload landed as a new commit on an ALREADY-OPEN plan
+       *  PR from a DIFFERENT approve run of this same pass — `createRatificationBranch`/`openPlanPr`
+       *  were both skipped in favour of {@link RatifyGateway.joinRatificationBranch}. */
+      joined?: boolean;
     }
   | {
       ok: false;
@@ -2552,12 +2591,19 @@ export function approveProposal(
 
   const resumeBranch = gateway.findPushedBranch?.(classification.proposalId);
   const adopted = resumeBranch !== undefined ? gateway.findExistingPr?.(resumeBranch) : undefined;
+  // W1-T4437: joining someone else's open PR is considered ONLY when this proposal has no history
+  // of its OWN to resume, and never for a skill draft (which carries a file, not a plan fragment, and
+  // opens its own `chore(skill):`-titled PR) — resuming/skill-writing above always wins.
+  const joinable = resumeBranch === undefined && !skillFile ? gateway.findJoinablePr?.() : undefined;
+  const joined = joinable !== undefined && gateway.joinRatificationBranch !== undefined;
 
   let branch: string;
   if (adopted) {
     branch = resumeBranch as string;
   } else if (resumeBranch !== undefined && gateway.completeRatificationBranch) {
     branch = gateway.completeRatificationBranch(resumeBranch, classification.proposalId);
+  } else if (joined) {
+    branch = gateway.joinRatificationBranch!(joinable.branch, payload);
   } else if (skillFile && gateway.writeSkillFile) {
     branch = gateway.writeSkillFile(classification.proposalId, skillFile);
   } else {
@@ -2569,6 +2615,9 @@ export function approveProposal(
   if (adopted) {
     prUrl = adopted.prUrl;
     prNumber = adopted.prNumber;
+  } else if (joined) {
+    prUrl = joinable.prUrl;
+    prNumber = joinable.prNumber;
   } else {
     try {
       prUrl = gateway.openPlanPr(branch, classification.proposalId);
@@ -2586,6 +2635,7 @@ export function approveProposal(
     pr_number: prNumber,
     branch,
     ...(skillFile ? { skill_file: approvedSkillRelPath(skillFile.name) } : {}),
+    ...(joined ? { joined: true } : {}),
   });
   return {
     ok: true,
@@ -2595,6 +2645,7 @@ export function approveProposal(
     prNumber,
     payload,
     ...(adopted ? { adopted: true } : {}),
+    ...(joined ? { joined: true } : {}),
   };
 }
 
