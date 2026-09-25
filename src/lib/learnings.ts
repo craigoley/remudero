@@ -44,7 +44,7 @@ const AUTONOMY_SRC = "learnings#standing-rule-8";
  * INVARIANT: this equals scripts/knowledge-budget-baseline.json's `capChars` — raise it there.
  * FALSIFIER: test/knowledge-budget-derivation.test.ts's drift test.
  */
-export const DEFAULT_KNOWLEDGE_BUDGET_CHARS = 8148;
+export const DEFAULT_KNOWLEDGE_BUDGET_CHARS = 15185;
 
 // Why: contradiction detection narrows recency-overwrite rather than replacing it — docs/forensics/learnings.md#lifecycle (W1-T88/P14).
 /**
