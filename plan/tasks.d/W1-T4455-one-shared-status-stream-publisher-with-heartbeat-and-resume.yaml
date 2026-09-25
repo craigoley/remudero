@@ -4,7 +4,7 @@
   depends_on: [W1-T4451]
   priority: 3
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 30.00
   risk: high
@@ -15,9 +15,11 @@
     - src/lib/status-stream-publisher.ts
     - src/lib/board.ts
   note: |
-    HELD FROM FLEET DISPATCH (operator, 2026-09-24): a dedicated build agent is building this task now.
-    `verify: human` is the hold; isDispatchEligible parks it until an operator releases it. Release it only
-    if that build is abandoned. Its PR carries this id as its Remudero-Task trailer.
+    RELEASED 2026-09-25: the reserved build is abandoned. Its only implementation PR (#7002) was closed
+    without merge after the plan still showed unmet dependency W1-T4451; that dependency has since shipped
+    as #6993. The original `run-W1-T4455-*` branch is absent, there is no open implementation PR, and no
+    active builder remains. The task is eligible again through the ordinary selector; its declared
+    dependency, high-risk declaration, and acceptance requirements are unchanged; only the dispatch hold is released.
   status: queued
   attempts: 0
   rationale: |
