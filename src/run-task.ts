@@ -10,6 +10,7 @@ import {
   type CaptureSurfaceFireRecord,
 } from "./lib/doctor.js";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { instanceMode, parseInstanceRegistry } from "./lib/instance-registry.js";
 import { ghExec, ghJsonAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
@@ -1758,6 +1759,9 @@ export function readyDraftViaGh(
   log: (step: string, extra?: Record<string, unknown>) => void,
   exec: typeof ghExec = ghExec,
 ): (pr: OpenPrView) => void {
+  if (instanceModeForTarget(owner, repo) === "shadow") {
+    return (pr) => log("shadow.ready_refused", { pr_url: pr.prUrl, reason: "shadow instance remains draft" });
+  }
   return (pr) =>
     readyDraftPullRequest(pr, {
       markReady: (prNumber) => {
@@ -2074,6 +2078,17 @@ export function buildSweepEffects(
     });
     return 0;
   };
+  const shadow = instanceModeForTarget(deps.owner, deps.repo) === "shadow";
+  const guardedLibDeps = shadow
+    ? {
+        ...libDeps,
+        readyDraftImpl: readyDraftViaGh(deps.owner, deps.repo, deps.log),
+        armImpl: (prUrl: string) => {
+          deps.log("shadow.arm_refused", { pr_url: prUrl, reason: "shadow instance cannot arm or merge" });
+          return "draft-refused" as const;
+        },
+      }
+    : libDeps;
   const effects = buildSweepEffectsFromLib({
     repoRoot,
     localRepoName: resolveOwnerRepo().repo,
@@ -2133,7 +2148,7 @@ export function buildSweepEffects(
     decideRegisteredFixOwnerRecoveryImpl: decideRegisteredFixOwnerRecovery,
     fixRungCheckoutRefusedErrorImpl: FixRungCheckoutRefusedError,
     defaultBudgetUsd: DEFAULT_BUDGET_USD,
-    ...libDeps,
+    ...guardedLibDeps,
   });
   // W1-T2890 holds this surface key-identical to the lib-built one, so the accessor is INJECTED
   // above rather than bolted on here: returning the lib's object unchanged makes that identity
@@ -3693,6 +3708,39 @@ export function fillDerivedBody(worktreePath: string): string {
  * DECISION (design point iii): the body is {@link fillDerivedBody} — REST's lack of
  * `--fill`'s autofill costs this small local helper, not an invented body.
  */
+/** Resolve mode from the tracked registry; the image omits its working-tree copy but retains git. */
+export function instanceModeForTarget(owner: string, repo: string, registryText?: string): "shadow" | "live" {
+  const path = process.env.RMD_INSTANCE_REGISTRY ?? join(repoRoot, ".remudero", "daemon-instances.yaml");
+  let text = registryText;
+  if (text === undefined && existsSync(path)) text = readFileSync(path, "utf8");
+  if (text === undefined && process.env.RMD_INSTANCE_REGISTRY) throw new Error(`instance registry unavailable: ${path}`);
+  if (text === undefined) {
+    text = execFileSync("git", ["-C", repoRoot, "show", "HEAD:.remudero/daemon-instances.yaml"], { encoding: "utf8" });
+  }
+  return instanceMode(parseInstanceRegistry(text), `${owner}/${repo}`);
+}
+
+/** A worker may have opened its own PR; confirm its draft state before proceeding. */
+export function ensureShadowDraft(prUrl: string, exec: typeof ghExec = ghExec): void {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (!target || instanceModeForTarget(target.owner, target.repo) !== "shadow") {
+    throw new Error(`shadow draft refused for a non-shadow target: ${prUrl}`);
+  }
+  const view = JSON.parse(exec(["pr", "view", prUrl, "--json", "isDraft"], { encoding: "utf8" })) as { isDraft?: unknown };
+  if (typeof view.isDraft !== "boolean") throw new Error(`cannot verify draft state: ${prUrl}`);
+  if (!view.isDraft && instanceModeForTarget(target.owner, target.repo) === "shadow") exec(["pr", "ready", "--undo", prUrl], { encoding: "utf8" });
+}
+
+export function recordShadowVerdict(
+  prUrl: string,
+  reviewVerdict: string,
+  would: "would_merge" | "would_block",
+  reason: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): void {
+  log("shadow.verdict", { pr_url: prUrl, review_verdict: reviewVerdict, would, reason });
+}
+
 export function ghPrCreateFillCommand(
   worktreePath: string,
   owner: string,
@@ -3700,6 +3748,7 @@ export function ghPrCreateFillCommand(
   branch: string,
   title?: string,
   bodyOverride?: string,
+  registryText?: string,
 ): { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } } {
   // LIVE-WRITE GUARD at the BUILDER, not at each of its four executors: this function
   // exists only to produce a `gh pr create` argv, so refusing here covers every call
@@ -3736,6 +3785,7 @@ export function ghPrCreateFillCommand(
     "-f",
     "base=main",
   ];
+  if (instanceModeForTarget(owner, repo, registryText) === "shadow") args.push("-F", "draft=true");
   return {
     command: "gh",
     args,
@@ -4330,6 +4380,11 @@ export function armAndLogOutcome(
   lane: ArmLane = "operator",
   headSha?: string,
 ): ArmOutcome {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (target && instanceModeForTarget(target.owner, target.repo) === "shadow") {
+    log("shadow.arm_refused", { pr_url: prUrl, reason: "shadow instance cannot arm or merge" });
+    return "draft-refused";
+  }
   const result = arm(prUrl, taskId);
   const outcome = typeof result === "string" ? result : result.outcome;
   const error = typeof result === "string" ? undefined : result.error;
@@ -6907,7 +6962,11 @@ async function runReview(args: {
   // verdict and this call is still refused. No `posted.posted` guard is needed: the `if
   // (!posted.posted)` branch above already returned.
   const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log };
-  armIfVerdictPermits(verdict, armCtx, { arm: args.arm });
+  if (instanceModeForTarget(owner, repo) === "shadow") {
+    log("shadow.arm_refused", { pr_url: prUrl, review_verdict: verdict.state, reason: "shadow instance cannot arm or merge" });
+  } else {
+    armIfVerdictPermits(verdict, armCtx, { arm: args.arm });
+  }
   if (verdict.capped) {
     // W1-T1085: the annotation gets the SAME `planOnly` fact the status three-ways on, so one run
     // stops emitting two contradictory sentences about one verdict. No decision changes here.
@@ -14356,6 +14415,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // anomaly as a WARNING and never kills.
   const budgetUsd = task.budget_usd ?? DEFAULT_BUDGET_USD;
   const softThresholdUsd = softBudgetThreshold(config);
+  const shadow = instanceModeForTarget(owner, task.repo) === "shadow";
 
   // ── MOUNT RESOLUTION (§9; class axis W1-T167). The (task_type × risk × class)
   // routing table OWNS the model/effort/max_turns a run rides — never a
@@ -14377,6 +14437,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   );
   log("run.start", {
     repo: task.repo,
+    mode: shadow ? "shadow" : "live",
     type: task.type,
     risk: task.risk,
     // W1-T167: the task's routing class (docs / plan-lint / src) and the class
@@ -14435,10 +14496,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // narrowing of the Claude lane to fit a cheaper one.
   const implementTools = implementToolBound(implementMount.provider, genericRouteTools);
   // Read from the SAME value the spawn is bounded with, so the contract a worker was given and the
-  // verdict it is judged by cannot disagree. True for the shell-less cash surface above, and ALSO
-  // when the operator has handed implement's git effects to the harness on every provider — the
-  // opt-in that makes a Claude implement run divertible, because its prompt then already says so.
-  const harnessOwnsGit = config.workerProviders?.harnessCommitsImplement === true
+  // verdict it is judged by cannot disagree. Shadow also gives PR publication to the harness so
+  // the worker cannot choose a ready PR instead of the registry-gated draft builder.
+  const harnessOwnsGit = shadow || config.workerProviders?.harnessCommitsImplement === true
     || harnessOwnsGitFor(implementTools);
   // THE COHERENCE RULE, AND IT IS ONE LINE ON PURPOSE: a spawn may offer a shell-less divert
   // surface ONLY if it was told the harness owns git. Offering one to a worker whose prompt said
@@ -15300,7 +15360,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const ruleToolPointer = ruleLookup
       ? `\nTo read a doctrine rule by id or phrase, or a learning's evidence by learnings#id, call ${WORKER_RULE_TOOL_NAME}.`
       : "";
-    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
+    const shadowInstruction = shadow
+      ? "\nSHADOW INSTANCE: save edits only. The harness opens a DRAFT pull request. Never use git or gh, mark it ready, arm auto-merge, or merge it."
+      : "";
+    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}${shadowInstruction}`;
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -15332,7 +15395,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // drill will send. `ruleHeadlinesPart` is the SAME string the turn-0 prompt above just
     // carried (design (iii)) — never re-derived, so a compaction can never re-inject a
     // headline index that drifted from what turn 0 actually said.
-    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
+    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}${shadowInstruction}`;
     log("anchor.built", { anchor });
 
     // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
@@ -15653,7 +15716,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           prompt: harnessOwnsGit
             ? `Decision made: ${chosen}. Now execute the change and the OUTPUT CONTRACT from before: ` +
               `save your edits to the files, run NO git or gh commands, and end with a REPORT carrying ` +
-              `a line \`COMMIT_MESSAGE: <type>(<scope>): <subject>\` — the harness commits, pushes and opens the PR.`
+              `a line \`COMMIT_MESSAGE: <type>(<scope>): <subject>\` — the harness commits, pushes and opens the PR.${shadowInstruction}`
             : `Decision made: ${chosen}. Now execute the change and the OUTPUT CONTRACT from before: ` +
               `commit, \`git push origin HEAD\` (no -u), open the PR with \`gh pr create --fill --base main\`, ` +
               `and end with a REPORT whose last line is exactly: PR_URL: <url>`,
@@ -15710,12 +15773,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // orchestrator PR creation after it already exist, so once this produces a commit the rest of
     // the run is the long-proven path, unchanged.
     //
-    // GATED ON THE SPAWN'S OWN TOOL SURFACE, not on the provider. `harnessOwnsGit` is true exactly
-    // when this spawn was bounded without a shell, which is the condition under which the worker
-    // was TOLD the harness would commit (the same flag built its output contract). A shell-capable
-    // worker that committed nothing is left alone: it could have committed and chose not to, and
-    // turning that into a pull request would change a long-standing verdict rather than enable a
-    // new lane.
+    // GATED ON THE OUTPUT CONTRACT: shell-less workers and shadow workers are both told the
+    // harness owns git. Other shell-capable workers keep their existing no-commit verdict.
     //
     // The first attempt uses the worker's anchored subject. A non-resumable writer that still omits
     // it after one contextual re-ask may use the task-record fallback below.
@@ -15726,6 +15785,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const harnessCommitRefusalState: { reason?: string } = {};
     commitCount = harnessCommitForShellLessWorker({
       harnessOwnsGit,
+      shadow,
       commitCount,
       report: fullText(impl),
       worktreePath,
@@ -16054,6 +16114,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       );
       return { taskId, runId, merged: false, costUsd, verdict: "pr_attribution_failed" };
     }
+    if (shadow) {
+      ensureShadowDraft(prUrl);
+      log("shadow.draft_confirmed", { pr_url: prUrl });
+    }
     // Stamp the provenance trailer (deriveStatus source (c)) before gating.
     ensureTaskTrailer(prUrl, taskId, log);
     recordHeadProviderAfterPush(
@@ -16112,6 +16176,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const ciState = ciGateState(ci);
     if (ciState !== "green") {
       const reason = ciGateBlockReason(ci);
+      if (shadow) recordShadowVerdict(prUrl, "not_reviewed", "would_block", reason, log);
       say("fallback: pushing branch already done; ci not green — skipping review, leaving PR open");
       log("verdict", {
         verdict: "blocked_ci",
@@ -16194,6 +16259,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     });
 
     if (review.verdictWithheld) {
+      if (shadow) recordShadowVerdict(prUrl, "withheld", "would_block", review.verdictWithheld, log);
       log("verdict", {
         verdict: "blocked",
         pr_url: prUrl,
@@ -16351,6 +16417,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         },
       });
       review = rung.review;
+      if (shadow && (review.state !== "success" || rung.outcome !== "fixed")) {
+        recordShadowVerdict(prUrl, review.state, "would_block", `review ${review.state}; fix rung ${rung.outcome}`, log);
+      }
       if (rung.outcome === "spawn_abandoned") {
         // W1-T1044: the worker never demonstrably returned — never a strike (see
         // spawnFixWorkerBounded's own doc), and the abandonment is already ledgered
@@ -16477,6 +16546,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // identical diff if either read failed differently) so this decision-time gate honours the
     // W1-T919 ruling exactly like the at-open one just did.
     const armDecision = resolveAutoMergeArm(review, tddStrict, cappedOverride, (s, extra) => log(s, extra), irreversible);
+    if (shadow && !armDecision.arm) {
+      recordShadowVerdict(prUrl, review.state, "would_block", armDecision.reason, log);
+      log("verdict", { verdict: "blocked", pr_url: prUrl, reason: "shadow instance; live arm gate refused" });
+      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
+    }
     if (!armDecision.arm) {
       // W1-T125 primitive, retargeted by W1-T975: this run itself never arms until
       // AFTER this check passes (see the deferred arm call further down, right
@@ -16662,6 +16736,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       confidenceThreshold: riskPolicy.confidenceThreshold,
     });
     if (riskJudgeResult.action.kind === "escalate") {
+      if (shadow) recordShadowVerdict(prUrl, review.state, "would_block", "risk judge escalated", log);
       log("verdict", {
         verdict: "blocked",
         pr_url: prUrl,
@@ -16673,6 +16748,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         ...terminalVerdictFields(impl),
       });
       say(`verdict: blocked — risk judge escalated: ${riskJudgeResult.escalationUrl}`);
+      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
+    }
+
+    if (shadow) {
+      recordShadowVerdict(prUrl, review.state, "would_merge", "live gates passed; shadow instance holds draft", log);
+      log("verdict", { verdict: "blocked", pr_url: prUrl, reason: "shadow instance awaits operator judgment" });
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
     }
 
@@ -31487,6 +31568,7 @@ export async function daemonCommand(
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
   log("daemon.target", {
     repo: target.repo,
+    mode: instanceModeForTarget(target.owner, target.repo),
     gateway: `${target.owner}/${target.repo}`,
     plan_path: target.planPath,
     self_host: target.isSelf,
@@ -37201,9 +37283,10 @@ export const REFUSED_REPORT_TAIL_CHARS = 800;
 
 export function harnessCommitForShellLessWorker(
   input: {
-    /** Was this spawn bounded WITHOUT a shell? False leaves the count untouched: a worker that
-     *  could have committed and chose not to keeps its long-standing `no_pr` verdict. */
+    /** Did the output contract assign git to the harness? False leaves the count untouched. */
     harnessOwnsGit: boolean;
+    /** Shadow publication uses the harness even when the worker has a shell. */
+    shadow?: boolean;
     commitCount: number;
     report: string;
     worktreePath: string;
@@ -37245,7 +37328,7 @@ export function harnessCommitForShellLessWorker(
     input.onRefusal?.(refusalReason, committed.undeclared);
     return input.commitCount;
   }
-  input.say(`harness committed the worker's edits (${committed.sha?.slice(0, 8)}) — it had no shell of its own`);
+  input.say(`harness committed the worker's edits (${committed.sha?.slice(0, 8)}) — ${input.shadow ? "shadow publication stays with the harness" : "it had no shell of its own"}`);
   return ahead(input.worktreePath, "origin/main");
 }
 
