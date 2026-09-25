@@ -68,7 +68,7 @@ import {
   INCIDENT_INGEST_ROUTE_METHOD,
   INCIDENT_INGEST_ROUTE_PATH,
 } from "./incident-events.js";
-import { buildIncidentsRoute, type IncidentsRouteDeps } from "./incident-lifecycle.js";
+import { buildIncidentsRoute, type IncidentsRouteInput } from "./incident-lifecycle.js";
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
@@ -451,7 +451,7 @@ export interface ServeDeps {
    * `readStore` is injectable so a test drives the "unreadable" (`ok: false`) path without a real
    * state dir — the same seam those two fields already use.
    */
-  incidents?: Omit<IncidentsRouteDeps, "stateDir"> & { stateDir?: string };
+  incidents?: Omit<IncidentsRouteInput, "stateDir"> & { stateDir?: string };
   /** W1-T4227: `GET /v1/registry`'s inputs; the repo path defaults via `daemonInstanceRegistryPath`. */
   registry?: {
     /** The repo-tracked `.remudero/daemon-instances.yaml` — the one registry. */

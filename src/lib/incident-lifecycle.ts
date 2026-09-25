@@ -17,12 +17,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { gardenStatePath, readGardenState, type GardenState } from "./gardener.js";
 import type { IncidentKind, IncidentSource } from "./incident-events.js";
 import { sendJson } from "./panel-actions.js";
 import type { Route } from "./service.js";
+import type { SreLaneInput } from "./sre-lane.js";
 
 // ── the record ───────────────────────────────────────────────────────────────────────────────
 
@@ -168,16 +169,15 @@ export function writeIncidentLifecycleStore(stateDir: string, store: IncidentLif
 
 // ── one pass ─────────────────────────────────────────────────────────────────────────────────
 
-export interface IncidentLifecyclePassDeps {
-  stateDir: string;
-  clock?: Clock;
+/** `stateDir`, `clock` and `log` are sre-lane.ts's own members — this pass closes the loop that
+ *  lane opens — so they are reused from {@link SreLaneInput}, never redeclared as another seam. */
+export type IncidentLifecyclePassInput = Pick<SreLaneInput, "stateDir" | "clock" | "log"> & {
   windowMs?: number;
   /** The newest `incident.event`/`incident.sampled` row's ts (ms) for `fingerprint` strictly after
    *  `sinceMs`, read-only — `undefined` when none fired. Mirrors sre-lane.ts's own `readEvents`
    *  seam: the caller owns the ledger union, this module owns only the decision. */
   latestEventMsSince: (fingerprint: string, sinceMs: number) => number | undefined;
-  log: (step: string, extra?: Record<string, unknown>) => void;
-}
+};
 
 /**
  * Evaluate every `deployed` record in `store` and apply {@link evaluateDeployedIncident}, crediting
@@ -185,7 +185,7 @@ export interface IncidentLifecyclePassDeps {
  * a record that has already verified or regressed is inert here forever after, so nothing is ever
  * credited or debited twice for the same fingerprint.
  */
-export function runIncidentLifecyclePass(store: IncidentLifecycleStore, deps: IncidentLifecyclePassDeps): IncidentLifecycleStore {
+export function runIncidentLifecyclePass(store: IncidentLifecycleStore, deps: IncidentLifecyclePassInput): IncidentLifecycleStore {
   const clock = deps.clock ?? systemClock;
   const nowMs = clock.now();
   let next = store;
@@ -237,17 +237,16 @@ function projectIncidentRecord(record: IncidentLifecycleRecord): IncidentWire {
   };
 }
 
-export interface IncidentsRouteDeps {
-  stateDir: string;
-  clock?: Clock;
+/** `stateDir`/`clock` are the pass's own (and so sre-lane.ts's) members, reused, not redeclared. */
+export type IncidentsRouteInput = Pick<IncidentLifecyclePassInput, "stateDir" | "clock"> & {
   /** Injectable so a test drives the "unreadable" (`ok: false`) path without a real state dir —
    *  the same seam `replay`/`peek`/`selfMeasurement` already use in serve.ts. */
   readStore?: (stateDir: string) => IncidentLifecycleStoreRead;
-}
+};
 
 /** `GET /v1/incidents` (read, W1-T4387): the lifecycle store, newest-first. An unreadable store is
  *  a 503 naming why, never a `200 {incidents: []}` a console cannot tell apart from "all clear". */
-export function buildIncidentsRoute(deps: IncidentsRouteDeps): Route {
+export function buildIncidentsRoute(deps: IncidentsRouteInput): Route {
   const clock = deps.clock ?? systemClock;
   const readStore = deps.readStore ?? readIncidentLifecycleStore;
   return {
