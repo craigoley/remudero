@@ -26,13 +26,15 @@
 // would ever race on) and force a silently growing exemption list -- the failure mode
 // scripts/task-id-existence-check.mjs's own header names. The hazard this file detects is
 // narrower and STATABLE: a count assertion over a MODULE-LEVEL TABLE (a top-level `const`/`let`,
-// the FAST_GATE_STEPS shape) that the same file ALSO enumerates with a `deepEqual`/
-// `deepStrictEqual` over that same table -- in the same test, or in a different one. That is the
-// shape where the count adds no coverage beyond what the deepEqual already pins, and adds a
-// silent merge hazard on top. A count over a table that is the ONLY assertion made about it, or a
-// count over an ordinary per-test local (a `calls`/`seen` recorder scoped inside one `test(...)`
-// body, never declared at module scope, and so never shared across two concurrent PRs the way a
-// table is) is legitimate and must not be flagged -- see the negative fixture below.
+// the FAST_GATE_STEPS shape) that the same file ALSO compares through `deepEqual`/
+// `deepStrictEqual`, whether that table is the actual or expected argument. This catches both a
+// shared table whose members are separately enumerated and a test-local baseline list compared
+// with a production registry. In either shape the count adds no coverage beyond the member
+// comparison, and adds a silent merge hazard on top. A count over a table that is the ONLY thing
+// asserted about it, or a count over an ordinary per-test local (a `calls`/`seen` recorder scoped
+// inside one `test(...)` body, never declared at module scope, and so never shared across two
+// concurrent PRs the way a table is) is legitimate and must not be flagged -- see the negative
+// fixture below.
 //
 // RE-DERIVED, NOT TRUSTED (task rationale, "RE-DERIVE THE POPULATION..."). Running this exact
 // detector over `git ls-files`-tracked test/**/*.test.ts at sha 7e86a241 (886 files) finds ZERO
@@ -59,26 +61,12 @@ const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 // ──────────────────────────────────────── the detector ────────────────────────────────────────
 
-/** A count assertion this rule considers unsafe: `assert.equal`/`assert.strictEqual` over
- *  `<receiver>.length` against an integer literal, where `<receiver>`'s base identifier is a
- *  module-level table this same file also enumerates via `deepEqual`/`deepStrictEqual`. */
+/** A count assertion this rule considers unsafe: a literal `.length`/`.size` assertion over a
+ *  module-level table that this file also compares through `deepEqual`/`deepStrictEqual`. */
 interface UnsafeCountAssertion {
   file: string;
   line: number;
   receiver: string;
-}
-
-const COUNT_RE = /assert\.(?:equal|strictEqual)\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.length\s*,\s*(\d+)\s*[,)]/g;
-const DEEP_RE = /assert\.(?:deepEqual|deepStrictEqual)\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)/g;
-
-/** A top-level (column-0) `const`/`let` declaration -- the FAST_GATE_STEPS shape: a named,
- *  module-scoped table, never a `test(...)` body's own local (which is indented). */
-const TOP_LEVEL_DECL_RE = /^(?:export )?(?:const|let)\s+([A-Za-z_$][\w$]*)/gm;
-
-function stripComments(source: string): string {
-  let out = source.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
-  out = out.replace(/\/\/[^\n]*/g, (m) => " ".repeat(m.length));
-  return out;
 }
 
 /** The leading identifier of a member chain: `FAST_GATE_STEPS` from `FAST_GATE_STEPS.map(...)`,
@@ -87,41 +75,121 @@ function baseIdent(receiver: string): string {
   return receiver.split(".")[0];
 }
 
-function lineOf(source: string, index: number): number {
-  return source.slice(0, index).split("\n").length;
+const COUNT_RE = /assert\.(?:equal|strictEqual)\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.(?:length|size)\s*,\s*(\d+)\s*[,)]/g;
+const DEEP_CALL_RE = /assert\.(?:deepEqual|deepStrictEqual)\s*\(/g;
+
+/** A top-level (column-0) `const`/`let` declaration -- never a `test(...)` body's local. */
+const TOP_LEVEL_DECL_RE = /^(?:export )?(?:const|let)\s+([A-Za-z_$][\w$]*)/gm;
+
+/** Preserve offsets and line numbers while excluding comments and quoted examples. */
+function maskNonCode(source: string): string {
+  let out = "";
+  let quote = "";
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i];
+    const next = source[i + 1];
+    if (quote) {
+      out += char === "\n" ? "\n" : " ";
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = "";
+    } else if (lineComment) {
+      out += char === "\n" ? "\n" : " ";
+      if (char === "\n") lineComment = false;
+    } else if (blockComment) {
+      out += char === "\n" ? "\n" : " ";
+      if (char === "*" && next === "/") {
+        out += " ";
+        i++;
+        blockComment = false;
+      }
+    } else if (char === "/" && next === "/") {
+      out += "  ";
+      i++;
+      lineComment = true;
+    } else if (char === "/" && next === "*") {
+      out += "  ";
+      i++;
+      blockComment = true;
+    } else if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      out += " ";
+    } else {
+      out += char;
+    }
+  }
+  return out;
+}
+
+/** Split a call's arguments at commas that are not nested in (), [] or {}. */
+function callArguments(source: string, openParen: number): string[] {
+  const args: string[] = [];
+  const stack: string[] = [")"];
+  const matching: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
+  let start = openParen + 1;
+  for (let i = start; i < source.length; i++) {
+    const char = source[i];
+    if (matching[char]) {
+      stack.push(matching[char]);
+    } else if (char === stack.at(-1)) {
+      stack.pop();
+      if (stack.length === 0) {
+        args.push(source.slice(start, i).trim());
+        return args;
+      }
+    } else if (char === "," && stack.length === 1) {
+      args.push(source.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  return [];
 }
 
 function findAll(re: RegExp, text: string): RegExpExecArray[] {
   const out: RegExpExecArray[] = [];
   re.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) out.push(m);
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text))) out.push(match);
   return out;
 }
 
-/** The rule itself. `requireSameReceiver` defaults to true -- the load-bearing co-location
- *  condition this file's own negative fixture proves is load-bearing (see the acceptance test
- *  that calls this with `requireSameReceiver: false`). Never set to false outside that one test:
- *  it exists solely to demonstrate what the condition guards against, not as a real detector mode. */
+function lineOf(source: string, index: number): number {
+  return source.slice(0, index).split("\n").length;
+}
+
+function identifiersIn(source: string): string[] {
+  return [...source.matchAll(/[A-Za-z_$][\w$]*/g)]
+    .filter((match) => source[match.index - 1] !== ".")
+    .map((match) => match[0]);
+}
+
+/** The rule defaults to matching the same module table on a deep-comparison side; disabling that
+ *  condition is used only by the negative fixture to prove it is load-bearing. */
 function unsafeCountAssertions(rawSource: string, file: string, opts: { requireSameReceiver?: boolean } = {}): UnsafeCountAssertion[] {
   const requireSameReceiver = opts.requireSameReceiver ?? true;
-  const source = stripComments(rawSource);
-
+  const source = maskNonCode(rawSource);
   const topLevelTables = new Set(findAll(TOP_LEVEL_DECL_RE, source).map((m) => m[1]));
-  const deepEqualBases = new Set(
-    findAll(DEEP_RE, source)
-      .map((m) => baseIdent(m[1]))
-      .filter((b) => topLevelTables.has(b)),
-  );
-  const anyTableEnumeratedInFile = deepEqualBases.size > 0;
+  const deepEqualBases = new Set<string>();
+  for (const call of findAll(DEEP_CALL_RE, source)) {
+    const openParen = call.index + call[0].lastIndexOf("(");
+    for (const argument of callArguments(source, openParen).slice(0, 2)) {
+      for (const name of identifiersIn(argument)) {
+        if (topLevelTables.has(name)) deepEqualBases.add(name);
+      }
+    }
+  }
 
+  const anyTableEnumeratedInFile = deepEqualBases.size > 0;
   const out: UnsafeCountAssertion[] = [];
-  for (const m of findAll(COUNT_RE, source)) {
-    const receiver = m[1];
+  for (const match of findAll(COUNT_RE, source)) {
+    const receiver = match[1];
     const base = baseIdent(receiver);
-    if (!topLevelTables.has(base)) continue; // not a shared table -- an ordinary per-test local
+    if (!topLevelTables.has(base)) continue; // ordinary per-test locals are not shared tables
     const flagged = requireSameReceiver ? deepEqualBases.has(base) : anyTableEnumeratedInFile;
-    if (flagged) out.push({ file, line: lineOf(source, m.index), receiver });
+    if (flagged) out.push({ file, line: lineOf(source, match.index), receiver });
   }
   return out;
 }
@@ -187,6 +255,42 @@ const NEGATIVE_FIXTURE = [
 test("a count assertion that is the only assertion about its collection is NOT flagged", () => {
   const hits = unsafeCountAssertions(NEGATIVE_FIXTURE, "fixture/negative.test.ts");
   assert.equal(hits.length, 0, `expected no hits, got: ${JSON.stringify(hits)}`);
+});
+
+const TEST_LOCAL_BASELINE_FIXTURE = [
+  'const BASELINE_COMMAND_NAMES = ["a", "b"];',
+  'const BASELINE_LABELS = new Set(["x", "y"]);',
+  'const COMMANDS = ["a", "b"];',
+  'const LABELS = new Set(["x", "y"]);',
+  'test("the test-local inventory is reviewed", () => {',
+  "  assert.deepStrictEqual([...COMMANDS.map((command, index) => [command, index])].sort(), BASELINE_COMMAND_NAMES);",
+  "  assert.equal(BASELINE_COMMAND_NAMES.length, 2);",
+  "  assert.deepEqual(LABELS, BASELINE_LABELS);",
+  "  assert.equal(BASELINE_LABELS.size, 2);",
+  "});",
+  "",
+].join("\n");
+
+test("W1-T4474: a literal count over a test-local baseline list is named", () => {
+  const file = "fixture/test-local-baseline.test.ts";
+  const hits = unsafeCountAssertions(TEST_LOCAL_BASELINE_FIXTURE, file);
+  assert.deepEqual(hits, [
+    { file, line: 7, receiver: "BASELINE_COMMAND_NAMES" },
+    { file, line: 9, receiver: "BASELINE_LABELS" },
+  ]);
+});
+
+test("quoted or commented lookalikes are not treated as executable count and deep-comparison assertions", () => {
+  const source = [
+    "const REGISTRY = [\"a\", \"b\"];",
+    "const BASELINE = [\"a\", \"b\"];",
+    'test("an example is not an assertion", () => {',
+    '  const example = "assert.deepEqual(REGISTRY, BASELINE); assert.equal(BASELINE.length, 2);";',
+    "  // assert.deepEqual(REGISTRY, BASELINE);",
+    "  assert.equal(BASELINE.length, 2);",
+    "});",
+  ].join("\n");
+  assert.deepEqual(unsafeCountAssertions(source, "fixture/lookalikes.test.ts"), []);
 });
 
 test("an ordinary per-test local (never a module-level table) is never flagged, even when the same test both counts and deepEquals it -- the mock-recorder shape this rule must not treat as hazardous", () => {
