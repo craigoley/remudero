@@ -32,3 +32,13 @@ Learnings used when offered: 13%. Dangling Why pointers: 0.
 - retire askuserquestion-auto-resolves-empty-headless: Workers offered it have rarely used it, compared with other learnings.
 
 Learnings used when offered: 13%. Dangling Why pointers: 0.
+
+## Pass 2026-09-25T20:17:12.931Z
+
+- retire warn-never-reaches-lint-plan-exit-code: Workers offered it have rarely used it, compared with other learnings.
+- retire next-task-id-needs-a-fresh-pull: Workers offered it have rarely used it, compared with other learnings.
+- retire ledger-step-name-is-a-claim-not-evidence: Workers offered it have rarely used it, compared with other learnings.
+- retire rerun-the-job-not-the-run: Workers offered it have rarely used it, compared with other learnings.
+- retire maxbudget-between-turns: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 12%. Dangling Why pointers: 0.

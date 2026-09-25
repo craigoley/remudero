@@ -81,7 +81,8 @@
   cited: "2026-08-23"
 - id: rerun-the-job-not-the-run
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire rerun-the-job-not-the-run
+  lifecycle: superseded
   files: [src/lib/sweep.ts, src/run-task.ts]
   fact: >-
     Two GitHub re-run endpoints, very different cost: jobs/{job_id}/rerun re-runs ONE job, while
