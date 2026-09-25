@@ -496,9 +496,9 @@ export interface CohortOutcome {
 export const CANARY_MERGE_RATE_DROP = "merge_rate_drop";
 export const CANARY_COST_PER_MERGED_RATIO = "cost_per_merged_ratio";
 
-/** A cohort breaches when its merge rate falls this far below the rest's… */
+/** PRIMARY CONTROL: a cohort breaches when its merge rate falls this far below the rest's… */
 export const DEFAULT_CANARY_MAX_MERGE_RATE_DROP = 0.15;
-/** …or when a merged task costs this many times what one costs in the rest. */
+/** PRIMARY CONTROL: …or when a merged task costs this many times what one costs in the rest. */
 export const DEFAULT_CANARY_MAX_COST_RATIO = 1.25;
 
 export function cohortGuardMetrics(opts: { maxMergeRateDrop?: number; maxCostRatio?: number } = {}): PromotionGuardMetric[] {

@@ -11,11 +11,14 @@ import { test } from "node:test";
 
 import type { Clock } from "../src/lib/clock.js";
 import {
+  applyConfigEdits,
   capCandidate,
   configCanariesPath,
   configGardenSpec,
+  mountCandidate,
   readConfigCanaries,
   recalibratedBudget,
+  reverseEdits,
   routeLine,
   runConfigGarden,
   CONFIG_GARDEN_CLASSES,
@@ -23,6 +26,7 @@ import {
   type ConfigInventory,
 } from "../src/lib/config-gardener.js";
 import { cohortGuardMetrics, cohortGuardObservations, enterCanary, stepCanary } from "../src/lib/experiment-promotion.js";
+import type { MountRecommendation } from "../src/lib/mount-recommender.js";
 import { gardenStatePath, readGardenState, type GardenCheckout, type PrState } from "../src/lib/gardener.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -186,6 +190,13 @@ test("W1-T4113: a thin cohort waits rather than being judged, and a closed PR ex
   h.advance(2 * HOUR);
   h.pass();
   assert.equal(readConfigCanaries(h.deps.stateDir)[0]!.promotion.state, "canary", "one task is below the floor: it waits");
+  h.advance(22 * 24 * HOUR);
+  h.pass();
+  assert.equal(readConfigCanaries(h.deps.stateDir)[0]!.promotion.state, "expired", "never measured, it expires rather than being promoted");
+  const released = readGardenState(gardenStatePath(h.deps.stateDir, "config"), CONFIG_GARDEN_CLASSES);
+  assert.deepEqual(released.classes["recalibrate-budget"], { alpha: 3, beta: 1 }, "an expiry is released unjudged");
+  assert.notEqual(released.pending?.prUrl, "https://github.com/acme/remudero/pull/101", "the expired canary no longer holds the gardener");
+  assert.ok(h.logs.some((l) => l.step === "config.canary_expired"));
 
   const closed = harness();
   closed.pass();
@@ -286,4 +297,36 @@ test("W1-T4113: a self-hosting daemon wires the config gardener", async () => {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
   }
+});
+
+test("W1-T4113: a mount recommendation is adopted on its route line, on the same provider only, and reverts exactly", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4113-mounts-`));
+  mkdirSync(join(root, ".remudero"));
+  const route = "      src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 160000 }";
+  const text = ["tiers:", "  sonnet: 2", "routes:", "  implement:", "    medium:", route, ""].join("\n");
+  writeFileSync(join(root, ".remudero", "mounts.yaml"), text);
+  const arm = (servedModel: string, effort: string, provider: string, cost: number) => ({ armKey: `${provider}/${servedModel}/${effort}`, provider, servedModel, effort, n: 40, passing: 30, costPerCompletedTaskUsd: cost });
+  const rec = (provider: string): MountRecommendation => ({
+    kind: "recommendation",
+    cellKey: "implement|medium|src",
+    type: "implement",
+    risk: "medium",
+    taskClass: "src",
+    recommendedArm: arm("haiku", "medium", provider, 2),
+    currentArm: arm("sonnet", "high", "claude", 5),
+    effectSizeUsd: 3,
+    interval: { lowUsd: 1, highUsd: 4 },
+    objective: { kind: "notional-dollar", unit: "usd", cheaperValue: 2, costlierValue: 5 },
+    note: "n",
+  });
+  const inv = (recommendations: MountRecommendation[]): ConfigInventory => ({ nowIso: new Date(T0).toISOString(), runs: [], queued: [], recommendations, active: [], cooling: [] });
+  assert.equal(mountCandidate(inv([rec("codex")]), root), undefined, "a provider switch is more than one line");
+  const action = mountCandidate(inv([rec("claude")]), root)!;
+  assert.deepEqual(action.edits, [{ path: ".remudero/mounts.yaml", from: route, to: "      src:       { model: haiku, effort: medium,   max_turns: 400, context_budget: 160000 }" }]);
+  assert.deepEqual(action.cohort, { kind: "cell", type: "implement", risk: "medium", taskClass: "src" });
+  assert.equal(action.shadowObservations[0]!.value, 1, "exposure is gated on the recommender's own effect interval");
+  assert.deepEqual(applyConfigEdits(root, action.edits), [".remudero/mounts.yaml"]);
+  assert.deepEqual(applyConfigEdits(root, action.edits), [], "an edit whose line moved on is skipped, never guessed");
+  applyConfigEdits(root, reverseEdits(action.edits));
+  assert.equal(readFileSync(join(root, ".remudero", "mounts.yaml"), "utf8"), text);
 });

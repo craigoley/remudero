@@ -133,10 +133,12 @@ export const BUDGET_HEADROOM = 1.5;
 export const BUDGET_MIN_SAMPLES = 20;
 /** A declared budget within this fraction of the derived one is left alone. */
 export const BUDGET_MIN_CHANGE = 0.25;
-/** Past p90×headroom, at most this share of the class's history may have overrun the new budget. */
+/** BACKSTOP: past p90×headroom, at most this share of the class's history may have overrun the new
+ *  budget. By construction under a tenth does, so this fires only when the derivation itself is wrong. */
 export const BUDGET_MAX_SHADOW_OVERRUN = 0.1;
 /** Every canary needs this many tasks on BOTH sides before it is judged (experiment-promotion's floor). */
 export const CANARY_DENOMINATOR_FLOOR = 5;
+/** PRIMARY CONTROL on exposure: a budget canary changes at most this many shards at once. */
 export const CANARY_MAX_COHORT = 10;
 export const CANARY_TTL_MS = 21 * 24 * 3600 * 1000;
 /** How often the ledger union is re-read for planning: every tick would read it every poll. */
@@ -386,9 +388,10 @@ export function mountCandidate(inv: ConfigInventory, repoRoot: string): ConfigGa
 
 /** The re-derived learnings cap, edited in both places the drift test pins together. */
 export function capCandidate(inv: ConfigInventory): ConfigGardenAction | undefined {
-  const d = inv.cap?.derivation;
-  if (!inv.cap || !d?.changed || !d.pressure || d.recommendedCapChars === inv.cap.current) return undefined;
-  const cur = inv.cap.current;
+  const cap = inv.cap;
+  const d = cap === undefined ? undefined : cap.derivation;
+  if (cap === undefined || d === undefined || d.changed === false || d.pressure === undefined || d.recommendedCapChars === cap.current) return undefined;
+  const cur = cap.current;
   const next = d.recommendedCapChars;
   const cohort: ConfigCohort = { kind: "all" };
   return {
