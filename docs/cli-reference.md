@@ -15,6 +15,7 @@ Every `rmd <command>` this binary dispatches, rendered from the same `COMMANDS` 
 
 ```
 usage:
+  rmd pr open --head <branch> --title <title> --body-file <file> [--dry-run]   # Open a checked, ready-for-review pull request over REST.
   rmd run-task <task-id> [--allow-stale] [--rerun]   # Dispatch one task from the origin/main plan blob, fetching first.
   rmd review <pr-number> [--repo <name>] [--override-capped-by <name> --override-capped-reason <text>]   # Post remudero-review on a hand-opened PR, materializing a worktree at its head.
   rmd merge-hold <engage|release> [--pr <n> [--task <id>]] --by <name> --reason <text> --confirm   # Engage or release an attributable, durable PR or fleet auto-merge hold.
@@ -114,6 +115,16 @@ command provably read-only.
 ```
 
 ## Commands
+
+### `rmd pr`
+
+Open a checked, ready-for-review pull request over REST.
+
+```
+rmd pr open --head <branch> --title <title> --body-file <file> [--dry-run]
+```
+
+Adds the task trailer for a run branch, checks the author-time gate and grep proof discrimination, then opens a ready pull request. --dry-run prints the final body without opening it.
 
 ### `rmd run-task`
 

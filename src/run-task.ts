@@ -10,6 +10,7 @@ import {
   type CaptureSurfaceFireRecord,
 } from "./lib/doctor.js";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { openPullRequestChecked, type PrOpenDeps } from "./lib/pr-open.js";
 import { ghExec, ghJsonAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
@@ -19610,6 +19611,53 @@ export async function evaluateRiskJudgeDispositionCommand(rest: string[]): Promi
   } catch (error) {
     console.error(`risk-judge-eval: ${String((error as Error)?.message ?? error)}`);
     return 2;
+  }
+}
+
+/** CLI boundary for the checked REST writer; the injected opener keeps argument/refusal tests offline. */
+export async function prOpenCommand(
+  rest: string[],
+  deps: { open?: typeof openPullRequestChecked; context?: PrOpenDeps } = {},
+): Promise<number> {
+  const flags = new Map<string, string>();
+  if (rest[0] !== "open") {
+    console.error("usage: rmd pr open --head <branch> --title <title> --body-file <file> [--dry-run]");
+    return 2;
+  }
+  let dryRun = false;
+  for (let i = 1; i < rest.length; i++) {
+    const arg = rest[i];
+    if (arg === "--dry-run" && !dryRun) { dryRun = true; continue; }
+    if (!["--head", "--title", "--body-file"].includes(arg) || flags.has(arg) || !rest[i + 1] || rest[i + 1].startsWith("--")) {
+      console.error(`pr open: invalid argument ${arg}`);
+      return 2;
+    }
+    flags.set(arg, rest[++i]);
+  }
+  const head = flags.get("--head");
+  const title = flags.get("--title");
+  const bodyFile = flags.get("--body-file");
+  if (!head || !title || !bodyFile) {
+    console.error("pr open: --head, --title and --body-file are required");
+    return 2;
+  }
+  try {
+    const context = deps.context ?? { root: repoRoot, ...resolveOwnerRepo() };
+    const writer = context.create ?? ((input: { head: string; title: string; body: string }) => {
+      assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${context.owner}/${context.repo}`);
+      return createPlanPrRest(ghJson, context.owner, context.repo, { ...input, base: "main" });
+    });
+    const options = { head, title, bodyFile, dryRun };
+    const result = deps.open
+      ? await deps.open(options, context)
+      : await openPullRequestChecked(options, { ...context, create: writer });
+    if (dryRun) console.log(result.body);
+    else if (result.pr) console.log(result.pr.prUrl);
+    else throw new Error("REST create returned no pull request");
+    return 0;
+  } catch (error) {
+    console.error(`pr open: ${String((error as Error)?.message ?? error)}`);
+    return 1;
   }
 }
 
@@ -45508,6 +45556,12 @@ export async function loadHeavyVerb(name: HeavyVerbName): Promise<void> {
 
 const COMMANDS: readonly CommandSpec[] = [
   {
+    name: "pr",
+    syntax: "rmd pr open --head <branch> --title <title> --body-file <file> [--dry-run]",
+    summary: "Open a checked, ready-for-review pull request over REST.",
+    detail: "Adds the task trailer for a run branch, checks the author-time gate and grep proof discrimination, then opens a ready pull request. --dry-run prints the final body without opening it.",
+  },
+  {
     name: "run-task",
     syntax: "rmd run-task <task-id> [--allow-stale] [--rerun]",
     summary: "Dispatch one task from the origin/main plan blob, fetching first.",
@@ -46526,6 +46580,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       return await withGhTransportFloor(() => reviewCommand(arg, rest.slice(1)));
     },
   ],
+  ["pr", (rest) => prOpenCommand(rest)],
   ["merge-hold", (rest) => mergeHoldCommand(rest)],
   ["feedback-reconcile", async (rest) => await feedbackReconcileCommand(rest)],
   [
