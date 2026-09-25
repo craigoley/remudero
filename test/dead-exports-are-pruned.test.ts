@@ -18,6 +18,7 @@ import {
   EXPORT_GARDEN_BATCH,
   exportDeclarationSpan,
   exportGardenCandidates,
+  exportGardenRecordPath,
   exportGardenSpec,
   exportInventory,
   IDENT_RE,
@@ -178,6 +179,21 @@ test("W1-T4117: a deletion re-added within the window is read as a failure", () 
   assert.deepEqual(reverted.tally, { trials: 5, successes: 1 }, "a re-added export is a failure, and never proposed again");
   scan(h.stateDir, "2026-09-24T00:00:00.000Z", [["src/lib/dead.ts", "deadA"]]);
   assert.deepEqual(exportGardenCandidates(exportInventory(repo.dir, h.stateDir), repo.dir), []);
+});
+
+test("W1-T4117: a corrupt gardener record restarts sightings before an export can be pruned", () => {
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4117-corrupt-`));
+  const finding = adoptionProposalId({ shape: "symbol-no-caller", definedIn: "src/lib/dead.ts", mechanism: "deadA" });
+  writeFileSync(exportGardenRecordPath(stateDir), "{torn record");
+
+  scan(stateDir, "2026-09-20T00:00:00.000Z", [["src/lib/dead.ts", "deadA"]]);
+  const first = exportInventory(stateDir, stateDir);
+  assert.deepEqual(first.record.sightings[finding], ["2026-09-20T00:00:00.000Z"]);
+  assert.deepEqual(first.twice, [], "a corrupt record cannot supply the first of two sightings");
+  assert.deepEqual(first.record.deletions, []);
+
+  scan(stateDir, "2026-09-21T00:00:00.000Z", [["src/lib/dead.ts", "deadA"]]);
+  assert.deepEqual(exportInventory(stateDir, stateDir).twice, [finding], "a second fresh scan restores eligibility");
 });
 
 test("W1-T4117: a declaration span covers its comment and body, and refuses an overload", () => {
