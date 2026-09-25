@@ -19,6 +19,7 @@ import {
   applyExportDeletions,
   exportDeclarationSpan,
   exportGardenCandidates,
+  exportGardenRecordPath,
   exportGardenSpec,
   exportInventory,
   IDENT_RE,
@@ -154,6 +155,23 @@ test("W1-T4117: an export named in a string lookup is kept", () => {
   assert.match(after, /^export function registryHandler\(\)/m, "the registry-named export is kept");
   assert.match(after, /^export function selfUsed\(\)/m, "an export its own file still uses is kept");
   assert.doesNotMatch(after, /plainDead/, "the export nothing names is deleted");
+});
+
+test("W1-T4117: a malformed record requires two fresh sightings before deletion", () => {
+  const repo = repoWith({ "src/lib/dead.ts": deadFile(["deadA"]) });
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4117-corrupt-`));
+  const reported: Array<[string, string]> = [["src/lib/dead.ts", "deadA"]];
+  writeFileSync(exportGardenRecordPath(stateDir), "{truncated");
+
+  scan(stateDir, "2026-09-20T00:00:00.000Z", reported);
+  const first = exportInventory(repo.dir, stateDir);
+  assert.deepEqual(first.twice, [], "a damaged record cannot supply the first sighting");
+  assert.deepEqual(exportGardenCandidates(first, repo.dir), [], "one fresh sighting cannot delete an export");
+
+  scan(stateDir, "2026-09-21T00:00:00.000Z", reported);
+  const second = exportInventory(repo.dir, stateDir);
+  assert.deepEqual(second.twice, [adoptionProposalId({ shape: "symbol-no-caller", definedIn: "src/lib/dead.ts", mechanism: "deadA" })]);
+  assert.deepEqual(exportGardenCandidates(second, repo.dir).map((action) => action.name), ["deadA"]);
 });
 
 test("W1-T4117: a concurrent source edit withdraws the export deletion", () => {
