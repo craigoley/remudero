@@ -716,6 +716,7 @@
     "test/daemon.test.ts": 13127,
     "test/dashboard-loads.test.ts": 0,
     "test/dashboard-main.test.ts": 294,
+    "test/dead-exports-are-pruned.test.ts": 0,
     "test/decision-summary.test.ts": 2470,
     "test/declared-files-correction-exit.test.ts": 305,
     "test/declared-guard-drift.test.ts": 7156,

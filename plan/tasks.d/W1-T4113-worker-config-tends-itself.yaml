@@ -12,7 +12,7 @@
   plan_refs: [W1-T4110, W1-T3146]
   files: [src/lib/config-gardener.ts, src/lib/experiment-promotion.ts, src/run-task.ts, test/worker-config-tends-itself.test.ts]
   priority: 2
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-23 (research): `recommendMounts` sends to the inbox; `declaredBudgetSanityWarning` warns; `cost-anomaly.ts`

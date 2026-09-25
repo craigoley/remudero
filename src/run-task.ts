@@ -149,13 +149,14 @@ import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-s
 import { createChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { mergedInLastDay } from "./lib/fleet-lane.js";
-import { gardenPrState, type GardenWorkspace } from "./lib/knowledge-gardener.js";
+import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { startGarden, type GardenCheckout } from "./lib/gardener.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
+import { exportGardenSpec } from "./lib/export-gardener.js";
 import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
@@ -240,7 +241,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -2150,6 +2151,7 @@ import {
   parseDecisionRequest,
   parseFollowups,
   parseLearningsUsed,
+  parseSkillsUsed,
   parseQuestion,
   parseReconReport,
   parseReport,
@@ -15685,6 +15687,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     }
 
     logLearningsUsed(log, fullText(impl), learningsResult.selectedIds, learningUsagePath(join(config.root, "state")));
+    logSkillsUsed(log, fullText(impl), injectableSkills.map((s) => s.name), skillUsagePath(join(config.root, "state")));
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(worktreePath, workerHeadReflogBefore);
 
@@ -31125,6 +31128,22 @@ export function logLearningsUsed(
   if (usagePath) recordLearningUsage(usagePath, row);
 }
 
+/** W1-T4114: `logLearningsUsed`'s own mirror for `SKILLS_USED` — the skills the knowledge
+ *  gardener's SKILL-LIFECYCLE class judges by, offered/used, not merely selected. */
+export function logSkillsUsed(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  text: string,
+  injectedNames: readonly string[],
+  usagePath?: string,
+): void {
+  const parsed = parseSkillsUsed(text, injectedNames);
+  const row = parsed
+    ? { used_names: parsed.usedNames, injected_names: parsed.injectedNames, refused: parsed.refused }
+    : { silent: true, injected_names: [...injectedNames] };
+  log("skills.used", row);
+  if (usagePath) recordSkillUsage(usagePath, row);
+}
+
 export function memoryLintCommand(rest: string[]): number {
   const out = (line: string) => console.log(line);
   const fix = rest.includes("--fix");
@@ -32388,6 +32407,18 @@ export async function daemonCommand(
                       garden?.stop();
                     },
                   };
+                },
+                // W1-T4117: an export the adoption scan reported unreferenced twice, and that grep
+                // finds named nowhere else, is deleted in a small batch.
+                (intervalMs: number) => {
+                  const exportGarden = {
+                    stateDir: join(config.root, "state"),
+                    repoRoot,
+                    openWorkspace: () => gardenCheckout({ name: "export", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
+                    log,
+                  };
+                  return startGarden(exportGardenSpec(exportGarden), exportGarden, intervalMs);
                 },
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
                 // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
