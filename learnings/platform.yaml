@@ -169,7 +169,8 @@
   cited: "2026-07-19"
 - id: websearch-serverside-webfetch-unverified
   subsystem: sdk-tools
-  lifecycle: active
+  # knowledge gardener: retire websearch-serverside-webfetch-unverified
+  lifecycle: superseded
   files: [src/lib/worker.ts, src/run-task.ts]
   fact: >-
     WebSearch is SERVER-SIDE (Anthropic's) so it researches without opening the sandbox allowedDomains;

@@ -52,7 +52,14 @@ import {
 } from "./status.js";
 import type { CreditBackfillReceipt, CreditStore } from "./status.js";
 import { installPolicyPath, loadDefaultPolicy, PolicyError } from "./policy.js";
-import { loadDefaultCostAnomalyPolicy, recordCostAnomalies, type CostAnomalyPolicy } from "./cost-anomaly.js";
+import {
+  costAnomalyIncidentEvent,
+  loadDefaultCostAnomalyPolicy,
+  recordCostAnomalies,
+  recordRunningLong,
+  runningLongIncidentEvent,
+  type CostAnomalyPolicy,
+} from "./cost-anomaly.js";
 import {
   acceptanceBlockDiagnostics,
   automergeHoldFromLedger,
@@ -9064,13 +9071,37 @@ export async function runSweep(
   // SAME throw containment — a detector failure must never fail the reconciliation pass it shares a
   // ledger read with. `recordCostAnomalies` is idempotent per run id.
   if (!deps.dryRun) {
+    const anomalyPolicy = deps.costAnomalyPolicy ?? loadDefaultCostAnomalyPolicy();
     try {
-      recordCostAnomalies(ledgerLines, deps.costAnomalyPolicy ?? loadDefaultCostAnomalyPolicy(), {
+      const newCostAnomalies = recordCostAnomalies(ledgerLines, anomalyPolicy, {
         ledgerPath: deps.ledgerPath,
         writeLedger: appendLine,
       });
+      // W1-T4417: a `cost.anomaly` row nobody reads is not a report — route each NEW finding into
+      // the SRE gardener's incident ingest (W1-T4383), grouped by task CLASS, not by run.
+      for (const finding of newCostAnomalies) {
+        appendLine(deps.ledgerPath, costAnomalyIncidentEvent(finding));
+      }
     } catch (e) {
       log("sweep.cost_anomaly.error", { error: String((e as Error)?.message ?? e) });
+    }
+
+    // ── W1-T4417 RUNNING-LONG SENTINEL ────────────────────────────────────────────────────────
+    // The other half of "a runaway run is ledgered and acted on never": while a run is still IN
+    // FLIGHT, compare its elapsed wall-clock time to its class's median SETTLED duration from the
+    // SAME corpus/policy — past the multiplier, ledger ONE `run.running_long` row (idempotent per
+    // run id, same as `cost.anomaly`) and post the same kind of incident event. Nothing here stops
+    // the run; wrapped in the same throw containment as the cost sentinel above.
+    try {
+      const newRunningLong = recordRunningLong(ledgerLines, anomalyPolicy, now, {
+        ledgerPath: deps.ledgerPath,
+        writeLedger: appendLine,
+      });
+      for (const finding of newRunningLong) {
+        appendLine(deps.ledgerPath, runningLongIncidentEvent(finding));
+      }
+    } catch (e) {
+      log("sweep.running_long.error", { error: String((e as Error)?.message ?? e) });
     }
   }
 

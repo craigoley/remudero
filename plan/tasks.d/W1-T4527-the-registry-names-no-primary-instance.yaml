@@ -1,0 +1,46 @@
+- id: W1-T4527
+  title: "THE INSTANCE REGISTRY NAMES NO PRIMARY — every instance runs its own deploy judge and restart pressure, so nothing can say which one decides a release: add a `primary: true` field that exactly one live instance carries, readable by the TS parser and both shell readers"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "session: 2026-09-24 release-tag design (operator ruling: core is the primary)"
+  note: |
+    reservation hand-off: run-W1-T4527-1790294141611 -> plan-file-W1-T4527-1790294141611
+  plan_refs: ["W1-T4227", "W1-T3732", "W1-T3733"]
+  files: [src/lib/instance-registry.ts, src/lib/deployer.ts, deploy/recycle-container.sh, deploy/install-host-units.sh, .remudero/daemon-instances.yaml, test/the-registry-names-one-primary-instance.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-24 at origin/main 9aa0dd61. Names are symbols; re-verify at your head.
+
+    OBSERVED: deploy/install-host-units.sh renders one launcher per container, and each runs
+    `rmd deploy-run --image-drift-only --state-root "$STATE_DIR"`. runDeployCycle (src/lib/deployer.ts)
+    accumulates restart pressure into deployRestartPressurePath(stateRoot) and calls judgeDeployWorth, so
+    every instance judges the same merged changes on its own and converges on its own schedule.
+    OBSERVED (operator recon 2026-09-23): core's install was at a564b8ae and console's at 472fac2b on one image.
+    OBSERVED: .remudero/daemon-instances.yaml declares core, site and console; no field marks a primary.
+    Both shell readers REFUSE an unknown field (`project|github_repo|retired) : ;;` then `*) ... REFUSING`),
+    so a new field must be added to both before any registry row carries it.
+    Operator ruling 2026-09-24: core (`remudero-daemon`) is the primary. This is phase 1 of the release-tag
+    plan (W1-T4527..W1-T4531): it only makes the primary nameable. No deploy behavior changes.
+  design: |
+    (i) `primary: true|false` is a known field in parseInstanceRegistry (instance-registry.ts), in
+        daemonInstanceRows (deployer.ts), and in both shell readers' known-field lists.
+    (ii) Exactly one LIVE instance may be primary. Zero or two is a named InstanceRegistryError
+         (`no_primary` / `duplicate_primary`), never a silent pick. A retired row's `primary` is ignored.
+    (iii) deployer.ts exposes isPrimaryDeployment(registryText, stateRoot), resolved through
+          instanceForStateRoot (the W1-T3732 state-root match). An unreadable registry or no match answers
+          `undefined`, and every caller treats undefined as "behave as today".
+    (iv) The tracked registry marks core `primary: true`. No other behavior changes in this task.
+  acceptance:
+    - claim: "exactly one live instance is primary, and zero or two is a named refusal"
+      proof: 'grep: test("W1-T4527: exactly one live instance is primary" in test/the-registry-names-one-primary-instance.test.ts'
+    - claim: "a deployment resolves whether it is the primary through its state root"
+      proof: 'grep: test("W1-T4527: a deployment knows whether it is the primary" in test/the-registry-names-one-primary-instance.test.ts'
+    - claim: "the tracked registry names core as the primary"
+      proof: 'grep: primary: true in .remudero/daemon-instances.yaml'

@@ -1,0 +1,50 @@
+- id: W1-T4530
+  title: "EVERY INSTANCE JUDGES AND DEPLOYS ON ITS OWN, SO THE FLEET DRIFTS APART — a non-primary instance stops running the deploy judge and instead converges to the newest promoted, unrevoked release tag, in its own idle window, with a deadline"
+  repo: remudero
+  depends_on: [W1-T4529]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "session: 2026-09-24 release-tag design"
+  note: |
+    reservation hand-off: run-W1-T4527-1790294141611 -> plan-file-W1-T4527-1790294141611
+  plan_refs: ["W1-T4527", "W1-T4528", "W1-T4529"]
+  files: [src/lib/release-tags.ts, src/lib/deployer.ts, src/run-task.ts, test/every-instance-converges-to-the-fleet-release.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-24 at origin/main 9aa0dd61. Names are symbols; re-verify at your head.
+
+    OBSERVED (operator recon 2026-09-23): on one image, core's install was at a564b8ae and console's at 472fac2b.
+    Each instance's runDeployCycle judges and accumulates its own restart pressure, so the fleet has no single
+    answer to "which version should this instance run".
+    Phase 4 of the release-tag plan, and the first that changes a satellite's behavior. It depends on the
+    bake (W1-T4529) so a satellite only ever follows a release the primary has run healthily.
+  design: |
+    (i) A deployment whose isPrimaryDeployment is `false` skips the pressure/judge block in runDeployCycle and
+        logs `deploy.judge_delegated`. `true` or `undefined` (unreadable registry, no match) keeps today's path.
+    (ii) The satellite reads `git ls-remote origin 'refs/tags/release/*' 'refs/tags/ring/fleet/*' 'refs/tags/revoked/*'`
+         (git protocol, no REST quota) and picks the newest release that has a ring/fleet tag and no revoked tag.
+    (iii) Before acting it checks the manifest's source_sha is an ancestor of origin/main, so a tag can never point
+          an instance at unmerged code. A failed check is logged `release.refused` with the reason.
+    (iv) If its install head is behind that source_sha, it deploys that SHA (not origin/main's tip) and recycles
+         onto the manifest's image_ref, through the existing idle gate. RELEASE_CONVERGE_DEADLINE_MS (recorded
+         constant, start at 6 h) forces the deploy at the next verified idle gap once passed.
+    (v) A satellite already on a newer revoked release rolls back to the newest healthy one.
+    (vi) GitHub unreachable or no release tags: keep running the current install and log `release.unreadable`;
+         never fall back to origin/main's tip.
+    (wiring) runDeployCycle calls resolveFleetRelease from release-tags.ts on a satellite.
+  acceptance:
+    - claim: "a non-primary instance no longer runs the deploy judge"
+      proof: 'grep: test("W1-T4530: a satellite delegates the deploy judgment" in test/every-instance-converges-to-the-fleet-release.test.ts'
+    - claim: "a satellite converges to the newest promoted, unrevoked release"
+      proof: 'grep: test("W1-T4530: a satellite converges to the newest promoted release" in test/every-instance-converges-to-the-fleet-release.test.ts'
+    - claim: "a release whose source is not on main is refused"
+      proof: 'grep: test("W1-T4530: a release not on main is refused" in test/every-instance-converges-to-the-fleet-release.test.ts'
+    - claim: "unreadable tags keep the current install"
+      proof: 'grep: test("W1-T4530: unreadable tags keep the current install" in test/every-instance-converges-to-the-fleet-release.test.ts'
+    - claim: "the deploy cycle resolves the fleet release"
+      proof: 'grep: resolveFleetRelease( in src/lib/deployer.ts'

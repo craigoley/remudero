@@ -1,0 +1,48 @@
+- id: W1-T4526
+  title: "A nested coverage preflight deletes its parent shard's live TMPDIR — the coverage leaf clears a shared scratch path before every run, so a test that calls runCiParity from a coverage shard erases its caller's active fixtures and checkout state"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  origin: "operator-approved follow-up 2026-09-24: local coverage-ratchet preflight erased its active shard TMPDIR while validating W1-T4422 and W1-T4443"
+  plan_refs: [W1-T4422, W1-T4443]
+  files: [src/lib/ci-parity.ts, test/coverage-leaf-isolates-reentrant-scratch.test.ts, test/the-local-gate-writes-coverage-where-ci-does.test.ts]
+  priority: 1
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on 2026-09-24: `coverage-ratchet:test-with-coverage` sets every shard's TMPDIR to
+    `coverageScratchDir(repoRoot)`. `test/ci-parity-contract.test.ts` calls `runCiParity(REPO_ROOT)`
+    from inside one of those shards; the nested `testWithCoverageLeaf` then recursively removes
+    that same directory before spawning its own shards. This deletes the caller's live temporary
+    fixtures and checkouts, causing unrelated tests in the active shard to fail. The defect is
+    re-entrancy, not an incorrect TMPDIR target: the sibling placement is required to keep fixture
+    controls outside the Git worktree and the host's `/tmp` coverage leak bounded. On macOS, a
+    short-path symlink used by the local gate also showed that Git and filesystem readers resolve
+    TMPDIR aliases differently; three unrelated tests failed on the alias and passed on its real
+    path, so shard environments must receive the canonical physical scratch path.
+  design: |
+    (i) Preserve the top-level stable scratch behavior and its stale-scratch cleanup.
+    (ii) Read re-entrancy from `process.env.TMPDIR`; when the active parent TMPDIR is the shared
+         coverage scratch, give this nested coverage invocation a unique child scratch directory.
+    (iii) Pass that child path to every nested shard and remove only that invocation's child in a
+          `finally` path after its shards finish; never remove the parent's active scratch.
+    (iv) Compare existing TMPDIR paths by both lexical and canonical paths, and pass the physical
+         scratch path to shards so Git and fixtures share one path identity across symlink aliases.
+    (v) Fail closed if isolated nested scratch cannot be prepared. New test files default to the
+         fast tier; do not add a row to the shared tier manifest. Add a regression that creates a
+         parent sentinel, executes the real coverage-leaf wiring with a recording spawn, verifies
+         the sentinel is present during nested execution, the nested path differs, and cleanup
+         removes only the nested path. Also cover a symlinked stable-scratch parent. Keep the tests
+         in the fast tier.
+  acceptance:
+    - claim: "a nested coverage run preserves its caller's live TMPDIR and cleans only its own scratch"
+      proof: 'grep: test("nested coverage runs isolate scratch without deleting the parent TMPDIR" in test/coverage-leaf-isolates-reentrant-scratch.test.ts'
+    - claim: "coverage shards use a canonical TMPDIR when the stable scratch parent is a symlink"
+      proof: "unit test: coverage shards use canonical TMPDIR paths when the sibling scratch parent is symlinked"
+  falsifier: |
+    Remove the nested scratch isolation and run the new regression: the parent sentinel is deleted
+    before the nested shard spawn, so the test fails; restoring isolation makes it pass.

@@ -149,11 +149,13 @@ import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-s
 import { createChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { mergedInLastDay } from "./lib/fleet-lane.js";
-import { gardenPrState, type GardenWorkspace } from "./lib/knowledge-gardener.js";
+import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { startGarden, type GardenCheckout } from "./lib/gardener.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
+import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "./lib/config-gardener.js";
+import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
 import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
@@ -238,7 +240,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "gate"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -2148,6 +2150,7 @@ import {
   parseDecisionRequest,
   parseFollowups,
   parseLearningsUsed,
+  parseSkillsUsed,
   parseQuestion,
   parseReconReport,
   parseReport,
@@ -15683,6 +15686,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     }
 
     logLearningsUsed(log, fullText(impl), learningsResult.selectedIds, learningUsagePath(join(config.root, "state")));
+    logSkillsUsed(log, fullText(impl), injectableSkills.map((s) => s.name), skillUsagePath(join(config.root, "state")));
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(worktreePath, workerHeadReflogBefore);
 
@@ -31123,6 +31127,22 @@ export function logLearningsUsed(
   if (usagePath) recordLearningUsage(usagePath, row);
 }
 
+/** W1-T4114: `logLearningsUsed`'s own mirror for `SKILLS_USED` — the skills the knowledge
+ *  gardener's SKILL-LIFECYCLE class judges by, offered/used, not merely selected. */
+export function logSkillsUsed(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  text: string,
+  injectedNames: readonly string[],
+  usagePath?: string,
+): void {
+  const parsed = parseSkillsUsed(text, injectedNames);
+  const row = parsed
+    ? { used_names: parsed.usedNames, injected_names: parsed.injectedNames, refused: parsed.refused }
+    : { silent: true, injected_names: [...injectedNames] };
+  log("skills.used", row);
+  if (usagePath) recordSkillUsage(usagePath, row);
+}
+
 export function memoryLintCommand(rest: string[]): number {
   const out = (line: string) => console.log(line);
   const fix = rest.includes("--fix");
@@ -32324,6 +32344,61 @@ export async function daemonCommand(
                       if (!stopped) garden = startGarden(gateGardenSpec(gateGarden, probes), gateGarden, intervalMs);
                     },
                     (e: unknown) => log("gate.gardener_failed", { error: String((e as Error)?.message ?? e) }),
+                  );
+                  return {
+                    stop: () => {
+                      stopped = true;
+                      garden?.stop();
+                    },
+                  };
+                },
+                // W1-T4112: the test suite tends itself — a material duration proposal is
+                // adopted, a repeat flaker is retiered to the slow tier, and a stale one-way
+                // baseline shrinks, all read from scripts/test-tier-manifest.mjs's own
+                // functions and the ledger's `test.flake_retry` rows. Same async-probe-load
+                // shape as the gate garden just above, since the manifest is also an ES module.
+                (intervalMs: number) => {
+                  const testGarden = {
+                    stateDir: join(config.root, "state"),
+                    repoRoot,
+                    openWorkspace: () => gardenCheckout({ name: "test", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
+                    log,
+                  };
+                  let garden: { stop: () => void } | undefined;
+                  let stopped = false;
+                  loadTestManifestProbe(repoRoot).then(
+                    (probe) => {
+                      if (!stopped) garden = startGarden(testGardenSpec(testGarden, probe), testGarden, intervalMs);
+                    },
+                    (e: unknown) => log("test.gardener_failed", { error: String((e as Error)?.message ?? e) }),
+                  );
+                  return {
+                    stop: () => {
+                      stopped = true;
+                      garden?.stop();
+                    },
+                  };
+                },
+                // W1-T4113: worker configuration tends itself — budgets, mounts and the learnings cap, each a
+                // canary it judges and rolls back. The headroom sweep is an ES module, so it starts once loaded.
+                (intervalMs: number) => {
+                  const configGarden = {
+                    stateDir: join(config.root, "state"),
+                    repoRoot,
+                    openWorkspace: () => gardenCheckout({ name: "config", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
+                    log,
+                  };
+                  let garden: { stop: () => void } | undefined;
+                  let stopped = false;
+                  import(pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href).then(
+                    (m: { buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] } }) => {
+                      const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
+                      const mountRecommendations = mountRecommendationSource({ build: m.buildMountHeadroomSweep, stateDir: configGarden.stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
+                      if (!stopped) garden = startConfigGarden(configGardenSpec(configGarden, { mountRecommendations }), configGarden, { mountRecommendations }, intervalMs);
+                    },
+                    (e: unknown) => log("config.gardener_failed", { error: String((e as Error)?.message ?? e) }),
                   );
                   return {
                     stop: () => {
