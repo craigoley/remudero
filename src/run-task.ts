@@ -410,7 +410,8 @@ import {
 import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
-import { requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { daemonInstanceRegistryPath, requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { parseInstanceRegistry, type InstanceRegistry } from "./lib/instance-registry.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
 import {
   assessInstallForDeploy,
@@ -3670,6 +3671,70 @@ export function fillDerivedBody(worktreePath: string): string {
 }
 
 /**
+ * W1-T4265 — THE SHADOW-MODE ASK: the registry's own answer for one `owner/repo`'s instance
+ * mode. A shadow instance's worker runs real tasks and opens real (ready) pull requests, but
+ * never arms or merges one (fed to the deferred arm block, below, via
+ * {@link resolveShadowInstanceArmPermission}); an instance with no `mode:` field, or a registry
+ * this cannot read or parse at all, FAILS OPEN to `"live"` — the design's own rule ("absent =
+ * live, so existing instances are unchanged"), and the same fail-open contract
+ * {@link parseInstanceRegistry}'s own `live` field already keeps. Pure over an already-read
+ * registry text so a test drives it with a fixture string, never a real file.
+ */
+export function instanceMode(ownerRepo: string, registryText: string | undefined): "shadow" | "live" {
+  if (registryText === undefined) return "live";
+  let registry: InstanceRegistry;
+  try {
+    registry = parseInstanceRegistry(registryText);
+  } catch {
+    // A registry this cannot parse names no instance this caller can trust — fail OPEN to live,
+    // never invent a shadow mode the text does not actually declare.
+    return "live";
+  }
+  const match = registry.instances.find((i) => i.repo.toLowerCase() === ownerRepo.toLowerCase());
+  return match?.mode ?? "live";
+}
+
+/**
+ * W1-T4265 — best-effort read of the repo-tracked registry ({@link daemonInstanceRegistryPath})
+ * for {@link instanceMode}'s own input. Returns `undefined` (never throws) when the file is
+ * absent or unreadable, which `instanceMode` already treats as `"live"` — an onboarding repo
+ * that has not yet grown a `.remudero/daemon-instances.yaml` of its own stays live, exactly as
+ * it always has.
+ */
+function readInstanceRegistryText(repoRoot: string): string | undefined {
+  try {
+    return readFileSync(daemonInstanceRegistryPath(repoRoot), "utf8");
+  } catch {
+    // Absent or unreadable — an onboarding repo with no registry file of its own yet, and every
+    // pre-W1-T4227 repo, both read identically: `instanceMode` already treats `undefined` as live.
+    return undefined;
+  }
+}
+
+/**
+ * W1-T4265 — the `shadow.verdict` row's own counterfactual: PURE over the SAME `armed` boolean
+ * (and, when it refused, the SAME reason string) a live instance's own arm decision already
+ * carries — never a re-derivation, so a shadow run's recorded counterfactual can never disagree
+ * with what the identical decision would have produced for a live instance handed the same PR.
+ */
+export function shadowLiveWouldHaveDone(armed: boolean, reason?: string): { would: "would_merge" | "would_block"; reason?: string } {
+  return armed ? { would: "would_merge" } : { would: "would_block", reason };
+}
+
+/**
+ * W1-T4265 — a shadow instance's own arm-at-verdict decision: PURE, and the SAME `{ armed,
+ * reason? }` shape {@link resolveWipeTestArmPermission} already returns for its own no-merge
+ * boundary, so the deferred-arm call site folds both refusals through one ternary with no shape
+ * mismatch. Never arms — a shadow instance's worker opens real pull requests and runs real
+ * tasks, but the one thing it never does, by design, is call `armAutoMergeAtOpen`.
+ */
+export function resolveShadowInstanceArmPermission(shadowInstance: boolean): { armed: boolean; reason?: string } {
+  return shadowInstance
+    ? { armed: false, reason: "shadow instance — never arms or merges a pull request (W1-T4265)" }
+    : { armed: true };
+}
+
+/**
  * Build the REST create invocation (`gh api --method POST repos/{owner}/{repo}/pulls`)
  * for a plan/triage/retro/implement PR — W1-T1202's transport swap off `gh pr create
  * --fill`, which is GraphQL (W1-T372's incident: a GraphQL exhaustion nobody's lane
@@ -3696,6 +3761,17 @@ export function fillDerivedBody(worktreePath: string): string {
  *
  * DECISION (design point iii): the body is {@link fillDerivedBody} — REST's lack of
  * `--fill`'s autofill costs this small local helper, not an invented body.
+ *
+ * NO `draft` PARAMETER (W1-T4265 note): the design this task shipped from called for a shadow
+ * instance's pull request to open as a draft. `scripts/no-draft-pull-request-census.mjs` +
+ * `test/no-draft-pull-request-ever-sits-on-the-board.test.ts` (W1-T4415, operator ruling
+ * 2026-09-24 — ONE DAY AFTER this task's own 2026-09-23 filing) REFUSE any tracked source under
+ * `src/` that opens or converts a pull request to a draft at all, and `runSweep`'s
+ * `readyDraftViaGh` actively marks any open draft ready again fleet-wide — so drafting is no
+ * longer an available mechanism, for a shadow instance or anyone else. See `instanceMode`'s own
+ * doc and `resolveShadowInstanceArmPermission` for the mechanism this task actually ships: a
+ * shadow instance's PR opens READY, like any other, and is reviewed like any other — it simply
+ * never reaches an arm call.
  */
 export function ghPrCreateFillCommand(
   worktreePath: string,
@@ -14354,6 +14430,15 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   const cashContainmentState = ctx.cashContainmentState ?? { contained: false };
   const cashContainmentBoundary = ctx.cashContainmentBoundary ?? assertOpenWeightToolBoundary;
 
+  // W1-T4265: ASKED ONCE, HELD FOR THE WHOLE RUN — a shadow instance's own registry row (see
+  // instanceMode's own doc). Read at the top so the deferred arm block below (the only place
+  // this run's behaviour actually branches on it) never re-reads the registry mid-run — a
+  // concurrent edit to the repo-tracked file could otherwise flip the decision between this
+  // read and the arm block. `repoRoot` is this run's own checkout, so the read is the SAME file
+  // a merged registry PR would already have updated by the time the NEXT run starts — never a
+  // stale, pre-fetched copy.
+  const shadowInstance = instanceMode(`${owner}/${task.repo}`, readInstanceRegistryText(repoRoot)) === "shadow";
+
   // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
   // DEFAULT_BUDGET_USD ($100 — an order of magnitude above any observed task) when a
   // task omits it; the SOFT threshold ($25 default, config-tunable) only surfaces an
@@ -16709,10 +16794,20 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // wipe-test.ts (`resolveWipeTestArmPermission`); this call site only consults it and skips
     // `armAutoMergeAtOpen` outright when it refuses, so a wipe-test PR is never armed and can
     // never merge out from under the pair it belongs to.
+    // W1-T4265: a shadow instance never reaches `armAutoMergeAtOpen` at all — checked FIRST,
+    // ahead of the wipe-test boundary below, so the two refusals can never both claim credit for
+    // the same unarmed PR. Reaching this line at all means ci went green, the review passed, the
+    // capped-verdict gate did not refuse and the risk judge did not escalate — the EXACT set of
+    // facts that makes a live instance's own arm-at-verdict unconditional, so a shadow instance's
+    // own `shadow.verdict` row here always names `would_merge`: this is the one point in the run
+    // where its own behaviour actually diverges from what a live instance would have done.
+    const shadowArmDecision = resolveShadowInstanceArmPermission(shadowInstance);
     const wipeTestArmDecision = resolveWipeTestArmPermission(!!opts.noMerge);
-    const armOutcome: ArmOutcome | "no-merge-boundary-refused" = wipeTestArmDecision.armed
-      ? armAutoMergeAtOpen(prUrl, undefined, irreversible)
-      : "no-merge-boundary-refused";
+    const armOutcome: ArmOutcome | "no-merge-boundary-refused" | "shadow-instance-refused" = !shadowArmDecision.armed
+      ? "shadow-instance-refused"
+      : wipeTestArmDecision.armed
+        ? armAutoMergeAtOpen(prUrl, undefined, irreversible)
+        : "no-merge-boundary-refused";
     // W1-T2258: `review.headSha` — the SAME head captured in `riskJudgeInput` above — is already
     // in scope here and simply was not put on the row; this is the SINGLE LARGEST dropped
     // population (the "run-task" lane, the deferred arm every normal implement-task PR takes).
@@ -16723,6 +16818,15 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       head_sha: review.headSha,
       ...(wipeTestArmDecision.reason ? { reason: wipeTestArmDecision.reason } : {}),
     });
+    if (shadowInstance) {
+      const shadowVerdict = shadowLiveWouldHaveDone(true);
+      log("shadow.verdict", {
+        pr_url: prUrl,
+        task_id: taskId,
+        review_verdict: review.state,
+        ...shadowVerdict,
+      });
+    }
 
     // ── POLL to the gate (W1-T1B).
     // Auto-merge was armed immediately above, now that this run has a verdict it

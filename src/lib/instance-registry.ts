@@ -19,6 +19,13 @@
  * `repo:` KEEPS ITS EXISTING MEANING — the bare name `rmd daemon --repo` is launched with — because
  * both scripts pass it straight to the daemon. The `owner/name` identity is the new `github_repo`
  * field; a registry that has not grown it yet may carry `owner/name` in `repo:` itself.
+ *
+ * W1-T4265 — THE ONBOARDING GATE: each instance also names its `mode` (`shadow` | `live`, absent
+ * → `live`, so a registry row written before this task parses exactly as it always has). A
+ * shadow instance's worker (`instanceMode`, `src/run-task.ts`) runs real tasks and opens real
+ * pull requests, but never arms or merges one — proven in shadow before a newly onboarded repo
+ * goes live (W1-T4266 flips this field, through a reviewed pull request, never a direct write to
+ * disk).
  */
 import { RmdError } from "./errors.js";
 
@@ -37,6 +44,7 @@ export type InstanceRegistryErrorCode =
   | "invalid_repo"
   | "invalid_project"
   | "invalid_retired"
+  | "invalid_mode"
   | "duplicate_live_repo";
 
 /** A registry the parser refuses. `code` is stable for callers; `message` names the line/instance. */
@@ -57,6 +65,15 @@ export interface RegistryInstance {
   repo: string;
   /** False only when the row says `retired: true`; a retired row may reuse a live row's repo. */
   live: boolean;
+  /**
+   * W1-T4265 — `shadow` or `live`. Absent `mode:` ⇒ `"live"`, so every registry row that predates
+   * this field (every instance declared before this task) is unchanged. A shadow instance's own
+   * worker never arms or merges a pull request (`instanceMode`,
+   * `resolveShadowInstanceArmPermission`, `src/run-task.ts`) — the onboarding gate a new repo is
+   * proven through before it goes live (W1-T4266 flips this field, through a reviewed pull
+   * request, never a direct write).
+   */
+  mode: "shadow" | "live";
 }
 
 export interface InstanceRegistry {
@@ -149,7 +166,14 @@ export function parseInstanceRegistry(text: string): InstanceRegistry {
     if (retired !== undefined && retired !== "true" && retired !== "false") {
       throw new InstanceRegistryError("invalid_retired", `instance '${row.name}' retired must be true or false`);
     }
-    return { name: row.name, project, repo: declared, live: retired !== "true" };
+    // W1-T4265: absent ⇒ "live" — an existing registry row that has not grown this field yet
+    // parses exactly as it always has (design: "absent = live, so existing instances are
+    // unchanged").
+    const mode = row.fields.get("mode");
+    if (mode !== undefined && mode !== "shadow" && mode !== "live") {
+      throw new InstanceRegistryError("invalid_mode", `instance '${row.name}' mode '${mode}' is not "shadow" or "live"`);
+    }
+    return { name: row.name, project, repo: declared, live: retired !== "true", mode: mode ?? "live" };
   });
   const liveRepos = new Map<string, string>();
   for (const instance of instances) {
