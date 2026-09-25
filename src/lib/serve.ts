@@ -3908,13 +3908,25 @@ export function assertRoutesScopeComplete(entries: readonly { method?: Method; p
  * or when `gh` is unavailable; the default fails soft to `""` — an empty log parses to zero
  * failing tests rather than throwing off a webhook delivery.
  */
-async function fetchCiIncidentJobLog(deps: ServeDeps, repository: string, jobId: number): Promise<string> {
+type CiIncidentExecFile = (
+  file: string,
+  args: string[],
+  options: { encoding: "utf8"; maxBuffer: number; timeout: number },
+  callback: (error: Error | null, stdout: string) => void,
+) => void;
+
+export async function fetchCiIncidentJobLog(
+  deps: Pick<ServeDeps, "ciIncidents" | "log">,
+  repository: string,
+  jobId: number,
+  run: CiIncidentExecFile = execFile,
+): Promise<string> {
   const inject = deps.ciIncidents?.fetchJobLog;
   if (inject) return inject(repository, jobId);
   if (!repository) return "";
   try {
     return await new Promise<string>((resolve, reject) => {
-      execFile(
+      run(
         "gh",
         ["api", `repos/${repository}/actions/jobs/${jobId}/logs`],
         {

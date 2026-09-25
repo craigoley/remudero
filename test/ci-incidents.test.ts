@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  ciIncidentEventLedgerLine,
   ciIncidentEventsFromLog,
   createCiIncidentState,
   recordCheckRunOutcome,
@@ -117,4 +118,21 @@ test("overlapping failures of the same test keep independent same-sha rerun hist
   assert.deepEqual(firstPass.events.map((event) => event.kind), ["flake", "flake"]);
   assert.deepEqual(secondPass.events.map((event) => event.kind), ["flake", "flake"]);
   assert.deepEqual(secondPass.state.pending, {});
+});
+
+test("CI incident events use the incident.event ledger step with their test fingerprint", () => {
+  const [event] = ciIncidentEventsFromLog(TWO_FAILURES, { sha: "head-a" });
+  const line = ciIncidentEventLedgerLine(event, 1234);
+
+  assert.deepEqual(line, {
+    run_id: `CI-INCIDENT-1234-${event.fingerprint.slice(0, 12)}`,
+    task_id: "INCIDENT",
+    step: "incident.event",
+    fingerprint: event.fingerprint,
+    source: "ci",
+    kind: "test_failure",
+    name: "test/auth.test.ts",
+    message: "alpha rejects an invalid token",
+    sha: "head-a",
+  });
 });

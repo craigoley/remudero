@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { FSWatcher } from "node:fs";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -27,6 +27,12 @@ import {
 import { createService, readBoundedRawBody, type Route } from "../src/lib/service.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { daemonCommand } from "../src/run-task.js";
+import { buildServeRoutes, fetchCiIncidentJobLog, type ServeDeps } from "../src/lib/serve.js";
+import type { IssueCloser } from "../src/lib/panel-actions.js";
+import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
+import type { Plan } from "../src/lib/plan.js";
+import type { GitHub } from "../src/lib/status.js";
+import type { TraceGithub } from "../src/lib/trace.js";
 
 const SECRET = "test-webhook-secret";
 const REPOSITORY = "craigoley/remudero";
@@ -128,9 +134,123 @@ test("the gateway forwards each verified completed check run through its typed c
   }
 });
 
+test("the served gateway records a failed test and its same-sha rerun as incident events", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-ci-incident-serve-"));
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const planPath = join(root, "plan", "tasks.yaml");
+  mkdirSync(dirname(planPath), { recursive: true });
+  writeFileSync(planPath, "[]\n");
+  const github: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+  };
+  const logReads: number[] = [];
+  const errors: string[] = [];
+  const deps: ServeDeps = {
+    board: { plan: { tasks: [], byId: new Map() } as Plan, ledgerPath, github },
+    panelGraph: {
+      root,
+      planPath,
+      ledgerPath,
+      github: { prView: () => null } as TraceGithub,
+      statusGithub: github,
+      ratify: { approve: () => {}, reframe: () => {} } as RatifyCliGateway,
+    },
+    ledgerPath,
+    issues: { close: () => {} } as IssueCloser,
+    fleetControlRoot: root,
+    questionsRoot: root,
+    tokens: { read: "read", write: "write" },
+    pollMs: 50,
+    githubEventWake: { secret: SECRET, repository: REPOSITORY },
+    ciIncidents: {
+      fetchJobLog: (_repository, jobId) => {
+        logReads.push(jobId);
+        if (jobId === 104) throw new Error("log reader failed");
+        return "not ok 1 - rejects an invalid token\n  ---\n  location: 'test/auth.test.ts:10:1'\n  ...\n";
+      },
+    },
+    log: (step) => errors.push(step),
+  };
+  const route = buildServeRoutes(deps).find((entry) => entry.path === "/v1/hooks/github");
+  assert.ok(route);
+
+  const incidentRows = () => existsSync(ledgerPath)
+    ? readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((line) => line.step === "incident.event")
+    : [];
+  const waitForRows = async (count: number) => {
+    const deadline = Date.now() + 10_000;
+    while (incidentRows().length < count && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(incidentRows().length, count);
+  };
+  const send = (url: string, id: number, conclusion: string) => {
+    const body = JSON.stringify({
+      action: "completed",
+      repository: { full_name: REPOSITORY },
+      check_run: { id, name: "ci-shard (1/8)", head_sha: "same-head", head_branch: "feature", conclusion },
+    });
+    return fetch(url, { method: "POST", headers: webhookHeaders(body, `incident-${id}`), body });
+  };
+
+  try {
+    await withRoute(route, async (url) => {
+      assert.equal((await send(url, 101, "failure")).status, 202);
+      await waitForRows(1);
+      assert.equal((await send(url, 102, "success")).status, 202);
+      await waitForRows(2);
+      assert.equal((await send(url, 103, "neutral")).status, 202);
+      assert.equal((await send(url, 104, "failure")).status, 202);
+      const deadline = Date.now() + 10_000;
+      while (!errors.includes("serve.ci_incidents.check_run_failed") && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    });
+    const rows = incidentRows();
+    assert.deepEqual(rows.map((row) => row.kind), ["test_failure", "flake"]);
+    assert.deepEqual(rows.map((row) => row.name), ["test/auth.test.ts", "test/auth.test.ts"]);
+    assert.equal(rows[0].fingerprint, rows[1].fingerprint);
+    assert.deepEqual(logReads, [101, 104], "only failed jobs need log reads");
+    assert.ok(errors.includes("serve.ci_incidents.check_run_failed"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the CI log reader names a failed REST read and returns a successful job log", async () => {
+  const errors: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const deps = { log: (step: string, extra?: Record<string, unknown>) => errors.push({ step, extra }) };
+  const calls: Array<{ file: string; args: string[]; timeout: number }> = [];
+  const success: NonNullable<Parameters<typeof fetchCiIncidentJobLog>[3]> = (file, args, options, callback) => {
+    calls.push({ file, args, timeout: options.timeout });
+    callback(null, "TAP version 13\nnot ok 1 - example\n");
+  };
+  assert.equal(await fetchCiIncidentJobLog(deps, "", 1), "", "no repository cannot name a job log");
+  assert.equal(await fetchCiIncidentJobLog(deps, REPOSITORY, 2, success), "TAP version 13\nnot ok 1 - example\n");
+  assert.deepEqual(calls, [{
+    file: "gh",
+    args: ["api", `repos/${REPOSITORY}/actions/jobs/2/logs`],
+    timeout: 30_000,
+  }]);
+
+  const failure: NonNullable<Parameters<typeof fetchCiIncidentJobLog>[3]> = (_file, _args, _options, callback) => {
+    callback(new Error("job log unavailable"), "");
+  };
+  assert.equal(await fetchCiIncidentJobLog(deps, REPOSITORY, 3, failure), "");
+  assert.deepEqual(errors, [{
+    step: "serve.ci_incidents.job_log_unreadable",
+    extra: { reason: "job log unavailable", repository: REPOSITORY, jobId: 3 },
+  }]);
+});
+
 test("check-run callbacks serialize same-check outcomes without holding webhook acknowledgements", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-github-check-run-order-"));
   const delivered: number[] = [];
+  const callbackErrors: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   let releaseFirst!: () => void;
   let markFirstStarted!: () => void;
   let markSecondStarted!: () => void;
@@ -148,11 +268,13 @@ test("check-run callbacks serialize same-check outcomes without holding webhook 
     repository: REPOSITORY,
     markerPath: sweepWakeMarkerPath(root),
     dedup: createDeliveryDedupStore(10),
+    log: (step, extra) => callbackErrors.push({ step, extra }),
     onCheckRunCompleted: async (info) => {
       delivered.push(info.id);
       if (info.id === 1) {
         markFirstStarted();
         await firstBlocked;
+        throw new Error("failed callback");
       } else {
         markSecondStarted();
       }
@@ -185,6 +307,10 @@ test("check-run callbacks serialize same-check outcomes without holding webhook 
       releaseFirst();
       await within(secondStarted, "second callback start");
       assert.deepEqual(delivered, [1, 2]);
+      assert.deepEqual(callbackErrors.filter((row) => row.step === "github.wake.check_run_callback_failed"), [{
+        step: "github.wake.check_run_callback_failed",
+        extra: { check_run_id: 1, reason: "failed callback" },
+      }]);
     });
   } finally {
     releaseFirst();
