@@ -1,0 +1,59 @@
+- id: W1-T100001
+  title: "FIELD TRIALS EVIDENCE PROGRAM — version the run contract, derive bounded local insights, and separate observational routing from controlled comparisons"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: low
+  band_meaning: blast-radius
+  origin: "human request 2026-09-25: model-performance telemetry, public field-trials page, gardener consolidation, A/B research"
+  plan_refs: ["W1-T3762", "W1-T4110", "PORTAL-T29", "docs/model-routing.md"]
+  files:
+    - docs/research/model-evidence-program.md
+    - test/model-evidence-program.test.ts
+  status: queued
+  rationale: |
+    The core already records model assignment, worker receipts, routing-v1 joins, an observational
+    headroom-selected routing comparison, exact ledger archive compaction, and a proposal gardener.
+    It lacks one versioned benchmark run/experiment data contract, a resource-bounded quality-aware
+    derived view, and a release protocol that prevents private operational evidence from becoming
+    a public leaderboard. The retired W1-T3958 and W1-T4009 tasks had dead dependencies; this
+    program must not revive those as broad routing or factory gates.
+  design: |
+    Write a source-backed, executable program design for the next narrowly scoped implementation
+    tasks. Name exactly what current assignment, receipt, routing-v1, ledger-compact, and gardener
+    surfaces provide and what they cannot support. Specify a versioned metadata-only run envelope:
+    instance/repo pseudonyms and publication rights, task/harness/corpus/scorer revisions, requested/
+    selected/served model and effort, randomized eligibility/arm or explicit observational assignment,
+    immutable run/attempt/assignment join IDs, outcome and follow-up windows, missingness reasons,
+    token/latency/repair/human-intervention fields, and cash-versus-notional cost semantics. Never
+    make raw prompts, source, secrets, arbitrary IDs, or account labels public telemetry.
+
+    Separate deterministic consolidation from an insight gardener. The former incrementally joins
+    the existing ledger union, emits idempotent lineage/watermark/coverage-bearing local aggregates,
+    represents late receipts and retractions, and measures bytes/cardinality so retention follows
+    observed growth; ledger-compact remains owner of exact raw archive compaction. The latter reads
+    only bounded derived cohorts, proposes one experiment or follow-up with receipts and self-scores
+    its recommendations, and neither changes routing silently nor blocks healthy PR flow.
+
+    Define an A/A instrumentation pilot before causal claims; then a priority-ordered A/B matrix
+    spanning model+effort, retrieval/context, review/repair, escalation, and parallelism. Each trial
+    declares randomization unit, eligibility, pinned stack, primary verified outcome, denominator,
+    missingness, cost/time/quality guardrails, uncertainty and stopping rule. Distinguish model-only
+    from model+harness and headroom-selected observations from random assignment. Public release is
+    a consented, reviewed, static aggregate with accessible graph/table provenance, never an API
+    into the private fleet. This task is a design artifact, not an authorization to spend on trial
+    calls, ingest private repos into a public corpus, publish scores, or add a merge gate.
+  acceptance:
+    - claim: "the program documents current evidence, missing fields, and a versioned privacy-safe run and cost contract"
+      proof: "unit test: model evidence program names current telemetry and a privacy-safe run envelope"
+    - claim: "the program separates exact raw archive compaction, deterministic derived consolidation, and the proposal gardener with volume controls"
+      proof: "unit test: model evidence program separates consolidation from insight gardening"
+    - claim: "the program defines A/A, causal experiments, coverage, guardrails, and safe publication without a new PR hold"
+      proof: "unit test: model evidence program defines discriminating trials and publication rules"
+  falsifier: |
+    Treat the headroom-selected Sol/Sonnet routing report as randomized; infer missing spend or
+    outcomes as zero; duplicate raw ledger storage; send unreviewed private data to the site;
+    or make an insight proposal a merge gate. Any such claim must fail the matching proof.
