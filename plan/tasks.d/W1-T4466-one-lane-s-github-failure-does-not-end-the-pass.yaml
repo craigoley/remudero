@@ -12,7 +12,9 @@
   origin: "operator ask 2026-09-24: no stuck PRs — automated flow and self-improvement; dispatch-starvation investigation"
   plan_refs: [W1-T1202, W1-T113]
   files: [src/run-task.ts, src/lib/daemon.ts, test/one-lane-s-github-failure-does-not-end-the-pass.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4466 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     OBSERVED from the daemon container's stdout over 30 hours (2026-09-23T16:57Z to 2026-09-24T15:44Z): 26 daemon passes

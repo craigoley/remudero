@@ -12,7 +12,9 @@
   plan_refs: [W1-T4090]
   files: [src/lib/measurement-cadence.ts, src/lib/policy.ts, plan/policy.yaml, src/lib/digest.ts, test/knowledge-is-measured-by-ablation.test.ts]
   priority: 2
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4092 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     READ 2026-09-22.
