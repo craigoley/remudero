@@ -493,8 +493,15 @@ interface RollupCheck {
   detailsUrl?: string;
 }
 
-/** The real host: git in the managed checkout, `gh` against `owner/repo`, files under `root/state`. */
-export function daemonSreRunbookHost(opts: { root: string; repoDir: string; owner: string; repo: string }): SreRunbookHost {
+/** The real host: git in the managed checkout, `gh` against `owner/repo`, files under `root/state`.
+ *  The container probe is injectable so the recycle safety guard can be tested in both states. */
+export function daemonSreRunbookHost(opts: {
+  root: string;
+  repoDir: string;
+  owner: string;
+  repo: string;
+  isInContainer?: () => boolean;
+}): SreRunbookHost {
   const repoArg = `${opts.owner}/${opts.repo}`;
   const git = (args: string[]) => execFileSync("git", ["-C", opts.repoDir, ...args], { encoding: "utf8" }).trim();
   const gh = (args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -529,7 +536,7 @@ export function daemonSreRunbookHost(opts: { root: string; repoDir: string; owne
     },
     // recycle-container.sh must never run inside the container it replaces (its own header).
     async canRecycle(container) {
-      if (defaultInContainer()) return { ok: false, observed: `recycle of ${container} refused: this daemon runs inside a container` };
+      if ((opts.isInContainer ?? defaultInContainer)()) return { ok: false, observed: `recycle of ${container} refused: this daemon runs inside a container` };
       return { ok: true, observed: `${container} reported drifted` };
     },
     async recycle(container) {

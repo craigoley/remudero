@@ -8,7 +8,8 @@
 //   - a runbook the governor holds in shadow records its action without taking it
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -437,6 +438,9 @@ test("the catalog's four runbooks answer their own incidents through an injected
 
   assert.equal(incidentSubject(incident({ sampleMessages: ["pr=1", "x pr=2"] }), "pr"), "2", "the newest sample names the subject");
   assert.equal(incidentSubject(incident({ sampleMessages: ["nothing"] }), "pr"), undefined);
+
+  const missingPr = await catalog[0]?.precheck(incident({ name: "ci-red-unrelated", sampleMessages: ["pr=0"] }));
+  assert.deepEqual(missingPr, { ok: false, observed: "incident names no pr=<n>" });
 });
 
 test("receipts are read back from the ledger, and a torn row is skipped", () => {
@@ -462,4 +466,106 @@ test("an unreadable lock path is treated as unknown rather than a dead holder", 
   assert.equal(result.present, true);
   assert.equal(result.holderDead, false, "unreadable must not be interpreted as stale and deleted");
   assert.match(result.observed, /pid unknown/);
+});
+
+test("the real runbook host exercises bounded GitHub, checkout, and local action paths", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-sre-host-"));
+  const bin = join(root, "bin");
+  const bare = join(root, "origin.git");
+  const seed = join(root, "seed");
+  const repoDir = join(root, "checkout");
+  const ghCalls = join(root, "gh-calls.log");
+  const npmCalls = join(root, "npm-calls.log");
+  const recycleArgs = join(root, "recycle-args.log");
+  const state = join(root, "state");
+  const inflight = join(state, "inflight");
+  const lockPath = join(inflight, "stale.lock");
+  const originalPath = process.env.PATH;
+  const originalGhCache = process.env.RMD_GH_CACHE_HOME;
+
+  try {
+    mkdirSync(bin, { recursive: true });
+    execFileSync("git", ["init", "--quiet", "--bare", "--initial-branch=main", bare]);
+    execFileSync("git", ["init", "--quiet", "--initial-branch=main", seed]);
+    execFileSync("git", ["-C", seed, "config", "user.name", "SRE host test"]);
+    execFileSync("git", ["-C", seed, "config", "user.email", "sre-host-test@example.invalid"]);
+    writeFileSync(join(seed, "seed.txt"), "first\n");
+    mkdirSync(join(seed, "deploy"), { recursive: true });
+    writeFileSync(join(seed, "deploy", "recycle-container.sh"), `#!/bin/sh\nprintf '%s\\n' "$@" > '${recycleArgs}'\n`);
+    execFileSync("git", ["-C", seed, "add", "seed.txt"]);
+    execFileSync("git", ["-C", seed, "add", "deploy/recycle-container.sh"]);
+    execFileSync("git", ["-C", seed, "commit", "--quiet", "-m", "seed"]);
+    execFileSync("git", ["-C", seed, "remote", "add", "origin", bare]);
+    execFileSync("git", ["-C", seed, "push", "--quiet", "origin", "main"]);
+    execFileSync("git", ["clone", "--quiet", bare, repoDir]);
+    writeFileSync(join(seed, "next.txt"), "second\n");
+    execFileSync("git", ["-C", seed, "add", "next.txt"]);
+    execFileSync("git", ["-C", seed, "commit", "--quiet", "-m", "advance main"]);
+    execFileSync("git", ["-C", seed, "push", "--quiet", "origin", "main"]);
+
+    mkdirSync(inflight, { recursive: true });
+    writeFileSync(lockPath, JSON.stringify({ pid: 2147483647, run_id: "stale-fixture" }));
+    const ghShim = join(bin, "gh");
+    writeFileSync(ghShim, `#!/bin/sh
+printf '%s\\n' "$*" >> '${ghCalls}'
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "77" ]; then
+  printf '%s\\n' '{"headRefOid":"head-77","statusCheckRollup":[{"name":"lint","conclusion":"FAILURE","detailsUrl":"https://github.com/o/r/actions/runs/1/job/71"},{"name":"tests","conclusion":"FAILURE","detailsUrl":"https://github.com/o/r/actions/runs/1"}]}'
+elif [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "78" ]; then
+  printf '%s\\n' '{"headRefOid":"head-78","statusCheckRollup":[{"name":"lint","conclusion":"SUCCESS"}]}'
+elif [ "$1" = "api" ]; then
+  printf '%s\\n' '[{"name":"lint","conclusion":"success"},{"name":"tests","conclusion":"success"}]'
+else
+  exit 2
+fi
+`);
+    chmodSync(ghShim, 0o755);
+    const npmShim = join(bin, "npm");
+    writeFileSync(npmShim, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${npmCalls}'\n`);
+    chmodSync(npmShim, 0o755);
+
+    process.env.PATH = `${bin}:${originalPath ?? ""}`;
+    process.env.RMD_GH_CACHE_HOME = join(root, "cache");
+    const host = daemonSreRunbookHost({ root, repoDir, owner: "o", repo: "r", isInContainer: () => false });
+
+    const failed = await host.failedCi(77);
+    assert.deepEqual(failed, { headSha: "head-77", unrelated: true, jobIds: [71], observed: "red: lint, tests; green on main: true" });
+    const clean = await host.failedCi(78);
+    assert.deepEqual(clean, { headSha: "head-78", unrelated: false, jobIds: [], observed: "red: none; green on main: false" });
+    await host.rerunJob(71);
+
+    const beforeFastForward = await host.checkout();
+    assert.deepEqual(beforeFastForward, { clean: true, behind: 1, borrowed: true, observed: "clean=true behind=1 borrowed=true" });
+    await host.fastForward();
+    const afterFastForward = await host.checkout();
+    assert.deepEqual(afterFastForward, { clean: true, behind: 0, borrowed: true, observed: "clean=true behind=0 borrowed=true" });
+
+    await host.reinstall();
+    assert.deepEqual(await host.canRecycle("fixture-container"), { ok: true, observed: "fixture-container reported drifted" });
+    await host.recycle("fixture-container");
+    assert.deepEqual(readFileSync(recycleArgs, "utf8").trim().split("\n"), ["--container", "fixture-container"]);
+    assert.deepEqual(await host.lock(lockPath), { present: true, holderDead: true, observed: `${lockPath} held by pid 2147483647 (dead)` });
+    assert.equal(await host.reviewRequested(77), false);
+    await host.requestReview(77);
+    assert.equal(await host.reviewRequested(77), true);
+    await host.removeLock(lockPath);
+    assert.equal(existsSync(lockPath), false);
+
+    const refusedHost = daemonSreRunbookHost({ root, repoDir, owner: "o", repo: "r", isInContainer: () => true });
+    assert.deepEqual(await refusedHost.canRecycle("fixture-container"), {
+      ok: false,
+      observed: "recycle of fixture-container refused: this daemon runs inside a container",
+    });
+    const defaultHost = daemonSreRunbookHost({ root, repoDir, owner: "o", repo: "r" });
+    assert.equal((await defaultHost.canRecycle("default-container")).ok, !existsSync("/.dockerenv"));
+
+    const calls = readFileSync(ghCalls, "utf8");
+    assert.match(calls, /pr view 77 --repo o\/r/);
+    assert.match(calls, /api -X POST repos\/o\/r\/actions\/jobs\/71\/rerun/);
+    assert.equal(readFileSync(npmCalls, "utf8").trim(), "ci");
+  } finally {
+    process.env.PATH = originalPath ?? "";
+    if (originalGhCache === undefined) delete process.env.RMD_GH_CACHE_HOME;
+    else process.env.RMD_GH_CACHE_HOME = originalGhCache;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
