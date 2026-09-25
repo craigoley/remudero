@@ -32,7 +32,8 @@ import { readLedgerLines } from "./status.js";
  */
 
 export const SRE_RUNBOOK_STEP = "sre.runbook";
-/** "a fix that failed twice" (operator ruling 2026-09-23) — the second failure escalates. */
+/** PRIMARY CONTROL: "a fix that failed twice" (operator ruling 2026-09-23) — the second failure
+ *  for one fingerprint stops the runbook and escalates. */
 export const SRE_RUNBOOK_FAILURE_LIMIT = 2;
 
 // ── fast burn ────────────────────────────────────────────────────────────────────────────────
@@ -226,6 +227,7 @@ export async function runMatchingRunbook(incident: IncidentEvidence, deps: SreRu
   try {
     await runbook.act(incident);
   } catch (e) {
+    // A thrown fix is a failed fix: its message becomes the receipt's `after`, never a thrown pass.
     actError = String((e as Error)?.message ?? e);
   }
   const after = actError === undefined ? await observe("verify", () => runbook.verify(incident)) : { ok: false, observed: `act threw: ${actError}` };
