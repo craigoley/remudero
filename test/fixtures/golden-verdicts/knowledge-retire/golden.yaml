@@ -17,3 +17,5 @@ criteria:
     proof_exec: executed_pass
   - met: true
     proof_exec: executed_pass
+  - met: true
+    proof_exec: executed_pass
