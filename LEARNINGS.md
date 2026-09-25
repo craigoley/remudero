@@ -37,6 +37,10 @@ paid to discover, tagged with the run/PR that proved it. Rules:
 - A required check must be posted by the ORCHESTRATOR, not solely by a worker: a crashed worker leaves the check ABSENT, and an absent required check blocks the merge forever (fail-closed becomes fail-stuck). The runner posts `remudero-review` unconditionally after judging; the fresh worker is advisory. [PR #13, this session]
 - A required check with NO poster is a permanent DEADLOCK, so a manual/hand-run PR needs an escape hatch that invokes the SAME judge by hand (`rmd review <n>`) — never a `--force` bypass. Recovery if protection is ever misconfigured: `gh api --method PATCH repos/<owner>/<repo>/branches/main/protection/required_status_checks -F strict=false -f 'contexts[]=ci'`. [PR #13/this PR]
 
+## Commit-message accuracy
+
+- Correction dated **2026-09-13**: commits `352b7d87f` and `a1a5ab51e` overclaimed "routed-followups-retire + the call-site suite 23/23". The verified counts are `test/routed-followups-retire.test.ts` = 9 and `test/the-followup-retirement-arm-has-a-call-site.test.ts` = 6, totalling 15, not 23. This historical summary correction does not gate commitlint or any required check; the landed commits remain unchanged.
+
 ## CI gates & the fleet quality bar (operator fleet, hard-won)
 
 - A required-check context is the **JOB NAME**, not the workflow file/string — branch protection keys on the job, so renaming the job silently un-requires the check. [operator fleet: SynthWatch/neon-drift/OleyArcade]
