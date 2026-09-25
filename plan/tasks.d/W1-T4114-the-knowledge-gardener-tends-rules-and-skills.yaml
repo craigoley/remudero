@@ -12,7 +12,9 @@
   plan_refs: [W1-T4095, W1-T4097, W1-T3379]
   files: [src/lib/knowledge-gardener.ts, src/lib/daemon.ts, src/lib/compaction.ts, src/lib/worker.ts, src/run-task.ts, test/the-knowledge-gardener-tends-rules-and-skills.test.ts, test/prompt-render.test.ts]
   priority: 2
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4114 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     READ 2026-09-23: buildKnowledgeInventory already lists doctrine, decisions, forensics, plan and memory; the planners
