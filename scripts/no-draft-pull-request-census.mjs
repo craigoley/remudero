@@ -24,6 +24,7 @@ export const DRAFT_CREATOR_PATTERNS = [
   { name: "--draft flag", re: /(^|[\s"'`[,])--draft\b/ },
   { name: "draft=true payload field", re: /\bdraft["']?\s*[=:]\s*["']?true\b/ },
   { name: "convertPullRequestToDraft mutation", re: /\bconvertPullRequestToDraft\b/ },
+  { name: "ready --undo flag", re: /(^|[\s"'`[,])--undo\b/ },
 ];
 
 /** `path` -> reason. A path here is skipped; an entry without a reason is refused by the test. */
