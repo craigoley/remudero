@@ -1,0 +1,52 @@
+- id: W1-T4556
+  title: "A PAID PILOT CANNOT BUDGET MIXED RUN COST AS CASH — attribute request receipts and refuse source gaps"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator approval 2026-09-25: paid model pilot for the three Remudero repos"
+  plan_refs: ["W1-T100001", "W1-T4553", "DECISIONS.md 2026-09-24 cash-simple trial"]
+  files:
+    - src/lib/cash-trial.ts
+    - test/a-capped-cash-trial-takes-only-the-simplest-work.test.ts
+    - docs/model-routing.md
+  status: queued
+  rationale: |
+    `summarizeCashTrial` currently charges a cash trial assignment from the final verdict's
+    `cost_usd`, which is the whole run's cost and can include subscription calls. The worker's
+    per-call `total_cost_usd`, `provider`, and `billing_mode` are on `implement.done` and related
+    call receipts. The trial's ledger reader also accepts an incomplete archive union, so an
+    unreadable rotation may undercount trial spend and make the paid arm appear open. These
+    defects undermine both the trial budget and any later cost benchmark. The general
+    `dailyCapUsd` remains a separate safety backstop; it does not make attribution correct.
+  design: |
+    Join cash-simple cash-arm assignment IDs to exact worker-call receipts in the established
+    three-form ledger union. Count each actual API-billed cash call once using its per-call
+    `total_cost_usd` estimate and UTC day; do not add final whole-run `cost_usd`, subscription
+    notional values, or control-arm calls to this trial-only total. Keep the estimate labeled as
+    provider/worker-reported, not an invoice. A retry or resumed cash call is its own receipt;
+    an archive replay of the same receipt is not. Validate nonnegative finite cost, cash provider,
+    and API billing mode; expose unknown/ambiguous spend instead of interpreting absence as zero.
+    If a ledger archive or live source needed for the current spend window is unreadable, or an
+    assigned cash call lacks a usable cost receipt, hold only the trial's paid arm with a stated
+    reason until repaired. The ordinary subscription/control dispatch and PR pipeline continue.
+    Preserve the task-stable allocation, narrow eligibility, rolling success comparison, and
+    existing total daily cash cap. Add a positive corpus control that reads a plain rotation,
+    gzip rotation, and live file. Do not publish a causal benchmark or require an LLM judge here.
+  acceptance:
+    - claim: "cash trial spend counts only distinct API-billed cash worker receipts, not mixed whole-run or subscription totals"
+      proof: "unit test: cash trial budget attributes per-call API spend without mixed run cost"
+    - claim: "both archive encodings and the live ledger contribute exactly once to today's spend"
+      proof: "unit test: cash trial reads three ledger forms and deduplicates replayed spend"
+    - claim: "missing, inconsistent, or unreadable cost evidence holds only the paid arm and states why"
+      proof: "unit test: cash trial holds paid arm on incomplete spend evidence without stopping control"
+    - claim: "the production decision uses the validated trial accounting path"
+      proof: "grep: spendUnavailableReason in src/lib/cash-trial.ts"
+  falsifier: |
+    An unreadable archive reads as zero spend; a subscription/review call eats the pilot budget;
+    duplicate replay double-charges; a missing cash receipt counts as free; or a hold prevents
+    normal subscription work or strands a PR. Each must fail the corresponding proof.
