@@ -76,8 +76,9 @@
     current entry shape, source line numbers, ordering, summaries, and missing-source behavior. (ii) Retire
     `regeneratePlanIndexFile` / `regeneratePlanIndexAndCommit` only after removing their Architect, plan, retro, and approve
     callers. The capability-snapshot flow stops writing the index; remove `plan-index` / `plan-index:check` package
-    scripts and the corresponding unwired/pre-push path registrations. (iii) The console still needs a file-shaped
-    artifact: CI generates `plan/plan-index.json` with the canonical generator and uploads it for the console consumer;
+    scripts and the corresponding unwired/pre-push path registrations.
+    (iii) The console still needs a file-shaped artifact: CI generates `plan/plan-index.json` with the canonical generator
+    and uploads it for the console consumer;
     it is a build artifact and never a committed/runtime source of truth. (iv) Remove the obsolete generated-file entries
     from `review.ts` and `sweep.ts`, delete the committed JSON in the same PR, and replace only tests whose assertions
     require the committed file or retired call sites.
