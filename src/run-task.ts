@@ -154,6 +154,7 @@ import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold
 import { startGarden, type GardenCheckout } from "./lib/gardener.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
+import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
@@ -240,7 +241,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "export"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -32354,6 +32355,33 @@ export async function daemonCommand(
                       if (!stopped) garden = startGarden(testGardenSpec(testGarden, probe), testGarden, intervalMs);
                     },
                     (e: unknown) => log("test.gardener_failed", { error: String((e as Error)?.message ?? e) }),
+                  );
+                  return {
+                    stop: () => {
+                      stopped = true;
+                      garden?.stop();
+                    },
+                  };
+                },
+                // W1-T4113: worker configuration tends itself — budgets, mounts and the learnings cap, each a
+                // canary it judges and rolls back. The headroom sweep is an ES module, so it starts once loaded.
+                (intervalMs: number) => {
+                  const configGarden = {
+                    stateDir: join(config.root, "state"),
+                    repoRoot,
+                    openWorkspace: () => gardenCheckout({ name: "config", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
+                    log,
+                  };
+                  let garden: { stop: () => void } | undefined;
+                  let stopped = false;
+                  import(pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href).then(
+                    (m: { buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] } }) => {
+                      const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
+                      const mountRecommendations = mountRecommendationSource({ build: m.buildMountHeadroomSweep, stateDir: configGarden.stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
+                      if (!stopped) garden = startConfigGarden(configGardenSpec(configGarden, { mountRecommendations }), configGarden, { mountRecommendations }, intervalMs);
+                    },
+                    (e: unknown) => log("config.gardener_failed", { error: String((e as Error)?.message ?? e) }),
                   );
                   return {
                     stop: () => {
