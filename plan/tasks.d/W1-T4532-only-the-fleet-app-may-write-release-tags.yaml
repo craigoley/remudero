@@ -1,22 +1,22 @@
-- id: W1-T4525
+- id: W1-T4532
   title: "A RELEASE TAG IS A FLEET-WIDE DEPLOY SWITCH THAT ANY WRITER COULD FLIP — add a tag ruleset so only the fleet GitHub App may create or delete release, ring and revoked tags"
   repo: remudero
-  depends_on: [W1-T4521]
+  depends_on: [W1-T4528]
   type: manual
   verify: human
   principles: {tdd: strict}
   budget_usd: 0.00
   risk: medium
   origin: "session: 2026-09-24 release-tag design"
-  plan_refs: ["W1-T4521", "W1-T4523"]
-  files: [plan/tasks.d/W1-T4525-only-the-fleet-app-may-write-release-tags.yaml]
+  plan_refs: ["W1-T4528", "W1-T4530"]
+  files: [plan/tasks.d/W1-T4532-only-the-fleet-app-may-write-release-tags.yaml]
   status: queued
   attempts: 0
   rationale: |
-    Once W1-T4523 ships, pushing refs/tags/ring/fleet/<id> tells every instance to deploy. Anyone with write access
+    Once W1-T4530 ships, pushing refs/tags/ring/fleet/<id> tells every instance to deploy. Anyone with write access
     could do that by hand today. GitHub repository rulesets can target tag patterns with Restrict creations and
     Restrict deletions, and grant bypass to a GitHub App, so only the fleet App's mints succeed.
-    This is an operator action in repository settings, so it is a manual task. Do it before W1-T4523 merges.
+    This is an operator action in repository settings, so it is a manual task. Do it before W1-T4530 merges.
   design: |
     In craigoley/remudero settings, add a tag ruleset targeting refs/tags/release/*, refs/tags/ring/* and
     refs/tags/revoked/*, with Restrict creations, Restrict updates and Restrict deletions enabled, and the fleet
