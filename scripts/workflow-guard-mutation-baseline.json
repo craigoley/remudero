@@ -18,9 +18,6 @@
     "coverage-ratchet#1: if [ \"$TEST_EXIT\" -ne 0 ]; then": {
       "reason": "W1-T3207 made coverage-ratchet the surviving test verdict, and this arm carries a failing suite into the job's exit code. An always-true mutant makes it report a failure that did not happen -- LOUD, not silent, so it is the safe direction -- but the inverse is what matters and no test pins either. Enumerated because the block reaches `exit 0`."
     },
-    "coverage-ratchet-required#1: [ \"${GITHUB_EVENT_NAME}\" = \"pull_request\" ] || { echo \"coverage-ratchet: push event \u2014 no PR coverage merge required.\"; exit 0; }": {
-      "reason": "The push-event bypass on the aggregator's merge step. Its four siblings in the same job ARE covered by test/push-ci-on-main.test.ts; this one is worded differently and that suite's assertion does not reach it. Closing it is a wording or assertion fix, not new machinery."
-    },
     "coverage-ratchet-required#1: if [ \"$CLASS\" != \"SOURCE\" ]; then": {
       "reason": "Fast-lane skip on the aggregator, first of four identical occurrences. Same gap as the coverage-ratchet entry above: the classifier is tested, its consumption here is not."
     },
