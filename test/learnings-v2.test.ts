@@ -93,7 +93,9 @@ test("learnings-v2: the live corpus retains its baseline V1 artifact hash", () =
   // hashes to the previous pin 895bc1fc…, so again only the data moved.
   // Its pass in #7101 retired websearch-serverside-webfetch-unverified the same way (the operator kept
   // sdk-result-envelope active); with ONLY that lifecycle flip reverted the corpus hashes to the previous pin 7548a929….
-  assert.equal(computeArtifactHash(corpus), "316723edea8f59cb61bbcf0beff73639b23acea6bb556558f55574c2908ab9fe");
+  // #7205 retired 14 more the same way (the operator kept the five a test requires active); main's
+  // corpus still hashes to the previous pin 316723ed… under this code, so only the data moved.
+  assert.equal(computeArtifactHash(corpus), "715eac5cbc8bf10f1407c2b1481311b507314ccda1f3e4c9010a5bd0a69256aa");
 });
 
 test("learnings-v2: a V1 or legacy artifact carrying origin is refused before trust", () => {

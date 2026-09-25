@@ -68,7 +68,8 @@
   cited: "2026-08-23"
 - id: body-fetch-guards-on-http-not-size
   subsystem: review
-  lifecycle: active
+  # knowledge gardener: retire body-fetch-guards-on-http-not-size
+  lifecycle: superseded
   files: [src/run-task.ts, src/lib/review.ts]
   fact: >-
     A failed body fetch parses as a DEFECT rather than an error: gh exiting 127 left a 0-byte file and

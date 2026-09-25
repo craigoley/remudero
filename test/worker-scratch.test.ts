@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   claudeScratchRoot,
   DEFAULT_SCRATCH_SWEEP_MAX_AGE_MS,
@@ -35,10 +36,15 @@ test("claudeScratchRoot: base = CLAUDE_CODE_TMPDIR || (darwin '/tmp'), then /cla
   }
 });
 
-test("scratchSlugForCwd: realpath(cwd) with every '/' → '-' (matches the observed CLI slug)", () => {
-  const d = mkdtempSync(join(tmpdir(), "rmd-slug-"));
+test("scratchSlugForCwd normalizes punctuation in a dotted realpath", () => {
+  const d = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}rmd.slug-`));
   try {
-    assert.equal(scratchSlugForCwd(d), realpathSync(d).replace(/\//g, "-"));
+    const realPath = realpathSync(d);
+    assert.ok(realPath.includes("."), "positive control: the realpath contains punctuation to normalize");
+    const slashOnlySlug = realPath.replace(/\//g, "-");
+    const expectedSlugFromRealPath = realPath.replace(/[^A-Za-z0-9_-]/g, "-");
+    assert.notEqual(expectedSlugFromRealPath, slashOnlySlug, "positive control: punctuation changes the expected slug");
+    assert.equal(scratchSlugForCwd(d), expectedSlugFromRealPath);
   } finally {
     rmSync(d, { recursive: true, force: true });
   }
