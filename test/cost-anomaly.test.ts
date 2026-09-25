@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   alreadyLedgeredCostAnomalyRunIds,
   COST_ANOMALY_STEP,
+  costAnomalyIncidentEvent,
   costAnomalyLine,
   CostAnomalyPolicyError,
   detectCostAnomalies,
@@ -15,6 +16,8 @@ import {
   parseCostAnomalyPolicy,
   pendingCostAnomalies,
   recordCostAnomalies,
+  RUNNING_LONG_STEP,
+  runningLongIncidentEvent,
   type CostAnomalyDeps,
   type CostAnomalyPolicy,
 } from "../src/lib/cost-anomaly.js";
@@ -513,4 +516,149 @@ test("loadCostAnomalyPolicy: a file that is not valid YAML is refused, naming th
   } catch (e) {
     assert.match(String((e as Error).message), new RegExp(bad.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
+});
+
+// ── W1-T4417: a runaway run's finding is ledgered EIGHT TIMES and acted on NEVER — route cost
+// and duration anomalies into the SRE gardener's incident ingest (W1-T4383) ──────────────────────
+
+test("runSweep: a new cost anomaly posts one incident.event row grouped by task class, not by run", async () => {
+  const path = ledgerTmpPath();
+  const ndjson = [
+    runLines({ runId: "W1-A1", taskId: "W1-A", taskClass: "src", costUsd: 1, ts: "2026-08-01T00:00:00.000Z" }),
+    runLines({ runId: "W1-A2", taskId: "W1-A", taskClass: "src", costUsd: 1, ts: "2026-08-01T01:00:00.000Z" }),
+    runLines({ runId: "W1-A3", taskId: "W1-A", taskClass: "src", costUsd: 1, ts: "2026-08-01T02:00:00.000Z" }),
+    runLines({ runId: "W1-A4", taskId: "W1-A", taskClass: "src", costUsd: 1, ts: "2026-08-01T03:00:00.000Z" }),
+    // two DIFFERENT runs/tasks in the SAME class, each an outlier — this is the W1-T4399 shape:
+    // one finding today, another a "class" apart, both belonging to the same "src" class.
+    runLines({ runId: "W1-T4399", taskId: "W1-T4399", taskClass: "src", costUsd: 9.32, ts: "2026-08-01T04:00:00.000Z" }),
+  ].join("\n");
+  writeFileSync(path, `${ndjson}\n`);
+
+  const deps = fakeSweepDeps(path, { costAnomalyPolicy: POLICY });
+  await runSweep([mergeableTestPr()], deps);
+
+  const lines = parseLedger(readFileSync(path, "utf8"));
+  assert.equal(lines.filter((r) => r.step === COST_ANOMALY_STEP).length, 1, "the finding itself: one cost.anomaly row");
+
+  const incidents = lines.filter((r) => r.step === "incident.event");
+  assert.equal(incidents.length, 1, "exactly one incident event posted for the one new finding");
+  const incident = incidents[0]!;
+  assert.equal(incident.task_id, "INCIDENT", "the registered pseudo sender, so producer-identity accepts it");
+  assert.equal(incident.kind, "anomaly");
+  assert.equal(incident.name, "cost.anomaly:src", "named by CLASS, never by run or task id");
+  assert.equal(typeof incident.fingerprint, "string");
+  assert.match(String(incident.message), /W1-T4399/);
+  assert.match(String(incident.message), /9\.32/);
+
+  // A SECOND outlier run lands in the SAME class later — its incident event fingerprints
+  // IDENTICALLY to the first, "grouped by class, not by task" (this task's own design note i).
+  const secondFinding = {
+    runId: "W1-T4400",
+    taskId: "W1-T4400",
+    taskClass: "src",
+    costUsd: 12.5,
+    medianCostUsd: 1,
+    multiplier: 3,
+    sampleSize: 5,
+  };
+  const secondEvent = costAnomalyIncidentEvent(secondFinding);
+  assert.equal(secondEvent.fingerprint, incident.fingerprint, "same class -> same fingerprint, regardless of run/task/cost");
+
+  // A DIFFERENT class fingerprints DIFFERENTLY — this is grouping by class, not a constant hash.
+  const otherClassEvent = costAnomalyIncidentEvent({ ...secondFinding, taskClass: "docs" });
+  assert.notEqual(otherClassEvent.fingerprint, incident.fingerprint);
+});
+
+test("runSweep --dry-run: writes NO incident.event row for a cost anomaly (same 'no ledger writes' contract)", async () => {
+  const path = ledgerTmpPath();
+  const ndjson = [
+    runLines({ runId: "W1-A1", taskId: "W1-A", taskClass: "src", costUsd: 1, ts: "2026-08-01T00:00:00.000Z" }),
+    runLines({ runId: "W1-A2", taskId: "W1-A", taskClass: "src", costUsd: 1, ts: "2026-08-01T01:00:00.000Z" }),
+    runLines({ runId: "W1-A3", taskId: "W1-A", taskClass: "src", costUsd: 1, ts: "2026-08-01T02:00:00.000Z" }),
+    runLines({ runId: "W1-A4", taskId: "W1-A", taskClass: "src", costUsd: 1, ts: "2026-08-01T03:00:00.000Z" }),
+    runLines({ runId: "W1-T7", taskId: "W1-T7", taskClass: "src", costUsd: 9.32, ts: "2026-08-01T04:00:00.000Z" }),
+  ].join("\n");
+  writeFileSync(path, `${ndjson}\n`);
+
+  const deps = fakeSweepDeps(path, { costAnomalyPolicy: POLICY, dryRun: true });
+  await runSweep([mergeableTestPr()], deps);
+
+  const lines = parseLedger(readFileSync(path, "utf8"));
+  assert.equal(lines.filter((r) => r.step === "incident.event").length, 0);
+});
+
+/** One `run.start` line with no `verdict` — a run STILL IN FLIGHT as of `now`. */
+function inFlightRunLine(opts: { runId: string; taskId: string; taskClass: string; ts: string }): string {
+  return JSON.stringify({ ts: opts.ts, run_id: opts.runId, task_id: opts.taskId, step: "run.start", type: "implement", task_class: opts.taskClass });
+}
+
+test("runSweep: a run past its class's median duration band is reported ONCE, while it still runs", async () => {
+  const path = ledgerTmpPath();
+  // class "src": 5 SETTLED runs, each exactly 10 minutes (start -> verdict) -- median is 10m.
+  // `runLines` stamps an identical start/verdict ts (0-duration), so each span is built by hand.
+  const settledSpans = [1, 2, 3, 4, 5]
+    .map((n) => {
+      const start = JSON.stringify({
+        ts: `2026-08-01T0${n}:00:00.000Z`,
+        run_id: `SETTLED${n}`,
+        task_id: `T${n}`,
+        step: "run.start",
+        type: "implement",
+        task_class: "src",
+      });
+      const verdict = JSON.stringify({
+        ts: `2026-08-01T0${n}:10:00.000Z`, // +10 minutes
+        run_id: `SETTLED${n}`,
+        task_id: `T${n}`,
+        step: "verdict",
+        verdict: "merged",
+        cost_usd: 1,
+      });
+      return `${start}\n${verdict}`;
+    })
+    .join("\n");
+  // A run STILL IN FLIGHT, started 45 minutes before "now" -- 4.5x the 10m median, over POLICY's
+  // 3x multiplier, and it carries NO verdict line at all (it has not settled).
+  const runningLine = inFlightRunLine({ runId: "W1-RUNAWAY", taskId: "W1-RUNAWAY", taskClass: "src", ts: "2026-08-01T06:00:00.000Z" });
+  writeFileSync(path, `${settledSpans}\n${runningLine}\n`);
+
+  const deps = fakeSweepDeps(path, {
+    costAnomalyPolicy: POLICY, // multiplier: 3, minSamples: 5
+    now: () => Date.parse("2026-08-01T06:45:00.000Z"), // 45 minutes after W1-RUNAWAY's start
+  });
+  await runSweep([mergeableTestPr()], deps);
+
+  const lines = parseLedger(readFileSync(path, "utf8"));
+  const runningLongRows = lines.filter((r) => r.step === RUNNING_LONG_STEP);
+  assert.equal(runningLongRows.length, 1, "exactly one run.running_long row for the one in-flight overrun");
+  assert.equal(runningLongRows[0]?.run_id, "W1-RUNAWAY");
+  assert.equal(runningLongRows[0]?.task_class, "src");
+  assert.equal(runningLongRows[0]?.median_ms, 10 * 60_000);
+  assert.equal(runningLongRows[0]?.elapsed_ms, 45 * 60_000);
+
+  const incidentRows = lines.filter((r) => r.step === "incident.event" && r.name === "run.running_long:src");
+  assert.equal(incidentRows.length, 1, "the same kind of incident event is posted for the running-long finding");
+  assert.equal(incidentRows[0]?.task_id, "INCIDENT");
+  assert.equal(incidentRows[0]?.kind, "anomaly");
+
+  // The run is STILL RUNNING -- no `verdict` line was ever added -- yet it was already reported.
+  assert.equal(lines.filter((r) => r.run_id === "W1-RUNAWAY" && r.step === "verdict").length, 0);
+
+  // A SECOND pass over the SAME (now-ledgered) file reports it no more than once.
+  await runSweep(
+    [mergeableTestPr()],
+    fakeSweepDeps(path, { costAnomalyPolicy: POLICY, now: () => Date.parse("2026-08-01T06:50:00.000Z") }),
+  );
+  const after = parseLedger(readFileSync(path, "utf8"));
+  assert.equal(after.filter((r) => r.step === RUNNING_LONG_STEP).length, 1, "never a second row for the same run");
+});
+
+test("runningLongIncidentEvent: two findings in the same class fingerprint identically; a different class does not", () => {
+  const a = runningLongIncidentEvent({ runId: "R1", taskId: "T1", taskClass: "src", elapsedMs: 100, medianMs: 10, multiplier: 3, sampleSize: 5 });
+  const b = runningLongIncidentEvent({ runId: "R2", taskId: "T2", taskClass: "src", elapsedMs: 999, medianMs: 20, multiplier: 3, sampleSize: 8 });
+  const c = runningLongIncidentEvent({ runId: "R3", taskId: "T3", taskClass: "docs", elapsedMs: 100, medianMs: 10, multiplier: 3, sampleSize: 5 });
+  assert.equal(a.fingerprint, b.fingerprint, "same class -> same fingerprint");
+  assert.notEqual(a.fingerprint, c.fingerprint, "different class -> different fingerprint");
+  assert.equal(a.task_id, "INCIDENT");
+  assert.equal(a.step, "incident.event");
 });
