@@ -151,13 +151,13 @@ import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { startGarden, type GardenCheckout } from "./lib/gardener.js";
+import { startGarden, type GardenCheckout, type GardenerDeps } from "./lib/gardener.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
-import { startCiFrictionGardener, readGateFireRateReport, type CiFrictionGardenerDeps } from "./lib/ci-friction-gardener.js";
+import { startCiFrictionGardener, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
 import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
@@ -32429,12 +32429,14 @@ export async function daemonCommand(
                 // drafted as one, parked for a person.
                 (intervalMs: number) => {
                   const stateDir = join(config.root, "state");
-                  const ciFrictionGarden: CiFrictionGardenerDeps = {
+                  const ciFrictionGarden: GardenerDeps = {
                     stateDir,
                     repoRoot,
                     openWorkspace: () => gardenCheckout({ name: "ci-friction", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
                     prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
                     log,
+                  };
+                  const sources: CiFrictionGardenSources = {
                     ledgerRecords: () => {
                       const read = readLedgerUnionRecordsSync(stateDir, { requireArchives: true, refuseIncomplete: true });
                       return read.ok ? (read.rows as LedgerRecord[]) : [];
@@ -32443,7 +32445,7 @@ export async function daemonCommand(
                     planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
                     mintTaskId: ciLearningTaskIdMinter(repoRoot),
                   };
-                  return startCiFrictionGardener(ciFrictionGarden, intervalMs);
+                  return startCiFrictionGardener(ciFrictionGarden, sources, intervalMs);
                 },
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
                 // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE

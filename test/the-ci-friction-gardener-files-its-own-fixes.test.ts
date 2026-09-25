@@ -23,8 +23,9 @@ import {
   priceCiFrictionCauses,
   PR_URL_RE,
   runPrIndex,
-  type CiFrictionGardenerDeps,
+  type CiFrictionGardenSources,
 } from "../src/lib/ci-friction-gardener.js";
+import type { GardenerDeps } from "../src/lib/gardener.js";
 import type { GateFireRateReport } from "../src/lib/gate-fire-rate.js";
 import type { LedgerRecord } from "../src/lib/retro.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -120,16 +121,20 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
   const repo = gitRepo({ kind: "w1t4435" });
   const root = repo.dir;
   mkdirSync(join(root, "state"), { recursive: true });
+  mkdirSync(join(root, ".remudero"), { recursive: true });
+  writeFileSync(join(root, ".remudero", "layout.json"), JSON.stringify({ planDir: "roadmap" }));
 
   type Landed = { paths: string[]; title: string; body: string };
   const landed: Landed[] = [];
   let minted = 0;
-  const deps: CiFrictionGardenerDeps = {
+  const deps: GardenerDeps = {
     stateDir: join(root, "state"),
     repoRoot: root,
     openWorkspace: () => ({ root, land: (opts) => (landed.push(opts), "https://github.com/acme/remudero/pull/99"), dispose: () => {} }),
     log: () => {},
     seed: 1,
+  };
+  const sources: CiFrictionGardenSources = {
     ledgerRecords: () => [
       { step: "pr.opened", run_id: "run-1", pr_url: "https://github.com/acme/remudero/pull/2", ts: "2026-09-24T01:00:00.000Z" },
       { step: "fix.base_refreshed", run_id: "run-1", matching_base_files: ["src/lib/shared.ts"], ts: "2026-09-24T01:30:00.000Z" },
@@ -145,7 +150,7 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
     mintTaskId: () => `W1-T900${++minted}`,
   };
 
-  const spec = ciFrictionGardenSpec(deps);
+  const spec = ciFrictionGardenSpec(deps, sources);
   assert.deepEqual(Object.keys(spec.review ?? {}), ["draft"], "filing a task is a person's call, judged by its PR");
   assert.deepEqual([...CI_FRICTION_GARDEN_CLASSES], ["draft"]);
 
@@ -156,8 +161,8 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
   assert.equal("review" in landed[0]!, false, "never held or drafted — reviewed and auto-merges like every fleet PR");
   assert.match(landed[0]!.body, /^\*\*Judged by its outcome\.\*\* The ci-friction gardener's `draft` changes are judged by whether this PR merges/);
 
-  const relPath = landed[0]!.paths.find((p) => p.startsWith("plan/tasks.d/"))!;
-  assert.match(relPath, /^plan\/tasks\.d\/W1-T9001-main-merge/);
+  const relPath = landed[0]!.paths.find((p) => p.startsWith("roadmap/tasks.d/"))!;
+  assert.match(relPath, /^roadmap\/tasks\.d\/W1-T9001-main-merge/);
   const shard = readFileSync(join(root, relPath), "utf8");
   assert.match(shard, /^- id: W1-T9001$/m);
   assert.match(shard, new RegExp(`^ {2}origin: "${ciFrictionOrigin(untracked.cause).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"$`, "m"));

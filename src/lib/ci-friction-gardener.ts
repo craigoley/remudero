@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
@@ -9,6 +9,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { gateFireRatesPath, type GateFireRateReport } from "./gate-fire-rate.js";
 import { ledgerLivePath } from "./ledger-union.js";
 import { loadPlanFromYaml } from "./plan.js";
+import { resolveRepoLayout } from "./repo-layout.js";
 import { lintTask } from "./task-linter.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import type { LedgerRecord } from "./retro.js";
@@ -291,7 +292,7 @@ export interface CiFrictionInventory {
   untracked?: CiFrictionCausePrice;
 }
 
-export interface CiFrictionGardenerDeps extends GardenerDeps {
+export interface CiFrictionGardenSources {
   /** The ledger union's own records — read once per pass, never parsed twice for one tick. */
   ledgerRecords: () => readonly LedgerRecord[];
   gateFireRates?: () => GateFireRateReport | undefined;
@@ -317,7 +318,7 @@ function draftCandidates(inv: CiFrictionInventory): CiFrictionGardenAction[] {
 }
 
 /** The repo's own CI friction as a gardener spec (gardener.ts, W1-T4110). */
-export function ciFrictionGardenSpec(deps: CiFrictionGardenerDeps): GardenSpec<CiFrictionGardenClass, CiFrictionInventory, CiFrictionGardenAction, GardenCheckout> {
+export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGardenSources): GardenSpec<CiFrictionGardenClass, CiFrictionInventory, CiFrictionGardenAction, GardenCheckout> {
   const clock: Clock = deps.clock ?? systemClock;
   return {
     name: "ci-friction",
@@ -331,9 +332,9 @@ export function ciFrictionGardenSpec(deps: CiFrictionGardenerDeps): GardenSpec<C
       return `${head}:${size}:${existsSync(report) ? statSync(report).size : 0}`;
     },
     inventory: () => {
-      const rounds = ciFrictionRoundsFromLedger(deps.ledgerRecords());
-      const priced = priceCiFrictionCauses(rounds, deps.gateFireRates?.());
-      return { priced, untracked: costliestUntrackedCause(priced, deps.planOrigins()) };
+      const rounds = ciFrictionRoundsFromLedger(sources.ledgerRecords());
+      const priced = priceCiFrictionCauses(rounds, sources.gateFireRates?.());
+      return { priced, untracked: costliestUntrackedCause(priced, sources.planOrigins()) };
     },
     fingerprint: (inv) => `${inv.priced.map((p) => `${ciFrictionCauseKey(p.cause)}:${p.minutes}`).join(",")}|${inv.untracked ? ciFrictionCauseKey(inv.untracked.cause) : ""}`,
     candidates: (inv) => draftCandidates(inv),
@@ -346,14 +347,16 @@ export function ciFrictionGardenSpec(deps: CiFrictionGardenerDeps): GardenSpec<C
     apply: (ws, plan, scorecard) => {
       const action = plan.actions[0];
       if (!action) return undefined;
-      const taskId = deps.mintTaskId();
+      const taskId = sources.mintTaskId();
       const contents = ciFrictionShardYaml(action.price, taskId);
       const verdict = ciFrictionRecordVerdict(contents, `ci-friction:${taskId}`);
       if (!verdict.ok) throw new Error(`ci-friction gardener: drafted record failed lint (${verdict.reason})`);
       const stem = kebabSlug(ciFrictionCauseKey(action.price.cause), CI_FRICTION_SLUG_MAX).replace(/-+$/, "");
-      const relPath = `plan/tasks.d/${taskId}${stem ? `-${stem}` : ""}.yaml`;
-      mkdirSync(join(ws.root, "plan", "tasks.d"), { recursive: true });
-      writeFileSync(join(ws.root, relPath), contents);
+      const shardDir = join(resolveRepoLayout(ws.root).planDir, "tasks.d");
+      const shardPath = join(shardDir, `${taskId}${stem ? `-${stem}` : ""}.yaml`);
+      const relPath = relative(ws.root, shardPath);
+      mkdirSync(shardDir, { recursive: true });
+      writeFileSync(shardPath, contents);
 
       const priced = (scorecard.priced as CiFrictionCausePrice[] | undefined) ?? [action.price];
       const row = ciFrictionTrendRow(clock.iso(), priced);
@@ -380,6 +383,6 @@ export function ciFrictionGardenSpec(deps: CiFrictionGardenerDeps): GardenSpec<C
 }
 
 /** Run ci-friction gardener passes on their own timer (gardener.ts's `startGarden`). */
-export function startCiFrictionGardener(deps: CiFrictionGardenerDeps, intervalMs: number): { stop: () => void } {
-  return startGarden(ciFrictionGardenSpec(deps), deps, intervalMs);
+export function startCiFrictionGardener(deps: GardenerDeps, sources: CiFrictionGardenSources, intervalMs: number): { stop: () => void } {
+  return startGarden(ciFrictionGardenSpec(deps, sources), deps, intervalMs);
 }
