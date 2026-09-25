@@ -33,7 +33,7 @@ const OTHER = "file/renumber-the-read-only-fix";
 function consoleReview(reserved: Record<string, string>, baseline?: string): { head: GitRepo; bare: GitRepo } {
   const bare = gitRepo({ bare: true, kind: "own-reservation-origin" });
   const work = gitRepo({ kind: "own-reservation-work" });
-  const files: Record<string, string> = { "plan/tasks.d/CONSOLE-T57-x.yaml": "- id: CONSOLE-T57\n" };
+  const files: Record<string, string> = { "plan/tasks.yaml": "- id: W1-T57\n  title: seed\n", "plan/tasks.d/CONSOLE-T57-x.yaml": "- id: CONSOLE-T57\n" };
   if (baseline !== undefined) files["plan/task-id-reservation-baseline.json"] = baseline;
   for (const [rel, text] of Object.entries(files)) {
     mkdirSync(dirname(join(work.dir, rel)), { recursive: true });
@@ -187,6 +187,7 @@ test("W1-T4414: a default-family mint with --branch records that branch too", as
   let code: number;
   try {
     code = await nextTaskIdCommand(["--branch", HEAD], {}, {
+      repoRoot: clone.dir,
       runGit: (args: string[]) => {
         try {
           return { status: 0, stdout: clone.git(...args), stderr: "" };
