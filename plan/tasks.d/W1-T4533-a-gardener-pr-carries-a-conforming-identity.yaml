@@ -4,7 +4,7 @@
   depends_on: []
   priority: 2
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   risk: low
   budget_usd: 8.00
@@ -12,7 +12,6 @@
   files:
     - scripts/lib/argv.mjs
     - test/a-gardener-pr-carries-a-conforming-identity.test.ts
-    - plan/tasks.d/W1-T4533-a-gardener-pr-carries-a-conforming-identity.yaml
   status: queued
   attempts: 0
   note: |
