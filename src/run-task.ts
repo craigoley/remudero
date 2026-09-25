@@ -24873,7 +24873,13 @@ export function runPreflightCiChecks(repoRoot: string, deps: Pick<PreflightFastD
   const steps: CiParityStepResult[] = PREFLIGHT_CI_CHECKS.map((entry) => {
     const name = `ci-checks:${entry.name}`;
     const { file, args } = entry.argv(repoRoot);
-    const r = withoutNodeTestContextEnv(() => shellOut(spawn, `${name} (predicts CI: ${entry.predictsCiJob})`, file, args, { cwd: repoRoot }));
+    // A throwing spawn is THIS step's named failure, never an abort of the run — `runStep`'s contract.
+    let r: { ok: boolean; detail: string };
+    try {
+      r = withoutNodeTestContextEnv(() => shellOut(spawn, `${name} (predicts CI: ${entry.predictsCiJob})`, file, args, { cwd: repoRoot }));
+    } catch (e) {
+      r = { ok: false, detail: `toolchain unavailable: ${String((e as Error)?.message ?? e)}` };
+    }
     return {
       name,
       ok: r.ok,
