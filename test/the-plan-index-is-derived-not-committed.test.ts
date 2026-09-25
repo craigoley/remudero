@@ -63,7 +63,7 @@ test("W1-T4432: readers derive and cache the plan index from MASTER-PLAN.md with
     const runTask = readFileSync(join(ROOT, "src", "run-task.ts"), "utf8");
     const panelGraph = readFileSync(join(ROOT, "src", "lib", "panel-graph.ts"), "utf8");
     assert.match(runTask, /loadPlanIndex\(join\(dirname\(planPath\), "\.\.", "MASTER-PLAN\.md"\)\)/);
-    assert.match(panelGraph, /loadPlanIndex\(join\(dirname\(deps\.planPath\), "\.\.", "MASTER-PLAN\.md"\)\)/);
+    assert.match(panelGraph, /loadPlanIndex\(resolveRepoLayout\(deps\.root\)\.masterPlan\)/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

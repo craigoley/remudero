@@ -33,6 +33,7 @@ import {
   type Task,
 } from "./plan.js";
 import { loadPlanIndex, type PlanIndex, type PlanIndexEntry } from "./plan-index.js";
+import { resolveRepoLayout } from "./repo-layout.js";
 import {
   buildLedgerIndex,
   projectPlan,
@@ -1174,7 +1175,7 @@ type PlanRefKind = "section" | "task-id" | "retro-proposal" | "workstream" | "un
 
 /** Classify one `plan_refs` entry into the five kinds design note (i) documents. Only
  *  `"section"` carries a `token` -- the ref text with its `§`/`MASTER-PLAN#` prefix stripped --
- *  for {@link resolveSectionHeading} to join against MASTER-PLAN.md's derived headings. */
+ *  for {@link resolveSectionHeading} to join against the source document's derived headings. */
 function classifyPlanRef(ref: string): { kind: PlanRefKind; token?: string } {
   if (ref.startsWith("§")) return { kind: "section", token: ref.slice(1) };
   if (ref.startsWith("MASTER-PLAN#")) return { kind: "section", token: ref.slice("MASTER-PLAN#".length) };
@@ -1290,7 +1291,7 @@ export function buildPlanViewRoute(deps: PanelGraphDeps, readPlanSnapshot?: () =
       const isMerged: MergedSet = (id) => projection.get(id)?.merged ?? false;
       const progress = computePlanProgress(plan, projection, deps.statusGithub, progressCache);
       const planRefs = planRefsFromSnapshot(plan);
-      const planIndex = loadPlanIndex(join(dirname(deps.planPath), "..", "MASTER-PLAN.md"));
+      const planIndex = loadPlanIndex(resolveRepoLayout(deps.root).masterPlan);
       const sections = computePlanSectionCounts(plan, projection, planRefs, planIndex, progress.unknown, sectionCache);
       const ledgerLines = readLedgerLines(deps.ledgerPath);
       const frontier = buildPlanFrontier(plan, isMerged, limit, ledgerLines, undefined, (id) =>
