@@ -32444,15 +32444,18 @@ export async function daemonCommand(
                 },
                 // W1-T4439: aggregate complete coverage-shard shadow records before W1-T4406
                 // may narrow CI. A real miss opens a parked task naming the observed edge.
-                (intervalMs: number) => startSelectorShadowGardener({
-                  stateDir: join(config.root, "state"),
-                  repoRoot,
-                  readRuns: () => readSelectorShadowRuns(self.owner, self.repo),
-                  readChangedPaths: (miss) => readSelectorShadowChangedPaths(self.owner, self.repo, miss),
-                  openWorkspace: () => gardenCheckout({ name: "selector-shadow", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
-                  mintTaskId: ciLearningTaskIdMinter(repoRoot),
-                  log,
-                }, intervalMs),
+                (intervalMs: number) => startSelectorShadowGardener(
+                  {
+                    stateDir: join(config.root, "state"),
+                    repoRoot,
+                    openWorkspace: () => gardenCheckout({ name: "selector-shadow", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                    log,
+                  },
+                  () => readSelectorShadowRuns(self.owner, self.repo),
+                  (miss) => readSelectorShadowChangedPaths(self.owner, self.repo, miss),
+                  ciLearningTaskIdMinter(repoRoot),
+                  intervalMs,
+                ),
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
                 // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
                 // registry instance" has no selector yet -- `RegistryInstance` carries no role or

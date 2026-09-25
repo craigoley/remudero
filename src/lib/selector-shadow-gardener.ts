@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { join } from "node:path";
 
-import type { GardenCheckout } from "./gardener.js";
+import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
+import type { GardenerDeps } from "./gardener.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { loadPlanFromYaml } from "./plan.js";
 import { lintTask } from "./task-linter.js";
@@ -113,8 +114,9 @@ export function readSelectorShadowRuns(
   const readLog = io.readLog ?? ((args: string[]) => ghExec(args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }));
   const response = readJson(["api", `repos/${owner}/${repo}/actions/workflows/ci.yml/runs?event=pull_request&status=completed&per_page=${limit}`]) as {
     workflow_runs?: Array<{ id?: number; head_sha?: string; pull_requests?: Array<{ number?: number; base?: { sha?: string } }> }>;
-  };
-  if (!Array.isArray(response?.workflow_runs)) throw new Error("selector shadow: GitHub returned no workflow_runs list");
+  } | null;
+  if (response === null || typeof response !== "object") throw new Error("selector shadow: GitHub returned no workflow-runs object");
+  if (!Array.isArray(response.workflow_runs)) throw new Error("selector shadow: GitHub returned no workflow_runs list");
   return response.workflow_runs.map((run) => {
     if (!nonnegativeInteger(run.id) || typeof run.head_sha !== "string") {
       throw new Error("selector shadow: a workflow run has no id or head SHA");
@@ -137,8 +139,9 @@ export function readSelectorShadowChangedPaths(
   if (!miss.baseSha) return [];
   const response = readJson(["api", `repos/${owner}/${repo}/compare/${miss.baseSha}...${miss.headSha}`]) as {
     files?: Array<{ filename?: string }>;
-  };
-  if (!Array.isArray(response?.files) || response.files.length >= 300 ||
+  } | null;
+  if (response === null || typeof response !== "object") throw new Error(`selector shadow: GitHub returned no comparison object for ${miss.headSha}`);
+  if (!Array.isArray(response.files) || response.files.length >= 300 ||
       response.files.some((file) => typeof file.filename !== "string")) {
     throw new Error(`selector shadow: incomplete comparison for ${miss.headSha}`);
   }
@@ -251,28 +254,26 @@ export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string,
   ].join("\n");
 }
 
-export interface SelectorShadowGardenerDeps {
-  stateDir: string;
-  repoRoot: string;
-  readRuns: () => SelectorShadowRun[];
-  readChangedPaths?: (miss: SelectorShadowMiss) => string[];
-  openWorkspace: () => GardenCheckout;
-  mintTaskId: () => string;
-  log: (step: string, extra?: Record<string, unknown>) => void;
-}
-
-/** Report every pass, and file at most one new missed edge so the daemon cannot flood the plan. */
-export function runSelectorShadowGardener(deps: SelectorShadowGardenerDeps): SelectorShadowReport {
+/** Report every pass, and file at most one new missed edge so the daemon cannot flood the plan.
+ *  The shared gardener seam carries state, checkout, workspace and log; the three reads are this
+ *  gardener's own inputs, passed beside it rather than declared as another seam shape. */
+export function runSelectorShadowGardener(
+  deps: GardenerDeps,
+  readRuns: () => SelectorShadowRun[],
+  readChangedPaths: (miss: SelectorShadowMiss) => string[],
+  mintTaskId: () => string,
+): SelectorShadowReport {
   const path = join(deps.stateDir, "selector-shadow-gardener.json");
-  const prior = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as { filedKeys?: string[] } : {};
+  const stored = readFileIfExists(path);
+  const prior = stored === undefined ? {} : JSON.parse(stored) as { filedKeys?: string[] };
   if (prior.filedKeys !== undefined && !Array.isArray(prior.filedKeys)) throw new Error("selector shadow: invalid filed-keys state");
   const filed = new Set(prior.filedKeys ?? []);
-  const report = selectorShadowReport(deps.readRuns(), selectorShadowFullSuiteSize(deps.repoRoot));
+  const report = selectorShadowReport(readRuns(), selectorShadowFullSuiteSize(deps.repoRoot));
   deps.log("selector-shadow.report", { ...report, misses: report.misses.slice(0, 20) });
   const miss = report.misses.find((m) => !filed.has(selectorShadowMissKey(m)));
   if (miss) {
-    const changedPaths = deps.readChangedPaths?.(miss) ?? [];
-    const taskId = deps.mintTaskId();
+    const changedPaths = readChangedPaths(miss);
+    const taskId = mintTaskId();
     const name = `${taskId.toLowerCase()}-selector-shadow-miss.yaml`;
     const relativePath = join("plan", "tasks.d", name);
     const contents = selectorShadowMissTask(miss, taskId, changedPaths);
@@ -281,8 +282,7 @@ export function runSelectorShadowGardener(deps: SelectorShadowGardenerDeps): Sel
     if (!lint.ok) throw new Error(`selector shadow: missed-edge task failed lint: ${lint.violations.map((v) => v.check).join(", ")}`);
     const workspace = deps.openWorkspace();
     try {
-      mkdirSync(join(workspace.root, "plan", "tasks.d"), { recursive: true });
-      writeFileSync(join(workspace.root, relativePath), contents);
+      writeAtomic(join(workspace.root, relativePath), contents);
       const prUrl = workspace.land({
         paths: [relativePath],
         title: `fix(selector): file missed ${miss.selection} edge for ${miss.file.split("/").at(-1)}`,
@@ -295,19 +295,24 @@ export function runSelectorShadowGardener(deps: SelectorShadowGardenerDeps): Sel
       workspace.dispose();
     }
   }
-  mkdirSync(deps.stateDir, { recursive: true });
-  writeFileSync(path, JSON.stringify({ filedKeys: [...filed], report }) + "\n");
+  writeAtomic(path, JSON.stringify({ filedKeys: [...filed], report }) + "\n");
   return report;
 }
 
 /** Run immediately, then on the daemon interval; one pass at a time. */
-export function startSelectorShadowGardener(deps: SelectorShadowGardenerDeps, intervalMs: number): { stop: () => void } {
+export function startSelectorShadowGardener(
+  deps: GardenerDeps,
+  readRuns: () => SelectorShadowRun[],
+  readChangedPaths: (miss: SelectorShadowMiss) => string[],
+  mintTaskId: () => string,
+  intervalMs: number,
+): { stop: () => void } {
   let running = false;
   const tick = () => {
     if (running) return;
     running = true;
     try {
-      runSelectorShadowGardener(deps);
+      runSelectorShadowGardener(deps, readRuns, readChangedPaths, mintTaskId);
     } catch (error) {
       deps.log("selector-shadow.gardener_failed", { error: String((error as Error)?.message ?? error) });
     } finally {

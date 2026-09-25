@@ -78,18 +78,16 @@ test("W1-T4439: a missed failure files a task naming the missing edge", () => {
   const deps = {
     stateDir: join(root, "state"),
     repoRoot: root,
-    readRuns: () => [observed],
-    readChangedPaths: () => ["scripts/clock-signature-ratchet.mjs"],
     openWorkspace: () => ({
       root,
       land: (opts: { paths: string[]; title: string; body: string }) =>
         (landed.push(opts), "https://github.com/acme/remudero/pull/99"),
       dispose: () => {},
     }),
-    mintTaskId: () => "W1-T9001",
-    log: (step: string) => events.push(step),
+    log: (step: string) => { events.push(step); },
   };
-  const report = runSelectorShadowGardener(deps);
+  const pass = () => runSelectorShadowGardener(deps, () => [observed], () => ["scripts/clock-signature-ratchet.mjs"], () => "W1-T9001");
+  const report = pass();
   assert.equal(report.verdict, "misses");
   assert.equal(landed.length, 1);
   assert.deepEqual(landed[0]!.paths, ["plan/tasks.d/w1-t9001-selector-shadow-miss.yaml"]);
@@ -100,7 +98,7 @@ test("W1-T4439: a missed failure files a task naming the missing edge", () => {
   assert.match(task, /verify: human/);
   assert.ok(events.includes("selector-shadow.report"));
   assert.ok(events.includes("selector-shadow.miss_filed"));
-  runSelectorShadowGardener(deps);
+  pass();
   assert.equal(landed.length, 1, "the same observed edge files once across passes");
 });
 
@@ -126,4 +124,7 @@ test("W1-T4439: the GitHub reader keeps each run's exact head and comparison", (
     return { files: [{ filename: "scripts/clock-signature-ratchet.mjs" }] };
   }), ["scripts/clock-signature-ratchet.mjs"]);
   assert.throws(() => readSelectorShadowChangedPaths("acme", "remudero", miss, () => ({ files: null })), /incomplete comparison/);
+  assert.throws(() => readSelectorShadowChangedPaths("acme", "remudero", miss, () => null), /no comparison object for abc123/);
+  assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => null, readLog: () => "" }), /no workflow-runs object/);
+  assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({}), readLog: () => "" }), /no workflow_runs list/);
 });
