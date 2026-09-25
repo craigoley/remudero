@@ -11,7 +11,7 @@
   band_meaning: span
   origin: "operator ask 2026-09-24: fix #7028 — a red it did not cause"
   plan_refs: [W1-T4414, W1-T3091]
-  files: [src/run-task.ts, test/a-new-task-id-must-be-reserved-by-its-own-branch.test.ts, test/next-task-id-reserve.test.ts, test/next-task-id-prefix.test.ts, test/owner-self-scoped-verbs-unchanged.test.ts, test/a-mint-that-does-not-claim-is-a-collision-waiting.test.ts, test/a-reservation-names-its-holder.test.ts, test/a-mint-test-reads-only-its-own-fixture.test.ts]
+  files: [src/run-task.ts, test/a-new-task-id-must-be-reserved-by-its-own-branch.test.ts, test/next-task-id-reserve.test.ts, test/next-task-id-prefix.test.ts, test/owner-self-scoped-verbs-unchanged.test.ts, test/a-mint-that-does-not-claim-is-a-collision-waiting.test.ts, test/a-reservation-names-its-holder.test.ts, test/a-mint-test-reads-only-its-own-fixture.test.ts, test/mint-open-pr-surface-is-rest.test.ts]
   status: queued
   attempts: 0
   rationale: |
