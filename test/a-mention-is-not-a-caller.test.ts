@@ -75,3 +75,26 @@ test("W1-T3409: a reachable imported call clears the no-caller finding", () => {
     (findings) => assert.ok(!findings.has("liveTarget"), "a reachable module importing and calling the symbol must clear the finding"),
   );
 });
+
+test("W1-T4441: a reachable module reading (never calling) an imported constant clears the no-caller finding", () => {
+  withFindings(
+    {
+      "src/lib/limits.ts": "export const USAGE_CACHE_MAX_AGE_MS = 60000;\n",
+      "src/run-task.ts": [
+        'import { USAGE_CACHE_MAX_AGE_MS } from "./lib/limits.js";',
+        "console.log(USAGE_CACHE_MAX_AGE_MS);",
+      ].join("\n"),
+    },
+    (findings) => assert.ok(!findings.has("USAGE_CACHE_MAX_AGE_MS"), "a read reference to an imported constant must clear the finding"),
+  );
+});
+
+test("W1-T4441: a constant imported but never referenced outside its import clause remains a no-caller finding", () => {
+  withFindings(
+    {
+      "src/lib/unread-limits.ts": "export const NEVER_READ_MS = 1000;\n",
+      "src/run-task.ts": ['import { NEVER_READ_MS } from "./lib/unread-limits.js";', "export {};"].join("\n"),
+    },
+    (findings) => assert.ok(findings.has("NEVER_READ_MS"), "an import with no further reference must remain a no-caller finding"),
+  );
+});
