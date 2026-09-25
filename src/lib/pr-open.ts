@@ -1,33 +1,19 @@
 /**
- * W1-T4420 — THE SHARED PRE-POST SEAM every automated PR opener routes through, so a body defect
- * is caught before the irreversible REST create, never patched afterward.
+ * W1-T4420 — THE SHARED PRE-POST SEAM every automated PR opener (implement/retro/triage/plan in
+ * `src/run-task.ts`) routes through, so a defective body is refused before the irreversible REST
+ * create rather than patched afterward. Operator declined a `rmd pr open` CLI + `PrOpenDeps`
+ * surface (PR #7165, 2026-09-25); this narrows the same inputs those four call sites already hold
+ * into one checked function instead — no command, no `COMMANDS` row, no new dependency type.
  *
- * Why this exists: the operator declined a prior implementation of this task (a new `rmd pr open`
- * CLI command and a `PrOpenDeps` interface, PR #7165 comment 2026-09-25) in favour of a checked
- * library function reused by the four existing automated openers already routed through
- * `ghPrCreateFillCommand` (`src/run-task.ts`: implement, retro, triage, plan). This module is that
- * function. It adds NO command, NO `COMMANDS` row and NO new dependency-object type — it narrows
- * the same positional inputs those four call sites already hold (a worktree path, a branch, an
- * optional task id, an injected create-builder) into one checked call.
- *
- * TWO DEFECT CLASSES this refuses BEFORE the REST POST, both previously caught only afterward by a
- * PATCH (or not at all):
- *
- * 1. NON-DISCRIMINATING: `ghPrCreateFillCommand` falls back to a generic Acceptance block
- *    ({@link "../run-task.js".PR_OPEN_TIME_ACCEPTANCE_FALLBACK}, re-detected here from its own
- *    proof text — see {@link bodyOnlyCarriesOpenTimeFallback} — never re-imported, to avoid a
- *    lib->root import cycle) whenever the commit-derived body carried no Acceptance block at all.
- *    That proof greps a function (`acceptanceAuthorTimeCheck`) that predates every PR reaching this
- *    fallback, so it discriminates nothing — `rmd retro`'s own post-create repair
- *    (`repairRetroAcceptanceBlock`) already fixes this for retro specifically, but only AFTER the
- *    PR exists, by re-fetching its diff over the network and PATCHing the body (measured live on
- *    #5769). {@link diffDerivedAcceptanceProof} builds the SAME kind of proof — one line this
- *    diff itself just added — from the worktree's OWN local diff against its merge base, so the
- *    substitution (or, failing that, the refusal) happens before the branch's PR is ever created.
- *
- * 2. PLAN-DIVERGENT: a filing PR's body (the `bodyOverride` the plan opener passes) cites a task id
- *    its own diff does not actually file — a stale reservedIds list, a wrong id in a hand-edited
- *    body override — refused rather than opened with a claim its own diff contradicts.
+ * Refuses TWO defect classes before the POST:
+ * 1. NON-DISCRIMINATING — `ghPrCreateFillCommand`'s generic open-time fallback Acceptance block
+ *    greps a function (`acceptanceAuthorTimeCheck`) that predates every PR reaching it, proving
+ *    nothing about THIS diff ({@link bodyOnlyCarriesOpenTimeFallback} re-detects it from its own
+ *    proof text, never re-imported, to avoid a lib->root cycle). `rmd retro` already repairs this
+ *    for itself, but only AFTER the PR exists (`repairRetroAcceptanceBlock`, a network PATCH).
+ *    {@link diffDerivedAcceptanceProof} builds the same kind of proof from the worktree's OWN
+ *    local diff, before any PR exists — substituting it, or refusing when none can be derived.
+ * 2. PLAN-DIVERGENT — a filing PR's `bodyOverride` citing a task id its own diff does not file.
  */
 
 import { breMetacharsIn } from "./task-linter.js";
