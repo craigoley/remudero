@@ -13,7 +13,10 @@
   plan_refs: ["W1-T4383", "W1-T4385", "W1-T4386"]
   files:
     - src/lib/ci-incidents.ts
+    - src/lib/github-event-wake.ts
     - src/lib/serve.ts
+    - test/ci-incidents.test.ts
+    - test/github-event-sweep-wake.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -36,11 +39,11 @@
     check), and serve.ts calls recordCheckRunOutcome( from its check_run webhook handling.
   acceptance:
     - claim: "a failing check posts one incident event per failing test, fingerprinted by test"
-      proof: "unit test: a failing check posts one incident event per failing test, fingerprinted by test"
+      proof: "grep: a failing check posts one incident event per failing test, fingerprinted by test in test/ci-incidents.test.ts"
     - claim: "a check that passes on a re-run at the same sha marks its failed tests as flaky"
-      proof: "unit test: a check that passes on a re-run at the same sha marks its failed tests as flaky"
+      proof: "grep: a check that passes on a re-run at the same sha marks its failed tests as flaky in test/ci-incidents.test.ts"
     - claim: "a test that also fails on main is never called a flake"
-      proof: "unit test: a test that also fails on main is never called a flake"
+      proof: "grep: a test that also fails on main is never called a flake in test/ci-incidents.test.ts"
     - claim: "the gateway records every completed check run's outcome"
       proof: 'grep: recordCheckRunOutcome( in src/lib/serve.ts'
   falsifier: |

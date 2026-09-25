@@ -1,34 +1,11 @@
 /**
- * lib/ci-incidents.ts — W1-T4391, the SRE gardener's CI-flake producer.
+ * W1-T4391: pure TAP parsing, test fingerprinting and failure-to-flake state transitions.
+ * serve.ts is the effectful caller: it reads failed job logs and writes events through
+ * W1-T4383's `incident.event` ledger schema for the W1-T4385 SRE lane.
+ * Fingerprints use only test file+title; a same-sha/same-check pass resolves failure, except
+ * tests already observed failing on `main`, which are never mislabeled as flakes.
  *
- * A FLAKY TEST COSTS A HUMAN A RE-RUN AND IS THEN FORGOTTEN. 2026-09-23: #6870's coverage shard
- * failed on a knowledge-gardener timer test unrelated to its diff — 91ms under a loaded runner, 3
- * of 3 passes locally. A human diagnosed it, re-ran the job and moved on. The flake stayed in the
- * suite for the next PR to trip on; nothing recorded the failure, the re-run, or the pass.
- *
- * TWO PURE FUNCTIONS, ONE IMPURE CALLER. This module opens no socket, reads no clock and writes
- * nothing — every failing-test extraction and every flaky/not-flaky judgment is a plain function
- * of its inputs, so the three claims below are each one direct call. serve.ts's `check_run`
- * webhook handling (github-event-wake.ts's `onCheckRunCompleted` hook) is the one impure caller:
- * it fetches a failed job's log once (REST, within the gh read budget), threads the returned
- * `CiIncidentState` across calls, and ledgers whatever events come back via
- * {@link ciIncidentEventLedgerLine} — reusing incident-events.ts's (W1-T4383) `incident.event`
- * step so the SRE lane (W1-T4385) reads CI flakes off the SAME ledger stream as every other
- * incident, never a second schema.
- *
- * FINGERPRINTED BY TEST, NEVER BY RUN. {@link fingerprintCiTest} hashes only the failing test's
- * file and title — no sha, no run id, no timestamp — so the SAME test failing on two different
- * pull requests (or twice on the same one) always produces the SAME fingerprint. That is what
- * lets `recordCheckRunOutcome` recognise "this exact test, passing now, failed a moment ago at
- * this exact commit" as one flake rather than two unrelated incidents.
- *
- * A FAILURE THAT ALSO FAILS ON MAIN IS NOT A FLAKE. `recordCheckRunOutcome` remembers, keyed by
- * fingerprint and never forgotten, every test it has ever seen fail on `check.mainBranch`
- * (default `"main"`). A pending failure whose fingerprint is in that set resolves silently on a
- * later pass — never as a `flake` event — because a test broken on trunk was never a fluke of
- * THIS re-run; it is a real break someone has to fix, and calling it flaky would bury the lead.
- *
- * FALSIFIER: test/a-flaky-test-becomes-an-incident.test.ts.
+ * FALSIFIER: test/ci-incidents.test.ts.
  */
 
 import { createHash } from "node:crypto";
@@ -134,6 +111,7 @@ export function ciIncidentEventsFromLog(log: string, meta: { sha: string }): CiI
 export const DEFAULT_CI_INCIDENT_MAIN_BRANCH = "main";
 
 interface CiIncidentPendingFailure {
+  fingerprint: string;
   sha: string;
   checkName: string;
   file: string;
@@ -142,7 +120,8 @@ interface CiIncidentPendingFailure {
 
 /** Threaded explicitly by the caller (serve.ts) across `check_run` deliveries — never a module
  *  singleton, so a test can drive two independent histories side by side. `pending` is every
- *  fingerprint currently failing, keyed by the sha+check it failed at; `knownBrokenOnMain` is
+ *  fingerprint currently failing, keyed by fingerprint+sha+check so overlapping runs cannot
+ *  overwrite one another; `knownBrokenOnMain` is
  *  NEVER cleared here — once a fingerprint is seen failing on `mainBranch` it can never again
  *  resolve as a flake, on any sha, on any check. */
 export interface CiIncidentState {
@@ -196,14 +175,21 @@ export function recordCheckRunOutcome(
   if (check.conclusion === "failure") {
     for (const event of ciIncidentEventsFromLog(check.log ?? "", { sha: check.sha })) {
       events.push(event);
-      pending[event.fingerprint] = { sha: check.sha, checkName: check.name, file: event.name, title: event.message };
+      const pendingKey = `${event.fingerprint}\u0000${check.sha}\u0000${check.name}`;
+      pending[pendingKey] = {
+        fingerprint: event.fingerprint,
+        sha: check.sha,
+        checkName: check.name,
+        file: event.name,
+        title: event.message,
+      };
       if (isMain) knownBrokenOnMain[event.fingerprint] = true;
     }
   } else if (check.conclusion === "success") {
-    for (const [fingerprint, failure] of Object.entries(pending)) {
+    for (const [pendingKey, failure] of Object.entries(pending)) {
       if (failure.sha !== check.sha || failure.checkName !== check.name) continue;
-      delete pending[fingerprint];
-      if (knownBrokenOnMain[fingerprint]) continue; // also broken on main: a real break, not a flake.
+      delete pending[pendingKey];
+      if (knownBrokenOnMain[failure.fingerprint]) continue; // also broken on main: a real break, not a flake.
       events.push({
         source: "ci",
         kind: "flake",
@@ -211,7 +197,7 @@ export function recordCheckRunOutcome(
         message: failure.title,
         frames: [{ file: failure.file, fn: failure.title }],
         sha: check.sha,
-        fingerprint,
+        fingerprint: failure.fingerprint,
       });
     }
   }

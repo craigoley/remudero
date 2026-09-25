@@ -114,6 +114,31 @@ function checkRunHeadIdentity(body: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+/** The verified webhook fields the CI incident consumer needs; branch is absent when GitHub
+ *  cannot associate a head branch with the check run. */
+export interface CheckRunCompletedInfo {
+  id: number;
+  sha: string;
+  branch?: string;
+  name: string;
+  conclusion: string;
+}
+
+function extractCheckRunCompletedInfo(body: unknown): CheckRunCompletedInfo | undefined {
+  if (typeof body !== "object" || body === null) return undefined;
+  const checkRun = (body as Record<string, unknown>).check_run;
+  if (typeof checkRun !== "object" || checkRun === null) return undefined;
+  const id = (checkRun as Record<string, unknown>).id;
+  if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) return undefined;
+  const sha = checkRunHeadIdentity(body);
+  const name = extractCheckRunField(body, "name")?.trim();
+  const conclusion = extractCheckRunField(body, "conclusion")?.trim();
+  if (!sha || !name || !conclusion) return undefined;
+  const headBranch = (checkRun as Record<string, unknown>).head_branch;
+  const branch = typeof headBranch === "string" && headBranch.trim() ? headBranch.trim() : undefined;
+  return { id, sha, ...(branch ? { branch } : {}), name, conclusion };
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
@@ -438,6 +463,8 @@ export interface GithubEventWakeOptions {
   writeMarker?: ((path: string, record: SweepWakeMarker) => void) | ((path: string, record: SweepWakeMarker) => Promise<void>);
   /** When set, a delivery that arms no marker, an ignored one and a duplicate are counted here, not logged. */
   counters?: WakeCounters;
+  /** Receives verified, allowlisted and deduplicated `check_run:completed` deliveries. */
+  onCheckRunCompleted?: (info: CheckRunCompletedInfo) => void | Promise<void>;
 }
 
 /**
@@ -459,6 +486,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
   const aggregateCheckNames =
     opts.aggregateCheckNames ?? DEFAULT_GITHUB_EVENT_WAKE_AGGREGATE_CHECK_NAMES;
   let semanticCounts = createGithubEventWakeSemanticCounts(aggregateCheckNames);
+  const checkRunCallbackTails = new Map<string, Promise<void>>();
 
   const recordClassification = (classification: GithubEventWakeClassification, body: unknown) => {
     semanticCounts.mode = semanticCheckMode;
@@ -493,6 +521,30 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
     const summary = semanticCounts;
     semanticCounts = createGithubEventWakeSemanticCounts(aggregateCheckNames);
     return summary;
+  };
+
+  const notifyCheckRunCompleted = (event: string, action: string | undefined, body: unknown): void => {
+    const callback = opts.onCheckRunCompleted;
+    if (event !== "check_run" || action !== "completed" || !callback) return;
+    const info = extractCheckRunCompletedInfo(body);
+    if (!info) return;
+    // A failed check's log read is async; serialize the same head/check so its later pass cannot
+    // overtake it, while never holding GitHub's webhook acknowledgement open.
+    const key = `${info.sha}\u0000${info.name}`;
+    const previous = checkRunCallbackTails.get(key) ?? Promise.resolve();
+    let queued: Promise<void>;
+    queued = previous
+      .then(() => callback(info))
+      .catch((error: unknown) => {
+        log("github.wake.check_run_callback_failed", {
+          check_run_id: info.id,
+          reason: String((error as Error)?.message ?? error),
+        });
+      })
+      .finally(() => {
+        if (checkRunCallbackTails.get(key) === queued) checkRunCallbackTails.delete(key);
+      });
+    checkRunCallbackTails.set(key, queued);
   };
 
   return {
@@ -575,6 +627,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
       recordClassification(classification, body);
       if (semanticCheckMode === "enforce" && !classification.actionable) {
         await opts.dedup.record(deliveryId);
+        notifyCheckRunCompleted(event, action, body);
         sendJson(res, 202, { accepted: false, reason: "successful_leaf" });
         return;
       }
@@ -589,6 +642,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
       const armed = readSweepWakeMarker(opts.markerPath) === undefined;
       await writeMarker(opts.markerPath, record);
       await opts.dedup.record(deliveryId);
+      notifyCheckRunCompleted(event, action, body);
       if (opts.counters && !armed) {
         countWake(opts.counters, "accepted_coalesced", event, action);
         sendJson(res, 202, { accepted: true });

@@ -3913,10 +3913,17 @@ async function fetchCiIncidentJobLog(deps: ServeDeps, repository: string, jobId:
   if (inject) return inject(repository, jobId);
   if (!repository) return "";
   try {
-    return execFileSync("gh", ["api", `repos/${repository}/actions/jobs/${jobId}/logs`], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      maxBuffer: 32 * 1024 * 1024,
+    return await new Promise<string>((resolve, reject) => {
+      execFile(
+        "gh",
+        ["api", `repos/${repository}/actions/jobs/${jobId}/logs`],
+        {
+          encoding: "utf8",
+          maxBuffer: 32 * 1024 * 1024,
+          timeout: 30_000,
+        },
+        (error, stdout) => (error ? reject(error) : resolve(stdout)),
+      );
     });
   } catch (e) {
     // CARRIED, NEVER ERASED (catch-erasure-ratchet): the empty string still parses to zero failing
