@@ -1783,6 +1783,8 @@ export function buildSweepEffects(
      *  `buildSweepEffectsFromLib`, so `sweep.ts`'s own `BuildSweepEffectsDeps` never has to know
      *  this field exists. */
     reviewerCodeFreshnessImpl?: () => ReviewerCodeFreshness;
+    /** Fixture for the registry read; production reads the tracked instance registry. */
+    instanceRegistryTextImpl?: () => string | undefined;
   },
 ): Pick<
   SweepDeps,
@@ -1864,7 +1866,7 @@ export function buildSweepEffects(
 
   export function fixRungTaskFor(
   */
-  const { reviewerCodeFreshnessImpl, ...libDeps } = deps;
+  const { reviewerCodeFreshnessImpl, instanceRegistryTextImpl, ...libDeps } = deps;
   // W1-T3723: WIRED, not merely exported. A fresh-tree runner nothing passes is the
   // shipped-unwired shape this repo refuses, and the whole point is that a stale reviewer stops
   // needing a restart — which only happens if production actually gets one.
@@ -2142,6 +2144,10 @@ export function buildSweepEffects(
     fixRungCheckoutRefusedErrorImpl: FixRungCheckoutRefusedError,
     defaultBudgetUsd: DEFAULT_BUDGET_USD,
     ...libDeps,
+    repoMode: libDeps.repoMode ?? instanceMode(
+      `${deps.owner}/${deps.repo}`,
+      instanceRegistryTextImpl ? instanceRegistryTextImpl() : readInstanceRegistryText(repoRoot),
+    ),
   });
   // W1-T2890 holds this surface key-identical to the lib-built one, so the accessor is INJECTED
   // above rather than bolted on here: returning the lib's object unchanged makes that identity
@@ -31550,6 +31556,7 @@ export async function daemonCommand(
   log("daemon.target", {
     repo: target.repo,
     gateway: `${target.owner}/${target.repo}`,
+    instance_mode: instanceMode(`${target.owner}/${target.repo}`, readInstanceRegistryText(repoRoot)),
     plan_path: target.planPath,
     self_host: target.isSelf,
     dry_run: target.dryRun,

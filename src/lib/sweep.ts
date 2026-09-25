@@ -985,6 +985,8 @@ export interface BuildSweepEffectsDeps {
   readyDraftImpl?: (pr: OpenPrView) => void | Promise<void>;
   owner: string;
   repo: string;
+  /** A shadow instance never arms a ready PR, including through this independent sweep lane. */
+  repoMode?: "shadow" | "live";
   repoRoot?: string;
   localRepoName?: string;
   nowMsImpl?: () => number;
@@ -1390,6 +1392,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   const {
     owner,
     repo,
+    repoMode = "live",
     config,
     repoRoot: entrypointRepoRoot = config.root,
     localRepoName = repo,
@@ -1811,6 +1814,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // cannot happen from this adapter but keeps every existing fake/test that returns a plain
     // `ArmOutcome` string compiling and behaving exactly as before) is returned unchanged.
     arm: (pr) => {
+      if (repoMode === "shadow") {
+        log("automerge.shadow_refused", {
+          pr_url: pr.prUrl,
+          task_id: pr.taskId,
+          reason: "shadow instance cannot arm or merge",
+        });
+        return "shadow-refused";
+      }
       let attemptError: string | undefined;
       const outcome = armAndLogOutcome(
         pr.prUrl,
@@ -7585,6 +7596,7 @@ export type ArmOutcomeName =
   | "no-task-id"
   | "head-unavailable"
   | "ledger-refused"
+  | "shadow-refused"
   | "armed"
   | "direct-merged"
   | "direct-merge-failed"
