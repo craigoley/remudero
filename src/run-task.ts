@@ -24879,6 +24879,19 @@ export interface PreflightCiChecksResult {
   ok: boolean;
 }
 
+/** A launcher may throw before a child exists (notably a deliberately narrow injected test
+ *  launcher). Keep that refusal in preflight's result and summary instead of aborting the verb. */
+function preflightCheckResult(name: string, run: () => PreflightCiChecksResult): PreflightCiChecksResult {
+  try {
+    return run();
+  } catch (error) {
+    return {
+      steps: [{ name, ok: false, detail: `${name}: FAIL — could not run local CI check: ${String(error)}` }],
+      ok: false,
+    };
+  }
+}
+
 /** Runs every {@link PREFLIGHT_CI_CHECKS} entry, each its own step, each naming the CI job it
  *  predicts on failure (design iii) so an author knows which red it just prevented.
  *  DELIBERATELY NO NEW `*Deps` SHAPE (test/deps-interface-census.test.ts's own ceiling, at its
@@ -25126,8 +25139,12 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // preflight, was catching: console-parity/the two census suites cost seconds like every other
   // fast-tier member, and the scoped diff-coverage step names its own size-based skip rather than
   // needing a second flag to stay fast — see runPreflightScopedDiffCoverage's own doc.
-  const ciChecks = rest.includes("--no-fast") ? undefined : runPreflightCiChecks(repoRoot, { spawn: deps.spawn });
-  const scopedCoverage = rest.includes("--no-fast") ? undefined : runPreflightScopedDiffCoverage(repoRoot, { spawn: deps.spawn });
+  const ciChecks = rest.includes("--no-fast")
+    ? undefined
+    : preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(repoRoot, { spawn: deps.spawn }));
+  const scopedCoverage = rest.includes("--no-fast")
+    ? undefined
+    : preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn: deps.spawn }));
   const ciParity = rest.includes("--ci-parity") ? runCiParity(repoRoot, { spawn: deps.spawn }) : undefined;
   const coverage = rest.includes("--coverage") ? runPreflightCoverage(repoRoot, { spawn: deps.spawn }) : undefined;
   // W1-T3738: opt-in, because each proof spawns a real base worktree and a real test — the

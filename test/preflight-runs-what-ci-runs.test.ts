@@ -316,6 +316,32 @@ test("W1-T4108: preflightCommand runs the new ci-checks and scoped-coverage step
   assert.equal(noFastLines.some((l) => l.includes("fast-coverage:")), false, "--no-fast must drop the new scoped-coverage step too");
 });
 
+test("W1-T4108: a launcher exception becomes a named preflight failure and the summary still completes", async () => {
+  // The older summary-containment fixture intentionally recognises only the original
+  // preflight commands. Its launcher throws on both added checks; that must leave a failed
+  // verdict, not abort before preflight can write/report its summary.
+  const spawn: PreflightSpawn = (file, args) => {
+    const key = [file, ...args].join(" ");
+    if (key.includes("commitlint")) return { status: 1, stdout: "", stderr: "header-max-length" };
+    if (key.includes("tsc")) return { status: 0, stdout: "", stderr: "" };
+    if (key.includes("git log")) return { status: 0, stdout: "\0feat(x): fine\n", stderr: "" };
+    throw new Error(`unscripted launcher call: ${key}`);
+  };
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (...args: unknown[]) => lines.push(args.join(" "));
+  let code: number;
+  try {
+    code = await preflightCommand([], { spawn });
+  } finally {
+    console.log = originalLog;
+  }
+  assert.equal(code, 1);
+  assert.ok(lines.some((line) => line.includes("ci-checks:invocation: FAIL") && line.includes("console-parity")));
+  assert.ok(lines.some((line) => line.includes("fast-coverage:base-pin: SKIPPED") && line.includes("unscripted launcher call")));
+  assert.ok(lines.some((line) => line.includes("summary NOT written")), "the existing injected-spawn summary rule must still run");
+});
+
 // ── acceptance 3: local coverage is measured with source maps ──────────────────────────────────
 
 test("W1-T4108: local coverage is measured with source maps", () => {
