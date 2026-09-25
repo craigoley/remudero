@@ -67,27 +67,27 @@ function baseDeps(root: string, overrides: Partial<SreLaneInput> = {}): SreLaneI
   };
 }
 
-test("a fingerprint with open feedback or an open task is never filed twice", () => {
+test("a fingerprint with open feedback or an open task is never filed twice", async () => {
   // Part 1: an ordinary pass files the worst incident, and its own feedback entry then blocks a
   // second pass from filing it again — the same aggregate re-read, nothing else changed.
   const root = tmpRoot();
   const events = [event(FP_A, "2026-09-23T10:00:00.000Z"), event(FP_A, "2026-09-23T10:05:00.000Z"), event(FP_A, "2026-09-23T10:10:00.000Z")];
   const deps = baseDeps(root, { readEvents: () => events });
 
-  const first = runSreLanePass(deps);
+  const first = await runSreLanePass(deps);
   assert.equal(first.filed, FP_A);
   const entries = listFeedback(root);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].origin, incidentFeedbackOrigin(FP_A));
 
-  const second = runSreLanePass(deps);
+  const second = await runSreLanePass(deps);
   assert.equal(second.filed, undefined, "the same fingerprint's own open feedback must never be filed twice");
 
   // Part 2: a fingerprint with no feedback entry at all is still refused when an open plan task
   // already covers it — the plan-side half of the same guard.
   const root2 = tmpRoot();
   const deps2 = baseDeps(root2, { readEvents: () => events, hasOpenTask: () => true });
-  const pass = runSreLanePass(deps2);
+  const pass = await runSreLanePass(deps2);
   assert.equal(pass.filed, undefined, "an open task must block filing even with no feedback entry yet");
   assert.equal(listFeedback(root2).length, 0);
 
@@ -97,7 +97,7 @@ test("a fingerprint with open feedback or an open task is never filed twice", ()
   assert.equal(fingerprintAlreadyOpen(FP_A, new Set(), () => false), false);
 });
 
-test("an incident names the merged pull requests that touched its in-app frames", () => {
+test("an incident names the merged pull requests that touched its in-app frames", async () => {
   const mergedPrs: MergedPrFiles[] = [
     { url: "https://github.com/o/r/pull/101", files: ["src/lib/sre-lane.ts"] },
     { url: "https://github.com/o/r/pull/102", files: ["docs/unrelated.md"] },
@@ -116,14 +116,14 @@ test("an incident names the merged pull requests that touched its in-app frames"
     framesFor: () => [{ file: "src/lib/sre-lane.ts", fn: "runSreLanePass" }],
     mergedPrsSince: () => mergedPrs,
   });
-  const pass = runSreLanePass(deps);
+  const pass = await runSreLanePass(deps);
   assert.equal(pass.filed, FP_A);
   const raw = listFeedback(root)[0].raw;
   assert.ok(raw.includes("https://github.com/o/r/pull/101"), "raw must name the suspect PR");
   assert.ok(!raw.includes("https://github.com/o/r/pull/102"), "raw must not name the unrelated PR");
 });
 
-test("incident filing is paced by the fleet's own merge rate", () => {
+test("incident filing is paced by the fleet's own merge rate", async () => {
   assert.equal(sreLaneRoom(0, 0), 0);
   assert.equal(sreLaneRoom(3, 1), 2);
   assert.equal(sreLaneRoom(1, 5), 0);
@@ -132,7 +132,7 @@ test("incident filing is paced by the fleet's own merge rate", () => {
   const root = tmpRoot();
   const events = [event(FP_A, "2026-09-23T10:00:00.000Z"), event(FP_A, "2026-09-23T10:01:00.000Z")];
   const quiet = baseDeps(root, { readEvents: () => events, mergedLastDay: () => 0 });
-  assert.equal(runSreLanePass(quiet).filed, undefined);
+  assert.equal((await runSreLanePass(quiet)).filed, undefined);
   assert.equal(listFeedback(root).length, 0);
 
   // A fleet merging exactly one PR a day files exactly one incident, then stops even though a
@@ -140,10 +140,10 @@ test("incident filing is paced by the fleet's own merge rate", () => {
   const root2 = tmpRoot();
   const twoFingerprints = [event(FP_A, "2026-09-23T10:00:00.000Z"), event(FP_B, "2026-09-23T09:00:00.000Z")];
   const pacedDeps = baseDeps(root2, { readEvents: () => twoFingerprints, mergedLastDay: () => 1 });
-  const filedFirst = runSreLanePass(pacedDeps);
+  const filedFirst = await runSreLanePass(pacedDeps);
   assert.equal(filedFirst.room, 0);
   assert.ok(filedFirst.filed === FP_A || filedFirst.filed === FP_B);
-  const secondPass = runSreLanePass(pacedDeps);
+  const secondPass = await runSreLanePass(pacedDeps);
   assert.equal(secondPass.filed, undefined, "the day's pace is spent; the other fingerprint waits");
   assert.equal(listFeedback(root2).length, 1);
 });
@@ -210,18 +210,19 @@ test("an unreadable SRE lane store restarts empty", () => {
   assert.deepEqual(readSreLaneStore(stateDir), {});
 });
 
-test("a failing SRE lane pass is logged, never thrown out of the timer", () => {
+test("a failing SRE lane pass is logged, never thrown out of the timer", async () => {
   const root = tmpRoot();
   const logged: Array<[string, Record<string, unknown> | undefined]> = [];
   const lane = startSreLane(baseDeps(root, {
     readEvents: () => { throw new Error("ledger unreadable"); },
     log: (step, extra) => { logged.push([step, extra]); },
   }))(60_000);
+  await lane.settled();
   lane.stop();
   assert.deepEqual(logged, [["sre_lane.failed", { error: "ledger unreadable" }]]);
 });
 
-test("the daemon's SRE lane reads only the INCIDENT rows of this instance's own ledger", () => {
+test("the daemon's SRE lane reads only the INCIDENT rows of this instance's own ledger", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "ledger.jsonl");
   const incident = { task_id: "INCIDENT", step: "incident.event", fingerprint: FP_A, kind: "exception", name: "TypeError", message: "boom", sha: "dep1" };
@@ -240,7 +241,9 @@ test("the daemon's SRE lane reads only the INCIDENT rows of this instance's own 
     mergedLastDay: () => 1, log: (step: string) => { logged.push(step); },
   };
 
-  startSreLane(daemonSreLaneInput(input))(60_000).stop();
+  const lane = startSreLane(daemonSreLaneInput(input))(60_000);
+  await lane.settled();
+  lane.stop();
   const entries = listFeedback(root);
   assert.deepEqual(entries.map((e) => e.origin), [incidentFeedbackOrigin(FP_A)], "only the INCIDENT rows count");
   assert.ok(entries[0].raw.includes("Count: 2"), "both incident steps are read, the torn row is not");
