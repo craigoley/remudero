@@ -76,7 +76,7 @@ test("W1-T3409: a reachable imported call clears the no-caller finding", () => {
   );
 });
 
-test("W1-T4441: a reachable module reading (never calling) an imported constant clears the no-caller finding", () => {
+test("W1-T4441: an exported constant read by a reachable importing module is not reported as symbol-no-caller", () => {
   withFindings(
     {
       "src/lib/limits.ts": "export const USAGE_CACHE_MAX_AGE_MS = 60000;\n",
