@@ -134,7 +134,7 @@ test("a diff touching only a plan/tasks.d/ shard KEEPS the carve-out, with the s
 });
 
 test("the plan monolith, MASTER-PLAN.md and the excused record stores all keep the carve-out too", () => {
-  for (const path of ["plan/tasks.yaml", "MASTER-PLAN.md", "plan/feedback/fb-1.yaml", "plan/plan-index.json"]) {
+  for (const path of ["plan/tasks.yaml", "MASTER-PLAN.md", "plan/feedback/fb-1.yaml"]) {
     const v = judgeReview(CRITERIA, { diff: diffTouching(path), report: RESPONSIVE_REPORT, planLint: CLEAN_PLAN_LINT });
     assert.equal(v.planOnly, true, `${path}: not enforcement data, so the carve-out is untouched`);
   }

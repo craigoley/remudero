@@ -17,7 +17,7 @@
 //
 // Usage:
 //   node scripts/generate-plan-index.mjs [--source MASTER-PLAN.md] [--out plan/plan-index.json]
-//   node scripts/generate-plan-index.mjs --check   # exit 1 if the committed index is stale
+//   node scripts/generate-plan-index.mjs --source MASTER-PLAN.md --out /tmp/plan-index.json --check
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
@@ -95,14 +95,14 @@ function main(argv) {
     try {
       committed = readFileSync(outPath, "utf8");
     } catch {
-      console.error(`generate-plan-index: ${outPath} does not exist -- run 'npm run plan-index' to generate it.`);
+      console.error(`generate-plan-index: ${outPath} does not exist -- run 'node scripts/generate-plan-index.mjs' to generate it.`);
       process.exitCode = 1;
       return;
     }
     if (committed !== fresh) {
       console.error(
         `generate-plan-index: ${outPath} is STALE -- it does not match a fresh regeneration from ${values.source}.\n` +
-          `Run 'npm run plan-index' and commit the result.`,
+          `Regenerate it with 'node scripts/generate-plan-index.mjs' and the same --source/--out arguments.`,
       );
       process.exitCode = 1;
       return;

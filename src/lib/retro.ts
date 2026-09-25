@@ -3975,8 +3975,8 @@ export interface StampCitationsAndCommitResult {
 }
 
 /** Apply every {@link changedCitationStamps} entry onto its shard's raw text, `git add` the
- *  touched shards, and commit ONLY if something actually staged. `regeneratePlanIndexAndCommit`
- *  is not imported, to avoid a retro.ts -> plan-pr-emitter.ts dependency neither needs.
+ *  touched shards, and commit ONLY if something actually staged. The plan index is derived when
+ *  read, so this writer has no generated index artifact to commit.
  *
  *  PASS ONE, STAMP ONLY: never adds an entry, drops one, or touches `lifecycle`. An empty
  *  `changed` map short-circuits before disk or git, so a quiet cycle produces an empty diff rather

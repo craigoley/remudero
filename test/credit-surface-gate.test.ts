@@ -123,7 +123,7 @@ test("W1-T1214: the refusal names both satisfying routes", () => {
 // ── Supporting coverage beyond the five named proofs (not itself a required proof) ─────────────
 
 test("credit surface gate: isFilingShapedSubject reuses LINT_FILING_SUBJECT_RE verbatim", () => {
-  assert.equal(isFilingShapedSubject("chore(plan): regenerate plan/plan-index.json"), true);
+  assert.equal(isFilingShapedSubject("chore(plan): update the plan section index"), true);
   assert.equal(isFilingShapedSubject("fix(plan): correct an acceptance proof"), true);
   assert.equal(isFilingShapedSubject("chore(triage): triage feedback#42"), true);
   assert.equal(isFilingShapedSubject("chore(feedback): capture recon note"), true);

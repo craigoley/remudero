@@ -1,12 +1,12 @@
 /**
  * The shared gate-contract module for every machine flow that opens a plan PR (W1-T136: `rmd retro` and
  * `rmd approve`). Two flows once reinvented commit and PR-body hygiene independently and both tripped the
- * same CI gate stack — commitlint, `plan-index:check`, and the review gate's fail-closed-on-no-Acceptance-
+ * same CI gate stack — commitlint and the review gate's fail-closed-on-no-Acceptance-
  * block rule. Why: the three incidents that forced this module into existence — docs/forensics/plan-pr-emitter.md
  * Six primitives: {@link renderAcceptanceBlock} renders a judgeable Acceptance block; {@link ensureJudgeableBody}
  * repairs one that parses defectively; {@link filingAcceptanceCriteria} writes acceptance for a PR that files a
  * task rather than building it; {@link buildPlanPrCommitMessage} / {@link buildPlanPrBody} assemble a gate-clean
- * commit and PR body; {@link regeneratePlanIndexFile} / {@link regeneratePlanIndexAndCommit} regenerate `plan/plan-index.json`.
+ * commit and PR body.
  * INVARIANT: a plan-FILING PR — one adding a task to `plan/tasks.yaml` that did not exist on `origin/main` —
  * must never carry a `Remudero-Task: <id>` trailer. `findMergedByTrailer` (lib/status.ts) marks the trailered
  * task DONE on merge, and a filing PR only adds the task, it does not build it. Every function below that
@@ -14,9 +14,6 @@
  * FALSIFIER: test/plan-pr-emitter.test.ts and the acceptance-block/retro-acceptance test suites.
  */
 
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { join } from "node:path";
 import type { AcceptanceCriterion } from "./plan.js";
 import { acceptanceBlockDiagnostics } from "./review.js";
 import { emDashSeparatedProof } from "./body-repair.js";
@@ -158,7 +155,7 @@ export function replaceAcceptanceBlock(body: string, fallbackCriteria: Acceptanc
  * Acceptance criteria about the filing itself, for a PR that files one or more new plan tasks. A filing PR
  * cannot yet cite the filed task's own acceptance criteria — the task does not exist in the working checkout
  * `remudero-review` resolves against until the PR is opened — so this substitutes a claim about the filing
- * being well-formed, provable by the gate that already runs on every PR (commitlint, `plan-index:check`).
+ * being well-formed, provable by the gate that already runs on every PR (commitlint, lint-plan).
  */
 export function filingAcceptanceCriteria(taskIds: string[], files: string[]): AcceptanceCriterion[] {
   if (taskIds.length === 0) {
@@ -166,7 +163,7 @@ export function filingAcceptanceCriteria(taskIds: string[], files: string[]): Ac
   }
   // W1-T3383b — THE PROOF MUST EXECUTE, OR THE OPERATOR'S ONE-BIT APPROVE CANNOT PRODUCE A
   // MERGEABLE PR. This function used to emit ONE criterion whose proof was PROSE ("this diff's only
-  // files are …; commitlint and plan-index-check both pass"), which carries no runnable dialect
+  // files are …; commitlint and lint-plan both pass"), which carries no runnable dialect
   // prefix. `acceptance-author-gate` refuses exactly that with `proof-shape`: the verdict caps at
   // proof_exec 0/1 and cannot arm. MEASURED 2026-09-11: every open ratification PR on the board was
   // refused this way — #5122, #5123, #5124, #5125 — so `rmd approve` was structurally incapable of
@@ -200,7 +197,7 @@ export function filingAcceptanceCriteria(taskIds: string[], files: string[]): Ac
     return [
       {
         claim: `${taskIds.join("/")} filed as well-formed plan task shard(s), not (yet) implemented`,
-        proof: `this diff's only files are ${files.join(", ")}; commitlint and plan-index-check both pass on the resulting commit`,
+        proof: `this diff's only files are ${files.join(", ")}; commitlint and lint-plan both pass on the resulting commit`,
       },
     ];
   }
@@ -376,94 +373,7 @@ export function renderPrNarrativeParagraphs(opts: PlanPrBodyOpts): string {
   return paragraphs.join("\n\n");
 }
 
-// ── 6. Plan-index regeneration (the #287 fix, mirrors lib/orientation.ts) ───────────────────
-
-const PLAN_INDEX_REL_PATH = "plan/plan-index.json";
-const PLAN_INDEX_COMMIT_MESSAGE = "chore(plan): regenerate plan/plan-index.json";
-
-export interface RegeneratePlanIndexOpts {
-  /** The git worktree containing MASTER-PLAN.md, plan/plan-index.json, and the generator script. */
-  worktreePath: string;
-  /** Repo-relative source, forwarded to the generator as `--source`. */
-  sourceRelPath?: string;
-  /** Repo-relative output, forwarded to the generator as `--out`. */
-  outRelPath?: string;
-}
-
-export interface RegeneratePlanIndexResult {
-  /** The repo-relative path written (defaults to `plan/plan-index.json`). */
-  relPath: string;
-  /** True iff the regenerated content differs from what was on disk beforehand. */
-  changed: boolean;
-}
-
-function readIfExists(path: string): string | undefined {
-  if (!existsSync(path)) return undefined;
-  try {
-    return readFileSync(path, "utf8");
-  } catch {
-    return undefined;
-  }
-}
-
-/** Regenerate `plan/plan-index.json` in `worktreePath` via the real `scripts/generate-plan-index.mjs`
- *  (never reimplementing its parsing), and report whether the content changed. Does not `git add`/commit
- *  — `rmd approve`'s own `git add -A` sweeps it up; see {@link regeneratePlanIndexAndCommit} for the commit-if-changed wrapper `rmd retro` uses instead. */
-export function regeneratePlanIndexFile(opts: RegeneratePlanIndexOpts): RegeneratePlanIndexResult {
-  const { worktreePath, sourceRelPath = "MASTER-PLAN.md", outRelPath = PLAN_INDEX_REL_PATH } = opts;
-  let scriptPath = join(worktreePath, "scripts", "generate-plan-index.mjs");
-  // Resolve symlinks: the script's own "run as main" guard compares a resolved URL against argv[1]'s
-  // literal path, so an unresolved scriptPath under a symlinked worktree root (e.g. macOS's /tmp)
-  // Why: never matches, and main() silently writes nothing — the #287 incident this caused, docs/forensics/plan-pr-emitter.md
-  try {
-    scriptPath = realpathSync(scriptPath);
-  } catch {
-    // Missing script — the execFileSync below will fail loudly with a clear ENOENT.
-  }
-  const outPath = join(worktreePath, outRelPath);
-  const before = readIfExists(outPath);
-  execFileSync(process.execPath, [scriptPath, "--source", sourceRelPath, "--out", outRelPath], {
-    cwd: worktreePath,
-    stdio: "pipe",
-  });
-  const after = readFileSync(outPath, "utf8");
-  return { relPath: outRelPath, changed: before !== after };
-}
-
-export interface RegeneratePlanIndexAndCommitResult {
-  relPath: string;
-  /** True iff content differed from HEAD and a new commit was made. */
-  committed: boolean;
-  /** `git show` of the new commit (patch + stat) — OMITTED when `committed` is false. */
-  diff?: string;
-}
-
-/**
- * Regenerate (via {@link regeneratePlanIndexFile}), `git add`, and — only if the content changed from
- * what's committed — commit it, mirroring {@link "./orientation.js".regenerateOrientation}'s
- * write/add/diff-cached-quiet/commit-if-changed discipline. `rmd retro` calls this as its own separate
- * commit; `rmd approve` does not need it.
- */
-export function regeneratePlanIndexAndCommit(opts: RegeneratePlanIndexOpts): RegeneratePlanIndexAndCommitResult {
-  const { worktreePath } = opts;
-  const { relPath } = regeneratePlanIndexFile(opts);
-  execFileSync("git", ["-C", worktreePath, "add", relPath]);
-  try {
-    execFileSync("git", ["-C", worktreePath, "diff", "--cached", "--quiet"]);
-    // exit 0: nothing staged, content unchanged from HEAD.
-    return { relPath, committed: false };
-  } catch {
-    // Non-zero: staged changes exist; commit them as their own, clearly-labeled commit.
-    execFileSync("git", ["-C", worktreePath, "commit", "-m", PLAN_INDEX_COMMIT_MESSAGE]);
-    const diff = execFileSync("git", ["-C", worktreePath, "show", "--stat=200", "-p", "HEAD"], {
-      encoding: "utf8",
-      maxBuffer: 1 << 24,
-    });
-    return { relPath, committed: true, diff };
-  }
-}
-
-// ── 7. Ratification PR — REST create + resumption probe (W1-T903) ───────────────────────────
+// ── 6. Ratification PR — REST create + resumption probe (W1-T903) ───────────────────────────
 // `gh pr create` is GraphQL: an exhausted GraphQL budget once stranded an already-pushed ratification
 // branch with no PR, and a naive re-run pushed a second branch instead of finishing the first. These two
 // primitives are a pure REST transport swap at that one site, reusing the same {@link GhApiFetcher} `fetchOpenPrsRest` already takes.
@@ -511,7 +421,7 @@ export function probeExistingPlanPr(fetch: GhApiFetcher, owner: string, repo: st
 
 // ── 8. Retro changeset-claim reconciliation (W1-T911) ───────────────────────────────────────
 // The retro worker opens a PR body whose changeset claim is true at that instant; the harness then commits
-// ORIENTATION.md and plan-index.json into the same PR afterward, widening the diff past what the body
+// ORIENTATION.md into the same PR afterward, widening the diff past what the body
 // already described, and `bodyContradictsDiff` (review.ts) correctly refuses the now-stale claim. Why: the
 // four incidents this reconciler exists to stop — docs/forensics/plan-pr-emitter.md
 // A pure reconciler — no git, no network, no I/O — repairing only the two claim shapes `bodyContradictsDiff`
