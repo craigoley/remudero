@@ -155,11 +155,11 @@ export function readIncidentLifecycleStore(stateDir: string): IncidentLifecycleS
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { ok: false, reason: "malformed" };
+      throw new SyntaxError("incident lifecycle store must be an object");
     }
     return { ok: true, store: parsed as IncidentLifecycleStore };
-  } catch {
-    return { ok: false, reason: "unreadable" };
+  } catch (error) {
+    return { ok: false, reason: error instanceof SyntaxError ? "malformed" : "unreadable" };
   }
 }
 
