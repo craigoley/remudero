@@ -114,8 +114,7 @@ function checkRunHeadIdentity(body: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-/** The verified webhook fields the CI incident consumer needs; branch is absent when GitHub
- *  cannot associate a head branch with the check run. */
+/** Verified `check_run:completed` fields for the CI incident consumer; `branch` is absent when GitHub names none. */
 export interface CheckRunCompletedInfo {
   id: number;
   sha: string;
@@ -528,8 +527,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
     if (event !== "check_run" || action !== "completed" || !callback) return;
     const info = extractCheckRunCompletedInfo(body);
     if (!info) return;
-    // A failed check's log read is async; serialize the same head/check so its later pass cannot
-    // overtake it, while never holding GitHub's webhook acknowledgement open.
+    // Serialized per head+check so a later pass can't overtake a failure's async log read; the ack never waits.
     const key = `${info.sha}\u0000${info.name}`;
     const previous = checkRunCallbackTails.get(key) ?? Promise.resolve();
     let queued: Promise<void>;
@@ -551,13 +549,10 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
     method: "POST",
     path: "/v1/hooks/github",
     scope: "write",
-    // W1-T404: declared for `assertWriteTiersComplete`'s completeness check even though
-    // `selfAuthenticated` (below) means `enforceWriteTiers` never actually consults it — this
-    // route writes only a durable "recheck GitHub" marker, the same bookkeeping-grade
-    // consequence `POST /v1/confirm` (serve.ts) already claims LOW for.
+    // W1-T404: declared for `assertWriteTiersComplete` though `selfAuthenticated` means `enforceWriteTiers` never
+    // consults it — this route writes only a "recheck GitHub" marker, the LOW tier `POST /v1/confirm` (serve.ts) claims.
     tier: "low",
-    // W1-T2568 (design i): see service.ts's Route.selfAuthenticated doc — GitHub's HMAC replaces
-    // the bearer token entirely for this one route.
+    // W1-T2568 (design i): GitHub's HMAC replaces the bearer token for this one route (service.ts's Route.selfAuthenticated).
     selfAuthenticated: true,
     handler: async (req, res) => {
       if (!opts.secret) {
