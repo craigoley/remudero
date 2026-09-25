@@ -1,0 +1,63 @@
+- id: W1-T4553
+  title: "BENCHMARK EVIDENCE QUALITY BEFORE MODEL SCORES — per-field coverage, assignment joins, and honest cost semantics on the internal analytics route"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "human request 2026-09-25: instrument model performance across Remudero instances and publish only defensible benchmarks"
+  plan_refs: ["W1-T100001", "W1-T3762", "docs/model-routing.md"]
+  files:
+    - src/lib/benchmark-evidence.ts
+    - src/lib/analytics-route.ts
+    - openapi/daemon.yaml
+    - test/benchmark-evidence.test.ts
+    - test/analytics-route.test.ts
+    - docs/model-routing.md
+  status: queued
+  rationale: |
+    `routing-v1` already joins pre-execution `worker.assignment` to terminal verdicts, but its
+    display totals coalesce some absent tokens, duration, and cost with zero. Its live routing
+    experiment is headroom-selected rather than randomized. The first useful benchmark telemetry
+    addition is therefore evidence quality, not a score or a model promotion gate. W1-T100001
+    lays out the later run envelope, local cohort gardener, A/A, and release path; this slice is
+    independent and can ship without waiting for that document's PR or a public consent decision.
+  design: |
+    Add a pure `benchmark-quality-v1` projection over the existing ledger-union rows, wired into
+    the authenticated internal `/v1/analytics` read path. Reuse its one bounded analytics scan
+    and snapshot, not a second full-corpus pass on each GET. Reuse assignment IDs and terminal
+    receipt rules from routing-v1; do not reclassify an intermediate worker row as a terminal.
+    Count assignments, joined terminal outcomes, unjoined assignments, unjoined terminals,
+    duplicate/crossover evidence, and coverage denominators for task class/risk, requested/
+    selected/served model, provider, effort, token envelope, duration, billing mode, and cost.
+    Legacy rows say `unavailable` with a reason, never measured zero, failure, or free spend.
+    Keep API-modeled/reported request cost and subscription notional cost in separate columns;
+    neither is an invoice without an invoice source. A subscription with no per-call cash charge
+    still consumes capacity and must not become a zero-dollar efficiency win.
+
+    Aggregate only on bounded task class/risk/provider/model/effort dimensions; run IDs, task IDs,
+    repo/account labels, prompts, source, and capacity snapshots never appear in response rows or
+    metric labels. Publish freshness, source-row coverage and schema version. A corrupt or missing
+    ledger corpus yields explicit unavailable state without changing model routing, daemon cycle,
+    PR checks, or the existing `routing-v1` response. Add the internal OpenAPI shape and explain
+    why this projection alone supports no public causal model ranking. This task adds no sampler,
+    cross-instance uploader, paid trial, public benchmark release, or merge hold.
+  acceptance:
+    - claim: "a real assignment and its terminal receipt join once while an intermediate row and duplicate archive row do not count as extra outcomes"
+      proof: "unit test: benchmark quality joins terminal evidence exactly once"
+    - claim: "missing outcome, served model, tokens, duration and cost are individually counted as unavailable rather than zeros or failures"
+      proof: "unit test: benchmark quality preserves per-field missingness and unmatched rows"
+    - claim: "API-modeled cost and subscription notional cost remain separate with source/coverage, and no run or account identifiers escape"
+      proof: "unit test: benchmark quality separates accounting modes and redacts identifiers"
+    - claim: "the authenticated analytics route and OpenAPI expose the bounded quality projection without replacing routing-v1"
+      proof: "unit test: analytics route serves benchmark quality beside routing telemetry"
+    - claim: "the production route calls the new projector and the public contract names its version"
+      proof: "grep: deriveBenchmarkEvidence( in src/lib/analytics-route.ts"
+  falsifier: |
+    A missing receipt increases success or failure; an intermediate worker row is counted as a
+    terminal; null spend turns into a measured zero; subscription notional and API cash are added;
+    raw identifiers leak to the response; or an unavailable projection blocks dispatch or a PR.
+    Each behavior must fail the corresponding proof.

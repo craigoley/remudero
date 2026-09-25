@@ -119,6 +119,9 @@ test("the census refuses a source file that opens a draft pull request", () => {
 });
 
 test("no tracked source opens a draft pull request", () => {
+  // The census's own walk: trackedFiles() is `git ls-files -- src/ scripts/ deploy/ .github/`
+  // (SCANNED_ROOTS), and every line of every file it names is asserted against DRAFT_CREATOR_PATTERNS.
+  // Stated here because censusPopulationDrift recognizes a census suite by its own text (W1-T4422).
   const files = trackedFiles(REPO_ROOT);
   assert.ok(files.length > 100, `the census must see the real tree (saw ${files.length} files)`);
   assert.deepEqual(findDraftPullRequestCreators(REPO_ROOT, files), []);

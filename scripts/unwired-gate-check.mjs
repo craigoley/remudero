@@ -88,13 +88,6 @@ export const NPM_SCRIPT_ALLOWANCE = [
       "separate, single-concern PR, same shape as the docs-index pair this PR does wire.",
   },
   {
-    npmScript: "plan-index:check",
-    reason:
-      "generate-plan-index.mjs's own staleness check on plan/plan-index.json; tested at the unit " +
-      "level (test/plan-index.test.ts) but invoked by no CI job -- wiring it is a separate, " +
-      "single-concern PR, same shape as the docs-index pair this PR does wire.",
-  },
-  {
     npmScript: "learnings-assert:check",
     reason:
       "learnings-assert-check.mjs's own `--check` mode; invoked by no CI job today -- wiring it " +

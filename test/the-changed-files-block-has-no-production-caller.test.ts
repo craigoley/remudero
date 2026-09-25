@@ -20,8 +20,8 @@ import {
  * its own test suite (test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts).
  *
  * This originally wired the two plan-ratification call sites. The autonomous `rmd plan` lane now
- * also authors through this module, but it must derive its list after the shared commit writer
- * regenerates plan-index.json. Every caller passes the SAME path list it uses for
+ * also authors through this module, and it derives its list after the shared plan-source commit.
+ * The index is read-time data and never adds a generated path. Every caller passes the SAME path list it uses for
  * `filingAcceptanceCriteria`'s filing evidence. Nothing is invented: the list handed to
  * `changedFiles` is the identical `filedPaths`/`filedTaskIds` local each closure already builds
  * from what it just wrote to disk (`shardRelPaths`/`allShardRelPaths` + `"MASTER-PLAN.md"`).

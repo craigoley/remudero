@@ -33,6 +33,7 @@ import {
   type Task,
 } from "./plan.js";
 import { loadPlanIndex, type PlanIndex, type PlanIndexEntry } from "./plan-index.js";
+import { resolveRepoLayout } from "./repo-layout.js";
 import {
   buildLedgerIndex,
   projectPlan,
@@ -783,9 +784,10 @@ export function buildPlanFrontier(
 
 // ── GET /v1/operator-activity — one bounded operator story (W1-T3852) ──────
 
-export const OPERATOR_ACTIVITY_CONTRACT_VERSION = "operator-activity-v1" as const;
+export const OPERATOR_ACTIVITY_CONTRACT_VERSION = "operator-activity-v2" as const;
 /** PRIMARY CONTROL: the projection's response item bound, enforced before serialization. */
 export const OPERATOR_ACTIVITY_MAX_ITEMS = 200;
+const OPERATOR_ACTIVITY_PLAN_KIND_MAX_ITEMS = Math.floor(OPERATOR_ACTIVITY_MAX_ITEMS / 3);
 
 export type OperatorActivityState = "verified" | "stale" | "unavailable" | "unknown" | "not-collected";
 export type OperatorActivityFreshness = "verified" | "stale" | "unavailable" | "unknown" | "not-collected";
@@ -814,6 +816,7 @@ export type OperatorActivityEnvelope =
       cursor: string;
       items: OperatorActivityItem[];
       truncated: boolean;
+      truncatedKinds?: OperatorActivityItemKind[];
       reason?: string;
     }
   | {
@@ -898,16 +901,6 @@ function activityRows(
     .filter((item): item is OperatorActivityItem => Boolean(item))
     .sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt))
     .slice(0, OPERATOR_ACTIVITY_MAX_ITEMS);
-}
-
-/** Whether `ledgerLines` hold at least {@link OPERATOR_ACTIVITY_MAX_ITEMS} rows {@link activityRows} would keep. */
-function activitiesSaturate(ledgerLines: ReadonlyArray<Record<string, unknown>>): boolean {
-  let count = 0;
-  for (const row of ledgerLines) {
-    if (activityTimestamp(row.ts) && boundedActivityText(row.step, 120)) count += 1;
-    if (count >= OPERATOR_ACTIVITY_MAX_ITEMS) return true;
-  }
-  return false;
 }
 
 /**
@@ -1042,12 +1035,16 @@ export function buildOperatorActivityProjection(input: OperatorActivityProjectio
   }
   const activities = activityRows(input.ledgerLines, observedAt);
   const freshness: OperatorActivityFreshness = input.githubReadFailed ? "unknown" : "verified";
-  // Activities alone filling the bound leave `items` and `truncated` identical without the frontier.
-  const workstreams = activities.length >= OPERATOR_ACTIVITY_MAX_ITEMS
-    ? []
-    : workstreamRows(input.plan, input.projection, input.ledgerLines, observedAt, input.githubReadFailed === true, input.githubFailureReason);
+  const workstreams = workstreamRows(input.plan, input.projection, input.ledgerLines, observedAt, input.githubReadFailed === true, input.githubFailureReason);
   const artifacts = artifactRows(input.plan, input.projection, workstreams, observedAt, freshness);
-  const items = [...activities, ...workstreams, ...artifacts].slice(0, OPERATOR_ACTIVITY_MAX_ITEMS);
+  const shownWorkstreams = workstreams.slice(0, OPERATOR_ACTIVITY_PLAN_KIND_MAX_ITEMS);
+  const shownArtifacts = artifacts.slice(0, OPERATOR_ACTIVITY_PLAN_KIND_MAX_ITEMS);
+  const shownActivities = activities.slice(0, OPERATOR_ACTIVITY_MAX_ITEMS - shownWorkstreams.length - shownArtifacts.length);
+  const truncatedKinds: OperatorActivityItemKind[] = [];
+  if (workstreams.length > shownWorkstreams.length) truncatedKinds.push("workstream");
+  if (artifacts.length > shownArtifacts.length) truncatedKinds.push("artifact");
+  if (activities.length > shownActivities.length) truncatedKinds.push("activity");
+  const items = [...shownWorkstreams, ...shownArtifacts, ...shownActivities];
   const latest = activities[0]?.observedAt ?? observedAt;
   return {
     version: OPERATOR_ACTIVITY_CONTRACT_VERSION,
@@ -1056,7 +1053,8 @@ export function buildOperatorActivityProjection(input: OperatorActivityProjectio
     observedAt,
     cursor: latest,
     items,
-    truncated: activities.length + workstreams.length + artifacts.length > OPERATOR_ACTIVITY_MAX_ITEMS,
+    truncated: truncatedKinds.length > 0,
+    ...(truncatedKinds.length > 0 ? { truncatedKinds } : {}),
     ...(input.githubReadFailed ? { reason: input.githubFailureReason ?? "status-source-unavailable" } : {}),
   };
 }
@@ -1088,10 +1086,8 @@ export function buildOperatorActivityRoute(deps: PanelGraphDeps, readPlanSnapsho
       }
       try {
         const plan = readPanelPlan(deps, readPlanSnapshot);
-        // Saturated, the projection skips the frontier, so neither the whole union nor projectPlan is read.
-        const saturated = activitiesSaturate(candidates);
-        const observedLedger = saturated ? candidates : readLedgerUnionBounded(deps.ledgerPath);
-        const projection = saturated ? new Map<string, StatusProjection>() : projectPlan(plan, {
+        const observedLedger = readLedgerUnionBounded(deps.ledgerPath);
+        const projection = projectPlan(plan, {
           ledgerPath: deps.ledgerPath,
           github: deps.statusGithub,
           readLedger: () => observedLedger,
@@ -1174,7 +1170,7 @@ type PlanRefKind = "section" | "task-id" | "retro-proposal" | "workstream" | "un
 
 /** Classify one `plan_refs` entry into the five kinds design note (i) documents. Only
  *  `"section"` carries a `token` -- the ref text with its `§`/`MASTER-PLAN#` prefix stripped --
- *  for {@link resolveSectionHeading} to join against plan-index.json's headings. */
+ *  for {@link resolveSectionHeading} to join against the source document's derived headings. */
 function classifyPlanRef(ref: string): { kind: PlanRefKind; token?: string } {
   if (ref.startsWith("§")) return { kind: "section", token: ref.slice(1) };
   if (ref.startsWith("MASTER-PLAN#")) return { kind: "section", token: ref.slice("MASTER-PLAN#".length) };
@@ -1184,7 +1180,7 @@ function classifyPlanRef(ref: string): { kind: PlanRefKind; token?: string } {
   return { kind: "unrecognized" };
 }
 
-/** Resolves a stripped section token ("5C", "7") to its plan-index.json heading, matching the
+/** Resolves a stripped section token ("5C", "7") to its derived plan-index heading, matching the
  *  heading's own leading token (everything before its first `.`) exactly — never a prefix match,
  *  which would let "5" wrongly match "5C. ...". A word-shaped ref (no leading digit) falls back
  *  to a case-insensitive heading-prefix match once the exact pass finds nothing. */
@@ -1290,7 +1286,7 @@ export function buildPlanViewRoute(deps: PanelGraphDeps, readPlanSnapshot?: () =
       const isMerged: MergedSet = (id) => projection.get(id)?.merged ?? false;
       const progress = computePlanProgress(plan, projection, deps.statusGithub, progressCache);
       const planRefs = planRefsFromSnapshot(plan);
-      const planIndex = loadPlanIndex(join(dirname(deps.planPath), "plan-index.json"));
+      const planIndex = loadPlanIndex(resolveRepoLayout(deps.root).masterPlan);
       const sections = computePlanSectionCounts(plan, projection, planRefs, planIndex, progress.unknown, sectionCache);
       const ledgerLines = readLedgerLines(deps.ledgerPath);
       const frontier = buildPlanFrontier(plan, isMerged, limit, ledgerLines, undefined, (id) =>

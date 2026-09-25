@@ -830,8 +830,6 @@ import {
   filingAcceptanceCriteria,
   probeExistingPlanPr,
   reconcileRetroChangesetClaim,
-  regeneratePlanIndexAndCommit,
-  regeneratePlanIndexFile,
   renderAcceptanceBlock,
   replaceAcceptanceBlock,
 } from "./lib/plan-pr-emitter.js";
@@ -6467,7 +6465,7 @@ async function runReview(args: {
   // `floorMet` is captured BEFORE the semantic downgrade arm, so the reviewer's only output
   // (`semantic[]`) cannot change a plan-only verdict — leaving it undefined is exactly what the
   // catch arm below already produces when a spawn fails. Every other gating arm — the deterministic
-  // floor, lint-plan, the plan-PR emitter and the plan-index checks — is untouched and still runs.
+  // floor, lint-plan, and the plan-PR emitter — is untouched and still runs.
   // The predicate is review.ts's own `planOnlyDiff`, never a second copy of the expression.
   const planOnlySkip = planOnlyDiff(diff);
   // Snapshot the optional mount before entering the async temp-dir callback. Besides making the
@@ -7126,7 +7124,7 @@ export function reportSubstituteStandDownReason(
 // ── GENERATOR-BACKED GATE FIX (W1-T2551) ──────────────────────────────────────────────────────
 //
 // GROUND TRUTH this closes: every `<name>:check` npm script paired with a bare `<name>` script is
-// a GENERATOR run in verify mode (plan-index/plan-index:check, docs-index/docs-index:check,
+// a GENERATOR run in verify mode (docs-index/docs-index:check,
 // learnings-index/learnings-index:check, cli-reference/cli-reference:check, capability-snapshot/
 // capability-snapshot:check, learnings-assert/learnings-assert:check, as of this writing — NEVER
 // hand-listed here, see {@link declaredGeneratorScriptFor}). Every one of those generators fails
@@ -7153,7 +7151,7 @@ export function reportSubstituteStandDownReason(
  * Read the generator/`:check` pairing OFF package.json's own declared `scripts` map — NEVER a
  * hand-maintained table like {@link REGENERABLE_ARTIFACT_GENERATORS} (lib/sweep.ts, a DIFFERENT
  * rung's admission list, out of scope here per this task's rationale (5b)). `checkOrGeneratorName`
- * may be given either shape (`"plan-index:check"` or bare `"plan-index"`); the BASE name is
+ * may be given either shape (`"docs-index:check"` or bare `"docs-index"`); the BASE name is
  * returned only when BOTH the bare name and its `:check` counterpart are declared scripts — that
  * shared declaration IS the pairing itself, not an inference drawn from it. `undefined` for any
  * name package.json does not declare BOTH halves of, including a `:check` script with no bare
@@ -15002,10 +15000,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // ── Recon (read-only).
     say("recon worker");
     // W1-T37 / MASTER-PLAN §8A Tier 2: the plan is RETRIEVED, not injected — the recon prompt
-    // carries the generated PLAN INDEX (section headings + one-line summaries + a grep hint), not
-    // the plan body. `loadPlanIndex` is non-fatal (a fresh checkout before the first `npm run
-    // plan-index` just omits the block); `npm run plan-index:check` fails CI on a stale index.
-    const planIndex = loadPlanIndex(join(dirname(planPath), "plan-index.json"));
+    // carries a content-hash-cached PLAN INDEX derived from MASTER-PLAN.md, not the plan body.
+    // `loadPlanIndex` is non-fatal when the source is missing and never writes a generated file.
+    const planIndex = loadPlanIndex(join(dirname(planPath), "..", "MASTER-PLAN.md"));
     const planIndexBlock = planIndex ? renderPlanIndex(planIndex) : "";
     // W1-T164: task-scoped operator guidance notes — read from the durable console-editable
     // store (`repoRoot`, the SAME root worker.ts's question store reads/writes), scoped strictly
@@ -17648,12 +17645,11 @@ function defaultRetroChangedFiles(url: string): string[] {
  *
  * WHY A POST-HOC RUNG RATHER THAN A BETTER TEMPLATE. `retroCommand` spawns the Architect, which
  * edits MASTER-PLAN.md, commits, pushes and OPENS THE PR WITH A BODY IT AUTHORED. Only then does
- * `regenerateOrientation` commit docs/ORIENTATION.md, and only then does
- * `regeneratePlanIndexAndCommit` commit plan/plan-index.json. The body is therefore written at a
- * moment when two of the three files DO NOT YET EXIST, and no wording can fix that. Reordering
- * cannot fix it either: ORIENTATION.md is regenerated FROM what the Architect just wrote, so it
- * cannot run first. The only point where the changeset is knowable is after all three commits —
- * which is exactly where this runs.
+ * `regenerateOrientation` and citation stamping run after the Architect opens the PR. The body is
+ * therefore written before the harness-owned follow-up changes are known, and no wording can fix
+ * that. Reordering cannot fix it either: ORIENTATION.md is regenerated FROM what the Architect
+ * just wrote, so it cannot run first. The only point where the changeset is knowable is after
+ * those follow-up commits — which is exactly where this runs.
  *
  * The actual string fold is {@link "./lib/plan-pr-emitter.js".reconcileRetroChangesetClaim} — a
  * PURE reconciler living beside every other plan-PR body primitive, repairing BOTH arms
@@ -27508,7 +27504,7 @@ export function parseGitLogCitationCommits(raw: string): GitLogCommit[] {
  * Best-effort: a read/mine/write hiccup degrades to "nothing stamped this cycle" (the corpus
  * keeps whatever `cited` values it already had — never cleared, per `stampCitations`' own
  * contract) rather than aborting the whole retro, the same non-fatal discipline
- * orientation/plan-index regeneration immediately around this call already follow.
+ * orientation/citation-stamp generation immediately around this call already follow.
  *
  * W1-T1267: `corpus` above IS the eligibility decision's evidence — and it's read from THIS
  * worktree's `learnings/`, which was branched from `origin/main` at worktree-cut time and never
@@ -28153,7 +28149,6 @@ async function retroCommand(
     // quietly omitting a generator and publishing a different artifact set than attempt one.
     const regenerateHarnessArtifacts = (): {
       orientationCommitted: boolean;
-      planIndexCommitted: boolean;
       citationStampCommitted: boolean;
     } => {
       // W1-T39: docs/ORIENTATION.md is HARNESS-OWNED — deterministically regenerated
@@ -28174,22 +28169,10 @@ async function retroCommand(
         log("orientation.write.error", { error: String((e as Error)?.message ?? e) });
       }
 
-      // W1-T136 (#287 class): plan/plan-index.json is HARNESS-OWNED too — the Architect
-      // just edited MASTER-PLAN.md above, and an un-regenerated index reds
-      // `plan-index:check` post-push (#287's exact failure).
-      let planIndexCommitted = false;
-      try {
-        const result = regeneratePlanIndexAndCommit({ worktreePath });
-        planIndexCommitted = result.committed;
-        if (result.committed) log("plan_index.regenerated", { diff_bytes: result.diff?.length ?? 0 });
-      } catch (e) {
-        log("plan_index.regen.error", { error: String((e as Error)?.message ?? e) });
-      }
-
-      // W1-T1248: the citation miners' production caller. It follows both other generators on
+      // W1-T1248: the citation miners' production caller. It follows orientation generation on
       // every pass so the exact final branch, not a pre-repair approximation, is validated.
       const citationStampCommitted = runCitationStampPass({ worktreePath, followupLedgerNdjson, log });
-      return { orientationCommitted, planIndexCommitted, citationStampCommitted };
+      return { orientationCommitted, citationStampCommitted };
     };
     regenerateHarnessArtifacts();
 
@@ -28537,8 +28520,8 @@ export function retroPrompt(gatherReport: string, calTable: string, runId: strin
     "it from this same gather right after you finish and commits it separately. Any edit you make to it",
     "is overwritten.",
     "W1-T908: do NOT describe the PR's changed-file set in the body — not as a list and above all",
-    "not as a COUNT. The harness commits docs/ORIENTATION.md and plan/plan-index.json onto this",
-    "same PR after you finish, so any such sentence is written before two of the three files exist",
+    "not as a COUNT. The harness commits docs/ORIENTATION.md onto this",
+    "same PR after you finish, so any such sentence is written before that generated file exists",
     "and is wrong every time. Never write 'exactly N files'; the harness names the paths for you.",
     "",
     "=== DETERMINISTIC GATHER (no LLM produced this) ===",
@@ -40975,8 +40958,8 @@ async function triageCommandLocked(
     // add -A -- plan/`, which never matched MASTER-PLAN.md (a root-level file, not under
     // plan/) — silently discarding any amendment the Architect made even though
     // triagePrompt/decideTriage/nonPlanFilesInDiff all license one. The shared function's
-    // `plan/ MASTER-PLAN.md` pathspec now stages the amendment, and it regenerates
-    // plan/plan-index.json first so a stray or renumbered heading never ships stale.
+    // `plan/ MASTER-PLAN.md` pathspec stages the amendment; the section index is derived from
+    // MASTER-PLAN.md whenever a runtime reader needs it.
     applyPlanProposalCommit(worktreePath, commitMessage, log);
 
     // OUTPUT VALIDATION (W1-T2326 Q2) — the PORT of `planCommand`'s `unreservedFiledIds` +
@@ -41467,7 +41450,7 @@ export async function planCommand(
     say(formatPlanVerdictLine(mode, decision));
     const commitMessage = planCommitMessage({ decision, mode, brief });
     applyPlanProposalCommit(worktreePath, commitMessage, log);
-    // Build the body only AFTER the shared commit writer has regenerated plan-index.json. The
+    // Build the body only AFTER the shared commit writer has staged the plan sources. The
     // changed-files block is an assertion about the actual commit, not the worker's pre-harness
     // advisory list; constructing it before regeneration would immediately make the PR contradict
     // its own diff whenever the index changes.
@@ -43306,15 +43289,6 @@ export async function approveCommand(
     const masterPlanPath = join(worktreePath, "MASTER-PLAN.md");
     writeFileSync(masterPlanPath, applyStampToMasterPlan(readFileSync(masterPlanPath, "utf8"), payload.proposalId, materialized.stampLine), "utf8");
 
-    // W1-T136 (#287 class): regenerate plan/plan-index.json to reflect the just-stamped
-    // MASTER-PLAN.md BEFORE the single git-add below, which already sweeps up anything
-    // under plan/ — no separate commit needed here, unlike retro's own commit.
-    try {
-      regeneratePlanIndexFile({ worktreePath });
-    } catch (e) {
-      log("plan_index.regen.error", { error: String((e as Error)?.message ?? e) });
-    }
-
     // materialized.fragmentYaml carries only REAL ids now (materializeDraftTaskIds already
     // rewrote every placeholder) — same per-line `- id: <id>` regex the pre-W1-T311 code used,
     // just over the rewritten text rather than payload.fragmentYaml verbatim.
@@ -43818,12 +43792,6 @@ async function approveBatchCommand(
         readFileSync(masterPlanPath, "utf8"),
       );
       writeFileSync(masterPlanPath, foldedMasterPlan, "utf8");
-
-      try {
-        regeneratePlanIndexFile({ worktreePath });
-      } catch (e) {
-        log("plan_index.regen.error", { error: String((e as Error)?.message ?? e) });
-      }
 
       execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
       execFileSync("git", ["-C", worktreePath, "commit", "-m", approveBatchCommitMessage(payloads)], { stdio: "inherit" });

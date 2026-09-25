@@ -1,0 +1,69 @@
+- id: W1-T4554
+  title: "AN EVIDENCE GARDENER THAT COUNTS BEFORE IT INTERPRETS — incremental cohort rollups, late-data repair, and measured storage pressure"
+  repo: remudero
+  depends_on: [W1-T4553]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "human request 2026-09-25: consolidate cross-instance model telemetry into intelligible insights without unbounded storage"
+  plan_refs: ["W1-T100001", "W1-T4553", "W1-T4110", "docs/model-routing.md"]
+  files:
+    - src/lib/benchmark-cohort.ts
+    - src/lib/benchmark-evidence.ts
+    - src/lib/daemon.ts
+    - test/benchmark-cohort.test.ts
+    - test/daemon-benchmark-cohort.test.ts
+    - docs/model-routing.md
+  status: queued
+  rationale: |
+    W1-T4553 makes the quality of assignment/terminal evidence explicit, but a growing fleet
+    cannot rescan and interpret every raw ledger rotation for every chart or insight pass.
+    `ledger-compact` already owns exact raw archive compaction and its recoverable cold store;
+    `gardener.ts` already owns proposal/outcome feedback. This task adds the deterministic local
+    layer between them, not another raw store, public uploader, or LLM rewrite of facts.
+  design: |
+    Consume W1-T4553's evidence classification through the established three-form ledger union's
+    streaming `openLedgerUnion` cursor (`afterRotation`, `liveStartOffset`, `dedupeSeed`) in bounded,
+    resumable batches; never materialize the whole archive union on every daemon cadence. Verify
+    checkpoint source identity before resuming, and re-audit affected sources if a rotation changes
+    or a live file truncates. Materialize versioned local daily/task-class/provider/model plus
+    harness-revision cohorts with source hashes, schema revision, watermark, count denominators,
+    per-field coverage, explicit unknown/censored values, and bytes read/written. Old rows with no
+    harness revision remain in an `unavailable` cohort rather than a guessed default. A replay of
+    identical inputs is idempotent; a late receipt, duplicate, corrected verdict, or retraction
+    invalidates and rebuilds only affected partitions from authoritative retained rows before
+    replacing snapshots atomically. A failed read marks the cohort unavailable and keeps the last
+    known-good snapshot with its age visible; it never publishes a healthy empty cohort.
+
+    On each pass measure bytes/day, events/run, compression, dimension cardinality, rebuild time,
+    and snapshot growth. Use those observations to propose a retention/downsampling follow-up if
+    pressure appears, rather than guessing hard ceilings or floors. Superseded *derived* snapshots
+    can be retired only after successor lineage and source counts reconcile; `ledger-compact`
+    remains the sole owner of raw archive compaction and retention. High-cardinality run/task IDs
+    stay local as join keys, never metric labels or public aggregate dimensions.
+
+    Wire one best-effort daemon cadence pass through an injected seam so a failed projection is
+    observable but cannot stop dispatch, review, merge, or the existing analytics route. The
+    semantic insight gardener may later consume only these bounded cohorts, propose one
+    evidence-linked experiment/follow-up at a time, and score its usefulness after verification;
+    that proposal loop is explicitly out of scope here and must never become a PR gate or silently
+    change model routing. No raw private telemetry leaves the instance in this task.
+  acceptance:
+    - claim: "all three ledger forms and duplicates reconcile into one local cohort with source lineage and a positive corpus control"
+      proof: "unit test: benchmark cohorts reconcile the three-form ledger union exactly"
+    - claim: "replay is idempotent, while a late receipt or retraction rebuilds only the affected partition and preserves unknown coverage"
+      proof: "unit test: benchmark cohorts replay late and withdrawn evidence without inventing zeros"
+    - claim: "measured growth and cardinality produce explicit pressure/unknown reports without deleting raw rows or hard-stopping PRs"
+      proof: "unit test: benchmark cohorts account for storage pressure without raw deletion"
+    - claim: "the daemon's real cadence reaches one bounded pass and logs failure without blocking normal work"
+      proof: "unit test: daemon benchmark cohort pass is best effort and production wired"
+    - claim: "the production daemon path invokes the derived cohort consolidator"
+      proof: "grep: runBenchmarkCohortPass( in src/lib/daemon.ts"
+  falsifier: |
+    Count one ledger row twice because rotations use different encodings; infer a missing model or
+    score as zero; rewrite a source row through an LLM; lose a late terminal or retraction; delete
+    a raw archive; or block a healthy PR because consolidation failed. Each behavior must fail its
+    corresponding proof.

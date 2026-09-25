@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -29,8 +29,9 @@ import {
   writeRatificationShards,
 } from "../src/lib/inbox.js";
 import type { Plan } from "../src/lib/plan.js";
-import { buildPlanPrBody, filingAcceptanceCriteria, regeneratePlanIndexFile } from "../src/lib/plan-pr-emitter.js";
+import { buildPlanPrBody, filingAcceptanceCriteria } from "../src/lib/plan-pr-emitter.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
+import { loadPlanIndex } from "../src/lib/plan-index.js";
 
 // ── commitlint (W1-T136 class) — same subprocess pattern as test/commit-message.test.ts,
 // redefined locally per that file's own convention of not sharing a lint helper. ──────────────
@@ -561,21 +562,14 @@ test("applyStampToMasterPlan: a stamp for a proposal with a bullet still replace
 // src/run-task.ts's approveCommand gateway, minus worktree/pruning machinery that needs no
 // proving here) in an ISOLATED temp git repo — never this repo's own worktree state. `openPlanPr`
 // just RECORDS the assembled body (gh has no network here) instead of calling the real `gh` CLI.
-// End to end this proves: the resulting commit passes REAL commitlint, plan/plan-index.json
-// matches a fresh REAL `--check` run, and the captured PR body has a judgeable Acceptance block
-// with NO Remudero-Task trailer.
-
-const GENERATE_PLAN_INDEX_SCRIPT = join(REPO_ROOT, "scripts", "generate-plan-index.mjs");
+// End to end this proves: the resulting commit passes REAL commitlint, does not write a
+// plan-index artifact, and the captured PR body has a judgeable Acceptance block without a trailer.
 
 function gitEnv() {
   return { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 }
 
 function makeApproveFixtureRepo(): string {
-  // realpathSync: macOS's os.tmpdir() lives under a `/tmp` -> `/private/tmp` symlink, and
-  // generate-plan-index.mjs's "run as main" guard compares a RESOLVED URL against argv[1]'s
-  // literal path — an unresolved path never matches, so main() silently never runs. Resolve
-  // once, up front (see test/plan-pr-emitter.test.ts's makeBareWorktree for the same fix).
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "rmd-approve-integration-")));
   const env = gitEnv();
   const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env });
@@ -583,29 +577,18 @@ function makeApproveFixtureRepo(): string {
   git("config", "user.email", "t@t");
   git("config", "user.name", "t");
 
-  mkdirSync(join(dir, "scripts"), { recursive: true });
-  copyFileSync(GENERATE_PLAN_INDEX_SCRIPT, join(dir, "scripts", "generate-plan-index.mjs"));
-  // W1-T2907: generate-plan-index.mjs now imports `./lib/argv.mjs`, so a fixture that copies the
-  // script alone leaves an unresolvable import and the whole test FILE fails to load.
-  cpSync(join(REPO_ROOT, "scripts", "lib"), join(dir, "scripts", "lib"), { recursive: true });
   mkdirSync(join(dir, "plan"), { recursive: true });
   writeFileSync(join(dir, "plan", "tasks.yaml"), "- id: W1-T1\n  title: existing task\n  repo: remudero\n");
   writeFileSync(
     join(dir, "MASTER-PLAN.md"),
     "# MASTER-PLAN\n\n## Proposals\n\n- P900 (plan) — CAPTURED 2026-07-19.\n",
   );
-  const gen = spawnSync(process.execPath, [join(dir, "scripts", "generate-plan-index.mjs"), "--source", "MASTER-PLAN.md", "--out", "plan/plan-index.json"], {
-    cwd: dir,
-    encoding: "utf8",
-  });
-  assert.equal(gen.status, 0, gen.stdout + gen.stderr);
-
   git("add", "-A");
   git("commit", "--quiet", "-m", "seed");
   return dir;
 }
 
-test("integration: approveProposal against a REAL git repo — commitlint-clean commit, fresh plan-index, judgeable no-trailer PR body", () => {
+test("integration: approveProposal commits without a plan-index artifact and opens a judgeable no-trailer PR", () => {
   const dir = makeApproveFixtureRepo();
   const env = gitEnv();
   const payload: RatificationPayload = {
@@ -628,8 +611,6 @@ test("integration: approveProposal against a REAL git repo — commitlint-clean 
       const masterPlanPath = join(dir, "MASTER-PLAN.md");
       writeFileSync(masterPlanPath, applyStampToMasterPlan(readFileSync(masterPlanPath, "utf8"), p.proposalId, p.stampLine), "utf8");
 
-      // The #287 fix: regenerate plan/plan-index.json BEFORE the single git-add below.
-      regeneratePlanIndexFile({ worktreePath: dir });
       filedTaskIds = [...p.fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]);
 
       execFileSync("git", ["-C", dir, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { env });
@@ -664,13 +645,11 @@ test("integration: approveProposal against a REAL git repo — commitlint-clean 
   assert.equal(lintResult.status, 0, `integration commit must pass commitlint:\n${message}\n${lintResult.stdout}${lintResult.stderr}`);
   assert.doesNotMatch(message, /Remudero-Task:/, "a filing PR's commit carries no trailer");
 
-  // 2. plan/plan-index.json matches a fresh, independent --check run.
-  const check = spawnSync(
-    process.execPath,
-    [join(dir, "scripts", "generate-plan-index.mjs"), "--source", "MASTER-PLAN.md", "--out", "plan/plan-index.json", "--check"],
-    { cwd: dir, encoding: "utf8" },
-  );
-  assert.equal(check.status, 0, check.stdout + check.stderr);
+  // 2. The PR commits the plan sources only; readers derive the index at use time.
+  const committedFiles = execFileSync("git", ["-C", dir, "show", "--pretty=format:", "--name-only", "HEAD"], { encoding: "utf8" });
+  assert.doesNotMatch(committedFiles, /plan\/plan-index\.json/);
+  assert.equal(existsSync(join(dir, "plan", "plan-index.json")), false);
+  assert.ok(loadPlanIndex(join(dir, "MASTER-PLAN.md"))?.entries.some((e) => e.heading === "Proposals"));
 
   // 3. The captured PR body has a judgeable Acceptance block and NO Remudero-Task trailer.
   assert.ok(capturedBody, "openPlanPr must have run and recorded a body");
@@ -706,7 +685,6 @@ test("integration: two ratification PRs filed together share no file — two app
         writeRatificationShards(dir, p.fragmentYaml, p.proposalId, { mkdirSync, writeFileSync }, join);
         const masterPlanPath = join(dir, "MASTER-PLAN.md");
         writeFileSync(masterPlanPath, applyStampToMasterPlan(readFileSync(masterPlanPath, "utf8"), p.proposalId, p.stampLine), "utf8");
-        regeneratePlanIndexFile({ worktreePath: dir });
         git("add", "-A", "--", "plan/", "MASTER-PLAN.md");
         git("commit", "--quiet", "-m", approveCommitMessage(p));
         return branch;
