@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { loadPlan } from "./plan.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
@@ -25,12 +25,12 @@ export type OpenPullRequestProofRunner = (
   repoRoot: string,
 ) => OpenPullRequestProofResult;
 
-const TASK_ID_RE = /^(?:W\d+|[A-Z][A-Z0-9_]*)-T\d+$/;
+const TASK_ID_SHAPE = /^(?:W\d+|[A-Z][A-Z0-9_]*)-T\d+$/;
 
 /** The filed task id carried by a worker's session branch, if this is a task branch. */
 export function filedTaskIdFromRunBranch(branch: string): string | undefined {
   const taskId = taskIdFromRunBranch(branch);
-  return taskId && TASK_ID_RE.test(taskId) ? taskId : undefined;
+  return taskId && TASK_ID_SHAPE.test(taskId) ? taskId : undefined;
 }
 
 function defaultProofRunner(proof: string, mergeBase: string, repoRoot: string): OpenPullRequestProofResult {
@@ -72,17 +72,21 @@ function appendAcceptance(body: string, block: string): string {
 }
 
 function mergeBaseFor(repoRoot: string, baseRef: string): string {
-  try {
-    const mergeBase = execFileSync("git", ["-C", repoRoot, "merge-base", baseRef, "HEAD"], {
-      encoding: "utf8",
-      stdio: "pipe",
-    }).trim();
-    if (mergeBase) return mergeBase;
-  } catch (error) {
-    const detail = error instanceof Error ? error.message.split("\n")[0] : String(error);
+  const result = spawnSync("git", ["-C", repoRoot, "merge-base", baseRef, "HEAD"], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) {
+    const detail =
+      result.error?.message ||
+      String(result.stderr ?? "").trim() ||
+      `exit ${result.status ?? result.signal ?? "unknown"}`;
     return reject(`cannot resolve merge base ${baseRef}: ${detail}`);
   }
-  return reject(`cannot resolve merge base ${baseRef}: git returned no merge-base sha`);
+  const mergeBase = String(result.stdout ?? "").trim();
+  return mergeBase
+    ? mergeBase
+    : reject(`cannot resolve merge base ${baseRef}: git returned no merge-base sha`);
 }
 
 /**
