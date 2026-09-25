@@ -18,6 +18,7 @@ import { test } from "node:test";
 
 import { gitRepo } from "./helpers/git-repo.js";
 import { runCensusFix } from "../src/lib/census-fix.js";
+import { commitWorkerEditsWithCensusFix } from "../src/run-task.js";
 
 /** `scripts/source-size-ratchet.mjs`'s own bucket — matches its exported `CEILING_BUCKET_LINES`,
  *  restated rather than imported: this suite proves the OUTCOME a real subprocess produced, not a
@@ -90,6 +91,33 @@ test("W1-T4434: an existing ceiling is never raised by census fix", () => {
     assert.deepEqual(JSON.parse(readFileSync(sourceSizeBaselinePath(repo.dir), "utf8")), {
       "src/lib/grown.ts": CEILING_BUCKET_LINES,
     });
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("W1-T4434: the harness's own commit step applies census fix first and stages its remedy", () => {
+  const repo = gitRepo();
+  try {
+    mkdirSync(join(repo.dir, "scripts"), { recursive: true });
+    writeFileSync(sourceSizeBaselinePath(repo.dir), "{}\n");
+    repo.git("add", "-A");
+    repo.git("commit", "-m", "seed an empty source-size baseline");
+
+    // The worker's own declared edit -- a new src file it never told census fix about.
+    plantSourceFile(repo.dir, "src/lib/worker-added.ts", 17);
+
+    const result = commitWorkerEditsWithCensusFix(repo.dir, ["src/lib/worker-added.ts"], "feat: add worker-added.ts");
+
+    assert.equal(result.committed, true, result.reason);
+    assert.equal(result.censusFix.changed, true);
+    assert.deepEqual(result.censusFix.changedFiles, ["scripts/source-size-baseline.json"]);
+    // The remedied baseline is staged and committed even though `declaredPaths` never named it --
+    // it is a REGENERABLE_ARTIFACT_GENERATORS entry (lib/sweep.ts), exactly like the worker's own
+    // regenerable-artifact allowance already grants for a gate-printed remedy (W1-T3015).
+    const committedFiles = repo.git("show", "--name-only", "--pretty=format:", "HEAD").split("\n").filter(Boolean);
+    assert.ok(committedFiles.includes("scripts/source-size-baseline.json"), committedFiles.join(", "));
+    assert.ok(committedFiles.includes("src/lib/worker-added.ts"), committedFiles.join(", "));
   } finally {
     repo.cleanup();
   }
