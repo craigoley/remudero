@@ -309,14 +309,15 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   const withinDay = (ts: string) => now - Date.parse(ts) < DAY_MS;
   const filedToday = Object.values(store).filter((d) => withinDay(d.ts)).length;
   const room = sreLaneRoom(deps.mergedLastDay(), filedToday);
-  if (room <= 0 && !deps.runbookPass) return { room };
+  const runMatchingRunbook = deps.runbookPass;
+  if (room <= 0 && !runMatchingRunbook) return { room };
 
   const openOrigins = openIncidentFeedbackOrigins(deps.root);
   const evidence = aggregateIncidents(deps.readEvents());
   const worst = worstOpenIncident(evidence, (fp) => fingerprintAlreadyOpen(fp, openOrigins, deps.hasOpenTask));
   if (!worst) return { room };
 
-  const runbook = deps.runbookPass ? await deps.runbookPass(worst) : undefined;
+  const runbook = runMatchingRunbook ? await runMatchingRunbook(worst) : undefined;
   if (room <= 0 || (runbook && !runbook.fileFeedback)) return { room, runbook };
 
   const frameFiles = deps.framesFor(worst.fingerprint).map((f) => f.file);
