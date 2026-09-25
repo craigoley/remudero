@@ -22,6 +22,7 @@ import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import {
   CI_PARITY_TABLE,
   HOST_CAUSED_SUITE_REDS,
+  HOST_CAUSED_SUITE_REDS_MEASURED_POLES,
   computeHostFacts,
   detectHostFacts,
   hostCausedSuiteRedsForFacts,
@@ -57,6 +58,7 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
 // silently triggered a fourth cluster would make those assertions read the wrong signal.
 const DARWIN_BASH_3_2: HostFacts = {
   platform: "darwin",
+  pole: "mini",
   bashMajorVersion: 3,
   hasProcMeminfo: false,
   nodeVersion: "22.22.3",
@@ -64,6 +66,7 @@ const DARWIN_BASH_3_2: HostFacts = {
 };
 const LINUX_CI: HostFacts = {
   platform: "linux",
+  pole: "ci",
   bashMajorVersion: 5,
   hasProcMeminfo: true,
   nodeVersion: "22.22.3",
@@ -215,8 +218,12 @@ test("hostCausedSuiteRedsForFacts: a linux/bash-5/with-procfs host matches NOTHI
   assert.deepEqual(applicable, [], "no cluster's appliesTo() is satisfied by a linux CI runner's facts");
 });
 
-test("hostCausedSuiteRedsStep: on a linux CI host, the step reports 0 applicable clusters and says a ci:test failure here is the diff's own", () => {
-  const step = hostCausedSuiteRedsStep(LINUX_CI);
+test("hostCausedSuiteRedsStep: on a synthetic measured linux CI pole, 0 applicable clusters keeps the existing this-diff wording", () => {
+  // Synthetic only: exercise the measured branch without claiming the production registry has
+  // a current full-suite measurement for CI.
+  const step = hostCausedSuiteRedsStep(LINUX_CI, [
+    { pole: "ci", measuredAt: "2026-09-25T00:00:00.000Z", sha: "0123456789abcdef0123456789abcdef01234567" },
+  ]);
   assert.equal(step.ok, true);
   assert.match(step.detail, /0 of \d+ known host-caused suite-red cluster\(s\) apply/);
   assert.match(step.detail, /any ci:test failure here is this diff's own/);
@@ -227,6 +234,8 @@ test("computeHostFacts / parseBashMajorVersion: an UNPARSEABLE or missing bash v
   assert.equal(parseBashMajorVersion("not a version string"), undefined);
   const facts = computeHostFacts({
     platform: "darwin",
+    env: {},
+    inContainer: false,
     bashVersionText: "",
     hasProcMeminfo: true,
     nodeVersion: "22.22.3",
@@ -261,6 +270,7 @@ test("hostCausedSuiteRedsStep: a cluster's appliesTo() predicate is never satisf
   // Same file as the darwin-keychain entry, but linux facts: the entry must not apply.
   const linuxFacts: HostFacts = {
     platform: "linux",
+    pole: "ci",
     bashMajorVersion: 5,
     hasProcMeminfo: true,
     nodeVersion: "22.22.3",
@@ -291,12 +301,69 @@ test("hostCausedSuiteRedsStep: never returns ok: false for ANY combination of ho
   const combos: HostFacts[] = [
     DARWIN_BASH_3_2,
     LINUX_CI,
-    { platform: "darwin", bashMajorVersion: undefined, hasProcMeminfo: true, nodeVersion: "22.22.3", pinnedNodeVersion: "22.22.3" },
-    { platform: "win32", bashMajorVersion: undefined, hasProcMeminfo: false, nodeVersion: "22.22.3", pinnedNodeVersion: "22.22.3" },
+    { platform: "darwin", pole: "mini", bashMajorVersion: undefined, hasProcMeminfo: true, nodeVersion: "22.22.3", pinnedNodeVersion: "22.22.3" },
+    { platform: "win32", pole: "ci", bashMajorVersion: undefined, hasProcMeminfo: false, nodeVersion: "22.22.3", pinnedNodeVersion: "22.22.3" },
   ];
   for (const facts of combos) {
     assert.equal(hostCausedSuiteRedsStep(facts).ok, true, `facts=${JSON.stringify(facts)} must still report ok: true`);
   }
+});
+
+test("an unmeasured pole is told its reds are unclassified, never that they are this diff's own", () => {
+  assert.deepEqual(HOST_CAUSED_SUITE_REDS_MEASURED_POLES, [], "historical partial censuses do not measure the current complete registry");
+  const step = hostCausedSuiteRedsStep(LINUX_CI);
+  assert.equal(step.ok, true);
+  assert.match(step.detail, /pole=ci/);
+  assert.match(step.detail, /unclassified against this registry/);
+  assert.doesNotMatch(step.detail, /this diff's own/);
+});
+
+test("a measured pole with no applicable cluster still reads as this diff's own", () => {
+  const step = hostCausedSuiteRedsStep(LINUX_CI, [
+    { pole: "ci", measuredAt: "2026-09-25T00:00:00.000Z", sha: "0123456789abcdef0123456789abcdef01234567" },
+  ]);
+  assert.match(step.detail, /0 of \d+ known host-caused suite-red cluster\(s\) apply/);
+  assert.match(step.detail, /any ci:test failure here is this diff's own/);
+});
+
+test("the pole axis cannot alter ci:test's verdict — every fact combination still reports ok true", () => {
+  const combos: HostFacts[] = [
+    DARWIN_BASH_3_2,
+    LINUX_CI,
+    { platform: "darwin", pole: undefined, bashMajorVersion: undefined, hasProcMeminfo: true, nodeVersion: "22.22.3", pinnedNodeVersion: "22.22.3" },
+    { platform: "linux", pole: "azure", bashMajorVersion: 5, hasProcMeminfo: true, nodeVersion: "22.22.3", pinnedNodeVersion: "22.22.3" },
+  ];
+  for (const facts of combos) assert.equal(hostCausedSuiteRedsStep(facts).ok, true);
+
+  const { spawn } = recordingSpawn({ "npm run test:ci": { status: 1, stderr: "not ok 1 - independent suite failure" } });
+  const result = runCiParity(REPO_ROOT, { spawn });
+  assert.equal(result.steps.find((step) => step.name === "ci:test")?.ok, false);
+  assert.equal(result.steps.find((step) => step.name === "ci:host-caused-suite-reds")?.ok, true);
+});
+
+test("the facts line names the running Node version and its pin alongside platform, bash and procfs", () => {
+  const step = hostCausedSuiteRedsStep({ ...LINUX_CI, nodeVersion: "22.23.2", pinnedNodeVersion: "22.22.3" });
+  assert.match(step.detail, /platform=linux/);
+  assert.match(step.detail, /bash-major=5/);
+  assert.match(step.detail, /\/proc\/meminfo=true/);
+  assert.match(step.detail, /node=22\.23\.2, pinned-node=22\.22\.3/);
+  assert.match(step.detail, /pole=ci/);
+});
+
+test("the pole is resolved through resolveHostPole and the measured-pole set is data", () => {
+  const mini = computeHostFacts({ platform: "darwin", env: {}, inContainer: false, bashVersionText: "5.2", hasProcMeminfo: false, nodeVersion: "22.22.3", nvmrcText: "22.22.3" });
+  const ci = computeHostFacts({ platform: "linux", env: { CI: "true" }, inContainer: true, bashVersionText: "5.2", hasProcMeminfo: true, nodeVersion: "22.22.3", nvmrcText: "22.22.3" });
+  const azure = computeHostFacts({ platform: "linux", env: {}, inContainer: true, bashVersionText: "5.2", hasProcMeminfo: true, nodeVersion: "22.22.3", nvmrcText: "22.22.3" });
+  assert.equal(mini.pole, "mini");
+  assert.equal(ci.pole, "ci", "CI environment takes precedence over the container marker");
+  assert.equal(azure.pole, "azure");
+  assert.ok(Array.isArray(HOST_CAUSED_SUITE_REDS_MEASURED_POLES));
+  for (const entry of HOST_CAUSED_SUITE_REDS_MEASURED_POLES) {
+    assert.ok(Number.isFinite(Date.parse(entry.measuredAt)));
+    assert.match(entry.sha, /^[0-9a-f]{40}$/);
+  }
+  const unknown = computeHostFacts({ platform: "linux", env: {}, inContainer: undefined, bashVersionText: "5.2", hasProcMeminfo: true, nodeVersion: "22.22.3", nvmrcText: undefined });
+  assert.equal(unknown.pole, undefined, "an unreadable marker stays unknown instead of guessing ci or azure");
 });
 
 // ── acceptance 5: the ci-parity step still shells the full suite exactly as it does today ───
