@@ -16,38 +16,23 @@ import type { LedgerRecord } from "./retro.js";
 /**
  * lib/ci-friction-gardener.ts (W1-T4435) — the fleet prices its own slowest gate.
  *
- * A 2026-09-24 BY-HAND study of the 150 most recent merged pull requests found 77% of all PR time
- * spent in repair rounds (before the final head's CI even starts) — the top causes being hot
- * shared files forcing main merges, late rule-check reds, and refused fix-lane commits — and none
- * of it was visible to the fleet. gate-gardener (W1-T4116) already measures how often each CI gate
- * fires; it never converts a fire into the PR MINUTES it cost, so a frequent one-minute check and a
- * rare 25-minute one look the same. This module does the conversion and ranks causes by minutes
- * lost, never by how often they fired — that inversion is this module's own falsifier.
+ * INVARIANT: every cause is ranked by PR MINUTES LOST, never fire count — a frequent one-minute
+ * check must never outrank a rare 25-minute one (this module's own falsifier). gate-gardener
+ * (W1-T4116) already counts how often each gate fires; it never prices a fire in PR time.
  *
- * FOUR CAUSE KINDS, priced from what the fleet already measures — no new GitHub calls:
- *   - `check`  — a red required gate's own CI minutes, read straight from gate-fire-rate.ts's
- *     persisted `GateFireRateReport` (W1-T4115), keyed by gate name. Real timestamps, not a guess.
- *   - `main_merge` — a `fix.base_refreshed` ledger round: GitHub auto-merging main into the branch
- *     because a shared file changed underneath it. Priced by the wall-clock minutes since the
- *     round before it, named by the file `matching_base_files` blames.
- *   - `conflict` — a `fix.dispatch` round whose own `mode` is `"merge-conflict"`, priced the same
- *     way.
- *   - `fix_refusal` — a round whose `fix.commit_refused` row fired (design point (iv)): the harness
- *     refused that round's commit, so it bought no progress at all. This is the class that made
- *     2026-09-24's "62 of 65 rounds refused" episode ordinary CI trivia instead of a human study.
- *
- * Every round's minutes are the wall-clock gap since the PREVIOUS round on the SAME run (or the
- * pull request's own `pr.opened`, for the first) — every ledger row already carries `ts`, so this
- * needs no new field anywhere it reads from.
+ * FOUR CAUSE KINDS, priced from what the fleet already measures — no new GitHub calls: `check`
+ * (a red gate's own minutes, from gate-fire-rate.ts's persisted report, W1-T4115); `main_merge`
+ * (a `fix.base_refreshed` round — GitHub auto-merging main in, named by the shared file it
+ * blames); `conflict` (a `fix.dispatch` round whose `mode` is `"merge-conflict"`); `fix_refusal`
+ * (a round whose `fix.commit_refused` fired — the harness refused that round's commit, so it
+ * bought no progress; design point (iv)). Each ledger round's minutes are the wall-clock gap
+ * since the run's PREVIOUS round (or its `pr.opened`) — every row already carries `ts`.
  *
  * ONE class, `draft` (a `review` class, gardener.ts): the costliest cause with no queued task
  * already tracking it (`origin: ci-friction:<cause>`) is filed as a parked, `verify: human`,
- * `author_class: machine` task — the same idempotency shape `measurement-cadence.ts`'s CI-learning
- * rung already uses, reviewed and judged by whether its PR merges, never self-approved. The SAME
- * pass appends a row to {@link CI_FRICTION_GARDEN_LOG} so the trend is visible as the total moving,
- * not just the newest draft. When every measured cause is already tracked, this pass proposes
- * nothing and opens no PR — the weekly trend row rides the next pass that DOES have something to
- * file, which is the one week worth reading anyway.
+ * `author_class: machine` task, same idempotency shape as measurement-cadence.ts's CI-learning
+ * rung, judged by whether its PR merges. The SAME pass appends a row to
+ * {@link CI_FRICTION_GARDEN_LOG} so the trend reads as the total moving (design point (iii)).
  */
 
 // ── Pricing: rounds → causes, never fire count ──────────────────────────────────────────────
