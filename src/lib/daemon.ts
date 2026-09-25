@@ -17,6 +17,10 @@
 import type { AutoTriageDecision } from "./auto-triage.js";
 import { startPlainBackfill, type PlainBackfillDeps } from "./inbox-plain.js";
 import { startFleetLane, triageFleetLane, type FleetLaneDeps } from "./fleet-lane.js";
+import type { Escalation } from "./escalate.js";
+import { governorIncidentFromLedgerRow, governorTiersFromLedger, sreGovernorVerdict, SRE_GOVERNOR_STEP, type SreGovernorControls, type SreGovernorIncident, type SreGovernorVerdict } from "./sre-governor.js";
+import { sreLaneOffPath } from "./sre-lane.js";
+import { daemonSreGovernorEnforcer, receiptFromLedgerRow, type SreGovernorEnforcer, type SreRunbookReceipt } from "./sre-runbooks.js";
 import type { GardenerDeps } from "./gardener.js";
 import { startKnowledgeGardener, type GardenWorkspace } from "./knowledge-gardener.js";
 import { startInboxResponder, type InboxResponderDeps } from "./inbox-responder.js";
@@ -963,6 +967,11 @@ export interface DaemonDeps {
   plainBackfill?: PlainBackfillDeps;
   /** W1-T4089: files and folds the fleet's own findings, on its own timer beside the main loop. */
   fleetLane?: FleetLaneDeps;
+  /** W1-T4390: the SRE governor's second enforcer, evaluated every tick over the SRE instance's
+   *  ledger ({@link stepSreGovernor}). Absent, it reads `fleetLane`'s state root — TRAP: the
+   *  registry (W1-T4227) names no instance `state_dir` yet, and the SRE lane runs on this daemon's
+   *  own state root, so that IS the SRE instance's ledger; that default has no repo to escalate under. */
+  sreGovernor?: SreGovernorEnforcer;
   /** W1-T4095: the knowledge gardener — scores, prunes and consolidates the knowledge base on its own
    *  timer beside the main loop, and lands its changes as one reviewed PR per pass. */
   knowledgeGardener?: GardenerDeps<GardenWorkspace>;
@@ -1380,6 +1389,91 @@ export async function stepPauseHoldGovernor(
   return tier;
 }
 
+
+// ── W1-T4390: the SRE governor's SECOND enforcer ──────────────────────────────────────────────
+
+/** Text the step writes into the lane's pause switch for a global hold — and the ONLY text it will
+ *  remove, so an operator's own pause, or a runbook stop, is never lifted by a hold ending. */
+export const SRE_GOVERNOR_GLOBAL_HOLD_TEXT = "sre-governor global hold";
+
+const isLiveAct = (r: SreRunbookReceipt): boolean => r.mode === "live" && (r.outcome === "cleared" || r.outcome === "failed");
+
+/** One tick of the core daemon's governor: `sreGovernorVerdict` over the SRE instance's ledger —
+ *  never the lane's memory — ledgering each tier change as an `sre.governor` row. A runbook newly
+ *  stopped (flapping, harm twice), or one that acted AFTER its stop (a lane that skipped its own
+ *  check), pauses the lane and escalates to the operator; a global hold pauses the lane only while
+ *  it holds. Nothing happens for a ledger with no receipts. Returns the verdicts. */
+export function stepSreGovernor(
+  enforcer: SreGovernorEnforcer,
+  controls: SreGovernorControls,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  nowMs: number,
+): Record<string, SreGovernorVerdict> {
+  const rows = enforcer.readLedger();
+  const receipts = rows.map((row) => receiptFromLedgerRow(row)).filter((r): r is SreRunbookReceipt => r !== undefined);
+  if (receipts.length === 0) return {};
+  const incidents = rows.map((row) => governorIncidentFromLedgerRow(row)).filter((e): e is SreGovernorIncident => e !== undefined);
+  const verdicts = sreGovernorVerdict(receipts, incidents, controls, nowMs);
+  const previous = governorTiersFromLedger(rows);
+  let globalHeld = false;
+  for (const [runbook, verdict] of Object.entries(verdicts)) {
+    const prev = previous.get(runbook);
+    const global = verdict.global === true;
+    if (prev?.tier !== verdict.tier || prev.global !== global) {
+      log(SRE_GOVERNOR_STEP, { runbook, from: prev?.tier ?? "none", to: verdict.tier, reason: verdict.reason, evidence: verdict.evidence ?? [], global });
+    }
+    if (verdict.tier !== "stopped") continue;
+    if (global) {
+      globalHeld = true;
+      continue;
+    }
+    const wasStopped = prev?.tier === "stopped" && !prev.global;
+    const bypassed = wasStopped && receipts.some((r) => r.id === runbook && isLiveAct(r) && (r.ts_ms ?? 0) > prev.atMs);
+    if (wasStopped && !bypassed) continue;
+    enforcer.pauseLane(`sre-governor: ${runbook} stopped — ${verdict.reason}\n`);
+    log("sre.governor.lane_paused", { runbook, reason: verdict.reason, bypassed });
+    if (bypassed) continue; // the operator was paged at the stop itself; a bypass re-pauses, quietly.
+    if (!enforcer.escalate) {
+      log("sre.governor.escalation_unwired", { runbook, reason: verdict.reason });
+      continue;
+    }
+    const url = enforcer.escalate(sreGovernorEscalation(runbook, verdict));
+    log("sre.governor.escalated", { runbook, issue_url: url ?? null });
+  }
+  const off = enforcer.laneOff();
+  if (globalHeld && off === undefined) {
+    enforcer.pauseLane(`${SRE_GOVERNOR_GLOBAL_HOLD_TEXT}\n`);
+    log("sre.governor.lane_paused", { global: true });
+  } else if (!globalHeld && off?.startsWith(SRE_GOVERNOR_GLOBAL_HOLD_TEXT)) {
+    enforcer.resumeLane();
+    log("sre.governor.lane_resumed", { global: true });
+  }
+  return verdicts;
+}
+
+/** The needs-human issue for a governor stop — one per runbook, whatever incident was burning. */
+function sreGovernorEscalation(runbook: string, verdict: SreGovernorVerdict): Escalation {
+  return {
+    class: "BLOCKED",
+    taskId: `SRE-GOVERNOR-${runbook}`,
+    summary: `SRE governor stopped runbook ${runbook}: ${verdict.reason}`,
+    detail: [
+      `The core daemon's SRE governor stopped runbook \`${runbook}\` and paused the SRE lane (state/SRE_LANE_OFF).`,
+      ``,
+      `Reason: ${verdict.reason}`,
+      ``,
+      `Evidence:`,
+      ...(verdict.evidence?.length ? verdict.evidence.map((e) => `- ${e}`) : ["- (none recorded)"]),
+    ].join("\n"),
+    options: [
+      { label: "Fix the cause, then resume the lane", detail: "Remove state/SRE_LANE_OFF; the stopped runbook stays held until its evidence ages out of the governor's memory." },
+      { label: "Leave the lane paused", detail: "Incidents keep filing through the ordinary feedback pipeline only once the lane resumes." },
+    ],
+    recommendation: "Fix the cause, then resume the lane",
+    headDedup: "independent",
+    consequence: "The SRE lane stays paused: no runbook acts and no incident is filed from it.",
+  };
+}
 /** Wraps a fired retro, and auto-triage, in the same restricted light-sweep ticker dispatch already uses. Either is an
  * unbounded await, so without a ticker the whole reconciliation went dark for its duration — measured 22.0 and 21.0
  * minutes across the two retro firings, zero dispositions in either window (W1-T276). Only the light pass is ticked
@@ -2351,6 +2445,10 @@ export async function runDaemon(
   // The Clock port (W1-T2897): `deps.now` keeps its legacy `() => Date` shape (many tests inject
   // it directly), adapted here once for every reading this loop needs.
   const daemonClock: Clock = clockFromDateFn(deps.now);
+  // W1-T4390: the SRE governor's port — injected, else over the fleet lane's state root (see DaemonDeps.sreGovernor).
+  const sreFallbackRoot = deps.fleetLane;
+  const sreGovernor: SreGovernorEnforcer | undefined =
+    deps.sreGovernor ?? (sreFallbackRoot ? daemonSreGovernorEnforcer({ ledgerPath: sreFallbackRoot.ledgerPath, laneOffPath: sreLaneOffPath(sreFallbackRoot.stateDir) }) : undefined);
   // One sampler state shared by the main loop and every in-flight ticker, so the two can never
   // double-read and staleness is measured against whichever read last. Seeded to 0 so the first long
   // phase after boot samples immediately (W1-T2565).
@@ -2678,6 +2776,18 @@ export async function runDaemon(
     if (stopped) {
       log("daemon.stop", { detail: stopped });
       return summary("stopped", stopped);
+    }
+
+    // W1-T4390: the SRE governor, from a DIFFERENT loop than the lane it polices — so a wedged lane,
+    // or one that skips its own check, is still paused. Before PAUSE, so a hold still stops the lane.
+    if (sreGovernor) {
+      try {
+        const quiet = deps.checkQuietHours?.();
+        const controls = { pause: deps.checkPause?.(), quietHours: quiet ? (quiet.detail ?? "quiet hours") : undefined };
+        stepSreGovernor(sreGovernor, controls, log, daemonClock.now());
+      } catch (e) {
+        log("sre.governor.failed", { reason: String((e as Error)?.message ?? e) });
+      }
     }
 
     // W1-T3335 — LEAVE BEFORE V8 THROWS YOU OUT. Measured 2026-09-10: this process reached
