@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
-import { fixedClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import { escalate, ghIssueGateway, type Escalation, type IssueGateway } from "./escalate.js";
 import { pendingPrActions, requestPrAction } from "./fleet-control.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -276,6 +276,25 @@ export function shadowUntilGoverned(): SreGovernorVerdict {
   return { tier: "shadow", reason: "no governor yet (W1-T4390): a new runbook starts in shadow" };
 }
 
+/** The daemon's runbook gates around a catalog (src/run-task.ts builds the catalog, so a test can
+ *  inject its own): receipts from this daemon's ledger, shadow until governed, and the operator's
+ *  assigned needs-human issue. */
+export function daemonSreRunbookDeps(opts: {
+  runbooks: readonly SreRunbook[];
+  ledgerPath: string;
+  owner: string;
+  repo: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}): Omit<SreRunbookDeps, "log"> {
+  return {
+    runbooks: opts.runbooks,
+    governorVerdict: shadowUntilGoverned,
+    receipts: () => readRunbookReceipts(opts.ledgerPath),
+    escalate: sreOperatorEscalation(opts),
+    nowMs: () => systemClock.now(),
+  };
+}
+
 /** The needs-human issue path, each issue assigned to the repo's owner — the operator — so GitHub
  *  delivers an email and a GitHub Mobile push. An unassignable issue still opens (logged). */
 export function sreOperatorEscalation(opts: {
@@ -302,7 +321,7 @@ export function sreOperatorEscalation(opts: {
   });
   return (e) => {
     try {
-      return escalate(e, { issues, ledgerPath: opts.ledgerPath, runId: `SRE-${(opts.nowMs ?? Date.now)()}` }) || null;
+      return escalate(e, { issues, ledgerPath: opts.ledgerPath, runId: `SRE-${(opts.nowMs ?? systemClock.now)()}` }) || null;
     } catch (error) {
       opts.log("sre.escalation_failed", { task_id: e.taskId, reason: String((error as Error)?.message ?? error) });
       return null;
