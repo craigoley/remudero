@@ -168,11 +168,9 @@ test("W1-T4117: a concurrent source edit withdraws the export deletion", () => {
 
   const path = join(repo.dir, "src/lib/dead.ts");
   const concurrentEdit = `${readFileSync(path, "utf8")}\n// concurrent edit\n`;
-  const deleted = applyExportDeletions(repo.dir, candidates, {
-    writeAtomic: (target, content, options) => {
-      writeAtomicFile(target, concurrentEdit);
-      return writeAtomicFile(target, content, options);
-    },
+  const deleted = applyExportDeletions(repo.dir, candidates, (target, content, options) => {
+    writeAtomicFile(target, concurrentEdit);
+    return writeAtomicFile(target, content, options);
   });
 
   assert.deepEqual(deleted, [], "the stale candidate is not reported as applied");
