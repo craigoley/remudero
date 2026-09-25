@@ -419,6 +419,17 @@ jobs:
           path: ${{ runner.temp }}/test-duration
           retention-days: 1
           if-no-files-found: ignore
+      - name: Generate the console plan-index artifact (W1-T4432)
+        if: ${{ matrix.shard == '1' }}
+        run: node scripts/generate-plan-index.mjs --out plan/plan-index.json
+      - name: Upload the console plan-index artifact (W1-T4432)
+        if: ${{ matrix.shard == '1' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plan-index-console
+          path: plan/plan-index.json
+          retention-days: 7
+          if-no-files-found: error
 
   # W1-T2904: flake-retry evidence, aggregated across every shard. INFORMATIONAL ONLY -- it writes
   # to the step summary and gates nothing, which is exactly why it may not live inside `ci-required`:
@@ -1212,32 +1223,12 @@ jobs:
           FLAKE_RETRY_DIR="${RUNNER_TEMP}/flake-retry"
           mkdir -p "$FLAKE_RETRY_DIR"
           grep -E '^FLAKE-RETRY' "${RUNNER_TEMP}/coverage-test-output.log" > "$FLAKE_RETRY_DIR/coverage-shard-${{ matrix.shard }}.log" || : > "$FLAKE_RETRY_DIR/coverage-shard-${{ matrix.shard }}.log"
-          # W1-T4462: --recent-failures, built from THIS shard's own flake-retry evidence above —
-          # the file(s) named on a "FLAKE-RETRY-FILES: retrying ... — <files>" line, which the
-          # retry step already wrote (never a second run just to produce this). Without it, a
-          # suite that only failed because it is currently flaky counts as a MISS the selector
-          # never modelled, indistinguishable from a real regression it would have missed.
-          node -e '
-            const fs = require("node:fs");
-            const log = fs.readFileSync(process.argv[1], "utf8");
-            const files = new Set();
-            const re = /^FLAKE-RETRY-FILES: retrying \d+ failed file\(s\)(?: uninstrumented)? — (.+)$/gm;
-            let m;
-            while ((m = re.exec(log))) {
-              for (const f of m[1].split(",")) {
-                const t = f.trim();
-                if (t) files.add(t);
-              }
-            }
-            fs.writeFileSync(process.argv[2], [...files].map((f) => f + "\n").join(""));
-          ' "$FLAKE_RETRY_DIR/coverage-shard-${{ matrix.shard }}.log" recent-failures.txt || : > recent-failures.txt
           # W1-T4404: the affected-suite selector in SHADOW. It records what it WOULD have run and, for
           # each file that really failed above, whether each selection had it. It runs after the
           # full suite, never changes what ran, and never changes this step's verdict.
           git diff -U0 HEAD^1...HEAD > "${RUNNER_TEMP}/affected.diff" 2>/dev/null || : > "${RUNNER_TEMP}/affected.diff"
           node --import tsx scripts/select-affected-suites.mjs --changed-files changed-files.txt \
             --diff "${RUNNER_TEMP}/affected.diff" --failed-from "${RUNNER_TEMP}/coverage-test-output.log" \
-            --recent-failures recent-failures.txt \
             || echo "W1-T4404: the shadow selector itself failed; nothing depends on it."
           if [ "$TEST_EXIT" -ne 0 ]; then
             echo "coverage-ratchet: the instrumented suite exited ${TEST_EXIT}. W1-T3207 makes this the surviving test harness; lcov/raw coverage are still checked before the shard fails."

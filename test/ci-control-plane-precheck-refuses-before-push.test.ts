@@ -45,7 +45,6 @@ function fixture(t: TestContext) {
   }
   copyFileSync(join(REPO_ROOT, "MASTER-PLAN.md"), join(work.dir, "MASTER-PLAN.md"));
   copyFileSync(join(REPO_ROOT, "plan", "policy.yaml"), join(work.dir, "plan", "policy.yaml"));
-  copyFileSync(join(REPO_ROOT, "plan", "plan-index.json"), join(work.dir, "plan", "plan-index.json"));
   symlinkSync(join(REPO_ROOT, "node_modules"), join(work.dir, "node_modules"));
 
   work.git("config", "core.hooksPath", "hooks");

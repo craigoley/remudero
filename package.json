@@ -45,8 +45,6 @@
     "assertion-discrimination": "node scripts/assertion-discrimination-check.mjs",
     "learnings-index": "node scripts/generate-learnings-index.mjs",
     "learnings-index:check": "node scripts/generate-learnings-index.mjs --check",
-    "plan-index": "node scripts/generate-plan-index.mjs",
-    "plan-index:check": "node scripts/generate-plan-index.mjs --check",
     "docs-index": "node scripts/generate-docs-index.mjs",
     "docs-index:check": "node scripts/generate-docs-index.mjs --check",
     "docs-index:check-paths": "node scripts/generate-docs-index.mjs --check-paths",

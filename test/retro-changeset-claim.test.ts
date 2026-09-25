@@ -2,7 +2,7 @@
  * W1-T911 — THE PURE RECONCILER (`reconcileRetroChangesetClaim`, lib/plan-pr-emitter.ts).
  *
  * The retro's PR body is written by the Architect worker BEFORE the harness commits
- * `docs/ORIENTATION.md` and `plan/plan-index.json` into the same PR — so a body that was TRUE
+ * `docs/ORIENTATION.md` into the same PR — so a body that was TRUE
  * the instant it was written ("touches exactly one file") is FALSE by the time
  * `bodyContradictsDiff` reads it, and no wording the Architect could have chosen fixes that (it
  * cannot know what the harness appends after it returns). W1-T908 shipped a repair for one of
@@ -34,7 +34,7 @@ import { test } from "node:test";
 import { reconcileRetroChangesetClaim } from "../src/lib/plan-pr-emitter.js";
 import { bodyContradictsDiff, changesetClaimsDisagreeing } from "../src/lib/review.js";
 
-const RETRO_PATHS = ["MASTER-PLAN.md", "docs/ORIENTATION.md", "plan/plan-index.json"];
+const RETRO_PATHS = ["MASTER-PLAN.md", "docs/ORIENTATION.md"];
 
 /** What the Architect actually writes today (quoted, in shape, from #974's merged body) plus the
  *  arm-(b) denial that tripped #1943: a truthful "no src/, no test/" alongside a FALSE "no
@@ -119,7 +119,7 @@ test("W1-T533: a body that already agrees is left alone rather than rewritten", 
 
   // A denial the diff does NOT refute is TRUE and must survive untouched — design (iv): only a
   // denial the diff actually contradicts may ever be dropped.
-  const truthfulDenial = "This retro touches MASTER-PLAN.md, docs/ORIENTATION.md and plan/plan-index.json. No src/, no test/.\n";
+  const truthfulDenial = "This retro touches MASTER-PLAN.md and docs/ORIENTATION.md. No src/, no test/.\n";
   assert.equal(
     reconcileRetroChangesetClaim(truthfulDenial, RETRO_PATHS),
     undefined,
