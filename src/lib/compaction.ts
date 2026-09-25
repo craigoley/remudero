@@ -486,6 +486,17 @@ export function outputContractLines(taskId: string, harnessCommits = false): str
     "  silent report must be distinguishable from one that explicitly claims none. Only cite an id",
     "  that was actually injected into your CONTEXT above — an id you were never shown is refused",
     "  by name and never counted as used.",
+    // W1-T4114: SKILLS_USED is LEARNINGS_USED's own mirror for the `## skill: <name>` procedures
+    // above — `skills.selection` already ledgers which skills were OFFERED (selected into the
+    // prompt); nothing until this line ever asked a worker whether an offered skill was USED, so
+    // the knowledge gardener's SKILL-LIFECYCLE class had only a selection count to judge a skill
+    // by. `parseSkillsUsed` (worker.ts) reads this back the same way `parseLearningsUsed` does.
+    "- Your REPORT must ALSO name the skills you actually USED this run — anchored to its own line",
+    "  start, exactly like PR_URL: `SKILLS_USED: skill#<name>, skill#<name>` for one or more, or",
+    "  `SKILLS_USED: none` if you used none. REQUIRED: a silent report must be distinguishable from",
+    "  one that explicitly claims none. Only cite a name that was actually shown to you as a",
+    "  `## skill: <name>` section above — a name you were never shown is refused by name and never",
+    "  counted as used.",
     ...(harnessCommits
       ? ["- End with a REPORT. Do NOT write a PR_URL line: you opened no pull request, and the",
          "  harness reads the url back from the one it creates."]
