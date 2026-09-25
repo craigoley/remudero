@@ -8,38 +8,32 @@ import { ledgerLivePath, readLedgerUnionRecordsSync } from "./ledger-union.js";
 /**
  * lib/test-gardener.ts (W1-T4112) — the test suite tends itself.
  *
- * scripts/test-tier-manifest.json holds hundreds of never-measured `0` placeholders, its last
- * bulk refresh predates the coverage lane it now schedules, CI's own `--propose` output lives
- * seven days as an artifact nobody adopts, and `test-with-retry.mjs`'s FLAKE-RETRY evidence used
- * to live on stdout only (fixed alongside this file — see that script's own W1-T4112 note). Each
- * pass proposes ONE class of change as ONE pull request, every value read from
- * scripts/test-tier-manifest.mjs's OWN functions or the fleet's OWN ledger, never a guess:
+ * scripts/test-tier-manifest.json holds hundreds of never-measured `0` placeholders, CI's own
+ * `--propose` output lives seven days as an artifact nobody adopts, and `test-with-retry.mjs`'s
+ * FLAKE-RETRY evidence used to live on stdout only (fixed alongside this file — see that script's
+ * own W1-T4112 note). Each pass proposes ONE class of change as ONE pull request, every value read
+ * from scripts/test-tier-manifest.mjs's OWN functions or the fleet's OWN ledger, never a guess:
  *
- *   - ADOPT-DURATIONS: a proposal at {@link testManifestProposalPath} that
- *     `proposalIsMaterial` says would move a file to a different shard — every row that changed
- *     lands together, judged by SHARD SKEW (`summarizeShardBalance`'s `shardSpreadMs`, before vs
- *     after adopting).
- *   - RETIER-FLAKER: a test file the ledger's `test.flake_retry` rows (design note i,
- *     test-with-retry.mjs) show retried at least {@link RETIER_THRESHOLD} times, forced into the
- *     slow tier by recording its duration at the manifest's own threshold — judged by RETRY COUNT.
- *   - SHRINK-BASELINE: the SAME proposal file, read only when it is NOT material (ADOPT-DURATIONS
- *     already claims every changed row on a material pass), for a row the proposal measures LOWER
- *     than committed — a one-way baseline that only ever grows unless something corrects it down —
- *     judged by the manifest's own total BASELINE SIZE.
+ *   - ADOPT-DURATIONS: a material proposal (`proposalIsMaterial`) that moves a file to a
+ *     different shard — every changed row lands together, judged by SHARD SKEW.
+ *   - RETIER-FLAKER: a file the ledger's `test.flake_retry` rows show retried at least
+ *     {@link RETIER_THRESHOLD} times, forced to the slow tier — judged by RETRY COUNT.
+ *   - SHRINK-BASELINE: the same proposal, read only when NOT material, for a row measured lower
+ *     than committed — a one-way baseline shrunk downward — judged by BASELINE SIZE.
  *
- * All three are `review` classes (gardener.ts): each edits a number a person can be wrong to trust
- * from one run, so each is judged by whether its PR merges, never by a synthetic pass/fail this
- * module invents. The PR opens ready for review — never a draft — and flows through the fleet's
- * review and auto-merge like every other PR; closing it is how a person declines it.
+ * All three are `review` classes (gardener.ts): judged by whether their PR merges, never a
+ * synthetic pass/fail this module invents.
  */
 
 export type TestGardenClass = "adopt-durations" | "retier-flaker" | "shrink-baseline";
 export const TEST_GARDEN_CLASSES: readonly TestGardenClass[] = ["adopt-durations", "retier-flaker", "shrink-baseline"];
 
-/** A repeat flaker: recorded at least this many `test.flake_retry` rows for the same file. One is
- *  a fluke a healthy retry already absorbed; three is a pattern worth moving off the fast lane's
- *  shard balance, chosen well below the handful of retries a genuinely unstable file accrues over
- *  even a single day of PRs and well above the one-off a passing retry already resolves. */
+/** PRIMARY CONTROL — the count RETIER-FLAKER itself acts on, not a guard against some other
+ *  mechanism's failure. A repeat flaker: recorded at least this many `test.flake_retry` rows for
+ *  the same file. One is a fluke a healthy retry already absorbed; three is a pattern worth moving
+ *  off the fast lane's shard balance, chosen well below the handful of retries a genuinely unstable
+ *  file accrues over even a single day of PRs and well above the one-off a passing retry already
+ *  resolves. */
 export const RETIER_THRESHOLD = 3;
 
 export type ManifestEdit = { kind: "row"; key: string; to: number };
