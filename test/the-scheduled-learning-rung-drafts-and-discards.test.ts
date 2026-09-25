@@ -11,10 +11,18 @@
  * four counts. This suite pins the daemon arm to the filing contract the CLI already honours.
  */
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { fixedClock } from "../src/lib/clock.js";
 import { buildCiLearningCadenceRunner } from "../src/run-task.js";
+
+// @host-capability isolated-temp-root: each test process owns its writable ledger fixture.
+const fixture = mkdtempSync(join(tmpdir(), "rmd-test-w1t3324-"));
+const root = join(fixture, "root");
+const checkoutRoot = join(fixture, "checkout");
 
 /** One repaired pair is the minimum mintable corpus — the lesson is in the DELTA. */
 function windowWithOneRepair() {
@@ -44,8 +52,8 @@ function recordingFiler() {
 test("W1-T3324: the scheduled rung calls the filer, so a drafted shard reaches the plan instead of a counter", async () => {
   const filer = recordingFiler();
   const run = buildCiLearningCadenceRunner({
-    root: "/tmp/w1t3324-root",
-    checkoutRoot: "/tmp/w1t3324-checkout",
+    root,
+    checkoutRoot,
     loadWindow: () => windowWithOneRepair(),
     fileShards: filer.fn as never,
     planOrigins: ["operator-session#something-else"],
@@ -64,8 +72,8 @@ test("W1-T3324: the plan-origins surface is LOAD-BEARING — a cause already fil
   // WORKS, so this drives both sides of the same surface.
   const fresh = recordingFiler();
   const runFresh = buildCiLearningCadenceRunner({
-    root: "/tmp/w1t3324-root",
-    checkoutRoot: "/tmp/w1t3324-checkout",
+    root,
+    checkoutRoot,
     loadWindow: () => windowWithOneRepair(),
     fileShards: fresh.fn as never,
     planOrigins: ["operator-session#unrelated"],
@@ -86,8 +94,8 @@ test("W1-T3324: the plan-origins surface is LOAD-BEARING — a cause already fil
   // Now the SAME corpus against a surface that already holds this cause.
   const dup = recordingFiler();
   const runDup = buildCiLearningCadenceRunner({
-    root: "/tmp/w1t3324-root",
-    checkoutRoot: "/tmp/w1t3324-checkout",
+    root,
+    checkoutRoot,
     loadWindow: () => windowWithOneRepair(),
     fileShards: dup.fn as never,
     planOrigins: ["ci-learning:4321:ci-gate"],
@@ -104,8 +112,8 @@ test("W1-T3324: a firing whose window read THROWS releases its allowance, so a t
   const fires: string[] = [];
   const releases: string[] = [];
   const run = buildCiLearningCadenceRunner({
-    root: "/tmp/w1t3324-root",
-    checkoutRoot: "/tmp/w1t3324-checkout",
+    root,
+    checkoutRoot,
     loadWindow: () => {
       throw new Error("Command failed: gh api ... Bad credentials (HTTP 401)");
     },
@@ -126,8 +134,8 @@ test("W1-T3324: a firing that FILED keeps its fire, so the crash-loop guard stil
   const fires: string[] = [];
   const releases: string[] = [];
   const run = buildCiLearningCadenceRunner({
-    root: "/tmp/w1t3324-root",
-    checkoutRoot: "/tmp/w1t3324-checkout",
+    root,
+    checkoutRoot,
     loadWindow: () => windowWithOneRepair(),
     fileShards: recordingFiler().fn as never,
     planOrigins: [],
@@ -149,8 +157,8 @@ test("W1-T3324: the run result names what LANDED, so filed-nothing and drafted-n
     refused: (drafts as Array<{ findingId?: string }>).map((d) => ({ findingId: d.findingId ?? "?", reason: "linter refused" })),
   });
   const run = buildCiLearningCadenceRunner({
-    root: "/tmp/w1t3324-root",
-    checkoutRoot: "/tmp/w1t3324-checkout",
+    root,
+    checkoutRoot,
     loadWindow: () => windowWithOneRepair(),
     fileShards: refusingFiler as never,
     planOrigins: [],
@@ -166,8 +174,8 @@ test("W1-T3324: the run result names what LANDED, so filed-nothing and drafted-n
 test("W1-T3324: every record the scheduled path drafts still carries author_class machine and verify human", async () => {
   const filer = recordingFiler();
   const run = buildCiLearningCadenceRunner({
-    root: "/tmp/w1t3324-root",
-    checkoutRoot: "/tmp/w1t3324-checkout",
+    root,
+    checkoutRoot,
     loadWindow: () => windowWithOneRepair(),
     fileShards: filer.fn as never,
     planOrigins: [],
@@ -192,8 +200,8 @@ test("W1-T3324: the recorded fire is stamped from the injected clock, never from
   const STAMP = Date.parse("2026-03-04T05:06:07.000Z");
   const fires: Date[] = [];
   const run = buildCiLearningCadenceRunner({
-    root: "/tmp/w1t3324-clock-root",
-    checkoutRoot: "/tmp/w1t3324-clock-checkout",
+    root,
+    checkoutRoot,
     loadWindow: () => windowWithOneRepair(),
     fileShards: recordingFiler().fn as never,
     planOrigins: ["operator-session#something-else"],

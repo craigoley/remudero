@@ -1,25 +1,16 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { loadPlanIndex, renderPlanIndex, type PlanIndex } from "../src/lib/plan-index.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
-// ── W1-T37: the plan INDEX generator (MASTER-PLAN §8A Tier 2) ──────────────────────────────────
-//
-// The plan is RETRIEVED, not injected: instead of shipping MASTER-PLAN.md's ~1900 lines to every
-// worker, a generated INDEX (plan/plan-index.json) carries just section headings + one-line
-// summaries + a grep hint. This suite proves the generator is ACTIVE, not merely present: a FRESH
-// index (matches a regeneration byte-for-byte) turns `--check` green; a STALE one turns it RED and
-// names the file to regenerate — same discipline as scripts/generate-learnings-index.mjs (W1-T33).
-// It also proves the REAL committed plan/plan-index.json is currently fresh (the same check CI
-// runs, via `npm test`, on every PR).
-//
-// (scripts/generate-plan-index.mjs is a plain .mjs file outside tsconfig's `include`, so its pure
-// functions are exercised here only via `spawnSync` against its CLI surface, mirroring
-// test/learnings-index.test.ts's convention for scripts/generate-learnings-index.mjs.)
+// W1-T4432: runtime readers derive the plan index from MASTER-PLAN.md instead of maintaining
+// plan/plan-index.json as a committed PR artifact. Generator CLI coverage below remains explicit
+// and isolated; runtime tests prove missing-file reads build/cache the projection without writes.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -73,7 +64,7 @@ test("generate-plan-index --check: a STALE index (source changed since generatio
     assert.notEqual(result.status, 0, output);
     assert.match(output, /is STALE/);
     assert.match(output, /plan-index\.json/);
-    assert.match(output, /npm run plan-index/);
+    assert.match(output, /node scripts\/generate-plan-index\.mjs/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -88,7 +79,7 @@ test("generate-plan-index --check: a MISSING committed index -> non-zero exit, t
     const output = result.stdout + result.stderr;
     assert.notEqual(result.status, 0, output);
     assert.match(output, /does not exist/);
-    assert.match(output, /npm run plan-index/);
+    assert.match(output, /node scripts\/generate-plan-index\.mjs/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -125,65 +116,53 @@ test("generate-plan-index: a NESTED (### ) subheading right under a section is s
   }
 });
 
-// ── The real plan/: the index is currently fresh ────────────────────────────────────────────────
+// ── src/lib/plan-index.ts — derived at read time ───────────────────────────────────────────
 
-test("the REAL committed plan/plan-index.json is NOT stale (this is what CI checks on every PR via `npm test`)", () => {
-  // Relative paths + cwd: REPO_ROOT, matching the exact invocation `npm run plan-index:check`
-  // uses (no --source/--out overrides) — an absolute --source would change the recorded
-  // `source` field and produce a false-positive STALE result unrelated to real drift.
-  const result = spawnSync(process.execPath, [SCRIPT, "--check"], { cwd: REPO_ROOT, encoding: "utf8" });
-  const output = result.stdout + result.stderr;
-  assert.equal(result.status, 0, output);
-});
-
-test("the real plan/plan-index.json carries every MASTER-PLAN.md '## ' section heading, in document order", () => {
-  const masterPlan = readFileSync(join(REPO_ROOT, "MASTER-PLAN.md"), "utf8");
-  const expectedHeadings = masterPlan
-    .split("\n")
-    .filter((l) => /^## /.test(l))
-    .map((l) => l.replace(/^##\s+/, "").trim());
-  const index = JSON.parse(readFileSync(join(REPO_ROOT, "plan", "plan-index.json"), "utf8"));
-  assert.deepEqual(
-    index.entries.map((e: { heading: string }) => e.heading),
-    expectedHeadings,
-  );
-});
-
-// ── src/lib/plan-index.ts — the runtime loader/renderer ─────────────────────────────────────────
-
-test("loadPlanIndex: a missing file is non-fatal — returns null (a fresh checkout before the first generation)", () => {
-  assert.equal(loadPlanIndex(join(tmpdir(), "does-not-exist-plan-index.json")), null);
-});
-
-test("loadPlanIndex: malformed JSON / wrong shape is non-fatal — returns null, never throws", () => {
-  const tmp = mkdtempSync(join(tmpdir(), "plan-index-malformed-"));
+test("loadPlanIndex: builds from MASTER-PLAN.md when no JSON index exists", () => {
+  const tmp = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-index-derived-`));
   try {
-    const badJson = join(tmp, "bad.json");
-    writeFileSync(badJson, "{ not valid json");
-    assert.equal(loadPlanIndex(badJson), null);
-
-    const wrongShape = join(tmp, "wrong-shape.json");
-    writeFileSync(wrongShape, JSON.stringify({ source: "x.md" })); // missing 'entries'
-    assert.equal(loadPlanIndex(wrongShape), null);
+    mkdirSync(join(tmp, "plan"));
+    const artifact = join(tmp, "plan", "plan-index.json");
+    const source = join(tmp, "MASTER-PLAN.md");
+    const contents = "# Plan\n\n## Current section\n\nDerived summary.\n";
+    writeFileSync(source, contents);
+    assert.equal(existsSync(artifact), false);
+    const index = loadPlanIndex(source);
+    const canonicalArtifact = join(tmp, "canonical-plan-index.json");
+    const generated = runGenerate(source, canonicalArtifact);
+    assert.equal(generated.status, 0, generated.stdout + generated.stderr);
+    assert.deepEqual(index?.entries, JSON.parse(readFileSync(canonicalArtifact, "utf8")).entries, "the runtime reader matches the generator parser output");
+    assert.deepEqual(index?.entries, [{ heading: "Current section", line: 3, summary: "Derived summary." }]);
+    assert.equal(existsSync(artifact), false, "reading must not create a committed index file");
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test("loadPlanIndex: a well-formed index round-trips through renderPlanIndex", () => {
-  const tmp = mkdtempSync(join(tmpdir(), "plan-index-roundtrip2-"));
+test("loadPlanIndex: changed MASTER-PLAN.md content invalidates the cached result", () => {
+  const tmp = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-index-cache-`));
   try {
-    const path = join(tmp, "plan-index.json");
-    const index: PlanIndex = {
-      source: "MASTER-PLAN.md",
-      entries: [{ heading: "4A. Workspace containment (fleet-wide)", line: 760, summary: "The sandbox story." }],
-    };
-    writeFileSync(path, JSON.stringify(index));
-    const loaded = loadPlanIndex(path);
-    assert.deepEqual(loaded, index);
-    const rendered = renderPlanIndex(loaded!);
-    assert.match(rendered, /"4A\. Workspace containment \(fleet-wide\)" \(line 760\): The sandbox story\./);
-    assert.match(rendered, /grep/);
+    mkdirSync(join(tmp, "plan"));
+    const artifact = join(tmp, "plan", "plan-index.json");
+    const source = join(tmp, "MASTER-PLAN.md");
+    writeFileSync(source, "# Plan\n\n## Before\n\nFirst summary.\n");
+    const before = loadPlanIndex(source);
+    assert.strictEqual(loadPlanIndex(source), before, "identical content reuses the content-hash cache entry");
+    writeFileSync(source, "# Plan\n\n## After\n\nSecond summary.\n");
+    const after = loadPlanIndex(source);
+    assert.notStrictEqual(after, before);
+    assert.deepEqual(after?.entries, [{ heading: "After", line: 3, summary: "Second summary." }]);
+    assert.equal(existsSync(artifact), false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("loadPlanIndex: a missing MASTER-PLAN.md is non-fatal", () => {
+  const tmp = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-index-missing-source-`));
+  try {
+    mkdirSync(join(tmp, "plan"));
+    assert.equal(loadPlanIndex(join(tmp, "MASTER-PLAN.md")), null);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

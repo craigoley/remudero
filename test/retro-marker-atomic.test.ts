@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 // intercepts the REAL fs.writeFileSync/fs.renameSync calls saveMarker makes, never a
 // reimplementation.
 import fsDefault from "node:fs";
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -516,13 +516,6 @@ function setupFakeRetroFixture(
     /** Omit MASTER-PLAN.md from the fixture repo -- regenerateOrientation throws (ENOENT),
      *  exercising its best-effort catch. */
     missingMasterPlan?: boolean;
-    /** Copy the REAL scripts/generate-plan-index.mjs into the fixture repo and let
-     *  regeneratePlanIndexAndCommit actually run it. Default false (absent): every
-     *  invocation spawns a REAL node subprocess whose OWN coverage gets tallied under
-     *  a fresh, unmerged random-tmp-path SF: record each time (a coverage-ratchet
-     *  measurement artifact, not a real regression) -- only the variants that
-     *  specifically need to prove the real regen path opt in. */
-    includeGeneratorScript?: boolean;
     /** Seed a malformed plan/tasks.yaml -- loadPlan throws inside the best-effort
      *  "next runnable task" lookup, exercising ITS catch. */
     badPlan?: boolean;
@@ -604,13 +597,6 @@ function setupFakeRetroFixture(
   // zero tasks -> the best-effort "next runnable task" lookup makes NO gh calls; a
   // deliberately-malformed plan instead makes loadPlan throw, exercising its own catch.
   writeFileSync(join(seed, "plan", "tasks.yaml"), opts.badPlan ? "not_a_task_list: true\n" : "[]\n");
-  writeFileSync(join(seed, "plan", "plan-index.json"), "{}\n");
-  if (opts.includeGeneratorScript) {
-    mkdirSync(join(seed, "scripts"), { recursive: true });
-    // The REAL generator script (self-contained: no src/ imports) -- never a reimplementation.
-    copyFileSync(join(process.cwd(), "scripts", "generate-plan-index.mjs"), join(seed, "scripts", "generate-plan-index.mjs"));
-    cpSync(join(process.cwd(), "scripts", "lib"), join(seed, "scripts", "lib"), { recursive: true });
-  }
   execFileSync("git", ["-C", seed, "add", "-A"]);
   execFileSync("git", ["-C", seed, "commit", "-q", "-m", "chore: fixture seed"]);
   execFileSync("git", ["-C", seed, "push", "-q", "origin", "main"]);
@@ -832,12 +818,8 @@ test("W1-T968: a retro PR reports a standing prior arm as armed although its own
   });
 });
 
-test("retroCommand: a clean run reaches the REAL saveMarker call at the end of the success path and lands a valid marker", async (t) => {
-  // The ONE variant that opts into the REAL scripts/generate-plan-index.mjs subprocess
-  // (every other variant below defaults to skipping it -- see includeGeneratorScript's
-  // doc) so the "regen actually committed" branches stay covered exactly once, not
-  // once per variant.
-  const fx = setupFakeRetroFixture(t, { includeGeneratorScript: true });
+test("retroCommand: a clean run advances its marker without an index artifact", async (t) => {
+  const fx = setupFakeRetroFixture(t);
   await fx.run(async () => {
     const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     // ci went "red" on the first poll (fake gh above) -> retroCommand returns 1 right
@@ -854,10 +836,8 @@ test("retroCommand: a clean run reaches the REAL saveMarker call at the end of t
       ledgerLines.some((l) => l.step === "retro.marker.advanced"),
       "retro.marker.advanced must be ledgered once the marker is actually saved",
     );
-    assert.ok(
-      ledgerLines.some((l) => l.step === "plan_index.regenerated"),
-      "the real generator script must have actually run and committed a change",
-    );
+    assert.ok(!ledgerLines.some((l) => String(l.step).startsWith("plan_index.")), "retro no longer regenerates or commits an index artifact");
+    assert.equal(fsDefault.existsSync(join(fx.root, "repos", "remudero", "plan", "plan-index.json")), false);
     const preflightIndex = ledgerLines.findIndex((l) => l.step === "retro.preflight_passed");
     const openedIndex = ledgerLines.findIndex((l) => l.step === "pr.opened");
     const markerIndex = ledgerLines.findIndex((l) => l.step === "retro.marker.advanced");
@@ -922,8 +902,8 @@ test("retroCommand: a clean run with a PRE-EXISTING valid marker still resolves 
   });
 });
 
-test("retroCommand: the one repair resumes the producing session on its original provider and reruns harness generators", async (t) => {
-  const fx = setupFakeRetroFixture(t, { preflightExercisesRepair: true, includeGeneratorScript: true });
+test("retroCommand: the one repair resumes the producing session and reruns preflight", async (t) => {
+  const fx = setupFakeRetroFixture(t, { preflightExercisesRepair: true });
   await fx.run(async () => {
     const exitCode = await withLiveWritesAllowed(() => retroCommand([], {
       spawn: fx.fakeSpawn,
@@ -1275,15 +1255,14 @@ test("retroCommand: an UNRESOLVED head ref (gh cannot say what branch the PR is 
   });
 });
 
-test("retroCommand: a missing plan-index generator script degrades plan-index.json regeneration gracefully (best-effort) and still reaches the marker advance", async (t) => {
-  const fx = setupFakeRetroFixture(t); // includeGeneratorScript defaults to false (absent)
+test("retroCommand: the removed plan-index generator is not required to advance the marker", async (t) => {
+  const fx = setupFakeRetroFixture(t);
   await fx.run(async () => {
     const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
     const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
-    assert.ok(marker.ts, "a best-effort plan-index.json failure must never prevent the marker from advancing");
-    const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
-    assert.ok(ledgerLines.some((l) => l.step === "plan_index.regen.error"), "the missing generator script must be ledgered, not silently swallowed");
+    assert.ok(marker.ts, "the marker advances without invoking a plan-index generator");
+    assert.equal(fsDefault.existsSync(join(fx.root, "repos", "remudero", "plan", "plan-index.json")), false);
   });
 });
 
@@ -1346,8 +1325,8 @@ test("retroCommand: a transient `gh pr edit` failure during the acceptance-repai
   });
 });
 
-test("retroCommand: the Architect commits NOTHING (no PR_URL, ORIENTATION.md/plan-index.json both degrade) -- the no-op guard exits before any PR, marker untouched", async (t) => {
-  const fx = setupFakeRetroFixture(t, { noPrUrl: true, missingMasterPlan: true }); // includeGeneratorScript defaults to false
+test("retroCommand: the Architect commits NOTHING when no PR_URL and no MASTER-PLAN are available -- marker stays untouched", async (t) => {
+  const fx = setupFakeRetroFixture(t, { noPrUrl: true, missingMasterPlan: true });
   await fx.run(async () => {
     const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     assert.equal(exitCode, 1, "0 commits ahead of origin/main means nothing to PR -- retro.no_op, exit 1");

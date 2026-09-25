@@ -732,17 +732,17 @@ test("renderReconPrompt: with an index block, the rendered prompt carries the fi
   assert.ok(prompt.indexOf("RECON worker") < prompt.indexOf("PLAN INDEX"));
 });
 
-test("renderReconPrompt: an EMPTY index block (fresh checkout, before the first `npm run plan-index`) never crashes — just the fixed recon instructions", () => {
+test("renderReconPrompt: an EMPTY index block (missing source) never crashes — just the fixed recon instructions", () => {
   const prompt = renderReconPrompt("");
   assert.match(prompt, /You are a RECON worker\./);
   assert.doesNotMatch(prompt, /PLAN INDEX/);
 });
 
-test("renderReconPrompt: the REAL committed plan/plan-index.json renders a prompt orders of magnitude smaller than MASTER-PLAN.md itself — the index is injected, the plan body is not", () => {
+test("renderReconPrompt: a read-time plan index renders a prompt orders of magnitude smaller than MASTER-PLAN.md itself — the index is injected, the plan body is not", () => {
   const repoRoot = join(new URL("..", import.meta.url).pathname);
   const masterPlan = readFileSync(join(repoRoot, "MASTER-PLAN.md"), "utf8");
-  const index = loadPlanIndex(join(repoRoot, "plan", "plan-index.json"));
-  assert.ok(index, "plan/plan-index.json must exist and parse (run `npm run plan-index`)");
+  const index = loadPlanIndex(join(repoRoot, "MASTER-PLAN.md"));
+  assert.ok(index, "the index must derive from MASTER-PLAN.md even when no JSON artifact exists");
   const planIndexBlock = renderPlanIndex(index!);
   const prompt = renderReconPrompt(planIndexBlock);
   // Char-count proof: the rendered prompt is a small fraction of the full plan body's size.

@@ -41,7 +41,7 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
 // ── acceptance 1: the fast mode runs the curated npm-script gates and reports each ──────────
 // step's own pass/fail ───────────────────────────────────────────────────────────────────────
 
-test("FAST_GATE_STEPS: the curated list names thirteen fast gates, including W1-T4433's tree-derived rule runner, plus the six measured census entries", () => {
+test("FAST_GATE_STEPS: the curated list names thirteen fast gates, including W1-T4433's tree-derived rule runner, plus the seven measured census entries", () => {
   const scripts = FAST_GATE_STEPS.map((s) => s.script).sort();
   assert.deepEqual(scripts, [
     "api-client:check",
@@ -50,6 +50,7 @@ test("FAST_GATE_STEPS: the curated list names thirteen fast gates, including W1-
     "census:catch-erasure",
       "census:ledger-literal",
     "census:negative-reachability",
+    "census:no-draft-pr",
     "census:no-shallowing",
     "census:self-path-proof",
     "claims",

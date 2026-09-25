@@ -14,7 +14,7 @@
 
 import type { LiveProviderAccounts } from "./analytics-live-metrics.js";
 import { fixedClock } from "./clock.js";
-import { loadMounts, mountsPath, type Mounts } from "./mounts.js";
+import { loadMounts, mountsPath, resolveClaudeModelAlias, type Mounts } from "./mounts.js";
 
 export const USAGE_PROJECTION_VERSION = "usage-v1";
 
@@ -582,7 +582,7 @@ function canonicalAggregate(aggregate: UsageRoutingAggregate, aliases: ReadonlyM
 }
 
 /**
- * Count a Claude alias row (`sonnet`, written when the worker was spawned with the alias) under the
+ * Count a historical Claude alias row (`sonnet`, once written for an alias spawn) under the
  * concrete id the mounts table resolves it to, so one model is one row in `byModel`.
  */
 export function withCanonicalModels(projection: UsageProjection, aliases: ReadonlyMap<string, string>): UsageProjection {
@@ -602,12 +602,10 @@ export function withCanonicalModels(projection: UsageProjection, aliases: Readon
  * mapped to the concrete id each alias starts at: the first candidate of its capability.
  */
 export function claudeModelAliases(mounts: Mounts): Map<string, string> {
-  const candidates = mounts.capabilities?.claudeCandidates ?? {};
-  const concrete = new Set(Object.values(candidates).flat());
   const aliases = new Map<string, string>();
-  for (const [model, capability] of Object.entries(mounts.capabilities?.claude ?? {})) {
-    const first = candidates[capability]?.[0];
-    if (!model.includes("-") && !concrete.has(model) && first) aliases.set(model, first);
+  for (const model of Object.keys(mounts.capabilities?.claude ?? {})) {
+    const resolved = resolveClaudeModelAlias(model, mounts.capabilities);
+    if (resolved !== model) aliases.set(model, resolved);
   }
   return aliases;
 }

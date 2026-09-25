@@ -2214,6 +2214,22 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     verdict: { status: "ADMITTED", measuredMs: 526 },
   },
   {
+    testFile: "test/no-draft-pull-request-ever-sits-on-the-board.test.ts",
+    job: "no-draft-pr-census",
+    script: "census:no-draft-pr",
+    walks: ["src/", "scripts/", "deploy/", ".github/"],
+    reason:
+      "same-class (W1-T4415) — a census suite: walks tracked src/, scripts/, deploy/ and .github/ (trackedFiles(), a git ls-files), " +
+      "asserts every line against its own four draft-creating-call shapes (its own DRAFT_CREATOR_PATTERNS table, named in full " +
+      "in that script's header rather than spelled out here so this very reason text cannot itself read as a hit) is either " +
+      "absent or reasoned in its own EXEMPTIONS table (empty today) — structurally identical to no-shallowing beside it. " +
+      "Operator ruling 2026-09-24: no process may open a draft PR, since a draft never reviews or merges and holds work " +
+      "exactly like a stuck one; this suite ran only in CI's coverage shards until now, so a violation surfaced only after a " +
+      "push. MEASURED 2026-09-25, three runs alone (after one cold npm-startup run discarded): 1276/1296/1296ms, median " +
+      "1296ms — well under FAST_GATE_CENSUS_BOUND_MS, so neither the predicate nor the cost gave a reason to refuse it",
+    verdict: { status: "ADMITTED", measuredMs: 1296 },
+  },
+  {
     testFile: "test/enforcement-data-carveout.test.ts",
     job: "enforcement-data-carveout-census",
     walks: ["src/", "scripts/"],

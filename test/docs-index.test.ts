@@ -36,8 +36,8 @@ const {
 // ── W1-T2282: the docs INDEX generator (MASTER-PLAN §8A) ────────────────────────────────────────
 //
 // docs/ was the one knowledge corpus that never got this repo's own RETRIEVED-not-INJECTED
-// treatment: MASTER-PLAN.md has plan/plan-index.json + `plan-index:check` (W1-T37, W1-T37-shaped
-// suite: test/plan-index.test.ts), learnings/ has learnings/index.json + a ratchet + per-task
+// treatment: MASTER-PLAN.md has a CI-built plan-index artifact and read-time runtime projection
+// (W1-T4432), learnings/ has learnings/index.json + a ratchet + per-task
 // matching (W1-T33, test/learnings-index.test.ts). This suite proves docs/docs-index.json is the
 // same discipline applied to docs/: a FRESH index (matches a regeneration byte-for-byte) turns
 // `--check` green; a STALE one (or one missing an entry) turns it RED and names the file to
