@@ -1,0 +1,49 @@
+- id: W1-T4545
+  title: "THE RUNTIME-ADOPTION SOCKET FIXTURE LEAVES ASYNC LISTEN/CLOSE WORK AFTER TEST COMPLETION, FAILING THE INSTRUMENTED COVERAGE SHARD"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  band_meaning: blast-radius
+  budget_usd: 1.00
+  files:
+    - test/runtime-adoption-is-reported-not-gated.test.ts
+  origin: "operator-session#preflight-runtime-adoption-socket-eaddrinuse-2026-09-25"
+  plan_refs: []
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED in the full `rmd preflight --ci-parity` at head `323c21f28598` against
+    base `4deed6a8305d`: the only remaining failure was coverage shard 1/4. Node
+    reported asynchronous activity after `declaredLedgerSteps: a listed source file
+    that cannot be read contributes no literals and does not abort the scan` ended,
+    followed by `listen EADDRINUSE` on its synthetic `unreadable.ts` socket path.
+    The same full-suite failure occurred on two runs. The test file itself passed 14/14
+    when run alone under coverage and in four concurrent instrumented invocations.
+
+    INFERRED cause: `withSocket` invokes `server.listen(path)`, runs the synchronous
+    scan, and calls `server.close()` without awaiting the listening or close callbacks.
+    Its fixture directory is removed as soon as the test callback returns, so the
+    server lifecycle can outlive its owning test under the full instrumented suite.
+    This is test-fixture lifecycle debt, not a production runtime-adoption defect.
+  design: |
+    Make the test-local `withSocket` helper asynchronous. Await successful listening
+    before running the scanner callback, reject if listen fails, and await the close
+    callback before resolving so the caller's `finally` removes the fixture only after
+    the socket server has settled. Update both socket-fixture call sites to await the
+    helper. Augment the existing unreadable-source socket test with assertions that the
+    helper returns a promise and its callback observes a bound Unix socket; preserve
+    the scanner's unreadable-file control. Keep the change confined to the declared test
+    file.
+  acceptance:
+    - claim: "the socket helper waits until listener readiness before invoking the scanner"
+      proof: 'grep: await once(srv, "listening") in test/runtime-adoption-is-reported-not-gated.test.ts'
+    - claim: "the socket helper waits for server close to finish before resolving to the caller"
+      proof: "grep: srv\\.close((error) => (error [?] reject(error) : resolve())) in test/runtime-adoption-is-reported-not-gated.test.ts"
+  falsifier: |
+    Remove the awaited-listening and awaited-close behavior. The new lifecycle test must
+    fail because the callback does not observe a bound socket or the helper does not
+    return a promise that settles after close; if it stays green, it does not guard the
+    lifecycle regression. The existing unreadable-socket scan test must remain green.
