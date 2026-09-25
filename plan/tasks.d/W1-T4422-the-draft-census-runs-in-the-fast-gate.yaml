@@ -14,7 +14,9 @@
   files:
     - src/lib/ci-parity.ts
     - package.json
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4422 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     W1-T4415 (#6923) ships scripts/no-draft-pull-request-census.mjs and holds the tree at zero through its test, which

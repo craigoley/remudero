@@ -12,7 +12,9 @@
     - test/worker-scratch.test.ts
   origin: "operator-session#local-preflight-worker-scratch-slug-2026-09-25"
   plan_refs: []
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4535 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     OBSERVED in the final full local preflight for W1-T3574 (head ebed4d05, measured base 6bc5f0615b65):
