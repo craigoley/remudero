@@ -24,6 +24,7 @@ import {
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { daemonCommand } from "../src/run-task.js";
+import { appendFlakeLedger } from "../scripts/test-with-retry.mjs";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -213,6 +214,27 @@ test("W1-T4112: a flake is ledgered, not only printed", () => {
   assert.equal(rows[0]!.test, "ledgered flaky test");
   assert.equal(rows[0]!.headline, "first attempt failed");
   assert.equal(typeof rows[0]!.ts, "string");
+});
+
+test("W1-T4112: a flake-ledger write failure warns without failing the suite", () => {
+  const warnings: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+  try {
+    assert.doesNotThrow(() =>
+      appendFlakeLedger([{ file: "flaky.test.mjs", test: "ledgered flaky test" }], "first attempt failed", {
+        path: "state/ledger.ndjson",
+        mkdir: () => {},
+        append: () => {
+          throw new Error("ledger unavailable");
+        },
+      }),
+    );
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /could not append the flake ledger \(ledger unavailable\)/);
 });
 
 test("W1-T4112: a self-hosting daemon wires the test gardener", async () => {
