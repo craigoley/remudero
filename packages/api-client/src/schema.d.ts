@@ -1052,6 +1052,66 @@ export interface components {
       /** Opaque server-configured provider profile id; never a credential or path. */
       profileId: string;
     };
+    BenchmarkQualityCoverage: {
+      denominator: number;
+      observed: number;
+      noTerminal: number;
+      notRecorded: number;
+    };
+    /** Internal evidence coverage, not a causal model score or public release. Local assignment and run identifiers are join keys only and never appear in this response. API request estimates and subscription notional amounts are separate; neither is an invoice. */
+    BenchmarkQualityProjection: {
+      version: "benchmark-quality-v1";
+      state: "observed" | "unavailable";
+      reason?: string;
+      asOf: string | null;
+      latestSourceAt: string | null;
+      sourceRows: {
+        assignments: number;
+        terminals: number;
+        invalidAssignments: number;
+        terminalsWithoutAssignmentId: number;
+      };
+      assignments: number;
+      joinedTerminalOutcomes: number;
+      assignmentsWithoutTerminal: number;
+      terminalsWithoutAssignment: number;
+      duplicates: {
+        assignmentRows: number;
+        terminalRows: number;
+      };
+      outcomes: {
+        success: number;
+        failure: number;
+        unavailable: number;
+      };
+      modelEvidence: {
+        requestedDifferentFromSelected: number;
+        servedDifferentFromSelected: number;
+      };
+      experimentalCrossover: "unavailable-no-random-allocation-receipt";
+      coverage: {
+        taskClass: BenchmarkQualityCoverage;
+        risk: BenchmarkQualityCoverage;
+        requestedModel: BenchmarkQualityCoverage;
+        selectedModel: BenchmarkQualityCoverage;
+        provider: BenchmarkQualityCoverage;
+        effort: BenchmarkQualityCoverage;
+        outcome: BenchmarkQualityCoverage;
+        servedModel: BenchmarkQualityCoverage;
+        tokens: BenchmarkQualityCoverage;
+        duration: BenchmarkQualityCoverage;
+        billingMode: BenchmarkQualityCoverage;
+        cost: BenchmarkQualityCoverage;
+      };
+      accounting: {
+        source: "worker-result-estimate-not-invoice";
+        apiRequestsWithCost: number;
+        apiRequestCostUsd: number;
+        subscriptionCallsWithNotionalCost: number;
+        subscriptionNotionalCostUsd: number;
+        unclassifiedCostRows: number;
+      };
+    };
   };
   securitySchemes: {
     /** Read-scoped bearer token. Grants GET access to read-scoped routes and SSE streams. A write-scoped token also satisfies this scope (write is a superset of read). */
@@ -1062,6 +1122,15 @@ export interface components {
 }
 
 export interface paths {
+  "/v1/analytics": {
+    get: {
+      responses: {
+          "200": BenchmarkQualityProjection;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
   "/v1/provider-auth": {
     get: {
       responses: {

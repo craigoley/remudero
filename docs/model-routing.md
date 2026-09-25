@@ -76,6 +76,30 @@ An assignment with no terminal receipt remains incomplete. A terminal receipt th
 assignment remains separately counted. Neither case becomes a fabricated success, provider receipt,
 or zero-cost call.
 
+### Benchmark evidence quality (internal)
+
+`GET /v1/analytics?projectionVersion=benchmark-quality-v1` serves a separate, read-scoped quality
+projection from the existing process-owned analytics snapshot. It does not scan the ledger on GET,
+alter `routing-v1`, or add bytes to the full analytics response. The first refresh after upgrading
+an older checkpoint replays the existing archive/live union once to establish complete coverage;
+subsequent refreshes resume the same cursor. A missing or unreadable source is `unavailable`, not an
+empty healthy cohort. Intermediate `implement.done` rows are never terminal worker outcomes.
+
+The assignment-based coverage denominators name missing task class, risk, requested/selected/served
+model, provider, effort, outcome, tokens, duration, billing mode, and cost separately. No terminal
+receipt is distinct from a terminal whose provider did not report a field. Unmatched terminal rows
+and duplicate assignment/terminal IDs are separate counts. The projection carries scan time and
+the latest retained source timestamp, but no run, task, repo, account, prompt, or source identifier.
+The OpenAPI contract is internal and the public Field Trials page does not fetch this endpoint.
+
+`total_cost_usd` comes from the worker-result envelope, not an invoice. The quality projection sums
+API-mode request estimates and subscription-mode notional amounts in different fields, only when
+both billing mode and a finite nonnegative cost are present. A missing cost never becomes a measured
+zero, and a subscription call with zero notional dollars is still a call consuming capacity. A
+configured model differing from the provider-served model is counted as routing evidence; it is
+**not** called an experimental crossover because no random-allocation receipt exists yet. This
+projection cannot support a public causal model ranking on its own.
+
 ## Baseline and savings
 
 On 2026-09-18, a read-only, rotation-safe production-ledger census found 326 retained
