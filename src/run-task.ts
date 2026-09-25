@@ -2197,6 +2197,7 @@ import {
   WorkerAbandonedError,
 } from "./lib/worker.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
+import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
 
 /** Preserve the watchdog's measured abandonment evidence when the advisory reviewer fails.
  * The catch arm must publish the values captured by the worker, rather than re-reading policy
@@ -13988,6 +13989,8 @@ async function runTask(
   const spawn: typeof spawnWorker = (spawnArgs) => {
     const effectiveSpawnArgs = cashContainmentState.contained ? forceCashContainedRunSpawn(spawnArgs, config) : spawnArgs;
     const stopPolling = workerStateSensor.startPolling();
+    let selectionAssignment: Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0] | undefined;
+    const baseStreamObserver = effectiveSpawnArgs.streamObserver ?? workerStateSensor.observer;
     return rawSpawn({
       ...effectiveSpawnArgs,
       // Every dispatch-phase worker inherits the run identity at the ONE wrapper that already owns its state/error telemetry, so the
@@ -13995,6 +13998,7 @@ async function runTask(
       runId: effectiveSpawnArgs.runId ?? runId,
       taskId: effectiveSpawnArgs.taskId ?? taskId,
       onSelectionAssignment: (assignment) => {
+        selectionAssignment = assignment;
         log("worker.assignment", { worker_assignment: assignment });
         effectiveSpawnArgs.onSelectionAssignment?.(assignment);
       },
@@ -14009,7 +14013,10 @@ async function runTask(
             path: err.path ?? null,
             error: String(err.message ?? err),
           })),
-      streamObserver: effectiveSpawnArgs.streamObserver ?? workerStateSensor.observer,
+      // Keep provider/model attribution specific to THIS spawn, not the run's initial mount.
+      // The selected assignment is authoritative for provider + requested model; the selected
+      // model is deliberately not promoted to a served-model receipt.
+      streamObserver: (event) => baseStreamObserver(enrichWorkerStreamEvent(event, effectiveSpawnArgs, selectionAssignment)),
       // W1-T1045: every real dispatch spawn gets the clock bound BY CONSTRUCTION — the SAME
       // wrap-once rationale as `onSpawnError`/`streamObserver` above. A caller that already set
       // its own `clockBound` (none exist today) is respected; every future dispatch call site
