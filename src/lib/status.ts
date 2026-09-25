@@ -2764,6 +2764,7 @@ const LANE_START_STEPS: ReadonlySet<string> = new Set([
  *  on the liveness bound rather than a fabricated step with no writer. */
 const LANE_TERMINAL_STEPS: ReadonlySet<string> = new Set([
   "verdict",
+  "run.error",
   "daemon.stop",
   "daemon.summary",
   "drain.stop",
@@ -2773,6 +2774,19 @@ const LANE_TERMINAL_STEPS: ReadonlySet<string> = new Set([
   "retro.error",
   "serve.stop",
   "triage.error",
+]);
+
+/** The cold fix rung runs under its caller's run_id, not the task run's. Its task_id is deliberately
+ *  preserved, so allow only that fix invocation's own rows to extend liveness after fix.dispatch;
+ *  a later sweep/automerge/review row naming the same task is not evidence that the worker lived. */
+const FIX_LANE_TERMINAL_STEPS: ReadonlySet<string> = new Set([
+  "fix.done",
+  "fix.resolved",
+  "fix.exhausted",
+  "fix.stood_down",
+  "fix.superseded",
+  "fix.superseded_unknown",
+  "fix.spawn_abandoned",
 ]);
 
 /** Scan `taskId`'s ledger lines for the state of its LATEST run: still in flight, and if so the CURRENT phase
@@ -2788,12 +2802,13 @@ function deriveRunState(
   let phase: Phase | undefined;
   let startedAt: string | undefined;
   let lastActivityTs: string | undefined;
+  let activeRunId: string | undefined;
+  let activeFixRunId: string | undefined;
   let workerState: WorkerState | undefined;
   let workerStateSince: string | undefined;
   let workerTelemetry: WorkerTelemetry | undefined;
   for (const line of indexedTaskRows(lines, taskId, index)) {
     if (line.task_id !== taskId) continue;
-    if (typeof line.ts === "string") lastActivityTs = line.ts;
     // Read into a bare local BEFORE the typeof guard, never inline off the property access: the rotation test's
     // consumer scan greps every consumer file's raw TEXT, comments included, for a property-access equality
     // check quoting a literal, and is not fussy about WHICH literal follows. Same reason the lane tables are
@@ -2802,8 +2817,11 @@ function deriveRunState(
     const step = typeof rawStep === "string" ? rawStep : undefined;
     if (step !== undefined && LANE_START_STEPS.has(step)) {
       inFlight = true;
+      activeRunId = typeof line.run_id === "string" ? line.run_id : undefined;
+      activeFixRunId = undefined;
       phase = "recon";
       startedAt = typeof line.ts === "string" ? line.ts : undefined;
+      if (typeof line.ts === "string") lastActivityTs = line.ts;
       // W1-T944: a fresh run.start resets worker.state exactly like phase resets to "recon" — an earlier run's
       // last-observed liveness must never leak into a later run's row.
       workerState = undefined;
@@ -2818,8 +2836,20 @@ function deriveRunState(
       };
       continue;
     }
+    const rowRunId = typeof line.run_id === "string" ? line.run_id : undefined;
+    if (step === "fix.dispatch" && inFlight) activeFixRunId = rowRunId;
+    const isOwnRunActivity = inFlight && activeRunId !== undefined && rowRunId === activeRunId;
+    const isActiveFixActivity =
+      inFlight &&
+      activeFixRunId !== undefined &&
+      rowRunId === activeFixRunId &&
+      step !== undefined &&
+      step.startsWith("fix.");
+    if ((isOwnRunActivity || isActiveFixActivity) && typeof line.ts === "string") lastActivityTs = line.ts;
+    if (isActiveFixActivity && step !== undefined && FIX_LANE_TERMINAL_STEPS.has(step)) activeFixRunId = undefined;
     if (step !== undefined && LANE_TERMINAL_STEPS.has(step)) {
       inFlight = false;
+      activeFixRunId = undefined;
       continue;
     }
     // W1-T944: a worker-state row is only appended ON A TRANSITION, so its own `ts` doubles as the transition

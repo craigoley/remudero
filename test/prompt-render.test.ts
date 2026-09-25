@@ -98,7 +98,9 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
   // (test/a-worker-is-taught-the-question-contract.test.ts pins the new text itself).
   // Re-baselined implement: its DECISION_REQUEST now asks for a FALSIFIER line
   // (test/a-decision-request-names-its-falsifier.test.ts pins the new text itself).
-  assert.equal(sha256(implement), "ebd6e18fd9907882d048984a6df3cb36f6788ce9d06d7b7dc7a525dfe40e02fd");
+  // W1-T4114 re-baselined implement: its contract now asks for a SKILLS_USED line
+  // (test/the-knowledge-gardener-tends-rules-and-skills.test.ts pins the new text itself).
+  assert.equal(sha256(implement), "b5b4ebe92e52d9d88656ec53473f950d9ac293c509242ac8a822884ee1e1dfe7");
 });
 
 test("prompt renderers: run-task keeps compatibility re-exports of the lib templates", () => {

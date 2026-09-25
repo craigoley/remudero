@@ -108,7 +108,6 @@
   "src/lib/console-url.ts": 88,
   "src/lib/containment.ts": 570,
   "src/lib/correct.ts": 29,
-  "src/lib/cost-anomaly.ts": 97,
   "src/lib/daemon-health.ts": 192,
   "src/lib/daemon.ts": 1750,
   "src/lib/deployer.ts": 750,
