@@ -1,3 +1,4 @@
+// @source-text-subject: this suite pins the migration's call-site wiring and absence of retired writer paths; loadPlanIndex behavior is exercised separately.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

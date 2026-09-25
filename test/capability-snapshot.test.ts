@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { loadPlanIndex } from "../src/lib/plan-index.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // ── W1-T383: the MASTER-PLAN.md CAPABILITY SNAPSHOT generator + drift gate ─────────────────────
 //
@@ -94,7 +95,7 @@ test("generate-capability-snapshot: the generated block carries exactly the four
 });
 
 test("generate-capability-snapshot: block regeneration shifts derived reader line numbers without writing JSON", () => {
-  const dir = mkdtempSync(join(tmpdir(), "capability-snapshot-derived-index-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}capability-snapshot-derived-index-`));
   try {
     const mp = join(dir, "MASTER-PLAN.md");
     writeFileSync(mp, FIXTURE_MASTER_PLAN);
