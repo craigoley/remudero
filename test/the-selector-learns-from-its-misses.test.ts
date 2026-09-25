@@ -74,6 +74,35 @@ test("W1-T4462: a census that imports its walker is selected", () => {
   }
 });
 
+test("W1-T4462: a missing imported walker is skipped, but another read failure stops census selection", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4462-walker-read-`));
+  try {
+    mkdirSync(join(root, "test"), { recursive: true });
+    mkdirSync(join(root, "scripts"), { recursive: true });
+    writeFileSync(
+      join(root, "test", "imports-its-walker.test.ts"),
+      'import { walk } from "../scripts/walker.mjs";\nwalk();\n',
+    );
+
+    assert.deepEqual(
+      censusSuiteFiles(["src/lib/thing.ts"], root),
+      [],
+      "a removed walker cannot establish that the suite walks a population",
+    );
+
+    // A directory at the imported module path produces EISDIR on the CI runner. Unlike a
+    // vanished import, this is a broken tree and the selector must fail closed.
+    mkdirSync(join(root, "scripts", "walker.mjs"));
+    assert.throws(
+      () => censusSuiteFiles(["src/lib/thing.ts"], root),
+      { code: "EISDIR" },
+      "an unreadable imported walker must not yield a successful empty census list",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T4462: the REAL #6967 regression — a src/ change reaches clock-signature-census through its imported walker", () => {
   // Replayed on the real tree, matching test/a-census-suite-is-unreachable-from-the-symbols-a-
   // diff-changes.test.ts's own convention: a synthetic changed-file set is not evidence that the
