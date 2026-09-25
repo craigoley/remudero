@@ -409,3 +409,14 @@ test("detectHostFacts: a spawn that THROWS (bash not found) is caught locally an
   const facts = detectHostFacts(REPO_ROOT, throwingSpawn, () => false);
   assert.equal(facts.bashMajorVersion, undefined);
 });
+
+test("detectHostFacts: an unreadable container marker leaves the host pole unknown, never guessed non-container", () => {
+  const { spawn } = recordingSpawn({ bash: { status: 0, stdout: "5.2.15(1)-release\n" } });
+  const facts = detectHostFacts(REPO_ROOT, spawn, (path) => {
+    if (path === "/.dockerenv") throw new Error("permission denied");
+    return path === "/proc/meminfo";
+  });
+
+  assert.equal(facts.pole, undefined);
+  assert.equal(facts.hasProcMeminfo, true, "the failed container-marker read does not erase other measured axes");
+});
