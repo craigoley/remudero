@@ -10,9 +10,11 @@
   band_meaning: span
   origin: "operator ask 2026-09-23; research over origin/main d7b569e0d"
   plan_refs: [W1-T4095, W1-T4097, W1-T3379]
-  files: [src/lib/knowledge-gardener.ts, src/lib/daemon.ts, src/lib/compaction.ts, src/lib/worker.ts, src/run-task.ts, test/the-knowledge-gardener-tends-rules-and-skills.test.ts]
+  files: [src/lib/knowledge-gardener.ts, src/lib/daemon.ts, src/lib/compaction.ts, src/lib/worker.ts, src/run-task.ts, test/the-knowledge-gardener-tends-rules-and-skills.test.ts, test/prompt-render.test.ts]
   priority: 2
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4114 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     READ 2026-09-23: buildKnowledgeInventory already lists doctrine, decisions, forensics, plan and memory; the planners
@@ -23,12 +25,11 @@
     (ii) New classes: RULE-MERGE (doctrine near-duplicates, through W1-T4097's meaning-hash lifecycle), SKILL-LIFECYCLE
          (stageSkillLifecycleProposal on schedule, judged by skills.used), GUARD-RETIREMENT (propose, operator review),
          REPAIR-REFERENCE (a dangling `Why:` or doc link rewritten to its moved target).
+  amendment: "2026-09-25 GUARD CRITERION REMOVED: \"the daemon still starts the knowledge gardener\" is a regression guard that passes at the merge base too, so proof-discrimination can never accept it. The daemon wiring is unchanged by this task."
   acceptance:
     - claim: "a worker's SKILLS_USED report is ledgered"
       proof: 'grep: test("W1-T4114: a worker.s SKILLS_USED report is ledgered" in test/the-knowledge-gardener-tends-rules-and-skills.test.ts'
     - claim: "near-duplicate doctrine rules are merged with every id still resolving"
       proof: 'grep: test("W1-T4114: near-duplicate doctrine rules are merged with every id still resolving" in test/the-knowledge-gardener-tends-rules-and-skills.test.ts'
-    - claim: "the daemon still starts the knowledge gardener"
-      proof: 'grep: startKnowledgeGardener( in src/lib/daemon.ts'
   falsifier: |
     Measure skills by selection and the first test finds no skills.used row.
