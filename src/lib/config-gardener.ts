@@ -386,8 +386,31 @@ export function mountCandidate(inv: ConfigInventory, repoRoot: string): ConfigGa
   return undefined;
 }
 
+/** The baseline file's measured fields, rewritten with the re-derivation's figures: its own note forbids
+ *  raising `capChars` without the re-measured pressure and priced delta beside it. A field whose line is
+ *  not in `baselineText` is not edited. */
+export function capBaselineEdits(baselineText: string, d: KnowledgeBudgetDerivation, nowIso: string): ConfigEdit[] {
+  const path = "scripts/knowledge-budget-baseline.json";
+  const values: Record<string, string> = {
+    capturedAt: JSON.stringify(nowIso.slice(0, 10)),
+    measuredDroppedWeightP50Chars: String(d.pressure?.droppedWeightP50),
+    measuredDroppedWeightP90Chars: String(d.pressure?.droppedWeightP90),
+    spawnsMeasured: String(d.pressure?.spawnsMeasured),
+    ...(d.cacheHitRatioUsed !== undefined ? { cacheHitRatioUsed: String(Math.round(d.cacheHitRatioUsed * 10_000) / 10_000) } : {}),
+    pricedDeltaTokens: String(d.deltaTokens),
+    capChars: String(d.recommendedCapChars),
+  };
+  const edits: ConfigEdit[] = [];
+  for (const line of baselineText.split("\n")) {
+    const m = /^ {2}"(\w+)": ([^,]+)(,?)$/.exec(line);
+    const to = m && values[m[1]!] !== undefined ? `  "${m[1]}": ${values[m[1]!]}${m[3]}` : undefined;
+    if (to !== undefined && to !== line) edits.push({ path, from: line, to });
+  }
+  return edits;
+}
+
 /** The re-derived learnings cap, edited in both places the drift test pins together. */
-export function capCandidate(inv: ConfigInventory): ConfigGardenAction | undefined {
+export function capCandidate(inv: ConfigInventory, baselineText: string): ConfigGardenAction | undefined {
   const cap = inv.cap;
   const d = cap === undefined ? undefined : cap.derivation;
   if (cap === undefined || d === undefined || d.changed === false || d.pressure === undefined || d.recommendedCapChars === cap.current) return undefined;
@@ -401,7 +424,7 @@ export function capCandidate(inv: ConfigInventory): ConfigGardenAction | undefin
     reason: `${d.pressure.spawnsMeasured} spawns under the ${cur}-char cap dropped p90 ${d.pressure.droppedWeightP90} chars of matched learnings; ${d.reason}`,
     edits: [
       { path: "src/lib/learnings.ts", from: `export const DEFAULT_KNOWLEDGE_BUDGET_CHARS = ${cur};`, to: `export const DEFAULT_KNOWLEDGE_BUDGET_CHARS = ${next};` },
-      { path: "scripts/knowledge-budget-baseline.json", from: `  "capChars": ${cur}`, to: `  "capChars": ${next}` },
+      ...capBaselineEdits(baselineText, d, inv.nowIso),
     ],
     cohort,
     candidate: `learnings cap ${next} chars`,
@@ -435,10 +458,12 @@ export function configPromotion(action: ConfigGardenAction, nowIso: string, repo
   };
 }
 
+const readIfPresent = (path: string): string => (existsSync(path) ? readFileSync(path, "utf8") : "");
+
 /** Every change any class could make now, each already clear of its shadow guard and of any scope an
  *  active canary holds. */
 export function configCandidates(inv: ConfigInventory, repoRoot: string, rng: () => number): ConfigGardenAction[] {
-  const all = [budgetCandidate(inv, rng), mountCandidate(inv, repoRoot), capCandidate(inv)].filter((a): a is ConfigGardenAction => a !== undefined);
+  const all = [budgetCandidate(inv, rng), mountCandidate(inv, repoRoot), capCandidate(inv, readIfPresent(join(repoRoot, "scripts", "knowledge-budget-baseline.json")))].filter((a): a is ConfigGardenAction => a !== undefined);
   const held = inv.active.map((c) => ({ promotionId: c.promotion.promotionId, scope: c.promotion.scope, state: c.promotion.state }));
   return all.filter((a) => {
     const p = configPromotion(a, inv.nowIso);

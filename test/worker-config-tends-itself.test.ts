@@ -254,13 +254,20 @@ test("W1-T4113: budgets come from the observed distribution with no floor; mount
       derivation: { currentCapChars: 8148, pressure: { spawnsMeasured: 40, droppedWeightP50: 500, droppedWeightP90: 900 }, deltaChars: 900, deltaTokens: 225, cacheHitRatioUsed: 0.97, recommendedCapChars: 9048, changed: true, reason: "priced" },
     },
   };
-  const cap = capCandidate(inv)!;
+  const baseline = readFileSync(join(import.meta.dirname, "..", "scripts", "knowledge-budget-baseline.json"), "utf8").replace(/"capChars": \d+/, '"capChars": 8148');
+  const cap = capCandidate(inv, baseline)!;
   assert.deepEqual(cap.edits.map((e) => [e.path, e.to]), [
     ["src/lib/learnings.ts", "export const DEFAULT_KNOWLEDGE_BUDGET_CHARS = 9048;"],
+    ["scripts/knowledge-budget-baseline.json", '  "capturedAt": "2026-09-25",'],
+    ["scripts/knowledge-budget-baseline.json", '  "measuredDroppedWeightP50Chars": 500,'],
+    ["scripts/knowledge-budget-baseline.json", '  "measuredDroppedWeightP90Chars": 900,'],
+    ["scripts/knowledge-budget-baseline.json", '  "spawnsMeasured": 40,'],
+    ["scripts/knowledge-budget-baseline.json", '  "cacheHitRatioUsed": 0.97,'],
+    ["scripts/knowledge-budget-baseline.json", '  "pricedDeltaTokens": 225,'],
     ["scripts/knowledge-budget-baseline.json", '  "capChars": 9048'],
-  ]);
+  ], "the cap moves with the re-measured pressure and priced delta beside it");
   assert.deepEqual(cap.cohort, { kind: "all" });
-  assert.equal(capCandidate({ ...inv, cap: { ...inv.cap!, derivation: { ...inv.cap!.derivation, changed: false } } }), undefined);
+  assert.equal(capCandidate({ ...inv, cap: { ...inv.cap!, derivation: { ...inv.cap!.derivation, changed: false } } }, baseline), undefined);
   assert.ok(configCanariesPath("/s").endsWith("config-gardener-canaries.json"));
 });
 
