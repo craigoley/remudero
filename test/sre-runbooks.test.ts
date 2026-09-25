@@ -8,12 +8,13 @@
 //   - a runbook the governor holds in shadow records its action without taking it
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { ghShim } from "./helpers/gh-shim.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import type { Escalation } from "../src/lib/escalate.js";
 import { listFeedback } from "../src/lib/feedback.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -471,10 +472,6 @@ test("an unreadable lock path is treated as unknown rather than a dead holder", 
 test("the real runbook host exercises bounded GitHub, checkout, and local action paths", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-sre-host-"));
   const bin = join(root, "bin");
-  const bare = join(root, "origin.git");
-  const seed = join(root, "seed");
-  const repoDir = join(root, "checkout");
-  const ghCalls = join(root, "gh-calls.log");
   const npmCalls = join(root, "npm-calls.log");
   const recycleArgs = join(root, "recycle-args.log");
   const state = join(root, "state");
@@ -485,45 +482,47 @@ test("the real runbook host exercises bounded GitHub, checkout, and local action
 
   try {
     mkdirSync(bin, { recursive: true });
-    execFileSync("git", ["init", "--quiet", "--bare", "--initial-branch=main", bare]);
-    execFileSync("git", ["init", "--quiet", "--initial-branch=main", seed]);
-    execFileSync("git", ["-C", seed, "config", "user.name", "SRE host test"]);
-    execFileSync("git", ["-C", seed, "config", "user.email", "sre-host-test@example.invalid"]);
-    writeFileSync(join(seed, "seed.txt"), "first\n");
-    mkdirSync(join(seed, "deploy"), { recursive: true });
-    writeFileSync(join(seed, "deploy", "recycle-container.sh"), `#!/bin/sh\nprintf '%s\\n' "$@" > '${recycleArgs}'\n`);
-    execFileSync("git", ["-C", seed, "add", "seed.txt"]);
-    execFileSync("git", ["-C", seed, "add", "deploy/recycle-container.sh"]);
-    execFileSync("git", ["-C", seed, "commit", "--quiet", "-m", "seed"]);
-    execFileSync("git", ["-C", seed, "remote", "add", "origin", bare]);
-    execFileSync("git", ["-C", seed, "push", "--quiet", "origin", "main"]);
-    execFileSync("git", ["clone", "--quiet", bare, repoDir]);
-    writeFileSync(join(seed, "next.txt"), "second\n");
-    execFileSync("git", ["-C", seed, "add", "next.txt"]);
-    execFileSync("git", ["-C", seed, "commit", "--quiet", "-m", "advance main"]);
-    execFileSync("git", ["-C", seed, "push", "--quiet", "origin", "main"]);
+    const bare = gitRepo({ bare: true, kind: "sre-host-origin" });
+    const seed = gitRepo({ kind: "sre-host-seed" });
+    writeFileSync(join(seed.dir, "seed.txt"), "first\n");
+    mkdirSync(join(seed.dir, "deploy"), { recursive: true });
+    writeFileSync(join(seed.dir, "deploy", "recycle-container.sh"), `#!/bin/sh\nprintf '%s\\n' "$@" > '${recycleArgs}'\n`);
+    seed.git("add", "seed.txt");
+    seed.git("add", "deploy/recycle-container.sh");
+    seed.git("commit", "--quiet", "-m", "seed");
+    seed.addRemote("origin", bare.dir);
+    seed.git("push", "--quiet", "origin", "main");
+    const checkout = gitRepo({ cloneFrom: bare.dir, kind: "sre-host-checkout" });
+    const repoDir = checkout.dir;
+    writeFileSync(join(seed.dir, "next.txt"), "second\n");
+    seed.git("add", "next.txt");
+    seed.git("commit", "--quiet", "-m", "advance main");
+    seed.git("push", "--quiet", "origin", "main");
 
     mkdirSync(inflight, { recursive: true });
     writeFileSync(lockPath, JSON.stringify({ pid: 2147483647, run_id: "stale-fixture" }));
-    const ghShim = join(bin, "gh");
-    writeFileSync(ghShim, `#!/bin/sh
-printf '%s\\n' "$*" >> '${ghCalls}'
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "77" ]; then
-  printf '%s\\n' '{"headRefOid":"head-77","statusCheckRollup":[{"name":"lint","conclusion":"FAILURE","detailsUrl":"https://github.com/o/r/actions/runs/1/job/71"},{"name":"tests","conclusion":"FAILURE","detailsUrl":"https://github.com/o/r/actions/runs/1"}]}'
-elif [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "78" ]; then
-  printf '%s\\n' '{"headRefOid":"head-78","statusCheckRollup":[{"name":"lint","conclusion":"SUCCESS"}]}'
-elif [ "$1" = "api" ]; then
-  printf '%s\\n' '[{"name":"lint","conclusion":"success"},{"name":"tests","conclusion":"success"}]'
-else
-  exit 2
-fi
-`);
-    chmodSync(ghShim, 0o755);
+    const gh = ghShim([
+      {
+        when: "pr view 77",
+        stdout: JSON.stringify({
+          headRefOid: "head-77",
+          statusCheckRollup: [
+            { name: "lint", conclusion: "FAILURE", detailsUrl: "https://github.com/o/r/actions/runs/1/job/71" },
+            { name: "tests", conclusion: "FAILURE", detailsUrl: "https://github.com/o/r/actions/runs/1" },
+          ],
+        }),
+      },
+      {
+        when: "pr view 78",
+        stdout: JSON.stringify({ headRefOid: "head-78", statusCheckRollup: [{ name: "lint", conclusion: "SUCCESS" }] }),
+      },
+      { when: "api", stdout: JSON.stringify([{ name: "lint", conclusion: "success" }, { name: "tests", conclusion: "success" }]) },
+    ], { kind: "sre-host" });
     const npmShim = join(bin, "npm");
     writeFileSync(npmShim, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${npmCalls}'\n`);
     chmodSync(npmShim, 0o755);
 
-    process.env.PATH = `${bin}:${originalPath ?? ""}`;
+    process.env.PATH = `${gh.dir}:${bin}:${originalPath ?? ""}`;
     process.env.RMD_GH_CACHE_HOME = join(root, "cache");
     const host = daemonSreRunbookHost({ root, repoDir, owner: "o", repo: "r", isInContainer: () => false });
 
@@ -558,7 +557,7 @@ fi
     const defaultHost = daemonSreRunbookHost({ root, repoDir, owner: "o", repo: "r" });
     assert.equal((await defaultHost.canRecycle("default-container")).ok, !existsSync("/.dockerenv"));
 
-    const calls = readFileSync(ghCalls, "utf8");
+    const calls = gh.calls().join("\n");
     assert.match(calls, /pr view 77 --repo o\/r/);
     assert.match(calls, /api -X POST repos\/o\/r\/actions\/jobs\/71\/rerun/);
     assert.equal(readFileSync(npmCalls, "utf8").trim(), "ci");
