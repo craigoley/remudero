@@ -882,7 +882,7 @@ components:
         version:
           type: string
           enum:
-            - operator-activity-v1
+            - operator-activity-v2
         state:
           type: string
           enum:
@@ -905,6 +905,15 @@ components:
             $ref: "#/components/schemas/OperatorActivityItem"
         truncated:
           type: boolean
+        truncatedKinds:
+          description: Present only when rows were cut; names each affected item kind.
+          type: array
+          items:
+            type: string
+            enum:
+              - activity
+              - workstream
+              - artifact
         reason:
           type: string
         detail:
@@ -3544,7 +3553,7 @@ paths:
     get:
       summary: Read the bounded operator activity, workstream, and artifact projection.
       description: >
-        Read-only operator-activity-v1 composition over the existing ledger, plan projection,
+        Read-only operator-activity-v2 composition over the existing ledger, plan projection,
         dispatcher frontier, and authoritative trace links. The response never contains raw
         prompts, transcripts, credentials, account identifiers, or browser-owned measurements.
         Unavailable and unknown source states remain explicit rather than becoming empty healthy data.
