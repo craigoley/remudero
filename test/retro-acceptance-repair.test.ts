@@ -231,7 +231,7 @@ test("the DEFAULT leaves really shell out to gh — argv, JSON parse and the edi
 // The rung above repairs the ACCEPTANCE block. This one repairs the sentence that says what the
 // PR changed — a separate defect with a separate cause. `retroCommand` spawns the Architect, which
 // edits MASTER-PLAN.md and OPENS THE PR WITH A BODY IT AUTHORED; only afterwards does the harness
-// commit docs/ORIENTATION.md and plan/plan-index.json onto the same PR. So the body is authored
+// commit docs/ORIENTATION.md onto the same PR. So the body is authored
 // before two of the three files exist, and every retro claimed one file while writing three:
 // #974 merged before the detector existed, #1685's review refused it, #1943 was hand-repaired
 // (its own commit list ends "re-head so the corrected body earns a fresh" verdict), and #1944
@@ -240,7 +240,7 @@ test("the DEFAULT leaves really shell out to gh — argv, JSON parse and the edi
 // These drive the REAL production functions. The strongest of them hands the repaired body to the
 // REAL `bodyContradictsDiff` — the gate that refused all four — rather than to a restatement of it.
 
-const RETRO_PATHS = ["MASTER-PLAN.md", "docs/ORIENTATION.md", "plan/plan-index.json"];
+const RETRO_PATHS = ["MASTER-PLAN.md", "docs/ORIENTATION.md"];
 
 /** What the Architect actually writes today, quoted from #974's merged body. */
 const TEMPLATED_BODY = [
@@ -329,7 +329,7 @@ test("W1-T908: the templated one-file claim is replaced rather than left standin
 
 test("W1-T908: the changeset is read after the harness companions are committed", () => {
   // THE ORDERING IS THE DEFECT, so the ordering is what is pinned. Reading the file set before
-  // the harness commits ORIENTATION.md and plan-index.json would reproduce the original bug with
+  // the harness commits ORIENTATION.md would reproduce the original bug with
   // a diff read bolted on, which is exactly the wrong fix — this asserts the call site sits
   // after both regenerations in the real production source, not merely that it exists.
   const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
@@ -339,13 +339,12 @@ test("W1-T908: the changeset is read after the harness companions are committed"
     return i;
   };
   const orientation = at("regenerateOrientation({");
-  const planIndex = at("regeneratePlanIndexAndCommit({");
   const repair = at("repairRetroChangesetClaim(prUrl, log)");
   assert.ok(orientation < repair, "docs/ORIENTATION.md is committed before the changeset is read");
-  assert.ok(planIndex < repair, "plan/plan-index.json is committed before the changeset is read");
+  assert.doesNotMatch(src, /regeneratePlanIndex(?:File|AndCommit)/, "no retro path regenerates the deleted index artifact");
 
-  // CONTROL: the indices are real positions in a real file, not three zeros agreeing by accident.
-  assert.notEqual(orientation, planIndex);
+  // CONTROL: both positions are real and distinct, not zero-valued misses agreeing by accident.
+  assert.notEqual(orientation, repair);
   assert.ok(src.indexOf("no such symbol zzq") === -1, "the locator returns -1 for an absent needle");
 
   // And the seam really is what supplies the paths — injected here, so a future refactor that
@@ -369,7 +368,7 @@ test("W1-T908: the real default changed-files seam shells out to gh and its erro
     join(bin, "gh"),
     `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(argvLog)}\n` +
       `case "$*" in\n` +
-      `  *"--name-only"*) printf 'MASTER-PLAN.md\\ndocs/ORIENTATION.md\\nplan/plan-index.json\\n' ;;\n` +
+      `  *"--name-only"*) printf 'MASTER-PLAN.md\\ndocs/ORIENTATION.md\\n' ;;\n` +
       `  *"--json body"*) printf '{"body":"touching exactly one file: MASTER-PLAN.md\\\\n"}' ;;\n` +
       `  *) : ;;\nesac\n`,
     { mode: 0o755 },

@@ -6341,7 +6341,6 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "full suite has run, so no edit to it can change what a CI gate measures. Promote it to INSTRUMENT_SURFACE when " +
     "W1-T4406 lets a selection skip suites.",
   "plan/tasks.yaml": "plan/task DATA, not gate logic",
-  "plan/plan-index.json": "a generated index artifact, and its :check mode is not wired into any CI workflow",
   "package-lock.json": "a dependency lockfile, not gate logic",
   "deploy/package.json": "the image's CLI manifest, an acr-build trigger input (IMAGE_BAKED_PATHS), not gate logic",
   "deploy/package-lock.json": "the image's CLI lockfile, an acr-build trigger input (IMAGE_BAKED_PATHS), not gate logic",
@@ -6529,8 +6528,6 @@ export const ENFORCEMENT_DATA_EXCLUSIONS: Readonly<Record<string, string>> = {
     "recorded decision entries — provenance the DECISIONS floor validates, not a gate's own thresholds",
   "plan/tasks.yaml":
     "the task monolith, the same paperwork as a shard; denying it the carve-out would tax every filing",
-  "plan/plan-index.json":
-    "a GENERATED projection (scripts/generate-plan-index.mjs regenerates it), not hand-authored enforcement data",
 };
 
 /** The enforcement-data paths a changed-file list touches, in diff order (W1-T427) — the OBSERVED EVIDENCE named on

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -37,8 +37,15 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+// Production reaper calls spawn git without an injected env, so isolate their inherited config too.
+process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+process.env.GIT_CONFIG_NOSYSTEM = "1";
+
 const GIT_ENV = {
   ...process.env,
+  // @host-capability isolated-git: fixture commands read neither user nor system git config.
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
   GIT_AUTHOR_NAME: "t",
   GIT_AUTHOR_EMAIL: "t@t",
   GIT_COMMITTER_NAME: "t",
@@ -60,7 +67,8 @@ function summaryOf(over: Partial<WorktreeReapSummary> = {}): WorktreeReapSummary
  *  its ceiling — and making that duplication visible is the whole point of that census, so the
  *  answer is to stop duplicating rather than to raise the row. */
 function seedRepo(prefix: string): { root: string; repo: string } {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${prefix}`));
+  // macOS spells /tmp as /private/tmp in git's worktree registry. Start with its real path.
+  const root = mkdtempSync(join(realpathSync(tmpdir()), `${RMD_TMP_PREFIX}${prefix}`));
   const repo = join(root, "repo");
   mkdirSync(repo, { recursive: true });
   git(["init", "--quiet", "-b", "main"], repo);
@@ -293,7 +301,7 @@ test("W1-T2847: with NO repoDir the report is skipped entirely rather than guess
 });
 
 test("W1-T2962: an unregistered directory is never a candidate", () => {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}adhoc-lane-unregistered-`));
+  const root = mkdtempSync(join(realpathSync(tmpdir()), `${RMD_TMP_PREFIX}adhoc-lane-unregistered-`));
   const config = cfg(join(root, "rmd-root"));
   const repo = join(root, "repo");
   const unregistered = join(config.root, "state");

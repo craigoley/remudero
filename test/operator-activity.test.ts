@@ -38,10 +38,10 @@ const PLAN_YAML = `
   status: queued
 `;
 
-function plan(): Plan {
+function plan(yaml = PLAN_YAML): Plan {
   const directory = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}operator-activity-`));
   const path = join(directory, "tasks.yaml");
-  writeFileSync(path, PLAN_YAML);
+  writeFileSync(path, yaml);
   return loadPlan(path);
 }
 
@@ -173,6 +173,47 @@ test("unit test: operator activity is versioned bounded read-only and single-pas
   assert.equal(route?.scope, "read");
 });
 
+test("unit test: operator activity keeps workstream and artifact rows when activities exceed the cap", () => {
+  const rows = Array.from({ length: OPERATOR_ACTIVITY_MAX_ITEMS + 25 }, (_, index) => ({
+    step: "worker.state",
+    task_id: `task-${index}`,
+    ts: new Date(Date.parse("2026-09-20T10:00:00.000Z") + index * 1000).toISOString(),
+  }));
+  const result = buildOperatorActivityProjection(verifiedInput(rows));
+  const items = itemsOf(result);
+  assert.equal(items.length, OPERATOR_ACTIVITY_MAX_ITEMS);
+  assert.ok(items.some((item) => item.kind === "workstream"));
+  assert.ok(items.some((item) => item.kind === "artifact"));
+  assert.equal(items.filter((item) => item.kind === "activity").length,
+    OPERATOR_ACTIVITY_MAX_ITEMS - items.filter((item) => item.kind !== "activity").length);
+  if (!("truncated" in result)) throw new Error("expected bounded item projection");
+  assert.equal(result.truncated, true);
+  assert.deepEqual(result.truncatedKinds, ["activity"]);
+});
+
+test("unit test: operator activity bounds each plan kind and names every truncated kind", () => {
+  const ids = Array.from({ length: 100 }, (_, index) => `T${index}`);
+  const manyTasks = ids.map((id) => `- id: ${id}\n  title: task ${id}\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued`).join("\n");
+  const rows = Array.from({ length: OPERATOR_ACTIVITY_MAX_ITEMS + 1 }, (_, index) => ({
+    step: "worker.state",
+    ts: new Date(Date.parse("2026-09-20T10:00:00.000Z") + index * 1000).toISOString(),
+  }));
+  const result = buildOperatorActivityProjection({
+    plan: plan(manyTasks),
+    projection: projection(ids),
+    ledgerLines: ledger(rows),
+    now: () => Date.parse("2026-09-20T10:01:00.000Z"),
+  });
+  const items = itemsOf(result);
+  assert.equal(items.length, OPERATOR_ACTIVITY_MAX_ITEMS);
+  assert.equal(items.filter((item) => item.kind === "workstream").length, Math.floor(OPERATOR_ACTIVITY_MAX_ITEMS / 3));
+  assert.equal(items.filter((item) => item.kind === "artifact").length, Math.floor(OPERATOR_ACTIVITY_MAX_ITEMS / 3));
+  assert.equal(items.filter((item) => item.kind === "activity").length, OPERATOR_ACTIVITY_MAX_ITEMS - 2 * Math.floor(OPERATOR_ACTIVITY_MAX_ITEMS / 3));
+  if (!("truncated" in result)) throw new Error("expected bounded item projection");
+  assert.equal(result.truncated, true);
+  assert.deepEqual(result.truncatedKinds, ["workstream", "artifact", "activity"]);
+});
+
 function routeDeps(ledgerPath: string): PanelGraphDeps {
   return {
     root: "/tmp/repo",
@@ -251,16 +292,24 @@ function activityCorpus() {
 async function served(route: ReturnType<typeof buildOperatorActivityRoute>) {
   const captured = responseCapture();
   await route.handler({} as never, captured.response, { params: {} });
-  const { observedAt: _observedAt, ...rest } = captured.json();
-  return { status: captured.status(), body: rest };
+  return { status: captured.status(), body: withoutProjectionTime(captured.json()) };
+}
+
+function withoutProjectionTime(value: Record<string, unknown>) {
+  const { observedAt: _observedAt, ...rest } = value;
+  if (!Array.isArray(rest.items)) return rest;
+  return {
+    ...rest,
+    items: (rest.items as Array<{ kind: string; observedAt: string }>).map((item) =>
+      item.kind === "activity" ? item : { ...item, observedAt: "projection-time" }),
+  };
 }
 
 test("unit test: operator activity from memoized rotations matches the whole-union projection", async () => {
   const fx = activityCorpus();
   const emptyPlan = () => ({ tasks: [], byId: new Map() }) as unknown as Plan;
   const expected = () => {
-    const { observedAt: _observedAt, ...rest } = buildOperatorActivityProjection({ plan: emptyPlan(), projection: new Map(), ledgerLines: readLedgerUnionBounded(fx.path) }) as Record<string, unknown>;
-    return rest;
+    return withoutProjectionTime(buildOperatorActivityProjection({ plan: emptyPlan(), projection: new Map(), ledgerLines: readLedgerUnionBounded(fx.path) }) as Record<string, unknown>);
   };
   try {
     const route = buildOperatorActivityRoute(routeDeps(fx.path), emptyPlan);
@@ -271,7 +320,7 @@ test("unit test: operator activity from memoized rotations matches the whole-uni
     fx.append([{ step: "run.start", task_id: "late", ts: "2026-09-20T11:00:00.000Z" }]);
     const warm = await served(route);
     assert.deepEqual(warm.body, expected());
-    assert.equal((warm.body.items as Array<{ taskId?: string }>)[0]?.taskId, "late");
+    assert.equal((warm.body.items as Array<{ kind: string; taskId?: string }>).find((item) => item.kind === "activity")?.taskId, "late");
   } finally {
     rmSync(fx.dir, { recursive: true, force: true });
   }
@@ -292,15 +341,16 @@ test("unit test: operator activity yields the event loop while it loads rotation
   }
 });
 
-test("unit test: saturated operator activity never derives the plan projection", async () => {
+test("unit test: saturated operator activity route includes workstreams and artifacts", async () => {
   const fx = activityCorpus();
   try {
-    const refusing = new Proxy({}, { get: (_target, name) => (name === "readFailed" || name === "readFailureReason" ? undefined : () => { throw new Error("projectPlan ran"); }) }) as never;
-    const route = buildOperatorActivityRoute({ ...routeDeps(fx.path), statusGithub: refusing }, plan);
+    const route = buildOperatorActivityRoute(routeDeps(fx.path), () => ({ tasks: [], byId: new Map() }) as unknown as Plan);
     const answer = await served(route);
     assert.equal(answer.status, 200);
     assert.equal(answer.body.state, "verified");
     assert.equal(answer.body.truncated, true);
+    assert.ok((answer.body.items as Array<{ kind: string }>).some((item) => item.kind === "workstream"));
+    assert.ok((answer.body.items as Array<{ kind: string }>).some((item) => item.kind === "artifact"));
   } finally {
     rmSync(fx.dir, { recursive: true, force: true });
   }

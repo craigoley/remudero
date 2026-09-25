@@ -704,6 +704,12 @@
       "grepHint": "Recovered research artefacts"
     },
     {
+      "path": "docs/research/model-evidence-program.md",
+      "title": "Model evidence program: from fleet work to field trials",
+      "summary": "Status: design, 2026-09-25. No trial result, public data transfer, new routing policy, paid call, or merge gate is authorized by this document. The site's `/fi…",
+      "grepHint": "Model evidence program: from fleet work to field trials"
+    },
+    {
       "path": "docs/research/recon-guard-complements.md",
       "title": "Recon: the guard complements — what each gate structurally cannot see — 2026-08-11",
       "summary": "Run at origin/main `3b18d956a46e8fc6be05868146437a8e7cd6af58` (toplevel /home/user/remudero, branch",

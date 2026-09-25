@@ -358,7 +358,7 @@ test("buildPlanFrontier: an empty plan yields an empty frontier, not an error", 
   assert.deepEqual(buildPlanFrontier(plan, NONE_MERGED, 10, []), []);
 });
 
-// ── W1-T376: per-section filed/merged COUNTS, joined off plan_refs against plan-index.json ─────
+// ── W1-T376: per-section filed/merged COUNTS, joined off plan_refs against derived headings ─────
 //
 // acceptance (1): "section counts key only on headings plan-index resolves, with task-id and
 // proposal and workstream refs contributing nothing" -- and the exact-token join must not let a
@@ -631,10 +631,9 @@ test("GET /v1/plan/view: an unreadable statusGithub -> 200 with progress.unknown
   });
 });
 
-// ── W1-T376, end-to-end: the route reads plan_refs off the REAL tasks.yaml + a REAL
-// plan/plan-index.json sitting next to it (never a new GitHub call) and returns `sections`. ────
+// ── W1-T376, end-to-end: the route derives its section index from MASTER-PLAN.md at read time. ────
 
-test("GET /v1/plan/view: `sections` is derived off the real plan/plan-index.json sitting next to planPath -- a task's plan_refs joins to its heading with NO percent anywhere in the payload's shape", async () => {
+test("GET /v1/plan/view: `sections` are derived from MASTER-PLAN.md without a JSON artifact", async () => {
   const root = tmpRoot();
   const planPath = writePlan(
     root,
@@ -654,10 +653,7 @@ test("GET /v1/plan/view: `sections` is derived off the real plan/plan-index.json
       "",
     ].join("\n"),
   );
-  writeFileSync(
-    join(root, "plan", "plan-index.json"),
-    JSON.stringify({ source: "MASTER-PLAN.md", entries: [{ heading: "5C. Task pre-flight: the plan gate", line: 1, summary: "" }] }),
-  );
+  writeFileSync(join(root, "MASTER-PLAN.md"), "# Plan\n\n## 5C. Task pre-flight: the plan gate\n\nFixture section.\n");
   const deps = routeDeps(root, planPath, statusGithubOf({}));
   await withRoute(deps, async (base) => {
     const res = await fetch(`${base}/v1/plan/view`, { headers: { Authorization: "Bearer read-token" } });
