@@ -1,8 +1,7 @@
-# The knowledge gardener's (W1-T4095) two-item RETIRE pass from fleet PR #7101. Each proof executes
+# The knowledge gardener's (W1-T4095) RETIRE pass from fleet PR #7101 (the operator kept
+# sdk-result-envelope active, so one item retires). Each proof executes
 # for real against the post-pass checkout/.
 - claim: this pass is recorded in the garden log
   proof: "grep: ^## Pass 2026-09-25T00:31:36.191Z$ in docs/knowledge-garden-log.md"
-- claim: the gardener's retire of sdk-result-envelope is marked in its entry
-  proof: "grep: knowledge gardener: retire sdk-result-envelope$ in learnings/platform.yaml"
 - claim: the gardener's retire of websearch-serverside-webfetch-unverified is marked in its entry
   proof: "grep: knowledge gardener: retire websearch-serverside-webfetch-unverified$ in learnings/platform.yaml"

@@ -113,8 +113,7 @@
 
 - id: sdk-result-envelope
   subsystem: ledger
-  # knowledge gardener: retire sdk-result-envelope
-  lifecycle: superseded
+  lifecycle: active
   files: [src/lib/ledger.ts, src/lib/worker.ts, src/run-task.ts]
   fact: >-
     The Agent SDK yields the type:"result" envelope (num_turns, total_cost_usd, subtype) and THEN

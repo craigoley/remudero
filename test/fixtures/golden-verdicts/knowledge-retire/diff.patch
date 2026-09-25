@@ -1,26 +1,19 @@
 diff --git a/docs/knowledge-garden-log.md b/docs/knowledge-garden-log.md
-index ccaa41b205..224446d92c 100644
+index ccaa41b205..2efe2d1a5b 100644
 --- a/docs/knowledge-garden-log.md
 +++ b/docs/knowledge-garden-log.md
-@@ -9,0 +10,7 @@
+@@ -9,0 +10,6 @@
 +
 +## Pass 2026-09-25T00:31:36.191Z
 +
-+- retire sdk-result-envelope: Workers offered it have rarely used it, compared with other learnings.
 +- retire websearch-serverside-webfetch-unverified: Workers offered it have rarely used it, compared with other learnings.
 +
 +Learnings used when offered: 13%. Dangling Why pointers: 0.
 diff --git a/learnings/platform.yaml b/learnings/platform.yaml
-index 1a8041d321..81c517bb0e 100644
+index 1a8041d321..7433433d60 100644
 --- a/learnings/platform.yaml
 +++ b/learnings/platform.yaml
-@@ -113,3 +113,4 @@
- - id: sdk-result-envelope
-   subsystem: ledger
--  lifecycle: active
-+  # knowledge gardener: retire sdk-result-envelope
-+  lifecycle: superseded
-@@ -169,3 +170,4 @@
+@@ -170,3 +170,4 @@
  - id: websearch-serverside-webfetch-unverified
    subsystem: sdk-tools
 -  lifecycle: active

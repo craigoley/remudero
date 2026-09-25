@@ -8,12 +8,8 @@ const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const corpus = loadLearningsCorpus(fileURLToPath(new URL("../learnings/", import.meta.url)));
 const plan = loadPlan(fileURLToPath(new URL("../plan/tasks.yaml", import.meta.url)));
 
-// The SDK-envelope facts that killed W1-T6's turn budget by being re-discovered. The knowledge
-// gardener's (W1-T4095) pass in fleet PR #7101 retired the second of the original pair,
-// sdk-result-envelope (lifecycle active → superseded, text kept). A superseded entry stops being
-// injected by design, so it moved from SDK_FACTS to RETIRED_SDK_FACTS, whose non-injection is pinned below.
-const SDK_FACTS = ["sdk-result-fields"];
-const RETIRED_SDK_FACTS = ["sdk-result-envelope"];
+// The SDK-envelope facts that killed W1-T6's turn budget by being re-discovered.
+const SDK_FACTS = ["sdk-result-fields", "sdk-result-envelope"];
 
 test("W1-T6 carries a files: field so learnings injection targets it (not repo-wide)", () => {
   const w1t6 = plan.byId.get("W1-T6")!;
@@ -27,12 +23,6 @@ test("a rendered prompt for a worker.ts/ledger task now CONTAINS the SDK-envelop
   const ids = selected.map((e) => e.id);
   for (const f of SDK_FACTS) {
     assert.ok(ids.includes(f), `expected '${f}' to be injected for W1-T6 (files=${w1t6.files}); got ${ids.join(", ")}`);
-  }
-  // a retired fact still matches W1-T6's files by path, and its text is kept, but it is NOT injected.
-  for (const f of RETIRED_SDK_FACTS) {
-    const retired = corpus.find((e) => e.id === f);
-    assert.equal(retired?.lifecycle, "superseded", `expected '${f}' to be kept in the corpus as superseded`);
-    assert.ok(!ids.includes(f), `expected superseded '${f}' NOT to be injected for W1-T6; got ${ids.join(", ")}`);
   }
   // and it actually renders into the CONTEXT the worker sees, with the precise fields.
   const ctx = renderLearningsContext(selected);
