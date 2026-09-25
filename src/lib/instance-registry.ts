@@ -37,6 +37,7 @@ export type InstanceRegistryErrorCode =
   | "invalid_repo"
   | "invalid_project"
   | "invalid_retired"
+  | "invalid_mode"
   | "duplicate_live_repo";
 
 /** A registry the parser refuses. `code` is stable for callers; `message` names the line/instance. */
@@ -57,6 +58,8 @@ export interface RegistryInstance {
   repo: string;
   /** False only when the row says `retired: true`; a retired row may reuse a live row's repo. */
   live: boolean;
+  /** Shadow runs execute and open draft PRs, but cannot land changes. */
+  mode: "shadow" | "live";
 }
 
 export interface InstanceRegistry {
@@ -149,7 +152,11 @@ export function parseInstanceRegistry(text: string): InstanceRegistry {
     if (retired !== undefined && retired !== "true" && retired !== "false") {
       throw new InstanceRegistryError("invalid_retired", `instance '${row.name}' retired must be true or false`);
     }
-    return { name: row.name, project, repo: declared, live: retired !== "true" };
+    const mode = row.fields.get("mode") ?? "live";
+    if (mode !== "shadow" && mode !== "live") {
+      throw new InstanceRegistryError("invalid_mode", `instance '${row.name}' mode must be shadow or live`);
+    }
+    return { name: row.name, project, repo: declared, live: retired !== "true", mode };
   });
   const liveRepos = new Map<string, string>();
   for (const instance of instances) {
@@ -165,6 +172,11 @@ export function parseInstanceRegistry(text: string): InstanceRegistry {
     liveRepos.set(key, instance.name);
   }
   return { instances };
+}
+
+/** An absent instance keeps the legacy live behaviour; malformed declarations are refused. */
+export function instanceMode(registry: InstanceRegistry, ownerRepo: string): "shadow" | "live" {
+  return registry.instances.find((instance) => instance.live && instance.repo.toLowerCase() === ownerRepo.toLowerCase())?.mode ?? "live";
 }
 
 export interface RegistryProjection {

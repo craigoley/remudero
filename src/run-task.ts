@@ -148,6 +148,7 @@ import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
+import { instanceMode, parseInstanceRegistry } from "./lib/instance-registry.js";
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
@@ -1757,18 +1758,25 @@ export function readyDraftViaGh(
   repo: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   exec: typeof ghExec = ghExec,
+  registryPath?: string,
 ): (pr: OpenPrView) => void {
-  return (pr) =>
+  return (pr) => {
+    if (instanceModeForRepo(owner, repo, registryPath) === "shadow") {
+      log("shadow.ready_refused", { pr_url: pr.prUrl, reason: "instance is shadow" });
+      return;
+    }
     readyDraftPullRequest(pr, {
       markReady: (prNumber) => {
         exec(["pr", "ready", String(prNumber), "--repo", `${owner}/${repo}`], { encoding: "utf8", stdio: "pipe" });
       },
       log,
     });
+  };
 }
 
 export function buildSweepEffects(
   deps: BuildSweepEffectsDeps & {
+    registryPath?: string;
     /** W1-T3618 test seam: override the reviewer-code freshness read the review gate below uses.
      *  Omitted ⇒ the real `checkReviewerCodeFreshness(repoRoot, process.env)`, exactly the
      *  production wiring. Destructured out before the rest of `deps` reaches
@@ -1856,7 +1864,8 @@ export function buildSweepEffects(
 
   export function fixRungTaskFor(
   */
-  const { reviewerCodeFreshnessImpl, ...libDeps } = deps;
+  const { reviewerCodeFreshnessImpl, registryPath, ...libDeps } = deps;
+  const shadow = instanceModeForRepo(deps.owner, deps.repo, registryPath) === "shadow";
   // W1-T3723: WIRED, not merely exported. A fresh-tree runner nothing passes is the
   // shipped-unwired shape this repo refuses, and the whole point is that a stale reviewer stops
   // needing a restart — which only happens if production actually gets one.
@@ -2121,7 +2130,9 @@ export function buildSweepEffects(
     fixRebaseMergeFactsImpl: fixRebaseMergeFactsFromRest,
     redBaseRefreshFactsImpl: redBaseRefreshFactsFromRest,
     ghUpdateBranchImpl: ghUpdateBranch,
-    readyDraftImpl: readyDraftViaGh(deps.owner, deps.repo, deps.log),
+    readyDraftImpl: shadow
+      ? (pr) => deps.log("shadow.ready_refused", { pr_url: pr.prUrl, reason: "instance is shadow" })
+      : readyDraftViaGh(deps.owner, deps.repo, deps.log),
     readFixRoundCommitsImpl: readFixRoundCommitsViaGit,
     runNpmScriptImpl: runNpmScriptViaSpawn,
     commitGeneratorOutputImpl: commitGeneratorOutputViaGit,
@@ -2138,6 +2149,15 @@ export function buildSweepEffects(
   // W1-T2890 holds this surface key-identical to the lib-built one, so the accessor is INJECTED
   // above rather than bolted on here: returning the lib's object unchanged makes that identity
   // structural instead of something a future edit has to remember to mirror.
+  if (shadow) {
+    return {
+      ...effects,
+      arm: (pr) => {
+        deps.log("shadow.arm_refused", { pr_url: pr.prUrl, reason: "instance is shadow" });
+        return "draft-refused";
+      },
+    };
+  }
   return effects;
 }
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
@@ -3693,6 +3713,58 @@ export function fillDerivedBody(worktreePath: string): string {
  * DECISION (design point iii): the body is {@link fillDerivedBody} — REST's lack of
  * `--fill`'s autofill costs this small local helper, not an invented body.
  */
+/** Resolve the target repo against the installed fleet registry on each write decision. */
+export function instanceModeForRepo(
+  owner: string,
+  repo: string,
+  registryPath = join(repoRoot, ".remudero", "daemon-instances.yaml"),
+): "shadow" | "live" {
+  if (!existsSync(registryPath)) return "live";
+  return instanceMode(parseInstanceRegistry(readFileSync(registryPath, "utf8")), `${owner}/${repo}`);
+}
+
+function shadowModeForPrUrl(prUrl: string, registryPath?: string): boolean {
+  const match = /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/pull\/\d+/.exec(prUrl);
+  return match !== null && instanceModeForRepo(match[1], match[2], registryPath) === "shadow";
+}
+
+/** One review's counterfactual, with a reason an operator can judge independently. */
+export function recordShadowVerdict(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  prUrl: string,
+  review: { state: string; capped?: boolean; verdictWithheld?: string },
+  blockReason?: string,
+  stage: "review" | "final" = "review",
+): void {
+  const reason = blockReason ?? review.verdictWithheld ?? (review.capped ? "review was capped" : review.state !== "success" ? `review ${review.state}` : undefined);
+  log("shadow.verdict", {
+    pr_url: prUrl,
+    stage,
+    review_verdict: review.state,
+    would: reason ? "would_block" : "would_merge",
+    reason: reason ?? "review passed; live auto-merge would be requested after remaining gates",
+  });
+}
+
+/** The worker may have opened its own PR; make its draft state an observed postcondition. */
+export function ensureShadowPullRequestDraft(
+  prUrl: string,
+  owner: string,
+  repo: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  exec: typeof ghExec = ghExec,
+  registryPath?: string,
+): void {
+  if (instanceModeForRepo(owner, repo, registryPath) !== "shadow") return;
+  const view = JSON.parse(String(exec(["pr", "view", prUrl, "--repo", `${owner}/${repo}`, "--json", "isDraft"], { encoding: "utf8" }))) as { isDraft?: boolean };
+  if (view.isDraft !== true) {
+    exec(["pr", "ready", prUrl, "--repo", `${owner}/${repo}`, "--undo"], { encoding: "utf8" });
+    const confirmed = JSON.parse(String(exec(["pr", "view", prUrl, "--repo", `${owner}/${repo}`, "--json", "isDraft"], { encoding: "utf8" }))) as { isDraft?: boolean };
+    if (confirmed.isDraft !== true) throw new Error(`shadow instance refused ready pull request ${prUrl}: draft conversion was not confirmed`);
+  }
+  log("shadow.draft_confirmed", { pr_url: prUrl, converted: view.isDraft !== true });
+}
+
 export function ghPrCreateFillCommand(
   worktreePath: string,
   owner: string,
@@ -3700,6 +3772,7 @@ export function ghPrCreateFillCommand(
   branch: string,
   title?: string,
   bodyOverride?: string,
+  registryPath?: string,
 ): { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } } {
   // LIVE-WRITE GUARD at the BUILDER, not at each of its four executors: this function
   // exists only to produce a `gh pr create` argv, so refusing here covers every call
@@ -3735,6 +3808,7 @@ export function ghPrCreateFillCommand(
     `head=${branch}`,
     "-f",
     "base=main",
+    ...(instanceModeForRepo(owner, repo, registryPath) === "shadow" ? ["-f", "draft=true"] : []),
   ];
   return {
     command: "gh",
@@ -4329,7 +4403,12 @@ export function armAndLogOutcome(
   arm: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = armAutoMergeDetailed,
   lane: ArmLane = "operator",
   headSha?: string,
+  registryPath?: string,
 ): ArmOutcome {
+  if (shadowModeForPrUrl(prUrl, registryPath)) {
+    log("shadow.arm_refused", { pr_url: prUrl, reason: "instance is shadow" });
+    return "draft-refused";
+  }
   const result = arm(prUrl, taskId);
   const outcome = typeof result === "string" ? result : result.outcome;
   const error = typeof result === "string" ? undefined : result.error;
@@ -6907,7 +6986,12 @@ async function runReview(args: {
   // verdict and this call is still refused. No `posted.posted` guard is needed: the `if
   // (!posted.posted)` branch above already returned.
   const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log };
-  armIfVerdictPermits(verdict, armCtx, { arm: args.arm });
+  if (instanceModeForRepo(owner, repo) === "shadow") {
+    recordShadowVerdict(log, prUrl, verdict);
+    log("shadow.arm_refused", { pr_url: prUrl, reason: "instance is shadow", head_sha: headSha });
+  } else {
+    armIfVerdictPermits(verdict, armCtx, { arm: args.arm });
+  }
   if (verdict.capped) {
     // W1-T1085: the annotation gets the SAME `planOnly` fact the status three-ways on, so one run
     // stops emitting two contradictory sentences about one verdict. No decision changes here.
@@ -15300,7 +15384,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const ruleToolPointer = ruleLookup
       ? `\nTo read a doctrine rule by id or phrase, or a learning's evidence by learnings#id, call ${WORKER_RULE_TOOL_NAME}.`
       : "";
-    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
+    const shadowContract = instanceModeForRepo(owner, task.repo) === "shadow"
+      ? "\nSHADOW INSTANCE: Open this run's pull request as a DRAFT (`gh pr create --draft`). Never mark it ready, arm auto-merge, or merge it. The operator judges the review evidence before anything lands."
+      : "";
+    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}${shadowContract}`;
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -15332,7 +15419,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // drill will send. `ruleHeadlinesPart` is the SAME string the turn-0 prompt above just
     // carried (design (iii)) — never re-derived, so a compaction can never re-inject a
     // headline index that drifted from what turn 0 actually said.
-    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
+    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}${shadowContract}`;
     log("anchor.built", { anchor });
 
     // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
@@ -16054,6 +16141,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       );
       return { taskId, runId, merged: false, costUsd, verdict: "pr_attribution_failed" };
     }
+    ensureShadowPullRequestDraft(prUrl, owner, task.repo, log);
     // Stamp the provenance trailer (deriveStatus source (c)) before gating.
     ensureTaskTrailer(prUrl, taskId, log);
     recordHeadProviderAfterPush(
@@ -16491,6 +16579,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       const reason = irreversible
         ? "diff classified irreversible (W1-T919) — auto-merge refused unattended"
         : "capped verdict refused auto-merge";
+      if (instanceModeForRepo(owner, task.repo) === "shadow") {
+        recordShadowVerdict(log, prUrl, review, reason, "final");
+      }
       // W1-T1215: FOLLOW THE OUTCOME. This discarded the return and logged `automerge.disarmed`
       // unconditionally, so a withdrawal GitHub refused read as a completed one. `disposeDisarm`
       // holds the whole decision (and every lost-race-only read) where a test can reach it.
@@ -16662,6 +16753,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       confidenceThreshold: riskPolicy.confidenceThreshold,
     });
     if (riskJudgeResult.action.kind === "escalate") {
+      if (instanceModeForRepo(owner, task.repo) === "shadow") {
+        recordShadowVerdict(log, prUrl, review, "risk judge escalated", "final");
+      }
       log("verdict", {
         verdict: "blocked",
         pr_url: prUrl,
@@ -16706,6 +16800,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // `armAutoMergeAtOpen` outright when it refuses, so a wipe-test PR is never armed and can
     // never merge out from under the pair it belongs to.
     const wipeTestArmDecision = resolveWipeTestArmPermission(!!opts.noMerge);
+    if (instanceModeForRepo(owner, task.repo) === "shadow") {
+      recordShadowVerdict(log, prUrl, review, undefined, "final");
+      log("verdict", { verdict: "blocked", pr_url: prUrl, reason: "shadow instance holds the draft for operator review", cost_usd: costUsd });
+      say(`verdict: shadow — draft left OPEN for operator review: ${prUrl}`);
+      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
+    }
     const armOutcome: ArmOutcome | "no-merge-boundary-refused" = wipeTestArmDecision.armed
       ? armAutoMergeAtOpen(prUrl, undefined, irreversible)
       : "no-merge-boundary-refused";
@@ -31481,11 +31581,13 @@ export async function daemonCommand(
     return 2;
   }
   const target = resolved.target;
+  const mode = instanceModeForRepo(target.owner, target.repo, join(effectiveRepoRoot, ".remudero", "daemon-instances.yaml"));
 
   const runId = `DAEMON-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
   log("daemon.target", {
+    mode,
     repo: target.repo,
     gateway: `${target.owner}/${target.repo}`,
     plan_path: target.planPath,
@@ -31828,6 +31930,7 @@ export async function daemonCommand(
   process.once("SIGTERM", onSignal);
 
   log("daemon.start", {
+    mode,
     max: opts.max ?? null,
     poll_interval_ms: opts.pollIntervalMs,
     lock_pid: drainLock.info.pid,
