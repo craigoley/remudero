@@ -10,7 +10,7 @@
  * that end-to-end case lives in test/a-garden-pr-through-a-symlinked-checkout-lands-a-fresh-docs-index.test.ts.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -36,15 +36,24 @@ const GATE_GARDEN_HEAD = {
   changedPaths: ["docs/gate-garden-log.md", "scripts/learnings-budget-baseline.json"],
 };
 
-test("isMainModule recognizes a symlinked argv path but not a different file", () => {
-  const root = mkdtempSync(join(tmpdir(), "rmd-argv-main-"));
+test("isMainModule recognizes a symlinked argv path but not a different file", (t) => {
+  // @host-capability symlink: this assertion needs a host that permits fixture symlinks.
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "rmd-test-argv-main-"));
   const target = join(root, "entry.mjs");
   const alias = join(root, "entry-alias.mjs");
   const unrelated = join(root, "other.mjs");
   writeFileSync(target, "");
   writeFileSync(unrelated, "");
-  symlinkSync(target, alias);
   try {
+    try {
+      symlinkSync(target, alias);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && ["EPERM", "EACCES", "ENOTSUP"].includes(String(error.code))) {
+        t.skip(`fixture symlink unavailable: ${String(error.code)}`);
+        return;
+      }
+      throw error;
+    }
     const moduleUrl = pathToFileURL(target).href;
     assert.equal(isMainModule(moduleUrl, alias), true);
     assert.equal(isMainModule(moduleUrl, unrelated), false);
