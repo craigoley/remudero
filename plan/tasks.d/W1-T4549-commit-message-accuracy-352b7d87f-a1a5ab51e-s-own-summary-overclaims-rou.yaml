@@ -1,0 +1,55 @@
+- id: W1-T4549
+  title: "commit-message accuracy — 352b7d87f/a1a5ab51e's own summary overclaims 'routed-followups-retire + the call-site suite 23/23'; the real, locally-verified count is 15 (9 + 6); append the correction to LEARNINGS.md, never rewrite the landed commit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 40.00
+  risk: low
+  origin: "followup#commit-count-mismatch-2026-09-13"
+  plan_refs: ["§12A"]
+  files: [LEARNINGS.md]
+  status: queued
+  attempts: 0
+  rationale: |
+    FROM W1-T3524 (run DAEMON-1789309323091, PR #5400). The commits that shipped the routed-followups
+    retirement work (352b7d87f / a1a5ab51e — the W1-T2563 predicate and its W1-T2601 call site) carry a
+    commit-message summary claiming "routed-followups-retire + the call-site suite 23/23". Running both
+    test files against the CURRENT tree (unchanged since those commits, per the follow-up's own check)
+    counts 9 test() cases in test/routed-followups-retire.test.ts and 6 in
+    test/the-followup-retirement-arm-has-a-call-site.test.ts — 15, not 23. VERIFIED independently before
+    filing: a repo-wide grep for the shas 352b7d87f / a1a5ab51e finds them nowhere else, so nothing
+    downstream currently depends on the wrong number — the discrepancy is confined to the commit's own
+    prose.
+    THIS DOES NOT GATE ANYTHING. commitlint only lints the PR TITLE (W1-T129), never the body, and no
+    required check reads a commit's summary text — the follow-up's own framing is right that this is a
+    historical-record accuracy fix, not a defect with live consequences.
+    THE COMMIT CANNOT BE EDITED. main is a protected branch and force-push to it is refused at the
+    deny-floor (hooks/deny-floor.sh) and by branch protection; rewriting a squash-merged commit's message
+    would mean force-pushing history over every PR that has landed since. LEARNINGS.md's own header states
+    the doctrine this task follows: "When one is contradicted by a later probe, append the correction with
+    its own provenance; never silently edit history." That is the mechanism here, applied to a commit
+    message instead of a prior LEARNINGS entry.
+  design: |
+    (i) VERIFY FROM SOURCE before writing anything (distrust-the-prompt, standing rule 7): run
+    `git log -1 --format=%B 352b7d87f` and `git log -1 --format=%B a1a5ab51e` to confirm the exact
+    overclaimed phrasing quoted above is what the commits actually say, and re-count the test cases in
+    both files at HEAD to reconfirm 9 + 6 = 15 rather than trusting this filing's arithmetic blindly.
+    (ii) APPEND — never amend, rebase, or force-push — one correction entry to LEARNINGS.md, in whichever
+    location fits the existing section structure (a new heading, e.g. "## Commit-message accuracy", or
+    folded into "## Acceptance, gates & the call site" if that reads more naturally). The entry MUST
+    literally contain: the sha 352b7d87f (and a1a5ab51e), the quoted overclaimed phrase, the exact split
+    (test/routed-followups-retire.test.ts = 9, test/the-followup-retirement-arm-has-a-call-site.test.ts =
+    6), the phrase "totalling 15" so the corrected count is unambiguous, a statement that this does not
+    gate commitlint or any required check, and the date 2026-09-13 as the correction's own provenance
+    stamp.
+    (iii) NOTHING ELSE CHANGES. No git history rewrite, no edit to the two test files, no touch to
+    src/lib/retro.ts or src/run-task.ts — this task's diff is LEARNINGS.md alone.
+  acceptance:
+    - claim: "LEARNINGS.md documents that 352b7d87f (and a1a5ab51e) overclaimed their own test coverage"
+      proof: "grep: 352b7d87f in LEARNINGS.md"
+    - claim: "the correction states the real, exact count — totalling 15, not 23"
+      proof: "grep: totalling 15 in LEARNINGS.md"
+    - claim: "the entry is dated as its own provenance stamp, per LEARNINGS.md's own append-never-edit doctrine"
+      proof: "grep: 2026-09-13 in LEARNINGS.md"
