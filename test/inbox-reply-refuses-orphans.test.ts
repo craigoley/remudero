@@ -74,8 +74,13 @@ test("test/inbox-reply-refuses-orphans.test.ts: W1-T4552 refuses an orphan or no
   assert.equal(orphanReply.status, 404, "the write must agree with the detail route");
   const nonOperatorReply = await reply(inboxThreadId(NON_OPERATOR_ID));
   assert.equal(nonOperatorReply.status, 404);
+  const orphanRead = await markRead(orphanThreadId, 0);
+  assert.equal(orphanRead.status, 404, "an absent thread cannot acquire a read cursor");
+  const nonOperatorRead = await markRead(inboxThreadId(NON_OPERATOR_ID), 0);
+  assert.equal(nonOperatorRead.status, 404, "a fleet-owned item cannot acquire an operator read cursor");
   const after = snapshot();
   assert.deepEqual(after, before);
+  assert.equal(existsSync(readMarksPath(stateDir)), false);
   const aheadRead = await markRead(inboxThreadId(OPERATOR_ID), 9999);
   assert.equal(aheadRead.status, 409);
   assert.equal(existsSync(readMarksPath(stateDir)), false, "an ahead read must not poison future unread status");
