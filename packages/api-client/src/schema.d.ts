@@ -261,13 +261,15 @@ export interface components {
     };
     /** GET /v1/operator-activity's bounded, source-labeled read projection. */
     OperatorActivityResult: {
-      version: "operator-activity-v1";
+      version: "operator-activity-v2";
       state: "verified" | "stale" | "unavailable" | "unknown" | "not-collected";
       source: string;
       observedAt: string;
       cursor?: string;
       items?: (OperatorActivityItem)[];
       truncated?: boolean;
+      /** Present only when rows were cut; names each affected item kind. */
+      truncatedKinds?: ("activity" | "workstream" | "artifact")[];
       reason?: string;
       detail?: string;
     };
