@@ -10,7 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -23,6 +23,9 @@ import { GARDEN_BRANCH_RE, gardenCheckout } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const { isMainModule } = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "lib", "argv.mjs")).href)) as {
+  isMainModule: (moduleUrl: string, argv1?: string) => boolean;
+};
 // `scripts/**` sits outside tsconfig's `include`, so the gate is reached by dynamic import.
 const { evaluateHeadIdentityGate } = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "head-identity-gate.mjs")).href)) as {
   evaluateHeadIdentityGate: (input: { headCommitMessage: string; headRef: string | undefined; changedPaths?: readonly string[] }) => {
@@ -36,6 +39,25 @@ const GATE_GARDEN_HEAD = {
   headCommitMessage: "chore(gates): the gate gardener proposes to refresh 2 gate row(s)\n\nTended by the gate gardener.",
   changedPaths: ["docs/gate-garden-log.md", "scripts/learnings-budget-baseline.json"],
 };
+
+test("isMainModule recognizes a symlinked argv path but not a different file", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-argv-main-"));
+  const target = join(root, "entry.mjs");
+  const alias = join(root, "entry-alias.mjs");
+  const unrelated = join(root, "other.mjs");
+  writeFileSync(target, "");
+  writeFileSync(unrelated, "");
+  symlinkSync(target, alias);
+  try {
+    const moduleUrl = pathToFileURL(target).href;
+    assert.equal(isMainModule(moduleUrl, alias), true);
+    assert.equal(isMainModule(moduleUrl, unrelated), false);
+    assert.equal(isMainModule(moduleUrl, join(root, "missing-argv.mjs")), false);
+    assert.equal(isMainModule(pathToFileURL(join(root, "missing-module.mjs")).href, alias), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("a gardener's own head is admitted by the head-identity gate", () => {
   const admitted = evaluateHeadIdentityGate({ ...GATE_GARDEN_HEAD, headRef: "gate-garden-1790195325864" });

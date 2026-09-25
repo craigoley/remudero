@@ -13,7 +13,8 @@
  * heavier. {@link parseArgv} adds exactly one thing `parseArgs` does not: a uniform `--help`.
  */
 import { parseArgs as nodeParseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 /**
  * Whether `moduleUrl` (a caller's own `import.meta.url`) names the process's entry script —
@@ -23,7 +24,12 @@ import { pathToFileURL } from "node:url";
  */
 export function isMainModule(moduleUrl, argv1 = process.argv[1]) {
   if (!argv1) return false;
-  return moduleUrl === pathToFileURL(argv1).href;
+  try {
+    return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(argv1);
+  } catch {
+    // A missing path or non-file URL cannot identify the process entry point.
+    return false;
+  }
 }
 
 /**
