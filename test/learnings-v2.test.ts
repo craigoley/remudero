@@ -88,7 +88,10 @@ test("learnings-v2: the live corpus retains its baseline V1 artifact hash", () =
   assert.equal(corpus.length, 83);
   // W1-T4240 repaired 17 dead `files:` globs; main's pre-repair corpus still hashes to the previous
   // pin f13ba22d… under this code, so the V1 hashing is unchanged and only the data moved.
-  assert.equal(computeArtifactHash(corpus), "895bc1fc67b06a06b61cab05e31e916634d70360a6fddd481837cdf714253add");
+  // The knowledge gardener's (W1-T4095) first pass (#7073) retired ls-remote-grep-matches-the-sha-column
+  // (lifecycle active → superseded, text kept); that corpus with ONLY the lifecycle flip reverted still
+  // hashes to the previous pin 895bc1fc…, so again only the data moved.
+  assert.equal(computeArtifactHash(corpus), "7548a92957f5864cfe333d48ed094d2cb4135d1083fd096b081e60f6c893ce9e");
 });
 
 test("learnings-v2: a V1 or legacy artifact carrying origin is refused before trust", () => {

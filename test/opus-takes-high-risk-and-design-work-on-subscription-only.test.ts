@@ -17,7 +17,8 @@ import {
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
 
 // Operator ruling 2026-09-24 (DECISIONS.md): Opus takes risk:high and design work on its FIRST
-// attempt, as a peer of the Architect and judge (G-17 amended), and only ever on a subscription.
+// attempt, as a peer of the Architect and judge (G-17 amended). A later operator ruling permits
+// a bounded Foundry cash exception only when both subscriptions block and cash can serve the tools.
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const NOW = Date.parse("2026-09-24T12:00:00.000Z");
@@ -129,6 +130,7 @@ const KEY = "test-only-overflow-factor-present";
 
 async function spawnAs(root: string, model: string, over: Partial<SpawnWorkerArgs> = {}, enabled = ["claude", "codex", "cash"]) {
   let cashSpawns = 0;
+  const cashSelections: Array<{ model: string; squeezed: boolean }> = [];
   let childEnv: Record<string, string | undefined> | undefined;
   const outcome = await spawnWorker({
     cwd: root,
@@ -150,7 +152,11 @@ async function spawnAs(root: string, model: string, over: Partial<SpawnWorkerArg
       readClaudeHealth: async () => ({ degradedModels: [], source: "fresh", observedAtMs: NOW }),
       readClaude: async () => unreadable("claude"),
       readCodex: async () => unreadable("codex"),
-      spawnOpenWeight: async () => { cashSpawns += 1; return { provider: "cash", text: "done", isError: false, subtype: "success" } as never; },
+      spawnOpenWeight: async (args, _config, selection) => {
+        cashSpawns += 1;
+        cashSelections.push({ model: selection.model, squeezed: args.cashSqueezed === true });
+        return { provider: "cash", model: selection.model, text: "done", isError: false, subtype: "success" } as never;
+      },
       writeStatus: () => {},
       now: () => NOW,
     },
@@ -170,7 +176,7 @@ async function spawnAs(root: string, model: string, over: Partial<SpawnWorkerArg
     }) as never,
     ...over,
   } as SpawnWorkerArgs).then((result: WorkerResult) => result, (error: unknown) => error);
-  return { outcome, cashSpawns, childEnv };
+  return { outcome, cashSpawns, cashSelections, childEnv };
 }
 
 test("a blocked auction holds frontier work instead of diverting it to cash or API credits", async () => {
@@ -190,7 +196,9 @@ test("a blocked auction holds frontier work instead of diverting it to cash or A
 test("a frontier spawn pinned to cash is refused by name", async () => {
   const root = fixtureRoot("rmd-opus-cash-");
   try {
-    const opus = await spawnAs(root, "claude-opus-5-5", { mountProvider: "cash" });
+    const opus = await spawnAs(root, "claude-opus-5-5", { mountProvider: "cash", env: {
+      RMD_FOUNDRY_CLAUDE_API_KEY: "test-only", RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://example.test/anthropic",
+    } });
     assert.ok(opus.outcome instanceof SubscriptionOnlyRefusedError);
     assert.equal(opus.cashSpawns, 0);
     const haiku = await spawnAs(root, "haiku", { mountProvider: "cash" });
@@ -198,6 +206,23 @@ test("a frontier spawn pinned to cash is refused by name", async () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a blocked frontier auction uses Foundry Opus only with a declared cash tool surface and endpoint", async () => {
+  const root = fixtureRoot("rmd-opus-emergency-");
+  try {
+    const env = { RMD_FOUNDRY_CLAUDE_API_KEY: "test-only", RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://example.test/anthropic" };
+    const emergency = await spawnAs(root, "opus", { env });
+    assert.deepEqual(emergency.cashSelections, [{ model: "claude-opus-5-5", squeezed: true }]);
+    assert.equal((emergency.outcome as WorkerResult).isError, false);
+    const shell = await spawnAs(root, "opus", { env, tools: ["Bash"] });
+    assert.equal(shell.cashSpawns, 0, "unsupported tools keep the task held");
+    assert.equal((shell.outcome as Error).name, "ProviderCapacityBlockedError");
+    const missing = await spawnAs(root, "opus", { env: { RMD_FOUNDRY_CLAUDE_API_KEY: "test-only" } });
+    assert.equal(missing.cashSpawns, 0, "an unconfigured Foundry endpoint keeps the task held");
+    const oneSubscription = await spawnAs(root, "opus", { env }, ["claude", "cash"]);
+    assert.equal(oneSubscription.cashSpawns, 0, "a single observed subscription cannot assert that both are blocked");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("an Opus Claude spawn never carries the API key even with the overflow valve armed", async () => {

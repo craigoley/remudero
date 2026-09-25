@@ -513,6 +513,7 @@ import {
   type AlertLaneAlert,
 } from "./lib/alert-lane.js";
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
+import { ghEscalationAnswerGateway, readEscalationAnswers, type EscalationAnswerGateway } from "./lib/escalation-answers.js";
 import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
@@ -551,7 +552,7 @@ import {
 // renderTraceChain/traceForward/traceReverse: only traceCommand read them, and it moved to
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
-import { defaultPreflightSpawn, runPreflight, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
+import { checkCommitMessage, defaultPreflightSpawn, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
 import {
   buildPreflightSummary,
   callerReachableSuites,
@@ -592,7 +593,7 @@ import {
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
-import { PROPOSAL_VERDICT_SYNTAX, proposalVerdictCommand } from "./lib/inbox-verdict-command.js";
+import { proposalVerdictCommand } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import {
   buildReadyServeServer,
@@ -804,6 +805,7 @@ import {
 import {
   AUTOMATED_RETRO_DECISION_ENV,
   decodeAutomatedRetroDecision,
+  retroExitAfterPrOpened,
   runAutomatedRetroSubprocess,
 } from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
@@ -1423,6 +1425,7 @@ import {
   type ArmAttemptOutcome,
   type ArmOutcomeName,
   type BuildSweepEffectsDeps,
+  type MetadataRepairResult,
   sweepArmTaskId,
   uncreditableHeadReason,
   creditSubjectIsImplementation,
@@ -2108,6 +2111,7 @@ export function buildSweepEffects(
     // `repairMissingTaskTrailer` calls it — which is exactly what killed PR #5505's sweep action.
     // Same REST writer the module's other three body-write sites already use.
     updatePrBodyImpl: updatePrBodyViaGh,
+    repairMetadataImpl: repairPrMetadata,
     readHeadShaImpl: readHeadShaRest,
     ghLiveHeadImpl: ghLiveHead,
     fetchPrDiffFilesImpl: fetchPrDiffFilesViaGh,
@@ -4593,6 +4597,61 @@ export async function updatePrBodyViaGh(prUrl: string, body: string): Promise<vo
   writePrBodyRest(prUrl, body);
 }
 
+export function prMetadataRestArgs(prUrl: string, fields: { title?: string; body?: string }): string[] {
+  const args = prBodyRestArgs(prUrl, "").slice(0, 4);
+  if (fields.title !== undefined) args.push("-f", `title=${fields.title}`);
+  if (fields.body !== undefined) args.push("-f", `body=${fields.body}`);
+  return args;
+}
+
+export async function repairPrMetadata(
+  pr: Pick<OpenPrView, "prUrl">,
+  checks: readonly string[],
+  write: (url: string, fields: { title?: string; body?: string }) => void =
+    (url, fields) => { ghExec(prMetadataRestArgs(url, fields), { stdio: "pipe" }); },
+  read: (url: string) => { title?: string; body?: string } = (url) => {
+    const target = prUrlTarget(url);
+    if (!target) throw new Error(`metadata read: cannot resolve PR URL ${JSON.stringify(url)}`);
+    return ghJson(["api", `repos/${target.owner}/${target.repo}/pulls/${target.number}`]) as { title?: string; body?: string };
+  },
+): Promise<MetadataRepairResult> {
+  const live = read(pr.prUrl);
+  const fields: { title?: string; body?: string } = {};
+  const bodyChecked = checks.includes("acceptance-author-gate") || checks.includes("proof-discrimination");
+  if (checks.includes("commitlint")) {
+    const liveTitle = live.title;
+    if (typeof liveTitle !== "string" || liveTitle.trim() === "") {
+      return { repaired: false, reason: "live PR title is unavailable" };
+    }
+    if (checkCommitMessage(liveTitle).length === 0) {
+      if (!bodyChecked) {
+        return { repaired: false, notMetadata: true, reason: "live PR title already satisfies commitlint; the red is not a title defect" };
+      }
+    } else {
+      const conventional = liveTitle.match(/^((?:build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(?:\([^)]*\))?):\s*(.*)$/i);
+      const prefix = conventional && conventional[1] === conventional[1].toLowerCase() ? conventional[1] : "fix(pr)";
+      const subject = conventional?.[2]?.trim() || liveTitle.trim();
+      fields.title = shapeCommitMessage(prefix, subject).header;
+      if (checkCommitMessage(fields.title).length > 0) {
+        return { repaired: false, reason: "candidate PR title did not satisfy commitlint" };
+      }
+    }
+  }
+  if (bodyChecked) {
+    if (live.body === undefined) return { repaired: false, reason: "live PR body is unavailable" };
+    const repair = acceptanceGateBodyRepair(live.body, SWEEP_METADATA_ACCEPTANCE_FALLBACK);
+    if (!repair) {
+      return { repaired: false, reason: "the body red has no deterministic acceptance repair; scope or proof amendment is required" };
+    }
+    fields.body = repair.repairedBody;
+  }
+  if (fields.title === undefined && fields.body === undefined) {
+    return { repaired: false, reason: "no title or body edit was derived" };
+  }
+  write(pr.prUrl, fields);
+  return { repaired: true, reason: `edited ${Object.keys(fields).join(" and ")} through the PR REST endpoint` };
+}
+
 /**
  * A single enumerated item's wrapping, split from its core so {@link rebuildChangesetEnumeration}
  * can copy the SAME wrap style (backticks, quotes, parens — whatever the body's own house style
@@ -4776,6 +4835,13 @@ const ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK: AcceptanceCriterion[] = [
   },
 ];
 
+const SWEEP_METADATA_ACCEPTANCE_FALLBACK: AcceptanceCriterion[] = [
+  {
+    claim: "this PR body carries a judgeable Acceptance block added by the metadata repair sweep",
+    proof: "grep: ^export function acceptanceAuthorTimeCheck in src/lib/review.ts",
+  },
+];
+
 /** {@link acceptanceGateBodyRepair}'s verdict. */
 export interface AcceptanceGateBodyRepair {
   /** Which of `acceptanceAuthorTimeCheck`'s defects this repair was chosen for. */
@@ -4808,10 +4874,13 @@ export interface AcceptanceGateBodyRepair {
  * intended, which design note i explicitly refuses). A body that is already `ok: true` also
  * returns `undefined` — nothing to repair.
  */
-export function acceptanceGateBodyRepair(body: string): AcceptanceGateBodyRepair | undefined {
+export function acceptanceGateBodyRepair(
+  body: string,
+  fallback: AcceptanceCriterion[] = ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK,
+): AcceptanceGateBodyRepair | undefined {
   const check = acceptanceAuthorTimeCheck(body);
   if (check.ok || (check.defect !== "no-header" && check.defect !== "empty-proofs")) return undefined;
-  return { defect: check.defect, repairedBody: ensureJudgeableBody(body, ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK) };
+  return { defect: check.defect, repairedBody: ensureJudgeableBody(body, fallback) };
 }
 
 /**
@@ -10747,12 +10816,14 @@ export async function runFixRung(opts: {
     }
     sessionToResume = fixResult.sessionId;
     if (harnessCommitRefused) {
+      const scopeAmendment = scopeAmendmentFromFixReport(workerTranscript(fixResult));
       deps.log("fix.commit_refused", {
         strike: strikes,
         round,
         mode: fixMode,
         head_sha: priorHeadSha,
         reason: harnessCommitRefusalReason,
+        ...(scopeAmendment ? { scope_amendment_detail: scopeAmendment } : {}),
         ...undeclaredPathsLedgerFields(harnessCommitUndeclared),
       });
     }
@@ -28237,7 +28308,7 @@ async function retroCommand(
     if (ci !== "green") {
       say(`ci ${ci} — PR left OPEN: ${prUrl}`);
       worktreeRemove(repoDir, worktreePath);
-      return 1;
+      return retroExitAfterPrOpened(ci);
     }
     const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
     const reviewCode = await reviewCommand(prNum);
@@ -28266,7 +28337,7 @@ async function retroCommand(
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
     const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
     say(`retro PR gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
-    return reviewCode;
+    return retroExitAfterPrOpened("green", reviewCode);
   } catch (e) {
     log("retro.error", retroErrorLedgerFields(e) ?? { error: String((e as Error)?.message ?? e) });
     try {
@@ -32322,6 +32393,8 @@ export async function daemonCommand(
           undefined,
           targetCheckoutRoot,
           () => activePlanRef.current,
+          // W1-T4471: the one real wiring of the owner-reply reader.
+          ghEscalationAnswerGateway(target.owner, target.repo),
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -36939,6 +37012,14 @@ export function forceCashContainedRunSpawn(args: SpawnWorkerArgs, config: Config
 /** W1-T4207: at most this many undeclared paths ride a `fix.commit_refused` row; the rest are counted. */
 const COMMIT_REFUSED_PATH_CAP = 20;
 
+export function scopeAmendmentFromFixReport(report: string): string | undefined {
+  const refusal = report.match(/^\d+\.\s+\[outside-declared-files\]\s+(.+)$/m)?.[1];
+  const taskLine = report.match(/^task:\s+(.+)$/im)?.[1];
+  const followUp = taskLine && /(?:out.of.scope|scope amendment|declared files)/i.test(taskLine) &&
+    /(?:[\w.-]+\/)+[\w.-]+/.test(taskLine) ? taskLine : undefined;
+  return (refusal ?? followUp)?.slice(0, 500);
+}
+
 /** W1-T4207: the capped `undeclared` list (plus `undeclared_omitted`) a refusal row carries. */
 function undeclaredPathsLedgerFields(undeclared: readonly string[]): Record<string, unknown> {
   if (undeclared.length === 0) return {};
@@ -38650,6 +38731,9 @@ export function buildSweepHook(
   // origin by accident.
   targetCheckoutRoot?: string,
   planAccessor?: () => Plan,
+  // W1-T4471: the owner-reply reader's gateway. Omitted ⇒ that rung is skipped, so a fixture
+  // never reaches GitHub; only the daemon's composition root passes the real one.
+  escalationAnswerGateway?: EscalationAnswerGateway,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -38705,6 +38789,16 @@ export function buildSweepHook(
       await mainHealthRung?.();
     } catch (e) {
       log("main.health.error", { error: String((e as Error)?.message ?? e) });
+    }
+    // W1-T4471: land owner replies in `plan/questions.ndjson` BEFORE `buildOpenPrViews` reads it,
+    // so a reply steers this same tick. Contained like `mainHealthRung` above.
+    if (escalationAnswerGateway) {
+      try {
+        const answers = readEscalationAnswers(repoRoot, runId, escalationAnswerGateway, { ledgerPath });
+        if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
+      } catch (e) {
+        log("escalation_answers.error", { error: String((e as Error)?.message ?? e) });
+      }
     }
     // W1-T3618: this pass's own reviewer-code freshness discovery, if any — read by `effects`
     // (`buildSweepEffects`'s own once-per-call cache) below and surfaced here so the daemon's tick
@@ -45757,14 +45851,14 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "decline",
-    syntax: PROPOSAL_VERDICT_SYNTAX.decline,
+    syntax: 'rmd decline <proposalId> --reason "<text>"',
     summary: "Decline an inbox proposal, recording why; reversible with rmd restore.",
     detail:
       "the terminal's route to the console's decline (POST /v1/inbox/decline, W1-T2604): re-classifies the proposal live, refuses one that is unknown, already RATIFIED, or already declined, and otherwise appends one panel.proposal_declined ledger row carrying the reason verbatim. Files nothing and opens no branch; the proposal stays in the registry and classifies as declined until restored. Exit 0 recorded, 1 refused, 2 a usage error",
   },
   {
     name: "restore",
-    syntax: PROPOSAL_VERDICT_SYNTAX.restore,
+    syntax: 'rmd restore <proposalId> --reason "<text>"',
     summary: "Take back a decline, so the proposal returns to the inbox.",
     detail:
       "the reversal of rmd decline and the terminal's route to POST /v1/inbox/restore (W1-T3407): refuses a proposal that is unknown, already RATIFIED, or not declined, and otherwise appends one panel.proposal_restored ledger row carrying the reason. Exit 0 recorded, 1 refused, 2 a usage error",

@@ -38,9 +38,11 @@
 
 - id: worker-no-mcp-config
   claim: "Workers get NO MCP config (MCP auto-approves under bypass, so the surface stays zero) —
-    spawnWorker's SDK Options and the worker settings template carry no MCP field at all."
+    the worker settings template carries no MCP field, spawnWorker reads no MCP config file, and the
+    only server it may pass the SDK is the in-process, read-only `knowledge` server built with
+    createSdkMcpServer (operator ruling 2026-09-24: allowlisted in-process servers only)."
   plan_section: "MASTER-PLAN.md §1 Architecture — four planes (Worker plane)"
-  assertion: '! grep -rIiq "mcp" src/lib/worker.ts settings/worker.json'
+  assertion: '! grep -Iiq "mcp" settings/worker.json && ! grep -Eiq "mcpConfig|mcp_config|\.mcp\.json|\"(stdio|sse|http)\"" src/lib/worker.ts && [ "$(grep -c "mcpServers" src/lib/worker.ts)" -le 1 ] && [ "$(grep -c "createSdkMcpServer(" src/lib/worker.ts)" -le 1 ] && { ! grep -q "mcpServers" src/lib/worker.ts || grep -A1 "mcpServers" src/lib/worker.ts | tail -n 1 | grep -Eq "^[[:space:]]*knowledge: createSdkMcpServer\(\{ name: \"knowledge\","; }'
   precondition_paths: ["src/lib/worker.ts", "settings/worker.json"]
 
 - id: worker-env-strips-anthropic

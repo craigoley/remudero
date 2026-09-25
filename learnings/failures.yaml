@@ -200,7 +200,8 @@
   cited: "2026-09-07"
 - id: ls-remote-grep-matches-the-sha-column
   subsystem: dispatch
-  lifecycle: active
+  # knowledge gardener: retire ls-remote-grep-matches-the-sha-column
+  lifecycle: superseded
   files: [ src/lib/status.ts, src/lib/sweep.ts, src/lib/drain.ts, src/run-task.ts ]
   fact: >-
     git ls-remote prints TWO columns, sha then ref, so piping it through a bare

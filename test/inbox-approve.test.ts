@@ -143,6 +143,92 @@ test("approveProposal: a READY classification produces exactly ONE branch call a
   assert.equal(lines[0].pr_url, "https://github.com/craigoley/remudero/pull/500");
 });
 
+function approveThroughShardWriter(fragmentYaml: string) {
+  const written: string[] = [];
+  let prCalls = 0;
+  const gateway: RatifyGateway = {
+    createRatificationBranch(payload) {
+      writeRatificationShards("/worktree", payload.fragmentYaml, payload.proposalId, {
+        mkdirSync: () => {},
+        writeFileSync: (_path, contents) => { written.push(contents); },
+      }, join);
+      return "run-approve-P-READY";
+    },
+    openPlanPr() { prCalls++; return "https://github.com/craigoley/remudero/pull/900"; },
+  };
+  const classification: InboxClassification = {
+    ...readyClassification(),
+    draft: { ...CACHED_DRAFT, fragmentYaml },
+  };
+  return { run: () => approveProposal(classification, gateway, { ledgerPath: ledgerPath(), runId: "RUN-RELINT" }), written, prCalls: () => prCalls };
+}
+
+test("an approved draft with a shared file-path proof files one title proof per criterion", () => {
+  const fragment = [
+    "- id: W1-T900", "  title: proof repair", "  repo: remudero", "  type: implement",
+    "  origin: architect", "  files: [src/lib/inbox.ts]", "  acceptance:",
+    '    - claim: "first action works"', '      proof: "unit test: test/inbox-approve.test.ts"',
+    '    - claim: "second action works"', '      proof: "unit test: test/inbox-approve.test.ts"', "",
+  ].join("\n");
+  const approval = approveThroughShardWriter(fragment);
+  assert.equal(approval.run().ok, true);
+  assert.equal(approval.prCalls(), 1);
+  assert.equal(approval.written.length, 1);
+  assert.match(approval.written[0], /proof: "unit test: first action works"/);
+  assert.match(approval.written[0], /proof: "unit test: second action works"/);
+  assert.doesNotMatch(approval.written[0], /proof: "unit test: test\/inbox-approve\.test\.ts"/);
+});
+
+test("an approved draft below the sizing bar files at risk high with a declared span", () => {
+  const fragment = [
+    "- id: W1-T901", "  title: broad task", "  repo: remudero", "  type: implement",
+    "  origin: architect", "  risk: medium", "  files: [src/lib/inbox.ts, src/lib/plan.ts]", "",
+  ].join("\n");
+  const approval = approveThroughShardWriter(fragment);
+  assert.equal(approval.run().ok, true);
+  assert.equal(approval.prCalls(), 1);
+  assert.match(approval.written[0], /^  risk: high$/m);
+  assert.match(approval.written[0], /^  band_meaning: span$/m);
+
+  const withoutRisk = approveThroughShardWriter(fragment.replace("  risk: medium\n", ""));
+  assert.equal(withoutRisk.run().ok, true);
+  assert.match(withoutRisk.written[0], /^  risk: high$/m);
+  assert.match(withoutRisk.written[0], /^  band_meaning: span$/m);
+});
+
+test("an approved draft with any other lint violation is refused before a PR opens", () => {
+  const fragment = [
+    "- id: W1-T901", "  title: valid sibling", "  repo: remudero", "  type: implement",
+    "  origin: architect", "  files: [src/lib/inbox.ts]",
+    "- id: W1-T902", "  title: invalid proof", "  repo: remudero", "  type: implement",
+    "  origin: architect", "  files: [src/lib/inbox.ts]", "  acceptance:",
+    '    - claim: "the action works"', '      proof: "some prose without a dialect"', "",
+  ].join("\n");
+  const approval = approveThroughShardWriter(fragment);
+  assert.throws(() => approval.run(), /\[proof-dialect\]/);
+  assert.equal(approval.prCalls(), 0);
+  assert.deepEqual(approval.written, []);
+
+  const missingBand = approveThroughShardWriter([
+    "- id: W1-T903", "  title: high risk without meaning", "  repo: remudero", "  type: implement",
+    "  origin: architect", "  risk: high", "  files: [src/lib/inbox.ts]", "",
+  ].join("\n"));
+  assert.throws(() => missingBand.run(), /\[sizing\].*band_meaning/);
+  assert.equal(missingBand.prCalls(), 0);
+});
+
+test("an approved draft whose sizing repair leaves unparseable YAML is refused as draft-parse before a PR opens", () => {
+  // No `risk:` key but an authored `band_meaning:` — the missing-risk repair appends a second band_meaning,
+  // so the re-parse after repair throws (duplicate map key) and must refuse, not file a broken shard.
+  const approval = approveThroughShardWriter([
+    "- id: W1-T904", "  title: broad task with a meaning but no risk", "  repo: remudero", "  type: implement",
+    "  origin: architect", "  band_meaning: span", "  files: [src/lib/inbox.ts, src/lib/plan.ts]", "",
+  ].join("\n"));
+  assert.throws(() => approval.run(), /refusing to file .* draft-parse: .*unique/i);
+  assert.equal(approval.prCalls(), 0);
+  assert.deepEqual(approval.written, []);
+});
+
 test("W1-T190 (acceptance 1): after approveProposal succeeds — the exact call `rmd approve` makes — a FRESH classification of the SAME proposal, off the SAME ledger, reports it as ratified, never READY again (the registry's own copy of the proposal is UNCHANGED here, exactly the 'write never happened' drift the P19 incident hit)", () => {
   const gateway = fakeGateway();
   const path = ledgerPath();
@@ -608,7 +694,7 @@ test("integration: two ratification PRs filed together share no file — two app
     const branch = `run-approve-${proposalId}`;
     const payload: RatificationPayload = {
       proposalId,
-      fragmentYaml: `- id: ${taskId}\n  title: ${title}\n  repo: remudero\n`,
+      fragmentYaml: `- id: ${taskId}\n  title: ${title}\n  repo: remudero\n  type: implement\n  origin: architect\n  files: [src/lib/inbox.ts]\n`,
       stampLine: `- ${proposalId} (codeql) — RATIFIED 2026-09-23 -> ${taskId}.`,
     };
     const draft: DraftedCandidate = { ...payload, anchorFingerprint: "landed::MASTER-PLAN.md" };

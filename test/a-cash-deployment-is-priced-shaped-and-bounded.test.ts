@@ -89,7 +89,7 @@ test("terra leads NOTHING — it is the escalation behind luna, never a lane's f
       if (capability === "frontier") {
         frontierRows++;
         const firstReady = row.find((id) => !OPENWEIGHT_AWAITING_READINESS.has(id));
-        assert.equal(firstReady, "gpt-5.6-luna", `frontier.${effort} leads (among ready deployments) with luna, which replaced gpt-5-mini`);
+        assert.equal(firstReady, "gpt-6-luna", `frontier.${effort} leads with the priced and shaped GPT-6 Luna`);
         assert.ok(row.includes("gpt-5.6-terra"), `frontier.${effort} keeps terra reachable as the escalation`);
       }
     }

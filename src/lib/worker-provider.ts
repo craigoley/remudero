@@ -721,6 +721,8 @@ export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightConte
   // `dailyCapUsd` honest. Raise it only when a long-context rate has been read AND priced.
   "gpt-5.6-luna": { totalTokens: 128_000, readAt: "2026-09-16" },
   "gpt-5.6-terra": { totalTokens: 128_000, readAt: "2026-09-16" },
+  // Azure's 922K input limit is lower than the combined window; reserve 8K for output.
+  "gpt-6-luna": { totalTokens: 922_000, readAt: "2026-09-24" },
 };
 
 /**
@@ -2050,6 +2052,8 @@ export async function spawnCodexWorker(
 /** Azure deployment authentication is process-local to the daemon. It is deliberately not a
  * config field and never enters a worker environment or a ledger row. */
 export const OPENWEIGHT_API_KEY_ENV = "RMD_OPENWEIGHT_API_KEY";
+export const FOUNDRY_CLAUDE_API_KEY_ENV = "RMD_FOUNDRY_CLAUDE_API_KEY";
+export const FOUNDRY_CLAUDE_ENDPOINT_ENV = "RMD_FOUNDRY_CLAUDE_ENDPOINT";
 /**
  * PRIMARY CONTROL: gpt-oss-120b is a reasoning model; 1,500 truncated a shard mid-string in the
  * live probe. The live cash union then recorded 54 replies truncated at the 5,000-token ceiling
@@ -2187,6 +2191,10 @@ export const OPENWEIGHT_OUTPUT_CONTRACT = [
 export interface OpenWeightPrice {
   inputUsdPerMillion: number;
   outputUsdPerMillion: number;
+  /** Upper bound used before transport when a provider can bill cache writes above base input. */
+  reservationInputUsdPerMillion?: number;
+  /** Standard requests above this input size bill the whole request at the long-context rates. */
+  longContext?: { thresholdInputTokens: number; inputUsdPerMillion: number; outputUsdPerMillion: number };
   /** ISO date the published figures were last read. Not decorative: it is what lets a later
    *  reader tell a stale row from a current one without diffing against the vendor's page. */
   readAt: string;
@@ -2213,7 +2221,22 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   // TERRA IS 10x LUNA ON BOTH AXES. It exists for the frontier band alone; nothing else may lead
   // with it. Sol ($5.00/$30.00) is deliberately NOT here -- 2.5x terra for the same band.
   "gpt-5.6-terra": { inputUsdPerMillion: 2.0, outputUsdPerMillion: 12.0, readAt: "2026-09-16" },
+  // Foundry Global Standard, 2026-09-24; requests above 272K input use long-context rates.
+  "gpt-6-luna": {
+    inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5,
+    longContext: { thresholdInputTokens: 272_000, inputUsdPerMillion: 0.2, outputUsdPerMillion: 0.75 },
+    readAt: "2026-09-24",
+  },
 };
+
+/** Separate protocol and provider, but the same atomic cash allowance. */
+export const FOUNDRY_OPUS_PRICE: OpenWeightPrice = {
+  inputUsdPerMillion: 4, outputUsdPerMillion: 20,
+  reservationInputUsdPerMillion: 8, readAt: "2026-09-24",
+};
+
+/** PRIMARY CONTROL: the UTC-day Opus limit inside the shared cash allowance. */
+export const FOUNDRY_OPUS_DAILY_CAP_USD = { normal: 5, squeezed: 10 } as const;
 
 /**
  * Per-deployment request TEMPERATURE, because a deployment may REFUSE a value rather than clamp it.
@@ -2291,6 +2314,7 @@ export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
   // measured 2026-09-16 -- the same refusal nano gives, so the field is omitted rather than sent.
   "gpt-5.6-luna": null,
   "gpt-5.6-terra": null,
+  "gpt-6-luna": null,
 };
 
 /** Raised INSTEAD of guessing a request shape. Thrown before the transport, like its pricing
@@ -2366,7 +2390,7 @@ export function openWeightDeploymentReady(deployment: string, nowMs = systemCloc
 /** Successors listed in the cash ladder ahead of their deployment and price (W1-T4079). The one
  *  exemption from "every listed deployment is priced, shaped and bounded"; selection passes over them
  *  until {@link openWeightDeploymentReady}. Remove an id once its rows exist. */
-export const OPENWEIGHT_AWAITING_READINESS: ReadonlySet<string> = new Set(["gpt-6-luna"]);
+export const OPENWEIGHT_AWAITING_READINESS: ReadonlySet<string> = new Set();
 
 /** Raised INSTEAD of pricing a deployment by a neighbour's row. Thrown before the transport, so a
  *  caller seeing it knows no paid request was made against an unknown price. */
@@ -2390,7 +2414,7 @@ export class OpenWeightUnpricedDeploymentError extends RmdError {
  *  settlement — resolves through here, so none of them can quietly disagree about what a
  *  deployment costs. An absent row FAILS CLOSED; it never falls back to another row. */
 export function openWeightPriceFor(deployment: string): OpenWeightPrice {
-  const row = OPENWEIGHT_PRICES[deployment];
+  const row = deployment === "claude-opus-5-5" ? FOUNDRY_OPUS_PRICE : OPENWEIGHT_PRICES[deployment];
   if (row === undefined) throw new OpenWeightUnpricedDeploymentError(deployment);
   return row;
 }
@@ -2398,7 +2422,8 @@ export function openWeightPriceFor(deployment: string): OpenWeightPrice {
 /** Dollars for one request's measured usage, at that deployment's own rate. */
 export function openWeightUsageUsd(deployment: string, promptTokens: number, completionTokens: number): number {
   const price = openWeightPriceFor(deployment);
-  return (promptTokens * price.inputUsdPerMillion + completionTokens * price.outputUsdPerMillion) / 1_000_000;
+  const rate = price.longContext && promptTokens > price.longContext.thresholdInputTokens ? price.longContext : price;
+  return (promptTokens * rate.inputUsdPerMillion + completionTokens * rate.outputUsdPerMillion) / 1_000_000;
 }
 
 /** The allowance file, a pure function of `config.root` the way {@link
@@ -2440,7 +2465,7 @@ export function openWeightUtcDay(atIso: string): string {
  */
 export interface OpenWeightAllowanceState {
   utcDay: string;
-  reservations: Record<string, { reservedUsd: number; settledUsd: number | null; settledReason?: string }>;
+  reservations: Record<string, { reservedUsd: number; settledUsd: number | null; settledReason?: string; deployment?: string }>;
 }
 
 /** Committed spend = the settled figure where one was read back, the conservative reservation
@@ -2469,7 +2494,8 @@ export function openWeightReservationUsd(
   // input, so a caller that turns one on MUST declare a ceiling for what it may retrieve or the
   // reservation silently stops being an upper bound. W1-T3558.
   const inputTokenCeiling = requestBodyBytes + Math.max(0, extraInputTokens);
-  return (inputTokenCeiling * price.inputUsdPerMillion + OPENWEIGHT_MAX_COMPLETION_TOKENS * price.outputUsdPerMillion) / 1_000_000;
+  const rate = price.longContext && inputTokenCeiling > price.longContext.thresholdInputTokens ? price.longContext : price;
+  return (inputTokenCeiling * (price.reservationInputUsdPerMillion ?? rate.inputUsdPerMillion) + OPENWEIGHT_MAX_COMPLETION_TOKENS * rate.outputUsdPerMillion) / 1_000_000;
 }
 
 /** Raised INSTEAD of sending a paid request. It is thrown before the transport, never after, so a
@@ -2638,8 +2664,17 @@ export function reserveOpenWeightBudget(
     if (committedUsd + wantUsd > capUsd) {
       throw new OpenWeightAllowanceExhaustedError({ committedUsd, capUsd, wantUsd, utcDay });
     }
+    if (input.deployment === "claude-opus-5-5") {
+      const opusCapUsd = input.squeezed ? FOUNDRY_OPUS_DAILY_CAP_USD.squeezed : FOUNDRY_OPUS_DAILY_CAP_USD.normal;
+      const opusCommittedUsd = openWeightCommittedUsd({
+        utcDay, reservations: Object.fromEntries(Object.entries(state.reservations).filter(([, row]) => row.deployment === "claude-opus-5-5")),
+      });
+      if (opusCommittedUsd + wantUsd > opusCapUsd) {
+        throw new OpenWeightAllowanceExhaustedError({ committedUsd: opusCommittedUsd, capUsd: opusCapUsd, wantUsd, utcDay });
+      }
+    }
     return {
-      next: { ...state, reservations: { ...state.reservations, [input.requestId]: { reservedUsd: wantUsd, settledUsd: null } } },
+      next: { ...state, reservations: { ...state.reservations, [input.requestId]: { reservedUsd: wantUsd, settledUsd: null, deployment: input.deployment } } },
       result: { reservedUsd: wantUsd, committedUsd: committedUsd + wantUsd, capUsd },
     };
   }, input.beforeCommit);
@@ -3236,6 +3271,9 @@ function openWeightResult(input: {
   turns: number;
   promptTokens: number;
   completionTokens: number;
+  actualCostUsd?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
   error?: unknown;
   budgetReservedUsd?: number;
   budgetSettledUsd?: number;
@@ -3259,13 +3297,13 @@ function openWeightResult(input: {
     // `spawnOpenWeightWorker` instead of being returned — collapsing the very contract the catch
     // exists to hold. A run that never reached the transport has no tokens, hence no cost, and
     // saying so requires no rate.
-    costUsd:
+    costUsd: input.actualCostUsd ?? (
       (input.promptTokens === 0 && input.completionTokens === 0
         ? 0
         : openWeightUsageUsd(input.model, input.promptTokens, input.completionTokens)) +
       // Brokered searches are billed on a DIFFERENT API than the conversation, so their tokens are
       // not in `promptTokens`/`completionTokens` and pricing those alone would understate the run.
-      (input.webSearchUsd ?? 0),
+      (input.webSearchUsd ?? 0)),
     numTurns: input.turns,
     maxTurns: undefined,
     text,
@@ -3278,7 +3316,7 @@ function openWeightResult(input: {
     childEnvKeys: [],
     model: input.model,
     effort: input.effort,
-    tokens: { input: input.promptTokens, output: input.completionTokens, cacheRead: 0, cacheCreation: 0 },
+    tokens: { input: input.promptTokens, output: input.completionTokens, cacheRead: input.cacheReadTokens ?? 0, cacheCreation: input.cacheCreationTokens ?? 0 },
     modelUsage: {},
     compactionEvents: [],
     compactionFailures: [],
@@ -3294,6 +3332,184 @@ function openWeightResult(input: {
     webSearchRefused: input.webSearchRefused ?? 0,
     webSearchUsd: input.webSearchUsd ?? 0,
   };
+}
+
+function foundryOpusEndpoint(env: NodeJS.ProcessEnv): string {
+  const raw = env[FOUNDRY_CLAUDE_ENDPOINT_ENV];
+  if (!raw) throw new Error(`cash Opus requires ${FOUNDRY_CLAUDE_ENDPOINT_ENV}`);
+  const url = new URL(raw);
+  if (url.protocol !== "https:" || url.pathname.replace(/\/$/, "") !== "/anthropic" || url.search || url.hash) {
+    throw new Error("cash Opus requires an HTTPS Foundry /anthropic base endpoint");
+  }
+  return new URL("v1/messages", `${url.toString().replace(/\/$/, "")}/`).toString();
+}
+
+function foundryOpusUsageUsd(usage: {
+  input_tokens: number; output_tokens: number;
+  cache_read_input_tokens?: number; cache_creation_input_tokens?: number;
+}): number {
+  // Price cache writes at the dearer 1h rate so a later cache_control cannot undercount.
+  return (usage.input_tokens * 4 + (usage.cache_read_input_tokens ?? 0) * 0.2 +
+    (usage.cache_creation_input_tokens ?? 0) * 8 + usage.output_tokens * 20) / 1_000_000;
+}
+
+function validFoundryTokenCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+export async function spawnFoundryOpusWorker(
+  args: OpenWeightSpawnArgs,
+  config: Config,
+  selection: Pick<OpenWeightModelSelection, "model" | "effort">,
+): Promise<OpenWeightWorkerResult> {
+  const clock = args.clock ?? systemClock;
+  const startedAt = clock.now();
+  let turns = 0;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheCreationTokens = 0;
+  let spentUsd = 0;
+  let budgetReservedUsd = 0;
+  let budgetSettledUsd = 0;
+  let text = "";
+  let sessionId = "";
+  let pending: { requestId: string; reservedUsd: number } | undefined;
+  const requestPrefix = `${args.runId ?? args.taskId ?? "foundry-opus"}-${startedAt}-${randomUUID()}`;
+  try {
+    if (selection.model !== "claude-opus-5-5" || args.cashSqueezed !== true) {
+      throw new Error("cash Opus requires an actual blocked-subscription squeeze");
+    }
+    if (args.capabilityGrant) {
+      const verification = verifyCapabilityGrant(args.capabilityGrant.store, args.capabilityGrant.request);
+      if (!verification.ok) throw new CapabilityGrantRefusedError(verification.reason, verification.code, args.capabilityGrant.request.grantId);
+    }
+    if (args.responseFormat !== undefined) throw new Error("cash Opus structured output is not declared by the Foundry adapter");
+    const env = args.env ?? process.env;
+    const key = env[FOUNDRY_CLAUDE_API_KEY_ENV];
+    if (!key) throw new Error(`cash Opus requires ${FOUNDRY_CLAUDE_API_KEY_ENV}`);
+    const endpoint = foundryOpusEndpoint(env);
+    const tools = openWeightTools(args.tools, false).map((row) => {
+      const fn = row.function as { name: string; description: string; parameters: Record<string, unknown> };
+      return { name: fn.name, description: fn.description, input_schema: fn.parameters };
+    });
+    const declaredNames = new Set(tools.map((tool) => tool.name));
+    const checkEnv = openWeightCheckEnv(args.workerHome, env);
+    const maxTurns = args.maxTurns ?? 1;
+    if (!Number.isInteger(maxTurns) || maxTurns <= 0) throw new Error("cash Opus maxTurns must be a positive integer");
+    const messages: Array<{ role: string; content: unknown }> = [{ role: "user", content: args.prompt }];
+    for (;;) {
+      turns += 1;
+      const body = JSON.stringify({
+        model: selection.model,
+        system: OPENWEIGHT_OUTPUT_CONTRACT,
+        messages,
+        max_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS,
+        output_config: { effort: selection.effort === "default" ? "medium" : selection.effort },
+        ...(tools.length ? { tools } : {}),
+      });
+      const requestId = `${requestPrefix}-${turns}`;
+      const reservation = reserveOpenWeightBudget(config, {
+        requestId, deployment: selection.model, requestBodyBytes: Buffer.byteLength(body, "utf8"),
+        atIso: clock.iso(), squeezed: true,
+      });
+      budgetReservedUsd += reservation.reservedUsd;
+      pending = { requestId, reservedUsd: reservation.reservedUsd };
+      const abort = new AbortController();
+      const timeoutMs = args.requestTimeoutMs ?? OPENWEIGHT_REQUEST_TIMEOUT_MS;
+      const deadline = setTimeout(() => abort.abort(), timeoutMs);
+      let response: Response;
+      try {
+        response = await (args.fetchImpl ?? fetch)(endpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+          body, signal: abort.signal,
+        });
+      } finally {
+        clearTimeout(deadline);
+      }
+      if (response.status === 404) throw new OpenWeightDeploymentNotFoundError(selection.model);
+      if (!response.ok) throw new Error(`cash Opus request failed with HTTP ${response.status}`);
+      const payload = await response.json() as {
+        id?: unknown; stop_reason?: unknown; content?: Array<Record<string, unknown>>;
+        usage?: { input_tokens?: unknown; output_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown };
+      };
+      sessionId = typeof payload.id === "string" ? payload.id : sessionId;
+      const usage = payload.usage;
+      if (!usage || !validFoundryTokenCount(usage.input_tokens) || !validFoundryTokenCount(usage.output_tokens) ||
+          (usage.cache_read_input_tokens !== undefined && !validFoundryTokenCount(usage.cache_read_input_tokens)) ||
+          (usage.cache_creation_input_tokens !== undefined && !validFoundryTokenCount(usage.cache_creation_input_tokens))) {
+        // The provider may have billed this request. Keep the conservative reservation.
+        spentUsd += reservation.reservedUsd;
+        budgetSettledUsd += reservation.reservedUsd;
+      } else {
+        const measured = {
+          input_tokens: usage.input_tokens, output_tokens: usage.output_tokens,
+          cache_read_input_tokens: typeof usage.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : 0,
+          cache_creation_input_tokens: typeof usage.cache_creation_input_tokens === "number" ? usage.cache_creation_input_tokens : 0,
+        };
+        const actualUsd = foundryOpusUsageUsd(measured);
+        if (actualUsd > reservation.reservedUsd) throw new Error("cash Opus usage exceeded its conservative reservation");
+        settleOpenWeightBudget(config, { requestId, actualUsd, atIso: clock.iso() });
+        promptTokens += measured.input_tokens;
+        completionTokens += measured.output_tokens;
+        cacheReadTokens += measured.cache_read_input_tokens;
+        cacheCreationTokens += measured.cache_creation_input_tokens;
+        spentUsd += actualUsd;
+        budgetSettledUsd += actualUsd;
+      }
+      pending = undefined;
+      if (!Array.isArray(payload.content)) throw new Error("cash Opus response has no content blocks");
+      if (payload.stop_reason === "max_tokens") throw new OpenWeightTruncatedReplyError("max_tokens", completionTokens);
+      if (payload.stop_reason === "refusal") throw new Error("cash Opus refused the request");
+      text = payload.content.filter((block) => block.type === "text" && typeof block.text === "string")
+        .map((block) => block.text as string).join("\n");
+      const calls = payload.content.filter((block) => block.type === "tool_use");
+      if (calls.length === 0) {
+        if (payload.stop_reason !== "end_turn") throw new Error(`cash Opus ended without a complete turn (${String(payload.stop_reason)})`);
+        return reconcileBoundedProviderAttempt(openWeightResult({
+          model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns,
+          promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens,
+          actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd,
+        }), args.externalEffect);
+      }
+      if (payload.stop_reason !== "tool_use") throw new Error(`cash Opus returned a tool call with stop_reason=${String(payload.stop_reason)}`);
+      if (turns >= maxTurns) throw new Error(`cash Opus tool loop exceeded maxTurns=${maxTurns}`);
+      messages.push({ role: "assistant", content: payload.content });
+      const results: Array<Record<string, unknown>> = [];
+      for (const call of calls) {
+        if (typeof call.id !== "string" || typeof call.name !== "string" || !declaredNames.has(call.name) ||
+            !call.input || typeof call.input !== "object" || Array.isArray(call.input)) {
+          throw new Error("cash Opus requested an undeclared or malformed tool");
+        }
+        let result: unknown;
+        try {
+          result = executeOpenWeightTool(call.name, call.input as Record<string, unknown>, args.cwd, checkEnv, args.workerHome, args.runCheck);
+        } catch (error) {
+          // A failed tool invalidates this chain; never turn its error into success.
+          throw new Error(`cash Opus tool ${call.name} failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        results.push({ type: "tool_result", tool_use_id: call.id, content: JSON.stringify(result) });
+      }
+      messages.push({ role: "user", content: results });
+    }
+  } catch (error) {
+    // An unknown transport outcome remains charged. Only a definite 404 is known to cost zero.
+    if (pending) {
+      const billed = error instanceof OpenWeightDeploymentNotFoundError ? 0 : pending.reservedUsd;
+      if (billed === 0) settleOpenWeightBudget(config, { requestId: pending.requestId, actualUsd: 0, atIso: clock.iso(), reason: "deployment not found" });
+      spentUsd += billed;
+      budgetSettledUsd += billed;
+    }
+    return reconcileBoundedProviderAttempt(openWeightResult({
+      model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns,
+      promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens,
+      actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd,
+      budgetRefused: error instanceof OpenWeightAllowanceExhaustedError,
+      ...(error instanceof OpenWeightDeploymentNotFoundError ? { deploymentAbsent: selection.model } : {}),
+      error: error instanceof Error ? error.message : String(error),
+    }), args.externalEffect);
+  }
 }
 
 async function reconcileBoundedProviderAttempt(
@@ -3317,6 +3533,7 @@ export async function spawnOpenWeightWorker(
   config: Config,
   selection: Pick<OpenWeightModelSelection, "model" | "effort">,
 ): Promise<OpenWeightWorkerResult> {
+  if (selection.model === "claude-opus-5-5") return spawnFoundryOpusWorker(args, config, selection);
   const clock = args.clock ?? systemClock;
   const startedAt = clock.now();
   let promptTokens = 0;
@@ -3385,6 +3602,8 @@ export async function spawnOpenWeightWorker(
         messages,
         ...temperatureField,
         ...responseFormatField,
+        // GPT-6 Chat Completions accepts function tools only at reasoning_effort=none.
+        ...(selection.model === "gpt-6-luna" && declaredNames.size > 0 ? { reasoning_effort: "none" } : {}),
         max_completion_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS,
         ...(declaredNames.size > 0 ? { tools, tool_choice: "auto" } : {}),
       });

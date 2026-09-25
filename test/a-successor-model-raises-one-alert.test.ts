@@ -44,8 +44,9 @@ test("W1-T4080: one alert per successor state, naming the next step", async () =
     const second = await watchSuccessorModels(base);
     assert.equal(first.alerted.length, 1);
     assert.equal(second.alerted.length, 0, "an unchanged state is deduplicated from durable state");
-    assert.equal(alerts[0]?.state, "deployed-unpriced");
-    assert.match(alerts[0]?.nextStep ?? "", /add gpt-6-luna/);
+    assert.equal(alerts[0]?.state, "ready", "the now-priced and shaped deployment has no setup step");
+    assert.equal(alerts[0]?.nextStep, "no action — routing is ready");
+    assert.equal(alerts[0]?.actionable, false);
     assert.ok(ledger.some((row) => row.step === "model.successor.read"));
     assert.ok(ledger.some((row) => row.step === "model.successor.alerted"));
 
