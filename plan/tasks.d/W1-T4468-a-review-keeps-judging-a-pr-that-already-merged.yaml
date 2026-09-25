@@ -14,6 +14,7 @@
   files:
     - src/run-task.ts
     - src/lib/review.ts
+    - test/review-closed-pending-short-circuit.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -42,13 +43,13 @@
     src/run-task.ts is large; add no new module-level comment blocks.
   acceptance:
     - claim: "a review whose pending post is refused because the PR merged stops before it fetches the diff or spawns the reviewer"
-      proof: "unit test: a review stops when its pending post finds the pr merged"
+      proof: "unit test: test/review-closed-pending-short-circuit.test.ts"
     - claim: "a review whose pending post is refused because the PR closed stops the same way"
-      proof: "unit test: a review stops when its pending post finds the pr closed"
+      proof: "unit test: test/review-closed-pending-short-circuit.test.ts"
     - claim: "an already-pending refusal still lets the review run"
-      proof: "unit test: an already pending refusal does not stop the review"
+      proof: "unit test: test/review-closed-pending-short-circuit.test.ts"
     - claim: "the stop is ledgered with the lifecycle that caused it"
-      proof: "unit test: the stood down row names the merged lifecycle"
+      proof: "unit test: test/review-closed-pending-short-circuit.test.ts"
   falsifier: |
     CLOSE IF runReview on main already returns before `gh pr diff` when postReviewPending reports a merged or closed
     lifecycle, or if the core ledger shows no review run continuing past an "already merged" refusal over a week.
