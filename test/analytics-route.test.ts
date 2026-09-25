@@ -242,6 +242,7 @@ test("streamed analytics: a corrupt archive is skipped, best-effort, never a cra
     writeLive(dir, ['{"ts":"2026-08-01T00:00:00.000Z","task_id":"CLI","run_id":"CLI-1","step":"cli.invoked","verb":"status"}']);
     const snapshot = await deriveAnalyticsSnapshotFromLedger(dir, fixedClock(Date.parse("2026-08-01T01:00:00.000Z")));
     assert.deepEqual(snapshot.invocationsByVerb, { status: 1 }, "the live row still reads even though the corrupt archive could not be opened");
+    assert.equal(snapshot.benchmarkEvidence.reason, "ledger-source-unreadable", "quality cannot claim a complete corpus from a partial archive read");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -507,6 +508,7 @@ test("deriveAnalyticsSnapshotFromLedger streams a replaying rotation union to th
     assert.deepEqual(actual, expected, "streaming changes retention, not any of the four analytics answers");
 
     const first = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, fixedClock(Date.parse(now)));
+    assert.equal(first.snapshot.benchmarkEvidence.assignments, 1);
     writeAnalyticsCheckpoint(dir, first.checkpoint);
     const resumedLine = '{"ts":"2026-08-14T00:04:00.000Z","task_id":"W1-T2","run_id":"R2","step":"run.start"}';
     writeLive(dir, [invoked, verdict, resumedLine]);
@@ -518,6 +520,15 @@ test("deriveAnalyticsSnapshotFromLedger streams a replaying rotation union to th
     );
     const fullAfterResume = await deriveAnalyticsSnapshotFromLedger(dir, fixedClock(Date.parse("2026-08-14T03:01:00.000Z")));
     assert.deepEqual(resumed.snapshot, fullAfterResume, "the checkpointed replay remains identical after a live-tail append");
+    assert.deepEqual(resumed.snapshot.benchmarkEvidence, fullAfterResume.benchmarkEvidence, "quality counters also resume without losing the archived assignment");
+
+    const legacy = JSON.parse(JSON.stringify(first.checkpoint)) as typeof first.checkpoint;
+    delete legacy.state.routingTelemetry.benchmarkVersion;
+    delete legacy.state.routingTelemetry.benchmarkCounters;
+    const rebuilt = await deriveAnalyticsSnapshotFromCheckpointedLedger(
+      dir, fixedClock(Date.parse("2026-08-14T03:01:00.000Z")), undefined, legacy,
+    );
+    assert.equal(rebuilt.snapshot.benchmarkEvidence.assignments, 1, "an old checkpoint must replay the archived assignment once for honest coverage");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -689,4 +700,100 @@ test("GET /v1/analytics is read-scoped and answers 200 from its process-owned sn
     assert.equal(status, 200);
     const parsed = JSON.parse(body) as AnalyticsSnapshot;
     assert.deepEqual(parsed, expected, "the route returns the already-derived process value without a reader capability");
+});
+
+test("analytics route serves benchmark quality beside routing telemetry", async () => {
+  const snapshot = deriveAnalyticsSnapshot([
+    { step: "run.start", run_id: "private-run", task_class: "src", risk: "low", type: "implement" },
+    {
+      step: "worker.assignment", run_id: "private-run",
+      worker_assignment: {
+        id: "private-assignment",
+        requested: { model: "model-a" },
+        selected: { provider: "codex", model: "model-a", effort: "medium", accountLabel: "private-account" },
+        routing: { mode: "multi-provider" },
+      },
+    },
+    { step: "implement.done", selection_assignment_id: "private-assignment", model: "model-a", total_cost_usd: 999 },
+    {
+      step: "verdict", selection_assignment_id: "private-assignment", model: "model-a", success: true,
+      served_model: "model-a", billing_mode: "api", total_cost_usd: 0.25, worker_duration_ms: 120,
+      tokens: { input: 20, output: 5, cacheRead: 0, cacheCreation: 0 },
+    },
+  ], "2026-09-25T20:00:00.000Z");
+  const route = buildAnalyticsRoute({ currentSnapshot: () => snapshot });
+  let status = 0;
+  let body = "";
+  const res = {
+    writeHead(code: number) { status = code; },
+    end(chunk: string) { body = chunk; },
+  } as unknown as ServerResponse;
+  await route.handler({ url: "/v1/analytics?projectionVersion=benchmark-quality-v1" } as never, res, { params: {} });
+  assert.equal(route.scope, "read");
+  assert.equal(status, 200);
+  const quality = JSON.parse(body) as AnalyticsSnapshot["benchmarkEvidence"];
+  assert.equal(quality.version, "benchmark-quality-v1");
+  assert.equal(quality.joinedTerminalOutcomes, 1);
+  assert.equal(quality.accounting.apiRequestCostUsd, 0.25);
+  assert.equal(quality.coverage.taskClass.observed, 1);
+  assert.equal(quality.coverage.risk.observed, 1);
+  assert.doesNotMatch(body, /private-run|private-assignment|private-account|999/);
+  assert.equal(snapshot.routingTelemetry.buckets[0]?.totalCostUsd, 0.25, "routing-v1 still observes only the terminal");
+  assert.doesNotMatch(JSON.stringify(snapshot), /benchmarkEvidence/, "the full payload stays byte-slim");
+});
+
+test("benchmark quality joins terminal evidence exactly once across archived and live replay", async () => {
+  const dir = tmpStateDir("benchmark-quality-union-");
+  try {
+    const assignment = JSON.stringify({
+      step: "worker.assignment", run_id: "private-run", ts: "2026-09-25T19:00:00.000Z",
+      worker_assignment: { id: "a", requested: { model: "model-a" }, selected: { provider: "codex", model: "model-a", effort: "medium" }, routing: { mode: "multi-provider" } },
+    });
+    const terminal = JSON.stringify({
+      step: "verdict", run_id: "private-run", selection_assignment_id: "a", model: "model-a", success: true,
+      served_model: "model-a", tokens: { input: 2, output: 1 }, billing_mode: "api",
+      total_cost_usd: 0.01, worker_duration_ms: 100, ts: "2026-09-25T19:01:00.000Z",
+    });
+    writeGzArchive(dir, "ledger.2026-09-25T19-00-00-000Z.ndjson.gz", [assignment]);
+    writePlainArchive(dir, "ledger.2026-09-25T19-01-00-000Z.ndjson", [assignment]);
+    writeLive(dir, [
+      JSON.stringify({ step: "implement.done", selection_assignment_id: "a", model: "model-a", total_cost_usd: 99 }),
+      terminal,
+      JSON.stringify({ ...JSON.parse(terminal), total_cost_usd: 900, ts: "2026-09-25T19:02:00.000Z" }),
+    ]);
+    const { snapshot } = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, fixedClock(Date.parse("2026-09-25T20:00:00.000Z")));
+    assert.equal(snapshot.benchmarkEvidence.assignments, 1);
+    assert.equal(snapshot.benchmarkEvidence.sourceRows.assignments, 1, "byte-identical archive replay was removed by the existing union");
+    assert.equal(snapshot.benchmarkEvidence.joinedTerminalOutcomes, 1);
+    assert.equal(snapshot.benchmarkEvidence.duplicates.terminalRows, 1);
+    assert.equal(snapshot.benchmarkEvidence.accounting.apiRequestCostUsd, 0.01, "neither an intermediate row nor a second verdict can overwrite the first terminal");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("benchmark quality reports an unreadable archive as unavailable, not an empty healthy cohort", async () => {
+  const dir = tmpStateDir("benchmark-quality-corrupt-");
+  try {
+    writeFileSync(join(dir, "ledger.2026-09-25T19-00-00-000Z.ndjson.gz"), "not gzip");
+    writeLive(dir, [JSON.stringify({ step: "worker.assignment", worker_assignment: { id: "a", selected: { provider: "codex", model: "model-a" }, routing: { mode: "claude-only" } } })]);
+    const { snapshot } = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, fixedClock(Date.parse("2026-09-25T20:00:00.000Z")));
+    assert.equal(snapshot.benchmarkEvidence.state, "unavailable");
+    assert.equal(snapshot.benchmarkEvidence.reason, "ledger-source-unreadable");
+    assert.equal(snapshot.routingTelemetry.assignmentsObserved, 1, "existing routing telemetry stays best effort");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("benchmark quality direct ledger read reports a missing source, not a healthy empty cohort", async () => {
+  const dir = tmpStateDir("benchmark-quality-missing-");
+  try {
+    const snapshot = await deriveAnalyticsSnapshotFromLedger(dir, fixedClock(Date.parse("2026-09-25T20:00:00.000Z")));
+    assert.equal(snapshot.benchmarkEvidence.state, "unavailable");
+    assert.equal(snapshot.benchmarkEvidence.reason, "ledger-source-missing");
+    assert.equal(snapshot.benchmarkEvidence.assignments, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
