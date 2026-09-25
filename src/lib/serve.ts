@@ -68,6 +68,13 @@ import {
   INCIDENT_INGEST_ROUTE_METHOD,
   INCIDENT_INGEST_ROUTE_PATH,
 } from "./incident-events.js";
+import {
+  ciIncidentEventLedgerLine,
+  createCiIncidentState,
+  recordCheckRunOutcome,
+  DEFAULT_CI_INCIDENT_MAIN_BRANCH,
+  type CiIncidentState,
+} from "./ci-incidents.js";
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
@@ -165,6 +172,7 @@ import {
   startWakeSummaryFlush,
   sweepWakeMarkerPath,
   wakeSummaryRow,
+  type CheckRunCompletedInfo,
   type GithubEventWakeSemanticMode,
   type WakeCounters,
 } from "./github-event-wake.js";
@@ -503,6 +511,20 @@ export interface ServeDeps {
     semanticCheckMode?: GithubEventWakeSemanticMode;
     aggregateCheckNames?: readonly string[];
     counters?: WakeCounters;
+  };
+  /**
+   * W1-T4391 — the SRE gardener's CI-flake producer (ci-incidents.ts), driven off the SAME
+   * verified `check_run` `completed` deliveries {@link githubEventWake} already receives (via
+   * `github-event-wake.ts`'s `onCheckRunCompleted` hook). `fetchJobLog` defaults to a real
+   * `gh api repos/<repo>/actions/jobs/<id>/logs` read (a GitHub Actions check run's own id IS its
+   * job id); a test injects a fixed log with no `gh` on PATH. `mainBranch` defaults to
+   * {@link DEFAULT_CI_INCIDENT_MAIN_BRANCH} ("main") — the branch a failure on which is a real
+   * break, never a flake. `clock` defaults to {@link systemClock}.
+   */
+  ciIncidents?: {
+    fetchJobLog?: (repository: string, jobId: number) => string | Promise<string>;
+    mainBranch?: string;
+    clock?: Clock;
   };
   incidentInvariants?: {
     intervalMs?: number;
@@ -3870,6 +3892,32 @@ export function assertRoutesScopeComplete(entries: readonly { method?: Method; p
     throw new Error(`route(s) with no declared Scope: ${missing.join(", ")}`);
   }
 }
+/**
+ * W1-T4391 — read a failed check's own job log, once, for `recordCheckRunOutcome` to parse. A
+ * GitHub Actions check run's `id` IS its job id, so `gh api repos/<repo>/actions/jobs/<id>/logs`
+ * is the SAME REST read {@link "./ci-failure-corpus.js"} already documents for this purpose
+ * (module header: "the gh read budget"). `deps.ciIncidents.fetchJobLog` overrides this for a test
+ * or when `gh` is unavailable; the default fails soft to `""` — an empty log parses to zero
+ * failing tests rather than throwing off a webhook delivery.
+ */
+async function fetchCiIncidentJobLog(deps: ServeDeps, repository: string, jobId: number): Promise<string> {
+  const inject = deps.ciIncidents?.fetchJobLog;
+  if (inject) return inject(repository, jobId);
+  if (!repository) return "";
+  try {
+    return execFileSync("gh", ["api", `repos/${repository}/actions/jobs/${jobId}/logs`], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 32 * 1024 * 1024,
+    });
+  } catch (e) {
+    // CARRIED, NEVER ERASED (catch-erasure-ratchet): the empty string still parses to zero failing
+    // tests below, but the reason a real failed check's log went unread is named in the ledger.
+    deps.log?.("serve.ci_incidents.job_log_unreadable", { reason: String((e as Error)?.message ?? e), repository, jobId });
+    return "";
+  }
+}
+
 interface ServeRoutesAssembly {
   routes: Route[];
   /** The first GitHub App token mint. Absent when App refresh is not configured. */
@@ -3970,6 +4018,35 @@ function assembleServeRoutes(
   // private content never crosses these routes either: inventory strips it structurally and
   // export returns only a bounded, secret-scrubbed preview (see context-controls.ts's header).
   const contextControlsRoutes = buildContextControlsRoutes({ ledgerPath: deps.ledgerPath });
+  // W1-T4391: threaded across every `check_run` delivery this process handles — never a module
+  // singleton (ci-incidents.ts's own doc), so this ONE closure, resolved once per `rmd serve`
+  // process exactly like `wakeCounters` above, is the one history `recordCheckRunOutcome` reads
+  // and rewrites.
+  let ciIncidentState: CiIncidentState = createCiIncidentState();
+  const onCheckRunCompleted = async (info: CheckRunCompletedInfo): Promise<void> => {
+    if (info.conclusion !== "failure" && info.conclusion !== "success") return; // no-op elsewhere.
+    try {
+      const log =
+        info.conclusion === "failure"
+          ? await fetchCiIncidentJobLog(deps, deps.githubEventWake?.repository ?? "", info.id)
+          : undefined;
+      const outcome = recordCheckRunOutcome(ciIncidentState, {
+        sha: info.sha,
+        branch: info.branch ?? "",
+        name: info.name,
+        conclusion: info.conclusion,
+        log,
+        mainBranch: deps.ciIncidents?.mainBranch ?? DEFAULT_CI_INCIDENT_MAIN_BRANCH,
+      });
+      ciIncidentState = outcome.state;
+      const nowMs = (deps.ciIncidents?.clock ?? systemClock).now();
+      for (const event of outcome.events) {
+        appendLedger(deps.ledgerPath, ciIncidentEventLedgerLine(event, nowMs));
+      }
+    } catch (e) {
+      deps.log?.("serve.ci_incidents.check_run_failed", { reason: String((e as Error)?.message ?? e) });
+    }
+  };
   const rawRoutes = [
     projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen), modelApprovals),
     buildRepoDashboardRoute({ root: deps.questionsRoot, ledgerPath: deps.ledgerPath, planPath: deps.panelGraph.planPath }),
@@ -4137,6 +4214,9 @@ function assembleServeRoutes(
       aggregateCheckNames: deps.githubEventWake?.aggregateCheckNames,
       counters: deps.githubEventWake?.counters,
       log: deps.log,
+      // W1-T4391: the SRE gardener's CI-flake producer — see the `onCheckRunCompleted` closure
+      // above this array.
+      onCheckRunCompleted,
     }),
     buildIncidentEventsRoute({ ledgerPath: deps.ledgerPath }),
   ];
