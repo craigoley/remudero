@@ -22,13 +22,34 @@ import {
   costliestUntrackedCause,
   priceCiFrictionCauses,
   PR_URL_RE,
+  readGateFireRateReport,
   runPrIndex,
   type CiFrictionGardenSources,
 } from "../src/lib/ci-friction-gardener.js";
 import type { GardenerDeps } from "../src/lib/gardener.js";
-import type { GateFireRateReport } from "../src/lib/gate-fire-rate.js";
+import { gateFireRatesPath, type GateFireRateReport } from "../src/lib/gate-fire-rate.js";
 import type { LedgerRecord } from "../src/lib/retro.js";
 import { gitRepo } from "./helpers/git-repo.js";
+
+test("readGateFireRateReport returns only a present, parseable persisted report", () => {
+  const root = gitRepo({ kind: "w1t4435-gate-fire-rate-report" }).dir;
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const reportPath = gateFireRatesPath(stateDir);
+  const report: GateFireRateReport = {
+    status: "measured",
+    prsScanned: 1,
+    gates: [],
+    neverFired: [],
+    alwaysFired: [],
+  };
+
+  assert.equal(readGateFireRateReport(stateDir), undefined, "absence is no report, not a guessed zero");
+  writeFileSync(reportPath, JSON.stringify(report));
+  assert.deepEqual(readGateFireRateReport(stateDir), report);
+  writeFileSync(reportPath, "{");
+  assert.equal(readGateFireRateReport(stateDir), undefined, "malformed persisted evidence degrades to unknown");
+});
 
 test("W1-T4435: the gardener prices each cause in PR minutes", () => {
   // A FREQUENT, CHEAP check: ten one-minute rounds against pull request 1's `pr.opened`.
@@ -116,6 +137,10 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
   const verdict = ciFrictionRecordVerdict(yaml, "test");
   assert.equal(verdict.ok, true, verdict.reason);
 
+  const malformed = ciFrictionRecordVerdict("- id: [", "malformed");
+  assert.equal(malformed.ok, false);
+  assert.match(malformed.reason, /^unparseable:/);
+
   // Wired end-to-end through the gardener framework: ONE class, judged by whether its PR merges,
   // and the SAME pass writes the weekly trend row beside the drafted shard.
   const repo = gitRepo({ kind: "w1t4435" });
@@ -177,4 +202,41 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
   // this pass never writes.
   const row = log.trim().split("\n").at(-1)!;
   assert.ok(landed[0]!.body.includes(`proof: grep: ${row} in ${CI_FRICTION_GARDEN_LOG}`));
+});
+
+test("W1-T4435: the gardener preserves an existing trend log while appending a new pass", () => {
+  const root = gitRepo({ kind: "w1t4435-existing-garden-log" }).dir;
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(join(root, "docs"), { recursive: true });
+  const priorLog = "# prior garden receipt\n| prior row |\n";
+  writeFileSync(join(root, CI_FRICTION_GARDEN_LOG), priorLog);
+
+  const landed: Array<{ paths: string[]; title: string; body: string }> = [];
+  const deps: GardenerDeps = {
+    stateDir,
+    repoRoot: root,
+    openWorkspace: () => ({
+      root,
+      land: (opts) => (landed.push(opts), "https://github.com/acme/remudero/pull/100"),
+      dispose: () => {},
+    }),
+    log: () => {},
+    seed: 1,
+  };
+  const sources: CiFrictionGardenSources = {
+    ledgerRecords: () => [
+      { step: "pr.opened", run_id: "run-existing-log", pr_url: "https://github.com/acme/remudero/pull/5", ts: "2026-09-24T04:00:00.000Z" },
+      { step: "fix.dispatch", run_id: "run-existing-log", mode: "merge-conflict", round: 1, ts: "2026-09-24T04:25:00.000Z" },
+    ],
+    planOrigins: () => [],
+    mintTaskId: () => "W1-T9003",
+  };
+
+  const pass = runGarden(ciFrictionGardenSpec(deps, sources), deps);
+  assert.deepEqual(pass.plan?.acting, ["draft"]);
+  assert.equal(landed.length, 1);
+  const appendedLog = readFileSync(join(root, CI_FRICTION_GARDEN_LOG), "utf8");
+  assert.ok(appendedLog.startsWith(priorLog), "the previous trend receipt must be retained");
+  assert.equal(appendedLog.trim().split("\n").filter((line) => line.startsWith("| 2026-")).length, 1);
 });
