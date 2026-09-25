@@ -94,7 +94,7 @@
   "src/lib/board-review.ts": 244,
   "src/lib/board-snapshot-cache.ts": 2,
   "src/lib/board.ts": 500,
-  "src/lib/branch-reaper.ts": 300,
+  "src/lib/branch-reaper.ts": 288,
   "src/lib/ci-gate-required.ts": 2,
   "src/lib/ci-parity.ts": 1000,
   "src/lib/claude-model-health.ts": 20,
