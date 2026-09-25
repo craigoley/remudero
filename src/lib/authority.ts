@@ -496,6 +496,20 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
     verb: "rmd onboard",
     note: "Standing rule 15: exactly one branch, one commit, one unarmed PR — a human runs `rmd onboard` deliberately.",
   },
+  // ── src/lib/sre-runbooks.ts ──────────────────────────────────────────────────────────────
+  {
+    id: "sre-rerun-failed-ci-job",
+    action: "re-run one failed CI job (never the whole run) on a PR whose red passes on main",
+    module: "src/lib/sre-runbooks.ts",
+    symbol: "daemonSreRunbookHost(...).rerunJob (the rerun-failed-ci-once runbook)",
+    boundary: "gh-job-rerun",
+    gate: "ledger-verdict",
+    ledgerSteps: ["sre.runbook"],
+    verb: "rmd daemon (the SRE lane, RMD_SRE_LANE=1)",
+    note:
+      "W1-T4386: fires only after its precheck holds, at most once per PR head sha, and only on a live governor " +
+      "verdict — the daemon holds every runbook in shadow until W1-T4390's governor lands.",
+  },
   // ── src/lib/panel-actions.ts ─────────────────────────────────────────────────────────────
   {
     id: "issue-close-panel-action",
