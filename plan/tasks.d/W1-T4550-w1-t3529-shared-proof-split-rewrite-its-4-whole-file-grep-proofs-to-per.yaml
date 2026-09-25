@@ -1,0 +1,72 @@
+- id: W1-T4550
+  title: "W1-T3529 shared-proof split — rewrite its 4 whole-file grep proofs to per-criterion `unit test: <exact title>` proofs (each criterion already has its own named test)"
+  repo: remudero
+  depends_on: [W1-T3529]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 30.00
+  files: [plan/tasks.d/W1-T3529-run-review-evidence-target.yaml]
+  origin: "feedback#fb-1789312874382-b6f4b1"
+  plan_refs: ["§5C"]
+  status: queued
+  attempts: 0
+  rationale: |
+    Flagged non-blocking by the CI-green review of PR #5416 (TRIAGE-fb-1789312874382-b6f4b1): all four
+    acceptance criteria on W1-T3529 (plan/tasks.d/W1-T3529-run-review-evidence-target.yaml) cite the SAME
+    whole-file proof — `grep: <pattern> in test/run-review-evidence-target.test.ts` — one pattern per
+    criterion, but every pattern resolves against the identical file path rather than an isolated,
+    independently-executable test. VERIFIED AT SOURCE (both files read directly, not assumed): the test
+    file already contains FOUR distinctly-titled `test(...)` blocks, one per criterion, each already named
+    after its criterion's claim almost verbatim:
+      - "W1-T3529: runReview passes its owner/repo target through to judgeReview evidence" (line 94)
+      - "W1-T3529: runReview does not re-derive the target from a bare repo name" (line 101)
+      - "W1-T3529: the fix-rung path still relies on its existing runReview owner/repo forwarding" (line 113)
+      - "W1-T3529: every pre-existing judgeReview evidence field remains in the runReview call" (line 123)
+    So the granularity the shared-proof warning wants already EXISTS in the test file — nothing needs to be
+    written there. The gap is purely in the PLAN: each criterion's `proof:` field should name its own test
+    via the `unit test:` dialect (which the review's proof executor runs with `--test-name-pattern` against
+    exactly that title) rather than a `grep:` pattern search over the whole file. This makes each of the
+    four criteria independently falsifiable — a regression that breaks only ONE of the four behaviors now
+    fails only its own criterion, instead of four grep patterns that happen to all target one path.
+  design: |
+    Rewrite exactly the four `proof:` lines under W1-T3529's `acceptance:` block in
+    plan/tasks.d/W1-T3529-run-review-evidence-target.yaml, one-to-one, and change NOTHING else on the task
+    (not `claim:` text, not criterion count/order, not `depends_on`/`origin`/`risk`/`files`/`falsifier`/
+    `note` — this is a proof-only amendment, the same discipline W1-T246's proof-rewrite successor
+    describes: assert only proof lines changed). The exact required mapping (verified against the live test
+    file, not to be re-derived by guesswork):
+      1. claim "runReview's judgeReview call passes target: { owner, repo } ..." ->
+         proof: "unit test: W1-T3529: runReview passes its owner/repo target through to judgeReview evidence"
+      2. claim "the fix-rung re-review call path ... reaches judgeReview with the same owner/repo ..." ->
+         proof: "unit test: W1-T3529: the fix-rung path still relies on its existing runReview owner/repo forwarding"
+      3. claim "every other judgeReview argument ... is byte-for-byte unchanged ..." ->
+         proof: "unit test: W1-T3529: every pre-existing judgeReview evidence field remains in the runReview call"
+      4. claim "a target is never re-derived from a bare repo name lacking its owner" ->
+         proof: "unit test: W1-T3529: runReview does not re-derive the target from a bare repo name"
+    Before opening the PR, confirm each rewritten proof resolves to EXACTLY ONE test on the current
+    test/run-review-evidence-target.test.ts (e.g. `node --test --test-name-pattern "<title>"
+    test/run-review-evidence-target.test.ts`, or `rmd check-proof` if available) — a title that matches zero
+    or more than one test is a worse regression than the shared-file grep it replaces, and must not ship.
+    Do not touch test/run-review-evidence-target.test.ts itself; the test titles already exist and are the
+    target this rewrite points at, not something to be authored here.
+  acceptance:
+    - claim: "criterion 1's proof names its own test exactly — 'runReview passes its owner/repo target through to judgeReview evidence' — replacing the shared whole-file grep"
+      proof: "grep: unit test: W1-T3529: runReview passes its owner/repo target through to judgeReview evidence in plan/tasks.d/W1-T3529-run-review-evidence-target.yaml"
+    - claim: "criterion 2's proof names its own test exactly — 'the fix-rung path still relies on its existing runReview owner/repo forwarding'"
+      proof: "grep: unit test: W1-T3529: the fix-rung path still relies on its existing runReview owner/repo forwarding in plan/tasks.d/W1-T3529-run-review-evidence-target.yaml"
+    - claim: "criterion 3's proof names its own test exactly — 'every pre-existing judgeReview evidence field remains in the runReview call'"
+      proof: "grep: unit test: W1-T3529: every pre-existing judgeReview evidence field remains in the runReview call in plan/tasks.d/W1-T3529-run-review-evidence-target.yaml"
+    - claim: "criterion 4's proof names its own test exactly — 'runReview does not re-derive the target from a bare repo name'"
+      proof: "grep: unit test: W1-T3529: runReview does not re-derive the target from a bare repo name in plan/tasks.d/W1-T3529-run-review-evidence-target.yaml"
+    - claim: "the rewrite is proof-only — the original claim text for the fourth criterion is untouched, confirming this amendment did not re-litigate what any criterion asserts"
+      proof: "grep: a target is never re-derived from a bare repo name lacking its owner in plan/tasks.d/W1-T3529-run-review-evidence-target.yaml"
+  note: |
+    Filed from the non-blocking shared-proof warning on W1-T3529 (TRIAGE-fb-1789312874382-b6f4b1, run
+    DAEMON-1789314256085, PR https://github.com/craigoley/remudero/pull/5416). Both the target shard and the
+    test file were read directly from the checkout before drafting this task — the four proof->title
+    mappings above are copied verbatim from test/run-review-evidence-target.test.ts's existing `test(...)`
+    titles, not reconstructed from the criteria's claim prose. depends_on W1-T3529 so this proof-only
+    amendment sequences after (or alongside, if already merged) the task whose plan entry it edits, per this
+    repo's file-overlap discipline for concurrent plan edits to the same shard.

@@ -32,7 +32,7 @@ import { readFileSync, readdirSync } from "node:fs";
 // arm below a real, driven fixture (test/a-census-suite-is-unreachable-from-the-symbols-a-diff-
 // changes.test.ts) instead of an untested comment.
 import fs from "node:fs";
-import { join, relative, sep } from "node:path";
+import { join, normalize, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 // `plan-scope.ts` is the canonical predicate's dependency-free leaf. Node 22.22.3 can strip its
 // type annotations without `tsx`, so coverage-ratchet can classify before installing dependencies.
@@ -277,6 +277,68 @@ export function sourceTextPathsRead(content) {
 }
 
 /**
+ * Relative import/require specifiers a file names — never a bare package name. The only kind
+ * {@link importedWalkerWalksArea} follows: one hop, matching the floor's own restraint.
+ */
+export function relativeImportSpecifiers(content) {
+  const out = [];
+  const patterns = [
+    /\b(?:import|export)\s[^'"`;]*?\bfrom\s*["']([^"']+)["']/g,
+    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+    /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g,
+  ];
+  for (const re of patterns) {
+    for (const m of content.matchAll(re)) {
+      if (m[1].startsWith(".")) out.push(m[1]);
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether `content` names one of `areas` as a directory it walks — LOOSER than the suite's own
+ * `bare.includes(area)` check above: a walker module typically joins the BARE segment name
+ * (`join(root, "src")`, no trailing slash) rather than a slash-suffixed path literal, so a quoted
+ * bare segment (`"src"`) counts too, not only a prefixed path literal (`"src/lib/x.ts"`).
+ */
+export function namesAreaLoosely(content, areas) {
+  const bare = withoutRelativePathLiterals(content);
+  for (const area of areas) {
+    if (bare.includes(area)) return true;
+    const segment = area.slice(0, -1);
+    if (segment.length > 0 && new RegExp(`["'\`]${segment}["'\`]`).test(bare)) return true;
+  }
+  return false;
+}
+
+/**
+ * W1-T4462 — A CENSUS THAT IMPORTS ITS WALKER SCRIPT LOOKS LIKE A PLAIN SUITE. MEASURED on #6967:
+ * test/clock-signature-census.test.ts imports `scanClockSignatures` from
+ * scripts/clock-signature-ratchet.mjs, whose OWN `readdirSync`-based walk of `src/` is what the
+ * census actually holds — the test file's own text names no enumeration idiom and no `src/`
+ * literal, so `walksAnArea` above never sees it. Follows ONE hop of the suite's own relative
+ * imports/requires into `scripts/`, `src/`, or `bin/`; a module that itself enumerates a
+ * population and names one of `areas` (loosely — see {@link namesAreaLoosely}) makes the suite
+ * that imports it a census suite too, exactly as if it had walked the tree inline.
+ */
+export function importedWalkerWalksArea(content, testDir, root, areas) {
+  for (const spec of relativeImportSpecifiers(content)) {
+    const abs = normalize(join(testDir, spec));
+    const rel = relative(root, abs).split(sep).join("/");
+    if (!/^(?:scripts|src|bin)\//.test(rel)) continue;
+    let moduleContent;
+    try {
+      moduleContent = fs.readFileSync(join(root, rel), "utf8");
+    } catch (err) {
+      if ((err && /** @type {{code?: string}} */ (err).code) === "ENOENT") continue;
+      throw err;
+    }
+    if (enumeratesPopulation(moduleContent) && namesAreaLoosely(moduleContent, areas)) return true;
+  }
+  return false;
+}
+
+/**
  * The suites a diff joins that name none of its symbols — enumerated from the tree at run time,
  * never a registry. Listed when relevant to the changed areas: enumerates a population and names
  * a touched area, or reads a specific changed file as text. The first arm is deliberately loose
@@ -314,7 +376,9 @@ export function censusSuiteFiles(changedFiles, root = REPO_ROOT) {
       throw err;
     }
     const bare = withoutRelativePathLiterals(content);
-    const walksAnArea = enumeratesPopulation(content) && [...areas].some((a) => bare.includes(a));
+    const walksAnArea =
+      (enumeratesPopulation(content) && [...areas].some((a) => bare.includes(a))) ||
+      importedWalkerWalksArea(content, testDir, root, areas);
     const readsAChangedFile = [...sourceTextPathsRead(content)].some((p) => changed.has(p));
     if (walksAnArea || readsAChangedFile) out.push(rel);
   }
