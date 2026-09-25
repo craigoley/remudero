@@ -1,15 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { fixedClock, systemClock } from "./clock.js";
 import { escalate, ghIssueGateway, type Escalation, type IssueGateway } from "./escalate.js";
-import { pendingPrActions, requestPrAction } from "./fleet-control.js";
+import { isQuietHours, pauseDetail, pendingPrActions, requestPrAction, stopDetail } from "./fleet-control.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { defaultInContainer } from "./fs-race-safe.js";
+import { defaultInContainer, writeAtomic } from "./fs-race-safe.js";
 import { ghExec } from "./github-transport.js";
 import { parseInflightLockInfo } from "./inflight-lock.js";
-import { DISPATCH_STALL_RULE_ID, NO_MERGES_WITH_GREEN_QUEUE_RULE_ID } from "./incident-invariants.js";
+import { isFastBurn, sreGovernorVerdict, verdictFor, governorIncidentFromLedgerRow, type IncidentEvidence, type SreGovernorControls, type SreGovernorIncident, type SreGovernorTier, type SreGovernorVerdict } from "./sre-governor.js";
 import { readLedgerLines } from "./status.js";
 
 /**
@@ -24,8 +24,10 @@ import { readLedgerLines } from "./status.js";
  * fingerprint — through the existing needs-human issue, assigned to the operator so GitHub delivers
  * email and a mobile push. Nothing else notifies.
  *
- * TRAP: the governor (W1-T4390) is not built yet, so the daemon's default verdict is `shadow` for
- * every runbook — the design's own "a NEW runbook starts in shadow". Nothing acts live until it lands.
+ * GOVERNED (W1-T4390): {@link daemonSreRunbookPass} asks sre-governor.ts's `sreGovernorVerdict`
+ * before every act, over this ledger only — the core daemon evaluates the same function every tick,
+ * so a lane that skips this check is still stopped. A stopped verdict that names flapping or harm
+ * also pages the operator here, through the same needs-human issue.
  *
  * FALSIFIER: test/sre-runbooks.test.ts.
  */
@@ -35,50 +37,12 @@ export const SRE_RUNBOOK_STEP = "sre.runbook";
  *  for one fingerprint stops the runbook and escalates. */
 export const SRE_RUNBOOK_FAILURE_LIMIT = 2;
 
-/** Every incident.event/incident.sampled row for one fingerprint, reduced to the evidence the
- *  design names: sample events, first/last seen, count, burn rate, deploy sha(s), instances. */
-export interface IncidentEvidence {
-  fingerprint: string;
-  kind: string;
-  name: string;
-  /** Up to 3 distinct scrubbed sample messages, oldest first — "" when no row carried a message. */
-  sampleMessages: string[];
-  firstSeenMs: number;
-  lastSeenMs: number;
-  count: number;
-  /** Events per hour over the observed span (a single event reads as 1 event/hour, not infinite). */
-  burnPerHour: number;
-  deployShas: string[];
-  instances: string[];
-}
-
-// ── fast burn ────────────────────────────────────────────────────────────────────────────────
-
-/** Still burning: the invariant timer and the incident ingest both re-ledger at least every few
- *  minutes while a failure persists, so a fingerprint silent this long is no longer a live burn. */
-export const FAST_BURN_RECENT_MS = 15 * 60_000;
-/** "console down or unusable": the board polls about once a minute per open tab, so a 5xx or a
- *  latency breach on half of one tab's polls for an hour is 30/hour — the console is unusable. */
-export const FAST_BURN_PER_HOUR = 30;
-const USER_VISIBLE_KINDS: ReadonlySet<string> = new Set(["http_5xx", "latency"]);
-/** "fleet built nothing for hours": the two invariants whose windows ARE hours of no progress. */
-const FLEET_STALL_RULES: ReadonlySet<string> = new Set([DISPATCH_STALL_RULE_ID, NO_MERGES_WITH_GREEN_QUEUE_RULE_ID]);
-
-/** True only for a user-visible fast burn that is still burning at `nowMs`. Pure. */
-export function isFastBurn(incident: IncidentEvidence, nowMs: number): boolean {
-  if (nowMs - incident.lastSeenMs > FAST_BURN_RECENT_MS) return false;
-  if (incident.kind === "invariant") return FLEET_STALL_RULES.has(incident.name);
-  return USER_VISIBLE_KINDS.has(incident.kind) && incident.burnPerHour >= FAST_BURN_PER_HOUR;
-}
-
 // ── the runbook contract ─────────────────────────────────────────────────────────────────────
 
-/** The governor's tiers (W1-T4390): only `live` acts; `shadow` records; `slow`/`stopped` hold. */
-export type SreGovernorTier = "live" | "slow" | "shadow" | "stopped";
-export interface SreGovernorVerdict {
-  tier: SreGovernorTier;
-  reason: string;
-}
+// The incident shape, the fast-burn test and the governor's tiers live in the leaf module the core
+// daemon also imports (W1-T4390), so both enforcers read ONE definition; re-exported for callers.
+export type { IncidentEvidence, SreGovernorTier, SreGovernorVerdict } from "./sre-governor.js";
+export { FAST_BURN_PER_HOUR, FAST_BURN_RECENT_MS, isFastBurn } from "./sre-governor.js";
 
 /** A precheck's or verify's reading. `ok` means "safe and needed" for a precheck, "cleared" for a
  *  verify; `observed` is the receipt's `before`/`after` text; `subject` keys once-only runbooks. */
@@ -114,6 +78,8 @@ export interface SreRunbookReceipt {
   /** The incident's own last-seen instant when this receipt was taken — a runbook re-runs only on
    *  NEWER evidence, so a paced-out lane re-reading one incident every tick records nothing new. */
   seen_ms?: number;
+  /** The ledger row's own instant (read back from `ts`) — the governor's clock for every receipt. */
+  ts_ms?: number;
 }
 
 export interface RunbookPassResult {
@@ -234,7 +200,8 @@ export async function runMatchingRunbook(
   if (verdict.tier !== "live") {
     record(log, { ...base, mode: verdict.tier, outcome: "held", reason: verdict.reason });
     // `slow` is a backoff: the runbook still owns the incident. `stopped` hands it to the fleet.
-    return { runbook: runbook.id, outcome: "held", fileFeedback: verdict.tier === "stopped", escalatedUrl: burnUrl() };
+    const stopUrl = verdict.escalate ? escalateOnce(incident, runbook.id, `governor stopped ${runbook.id}: ${verdict.reason}`, escalate, log, history) : undefined;
+    return { runbook: runbook.id, outcome: "held", fileFeedback: verdict.tier === "stopped", escalatedUrl: stopUrl ?? burnUrl() };
   }
 
   let actError: string | undefined;
@@ -278,6 +245,7 @@ export function receiptFromLedgerRow(row: Record<string, unknown>): SreRunbookRe
     before: text("before"),
     after: text("after"),
     seen_ms: typeof row.seen_ms === "number" ? row.seen_ms : undefined,
+    ts_ms: typeof row.ts === "string" && Number.isFinite(Date.parse(row.ts)) ? Date.parse(row.ts) : undefined,
   };
 }
 
@@ -287,14 +255,37 @@ export function readRunbookReceipts(ledgerPath: string): SreRunbookReceipt[] {
     .filter((r): r is SreRunbookReceipt => r !== undefined);
 }
 
-/** The daemon's verdict until W1-T4390's governor lands: every runbook starts, and stays, in shadow. */
-export function shadowUntilGoverned(): SreGovernorVerdict {
-  return { tier: "shadow", reason: "no governor yet (W1-T4390): a new runbook starts in shadow" };
+/** Every incident row this ledger holds, as the governor reads them. */
+export function readGovernorIncidents(ledgerPath: string): SreGovernorIncident[] {
+  return readLedgerLines(ledgerPath) // ledger-read-intent: live — the incidents this daemon ledgered.
+    .map((row) => governorIncidentFromLedgerRow(row))
+    .filter((e): e is SreGovernorIncident => e !== undefined);
+}
+
+/** STOP, PAUSE and QUIET_HOURS as fleet-control.ts writes them under `<root>/state` — the directory
+ *  the ledger itself lives in (ledger-path.ts `ledgerPathFor`), so root is two levels above it. */
+export function fleetControlsBesideLedger(ledgerPath: string): SreGovernorControls {
+  const root = dirname(dirname(ledgerPath));
+  return { emergencyStop: stopDetail(root), pause: pauseDetail(root), quietHours: isQuietHours(root) ? "QUIET_HOURS set" : undefined };
+}
+
+/** The lane's own enforcer: `sreGovernorVerdict` over this ledger's receipts, incidents and the
+ *  fleet controls, evaluated fresh before every act — never a verdict the lane remembered. */
+export function ledgerGovernorVerdict(
+  ledgerPath: string,
+  runbookIds: readonly string[],
+  nowMs: () => number,
+  controls: () => SreGovernorControls = () => fleetControlsBesideLedger(ledgerPath),
+): (runbookId: string) => SreGovernorVerdict {
+  return (runbookId) => {
+    const verdicts = sreGovernorVerdict(readRunbookReceipts(ledgerPath), readGovernorIncidents(ledgerPath), controls(), nowMs(), runbookIds);
+    return verdictFor(verdicts, runbookId);
+  };
 }
 
 /** The daemon's runbook gates around a catalog (src/run-task.ts builds the catalog, so a test can
- *  inject its own): receipts from this daemon's ledger, shadow until governed, and the operator's
- *  assigned needs-human issue. */
+ *  inject its own): receipts from this daemon's ledger, the governor over that same ledger, and the
+ *  operator's assigned needs-human issue. */
 export function daemonSreRunbookPass(
   runbooks: readonly SreRunbook[],
   ledgerPath: string,
@@ -305,7 +296,8 @@ export function daemonSreRunbookPass(
   const receipts = () => readRunbookReceipts(ledgerPath);
   const escalate = sreOperatorEscalation({ owner, repo, ledgerPath, log });
   const nowMs = () => systemClock.now();
-  return (incident) => runMatchingRunbook(incident, runbooks, shadowUntilGoverned, receipts, escalate, log, nowMs);
+  const governor = ledgerGovernorVerdict(ledgerPath, runbooks.map((r) => r.id), nowMs);
+  return (incident) => runMatchingRunbook(incident, runbooks, (id) => governor(id), receipts, escalate, log, nowMs);
 }
 
 /** The needs-human issue path, each issue assigned to the repo's owner — the operator — so GitHub
@@ -567,4 +559,42 @@ function readFileIfPresent(path: string): string {
     // A lock that vanished between the existence check and this read has no holder to judge.
     return `unreadable: ${String((e as Error)?.message ?? e)}`;
   }
+}
+
+// ── the daemon's governor port (W1-T4390) ────────────────────────────────────────────────────
+
+/** What the core daemon's governor step reads and writes, injected so daemon.ts stays free of I/O:
+ *  the SRE instance's live ledger, the lane's pause switch, and the operator's escalation. */
+export interface SreGovernorEnforcer {
+  /** Every row of the SRE instance's live ledger. */
+  readLedger(): Record<string, unknown>[];
+  /** The lane's pause switch's text while present, `undefined` while absent. */
+  laneOff(): string | undefined;
+  pauseLane(text: string): void;
+  resumeLane(): void;
+  /** Absent when the composition root has no repo identity to open an issue under. */
+  escalate?: (e: Escalation) => string | null;
+}
+
+/** The real port over one state root. `laneOffPath` is sre-lane.ts's `sreLaneOffPath` — passed in,
+ *  since sre-lane.ts imports this module and importing it back would close a cycle. */
+export function daemonSreGovernorEnforcer(opts: {
+  ledgerPath: string;
+  laneOffPath: string;
+  escalate?: (e: Escalation) => string | null;
+}): SreGovernorEnforcer {
+  return {
+    readLedger: () => readLedgerLines(opts.ledgerPath), // ledger-read-intent: live — the governor reads this instance's own receipts.
+    laneOff: () => (existsSync(opts.laneOffPath) ? readFileIfPresent(opts.laneOffPath) : undefined),
+    pauseLane: (text) => writeAtomic(opts.laneOffPath, text),
+    resumeLane: () => {
+      try {
+        unlinkSync(opts.laneOffPath);
+      } catch (e) {
+        // Already gone — an operator resumed it first; the lane is resumed either way.
+        if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") throw e;
+      }
+    },
+    escalate: opts.escalate,
+  };
 }

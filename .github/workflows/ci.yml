@@ -419,6 +419,17 @@ jobs:
           path: ${{ runner.temp }}/test-duration
           retention-days: 1
           if-no-files-found: ignore
+      - name: Generate the console plan-index artifact (W1-T4432)
+        if: ${{ matrix.shard == '1' }}
+        run: node scripts/generate-plan-index.mjs --out plan/plan-index.json
+      - name: Upload the console plan-index artifact (W1-T4432)
+        if: ${{ matrix.shard == '1' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plan-index-console
+          path: plan/plan-index.json
+          retention-days: 7
+          if-no-files-found: error
 
   # W1-T2904: flake-retry evidence, aggregated across every shard. INFORMATIONAL ONLY -- it writes
   # to the step summary and gates nothing, which is exactly why it may not live inside `ci-required`:

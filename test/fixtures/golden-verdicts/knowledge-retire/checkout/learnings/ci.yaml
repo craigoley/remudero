@@ -1,0 +1,3 @@
+- id: body-fetch-guards-on-http-not-size
+  # knowledge gardener: retire body-fetch-guards-on-http-not-size
+  lifecycle: superseded

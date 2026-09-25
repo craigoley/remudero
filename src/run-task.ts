@@ -718,6 +718,7 @@ import {
   parseSupersedesExpr,
   approveRunBranch,
   approvedSkillRelPath,
+  mostRecentApprovePr,
   priorApproveRunBranch,
   pruneRatifiedProposals,
   proposalsNeedingDraft,
@@ -820,6 +821,7 @@ import {
   runAutomatedRetroSubprocess,
 } from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
+import { filedTaskIdFromRunBranch, openPullRequestChecked, type OpenPullRequestProofRunner } from "./lib/pr-open.js";
 import {
   buildPlanPrBody,
   bodyNeedsAcceptanceRepair,
@@ -828,8 +830,6 @@ import {
   filingAcceptanceCriteria,
   probeExistingPlanPr,
   reconcileRetroChangesetClaim,
-  regeneratePlanIndexAndCommit,
-  regeneratePlanIndexFile,
   renderAcceptanceBlock,
   replaceAcceptanceBlock,
 } from "./lib/plan-pr-emitter.js";
@@ -3708,6 +3708,7 @@ export function ghPrCreateFillCommand(
   branch: string,
   title?: string,
   bodyOverride?: string,
+  proofRunner?: OpenPullRequestProofRunner,
 ): { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } } {
   // LIVE-WRITE GUARD at the BUILDER, not at each of its four executors: this function
   // exists only to produce a `gh pr create` argv, so refusing here covers every call
@@ -3726,10 +3727,13 @@ export function ghPrCreateFillCommand(
   // body from the commit, which carries no Acceptance block, so every PR opened through this seam
   // used to reach `acceptance-author-gate` with nothing to judge and fail closed. A no-op whenever
   // the body already parses judgeably.
-  const body = ensureJudgeableBody(
-    bodyParts.filter((p) => p.length > 0).join("\n\n"),
-    PR_OPEN_TIME_ACCEPTANCE_FALLBACK,
-  );
+  const draftedBody = bodyParts.filter((p) => p.length > 0).join("\n\n");
+  // A filed run branch takes its Acceptance block from the task record inside the checked opener.
+  // Other lanes retain the open-time fallback that predates the task-aware check.
+  const body = filedTaskIdFromRunBranch(branch)
+    ? draftedBody
+    : ensureJudgeableBody(draftedBody, PR_OPEN_TIME_ACCEPTANCE_FALLBACK);
+  const checkedBody = openPullRequestChecked(body, branch, worktreePath, "origin/main", proofRunner);
   const args = [
     "api",
     "--method",
@@ -3738,7 +3742,7 @@ export function ghPrCreateFillCommand(
     "-f",
     `title=${resolvedTitle}`,
     "-f",
-    `body=${body}`,
+    `body=${checkedBody}`,
     "-f",
     `head=${branch}`,
     "-f",
@@ -6414,7 +6418,7 @@ async function runReview(args: {
   // `floorMet` is captured BEFORE the semantic downgrade arm, so the reviewer's only output
   // (`semantic[]`) cannot change a plan-only verdict — leaving it undefined is exactly what the
   // catch arm below already produces when a spawn fails. Every other gating arm — the deterministic
-  // floor, lint-plan, the plan-PR emitter and the plan-index checks — is untouched and still runs.
+  // floor, lint-plan, and the plan-PR emitter — is untouched and still runs.
   // The predicate is review.ts's own `planOnlyDiff`, never a second copy of the expression.
   const planOnlySkip = planOnlyDiff(diff);
   // Snapshot the optional mount before entering the async temp-dir callback. Besides making the
@@ -7073,7 +7077,7 @@ export function reportSubstituteStandDownReason(
 // ── GENERATOR-BACKED GATE FIX (W1-T2551) ──────────────────────────────────────────────────────
 //
 // GROUND TRUTH this closes: every `<name>:check` npm script paired with a bare `<name>` script is
-// a GENERATOR run in verify mode (plan-index/plan-index:check, docs-index/docs-index:check,
+// a GENERATOR run in verify mode (docs-index/docs-index:check,
 // learnings-index/learnings-index:check, cli-reference/cli-reference:check, capability-snapshot/
 // capability-snapshot:check, learnings-assert/learnings-assert:check, as of this writing — NEVER
 // hand-listed here, see {@link declaredGeneratorScriptFor}). Every one of those generators fails
@@ -7100,7 +7104,7 @@ export function reportSubstituteStandDownReason(
  * Read the generator/`:check` pairing OFF package.json's own declared `scripts` map — NEVER a
  * hand-maintained table like {@link REGENERABLE_ARTIFACT_GENERATORS} (lib/sweep.ts, a DIFFERENT
  * rung's admission list, out of scope here per this task's rationale (5b)). `checkOrGeneratorName`
- * may be given either shape (`"plan-index:check"` or bare `"plan-index"`); the BASE name is
+ * may be given either shape (`"docs-index:check"` or bare `"docs-index"`); the BASE name is
  * returned only when BOTH the bare name and its `:check` counterpart are declared scripts — that
  * shared declaration IS the pairing itself, not an inference drawn from it. `undefined` for any
  * name package.json does not declare BOTH halves of, including a `:check` script with no bare
@@ -14945,10 +14949,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // ── Recon (read-only).
     say("recon worker");
     // W1-T37 / MASTER-PLAN §8A Tier 2: the plan is RETRIEVED, not injected — the recon prompt
-    // carries the generated PLAN INDEX (section headings + one-line summaries + a grep hint), not
-    // the plan body. `loadPlanIndex` is non-fatal (a fresh checkout before the first `npm run
-    // plan-index` just omits the block); `npm run plan-index:check` fails CI on a stale index.
-    const planIndex = loadPlanIndex(join(dirname(planPath), "plan-index.json"));
+    // carries a content-hash-cached PLAN INDEX derived from MASTER-PLAN.md, not the plan body.
+    // `loadPlanIndex` is non-fatal when the source is missing and never writes a generated file.
+    const planIndex = loadPlanIndex(join(dirname(planPath), "..", "MASTER-PLAN.md"));
     const planIndexBlock = planIndex ? renderPlanIndex(planIndex) : "";
     // W1-T164: task-scoped operator guidance notes — read from the durable console-editable
     // store (`repoRoot`, the SAME root worker.ts's question store reads/writes), scoped strictly
@@ -17577,12 +17580,11 @@ function defaultRetroChangedFiles(url: string): string[] {
  *
  * WHY A POST-HOC RUNG RATHER THAN A BETTER TEMPLATE. `retroCommand` spawns the Architect, which
  * edits MASTER-PLAN.md, commits, pushes and OPENS THE PR WITH A BODY IT AUTHORED. Only then does
- * `regenerateOrientation` commit docs/ORIENTATION.md, and only then does
- * `regeneratePlanIndexAndCommit` commit plan/plan-index.json. The body is therefore written at a
- * moment when two of the three files DO NOT YET EXIST, and no wording can fix that. Reordering
- * cannot fix it either: ORIENTATION.md is regenerated FROM what the Architect just wrote, so it
- * cannot run first. The only point where the changeset is knowable is after all three commits —
- * which is exactly where this runs.
+ * `regenerateOrientation` and citation stamping run after the Architect opens the PR. The body is
+ * therefore written before the harness-owned follow-up changes are known, and no wording can fix
+ * that. Reordering cannot fix it either: ORIENTATION.md is regenerated FROM what the Architect
+ * just wrote, so it cannot run first. The only point where the changeset is knowable is after
+ * those follow-up commits — which is exactly where this runs.
  *
  * The actual string fold is {@link "./lib/plan-pr-emitter.js".reconcileRetroChangesetClaim} — a
  * PURE reconciler living beside every other plan-PR body primitive, repairing BOTH arms
@@ -27437,7 +27439,7 @@ export function parseGitLogCitationCommits(raw: string): GitLogCommit[] {
  * Best-effort: a read/mine/write hiccup degrades to "nothing stamped this cycle" (the corpus
  * keeps whatever `cited` values it already had — never cleared, per `stampCitations`' own
  * contract) rather than aborting the whole retro, the same non-fatal discipline
- * orientation/plan-index regeneration immediately around this call already follow.
+ * orientation/citation-stamp generation immediately around this call already follow.
  *
  * W1-T1267: `corpus` above IS the eligibility decision's evidence — and it's read from THIS
  * worktree's `learnings/`, which was branched from `origin/main` at worktree-cut time and never
@@ -28082,7 +28084,6 @@ async function retroCommand(
     // quietly omitting a generator and publishing a different artifact set than attempt one.
     const regenerateHarnessArtifacts = (): {
       orientationCommitted: boolean;
-      planIndexCommitted: boolean;
       citationStampCommitted: boolean;
     } => {
       // W1-T39: docs/ORIENTATION.md is HARNESS-OWNED — deterministically regenerated
@@ -28103,22 +28104,10 @@ async function retroCommand(
         log("orientation.write.error", { error: String((e as Error)?.message ?? e) });
       }
 
-      // W1-T136 (#287 class): plan/plan-index.json is HARNESS-OWNED too — the Architect
-      // just edited MASTER-PLAN.md above, and an un-regenerated index reds
-      // `plan-index:check` post-push (#287's exact failure).
-      let planIndexCommitted = false;
-      try {
-        const result = regeneratePlanIndexAndCommit({ worktreePath });
-        planIndexCommitted = result.committed;
-        if (result.committed) log("plan_index.regenerated", { diff_bytes: result.diff?.length ?? 0 });
-      } catch (e) {
-        log("plan_index.regen.error", { error: String((e as Error)?.message ?? e) });
-      }
-
-      // W1-T1248: the citation miners' production caller. It follows both other generators on
+      // W1-T1248: the citation miners' production caller. It follows orientation generation on
       // every pass so the exact final branch, not a pre-repair approximation, is validated.
       const citationStampCommitted = runCitationStampPass({ worktreePath, followupLedgerNdjson, log });
-      return { orientationCommitted, planIndexCommitted, citationStampCommitted };
+      return { orientationCommitted, citationStampCommitted };
     };
     regenerateHarnessArtifacts();
 
@@ -28466,8 +28455,8 @@ export function retroPrompt(gatherReport: string, calTable: string, runId: strin
     "it from this same gather right after you finish and commits it separately. Any edit you make to it",
     "is overwritten.",
     "W1-T908: do NOT describe the PR's changed-file set in the body — not as a list and above all",
-    "not as a COUNT. The harness commits docs/ORIENTATION.md and plan/plan-index.json onto this",
-    "same PR after you finish, so any such sentence is written before two of the three files exist",
+    "not as a COUNT. The harness commits docs/ORIENTATION.md onto this",
+    "same PR after you finish, so any such sentence is written before that generated file exists",
     "and is wrong every time. Never write 'exactly N files'; the harness names the paths for you.",
     "",
     "=== DETERMINISTIC GATHER (no LLM produced this) ===",
@@ -40915,8 +40904,8 @@ async function triageCommandLocked(
     // add -A -- plan/`, which never matched MASTER-PLAN.md (a root-level file, not under
     // plan/) — silently discarding any amendment the Architect made even though
     // triagePrompt/decideTriage/nonPlanFilesInDiff all license one. The shared function's
-    // `plan/ MASTER-PLAN.md` pathspec now stages the amendment, and it regenerates
-    // plan/plan-index.json first so a stray or renumbered heading never ships stale.
+    // `plan/ MASTER-PLAN.md` pathspec stages the amendment; the section index is derived from
+    // MASTER-PLAN.md whenever a runtime reader needs it.
     applyPlanProposalCommit(worktreePath, commitMessage, log);
 
     // OUTPUT VALIDATION (W1-T2326 Q2) — the PORT of `planCommand`'s `unreservedFiledIds` +
@@ -41407,7 +41396,7 @@ export async function planCommand(
     say(formatPlanVerdictLine(mode, decision));
     const commitMessage = planCommitMessage({ decision, mode, brief });
     applyPlanProposalCommit(worktreePath, commitMessage, log);
-    // Build the body only AFTER the shared commit writer has regenerated plan-index.json. The
+    // Build the body only AFTER the shared commit writer has staged the plan sources. The
     // changed-files block is an assertion about the actual commit, not the worker's pre-harness
     // advisory list; constructing it before regeneration would immediately make the PR contradict
     // its own diff whenever the index changes.
@@ -43174,6 +43163,99 @@ export async function approveCommand(
     writeRunLock(path, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
     return { branch, path };
   };
+  // W1-T4437: the mint/write/commit steps `createRatificationBranch` and `joinRatificationBranch`
+  // BOTH run once the worktree exists — the only difference between the two gateway methods is
+  // which ref that worktree was checked out AT (a fresh `origin/main` vs. an already-open PR's own
+  // tip) and whether the result is pushed as a NEW branch or a new commit on an existing one.
+  // Shared here so the mint/shard/stamp/advisory sequence can never drift between the two.
+  const materializeAndCommitApproveFragment = (worktreePath: string, payload: RatificationPayload, purposeLabel: string): void => {
+    // W1-T311: MINT + RESERVE the drafted fragment's placeholder (`NEW-<n>`) ids from the
+    // worktree's OWN plan, AFTER it is checked out and BEFORE anything is written — the same
+    // ordering `rmd triage`/`rmd plan` already use (:11831,:12159), calling the ONE shared
+    // derivation rather than re-deriving ids locally here. A degraded mint source or a
+    // reservation failure REFUSES (throws) before any write, so no partial union ever reaches
+    // the worktree.
+    const materialized = materializeDraftTaskIds(
+      { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
+      {
+        mint: () =>
+          mintNextTaskIdWithHistory({
+            planPath: join(worktreePath, "plan", "tasks.yaml"),
+            repoRoot: worktreePath,
+            openPrTexts: () => openPrMintTexts(owner, repo),
+          }),
+        reserveBlock: (startId, count) => {
+          idBlock = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
+            info: { purpose: `rmd approve ${payload.proposalId} (${purposeLabel})` },
+          });
+          // Same closure-narrowing reason as the triage and plan lanes.
+          const approveReserveFrom = idBlock.ids[0];
+          // W1-T949: AND RESERVE THE SAME BLOCK REMOTELY — this closure is the ONLY thing
+          // `materializeDraftTaskIds` (lib/inbox.ts) sees; `reserveBlock` there is an INJECTED
+          // callback (`DraftTaskIdMintDeps.reserveBlock`), so the remote half threads through
+          // it right here without inbox.ts needing to know the local store even exists. Caught
+          // and re-thrown here (rather than left to inbox.ts's own catch, which folds ANY
+          // reservation failure into a free-text `reason` string) so a genuine
+          // `TaskIdReservationError` still leaves a durable, structured ledger event before
+          // `materializeDraftTaskIds` reduces it to prose.
+          const remote = withIdReservationLogging(
+            log,
+            "approve.id_reservation_failed",
+            () =>
+              reserveTaskIdBlockRemote(
+                approveReserveFrom,
+                count,
+                gitRemoteRefReserver({
+                  run: (args) => {
+                    const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
+                    return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+                  },
+                }),
+              ),
+            { proposal_id: payload.proposalId },
+          );
+          return { ids: remote.ids };
+        },
+      },
+    );
+    if (!materialized.ok) {
+      throw new Error(`rmd approve: refusing to materialize task id(s) for ${payload.proposalId} — ${materialized.reason}`);
+    }
+    log("approve.id_materialized", { proposal_id: payload.proposalId, ids: materialized.ids });
+
+    // ONE SHARD PER DRAFTED TASK, NEVER AN APPEND TO THE MONOLITH. `lint-plan`'s
+    // `monolith-filing` rule refuses a NEW id filed into plan/tasks.yaml in as many words, and
+    // this was the last write site still doing it. It had never met the gate: no proposal had
+    // ever been ratified (0 `ratify.approved` rows before 2026-08-29), so the first successful
+    // approve came back `lint-plan failure` on its own filing and all 17 READY proposals would
+    // have failed identically. `applyFragmentToPlanYaml` (lib/inbox.ts) stays exported and
+    // tested — it is still the monolith composer — but this path no longer reaches it.
+    shardRelPaths = writeRatificationShards(worktreePath, materialized.fragmentYaml, payload.proposalId, { mkdirSync, writeFileSync }, join);
+    log("approve.shards_written", { proposal_id: payload.proposalId, paths: shardRelPaths });
+    const masterPlanPath = join(worktreePath, "MASTER-PLAN.md");
+    writeFileSync(masterPlanPath, applyStampToMasterPlan(readFileSync(masterPlanPath, "utf8"), payload.proposalId, materialized.stampLine), "utf8");
+
+    // materialized.fragmentYaml carries only REAL ids now (materializeDraftTaskIds already
+    // rewrote every placeholder) — same per-line `- id: <id>` regex the pre-W1-T311 code used,
+    // just over the rewritten text rather than payload.fragmentYaml verbatim.
+    filedTaskIds = [...materialized.fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]);
+
+    // W1-T985 — the rare-overlap advisory for the shards this ratification just wrote. Same
+    // reader `nextTaskIdCommand` has had since W1-T917, reached here because this lane files
+    // without a human at a terminal; see the triage lane's twin of this block for the full
+    // reasoning. `filedTaskIds` is read one line above from the SAME materialised fragment the
+    // shards were written from, so the ids and the shards on disk cannot disagree.
+    printLaneOverlapAdvisory(
+      declaredFilesForFiledIds(join(worktreePath, "plan", "tasks.yaml"), filedTaskIds, deps.overlap),
+      owner,
+      repo,
+      join(worktreePath, "plan", "tasks.yaml"),
+      deps.overlap,
+    );
+
+    execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
+    execFileSync("git", ["-C", worktreePath, "commit", "-m", approveCommitMessage(payload)], { stdio: "inherit" });
+  };
   const gateway: RatifyGateway = deps.gateway ?? {
     // W1-T903 design (iii): evidence (ledger) + a real remote read — never guessed. A cheap
     // ledger-only miss (the overwhelming majority of approve calls: no prior run at all) never
@@ -43189,6 +43271,26 @@ export async function approveCommand(
     // never `gh pr list` — a probe issues no GraphQL call at all.
     findExistingPr(branch) {
       return probeExistingPlanPr(ghJson, owner, repo, branch);
+    },
+    // W1-T4437 design (i)/(ii): the OPEN plan PR of a DIFFERENT approve run of this same pass, if
+    // one is safe to join. The ledger names the CANDIDATE (evidence only, cheap, no network);
+    // everything after that is a live confirmation, since only GitHub can say whether it is still
+    // open and not already queued to merge. Fails closed on every uncertainty — a merged/closed
+    // candidate, or a head sha this cannot read, answers "not joinable" and this approval opens its
+    // own PR exactly as it always has, never risking a commit on a PR already on its way to main.
+    findJoinablePr() {
+      const candidate = mostRecentApprovePr(readLedgerLines(ledgerPath));
+      if (!candidate) return undefined;
+      const open = probeExistingPlanPr(ghJson, owner, repo, candidate.branch);
+      if (!open) return undefined;
+      let headSha: string | undefined;
+      try {
+        headSha = readHeadShaRest(open.prUrl);
+      } catch {
+        return undefined; // unreadable head — cannot confirm it is safe to join
+      }
+      if (priorArmOnHead(readLedgerLines(ledgerPath), open.prUrl, headSha)) return undefined; // already queued to merge
+      return { branch: candidate.branch, prUrl: open.prUrl, prNumber: open.prNumber };
     },
     // W1-T903 design (iii)/(vi): COMPLETE an already-pushed branch — check it out (no `-b` onto
     // a fresh commit, the branch's OWN remote tip), and read filed task ids back from what is
@@ -43233,103 +43335,28 @@ export async function approveCommand(
       // W1-T2621: see completeRatificationBranch's identical note, above.
       worktreeAdd(dir, worktreePath, branch, "origin/main", { log });
       writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
-
-      // W1-T311: MINT + RESERVE the drafted fragment's placeholder (`NEW-<n>`) ids from the
-      // FRESH worktree's plan, AFTER it is created at origin/main and BEFORE anything is
-      // written — the same ordering `rmd triage`/`rmd plan` already use (:11831,:12159), calling
-      // the ONE shared derivation rather than re-deriving ids locally here. A degraded mint
-      // source or a reservation failure REFUSES (throws) before any write, so no partial union
-      // ever reaches the worktree.
-      const materialized = materializeDraftTaskIds(
-        { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
-        {
-          mint: () =>
-            mintNextTaskIdWithHistory({
-              planPath: join(worktreePath as string, "plan", "tasks.yaml"),
-              repoRoot: worktreePath as string,
-              openPrTexts: () => openPrMintTexts(owner, repo),
-            }),
-          reserveBlock: (startId, count) => {
-            idBlock = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
-              info: { purpose: `rmd approve ${payload.proposalId} (run ${runId})` },
-            });
-            // Same closure-narrowing reason as the triage and plan lanes.
-            const approveReserveFrom = idBlock.ids[0];
-            // W1-T949: AND RESERVE THE SAME BLOCK REMOTELY — this closure is the ONLY thing
-            // `materializeDraftTaskIds` (lib/inbox.ts) sees; `reserveBlock` there is an INJECTED
-            // callback (`DraftTaskIdMintDeps.reserveBlock`), so the remote half threads through
-            // it right here without inbox.ts needing to know the local store even exists. Caught
-            // and re-thrown here (rather than left to inbox.ts's own catch, which folds ANY
-            // reservation failure into a free-text `reason` string) so a genuine
-            // `TaskIdReservationError` still leaves a durable, structured ledger event before
-            // `materializeDraftTaskIds` reduces it to prose.
-            const remote = withIdReservationLogging(
-              log,
-              "approve.id_reservation_failed",
-              () =>
-                reserveTaskIdBlockRemote(
-                  approveReserveFrom,
-                  count,
-                  gitRemoteRefReserver({
-                    run: (args) => {
-                      const r = spawnSync("git", ["-C", worktreePath as string, ...args], { encoding: "utf8" });
-                      return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-                    },
-                  }),
-                ),
-              { proposal_id: payload.proposalId },
-            );
-            return { ids: remote.ids };
-          },
-        },
-      );
-      if (!materialized.ok) {
-        throw new Error(`rmd approve: refusing to materialize task id(s) for ${payload.proposalId} — ${materialized.reason}`);
-      }
-      log("approve.id_materialized", { proposal_id: payload.proposalId, ids: materialized.ids });
-
-      // ONE SHARD PER DRAFTED TASK, NEVER AN APPEND TO THE MONOLITH. `lint-plan`'s
-      // `monolith-filing` rule refuses a NEW id filed into plan/tasks.yaml in as many words, and
-      // this was the last write site still doing it. It had never met the gate: no proposal had
-      // ever been ratified (0 `ratify.approved` rows before 2026-08-29), so the first successful
-      // approve came back `lint-plan failure` on its own filing and all 17 READY proposals would
-      // have failed identically. `applyFragmentToPlanYaml` (lib/inbox.ts) stays exported and
-      // tested — it is still the monolith composer — but this path no longer reaches it.
-      shardRelPaths = writeRatificationShards(worktreePath, materialized.fragmentYaml, payload.proposalId, { mkdirSync, writeFileSync }, join);
-      log("approve.shards_written", { proposal_id: payload.proposalId, paths: shardRelPaths });
-      const masterPlanPath = join(worktreePath, "MASTER-PLAN.md");
-      writeFileSync(masterPlanPath, applyStampToMasterPlan(readFileSync(masterPlanPath, "utf8"), payload.proposalId, materialized.stampLine), "utf8");
-
-      // W1-T136 (#287 class): regenerate plan/plan-index.json to reflect the just-stamped
-      // MASTER-PLAN.md BEFORE the single git-add below, which already sweeps up anything
-      // under plan/ — no separate commit needed here, unlike retro's own commit.
-      try {
-        regeneratePlanIndexFile({ worktreePath });
-      } catch (e) {
-        log("plan_index.regen.error", { error: String((e as Error)?.message ?? e) });
-      }
-
-      // materialized.fragmentYaml carries only REAL ids now (materializeDraftTaskIds already
-      // rewrote every placeholder) — same per-line `- id: <id>` regex the pre-W1-T311 code used,
-      // just over the rewritten text rather than payload.fragmentYaml verbatim.
-      filedTaskIds = [...materialized.fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]);
-
-      // W1-T985 — the rare-overlap advisory for the shards this ratification just wrote. Same
-      // reader `nextTaskIdCommand` has had since W1-T917, reached here because this lane files
-      // without a human at a terminal; see the triage lane's twin of this block for the full
-      // reasoning. `filedTaskIds` is read one line above from the SAME materialised fragment the
-      // shards were written from, so the ids and the shards on disk cannot disagree.
-      printLaneOverlapAdvisory(
-        declaredFilesForFiledIds(join(worktreePath, "plan", "tasks.yaml"), filedTaskIds, deps.overlap),
-        owner,
-        repo,
-        join(worktreePath, "plan", "tasks.yaml"),
-        deps.overlap,
-      );
-
-      execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
-      execFileSync("git", ["-C", worktreePath, "commit", "-m", approveCommitMessage(payload)], { stdio: "inherit" });
+      materializeAndCommitApproveFragment(worktreePath, payload, `run ${runId}`);
       gitPushRunBranch(worktreePath);
+      return branch;
+    },
+    // W1-T4437 design (i)/(ii): add ONE more proposal's shard(s) as a NEW COMMIT on an
+    // ALREADY-PUSHED, still-open plan PR from a DIFFERENT approve run of this same pass — never a
+    // new branch, never a new PR. Checked out at the branch's OWN remote tip (never `origin/main`),
+    // the same base `completeRatificationBranch` above uses, so the mint below sees every id
+    // already filed on it and never re-mints one.
+    joinRatificationBranch(branch, payload) {
+      const dir = ensureRepoDir();
+      const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
+      if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
+      worktreePath = join(worktreesDir(config), branch);
+      worktreeAdd(dir, worktreePath, branch, `origin/${branch}`, { log });
+      // Reads through the shared Clock port (systemClock.iso()), never a bare `new Date()` —
+      // clock-signature-census.test.ts tracks every new legacy-shaped call site added to this
+      // file, and every OTHER `startedAt` in this function already predates that gate.
+      writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
+      materializeAndCommitApproveFragment(worktreePath, payload, `joined ${branch}`);
+      gitPushRunBranch(worktreePath);
+      log("approve.joined", { proposal_id: payload.proposalId, branch });
       return branch;
     },
     // W1-T4338: the skill-draft twin of createRatificationBranch — one SKILL.md, verbatim, on a fresh branch.
@@ -43531,8 +43558,10 @@ export async function approveCommand(
     // credit that trailer's id as DONE on merge — see lib/plan-pr-emitter.ts's doc
     // comment). proposalId (e.g. "P19") never collides with a real task id's W1-Txxx
     // shape, but a filing PR carries NO Remudero-Task trailer at all, full stop.
-    log("pr.opened", { pr_url: result.prUrl, branch: result.branch, adopted: result.adopted === true });
-    console.log(`rmd approve: ${proposalId} — plan PR ${result.adopted ? "adopted" : "opened"}: ${result.prUrl}`);
+    log("pr.opened", { pr_url: result.prUrl, branch: result.branch, adopted: result.adopted === true, joined: result.joined === true });
+    console.log(
+      `rmd approve: ${proposalId} — plan PR ${result.adopted ? "adopted" : result.joined ? "joined" : "opened"}: ${result.prUrl}`,
+    );
 
     const ci = ciGateState(await waitForCiGreen(result.prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
@@ -43709,12 +43738,6 @@ async function approveBatchCommand(
         readFileSync(masterPlanPath, "utf8"),
       );
       writeFileSync(masterPlanPath, foldedMasterPlan, "utf8");
-
-      try {
-        regeneratePlanIndexFile({ worktreePath });
-      } catch (e) {
-        log("plan_index.regen.error", { error: String((e as Error)?.message ?? e) });
-      }
 
       execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
       execFileSync("git", ["-C", worktreePath, "commit", "-m", approveBatchCommitMessage(payloads)], { stdio: "inherit" });

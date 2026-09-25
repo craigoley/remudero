@@ -81,7 +81,9 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
     "- Rule headline [src: plan#W1-T2508]",
   );
 
-  assert.equal(sha256(fix), "b08659f95da978d4dec4e2e9d290d6a786216b7617b952febd7648e88cc233b9");
+  // W1-T4432: the plan index is no longer a regenerable artifact, so the fix prompt's generated
+  // registry exception list intentionally no longer includes plan/plan-index.json.
+  assert.equal(sha256(fix), "4fec79a7d4bb5e7b22f9a4f5d3069b34cf9e339e7cfafd4071565c7aace02c75");
   assert.equal(sha256(prerequisite), "5c52a37d141fdb3048e692885a6c8b3ae1f9481dd0f4c2f845cde736bcffa239");
   // W1-T3656 DELIBERATELY diverged this ONE template. renderReconPrompt no longer names shell
   // binaries ("git remote -v, git log --oneline -5, ls"), because a worker holding the allowlisted

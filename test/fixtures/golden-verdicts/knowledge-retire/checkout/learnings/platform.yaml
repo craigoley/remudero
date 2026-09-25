@@ -1,3 +1,6 @@
-- id: websearch-serverside-webfetch-unverified
-  # knowledge gardener: retire websearch-serverside-webfetch-unverified
+- id: sdk-builtin-tools-are-the-boundary
+  # knowledge gardener: retire sdk-builtin-tools-are-the-boundary
+  lifecycle: superseded
+- id: askuserquestion-auto-resolves-empty-headless
+  # knowledge gardener: retire askuserquestion-auto-resolves-empty-headless
   lifecycle: superseded

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -21,6 +23,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const SCRIPT_URL = pathToFileURL(
   join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "console-live-review.mjs"),
 ).href;
+
+// @host-capability isolated-temp-root: artefacts belong to this test process alone.
+const artefactRoot = mkdtempSync(join(tmpdir(), "rmd-test-console-review-"));
 
 const mod = (await import(SCRIPT_URL)) as {
   VIEWPORTS: Array<{ name: string; width: number; height: number }>;
@@ -278,7 +283,7 @@ test("W1-T3185: browser absence classification fails closed when its imports can
 });
 
 test("W1-T3185: artefacts are written beside screenshots for operator review", () => {
-  const outDir = join("/tmp", "console-live-review-artefacts");
+  const outDir = join(artefactRoot, "artefacts");
   const report = { target: "http://127.0.0.1:4317/", startedAt: "2026-09-08T00:00:00.000Z", viewports: [] };
   const path = mod.writeArtefacts(report, outDir);
 

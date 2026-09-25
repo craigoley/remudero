@@ -2,12 +2,12 @@
  * test/a-printed-remedy-is-never-applied.test.ts — W1-T2551.
  *
  * THE DEFECT. Every `<name>:check` npm script paired with a bare `<name>` script is a GENERATOR
- * run in verify mode (plan-index/plan-index:check, docs-index/docs-index:check,
+ * run in verify mode (docs-index/docs-index:check,
  * learnings-index/learnings-index:check, cli-reference/cli-reference:check,
  * capability-snapshot/capability-snapshot:check, learnings-assert/learnings-assert:check, as
  * declared in this repo's OWN package.json). Every one of those generators fails `--check` with
  * the IDENTICAL sentence, `Run 'npm run <name>' and commit the result.` (grepped verbatim out of
- * scripts/generate-plan-index.mjs et al., not assumed) — a printed, machine-fixable remedy. Before
+ * scripts/generate-docs-index.mjs et al., not assumed) — a printed, machine-fixable remedy. Before
  * this task, a ci-log fix-rung dispatch for exactly this class was handed to a full fix WORKER
  * anyway, spending a strike against `strikeCap` to reach the command the gate already named.
  *
@@ -134,8 +134,6 @@ function fakeIssueStore(): IssueGateway & { calls: Array<{ title: string; body: 
 // imported from package.json, so these tests prove the FUNCTIONS read whatever `scripts` map they
 // are given, not a baked-in assumption about this repo's own file.
 const REAL_SHAPED_SCRIPTS: Readonly<Record<string, string>> = Object.freeze({
-  "plan-index": "node scripts/generate-plan-index.mjs",
-  "plan-index:check": "node scripts/generate-plan-index.mjs --check",
   "docs-index": "node scripts/generate-docs-index.mjs",
   "docs-index:check": "node scripts/generate-docs-index.mjs --check",
   "learnings-index": "node scripts/generate-learnings-index.mjs",
@@ -157,7 +155,7 @@ function remedyLog(name: string, extra = ""): string {
 // ── declaredGeneratorScriptFor / remedyGeneratorNamedInLog / generatorFixFor ─────────────────────
 
 test("declaredGeneratorScriptFor: a `:check` script paired with a declared bare script resolves to the bare name", () => {
-  assert.equal(declaredGeneratorScriptFor(REAL_SHAPED_SCRIPTS, "plan-index:check"), "plan-index");
+  assert.equal(declaredGeneratorScriptFor(REAL_SHAPED_SCRIPTS, "docs-index:check"), "docs-index");
   assert.equal(declaredGeneratorScriptFor(REAL_SHAPED_SCRIPTS, "learnings-index:check"), "learnings-index");
   // Bare name given directly resolves identically — the pairing is symmetric.
   assert.equal(declaredGeneratorScriptFor(REAL_SHAPED_SCRIPTS, "docs-index"), "docs-index");
@@ -184,7 +182,7 @@ test("declaredGeneratorScriptFor: reads THE GIVEN scripts map, not a hand-mainta
 });
 
 test("remedyGeneratorNamedInLog: extracts the generator name from the EXACT sentence every generate-*.mjs script prints", () => {
-  assert.equal(remedyGeneratorNamedInLog(remedyLog("plan-index")), "plan-index");
+  assert.equal(remedyGeneratorNamedInLog(remedyLog("docs-index")), "docs-index");
   assert.equal(remedyGeneratorNamedInLog(remedyLog("learnings-assert")), "learnings-assert");
 });
 
@@ -194,7 +192,7 @@ test("remedyGeneratorNamedInLog: undefined for an ordinary CI failure that names
 });
 
 test("generatorFixFor: BOTH the log must name a remedy AND that name must be a declared pairing", () => {
-  assert.equal(generatorFixFor({ logTail: remedyLog("plan-index") }, REAL_SHAPED_SCRIPTS), "plan-index");
+  assert.equal(generatorFixFor({ logTail: remedyLog("docs-index") }, REAL_SHAPED_SCRIPTS), "docs-index");
   // The log names a real command, but this scripts map declares no pairing for it (the untrusted-
   // log threat model, W1-T210's own discipline extended here: a crafted log naming an arbitrary
   // command must never be enough on its own).
@@ -204,10 +202,10 @@ test("generatorFixFor: BOTH the log must name a remedy AND that name must be a d
 });
 
 test("allCiFailuresAreGeneratorFixable: true only when EVERY failure resolves — a mixed batch is false (acceptance criterion 3)", () => {
-  const allFixable: CiFailure[] = [{ name: "plan-index-check", logTail: remedyLog("plan-index") }, { name: "docs-index-check", logTail: remedyLog("docs-index") }];
+  const allFixable: CiFailure[] = [{ name: "docs-index-check", logTail: remedyLog("docs-index") }, { name: "learnings-index-check", logTail: remedyLog("learnings-index") }];
   assert.equal(allCiFailuresAreGeneratorFixable(allFixable, REAL_SHAPED_SCRIPTS), true);
 
-  const mixed: CiFailure[] = [{ name: "plan-index-check", logTail: remedyLog("plan-index") }, { name: "unit-tests", logTail: "AssertionError: expected true to equal false" }];
+  const mixed: CiFailure[] = [{ name: "docs-index-check", logTail: remedyLog("docs-index") }, { name: "unit-tests", logTail: "AssertionError: expected true to equal false" }];
   assert.equal(allCiFailuresAreGeneratorFixable(mixed, REAL_SHAPED_SCRIPTS), false);
 
   assert.equal(allCiFailuresAreGeneratorFixable([], REAL_SHAPED_SCRIPTS), false, "empty is never fixable — nothing to fix");
@@ -221,7 +219,7 @@ test("runGeneratorFixForCiFailures (criterion 1): runs the declared generator, r
   const pushes: Array<{ cwd: string; branch: string }> = [];
 
   const outcome = await runGeneratorFixForCiFailures({
-    failures: [{ name: "plan-index-check", logTail: remedyLog("plan-index") }],
+    failures: [{ name: "docs-index-check", logTail: remedyLog("docs-index") }],
     scripts: REAL_SHAPED_SCRIPTS,
     worktreePath: "/tmp/wt-2551",
     taskId: "W1-T9001",
@@ -242,9 +240,9 @@ test("runGeneratorFixForCiFailures (criterion 1): runs the declared generator, r
     },
   });
 
-  assert.deepEqual(ranScripts, ["plan-index", "plan-index:check"], "the generator runs, then its OWN check re-verifies — in that order");
+  assert.deepEqual(ranScripts, ["docs-index", "docs-index:check"], "the generator runs, then its OWN check re-verifies — in that order");
   assert.equal(outcome.applied, true);
-  assert.deepEqual(outcome.generators, ["plan-index"]);
+  assert.deepEqual(outcome.generators, ["docs-index"]);
   assert.equal(outcome.commitSha, "cafef00d");
   assert.equal(commits.length, 1, "exactly one commit — the generator's own output");
   assert.equal(pushes.length, 1);
@@ -437,10 +435,10 @@ test("runFixRung (criterion 1, integration): a ci-log round entirely generator-f
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
 
   const outcome = await runFixRung({
-    ...fixRungBaseOpts({ id: "W1-T2551A", title: "regenerate the stale plan index" }),
+    ...fixRungBaseOpts({ id: "W1-T2551A", title: "regenerate the stale docs index" }),
     strikeCap: 3,
     initialReview: ciLogInitialReview(),
-    ciFailures: [{ name: "plan-index-check", logTail: remedyLog("plan-index") }],
+    ciFailures: [{ name: "docs-index-check", logTail: remedyLog("docs-index") }],
     deps: {
       spawn: async (args) => {
         spawnCalls.push(args);
@@ -475,7 +473,7 @@ test("runFixRung (criterion 1, integration): a ci-log round entirely generator-f
   });
 
   assert.equal(spawnCalls.length, 0, "no fix worker is ever spawned for a fully generator-fixable round");
-  assert.deepEqual(runScriptCalls, ["plan-index", "plan-index:check"]);
+  assert.deepEqual(runScriptCalls, ["docs-index", "docs-index:check"]);
   assert.equal(outcome.strikes, 0, "the generator-fix short-circuit never spends a strike");
   assert.equal(outcome.outcome, "stood_down", "CI cleared and the empty-evidence guard cleanly stands the rung down");
 
@@ -533,10 +531,10 @@ test("runFixRung (criterion 3, integration, dep-absent): with the generator-fix 
   const spawnCalls: SpawnWorkerArgs[] = [];
 
   const outcome = await runFixRung({
-    ...fixRungBaseOpts({ id: "W1-T2551C", title: "regenerate the stale plan index" }),
+    ...fixRungBaseOpts({ id: "W1-T2551C", title: "regenerate the stale docs index" }),
     strikeCap: 3,
     initialReview: ciLogInitialReview(),
-    ciFailures: [{ name: "plan-index-check", logTail: remedyLog("plan-index") }],
+    ciFailures: [{ name: "docs-index-check", logTail: remedyLog("docs-index") }],
     deps: {
       spawn: async (args) => {
         spawnCalls.push(args);
@@ -546,7 +544,7 @@ test("runFixRung (criterion 3, integration, dep-absent): with the generator-fix 
       runReview: async () => ({
         ...ciLogInitialReview("sha-fixed"),
         state: "success",
-        criteria: [{ claim: "plan index is fresh", met: true, proof: "npm run plan-index:check", reason: "", proof_exec: "executed_pass" }],
+        criteria: [{ claim: "docs index is fresh", met: true, proof: "npm run docs-index:check", reason: "", proof_exec: "executed_pass" }],
       }),
       push: () => {},
       issues: fakeIssueStore(),

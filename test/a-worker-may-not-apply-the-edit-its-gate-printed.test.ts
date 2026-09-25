@@ -39,7 +39,7 @@ import {
 import { REGENERABLE_ARTIFACT_GENERATORS } from "../src/lib/sweep.js";
 
 const REGISTRY_PATH = "scripts/source-size-baseline.json";
-const OTHER_REGISTRY_PATH = "plan/plan-index.json";
+const OTHER_REGISTRY_PATH = "docs/docs-index.json";
 const ROGUE_PATH = "src/lib/rogue.ts";
 
 const ORIGINAL_SENTENCE =

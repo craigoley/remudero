@@ -161,7 +161,7 @@ test("W1-T3388: isDispatchedRunBranch and isFilingShapedSubject are reused verba
   assert.equal(isDispatchedRunBranch("run-W1-T2519-1787425298842"), true);
   assert.equal(isDispatchedRunBranch("run-unfiled-1787425298842"), true);
   assert.equal(isDispatchedRunBranch("fix/whatever"), false);
-  assert.equal(isFilingShapedSubject("chore(plan): regenerate plan/plan-index.json"), true);
+  assert.equal(isFilingShapedSubject("chore(plan): update the plan section index"), true);
   assert.equal(isFilingShapedSubject("fix(drain): stop a stuck branch"), false);
 });
 

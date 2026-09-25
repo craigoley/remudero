@@ -29,6 +29,16 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CI_YAML_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
+const bashVersion = spawnSync("bash", ["--version"], { encoding: "utf8" }).stdout ?? "";
+const BASH_3_MAPFILE_SHIM = /^GNU bash, version 3\./.test(bashVersion)
+  ? `mapfile() {
+  local target line
+  if [ "\${1:-}" = "-t" ]; then target="$2"; else target="$1"; fi
+  [ -n "$target" ] || return 2
+  eval "$target=()"
+  while IFS= read -r line; do eval "$target+=(\"\$line\")"; done
+}`
+  : "";
 
 type Step = { name?: string; id?: string; run?: string };
 type Job = { steps?: Step[]; strategy?: { matrix?: { shard?: unknown[] } } };
@@ -65,7 +75,10 @@ function runStep(run: string, env: Record<string, string>, nodeStub: string = DE
   const log = join(dir, "node-calls.log");
   writeFileSync(join(dir, "bin", "node"), nodeStub);
   chmodSync(join(dir, "bin", "node"), 0o755);
-  writeFileSync(join(dir, "run.sh"), run);
+  // The GitHub runner uses Bash 5, while macOS ships Bash 3.2 without `mapfile`. Keep the
+  // fixture's execution of the workflow body meaningful on the operator's host by providing the
+  // Bash 4+ builtin's `-t` behavior only when the shell actually lacks it.
+  writeFileSync(join(dir, "run.sh"), BASH_3_MAPFILE_SHIM ? `${BASH_3_MAPFILE_SHIM}\n${run}` : run);
   const r = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", join(dir, "run.sh")], {
     cwd: dir,
     encoding: "utf8",

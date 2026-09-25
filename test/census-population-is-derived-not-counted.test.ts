@@ -150,10 +150,11 @@ test("FAST_GATE_CENSUS_BOUND_MS is unchanged at 2000ms — this task does not to
   assert.equal(FAST_GATE_CENSUS_BOUND_MS, 2000);
 });
 
-test("the six census entries admitted since W1-T2478 are still admitted, by job name, and CENSUS_POPULATION carries no `ok`/refusal field of its own — the derivation is data, never a second gate", () => {
+test("the seven census entries admitted since W1-T2478 are still admitted, by job name, and CENSUS_POPULATION carries no `ok`/refusal field of its own — the derivation is data, never a second gate", () => {
   const jobs = CENSUS_ADMITTED_MEMBERS.map((m) => m.job).sort();
   // W1-T2695: `authority-census` joins the four W1-T2478 admitted — the same growth shape the
   // COMMANDS registry baseline follows when a genuinely new, identically-shaped suite lands.
+  // W1-T4422: `no-draft-pr-census` (W1-T4415's suite) joins on the same terms.
   assert.deepEqual(
     jobs,
     [
@@ -162,6 +163,7 @@ test("the six census entries admitted since W1-T2478 are still admitted, by job 
       "catch-erasure-census",
       "ledger-literal-census",
       "negative-reachability-census",
+      "no-draft-pr-census",
       "no-shallowing-census",
     ].sort(),
   );
