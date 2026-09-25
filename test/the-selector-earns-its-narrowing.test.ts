@@ -13,10 +13,13 @@ import {
   readSelectorShadowRuns,
   runSelectorShadowGardener,
   selectorShadowReport,
+  startSelectorShadowGardener,
   type SelectorShadowRecord,
   type SelectorShadowRun,
 } from "../src/lib/selector-shadow-gardener.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
+import { daemonCommand } from "../src/run-task.js";
 
 function run(id: number, record: SelectorShadowRecord, overrides: Partial<SelectorShadowRun> = {}): SelectorShadowRun {
   const log = Array.from({ length: SELECTOR_SHADOW_SHARDS }, (_, shard) =>
@@ -53,6 +56,7 @@ test("W1-T4439: the gardener reports each selection's miss rate from the shadow 
   assert.equal(incomplete.floor.failures, 0);
   assert.equal(incomplete.verdict, "insufficient");
   assert.throws(() => parseSelectorShadowLines('AFFECTED-SUITES-SHADOW: {"fullRun":false,"floorSize":0,"failures":[{"file":"test/a.test.ts","floor":"unknown"}]}'), /invalid failure verdict/);
+  assert.throws(() => parseSelectorShadowLines('AFFECTED-SUITES-SHADOW: {"fullRun":false,"floorSize":-1,"failures":[]}'), /invalid record sizes or failures/);
 
   const enough = Array.from({ length: SELECTOR_SHADOW_MIN_RUNS }, (_, i) => run(i + 10, {
     fullRun: false, floorSize: 80, narrowSize: 20,
@@ -127,4 +131,57 @@ test("W1-T4439: the GitHub reader keeps each run's exact head and comparison", (
   assert.throws(() => readSelectorShadowChangedPaths("acme", "remudero", miss, () => null), /no comparison object for abc123/);
   assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => null, readLog: () => "" }), /no workflow-runs object/);
   assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({}), readLog: () => "" }), /no workflow_runs list/);
+  assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({ workflow_runs: [{ head_sha: "abc123" }] }), readLog: () => "" }), /no id or head SHA/);
+});
+
+test("W1-T4439: a failed pass is logged by name and never stops the daemon's timer", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-tick-`));
+  const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const garden = startSelectorShadowGardener(
+    {
+      stateDir: join(root, "state"),
+      repoRoot: root,
+      openWorkspace: () => { throw new Error("no miss, so no workspace"); },
+      log: (step, extra) => { events.push({ step, extra }); },
+    },
+    () => { throw new Error("gh run list unavailable"); },
+    () => [],
+    () => "W1-T9002",
+    60_000,
+  );
+  try {
+    for (let waited = 0; events.length === 0 && waited < 5_000; waited += 10) await new Promise((r) => setTimeout(r, 10));
+  } finally {
+    garden.stop();
+  }
+  assert.deepEqual(events, [{ step: "selector-shadow.gardener_failed", extra: { error: "gh run list unavailable" } }]);
+});
+
+test("W1-T4439: a self-hosting daemon wires the selector-shadow gardener", async () => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4439-home-`));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  let captured: DaemonDeps | undefined;
+  try {
+    await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan, d): Promise<DaemonSummary> => {
+        captured = d;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    // plan, gate, test, config, export, ci-friction, then this gardener.
+    const start = captured?.gardens?.[6];
+    assert.ok(start, "a seventh garden is wired after the ci-friction gardener");
+    // Stopped before its first tick, so the pass never reaches the real GitHub transport.
+    start!(60_000).stop();
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+  }
 });
