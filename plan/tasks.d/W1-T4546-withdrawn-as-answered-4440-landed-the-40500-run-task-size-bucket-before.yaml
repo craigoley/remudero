@@ -1,0 +1,37 @@
+- id: W1-T4546
+  title: "WITHDRAWN AS ANSWERED — #4440 landed the 40500 run-task size bucket before #4437, so no baseline fix remains to build"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: blocked
+  retirement: withdrawn
+  attempts: 0
+  acceptance:
+    - claim: "the research question is resolved with the winning and duplicate PR dispositions recorded, and this entry can never dispatch"
+      proof: "grep: NO BUILDABLE RESIDUE in plan/tasks.d/W1-T4546-run-task-size-bucket-question-resolved.yaml"
+  origin: "followup:DAEMON-1788798101016:2026-09-07T16:30:06.550Z:1"
+  plan_refs: ["P25", "§7B", "W1-T1014", "W1-T1033", "W1-T2204", "W1-T2683", "P63", "W1-T2653"]
+  files: [plan/tasks.d/W1-T4546-run-task-size-bucket-question-resolved.yaml]
+  rationale: |
+    NO BUILDABLE RESIDUE. The proposal was emitted at 16:30:06Z. #4440 had already opened at
+    16:23:09Z with the exact `scripts/source-size-baseline.json` change
+    `src/run-task.ts: 40000 -> 40500`; commit 39e55164b added that same line to #4437 at
+    16:25:40Z. #4440 then merged at 16:40:16Z, three minutes before #4437 merged at
+    16:43:31Z. Therefore #4437 did not supersede #4440: the dedicated PR landed the repair
+    first, and #4437's carried copy became redundant against the repaired main.
+
+    A second independently-opened baseline PR, #4442, was the actual duplicate. It opened at
+    16:31:10Z and closed unmerged at 16:36:02Z with a comment naming #4440's byte-identical
+    earlier change. Main now records `"src/run-task.ts": 40500`, so filing another baseline
+    edit would recreate work already completed.
+
+    The durable mechanisms are already assigned: W1-T1014 owns independently-green changes
+    composing into a red main; W1-T1033 and W1-T2204/W1-T2683 own making main's check state
+    observable and consumed; P63/W1-T2653 owns reachability of a gate's prescribed remedy.
+    This answered instance does not mint a competing implementation.
+  design: |
+    NOT TO BE BUILT. Keep this blocked withdrawal as the provenance-bearing answer to the
+    research proposal. Do not edit the baseline, reopen #4442, or file a second implementation
+    of the already-owned main-health, cross-PR-composition, or remedy-reachability classes.
