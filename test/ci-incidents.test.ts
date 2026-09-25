@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import {
   ciIncidentEventsFromLog,
   createCiIncidentState,
+  readCiIncidentJobLog,
   recordCheckRunOutcome,
 } from "../src/lib/ci-incidents.js";
+
+const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
 const TWO_FAILURES = [
   "TAP version 13",
@@ -24,6 +32,71 @@ const TWO_FAILURES = [
   "  failureType: 'testCodeFailure'",
   "  ...",
 ].join("\n");
+
+test("a failed job log is read through the real bounded gh text transport", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-ci-incident-job-log-"));
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  writeFileSync(
+    join(bin, "gh"),
+    "#!/bin/sh\nprintf 'ARGS:%s\\n' \"$*\"\nprintf 'RAW LOG: not JSON\\n'\n",
+    { mode: 0o755 },
+  );
+  const moduleUrl = pathToFileURL(join(repoRoot, "src/lib/ci-incidents.ts")).href;
+  try {
+    const output = execFileSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "--input-type=module",
+        "-e",
+        `import { readCiIncidentJobLog } from ${JSON.stringify(moduleUrl)}; process.stdout.write(await readCiIncidentJobLog("craigoley/remudero", 321));`,
+      ],
+      {
+        cwd: repoRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+          HOME: root,
+          RMD_GH_CACHE_HOME: root,
+          RMD_GH_TRANSPORT_FLOOR: "advisory",
+        },
+      },
+    );
+    assert.equal(output, "ARGS:api repos/craigoley/remudero/actions/jobs/321/logs\nRAW LOG: not JSON\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("job-log reading skips unknown repositories and reports a failed read without throwing", async () => {
+  let calls = 0;
+  assert.equal(
+    await readCiIncidentJobLog("", 321, {
+      fetchJobLog: async () => {
+        calls += 1;
+        return "unexpected";
+      },
+    }),
+    "",
+  );
+  assert.equal(calls, 0);
+
+  const failures: unknown[] = [];
+  assert.equal(
+    await readCiIncidentJobLog("craigoley/remudero", 321, {
+      fetchJobLog: async () => {
+        throw new Error("fixture transport failure");
+      },
+      onUnreadable: (error) => failures.push(error),
+    }),
+    "",
+  );
+  assert.equal(failures.length, 1);
+  assert.match(String(failures[0]), /fixture transport failure/);
+});
 
 test("a failing check posts one incident event per failing test, fingerprinted by test", () => {
   const events = ciIncidentEventsFromLog(TWO_FAILURES, { sha: "head-a" });

@@ -72,6 +72,7 @@ import { buildIncidentsRoute, type IncidentsRouteInput } from "./incident-lifecy
 import {
   ciIncidentEventLedgerLine,
   createCiIncidentState,
+  readCiIncidentJobLog,
   recordCheckRunOutcome,
   DEFAULT_CI_INCIDENT_MAIN_BRANCH,
   type CiIncidentState,
@@ -3909,28 +3910,15 @@ export function assertRoutesScopeComplete(entries: readonly { method?: Method; p
  * failing tests rather than throwing off a webhook delivery.
  */
 async function fetchCiIncidentJobLog(deps: ServeDeps, repository: string, jobId: number): Promise<string> {
-  const inject = deps.ciIncidents?.fetchJobLog;
-  if (inject) return inject(repository, jobId);
-  if (!repository) return "";
-  try {
-    return await new Promise<string>((resolve, reject) => {
-      execFile(
-        "gh",
-        ["api", `repos/${repository}/actions/jobs/${jobId}/logs`],
-        {
-          encoding: "utf8",
-          maxBuffer: 32 * 1024 * 1024,
-          timeout: 30_000,
-        },
-        (error, stdout) => (error ? reject(error) : resolve(stdout)),
-      );
-    });
-  } catch (e) {
-    // CARRIED, NEVER ERASED (catch-erasure-ratchet): the empty string still parses to zero failing
-    // tests below, but the reason a real failed check's log went unread is named in the ledger.
-    deps.log?.("serve.ci_incidents.job_log_unreadable", { reason: String((e as Error)?.message ?? e), repository, jobId });
-    return "";
-  }
+  return readCiIncidentJobLog(repository, jobId, {
+    fetchJobLog: deps.ciIncidents?.fetchJobLog,
+    onUnreadable: (error) =>
+      deps.log?.("serve.ci_incidents.job_log_unreadable", {
+        reason: String((error as Error)?.message ?? error),
+        repository,
+        jobId,
+      }),
+  });
 }
 
 interface ServeRoutesAssembly {
