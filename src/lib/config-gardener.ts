@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { systemClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import { aggregateCacheHitTotals, deriveKnowledgeBudgetCap, measureKnowledgeBudgetPressure, TRIVIAL_DROPPED_WEIGHT_CHARS, type CacheHitTokens, type KnowledgeBudgetDerivation } from "./digest.js";
 import {
   cohortGuardMetrics,
@@ -257,7 +257,7 @@ export function configInventory(deps: GardenerDeps, sources: ConfigGardenSources
   const nowMs = (deps.clock ?? systemClock).now();
   const canaries = readConfigCanaries(deps.stateDir);
   return {
-    nowIso: new Date(nowMs).toISOString(),
+    nowIso: fixedClock(nowMs).iso(),
     runs: gatherRuns(rows as LedgerRecord[]),
     queued: queuedBudgets(deps.repoRoot, deps.stateDir),
     recommendations: sources.mountRecommendations?.() ?? [],
@@ -438,7 +438,7 @@ export function capCandidate(inv: ConfigInventory, baselineText: string): Config
 /** A draft promotion for `action`, approved by the gardener's own draw and not yet exposed. */
 export function configPromotion(action: ConfigGardenAction, nowIso: string, repo = "remudero"): PromotionRecord {
   const now = Date.parse(nowIso);
-  const expiresAt = new Date(now + CANARY_TTL_MS).toISOString();
+  const expiresAt = fixedClock(now + CANARY_TTL_MS).iso();
   return {
     version: EXPERIMENT_PROMOTION_VERSION,
     promotionId: `config-${action.scope}-${now}`,
@@ -573,7 +573,7 @@ export function tendConfigCanaries(deps: GardenerDeps, runs: () => RunSummary[])
   const canaries = file.canaries;
   if (!canaries.some((c) => isPromotionActive(c.promotion.state))) return [];
   if (file.lastTendMs !== undefined && nowMs - file.lastTendMs < CONFIG_TEND_INTERVAL_MS) return [];
-  const nowIso = new Date(nowMs).toISOString();
+  const nowIso = fixedClock(nowMs).iso();
   const results: TendResult[] = [];
   let measured: RunSummary[] | undefined;
   for (const [i, c] of canaries.entries()) {
@@ -635,7 +635,7 @@ export function runConfigGarden(spec: ConfigGardenSpec, deps: GardenerDeps, sour
   const pass = runGarden(spec, deps);
   const action = pass.plan?.actions[0];
   if (pass.prUrl && action) {
-    const nowIso = new Date((deps.clock ?? systemClock).now()).toISOString();
+    const nowIso = (deps.clock ?? systemClock).iso();
     const promotion = configPromotion(action, nowIso);
     const shadow = enterCanary(promotion, action.shadowMetrics, action.shadowObservations, nowIso);
     const canary: ConfigCanary = {
