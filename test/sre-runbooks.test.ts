@@ -319,7 +319,7 @@ test("an escalation opens the needs-human issue assigned to the operator", () =>
   });
 });
 
-test("the daemon runbook pass remains in shadow until a governor is wired", async () => {
+test("the daemon runbook pass holds a runbook its governor has never seen in shadow", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-sre-daemon-pass-"));
   const ledgerPath = join(root, "ledger.jsonl");
   writeFileSync(ledgerPath, "");
@@ -330,8 +330,8 @@ test("the daemon runbook pass remains in shadow until a governor is wired", asyn
   const result = await pass(incident());
   assert.equal(result.outcome, "would_act");
   assert.equal(result.fileFeedback, true);
-  assert.deepEqual(calls, ["precheck"], "the production daemon does not act before its governor exists");
-  assert.equal(logged[0]?.extra?.reason, "no governor yet (W1-T4390): a new runbook starts in shadow");
+  assert.deepEqual(calls, ["precheck"], "a new runbook does not act before it earns live (W1-T4390)");
+  assert.equal(logged[0]?.extra?.reason, "new runbook: starts in shadow and earns live on a clean shadow record");
 });
 
 test("failed escalation delivery is logged and returns null instead of escaping the daemon", () => {
@@ -453,7 +453,7 @@ test("receipts are read back from the ledger, and a torn row is skipped", () => 
     { ts: "2026-09-25T11:02:00.000Z", step: "run.start", id: "a", fingerprint: FP, mode: "live", outcome: "failed" },
   ].map((row) => JSON.stringify(row)).join("\n") + "\n");
   assert.deepEqual(readRunbookReceipts(ledgerPath), [
-    { id: "a", fingerprint: FP, mode: "live", outcome: "failed", subject: undefined, before: "b", after: "x", seen_ms: 5 },
+    { id: "a", fingerprint: FP, mode: "live", outcome: "failed", subject: undefined, before: "b", after: "x", seen_ms: 5, ts_ms: Date.parse("2026-09-25T11:00:00.000Z") },
   ]);
 });
 
