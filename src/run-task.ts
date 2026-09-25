@@ -151,12 +151,13 @@ import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { startGarden, type GardenCheckout } from "./lib/gardener.js";
+import { startGarden, type GardenCheckout, type GardenerDeps } from "./lib/gardener.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
+import { startCiFrictionGardener, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
 import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
@@ -242,7 +243,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export", "ci-friction"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -800,6 +801,7 @@ import {
   shippedSince,
   stampCitationsAndCommit,
   type GitLogCommit,
+  type LedgerRecord,
   type MastMapping,
   type PlanStateTruthResolver,
   type RetroTriggerDecision,
@@ -32424,6 +32426,31 @@ export async function daemonCommand(
                     log,
                   };
                   return startGarden(exportGardenSpec(exportGarden), exportGarden, intervalMs);
+                },
+                // W1-T4435: the fleet prices its own slowest gate. Every extra-head cause (a red
+                // required check, main merging in, a merge conflict, a refused fix-lane commit) is
+                // priced in PR MINUTES — never fire count — from the ledger union and gate-fire-
+                // rate.ts's own measurement (W1-T4115); the costliest cause with no open task is
+                // drafted as one, parked for a person.
+                (intervalMs: number) => {
+                  const stateDir = join(config.root, "state");
+                  const ciFrictionGarden: GardenerDeps = {
+                    stateDir,
+                    repoRoot,
+                    openWorkspace: () => gardenCheckout({ name: "ci-friction", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
+                    log,
+                  };
+                  const sources: CiFrictionGardenSources = {
+                    ledgerRecords: () => {
+                      const read = readLedgerUnionRecordsSync(stateDir, { requireArchives: true, refuseIncomplete: true });
+                      return read.ok ? (read.rows as LedgerRecord[]) : [];
+                    },
+                    gateFireRates: () => readGateFireRateReport(stateDir),
+                    planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+                    mintTaskId: ciLearningTaskIdMinter(repoRoot),
+                  };
+                  return startCiFrictionGardener(ciFrictionGarden, sources, intervalMs);
                 },
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
                 // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
