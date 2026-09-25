@@ -1,30 +1,18 @@
 /**
- * lib/incident-lifecycle.ts (W1-T4387) — NOBODY CHECKS A FIX ACTUALLY FIXED ANYTHING.
+ * lib/incident-lifecycle.ts (W1-T4387) — closes the loop W1-T4385's SRE lane opens by filing an
+ * `incident#<fingerprint>`: a small per-fingerprint state machine, `new -> filed -> building (PR
+ * n) -> deployed (fix sha running) -> verified | regressed`. A fix PR names its incident with a
+ * `Fixes-Incident: <fingerprint>` trailer ({@link linkFixPr}, mirroring `Remudero-Task:`'s own
+ * grammar). {@link evaluateDeployedIncident} is the pure decision: a `deployed` record verifies
+ * once quiet through the window since deploy, regresses the moment an event fires after deploy —
+ * never both, never on a record that is not `deployed`.
  *
- * W1-T4385's SRE lane already files `incident#<fingerprint>` feedback; W1-T4386 (queued) will let
- * runbooks fix some of it automatically. Neither closes the loop the operator actually asked for:
- * "the resolution might already be in progress automatically" has to be VISIBLE, not assumed. This
- * module is that loop's ledger of record, one small state machine per fingerprint:
+ * INVARIANT: verified/regressed each adjust a Beta record for the incident's own `kind`, reusing
+ * gardener.ts's alpha/beta shape ({@link readGardenState}) rather than redeclaring it.
  *
- *   new -> filed (feedback id) -> building (PR n) -> deployed (the fix sha is running)
- *        -> verified (the fingerprint stayed quiet through the window after deploy)
- *        -> regressed (an event returned; the PR link and evidence survive the transition)
- *
- * A fix PR names its incident with a `Fixes-Incident: <fingerprint>` trailer (mirrors the
- * `Remudero-Task:` trailer every PR already carries — see status.ts/board.ts's own `TRAILER_RE`);
- * {@link linkFixPr} reads it. {@link evaluateDeployedIncident} is the pure decision at the module's
- * centre: given whatever the caller found for "did this fingerprint fire again since deploy", it
- * verifies or regresses — never both, never neither, and never on a record that is not `deployed`.
- *
- * CREDIT: verified/regressed each adjust a Beta record for the incident's OWN `kind`
- * (exception/http_5xx/latency/invariant) — the same alpha/beta shape gardener.ts already defines
- * and reads generically ({@link readGardenState}), reused rather than redeclared, so a future
- * gardener spec can read this class's record with zero new code.
- *
- * GET /v1/incidents (`buildIncidentsRoute`) serves the store for the console. Its one hard rule,
- * because "nobody checks" is exactly the failure mode this task exists to close: an UNREADABLE
- * store is reported as an error, never silently rendered as the empty, healthy list a caller
- * cannot tell apart from "no incidents have ever fired".
+ * TRAP this exists to close: `GET /v1/incidents` must report an UNREADABLE store as an error, not
+ * the same `200 {incidents: []}` a genuinely quiet fleet returns — the two are indistinguishable
+ * to a caller unless the route says which one happened. FALSIFIER: test/incident-lifecycle.test.ts.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
