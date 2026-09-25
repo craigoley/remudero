@@ -19,7 +19,7 @@
  * is a source grep, not a behaviour this file re-proves.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -39,6 +39,7 @@ import {
   guardRetirementCandidates,
   guardRetirementProposalId,
   initialGardenerState,
+  knowledgeGardenSpec,
   MERGED_RULES_FILE,
   planGardenPass,
   readSkillUsage,
@@ -229,10 +230,12 @@ test("W1-T4114: an unambiguous dangling Why: pointer is rewritten to its moved t
 
   const changed = applyRepairReferenceActions(root, actions);
   assert.deepEqual(changed, ["src/lib/x.ts"]);
-  const text = readFileSync(join(root, "src", "lib", "x.ts"), "utf8");
-  assert.match(text, /Why: docs\/forensics\/archive\/moved\.md/);
   assert.deepEqual(danglingWhyPointers(root), [], "nothing dangling is left to repair");
   assert.deepEqual(repairReferenceCandidates(root), [], "a second pass proposes nothing further");
+  // The pointer now names the MOVED page, read back through the scanner itself: remove that page
+  // and the same line dangles again, at its new target, not its old one.
+  rmSync(join(root, "docs", "forensics", "archive", "moved.md"));
+  assert.deepEqual(danglingWhyPointers(root), [{ file: "src/lib/x.ts", line: 1, target: "docs/forensics/archive/moved.md" }]);
 });
 
 test("W1-T4114: an ambiguous or genuinely-gone dangling pointer is left alone", () => {
@@ -242,4 +245,32 @@ test("W1-T4114: an ambiguous or genuinely-gone dangling pointer is left alone", 
   // Genuinely gone: no same-named page exists anywhere.
   writeFileSync(join(root, "src", "lib", "gone.ts"), "// Why: docs/forensics/nowhere.md\nexport const g = 1;\n");
   assert.deepEqual(repairReferenceCandidates(root), []);
+});
+
+// ── every new store reads an unreadable file as no history — one assertion per catch arm ────────
+
+test("W1-T4114: an unreadable skills-usage store, merged-rules registry or retro marker reads as no history", () => {
+  const root = tmpRoot("w1t4114-unreadable-");
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(join(root, "doctrine"), { recursive: true });
+
+  writeFileSync(skillUsagePath(stateDir), "{not json");
+  assert.deepEqual(readSkillUsage(skillUsagePath(stateDir)), {});
+
+  writeFileSync(join(root, MERGED_RULES_FILE), "{not json");
+  assert.equal(resolveMergedRuleId(root, "some-rule"), "some-rule");
+
+  const spec = knowledgeGardenSpec({
+    repoRoot: root,
+    stateDir,
+    openWorkspace: () => {
+      throw new Error("inventory must not open a workspace");
+    },
+    log: () => {},
+  });
+  writeFileSync(join(stateDir, "last-retro.json"), JSON.stringify({ guard_zero_streak: { "quiet-guard": GUARD_RETIREMENT_ZERO_STREAK } }));
+  assert.deepEqual(spec.inventory().guardZeroStreak, { "quiet-guard": GUARD_RETIREMENT_ZERO_STREAK });
+  writeFileSync(join(stateDir, "last-retro.json"), "{not json");
+  assert.deepEqual(spec.inventory().guardZeroStreak, {});
 });

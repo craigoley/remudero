@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "
 import { basename, join, relative } from "node:path";
 
 import { systemClock } from "./clock.js";
-import { writeAtomic } from "./fs-race-safe.js";
+import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { buildKnowledgeInventory, danglingWhyPointers, inventoryTotals, type KnowledgeItem } from "./knowledge-inventory.js";
 import { resolveCanonicalRuleId, slugifyRuleId, type MergedRuleGroup } from "./doctrine-lifecycle.js";
@@ -301,18 +301,18 @@ export function applyRuleMergeActions(root: string, actions: GardenAction[]): st
     if (a.target !== group.canonicalId && !group.aliasIds.includes(a.target)) group.aliasIds.push(a.target);
   }
   const changed = new Set<string>([MERGED_RULES_FILE]);
-  writeFileSync(join(root, MERGED_RULES_FILE), JSON.stringify(groups, null, 2) + "\n");
+  writeAtomic(join(root, MERGED_RULES_FILE), JSON.stringify(groups, null, 2) + "\n");
   for (const a of targets) {
-    if (!a.at || !existsSync(join(root, a.at))) continue;
+    const text = a.at ? readFileIfExists(join(root, a.at)) : undefined;
+    if (!a.at || text === undefined) continue;
     // Appended, never prepended: `test/the-doctrine-index-points-at-every-body.test.ts` holds every
     // stored body to opening with its OWN headline, and this marker must never be the reason a
     // real merge PR breaks that invariant. A three-line HTML comment, its middle line exactly
     // `gardenMarker(a)` with nothing trailing — the SAME `${gardenMarker(a)}$` anchor prBody's own
     // proof line greps for on the learnings side.
     const marker = `<!--\n${gardenMarker(a)}\n-->\n`;
-    const text = readFileSync(join(root, a.at), "utf8");
     if (text.includes(`\n${gardenMarker(a)}\n`)) continue;
-    writeFileSync(join(root, a.at), `${text.replace(/\n*$/, "\n")}${marker}`);
+    writeAtomic(join(root, a.at), `${text.replace(/\n*$/, "\n")}${marker}`);
     changed.add(a.at);
   }
   return [...changed].sort();
@@ -365,8 +365,8 @@ export function applyRepairReferenceActions(root: string, actions: GardenAction[
   const changed: string[] = [];
   for (const file of files) {
     const path = join(root, file);
-    if (!existsSync(path)) continue;
-    const text = readFileSync(path, "utf8");
+    const text = readFileIfExists(path);
+    if (text === undefined) continue;
     // Re-derive each dangling pointer's ORIGINAL literal from the file itself (never the action's
     // own `target`, which carries `file:line`, not the path text) — the one substring this repair
     // is licensed to touch, so a stale `to` can never clobber an unrelated `Why:` line.
@@ -377,7 +377,7 @@ export function applyRepairReferenceActions(root: string, actions: GardenAction[
       rewritten = rewritten.replace(`Why: ${d.target}`, `Why: ${match.to}`);
     }
     if (rewritten !== text) {
-      writeFileSync(path, rewritten);
+      writeAtomic(path, rewritten);
       changed.push(file);
     }
   }
