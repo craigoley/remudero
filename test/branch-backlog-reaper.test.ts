@@ -66,6 +66,7 @@ test("prState 'none' paired with an unreadable tip is held and ALSO flagged unde
 test("a merged PR head the bulk paginated walk missed is found by the per-head follow-up and reported deletable", () => {
   const exec = (cmd: string, args: string[]): string => {
     if (args[0] === "ls-remote") return "a1\trefs/heads/main\nb2\trefs/heads/old-merged-outside-window\n";
+    if (args[0] === "for-each-ref") return args.includes("--merged=origin/main") ? "origin/main\n" : "origin/main\ta1\t1\norigin/old-merged-outside-window\tdeadbeef00\t1\n";
     if (cmd === "gh") {
       // The bulk `pulls?state=all&...` walk (no `head=` filter) finds nothing in its window;
       // the per-head `pulls?head=owner:branch&...` follow-up proves this ONE branch's own PR
@@ -162,6 +163,7 @@ test("the manifest prints sha with name for every deletable branch, and the run 
   const exec = (cmd: string, args: string[]): string => {
     calls.push([cmd, ...args]);
     if (args[0] === "ls-remote") return "a1\trefs/heads/main\nb2\trefs/heads/merged-elsewhere\n";
+    if (args[0] === "for-each-ref") return args.includes("--merged=origin/main") ? "origin/main\n" : "origin/main\ta1\t1\norigin/merged-elsewhere\tdeadbeef00\t1\n";
     if (cmd === "gh") {
       const endpoint = args[1] ?? "";
       return endpoint.includes("head=") ? "closed\ttrue" : "";

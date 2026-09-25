@@ -148,8 +148,10 @@ test("an EMPTY branch listing is refused rather than reported as three empty buc
 test("drift exits non-zero — the ci-parity shape, not a note in passing", () => {
   const exec = (cmd: string, args: string[]): string => {
     if (args[0] === "ls-remote") return "a1\trefs/heads/main\nb2\trefs/heads/some-infra-branch\n";
+    if (args[0] === "for-each-ref") return args.includes("--merged=origin/main") ? "origin/main\n" : "origin/main\ta1\t1\norigin/some-infra-branch\tb2\t1\n";
     if (args[0] === "merge-base") throw new Error("not an ancestor");
     if (args[0] === "rev-parse") return "b2b2b2\n";
+    if (args[0] === "grep" && args.includes("-F")) return "src/lib/somewhere.ts:1:some-infra-branch\n";
     if (args[0] === "grep") return "src/lib/somewhere.ts\n"; // named in source, undeclared
     if (cmd === "gh") return "[]";
     return "";
@@ -213,6 +215,7 @@ test("the dry run LEDGERS its answer, so a report nobody read is still on disk",
   const ledgerPath = join(dir, "ledger.ndjson");
   const exec = (cmd: string, args: string[]): string => {
     if (args[0] === "ls-remote") return "a1\trefs/heads/main\nb2\trefs/heads/gone-to-main\n";
+    if (args[0] === "for-each-ref") return args.includes("--merged=origin/main") ? "origin/main\norigin/gone-to-main\n" : "origin/main\ta1\t1\norigin/gone-to-main\tb2b2b2\t1\n";
     if (args[0] === "merge-base") return "";
     if (args[0] === "rev-parse") return "b2b2b2\n";
     if (args[0] === "grep") throw new Error("exit 1");
@@ -302,6 +305,7 @@ test("a failed prune push is reported with every branch still on origin", () => 
   console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
   const exec = (cmd: string, args: string[]): string => {
     if (args[0] === "ls-remote") return "a1\trefs/heads/main\nb2\trefs/heads/finished\n";
+    if (args[0] === "for-each-ref") return args.includes("--merged=origin/main") ? "origin/main\norigin/finished\n" : "origin/main\ta1\t1\norigin/finished\tb2b2b2\t1\n";
     if (args[0] === "merge-base") return "";
     if (args[0] === "rev-parse") return "b2b2b2\n";
     if (args[0] === "grep" && args.includes("-o")) {

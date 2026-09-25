@@ -17,11 +17,13 @@ function runReaper() {
   const exec = (cmd: string, args: string[]): string => {
     calls.push([cmd, ...args]);
     if (args[0] === "ls-remote") return branchNames.map((name, i) => `${i + 1}\trefs/heads/${name}`).join("\n") + "\n";
+    if (args[0] === "for-each-ref") return args.includes("--merged=origin/main") ? "origin/main\n" : branchNames.map((name, i) => `origin/${name}\t${i + 1}\t1`).join("\n");
     if (args[0] === "merge-base") {
       if (args[2] === "origin/main") return "";
       throw new Error("not an ancestor");
     }
     if (args[0] === "rev-parse") return "deadbeef\n";
+    if (args[0] === "grep" && args.includes("-F")) throw new Error("no source match");
     if (args[0] === "grep" && args.includes("-o")) {
       return DECLARED_BRANCH_GUARDS.map((name) => `src/run-task.ts:1:${name}`).join("\n");
     }
