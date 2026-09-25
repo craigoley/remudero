@@ -45,11 +45,11 @@
     - claim: "a review whose pending post is refused because the PR merged stops before it fetches the diff or spawns the reviewer"
       proof: "unit test: test/review-closed-pending-short-circuit.test.ts"
     - claim: "a review whose pending post is refused because the PR closed stops the same way"
-      proof: "unit test: test/review-closed-pending-short-circuit.test.ts"
+      proof: 'grep: verdictWithheld, "pr_closed" in test/review-closed-pending-short-circuit.test.ts'
     - claim: "an already-pending refusal still lets the review run"
-      proof: "unit test: test/review-closed-pending-short-circuit.test.ts"
+      proof: 'grep: assert\.match(run\.calls, /pr diff/); in test/review-closed-pending-short-circuit.test.ts'
     - claim: "the stop is ledgered with the lifecycle that caused it"
-      proof: "unit test: test/review-closed-pending-short-circuit.test.ts"
+      proof: 'grep: row\.step === "review\.stood_down" in test/review-closed-pending-short-circuit.test.ts'
   falsifier: |
     CLOSE IF runReview on main already returns before `gh pr diff` when postReviewPending reports a merged or closed
     lifecycle, or if the core ledger shows no review run continuing past an "already merged" refusal over a week.
