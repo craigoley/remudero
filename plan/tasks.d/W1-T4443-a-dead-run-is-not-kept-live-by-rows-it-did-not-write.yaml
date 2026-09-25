@@ -12,6 +12,7 @@
   plan_refs: ["W1-T1240", "W1-T179", "W1-T155", "W1-T282"]
   files:
     - src/lib/status.ts
+    - test/status.test.ts
   status: queued
   attempts: 0
   rationale: |
