@@ -67,7 +67,8 @@
 # interactive steps for no-TTY: flags + TTY-absent default; test via injected input. (DIAGNOSIS.md) ──
 - id: no-live-operator-in-headless-worker
   subsystem: cli
-  lifecycle: active
+  # knowledge gardener: retire no-live-operator-in-headless-worker
+  lifecycle: superseded
   operator_impact: true
   files: [src/lib/init.ts, src/run-task.ts, bin/rmd]
   fact: >-
@@ -100,7 +101,8 @@
 # ── Control-surface hazards for an unattended daemon (fix/cli-safe-control-surface). ──
 - id: control-surface-fail-loud-stop-one-shot
   subsystem: cli
-  lifecycle: active
+  # knowledge gardener: retire control-surface-fail-loud-stop-one-shot
+  lifecycle: superseded
   operator_impact: true
   files: [src/run-task.ts, src/lib/fleet-control.ts]
   fact: >-

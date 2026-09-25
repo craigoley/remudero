@@ -30,6 +30,7 @@ import {
   retireCandidates,
   runGardenPass,
   startKnowledgeGardener,
+  testPinnedLearnings,
   type GardenerState,
   type GardenWorkspace,
 } from "../src/lib/knowledge-gardener.js";
@@ -403,3 +404,68 @@ test("W1-T4095: a pass scores the operator's memory and appends to an existing g
   assert.match(log, /Learnings used when offered: 40%/);
 });
 
+
+/** The retire test's usage: `rarely-used` is clearly worse than the corpus's typical learning. */
+const RETIRE_USAGE = { "rarely-used": { offered: 200, used: 1 }, "often-used": { offered: 50, used: 40 }, "ledger-union": { offered: 40, used: 20 } };
+
+/** A corpus whose `test/` names `ids` as string literals, with only `only` free to act. */
+function pinnedCorpus(testText: string, only: "retire" | "merge"): string {
+  const root = corpus();
+  mkdirSync(join(root, "test", "fixtures"), { recursive: true });
+  writeFileSync(join(root, "test", "pins.test.ts"), testText);
+  // A fixture is data, never a requirement, and a non-source file is not read at all.
+  writeFileSync(join(root, "test", "fixtures", "copy.ts"), `const X = ["ledger-union-again", "rarely-used"];\n`);
+  writeFileSync(join(root, "test", "notes.md"), "`rarely-used`\n");
+  usageFor(root, RETIRE_USAGE);
+  for (const c of ["merge", "retire", "refresh", "rule-merge", "skill-lifecycle", "guard-retirement", "repair-reference"]) {
+    if (c !== only) writeFileSync(join(root, "state", `KNOWLEDGE_OFF-${c}`), "");
+  }
+  return root;
+}
+
+test("the gardener keeps a learning a test requires, even when its usage would retire it", () => {
+  const root = pinnedCorpus(`const REQUIRED = ["rarely-used", 'ledger-union-again'];\n`, "retire");
+  const ids = ["rarely-used", "ledger-union-again", "often-used"];
+  assert.deepEqual(testPinnedLearnings(root, ids), { "rarely-used": "test/pins.test.ts", "ledger-union-again": "test/pins.test.ts" });
+  assert.deepEqual(testPinnedLearnings(join(root, "nowhere"), ids), {}, "a checkout with no test/ pins nothing");
+  // Its usage alone qualifies it: the unguarded candidate selection names it.
+  assert.deepEqual(retireCandidates(RETIRE_USAGE, ["rarely-used", "often-used", "ledger-union"], seededRandom(1)), ["rarely-used"]);
+  const rows: Array<[string, Record<string, unknown> | undefined]> = [];
+  const result = runGardenPass({
+    stateDir: join(root, "state"),
+    repoRoot: root,
+    openWorkspace: () => {
+      throw new Error("nothing to land: the only retire candidate is pinned by a test");
+    },
+    log: (s, e) => rows.push([s, e]),
+    seed: 3,
+  });
+  assert.ok(result.ran);
+  assert.equal(result.plan?.actions.some((a) => a.target === "rarely-used"), false, "never proposed for retirement");
+  assert.match(readFileSync(join(root, "learnings", "core.yaml"), "utf8"), /- id: rarely-used\n {2}subsystem: t\n {2}lifecycle: active/);
+  const kept = rows.filter(([s]) => s === "knowledge.kept_for_test").map(([, e]) => e);
+  assert.deepEqual(kept, [
+    { class: "merge", target: "ledger-union-again", test: "test/pins.test.ts", reason: "test/pins.test.ts names it, so a test requires it." },
+    { class: "retire", target: "rarely-used", test: "test/pins.test.ts", reason: "test/pins.test.ts names it, so a test requires it." },
+  ]);
+  // Folding it away is superseding it too: a pinned near-duplicate is never merged either.
+  const items = buildKnowledgeInventory(root);
+  const merge = planGardenPass({ items, usage: {}, state: initialGardenerState(), rng: () => 0.99, switchedOff: (c) => c !== "merge", testPins: testPinnedLearnings(root, ids) });
+  assert.deepEqual(merge.actions, []);
+});
+
+test("the gardener still retires an unpinned learning with the same usage", () => {
+  const root = pinnedCorpus(`const OTHER = ["often-used"];\n`, "retire");
+  const landed: Array<{ paths: string[]; title: string; body: string }> = [];
+  const rows: string[] = [];
+  const result = runGardenPass({ stateDir: join(root, "state"), repoRoot: root, openWorkspace: fakeWorkspace(root, landed), log: (s) => rows.push(s), seed: 3 });
+  assert.deepEqual(result.plan?.acting, ["retire"]);
+  assert.deepEqual(result.plan?.actions.map((a) => a.target), ["rarely-used"]);
+  assert.equal(landed.length, 1);
+  assert.match(readFileSync(join(root, "learnings", "core.yaml"), "utf8"), /# knowledge gardener: retire rarely-used\n {2}lifecycle: superseded/);
+  assert.ok(!rows.includes("knowledge.kept_for_test"), "nothing a test requires was a candidate");
+  // The same pins through planGardenPass: an unpinned near-duplicate still merges.
+  const items = buildKnowledgeInventory(corpus());
+  const merge = planGardenPass({ items, usage: {}, state: initialGardenerState(), rng: () => 0.99, switchedOff: (c) => c !== "merge", testPins: { "often-used": "test/pins.test.ts" } });
+  assert.deepEqual(merge.actions.map((a) => a.target), ["ledger-union-again"]);
+});
