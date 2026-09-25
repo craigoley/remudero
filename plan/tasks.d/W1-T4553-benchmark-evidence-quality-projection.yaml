@@ -27,7 +27,8 @@
     independent and can ship without waiting for that document's PR or a public consent decision.
   design: |
     Add a pure `benchmark-quality-v1` projection over the existing ledger-union rows, wired into
-    the authenticated internal `/v1/analytics` read path. Reuse assignment IDs and terminal
+    the authenticated internal `/v1/analytics` read path. Reuse its one bounded analytics scan
+    and snapshot, not a second full-corpus pass on each GET. Reuse assignment IDs and terminal
     receipt rules from routing-v1; do not reclassify an intermediate worker row as a terminal.
     Count assignments, joined terminal outcomes, unjoined assignments, unjoined terminals,
     duplicate/crossover evidence, and coverage denominators for task class/risk, requested/
