@@ -12,7 +12,7 @@
   plan_refs: [W1-T4110, W1-T4071]
   files: [src/lib/test-gardener.ts, scripts/test-tier-manifest.mjs, scripts/test-with-retry.mjs, src/run-task.ts, test/the-test-suite-tends-itself.test.ts]
   priority: 2
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-23 (research): 1,793 test files; the manifest's `--propose/--adopt` (proposalIsMaterial) exists and CI
