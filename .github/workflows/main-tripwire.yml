@@ -1,0 +1,139 @@
+name: main-tripwire
+
+# W1-T4472 — MAIN'S OWN CI REPORTED A RED 50 MINUTES AFTER IT LANDED, 19 MINUTES AFTER IT WAS
+# FIXED. ci.yml's push lane groups every push to `main` under ONE concurrency key
+# (`ci-${{ github.ref }}`), and GitHub keeps only one running plus one pending run in that group —
+# every other push in between is superseded while pending. MEASURED 2026-09-24 (the actions/runs
+# API, ci.yml push runs on main since 09:00Z): 40 runs, 25 cancelled (GitHub's pending-run
+# replacement, not cancel-in-progress), 11 success, 3 failure, 1 in progress; a surviving run took
+# ~37-41 minutes. #7005 merged a semantic skew at 16:52:30Z; ci.yml's own red on it did not land
+# until 17:42Z — after the fix (#7041, 17:23Z) had already merged past it.
+#
+# THIS WORKFLOW is the tripwire: a per-commit, non-required check, grouped so it is NEVER
+# superseded, running only the suites this merge's own pushed range affects — on the MERGED tree
+# (github.sha, after the merge, never a PR head). It does not replace ci.yml's full required run;
+# it exists to surface a red in minutes rather than the better part of an hour. A GREEN tripwire is
+# NOT evidence main is green — it ran a subset. Only ci-gate's full required run decides that.
+# `src/lib/main-health-rung.ts` reads a RED tripwire on main's newest head as main red at once,
+# without waiting on the full required run to conclude.
+#
+# INVARIANT — NEVER SUPERSEDED: `concurrency.group` is keyed on `github.sha`, not `github.ref`
+# (ci.yml's key). Every push lands a DIFFERENT sha, so every push's tripwire gets its own group and
+# nothing in it is ever cancelled by a later push — the exact defect measured above.
+#
+# NON-REQUIRED BY DESIGN: this check is never added to ci-gate.yml's REQUIRED list. It reports a
+# best-effort SUBSET of the suite; requiring it would deadlock merges on a check that, by
+# construction, sometimes runs nothing (a plan/docs-only push affects zero suites) or falls back to
+# only the fast tier (an unmodelled change — see the selection step below).
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: main-tripwire-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  main-tripwire:
+    name: main-tripwire
+    runs-on: ubuntu-latest
+    # LIGHT band (W1-T1009's own banding, applied here without a Playwright install step): a
+    # tripwire that could run anywhere near ci.yml's own ~37-41 minute survivors would defeat the
+    # whole point of this workflow, so it is bounded well below that.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: the range below diffs `github.event.before..github.sha`, and a shallow
+          # checkout would leave `before` unreachable. No shallowing flag appears anywhere in this
+          # file (test/no-shallowing-of-the-canonical-checkout.test.ts scans every workflow file).
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Determine this merge's own pushed range
+        id: range
+        run: |
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.sha }}"
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BEFORE" 2>/dev/null; then
+            BASE="$BEFORE"
+          elif git rev-parse --verify --quiet "${AFTER}^" >/dev/null 2>&1; then
+            BASE="$(git rev-parse "${AFTER}^")"
+          else
+            BASE=""
+          fi
+          if [ -n "$BASE" ]; then
+            git diff --name-only "$BASE" "$AFTER" > changed-files.txt
+          else
+            # No usable parent (the repository's very first commit) — every tracked file is new.
+            git ls-tree -r --name-only "$AFTER" > changed-files.txt
+          fi
+          echo "base=${BASE}" >> "$GITHUB_OUTPUT"
+          echo "main-tripwire: range ${BASE:-<root commit>}..${AFTER}, $(grep -c . changed-files.txt || true) changed file(s)"
+      - name: Select the suites this merge's own diff affects (W1-T4404's selector, run for real)
+        run: |
+          # W1-T4472 design (i): select-affected-suites.mjs stays SHADOW (W1-T4404/W1-T4406) — it
+          # never gates the required `ci` run. This step calls the SAME pure selector
+          # (src/lib/affected-suites.ts) directly, for real, scoped to this one non-required
+          # tripwire check alone. The generated file below is never committed (git-ignored by
+          # being untracked), so it carries no instrument-surface or census weight of its own.
+          cat > main-tripwire-select.mjs <<'EOF'
+          import { readFileSync, writeFileSync, existsSync } from "node:fs";
+          import { join } from "node:path";
+          import { affectedSelectionOrFull, readAffectedSuitesInput } from "./src/lib/affected-suites.ts";
+          import { listTestFiles, loadManifest, tierFiles } from "./scripts/test-tier-manifest.mjs";
+
+          const root = process.cwd();
+          const changed = readFileSync("changed-files.txt", "utf8").split("\n").map((s) => s.trim()).filter(Boolean);
+          const touchedTests = changed.filter((f) => /^test\/.*\.test\.ts$/.test(f) && existsSync(join(root, f)));
+
+          const selection = affectedSelectionOrFull(changed, () => readAffectedSuitesInput(root, changed));
+
+          let suites;
+          let mode;
+          if (selection.fullRun) {
+            // Falls back to the fast tier rather than the full ~37-41 minute run: an unmodelled
+            // change (config, lockfile, workflow, a non-suite test/ file) still gets a fast,
+            // best-effort check instead of none.
+            const testFiles = listTestFiles(root);
+            const manifest = loadManifest("scripts/test-tier-manifest.json");
+            const { fast } = tierFiles(testFiles, manifest);
+            suites = new Set(fast);
+            mode = `full-run fallback (fast tier, ${fast.length} file(s)): ${selection.reasons.join("; ")}`;
+          } else {
+            suites = new Set(selection.suites);
+            mode = `affected: ${selection.suites.length} suite(s) selected`;
+          }
+          // Always includes every test file the range itself touched, whichever arm ran above.
+          for (const f of touchedTests) suites.add(f);
+
+          const list = [...suites].sort();
+          writeFileSync("tripwire-suites.txt", list.length > 0 ? list.join("\n") + "\n" : "");
+          const summary = `main-tripwire: ${mode}; ${touchedTests.length} touched test file(s) always included; ${list.length} suite(s) total.`;
+          console.log(summary);
+          if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, `- ${summary}\n`, { flag: "a" });
+          EOF
+          node --import tsx main-tripwire-select.mjs
+      - name: Run the selected suites over the merged tree (never superseded by a later push)
+        run: |
+          set +e
+          if [ ! -s tripwire-suites.txt ]; then
+            echo "main-tripwire: this merge's own diff affects zero suites — nothing to verify, trivially green."
+            exit 0
+          fi
+          node scripts/test-with-retry.mjs \
+            node scripts/test-tier-manifest.mjs --run-candidates tripwire-suites.txt --shard 1/1 \
+            2>&1 | tee tripwire-output.log
+          CODE="${PIPESTATUS[0]}"
+          set -e
+          if [ "$CODE" -ne 0 ] && ! grep -qE '^# tests [0-9]+' tripwire-output.log; then
+            echo "::error::main-tripwire exited ${CODE} with NO node-test-runner summary — an unverified failure set (W1-T2597's own reasoning applies here too)."
+          fi
+          exit "$CODE"

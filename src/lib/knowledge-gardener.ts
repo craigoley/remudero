@@ -165,6 +165,38 @@ export function retireCandidates(usage: LearningUsage, activeIds: string[], rng:
   });
 }
 
+/** Each learning id a test names as a string literal, mapped to the first test file naming it.
+ *  A test that requires a learning (`test/learnings-injection-w1t6.test.ts` requires
+ *  `sdk-result-envelope` to be injected) goes red when it is superseded, so the gardener never
+ *  retires or folds one away: passes #7101 and #7205 both tried. `test/fixtures` is data, skipped. */
+export function testPinnedLearnings(root: string, ids: string[]): Record<string, string> {
+  const wanted = new Set(ids);
+  const pins: Record<string, string> = {};
+  const walk = (dir: string): void => {
+    for (const ent of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const path = join(dir, ent.name);
+      if (ent.isDirectory()) {
+        if (ent.name !== "fixtures") walk(path);
+      } else if (/\.[cm]?[jt]s$/.test(ent.name)) {
+        for (const m of readFileSync(path, "utf8").matchAll(/(["'`])([\w.-]+)\1/g)) {
+          if (wanted.has(m[2]!) && !(m[2]! in pins)) pins[m[2]!] = relative(root, path).split("\\").join("/");
+        }
+      }
+    }
+  };
+  if (existsSync(join(root, "test"))) walk(join(root, "test"));
+  return pins;
+}
+
+/** Split off each merge or retire that would supersede a test-pinned learning, with the reason. */
+function withoutTestPinned(actions: GardenAction[], pins: Record<string, string>): { actions: GardenAction[]; kept: GardenAction[] } {
+  const pinned = (a: GardenAction) => (a.class === "merge" || a.class === "retire") && pins[a.target] !== undefined;
+  return {
+    actions: actions.filter((a) => !pinned(a)),
+    kept: actions.filter(pinned).map((a) => ({ class: a.class, target: a.target, reason: `${pins[a.target]} names it, so a test requires it.` })),
+  };
+}
+
 export function usedShare(usage: LearningUsage): number | null {
   const counts = Object.values(usage);
   const offered = counts.reduce((s, c) => s + c.offered, 0);
@@ -479,8 +511,9 @@ export function planGardenPass(opts: {
   approvedSkillNames?: string[];
   guardZeroStreak?: Record<string, number>;
   root?: string;
+  testPins?: Record<string, string>;
 }): GardenPlan {
-  return planGarden({ classes: GARDEN_ACTION_CLASSES, state: toGeneric(opts.state), rng: opts.rng, switchedOff: opts.switchedOff, candidates: () => candidateActions(opts) });
+  return planGarden({ classes: GARDEN_ACTION_CLASSES, state: toGeneric(opts.state), rng: opts.rng, switchedOff: opts.switchedOff, candidates: () => candidateActions(opts).actions });
 }
 
 function candidateActions(opts: {
@@ -491,8 +524,8 @@ function candidateActions(opts: {
   approvedSkillNames?: string[];
   guardZeroStreak?: Record<string, number>;
   root?: string;
-}): GardenAction[] {
-  const bare = (id: string) => id.replace(/^learnings#/, "");
+  testPins?: Record<string, string>;
+}): { actions: GardenAction[]; kept: GardenAction[] } {
   const actions: GardenAction[] = duplicateLearningPairs(opts.items).map(([newer, older]) => ({
     class: "merge" as const,
     target: bare(newer.id),
@@ -519,8 +552,10 @@ function candidateActions(opts: {
   if (opts.root) actions.push(...repairReferenceCandidates(opts.root));
   actions.push(...guardRetirementCandidates(opts.guardZeroStreak ?? {}));
   actions.push(...skillLifecycleCandidates(opts.skillUsage ?? {}, opts.approvedSkillNames ?? [], opts.rng));
-  return actions;
+  return withoutTestPinned(actions, opts.testPins ?? {});
 }
+
+const bare = (id: string) => id.replace(/^learnings#/, "");
 
 /** Supersede learnings in their shards by text surgery on each entry's own block, so the diff is
  *  exactly the changed lines. Returns the shard files it changed. */
@@ -683,6 +718,7 @@ interface KnowledgeInventory {
   skillUsage: SkillUsage;
   approvedSkillNames: string[];
   guardZeroStreak: Record<string, number>;
+  testPins: Record<string, string>;
 }
 
 /** The knowledge base as a gardener spec: its corpus, its evidence and its actions. RULE-MERGE and
@@ -698,19 +734,28 @@ export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): Garden
     name: "knowledge",
     classes: GARDEN_ACTION_CLASSES,
     cheapFingerprint: () => cheapFingerprint(deps.repoRoot, deps.stateDir),
-    inventory: () => ({
-      items: buildKnowledgeInventory(deps.repoRoot, { memoryDirs: deps.memoryDirs }),
-      usage: readLearningUsage(`${deps.stateDir}/learnings-usage.json`),
-      skillUsage: readSkillUsage(skillUsagePath(deps.stateDir)),
-      approvedSkillNames: loadInjectableSkills(approvedSkillsDir).map((s) => s.name),
-      guardZeroStreak: readGuardZeroStreak(deps.stateDir),
-    }),
+    inventory: () => {
+      const items = buildKnowledgeInventory(deps.repoRoot, { memoryDirs: deps.memoryDirs });
+      const learningIds = items.filter((i) => i.kind === "learning").map((i) => bare(i.id));
+      return {
+        items,
+        testPins: testPinnedLearnings(deps.repoRoot, learningIds),
+        usage: readLearningUsage(`${deps.stateDir}/learnings-usage.json`),
+        skillUsage: readSkillUsage(skillUsagePath(deps.stateDir)),
+        approvedSkillNames: loadInjectableSkills(approvedSkillsDir).map((s) => s.name),
+        guardZeroStreak: readGuardZeroStreak(deps.stateDir),
+      };
+    },
     fingerprint: (inv) => gardenFingerprint(inv.items, inv.usage),
     // Every class that lands a PR here is judged on the same evidence: whether workers use the
     // learnings they are offered. SKILL-LIFECYCLE/GUARD-RETIREMENT never land a PR (see above), so
     // this metric is never actually read for them — `rmd approve` is their judge, not this loop.
     metric: (inv) => toOutcome(usageTotals(inv.usage)),
-    candidates: (inv, rng) => candidateActions({ ...inv, rng, root: deps.repoRoot }),
+    candidates: (inv, rng) => {
+      const { actions, kept } = candidateActions({ ...inv, rng, root: deps.repoRoot });
+      for (const k of kept) deps.log("knowledge.kept_for_test", { class: k.class, target: k.target, test: inv.testPins[k.target], reason: k.reason });
+      return actions;
+    },
     scorecard: (inv, plan) => ({ ...buildScorecard({ ...inv, dangling: danglingWhyPointers(deps.repoRoot).length, plan, memoryDirs: deps.memoryDirs }) }),
     apply: (ws, plan, card) => {
       const applied = applyLearningActions(resolveRepoLayout(ws.root).learningsDir, plan.actions);

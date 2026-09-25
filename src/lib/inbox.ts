@@ -7,7 +7,7 @@ import fs from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
-import { parseTasksFromYaml, PlanError, unmetDependencies } from "./plan.js";
+import { parseTasksFromYaml, PlanError, TASK_TYPES, unmetDependencies } from "./plan.js";
 import { lintPlan, lintTask, promoteIntroducedPlanOnlyDiagnostics, type LintViolation } from "./task-linter.js";
 import { DUPLICATE_SLUG_SHINGLE_K } from "./task-linter.js";
 import { bestNearDuplicate, DEFAULT_DUPLICATE_CUTOFF, type DuplicateCorpusEntry } from "./knowledge-dedup.js";
@@ -1324,6 +1324,40 @@ export function planProjectionForDependsOn(planText: string): string {
   return rows.join("\n");
 }
 
+/**
+ * W1-T4442 — the ONE worked example the draft prompt shows the shape it parses against, so the
+ * drafting model no longer has to GUESS what "acceptance" or "type" mean from a bare field list.
+ * Every 6-of-6 `inbox.draft_relint` `draft-parse` failure measured 2026-09-24 was exactly this
+ * guess going wrong: a string `acceptance`, a claim-less criterion, or an invalid `type`. This
+ * example is run through the SAME {@link lintDraftedFragment} pipeline a real draft is (a test
+ * asserts it lints clean), so the example itself can never silently drift from what the parser
+ * and linter actually accept.
+ *
+ * `type:` is taken from {@link TASK_TYPES} — the plan schema's own closed enum — rather than
+ * hand-typed, so a future enum change cannot leave this example naming a value the parser no
+ * longer accepts.
+ */
+export function inboxDraftExampleFragmentYaml(): string {
+  const exampleType: (typeof TASK_TYPES)[number] = TASK_TYPES.includes("implement") ? "implement" : TASK_TYPES[0];
+  return [
+    "- id: NEW-1",
+    '  title: "Tighten the empty-input guard in parseWidget"',
+    "  repo: remudero",
+    "  depends_on: []",
+    `  type: ${exampleType}`,
+    "  verify: auto",
+    "  risk: medium",
+    "  status: queued",
+    "  attempts: 0",
+    "  files:",
+    "    - src/lib/widget.ts",
+    "  acceptance:",
+    '    - claim: "parseWidget rejects an empty input instead of throwing a raw TypeError"',
+    '      proof: "unit test: parseWidget rejects an empty input instead of throwing a raw TypeError"',
+    '  origin: "architect"',
+  ].join("\n");
+}
+
 export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, runId: string): string {
   // W1-T194: retraction is STRUCTURAL — a retracted round is omitted entirely, never summarised. Numbering stays
   // POSITIONAL against the FULL history, so "round N" always means the same round.
@@ -1392,6 +1426,20 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "RAW YAML ONLY between the FRAGMENT markers — do NOT wrap it in a markdown code fence",
     "(no ```yaml or ``` line before or after it); the harness parses the fragment as YAML",
     "verbatim, and a fence around it fails that parse.",
+    "",
+    `Valid \`type:\` values (a closed enum — anything else is rejected): ${TASK_TYPES.join(", ")}.`,
+    "`acceptance:` is a LIST of mappings, never a string and never a bare list of strings. Each",
+    "item has a `claim:` (what becomes true) AND a `proof:` (how a reviewer checks it), both",
+    "double-quoted, like this ONE COMPLETE WORKED EXAMPLE for an unrelated, illustrative proposal —",
+    "never copy its id, title or content, only its SHAPE, into your own answer below:",
+    "",
+    "=== EXAMPLE FRAGMENT START (illustrative only) ===",
+    inboxDraftExampleFragmentYaml(),
+    "=== EXAMPLE FRAGMENT END ===",
+    "STAMP: - EXAMPLE-P (illustrative example only) — RATIFIED 2026-01-01 -> NEW-1.",
+    "",
+    "Now draft YOUR OWN task(s) for THIS proposal, in that same shape, between the two REAL",
+    "markers below:",
     "",
     "=== FRAGMENT START ===",
     "<the new tasks.yaml entries as YAML — a list of task mappings>",
@@ -1548,7 +1596,16 @@ export function lintDraftedFragment(fragmentYaml: string, proposalId: string, st
  *  so the Architect fixes the SPECIFIC failures rather than re-rolling. */
 export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string, violations: DraftLintViolation[]): string {
   return [
-    `Your drafted plan fragment for ${proposal.id} FAILED the plan's own linter (rmd lint-plan) and CANNOT be cached as-is. Fix EVERY blocking violation below, then re-emit the COMPLETE corrected fragment + stamp in the same FRAGMENT/STAMP marker format.`,
+    `Your drafted plan fragment for ${proposal.id} FAILED the plan's own linter (rmd lint-plan) and CANNOT be cached as-is. Fix EVERY blocking violation below, then re-emit the COMPLETE corrected fragment + stamp between the SAME literal markers as before:`,
+    "",
+    // W1-T4442: a redraft carries no copy of the original draft prompt, so the ONLY place it can
+    // see the literal marker text it must reproduce is HERE. Naming "the FRAGMENT/STAMP marker
+    // format" in prose was not enough — 3-of-3 attempt-2 rows measured 2026-09-24 answered in
+    // prose instead, because they had no marker to copy.
+    "=== FRAGMENT START ===",
+    "<the corrected tasks.yaml entries as YAML — a list of task mappings>",
+    "=== FRAGMENT END ===",
+    "STAMP: <the corrected one-line ratification stamp>",
     "",
     ...relintGuidanceLines(violations),
     "",

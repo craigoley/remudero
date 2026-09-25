@@ -10,8 +10,48 @@
   risk: high
   band_meaning: span
   origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; research over the 150 most recent merged PRs"
-  plan_refs: []
-  files: [src/lib/plan-index.ts, src/lib/plan-pr-emitter.ts, test/the-plan-index-is-derived-not-committed.test.ts]
+  plan_refs: [W1-T230, W1-T242, W1-T192, W1-T150, W1-T58, W1-T65, W1-T72, W1-T77, W1-T78, W1-T91, W1-T100, W1-T132, W1-T168, W1-T4468]
+  files:
+    - .github/workflows/ci.yml
+    - package.json
+    - plan/plan-index.json
+    - scripts/ci-control-plane-precheck.mjs
+    - scripts/generate-capability-snapshot.mjs
+    - scripts/generate-plan-index.mjs
+    - scripts/unwired-gate-check.mjs
+    - src/lib/panel-graph.ts
+    - src/lib/plan-architect.ts
+    - src/lib/plan-index.ts
+    - src/lib/plan-pr-emitter.ts
+    - src/lib/review.ts
+    - src/lib/retro.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/a-printed-remedy-is-never-applied.test.ts
+    - test/a-worker-may-not-apply-the-edit-its-gate-printed.test.ts
+    - test/architect-lane-master-plan-commit.test.ts
+    - test/capability-snapshot.test.ts
+    - test/catch-erasure-ratchet.test.ts
+    - test/ci-control-plane-precheck-refuses-before-push.test.ts
+    - test/credit-surface-gate.test.ts
+    - test/docs-index.test.ts
+    - test/enforcement-data-carveout.test.ts
+    - test/fast-lane-classifier.test.ts
+    - test/followup-dedup-census.test.ts
+    - test/inbox-approve.test.ts
+    - test/plan-index.test.ts
+    - test/plan-pr-emitter.test.ts
+    - test/plan-view.test.ts
+    - test/retro-acceptance-repair.test.ts
+    - test/retro-changeset-claim.test.ts
+    - test/retro-marker-atomic.test.ts
+    - test/run-task.test.ts
+    - test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts
+    - test/the-changed-files-block-has-no-production-caller.test.ts
+    - test/the-full-suite-runs-in-the-merge-queue.test.ts
+    - test/the-plan-index-is-derived-not-committed.test.ts
+    - test/the-ratified-baseline-ratchet-repair-has-a-production-executor.test.ts
+    - test/worker-scratch.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -19,14 +59,40 @@
     OBSERVED: remudero-fleet[bot] merges a `chore(plan): regenerate plan/plan-index.json` PR after most plan merges
     (#6930, #6902, #6895, #6884, #6865 in two days); plan-index.json is changed by 7 of 150 merged PRs, 2 of them PRs that had
     main merged in.
+    REPLAN REQUIRED BY THE OPERATOR AFTER PR #7172 CLOSED: the first `files:` list omitted the writers, readers' registries,
+    console artifact, and regression guards, so its implementation could not safely retire the committed index. The full
+    production surface is the Architect commit flow (`applyPlanProposalCommit`), plan/retro/approve in `run-task.ts`, the
+    capability snapshot generator, both plan-index npm scripts, the two CI prechecks, the panel-graph console reader, and
+    the `review.ts` / `sweep.ts` path registries. The old guards in `test/plan-index.test.ts`, capability-snapshot,
+    architect, emitter, inbox-approve, retro, run-task, and path-classification suites must be retargeted to the new source
+    or retired when they assert that generated JSON is committed or a removed writer is called. Unrelated parsing and
+    runtime behavior remains covered. `scripts/generate-plan-index.mjs` already exports the canonical `parsePlanIndex`;
+    the read-time implementation will call that parser rather than reimplement its heading/summary rules. `plan_refs`
+    records the pre-existing W1 tasks sharing `src/lib/review.ts`, `src/lib/sweep.ts`, or `src/run-task.ts`; this change
+    retires their obsolete generated-index handling while preserving their independent review, dispatch, and task rules.
   design: |
-    (i) Readers build the index from plan/ at read time (cached by the plan tree hash) instead of reading a committed
-    file. (ii) The regenerate-PR emitter is retired. (iii) If any consumer needs a file (the console), CI builds it as an
-    artifact rather than a commit. (iv) plan-index.json is deleted from the tree in the same PR.
+    (i) The worker prompt and panel-graph console reader derive the compact index from `MASTER-PLAN.md` at read time,
+    cache by source content hash, and reuse `parsePlanIndex` exported from `scripts/generate-plan-index.mjs`. Preserve the
+    current entry shape, source line numbers, ordering, summaries, and missing-source behavior. (ii) Retire
+    `regeneratePlanIndexFile` / `regeneratePlanIndexAndCommit` only after removing their Architect, plan, retro, and approve
+    callers. The capability-snapshot flow stops writing the index; remove `plan-index` / `plan-index:check` package
+    scripts and the corresponding unwired/pre-push path registrations.
+    (iii) The console still needs a file-shaped artifact: CI generates `plan/plan-index.json` with the canonical generator
+    and uploads it for the console consumer;
+    it is a build artifact and never a committed/runtime source of truth. (iv) Remove the obsolete generated-file entries
+    from `review.ts` and `sweep.ts`, delete the committed JSON in the same PR, and replace only tests whose assertions
+    require the committed file or retired call sites.
   acceptance:
-    - claim: "the plan index is built from plan/ at read time"
-      proof: 'grep: test("W1-T4432: the plan index is built from plan/ at read time" in test/the-plan-index-is-derived-not-committed.test.ts'
-    - claim: "no pull request regenerates the plan index"
-      proof: 'grep: test("W1-T4432: no pull request regenerates the plan index" in test/the-plan-index-is-derived-not-committed.test.ts'
+    - claim: "runtime readers derive and cache the index from MASTER-PLAN.md using the generator's parser"
+      proof: 'grep: test("W1-T4432: readers derive and cache the plan index from MASTER-PLAN\.md with the shared parser" in test/the-plan-index-is-derived-not-committed.test.ts'
+    - claim: "Architect, plan, retro, approve, and capability-snapshot flows no longer write a committed plan index"
+      proof: 'grep: test("W1-T4432: plan commit flows and capability snapshot do not write a committed plan index" in test/the-plan-index-is-derived-not-committed.test.ts'
+    - claim: "CI provides the console with a generated plan-index artifact, without committing the file"
+      proof: 'grep: test("W1-T4432: the console receives a generated plan-index artifact from CI" in test/the-plan-index-is-derived-not-committed.test.ts'
+    - claim: "path registries and pre-push gates no longer require a committed plan-index file"
+      proof: 'grep: test("W1-T4432: no plan-index path registry or gate requires a committed index" in test/the-plan-index-is-derived-not-committed.test.ts'
   falsifier: |
-    Keep the committed file and the first test finds a reader that fails when plan-index.json is absent.
+    Keep the committed file or any regeneration writer if a worker or console reader loses headings/line numbers when the
+    file is absent, the CI artifact differs from the canonical generator, or Architect/plan/retro/approve can still stage
+    the index. The tests must delete the file and run each real reader, and must falsify at least one removed writer when
+    its guard is temporarily restored.

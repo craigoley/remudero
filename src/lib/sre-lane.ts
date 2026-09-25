@@ -6,7 +6,13 @@ import { fixedClock, systemClock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
+import {
+  type IncidentEvidence,
+  type RunbookPassResult,
+} from "./sre-runbooks.js";
 import { readLedgerLines } from "./status.js";
+
+export type { IncidentEvidence } from "./sre-runbooks.js";
 
 /**
  * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane, not inside the core
@@ -17,8 +23,8 @@ import { readLedgerLines } from "./status.js";
  * entry per pass via {@link captureFeedback} — the existing feedback -> triage -> plan -> build
  * pipeline builds the rest.
  *
- * INVARIANT: filing feedback is this lane's entire write surface; it never dispatches a build
- * itself, the same way other machine-origin feedback (`alert#…`, `repair#…`) already flows.
+ * INVARIANT: filing feedback is this lane's only write surface besides the allowlisted, reversible
+ * runbooks (sre-runbooks.ts, W1-T4386) each incident is handed to first; it never dispatches a build.
  *
  * PACING: never more filings a day than the fleet merged in the last day (mirrors fleet-lane.ts).
  * `sre-lane-decisions.json` tracks what it filed; `state/SRE_LANE_OFF` is its pause switch.
@@ -81,23 +87,6 @@ export interface IncidentFrameLike {
 export interface MergedPrFiles {
   url: string;
   files: string[];
-}
-
-/** Every incident.event/incident.sampled row for one fingerprint, reduced to the evidence the
- *  design names: sample events, first/last seen, count, burn rate, deploy sha(s), instances. */
-export interface IncidentEvidence {
-  fingerprint: string;
-  kind: string;
-  name: string;
-  /** Up to 3 distinct scrubbed sample messages, oldest first — "" when no row carried a message. */
-  sampleMessages: string[];
-  firstSeenMs: number;
-  lastSeenMs: number;
-  count: number;
-  /** Events per hour over the observed span (a single event reads as 1 event/hour, not infinite). */
-  burnPerHour: number;
-  deployShas: string[];
-  instances: string[];
 }
 
 const HOUR_MS = 60 * 60_000;
@@ -294,6 +283,8 @@ export type SreLaneInput = Pick<FleetLaneDeps, "stateDir" | "mergedLastDay" | "c
   /** Merged PRs (with files) since a deploy sha — `undefined` sha reads the last 24 hours. */
   mergedPrsSince: (sinceSha: string | undefined) => MergedPrFiles[];
   log: (step: string, extra?: Record<string, unknown>) => void;
+  /** W1-T4386: the runbook pass is composed at the daemon boundary. Absent, incidents file as before. */
+  runbookPass?: (incident: IncidentEvidence) => Promise<RunbookPassResult>;
 };
 
 export interface SreLanePass {
@@ -301,25 +292,33 @@ export interface SreLanePass {
   filed?: string;
   /** How many more this pass could have filed under the pace, after this pass's own filing. */
   room: number;
+  /** What the runbook matcher did with this pass's incident, when a catalog is wired. */
+  runbook?: RunbookPassResult;
 }
 
-/** One pass: aggregate evidence, skip fingerprints with open feedback or an open task, file the
- *  worst-burning survivor at the fleet's own pace. Never files more than one fingerprint a pass —
+/** One pass: aggregate evidence, skip fingerprints with open feedback or an open task, hand the
+ *  worst-burning survivor to {@link runMatchingRunbook}, and file it at the fleet's own pace unless a
+ *  runbook still owns it. The runbook step is NOT paced: a fleet that merged nothing is exactly the
+ *  one whose stale checkout most needs healing, and whose fast burn most needs the operator. Never files more than one fingerprint a pass —
  *  the same one-at-a-time discipline fleet-lane.ts's `triageFleetLane` uses, and for the same
  *  reason: a burst of concurrent filers racing the same checkout is worse than a slower lane. */
-export function runSreLanePass(deps: SreLaneInput): SreLanePass {
+export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   if (existsSync(sreLaneOffPath(deps.stateDir))) return { room: 0 };
   const now = (deps.clock ?? systemClock).now();
   const store = readSreLaneStore(deps.stateDir);
   const withinDay = (ts: string) => now - Date.parse(ts) < DAY_MS;
   const filedToday = Object.values(store).filter((d) => withinDay(d.ts)).length;
   const room = sreLaneRoom(deps.mergedLastDay(), filedToday);
-  if (room <= 0) return { room };
+  const runMatchingRunbook = deps.runbookPass;
+  if (room <= 0 && !runMatchingRunbook) return { room };
 
   const openOrigins = openIncidentFeedbackOrigins(deps.root);
   const evidence = aggregateIncidents(deps.readEvents());
   const worst = worstOpenIncident(evidence, (fp) => fingerprintAlreadyOpen(fp, openOrigins, deps.hasOpenTask));
   if (!worst) return { room };
+
+  const runbook = runMatchingRunbook ? await runMatchingRunbook(worst) : undefined;
+  if (room <= 0 || (runbook && !runbook.fileFeedback)) return { room, runbook };
 
   const frameFiles = deps.framesFor(worst.fingerprint).map((f) => f.file);
   const suspectPrs = suspectPullRequests(deps.mergedPrsSince(worst.deployShas[0]), frameFiles);
@@ -336,33 +335,39 @@ export function runSreLanePass(deps: SreLaneInput): SreLanePass {
     burn_per_hour: worst.burnPerHour,
     suspect_prs: suspectPrs.length,
   });
-  return { filed: worst.fingerprint, room: room - 1 };
+  return { filed: worst.fingerprint, room: room - 1, runbook };
 }
 
 /** Run {@link runSreLanePass} on its own timer, never two at once — mirrors gardener.ts's and
- *  fleet-lane.ts's own tick wrappers exactly. Returns a `(pollIntervalMs) => {stop}` starter, the
- *  exact shape `src/run-task.ts`'s daemon `gardens` array already takes every other lane as. */
-export function startSreLane(deps: SreLaneInput): (pollIntervalMs: number) => { stop: () => void } {
+ *  fleet-lane.ts's own tick wrappers. Returns a `(pollIntervalMs) => {stop}` starter, the exact
+ *  shape `src/run-task.ts`'s daemon `gardens` array already takes every other lane as;
+ *  `settled()` resolves once the pass in flight (if any) finishes. */
+export function startSreLane(deps: SreLaneInput): (pollIntervalMs: number) => { stop: () => void; settled: () => Promise<void> } {
   return (pollIntervalMs: number) => {
-    // A pass is synchronous, so two ticks can never overlap and no re-entry guard is needed.
+    // A runbook awaits its act, so a slow pass must not overlap the next tick: skip, never queue.
+    let inFlight: Promise<void> | undefined;
     const tick = () => {
-      try {
-        runSreLanePass(deps);
-      } catch (e) {
-        deps.log("sre_lane.failed", { error: String((e as Error)?.message ?? e) });
-      }
+      if (inFlight) return;
+      inFlight = runSreLanePass(deps)
+        .then(
+          () => undefined,
+          (e: unknown) => deps.log("sre_lane.failed", { error: String((e as Error)?.message ?? e) }),
+        )
+        .finally(() => {
+          inFlight = undefined;
+        });
     };
     tick();
     const timer = setInterval(tick, pollIntervalMs);
     timer.unref?.();
-    return { stop: () => clearInterval(timer) };
+    return { stop: () => clearInterval(timer), settled: async () => inFlight };
   };
 }
 
 /** The daemon's lane input (src/run-task.ts): `readEvents` reads only this daemon's own ledger and
  *  `hasOpenTask`/`framesFor` answer nothing yet — the module doc's TRAP. */
 export function daemonSreLaneInput(
-  input: Pick<SreLaneInput, "stateDir" | "root" | "mergedLastDay" | "log"> & { ledgerPath: string; owner: string; repo: string },
+  input: Pick<SreLaneInput, "stateDir" | "root" | "mergedLastDay" | "log" | "runbookPass"> & { ledgerPath: string; owner: string; repo: string },
 ): SreLaneInput {
   return {
     stateDir: input.stateDir,
@@ -377,5 +382,6 @@ export function daemonSreLaneInput(
     mergedPrsSince: (sinceSha) => mergedPrsSince(input.root, input.owner, input.repo, sinceSha),
     mergedLastDay: input.mergedLastDay,
     log: input.log,
+    runbookPass: input.runbookPass,
   };
 }

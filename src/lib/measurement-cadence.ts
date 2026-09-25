@@ -560,11 +560,26 @@ function reachableAdoptionSources(corpus: AdoptionCorpusFile[]): {
   reachable: Set<string>;
   imports: Map<string, AdoptionImport[]>;
   executableText: Map<string, string>;
+  executableTextWithoutImports: Map<string, string>;
 } {
   const sourceFiles = corpus.filter((file) => isAdoptionSourcePath(file.rel));
   const sourceRels = new Set(sourceFiles.map((file) => file.rel));
   const imports = new Map(sourceFiles.map((file) => [file.rel, importsInAdoptionSource(file.rel, file.text, sourceRels)]));
   const executableText = new Map(sourceFiles.map((file) => [file.rel, stripAdoptionText(file.text, true)]));
+  // A plain identifier reference check (used for a value constant, below) must not count the
+  // import clause itself — the imported name is always lexically present there, so leaving it
+  // in would make every import self-adopt regardless of whether the module ever reads the value.
+  // Blank the import statement BEFORE string-erasure — erasure removes the quote characters this
+  // pattern needs to find the `from "..."` clause in the first place. Mirrors the import-line
+  // shape `importsInAdoptionSource` parses, kept local rather than shared (both are one line).
+  const importStatementPattern = /^[ \t]*import[ \t]+(?!type\b)([\s\S]*?)[ \t]+from[ \t]+["']([^"']+)["'];?/gm;
+  const executableTextWithoutImports = new Map(
+    sourceFiles.map((file) => {
+      const withoutComments = stripAdoptionText(file.text, false);
+      const withoutImports = withoutComments.replace(importStatementPattern, (m) => m.replace(/[^\n]/g, " "));
+      return [file.rel, stripAdoptionText(withoutImports, true)];
+    }),
+  );
   const reachable = new Set<string>();
   // Synthetic and partially checked-out repositories may not carry the CLI root. They can still
   // prove a real cross-file call, but cannot support a negative claim about a module's reachability;
@@ -576,7 +591,7 @@ function reachableAdoptionSources(corpus: AdoptionCorpusFile[]): {
     reachable.add(current);
     for (const imported of imports.get(current) ?? []) pending.push(imported.target);
   }
-  return { reachable, imports, executableText };
+  return { reachable, imports, executableText, executableTextWithoutImports };
 }
 
 /** Reads every candidate file once — `src/`, `scripts/`, `bin/`, `test/` — so a reachability
@@ -645,6 +660,10 @@ function scanUnadoptedSymbols(
   shipDateFor: (checkoutDir: string, file: string, needle?: string) => string,
 ): AdoptionFinding[] {
   const EXPORT_DECL_RE = /^export\s+(?:async\s+)?function\s+(\w+)\s*\(|^export\s+const\s+(\w+)\s*=/gm;
+  // A `const` bound to a function value is still only adopted by a call — same rule as
+  // `export function`. Only a PLAIN value constant (an object, array, string, number, ...) gets
+  // the broader read-reference rule below, since it is never legitimately "called".
+  const FUNCTION_VALUE_RE = /^\s*(?:async\s+)?(?:\(|function\b|[A-Za-z_$][\w$]*\s*=>)/;
   const findings: AdoptionFinding[] = [];
   const seen = new Set<string>();
   const sources = reachableAdoptionSources(corpus);
@@ -657,16 +676,22 @@ function scanUnadoptedSymbols(
       if (seen.has(key)) continue;
       seen.add(key);
 
+      const isPlainValueConst = m[2] !== undefined && !FUNCTION_VALUE_RE.test(file.text.slice(m.index! + m[0].length));
+
       let reached = false;
       for (const candidate of sources.reachable) {
         if (candidate === file.rel) continue;
-        const executable = sources.executableText.get(candidate);
+        const executable = isPlainValueConst
+          ? sources.executableTextWithoutImports.get(candidate)
+          : sources.executableText.get(candidate);
         if (!executable) continue;
         for (const imported of sources.imports.get(candidate) ?? []) {
           const localName = imported.target === file.rel ? imported.localNames.get(name) : undefined;
           if (!localName) continue;
-          const call = new RegExp(`(?<![\\w$.])${escapeAdoptionRegExp(localName)}\\s*\\(`);
-          if (call.test(executable)) {
+          const evidence = isPlainValueConst
+            ? new RegExp(`(?<![\\w$.])${escapeAdoptionRegExp(localName)}(?![\\w$])`)
+            : new RegExp(`(?<![\\w$.])${escapeAdoptionRegExp(localName)}\\s*\\(`);
+          if (evidence.test(executable)) {
             reached = true;
             break;
           }

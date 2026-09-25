@@ -151,13 +151,15 @@ import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { startGarden, type GardenCheckout } from "./lib/gardener.js";
+import { startGarden, type GardenCheckout, type GardenerDeps } from "./lib/gardener.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
+import { startCiFrictionGardener, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
 import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
+import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
@@ -241,7 +243,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export", "ci-friction"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -578,6 +580,10 @@ import {
   type PreflightFastDeps,
   type RemedyFileForGate,
 } from "./lib/ci-parity.js";
+// W1-T4434 — `rmd census fix`'s own orchestrator: applies each census red's registered
+// MECHANICAL remedy (a new file's baseline row, never a raised ceiling) before the implement
+// worker's final commit. See {@link commitWorkerEditsWithCensusFix} below for the call site.
+import { runCensusFix, type CensusFixResult } from "./lib/census-fix.js";
 // W1-T4108 — the same suite selector CI's shadow selector and `--coverage`'s report-only step
 // already share (affectedSuitesStep, lib/ci-parity.ts), reused here so the new scoped-coverage
 // default step can never independently derive a second notion of "which suites reach a changed
@@ -795,6 +801,7 @@ import {
   shippedSince,
   stampCitationsAndCommit,
   type GitLogCommit,
+  type LedgerRecord,
   type MastMapping,
   type PlanStateTruthResolver,
   type RetroTriggerDecision,
@@ -32420,6 +32427,31 @@ export async function daemonCommand(
                   };
                   return startGarden(exportGardenSpec(exportGarden), exportGarden, intervalMs);
                 },
+                // W1-T4435: the fleet prices its own slowest gate. Every extra-head cause (a red
+                // required check, main merging in, a merge conflict, a refused fix-lane commit) is
+                // priced in PR MINUTES — never fire count — from the ledger union and gate-fire-
+                // rate.ts's own measurement (W1-T4115); the costliest cause with no open task is
+                // drafted as one, parked for a person.
+                (intervalMs: number) => {
+                  const stateDir = join(config.root, "state");
+                  const ciFrictionGarden: GardenerDeps = {
+                    stateDir,
+                    repoRoot,
+                    openWorkspace: () => gardenCheckout({ name: "ci-friction", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
+                    log,
+                  };
+                  const sources: CiFrictionGardenSources = {
+                    ledgerRecords: () => {
+                      const read = readLedgerUnionRecordsSync(stateDir, { requireArchives: true, refuseIncomplete: true });
+                      return read.ok ? (read.rows as LedgerRecord[]) : [];
+                    },
+                    gateFireRates: () => readGateFireRateReport(stateDir),
+                    planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+                    mintTaskId: ciLearningTaskIdMinter(repoRoot),
+                  };
+                  return startCiFrictionGardener(ciFrictionGarden, sources, intervalMs);
+                },
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
                 // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
                 // registry instance" has no selector yet -- `RegistryInstance` carries no role or
@@ -32437,6 +32469,17 @@ export async function daemonCommand(
                       repo: self.repo,
                       mergedLastDay: () => mergedInLastDay(repoRoot),
                       log,
+                      // W1-T4386: the allowlisted, reversible runbooks each incident meets first.
+                      runbookPass: daemonSreRunbookPass(
+                        sreRunbookCatalog(
+                          daemonSreRunbookHost({ root: config.root, repoDir: repoRoot, owner: self.owner, repo: self.repo }),
+                          () => readRunbookReceipts(ledgerPath),
+                        ),
+                        ledgerPath,
+                        self.owner,
+                        self.repo,
+                        log,
+                      ),
                     }),
                   ),
                 ].filter(() => process.env.RMD_SRE_LANE === "1"),
@@ -37029,6 +37072,32 @@ export function commitWorkerEdits(
     undeclared,
     ...(regenerable.length > 0 ? { regenerable } : {}),
   };
+}
+
+/**
+ * W1-T4434: `rmd census fix` before the harness's own commit — {@link commitWorkerEdits} above
+ * stages and commits exactly the worker's declared and regenerable changes; this wraps it with
+ * {@link runCensusFix}, called FIRST, so a census red with a registered MECHANICAL remedy (a new
+ * file's baseline row, added at its measured value and never raising an existing one) is already
+ * fixed by the time that staging runs. A separate function, deliberately never folded into
+ * `commitWorkerEdits` itself: that verb's own tests drive it with a bare `runGit` double and a
+ * `repoDir` that need not exist on disk, and `runCensusFix` shells two real, already-shipped
+ * ratchet scripts (`scripts/comment-load-ratchet.mjs`, `scripts/source-size-ratchet.mjs`) against
+ * whatever `repoDir` names — unconditionally doing that inside `commitWorkerEdits` would change
+ * what every one of those existing fixtures exercises. Every baseline `runCensusFix` can touch
+ * (`scripts/comment-load-baseline.json`, `scripts/source-size-baseline.json`) is already a
+ * `REGENERABLE_ARTIFACT_GENERATORS` entry (lib/sweep.ts, W1-T3015/W1-T2650), so `commitWorkerEdits`
+ * stages a remedied file even though the worker's own `declaredPaths` never names it.
+ */
+export function commitWorkerEditsWithCensusFix(
+  repoDir: string,
+  declaredPaths: readonly string[],
+  message: string,
+  deps: PublishAbandonedFixOwnerAheadDeps & { censusFix?: typeof runCensusFix } = {},
+): WorkerEditCommit & { censusFix: CensusFixResult } {
+  const censusFix = deps.censusFix ? deps.censusFix(repoDir) : runCensusFix(repoDir);
+  const { censusFix: _injectedCensusFix, ...gitDeps } = deps;
+  return { ...commitWorkerEdits(repoDir, declaredPaths, message, gitDeps), censusFix };
 }
 
 /** True when the worktree `runGit` targets is mid-merge (MERGE_HEAD is set). */
