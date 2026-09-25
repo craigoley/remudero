@@ -11,7 +11,10 @@ import { CI_PARITY_TABLE, coverageScratchDir } from "../src/lib/ci-parity.js";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
 
-function coverageSpawn(onShardTmp: (tmp: string | undefined) => void, failShard = false): PreflightSpawn {
+function coverageSpawn(
+  onShardTmp: (tmp: string | undefined) => void,
+  failShard = false,
+): PreflightSpawn {
   return (file, args, opts) => {
     if (file === "git" && args[0] === "rev-parse") {
       return { status: 0, stdout: `${PINNED_BASE_SHA}\n`, stderr: "" };
@@ -108,6 +111,44 @@ test("a top-level coverage run keeps the stable sibling TMPDIR and does not conf
     else process.env.TMPDIR = previousTmp;
     rmSync(stableTmp, { recursive: true, force: true });
     rmSync(neighborTmp, { recursive: true, force: true });
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("an unresolvable caller TMPDIR fails closed and preserves stable coverage scratch", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "rmd-unresolvable-coverage-"));
+  const stableTmp = coverageScratchDir(repoRoot);
+  const missingCallerTmp = join(repoRoot, "not-created-yet");
+  const sentinel = join(stableTmp, "caller-fixture");
+  const previousTmp = process.env.TMPDIR;
+  let nestedTmp: string | undefined;
+
+  try {
+    mkdirSync(stableTmp, { recursive: true });
+    writeFileSync(sentinel, "owned by the active parent shard\n");
+    assert.equal(existsSync(missingCallerTmp), false, "the caller TMPDIR is deliberately unresolved before the probe");
+    process.env.TMPDIR = missingCallerTmp;
+
+    const entry = CI_PARITY_TABLE.find((row) => row.job === "coverage-ratchet");
+    assert.ok(entry?.run, "control: the coverage-ratchet job is mirrored locally");
+    const steps = entry!.run!(repoRoot, coverageSpawn((tmp) => {
+      nestedTmp = tmp;
+      assert.ok(existsSync(sentinel), "an unresolved caller TMPDIR must never authorize clearing stable scratch");
+      assert.ok(nestedTmp, "the fail-closed path still gives the shard isolated scratch");
+      assert.equal(dirname(nestedTmp), realpathSync(missingCallerTmp), "the isolated scratch is nested beneath the caller path once created");
+      assert.ok(existsSync(nestedTmp), "nested scratch exists while its shard runs");
+    }));
+
+    const coverage = steps.find((step) => step.name === "coverage-ratchet:test-with-coverage");
+    assert.ok(coverage?.ok, coverage?.detail);
+    assert.ok(nestedTmp, "the fail-closed control reached a coverage shard");
+    assert.equal(existsSync(nestedTmp), false, "the nested invocation removes only its own scratch");
+    assert.deepEqual(readdirSync(stableTmp), ["caller-fixture"], "the unresolved path leaves parent scratch untouched");
+  } finally {
+    if (previousTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmp;
+    rmSync(stableTmp, { recursive: true, force: true });
+    rmSync(missingCallerTmp, { recursive: true, force: true });
     rmSync(repoRoot, { recursive: true, force: true });
   }
 });
