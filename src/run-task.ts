@@ -819,6 +819,7 @@ import {
   runAutomatedRetroSubprocess,
 } from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
+import { filedTaskIdFromRunBranch, openPullRequestChecked, type OpenPullRequestProofRunner } from "./lib/pr-open.js";
 import {
   buildPlanPrBody,
   bodyNeedsAcceptanceRepair,
@@ -3707,6 +3708,7 @@ export function ghPrCreateFillCommand(
   branch: string,
   title?: string,
   bodyOverride?: string,
+  proofRunner?: OpenPullRequestProofRunner,
 ): { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } } {
   // LIVE-WRITE GUARD at the BUILDER, not at each of its four executors: this function
   // exists only to produce a `gh pr create` argv, so refusing here covers every call
@@ -3725,10 +3727,13 @@ export function ghPrCreateFillCommand(
   // body from the commit, which carries no Acceptance block, so every PR opened through this seam
   // used to reach `acceptance-author-gate` with nothing to judge and fail closed. A no-op whenever
   // the body already parses judgeably.
-  const body = ensureJudgeableBody(
-    bodyParts.filter((p) => p.length > 0).join("\n\n"),
-    PR_OPEN_TIME_ACCEPTANCE_FALLBACK,
-  );
+  const draftedBody = bodyParts.filter((p) => p.length > 0).join("\n\n");
+  // A filed run branch takes its Acceptance block from the task record inside the checked opener.
+  // Other lanes retain the open-time fallback that predates the task-aware check.
+  const body = filedTaskIdFromRunBranch(branch)
+    ? draftedBody
+    : ensureJudgeableBody(draftedBody, PR_OPEN_TIME_ACCEPTANCE_FALLBACK);
+  const checkedBody = openPullRequestChecked(body, branch, worktreePath, "origin/main", proofRunner);
   const args = [
     "api",
     "--method",
@@ -3737,7 +3742,7 @@ export function ghPrCreateFillCommand(
     "-f",
     `title=${resolvedTitle}`,
     "-f",
-    `body=${body}`,
+    `body=${checkedBody}`,
     "-f",
     `head=${branch}`,
     "-f",

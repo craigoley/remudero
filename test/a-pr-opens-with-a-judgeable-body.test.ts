@@ -6,7 +6,9 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { acceptanceGateBodyRepair, ghPrCreateFillCommand } from "../src/run-task.js";
-import { bodyNeedsAcceptanceRepair } from "../src/lib/plan-pr-emitter.js";
+import { bodyNeedsAcceptanceRepair, renderAcceptanceBlock } from "../src/lib/plan-pr-emitter.js";
+import { loadPlan } from "../src/lib/plan.js";
+import { parseAcceptanceBlock } from "../src/lib/review.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -60,7 +62,7 @@ function commit(dir: string, subject: string, body?: string): void {
 function bodyOf(dir: string): string {
   // The builder refuses a live write under the test runner by design; this is the same opt-in
   // every other test of this seam uses, and it wraps ONLY the argv construction — nothing spawns.
-  const built = withLiveWritesAllowed(() => ghPrCreateFillCommand(dir, "o", "r", "run-W1-T1-1", "feat(x): a subject"));
+  const built = withLiveWritesAllowed(() => ghPrCreateFillCommand(dir, "o", "r", "run-T1-1", "feat(x): a subject"));
   const at = built.args.findIndex((a) => a.startsWith("body="));
   assert.notEqual(at, -1, "the create argv must carry a body");
   return built.args[at].slice("body=".length);
@@ -145,4 +147,80 @@ test("an author's RECOVERABLE criteria beat the generic fallback rather than bei
   const body = bodyOf(dir);
   assert.equal(bodyNeedsAcceptanceRepair(body), false, "the repaired body must parse");
   assert.match(body, /the reaper withholds an active branch/, "the author's own claim must be carried into the repair");
+});
+
+test("run branches receive the Remudero-Task body trailer before REST pull creation in test/a-pr-opens-with-a-judgeable-body.test.ts", () => {
+  const task = loadPlan(join(REPO_ROOT, "plan", "tasks.yaml")).tasks.find((candidate) => candidate.id === "W1-T4420");
+  const criteria = task?.acceptance ?? [];
+  assert.ok(criteria.length, "W1-T4420 must carry its filed acceptance criteria");
+  const checkedProofs: string[] = [];
+  const branch = `run-W1-T4420-${Date.now()}`;
+  const built = withLiveWritesAllowed(() =>
+    ghPrCreateFillCommand(
+      REPO_ROOT,
+      "o",
+      "r",
+      branch,
+      "feat(pr): open checked pull requests",
+      undefined,
+      (proof) => {
+        checkedProofs.push(proof);
+        return { status: 0 };
+      },
+    ),
+  );
+  const bodyArg = built.args.find((arg) => arg.startsWith("body="));
+  assert.ok(bodyArg, "the REST create must carry the checked body");
+  const body = bodyArg.slice("body=".length);
+  assert.match(body, /^Remudero-Task: W1-T4420$/m, "the branch's task trailer must be in the body before POST");
+  assert.deepEqual(parseAcceptanceBlock(body), criteria.map(({ claim, proof }) => ({ claim, proof })));
+  assert.deepEqual(checkedProofs, criteria.map((criterion) => criterion.proof));
+  assert.deepEqual(built.args.slice(0, 4), ["api", "--method", "POST", "repos/o/r/pulls"]);
+});
+
+test("the shared PR opener refuses a stale or plan-divergent acceptance block before POST in test/a-pr-opens-with-a-judgeable-body.test.ts", () => {
+  const task = loadPlan(join(REPO_ROOT, "plan", "tasks.yaml")).tasks.find((candidate) => candidate.id === "W1-T4420");
+  const criteria = task?.acceptance ?? [];
+  assert.ok(criteria.length, "W1-T4420 must carry its filed acceptance criteria");
+  const branch = `run-W1-T4420-${Date.now()}`;
+  let proofCalls = 0;
+  assert.throws(
+    () =>
+      withLiveWritesAllowed(() =>
+        ghPrCreateFillCommand(
+          REPO_ROOT,
+          "o",
+          "r",
+          branch,
+          "feat(pr): open checked pull requests",
+          "Acceptance:\n- unrelated claim | grep: unrelated in src/lib/review.ts",
+          () => {
+            proofCalls += 1;
+            return { status: 0 };
+          },
+        ),
+      ),
+    /Acceptance block does not match W1-T4420's filed criteria/,
+  );
+  assert.equal(proofCalls, 0, "a divergent block is refused before proof execution and before a REST argv exists");
+
+  assert.throws(
+    () =>
+      withLiveWritesAllowed(() =>
+        ghPrCreateFillCommand(
+          REPO_ROOT,
+          "o",
+          "r",
+          branch,
+          "feat(pr): open checked pull requests",
+          renderAcceptanceBlock(criteria),
+          () => {
+            proofCalls += 1;
+            return { status: 5, stdout: "the proof passes at the merge base" };
+          },
+        ),
+      ),
+    /proof did not pass against merge base/,
+  );
+  assert.equal(proofCalls, 1, "the first stale proof stops the opener before REST creation");
 });
