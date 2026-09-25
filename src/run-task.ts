@@ -578,6 +578,10 @@ import {
   type PreflightFastDeps,
   type RemedyFileForGate,
 } from "./lib/ci-parity.js";
+// W1-T4434 — `rmd census fix`'s own orchestrator: applies each census red's registered
+// MECHANICAL remedy (a new file's baseline row, never a raised ceiling) before the implement
+// worker's final commit. See {@link commitWorkerEditsWithCensusFix} below for the call site.
+import { runCensusFix, type CensusFixResult } from "./lib/census-fix.js";
 // W1-T4108 — the same suite selector CI's shadow selector and `--coverage`'s report-only step
 // already share (affectedSuitesStep, lib/ci-parity.ts), reused here so the new scoped-coverage
 // default step can never independently derive a second notion of "which suites reach a changed
@@ -37029,6 +37033,32 @@ export function commitWorkerEdits(
     undeclared,
     ...(regenerable.length > 0 ? { regenerable } : {}),
   };
+}
+
+/**
+ * W1-T4434: `rmd census fix` before the harness's own commit — {@link commitWorkerEdits} above
+ * stages and commits exactly the worker's declared and regenerable changes; this wraps it with
+ * {@link runCensusFix}, called FIRST, so a census red with a registered MECHANICAL remedy (a new
+ * file's baseline row, added at its measured value and never raising an existing one) is already
+ * fixed by the time that staging runs. A separate function, deliberately never folded into
+ * `commitWorkerEdits` itself: that verb's own tests drive it with a bare `runGit` double and a
+ * `repoDir` that need not exist on disk, and `runCensusFix` shells two real, already-shipped
+ * ratchet scripts (`scripts/comment-load-ratchet.mjs`, `scripts/source-size-ratchet.mjs`) against
+ * whatever `repoDir` names — unconditionally doing that inside `commitWorkerEdits` would change
+ * what every one of those existing fixtures exercises. Every baseline `runCensusFix` can touch
+ * (`scripts/comment-load-baseline.json`, `scripts/source-size-baseline.json`) is already a
+ * `REGENERABLE_ARTIFACT_GENERATORS` entry (lib/sweep.ts, W1-T3015/W1-T2650), so `commitWorkerEdits`
+ * stages a remedied file even though the worker's own `declaredPaths` never names it.
+ */
+export function commitWorkerEditsWithCensusFix(
+  repoDir: string,
+  declaredPaths: readonly string[],
+  message: string,
+  deps: PublishAbandonedFixOwnerAheadDeps & { censusFix?: typeof runCensusFix } = {},
+): WorkerEditCommit & { censusFix: CensusFixResult } {
+  const censusFix = (deps.censusFix ?? runCensusFix)(repoDir);
+  const { censusFix: _injectedCensusFix, ...gitDeps } = deps;
+  return { ...commitWorkerEdits(repoDir, declaredPaths, message, gitDeps), censusFix };
 }
 
 /** True when the worktree `runGit` targets is mid-merge (MERGE_HEAD is set). */
