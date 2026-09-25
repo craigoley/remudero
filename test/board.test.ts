@@ -648,15 +648,39 @@ test("worker.activity reaches the bounded recent feed with tool identity, ration
   const plan = planOf([task({ id: "W1-T1", title: "task one" })]);
   appendFileSync(
     ledgerPath,
-    `${JSON.stringify({ ts: "2026-07-20T10:00:00Z", run_id: "r1", task_id: "W1-T1", step: "worker.activity", event_at: "2026-07-20T10:00:00Z", event_kind: "tool-executing", tool_name: "Bash", tool_reason: "run focused tests", tool_started_at: "2026-07-20T10:00:00Z" })}\n` +
-      `${JSON.stringify({ ts: "2026-07-20T10:00:02Z", run_id: "r1", task_id: "W1-T1", step: "worker.activity", event_at: "2026-07-20T10:00:02Z", event_kind: "message", tool_name: "Bash", tool_completed_at: "2026-07-20T10:00:02Z", tool_duration_ms: 2_000, tool_outcome: "success" })}\n`,
+    `${JSON.stringify({ ts: "2026-07-20T10:00:00Z", run_id: "r1", task_id: "W1-T1", step: "worker.activity", event_at: "2026-07-20T10:00:00Z", event_kind: "tool-executing", worker_role: "implementer", provider: "codex", requested_model: "gpt-5.5", turns_so_far: 3, tool_name: "Bash", tool_reason: "run focused tests", tool_started_at: "2026-07-20T10:00:00Z" })}\n` +
+      `${JSON.stringify({ ts: "2026-07-20T10:00:02Z", run_id: "r1", task_id: "W1-T1", step: "worker.activity", event_at: "2026-07-20T10:00:02Z", event_kind: "message", served_model: "gpt-5.5", turns_so_far: 4, tool_name: "Bash", tool_completed_at: "2026-07-20T10:00:02Z", tool_duration_ms: 2_000, tool_outcome: "success" })}\n`,
   );
   const entries = computeRecentActivity({ plan, ledgerPath, github: fakeGitHub() }, createRecentActivityCache());
   assert.deepEqual(entries.map((entry) => entry.verb), ["worker", "worker"]);
   assert.equal(entries[0]?.toolDurationMs, 2_000);
   assert.equal(entries[0]?.toolOutcome, "success");
   assert.equal(entries[0]?.toolName, "Bash");
+  assert.equal(entries[0]?.runId, "r1");
+  assert.equal(entries[0]?.eventAt, "2026-07-20T10:00:02Z");
+  assert.equal(entries[0]?.servedModel, "gpt-5.5");
+  assert.equal(entries[0]?.turnsSoFar, 4);
+  assert.equal(entries[1]?.workerRole, "implementer");
+  assert.equal(entries[1]?.provider, "codex");
+  assert.equal(entries[1]?.requestedModel, "gpt-5.5");
+  assert.equal(entries[1]?.turnsSoFar, 3);
+  assert.equal(entries[1]?.toolStartedAt, "2026-07-20T10:00:00Z");
   assert.equal(entries[1]?.toolReason, "run focused tests");
+});
+
+test("recent worker events retain run identity so repeated task dispatches stay separable", () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1", title: "task one" })]);
+  appendFileSync(
+    ledgerPath,
+    [
+      { ts: "2026-07-20T10:00:00Z", run_id: "old-run", task_id: "W1-T1", step: "worker.activity", event_kind: "working" },
+      { ts: "2026-07-20T10:01:00Z", run_id: "current-run", task_id: "W1-T1", step: "worker.activity", event_kind: "working" },
+    ].map((row) => JSON.stringify(row)).join("\n") + "\n",
+  );
+
+  const entries = computeRecentActivity({ plan, ledgerPath, github: fakeGitHub() }, createRecentActivityCache());
+  assert.deepEqual(entries.map((entry) => entry.runId), ["current-run", "old-run"]);
 });
 
 test("W1-T184: GitHub outage renders the IDENTICAL activity feed as a healthy read — GitHub decorates (PR title), it never gates the row", () => {
@@ -1257,7 +1281,7 @@ test("GET /v1/recent: reachable through the real assembled route (not just the p
     assert.equal(res.status, 200);
     const body = (await res.json()) as { entries: Array<Record<string, unknown>> };
     assert.deepEqual(body.entries, [
-      { taskId: "W1-T1", verb: "merged", detail: "merged", title: "a task", costUsd: 2, prUrl, prNumber: 1, ts: body.entries[0]!.ts },
+      { taskId: "W1-T1", runId: "r1", verb: "merged", detail: "merged", title: "a task", costUsd: 2, prUrl, prNumber: 1, ts: body.entries[0]!.ts },
     ]);
   } finally {
     server.close();

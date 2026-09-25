@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-24: fix #7028 and address needs-human #7033 — automated flow, no stuck PRs"
   plan_refs: [W1-T78, W1-T106, W1-T1117]
   files: [src/lib/sweep.ts, test/a-conflicted-pr-is-never-escalated-as-checkless.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED (rmd ledger-grep RETRO-1790262688710, 2026-09-24): PR #7028 was disposed "conflicted (mergeState dirty)" on

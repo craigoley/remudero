@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-24: no stuck PRs — automated flow and self-improvement; verification of W1-T4450 on live code"
   plan_refs: [W1-T4450, W1-T4052, W1-T3727]
   files: [src/run-task.ts, test/a-writer-that-cannot-resume-still-names-its-commit.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED (rmd ledger-grep fix.commit_line_, 2026-09-24): the W1-T4450 fix-lane re-ask fired 4 times after merging

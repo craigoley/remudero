@@ -933,6 +933,9 @@ const OPERATOR_ACTION_STEPS = new Set(["console.kick_refused", "console.kick_dis
 /** One RECENT row: a single ledger event, not a task's final state — see this section's header. */
 export interface RecentActivityEntry {
   taskId: string;
+  /** The originating dispatch identity. Task ids can be dispatched again; this is the join key
+   *  that keeps a worker's selected-run activity separate from older attempts. */
+  runId?: string;
   /** The plan task's own title, so RECENT names what a row is, not just its id. */
   title: string;
   verb: RecentActivityVerb;
@@ -947,8 +950,17 @@ export interface RecentActivityEntry {
   prUrl?: string;
   /** Present for `worker.activity` rows; all are bounded/structured, never raw tool payloads. */
   eventKind?: "working" | "tool-executing" | "message";
+  eventAt?: string;
+  workerRole?: "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
+  /** Provider/model values are assignment or stream metadata, not proof of a served model. */
+  provider?: string;
+  requestedModel?: string;
+  servedModel?: string;
+  turnsSoFar?: number;
   toolName?: string;
   toolReason?: string;
+  toolStartedAt?: string;
+  toolCompletedAt?: string;
   toolDurationMs?: number;
   toolOutcome?: "success" | "error";
   /** GitHub decoration, never a gate — the PR's title, present only when a read resolved it. */
@@ -1021,6 +1033,22 @@ function boundedReason(reason: unknown): string {
   return reason.length <= MAX_REFUSAL_REASON_CHARS ? reason : `${reason.slice(0, MAX_REFUSAL_REASON_CHARS)}…`;
 }
 
+/** Metadata values are identifiers, not prose. Bound them so a malformed ledger row cannot
+ *  turn the recent feed into an unbounded payload; unlike a reason, an absent identifier stays
+ *  absent instead of being replaced by a success-shaped fallback. */
+function boundedRecentTelemetryText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  if (!text) return undefined;
+  return text.length <= 160 ? text : `${text.slice(0, 159)}…`;
+}
+
+function recentWorkerRole(value: unknown): RecentActivityEntry["workerRole"] {
+  return value === "recon" || value === "implementer" || value === "reviewer" || value === "fixer" || value === "triage" || value === "retro" || value === "unknown"
+    ? value
+    : undefined;
+}
+
 /** The activity feed's own event classification: one ledger line in, at most one
  *  {@link RecentActivityEntry} out. Pure and separate from the stateful scan below, so the
  *  mapping is easy to audit. */
@@ -1049,7 +1077,11 @@ function classifyLine(
       return { taskId, title, ts, verb: "escalated", detail: typeof line.class === "string" ? line.class : undefined, prUrl, prNumber };
     case "implement.done":
       return { taskId, title, ts, verb: "spend", costUsd, numTurns, prUrl, prNumber };
-    case "worker.activity":
+    case "worker.activity": {
+      const workerRole = recentWorkerRole(line.worker_role);
+      const provider = boundedRecentTelemetryText(line.provider);
+      const requestedModel = boundedRecentTelemetryText(line.requested_model);
+      const servedModel = boundedRecentTelemetryText(line.served_model);
       return {
         taskId,
         title,
@@ -1060,13 +1092,24 @@ function classifyLine(
           line.event_kind === "working" || line.event_kind === "tool-executing" || line.event_kind === "message"
             ? line.event_kind
             : undefined,
+        ...(typeof line.event_at === "string" ? { eventAt: line.event_at } : {}),
+        ...(workerRole ? { workerRole } : {}),
+        ...(provider ? { provider } : {}),
+        ...(requestedModel ? { requestedModel } : {}),
+        ...(servedModel ? { servedModel } : {}),
+        ...(typeof line.turns_so_far === "number" && Number.isFinite(line.turns_so_far) && line.turns_so_far >= 0
+          ? { turnsSoFar: line.turns_so_far }
+          : {}),
         ...(typeof line.tool_name === "string" ? { toolName: line.tool_name } : {}),
         ...(typeof line.tool_reason === "string" ? { toolReason: line.tool_reason } : {}),
+        ...(typeof line.tool_started_at === "string" ? { toolStartedAt: line.tool_started_at } : {}),
+        ...(typeof line.tool_completed_at === "string" ? { toolCompletedAt: line.tool_completed_at } : {}),
         ...(typeof line.tool_duration_ms === "number" ? { toolDurationMs: Math.max(0, line.tool_duration_ms) } : {}),
         ...(line.tool_outcome === "success" || line.tool_outcome === "error" ? { toolOutcome: line.tool_outcome } : {}),
         prUrl,
         prNumber,
       };
+    }
     // W1-T266 — the daemon's resolution of an operator's Run click. See OPERATOR_ACTION_STEPS.
     // The `reason` is carried VERBATIM (bar the length bound below) rather than mapped to
     // friendlier prose: a translation table here would be a second place for the truth to live,
@@ -1126,7 +1169,7 @@ export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCach
     const prUrl = typeof line.pr_url === "string" ? line.pr_url : runId ? state.prByRun.get(runId) : undefined;
     const entry = classifyLine(line, taskId, task?.title ?? taskId, ts, prUrl);
     if (!entry) continue;
-    state.entries.push(decoratePrTitle(entry, deps));
+    state.entries.push(decoratePrTitle(runId ? { ...entry, runId } : entry, deps));
     if (state.entries.length > RECENT_ACTIVITY_HISTORY_CAP) state.entries.shift();
   }
 

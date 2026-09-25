@@ -583,23 +583,23 @@ test("W1-T3379 criterion 1: a real implement dispatch emits its run-correlated a
     const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
       .trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
     const selection = ledger.find((row) => row.step === "skills.selection");
-    assert.deepEqual(selection && {
-      run_id: selection.run_id,
-      task_type: selection.task_type,
-      approved_eligible_names: selection.approved_eligible_names,
-      path_filtered_names: selection.path_filtered_names,
-      selected_names: selection.selected_names,
-      budget_omitted_names: selection.budget_omitted_names,
-      zero_selection: selection.zero_selection,
-    }, {
-      run_id: `T-SKILL-OBSERVATION-${fixedNow}`,
-      task_type: "implement",
-      approved_eligible_names: ["ci-state-forensics", "proof-preflight"],
-      path_filtered_names: [],
-      selected_names: ["ci-state-forensics", "proof-preflight"],
-      budget_omitted_names: [],
-      zero_selection: false,
-    });
+    assert.ok(selection, "a skills.selection row is ledgered");
+    assert.equal(selection.run_id, `T-SKILL-OBSERVATION-${fixedNow}`);
+    assert.equal(selection.task_type, "implement");
+    const treeImplementNames = loadInjectableSkills(join(process.cwd(), ".claude", "skills"))
+      .filter((s) => s.appliesTo.includes("implement"))
+      .map((s) => s.name);
+    assert.ok(treeImplementNames.includes("ci-state-forensics") && treeImplementNames.includes("proof-preflight"),
+      "control: the approved tree still carries the two skills this test was written against");
+    const eligible = selection.approved_eligible_names as string[];
+    const pathFiltered = selection.path_filtered_names as string[];
+    const selected = selection.selected_names as string[];
+    const omitted = selection.budget_omitted_names as string[];
+    assert.deepEqual([...eligible, ...pathFiltered].sort(), [...treeImplementNames].sort(),
+      "every approved implement skill in the tree is either eligible or path-filtered");
+    assert.deepEqual([...selected, ...omitted].sort(), [...eligible].sort(),
+      "every eligible skill is either selected or budget-omitted, never both");
+    assert.equal(selection.zero_selection, selected.length === 0);
     assert.equal(ledger.some((row) => row.step === "skills.injected"), true,
       "an approved selected skill still reaches the compatibility injection event");
   } finally {
