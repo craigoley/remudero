@@ -1,5 +1,5 @@
 - id: W1-T4265
-  title: "A NEWLY ONBOARDED REPO WOULD GO STRAIGHT TO MERGING — give a registry instance a mode: shadow instances run real tasks but open DRAFT pull requests, never arm or merge, and record what would have merged or been blocked, so the operator judges evidence before anything lands"
+  title: "A NEWLY ONBOARDED REPO WOULD GO STRAIGHT TO MERGING — give a registry instance a mode: shadow instances run real tasks and open ready pull requests, never arm or merge, and record what would have merged or been blocked, so the operator judges evidence before anything lands"
   repo: remudero
   depends_on: [W1-T4227]
   priority: 2
@@ -13,28 +13,39 @@
   plan_refs: ["W1-T4227", "W1-T4264", "W1-T4266"]
   files:
     - src/lib/instance-registry.ts
+    - src/lib/sweep.ts
     - src/run-task.ts
+    - test/shadow-instance-safety.test.ts
+    - test/owner-dispatch-threading.test.ts
   status: queued
   attempts: 0
   rationale: |
     The design doc's onboarding gate: a new repo is proven in a shadow instance before it goes live
     (GitHub rulesets' Evaluate mode is the precedent: record what would have passed or failed without
     enforcing). The operator must never discover that a dry run merged code. Wild Trails
-    (craigoley/wild-trails) is the first repo through it.
+    (craigoley/wild-trails) is the first repo through it. W1-T4415, filed after this task,
+    prohibits draft PRs and automatically readies any that exist. Shadow safety must therefore
+    be enforced at the arm/merge boundary, not by draft state.
   design: |
     Registry instances gain `mode: shadow | live` (absent = live, so existing instances are unchanged).
-    A shadow instance's worker opens pull requests as drafts, and every path that arms auto-merge, merges
-    or marks ready-for-review refuses for a shadow instance by name. After review, the run ledgers
+    A shadow instance's worker opens pull requests ready for review; every path that arms auto-merge
+    or merges refuses for a shadow instance by name. After review, the run ledgers
     `shadow.verdict` with the PR, the review verdict and what a live instance would have done
     (would_merge | would_block + reason). A daemon started with mode shadow says so in its first ledger row.
+    The independent sweep arm path must also refuse shadow instances; withholding the task-run
+    arm alone is unsafe because sweep can arm the same ready PR on its next pass.
   acceptance:
-    - claim: "a shadow instance opens its pull requests as drafts"
-      proof: "unit test: a shadow instance opens its pull requests as drafts"
+    - claim: "a shadow instance opens pull requests ready for review under the no-draft rule"
+      proof: "unit test: test/shadow-instance-safety.test.ts"
     - claim: "a shadow instance never arms or merges a pull request"
-      proof: "unit test: a shadow instance never arms or merges a pull request"
+      proof: 'grep: assert\.equal(mergeCalls, 0) in test/shadow-instance-safety.test.ts'
     - claim: "a shadow run records what a live instance would have done"
-      proof: "unit test: a shadow run records what a live instance would have done"
+      proof: 'grep: assert\.equal(verdict\.would, "would_merge") in test/shadow-instance-safety.test.ts'
     - claim: "an instance with no mode stays live"
-      proof: "unit test: an instance with no mode stays live"
+      proof: 'grep: assert\.equal(instanceMode("owner/repo", undefined), "live") in test/shadow-instance-safety.test.ts'
     - claim: "the pull request path asks the registry for the instance mode"
       proof: "grep: instanceMode( in src/run-task.ts"
+    - claim: "the independent sweep path cannot arm a shadow instance"
+      proof: 'grep: assert\.equal(sweepArmCalls, 0) in test/shadow-instance-safety.test.ts'
+    - claim: "the daemon's first target ledger row names its resolved instance mode"
+      proof: 'grep: assert\.equal(JSON\.parse(targetLine)\.instance_mode, "live") in test/owner-dispatch-threading.test.ts'
