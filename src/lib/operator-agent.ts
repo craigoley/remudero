@@ -116,7 +116,6 @@ export const OPERATOR_AGENT_DELEGATION_HANDOFF_STEP = "panel.operator_agent_dele
  *  EMERGENCY_STOP_ISSUED_LEDGER_STEP/EMERGENCY_STOP_CLEARED_LEDGER_STEP (ledger.ts) — these stay
  *  local, matching OPERATOR_AGENT_PROPOSAL_STEP's precedent just above. */
 export const EMERGENCY_STOP_REFUSAL_STEP = "panel.emergency_stop_refusal";
-export const EMERGENCY_STOP_CANCELLATION_STEP = "panel.emergency_stop_cancellation";
 export const OPERATOR_AGENT_DEFAULT_SETTINGS = { enabled: true, confidenceThreshold: 0.9 } as const;
 
 export const OPERATOR_AGENT_CATEGORIES = ["optimize", "fix", "scale"] as const;
@@ -637,8 +636,6 @@ export function readGovernedContext(deps: OperatorAgentRouteDependencies, query:
   const unavailableStale = matching.filter((item) => contextStatus(item.contextId, state, now) === "stale").map((item) => item.contextId);
   return { ...result, stale: [...new Set([...result.stale, ...unavailableStale])], absent: matching.length === 0 };
 }
-
-export const readPersonalContext = readGovernedContext;
 
 function publicContext(item: ContextItem, state: ContextLedgerState, now: number): ContextInventoryItem {
   return contextInventoryItem(item, state, now);

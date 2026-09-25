@@ -1,5 +1,3 @@
-export const CONFIG_SCHEMA_VERSION = 1;
-
 /** The shared provider identity; config re-exports it for existing consumers.
  *
  * W1-T3607: THE CATEGORY IS HOW A DEPLOYMENT IS PAID FOR, NOT WHAT LICENCE IT SHIPS UNDER. "openweight"

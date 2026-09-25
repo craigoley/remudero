@@ -41,8 +41,6 @@ import {
   type OperatorAgentRouteDependencies,
 } from "./operator-agent.js";
 
-export const CONTEXT_CONTROLS_VERSION = "context-controls-v1" as const;
-
 export type ContextControlsDeps = OperatorAgentRouteDependencies;
 
 export interface ContextControlsInventoryQuery {
