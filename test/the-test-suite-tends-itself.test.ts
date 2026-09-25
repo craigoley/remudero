@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { gardenStatePath, readGardenState, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
 import {
@@ -213,6 +213,25 @@ test("W1-T4112: a flake is ledgered, not only printed", () => {
   assert.equal(rows[0]!.test, "ledgered flaky test");
   assert.equal(rows[0]!.headline, "first attempt failed");
   assert.equal(typeof rows[0]!.ts, "string");
+});
+
+test("W1-T4112: an unwritable flake ledger warns and returns without throwing", async () => {
+  const script = pathToFileURL(join(REPO_ROOT, "scripts", "test-with-retry.mjs")).href;
+  const { appendFlakeLedger } = (await import(script)) as {
+    appendFlakeLedger: (entries: { file: string; test: string }[], headline: string, options: { path: string }) => void;
+  };
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4112-ledger-error-`));
+  const warnings: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => { warnings.push(args.join(" ")); };
+  try {
+    // A directory cannot be appended to as a file; this drives the real filesystem catch arm.
+    appendFlakeLedger([{ file: "test/flaky.test.ts", test: "flaky test" }], "first attempt failed", { path: dir });
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /^test-with-retry: warning: could not append the flake ledger \(.+\)$/);
 });
 
 test("W1-T4112: a self-hosting daemon wires the test gardener", async () => {
