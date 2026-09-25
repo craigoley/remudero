@@ -134,7 +134,8 @@
 # ── Agent SDK tools & the feedback front door (§7B) [research 2026-07-14] ──
 - id: sdk-builtin-tools-are-the-boundary
   subsystem: sdk-tools
-  lifecycle: active
+  # knowledge gardener: retire sdk-builtin-tools-are-the-boundary
+  lifecycle: superseded
   files: [src/lib/worker.ts, src/run-task.ts]
   fact: >-
     The Agent SDK ships built-in tools (Read/Write/Edit/Bash/Glob/Grep/WebSearch/WebFetch/AskUserQuestion/
@@ -155,7 +156,8 @@
 
 - id: askuserquestion-auto-resolves-empty-headless
   subsystem: feedback
-  lifecycle: active
+  # knowledge gardener: retire askuserquestion-auto-resolves-empty-headless
+  lifecycle: superseded
   files: [src/run-task.ts, src/lib/triage.ts, src/lib/escalate.ts]
   fact: >-
     AskUserQuestion neither works headlessly nor stalls: with no TTY it silently AUTO-RESOLVES with

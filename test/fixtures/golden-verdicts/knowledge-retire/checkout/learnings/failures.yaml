@@ -1,0 +1,6 @@
+- id: no-live-operator-in-headless-worker
+  # knowledge gardener: retire no-live-operator-in-headless-worker
+  lifecycle: superseded
+- id: control-surface-fail-loud-stop-one-shot
+  # knowledge gardener: retire control-surface-fail-loud-stop-one-shot
+  lifecycle: superseded

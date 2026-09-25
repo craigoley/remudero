@@ -1,0 +1,27 @@
+- id: claude-code-hybrid-retrieval
+  # knowledge gardener: retire claude-code-hybrid-retrieval
+  lifecycle: superseded
+- id: compaction-recall-first
+  # knowledge gardener: retire compaction-recall-first
+  lifecycle: superseded
+- id: cache-prefix-bytes
+  # knowledge gardener: retire cache-prefix-bytes
+  lifecycle: superseded
+- id: docs-are-a-gated-artifact
+  # knowledge gardener: retire docs-are-a-gated-artifact
+  lifecycle: superseded
+- id: daemon-split-logic-from-live-commissioning
+  # knowledge gardener: retire daemon-split-logic-from-live-commissioning
+  lifecycle: superseded
+- id: task-quality-gates-before-dispatch
+  # knowledge gardener: retire task-quality-gates-before-dispatch
+  lifecycle: superseded
+- id: daemon-repo-targeting-explicit
+  # knowledge gardener: retire daemon-repo-targeting-explicit
+  lifecycle: superseded
+- id: task-credit-needs-an-anchored-trailer
+  # knowledge gardener: retire task-credit-needs-an-anchored-trailer
+  lifecycle: superseded
+- id: implement-lane-model-lives-on-the-run-not-the-verdict-row
+  # knowledge gardener: retire implement-lane-model-lives-on-the-run-not-the-verdict-row
+  lifecycle: superseded
