@@ -9,6 +9,8 @@
   risk: high
   band_meaning: span
   origin: "session: 2026-09-24 release-tag design (operator ruling: core is the primary)"
+  note: |
+    reservation hand-off: run-W1-T4527-1790294141611 -> plan-file-W1-T4527-1790294141611
   plan_refs: ["W1-T4227", "W1-T3732", "W1-T3733"]
   files: [src/lib/instance-registry.ts, src/lib/deployer.ts, deploy/recycle-container.sh, deploy/install-host-units.sh, .remudero/daemon-instances.yaml, test/the-registry-names-one-primary-instance.test.ts]
   status: queued

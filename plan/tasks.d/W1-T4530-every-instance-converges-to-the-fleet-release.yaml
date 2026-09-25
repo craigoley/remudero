@@ -9,6 +9,8 @@
   risk: high
   band_meaning: span
   origin: "session: 2026-09-24 release-tag design"
+  note: |
+    reservation hand-off: run-W1-T4527-1790294141611 -> plan-file-W1-T4527-1790294141611
   plan_refs: ["W1-T4527", "W1-T4528", "W1-T4529"]
   files: [src/lib/release-tags.ts, src/lib/deployer.ts, src/run-task.ts, test/every-instance-converges-to-the-fleet-release.test.ts]
   status: queued

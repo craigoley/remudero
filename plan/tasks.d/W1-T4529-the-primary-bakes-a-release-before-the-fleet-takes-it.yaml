@@ -9,6 +9,8 @@
   risk: high
   band_meaning: span
   origin: "session: 2026-09-24 release-tag design (operator ruling: 30-minute bake to start)"
+  note: |
+    reservation hand-off: run-W1-T4527-1790294141611 -> plan-file-W1-T4527-1790294141611
   plan_refs: ["W1-T4528"]
   files: [src/lib/release-tags.ts, src/lib/deployer.ts, test/the-primary-bakes-a-release-before-the-fleet.test.ts]
   status: queued

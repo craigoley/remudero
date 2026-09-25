@@ -8,6 +8,8 @@
   budget_usd: 0.00
   risk: medium
   origin: "session: 2026-09-24 release-tag design"
+  note: |
+    reservation hand-off: run-W1-T4527-1790294141611 -> plan-file-W1-T4527-1790294141611
   plan_refs: ["W1-T4528", "W1-T4530"]
   files: [plan/tasks.d/W1-T4532-only-the-fleet-app-may-write-release-tags.yaml]
   status: queued
