@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import type { Config } from "./config-schema.js";
-import { systemClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import { enabledWorkerProviders } from "./config.js";
-import { readLedgerUnionRawLinesSync } from "./ledger-union.js";
+import { ledgerLivePath, readLedgerUnionRawLinesSync, realLedgerFs } from "./ledger-union.js";
 
 /**
  * The cash-simple trial (operator ruling 2026-09-24, DECISIONS.md): a capped share of the simplest
@@ -72,6 +72,7 @@ export interface CashTrialEvidence {
   cash: CashTrialArmEvidence;
   control: CashTrialArmEvidence;
   spentTodayUsd: number;
+  spendUnavailableReason?: string;
 }
 
 type Row = Record<string, unknown>;
@@ -79,21 +80,38 @@ type Row = Record<string, unknown>;
 /** Fold windowed ledger rows: each tagged run's arm, whether its verdict opened a PR, and today's cash spend. */
 export function summarizeCashTrial(rows: Iterable<Row>, today: string): CashTrialEvidence {
   const armByRun = new Map<string, "cash" | "control">();
-  const cashAssignments = new Set<string>();
+  const cashAssignments = new Map<string, string>();
   const verdicts = new Map<string, boolean>();
-  const costs: Array<{ id: string; ts: string; usd: number }> = [];
+  const calls = new Map<string, { ts: string; usd: number | undefined; provider: unknown; billingMode: unknown; conflicting: boolean }>();
   for (const row of rows) {
     const assignment = row.worker_assignment as Row | undefined;
     const decision = (assignment?.routing as Row | undefined)?.decision as Row | undefined;
     const runId = typeof row.run_id === "string" ? row.run_id : undefined;
     if (row.step === "worker.assignment" && runId && decision?.trial === CASH_TRIAL_ID) {
       if (decision.trialArm === "cash" || decision.trialArm === "control") armByRun.set(runId, decision.trialArm);
-      if (decision.trialArm === "cash" && typeof assignment?.id === "string") cashAssignments.add(assignment.id);
+      if (decision.trialArm === "cash" && typeof assignment?.id === "string") {
+        cashAssignments.set(assignment.id, typeof row.ts === "string" ? row.ts : "");
+      }
     } else if (row.step === "verdict" && runId) {
       verdicts.set(runId, typeof row.pr_url === "string" && row.pr_url.length > 0 && row.verdict !== "failed");
     }
-    if (typeof row.selection_assignment_id === "string" && typeof row.cost_usd === "number") {
-      costs.push({ id: row.selection_assignment_id, ts: typeof row.ts === "string" ? row.ts : "", usd: row.cost_usd });
+    if ((row.step === "implement.done" || row.step === "implement.resumed") && typeof row.selection_assignment_id === "string") {
+      const id = row.selection_assignment_id;
+      const current = {
+        ts: typeof row.ts === "string" ? row.ts : "",
+        usd: typeof row.total_cost_usd === "number" ? row.total_cost_usd : undefined,
+        provider: row.provider,
+        billingMode: row.billing_mode,
+        conflicting: false,
+      };
+      const prior = calls.get(id);
+      if (prior) {
+        if (prior.ts !== current.ts || prior.usd !== current.usd || prior.provider !== current.provider || prior.billingMode !== current.billingMode) {
+          prior.conflicting = true;
+        }
+      } else {
+        calls.set(id, current);
+      }
     }
   }
   const evidence: CashTrialEvidence = { cash: { runs: 0, prs: 0 }, control: { runs: 0, prs: 0 }, spentTodayUsd: 0 };
@@ -103,14 +121,26 @@ export function summarizeCashTrial(rows: Iterable<Row>, today: string): CashTria
     evidence[arm].runs += 1;
     if (opened) evidence[arm].prs += 1;
   }
-  evidence.spentTodayUsd = costs
-    .filter((cost) => cashAssignments.has(cost.id) && cost.ts.startsWith(today))
-    .reduce((sum, cost) => sum + cost.usd, 0);
+  for (const [id, assignmentTs] of cashAssignments) {
+    const call = calls.get(id);
+    if (!call) {
+      if (assignmentTs.startsWith(today)) evidence.spendUnavailableReason = "cash assignment has no worker-call cost receipt";
+      continue;
+    }
+    if (!call.ts.startsWith(today)) continue;
+    if (call.conflicting || call.provider !== "cash" || call.billingMode !== "api" ||
+      call.usd === undefined || !Number.isFinite(call.usd) || call.usd < 0) {
+      evidence.spendUnavailableReason = "cash worker-call cost receipt is missing or inconsistent";
+      continue;
+    }
+    evidence.spentTodayUsd = Math.round((evidence.spentTodayUsd + call.usd) * 1e6) / 1e6;
+  }
   return evidence;
 }
 
 /** Why the trial may not take this task right now, or undefined when it is open. */
 export function cashTrialStopReason(evidence: CashTrialEvidence, policy: CashTrialPolicy, dailyCapUsd: number): string | undefined {
+  if (evidence.spendUnavailableReason) return `trial spend evidence unavailable: ${evidence.spendUnavailableReason}`;
   const budget = dailyCapUsd * policy.budgetShareOfDailyCap;
   if (evidence.spentTodayUsd >= budget) {
     return `trial budget spent today ($${evidence.spentTodayUsd.toFixed(2)} of $${budget.toFixed(2)})`;
@@ -133,18 +163,47 @@ export function cashTrialStopReason(evidence: CashTrialEvidence, policy: CashTri
     `${measured ? `control ${(controlRate * 100).toFixed(0)}%` : "an unmeasured control taken as 100%"}`;
 }
 
-function windowedRows(stateDir: string, windowMs: number): Row[] {
+function windowedRows(stateDir: string, windowMs: number, today: string): { rows: Row[]; unavailableReason?: string } {
+  let liveReadFailed = false;
+  const livePath = ledgerLivePath(stateDir);
+  const dayStartMs = Date.parse(`${today}T00:00:00.000Z`);
+  const startMs = dayStartMs - windowMs + 86_400_000;
+  if (!Number.isFinite(dayStartMs) || !Number.isFinite(startMs) || Math.abs(startMs) > 8.64e15) {
+    return { rows: [], unavailableReason: "trial evidence window is invalid" };
+  }
   const read = readLedgerUnionRawLinesSync(stateDir, {
-    rotationWindowMs: windowMs,
+    sinceTs: fixedClock(startMs).iso(),
     pattern: /cash-simple|"step":"verdict"|selection_assignment_id/,
+    refuseIncomplete: true,
+  }, {
+    ...realLedgerFs,
+    readFileSync: (path) => {
+      try { return realLedgerFs.readFileSync(path); }
+      catch (error) {
+        if (path === livePath) liveReadFailed = true;
+        throw error;
+      }
+    },
   });
-  return read.rawLines.flatMap((line) => {
+  if (read.unread.length > 0 || liveReadFailed || !read.liveFileRead || read.unclassified.length > 0) {
+    return { rows: [], unavailableReason: "ledger source unreadable or incomplete for paid-trial spend" };
+  }
+  const rows: Row[] = [];
+  let invalidRows = 0;
+  for (const line of read.rawLines) {
     try {
-      return [JSON.parse(line) as Row];
-    } catch {
-      return []; // a torn line is not evidence either way
+      const row = JSON.parse(line) as Row;
+      const tsMs = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+      if (!Number.isFinite(tsMs)) invalidRows += 1;
+      else if (tsMs >= startMs && tsMs < dayStartMs + 86_400_000) rows.push(row);
+    } catch (error) {
+      const reason = `ledger row unreadable for paid-trial spend (${error instanceof SyntaxError ? "invalid-json" : "parse-error"})`;
+      return { rows: [], unavailableReason: reason };
     }
-  });
+  }
+  return invalidRows > 0
+    ? { rows: [], unavailableReason: "ledger row unreadable for paid-trial spend" }
+    : { rows };
 }
 
 /** Decide one implement run's trial arm, or undefined when the task is not trial work at all. */
@@ -166,13 +225,24 @@ export function decideCashTrial(
   if (!enabledWorkerProviders(input.config).includes("cash")) return held("cash is not an enabled worker provider");
   const cap = input.config.dailyCapUsd;
   if (typeof cap !== "number") return held("dailyCapUsd is unset, so trial spend would be unbounded");
+  if (!Number.isFinite(cap) || cap <= 0) return held("dailyCapUsd is invalid for a paid trial");
+  if (!Number.isFinite(policy.budgetShareOfDailyCap) || policy.budgetShareOfDailyCap <= 0 || policy.budgetShareOfDailyCap > 1 ||
+    !Number.isInteger(policy.windowDays) || policy.windowDays <= 0 ||
+    !Number.isInteger(policy.sharePercent) || policy.sharePercent < 0 || policy.sharePercent > 100) {
+    return held("cash trial policy has an invalid budget, window, or allocation share");
+  }
   if (!input.harnessCommits) return held("workerProviders.harnessCommitsImplement is off, so a shell-less worker cannot land a commit");
   const windowMs = policy.windowDays * 86_400_000;
-  const rows = (input.readRows ?? windowedRows)(input.stateDir, windowMs);
-  const today = input.today ?? systemClock.iso().slice(0, 10);
-  const stop = cashTrialStopReason(summarizeCashTrial(rows, today), policy, cap);
-  if (stop !== undefined) return held(stop);
   const arm = cashTrialArmFor(input.task.id, policy.sharePercent);
+  if (arm === "control") return { id: CASH_TRIAL_ID, arm, reason: `control arm by stable task hash at ${policy.sharePercent}% share` };
+  const today = input.today ?? systemClock.iso().slice(0, 10);
+  const read = input.readRows
+    ? { rows: input.readRows(input.stateDir, windowMs) }
+    : windowedRows(input.stateDir, windowMs, today);
+  const evidence = summarizeCashTrial(read.rows, today);
+  if (read.unavailableReason) evidence.spendUnavailableReason = read.unavailableReason;
+  const stop = cashTrialStopReason(evidence, policy, cap);
+  if (stop !== undefined) return held(stop);
   return { id: CASH_TRIAL_ID, arm, reason: `${arm} arm by stable task hash at ${policy.sharePercent}% share` };
 }
 

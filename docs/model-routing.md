@@ -135,6 +135,19 @@ $0.20 cache reads, and $20 output per million tokens in its
 while the Codex and Claude routing auction here spends subscriptions. The quoted $4–10 monthly
 personal-agent estimate does not establish Remudero savings.
 
+## Paid pilot accounting
+
+The narrow `cash-simple` paid trial is a separate, task-stable allocation for low-risk, single-file
+docs or plan-lint implementation. Its pilot-only daily spend is the sum of distinct API-billed
+cash worker-call `total_cost_usd` receipts joined to trial assignment IDs, attributed to the
+call's UTC day. The final task verdict's `cost_usd` can include other subscription and repair
+work and is not the cash-arm budget. These receipts are worker/provider estimates, not invoices;
+subscription notional amounts remain separate. An unreadable ledger source, conflicting call
+receipt, or missing cost evidence temporarily holds only the paid arm with a reason. Control and
+ordinary subscription work continue, and no benchmark check holds a PR. The existing overall
+daily cash cap is still an independent backstop. Trial PR-open rate is an operational diagnostic,
+not verified completion or a public causal model ranking.
+
 ## Rollback
 
 The policy switch is the candidate membership and order of `capabilities.codex.balanced` in
