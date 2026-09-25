@@ -1,0 +1,105 @@
+- id: W1-T4547
+  title: "the plan-tree-cleanliness assertion cannot tell pre-existing dirt from dirt this suite caused — a stray plan/tasks.d/ file from an unrelated run read identically to a real regression, and W1-T3367's own litter (W1-T3372) was never distinguished from either"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    OBSERVED (feedback#followup:DAEMON-1789089508795:2026-09-11T02:10:13.613Z:1, from run W1-T3367 /
+    PR #5050): `test/task-linter-wiring.test.ts`'s final test — `"the plan tree is unchanged after the
+    suite runs"` — failed LOCALLY (not in CI) because `plan/tasks.d/` carried an untracked
+    `W1-T3372-the-coverage-ratchet-gate-refused-1-pull-request-in-this-window-and-each.yaml`, tentatively
+    attributed to "an unrelated concurrent process sharing this checkout." The reporting worker did not
+    claim to know the mechanism — it flagged it as worth checking.
+    W1-T515 (merged) ALREADY RETIRED THIS SUITE'S OWN TWO WRITERS into the live plan tree — the wiring
+    probe (which now lands under `test/fixtures/`, not `plan/tasks.d/`) and the changed-tasks base
+    comparison (which now edits a committed FIXTURE shard, not a real task record) — and locked that with
+    exactly the assertion that failed here. So as of that merge, NOTHING in this suite's own test bodies
+    should write into the live `plan/tasks.d/` tree. Whatever left `W1-T3372-*.yaml` behind, it was NOT
+    this suite writing it — which makes the CURRENT assertion doubly wrong to blame on this suite: it
+    reads `git status --porcelain -- plan/` exactly ONCE, at the end, and fails identically whether the
+    dirt was inherited from something that ran before this process started or was somehow introduced
+    during it. Both read as "this suite must leave plan/ byte-identical" — a message that misdirects an
+    operator toward the wrong file every time the cause is external.
+    VERIFIED FROM SOURCE AT THIS FILING (re-derive before building — this is a query, not a constant, per
+    the W1-T515 precedent): (i) `git grep -n symlink -- src/` finds symlinking of `node_modules`
+    (`linkWorktreeNodeModules`) and of specific worker-HOME credential paths (`worker-home.ts`'s
+    `WORKER_HOME_SYMLINKS`) — NOTHING touches `plan/` or `plan/tasks.d/` anywhere in `src/`, so no
+    filesystem-level bridge exists between worktrees for that path. (ii) `createDaemonLaneWorktree`
+    (`src/run-task.ts`) calls `pruneStaleRuns` FIRST (force-removing registered, non-live, past-grace
+    `run-*` worktrees via `git worktree remove --force`, which deletes the on-disk directory), then
+    computes its branch via `uniqueRunBranch` (`src/lib/worker.ts`), which checks `localBranchExists` and
+    appends a numeric suffix on collision rather than ever reusing a live/ambiguous path. `addLaneWorktree`
+    is likewise keyed on `run-${runId}`. Neither computes a path that two concurrent runs could plausibly
+    share. So static reading found no structural leak in the worktree-creation/prune path either.
+    THE ONE DOCUMENTED CLASS THAT COULD EXPLAIN IT, NAMED BUT NOT CONFIRMED: W1-T1010's own rationale
+    records a live incident where an ungraceful container recycle found "three workers mid-run" — i.e.
+    workers CAN be caught writing when the host interrupts them, and W1-T1010's design notes the recycled
+    container "reads the SAME bind mount" the prior one did. If a worker whose job is to DRAFT a task
+    shard (e.g. a follow-up-harvest or inbox-draft class run) was interrupted after writing
+    `plan/tasks.d/<id>-*.yaml` but before committing/cleanup, and its worktree was left on disk rather than
+    reaped, that is a plausible — but unconfirmed — source. It is equally plausible the litter was simply
+    W1-T3367's OWN uncommitted in-progress output (if W1-T3367 is itself a shard-drafting task, its own
+    test run could legitimately see its own not-yet-committed draft as "dirty" before that draft is
+    finalized) — a misattribution, not a leak at all. Neither can be settled by reading source alone; it
+    needs the actual PR #5050 body and W1-T3367's own ledger, which this filing has no tool access to pull.
+    THE DEFECT WORTH FIXING EITHER WAY: the assertion itself cannot currently distinguish these cases, and
+    that is what makes a real, external, worth-investigating anomaly indistinguishable from a false alarm
+    against this suite. Fix the OBSERVABILITY first — it is the load-bearing, unambiguously buildable half
+    — and require the investigation as a precondition to filing any further fix, never as a bundled guess.
+  design: |
+    (i) A PURE CLASSIFIER, defined and unit-tested inside `test/task-linter-wiring.test.ts` itself (a
+    test-file-local helper, mirroring how this same file already self-tests its own probe-path logic):
+    `classifyPlanPorcelainDelta(before: string, after: string)` returning one of `{status:"clean"}`,
+    `{status:"pre_existing", paths, message}` (before non-empty, after EQUALS before — dirt present when
+    this suite started, unchanged by it) or `{status:"introduced", paths, message}` (after carries a path
+    NOT present in before — dirt that appeared during this suite's own run). Two empty inputs -> clean,
+    silently. The `message` for `pre_existing` must say the dirt PREDATES this suite and name the paths,
+    explicitly distinguishing it from a regression in this file; the `message` for `introduced` must say
+    the opposite — this suite's own run left it behind.
+    (ii) CAPTURE THE BEFORE SNAPSHOT AS EARLY AS POSSIBLE — a module-top `const`, immediately after
+    `REPO_ROOT` is defined (line 16 today; re-verify), using the SAME `git status --porcelain -- plan/`
+    invocation the existing final test already runs (`execFileSync("git", ["-C", REPO_ROOT, "status",
+    "--porcelain", "--", "plan/"], { encoding: "utf8" })`), captured BEFORE any `test()` callback in this
+    file executes. This reflects what the suite INHERITED, not what any of its own tests may have touched.
+    (iii) THE LIVE TEST ROUTES THROUGH THE CLASSIFIER. `"the plan tree is unchanged after the suite runs"`
+    keeps reading the AFTER porcelain exactly as today, but now calls `classifyPlanPorcelainDelta(before,
+    after)` and asserts `status !== "introduced"` AND `status !== "pre_existing"` are BOTH still failures
+    (a dirty tree is still worth surfacing loudly, whichever caused it — silently swallowing pre-existing
+    dirt would hide a real anomaly), but with the two cases carrying DIFFERENT, correctly-attributed
+    messages rather than one message that always implicates this suite.
+    (iv) NOT IN SCOPE, AND NOT TO BE GUESSED. This task touches ONLY `test/task-linter-wiring.test.ts` and
+    makes NO change to `src/lib/worker.ts`, `pruneStaleRuns`, `uniqueRunBranch`, or any worktree-creation
+    path. If the implementer, while doing this work, pulls PR #5050 and W1-T3367's own ledger (both cited
+    above, neither read by this filing for lack of tool access) and that evidence surfaces a GENUINE
+    cross-worktree or interrupted-recycle leak — as opposed to W1-T3367's own uncommitted output — record
+    the finding in the PR report and FILE A SEPARATE FOLLOW-UP for the fix. Do not fix a src/ mechanism in
+    this same PR: this task's own acceptance is deliberately confined to one file, and bundling an unproven
+    worktree fix here would be exactly the scope creep W1-T515's own precedent refused.
+  acceptance:
+    - claim: "a before-snapshot identical to the after-snapshot (dirt present when the suite starts, unchanged by it) classifies as pre-existing, naming the inherited path(s), never worded as a regression this suite caused"
+      proof: "unit test: a before-snapshot identical to after classifies as pre-existing dirt"
+    - claim: "a path present in the after-snapshot but absent from the before-snapshot classifies as introduced by this suite, worded distinctly from the pre-existing case"
+      proof: "unit test: a path present only in the after snapshot classifies as suite-introduced dirt"
+    - claim: "two empty snapshots (nothing before, nothing after) classify clean with no finding — the classifier never manufactures a result where none exists"
+      proof: "unit test: two empty snapshots classify clean with no finding"
+    - claim: "the live cleanliness test's final assertion routes through the new classifier rather than the old bare equal-to-empty-string check it replaces"
+      proof: "grep: classifyPlanPorcelainDelta in test/task-linter-wiring.test.ts"
+  origin: "followup#DAEMON-1789089508795"
+  plan_refs: ["W1-T515"]
+  files: [test/task-linter-wiring.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-09-11 from feedback#followup:DAEMON-1789089508795:2026-09-11T02:10:13.613Z:1 (run
+    W1-T3367, PR #5050). Deliberately does NOT presuppose a worktree-isolation leak: a source audit at
+    filing time found no symlink bridging `plan/` between worktrees and no path/branch-collision gap in
+    `uniqueRunBranch`/`pruneStaleRuns`/`worktreeAdd` — re-derive before building, per the W1-T515 precedent
+    that these facts move. The one documented class that COULD explain the symptom (W1-T1010's
+    workers-caught-mid-run-by-an-ungraceful-recycle incident) is named but unconfirmed; equally plausible
+    is that W1-T3367 saw its OWN uncommitted draft output, a misattribution rather than a leak. Scoped to
+    ONE file (the assertion's diagnostic power) so it is buildable regardless of which is true; any
+    src/-level fix a real investigation surfaces is EXPLICITLY deferred to a separate follow-up, never
+    bundled here."
