@@ -300,3 +300,101 @@ test("visibleCriteria: generic over anything carrying an optional `holdout` flag
     ["a"],
   );
 });
+
+// ── W1-T4419: `kind: guard` acceptance criteria ─────────────────────────────
+
+test("a criterion's `kind: guard` carries through YAML parsing unchanged; an ordinary criterion's `kind` is undefined", () => {
+  const plan = loadPlan(
+    planFile(`
+- id: G
+  title: has a guard criterion alongside an ordinary one
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "the new behaviour exists"
+      proof: "grep: NEW_MARKER in src/x.ts"
+    - claim: "the old behaviour still works"
+      proof: "grep: OLD_MARKER in src/x.ts"
+      kind: guard
+`),
+  );
+  const criteria = selectTask(plan, "G").acceptance ?? [];
+  assert.equal(criteria.length, 2);
+  assert.equal(criteria[0].kind, undefined, "an ordinary criterion has no kind — it defaults to 'change'");
+  assert.equal(criteria[1].kind, "guard");
+});
+
+test("an invalid `kind` value is refused at parse time, naming the field", () => {
+  assert.throws(
+    () =>
+      loadPlan(
+        planFile(`
+- id: BADKIND
+  title: an invalid kind value
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "something"
+      proof: "grep: X in src/x.ts"
+      kind: regression
+`),
+      ),
+    (err: unknown) => err instanceof PlanError && /'kind' must be change\|guard/.test((err as Error).message),
+  );
+});
+
+test("a task whose acceptance criteria are ALL `kind: guard` is refused — nothing discriminates its own work", () => {
+  assert.throws(
+    () =>
+      loadPlan(
+        planFile(`
+- id: ALLGUARD
+  title: every criterion is a guard
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "old behaviour A still works"
+      proof: "grep: A_MARKER in src/x.ts"
+      kind: guard
+    - claim: "old behaviour B still works"
+      proof: "grep: B_MARKER in src/x.ts"
+      kind: guard
+`),
+      ),
+    (err: unknown) => err instanceof PlanError && /every acceptance criterion is 'kind: guard'/.test((err as Error).message),
+  );
+});
+
+test("a task with a mix of `kind: guard` and an ordinary (default-kind) criterion loads cleanly — something still discriminates", () => {
+  const plan = loadPlan(
+    planFile(`
+- id: MIXED
+  title: one guard, one ordinary
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "old behaviour still works"
+      proof: "grep: OLD_MARKER in src/x.ts"
+      kind: guard
+    - claim: "new behaviour exists"
+      proof: "grep: NEW_MARKER in src/x.ts"
+`),
+  );
+  assert.equal((selectTask(plan, "MIXED").acceptance ?? []).length, 2);
+});

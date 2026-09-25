@@ -46,6 +46,19 @@ const MERGED_STATUSES = new Set<TaskStatus>(["merged", "done"]);
 export const RETIREMENT_REASONS = ["retired", "closed", "withdrawn"] as const;
 export type RetirementReason = (typeof RETIREMENT_REASONS)[number];
 
+/**
+ * W1-T4419 — which of two things a criterion asserts. `"change"` (the default) must discriminate
+ * head from base: proof-discrimination refuses it if its proof already passes at the merge base.
+ * `"guard"` is a REGRESSION GUARD — a proof that passes at the merge base BY DESIGN (it is proving
+ * nothing broke, not that something changed), so it is exempt from that comparison. Review still
+ * executes a guard's proof exactly like any other criterion, and it must still pass at head.
+ * Why: docs/forensics/plan.md#acceptancecriterionkind.
+ */
+export const ACCEPTANCE_KINDS = ["change", "guard"] as const;
+export type AcceptanceKind = (typeof ACCEPTANCE_KINDS)[number];
+/** Default acceptance kind when a criterion omits `kind:` — unchanged from before this field existed. */
+export const DEFAULT_ACCEPTANCE_KIND: AcceptanceKind = "change";
+
 export interface AcceptanceCriterion {
   claim: string;
   proof: string;
@@ -57,6 +70,8 @@ export interface AcceptanceCriterion {
    *  filters it out of worker prompts, but `judgeReview` still judges it. Why:
    *  docs/forensics/plan.md#acceptancecriterionholdout. */
   holdout?: boolean;
+  /** W1-T4419 — see {@link ACCEPTANCE_KINDS}. Absent ⇒ {@link DEFAULT_ACCEPTANCE_KIND} (`"change"`). */
+  kind?: AcceptanceKind;
 }
 
 /**
@@ -304,6 +319,11 @@ export function validateAcceptanceShape(raw: unknown, sourceLabel: string, taskI
     if (typeof c.claim !== "string" || c.claim.trim() === "") {
       throw new PlanError(`${at}: 'claim' must be a non-empty string, got ${yamlTypeOf(c.claim)}`);
     }
+    // W1-T4419 — `kind` is validated for EVERY criterion, including a `satisfied_by` one below:
+    // nothing about standing in for a proof changes what a valid `kind` value is.
+    if (c.kind !== undefined && !ACCEPTANCE_KINDS.includes(c.kind as AcceptanceKind)) {
+      throw new PlanError(`${at}: 'kind' must be ${ACCEPTANCE_KINDS.join("|")}, got ${JSON.stringify(c.kind)}`);
+    }
     // `satisfied_by` (Architect-only, §12 rule 16) stands IN PLACE OF a proof: such a criterion is
     // judged MET by citing an earlier PR, so it has no proof text to execute and requiring one
     // would reject the form the plan already uses.
@@ -317,6 +337,18 @@ export function validateAcceptanceShape(raw: unknown, sourceLabel: string, taskI
       throw new PlanError(`${at}: 'proof' must be a non-empty string (or 'satisfied_by' in its place), got ${yamlTypeOf(c.proof)}`);
     }
   });
+  // W1-T4419 — A TASK WHOSE CRITERIA ARE ALL `kind: guard` HAS NOTHING THAT DISCRIMINATES ITS OWN
+  // WORK. A guard is exempt from proof-discrimination's head-vs-base comparison BECAUSE it passes
+  // at the merge base by design (it proves nothing broke); a task built entirely of such criteria
+  // would sail through review having proven only that pre-existing behaviour survived, never that
+  // this task's own change exists. Refused here, at parse time, so `rmd lint-plan` (which loads
+  // the plan through this same validator) catches it before review ever runs.
+  if (raw.length > 0 && raw.every((entry) => ((entry as Record<string, unknown>).kind ?? DEFAULT_ACCEPTANCE_KIND) === "guard")) {
+    throw new PlanError(
+      `${where}: every acceptance criterion is 'kind: guard' — nothing discriminates this task's own work; ` +
+        "add at least one 'kind: change' (or default-kind) criterion; a guard alone only proves existing behaviour survived",
+    );
+  }
   return raw as AcceptanceCriterion[];
 }
 
