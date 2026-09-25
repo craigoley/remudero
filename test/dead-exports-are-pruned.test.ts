@@ -16,6 +16,7 @@ import { test } from "node:test";
 
 import {
   EXPORT_GARDEN_BATCH,
+  applyExportDeletions,
   exportDeclarationSpan,
   exportGardenCandidates,
   exportGardenSpec,
@@ -27,6 +28,7 @@ import {
 import { gardenStatePath, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
 import { adoptionLatestPath, adoptionProposalId } from "../src/lib/measurement-cadence.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { writeAtomic as writeAtomicFile } from "../src/lib/fs-race-safe.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 
 const DEAD = ["deadA", "deadB", "deadC", "deadD", "deadE", "deadF", "deadG"];
@@ -152,6 +154,29 @@ test("W1-T4117: an export named in a string lookup is kept", () => {
   assert.match(after, /^export function registryHandler\(\)/m, "the registry-named export is kept");
   assert.match(after, /^export function selfUsed\(\)/m, "an export its own file still uses is kept");
   assert.doesNotMatch(after, /plainDead/, "the export nothing names is deleted");
+});
+
+test("W1-T4117: a concurrent source edit withdraws the export deletion", () => {
+  const repo = repoWith({ "src/lib/dead.ts": deadFile(["deadA"]) });
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4117-race-`));
+  const report: Array<[string, string]> = [["src/lib/dead.ts", "deadA"]];
+  scan(stateDir, "2026-09-20T00:00:00.000Z", report);
+  exportInventory(repo.dir, stateDir);
+  scan(stateDir, "2026-09-21T00:00:00.000Z", report);
+  const candidates = exportGardenCandidates(exportInventory(repo.dir, stateDir), repo.dir);
+  assert.equal(candidates.length, 1);
+
+  const path = join(repo.dir, "src/lib/dead.ts");
+  const concurrentEdit = `${readFileSync(path, "utf8")}\n// concurrent edit\n`;
+  const deleted = applyExportDeletions(repo.dir, candidates, {
+    writeAtomic: (target, content, options) => {
+      writeAtomicFile(target, concurrentEdit);
+      return writeAtomicFile(target, content, options);
+    },
+  });
+
+  assert.deepEqual(deleted, [], "the stale candidate is not reported as applied");
+  assert.equal(readFileSync(path, "utf8"), concurrentEdit, "a concurrent edit is preserved byte-for-byte");
 });
 
 test("W1-T4117: a deletion re-added within the window is read as a failure", () => {

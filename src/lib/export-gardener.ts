@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { writeAtomic } from "./fs-race-safe.js";
+import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec, Outcome } from "./gardener.js";
 import { adoptionLatestPath, readAdoptionLatest } from "./measurement-cadence.js";
 
@@ -295,15 +295,25 @@ export function exportGardenCandidates(inv: ExportInventory, repoRoot: string): 
 
 /** Delete each action's export in `root`, re-checked there: a declaration that no longer reads
  *  whole, or a name something now mentions, is left alone. Returns the actions deleted. */
-export function applyExportDeletions(root: string, actions: ExportGardenAction[]): ExportGardenAction[] {
+export function applyExportDeletions(
+  root: string,
+  actions: ExportGardenAction[],
+  deps: { writeAtomic?: typeof writeAtomic } = {},
+): ExportGardenAction[] {
   const done: ExportGardenAction[] = [];
+  const atomicWrite = deps.writeAtomic ?? writeAtomic;
   for (const a of actions) {
     const path = join(root, a.file);
-    if (!existsSync(path)) continue;
-    const text = readFileSync(path, "utf8");
+    const text = readFileIfExists(path);
+    if (text === undefined) continue;
     const span = exportDeclarationSpan(text, a.name);
     if (!span || referencesOutside(root, a.file, a.name, span).length > 0) continue;
-    writeFileSync(path, deleteSpan(text, span));
+    // Replace only the exact bytes the candidate was rechecked against. A concurrent edit between
+    // the read and staged rename withdraws the write instead of discarding that edit.
+    const replaced = atomicWrite(path, deleteSpan(text, span), {
+      beforeRename: () => readFileIfExists(path) === text,
+    });
+    if (!replaced) continue;
     done.push(a);
   }
   return done;
