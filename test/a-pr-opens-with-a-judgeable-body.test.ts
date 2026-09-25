@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -11,6 +11,7 @@ import { loadPlan } from "../src/lib/plan.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { defaultProofRunner, openPullRequestChecked } from "../src/lib/pr-open.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const GATE_URL = pathToFileURL(join(REPO_ROOT, "scripts", "acceptance-author-gate.mjs")).href;
@@ -223,4 +224,75 @@ test("the shared PR opener refuses a stale or plan-divergent acceptance block be
     /proof did not pass against merge base/,
   );
   assert.equal(proofCalls, 1, "the first stale proof stops the opener before REST creation");
+});
+
+function filedTaskFixture(proof = "grep: marker in README.md"): string {
+  const dir = fixture();
+  mkdirSync(join(dir, "plan"));
+  writeFileSync(join(dir, "plan", "tasks.yaml"), [
+    "- id: W1-T4420",
+    "  title: checked PR fixture",
+    "  repo: remudero",
+    "  type: implement",
+    "  acceptance:",
+    "    - claim: the marker is present",
+    `      proof: ${JSON.stringify(proof)}`,
+  ].join("\n"));
+  return dir;
+}
+
+test("the default PR proof runner executes the real check-proof process", () => {
+  const result = defaultProofRunner(
+    "grep: W1_T4420_ABSENT_PROOF_MARKER in src/lib/pr-open.ts",
+    "origin/main",
+    REPO_ROOT,
+  );
+  assert.equal(result.error, undefined, result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stdout ?? "", /verdict:\s+fail/);
+});
+
+test("the shared PR opener refuses an unavailable merge base before running a proof", () => {
+  const dir = filedTaskFixture();
+  let ran = false;
+  assert.throws(
+    () => openPullRequestChecked("", "run-W1-T4420-1", dir, "missing/base", () => {
+      ran = true;
+      return { status: 0 };
+    }),
+    /cannot resolve merge base missing\/base/,
+  );
+  assert.equal(ran, false);
+});
+
+test("the shared PR opener rejects a conflicting task trailer and malformed block before proof execution", () => {
+  const dir = filedTaskFixture();
+  let ran = false;
+  const runProof = () => {
+    ran = true;
+    return { status: 0 };
+  };
+  assert.throws(
+    () => openPullRequestChecked("Remudero-Task: W1-T9999", "run-W1-T4420-1", dir, "origin/main", runProof),
+    /body trailer names W1-T9999/,
+  );
+  assert.throws(
+    () => openPullRequestChecked("Acceptance:\n- claim without proof", "run-W1-T4420-1", dir, "origin/main", runProof),
+    /Acceptance block is malformed/,
+  );
+  assert.equal(ran, false);
+});
+
+test("the shared PR opener refuses a filed proof that check-proof cannot execute", () => {
+  const dir = filedTaskFixture("a prose-only proof");
+  let ran = false;
+  assert.throws(
+    () => openPullRequestChecked("", "run-W1-T4420-1", dir, "origin/main", () => {
+      ran = true;
+      return { status: 0 };
+    }),
+    /proof the local check-proof command cannot execute/,
+  );
+  assert.equal(ran, false);
 });

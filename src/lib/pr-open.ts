@@ -33,7 +33,7 @@ export function filedTaskIdFromRunBranch(branch: string): string | undefined {
   return taskId && TASK_ID_SHAPE.test(taskId) ? taskId : undefined;
 }
 
-function defaultProofRunner(proof: string, mergeBase: string, repoRoot: string): OpenPullRequestProofResult {
+export function defaultProofRunner(proof: string, mergeBase: string, repoRoot: string): OpenPullRequestProofResult {
   const result = spawnSync(
     process.execPath,
     ["--import", "tsx", "src/run-task.ts", "check-proof", proof, "--base", mergeBase],
