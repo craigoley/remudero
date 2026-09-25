@@ -499,11 +499,20 @@ interface RollupCheck {
   detailsUrl?: string;
 }
 
-/** The real host: git in the managed checkout, `gh` against `owner/repo`, files under `root/state`. */
-export function daemonSreRunbookHost(opts: { root: string; repoDir: string; owner: string; repo: string }): SreRunbookHost {
+/** The real host: git in the managed checkout, `gh` against `owner/repo`, files under `root/state`.
+ *  `inContainer` is injectable (defaults to {@link defaultInContainer}) so a test can drive both the
+ *  refused and the drifted arm of `canRecycle` without depending on the runner's own environment. */
+export function daemonSreRunbookHost(opts: {
+  root: string;
+  repoDir: string;
+  owner: string;
+  repo: string;
+  inContainer?: () => boolean;
+}): SreRunbookHost {
   const repoArg = `${opts.owner}/${opts.repo}`;
   const git = (args: string[]) => execFileSync("git", ["-C", opts.repoDir, ...args], { encoding: "utf8" }).trim();
   const gh = (args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const inContainer = opts.inContainer ?? defaultInContainer;
   const failed = (checks: RollupCheck[]) => checks.filter((c) => c.conclusion === "FAILURE");
   return {
     async failedCi(pr) {
@@ -535,7 +544,7 @@ export function daemonSreRunbookHost(opts: { root: string; repoDir: string; owne
     },
     // recycle-container.sh must never run inside the container it replaces (its own header).
     async canRecycle(container) {
-      if (defaultInContainer()) return { ok: false, observed: `recycle of ${container} refused: this daemon runs inside a container` };
+      if (inContainer()) return { ok: false, observed: `recycle of ${container} refused: this daemon runs inside a container` };
       return { ok: true, observed: `${container} reported drifted` };
     },
     async recycle(container) {

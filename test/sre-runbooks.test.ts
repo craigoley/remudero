@@ -8,7 +8,8 @@
 //   - a runbook the governor holds in shadow records its action without taking it
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -20,11 +21,14 @@ import { runSreLanePass, type IncidentEvidence, type SreLaneInput } from "../src
 import {
   FAST_BURN_PER_HOUR,
   SRE_RUNBOOK_STEP,
+  daemonSreRunbookDeps,
+  daemonSreRunbookHost,
   incidentSubject,
   isFastBurn,
   readRunbookReceipts,
   receiptFromLedgerRow,
   runMatchingRunbook,
+  shadowUntilGoverned,
   sreOperatorEscalation,
   sreRunbookCatalog,
   type RunbookObservation,
@@ -353,4 +357,151 @@ test("receipts are read back from the ledger, and a torn row is skipped", () => 
   assert.deepEqual(readRunbookReceipts(ledgerPath), [
     { id: "a", fingerprint: FP, mode: "live", outcome: "failed", subject: undefined, before: "b", after: "x", seen_ms: 5 },
   ]);
+});
+
+test("shadowUntilGoverned always reads as shadow until the governor lands", () => {
+  assert.deepEqual(shadowUntilGoverned(), {
+    tier: "shadow",
+    reason: "no governor yet (W1-T4390): a new runbook starts in shadow",
+  });
+});
+
+test("daemonSreRunbookDeps wires the real ledger, the shadow governor and the operator escalation", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-sre-daemon-deps-"));
+  const ledgerPath = join(root, "ledger.jsonl");
+  writeFileSync(
+    ledgerPath,
+    JSON.stringify({ ts: "2026-09-25T11:00:00.000Z", step: SRE_RUNBOOK_STEP, id: "a", fingerprint: FP, mode: "live", outcome: "failed" }) + "\n",
+  );
+  const { runbook } = scripted({});
+  const built = daemonSreRunbookDeps({ runbooks: [runbook], ledgerPath, owner: "o", repo: "r", log: () => {} });
+  assert.deepEqual(built.runbooks, [runbook]);
+  assert.equal(built.governorVerdict("x", incident()).tier, "shadow");
+  assert.equal(built.receipts().length, 1, "the real ledger read runs");
+  assert.equal(typeof built.nowMs(), "number");
+  assert.equal(typeof built.escalate, "function");
+});
+
+// ── W1-T4386 CI-log round: the DEFAULT (uninjected) host, git/gh/npm/bash included ─────────────
+//
+// `diff-coverage` (scripts/diff-coverage.mjs) blocks a diff that adds a source line lcov marks
+// never-hit. `daemonSreRunbookHost` and `sreOperatorEscalation`'s own real `gh`/`git` defaults are
+// TEXTUALLY new here and every other test above drives them through an INJECTED fake — so the
+// default closures' own bodies never ran. The fix is the same PATH-stubbed-`gh` idiom
+// test/github-transport.test.ts already established ("… reaches the real ghExec default"), plus a
+// throwaway local git repo (its own `origin` remote pointing at itself, so `fetch`/`merge`/
+// `rev-list` all run for real with no network) — never a mock of `node:child_process` itself.
+
+const GIT_FIXTURE_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: "t",
+  GIT_AUTHOR_EMAIL: "t@t",
+  GIT_COMMITTER_NAME: "t",
+  GIT_COMMITTER_EMAIL: "t@t",
+};
+
+function realGit(dir: string, ...args: string[]): string {
+  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: GIT_FIXTURE_ENV });
+}
+
+/** A real, local checkout whose own `origin` remote points at itself, so the host's real `git`
+ *  default can fetch/merge/status/rev-list for real with no network. */
+function realCheckoutRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-sre-runbook-host-repo-"));
+  realGit(dir, "init", "--quiet", "-b", "main");
+  writeFileSync(join(dir, "README.md"), "fixture\n");
+  realGit(dir, "add", "-A");
+  realGit(dir, "commit", "--quiet", "-m", "fixture");
+  realGit(dir, "remote", "add", "origin", dir);
+  return dir;
+}
+
+/** A throwaway `gh` on `PATH` ahead of the real one, returning `{}` to everything — never the
+ *  network. Async-aware: the caller may return a promise and the stub stays on `PATH` until it
+ *  settles. */
+async function withFakeGhOnPath<T>(fn: () => T | Promise<T>): Promise<T> {
+  const bin = mkdtempSync(join(tmpdir(), "rmd-sre-runbooks-gh-stub-"));
+  // `check-runs` gets an ARRAY (failedCi's second read maps it with no `?? []` fallback); every
+  // other call gets `{}`, which every other call site reads defensively (`?? []`, `?? "unknown"`).
+  writeFileSync(
+    join(bin, "gh"),
+    ["#!/bin/sh", 'case "$*" in', "  *check-runs*) echo '[]' ;;", "  *) echo '{}' ;;", "esac", "exit 0", ""].join("\n"),
+    { mode: 0o755 },
+  );
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    return await fn();
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+  }
+}
+
+test("daemonSreRunbookHost's real git/gh/npm/bash defaults run every host method, both canRecycle arms included", async () => {
+  await withFakeGhOnPath(async () => {
+    const repoDir = realCheckoutRepo();
+    const root = mkdtempSync(join(tmpdir(), "rmd-sre-runbook-host-root-"));
+    mkdirSync(join(root, "state", "inflight"), { recursive: true });
+    writeFileSync(join(root, "state", "inflight", "x.lock"), "held");
+    const host = daemonSreRunbookHost({ root, repoDir, owner: "o", repo: "r" });
+
+    const ci = await host.failedCi(1);
+    assert.equal(typeof ci.observed, "string", "the real gh default answered failedCi");
+
+    await host.rerunJob(1);
+
+    const checkoutState = await host.checkout();
+    assert.equal(checkoutState.clean, true, "the real git default reads the fixture repo as clean");
+    assert.equal(checkoutState.borrowed, true, "the inflight lock file makes the checkout read as borrowed");
+
+    await host.fastForward();
+    await assert.rejects(() => host.reinstall(), "npm ci has no package.json to install from");
+    await assert.rejects(() => host.recycle("x"), "deploy/recycle-container.sh does not exist in the fixture repo");
+
+    const forcedIn = daemonSreRunbookHost({ root, repoDir, owner: "o", repo: "r", inContainer: () => true });
+    const forcedOut = daemonSreRunbookHost({ root, repoDir, owner: "o", repo: "r", inContainer: () => false });
+    assert.equal((await forcedIn.canRecycle("x")).ok, false, "refused inside a container");
+    assert.equal((await forcedOut.canRecycle("x")).ok, true, "reported drifted outside a container");
+
+    const absent = await host.lock(join(root, "state", "missing.lock"));
+    assert.equal(absent.present, false);
+
+    const presentPath = join(root, "state", "present.lock");
+    writeFileSync(presentPath, JSON.stringify({ pid: process.pid }));
+    const present = await host.lock(presentPath);
+    assert.equal(present.present, true);
+
+    // A path that exists but cannot be read as a lock file (a directory) drives readFileIfPresent's
+    // own catch arm.
+    const unreadablePath = join(root, "state", "a-directory.lock");
+    mkdirSync(unreadablePath);
+    const unreadable = await host.lock(unreadablePath);
+    assert.equal(unreadable.present, true);
+
+    await host.removeLock(presentPath);
+
+    assert.equal(typeof (await host.reviewRequested(1)), "boolean");
+    await host.requestReview(1);
+  });
+});
+
+test("sreOperatorEscalation reaches the real ghExec default when no exec override is given", async () => {
+  await withFakeGhOnPath(async () => {
+    const root = mkdtempSync(join(tmpdir(), "rmd-sre-escalate-real-"));
+    const ledgerPath = join(root, "ledger.jsonl");
+    writeFileSync(ledgerPath, "");
+    const logged: string[] = [];
+    const escalateToOperator = sreOperatorEscalation({
+      owner: "craigoley",
+      repo: "remudero",
+      ledgerPath,
+      log: (s) => logged.push(s),
+      nowMs: () => NOW,
+    });
+    const d = deps([]);
+    await withLiveWritesAllowed(() =>
+      runMatchingRunbook(incident({ name: "dispatch-stall" }), { ...d.deps, escalate: escalateToOperator }),
+    );
+  });
 });
