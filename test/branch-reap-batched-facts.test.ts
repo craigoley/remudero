@@ -43,6 +43,23 @@ test("an unreadable branch reap state fires a first pass", () => {
   }
 });
 
+test("a persisted merged-head cache keeps only string shas", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reap-cache-`));
+  try {
+    const path = join(root, "branch-reap-state.json");
+    writeFileSync(path, JSON.stringify({
+      lastRunAtMs: 1_000,
+      mergedHeadShas: { merged: "tip-merged", malformed: 42 },
+    }));
+    assert.deepEqual(readAutomaticBranchReapState(path), {
+      lastRunAtMs: 1_000,
+      mergedHeadShas: { merged: "tip-merged" },
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function batchExec(names: readonly string[], calls: string[][], headAnswer = ""): (cmd: string, args: string[]) => string {
   return (cmd, args) => {
     calls.push([cmd, ...args]);
