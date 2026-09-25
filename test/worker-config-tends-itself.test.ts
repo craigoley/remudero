@@ -12,15 +12,19 @@ import { test } from "node:test";
 import type { Clock } from "../src/lib/clock.js";
 import {
   applyConfigEdits,
+  capDerivation,
   capCandidate,
   configCanariesPath,
   configGardenSpec,
   mountCandidate,
+  readConfigCanaryFile,
   readConfigCanaries,
   recalibratedBudget,
   reverseEdits,
   routeLine,
   runConfigGarden,
+  splitCohort,
+  startConfigGarden,
   CONFIG_GARDEN_CLASSES,
   type ConfigGardenSources,
   type ConfigInventory,
@@ -28,6 +32,7 @@ import {
 import { cohortGuardMetrics, cohortGuardObservations, enterCanary, stepCanary } from "../src/lib/experiment-promotion.js";
 import type { MountRecommendation } from "../src/lib/mount-recommender.js";
 import { gardenStatePath, readGardenState, type GardenCheckout, type PrState } from "../src/lib/gardener.js";
+import type { RunSummary } from "../src/lib/retro.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { daemonCommand } from "../src/run-task.js";
@@ -336,4 +341,69 @@ test("W1-T4113: a mount recommendation is adopted on its route line, on the same
   assert.deepEqual(applyConfigEdits(root, action.edits), [], "an edit whose line moved on is skipped, never guessed");
   applyConfigEdits(root, reverseEdits(action.edits));
   assert.equal(readFileSync(join(root, ".remudero", "mounts.yaml"), "utf8"), text);
+});
+
+test("W1-T4113: unreadable canary state stops the pass and the timer reports why", () => {
+  const h = harness();
+  const path = configCanariesPath(h.deps.stateDir);
+  writeFileSync(path, "{broken json");
+  assert.throws(() => readConfigCanaryFile(h.deps.stateDir), /config gardener: unreadable .*config-gardener-canaries\.json/);
+
+  const timer = startConfigGarden(configGardenSpec(h.deps, { ledgerRows: () => [] }), h.deps, { ledgerRows: () => [] }, HOUR);
+  timer.stop();
+  assert.equal(h.landed.length, 0, "the failed pass did not open a configuration PR");
+  assert.ok(h.logs.some((l) => l.step === "config.gardener_failed" && /unreadable .*config-gardener-canaries\.json/.test(String(l.extra?.error))));
+});
+
+test("W1-T4113: whole-route cohorts compare equal windows and discard incomplete or unrelated runs", () => {
+  const exposedAt = new Date(T0).toISOString();
+  const nowIso = new Date(T0 + 2 * HOUR).toISOString();
+  const item = (id: string, offset: number, type = "implement", verdict = "merged", risk = "medium", taskClass = "src"): RunSummary => ({
+    runId: id, taskId: id, type, verdict, risk, taskClass,
+    startTs: new Date(T0 + offset * HOUR).toISOString(), costUsd: 4, numTurns: 1,
+  });
+  const before = item("before", -1);
+  const after = item("after", 1);
+  const runs = [item("too-old", -3), before, after, item("incomplete", 1, "implement", "incomplete"), item("wrong-type", 1, "fix"), item("wrong-risk", 1, "implement", "merged", "high"), item("wrong-class", 1, "implement", "merged", "medium", "docs")];
+
+  assert.deepEqual(splitCohort({ kind: "cell", type: "implement", risk: "medium", taskClass: "src" }, runs, exposedAt, nowIso), { canary: [after], rest: [before] });
+  assert.deepEqual(splitCohort({ kind: "all" }, runs, exposedAt, nowIso), {
+    canary: [after, runs[5], runs[6]], rest: [before],
+  }, "a cap change reaches every settled implement class and risk, but not fix runs");
+});
+
+test("W1-T4113: cap re-derivation prices current-cap pressure with cache totals across classes", () => {
+  const rows = [
+    { step: "learnings.injected", budget_chars: 8000, dropped: ["old"] },
+    { step: "learnings.injected", budget_chars: 9000, dropped: ["current"] },
+    { step: "run.start", run_id: "a", task_class: "src" },
+    { step: "run.start", run_id: "b", task_class: "docs" },
+    { step: "worker.call", run_id: "a", model: "sonnet", effort: "high", tokens: { cacheRead: 60, input: 20, cacheCreation: 0 } },
+    { step: "worker.call", run_id: "b", model: "sonnet", effort: "high", tokens: { cacheRead: 20, input: 0, cacheCreation: 20 } },
+  ];
+  const derived = capDerivation(rows, { old: 2000, current: 200 }, 9000);
+  assert.deepEqual(derived.pressure, { spawnsMeasured: 1, droppedWeightP50: 200, droppedWeightP90: 200 });
+  assert.equal(derived.cacheHitRatioUsed, 2 / 3, "the price includes both task classes");
+  assert.equal(derived.recommendedCapChars, 9200);
+  assert.equal(derived.changed, true);
+});
+
+test("W1-T4113: rollback reports when the canary lines have moved on", () => {
+  const { h, cohort } = exposedBudgetCanary();
+  for (const id of cohort) {
+    const path = join(h.root, "plan", "tasks.d", `${id}-x.yaml`);
+    writeFileSync(path, readFileSync(path, "utf8").replace("  budget_usd: 9.00", "  budget_usd: 31.00"));
+  }
+  const rest = h.ids.filter((id) => !cohort.includes(id));
+  cohort.forEach((id, i) => h.rows.push(...run(`c${i}`, id, h.now() + HOUR, "blocked", 9.4)));
+  rest.forEach((id, i) => h.rows.push(...run(`r${i}`, id, h.now() + HOUR, "merged", 5)));
+  h.advance(2 * HOUR);
+  h.pass();
+
+  const judged = readConfigCanaries(h.deps.stateDir)[0]!;
+  assert.equal(judged.promotion.state, "rolled_back");
+  assert.equal(judged.rollbackPrUrl, undefined, "no rollback PR claims to restore lines that changed independently");
+  assert.equal(h.landed.length, 1);
+  assert.ok(h.logs.some((l) => l.step === "config.rollback_nothing_to_revert" && l.extra?.pr_url === judged.prUrl));
+  for (const id of cohort) assert.equal(h.budgetOf(id), "31.00");
 });
