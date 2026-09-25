@@ -10,7 +10,6 @@ import { defaultInContainer } from "./fs-race-safe.js";
 import { ghExec } from "./github-transport.js";
 import { parseInflightLockInfo } from "./inflight-lock.js";
 import { DISPATCH_STALL_RULE_ID, NO_MERGES_WITH_GREEN_QUEUE_RULE_ID } from "./incident-invariants.js";
-import type { IncidentEvidence } from "./sre-lane.js";
 import { readLedgerLines } from "./status.js";
 
 /**
@@ -35,6 +34,23 @@ export const SRE_RUNBOOK_STEP = "sre.runbook";
 /** PRIMARY CONTROL: "a fix that failed twice" (operator ruling 2026-09-23) — the second failure
  *  for one fingerprint stops the runbook and escalates. */
 export const SRE_RUNBOOK_FAILURE_LIMIT = 2;
+
+/** Every incident.event/incident.sampled row for one fingerprint, reduced to the evidence the
+ *  design names: sample events, first/last seen, count, burn rate, deploy sha(s), instances. */
+export interface IncidentEvidence {
+  fingerprint: string;
+  kind: string;
+  name: string;
+  /** Up to 3 distinct scrubbed sample messages, oldest first — "" when no row carried a message. */
+  sampleMessages: string[];
+  firstSeenMs: number;
+  lastSeenMs: number;
+  count: number;
+  /** Events per hour over the observed span (a single event reads as 1 event/hour, not infinite). */
+  burnPerHour: number;
+  deployShas: string[];
+  instances: string[];
+}
 
 // ── fast burn ────────────────────────────────────────────────────────────────────────────────
 

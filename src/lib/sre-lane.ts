@@ -6,8 +6,15 @@ import { fixedClock, systemClock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
-import { runMatchingRunbook, type RunbookPassResult, type SreRunbookDeps } from "./sre-runbooks.js";
+import {
+  runMatchingRunbook,
+  type IncidentEvidence,
+  type RunbookPassResult,
+  type SreRunbookDeps,
+} from "./sre-runbooks.js";
 import { readLedgerLines } from "./status.js";
+
+export type { IncidentEvidence } from "./sre-runbooks.js";
 
 /**
  * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane, not inside the core
@@ -82,23 +89,6 @@ export interface IncidentFrameLike {
 export interface MergedPrFiles {
   url: string;
   files: string[];
-}
-
-/** Every incident.event/incident.sampled row for one fingerprint, reduced to the evidence the
- *  design names: sample events, first/last seen, count, burn rate, deploy sha(s), instances. */
-export interface IncidentEvidence {
-  fingerprint: string;
-  kind: string;
-  name: string;
-  /** Up to 3 distinct scrubbed sample messages, oldest first — "" when no row carried a message. */
-  sampleMessages: string[];
-  firstSeenMs: number;
-  lastSeenMs: number;
-  count: number;
-  /** Events per hour over the observed span (a single event reads as 1 event/hour, not infinite). */
-  burnPerHour: number;
-  deployShas: string[];
-  instances: string[];
 }
 
 const HOUR_MS = 60 * 60_000;
