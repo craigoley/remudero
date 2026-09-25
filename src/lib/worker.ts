@@ -61,7 +61,7 @@ import {
   type ClaudeModelHealthSource,
   type ClaudeModelHealthState,
 } from "./claude-model-health.js";
-import { loadMounts, mountsPath, subscriptionOnlyModel, type CapabilityLadder } from "./mounts.js";
+import { loadMounts, mountsPath, resolveClaudeModelAlias, subscriptionOnlyModel, type CapabilityLadder } from "./mounts.js";
 import { routingExperimentFor } from "./routing-experiments.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { assertLiveSpawnAllowed } from "./spawn-guard.js";
@@ -1468,9 +1468,12 @@ export function workerSelectionAssignment(
     alternatives?: readonly string[];
     /** The capability tier the requested model resolves to; absent when no model was requested. */
     capability?: CodexModelTier;
+    capabilities?: CapabilityLadder;
   },
 ): WorkerSelectionAssignment {
   const selected = input.capacity;
+  const model = input.model ?? selected?.model ?? args.model ?? DEFAULT_MODEL_LABEL;
+  const recordedModel = input.provider === "claude" ? resolveClaudeModelAlias(model, input.capabilities) : model;
   return {
     version: 1,
     id: randomUUID(),
@@ -1482,7 +1485,7 @@ export function workerSelectionAssignment(
     },
     selected: {
       provider: input.provider,
-      model: input.model ?? selected?.model ?? args.model ?? DEFAULT_MODEL_LABEL,
+      model: recordedModel,
       effort: input.effort ?? selected?.effort ?? args.effort ?? DEFAULT_EFFORT_LABEL,
       ...(selected?.accountLabel ? { accountLabel: selected.accountLabel } : {}),
     },
@@ -1500,7 +1503,7 @@ export function workerSelectionAssignment(
         : {}),
       ...(input.preferenceBypass ? { preferenceBypass: input.preferenceBypass } : {}),
       ...(input.capabilityPreference ? { capabilityPreference: input.capabilityPreference } : {}),
-      decision: routingDecision(args, input),
+      decision: routingDecision(args, recordedModel !== model ? { ...input, model: recordedModel } : input),
     },
     candidates: (input.capacities ?? (selected ? [selected] : [])).slice(0, 8).map(selectionCandidateSnapshot),
   };
@@ -2580,6 +2583,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
       provider: "claude",
       model: routedClaudeModel,
+      capabilities,
       effort: routedClaudeSelection?.capacity.effort ?? args.effort,
       capacity: routedClaudeSelection?.capacity,
       capacities: routedClaudeCapacities,

@@ -11,7 +11,6 @@ import { gitOrThrow } from "./lib/git.mjs";
 const CONTROL_PLANE_INPUTS = [".github/workflows/", "src/lib/ci-parity.ts", "src/lib/ci-control-plane.ts"];
 const CAPABILITY_SNAPSHOT_INPUTS = [
   "MASTER-PLAN.md",
-  "plan/plan-index.json",
   "plan/policy.yaml",
   "src/run-task.ts",
   "src/lib/policy.ts",

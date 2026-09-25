@@ -162,6 +162,14 @@ export interface CapabilityLadder {
   subscriptionOnly?: string[];
 }
 
+export function resolveClaudeModelAlias(model: string, capabilities: CapabilityLadder | undefined): string {
+  if (model.includes("-") || !capabilities) return model;
+  const candidates = capabilities.claudeCandidates ?? {};
+  if (Object.values(candidates).some((models) => models.includes(model))) return model;
+  const capability = capabilities.claude[model];
+  return (capability ? candidates[capability]?.[0] : undefined) ?? model;
+}
+
 /** The whole parsed, validated routing table. */
 export interface Mounts {
   /** Model-tier ordering; higher rank = higher-thinking mount (config-maintained). */

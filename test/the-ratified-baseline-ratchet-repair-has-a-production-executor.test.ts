@@ -218,10 +218,10 @@ test("W1-T4004: production executor records both ratified baselines in one guard
 test("W1-T4004: baseline repair admission is independent from conflict regeneration", () => {
   assert.deepEqual(Object.keys(RATIFIED_BASELINE_RATCHET_REPAIRS).sort(), ["comment-load-ratchet", "source-size-baseline:legacy"]);
   const nonBaseline = ratchetPr({
-    redRequiredChecks: ["plan-index"],
-    ciFailures: [{ name: "plan-index", logTail: "generator" }],
+    redRequiredChecks: ["docs-index"],
+    ciFailures: [{ name: "docs-index", logTail: "generator" }],
   });
-  assert.deepEqual(recordableRatchetRepairFor(nonBaseline), ["plan-index"], "the broader conflict registry still recognizes its own member");
+  assert.deepEqual(recordableRatchetRepairFor(nonBaseline), ["docs-index"], "the broader conflict registry still recognizes its own member");
   assert.equal(ratifiedBaselineRatchetRepairFor(nonBaseline), undefined, "that membership grants no unattended baseline-write authority");
 });
 

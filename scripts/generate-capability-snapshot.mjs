@@ -26,14 +26,12 @@
 // sources (plan/policy.yaml, src/run-task.ts, .github/workflows/ci-gate.yml, state/'s daily-cost-
 // ceiling override) haven't changed -- same discipline as scripts/generate-cli-reference.mjs.
 //
-// Because rewriting the block can change MASTER-PLAN.md's line count, THIS SAME INVOCATION also
-// regenerates plan/plan-index.json (via generate-plan-index.mjs's own parsePlanIndex/
-// serializePlanIndex -- one parser, never a second hand-copied one) so the index never goes stale
-// relative to a block regeneration.
+// The plan index is derived by its readers from MASTER-PLAN.md at read time; this command only
+// updates the capability block.
 //
 // Usage:
-//   npm run capability-snapshot          # regenerate MASTER-PLAN.md's block + plan/plan-index.json
-//   npm run capability-snapshot:check    # exit 1 if either committed file is stale
+//   npm run capability-snapshot          # regenerate MASTER-PLAN.md's block
+//   npm run capability-snapshot:check    # check the committed block
 //
 // Run directly with `tsx` (not plain `node`): two claims import from .ts modules (src/run-task.ts,
 // src/lib/policy.ts), and only tsx's loader can import those from this script.
@@ -45,11 +43,9 @@ import { isMainModule } from "./lib/argv.mjs";
 import { parse as parseYaml } from "yaml";
 import { RECON_MAX_TURNS } from "../src/run-task.ts";
 import { loadPolicy, policyPath, resolveDailyCostCeiling } from "../src/lib/policy.ts";
-import { parsePlanIndex, serializePlanIndex } from "./generate-plan-index.mjs";
 
 const DEFAULT_ROOT = ".";
 const DEFAULT_MASTER_PLAN = "MASTER-PLAN.md";
-const DEFAULT_PLAN_INDEX = join("plan", "plan-index.json");
 
 const BEGIN_MARKER = "<!-- CAPABILITY SNAPSHOT:BEGIN -->";
 const END_MARKER = "<!-- CAPABILITY SNAPSHOT:END -->";
@@ -188,14 +184,12 @@ function main(argv) {
     options: {
       root: { type: "string", default: DEFAULT_ROOT },
       "master-plan": { type: "string", default: DEFAULT_MASTER_PLAN },
-      "plan-index": { type: "string", default: DEFAULT_PLAN_INDEX },
       check: { type: "boolean", default: false },
     },
   });
 
   const root = values.root;
   const masterPlanPath = values["master-plan"];
-  const planIndexPath = values["plan-index"];
 
   let freshBlock;
   try {
@@ -225,8 +219,6 @@ function main(argv) {
     return;
   }
 
-  const freshPlanIndex = serializePlanIndex(parsePlanIndex(freshMasterPlan), masterPlanPath);
-
   if (values.check) {
     let ok = true;
 
@@ -238,39 +230,17 @@ function main(argv) {
       ok = false;
     }
 
-    let committedPlanIndex;
-    try {
-      committedPlanIndex = readFileSync(planIndexPath, "utf8");
-    } catch {
-      console.error(
-        `generate-capability-snapshot: ${planIndexPath} does not exist -- run 'npm run capability-snapshot' to generate it.`,
-      );
-      ok = false;
-    }
-    if (committedPlanIndex !== undefined && committedPlanIndex !== freshPlanIndex) {
-      console.error(
-        `generate-capability-snapshot: ${planIndexPath} is STALE relative to a fresh ${masterPlanPath} regeneration.\n` +
-          `Run 'npm run capability-snapshot' and commit the result.`,
-      );
-      ok = false;
-    }
-
     if (!ok) {
       process.exitCode = 1;
       return;
     }
-    console.log(
-      `generate-capability-snapshot: OK -- ${masterPlanPath} and ${planIndexPath} match a fresh regeneration (${CLAIMS.length} claim(s)).`,
-    );
+    console.log(`generate-capability-snapshot: OK -- ${masterPlanPath} block matches a fresh regeneration (${CLAIMS.length} claim(s)).`);
     process.exitCode = 0;
     return;
   }
 
   writeFileSync(masterPlanPath, freshMasterPlan);
-  writeFileSync(planIndexPath, freshPlanIndex);
-  console.log(
-    `generate-capability-snapshot: wrote ${masterPlanPath} and ${planIndexPath} (${CLAIMS.length} claim(s)).`,
-  );
+  console.log(`generate-capability-snapshot: wrote ${masterPlanPath} capability block (${CLAIMS.length} claim(s)).`);
   process.exitCode = 0;
 }
 
