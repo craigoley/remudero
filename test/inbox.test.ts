@@ -10,7 +10,9 @@ import {
   draftAttemptKey,
   draftsDueOnDaemon,
   gitGrepAnchorTrue,
+  inboxDraftExampleFragmentYaml,
   inboxDraftPrompt,
+  inboxDraftRelintPrompt,
   isDraftStale,
   isRatifiedInLedger,
   parseDraftAttemptCache,
@@ -34,6 +36,7 @@ import {
   type DraftCache,
   type DraftInFlightCache,
   type DraftedCandidate,
+  type DraftLintViolation,
   type DraftSpawn,
   type EvidenceAnchor,
   type InboxClassification,
@@ -633,6 +636,31 @@ test("inboxDraftPrompt instructs raw-YAML-only output — no markdown code fence
   const prompt = inboxDraftPrompt(proposal, "- id: W1-T1\n", "run-1");
   assert.match(prompt, /RAW YAML ONLY/);
   assert.match(prompt, /do NOT wrap it in a markdown code fence/);
+});
+
+// ── W1-T4442: the draft prompt shows the shape it parses ───────────────────────────────────
+
+test("the example fragment the draft prompt prints parses and lints clean", () => {
+  const proposal: Proposal = { id: "P42", summary: "do the thing", evidenceAnchors: [] };
+  const prompt = inboxDraftPrompt(proposal, "- id: W1-T1\n", "run-1");
+  const example = inboxDraftExampleFragmentYaml();
+  // The prompt embeds the SAME generator's output verbatim — never a hand-copied restatement that
+  // could drift from what a test actually lints.
+  assert.ok(prompt.includes(example), "inboxDraftPrompt must print the example fragment verbatim");
+  assert.deepEqual(lintDraftedFragment(example, "P-EXAMPLE"), []);
+  // The example also shows every required key the OUTPUT instructions name, and a closed-enum type.
+  assert.match(example, /^  type: (recon|implement|diagnose|review|manual)$/m);
+  assert.match(example, /acceptance:\n {4}- claim: "/);
+  assert.match(example, /proof: "/);
+});
+
+test("the redraft prompt prints the literal fragment markers and the stamp line", () => {
+  const proposal: Proposal = { id: "P42", summary: "do the thing", evidenceAnchors: [] };
+  const violations: DraftLintViolation[] = [{ check: "draft-parse", severity: "block", message: "fragment failed to parse" }];
+  const prompt = inboxDraftRelintPrompt(proposal, "- id: BROKEN\n", violations);
+  assert.match(prompt, /^=== FRAGMENT START ===$/m);
+  assert.match(prompt, /^=== FRAGMENT END ===$/m);
+  assert.match(prompt, /^STAMP: /m);
 });
 
 // ── W1-T173: fenced Architect drafts must never falsely fail lint_clean (P19 fixture) ──────
