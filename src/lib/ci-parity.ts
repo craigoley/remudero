@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { availableParallelism, tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import { readAffectedSuitesInput, selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
@@ -864,7 +864,7 @@ function coverageMergeArgs(repoRoot: string, lcovPath: string): string[] {
   ];
 }
 
-function testWithCoverageShards(repoRoot: string, spawn: PreflightSpawn, lcovPath: string): CiParityLeafResult {
+function testWithCoverageShards(repoRoot: string, spawn: PreflightSpawn, lcovPath: string, scratchDir: string): CiParityLeafResult {
   const shardRoot = coverageShardRoot(repoRoot);
   try {
     rmSync(shardRoot, { recursive: true, force: true });
@@ -897,7 +897,7 @@ function testWithCoverageShards(repoRoot: string, spawn: PreflightSpawn, lcovPat
     }
     const res = spawn(process.execPath, coverageShardArgs(repoRoot, shard, testFiles), {
       cwd: repoRoot,
-      env: { TMPDIR: coverageScratchDir(repoRoot), NODE_V8_COVERAGE: rawDir },
+      env: { TMPDIR: scratchDir, NODE_V8_COVERAGE: rawDir },
     });
     const spawnFailed = spawnFailureDetail(label, res);
     if (spawnFailed) return { ok: false, detail: spawnFailed };
@@ -938,16 +938,47 @@ function testWithCoverageShards(repoRoot: string, spawn: PreflightSpawn, lcovPat
   };
 }
 
+function pathIsInside(directory: string, candidate: string): boolean {
+  const path = relative(directory, candidate);
+  return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+}
+
 function testWithCoverageLeaf(repoRoot: string, spawn: PreflightSpawn, lcovPath: string): CiParityLeafResult {
+  const stableScratch = coverageScratchDir(repoRoot);
+  let scratchDir: string;
+  let nested = false;
   try {
     mkdirSync(join(repoRoot, "coverage"), { recursive: true });
-    // CLEARED, NOT JUST CREATED: the runner clears its scratch on a normal exit, so this bounds the abnormal one.
-    rmSync(coverageScratchDir(repoRoot), { recursive: true, force: true });
-    mkdirSync(coverageScratchDir(repoRoot), { recursive: true });
-  } catch {
-    // best-effort — an injected spawn may point repoRoot at a fixture needing no coverage/ directory.
+    mkdirSync(dirname(stableScratch), { recursive: true });
+    const physicalScratch = existsSync(stableScratch)
+      ? realpathSync(stableScratch)
+      : join(realpathSync(dirname(stableScratch)), basename(stableScratch));
+    const parentTmpdir = process.env.TMPDIR;
+    nested = parentTmpdir !== undefined &&
+      (pathIsInside(stableScratch, parentTmpdir) || pathIsInside(physicalScratch, realpathSync(parentTmpdir)));
+    if (nested) {
+      // The parent's live fixtures may be anywhere under stableScratch. A child is ours to remove.
+      scratchDir = mkdtempSync(join(physicalScratch, "nested-"));
+    } else {
+      // A top-level run still clears stale scratch from an earlier abnormal exit.
+      rmSync(stableScratch, { recursive: true, force: true });
+      mkdirSync(stableScratch, { recursive: true });
+      scratchDir = realpathSync(stableScratch);
+    }
+  } catch (error) {
+    // Preserve the historical best-effort top-level seam when no stable scratch exists to erase.
+    // An active parent scratch, including a path alias, always exists and must fail closed here.
+    if (!existsSync(stableScratch) &&
+        (process.env.TMPDIR === undefined || !pathIsInside(stableScratch, process.env.TMPDIR))) {
+      return testWithCoverageShards(repoRoot, spawn, lcovPath, stableScratch);
+    }
+    return { ok: false, detail: `FAIL — coverage-ratchet: could not prepare coverage scratch: ${String(error)}` };
   }
-  return testWithCoverageShards(repoRoot, spawn, lcovPath);
+  try {
+    return testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir);
+  } finally {
+    if (nested) rmSync(scratchDir, { recursive: true, force: true });
+  }
 }
 
 const CI_TEST_SHARD_COUNT = 4;

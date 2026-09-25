@@ -16,7 +16,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
@@ -38,18 +38,35 @@ function recordingSpawn(calls: { args: string[]; env?: NodeJS.ProcessEnv }[]): P
   };
 }
 
-function coverageCall(): { args: string[]; env?: NodeJS.ProcessEnv } {
+function coverageCall(repoRoot = REPO_ROOT): { args: string[]; env?: NodeJS.ProcessEnv } {
   const calls: { args: string[]; env?: NodeJS.ProcessEnv }[] = [];
   const entry = CI_PARITY_TABLE.find((e) => e.job === "coverage-ratchet");
   assert.ok(entry?.run, "control: the coverage-ratchet entry exists and is mirrored locally");
-  entry!.run!(REPO_ROOT, recordingSpawn(calls));
+  entry!.run!(repoRoot, recordingSpawn(calls));
   const call = calls.find((c) => c.args.includes("--experimental-test-coverage"));
   assert.ok(call, "control: the leaf really did spawn the coverage command");
   return call!;
 }
 
 test("the coverage leaf points TMPDIR at a bounded sibling scratch, outside the checkout", () => {
-  assert.equal(coverageCall().env?.TMPDIR, coverageScratchDir(REPO_ROOT));
+  const scratch = coverageScratchDir(REPO_ROOT);
+  assert.equal(coverageCall().env?.TMPDIR, existsSync(scratch) ? realpathSync(scratch) : scratch);
+});
+
+test("top-level coverage clears stale sibling scratch and passes its physical path to shards", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-coverage-top-level-"));
+  const repoRoot = join(root, "repo");
+  const scratch = coverageScratchDir(repoRoot);
+  const stale = join(scratch, "left-by-killed-run");
+  mkdirSync(repoRoot);
+  mkdirSync(scratch, { recursive: true });
+  writeFileSync(stale, "stale");
+  try {
+    assert.equal(coverageCall(repoRoot).env?.TMPDIR, realpathSync(scratch));
+    assert.equal(existsSync(stale), false, "the top-level run removes only stale scratch");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("that scratch is a stable sibling namespace, never a child of the Git worktree", () => {
