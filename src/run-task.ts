@@ -37056,7 +37056,7 @@ export function commitWorkerEditsWithCensusFix(
   message: string,
   deps: PublishAbandonedFixOwnerAheadDeps & { censusFix?: typeof runCensusFix } = {},
 ): WorkerEditCommit & { censusFix: CensusFixResult } {
-  const censusFix = (deps.censusFix ?? runCensusFix)(repoDir);
+  const censusFix = deps.censusFix ? deps.censusFix(repoDir) : runCensusFix(repoDir);
   const { censusFix: _injectedCensusFix, ...gitDeps } = deps;
   return { ...commitWorkerEdits(repoDir, declaredPaths, message, gitDeps), censusFix };
 }

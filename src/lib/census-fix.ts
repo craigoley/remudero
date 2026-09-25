@@ -7,25 +7,22 @@
  * in that sample had a remedy the failing test itself already names — record a new file's row at
  * its measured value, never raise an existing one. `scripts/comment-load-ratchet.mjs` and
  * `scripts/source-size-ratchet.mjs`'s legacy `--baseline` mode already implement exactly that
- * RATCHET, NOT A CAP contract on their own two baseline JSON files (see each script's own module
- * doc): default (non-`--check`) mode records a newly-seen file's row and a shrink, and refuses —
- * unchanged — on growth past a recorded ceiling. This module does not re-derive either
- * measurement; it ORCHESTRATES the two already-shipped recording modes and adds one BACKSTOP no
- * spawned script can see past: diff each baseline's bytes before and after, and refuse to keep any
- * run whose own existing row reads HIGHER afterwards than before, regardless of what the spawned
- * script itself claims. `scripts/comment-load-baseline.json` and `scripts/source-size-baseline.json`
- * are both already `REGENERABLE_ARTIFACT_GENERATORS` entries (lib/sweep.ts, W1-T3015/W1-T2650), so a
- * change this module makes is stageable by `commitWorkerEdits` even though the worker never
- * declared either path.
+ * RATCHET, NOT A CAP contract on their own two baseline JSON files: default (non-`--check`) mode
+ * records a newly-seen file's row and a shrink, and refuses — unchanged — on growth past a
+ * recorded ceiling.
+ */
+
+/**
+ * This module does not re-derive either measurement; it ORCHESTRATES the two already-shipped
+ * recording modes and adds one BACKSTOP no spawned script can see past: diff each baseline's bytes
+ * before and after, and refuse to keep any run whose own existing row reads HIGHER afterwards than
+ * before. `scripts/comment-load-baseline.json` and `scripts/source-size-baseline.json` are both
+ * already `REGENERABLE_ARTIFACT_GENERATORS` entries (lib/sweep.ts, W1-T3015/W1-T2650), so a change
+ * here is stageable by `commitWorkerEdits` even though the worker never declared either path.
  *
- * A THIRD OBSERVED REMEDY — using `test/helpers/gh-shim.ts`/`git-repo.ts` instead of a hand-rolled
- * fixture, or naming a new census/ratchet suite so `listRuleSuites` (lib/ci-parity.ts) admits it —
- * is NOT applied here: neither is mechanical in the sense this module requires (a value computed
- * from the tree with no reading of intent). Both stay a REPORT, never a change, matching design
- * note (i): "Anything else is reported, not changed."
- *
- * Why: docs/forensics/ci-parity.md carries the wider census-registry design this module composes
- * with; this file owns only the fix half.
+ * A THIRD OBSERVED REMEDY — the shared fixture helper, or a new census suite `listRuleSuites`
+ * admits by name — is NOT applied here: neither is mechanical in the sense this module requires.
+ * Both stay a REPORT, never a change (design note i). Why: docs/forensics/ci-parity.md.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
