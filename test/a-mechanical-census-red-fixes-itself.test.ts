@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
-import { runCensusFix } from "../src/lib/census-fix.js";
+import { runCensusFix, type CensusFixSpawn } from "../src/lib/census-fix.js";
 import { commitWorkerEditsWithCensusFix } from "../src/run-task.js";
 
 /** `scripts/source-size-ratchet.mjs`'s own bucket — matches its exported `CEILING_BUCKET_LINES`,
@@ -144,6 +144,57 @@ test("W1-T4434: a clean tree with no census red reports no change", () => {
     assert.equal(result.changed, false);
     assert.deepEqual(result.changedFiles, []);
     assert.deepEqual(result.summaryLines, []);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("W1-T4434: malformed baseline JSON stays unchanged and supplies no repair rows", () => {
+  const repo = gitRepo();
+  const malformed = "{not-json\n";
+  try {
+    mkdirSync(join(repo.dir, "scripts"), { recursive: true });
+    writeFileSync(join(repo.dir, "scripts", "comment-load-baseline.json"), malformed);
+    writeFileSync(sourceSizeBaselinePath(repo.dir), malformed);
+
+    const result = runCensusFix(repo.dir, () => ({ status: 0, stdout: "", stderr: "" }));
+
+    assert.equal(result.changed, false);
+    assert.deepEqual(result.changedFiles, []);
+    assert.equal(readFileSync(join(repo.dir, "scripts", "comment-load-baseline.json"), "utf8"), malformed);
+    assert.equal(readFileSync(sourceSizeBaselinePath(repo.dir), "utf8"), malformed);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("W1-T4434: the orchestrator restores any existing row a spawned remedy tries to raise", () => {
+  const repo = gitRepo();
+  const original = `${JSON.stringify({ "src/lib/grown.ts": CEILING_BUCKET_LINES }, null, 2)}\n`;
+  try {
+    mkdirSync(join(repo.dir, "scripts"), { recursive: true });
+    writeFileSync(join(repo.dir, "scripts", "comment-load-baseline.json"), "{}\n");
+    writeFileSync(sourceSizeBaselinePath(repo.dir), original);
+    const spawn: CensusFixSpawn = (_command, args, cwd) => {
+      const baselineIndex = args.indexOf("--baseline");
+      if (baselineIndex >= 0) {
+        const path = args[baselineIndex + 1];
+        assert.ok(path, "the legacy source-size remedy must name its baseline path");
+        const rows = JSON.parse(readFileSync(path, "utf8")) as Record<string, number>;
+        rows["src/lib/grown.ts"] = CEILING_BUCKET_LINES + 1;
+        writeFileSync(path, `${JSON.stringify(rows, null, 2)}\n`);
+      }
+      assert.equal(cwd, repo.dir);
+      return { status: 0, stdout: "", stderr: "" };
+    };
+
+    const result = runCensusFix(repo.dir, spawn);
+    const sourceSize = result.outcomes.find((outcome) => outcome.remedy === "source-size-baseline-row");
+    assert.ok(sourceSize, "runCensusFix must report a source-size-baseline-row outcome");
+    assert.equal(sourceSize.applied, false);
+    assert.deepEqual(sourceSize.added, []);
+    assert.equal(readFileSync(sourceSizeBaselinePath(repo.dir), "utf8"), original, "the pre-run bytes are restored");
+    assert.match(sourceSize.detail, /refused: "src\/lib\/grown\.ts" would have risen from 500 to 501/);
   } finally {
     repo.cleanup();
   }
