@@ -16,7 +16,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { gitRepo } from "./helpers/git-repo.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 import { runCensusFix } from "../src/lib/census-fix.js";
 import { commitWorkerEditsWithCensusFix } from "../src/run-task.js";
 
@@ -99,6 +99,10 @@ test("W1-T4434: an existing ceiling is never raised by census fix", () => {
 test("W1-T4434: the harness's own commit step applies census fix first and stages its remedy", () => {
   const repo = gitRepo();
   try {
+    // commitWorkerEditsWithCensusFix shells git itself, outside gitRepo's identity-bearing wrapper.
+    // Give that real subprocess the same fixture-local identity; CI has no global identity to borrow.
+    repo.git("config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
+    repo.git("config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
     mkdirSync(join(repo.dir, "scripts"), { recursive: true });
     writeFileSync(sourceSizeBaselinePath(repo.dir), "{}\n");
     repo.git("add", "-A");
