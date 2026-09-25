@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-24: fix #7028 — a semantic merge skew with no conflict marker"
   plan_refs: [W1-T2527]
   files: [test/a-count-assertion-names-its-members.test.ts, test/help-renders-a-summary-not-a-paragraph.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-24: the literal count and the list length were:

@@ -14,7 +14,7 @@
   files:
     - src/lib/plan.ts
     - scripts/proof-discrimination-gate.mjs
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-24: three shards (W1-T4409, W1-T4413, W1-T4388) each carried a legitimate regression guard

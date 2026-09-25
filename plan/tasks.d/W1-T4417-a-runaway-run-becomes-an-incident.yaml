@@ -14,7 +14,7 @@
   files:
     - src/lib/cost-anomaly.ts
     - src/lib/sweep.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-24: W1-T4399's run cost $24.95 against a src-class median of $1.03 (multiplier 8 threshold,
