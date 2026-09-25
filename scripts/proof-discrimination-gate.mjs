@@ -68,6 +68,7 @@ export function evaluateProofDiscrimination(criteria, mergeBase, runProof) {
   const unreadable = [];
   let executed = 0;
   let credited = 0;
+  let guarded = 0;
   for (const criterion of criteria) {
     // W1-T3729 — A CRITERION THE PLAN CREDITS TO AN EARLIER MERGE IS STALE BY CONSTRUCTION.
     //
@@ -90,6 +91,22 @@ export function evaluateProofDiscrimination(criteria, mergeBase, runProof) {
       credited += 1;
       continue;
     }
+    // W1-T4419 — A GUARD CRITERION PASSES AT THE MERGE BASE BY DESIGN, SO IT CANNOT DISCRIMINATE.
+    //
+    // `kind: guard` (plan.ts) marks a criterion whose proof is a REGRESSION guard — it protects an
+    // existing behaviour rather than proving a new one, so passing at both head and the merge base
+    // is exactly what a correct guard does, not evidence of a non-discriminating proof. Skipping it
+    // here is not the same as skipping it in review: review (review.ts) still executes a guard's
+    // proof like any other criterion and it must still pass at head — only THIS head-vs-base
+    // comparison is exempted.
+    //
+    // COUNTED SEPARATELY, NEVER AS `executed`, for the same reason `credited` is: a task made
+    // entirely of guards is refused at parse time (plan.ts's validateAcceptanceShape), so a mixed
+    // task reaching this gate with SOME guards must not be reported as if this gate did no work.
+    if (criterion.kind === "guard") {
+      guarded += 1;
+      continue;
+    }
     const proof = criterion.proof?.trim() ?? "";
     if (!proof || parseWhitelistedProof(proof) === null) continue;
     const result = runProof(proof, mergeBase);
@@ -102,7 +119,7 @@ export function evaluateProofDiscrimination(criteria, mergeBase, runProof) {
       stale.push({ proof, ...proofCounts(result.stdout), output: result.stdout.trim() });
     }
   }
-  return { stale, unreadable, executed, credited };
+  return { stale, unreadable, executed, credited, guarded };
 }
 
 /**
@@ -196,6 +213,12 @@ export function main(argv, {
     log.log(
       `proof-discrimination: ${result.credited} criterion(s) credited to a prior merge by \`satisfied_by\` and not executed ` +
         "— review grades these MET without running them (review.ts:2359), so they cannot discriminate this PR's work.",
+    );
+  }
+  if (result.guarded > 0) {
+    log.log(
+      `proof-discrimination: ${result.guarded} criterion(s) declared \`kind: guard\` and skipped for this head-vs-base ` +
+        "comparison — a regression guard passes at the merge base by design; review still executes it and it must pass at head.",
     );
   }
   if (result.unreadable.length > 0) {

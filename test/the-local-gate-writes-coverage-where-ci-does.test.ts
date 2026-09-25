@@ -16,7 +16,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
@@ -38,18 +38,34 @@ function recordingSpawn(calls: { args: string[]; env?: NodeJS.ProcessEnv }[]): P
   };
 }
 
-function coverageCall(): { args: string[]; env?: NodeJS.ProcessEnv } {
+function coverageCall(repoRoot = REPO_ROOT): { args: string[]; env?: NodeJS.ProcessEnv } {
   const calls: { args: string[]; env?: NodeJS.ProcessEnv }[] = [];
   const entry = CI_PARITY_TABLE.find((e) => e.job === "coverage-ratchet");
   assert.ok(entry?.run, "control: the coverage-ratchet entry exists and is mirrored locally");
-  entry!.run!(REPO_ROOT, recordingSpawn(calls));
+  entry!.run!(repoRoot, recordingSpawn(calls));
   const call = calls.find((c) => c.args.includes("--experimental-test-coverage"));
   assert.ok(call, "control: the leaf really did spawn the coverage command");
   return call!;
 }
 
-test("the coverage leaf points TMPDIR at a bounded sibling scratch, outside the checkout", () => {
-  assert.equal(coverageCall().env?.TMPDIR, coverageScratchDir(REPO_ROOT));
+test("coverage shards use canonical TMPDIR paths when the sibling scratch parent is symlinked", () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), "rmd-gate-coverage-path-"));
+  const repoRoot = join(tempRoot, "repo");
+  const physicalScratchParent = join(tempRoot, "physical-coverage");
+  const scratchParentAlias = join(tempRoot, ".remudero-coverage");
+  mkdirSync(repoRoot);
+  mkdirSync(physicalScratchParent);
+  symlinkSync(physicalScratchParent, scratchParentAlias, "dir");
+  const scratch = coverageScratchDir(repoRoot);
+  try {
+    assert.equal(coverageCall(repoRoot).env?.TMPDIR, realpathSync(scratch));
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+    rmSync(scratchParentAlias, { force: true });
+    rmSync(physicalScratchParent, { recursive: true, force: true });
+    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test("that scratch is a stable sibling namespace, never a child of the Git worktree", () => {
