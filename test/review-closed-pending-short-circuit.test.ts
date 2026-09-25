@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { runReview } from "../src/run-task.js";
+import { ghShim, type GhShim } from "./helpers/gh-shim.js";
 import { REVIEW_ENGINE_REVISION, reviewInputDigest } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";
@@ -24,7 +25,7 @@ const TASK_ID = "W1-T4468";
 
 type Lifecycle = "open" | "merged" | "closed";
 
-function stubGh(binDir: string, callLog: string, lifecycle: Lifecycle): void {
+function stubGh(lifecycle: Lifecycle): GhShim {
   const row = JSON.stringify({
     number: 4468,
     html_url: PR_URL,
@@ -34,26 +35,17 @@ function stubGh(binDir: string, callLog: string, lifecycle: Lifecycle): void {
     merged_at: lifecycle === "merged" ? "2026-09-24T16:00:00Z" : null,
     head: { ref: "b", sha: HEAD_SHA },
   });
-  writeFileSync(
-    join(binDir, "gh"),
-    `#!/bin/sh
-echo "$*" >> '${callLog}'
-case "$1 $2" in
-  "api "*)
-    case "$*" in
-      *pulls/*) echo '${row}' ;;
-      *) echo '{}' ;;
-    esac ;;
-  "pr view")
-    case "$*" in
-      *headRefOid*) echo '{"headRefOid":"${HEAD_SHA}"}' ;;
-      *) echo '{}' ;;
-    esac ;;
-  "pr diff") echo "diff --git a/README.md b/README.md" ;;
-  *) exit 0 ;;
-esac
-`,
-    { mode: 0o755 },
+  // First match wins: the REST pull read, any other api call, the head-sha view, any other view,
+  // then the diff fetch whose absence the stand-down tests assert.
+  return ghShim(
+    [
+      { when: "pulls/", stdout: row },
+      { when: "api ", stdout: "{}" },
+      { when: "headRefOid", stdout: JSON.stringify({ headRefOid: HEAD_SHA }) },
+      { when: "pr view", stdout: "{}" },
+      { when: "pr diff", stdout: "diff --git a/README.md b/README.md" },
+    ],
+    { kind: "closed-pending-gh" },
   );
 }
 
@@ -66,18 +58,17 @@ interface ReviewRun {
 
 async function drive(lifecycle: Lifecycle, seedLedger?: (ledgerPath: string) => void): Promise<ReviewRun> {
   const root = mkdtempSync(join(tmpdir(), "rmd-closed-pending-"));
-  const binDir = mkdtempSync(join(tmpdir(), "rmd-closed-pending-gh-"));
-  const callLog = join(root, "gh-calls.log");
   const oldPath = process.env.PATH;
   const rows: Array<{ step: string } & Record<string, unknown>> = [];
   let result: ReviewRun["result"];
+  let shim: GhShim | undefined;
   const ledgerPath = join(root, "state", "ledger.ndjson");
   try {
     mkdirSync(join(root, "state"), { recursive: true });
     seedLedger?.(ledgerPath);
     writeFileSync(join(root, "settings.json"), "{}", "utf8");
-    stubGh(binDir, callLog, lifecycle);
-    process.env.PATH = `${binDir}:${oldPath}`;
+    shim = stubGh(lifecycle);
+    process.env.PATH = `${shim.dir}:${oldPath}`;
     try {
       result = await runReview({
         owner: "acme",
@@ -100,13 +91,13 @@ async function drive(lifecycle: Lifecycle, seedLedger?: (ledgerPath: string) => 
       // A review that carries on past the pending post may fail later against this thin stub;
       // only what it shelled out before that is asserted.
     }
-    const calls = existsSync(callLog) ? readFileSync(callLog, "utf8") : "";
+    const calls = shim.calls().join("\n");
     const ledger = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
     return { result, rows, calls, ledger };
   } finally {
     process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });
-    rmSync(binDir, { recursive: true, force: true });
+    if (shim) rmSync(shim.dir, { recursive: true, force: true });
   }
 }
 
