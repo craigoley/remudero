@@ -6,12 +6,13 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  risk: low
+  risk: high
   band_meaning: blast-radius
   origin: "human request 2026-09-25: model-performance telemetry, public field-trials page, gardener consolidation, A/B research"
   plan_refs: ["W1-T3762", "W1-T4110", "PORTAL-T29", "docs/model-routing.md"]
   files:
     - docs/research/model-evidence-program.md
+    - docs/docs-index.json
     - test/model-evidence-program.test.ts
   status: queued
   rationale: |
