@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { gardenStatePath, readGardenState, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
 import {
@@ -24,10 +24,18 @@ import {
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { daemonCommand } from "../src/run-task.js";
-import { appendFlakeLedger } from "../scripts/test-with-retry.mjs";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+// scripts/ is outside tsconfig's include; load the real .mjs module through a URL, as the
+// existing test-with-retry suites do, while keeping this test's seam explicitly typed.
+const { appendFlakeLedger } = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "test-with-retry.mjs")).href)) as {
+  appendFlakeLedger: (
+    entries: Array<{ file: string; test: string }>,
+    headline: string,
+    options: { path: string; mkdir: () => void; append: () => void },
+  ) => void;
+};
 const probesPromise = loadTestManifestProbe(REPO_ROOT);
 
 /** A fixture repo carrying a small, real test/ directory (so `listTestFiles` finds it on disk)
