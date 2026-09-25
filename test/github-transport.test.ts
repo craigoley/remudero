@@ -11,6 +11,7 @@ import {
   ghExecFile,
   ghJson,
   ghJsonAsync,
+  ghTextAsync,
   ghOptionsWithDefaultTimeout,
   parseGhRateLimitHeaders,
 } from "../src/lib/github-transport.js";
@@ -384,6 +385,28 @@ test("ghJsonAsync adds the default timeout to the single async transport spawn",
 
   assert.deepEqual(body, { ok: true });
   assert.deepEqual(calls, [{ file: "gh", args: ["api", "repos/o/r"], timeout: DEFAULT_GH_CALL_TIMEOUT_MS }]);
+});
+
+test("ghTextAsync preserves a plain-text response and honors its caller bounds", async () => {
+  const calls: Array<{ file: string; args: readonly string[]; maxBuffer: number; timeout: number }> = [];
+  const body = await ghTextAsync(
+    ["api", "repos/o/r/actions/jobs/7/logs"],
+    { maxBuffer: 32 * 1024 * 1024, timeout: 30_000 },
+    async (file, args, opts) => {
+      calls.push({ file, args, maxBuffer: opts.maxBuffer, timeout: opts.timeout });
+      return { stdout: "not JSON\nwith a second line\n", stderr: "" };
+    },
+  );
+
+  assert.equal(body, "not JSON\nwith a second line\n");
+  assert.deepEqual(calls, [
+    {
+      file: "gh",
+      args: ["api", "repos/o/r/actions/jobs/7/logs"],
+      maxBuffer: 32 * 1024 * 1024,
+      timeout: 30_000,
+    },
+  ]);
 });
 
 test("a timed-out transport call keeps the named ETIMEDOUT failure shape", () => {

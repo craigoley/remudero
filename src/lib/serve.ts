@@ -69,6 +69,14 @@ import {
   INCIDENT_INGEST_ROUTE_PATH,
 } from "./incident-events.js";
 import { buildIncidentsRoute, type IncidentsRouteInput } from "./incident-lifecycle.js";
+import {
+  ciIncidentEventLedgerLine,
+  createCiIncidentState,
+  readCiIncidentJobLog,
+  recordCheckRunOutcome,
+  DEFAULT_CI_INCIDENT_MAIN_BRANCH,
+  type CiIncidentState,
+} from "./ci-incidents.js";
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
@@ -166,6 +174,7 @@ import {
   startWakeSummaryFlush,
   sweepWakeMarkerPath,
   wakeSummaryRow,
+  type CheckRunCompletedInfo,
   type GithubEventWakeSemanticMode,
   type WakeCounters,
 } from "./github-event-wake.js";
@@ -511,6 +520,12 @@ export interface ServeDeps {
     semanticCheckMode?: GithubEventWakeSemanticMode;
     aggregateCheckNames?: readonly string[];
     counters?: WakeCounters;
+  };
+  /** W1-T4391: CI-flake producer seams; each defaults to the real job-log read, "main" and the system clock. */
+  ciIncidents?: {
+    fetchJobLog?: (repository: string, jobId: number) => string | Promise<string>;
+    mainBranch?: string;
+    clock?: Clock;
   };
   incidentInvariants?: {
     intervalMs?: number;
@@ -3978,6 +3993,26 @@ function assembleServeRoutes(
   // private content never crosses these routes either: inventory strips it structurally and
   // export returns only a bounded, secret-scrubbed preview (see context-controls.ts's header).
   const contextControlsRoutes = buildContextControlsRoutes({ ledgerPath: deps.ledgerPath });
+  // One history per `rmd serve` process, never a module singleton; a throw logs `github.wake.check_run_callback_failed`.
+  let ciIncidentState: CiIncidentState = createCiIncidentState();
+  const onCheckRunCompleted = async (info: CheckRunCompletedInfo): Promise<void> => {
+    if (info.conclusion !== "failure" && info.conclusion !== "success") return;
+    const log =
+      info.conclusion === "failure"
+        ? await readCiIncidentJobLog(deps.githubEventWake?.repository ?? "", info.id, deps.ciIncidents?.fetchJobLog, deps.log)
+        : undefined;
+    const outcome = recordCheckRunOutcome(ciIncidentState, {
+      sha: info.sha,
+      branch: info.branch ?? "",
+      name: info.name,
+      conclusion: info.conclusion,
+      log,
+      mainBranch: deps.ciIncidents?.mainBranch ?? DEFAULT_CI_INCIDENT_MAIN_BRANCH,
+    });
+    ciIncidentState = outcome.state;
+    const nowMs = (deps.ciIncidents?.clock ?? systemClock).now();
+    for (const event of outcome.events) appendLedger(deps.ledgerPath, ciIncidentEventLedgerLine(event, nowMs));
+  };
   const rawRoutes = [
     projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen), modelApprovals),
     buildRepoDashboardRoute({ root: deps.questionsRoot, ledgerPath: deps.ledgerPath, planPath: deps.panelGraph.planPath }),
@@ -4145,6 +4180,7 @@ function assembleServeRoutes(
       aggregateCheckNames: deps.githubEventWake?.aggregateCheckNames,
       counters: deps.githubEventWake?.counters,
       log: deps.log,
+      onCheckRunCompleted,
     }),
     buildIncidentEventsRoute({ ledgerPath: deps.ledgerPath }),
     // W1-T4387: the fix-verification lifecycle's own read surface, beside the ingest route above.

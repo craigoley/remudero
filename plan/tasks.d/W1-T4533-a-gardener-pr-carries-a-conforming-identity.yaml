@@ -29,9 +29,10 @@
     false when either path cannot be resolved; do not fall back to basename matching. Add a symlink-path
     regression while keeping unrelated scripts false. Keep the real garden integration test as the end-to-end
     proof that the docs generator actually runs and its index is committed.
+  amendment: "2026-09-25 PROOF RETARGETED: \"a garden PR that writes a docs log lands a fresh docs index\" lives in test/a-gardener-pr-carries-a-conforming-identity.test.ts, which main already has, so proof-discrimination runs its BASE version at the merge base, where it passes, and can never accept it. The symlinked-path landing test moves to its own added file under a title naming the behaviour this task changes."
   acceptance:
-    - claim: "a garden PR that writes a docs log lands a fresh docs index"
-      proof: "unit test: a garden PR that writes a docs log lands a fresh docs index"
+    - claim: "a garden PR run through a symlinked checkout path lands a fresh docs index"
+      proof: "unit test: a garden PR run through a symlinked checkout path lands a fresh docs index"
   falsifier: |
     CLOSE IF `isMainModule` already treats `/var` and `/private/var` spellings as the same existing file and
     all path-sensitive tests pass on this macOS host without changing the scratch safety boundary.
