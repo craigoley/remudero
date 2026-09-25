@@ -36,6 +36,13 @@ export interface AffectedSelection {
    *  suites from most src/ changes; symbol-level reach is where selectivity could come from, and
    *  the shadow record says whether it is safe. Absent when no symbol source was supplied. */
   narrow?: string[];
+  /** W1-T4462 — suites counted in `suites`/`narrow` ONLY because they failed recently: no changed
+   *  test, import-graph reach, symbol reach, or path-reading arm claims them — recentFailures is
+   *  the sole reason. `shadowRecord` reads this to label a real failure caught only this way
+   *  "flake" rather than "selected": a currently-unstable suite staying selected tells you nothing
+   *  about whether the selector's MODEL would have reached it, which is the half W1-T4406 must be
+   *  able to trust. `narrow` is present only when `narrow` above was computed. */
+  recentOnly: { floor: string[]; narrow?: string[] };
 }
 
 /** Everything the selector decides from, as plain DATA — the selector itself reads nothing. */
@@ -98,7 +105,7 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   const files = changed.filter((f) => f.length > 0);
   const trigger = fullRunTrigger(files);
   if (trigger !== undefined) {
-    return { suites: [], fullRun: true, reasons: [`full run: ${trigger} is outside what the selector models`] };
+    return { suites: [], fullRun: true, reasons: [`full run: ${trigger} is outside what the selector models`], recentOnly: { floor: [] } };
   }
 
   const reasons = new Map<string, string>();
@@ -139,11 +146,21 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   for (const s of recent) pick(s, "failed recently");
 
   const suites = [...reasons.keys()].filter((s) => SUITE.test(s)).sort();
-  const selection: AffectedSelection = { suites, fullRun: false, reasons: suites.map((s) => `${s}: ${reasons.get(s)}`) };
+  // W1-T4462: a suite whose FIRST-registered reason is "failed recently" claimed no earlier arm —
+  // pick() never overwrites, so this is exactly the suites recentFailures alone rescued.
+  const recentOnlyFloor = suites.filter((s) => reasons.get(s) === "failed recently");
+  const selection: AffectedSelection = {
+    suites,
+    fullRun: false,
+    reasons: suites.map((s) => `${s}: ${reasons.get(s)}`),
+    recentOnly: { floor: recentOnlyFloor },
+  };
   if (input.symbolSuites) {
     const changedTests = files.filter((f) => SUITE.test(f));
-    const narrow = new Set([...changedTests, ...input.symbolSuites, ...pathReaders, ...recent]);
+    const narrowStructural = new Set([...changedTests, ...input.symbolSuites, ...pathReaders]);
+    const narrow = new Set([...narrowStructural, ...recent]);
     selection.narrow = [...narrow].filter((s) => SUITE.test(s)).sort();
+    selection.recentOnly.narrow = selection.narrow.filter((s) => !narrowStructural.has(s));
   }
   return selection;
 }
@@ -225,15 +242,23 @@ export function affectedSelectionOrFull(changed: readonly string[], readInput: (
     return selectAffectedSuites(changed, readInput());
   } catch (err) {
     // A failed read is a FULL run that names its cause — never an empty selection.
-    return { suites: [], fullRun: true, reasons: [`full run: the selector could not read its input — ${(err as Error).message}`] };
+    return {
+      suites: [],
+      fullRun: true,
+      reasons: [`full run: the selector could not read its input — ${(err as Error).message}`],
+      recentOnly: { floor: [] },
+    };
   }
 }
 
-/** One real failure's verdict against each selection: would that selection have run it? */
+/** One real failure's verdict against each selection: would that selection have run it? "flake"
+ *  (W1-T4462) is neither: the failure WAS caught, but only because recentFailures rescued a
+ *  suite no structural arm reached — the informative half (does the MODEL reach it) still reads
+ *  as unproven, so a flake is never mistaken for a real hit. */
 export interface ShadowFailure {
   file: string;
-  floor: "selected" | "missed";
-  narrow?: "selected" | "missed";
+  floor: "selected" | "missed" | "flake";
+  narrow?: "selected" | "missed" | "flake";
 }
 
 /** W1-T4404 (ii) — the SHADOW RECORD for one full run: for every file that really failed, whether
@@ -242,15 +267,21 @@ export interface ShadowFailure {
 export function shadowRecord(selection: AffectedSelection, failedFiles: readonly string[]): { fullRun: boolean; floorSize: number; narrowSize?: number; failures: ShadowFailure[] } {
   const floor = new Set(selection.suites);
   const narrow = selection.narrow ? new Set(selection.narrow) : undefined;
-  const verdict = (set: Set<string>, file: string) => (selection.fullRun || set.has(file) ? "selected" : "missed");
+  const recentOnlyFloor = new Set(selection.recentOnly.floor);
+  const recentOnlyNarrow = new Set(selection.recentOnly.narrow ?? []);
+  const verdict = (set: Set<string>, recentOnly: Set<string>, file: string): "selected" | "missed" | "flake" => {
+    if (selection.fullRun) return "selected";
+    if (!set.has(file)) return "missed";
+    return recentOnly.has(file) ? "flake" : "selected";
+  };
   return {
     fullRun: selection.fullRun,
     floorSize: selection.suites.length,
     ...(narrow ? { narrowSize: narrow.size } : {}),
     failures: [...new Set(failedFiles)].sort().map((file) => ({
       file,
-      floor: verdict(floor, file),
-      ...(narrow ? { narrow: verdict(narrow, file) } : {}),
+      floor: verdict(floor, recentOnlyFloor, file),
+      ...(narrow ? { narrow: verdict(narrow, recentOnlyNarrow, file) } : {}),
     })),
   };
 }
