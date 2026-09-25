@@ -149,7 +149,7 @@ import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-s
 import { createChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { mergedInLastDay } from "./lib/fleet-lane.js";
-import { gardenPrState, type GardenWorkspace } from "./lib/knowledge-gardener.js";
+import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { startGarden, type GardenCheckout } from "./lib/gardener.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
@@ -2150,6 +2150,7 @@ import {
   parseDecisionRequest,
   parseFollowups,
   parseLearningsUsed,
+  parseSkillsUsed,
   parseQuestion,
   parseReconReport,
   parseReport,
@@ -15685,6 +15686,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     }
 
     logLearningsUsed(log, fullText(impl), learningsResult.selectedIds, learningUsagePath(join(config.root, "state")));
+    logSkillsUsed(log, fullText(impl), injectableSkills.map((s) => s.name), skillUsagePath(join(config.root, "state")));
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(worktreePath, workerHeadReflogBefore);
 
@@ -31123,6 +31125,22 @@ export function logLearningsUsed(
     : { silent: true, injected_ids: [...injectedIds] };
   log("learnings.used", row);
   if (usagePath) recordLearningUsage(usagePath, row);
+}
+
+/** W1-T4114: `logLearningsUsed`'s own mirror for `SKILLS_USED` — the skills the knowledge
+ *  gardener's SKILL-LIFECYCLE class judges by, offered/used, not merely selected. */
+export function logSkillsUsed(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  text: string,
+  injectedNames: readonly string[],
+  usagePath?: string,
+): void {
+  const parsed = parseSkillsUsed(text, injectedNames);
+  const row = parsed
+    ? { used_names: parsed.usedNames, injected_names: parsed.injectedNames, refused: parsed.refused }
+    : { silent: true, injected_names: [...injectedNames] };
+  log("skills.used", row);
+  if (usagePath) recordSkillUsage(usagePath, row);
 }
 
 export function memoryLintCommand(rest: string[]): number {

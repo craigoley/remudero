@@ -3361,6 +3361,49 @@ export function parseLearningsUsed(text: string, injectedIds: readonly string[])
   return { usedIds, refused, injectedIds: [...injectedIds] };
 }
 
+/** One name a worker's `SKILLS_USED` line named that was never shown to it as a `## skill: <name>`
+ *  section — {@link LearningsUsedRefusal}'s own mirror for the skills channel. */
+export interface SkillsUsedRefusal {
+  name: string;
+  reason: string;
+}
+
+/** {@link parseSkillsUsed}'s answer — {@link LearningsUsedResult}'s own mirror for `SKILLS_USED`. */
+export interface SkillsUsedResult {
+  usedNames: string[];
+  refused: SkillsUsedRefusal[];
+  injectedNames: string[];
+}
+
+const SKILLS_USED_REFUSAL_REASON = "never injected into this run";
+
+/**
+ * W1-T4114 — SKILLS_USED is `parseLearningsUsed`'s own mirror for the skill procedures a task
+ * class was offered (`## skill: <name>` sections rendered by `renderSkillsPart`). Same
+ * last-line-wins, same explicit-`none`-vs-silent distinction, same by-name refusal of a citation
+ * for a skill the worker was never shown: a worker claiming to have used a skill it never saw is
+ * the same fabrication `parseLearningsUsed` already refuses on the learnings channel.
+ */
+export function parseSkillsUsed(text: string, injectedNames: readonly string[]): SkillsUsedResult | null {
+  const matches = [...text.matchAll(/^[ \t]*SKILLS_USED:[ \t]*(.*)$/gim)];
+  if (matches.length === 0) return null;
+  const value = matches[matches.length - 1][1].trim();
+  const injected = new Set(injectedNames);
+  const usedNames: string[] = [];
+  const refused: SkillsUsedRefusal[] = [];
+  if (!/^none$/i.test(value)) {
+    const seen = new Set<string>();
+    for (const m of value.matchAll(/skill#([A-Za-z0-9][A-Za-z0-9-]*)/g)) {
+      const name = m[1];
+      if (seen.has(name)) continue;
+      seen.add(name);
+      if (injected.has(name)) usedNames.push(name);
+      else refused.push({ name, reason: SKILLS_USED_REFUSAL_REASON });
+    }
+  }
+  return { usedNames, refused, injectedNames: [...injectedNames] };
+}
+
 /** Strip presentation decoration from a decision option or recommendation label, so the value returned is the DATA and not the
  * data plus chrome: the inline `(RECOMMENDED)` marker, markdown emphasis, code ticks and emoji go, then whitespace collapses.
  * Why: the WS-0 `)` bleed and the T1D noise are one class of bug, a decorated label mistaken for the value it dresses up. */
