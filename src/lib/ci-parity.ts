@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { availableParallelism, tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import { readAffectedSuitesInput, selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
@@ -794,8 +794,19 @@ export function coverageScratchDir(repoRoot: string): string {
   // The test runner and fixtures both derive temporary paths from TMPDIR. Keeping it below the
   // checkout makes a fixture intended to be outside Git resolve INSIDE that checkout, defeating
   // its non-repository control and the worker-home placement invariant. A stable sibling remains
-  // cleared by testWithCoverageLeaf before the next coverage run without changing that meaning.
+  // cleared by a top-level testWithCoverageLeaf before the next coverage run without changing that meaning.
   return join(dirname(repoRoot), ".remudero-coverage", basename(repoRoot), "tmp");
+}
+
+function pathIsWithin(parent: string, candidate: string): boolean {
+  const isWithin = (root: string, path: string) => path === root || path.startsWith(`${root}${sep}`);
+  if (isWithin(resolve(parent), resolve(candidate))) return true;
+  try {
+    return isWithin(realpathSync(parent), realpathSync(candidate));
+  } catch {
+    // An unreadable/unresolvable TMPDIR must not authorize clearing the stable scratch.
+    return true;
+  }
 }
 
 function coverageShardRoot(repoRoot: string): string {
@@ -864,7 +875,12 @@ function coverageMergeArgs(repoRoot: string, lcovPath: string): string[] {
   ];
 }
 
-function testWithCoverageShards(repoRoot: string, spawn: PreflightSpawn, lcovPath: string): CiParityLeafResult {
+function testWithCoverageShards(
+  repoRoot: string,
+  spawn: PreflightSpawn,
+  lcovPath: string,
+  scratchDir: string,
+): CiParityLeafResult {
   const shardRoot = coverageShardRoot(repoRoot);
   try {
     rmSync(shardRoot, { recursive: true, force: true });
@@ -897,7 +913,7 @@ function testWithCoverageShards(repoRoot: string, spawn: PreflightSpawn, lcovPat
     }
     const res = spawn(process.execPath, coverageShardArgs(repoRoot, shard, testFiles), {
       cwd: repoRoot,
-      env: { TMPDIR: coverageScratchDir(repoRoot), NODE_V8_COVERAGE: rawDir },
+      env: { TMPDIR: scratchDir, NODE_V8_COVERAGE: rawDir },
     });
     const spawnFailed = spawnFailureDetail(label, res);
     if (spawnFailed) return { ok: false, detail: spawnFailed };
@@ -939,15 +955,35 @@ function testWithCoverageShards(repoRoot: string, spawn: PreflightSpawn, lcovPat
 }
 
 function testWithCoverageLeaf(repoRoot: string, spawn: PreflightSpawn, lcovPath: string): CiParityLeafResult {
-  try {
-    mkdirSync(join(repoRoot, "coverage"), { recursive: true });
+  const stableScratch = coverageScratchDir(repoRoot);
+  const activeTmp = process.env.TMPDIR;
+  mkdirSync(join(repoRoot, "coverage"), { recursive: true });
+  mkdirSync(stableScratch, { recursive: true });
+  const nested = activeTmp !== undefined && pathIsWithin(stableScratch, activeTmp);
+
+  let scratchDir = stableScratch;
+  let ownedNestedScratch: string | undefined;
+  if (nested) {
+    // The `env` passed to spawn affects only the child; re-entrancy belongs to this process's
+    // actual environment. Resolve aliases before making the child so shard fixtures and Git see
+    // the same path, then give the nested leaf a child it can never clear out from under its caller.
+    mkdirSync(activeTmp, { recursive: true });
+    scratchDir = mkdtempSync(join(realpathSync(activeTmp), "nested-coverage-"));
+    ownedNestedScratch = scratchDir;
+  } else {
     // CLEARED, NOT JUST CREATED: the runner clears its scratch on a normal exit, so this bounds the abnormal one.
-    rmSync(coverageScratchDir(repoRoot), { recursive: true, force: true });
-    mkdirSync(coverageScratchDir(repoRoot), { recursive: true });
-  } catch {
-    // best-effort — an injected spawn may point repoRoot at a fixture needing no coverage/ directory.
+    rmSync(stableScratch, { recursive: true, force: true });
+    mkdirSync(stableScratch, { recursive: true });
+    scratchDir = realpathSync(stableScratch);
   }
-  return testWithCoverageShards(repoRoot, spawn, lcovPath);
+
+  try {
+    return testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir);
+  } finally {
+    if (ownedNestedScratch !== undefined) {
+      rmSync(ownedNestedScratch, { recursive: true, force: true });
+    }
+  }
 }
 
 const CI_TEST_SHARD_COUNT = 4;
