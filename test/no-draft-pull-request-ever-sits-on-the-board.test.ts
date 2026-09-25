@@ -105,13 +105,15 @@ test("the census refuses a source file that opens a draft pull request", () => {
     "scripts/json-draft.mjs": 'const body = { title, head, base, "draft": true };',
     ".github/workflows/x.yml": "      - run: gh pr create --draft --fill",
     "src/lib/converts.ts": "mutation { convertPullRequestToDraft(input: { pullRequestId: $id }) { clientMutationId } }",
+    "src/lib/undoes-ready.ts": 'ghExec(["pr", "ready", url, "--undo"], { stdio: "pipe" });',
+    ".github/workflows/y.yml": "      - run: gh pr ready 12 --undo",
     "src/lib/reads-draft.ts": "if (pr.isDraft === true) held.push(pr);",
     "test/fixture.ts": 'ghExec(["pr", "create", "--draft"]);',
   };
   const hits = findDraftPullRequestCreators("/unused", Object.keys(files), (p) => files[p]!);
   assert.deepEqual(
     hits.map((h) => h.path).sort(),
-    ["src/lib/opens-draft.ts", "src/lib/rest-draft.ts", "scripts/json-draft.mjs", ".github/workflows/x.yml", "src/lib/converts.ts"].sort(),
+    ["src/lib/opens-draft.ts", "src/lib/rest-draft.ts", "scripts/json-draft.mjs", ".github/workflows/x.yml", "src/lib/converts.ts", "src/lib/undoes-ready.ts", ".github/workflows/y.yml"].sort(),
     "every creator shape is caught; reading isDraft and anything outside the scanned roots is not",
   );
 });
@@ -121,7 +123,7 @@ test("no tracked source opens a draft pull request", () => {
   assert.ok(files.length > 100, `the census must see the real tree (saw ${files.length} files)`);
   assert.deepEqual(findDraftPullRequestCreators(REPO_ROOT, files), []);
   for (const [path, reason] of EXEMPTIONS) assert.ok(String(reason).trim().length > 0, `${path}: an exemption needs a reason`);
-  assert.equal(DRAFT_CREATOR_PATTERNS.length, 3);
+  assert.equal(DRAFT_CREATOR_PATTERNS.length, 4);
 });
 
 test("the census CLI reports OK on a clean tree and refuses a tree that opens a draft", () => {
