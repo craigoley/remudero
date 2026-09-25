@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-24: no stuck PRs — automated flow and self-improvement; fix-lane investigation of 65 fix rounds"
   plan_refs: [W1-T4351, W1-T3868]
   files: [src/lib/sweep.ts, src/run-task.ts, test/a-red-no-file-can-fix-gets-no-worker.test.ts, test/post-fix-reverification.test.ts, test/sweep-blocked-routing.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-24 over the fix.done rows since 2026-09-23T15:59Z: 62 of 65 fix rounds ended commit_refused ($73.51). Reasons: 37 missing COMMIT_MESSAGE line and 9 regenerable-baseline edits refused (both W1-T4450), 12 'the worker changed nothing', 8 'the task declares no files'.
