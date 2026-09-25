@@ -135,29 +135,29 @@ export function createCiIncidentState(): CiIncidentState {
   return { pending: {}, knownBrokenOnMain: {} };
 }
 
-export interface CiIncidentJobLogDeps {
-  /** Offline/test reader. Production leaves this absent and uses the shared `gh` transport. */
-  fetchJobLog?: (repository: string, jobId: number) => string | Promise<string>;
-  /** Names a failed read without turning a webhook delivery into a failed request. */
-  onUnreadable?: (error: unknown) => void;
-}
-
 /** Read the raw log for a check-run/job id. Missing repository metadata is known-unavailable,
  *  rather than an invitation to guess a repository; transport failures fail soft and stay visible. */
 export async function readCiIncidentJobLog(
   repository: string,
   jobId: number,
-  deps: CiIncidentJobLogDeps = {},
+  fetchJobLog?: (repository: string, jobId: number) => string | Promise<string>,
+  log?: (step: string, extra?: Record<string, unknown>) => void,
 ): Promise<string> {
   if (!repository) return "";
   try {
-    if (deps.fetchJobLog) return await deps.fetchJobLog(repository, jobId);
+    if (fetchJobLog) return await fetchJobLog(repository, jobId);
     return await ghTextAsync(["api", `repos/${repository}/actions/jobs/${jobId}/logs`], {
       maxBuffer: 32 * 1024 * 1024,
       timeout: 30_000,
     });
   } catch (error) {
-    deps.onUnreadable?.(error);
+    if (log) {
+      log("serve.ci_incidents.job_log_unreadable", {
+        reason: String((error as Error)?.message ?? error),
+        repository,
+        jobId,
+      });
+    }
     return "";
   }
 }

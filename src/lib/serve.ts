@@ -3910,15 +3910,7 @@ export function assertRoutesScopeComplete(entries: readonly { method?: Method; p
  * failing tests rather than throwing off a webhook delivery.
  */
 async function fetchCiIncidentJobLog(deps: ServeDeps, repository: string, jobId: number): Promise<string> {
-  return readCiIncidentJobLog(repository, jobId, {
-    fetchJobLog: deps.ciIncidents?.fetchJobLog,
-    onUnreadable: (error) =>
-      deps.log?.("serve.ci_incidents.job_log_unreadable", {
-        reason: String((error as Error)?.message ?? error),
-        repository,
-        jobId,
-      }),
-  });
+  return readCiIncidentJobLog(repository, jobId, deps.ciIncidents?.fetchJobLog, deps.log);
 }
 
 interface ServeRoutesAssembly {
