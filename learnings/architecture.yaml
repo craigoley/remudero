@@ -22,7 +22,8 @@
   cited: "2026-07-14"
 - id: claude-code-hybrid-retrieval
   subsystem: knowledge
-  lifecycle: active
+  # knowledge gardener: retire claude-code-hybrid-retrieval
+  lifecycle: superseded
   files: [ src/lib/learnings.ts, src/run-task.ts ]
   fact: >-
     Claude Code is HYBRID: stable context up front + glob/grep for just-in-time
@@ -32,7 +33,8 @@
   cited: "2026-07-14"
 - id: compaction-recall-first
   subsystem: context
-  lifecycle: active
+  # knowledge gardener: retire compaction-recall-first
+  lifecycle: superseded
   files: [ src/lib/retro.ts, src/run-task.ts ]
   fact: >-
     A compaction summary that DROPS a critical fact is worse than no summary —
@@ -43,7 +45,8 @@
   cited: "2026-07-14"
 - id: cache-prefix-bytes
   subsystem: context
-  lifecycle: active
+  # knowledge gardener: retire cache-prefix-bytes
+  lifecycle: superseded
   files: [ src/lib/learnings.ts, src/run-task.ts ]
   fact: >-
     Prompt caches key on EXACT PREFIX BYTES: any early edit invalidates the
@@ -65,7 +68,8 @@
 # ── Documentation as a gated artifact (§12A) [research 2026-07-14] ──
 - id: docs-are-a-gated-artifact
   subsystem: docs
-  lifecycle: active
+  # knowledge gardener: retire docs-are-a-gated-artifact
+  lifecycle: superseded
   files: [ src/run-task.ts, "docs/**" ]
   fact: >-
     Docs are a gated artifact: GENERATED docs (rmd --help / CLI reference / API
@@ -79,7 +83,8 @@
 # unit-tested) from live commissioning (verify:human). (DIAGNOSIS.md diag/w1t12-max-turns) ──
 - id: daemon-split-logic-from-live-commissioning
   subsystem: architecture
-  lifecycle: active
+  # knowledge gardener: retire daemon-split-logic-from-live-commissioning
+  lifecycle: superseded
   files: [ src/lib/daemon.ts, src/lib/launchd.ts, src/run-task.ts ]
   fact: >-
     W1-T12 (the daemon) bundled THREE concerns (scheduler loop + launchd unit +
@@ -98,7 +103,8 @@
 # pattern was caught. Gate task quality BEFORE dispatch + re-grade continuously. (§5C) ──
 - id: task-quality-gates-before-dispatch
   subsystem: architecture
-  lifecycle: active
+  # knowledge gardener: retire task-quality-gates-before-dispatch
+  lifecycle: superseded
   files: [ src/lib/task-linter.ts, src/run-task.ts, src/lib/retro.ts ]
   fact: >-
     The runner was the FIRST line of task-quality defense, so FOUR malformed
@@ -115,7 +121,8 @@
 # ── How the daemon selects its repo (fix/daemon-repo-targeting; W1-T12d commissioning). ──
 - id: daemon-repo-targeting-explicit
   subsystem: cli
-  lifecycle: active
+  # knowledge gardener: retire daemon-repo-targeting-explicit
+  lifecycle: superseded
   files: [ src/run-task.ts, src/lib/launchd.ts ]
   fact: >-
     `rmd daemon` originally read its plan from the CHECKOUT it ran in
@@ -177,7 +184,8 @@
   cited: "2026-08-23"
 - id: task-credit-needs-an-anchored-trailer
   subsystem: plan
-  lifecycle: active
+  # knowledge gardener: retire task-credit-needs-an-anchored-trailer
+  lifecycle: superseded
   files: [ plan/tasks.yaml, "plan/tasks.d/**", src/run-task.ts ]
   fact: >-
     git log --grep <id> is a SUBSTRING match and credits commits that merely
@@ -346,7 +354,8 @@
   cited: "2026-08-31"
 - id: warn-never-reaches-lint-plan-exit-code
   subsystem: plan
-  lifecycle: active
+  # knowledge gardener: retire warn-never-reaches-lint-plan-exit-code
+  lifecycle: superseded
   files: [ src/run-task.ts ]
   fact: >-
     A `warn` never reaches `lint-plan`'s exit code. `lintPlanCommand`
@@ -364,7 +373,8 @@
   cited: "2026-08-31"
 - id: next-task-id-needs-a-fresh-pull
   subsystem: plan
-  lifecycle: active
+  # knowledge gardener: retire next-task-id-needs-a-fresh-pull
+  lifecycle: superseded
   files: [ src/run-task.ts, src/lib/task-id-reservation.ts, src/lib/auto-triage.ts ]
   fact: >-
     `rmd next-task-id` reads the LOCAL checkout — `git pull` first or it returns
@@ -439,7 +449,8 @@
   cited: "2026-08-31"
 - id: ledger-step-name-is-a-claim-not-evidence
   subsystem: ledger
-  lifecycle: active
+  # knowledge gardener: retire ledger-step-name-is-a-claim-not-evidence
+  lifecycle: superseded
   files: [ plan/policy.yaml, src/lib/auto-triage.ts, src/run-task.ts ]
   fact: >-
     Treat a step NAME as a claim, not evidence — check what the function that
@@ -560,7 +571,8 @@
   cited: "2026-08-31"
 - id: implement-lane-model-lives-on-the-run-not-the-verdict-row
   subsystem: retro
-  lifecycle: active
+  # knowledge gardener: retire implement-lane-model-lives-on-the-run-not-the-verdict-row
+  lifecycle: superseded
   files: [ src/lib/retro.ts, src/run-task.ts ]
   fact: >-
     No `log("verdict", …)` site in `src/run-task.ts` writes a `model` key (23 sites,

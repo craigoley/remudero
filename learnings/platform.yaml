@@ -113,7 +113,8 @@
 
 - id: sdk-result-envelope
   subsystem: ledger
-  lifecycle: active
+  # knowledge gardener: retire sdk-result-envelope
+  lifecycle: superseded
   files: [src/lib/ledger.ts, src/lib/worker.ts, src/run-task.ts]
   fact: >-
     The Agent SDK yields the type:"result" envelope (num_turns, total_cost_usd, subtype) and THEN
@@ -134,7 +135,8 @@
 # ── Agent SDK tools & the feedback front door (§7B) [research 2026-07-14] ──
 - id: sdk-builtin-tools-are-the-boundary
   subsystem: sdk-tools
-  lifecycle: active
+  # knowledge gardener: retire sdk-builtin-tools-are-the-boundary
+  lifecycle: superseded
   files: [src/lib/worker.ts, src/run-task.ts]
   fact: >-
     The Agent SDK ships built-in tools (Read/Write/Edit/Bash/Glob/Grep/WebSearch/WebFetch/AskUserQuestion/
@@ -155,7 +157,8 @@
 
 - id: askuserquestion-auto-resolves-empty-headless
   subsystem: feedback
-  lifecycle: active
+  # knowledge gardener: retire askuserquestion-auto-resolves-empty-headless
+  lifecycle: superseded
   files: [src/run-task.ts, src/lib/triage.ts, src/lib/escalate.ts]
   fact: >-
     AskUserQuestion neither works headlessly nor stalls: with no TTY it silently AUTO-RESOLVES with
@@ -234,7 +237,8 @@
 # sdk.d.ts (SDK 0.3.209), not the prompt. This is the ground truth ~33 turns were spent re-discovering. ──
 - id: sdk-result-fields
   subsystem: ledger
-  lifecycle: active
+  # knowledge gardener: retire sdk-result-fields
+  lifecycle: superseded
   files: [src/lib/worker.ts, src/lib/ledger.ts, src/run-task.ts]
   fact: >-
     The SDK type:"result" envelope carries the telemetry to log: num_turns, total_cost_usd, usage
