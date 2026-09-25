@@ -1,19 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 import {
   DEFAULT_GH_CALL_TIMEOUT_MS,
+  DEFAULT_GH_SYNC_KILL_SIGNAL,
   ghExecFile,
   ghJson,
   ghJsonAsync,
   ghTextAsync,
   ghOptionsWithDefaultTimeout,
   parseGhRateLimitHeaders,
+  withGhKillEscalation,
 } from "../src/lib/github-transport.js";
 import { classifyGhFailure, type GitHub } from "../src/lib/status.js";
 import { ghPostureGateway } from "../src/lib/github-posture.js";
@@ -363,6 +366,60 @@ test("W1-T3782: an explicit gh transport buffer remains authoritative", () => {
 
 test("ghOptionsWithDefaultTimeout preserves an explicit tighter caller timeout", () => {
   assert.equal(ghOptionsWithDefaultTimeout({ timeout: 123 }).timeout, 123);
+});
+
+test("ghOptionsWithDefaultTimeout sets SIGKILL, not SIGTERM, since a sync spawn cannot escalate (W1-T4446)", () => {
+  assert.equal(ghOptionsWithDefaultTimeout({}).killSignal, DEFAULT_GH_SYNC_KILL_SIGNAL);
+  assert.equal(DEFAULT_GH_SYNC_KILL_SIGNAL, "SIGKILL");
+});
+
+test("ghOptionsWithDefaultTimeout preserves an explicit caller killSignal", () => {
+  assert.equal(ghOptionsWithDefaultTimeout({ killSignal: "SIGTERM" }).killSignal, "SIGTERM");
+});
+
+test("W1-T4446: a gh child that ignores SIGTERM receives SIGKILL after the timeout grace", async () => {
+  // A REAL child, not a mock: `withGhKillEscalation` reaches into the live ChildProcess Node's
+  // own `promisify(execFile)` attaches to its returned promise (`.child`), so only a genuine
+  // spawn exercises it. The script traps SIGTERM and swallows it, mirroring `gh`'s own survival
+  // of the signal Node's `timeout` option sends by default.
+  const execFileAsyncForTest = promisify(execFile);
+  const timeoutMs = 100;
+  const graceMs = 150;
+  const startedAt = Date.now();
+  const execPromise = execFileAsyncForTest("bash", ["-c", "trap '' TERM; sleep 30"], {
+    encoding: "utf8",
+    timeout: timeoutMs,
+  });
+  const warnings: string[] = [];
+  const escalated = withGhKillEscalation(execPromise, ["issue", "list"], timeoutMs, {
+    graceMs,
+    warn: (line) => warnings.push(line),
+  });
+
+  await assert.rejects(escalated, (error: unknown) => {
+    const err = error as NodeJS.ErrnoException & { signal?: NodeJS.Signals | null };
+    return err.signal === "SIGKILL";
+  });
+
+  // The rejection only ever arrives once the child has actually died to SIGKILL, so this bound
+  // also proves SIGTERM alone (delivered at ~timeoutMs) did not end it — the script really did
+  // ignore it, and only the escalation after the grace did.
+  assert.ok(Date.now() - startedAt >= timeoutMs + graceMs - 20, "SIGKILL fired only after the grace elapsed");
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /^gh\.kill_escalated \(W1-T4446\): gh issue ignored SIGTERM and was sent SIGKILL/);
+});
+
+test("withGhKillEscalation is a no-op for an injected fake executor's promise (no ChildProcess to escalate)", async () => {
+  const fakePromise = Promise.resolve({ stdout: "{}", stderr: "" });
+  const warnings: string[] = [];
+  const result = await withGhKillEscalation(fakePromise, ["issue", "list"], 10, {
+    graceMs: 10,
+    warn: (line) => warnings.push(line),
+  });
+  assert.deepEqual(result, { stdout: "{}", stderr: "" });
+  // Give any (incorrect) timer a chance to fire before asserting it never did.
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(warnings.length, 0);
 });
 
 test("ghJson adds the default timeout to the single sync transport spawn", () => {

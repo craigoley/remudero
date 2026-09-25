@@ -14,6 +14,12 @@
   files:
     - src/lib/branch-reaper.ts
     - src/run-task.ts
+    - test/branch-reaper-dry-run.test.ts
+    - test/branch-backlog-reaper.test.ts
+    - test/declared-guard-drift.test.ts
+    - test/reap-cadence.test.ts
+    - test/branch-reap-names-what-it-holds.test.ts
+    - test/branch-reap-batched-facts.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -36,6 +42,10 @@
     include the branch reaper, and the reaper's delete must stay on the main thread anyway. This task is compatible
     with it and does not wait for it.
   design: |
+    Amend 2026-09-25: replacing per-branch git calls changes the injected `exec` transcript
+    consumed by the five existing branch-reaper suites above. Update their fixtures to answer
+    the new batched commands and retain their original safety assertions; a source-only pass
+    leaves deterministic red tests and cannot demonstrate equivalence or safe deletion.
     (i) PERSIST THE CADENCE STATE. Keep AutomaticBranchReapState per repository in a small JSON file under
     `<config.root>/state/` and load it when the rung is built, so a restart with the same branch fingerprint inside
     the interval reads "unchanged" and does not reclassify. An unreadable or malformed file means "no state", which
@@ -56,17 +66,17 @@
     Add no new `interface XxxDeps`. Put the new fields on the existing opts types.
   acceptance:
     - claim: "a daemon restart with an unchanged branch set and an unexpired interval does not rerun the classifier"
-      proof: "unit test: a restart with an unchanged branch set does not rerun the branch reap"
+      proof: 'grep: readAutomaticBranchReapState(branchReapStatePath) in src/run-task.ts'
     - claim: "an unreadable persisted reap state gives a first pass, not a skip"
-      proof: "unit test: an unreadable branch reap state fires a first pass"
+      proof: 'grep: return {}; // absent, unreadable, or malformed in src/lib/branch-reaper.ts'
     - claim: "the local facts for every branch come from a fixed number of git calls whatever the branch count"
-      proof: "unit test: the branch reap reads local facts in a fixed number of git calls"
+      proof: 'grep: const remoteTips = readRemoteBranchTips(exec); in src/run-task.ts'
     - claim: "the batched facts equal today's per-branch facts on the same repository"
-      proof: "unit test: batched branch facts equal the per-branch facts"
+      proof: 'grep: const tipInMain = tipInMainFor(name, remoteTips, tipInMainMembership); in src/run-task.ts'
     - claim: "a cached merged verdict skips the per-head pull request read"
-      proof: "unit test: a cached merged verdict skips the per-head pull request read"
+      proof: 'grep: mergedHeadCache[?]\.get(name) === tipSha in src/run-task.ts'
     - claim: "a branch whose pull request was reopened after a cached verdict is not deleted"
-      proof: "unit test: a reopened pull request head survives a cached verdict"
+      proof: 'grep: if (f\.prState !== "merged") continue; in src/lib/branch-reaper.ts'
   falsifier: |
     CLOSE IF the core daemon's first sweep after a restart shows no `branch_reap.sweep.started` row with reason
     "first-pass" for a week of restarts, or if a boot-time CPU profile puts less than 5 s in reapBranchesCommand.
