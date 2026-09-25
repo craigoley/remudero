@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { appendLedger, type LedgerLine } from "./ledger.js";
@@ -16,6 +17,17 @@ import { gatherRuns, type LedgerRecord, type RunSummary } from "./retro.js";
  * finding or appends ONE `cost.anomaly` ledger row. Nothing here defers dispatch, stops a
  * worker, or blocks a merge; the runaway guards (`budget_usd`, the per-run turn limit) are
  * untouched.
+ *
+ * W1-T4417 — A FINDING NOBODY SEES IS NOT A REPORT: a `cost.anomaly` row sat in the ledger eight
+ * times over for one run and reached no one. {@link costAnomalyIncidentEvent} builds (never
+ * writes — `sweep.ts` appends it) the SAME KIND of `incident.event` row the W1-T4383 ingest
+ * route ledgers, fingerprinted by `kind` + `name` ALONE (never the per-run message), so every
+ * anomaly in one task CLASS collapses to ONE fingerprint the SRE gardener triages, not one per
+ * run. {@link detectRunningLong}/{@link recordRunningLong} are this same idea's other half: an
+ * IN-FLIGHT run (no `verdict` line yet) compared to its class's median SETTLED duration — past
+ * the multiplier it ledgers ONE `run.running_long` row (idempotent per run id, exactly like
+ * `cost.anomaly`) and {@link runningLongIncidentEvent} builds its own incident event the same way.
+ * Neither detector stops the run itself — still just a report.
  *
  * MEDIAN, NOT MEAN (design note iii): the mean is dragged by the very outlier being detected —
  * `plan/policy.yaml`'s own `autoTriage.maxPerDay` comment records this repo quoting a single
@@ -267,4 +279,207 @@ export function recordCostAnomalies(
   const writeLedger = deps.writeLedger ?? appendLedger;
   for (const finding of pending) writeLedger(deps.ledgerPath, costAnomalyLine(finding));
   return pending;
+}
+
+// ── W1-T4417: route a finding into the SRE gardener's incident ingest (W1-T4383) ────────────────
+//
+// No separate in-process writer lives in `incident-events.ts` today — that module's whole write
+// surface is one HTTP route handler (validate -> scrub -> fingerprint -> ledger, inline). Rather
+// than widen this task's declared files to add one there, {@link incidentEventLine} builds the
+// SAME SHAPE of row directly: `task_id: "INCIDENT"` (the registered pseudo sender,
+// producer-identity.ts), `step: "incident.event"`, and a `fingerprint`/`kind`/`name` triple
+// `sre-lane.ts`'s `incidentEventFromLedgerRow` already knows how to read. The fingerprint is
+// deliberately basis'd on `kind` + `name` ONLY — never the per-run `message` — so every finding
+// in one task CLASS (the `name`'s own suffix) collapses to ONE fingerprint, "grouped by class,
+// not by task" (this task's own design note i).
+const ANOMALY_INCIDENT_KIND = "anomaly";
+
+function incidentEventLine(input: { runId: string; name: string; message: string }): LedgerLine {
+  const fingerprint = createHash("sha256").update(`${ANOMALY_INCIDENT_KIND}\u0000${input.name}`, "utf8").digest("hex");
+  return {
+    run_id: `INCIDENT-${input.runId}`,
+    task_id: "INCIDENT",
+    step: "incident.event",
+    fingerprint,
+    source: "daemon",
+    kind: ANOMALY_INCIDENT_KIND,
+    name: input.name,
+    message: input.message,
+  };
+}
+
+/** Build (never write — `sweep.ts` appends it where it records anomalies) the one incident event
+ *  a NEW `cost.anomaly` finding earns: `name` carries only the task CLASS, so two findings in the
+ *  same class fingerprint identically no matter which run/task each names. */
+export function costAnomalyIncidentEvent(finding: CostAnomalyFinding): LedgerLine {
+  return incidentEventLine({
+    runId: finding.runId,
+    name: `cost.anomaly:${finding.taskClass}`,
+    message:
+      `task ${finding.taskId} (run ${finding.runId}) cost $${finding.costUsd} against class ` +
+      `"${finding.taskClass}"'s median $${finding.medianCostUsd} (×${finding.multiplier}, n=${finding.sampleSize})`,
+  });
+}
+
+// ── W1-T4417 RUNNING-LONG SENTINEL ───────────────────────────────────────────────────────────
+//
+// The OTHER half of "a runaway run": cost is only visible once a run SETTLES, but a run stuck
+// mid-flight is invisible to `detectCostAnomalies` by construction (design note: "an in-flight
+// run's partial cost neither anchors a class's median nor is itself judged against one"). This
+// compares elapsed WALL-CLOCK time instead, against the SAME class's median duration taken over
+// its own SETTLED runs (`run.start` -> `verdict` ts span) — same multiplier/minSamples policy,
+// same "a thin class is silent" floor, same "one row per run" idempotence as the cost sentinel.
+
+/** One run's own start/settle timestamps, off the raw ledger — kept private: `retro.ts`'s
+ *  `RunSummary` carries no duration field, and widening it is out of this task's declared files. */
+interface RunClock {
+  runId: string;
+  taskId: string;
+  taskClass: string;
+  startMs: number;
+  /** The terminal `verdict` line's ts, in ms — `undefined` while the run is still in flight. */
+  endMs?: number;
+}
+
+function runClocks(records: readonly LedgerRecord[]): RunClock[] {
+  const byRun = new Map<string, LedgerRecord[]>();
+  for (const r of records) {
+    if (typeof r.run_id !== "string") continue;
+    const arr = byRun.get(r.run_id) ?? [];
+    arr.push(r);
+    byRun.set(r.run_id, arr);
+  }
+  const out: RunClock[] = [];
+  for (const [runId, lines] of byRun) {
+    const start = lines.find((l) => l.step === "run.start");
+    if (!start || typeof start.ts !== "string") continue; // a torn fragment — skip, same as gatherRuns
+    const startMs = Date.parse(start.ts);
+    if (!Number.isFinite(startMs)) continue;
+    const verdictLine = lines.find((l) => l.step === "verdict");
+    const endMs = verdictLine && typeof verdictLine.ts === "string" ? Date.parse(verdictLine.ts) : undefined;
+    out.push({
+      runId,
+      taskId: String(start.task_id ?? ""),
+      taskClass: typeof start.task_class === "string" ? start.task_class : "unknown",
+      startMs,
+      ...(endMs !== undefined && Number.isFinite(endMs) ? { endMs } : {}),
+    });
+  }
+  return out;
+}
+
+/** One in-flight run flagged against its own class's median SETTLED duration — the duration
+ *  analogue of {@link CostAnomalyFinding}. */
+export interface RunningLongFinding {
+  runId: string;
+  taskId: string;
+  taskClass: string;
+  elapsedMs: number;
+  medianMs: number;
+  multiplier: number;
+  /** How many SETTLED runs `medianMs` was computed over. */
+  sampleSize: number;
+}
+
+export const RUNNING_LONG_STEP = "run.running_long";
+
+/**
+ * PURE fold, mirroring {@link detectCostAnomalies}'s shape exactly but over DURATION instead of
+ * cost: computes each class's median span (`run.start` -> `verdict`) over its own SETTLED runs,
+ * then flags every run STILL IN FLIGHT (no `verdict` line yet, so `endMs === undefined`) whose
+ * elapsed time as of `nowMs` exceeds `median * policy.multiplier` — never a settled run (once it
+ * has a verdict it is no longer a candidate at all, "reported once while it still runs"), and
+ * never a class under `policy.minSamples` settled runs (design note ii, same floor as cost).
+ */
+export function detectRunningLong(records: readonly LedgerRecord[], policy: CostAnomalyPolicy, nowMs: number): RunningLongFinding[] {
+  const clocks = runClocks(records);
+  const settledByClass = new Map<string, number[]>();
+  for (const c of clocks) {
+    if (c.endMs === undefined) continue;
+    const durationMs = c.endMs - c.startMs;
+    if (durationMs < 0) continue; // a torn/out-of-order pair — never a negative duration
+    const arr = settledByClass.get(c.taskClass) ?? [];
+    arr.push(durationMs);
+    settledByClass.set(c.taskClass, arr);
+  }
+  const out: RunningLongFinding[] = [];
+  for (const c of clocks) {
+    if (c.endMs !== undefined) continue; // only a run STILL RUNNING is ever a candidate
+    const durations = settledByClass.get(c.taskClass);
+    if (!durations || durations.length < policy.minSamples) continue;
+    const medianMs = median(durations);
+    const elapsedMs = nowMs - c.startMs;
+    if (elapsedMs > medianMs * policy.multiplier) {
+      out.push({
+        runId: c.runId,
+        taskId: c.taskId,
+        taskClass: c.taskClass,
+        elapsedMs,
+        medianMs: Math.round(medianMs),
+        multiplier: policy.multiplier,
+        sampleSize: durations.length,
+      });
+    }
+  }
+  out.sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
+  return out;
+}
+
+/** Every run id this ledger has ALREADY recorded a `run.running_long` row for — mirrors {@link
+ *  alreadyLedgeredCostAnomalyRunIds} exactly, one row per run id, ever. */
+export function alreadyLedgeredRunningLongRunIds(records: readonly LedgerRecord[]): Set<string> {
+  const out = new Set<string>();
+  for (const r of records) {
+    if (r.step === RUNNING_LONG_STEP && typeof r.run_id === "string") out.add(r.run_id);
+  }
+  return out;
+}
+
+/** {@link detectRunningLong} filtered against {@link alreadyLedgeredRunningLongRunIds} — a
+ *  repeated pass over the same (now-ledgered) run returns nothing new for it, mirroring {@link
+ *  pendingCostAnomalies}. */
+export function pendingRunningLong(records: readonly LedgerRecord[], policy: CostAnomalyPolicy, nowMs: number): RunningLongFinding[] {
+  const already = alreadyLedgeredRunningLongRunIds(records);
+  return detectRunningLong(records, policy, nowMs).filter((f) => !already.has(f.runId));
+}
+
+/** Build (never write) the ledger line for one running-long finding — mirrors {@link costAnomalyLine}. */
+export function runningLongLine(finding: RunningLongFinding): LedgerLine {
+  return {
+    run_id: finding.runId,
+    task_id: finding.taskId,
+    step: RUNNING_LONG_STEP,
+    task_class: finding.taskClass,
+    elapsed_ms: finding.elapsedMs,
+    median_ms: finding.medianMs,
+    multiplier: finding.multiplier,
+    sample_size: finding.sampleSize,
+  };
+}
+
+/** The ONE effectful entry point for the running-long sentinel — mirrors {@link
+ *  recordCostAnomalies} exactly, down to the same {@link CostAnomalyDeps} shape (a ledger sink,
+ *  nothing else). Appends exactly one `run.running_long` row per pending finding. */
+export function recordRunningLong(
+  records: readonly LedgerRecord[],
+  policy: CostAnomalyPolicy,
+  nowMs: number,
+  deps: CostAnomalyDeps,
+): RunningLongFinding[] {
+  const pending = pendingRunningLong(records, policy, nowMs);
+  const writeLedger = deps.writeLedger ?? appendLedger;
+  for (const finding of pending) writeLedger(deps.ledgerPath, runningLongLine(finding));
+  return pending;
+}
+
+/** Build (never write) the one incident event a NEW `run.running_long` finding earns — same
+ *  class-grouped fingerprint discipline as {@link costAnomalyIncidentEvent}. */
+export function runningLongIncidentEvent(finding: RunningLongFinding): LedgerLine {
+  return incidentEventLine({
+    runId: finding.runId,
+    name: `run.running_long:${finding.taskClass}`,
+    message:
+      `task ${finding.taskId} (run ${finding.runId}) has run ${finding.elapsedMs}ms against class ` +
+      `"${finding.taskClass}"'s median ${finding.medianMs}ms (×${finding.multiplier}, n=${finding.sampleSize})`,
+  });
 }
