@@ -291,8 +291,8 @@ test("W1-T4113: a self-hosting daemon wires the config gardener", async () => {
         return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
       },
     });
-    const start = captured?.gardens?.[2];
-    assert.ok(start, "the config gardener is wired after the plan and gate gardeners");
+    const start = captured?.gardens?.[3];
+    assert.ok(start, "the config gardener is wired after the plan, gate and test gardeners");
     const stateFile = gardenStatePath(join(root, "state"), "config");
     const garden = start!(60_000);
     for (let waited = 0; !existsSync(stateFile) && waited < 20_000; waited += 100) await new Promise((r) => setTimeout(r, 100));

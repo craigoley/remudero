@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname, join, relative, sep } from "node:path";
 
 import { fixedClock, systemClock } from "./clock.js";
 import { aggregateCacheHitTotals, deriveKnowledgeBudgetCap, measureKnowledgeBudgetPressure, TRIVIAL_DROPPED_WEIGHT_CHARS, type CacheHitTokens, type KnowledgeBudgetDerivation } from "./digest.js";
@@ -17,14 +17,14 @@ import {
   type PromotionGuardMetric,
   type PromotionRecord,
 } from "./experiment-promotion.js";
-import { writeAtomic } from "./fs-race-safe.js";
+import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { gardenStatePath, judgeGardenDecision, readGardenState, runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type PrState } from "./gardener.js";
 import { buildEntryWeightIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLearningsCorpus } from "./learnings.js";
 import type { LedgerLine } from "./ledger.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { BillingMode } from "./env.js";
 import { recommendMounts, type MountHeadroomCell, type MountRecommendation } from "./mount-recommender.js";
-import { loadMounts } from "./mounts.js";
+import { loadMounts, mountsPath } from "./mounts.js";
 import { loadPlan } from "./plan.js";
 import { planShards } from "./plan-gardener.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -42,7 +42,7 @@ import { deriveTaskClass } from "./task-class.js";
  *   - RECALIBRATE-BUDGET: queued shards of one task class get `budget_usd` from that class's observed
  *     implement cost distribution (p90 with headroom for the between-turn overshoot) — no fixed floor.
  *   - ADOPT-MOUNT: a mount recommendation that cleared the recommender's evidence gates is written into
- *     its route in `.remudero/mounts.yaml`.
+ *     its route in the mounts table (mounts.ts's `mountsPath`).
  *   - RE-DERIVE-CAP: the learnings character cap is re-derived from the spawns measured UNDER the
  *     current cap, with the same two functions that derived it (digest.ts).
  *
@@ -358,8 +358,8 @@ export function routeLine(text: string, type: string, risk: string, taskClass: s
 /** The first recommendation whose route exists and would change, adopted on the same provider only —
  *  a provider switch changes more than the one line this edits. */
 export function mountCandidate(inv: ConfigInventory, repoRoot: string): ConfigGardenAction | undefined {
-  const path = ".remudero/mounts.yaml";
-  const full = join(repoRoot, path);
+  const full = mountsPath(repoRoot);
+  const path = relative(repoRoot, full).split(sep).join("/");
   if (!existsSync(full) || inv.recommendations.length === 0) return undefined;
   const text = readFileSync(full, "utf8");
   for (const rec of inv.recommendations) {
@@ -474,17 +474,20 @@ export function configCandidates(inv: ConfigInventory, repoRoot: string, rng: ()
 // ── Apply and roll back ──────────────────────────────────────────────────────────────────────
 
 /** Apply `edits` under `root`; returns the paths changed. An edit whose `from` line is not present
- *  exactly once is skipped — the file moved on, and a guess would edit the wrong line. */
+ *  exactly once is skipped — the file moved on, and a guess would edit the wrong line. The read is
+ *  one ENOENT-guarded `readFileIfExists` and the write a temp-then-rename `writeAtomic`, so no
+ *  separate existence check opens a window between checking the path and writing it. */
 export function applyConfigEdits(root: string, edits: ConfigEdit[]): string[] {
   const changed = new Set<string>();
   for (const e of edits) {
     const path = join(root, e.path);
-    if (!existsSync(path)) continue;
-    const lines = readFileSync(path, "utf8").split("\n");
+    const raw = readFileIfExists(path);
+    if (raw === undefined) continue;
+    const lines = raw.split("\n");
     const hits = lines.flatMap((l, i) => (l === e.from ? [i] : []));
     if (hits.length !== 1) continue;
     lines[hits[0]!] = e.to;
-    writeFileSync(path, lines.join("\n"));
+    writeAtomic(path, lines.join("\n"));
     changed.add(e.path);
   }
   return [...changed].sort();
