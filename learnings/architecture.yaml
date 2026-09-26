@@ -372,7 +372,8 @@
   cited: "2026-08-31"
 - id: next-task-id-needs-a-fresh-pull
   subsystem: plan
-  lifecycle: active
+  # knowledge gardener: retire next-task-id-needs-a-fresh-pull
+  lifecycle: superseded
   files: [ src/run-task.ts, src/lib/task-id-reservation.ts, src/lib/auto-triage.ts ]
   fact: >-
     `rmd next-task-id` reads the LOCAL checkout — `git pull` first or it returns
@@ -447,7 +448,8 @@
   cited: "2026-08-31"
 - id: ledger-step-name-is-a-claim-not-evidence
   subsystem: ledger
-  lifecycle: active
+  # knowledge gardener: retire ledger-step-name-is-a-claim-not-evidence
+  lifecycle: superseded
   files: [ plan/policy.yaml, src/lib/auto-triage.ts, src/run-task.ts ]
   fact: >-
     Treat a step NAME as a claim, not evidence — check what the function that

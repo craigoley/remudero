@@ -39,3 +39,10 @@ Learnings used when offered: 13%. Dangling Why pointers: 0.
 - retire maxbudget-between-turns: Workers offered it have rarely used it, compared with other learnings.
 
 Learnings used when offered: 12%. Dangling Why pointers: 0.
+
+## Pass 2026-09-26T16:42:29.608Z
+
+- retire next-task-id-needs-a-fresh-pull: Workers offered it have rarely used it, compared with other learnings.
+- retire ledger-step-name-is-a-claim-not-evidence: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 12%. Dangling Why pointers: 0.
