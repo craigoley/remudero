@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { readLedgerLines } from "../src/lib/status.js";
 import { CLAUDE_BIN_ENV_OVERRIDE } from "../src/lib/worker.js";
 import { runReview } from "../src/run-task.js";
-import { judgeReview, planOnlyDiff, reviewerOutcome } from "../src/lib/review.js";
+import { judgeReview, planOnlyDiff, reviewerOutcome, taskIdDeclarationsInDiff } from "../src/lib/review.js";
 
 const REPO_ROOT = process.cwd();
 /** W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing. */
@@ -28,13 +28,26 @@ const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encodi
 
 const PLAN_ONLY_DIFF = [
   "diff --git a/plan/tasks.d/W1-T9999-x.yaml b/plan/tasks.d/W1-T9999-x.yaml",
-  "new file mode 100644",
-  "--- /dev/null",
+  "--- a/plan/tasks.d/W1-T9999-x.yaml",
   "+++ b/plan/tasks.d/W1-T9999-x.yaml",
-  "@@ -0,0 +1,2 @@",
-  "+- id: W1-T9999",
-  "+  title: a filing",
+  "@@ -1,2 +1,2 @@",
+  " - id: W1-T9999",
+  "-  title: previous filing",
+  "+  title: revised filing",
 ].join("\n");
+
+test("plan-only spawn fixture does not add a new task id", () => {
+  const filing = [
+    "diff --git a/plan/tasks.d/W1-T9999-x.yaml b/plan/tasks.d/W1-T9999-x.yaml",
+    "new file mode 100644",
+    "--- /dev/null",
+    "+++ b/plan/tasks.d/W1-T9999-x.yaml",
+    "@@ -0,0 +1 @@",
+    "+- id: W1-T9999",
+  ].join("\n");
+  assert.deepEqual(taskIdDeclarationsInDiff(filing).added.map((row) => row.id), ["W1-T9999"], "the control must recognize a new filing");
+  assert.deepEqual(taskIdDeclarationsInDiff(PLAN_ONLY_DIFF).added, [], "the driven fixture must not require a reservation");
+});
 
 /** The SAME diff plus one `src/` file — the boundary `planOnly` draws. */
 const PLAN_PLUS_SRC_DIFF = [
@@ -247,7 +260,7 @@ test("the outcome reports the skip only when a spawn REALLY did not happen — i
 test("DRIVEN CONTROL: the same harness on a plan+src diff STILL spawns — the skip is scoped to plan-only", async () => {
   const r = await driveReview(PLAN_PLUS_SRC_DIFF);
   console.log(`    PLAN+SRC   spawns=${r.spawns}  outcome=${r.outcome}`);
-  assert.equal(r.spawns, 1, `a diff carrying src/ must still spawn (spawns=${r.spawns})`);
+  assert.equal(r.spawns, 1, `a diff carrying src/ must still spawn (spawns=${r.spawns}, outcome=${r.outcome}, summary=${r.summary}, steps=${r.steps.join(",")})`);
   assert.notEqual(r.outcome, "not_attempted_plan_only", "and must not report the plan-only skip");
   assert.ok(!r.steps.includes("review.reviewer.skipped"), "nor emit the skip row");
 });
