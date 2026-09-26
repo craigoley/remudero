@@ -43,8 +43,8 @@ function browserLaunchingTestFiles(): string[] {
 test("every browser-launching test file awaits the launch PROMISE in teardown, never the resolved handle", () => {
   const files = browserLaunchingTestFiles();
   // W1-T4563 retired the daemon's in-process console with the eleven suites that drove it in a
-  // browser; four browser-launching suites remain (the corpus control this floor exists for).
-  assert.ok(files.length >= 4, `expected at least the four known browser suites, found ${files.length}`);
+  // browser, and W1-T4566 deleted dashboard-loads; three remain (the corpus control this floor exists for).
+  assert.ok(files.length >= 3, `expected at least the three known browser suites (W1-T4566 deleted dashboard-loads), found ${files.length}`);
   for (const f of files) {
     const src = readFileSync(join(REPO_ROOT, f), "utf8");
     assert.match(

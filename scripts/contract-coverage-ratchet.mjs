@@ -3,18 +3,13 @@
 // openapi/daemon.yaml. The uncovered count is a ratchet: it may FALL and never RISE.
 //
 // WHY (W1-T3174). `scripts/no-hand-rolled-fetch-check.mjs` is a required gate that walks `apps` and
-// `packages` and refuses any direct `fetch(`. That is the correct rule (MASTER-PLAN §7A) and this
-// does not relax it — it means `apps/dashboard` CANNOT call a route the generated client does not
-// expose, by CI rather than by convention. So the contract is the critical path for the console
-// rebuild: every route the new screens need has to exist in the spec first.
+// `packages` and refuses any direct `fetch(`, so an in-repo client can only call a route the
+// generated client exposes. MEASURED 2026-09-09: the console's client called 39 distinct `/v1/`
+// routes; `openapi/daemon.yaml` declared 13.
 //
-// MEASURED 2026-09-09: the console's client calls 39 distinct `/v1/` routes; `openapi/daemon.yaml`
-// declares 13.
-//
-// ⚠ IT MUST SEE THE STRING CONSOLE TOO. Counting only `apps/` reports a clean sheet while the
-// routes in daily use go undeclared — the live console's client is `src/lib/console-shell-client.ts`
-// and it is not under `apps/`. A census that looks only where the fetch gate looks measures the
-// wrong population and reads as done.
+// W1-T4563/W1-T4566 retired both in-repo consoles (the string shell and apps/dashboard). The live
+// console is app.remudero.com (repo remudero-console), whose calls this census cannot see, and the
+// smoke consumer calls no literal route, so the in-repo population is DECLARED EMPTY below.
 //
 // IT DOES NOT DOCUMENT ROUTES, BY DESIGN. W1-T3174 (i): per-screen, never all-27-up-front — a shard
 // that lands speculative path definitions has written a schema nobody has read. This makes the gap
@@ -23,14 +18,9 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-/** Where a first-party client's route calls live. The string console is listed EXPLICITLY because
- *  it is the one consumer that does not sit under `apps/`, and it is the largest. */
-export const CLIENT_SOURCES = [
-  "src/lib/console-shell-client.ts",
-  "src/lib/console-shell-script.ts",
-  "apps/dashboard/src",
-  "packages/daemon-client-smoke/src",
-];
+/** Where an in-repo first-party client's route calls live. EMPTY BY DECLARATION since W1-T4566:
+ *  `main` reports that as its own verdict, distinct from a declared source that extracts nothing. */
+export const CLIENT_SOURCES = [];
 
 export const BASELINE_PATH = "scripts/contract-coverage-baseline.json";
 
@@ -129,6 +119,10 @@ export function readTextTree(target) {
 // left here is argument threading and the two `process.exit` calls that are the gate's verdict,
 // and a test cannot observe an exit code without spawning the script.
 function main() {
+  if (CLIENT_SOURCES.length === 0) {
+    console.log("contract-coverage: no in-repo first-party client is declared (W1-T4566); nothing to census.");
+    process.exit(0);
+  }
   const called = routesCalled(CLIENT_SOURCES, readTextTree);
   const declared = routesDeclared(readFileSync("openapi/daemon.yaml", "utf8"));
   // A ZERO ON EITHER SIDE IS A BROKEN CENSUS, NOT A CLEAN SHEET. Both extractions are regexes over

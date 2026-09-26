@@ -111,13 +111,6 @@ jobs:
       # conditionally skippable (never REQUIRED-able without reproducing synthwatch #102), a
       # documented advisory-only scanner or aggregation shard, or deferred pending a red state.
       # Promoting one is a separate, one-concern PR, not a side effect of adding a name (R-51).
-      # W1-T3177: `dashboard` starts ADVISORY, per this block's own rule that a name is added to
-      # REQUIRED "once it is live on main". It is a brand-new toolchain (React 19 + Vite + Vitest)
-      # whose first green run on main has not happened yet, and a required check that has never been
-      # observed green there can deadlock every merge on its first flake. Promoting it is a one-line
-      # follow-up once it has run clean on main — and it is REGISTERED rather than omitted, because
-      # the alternative is exactly what test/every-pr-check-is-required-or-advisory.test.ts refuses:
-      # a job that can go silently red forever with nothing to notice.
       # squash-trailer-gate: ADVISORY because it is a DUPLICATE, not because it is optional. Its
       # step runs `node --import tsx scripts/acceptance-author-gate.mjs` — byte-identical to the
       # acceptance-author-gate job's own step, and `scripts/squash-trailer-gate.mjs` does not exist.
@@ -133,7 +126,7 @@ jobs:
       # W1-T4399: ~17 one-runner gates (commitlint, lint-plan, depcruise, containment-probe,
       # jscpd-gate, claims, learnings-budget-ratchet, api-client-drift, no-hand-rolled-fetch,
       # prompt-surface-gate, leak-grep, assertion-discrimination, task-id-existence,
-      # comment-load-ratchet, source-size, baseline-monotonic, dashboard) now run as STEPS of one
+      # comment-load-ratchet, source-size, baseline-monotonic) now run as STEPS of one
       # job in ci.yml (the former `commitlint` job, expanded in place — see its own header comment
       # there for why it keeps that key rather than a new one), which posts each gate's result
       # under its OWN unchanged name via the checks API. No name here changes and no name is added:
@@ -147,7 +140,6 @@ jobs:
         [
         "squash-trailer-gate",
         "gate-monotonic",
-        "dashboard",
         "flake-retry-aggregate",
         "ci-shard (1/8)",
         "ci-shard (2/8)",

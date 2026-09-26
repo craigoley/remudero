@@ -150,14 +150,14 @@ test("isManifestPath: a grouped actions bump touching a workflow file is confine
 });
 
 test("offendingFiles reads the real workspace declaration and deploy dependency surfaces", () => {
-  assert.equal(isDependencyDeclarationPath("apps/dashboard/package.json"), true);
+  assert.equal(isDependencyDeclarationPath("packages/api-client/package.json"), true);
   assert.equal(isDependencyDeclarationPath("deploy/package.json"), true);
   assert.equal(isDependencyDeclarationPath("deploy/package-lock.json"), true);
   assert.equal(isDependencyDeclarationPath("deploy/Dockerfile"), true);
   const diff = [
-    "diff --git a/apps/dashboard/package.json b/apps/dashboard/package.json",
-    "--- a/apps/dashboard/package.json",
-    "+++ b/apps/dashboard/package.json",
+    "diff --git a/packages/api-client/package.json b/packages/api-client/package.json",
+    "--- a/packages/api-client/package.json",
+    "+++ b/packages/api-client/package.json",
     "@@ -1 +1 @@",
     "-a",
     "+b",

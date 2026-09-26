@@ -81,7 +81,7 @@ test("dedicated checkout overlays daemon checkout", () => {
     const result = runDry({ stateDir: stateRoot, serveRepoDir: serveRepo });
     assert.equal(result.status, 0, result.out);
     assert.ok(result.out.includes(`-v ${serveRepo}:/home/node/Remudero/remudero`));
-    assert.match(result.out, /-e RMD_CONSOLE_BUILD_ROOT=\/home\/node\/Remudero\/remudero\/apps\/dashboard\/dist/);
+    assert.equal(result.out.includes("RMD_CONSOLE_BUILD_ROOT"), false, "W1-T4566: no console build is wired into the serve container");
     assert.ok(result.out.includes(`-v ${stateRoot}:/home/node/Remudero`));
     assert.equal(existsSync(serveRepo), false, "dry-run must not create the dedicated checkout");
   } finally {

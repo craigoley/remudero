@@ -90,48 +90,15 @@ that unit now **refuses at generation** (W1-T109) unless you also pass
 acknowledged, rather than silently emitting a unit whose daemon refuses to start and gets
 KeepAlive-restarted forever.
 
-## Which surface is `apps/dashboard`? (W1-T2902 ruling)
+## Which surface is `apps/dashboard`? (W1-T2902 ruling, superseded by W1-T4566)
 
-Two browser surfaces exist against this daemon, and they are **not** the same thing under a
-different name:
-
-- **The console** is app.remudero.com (repo `remudero-console`), which reads this daemon's `/v1`
-  gateway (`rmd serve`) server-side. The daemon's own inline shell was retired by W1-T4563.
-- **`apps/dashboard`** is a *separate*, portable static page (`index.html` + a compiled
-  `main.js`, no bundler by design) meant to be opened standalone or wrapped by a native shell
-  (the Tauri macOS/iOS clients MASTER-PLAN §7 names) and pointed at *any* reachable daemon via
-  `?daemon=<url>`.
-
-As of W1-T2902's own recon it **could not load as shipped**: `index.html` referenced a
-`./main.js` the repo's root `tsc` build never produced there (it emitted to the shared
-`dist/apps/dashboard/src/`, not beside `index.html`), and `main.ts`'s one import — the bare
-specifier `@remudero/api-client/client` — had no import map for a browser to resolve it
-(unlike `tsx`/Node, a browser cannot read a `package.json` `exports` map on its own).
-
-**Ruling: FIXED, not deleted.** `apps/dashboard` is not superseded by the console shell — it is
-a different product for a different deployment shape (portable/native-wrapped vs. inline HTML
-over the daemon's own HTTP server), and it already carries real, tested logic worth keeping:
-`main.ts`'s `isAllowedDaemonUrl` allow-list closes a CSRF/credential-exfiltration gap CodeQL
-flagged (alerts #32/#33/#52/#54) — deleting the file would have silently orphaned that tracked
-finding. The fix:
-
-- `apps/dashboard/tsconfig.json` — a package-local build (`npm run build` inside
-  `apps/dashboard`) that emits `main.js` and its one dependency's compiled copy **under
-  `apps/dashboard/build/`**, i.e. beside `index.html`, never into the monorepo's shared `dist/`.
-- `apps/dashboard/index.html` — a `<script type="importmap">` resolving
-  `@remudero/api-client/client` to that same build's compiled copy, and its module `<script>`
-  pointed at the build's actual output path.
-- `test/dashboard-loads.test.ts` — runs that build for real and drives a headless-Chromium
-  navigation against the built output (never `file://`: a module script's import map is
-  CORS-governed like any other module fetch), proving the page's module graph resolves and the
-  live board actually renders.
-
-**Named, not fixed here:** the real daemon (`src/lib/service.ts`) sends no
-`Access-Control-Allow-Origin` header, so a `?daemon=` pointed at a genuinely different origin
-than wherever this page is hosted from still fails its CORS preflight — the cross-origin
-deployment story `main.ts`'s own header already named as deferred follow-on work ("wiring the
-daemon to actually serve this directory ... over Tailscale"). That is a distinct concern from
-"can the page load at all," which is what this ruling closes.
+There is one console: app.remudero.com (repo `remudero-console`), which reads this daemon's `/v1`
+gateway (`rmd serve`) server-side. W1-T4563 retired the daemon's own inline shell, and W1-T4566
+deleted `apps/dashboard`, the portable static page W1-T2902 had ruled "fixed, not deleted". Nothing
+served its build once the `/console/*` mount was gone, and its `?daemon=` parameter was the taint
+source behind CodeQL alerts #32/#33/#52/#54, so deleting it removes that source outright. The
+client-side half of that fix, `packages/api-client`'s pinned origin, stays and is still tested
+(`test/api-client-base-url.test.ts`).
 
 ## The console is the primary control surface (W1-T2926)
 
