@@ -1803,6 +1803,8 @@ export function buildSweepEffects(
   | "readyDraft"
   | "captureRepairFeedback"
   | "disarmAutoMerge"
+  | "stackPrerequisite"
+  | "withdrawStackAutoMerge"
   | "requeueCheck"
   | "escalateCancelledCheck"
   | "escalateInfrastructureCheck"

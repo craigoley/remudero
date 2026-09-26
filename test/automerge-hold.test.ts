@@ -187,6 +187,89 @@ test("an open pull request already armed when the hold is engaged has that arm w
   assert.equal(withdrawalLines[0].hold_by, "craig");
 });
 
+test("W1-T4581 an already-armed stacked child is withdrawn before its declared parents merge", async () => {
+  const withdrawn: OpenPrView[] = [];
+  const notices: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const deps = fakeDeps([], {
+    stackPrerequisite: () => ({
+      state: "blocked",
+      parentNumbers: [1765, 1764],
+      pendingParentNumbers: [1765],
+      detail: "declared parent #1765 is not merged",
+    }),
+    withdrawStackAutoMerge: (pr) => {
+      withdrawn.push(pr);
+      return "disarmed";
+    },
+    log: (step, extra) => notices.push({ step, extra }),
+  });
+
+  const summary = await runSweep([greenPr({ autoMergeArmed: true })], deps);
+
+  assert.deepEqual(withdrawn.map((pr) => pr.prNumber), [PR_NUMBER], "the old GitHub arm is withdrawn on observation");
+  assert.deepEqual(deps.armed, [], "the already-armed PR is never re-armed by this sweep");
+  const refusal = notices.find((entry) => entry.step === "automerge.arm_skipped");
+  assert.equal(refusal?.extra?.outcome, "stack-parent-refused");
+  assert.deepEqual(refusal?.extra?.stack_parent_numbers, [1765, 1764]);
+  assert.equal(refusal?.extra?.withdrawal, "disarmed");
+  const disposed = readLedgerLines(deps.ledgerPath).find((line) => line.step === "sweep.disposed");
+  assert.match(String(disposed?.stand_down_reason), /withdrawal disarmed.*parent #1765/);
+  assert.equal(summary.actions[0].acted, false);
+});
+
+test("W1-T4581 criterion 4: a parent-order refusal clears the old armed dedup so the child can arm after the stack becomes ready", async () => {
+  const previouslyArmed = {
+    ts: "2026-08-21T11:40:00.000Z",
+    run_id: "SWEEP-PRIOR",
+    step: "sweep.disposed",
+    disposition: "mergeable",
+    acted: true,
+    pr_number: PR_NUMBER,
+    head_sha: HEAD,
+  };
+  const priorStackRefusal = {
+    ts: "2026-08-21T11:50:00.000Z",
+    run_id: "SWEEP-PRIOR",
+    step: "automerge.arm_skipped",
+    outcome: "stack-parent-refused",
+    pr_number: PR_NUMBER,
+    head_sha: HEAD,
+  };
+  const deps = fakeDeps([previouslyArmed, priorStackRefusal]);
+
+  const summary = await runSweep([greenPr({ autoMergeArmed: false })], deps);
+
+  assert.deepEqual(deps.armed.map((pr) => pr.prNumber), [PR_NUMBER], "the child re-earns an arm after the stack is ready");
+  assert.equal(summary.actions[0].acted, true);
+});
+
+test("W1-T4581 an unreadable parent state also withdraws a pre-existing arm, while unstacked arms are untouched", async () => {
+  const unreadableWithdrawals: OpenPrView[] = [];
+  const unreadable = fakeDeps([], {
+    stackPrerequisite: () => ({ state: "unreadable", parentNumbers: [1765], detail: "REST unavailable" }),
+    withdrawStackAutoMerge: (pr) => void unreadableWithdrawals.push(pr),
+  });
+  await runSweep([greenPr({ autoMergeArmed: true })], unreadable);
+  assert.deepEqual(unreadableWithdrawals.map((pr) => pr.prNumber), [PR_NUMBER]);
+
+  const ordinaryWithdrawals: OpenPrView[] = [];
+  const ordinary = fakeDeps([], {
+    stackPrerequisite: () => ({ state: "unstacked", parentNumbers: [] }),
+    withdrawStackAutoMerge: (pr) => void ordinaryWithdrawals.push(pr),
+  });
+  await runSweep([greenPr({ autoMergeArmed: true })], ordinary);
+  assert.deepEqual(ordinaryWithdrawals, [], "a normal unstacked PR keeps the pre-existing armed path");
+
+  const previewWithdrawals: OpenPrView[] = [];
+  const preview = fakeDeps([], {
+    dryRun: true,
+    stackPrerequisite: () => ({ state: "blocked", parentNumbers: [1765], detail: "parent is open" }),
+    withdrawStackAutoMerge: (pr) => void previewWithdrawals.push(pr),
+  });
+  await runSweep([greenPr({ autoMergeArmed: true })], preview);
+  assert.deepEqual(previewWithdrawals, [], "a dry-run never withdraws a live GitHub arm");
+});
+
 test("an ALREADY-unarmed PR under a hold issues NO withdrawal — the converging disarm never probes what is not armed", async () => {
   const withdrawn: OpenPrView[] = [];
   const deps = fakeDeps([holdEngagedLine()], {
@@ -405,6 +488,7 @@ test("armOutcomeReason: a hold refusal names the hold and says only a release li
 
 test("the sweep's converging withdrawal calls the disarm leaf with the held PR's own url", () => {
   const disarmed: string[] = [];
+  const restPaths: string[] = [];
   // `disarmImpl` is the only seam this fixture overrides, so every other optional dep stays at
   // its default rather than being restated.
   const effects = buildSweepEffects({
@@ -416,6 +500,10 @@ test("the sweep's converging withdrawal calls the disarm leaf with the held PR's
     plan: { tasks: [], byId: new Map() },
     log: () => {},
     policy: undefined,
+    ghJsonImpl: (args) => {
+      restPaths.push(args[1] ?? "");
+      return { body: null };
+    },
     reviewRunner: undefined,
     spawnImpl: undefined,
     pushEmptyCommit: undefined,
@@ -439,4 +527,12 @@ test("the sweep's converging withdrawal calls the disarm leaf with the held PR's
     ["https://github.com/craigoley/remudero/pull/2376"],
     "the adapter passes the PR's OWN url through to the leaf — never a rebuilt or defaulted one",
   );
+  const stackPr = { prUrl: "https://github.com/craigoley/remudero/pull/2377" } as OpenPrView;
+  assert.deepEqual(effects.stackPrerequisite?.(stackPr), { state: "unstacked", parentNumbers: [] });
+  assert.deepEqual(restPaths, ["repos/craigoley/remudero/pulls/2377"], "the sweep adapter uses its injected REST reader");
+  effects.withdrawStackAutoMerge?.(stackPr);
+  assert.deepEqual(disarmed, [
+    "https://github.com/craigoley/remudero/pull/2376",
+    "https://github.com/craigoley/remudero/pull/2377",
+  ], "the stack-order withdrawal reaches the same guarded disarm leaf");
 });
