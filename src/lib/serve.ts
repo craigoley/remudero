@@ -4082,8 +4082,6 @@ function assembleServeRoutes(
     // ledger. The experiment routes are mounted through this same production assembly so the
     // console cannot approve a change without a durable baseline and rollback path.
     ...operatorAgentRoutes,
-    // Read-scoped despite POST: this route projects only the process-owned analytics snapshot.
-    // The repository comes from server configuration, never the caller's JSON body.
     buildOperatorAgentAnswerRoute(() => ({
       repository: deps.githubEventWake?.repository,
       instance: deps.instances?.coreInstance ?? CORE_INSTANCE,

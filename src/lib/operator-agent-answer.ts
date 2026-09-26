@@ -1,6 +1,7 @@
 /** Bounded, read-only answers over the process-owned analytics projection. No model or ledger scan. */
 import type { AnalyticsSnapshot, ConsoleV1Metric } from "./analytics-route.js";
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { fixedClock, systemClock } from "./clock.js";
 import { proposalIdOfThread } from "./inbox-thread.js";
 import { jsonAction, sendJson } from "./panel-actions.js";
 import type { Route } from "./service.js";
@@ -110,8 +111,8 @@ function metric(snapshot: AnswerInput["snapshot"], key: ConsoleV1Metric["key"]):
 
 /** Only server-owned, aggregate evidence may become an answer; no arbitrary question text is interpolated. */
 export function buildOperatorAgentAnswer(input: AnswerInput): OperatorAgentAnswer {
-  const now = input.now ?? Date.now();
-  const generatedAt = new Date(now).toISOString();
+  const now = input.now ?? systemClock.now();
+  const generatedAt = fixedClock(now).iso();
   const repository = input.repository && REPOSITORY.test(input.repository) ? input.repository : null;
   const base = {
     version: "answer-v1" as const,
