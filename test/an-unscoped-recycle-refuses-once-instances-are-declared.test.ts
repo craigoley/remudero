@@ -8,12 +8,13 @@
  * site, console), so an operator meaning site or console would have recycled CORE — and against
  * `rmd-state`, which is not even core's own state directory (it runs on `rmd-state2`).
  *
- * Every refusal below fires before any `docker` call, so this suite needs no container stubs.
+ * The absent-registry control deliberately proceeds beyond that refusal, so every invocation
+ * uses a Docker stub and an isolated HOME. A changed guard must never reach the live daemon.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -40,11 +41,19 @@ const REQUIRED_FIELDS = [
 ] as const;
 
 function run(args: string[], env: Record<string, string> = {}) {
+  const root = mkdtempSync(join(tmpdir(), "rmd-unscoped-recycle-fixture-"));
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "docker"), "#!/bin/sh\necho 'fixture Docker refuses live access' >&2\nexit 97\n");
+  chmodSync(join(bin, "docker"), 0o755);
   return spawnSync(BASH_BIN, [SCRIPT, ...args], {
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
       ...process.env,
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      HOME: root,
+      RMD_STATE_DIR: "",
       // Never let a sandboxed runner trip the in-container guard for an unrelated reason.
       RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "w1t3596-no-such-dockerenv"),
       ...env,
