@@ -1421,6 +1421,7 @@ import {
   ABSENT_REPUSH_CAP,
   DEFAULT_FIX_CLASSES,
   buildSweepEffects as buildSweepEffectsFromLib,
+  corroboratedIneligibilityReason,
   currentPlanIneligibilityReason,
   defaultSweepGhRun,
   dispatchFixCatchOutcome,
@@ -32697,7 +32698,7 @@ export async function daemonCommand(
           // (runDaemon's loop body, lib/daemon.ts) and this hook's own closure runs later in the
           // same tick, so by the time it calls `buildOpenPrViews`, `lastProj` is already this tick's
           // fresh dispatch projection.
-          (t: Task) => lastProj?.get(t.id)?.merged ?? false,
+          resequenceMergedResolver(() => lastProj),
           undefined,
           targetCheckoutRoot,
           () => activePlanRef.current,
@@ -32720,7 +32721,7 @@ export async function daemonCommand(
           // W1-T3585 — the SAME accessor `sweep:` above threads, off the SAME `lastProj` tick
           // snapshot: both daemon sweep paths must reconcile the identical current-plan
           // eligibility predicate, never two independently-derived ones.
-          (t: Task) => lastProj?.get(t.id)?.merged ?? false,
+          resequenceMergedResolver(() => lastProj),
           undefined,
           () => activePlanRef.current,
         ),
@@ -35684,7 +35685,9 @@ export function buildOpenPrViews(
     // `currentPlanIneligibilityReason`'s own doc (lib/sweep.ts) for the reason it can return.
     const planResequenceIneligible =
       mainPlan && taskRecord && deps.isMerged
-        ? currentPlanIneligibilityReason(mainPlan, taskRecord, deps.isMerged)
+        ? corroboratedIneligibilityReason(mainPlan, taskRecord, deps.isMerged, (ids) =>
+            ids.length === 0 ? new Set<string>() : readMergeCreditedTaskIds(ledgerPath, { candidates: ids }).credited,
+          )
         : undefined;
     const fileObservation = planFilingFiles.get(pr.number);
     const observedFiles = fileObservation?.state === "complete" ? fileObservation.paths : undefined;
@@ -42089,6 +42092,14 @@ export function buildInboxDraftHook(
 /** EXPORTED for its own coverage: the memoising seam W1-T510's readiness split rests on. Its
  *  body is reachable from no other test — both `inboxCommand` call sites need a live plan and
  *  a real GitHub gateway, which is why these lines arrived uncovered. */
+/** W1-T4565: the resequence CLOSE's resolver; `indeterminate` reads as met (DO NOT ACT), so doubt only withholds a close. */
+export function resequenceMergedResolver(projection: () => Map<string, StatusProjection> | undefined): MergedResolver {
+  return (t) => {
+    const p = projection()?.get(t.id);
+    return p?.merged === true || p?.indeterminate === true;
+  };
+}
+
 export function buildDepsReadinessAccessors(plan: Plan, deriveDeps: DeriveDeps): { isMerged: MergedResolver; depsUnobservable: (taskId: string) => GhFailureReason | undefined } {
   const projectionOf = new Map<string, StatusProjection>();
   const derive = (t: Task): StatusProjection => {
