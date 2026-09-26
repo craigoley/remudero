@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,6 +11,7 @@ import {
   parseSelectorShadowLines,
   readSelectorShadowChangedPaths,
   readSelectorShadowRuns,
+  readSelectorShadowRunsAsync,
   runSelectorShadowGardener,
   selectorShadowReport,
   startSelectorShadowGardener,
@@ -134,6 +135,65 @@ test("W1-T4439: the GitHub reader keeps each run's exact head and comparison", (
   assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({ workflow_runs: [{ head_sha: "abc123" }] }), readLog: () => "" }), /no id or head SHA/);
 });
 
+test("the scheduled selector-shadow log read yields the daemon loop and does not overlap ticks", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-async-tick-`));
+  const events: string[] = [];
+  let reads = 0;
+  let rejectRead: ((error: Error) => void) | undefined;
+  const pendingRead = new Promise<SelectorShadowRun[]>((_, reject) => { rejectRead = reject; });
+  const garden = startSelectorShadowGardener(
+    {
+      stateDir: join(root, "state"),
+      repoRoot: root,
+      openWorkspace: () => { throw new Error("no miss, so no workspace"); },
+      log: (step) => { events.push(step); },
+    },
+    () => { reads += 1; return pendingRead; },
+    () => [],
+    () => "W1-T9002",
+    10,
+  );
+  try {
+    for (let waited = 0; reads === 0 && waited < 1_000; waited += 10) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(reads, 1, "the first scheduled pass started");
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(reads, 1, "a pending GitHub read never starts a second pass");
+    assert.deepEqual(events, [], "the daemon timer ran while the log read was pending");
+    garden.stop();
+    rejectRead!(new Error("log read failed"));
+    for (let waited = 0; events.length === 0 && waited < 1_000; waited += 10) await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(events, ["selector-shadow.gardener_failed"]);
+  } finally {
+    garden.stop();
+  }
+});
+
+test("the async selector-shadow reader keeps run logs sequential while other timers run", async () => {
+  const calls: string[][] = [];
+  let releaseFirst: (() => void) | undefined;
+  const firstLog = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const reading = readSelectorShadowRunsAsync("acme", "remudero", 2, {
+    readJson: async (args) => {
+      calls.push(args);
+      return { workflow_runs: [{ id: 42, head_sha: "abc123" }, { id: 43, head_sha: "def456" }] };
+    },
+    readLog: async (args) => {
+      calls.push(args);
+      if (args[2] === "42") await firstLog;
+      return `log for ${args[2]}`;
+    },
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(calls.map((args) => args[2]), [undefined, "42"], "later logs wait for the first bounded read");
+  releaseFirst!();
+  const runs = await reading;
+  assert.deepEqual(calls.map((args) => args[2]), [undefined, "42", "43"]);
+  assert.deepEqual(runs.map((run) => [run.id, run.headSha, run.log]), [
+    [42, "abc123", "log for 42"],
+    [43, "def456", "log for 43"],
+  ]);
+});
+
 test("W1-T4439: a failed pass is logged by name and never stops the daemon's timer", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-tick-`));
   const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
@@ -157,7 +217,7 @@ test("W1-T4439: a failed pass is logged by name and never stops the daemon's tim
   assert.deepEqual(events, [{ step: "selector-shadow.gardener_failed", extra: { error: "gh run list unavailable" } }]);
 });
 
-test("W1-T4439: a self-hosting daemon wires the selector-shadow gardener", async () => {
+test("a self-hosting daemon keeps timers alive while selector-shadow reads a run log", async () => {
   const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4439-home-`));
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
@@ -166,6 +226,10 @@ test("W1-T4439: a self-hosting daemon wires the selector-shadow gardener", async
   const planPath = join(home, "tasks.yaml");
   writeFileSync(planPath, "[]\n");
   const oldHome = process.env.HOME;
+  const oldPath = process.env.PATH;
+  const oldFloor = process.env.RMD_GH_TRANSPORT_FLOOR;
+  const oldStarted = process.env.RMD_SELECTOR_SHADOW_FAKE_STARTED;
+  const oldDone = process.env.RMD_SELECTOR_SHADOW_FAKE_DONE;
   process.env.HOME = home;
   let captured: DaemonDeps | undefined;
   try {
@@ -178,10 +242,51 @@ test("W1-T4439: a self-hosting daemon wires the selector-shadow gardener", async
     // plan, gate, test, config, export, ci-friction, then this gardener.
     const start = captured?.gardens?.[6];
     assert.ok(start, "a seventh garden is wired after the ci-friction gardener");
-    // Stopped before its first tick, so the pass never reaches the real GitHub transport.
-    start!(60_000).stop();
+    const bin = join(home, "bin");
+    mkdirSync(bin);
+    const fakeGh = join(bin, "gh");
+    writeFileSync(fakeGh, [
+      "#!/bin/sh",
+      "if [ \"$1\" = api ]; then",
+      "  printf '%s\\n' '{\"workflow_runs\":[{\"id\":42,\"head_sha\":\"abc123\"}]}'",
+      "elif [ \"$1\" = run ]; then",
+      "  : > \"$RMD_SELECTOR_SHADOW_FAKE_STARTED\"",
+      "  sleep 0.5",
+      "  : > \"$RMD_SELECTOR_SHADOW_FAKE_DONE\"",
+      "  printf 'unparseable log\\n'",
+      "else",
+      "  exit 2",
+      "fi",
+      "",
+    ].join("\n"));
+    chmodSync(fakeGh, 0o755);
+    const started = join(home, "log-started");
+    const done = join(home, "log-done");
+    process.env.PATH = `${bin}:${oldPath ?? ""}`;
+    process.env.RMD_GH_TRANSPORT_FLOOR = "advisory";
+    process.env.RMD_SELECTOR_SHADOW_FAKE_STARTED = started;
+    process.env.RMD_SELECTOR_SHADOW_FAKE_DONE = done;
+    const garden = start!(60_000);
+    try {
+      for (let waited = 0; !existsSync(started) && waited < 5_000; waited += 10) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert.ok(existsSync(started), "the installed reader reached the fake run-log child");
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(existsSync(done), false, "the daemon event loop ran before the log child finished");
+    } finally {
+      garden.stop();
+    }
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    if (oldFloor === undefined) delete process.env.RMD_GH_TRANSPORT_FLOOR;
+    else process.env.RMD_GH_TRANSPORT_FLOOR = oldFloor;
+    if (oldStarted === undefined) delete process.env.RMD_SELECTOR_SHADOW_FAKE_STARTED;
+    else process.env.RMD_SELECTOR_SHADOW_FAKE_STARTED = oldStarted;
+    if (oldDone === undefined) delete process.env.RMD_SELECTOR_SHADOW_FAKE_DONE;
+    else process.env.RMD_SELECTOR_SHADOW_FAKE_DONE = oldDone;
   }
 });

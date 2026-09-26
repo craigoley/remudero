@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { GardenerDeps } from "./gardener.js";
-import { ghExec, ghJson } from "./github-transport.js";
+import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { loadPlanFromYaml } from "./plan.js";
 import { lintTask } from "./task-linter.js";
 
@@ -103,21 +103,13 @@ export function parseSelectorShadowLines(log: string): SelectorShadowRecord[] {
   return records;
 }
 
-/** The installed `gh` transport reads completed PR runs, then each run's coverage job log. */
-export function readSelectorShadowRuns(
-  owner: string,
-  repo: string,
-  limit = SELECTOR_SHADOW_RUN_LIMIT,
-  io: { readJson?: (args: string[]) => unknown; readLog?: (args: string[]) => string } = {},
-): SelectorShadowRun[] {
-  const readJson = io.readJson ?? ghJson;
-  const readLog = io.readLog ?? ((args: string[]) => ghExec(args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }));
-  const response = readJson(["api", `repos/${owner}/${repo}/actions/workflows/ci.yml/runs?event=pull_request&status=completed&per_page=${limit}`]) as {
+function selectorShadowRunHeaders(response: unknown): Array<Omit<SelectorShadowRun, "log">> {
+  const body = response as {
     workflow_runs?: Array<{ id?: number; head_sha?: string; pull_requests?: Array<{ number?: number; base?: { sha?: string } }> }>;
   } | null;
-  if (response === null || typeof response !== "object") throw new Error("selector shadow: GitHub returned no workflow-runs object");
-  if (!Array.isArray(response.workflow_runs)) throw new Error("selector shadow: GitHub returned no workflow_runs list");
-  return response.workflow_runs.map((run) => {
+  if (body === null || typeof body !== "object") throw new Error("selector shadow: GitHub returned no workflow-runs object");
+  if (!Array.isArray(body.workflow_runs)) throw new Error("selector shadow: GitHub returned no workflow_runs list");
+  return body.workflow_runs.map((run) => {
     if (!nonnegativeInteger(run.id) || typeof run.head_sha !== "string") {
       throw new Error("selector shadow: a workflow run has no id or head SHA");
     }
@@ -126,9 +118,48 @@ export function readSelectorShadowRuns(
       headSha: run.head_sha,
       ...(typeof run.pull_requests?.[0]?.base?.sha === "string" ? { baseSha: run.pull_requests[0].base.sha } : {}),
       ...(nonnegativeInteger(run.pull_requests?.[0]?.number) ? { prNumber: run.pull_requests![0]!.number } : {}),
-      log: readLog(["run", "view", String(run.id), "--repo", `${owner}/${repo}`, "--log"]),
     };
   });
+}
+
+function selectorShadowRunListArgs(owner: string, repo: string, limit: number): string[] {
+  return ["api", `repos/${owner}/${repo}/actions/workflows/ci.yml/runs?event=pull_request&status=completed&per_page=${limit}`];
+}
+
+function selectorShadowRunLogArgs(owner: string, repo: string, id: number): string[] {
+  return ["run", "view", String(id), "--repo", `${owner}/${repo}`, "--log"];
+}
+
+/** Synchronous reader retained for direct/offline callers. The daemon uses the async reader below. */
+export function readSelectorShadowRuns(
+  owner: string,
+  repo: string,
+  limit = SELECTOR_SHADOW_RUN_LIMIT,
+  io: { readJson?: (args: string[]) => unknown; readLog?: (args: string[]) => string } = {},
+): SelectorShadowRun[] {
+  const readJson = io.readJson ?? ghJson;
+  const readLog = io.readLog ?? ((args: string[]) => ghExec(args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }));
+  return selectorShadowRunHeaders(readJson(selectorShadowRunListArgs(owner, repo, limit))).map((run) => ({
+    ...run,
+    log: readLog(selectorShadowRunLogArgs(owner, repo, run.id)),
+  }));
+}
+
+/** Reading many run logs must yield the daemon event loop between bounded GitHub calls. */
+export async function readSelectorShadowRunsAsync(
+  owner: string,
+  repo: string,
+  limit = SELECTOR_SHADOW_RUN_LIMIT,
+  io: { readJson?: (args: string[]) => Promise<unknown>; readLog?: (args: string[]) => Promise<string> } = {},
+): Promise<SelectorShadowRun[]> {
+  const readJson = io.readJson ?? ghJsonAsync;
+  const readLog = io.readLog ?? ((args: string[]) => ghTextAsync(args, { maxBuffer: 64 * 1024 * 1024 }));
+  const headers = selectorShadowRunHeaders(await readJson(selectorShadowRunListArgs(owner, repo, limit)));
+  const runs: SelectorShadowRun[] = [];
+  for (const run of headers) {
+    runs.push({ ...run, log: await readLog(selectorShadowRunLogArgs(owner, repo, run.id)) });
+  }
+  return runs;
 }
 
 /** Fetch the changed side of the exact PR-run comparison only when a miss needs a task. */
@@ -302,17 +333,18 @@ export function runSelectorShadowGardener(
 /** Run immediately, then on the daemon interval; one pass at a time. */
 export function startSelectorShadowGardener(
   deps: GardenerDeps,
-  readRuns: () => SelectorShadowRun[],
+  readRuns: () => SelectorShadowRun[] | Promise<SelectorShadowRun[]>,
   readChangedPaths: (miss: SelectorShadowMiss) => string[],
   mintTaskId: () => string,
   intervalMs: number,
 ): { stop: () => void } {
   let running = false;
-  const tick = () => {
+  const tick = async () => {
     if (running) return;
     running = true;
     try {
-      runSelectorShadowGardener(deps, readRuns, readChangedPaths, mintTaskId);
+      const runs = await readRuns();
+      runSelectorShadowGardener(deps, () => runs, readChangedPaths, mintTaskId);
     } catch (error) {
       deps.log("selector-shadow.gardener_failed", { error: String((error as Error)?.message ?? error) });
     } finally {
