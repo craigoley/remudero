@@ -106,7 +106,8 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
     body: input.body ?? null,
     acceptance,
     declaredFiles: input.declaredFiles ?? [],
-    ...(input.ownership !== undefined ? { ownership: input.ownership } : {}),
+    ...(input.ownership !== undefined ? { ownership: input.ownership.map((finding) => finding.kind === "unknown"
+      ? { id: finding.id, file: finding.file, kind: finding.kind } : finding) } : {}),
   });
   return `v2:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
 }
@@ -5963,9 +5964,12 @@ export function reviewReservationOwnershipEvidence(
   headCheckoutDir: string | undefined,
   read?: Parameters<typeof taskIdOwnershipFindings>[5],
 ): TaskIdOwnershipFinding[] | undefined {
-  if (!headRefName || !headCheckoutDir) return undefined;
   const added = taskIdDeclarationsInDiff(diff).added;
   if (added.length === 0) return undefined;
+  if (!headRefName || !headCheckoutDir) {
+    const filed = new Map(added.filter((declaration) => parsePrefixedTaskId(declaration.id)).map((declaration) => [declaration.id, declaration.file]));
+    return [...filed].map(([id, file]) => ({ id, file, kind: "unknown", reason: !headRefName ? "head-ref-unavailable" : "head-checkout-unavailable" }));
+  }
   const base = taskIdDeclarationsAtRef(headCheckoutDir, "origin/main");
   return taskIdOwnershipFindings(diff, added, base, headRefName, headCheckoutDir, read);
 }

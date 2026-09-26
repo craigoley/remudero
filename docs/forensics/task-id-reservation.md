@@ -12,7 +12,7 @@ For a diff that adds a task ID, review now reads the reservation before
 claiming a decision. Its ownership findings, including an empty array meaning
 "checked and valid," enter the decision digest and are reused by the judge.
 An unchanged missing or foreign holder retains the same digest and refusal;
-an unreadable ref never becomes a pass. A changed reservation yields a fresh
+an unreadable ref or unavailable review checkout never becomes a pass. A changed reservation yields a fresh
 decision, so the guarded status poster can replace the old red verdict on the
 same PR head without treating two different inputs as a contradiction. This
 does not add a worker call or relax head, lifecycle, or foreign-holder guards.

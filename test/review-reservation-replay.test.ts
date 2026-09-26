@@ -66,6 +66,13 @@ test("unchanged reservation failure remains a named refusal", async () => {
     const unreadable = reviewReservationOwnershipEvidence(DIFF, BRANCH, root, () => new Map([[ID, { status: "unknown" as const, reason: "transport unavailable" }]]));
     assert.equal(judgeReview(CRITERIA, { diff: DIFF, report: REPORT, planLint: CLEAN_LINT, headCheckoutDir: root, headRefName: BRANCH, reservationOwnership: unreadable }).state, "failure");
     assert.notEqual(digest("same-head", absent()), digest("same-head", unreadable));
+    const unreadableAgain = reviewReservationOwnershipEvidence(DIFF, BRANCH, root, () => new Map([[ID, { status: "unknown" as const, reason: "transport still unavailable" }]]));
+    assert.equal(digest("same-head", unreadable), digest("same-head", unreadableAgain), "diagnostic wording is not new ownership evidence");
+    const noCheckout = reviewReservationOwnershipEvidence(DIFF, BRANCH, undefined);
+    assert.deepEqual(noCheckout?.map((finding) => finding.kind), ["unknown"]);
+    assert.deepEqual(reviewReservationOwnershipEvidence(DIFF, undefined, root)?.map((finding) => finding.kind), ["unknown"]);
+    const noCheckoutVerdict = judgeReview(CRITERIA, { diff: DIFF, report: REPORT, planLint: CLEAN_LINT, headRefName: BRANCH, reservationOwnership: noCheckout });
+    assert.equal(noCheckoutVerdict.state, "failure", "losing the checkout cannot erase a prior ownership refusal");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
