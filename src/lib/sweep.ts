@@ -2012,15 +2012,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // no-op — never a guessed target.
     // W1-T4586: ONE read, only when the sweep is about to act on red CI. The concurrency group
     // that cancels a sibling is ci.yml's, so only its runs count.
-    liveCiRunForHead: (pr) => {
+    liveCiRunForHead: async (pr) => {
       try {
-        const out = ghRunImpl("gh", [
-          "api",
-          `repos/${owner}/${repo}/actions/runs?head_sha=${pr.headSha}&per_page=50`,
-          "--jq",
-          '[.workflow_runs[] | select(.path == ".github/workflows/ci.yml") | select(.status != "completed")] | length',
-        ]);
-        return Number(String(out ?? "").trim()) > 0;
+        // A READ, so it rides readJsonImpl (the read seam), never ghRunImpl (the effect seam).
+        const body = (await readJsonImpl(["api", `repos/${owner}/${repo}/actions/runs?head_sha=${pr.headSha}&per_page=50`])) as
+          | { workflow_runs?: Array<{ path?: string; status?: string }> }
+          | undefined;
+        return (body?.workflow_runs ?? []).some((run) => run.path === ".github/workflows/ci.yml" && run.status !== "completed");
       } catch (e) {
         log("sweep.live_ci_run.error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
         return false;
