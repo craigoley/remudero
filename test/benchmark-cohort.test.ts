@@ -332,3 +332,39 @@ test("benchmark cohorts distinguish an unreadable state root from a ledger with 
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
+
+test("benchmark cohorts quarantine a malformed source while continuing to audit later evidence", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-fault-progress-"));
+  try {
+    const badPath = join(stateDir, "ledger.2026-09-25T12-00-00-000Z.ndjson.gz");
+    const goodPath = join(stateDir, "ledger.2026-09-26T12-00-00-000Z.ndjson");
+    const older = row({ ts: "2026-09-25T11:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: "a1", selected: { provider: "cash", model: "gpt-5-nano" } } });
+    const newer = row({ ts: "2026-09-26T11:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: "a2", selected: { provider: "codex", model: "gpt-6-sol" } } });
+    writeFileSync(badPath, gzipSync(older + "{malformed\n"));
+    writeFileSync(goodPath, newer);
+    const partial = await runBenchmarkCohortPass(stateDir, { maxSources: 1 });
+    assert.equal(partial.state, "partial");
+    assert.equal(partial.pendingSources, 1);
+    const audited = await runBenchmarkCohortPass(stateDir, { maxSources: 1 });
+    assert.equal(audited.state, "unavailable");
+    assert.equal(audited.snapshot.reason, "ledger-source-malformed");
+    assert.equal(audited.scannedSources, 1, "a bad old archive does not starve later sources");
+    const checkpoint = JSON.parse(readFileSync(join(stateDir, "benchmark-cohort-v1.json"), "utf8"));
+    assert.equal(checkpoint.sources.length, 1);
+    assert.equal(checkpoint.sources[0].name, "ledger.2026-09-26T12-00-00-000Z.ndjson");
+    assert.equal(checkpoint.sourceFaults[0].name, "ledger.2026-09-25T12-00-00-000Z.ndjson.gz");
+    const stable = await runBenchmarkCohortPass(stateDir, { maxSources: 1 });
+    assert.equal(stable.state, "unavailable");
+    assert.equal(stable.scannedSources, 0, "the unchanged bad source is not retried every daemon tick");
+
+    writeFileSync(badPath, gzipSync(older));
+    const recovered = await runBenchmarkCohortPass(stateDir, { maxSources: 1 });
+    assert.equal(recovered.state, "complete");
+    assert.equal(recovered.snapshot.sourceRows.assignments, 2);
+    assert.equal(recovered.snapshot.sourceLineage.length, 2);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});

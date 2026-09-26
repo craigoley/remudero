@@ -141,6 +141,9 @@ fallback, corrections, and retractions rebuild affected dimension partitions. A 
 malformed source, unreadable archive, torn live tail, or incomplete scan yields `unavailable`
 with last-good age rather than a fresh zero. A damaged checkpoint triggers full replay and stays
 unavailable until that replay completes. None of these conditions gates a worker or PR.
+An unchanged faulty source is recorded locally so later archives can still be audited; it is
+rechecked when its source identity changes. The complete cohort remains unavailable until every
+source is healthy or a retired source's evidence is reconciled.
 
 Dimensions are UTC day, task class, selected provider/model, and explicitly unavailable harness
 revision. Assignment-based denominators distinguish no worker call from a call with missing

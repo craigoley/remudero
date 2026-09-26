@@ -15,9 +15,11 @@ type SourceRecord = {
   sha256: string;
   rows: EvidenceRow[];
 };
+type SourceFault = { name: string; form: Form; size: number; mtimeMs: number; reason: string };
 type Checkpoint = {
   version: typeof BENCHMARK_COHORT_VERSION;
   sources: SourceRecord[];
+  sourceFaults?: SourceFault[];
   baselineSources?: SourceRecord[];
   lastGood?: BenchmarkCohortSnapshot;
 };
@@ -85,6 +87,13 @@ function validSources(value: unknown): value is SourceRecord[] {
       && Number.isSafeInteger(entry.bytes) && entry.bytes >= 0 && object(entry.row)));
 }
 
+function validFaults(value: unknown): value is SourceFault[] {
+  return Array.isArray(value) && value.every((fault) => fault && typeof fault.name === "string"
+    && ["gzip", "plain", "live"].includes(fault.form) && Number.isSafeInteger(fault.size) && fault.size >= 0
+    && typeof fault.mtimeMs === "number" && Number.isFinite(fault.mtimeMs)
+    && typeof fault.reason === "string" && fault.reason.length > 0);
+}
+
 function validLastGood(value: unknown, sources: SourceRecord[]): value is BenchmarkCohortSnapshot {
   const snapshot = object(value);
   return snapshot?.version === BENCHMARK_COHORT_VERSION && snapshot.state === "observed"
@@ -114,9 +123,11 @@ function readCheckpoint(stateDir: string): Checkpoint {
   try {
     const parsed = JSON.parse(readFileSync(checkpointPath(stateDir), "utf8")) as Partial<Checkpoint>;
     if (parsed.version === BENCHMARK_COHORT_VERSION && validSources(parsed.sources)
-      && (parsed.baselineSources === undefined || validSources(parsed.baselineSources))) {
+      && (parsed.baselineSources === undefined || validSources(parsed.baselineSources))
+      && (parsed.sourceFaults === undefined || validFaults(parsed.sourceFaults))) {
       const lastGoodSources = parsed.baselineSources ?? parsed.sources;
       return { version: BENCHMARK_COHORT_VERSION, sources: parsed.sources,
+        ...(parsed.sourceFaults ? { sourceFaults: parsed.sourceFaults } : {}),
         ...(parsed.baselineSources ? { baselineSources: parsed.baselineSources } : {}),
         ...(validLastGood(parsed.lastGood, lastGoodSources) ? { lastGood: parsed.lastGood } : {}) };
     }
@@ -449,11 +460,14 @@ export async function runBenchmarkCohortPass(
   catch { return { state: "unavailable", snapshot: emptySnapshot("ledger-source-unreadable", checkpoint.lastGood), scannedSources: 0, pendingSources: 0 }; }
   if (current.length === 0) return { state: "unavailable", snapshot: emptySnapshot("ledger-source-missing", checkpoint.lastGood), scannedSources: 0, pendingSources: 0 };
   const known = new Map(checkpoint.sources.map((source) => [source.name, source]));
+  const faults = new Map((checkpoint.sourceFaults ?? []).map((fault) => [fault.name, fault]));
   const changed = current.filter((entry) => {
     const prior = known.get(entry.name);
-    return !prior || prior.size !== entry.size || prior.mtimeMs !== entry.mtimeMs || prior.form !== entry.form;
+    if (prior) return prior.size !== entry.size || prior.mtimeMs !== entry.mtimeMs || prior.form !== entry.form;
+    const fault = faults.get(entry.name);
+    return !fault || fault.size !== entry.size || fault.mtimeMs !== entry.mtimeMs || fault.form !== entry.form;
   });
-  if (changed.length === 0 && checkpoint.lastGood && !checkpoint.baselineSources
+  if (changed.length === 0 && faults.size === 0 && checkpoint.lastGood && !checkpoint.baselineSources
     && checkpoint.sources.length === current.length) {
     return { state: "complete", snapshot: checkpoint.lastGood, scannedSources: 0, pendingSources: 0 };
   }
@@ -463,32 +477,37 @@ export async function runBenchmarkCohortPass(
   }
   let scannedSources = 0;
   let auditedSourceBytes = 0;
-  let failure: string | undefined;
   for (const entry of changed.slice(0, maxSources)) {
     const rotations = current.filter((candidate) => candidate.form !== "live");
     const index = rotations.findIndex((candidate) => candidate.name === entry.name);
     const precedingRotation = entry.form === "live" ? rotations.at(-1)?.name : rotations[index - 1]?.name;
     try {
       known.set(entry.name, await scanSource(entry, precedingRotation, known.get(entry.name)));
+      faults.delete(entry.name);
       scannedSources += 1;
       auditedSourceBytes += entry.size;
     } catch (error) {
-      failure = String((error as Error)?.message ?? error);
-      break;
+      known.delete(entry.name);
+      faults.set(entry.name, { name: entry.name, form: entry.form, size: entry.size,
+        mtimeMs: entry.mtimeMs, reason: String((error as Error)?.message ?? error) });
     }
   }
   checkpoint.sources = current.flatMap((entry) => { const source = known.get(entry.name); return source ? [source] : []; });
+  checkpoint.sourceFaults = current.flatMap((entry) => { const fault = faults.get(entry.name); return fault ? [fault] : []; });
   const pendingSources = current.filter((entry) => {
     const source = known.get(entry.name);
-    return !source || source.size !== entry.size || source.mtimeMs !== entry.mtimeMs || source.form !== entry.form;
+    if (source) return source.size !== entry.size || source.mtimeMs !== entry.mtimeMs || source.form !== entry.form;
+    const fault = faults.get(entry.name);
+    return !fault || fault.size !== entry.size || fault.mtimeMs !== entry.mtimeMs || fault.form !== entry.form;
   }).length;
-  if (failure) {
-    const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
-    return { state: "unavailable", snapshot: emptySnapshot(failure, checkpoint.lastGood), scannedSources, pendingSources, checkpointBytes };
-  }
-  if (pendingSources > 0 || checkpoint.sources.length !== current.length) {
+  if (pendingSources > 0) {
     const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
     return { state: "partial", snapshot: emptySnapshot("scan-incomplete", checkpoint.lastGood), scannedSources, pendingSources, checkpointBytes };
+  }
+  if (checkpoint.sourceFaults.length > 0) {
+    const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
+    return { state: "unavailable", snapshot: emptySnapshot(checkpoint.sourceFaults[0].reason, checkpoint.lastGood),
+      scannedSources, pendingSources: 0, checkpointBytes };
   }
   const presentNames = new Set(current.map((entry) => entry.name));
   const retired = checkpoint.baselineSources?.filter((source) => !presentNames.has(source.name)) ?? [];
