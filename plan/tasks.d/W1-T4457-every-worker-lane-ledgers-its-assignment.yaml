@@ -12,7 +12,6 @@
   plan_refs: ["W1-T3762", "W1-T4453"]
   files:
     - src/run-task.ts
-    - test/every-worker-lane-ledgers-its-assignment.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -28,6 +27,6 @@
     behaviour: the worker catches it and routing is unchanged. No change to routing decisions.
   acceptance:
     - claim: "a non-dispatch worker spawn ledgers its worker assignment"
-      proof: "unit test: test/every-worker-lane-ledgers-its-assignment.test.ts"
+      proof: "unit test: a non-dispatch worker spawn ledgers its worker assignment"
   falsifier: |
     CLOSE IF every spawnWorker caller in run-task.ts on main already passes onSelectionAssignment.
