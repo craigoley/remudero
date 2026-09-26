@@ -1,0 +1,50 @@
+- id: W1-T4558
+  title: "INBOX REPLY PARTIAL WRITES CAN DUPLICATE A DELIVERED MESSAGE — make delivery and audit outcomes explicit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-26 operator request: trace Inbox from list through reply responses and fix flaky data"
+  plan_refs: [W1-T4088, W1-T4552]
+  files:
+    - src/lib/panel-graph.ts
+    - src/lib/inbox-thread.ts
+    - test/inbox-reply-partial-write.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    POST /v1/inbox/thread/reply appends a durable message before appendPanelLedger records
+    inbox.thread_replied. If that later ledger append throws, createService catches it and
+    returns HTTP 500 after the message already exists. The console's submitInboxThreadAction
+    maps that 500 to failed and keeps the draft. Retrying can append the same reply again;
+    meanwhile no audit row explains the first delivery. This is a partial write, not a
+    failed delivery. A source audit found this ordering; an injected fault test must prove
+    the actual wire outcome before choosing the repair.
+  design: |
+    Establish one authoritative, durable reply identity and make repeat submission safe for
+    the same operator intent. Distinguish a committed message with failed audit append from
+    a message append that never committed; do not return a generic failure that invites an
+    unsafe retry, and do not claim the ledger audit succeeded when it did not. Preserve the
+    bearer/tier gates and existing successful reply behavior. Expose an explicit, bounded
+    partial-success receipt and a recoverable audit gap keyed to the committed message so
+    reconciliation cannot invent duplicate replies or duplicate audit credit. Add a fault
+    seam/test for the exact write order, including a second request after the audit failure.
+    The console must consume the new receipt vocabulary in a separate scoped follow-up;
+    until then, a successful HTTP delivery receipt must never be misread as a failed send.
+  acceptance:
+    - claim: "a ledger append failure after the message append is reported as delivered with an explicit audit gap, not as a failed send"
+      proof: 'unit test: test/inbox-reply-partial-write.test.ts'
+    - claim: "retrying the same operator reply intent cannot append a second message"
+      proof: 'grep: same reply intent cannot append a second message in test/inbox-reply-partial-write.test.ts'
+    - claim: "a message-store failure is not reported as delivered and leaves no successful audit claim"
+      proof: 'grep: message store failure is not delivered in test/inbox-reply-partial-write.test.ts'
+    - claim: "a successful reply still records one message and one attributable inbox.thread_replied audit row"
+      proof: 'grep: successful reply records one message and one audit row in test/inbox-reply-partial-write.test.ts'
+  falsifier: |
+    Inject a ledger append error only after the thread-message append. A 500 with one stored
+    message, or a second stored message after retrying the same intent, disproves the repair.
