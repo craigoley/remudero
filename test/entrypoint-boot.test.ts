@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { DAEMON_EXIT_BLOCKED, DAEMON_EXIT_IDLE_STARVED, DAEMON_EXIT_STALE } from "../src/lib/daemon.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "entrypoint.sh");
@@ -830,7 +831,7 @@ test("idle_starved: supervised entrypoint stays asleep on an empty probe, then w
 
 test("idle_starved: plan/main movement and unreadable PR data both wake the probe", () => {
   const origin = makeOrigin();
-  const root = mkdtempSync(join(tmpdir(), "idle-starved-probe-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}idle-starved-probe-`));
   const checkout = join(root, "target");
   const stubs = join(root, "stubs");
   const state = join(root, "state");

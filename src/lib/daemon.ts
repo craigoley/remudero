@@ -4052,7 +4052,8 @@ export async function runDaemon(
               !deps.isCreditIndeterminate!(task.id) &&
               (isMerged(task.id) || (task.verify === "human" && !released.has(task.id))));
             if (exhausted && !(await stopInterphaseReviewClock()) &&
-              !prActionPumpRef.isBusy() && !plainBackfill?.isBusy() && !inboxResponder?.isBusy() &&
+              !prActionPumpRef.isBusy() && (!plainBackfill || !plainBackfill.isBusy()) &&
+              (!inboxResponder || !inboxResponder.isBusy()) &&
               !deps.pendingKicks?.().length && !deps.pendingPrActions?.().length) {
               log("daemon.idle_starved.enter", { repo: deps.targetRepo, open_prs: 0, plan_tasks: planForBatch.tasks.length });
               return summary("idle_starved", "confirmed empty PR board and no remaining auto-eligible task");

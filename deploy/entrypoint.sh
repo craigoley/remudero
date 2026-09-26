@@ -433,7 +433,6 @@ DAEMON_EXIT_STALE=75
 DAEMON_EXIT_BLOCKED=76
 # Duplicated from `DAEMON_EXIT_ENVIRONMENTAL`, same reason and same falsifier as above.
 DAEMON_EXIT_ENVIRONMENTAL=77
-# Duplicated from `DAEMON_EXIT_IDLE_STARVED`; 78 is handled in-container, never charged to Docker.
 DAEMON_EXIT_IDLE_STARVED=78
 # 100, not the original 20: MEASURED 2026-08-18 merge rates (median 63/day) spend a budget of 20
 # inside a single day, after which a routine freshness exit falls through and spends the crash
@@ -537,8 +536,6 @@ forward_signal() {
 trap 'forward_signal TERM' TERM
 trap 'forward_signal INT' INT
 
-# Only the supervised daemon may hand an empty queue to this shell. One-shot verbs and bare
-# non-supervised invocations retain their ordinary exit semantics.
 if [ "${1:-}" = "./bin/rmd" ] && [ "${2:-}" = "daemon" ]; then
   export RMD_IDLE_STARVED_SUPERVISED=1
 fi
@@ -573,8 +570,6 @@ idle_starved_wait() {
   while :; do
     i=0
     while [ "$i" -lt 6 ]; do
-      # The fleet heartbeat treats daemon ledger silence over 10m as death. A five-minute
-      # shell pulse names this intentional state, without a model call or a fake scheduler tick.
       printf '{"ts":"%s","run_id":"IDLE-%s","task_id":"DAEMON","step":"daemon.idle_starved.pulse","lane":"daemon","repo":"%s"}\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${base_sha:0:12}" "$slug" >> "$CONFIG_ROOT/state/ledger.ndjson" || return 2
       [ ! -e "$CONFIG_ROOT/state/STOP" ] || { log "idle_starved: STOP requested"; return 0; }
