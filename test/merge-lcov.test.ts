@@ -1,12 +1,26 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
 // @ts-expect-error The production coverage merger is an executable .mjs module outside tsconfig.
-import { renderCoverageSummary } from '../scripts/coverage-merge-ratchet.mjs';
+import { renderCoverageSummary, stageRawCoverageFile } from '../scripts/coverage-merge-ratchet.mjs';
+
+test('raw coverage staging uses a same-filesystem hard link, not a second multi-gigabyte copy', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rmd-coverage-link-'));
+  const raw = join(root, 'raw.json');
+  const staged = join(root, 'staged.json');
+  try {
+    writeFileSync(raw, '{"result":[]}\n');
+    stageRawCoverageFile(raw, staged);
+    assert.equal(statSync(raw).ino, statSync(staged).ino, 'staging must reuse the raw file inode');
+    assert.equal(readFileSync(staged, 'utf8'), readFileSync(raw, 'utf8'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function runMerger(output: string, ...rawDirectories: string[]): string {
   return execFileSync(

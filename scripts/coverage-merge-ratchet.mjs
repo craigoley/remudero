@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, relative, resolve } from 'node:path';
 import { createRequire } from 'node:module';
@@ -49,6 +49,15 @@ function loadTestCoverage() {
     return require('internal/test_runner/coverage').TestCoverage;
   } catch (error) {
     throw new Error(`Node's pinned raw coverage merger is unavailable; invoke with node --expose-internals (${error.message})`);
+  }
+}
+
+export function stageRawCoverageFile(file, staged) {
+  try {
+    linkSync(file, staged);
+  } catch (error) {
+    if (error.code !== 'EXDEV') throw error;
+    copyFileSync(file, staged);
   }
 }
 
@@ -115,7 +124,7 @@ function withStagedRawCoverage(directories, collect) {
           }
         } else {
           const stagedName = `coverage-${process.pid}-${Date.now()}-${rawFileCount}.json`;
-          copyFileSync(file, join(staging, stagedName));
+          stageRawCoverageFile(file, join(staging, stagedName));
           rawFileCount += 1;
         }
       }
