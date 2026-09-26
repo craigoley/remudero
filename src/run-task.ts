@@ -13861,6 +13861,60 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
   };
 }
 
+/** Owns the one worker-attempt receipt on every dispatch path through the shared spawn wrapper.
+ * The call/result/error is authoritative; evidence collection cannot change any of them. */
+export function recordBenchmarkWorkerAttempt(
+  call: () => Promise<WorkerResult>,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  selected: () => { id: string } | undefined,
+  stopPolling: () => void,
+): Promise<WorkerResult> {
+  const failed = (): void => {
+    try {
+      const assignment = selected();
+      log("worker.attempt", {
+        ...(assignment ? { selection_assignment_id: assignment.id } : {}),
+        success: false,
+        worker_failure: "spawn-threw-before-result",
+      });
+    } catch { /* preserve the original worker error */ }
+  };
+  let workerCall: Promise<WorkerResult>;
+  try {
+    workerCall = call();
+  } catch (error) {
+    failed();
+    stopPolling();
+    throw error;
+  }
+  return workerCall.then((result) => {
+    try {
+      const fields = workerLedgerFields(result);
+      const resultId = result.selectionAssignmentId;
+      const selection = selected();
+      const assignmentId = resultId ?? selection?.id;
+      // A stream without a result envelope carries default zero usage and an empty subtype;
+      // those defaults are not measured zero.
+      const resultEnvelopeObserved = typeof result.subtype === "string" && result.subtype.length > 0;
+      log("worker.attempt", {
+        ...(assignmentId ? { selection_assignment_id: assignmentId } : {}),
+        ...(resultId && selection && resultId !== selection.id ? { assignment_observed: false } : {}),
+        ...(result.isError || result.apiError || result.usageRefusal
+          ? { success: false }
+          : resultEnvelopeObserved ? { success: true } : {}),
+        served_model: fields.served_model,
+        ...(resultEnvelopeObserved ? { tokens: fields.tokens } : {}),
+        worker_duration_ms: fields.worker_duration_ms,
+        ...(resultEnvelopeObserved ? { billing_mode: fields.billing_mode, total_cost_usd: fields.total_cost_usd } : {}),
+      });
+    } catch { /* telemetry cannot alter the returned worker result */ }
+    return result;
+  }, (error: unknown) => {
+    failed();
+    throw error;
+  }).finally(stopPolling);
+}
+
 async function runTask(
   taskId: string,
   opts: {
@@ -14105,9 +14159,7 @@ async function runTask(
     const stopPolling = workerStateSensor.startPolling();
     let selectionAssignment: Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0] | undefined;
     const baseStreamObserver = effectiveSpawnArgs.streamObserver ?? workerStateSensor.observer;
-    let workerCall: ReturnType<typeof rawSpawn>;
-    try {
-      workerCall = rawSpawn({
+    return recordBenchmarkWorkerAttempt(() => rawSpawn({
       ...effectiveSpawnArgs,
       // Every dispatch-phase worker inherits the run identity at the ONE wrapper that already owns its state/error telemetry, so the
       // routing assignment and terminal worker row join without inferring a task; an injected observer still runs, but after the ledger.
@@ -14138,48 +14190,7 @@ async function runTask(
       // its own `clockBound` (none exist today) is respected; every future dispatch call site
       // through this wrapper is covered without remembering to add it individually.
       clockBound: effectiveSpawnArgs.clockBound ?? { boundMs: workerAbandonMs },
-      });
-    } catch (error) {
-      stopPolling();
-      log("worker.attempt", {
-        ...(selectionAssignment ? { selection_assignment_id: selectionAssignment.id } : {}),
-        success: false,
-        worker_failure: "spawn-threw-before-result",
-      });
-      throw error;
-    }
-    return workerCall.then((result) => {
-      try {
-        const fields = workerLedgerFields(result);
-        const resultId = result.selectionAssignmentId;
-        const assignmentId = resultId ?? selectionAssignment?.id;
-        // The Claude SDK can end without a result envelope; collectWorkerResult then carries
-        // default zero usage and an empty subtype. Those defaults are not measured zero.
-        const resultEnvelopeObserved = typeof result.subtype === "string" && result.subtype.length > 0;
-        log("worker.attempt", {
-          ...(assignmentId ? { selection_assignment_id: assignmentId } : {}),
-          ...(resultId && selectionAssignment && resultId !== selectionAssignment.id
-            ? { assignment_observed: false } : {}),
-          ...(result.isError || result.apiError || result.usageRefusal
-            ? { success: false }
-            : resultEnvelopeObserved ? { success: true } : {}),
-          served_model: fields.served_model,
-          ...(resultEnvelopeObserved ? { tokens: fields.tokens } : {}),
-          worker_duration_ms: fields.worker_duration_ms,
-          ...(resultEnvelopeObserved ? { billing_mode: fields.billing_mode, total_cost_usd: fields.total_cost_usd } : {}),
-        });
-      } catch { /* telemetry cannot alter the returned worker result */ }
-      return result;
-    }, (error: unknown) => {
-      try {
-        log("worker.attempt", {
-          ...(selectionAssignment ? { selection_assignment_id: selectionAssignment.id } : {}),
-          success: false,
-          worker_failure: "spawn-threw-before-result",
-        });
-      } catch { /* preserve the original error */ }
-      throw error;
-    }).finally(stopPolling);
+      }), log, () => selectionAssignment, stopPolling);
   };
   // W1-T143: a raw synchronous write, not console.log — this narration is exactly what the
   // daemon's `runOne` exercises on every dispatch, and console.log's async, non-TTY-buffered
