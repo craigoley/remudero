@@ -12,6 +12,7 @@ import {
   DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS,
   DEFAULT_POLL_INTERVAL_MS,
   DAEMON_EXIT_BLOCKED,
+  DAEMON_EXIT_IDLE_STARVED,
   DAEMON_EXIT_STALE,
   DEFAULT_UNREADABLE_DEGRADED_LIMIT,
   buildDefaultHeadroomPolicy,
@@ -110,6 +111,110 @@ function fakeClock(): { sleep: (ms: number) => Promise<void>; calls: number[] } 
   const calls: number[] = [];
   return { sleep: async (ms: number) => { calls.push(ms); }, calls };
 }
+
+test("idle_starved: a confirmed empty dedicated queue exits without a normal poll", async () => {
+  const lines: string[] = [];
+  const clock = fakeClock();
+  const s = await runDaemon(fixturePlan(), {
+    refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
+    runOne: async () => { throw new Error("unexpected dispatch"); },
+    isCreditIndeterminate: () => false,
+    readLedgerLines: () => [],
+    confirmedOpenPrCount: () => 0,
+    idleStarvedSupervised: true,
+    targetRepo: "remudero-site",
+    sleep: clock.sleep,
+    log: (step) => lines.push(step),
+  });
+  assert.equal(s.stopReason, "idle_starved");
+  assert.equal(daemonExitCode(s.stopReason), DAEMON_EXIT_IDLE_STARVED);
+  assert.deepEqual(clock.calls, []);
+  assert.ok(lines.includes("daemon.idle_starved.enter"));
+});
+
+test("idle_starved: an unreadable PR board remains on the normal poll path", async () => {
+  const clock = fakeClock();
+  let stopReads = 0;
+  const s = await runDaemon(fixturePlan(), {
+    refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
+    runOne: async () => { throw new Error("unexpected dispatch"); },
+    isCreditIndeterminate: () => false,
+    readLedgerLines: () => [],
+    confirmedOpenPrCount: () => undefined,
+    idleStarvedSupervised: true,
+    checkStop: () => ++stopReads > 1 ? "test stop" : undefined,
+    sleep: clock.sleep,
+  });
+  assert.equal(s.stopReason, "stopped");
+  assert.ok(clock.calls.length > 0, "unknown is not an empty board");
+});
+
+test("idle_starved: an uncredited auto task cannot be hidden by a dispatch hold", async () => {
+  const clock = fakeClock();
+  let stopReads = 0;
+  const s = await runDaemon(fixturePlan(), {
+    refreshMerged: () => NONE_MERGED,
+    runOne: async () => { throw new Error("unexpected dispatch"); },
+    isCreditIndeterminate: () => false,
+    isCircuitTripped: () => true,
+    readLedgerLines: () => [],
+    confirmedOpenPrCount: () => 0,
+    idleStarvedSupervised: true,
+    checkStop: () => ++stopReads > 1 ? "test stop" : undefined,
+    sleep: clock.sleep,
+  });
+  assert.equal(s.stopReason, "stopped");
+  assert.ok(clock.calls.length > 0);
+});
+
+test("idle_starved: an operator-released human task or failed board read keeps the daemon awake", async () => {
+  for (const mode of ["released", "failed-board"] as const) {
+    const clock = fakeClock();
+    let stopReads = 0;
+    const lines: string[] = [];
+    const s = await runDaemon(fixturePlan(), {
+      refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
+      runOne: async () => { throw new Error("unexpected dispatch"); },
+      isCreditIndeterminate: () => false,
+      readLedgerLines: () => mode === "released" ? [JSON.stringify({ step: "ratify.approved", task_id: "H" })] : [],
+      confirmedOpenPrCount: () => {
+        if (mode === "failed-board") throw new Error("board unreadable");
+        return 0;
+      },
+      idleStarvedSupervised: true,
+      checkStop: () => ++stopReads > 1 ? "test stop" : undefined,
+      sleep: clock.sleep,
+      log: (step) => lines.push(step),
+    });
+    assert.equal(s.stopReason, "stopped", mode);
+    assert.ok(clock.calls.length > 0, mode);
+    if (mode === "failed-board") assert.ok(lines.includes("daemon.idle_starved.unassessed"));
+  }
+});
+
+test("idle_starved: a detached PR action must settle before the Node process can exit", async () => {
+  const clock = fakeClock();
+  let stopReads = 0;
+  let markerReads = 0;
+  let finish!: (result: { outcome: "completed" }) => void;
+  const inFlight = new Promise<{ outcome: "completed" }>((resolve) => { finish = resolve; });
+  const s = await runDaemon(fixturePlan(), {
+    refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
+    runOne: async () => { throw new Error("unexpected dispatch"); },
+    isCreditIndeterminate: () => false,
+    readLedgerLines: () => [],
+    confirmedOpenPrCount: () => 0,
+    idleStarvedSupervised: true,
+    pendingPrActions: () => ++markerReads === 1 ? [{ action: "review", prNumber: 1, origin: "test", requestedAt: new Date().toISOString() }] : [],
+    runPrAction: () => inFlight,
+    checkStop: () => ++stopReads > 1 ? "test stop" : undefined,
+    sleep: clock.sleep,
+  });
+  assert.equal(s.stopReason, "stopped", "an in-flight action is not a clean idle boundary");
+  assert.ok(clock.calls.length > 0);
+  finish({ outcome: "completed" });
+  await inFlight;
+});
 
 // ── daemonBoot: the ANTHROPIC-clean-env boot assertion (W1-T12b) ───────────
 // Run entirely in-process over an injected log + env — NO real launchd load

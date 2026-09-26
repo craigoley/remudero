@@ -341,6 +341,7 @@ test("W1-T4088: the responder's timer logs a failure and keeps going", async () 
   writeFileSync(store.threadStorePath, "{ torn\n");
   const lines: string[] = [];
   const pump = startInboxResponder(f.responder(), 10, (s) => lines.push(s));
+  assert.equal(pump.isBusy(), true, "the in-flight reply check blocks an idle transition");
   await new Promise((resolve) => setTimeout(resolve, 30));
   writeFileSync(store.threadStorePath, "");
   appendThreadMessage(inboxThreadIdentity(VH), "reply", "drop it", store);
@@ -348,6 +349,7 @@ test("W1-T4088: the responder's timer logs a failure and keeps going", async () 
   await new Promise((resolve) => setTimeout(resolve, 60));
   pump.stop();
   await pump.settled();
+  assert.equal(pump.isBusy(), false, "a settled thread reply no longer holds idle admission");
   assert.ok(lines.includes("inbox.thread_answer_failed"));
   assert.ok(lines.includes("inbox.thread_answered"));
 });

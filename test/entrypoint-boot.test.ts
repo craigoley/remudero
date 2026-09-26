@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { DAEMON_EXIT_BLOCKED, DAEMON_EXIT_STALE } from "../src/lib/daemon.js";
+import { DAEMON_EXIT_BLOCKED, DAEMON_EXIT_IDLE_STARVED, DAEMON_EXIT_STALE } from "../src/lib/daemon.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "entrypoint.sh");
@@ -162,11 +162,12 @@ function ambientWithoutRmdControls(): NodeJS.ProcessEnv {
 function boot(
   home: string,
   origin: string,
-  opts: { ref?: string; env?: Record<string, string>; cmd?: string[]; script?: string; cwd?: string; timeoutMs?: number } = {},
+  opts: { ref?: string; env?: Record<string, string>; cmd?: string[]; script?: string; cwd?: string; timeoutMs?: number; stubs?: Record<string, string> } = {},
 ): Boot {
   const stubs = mkdtempSync(join(tmpdir(), "entrypoint-stub-"));
   const rec = mkdtempSync(join(tmpdir(), "entrypoint-rec-"));
   writeNpmStub(stubs, rec);
+  for (const [name, body] of Object.entries(opts.stubs ?? {})) writeFileSync(join(stubs, name), body, { mode: 0o755 });
   const r = spawnSync("bash", [opts.script ?? SCRIPT, ...(opts.cmd ?? ["true"])], {
     encoding: "utf8",
     // W1-T2993: never unbounded. A blocked fixture is cancelled by the runner minutes later and
@@ -782,6 +783,86 @@ test("W1-T490: the entrypoint's freshness code is the SAME NUMBER as DAEMON_EXIT
   // POSITIVE CONTROL on that match: the same predicate must FAIL against a mutated script, or it
   // would pass for a file that no longer carries the assignment at all.
   assert.equal(/^DAEMON_EXIT_STALE=(\d+)$/m.test(script.replace(/^DAEMON_EXIT_STALE=\d+$/m, "# gone")), false);
+});
+
+test("idle_starved: supervised entrypoint stays asleep on an empty probe, then wakes on a new PR", () => {
+  const shellCode = readFileSync(SCRIPT, "utf8").match(/^DAEMON_EXIT_IDLE_STARVED=(\d+)$/m);
+  assert.equal(Number(shellCode?.[1]), DAEMON_EXIT_IDLE_STARVED, "Node and shell must agree on the idle exit code");
+  const origin = makeOrigin();
+  mkdirSync(join(origin, "deploy"), { recursive: true });
+  writeFileSync(join(origin, "deploy", "idle-starved-probe.sh"), readFileSync(join(REPO_ROOT, "deploy", "idle-starved-probe.sh")));
+  writeFileSync(join(origin, "bin", "rmd"), [
+    "#!/usr/bin/env bash",
+    'state="$HOME/Remudero/state"',
+    'mkdir -p "$state" "$HOME/Remudero/repos"',
+    'if [ ! -e "$state/first-run" ]; then',
+    '  touch "$state/first-run"',
+    '  git clone -q "$RMD_REPO_URL" "$HOME/Remudero/repos/remudero-site"',
+    `  exit ${DAEMON_EXIT_IDLE_STARVED}`,
+    "fi",
+    'touch "$state/woke"',
+    "exit 0",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  git(origin, ["add", "-A"]);
+  commit(origin, "idle probe fixture");
+  const home = freshHome();
+  const run = boot(home, origin, {
+    cmd: ["./bin/rmd", "daemon", "--repo", "fake/remudero-site"],
+    env: { RMD_RESTART_THROTTLE_S: "1", GH_TOKEN: "fixture-token" },
+    stubs: {
+      sleep: "#!/usr/bin/env bash\nexit 0\n",
+      gh: [
+        "#!/usr/bin/env bash",
+        'state="$HOME/Remudero/state"',
+        'if [ ! -e "$state/first-probe" ]; then touch "$state/first-probe"; printf "[]"; else printf "[{\\"number\\":1}]"; fi',
+        "",
+      ].join("\n"),
+    },
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.ok(existsSync(join(home, "Remudero", "state", "woke")), "new PR relaunched the daemon");
+  assert.match(run.stderr, /idle_starved: fake\/remudero-site remains empty/);
+  assert.match(run.stderr, /idle_starved: wake .*probe exit 10/);
+  const ledger = readFileSync(join(home, "Remudero", "state", "ledger.ndjson"), "utf8");
+  assert.equal(ledger.split("daemon.idle_starved.pulse").length - 1, 12, "two 30-minute windows emit six pulses each");
+});
+
+test("idle_starved: plan/main movement and unreadable PR data both wake the probe", () => {
+  const origin = makeOrigin();
+  const root = mkdtempSync(join(tmpdir(), "idle-starved-probe-"));
+  const checkout = join(root, "target");
+  const stubs = join(root, "stubs");
+  const state = join(root, "state");
+  mkdirSync(stubs);
+  mkdirSync(state);
+  const marker = join(state, "idle-starved.marker");
+  writeFileSync(marker, "");
+  writeFileSync(join(state, "ledger.ndjson"), "");
+  const since = new Date().toISOString().replace(/\.[0-9]{3}Z$/, ".000Z");
+  git(root, ["clone", "-q", origin, checkout]);
+  const base = git(checkout, ["rev-parse", "HEAD"]);
+  const gh = join(stubs, "gh");
+  writeFileSync(gh, "#!/usr/bin/env bash\nprintf '[]'\n", { mode: 0o755 });
+  const probe = (app = false) => spawnSync("bash", [join(REPO_ROOT, "deploy", "idle-starved-probe.sh"), "fake/remudero-site", checkout, base, state, since, marker, REPO_ROOT], {
+    encoding: "utf8",
+    env: { ...ambientWithoutRmdControls(), PATH: `${stubs}:${process.env.PATH ?? ""}`, GH_TOKEN: app ? "" : "fixture-token", GH_APP_ID: app ? "fixture-app" : "", GH_APP_INSTALLATION_ID: app ? "1" : "", GH_APP_PRIVATE_KEY_PATH: app ? join(root, "key.pem") : "" },
+  });
+  assert.equal(probe().status, 0, "empty PR board and unchanged main stay asleep");
+  writeFileSync(join(stubs, "node"), "#!/usr/bin/env bash\nprintf 'fixture-token'\n", { mode: 0o755 });
+  writeFileSync(gh, "#!/usr/bin/env bash\n[ \"$GH_TOKEN\" = 'fixture-token' ] || exit 22\nprintf '[]'\n", { mode: 0o755 });
+  assert.equal(probe(true).status, 0, "the private-repo probe mints an App token before reading GitHub");
+  writeFileSync(gh, "#!/usr/bin/env bash\nprintf '[]'\n", { mode: 0o755 });
+  writeFileSync(join(state, "ledger.ndjson"), JSON.stringify({ ts: new Date(Date.now() + 1000).toISOString(), step: "ratify.approved", task_id: "H" }) + "\n");
+  assert.equal(probe().status, 10, "a newly released human task wakes even without a plan commit");
+  writeFileSync(join(state, "ledger.ndjson"), "");
+  writeFileSync(join(state, "KICK_REQUESTED-H"), "{}");
+  assert.equal(probe().status, 10, "a console kick wakes the task daemon");
+  unlinkSync(join(state, "KICK_REQUESTED-H"));
+  advanceOrigin(origin, "plan-change.txt", "new task landed\n");
+  assert.equal(probe().status, 10, "a moved main wakes the full daemon");
+  writeFileSync(gh, "#!/usr/bin/env bash\nprintf '{bad json'\n", { mode: 0o755 });
+  assert.equal(probe().status, 2, "unreadable PR data is never interpreted as an empty board");
 });
 
 test("W1-T2537: the entrypoint's blocked code is the SAME NUMBER as DAEMON_EXIT_BLOCKED, not a drifting literal", () => {

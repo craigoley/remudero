@@ -433,6 +433,8 @@ DAEMON_EXIT_STALE=75
 DAEMON_EXIT_BLOCKED=76
 # Duplicated from `DAEMON_EXIT_ENVIRONMENTAL`, same reason and same falsifier as above.
 DAEMON_EXIT_ENVIRONMENTAL=77
+# Duplicated from `DAEMON_EXIT_IDLE_STARVED`; 78 is handled in-container, never charged to Docker.
+DAEMON_EXIT_IDLE_STARVED=78
 # 100, not the original 20: MEASURED 2026-08-18 merge rates (median 63/day) spend a budget of 20
 # inside a single day, after which a routine freshness exit falls through and spends the crash
 # budget instead — the exact conflation this whole block exists to undo. Worst case is
@@ -535,6 +537,71 @@ forward_signal() {
 trap 'forward_signal TERM' TERM
 trap 'forward_signal INT' INT
 
+# Only the supervised daemon may hand an empty queue to this shell. One-shot verbs and bare
+# non-supervised invocations retain their ordinary exit semantics.
+if [ "${1:-}" = "./bin/rmd" ] && [ "${2:-}" = "daemon" ]; then
+  export RMD_IDLE_STARVED_SUPERVISED=1
+fi
+
+idle_starved_wait() {
+  local repo_arg="" arg previous="" owner="" repo="" slug="" checkout="" base_sha="" origin_url="" probe_rc=0 i marker since
+  for arg in "$@"; do
+    if [ "$previous" = "--repo" ]; then repo_arg="$arg"; break; fi
+    previous="$arg"
+  done
+  [ -n "$repo_arg" ] || return 2
+  repo="${repo_arg##*/}"
+  if [[ "$repo_arg" == */* ]]; then
+    slug="$repo_arg"
+  else
+    origin_url="$(git -C "$TREE" remote get-url origin)" || return 2
+    if [[ "$origin_url" =~ github\.com[:/]([A-Za-z0-9_.-]+)/[A-Za-z0-9_.-]+(\.git)?$ ]]; then
+      owner="${BASH_REMATCH[1]}"
+    else
+      return 2
+    fi
+    slug="$owner/$repo"
+  fi
+  [[ "$slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 2
+  checkout="$CONFIG_ROOT/repos/$repo"
+  base_sha="$(git -C "$checkout" rev-parse --verify HEAD)" || return 2
+  [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]] || return 2
+  marker="$CONFIG_ROOT/state/idle-starved.marker"
+  touch "$marker" || return 2
+  since="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  log "idle_starved: $slug at $base_sha; probing every 1800s with no Node worker"
+  while :; do
+    i=0
+    while [ "$i" -lt 6 ]; do
+      # The fleet heartbeat treats daemon ledger silence over 10m as death. A five-minute
+      # shell pulse names this intentional state, without a model call or a fake scheduler tick.
+      printf '{"ts":"%s","run_id":"IDLE-%s","task_id":"DAEMON","step":"daemon.idle_starved.pulse","lane":"daemon","repo":"%s"}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${base_sha:0:12}" "$slug" >> "$CONFIG_ROOT/state/ledger.ndjson" || return 2
+      [ ! -e "$CONFIG_ROOT/state/STOP" ] || { log "idle_starved: STOP requested"; return 0; }
+      sleep 300 &
+      child_pid=$!
+      probe_rc=0
+      wait "$child_pid" || probe_rc=$?
+      child_pid=""
+      if [ -n "$signal_forwarded" ]; then return 0; fi
+      [ "$probe_rc" -eq 0 ] || return 2
+      i=$((i + 1))
+    done
+    probe_rc=0
+    bash "$TREE/deploy/idle-starved-probe.sh" "$slug" "$checkout" "$base_sha" "$CONFIG_ROOT/state" "$since" "$marker" "$TREE" &
+    child_pid=$!
+    wait "$child_pid" || probe_rc=$?
+    child_pid=""
+    if [ -n "$signal_forwarded" ]; then return 0; fi
+    if [ "$probe_rc" -ne 0 ]; then
+      log "idle_starved: wake ($slug probe exit $probe_rc); resuming full daemon"
+      if [ "$probe_rc" -eq 10 ]; then return 1; fi
+      return 2
+    fi
+    log "idle_starved: $slug remains empty"
+  done
+}
+
 # Trap: the exit code must be captured from the SAME command that runs it — `if "$@"; then ...; fi;
 # rc=$?` reads $? from the compound, which is 0 whenever the condition merely tested false, so a
 # crashing daemon read as a success. Backgrounded, not foreground, so the trap above can react
@@ -572,6 +639,23 @@ while :; do
   if [ "$rc" -eq 0 ]; then
     log "exited 0 — not throttled (a STOP is a clean stop; --restart=on-failure leaves the container down)"
     exit 0
+  fi
+
+  if [ "$rc" -eq "$DAEMON_EXIT_IDLE_STARVED" ] && [ "${RMD_IDLE_STARVED_SUPERVISED:-}" = "1" ]; then
+    idle_rc=0
+    idle_starved_wait "$@" || idle_rc=$?
+    rm -f -- "$CONFIG_ROOT/state/idle-starved.marker"
+    if [ "$idle_rc" -eq 0 ]; then
+      log "idle_starved: deliberate stop — exiting cleanly"
+      exit 0
+    fi
+    if [ "$idle_rc" -eq 2 ]; then
+      log "idle_starved: probe setup/clock failed; disabling quiet mode for this process and resuming normally"
+      export RMD_IDLE_STARVED_SUPERVISED=0
+    fi
+    sync_tree
+    resolve_rmd_on_path
+    continue
   fi
 
   # A `stale` stop is not a failure — the daemon wants exactly this restart, on code that has
