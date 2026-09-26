@@ -13,6 +13,9 @@
   files:
     - src/lib/self-sync.ts
     - test/a-reviewer-ahead-of-main-is-fresh.test.ts
+    - test/a-stale-gate-cannot-publish-a-verdict.test.ts
+    - test/a-reviewer-verdict-survives-unrelated-main-churn.test.ts
+    - test/a-run-task-advance-is-classified-by-review-path.test.ts
   status: queued
   rationale: |
     checkReviewerCodeFreshness compares HEAD..origin/main whenever SHAs differ. On #7290,
@@ -22,6 +25,8 @@
     reviewer run from current main posted success, but the branch-local refusal is a
     repeatable stuck-review path. W1-T4469 narrowed run-task hunk classification for
     genuine main advances; it did not distinguish ahead, behind, and diverged ancestry.
+    Existing freshness fixtures use synthetic SHA pairs and must be updated to state
+    their ancestry explicitly; their old assumptions cannot prove this distinction.
   design: |
     Read the merge base of the loaded reviewer code SHA and origin/main before applying
     reviewAdvanceIsMaterialAt. If origin/main is an ancestor of code, this reviewer is
