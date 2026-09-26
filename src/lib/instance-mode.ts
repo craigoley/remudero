@@ -11,6 +11,7 @@ export function instanceMode(ownerRepo: string, registryText: string | undefined
     const match = registry.instances.find((instance) => instance.repo.toLowerCase() === ownerRepo.toLowerCase());
     return match?.mode ?? "live";
   } catch {
+    // Invalid text grants no shadow declaration. Preserve the documented absent-mode live policy.
     return "live";
   }
 }
@@ -20,6 +21,7 @@ export function readInstanceRegistryText(repoRoot: string): string | undefined {
   try {
     return readFileSync(daemonInstanceRegistryPath(repoRoot), "utf8");
   } catch {
+    // A missing/unreadable registry cannot establish shadow mode; legacy installs remain live.
     return undefined;
   }
 }
