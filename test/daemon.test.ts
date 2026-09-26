@@ -167,6 +167,25 @@ test("idle_starved: an uncredited auto task cannot be hidden by a dispatch hold"
   assert.ok(clock.calls.length > 0);
 });
 
+test("idle_starved: a frontier containing only blocked or dependency-blocked tasks can sleep", async () => {
+  const plan = fixturePlan();
+  plan.byId.get("A")!.status = "blocked";
+  plan.byId.get("D")!.status = "blocked";
+  const clock = fakeClock();
+  const s = await runDaemon(plan, {
+    refreshMerged: () => NONE_MERGED,
+    runOne: async () => { throw new Error("unexpected dispatch"); },
+    isCreditIndeterminate: () => false,
+    readLedgerLines: () => [],
+    confirmedOpenPrCount: () => 0,
+    idleStarvedSupervised: true,
+    targetRepo: "remudero-site",
+    sleep: clock.sleep,
+  });
+  assert.equal(s.stopReason, "idle_starved");
+  assert.deepEqual(clock.calls, []);
+});
+
 test("idle_starved: an operator-released human task or failed board read keeps the daemon awake", async () => {
   for (const mode of ["released", "failed-board"] as const) {
     const clock = fakeClock();

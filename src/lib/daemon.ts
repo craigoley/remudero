@@ -4040,7 +4040,7 @@ export async function runDaemon(
       }
       // The ordinary zero-dispatch state also includes queue holds, failed credit reads, released
       // human tasks, and in-flight PR work. None is proof of an exhausted queue. The strict gate
-      // below requires a complete PR observation and every auto-eligible plan record credited.
+      // below requires a complete PR observation and no structurally unblocked task.
       // Only a supervised dedicated instance takes this exit: the self-hosting daemon's other
       // cadences can generate work without a plan edit or a new PR.
       if (deps.idleStarvedSupervised && !sweepLiveness.inFlight && deps.confirmedOpenPrCount && deps.isCreditIndeterminate && deps.readLedgerLines) {
@@ -4048,15 +4048,23 @@ export async function runDaemon(
           const openCount = deps.confirmedOpenPrCount();
           if (openCount === 0 && !deps.pendingKicks?.().length && !deps.pendingPrActions?.().length) {
             const released = releasedTaskIds(deps.readLedgerLines());
-            const exhausted = planForBatch.tasks.every((task) =>
-              !deps.isCreditIndeterminate!(task.id) &&
-              (isMerged(task.id) || (task.verify === "human" && !released.has(task.id))));
-            if (exhausted && !(await stopInterphaseReviewClock()) &&
+            const hasUnblockedTask = planForBatch.tasks.some((task) => {
+              if (deps.isCreditIndeterminate!(task.id)) throw new Error(`credit unreadable: ${task.id}`);
+              if (isMerged(task.id)) return false;
+              try {
+                assertRunnable(planForBatch, task, (dep) => isMerged(dep.id), released);
+                return true;
+              } catch (e) {
+                if (e instanceof TaskAdmissionError) return false;
+                throw e;
+              }
+            });
+            if (!hasUnblockedTask && !(await stopInterphaseReviewClock()) &&
               !prActionPumpRef.isBusy() && (!plainBackfill || !plainBackfill.isBusy()) &&
               (!inboxResponder || !inboxResponder.isBusy()) &&
               !deps.pendingKicks?.().length && !deps.pendingPrActions?.().length) {
               log("daemon.idle_starved.enter", { repo: deps.targetRepo, open_prs: 0, plan_tasks: planForBatch.tasks.length });
-              return summary("idle_starved", "confirmed empty PR board and no remaining auto-eligible task");
+              return summary("idle_starved", "confirmed empty PR board and no unblocked task");
             }
           }
         } catch (e) {
