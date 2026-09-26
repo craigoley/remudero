@@ -18,6 +18,7 @@ import { test } from "node:test";
 import { FOLLOW_UP_POLICY_VERSION, appendFollowUpCandidate, type FollowUpCandidate } from "../src/lib/follow-up-policy.js";
 import { buildOperatorAgentFollowUpReadRoute } from "../src/lib/operator-agent.js";
 import { buildSelfMeasurementRoute } from "../src/lib/serve.js";
+import type { LedgerUnionResult } from "../src/lib/ledger-union.js";
 import type { Route } from "../src/lib/service.js";
 
 /** A fixed whole-second mtime for every fixture archive. */
@@ -157,4 +158,33 @@ test("W1-T4567: self-measurement stops at the newest rows and returns headlines"
   } finally {
     rmSync(join(stateDir, ".."), { recursive: true, force: true });
   }
+});
+
+test("W1-T4567: an injected union reader is summarized the same way, and its unreadable answer passes through", async () => {
+  const union = (matches: string[], ok: boolean) => (stateDir: string): LedgerUnionResult => ({
+    stateDir,
+    archiveFiles: [],
+    archiveCount: ok ? 1 : 0,
+    liveFileRead: true,
+    unread: [],
+    ok,
+    matches,
+  });
+  const row = JSON.stringify({
+    ts: "2026-09-22T11:00:00.000Z",
+    step: "measurement_cadence.ran",
+    autonomy_rate: { status: "measured", zeroTouchRate: 0.57, merges: [1, 2] },
+    verb_census: ["a", "b", "c"],
+  });
+  const ok = JSON.parse((await call(buildSelfMeasurementRoute({ stateDir: "/nonexistent", prewarm: false, ledgerUnion: union([row], true) }), "/v1/self-measurement")).body) as {
+    status: string;
+    rows: Array<{ result: Record<string, unknown> }>;
+  };
+  assert.equal(ok.status, "ok");
+  assert.deepEqual(ok.rows[0]?.result.autonomyRate, { status: "measured", zeroTouchRate: 0.57, mergesCount: 2 });
+  assert.deepEqual(ok.rows[0]?.result.verbCensus, { count: 3 }, "a verb whose whole value is an array reads as its count");
+
+  const down = JSON.parse((await call(buildSelfMeasurementRoute({ stateDir: "/nonexistent", prewarm: false, ledgerUnion: union([], false) }), "/v1/self-measurement")).body) as { status: string; reason: string };
+  assert.equal(down.status, "unreadable");
+  assert.match(down.reason, /no ledger archives found/);
 });
