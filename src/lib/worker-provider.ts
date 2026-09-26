@@ -4,6 +4,7 @@ import { constants as fsConstants, accessSync, existsSync, mkdirSync, readFileSy
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import { Worker } from "node:worker_threads";
 import {
   verifyCapabilityGrant,
   type CapabilityGrantStore,
@@ -1376,7 +1377,7 @@ function codexCapacityHedgeDelay(timeoutMs: number): number {
  * The hedge is inside the raw exchange, so ordinary single-flight callers still share one attempt
  * pair and a successful result is always freshly read from the winning child.
  */
-async function readCodexRuntimeWithTimeoutHedge(
+export async function readCodexRuntimeWithTimeoutHedge(
   config: Config,
   bin: string,
   deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & { clock: Pick<Clock, "now"> },
@@ -1472,6 +1473,52 @@ async function readCodexRuntimeWithTimeoutHedge(
   });
 }
 
+/** Keep the app-server exchange's deadline and stdout callbacks off the daemon's busy event loop. */
+function readCodexRuntimeOffThread(config: Config, bin: string, timeoutMs: number): Promise<CodexRuntimeResult> {
+  return new Promise((resolve) => {
+    let probe: Worker;
+    try {
+      probe = new Worker(new URL("./codex-capacity-probe.mjs", import.meta.url), {
+        workerData: { bin, codexHome: codexHome(config), timeoutMs },
+        execArgv: ["--import", "tsx"],
+      });
+    } catch (error) {
+      resolve(codexRuntimeFailure(`app-server probe worker failed to start: ${String((error as Error).message ?? error)}`));
+      return;
+    }
+    let settled = false;
+    const finish = (result: CodexRuntimeResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      void probe.terminate().catch(() => undefined);
+      resolve(result);
+    };
+    // The worker owns both bounded app-server attempts. This outer bound catches a worker that
+    // never boots or reports; checking it after a poll turn lets an already-queued message win if
+    // the daemon itself was blocked when the watchdog fired.
+    const watchdog = setTimeout(() => {
+      setImmediate(() => finish(codexRuntimeFailure("app-server probe worker exceeded its outer deadline")));
+    }, 2 * timeoutMs + 5_000);
+    probe.once("message", (result: CodexRuntimeResult) => {
+      if (!result || typeof result !== "object" || !("provider" in result || "rateLimits" in result)) {
+        finish(codexRuntimeFailure("app-server probe worker returned a malformed result"));
+      } else {
+        finish(result);
+      }
+    });
+    probe.once("error", (error) => finish(codexRuntimeFailure(`app-server probe worker error: ${error.message}`)));
+    probe.once("exit", (code) => finish(codexRuntimeFailure(`app-server probe worker exited ${code} before reporting`)));
+  });
+}
+
+function startCodexRuntime(config: Config, bin: string, deps: CodexCapacityDeps, now: () => number): Promise<CodexRuntimeResult> {
+  // Synthetic transports stay in-process so protocol tests can control exact RPC timing.
+  return deps.spawn
+    ? readCodexRuntimeWithTimeoutHedge(config, bin, { ...deps, clock: { now } })
+    : readCodexRuntimeOffThread(config, bin, deps.timeoutMs ?? 10_000);
+}
+
 function selectCodexRuntime(
   value: CodexRuntimeReading,
   config: Config,
@@ -1531,11 +1578,11 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
     if (active) {
       exchange = active;
     } else {
-      exchange = readCodexRuntimeWithTimeoutHedge(config, bin, { ...deps, clock: { now } });
+      exchange = startCodexRuntime(config, bin, deps, now);
       codexCapacityInFlight.set(cacheKey, exchange);
     }
   } else {
-    exchange = readCodexRuntimeWithTimeoutHedge(config, bin, { ...deps, clock: { now } });
+    exchange = startCodexRuntime(config, bin, deps, now);
   }
 
   let value: CodexRuntimeResult;
