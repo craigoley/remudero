@@ -1,0 +1,50 @@
+- id: W1-T4561
+  title: "A REPAIRED RESERVATION MUST REOPEN ITS REVIEW — same-head plan PRs cannot stay red on a cached external-state failure"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "PR #7284 2026-09-26: review stayed red after W1-T4560 reservation was claimed until an unrelated PR-body edit"
+  plan_refs: ["W1-T4414", "W1-T3647", "W1-T230", "W1-T58", "W1-T65", "W1-T72", "docs/forensics/task-id-reservation.md"]
+  files:
+    - src/lib/review.ts
+    - src/run-task.ts
+    - test/review-reservation-replay.test.ts
+    - docs/forensics/task-id-reservation.md
+  status: queued
+  rationale: |
+    PR #7284's first plan-only review correctly failed: W1-T4560 had no refs/rmd-id/W1-T4560
+    claim. After the exact ref was claimed for the filing branch, a same-head/same-body rerun
+    replayed the old failure before reading reservation state. Only a body edit changed the
+    review-decision digest and allowed the repaired evidence to be judged. This is a concrete
+    stuck-PR path in a flow intended to recover from repairable external-state failures.
+    W1-T230, W1-T58, W1-T65, and W1-T72 overlap these review files but cover other
+    posting/proof paths; none makes a changed reservation reopen a cached ownership failure.
+  design: |
+    A prior terminal failure whose only structural blocker is task-id reservation ownership
+    must not be immutable under an unchanged head/body. On a later review, re-read the exact
+    reservation anchors for added task IDs and compare them with the prior ownership finding.
+    Reopen the decision only when that external evidence changed or was previously unreadable;
+    unchanged ownership still yields the named failure and no invented success. Carry the
+    refreshed reservation evidence through the deterministic judge and guarded status poster
+    so a now-valid holder can replace the old red status without a contradictory-verdict hold.
+    Preserve the per-input pending/terminal lock, head identity, foreign-holder refusal,
+    merge-base proof execution, and id-collision checks. No no-op SHA, manual status override,
+    body-edit workaround, extra LLM call, or new PR gate is a repair. A concurrent holder race
+    remains a refusal, never a forced takeover; the loser renumbers.
+  acceptance:
+    - claim: "a newly claimed exact reservation turns a prior same-head unreserved failure into a fresh deterministic review"
+      proof: "unit test: reservation repair reopens a same-head review decision"
+    - claim: "an unchanged missing or foreign reservation never passes from a cached or partial read"
+      proof: "unit test: unchanged reservation failure remains a named refusal"
+    - claim: "a repaired ownership verdict replaces the stale red status without a conflict or unrelated body edit"
+      proof: "unit test: repaired reservation posts success without a verdict conflict"
+    - claim: "the production review path consults exact reservation evidence before replaying ownership failures"
+      proof: "unit test: production review refreshes ownership before replay"
+  falsifier: |
+    Claim the ref after a review failure and rerun the same head/body. It must not replay the
+    previous red. Leave the ref absent or claimed by another branch; it must not turn green.
