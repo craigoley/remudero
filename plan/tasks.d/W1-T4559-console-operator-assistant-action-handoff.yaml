@@ -1,0 +1,59 @@
+- id: W1-T4559
+  title: "SERVE A BOUNDED OPERATOR-ASSISTANT ACTION HANDOFF — typed preview, confirmation, and receipts"
+  repo: remudero
+  depends_on: [W1-T4555]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 60.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-09-25 operator request: the console agent acts for its signed-in operator across connected repositories"
+  plan_refs: ["CONSOLE-T76", "W1-T3855", "W1-T3894", "W1-T4555"]
+  files:
+    - src/lib/operator-agent-action-handoff.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - test/operator-agent-action-handoff.test.ts
+    - test/operator-agent-action-route.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Core has bounded automation and consequence/approval primitives, but no versioned,
+    authenticated handoff from a console conversation to a particular operator action.
+    The answer-v1 route is deliberately read-only. CONSOLE-T76 must not infer that a
+    natural-language answer, a model-generated URL, or a bearer token authorizes a write.
+  design: |
+    Serve action-handoff-v1 as a small allowlist of existing reversible operator verbs,
+    each bound to the daemon instance's server-owned repository, exact target, required
+    write tier, consequence class, and recovery path. The prepare route validates typed
+    arguments and current state, calls existing preview/consequence policy, and returns
+    a bounded, expiring action preview plus a single-use confirmation identity. It
+    performs no target mutation. The execute route accepts only a prepared identity
+    and explicit operator confirmation, revalidates target/scope/freshness/tier and
+    policy, then delegates to the existing governed verb implementation. It records
+    attributable, idempotent execution/refusal receipts with an explicit outcome;
+    a timeout or partial external effect is unresolved, never a success-shaped answer.
+    Reject cross-repository targets, arbitrary shell/API paths, model-supplied bearer
+    tokens, unknown verbs, stale previews, replay, and a changed target. Keep high-tier,
+    financial, destructive, and credential actions unavailable in v1 until a separate
+    capability-specific approval path is proven; existing consequence approvals do not
+    become a blanket grant. The console owns user authentication, repository allowlist,
+    review UI and final confirmation; core owns instance-scoped authorization and the
+    action truth. No answer-v1 payload may execute or serve as a confirmation token.
+  acceptance:
+    - claim: "a prepared action is typed, allowlisted, instance-scoped, non-mutating, and names its exact target, tier, consequence, expiry, and recovery path"
+      proof: 'unit test: test/operator-agent-action-handoff.test.ts'
+    - claim: "execution requires explicit confirmation and revalidates target, scope, freshness, tier, and consequence before a governed verb runs"
+      proof: 'unit test: test/operator-agent-action-route.test.ts'
+    - claim: "unknown, high-risk, cross-repository, stale, replayed, and model-supplied actions refuse without a target write"
+      proof: 'grep: unsafe assistant actions refuse without a target write in test/operator-agent-action-route.test.ts'
+    - claim: "a repeated intent yields one action and one attributable receipt; ambiguous external outcomes remain unresolved"
+      proof: 'grep: repeated assistant intent has one action and one receipt in test/operator-agent-action-handoff.test.ts'
+    - claim: "the served route and OpenAPI contract expose action-handoff-v1 separately from read-only answer-v1"
+      proof: 'grep: buildOperatorAgentActionHandoffRoutes( in src/lib/serve.ts'
+  falsifier: |
+    Submit a natural-language answer as executable authority, switch repository or
+    target after preview, replay confirmation, or lose an external outcome and still
+    receive a success receipt. Any one behavior disproves the handoff boundary.
