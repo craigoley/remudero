@@ -751,7 +751,7 @@ test("DEFAULT_BOARD_PREWARM_MS matches buildBatchedGithub's own default TTL (15s
 
 test("resolveServePort: no --port -> DEFAULT_SERVE_PORT", () => {
   assert.equal(resolveServePort([]), DEFAULT_SERVE_PORT);
-  assert.equal(DEFAULT_SERVE_PORT, 4317); // matches apps/dashboard/src/main.ts's own default
+  assert.equal(DEFAULT_SERVE_PORT, 4317);
 });
 
 test("resolveServePort: --port <n> is honored", () => {

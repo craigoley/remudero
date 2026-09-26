@@ -6,7 +6,7 @@
 // PR; tsconfig.json's `include` already covers `packages/*/src/**/*.ts`, so this file needs no
 // new CI wiring) goes RED the moment a daemon surface field it depends on is removed or renamed --
 // proving §7A's "a breaking contract change must fail CI in EVERY consumer in the SAME PR" BEFORE
-// any real client (apps/dashboard, W3-T2+) exists.
+// any real client exists (the live console is now its own repository, remudero-console).
 //
 // See test/consumer-breaking-change.test.ts for the falsifier proof: a mutated
 // packages/api-client/src/schema.d.ts (a renamed field, then a renamed enum member) turns THIS
