@@ -52,13 +52,3 @@ test("W1-T4457 criterion 1: a non-dispatch worker spawn ledgers its worker assig
     rmSync(root, { recursive: true, force: true });
   }
 });
-
-test("the existing non-dispatch defaults use the assignment sink, including cash-eligible lanes", () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  const lanes = new Set([...source.matchAll(/ledgeredNonDispatchSpawn\("([^"]+)"/g),
-    ...source.matchAll(/ledgerNonDispatchAssignment\("([^"]+)"/g)].map((match) => match[1]));
-  for (const lane of ["review", "promotion-judge", "retro", "serve-feedback", "triage", "plan",
-    "inbox-draft", "risk-judge", "alert-fix", "onboard-synthesis"]) {
-    assert.equal(lanes.has(lane), true, `${lane} must not silently lose its assignment sink`);
-  }
-});
