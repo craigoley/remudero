@@ -182,6 +182,8 @@ export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
    * yields every later readable source, while the caller decides whether partial history is safe
    * for its decision. A missing or unreadable live file is deliberately not reported here. */
   onUnreadArchive?: (path: string) => void;
+  /** A live read failure is not an empty corpus to an audited projection. Ordinary readers may omit this. */
+  onUnreadLive?: (path: string) => void;
   /** Called only for a row that survived the union's exact replay dedupe. The normalized raw
    * line lets a bounded audit projection seed a later live-file overlay without reserializing
    * JSON and changing its identity. */
@@ -199,6 +201,8 @@ export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
   dedupeWindowPerStep?: number;
   /** Resume after an immutable rotation already represented by a checkpoint. */
   afterRotation?: string;
+  /** Inclusive upper bound for archive enumeration; pair with afterRotation for one-source batches. */
+  throughRotation?: string;
   /** Resume the mutable live ledger at a byte offset when it has only grown. */
   liveStartOffset?: number;
   /** Seed the bounded replay window without persisting raw ledger lines. */
@@ -242,7 +246,10 @@ export async function* openLedgerUnion(
   const resumedRotations = opts.afterRotation === undefined
     ? rotations
     : rotations.filter((entry) => basename(entry.path) > opts.afterRotation!);
-  const entries = opts.includeLive === false ? resumedRotations : [...resumedRotations, { path: livePath, form: "plain" as const }];
+  const selectedRotations = opts.throughRotation === undefined
+    ? resumedRotations
+    : resumedRotations.filter((entry) => basename(entry.path) <= opts.throughRotation!);
+  const entries = opts.includeLive === false ? selectedRotations : [...selectedRotations, { path: livePath, form: "plain" as const }];
   const seen = new Set<string>();
   const recentByStep = new Map<string, { order: string[]; next: number; seen: Set<string> }>();
   if (opts.dedupeSeed !== undefined) {
@@ -336,6 +343,7 @@ export async function* openLedgerUnion(
       archiveUnread = true;
     } finally {
       if (entry.path !== livePath && archiveUnread) opts.onUnreadArchive?.(entry.path);
+      if (entry.path === livePath && archiveUnread) opts.onUnreadLive?.(entry.path);
       // Explicit ownership rather than relying only on async-iterator return semantics: timeout,
       // server close and stale-code exit all need the active descriptor/gunzip/readline released
       // before this generator can settle and before another rotation can open.
