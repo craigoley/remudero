@@ -130,6 +130,29 @@ OpenTelemetry export uses bounded dimensions, its overflow bucket must be report
 dimension coverage, not a trustworthy provider/model slice: the SDK retains the total but strips
 the overflowing measurement's original attributes ([OpenTelemetry cardinality guidance](https://opentelemetry.io/blog/2026/cardinality-limits-in-opentelemetry/)).
 
+### Local cohort gardener (internal)
+
+Each daemon instance now runs a detached, best-effort cohort pass over its own ledger state. It
+audits gzip/plain rotations and the live tail in bounded, resumable source batches, checkpoints
+source hashes and a local `benchmark-cohort-v1` snapshot atomically, and re-audits edited sources
+or a changed live prefix. A retired source must reconcile its exact evidence lines in a successor
+before the snapshot can be observed. Exact replay lines are deduplicated; late attempts, terminal
+fallback, corrections, and retractions rebuild affected dimension partitions. A missing or
+malformed source, unreadable archive, torn live tail, or incomplete scan yields `unavailable`
+with last-good age rather than a fresh zero. A damaged checkpoint triggers full replay and stays
+unavailable until that replay completes. None of these conditions gates a worker or PR.
+
+Dimensions are UTC day, task class, selected provider/model, and explicitly unavailable harness
+revision. Assignment-based denominators distinguish no worker call from a call with missing
+served-model, billing, or cost evidence. A per-call attempt wins over a final verdict as worker
+call evidence; neither proves task correctness. Estimated API dollars and subscription notional
+amounts remain separate. The pressure report measures source and checkpoint bytes, relevant
+evidence bytes by UTC day, observed events per run, dimension count, and rebuilt partitions;
+it does not delete raw rows or impose a fixed storage cutoff. Run and assignment IDs stay in the
+private local checkpoint as join keys, never graph labels. There is no uploader, public cohort
+endpoint, randomized-effect estimate, or verified GitHub-outcome join in this pass. The public
+Field Trials route remains feature-flagged to 404 until consent, quality, and review are ready.
+
 ## Baseline and savings
 
 On 2026-09-18, a read-only, rotation-safe production-ledger census found 326 retained
