@@ -1247,6 +1247,7 @@ import {
   type PlanLintOutcome,
   type ReviewEvaluatorProvenance,
   type NameFilterResolution,
+  registerReviewerCheckout,
 } from "./lib/review.js";
 import {
   proofQueueAudit,
@@ -17167,6 +17168,7 @@ export function buildBaseProofDir(
   let worktreeFailure: string;
   try {
     addWorktree(headCheckoutDir, dir, base);
+    registerReviewerCheckout(dir);
     // (W1-T3098) THE DIFFERENTIAL RUN: a bare `git worktree add --detach <dir> <base>` (R-11) is a
     // checkout of the MERGE-BASE and so never contains a test the PR itself added — `node --test`
     // there finds nothing, exits nonzero, and the classifier used to read that as `discriminates`.
@@ -17416,6 +17418,7 @@ export function materializeReviewWorktree(
         "a stale fetch or a moved ref; refusing to review a possibly-wrong tree rather than posting a false verdict",
     );
   }
+  registerReviewerCheckout(worktreePath);
   return { worktreePath };
 }
 
