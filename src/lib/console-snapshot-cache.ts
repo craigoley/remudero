@@ -19,6 +19,7 @@ import { createHash } from "node:crypto";
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from "node:http";
 import { RECAP_ACK_HEADER } from "./board.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { startConsoleProjectionWorker, type ConsoleProjectionWorker } from "./console-projection-worker.js";
 import type { ConsoleSnapshotStore } from "./console-snapshot-store.js";
 import { bearerTokenId } from "./panel-actions.js";
 import type { Route } from "./service.js";
@@ -395,4 +396,11 @@ export function prewarmReadRoutes(routes: readonly Route[], paths: readonly stri
       resolve();
     });
   });
+}
+
+let sharedProjectionWorker: ConsoleProjectionWorker | undefined;
+/** The process's one projection worker (W1-T4454): the snapshot cache's heavy refreshes compute there, off serve's loop. */
+export function consoleProjectionWorker(): ConsoleProjectionWorker {
+  sharedProjectionWorker ??= startConsoleProjectionWorker();
+  return sharedProjectionWorker;
 }

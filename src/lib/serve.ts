@@ -179,6 +179,7 @@ import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import type { ConsoleProjectionWorker, FeedbackProjectionInput } from "./console-projection-worker.js";
 import { createConsoleSnapshotStore } from "./console-snapshot-store.js";
 import {
   createConsoleSnapshotCache,
@@ -258,6 +259,7 @@ export function resolveEscalationOptionAffordance(option: EscalationOption): Esc
 export const DEFAULT_SERVE_PORT = 4317;
 
 export interface ServeDeps {
+  projectionWorker?: ConsoleProjectionWorker;
   consoleSnapshots?: { dir: string; prewarmPaths?: readonly string[] };
   /** Injectable ONLY so a unit test can pin the captured sha; real callers omit it and get
    *  {@link resolveConsoleSha}, resolved once at server start. */
@@ -2400,10 +2402,12 @@ function assembleServeRoutes(
   // W1-T193: `ratify` defaults to a REAL ratifyCliGateway (see ServeDeps.panelGraph's own doc)
   // when the caller doesn't inject one -- rmd serve's own CLI wiring relies on this default;
   // a test supplies `ratify` explicitly to inject a fake instead.
+  const projectionWorker = deps.projectionWorker;
   const panelGraphDeps = {
     ...deps.panelGraph,
     inboxRoot: deps.fleetControlRoot,
     ratify: deps.panelGraph.ratify ?? ratifyCliGateway(deps.panelGraph.root, join(deps.fleetControlRoot, "state", "logs")),
+    ...(projectionWorker ? { projectFeedback: (input: FeedbackProjectionInput) => projectionWorker.feedback(input), logProjection: deps.log } : {}),
   };
   const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
   // W1-T500: SAME instance `createService`'s dispatch consults (see ServeDeps.confirmNonces's own

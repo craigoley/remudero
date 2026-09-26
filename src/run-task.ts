@@ -626,6 +626,7 @@ import {
   serviceTokensPath,
   defaultIsListening,
 } from "./lib/serve.js";
+import { consoleProjectionWorker } from "./lib/console-snapshot-cache.js";
 import { runRelayClient } from "./lib/relay-client.js";
 import { assertProposedPlanLoads,
   buildGrillEscalation,
@@ -34188,6 +34189,7 @@ export async function serveCommand(
     identity,
     log,
     consoleSnapshots: { dir: join(config.root, "state", "console-snapshots"), prewarmPaths: ["/v1/operator-activity", "/v1/action-results"] },
+    projectionWorker: consoleProjectionWorker(),
     // W1-T945: GET /v1/peek's root (config.root, the SAME root buildWorkerStateSensor resolves
     // state/runs/<runId>.tail against) + its liveness predicate, a closure over the REAL
     // liveInflightRuns over the REAL `<config.root>/state/inflight` lock directory — the exact
