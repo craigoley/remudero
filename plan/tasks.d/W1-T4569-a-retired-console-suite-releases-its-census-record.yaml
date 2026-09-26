@@ -1,0 +1,33 @@
+- id: W1-T4569
+  title: "A RETIRING SUITE'S CENSUS RECORD MUST BE RELEASED BEFORE THE SUITE IS DELETED — W1-T4563 deletes test/console-shell-coverage-is-vacuous.test.ts with the daemon's console, the census refuses the drop, and its table is an instrument that cannot ride in the same product change"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: low
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-26: old-console retirement (W1-T4563) sequencing under Standing rule 25"
+  plan_refs: ["W1-T4563"]
+  files:
+    - scripts/expiring-fixture-census.mjs
+    - test/a-retired-console-suite-releases-its-census-record.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-26 on W1-T4563's branch: `node scripts/expiring-fixture-census.mjs` exits 1,
+    "test/console-shell-coverage-is-vacuous.test.ts: measured 0 stamp(s), recorded 3". That suite
+    measured the daemon's in-process console, which W1-T4563 retires. The fix the census names is to
+    lower RECORDED_POPULATION_BY_FILE, but that file is on INSTRUMENT_SURFACE, and W1-T4563 changes
+    src/, so Standing rule 25 refuses both in one change. `refusePopulationDrop` only refuses
+    current < recorded, so releasing the record first is green on main (3 measured, none recorded)
+    and on W1-T4563's head (0 measured, none recorded) -- measured both ways.
+  design: |
+    Delete the one RECORDED_POPULATION_BY_FILE entry for the retiring suite. Nothing else in the
+    census changes; every other recorded file still refuses a drop.
+  acceptance:
+    - claim: "the retiring console suite has no recorded census population, and deleting it is not a drop while a still-recorded file still is"
+      proof: "unit test: test/a-retired-console-suite-releases-its-census-record.test.ts"
+  falsifier: |
+    Restore the entry and both tests fail (measured: 0/2 pass).

@@ -50,6 +50,10 @@ test("the freshness check reports FRESH for an immaterial advance, so the verdic
   // End to end through the real function: a behind service whose diff touches nothing on the
   // review path must come back fresh, which is what lets postReviewStatusGuarded publish.
   const freshness = checkReviewerCodeFreshness("/unused", {}, {
+    git: (args: string[]) => {
+      if (args[0] === "merge-base") return "a".repeat(40);
+      throw new Error(`unexpected git call: ${args.join(" ")}`);
+    },
     checkServiceFreshness: () => ({
       status: "loaded",
       behind: { oldSha: "a".repeat(40), newSha: "b".repeat(40), changedPaths: ["src/lib/cash-actuals.ts", "plan/tasks.yaml"] },
@@ -61,6 +65,10 @@ test("the freshness check reports FRESH for an immaterial advance, so the verdic
 
 test("and STALE when the advance really did touch the review path", () => {
   const freshness = checkReviewerCodeFreshness("/unused", {}, {
+    git: (args: string[]) => {
+      if (args[0] === "merge-base") return "a".repeat(40);
+      throw new Error(`unexpected git call: ${args.join(" ")}`);
+    },
     checkServiceFreshness: () => ({
       status: "loaded",
       behind: { oldSha: "a".repeat(40), newSha: "b".repeat(40), changedPaths: ["src/lib/review.ts"] },

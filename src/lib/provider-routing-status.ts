@@ -6,6 +6,7 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { WorkerProviderId } from "./config.js";
+import { WORKER_PROVIDER_IDS } from "./config-schema.js";
 import type { ClaudeModelHealthRoute, ClaudeModelHealthSource, ClaudeModelHealthState } from "./claude-model-health.js";
 import type {
   EffectiveProviderRoutingPolicy,
@@ -168,6 +169,15 @@ function safeLabel(value: unknown): string | undefined {
 
 function providerId(value: unknown): WorkerProviderId | undefined {
   return value === "claude" || value === "codex" ? value : undefined;
+}
+
+/** W1-T4562: a POLICY names any configured worker provider -- the committed host policy enables
+ *  `cash` today, and `openweight` is a valid id -- while capacity rows are still only ever the two
+ *  subscription providers ({@link providerId}). Reading a policy through the capacity check made
+ *  every projection with `cash` enabled read `malformed`, blanking GET /v1/provider-routing and
+ *  refusing every policy write as `provider_policy_unavailable`. */
+function policyProviderId(value: unknown): WorkerProviderId | undefined {
+  return typeof value === "string" && (WORKER_PROVIDER_IDS as readonly string[]).includes(value) ? (value as WorkerProviderId) : undefined;
 }
 
 function safePercent(value: unknown): number | undefined {
@@ -462,7 +472,7 @@ function unknown(reason: ProviderRoutingUnknownReason): ProviderRoutingStatus {
 
 function parseProviderList(value: unknown, allowEmpty = false): WorkerProviderId[] | undefined {
   if (!Array.isArray(value) || (!allowEmpty && value.length === 0)) return undefined;
-  const providers = value.map(providerId).filter((provider): provider is WorkerProviderId => provider !== undefined);
+  const providers = value.map(policyProviderId).filter((provider): provider is WorkerProviderId => provider !== undefined);
   if (providers.length !== value.length || new Set(providers).size !== providers.length) return undefined;
   return providers;
 }
@@ -597,12 +607,13 @@ function parsePolicy(value: unknown): ProviderRoutingPolicyStatus | undefined {
   ) return undefined;
   const enabledProviders = parseProviderList(raw.enabledProviders);
   const routableProviders = parseProviderList(raw.routableProviders);
-  const preference = raw.preference;
+  const preference: ProviderRoutingPreference | undefined =
+    raw.preference === "automatic" ? "automatic" : policyProviderId(raw.preference);
   const reservePercent = safePercent(raw.reservePercent);
   if (
     !enabledProviders ||
     !routableProviders ||
-    (preference !== "automatic" && preference !== "claude" && preference !== "codex") ||
+    preference === undefined ||
     reservePercent === undefined ||
     reservePercent >= 100 ||
     !Array.isArray(raw.parks)
@@ -611,7 +622,7 @@ function parsePolicy(value: unknown): ProviderRoutingPolicyStatus | undefined {
   for (const candidate of raw.parks.slice(0, 2)) {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
     const park = candidate as Record<string, unknown>;
-    const provider = providerId(park.provider);
+    const provider = policyProviderId(park.provider);
     const until = isoTime(park.until);
     if (!provider || !until) return undefined;
     parks.push({ provider, until });

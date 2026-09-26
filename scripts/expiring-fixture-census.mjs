@@ -105,7 +105,6 @@ export const RECORDED_POPULATION_BY_FILE = Object.freeze({
   "test/board.test.ts": 4,
   "test/cancelled-check-arm-can-see-it.test.ts": 1,
   "test/ci-log-unavailable-is-named.test.ts": 1,
-  "test/console-shell-coverage-is-vacuous.test.ts": 3,
   "test/cost-anomaly.test.ts": 1,
   "test/daemon-freshness.test.ts": 0,
   "test/daemon.test.ts": 2,

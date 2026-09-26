@@ -203,7 +203,7 @@ test("the freshness check posts across a run-task advance off the review path", 
   const withReview = () => ({ ...service(), behind: { ...service().behind, changedPaths: ["src/run-task.ts", "src/lib/review.ts"] } });
   assert.equal(checkReviewerCodeFreshness(repo.dir, {}, { checkServiceFreshness: withReview } as never).status, "stale");
   const unreadable = checkReviewerCodeFreshness("/nonexistent-rmd-dir", {}, { checkServiceFreshness: behind(["src/run-task.ts"]) } as never);
-  assert.equal(unreadable.status, "stale", "no git to read the advance with still withholds");
+  assert.equal(unreadable.status, "unreadable", "no git ancestry to read still withholds");
 });
 
 test("the guarded freshness check reads a run-task.ts past the 1 MiB exec buffer", () => {

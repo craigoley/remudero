@@ -1220,6 +1220,7 @@ import {
   reviewEvidenceStrength,
   claimReviewDecision,
   reviewDecisionDigest,
+  reviewReservationOwnershipEvidence,
   reviewContractDigest,
   reviewInputDigest,
   cappedReason,
@@ -6411,8 +6412,9 @@ async function runReview(args: {
   const diff = ghExec(["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
   const scopeContext = reviewScopeContext(diff, task.files);
   const criteria = task.acceptance ?? [];
+  const ownership = reviewReservationOwnershipEvidence(diff, args.headRefName, args.headCheckoutDir);
   const decisionDigest = reviewDecisionDigest({
-    headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files,
+    headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership,
   });
   const decisionClaim = await claimReviewDecision({
     ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest, headCheckoutDir: args.headCheckoutDir,
@@ -6615,6 +6617,7 @@ async function runReview(args: {
     report,
     planLint,
     headRefName: args.headRefName,
+    reservationOwnership: ownership,
     implementationReport: args.implementationReport,
     target: { owner, repo },
     // W1-T1100: threaded straight from this call's own args — see this arg's own doc.

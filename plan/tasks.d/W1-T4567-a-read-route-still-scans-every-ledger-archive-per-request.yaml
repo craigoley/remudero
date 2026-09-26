@@ -1,0 +1,48 @@
+- id: W1-T4567
+  title: "A READ ROUTE STILL SCANS EVERY LEDGER ARCHIVE PER REQUEST — /v1/self-measurement returns 8 MB in 2.6-3.0 s to answer ten rows, /v1/operator-agent/follow-ups takes 5.8 s to answer 34 bytes, and the gate that forbids blocking reads on the console path is defeated by one function call"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-26: console data-architecture review, measured on the live gateway"
+  plan_refs: ["W1-T3196", "W1-T4451", "W1-T4452", "W1-T4454", "W1-T4557"]
+  files:
+    - src/lib/serve.ts
+    - src/lib/measurement-cadence.ts
+    - src/lib/operator-agent.ts
+    - test/a-read-route-never-scans-the-whole-ledger.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-26 against the live gateway (read token, direct to the serve container):
+    GET /v1/self-measurement 200, 8,040,418 bytes, 2.6-3.0 s on every request (uncached);
+    GET /v1/operator-agent/follow-ups 200, 34 bytes, 5.76 s; GET /v1/operator-activity 114 KB,
+    14.8 s. The corpus is 383 gz archives, 101 MB compressed, 2,692,037 rows, growing by up to 186
+    rotations a day. `latestMeasurementRows` calls `resolveLedgerUnion(stateDir, pattern)` with
+    `requireArchives: true, refuseIncomplete: true` -- every archive decompressed and regex-scanned
+    to return the newest ten `measurement_cadence.ran` rows, each row carrying whole reports (one
+    field alone 618 KB). `consoleBlockingRequestPathViolations` greps each GET handler's own
+    `toString()` for fs symbols; the self-measurement handler is two lines and calls
+    `latestMeasurementRows`, so a 3 s full-corpus read passes a gate whose baseline is 0.
+    W1-T4452/W1-T4454 (queued) cache and move operator-activity and feedback off the loop; they do
+    not bound these two reads, and caching an unbounded read only hides its cost.
+  design: |
+    (i) /v1/self-measurement reads the newest N rows through the W1-T4557 cursor, newest source
+    first, stopping at N -- never the whole union -- and returns each measure's status and headline
+    numbers, not its full report (a `?detail=<measure>` read may return one report). (ii)
+    /v1/operator-agent/follow-ups is bounded the same way; find which union read it performs and
+    bound it. (iii) Make the blocking-read gate refuse by REACH, not by handler text: a test drives
+    every GET read route with the ledger-union readers stubbed to count calls and fails when any
+    route performs an unbounded union read per request. Completeness answers stay available on the
+    CLI verbs, which are not on a request path.
+  acceptance:
+    - claim: "no GET read route performs an unbounded ledger-union read per request"
+      proof: "unit test: W1-T4567: no read route scans the whole ledger union per request"
+    - claim: "self-measurement answers the newest rows without opening every archive and without full reports"
+      proof: "unit test: W1-T4567: self-measurement stops at the newest rows and returns headlines"
+  falsifier: |
+    Route /v1/self-measurement back through resolveLedgerUnion and the first proof fails.

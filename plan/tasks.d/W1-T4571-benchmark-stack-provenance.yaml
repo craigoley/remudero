@@ -1,0 +1,58 @@
+- id: W1-T4571
+  title: "A MODEL LABEL IS NOT A TREATMENT — attest the working stack before a comparable benchmark"
+  repo: remudero
+  depends_on: [W1-T4560]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  band_meaning: span
+  origin: "operator review 2026-09-26: the private benchmark-run receipt still marks every stack revision not-pinned-by-harness"
+  plan_refs: ["W1-T4560", "W1-T4554", "docs/research/model-evidence-program.md"]
+  files:
+    - src/lib/benchmark-run.ts
+    - src/lib/benchmark-evidence.ts
+    - src/run-task.ts
+    - test/benchmark-run.test.ts
+    - test/benchmark-evidence.test.ts
+    - test/run-task-benchmark-run-wiring.test.ts
+    - docs/model-routing.md
+  status: queued
+  rationale: |
+    The merged benchmark-run-v1 envelope correctly refuses to guess harness, prompt, tool,
+    scorer, and environment revisions: all are currently `not-pinned-by-harness`. That protects
+    against false scores, but means even a complete assignment-to-terminal cohort cannot yet
+    establish equal treatment across arms or across the three opted-in repositories. The core
+    research design requires a pinned model + harness, not just a model name. This task records
+    only revisions actually identified at the worker boundary and makes their absence a visible
+    comparability refusal. The high band reflects source, projection, and test span.
+  design: |
+    Supply benchmarkRunAssignmentReceipt with an optional, validated stack-identity evidence
+    object from the production worker-dispatch path. Identify the executing harness revision
+    from the code or image the worker actually runs, not an operator checkout or a guessed
+    origin/main HEAD. Identify prompt-template, tool-policy, scorer, and environment revisions
+    only from immutable resolved artifacts or explicit trial manifests; do not hash raw prompts,
+    source content, secrets, accounts, or private repo names into public fields. Every absent or
+    conflicting pin stays `unavailable` with a specific reason. Capture assignment-time pins
+    before execution, and keep fallback/served-model mismatches visible at terminal time.
+
+    Add a pure comparability classification over two benchmark assignments that returns
+    `comparable`, `different-stack`, or `unavailable`, naming each decisive revision and
+    missing field. Old rows remain unavailable. Do not fold incomparable arms into one model
+    score or change routing; the local cohort may still count them as coverage debt. A later
+    randomized A/A harness can pass explicit pinned manifests through this same contract.
+  acceptance:
+    - claim: "production assignment receipts use only attested worker-boundary stack revisions"
+      proof: "unit test: benchmark stack provenance is captured from the executing worker boundary"
+    - claim: "missing or conflicting revisions remain unavailable rather than guessing a checkout SHA"
+      proof: "unit test: benchmark stack provenance refuses guessed or conflicting revisions"
+    - claim: "comparability separates equal stacks from different or unpinned working setups"
+      proof: "unit test: benchmark stack comparability requires matching observed revisions"
+    - claim: "the run-task worker assignment path passes the validated stack evidence into the receipt"
+      proof: "unit test: run task wires worker stack provenance into benchmark receipts"
+  falsifier: |
+    Two workers with the same model label but different prompt/tool/scorer revisions classify
+    comparable; a bare local HEAD becomes the serving worker's image revision; an absent pin
+    becomes a default string; or raw prompt/source/account content enters the receipt. Each
+    case must fail a proof. This telemetry never holds a healthy PR.
