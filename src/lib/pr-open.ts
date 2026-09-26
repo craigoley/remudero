@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { loadPlan } from "./plan.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
+import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
 import { taskIdFromRunBranch } from "./status.js";
 import {
   acceptanceAuthorTimeCheck,
@@ -37,7 +38,9 @@ export function defaultProofRunner(proof: string, mergeBase: string, repoRoot: s
   const result = spawnSync(
     process.execPath,
     ["--import", "tsx", "src/run-task.ts", "check-proof", proof, "--base", mergeBase],
-    { cwd: repoRoot, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
+    // A PR proof runs on the branch being published. The child already receives its exact base
+    // and must inspect that branch, not ask self-sync to fast-forward it to origin/main.
+    { cwd: repoRoot, encoding: "utf8", maxBuffer: 16 * 1024 * 1024, env: { ...process.env, [SELF_SYNC_GUARD_ENV]: "1" } },
   );
   return {
     status: result.status,
