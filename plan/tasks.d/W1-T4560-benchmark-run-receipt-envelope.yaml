@@ -1,0 +1,56 @@
+- id: W1-T4560
+  title: "BENCHMARK THE STACK, NOT THE MODEL LABEL — versioned private assignment and terminal receipt envelope"
+  repo: remudero
+  depends_on: [W1-T4553]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator 2026-09-26: continue model benchmarking telemetry and evidence gardener follow-ups"
+  plan_refs: ["W1-T100001", "W1-T4554", "docs/research/model-evidence-program.md"]
+  files:
+    - src/lib/benchmark-run.ts
+    - src/run-task.ts
+    - test/benchmark-run.test.ts
+    - test/run-task-benchmark-run-wiring.test.ts
+    - docs/model-routing.md
+  status: queued
+  rationale: |
+    Existing worker.assignment/verdict joins identify selected and served models, but an
+    assignment has no pinned benchmark-run schema for the work and working stack. W1-T4554
+    must not infer a harness revision, consent, randomization, or missing terminal fields from
+    these historical rows. The narrow producer contract belongs before cross-instance cohorts.
+  design: |
+    Attach a versioned metadata-only benchmark_run receipt to the existing worker.assignment
+    and terminal verdict ledger rows in the real run-task spawn/log path. Reuse immutable
+    selection_assignment_id, run_id, and existing worker result values rather than emitting
+    a second counted worker call. Record the assignment-time task class and risk, provider,
+    requested/selected model and effort, and independently sourced harness/tool/prompt/scorer
+    revisions when available; every unavailable revision carries an explicit reason rather
+    than a guessed repo HEAD. Rights default private until a locally verified consent receipt
+    can be attached. Mark allocation observational unless a durable randomization receipt
+    exists; do not relabel headroom routing as an experiment.
+
+    At terminal record observed, failed, censored, or unavailable state for the call and
+    explicit missingness for provider-served model, tokens, duration, and cost. Keep API cash
+    estimate and subscription notional cost separate; no invoice claim. An intermediate
+    implement.done row must never become the final outcome. Legacy rows remain legible as
+    pre-instrumentation/unavailable. Never retain prompt text, source, credentials, account
+    labels, repository names, or raw identifiers in a public aggregate. This is local ledger
+    telemetry only, with no new PR gate, route change, paid traffic, or upload.
+  acceptance:
+    - claim: "the assignment receipt binds work and stack provenance to the immutable selection ID without guessing revisions or publication rights"
+      proof: "unit test: benchmark run assignment records private stack provenance and explicit unavailable revisions"
+    - claim: "terminal evidence distinguishes missing fields from observed zero and cash from subscription accounting"
+      proof: "unit test: benchmark run terminal preserves missingness and separate accounting modes"
+    - claim: "an intermediate worker result and an unjoined verdict never fabricate a joined benchmark outcome"
+      proof: "unit test: benchmark run refuses intermediate and unjoined terminal claims"
+    - claim: "the actual run-task assignment and terminal logger carries the envelope without changing dispatch or review behavior"
+      proof: "unit test: run task wires benchmark run receipts at assignment and terminal"
+    - claim: "the production path invokes the versioned envelope builder"
+      proof: "grep: benchmarkRunAssignmentReceipt( in src/run-task.ts"
+  falsifier: |
+    Treating a selected model as served, a missing cost as zero, a subscription estimate as
+    cash, a headroom choice as random, or an absent consent receipt as public must fail.
