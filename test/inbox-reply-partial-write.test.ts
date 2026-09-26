@@ -65,7 +65,7 @@ async function fixture(t: TestContext) {
   return { ledgerPath, storePath, reply, messages, audits, errors, deps };
 }
 
-test("W1-T4558: a ledger append failure after the message append is delivered with an explicit audit gap", async (t) => {
+test("W1-T4558: a ledger append failure is delivered with an audit gap, and the same reply intent cannot append a second message", async (t) => {
   const f = await fixture(t);
   f.deps.appendInboxReplyAudit = () => { throw new Error("injected ledger append failure"); };
   const first = await f.reply();
@@ -76,7 +76,6 @@ test("W1-T4558: a ledger append failure after the message append is delivered wi
   assert.equal(typeof first.body.replyId, "string");
   f.deps.appendInboxReplyAudit = undefined;
 
-  // same reply intent cannot append a second message
   const retry = await f.reply();
   assert.equal(retry.status, 200);
   assert.equal(retry.body.replyId, first.body.replyId);
