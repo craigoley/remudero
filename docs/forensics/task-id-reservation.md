@@ -1,5 +1,22 @@
 # task-id-reservation.ts forensics
 
+## Same-head review repair (W1-T4561)
+
+PR #7284 first failed review because its newly filed task ID had no remote
+`refs/rmd-id/<id>` anchor. Claiming the exact ref did not change the PR head or
+body, so the old review-decision digest replayed that failure before the judge
+read the repaired reservation. Editing the PR body happened to force a retry;
+it was not a valid repair workflow.
+
+For a diff that adds a task ID, review now reads the reservation before
+claiming a decision. Its ownership findings, including an empty array meaning
+"checked and valid," enter the decision digest and are reused by the judge.
+An unchanged missing or foreign holder retains the same digest and refusal;
+an unreadable ref never becomes a pass. A changed reservation yields a fresh
+decision, so the guarded status poster can replace the old red verdict on the
+same PR head without treating two different inputs as a contradiction. This
+does not add a worker call or relax head, lifecycle, or foreign-holder guards.
+
 The measured forensics, incident narratives and design arguments removed from
 `src/lib/task-id-reservation.ts` when its comments were compacted to the plain-language standard.
 Every block below is the removed text verbatim, nothing else changed. Headings name the symbol or

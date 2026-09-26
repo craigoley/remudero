@@ -83,6 +83,8 @@ export interface ReviewDecisionDigestInput {
   declaredFiles?: readonly string[];
   policyRevision?: string;
   engineRevision?: string;
+  /** Exact reservation findings observed for newly filed ids; an empty array means ownership was checked and valid. */
+  ownership?: readonly TaskIdOwnershipFinding[];
 }
 
 /** Content address of every material input to one review decision; model output is excluded. */
@@ -104,6 +106,7 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
     body: input.body ?? null,
     acceptance,
     declaredFiles: input.declaredFiles ?? [],
+    ...(input.ownership !== undefined ? { ownership: input.ownership } : {}),
   });
   return `v2:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
 }
@@ -396,6 +399,8 @@ export interface ReviewEvidence {
   report: string;
   /** W1-T4414: the PR's head branch. Absent ⇒ the reservation-ownership check cannot compare a holder and does not run. */
   headRefName?: string;
+  /** The reservation read that keyed this decision, so the judge never races a second remote read. */
+  reservationOwnership?: TaskIdOwnershipFinding[];
   /** The implementation worker's full report. Kept distinct from the PR body: body integrity
    * remains authoritative for prose/diff checks while this optional channel supplies only the
    * strict `REFUSED:` grammar. */
@@ -3747,9 +3752,9 @@ export function judgeReview(
       : [];
   const idCollisions = baseIdDecls.length > 0 ? taskIdCollisions(idDecls.added, baseIdDecls, idDecls.removed) : [];
   const idOwnership =
-    idDecls.added.length > 0 && evidence.headCheckoutDir && evidence.headRefName
+    evidence.reservationOwnership ?? (idDecls.added.length > 0 && evidence.headCheckoutDir && evidence.headRefName
       ? taskIdOwnershipFindings(evidence.diff, idDecls.added, baseIdDecls, evidence.headRefName, evidence.headCheckoutDir)
-      : [];
+      : []);
   const idOwnershipFails = idOwnership.some((f) => f.kind !== "unknown");
   const idOwnershipUnknown = idOwnership.some((f) => f.kind === "unknown");
 
@@ -5949,6 +5954,20 @@ export function taskIdOwnershipFindings(
     }
   }
   return findings;
+}
+
+/** Snapshot the external reservation before decision replay, then reuse this exact read in the judge. */
+export function reviewReservationOwnershipEvidence(
+  diff: string,
+  headRefName: string | undefined,
+  headCheckoutDir: string | undefined,
+  read?: Parameters<typeof taskIdOwnershipFindings>[5],
+): TaskIdOwnershipFinding[] | undefined {
+  if (!headRefName || !headCheckoutDir) return undefined;
+  const added = taskIdDeclarationsInDiff(diff).added;
+  if (added.length === 0) return undefined;
+  const base = taskIdDeclarationsAtRef(headCheckoutDir, "origin/main");
+  return taskIdOwnershipFindings(diff, added, base, headRefName, headCheckoutDir, read);
 }
 
 // ── Item 1: ONE CONCERN per PR ─────────────────────────────────────────────
