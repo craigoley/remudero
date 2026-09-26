@@ -1246,8 +1246,6 @@ test("console version: GET /v1/version is READ-scoped, so a staleness check neve
 
 // ── W1-T4563: `/` is no longer a console ─────────────────────────────────────
 test("W1-T4563: GET / answers what this surface is and where the console lives, never an HTML shell", async () => {
-  const { CANONICAL_CONSOLE_URL } = await import("../src/lib/serve.js");
-  assert.equal(CANONICAL_CONSOLE_URL, "https://app.remudero.com");
   const root = tmpRoot();
   await withServeServer(depsFor(root, { tasks: [], byId: new Map() }), async (base) => {
     const res = await get(base, "/", READ_TOKEN);
@@ -1263,4 +1261,9 @@ test("W1-T4563: GET / answers what this surface is and where the console lives, 
       assert.equal(gone.status, 404, path);
     }
   });
+});
+
+test("W1-T4563: the gateway names app.remudero.com as the canonical console", async () => {
+  const { CANONICAL_CONSOLE_URL } = await import("../src/lib/serve.js");
+  assert.equal(CANONICAL_CONSOLE_URL, "https://app.remudero.com");
 });
