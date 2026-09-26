@@ -50,7 +50,7 @@ function recorder() {
 // W1-T1052: split by whether `attemptArm` was genuinely reached — an outcome returned before
 // any attempt (never armed, never merged) versus one where the attempt was made and did not
 // stick. `armOutcomeArmed`'s own doc comment (lib/sweep.ts) draws exactly this line.
-const NEVER_ATTEMPTED: ArmOutcome[] = ["no-task-id", "head-unavailable", "ledger-refused"];
+const NEVER_ATTEMPTED: ArmOutcome[] = ["no-task-id", "head-unavailable", "ledger-refused", "stack-parent-refused"];
 const ATTEMPTED_AND_FAILED: ArmOutcome[] = ["direct-merge-failed", "arm-error-ignored"];
 const NON_ARMING: ArmOutcome[] = [...NEVER_ATTEMPTED, ...ATTEMPTED_AND_FAILED];
 
@@ -183,9 +183,9 @@ test("arm step name: the change adds no new ledger step", () => {
     armAndLogOutcome("https://github.com/craigoley/remudero/pull/1052", "W1-T1052", r.log, () => outcome);
     assert.equal(r.steps.length, 1, `${outcome}: exactly one ledger line — the rename must not add a second row`);
   }
-  // Neither the old nor the new step name is a member of DECISION_RELEVANT_LEDGER_STEPS — no
-  // decision reads either back, so the rename creates no membership obligation on that set.
-  assert.equal(DECISION_RELEVANT_LEDGER_STEPS.has("automerge.arm_skipped"), false);
+  // W1-T4581 now consumes the existing skip row to preserve stack-parent refusal/dedup across
+  // ledger rotation. The rename still adds no new step: arm_failed remains write-only.
+  assert.equal(DECISION_RELEVANT_LEDGER_STEPS.has("automerge.arm_skipped"), true);
   assert.equal(DECISION_RELEVANT_LEDGER_STEPS.has("automerge.arm_failed"), false);
 });
 
