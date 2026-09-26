@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { test } from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
@@ -32,6 +33,60 @@ test("openLedgerUnion yields gzip rotation, plain rotation and live rows exactly
     for await (const rec of openLedgerUnion(dir)) markers.push(String(rec.marker));
 
     assert.deepEqual(markers, ["gzip", "shared", "plain", "live"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ledger union selects one source and reports unreadable live evidence", async () => {
+  const dir = tmpStateDir();
+  try {
+    const first = "ledger.2026-01-01T00-00-00-000Z.ndjson.gz";
+    const second = "ledger.2026-01-02T00-00-00-000Z.ndjson";
+    const live = join(dir, LEDGER_FILENAME);
+    writeFileSync(join(dir, first), gzipSync(Buffer.from(row("first") + "\n")));
+    writeFileSync(join(dir, second), row("second") + "\n");
+    writeFileSync(live, row("live") + "\n");
+    const markers = async (opts: Parameters<typeof openLedgerUnion>[1], io?: Parameters<typeof openLedgerUnion>[2]): Promise<string[]> => {
+      const found: string[] = [];
+      for await (const rec of openLedgerUnion(dir, opts, io)) found.push(String(rec.marker));
+      return found;
+    };
+    assert.deepEqual(await markers({ throughRotation: first, includeLive: false }), ["first"]);
+    assert.deepEqual(await markers({ afterRotation: first, throughRotation: second, includeLive: false }), ["second"]);
+    assert.deepEqual(await markers({ afterRotation: second }), ["live"]);
+    const unread: string[] = [];
+    assert.deepEqual(await markers({ afterRotation: second, onUnreadLive: (path) => unread.push(path) }, {
+      readdirSync,
+      existsSync,
+      createReadStream: (path, options) => path === live
+        ? Readable.from((async function* () { throw new Error("unreadable live"); })())
+        : createReadStream(path, options),
+    }), []);
+    assert.deepEqual(unread, [live]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ledger union keeps three-form defaults with and without a cursor", async () => {
+  const dir = tmpStateDir();
+  try {
+    const first = "ledger.2026-01-01T00-00-00-000Z.ndjson.gz";
+    const second = "ledger.2026-01-02T00-00-00-000Z.ndjson";
+    const replay = row("replayed", "worker.assignment");
+    writeFileSync(join(dir, first), gzipSync(Buffer.from(row("gzip") + "\n" + replay + "\n")));
+    writeFileSync(join(dir, second), replay + "\n" + row("plain") + "\n");
+    writeFileSync(join(dir, LEDGER_FILENAME), row("live") + "\n");
+    const collect = async (opts: Parameters<typeof openLedgerUnion>[1] = {}): Promise<string[]> => {
+      const found: string[] = [];
+      for await (const rec of openLedgerUnion(dir, opts)) found.push(String(rec.marker));
+      return found;
+    };
+    assert.deepEqual(await collect({ throughRotation: first, includeLive: false }), ["gzip", "replayed"]);
+    assert.deepEqual(await collect(), ["gzip", "replayed", "plain", "live"]);
+    assert.deepEqual(await collect({ afterRotation: first, throughRotation: second, includeLive: false }), ["replayed", "plain"]);
+    assert.deepEqual(await collect(), ["gzip", "replayed", "plain", "live"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
