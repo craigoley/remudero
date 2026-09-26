@@ -1,8 +1,9 @@
-# REMUDERO — Master Plan (v2.93 · synced 2026-09-26)
-**FOCUS — TWO SHIPS, WHILE THE FAILURE TAXONOMY STILL CANNOT NAME ITS RUNS.**
-R81 observed 40 runs: `incomplete`×26, `blocked_transient`×13 and `merged`×1. W1-T4446/#7253
-merged after an `incomplete` verdict, and the prior retro/#7247 merged gate-side. All 13 transient
-blocks carry `openweight_error`, but MAST names no run exemplar (**P42**). **No proposal minted.**
+# REMUDERO — Master Plan (v2.94 · synced 2026-09-26)
+**FOCUS — CONTAINMENT RECURS ON ONE HOST WHILE THE VERDICT TAXONOMY STAYS DARK.**
+R82 observed 40 runs: `blocked_containment`×5, `blocked_transient`×10 and `incomplete`×25.
+RETRO/#7309 merged gate-side; the ledger recorded no `merged` verdict. Five containment blocks
+across three tasks reported `write-never-attempted` (**P52**); 34 non-merged verdicts remain
+unmapped (**P42**). **No proposal minted.**
 
 **Header discipline (v2.17).** Sync date + current focus, nothing else; the sections are the source of
 truth. A retro that re-inflates this header has failed the HARNESS-COMPRESSION bar.
@@ -189,21 +190,16 @@ this block — a generator has no authority over WHY.
 - **ci-gate REQUIRED checks**: 27 — ci, lint-plan, depcruise, containment-probe, coverage-ratchet, mutation-ratchet, jscpd-gate, claims, learnings-budget-ratchet, commitlint, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, scan-pr / osv-scan, License Review, leak-grep, assertion-discrimination, task-id-existence, acceptance-author-gate, head-identity-gate, proof-discrimination, unwired-gate, comment-load-ratchet, source-size, coverage-session-blanking, baseline-monotonic, test-slow — source: `REQUIRED` (.github/workflows/ci-gate.yml, job `ci-gate`)
 <!-- CAPABILITY SNAPSHOT:END -->
 
-★ **CURRENT R81 (RETRO-1790437945765, 2026-09-26): 40 OBSERVED RUNS, 1 LEDGER `merged`, 2 OWNERSHIP-ASSERTED SHIPS.** The verdict census is `incomplete`×26, `blocked_transient`×13 and `merged`×1. W1-T4446/#7253 is the one ledger-credited merge ($0.170/129t); its owning run ended `incomplete`. RETRO/#7247 ($1.483/0t) is the gate-side merge, also after an `incomplete` run. Earlier W1-T4446 and W1-T4555 runs name later branches' PRs, so their trailers were rejected rather than credited to the wrong runs (**P74**). MAST counts infrastructure 0 (−2), but leaves `blocked_transient:openweight_error`×13 and `incomplete`×25 unmapped (**P42**); its zero mapped category does not resolve those failures. No degraded-success, recurring procedural-success or repeated failed-review reason cleared the gather's respective floors.
+★ **CURRENT R82 (RETRO-1790452496667, 2026-09-26): 40 OBSERVED RUNS, NO LEDGER `merged`, ONE OWNERSHIP-ASSERTED SHIP.** The verdict census is `blocked_containment`×5, `blocked_transient`×10 and `incomplete`×25. RETRO [#7309](https://github.com/craigoley/remudero/pull/7309) merged gate-side after an `incomplete` run; two other retro runs' trailers were rejected because #7309 belongs to a different head branch (**P69**). MAST maps the five containment blocks to infrastructure, not task defects: W1-T4266 twice, W1-T4457 once and W1-T4559 twice, all `outside-cwd-denial` with `write-never-attempted` on one host (**P52**). It leaves `blocked_transient:openweight_error`×10 and `incomplete`×24 unmapped (**P42**). No degraded-success, procedural-success or failed-review pattern met its promotion floor.
 
-★ **CURRENT NET STATE:** the plan-health sweep finds no violations; plan coherence finds no disagreement among **2,108 shards and 269 monolith records**. The plan-state truth rung checked one asserted-unbuilt id and found it unmerged; SHIPS-UNWIRED names no newly unreachable claim. Containment and isolation recorded zero fires with one zero marker each, so no catch is proven. The golden replay suite did not run; mutation verdict history has **N=0** because no CI-side emission is wired. LEARNINGS has **80 entries, +1**. Ratification reads **9 approved / 0 reframed** over an incomplete 260,267-row ledger window that dropped 53,419 older rows; it is not comparable to an all-history rate. G-17 is **historical, notional API-equivalent cost**, not billed spend: 671 Architect-lane rows / $10.57 = **5.4%** of 804 measured rows / $197.03, with a newest row at 2026-09-26T15:41:36.641Z. It measures only G-17's capability half; ratification authority, `assertArchitectAboveWorker` and mounts stay as they are. The harvest's fixture, coverage-log, branch-reap and serve-read follow-ups remain proposal candidates, not filed work.
+★ **CURRENT NET STATE:** WS-0 and WS-1 are shipped; the plan-health sweep finds no violations, and plan coherence finds no disagreement among **2,122 shards and 269 monolith records**. The one asserted-unbuilt id checked remains unmerged; SHIPS-UNWIRED names no newly unreachable claim. Isolation did not fire, with two zero markers; the golden replay suite did not run, and mutation verdict history remains **N=0**, with CI-side emission unwired. LEARNINGS has **80 entries, +0**. Ratification reads **9 approved / 0 reframed** over an incomplete 260,617-row ledger window that dropped 27,939 older rows. G-17's **historical, notional API-equivalent cost** is 591 Architect-lane rows / $8.31 = **5.6%** of 713 measured rows / $149.39; its newest row is 2026-09-26T19:27:33.456Z. This measures only G-17's capability half; ratification authority, `assertArchitectAboveWorker` and mounts do not change. No follow-up cleared harvest this cycle.
 
-★ **CURRENT CALIBRATION:** implement 26 runs / 1 merged / $0.041 average / 16.5 turns average / $1.064 total; retro 1 / 0 / $1.483 / 0 / $1.483; triage 13 / 0 / $0.000 / 0 / $0.000. The observed table below is the mount input, but **P65's changed-files classifier has not shipped**, so the mount freeze still holds. Class `src` has 26 runs / 1 merged and 181,755 output tokens; its 429 turns/merge and 181,755 tokens/merge divide by a shipped denominator of one. Closure reads `src` 1 of 611 and `docs` 0 of 63, `plan-lint` 0 of 29, `design` 0 of 5. Weekly-limit burn by model class is opus **7,837 turns / 93.2%**, sonnet **574 / 6.8%**, unresolved **0 turns**; the $ context is not the objective. No tier or mount row moves.
+★ **CURRENT CALIBRATION:** the observed table below prices 27 implement, 3 retro and 10 triage runs, with no merged verdicts. **P65's changed-files classifier has not shipped**, so the mount freeze still holds. Class `src` has 27 runs / 0 merged and 146,503 output tokens; turns/merge and tokens/merge are undefined. Closure reads `src` 0 of 623 and `docs` 0 of 64, `plan-lint` 0 of 29, `design` 0 of 5. Weekly-limit burn is opus **6,900 turns / 93.9%**, sonnet **451 / 6.1%**, unresolved **0 turns**; the $ context is not the objective. No tier or mount row moves.
 
-★ **WS-1 COMPLETE + L2 LIVE (2026-07-15) — FOLDED TO THREE LINES BY R23; the SHIPPED log carries every
-PR and the claims have held for fifteen retro-cycles.** Self-hosting exit criterion MET (`rmd daemon`
-drained SBX-T1/T2/T3 unattended → #6/#7/#8, then survived kill-9 + restart with **no duplicate task
-run**, W1-T12d, operator-attested; the drill was bounded, so recovery is proven by no-duplicate + clean
-idle, not by an active `reconstructOrphan`). §5's Tier-1 security stack runs on remudero itself (§5A's
-"the harness eats first" is FACT there), and the daemon drains `remudero` and fires its own retro
-(W1-T160/#853) — the operator-kick era is over.
-
-**WS-0 and WS-1 are SHIPPED.**
+★ **WS-1 COMPLETE + L2 LIVE (2026-07-15).** `rmd daemon` drained SBX-T1/T2/T3 unattended
+(#6/#7/#8); the bounded kill-9/restart drill had no duplicate run (W1-T12d, operator-attested).
+The Tier-1 security stack runs on remudero (§5A), and the daemon drains its own tasks and retro
+(W1-T160/#853). The SHIPPED log carries the PR evidence.
 **The DARK roster below** carries R44's self-declared missing wires (`pruneSelfReferentialFollowups`, the
 `worktree.*` fields' absent status-board latch, `namedTaskId`, the `rmd sweep` label undercount, the
 `docs/docs-index.json` deadlock — **P63, exercised**); their ships are in the SHIPPED log (rule 13).
@@ -442,6 +438,10 @@ hides: the repair is filed by whoever is blocked, not by whoever broke it.
 
 Shipped arcs, keyed by Remudero-Task (Standing rule 13: the proof is a MERGED PR, not prose).
 Newest first. Cost/turns from the run ledger.
+
+### RETRO-1790452496667 (2026-09-26, R82) — one gate-side plan-sync
+
+- **RETRO** [#7309](https://github.com/craigoley/remudero/pull/7309) $0.000·0t — the ownership-asserted union credits the merge although the run ended `incomplete`; no ledger `merged` verdict was recorded. Two later retro runs that named #7309 were rejected because their head branches do not own it (**P69**).
 
 ### RETRO-1790437945765 (2026-09-26, R81) — W1-T4446 plus a gate-side plan-sync
 
@@ -1366,16 +1366,17 @@ i.e. the plan's OLDEST entries were its most verbose. Ids/PRs/costs/turns preser
 - **THE FIRST GREEN LOOP — 3 tasks** (WS-0 spike/#1 $0.86, 7/7 verdicts GREEN, ground truth in FIELD
   FINDING 10 · SB-HELLO/sandbox#2 $0.41 · CI-GREEN-PROBE/#5 $0.44)
 
-## Calibration (observed — current R81 first; prior-cycle evidence follows)
+## Calibration (observed — current R82 first; prior-cycle evidence follows)
 
-**RETRO-1790437945765 (2026-09-26) — observed task-type calibration.** Dollars are notional API-equivalent cost, not billed spend. W1-T5 needs this row; P65's mount freeze still forbids a re-base on it.
+**RETRO-1790452496667 (2026-09-26) — observed task-type calibration.** Dollars are notional API-equivalent cost, not billed spend. W1-T5 needs this row; P65's mount freeze still forbids a re-base on it.
 
 | task_type | runs | merged | avg $ | avg turns | total $ |
 |---|---|---|---|---|---|
-| implement | 26 | 1 | $0.041 | 16.5 | $1.064 |
-| retro | 1 | 0 | $1.483 | 0 | $1.483 |
-| triage | 13 | 0 | $0.000 | 0 | $0.000 |
+| implement | 27 | 0 | $0.000 | 3 | $0.004 |
+| retro | 3 | 0 | $0.000 | 0 | $0.000 |
+| triage | 10 | 0 | $0.000 | 0 | $0.000 |
 
+**R81 folded:** 40 runs; implement 26 / 1 / $0.041 / 16.5 turns / $1.064, retro 1 / 0 / $1.483 / 0 / $1.483, triage 13 / 0 / $0.000 / 0 / $0.000. Its detail remains in git history.
 **R80 folded:** 27 runs; implement 20 / 6 / $1.671 / 67.55 turns / $33.425, with no calibration-writer change and no mount re-base. Its detailed reading remains in git history.
 
 **Prior cycles (FOLDED — trend only; ledger-merged first, real ships in parentheses):** **R58–R78 FOLDED** (implement endpoints still quoted: R59 $0.916, R65 $0.030,
@@ -1395,9 +1396,6 @@ $3.812–$8.327/run, 7.8–116.2t) · **R8–R10 FOLDED BY R24** (248 runs / 21 
 $1.258–$10.650, 14.7–86.6t — R8 churn-poisoned by the W1-T1 spin loop and never to be re-based on) ·
 **R1–R7 FOLDED BY R15** (91 runs / 47 merged, $1.838–$5.794/run, 21.4–72.2t — pre-fleet).
 *(⚠ = turn column dark, sub-40% covered, or fully covered and arithmetically wrong; do not use.)*
-**Derived all-time:** ~2158 runs, ~829 ledger-merged (**R80 adds 27 runs and 6 `merged`. The credit
-feed names 6 task pairs, all NEW, and the union adds six new gate-side merges** — DR-22, DR-30).
-
 **Reads:** *(the standing lesson kept from R53's deleted block, in one line: a section that is not
 re-scored is not evidence, and a retro that updates the table above a paragraph without reading the
 paragraph has published last cycle twice.)*
@@ -1433,39 +1431,38 @@ paragraph has published last cycle twice.)*
 
 **★ THE LIVE RANKING IS RETIRED (R53-4's arm, fired 2026-09-15; its account was DELETED BY R58, and R80 folds this note to one sentence).** This section publishes no ORDER over its open proposals; the DEBT line below names each one-file remedy with its AGE IN CYCLES, and rank language inside older entries is historical record only.
 
-**★ R81 RETRO PROPOSALS — FAILURE MINING (PROPOSALS ONLY; nothing filed). No new proposal minted this cycle.** The highest active header before this edit was **P82**; the scoped proposal-header census found no higher id.
-- **P42, proposed golden:** all 13 `blocked_transient:openweight_error` verdicts are unmapped and unnamed by run. Seed one reason-preserving fixture with a run exemplar and a merge-state join that excludes a ledger-credited ship; the existing P42 golden specifies both checks. The 25 unmapped `incomplete` verdicts are also P42's existing class. The gather does not supply run ids for these failures, so none can honestly be assigned to W1-T4446 or another task.
-- **P74, existing credit golden:** W1-T4446's earlier runs and five W1-T4555 runs point at later branches' merged PRs. Preserve the earlier-run rejection as evidence of the ownership join; W1-T4446/#7253 receives one credit, not one per trailer.
-- **No new infrastructure golden:** containment and isolation did not fire. Their zero rows have one marker each, which proves a marker existed, not that either guard caught a defect. Replay did not run and mutation verdict emission remains unwired (**P48/P52**).
+**★ R82 RETRO PROPOSALS — FAILURE MINING (PROPOSALS ONLY; nothing filed). No new proposal minted this cycle.** The scoped active-header census still tops out at **P82**.
+- **P52, proposed golden:** seed five `containment/outside-cwd-denial` blocks across three tasks on one host, each with `write-never-attempted`; assert one infrastructure escalation, bounded probe retry and no task strike. These five observed blocks are a host signal, not task defects.
+- **P42, proposed golden:** seed `blocked_transient:openweight_error`×10 and `incomplete`×24 with run exemplars; assert the reason suffix survives mapping and the gate-side #7309 merge is excluded from failure counts.
+- **P69, proposed credit golden:** #7309 is credited to its owning retro branch once; the two other retro runs naming that PR remain rejected as foreign trailers.
 
-**Harvest routing:** the knowledge-gardener fixture deadlock and branch-reap missing proofs are scope questions for **P63**; unreadable coverage-shard logs and log-fetch gaps belong with **P82** pending real job logs. Boot and panel plan reads remain distinct follow-ups from W1-T4481. These are candidates, not filed tasks. No procedural or failed-review pattern met its two-run floor. The three learning-promotion recommendations remain proposals for a reviewed change at their named layer; this plan edit does not promote them.
-**R81 COMPRESSION:** R80's calibration analysis was folded to one historical line, and its prior proposal-mining/harvest recap was replaced by this shorter current reading. The standing debt below remains the durable owner of recurring remedies.
+**R82 COMPRESSION:** the stale R81 failure-mining, harvest and compression recap was deleted; these three routed cases replace it. Replay and mutation remain unmeasured, and the three learning-promotion suggestions remain proposals for their named layer.
 
 **(j) THE STANDING DEBT LINE — EACH ENTRY WITH ITS AGE IN CYCLES (R51-5's arm, still firing; since the
 ranking's deletion this is the ONLY ordering-shaped artifact this section publishes).** This rung has
 PROPOSED the same corrective tasks every cycle and filed none, because it is forbidden to touch
 `plan/tasks.yaml` and no downstream rung reads this section:
 **(1)** `plan/mast-mapping.yaml` (untouched since #1270) needs `incomplete`, `blocked_transient` and
-`failed` rows, and its merge-state join must exclude ledger-credit rescues — **AGE: 47 cycles; R81 leaves 13 reasoned transient and 25 incomplete verdicts unmapped**.
+`failed` rows, and its merge-state join must exclude ledger-credit rescues — **AGE: 48 cycles; R82 leaves 10 reasoned transient and 24 incomplete verdicts unmapped**.
 **(2)** struck by R69 (W1-T49 retired, #6254). **(3)** the credit row needs an idempotency key (P70) —
-**AGE: 25 cycles; 0 of 1 repeats in R81, still not a fix (DR-18(i))**. **(4)** the retro
-lane needs a per-run key (P69) — **AGE: 27 cycles; #7247 merged gate-side**. **(5)** the ownership
-assert must resolve across all runs of a task id (P74) — **AGE: 22 cycles; 7 rejections in R81 across W1-T4446 and W1-T4555**. **(6)** `blocked_budget`
-rows must carry the limit that fired and the reading it fired at (P44) — **AGE: 20 cycles**. **(7)** the
+**AGE: 26 cycles; 0 of 1 repeats in R82, still not a fix (DR-18(i))**. **(4)** the retro
+lane needs a per-run key (P69) — **AGE: 28 cycles; #7309 merged gate-side, two foreign retro runs rejected**. **(5)** the ownership
+assert must resolve across all runs of a task id (P74) — **AGE: 23 cycles; no task-id sibling-run sample in R82**. **(6)** `blocked_budget`
+rows must carry the limit that fired and the reading it fired at (P44) — **AGE: 21 cycles**. **(7)** the
 id reservation must record a real branch, admit a self-hand-off, AND survive a mid-session credential
-expiry, **and a PR-body defect must reach a rung holding `gh pr edit`** (P77) — **AGE: 19 cycles;
-body writes refused again on #7177, #7204 and #7208**. **(8)** the acceptance dialect needs a non-regression proof form, a
+expiry, **and a PR-body defect must reach a rung holding `gh pr edit`** (P77) — **AGE: 20 cycles;
+R82 supplies no new body-write sample**. **(8)** the acceptance dialect needs a non-regression proof form, a
 `grep:` proof aimed inside the task's own `files:` list, AND a check that a `unit test:` bare title can
-resolve to a real test (P78) — **AGE: 18 cycles**. **(9)** the expiring-fixture/shared-counter census
-must warn-and-file rather than block unrelated PRs (P79) — **AGE: 17 cycles**. **(10)** the `gh` cadence
-floor must stamp its clock on the ALLOWED call only and count its refusals (P80) — **AGE: 16 cycles**.
+resolve to a real test (P78) — **AGE: 19 cycles**. **(9)** the expiring-fixture/shared-counter census
+must warn-and-file rather than block unrelated PRs (P79) — **AGE: 18 cycles**. **(10)** the `gh` cadence
+floor must stamp its clock on the ALLOWED call only and count its refusals (P80) — **AGE: 17 cycles**.
 **(11)** a record whose falsifier can close a criterion the same record asserts must be refused at
-filing time, or the reviewer's input must carry the falsifier (P81) — **AGE: 15 cycles**. **(12)** a
+filing time, or the reviewer's input must carry the falsifier (P81) — **AGE: 16 cycles**. **(12)** a
 `ci-log` fix dispatch must fetch the full failing-step log first, including the `commitlint` job's log
-for a consolidated sub-check, and spend no strike on a tail with no diagnostic line (P82) — **AGE: 12
+for a consolidated sub-check, and spend no strike on a tail with no diagnostic line (P82) — **AGE: 13
 cycles**.
-**Eleven entries are open, with a combined dwell of 238 cycles** (**P71**). **Routed with no DEBT line:**
-the ratification reading (9/0) goes to **P48**, and LEARNINGS at 80 (+1) goes to the DARK roster's `learningDuplicateViolation` line
+**Eleven entries are open, with a combined dwell of 249 cycles** (**P71**). **Routed with no DEBT line:**
+the ratification reading (9/0) goes to **P48**, and LEARNINGS at 80 (+0) goes to the DARK roster's `learningDuplicateViolation` line
 (T420/#1610).
 
 **P17 LEFT THE RANKING 2026-08-20 — W1-T71 SHIPPED (#2182)**. **P29 LEFT THE RANKING 2026-08-07** —

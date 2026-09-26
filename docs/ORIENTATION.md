@@ -1,17 +1,16 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-09-26T16:02:03.973Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-09-26T20:02:26.407Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-40 run(s) since the last retro marker. Verdicts: {"blocked_transient":13,"incomplete":26,"merged":1}.
+40 run(s) since the last retro marker. Verdicts: {"blocked_containment":5,"blocked_transient":10,"incomplete":25}.
 
 ### Shipped since marker
-- RETRO → https://github.com/craigoley/remudero/pull/7247 (gate-side merge; run ended incomplete)
-- W1-T4446 → https://github.com/craigoley/remudero/pull/7253 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- RETRO → https://github.com/craigoley/remudero/pull/7309 (gate-side merge; run ended incomplete)
 
 ## Next runnable task
 
