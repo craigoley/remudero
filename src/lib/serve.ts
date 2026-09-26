@@ -625,7 +625,6 @@ export const CONSOLE_BLOCKING_REQUEST_PATH_BASELINE = 0;
  *  by REACH in test/every-get-read-route-is-bounded-by-reach.test.ts. A set that may only SHRINK:
  *  a new route that scans the union per request is refused, and a route bounded later leaves it. */
 export const CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE: readonly string[] = [
-  "GET /v1/operator-activity",
   "GET /v1/operator-agent/consequences",
   "GET /v1/operator-agent/context",
   "GET /v1/operator-agent/experiments",
