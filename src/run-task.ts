@@ -880,7 +880,7 @@ import {
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
-import { benchmarkRunAssignmentReceipt, benchmarkRunTerminalReceipt } from "./lib/benchmark-run.js";
+import { benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources } from "./lib/benchmark-run.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -13824,15 +13824,22 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
       };
     }
     let fields: Record<string, unknown>;
+    let durableAssignmentId: string | undefined;
     try {
       const assignment = step === "worker.assignment" ? extra.worker_assignment : undefined;
-      let benchmarkRun: ReturnType<typeof benchmarkRunAssignmentReceipt> | ReturnType<typeof benchmarkRunTerminalReceipt>;
+      let benchmarkRun: ReturnType<typeof benchmarkRunAssignmentReceipt> | ReturnType<typeof benchmarkRunTerminalReceipt>
+        | ReturnType<typeof benchmarkRunAttemptReceipt>;
       if (assignment && typeof assignment === "object" && !Array.isArray(assignment)) {
         const selected = assignment as Parameters<typeof benchmarkRunAssignmentReceipt>[0];
         if (typeof selected.id === "string" && selected.id.length > 0 && selected.requested && selected.selected) {
           benchmarkRun = benchmarkRunAssignmentReceipt(selected, work);
-          assignments.add(selected.id);
+          durableAssignmentId = selected.id;
         }
+      } else if (step === "worker.attempt") {
+        const id = typeof extra.selection_assignment_id === "string" ? extra.selection_assignment_id : undefined;
+        benchmarkRun = benchmarkRunAttemptReceipt({
+          step, ...extra, assignment_observed: extra.assignment_observed !== false && id !== undefined && assignments.has(id),
+        });
       } else if (step === "verdict") {
         benchmarkRun = benchmarkRunTerminalReceipt(
           { step, ...extra },
@@ -13844,8 +13851,62 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
       // Keep the source row and mark the receipt unavailable; telemetry cannot block dispatch.
       fields = { ...extra, benchmark_run_unavailable_reason: "receipt-build-failed" };
     }
-    write(step, fields);
+    if (step === "worker.attempt") {
+      // A metric write is never allowed to change a worker's actual result or retry path.
+      try { write(step, fields); } catch { /* measured as absent on the next source audit */ }
+    } else {
+      write(step, fields);
+      if (durableAssignmentId) assignments.add(durableAssignmentId);
+    }
   };
+}
+
+/** Owns the one worker-attempt receipt on every dispatch path through the shared spawn wrapper.
+ * The call/result/error is authoritative; evidence collection cannot change any of them. */
+export function recordBenchmarkWorkerAttempt(
+  call: () => Promise<WorkerResult>,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  selected: () => { id: string } | undefined,
+  stopPolling: () => void,
+): Promise<WorkerResult> {
+  const failed = (): void => {
+    try {
+      const assignment = selected();
+      log("worker.attempt", {
+        ...(assignment ? { selection_assignment_id: assignment.id } : {}),
+        success: false,
+        worker_failure: "spawn-threw-before-result",
+      });
+    } catch { /* preserve the original worker error */ }
+  };
+  let workerCall: Promise<WorkerResult>;
+  try {
+    workerCall = call();
+  } catch (error) {
+    failed();
+    stopPolling();
+    throw error;
+  }
+  return workerCall.then((result) => {
+    try {
+      const resultId = result.selectionAssignmentId;
+      const selection = selected();
+      const assignmentId = resultId ?? selection?.id;
+      const resultEnvelopeObserved = typeof result.subtype === "string" && result.subtype.length > 0;
+      log("worker.attempt", {
+        ...(assignmentId ? { selection_assignment_id: assignmentId } : {}),
+        ...(resultId && selection && resultId !== selection.id ? { assignment_observed: false } : {}),
+        ...(result.isError || result.apiError || result.usageRefusal
+          ? { success: false }
+          : resultEnvelopeObserved ? { success: true } : {}),
+        ...benchmarkWorkerAttemptResources(result),
+      });
+    } catch { /* telemetry cannot alter the returned worker result */ }
+    return result;
+  }, (error: unknown) => {
+    failed();
+    throw error;
+  }).finally(stopPolling);
 }
 
 async function runTask(
@@ -14092,7 +14153,7 @@ async function runTask(
     const stopPolling = workerStateSensor.startPolling();
     let selectionAssignment: Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0] | undefined;
     const baseStreamObserver = effectiveSpawnArgs.streamObserver ?? workerStateSensor.observer;
-    return rawSpawn({
+    return recordBenchmarkWorkerAttempt(() => rawSpawn({
       ...effectiveSpawnArgs,
       // Every dispatch-phase worker inherits the run identity at the ONE wrapper that already owns its state/error telemetry, so the
       // routing assignment and terminal worker row join without inferring a task; an injected observer still runs, but after the ledger.
@@ -14123,7 +14184,7 @@ async function runTask(
       // its own `clockBound` (none exist today) is respected; every future dispatch call site
       // through this wrapper is covered without remembering to add it individually.
       clockBound: effectiveSpawnArgs.clockBound ?? { boundMs: workerAbandonMs },
-    }).finally(stopPolling);
+      }), log, () => selectionAssignment, stopPolling);
   };
   // W1-T143: a raw synchronous write, not console.log — this narration is exactly what the
   // daemon's `runOne` exercises on every dispatch, and console.log's async, non-TTY-buffered

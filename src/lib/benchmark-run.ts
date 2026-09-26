@@ -1,5 +1,7 @@
 /** Private, metadata-only receipts. The enclosing ledger row owns run/assignment IDs; this
  * envelope deliberately contains neither IDs nor content, and grants no publication rights. */
+import { workerLedgerFields, type WorkerResult } from "./worker.js";
+
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
 
 type Evidence<T> = { state: "observed"; value: T } | { state: "unavailable"; reason: string };
@@ -54,12 +56,7 @@ export function benchmarkRunAssignmentReceipt(
   };
 }
 
-export function benchmarkRunTerminalReceipt(row: Record<string, unknown>, assignmentObserved: boolean) {
-  // Intermediate worker rows can carry identical workerLedgerFields, but they are not a
-  // terminal task outcome. An orphan terminal belongs in coverage debt, not a model cohort.
-  if (row.step !== "verdict" || !assignmentObserved || typeof row.selection_assignment_id !== "string"
-    || row.selection_assignment_id.length === 0) return undefined;
-
+function callEvidence(row: Record<string, unknown>) {
   const rawTokens = row.tokens && typeof row.tokens === "object" && !Array.isArray(row.tokens)
     ? row.tokens as Record<string, unknown> : undefined;
   const input = observedNonnegative(rawTokens?.input, "worker-tokens-not-reported");
@@ -75,8 +72,6 @@ export function benchmarkRunTerminalReceipt(row: Record<string, unknown>, assign
     ? row.billing_mode : undefined;
   const otherMode = unavailable("different-billing-mode");
   return {
-    version: BENCHMARK_RUN_VERSION,
-    phase: "terminal" as const,
     workerCall,
     servedModel: observedString(row.served_model, "provider-did-not-report-served-model"),
     tokens,
@@ -88,4 +83,43 @@ export function benchmarkRunTerminalReceipt(row: Record<string, unknown>, assign
       subscriptionNotionalUsd: billingMode === "subscription" ? cost : billingMode ? otherMode : unavailable("billing-mode-not-reported"),
     },
   };
+}
+
+/** Keep the billing derivation at the canonical worker boundary, including cash-provider calls.
+ * An empty result envelope carries default usage zeros, not observations. */
+export function benchmarkWorkerAttemptResources(result: WorkerResult) {
+  const fields = workerLedgerFields(result);
+  const observedEnvelope = typeof result.subtype === "string" && result.subtype.length > 0;
+  return {
+    served_model: fields.served_model,
+    worker_duration_ms: fields.worker_duration_ms,
+    ...(observedEnvelope ? {
+      tokens: fields.tokens,
+      billing_mode: fields.billing_mode,
+      total_cost_usd: fields.total_cost_usd,
+    } : {}),
+  };
+}
+
+/** One worker call, including non-final recon/repair calls. This is not a verified task outcome. */
+export function benchmarkRunAttemptReceipt(row: Record<string, unknown>) {
+  if (row.step !== "worker.attempt") return undefined;
+  return {
+    version: BENCHMARK_RUN_VERSION,
+    phase: "attempt" as const,
+    assignmentJoin: row.assignment_observed === false
+      ? unavailable("assignment-not-observed-in-run")
+      : typeof row.selection_assignment_id === "string" && row.selection_assignment_id.length > 0
+      ? { state: "observed" as const, value: true as const }
+      : unavailable("assignment-id-not-reported"),
+    ...callEvidence(row),
+  };
+}
+
+export function benchmarkRunTerminalReceipt(row: Record<string, unknown>, assignmentObserved: boolean) {
+  // The task verdict is distinct from each worker-attempt receipt. Legacy consumers retain
+  // this phase until the cohort builder can join end-to-end verification separately.
+  if (row.step !== "verdict" || !assignmentObserved || typeof row.selection_assignment_id !== "string"
+    || row.selection_assignment_id.length === 0) return undefined;
+  return { version: BENCHMARK_RUN_VERSION, phase: "terminal" as const, ...callEvidence(row) };
 }
