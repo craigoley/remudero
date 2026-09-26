@@ -4055,8 +4055,7 @@ paths:
                     type: string
                     enum: [answer-v1]
                   repository:
-                    type: string
-                    nullable: true
+                    type: [string, "null"]
                   instance:
                     type: string
                   lens:

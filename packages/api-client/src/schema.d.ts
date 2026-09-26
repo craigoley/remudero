@@ -1412,6 +1412,35 @@ export interface paths {
         };
     };
   };
+  "/v1/operator-agent/ask": {
+    post: {
+      responses: {
+          "200": {
+            version: "answer-v1";
+            repository: string | null;
+            instance: string;
+            lens: "current-repository";
+            coverage: "verified" | "partial" | "unavailable" | "unsupported";
+            answer: string;
+            generatedAt: string;
+            citations: ({
+              sourceId: string;
+              observedAt: string;
+              freshness: "verified" | "stale";
+              label: string;
+              value: string;
+            })[];
+            missingSources: ({
+              sourceId: string;
+              reason: string;
+            })[];
+          };
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
   "/v1/operator-agent/proposals": {
     get: {
       responses: {
