@@ -17,8 +17,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { classifyAskRecordItem } from "../src/lib/ask-classification.js";
 import { fileURLToPath } from "node:url";
-import type { AddressInfo } from "node:net";
-import { buildServeRoutes, resolveConsoleSha, CONSOLE_SHA_UNKNOWN, buildServeServer, DEFAULT_BOARD_PREWARM_MS, DEFAULT_SERVE_PORT, prewarmBoardGithub, resolveServePort, resolveServeHost, resolveServeHosts, DEFAULT_SERVE_HOST, resolveServiceTokens, serviceTokensPath, type ServeDeps } from "../src/lib/serve.js";
+import { createServer, type AddressInfo } from "node:net";
+import { buildServeRoutes, resolveConsoleSha, CONSOLE_SHA_UNKNOWN, buildServeServer, DEFAULT_BOARD_PREWARM_MS, DEFAULT_SERVE_PORT, prewarmBoardGithub, resolveServePort, resolveServeHost, resolveServeHosts, DEFAULT_SERVE_HOST, resolveServiceTokens, serviceTokensPath, defaultIsListening, type ServeDeps } from "../src/lib/serve.js";
 import type { Route } from "../src/lib/service.js";
 import { isPaused, pauseDetail } from "../src/lib/fleet-control.js";
 import type { Plan, Task } from "../src/lib/plan.js";
@@ -1266,4 +1266,21 @@ test("W1-T4563: GET / answers what this surface is and where the console lives, 
 test("W1-T4563: the gateway names app.remudero.com as the canonical console", async () => {
   const { CANONICAL_CONSOLE_URL } = await import("../src/lib/serve.js");
   assert.equal(CANONICAL_CONSOLE_URL, "https://app.remudero.com");
+});
+
+test("W1-T4563: the moved port probe recognizes a listener and a released port", async () => {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const port = (server.address() as AddressInfo).port;
+  try {
+    assert.equal(await defaultIsListening("127.0.0.1", port), true);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+  assert.equal(await defaultIsListening("127.0.0.1", port), false);
 });
