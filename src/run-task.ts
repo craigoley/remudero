@@ -13812,8 +13812,6 @@ export function predecessorTranscriptPromptLines(paths: readonly string[]): stri
   ];
 }
 
-/** The production run's one ledger logger passes through this seam. The caller still owns
- * appendLedger and the run/task IDs; benchmark metadata cannot change dispatch or verdicts. */
 export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<string, unknown>) => void) {
   const assignments = new Set<string>();
   let work: { taskClass?: string; risk?: string } = {};
@@ -13842,8 +13840,7 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
       }
       fields = { ...extra, ...(benchmarkRun ? { benchmark_run: benchmarkRun } : {}) };
     } catch {
-      // Instrumentation must not strand a healthy PR. Keep the source row, make the failed
-      // projection visible, and let the later cohort refuse it rather than count a zero.
+      // Keep the source row and mark the receipt unavailable; telemetry cannot block dispatch.
       fields = { ...extra, benchmark_run_unavailable_reason: "receipt-build-failed" };
     }
     write(step, fields);
