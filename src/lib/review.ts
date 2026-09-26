@@ -779,14 +779,10 @@ export interface WhitelistedProof {
 
 const TEST_PATH_RE = /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/;
 
-/** The dashboard's Vitest config, named ONCE. W1-T3177 ships it; until then a dashboard proof
- *  resolves and its file does not exist, which is the forward-reference the carve-out handles. */
-const DASHBOARD_VITEST_CONFIG = "apps/dashboard/vite.config.ts";
-
 /** One declared suite root: where it lives, the runner that executes it, and (Vitest only) an
  *  optional FORCED `--config` path. Absent `configPath` means the runner finds its own config the
  *  ordinary way — remudero-site's Vitest is checkout-local and pinned, so its entry names none
- *  (W1-T3525's explicit instruction, unlike the dashboard's forced {@link DASHBOARD_VITEST_CONFIG}). */
+ *  (W1-T3525's explicit instruction). W1-T4585 removed the retired apps/dashboard root. */
 interface SuiteRoot {
   readonly root: string;
   readonly runner: "node" | "vitest";
@@ -808,10 +804,7 @@ export interface SuiteRegistryTarget {
  * BYTE-FOR-BYTE by W1-T3525: this array's shape and argv are untouched, only the LOOKUP around it
  * changed from a flat list to a registry keyed on the resolved target.
  */
-const SUITE_ROOTS = [
-  { root: "test/", runner: "node" },
-  { root: "apps/dashboard/src/", runner: "vitest", configPath: DASHBOARD_VITEST_CONFIG },
-] as const;
+const SUITE_ROOTS = [{ root: "test/", runner: "node" }] as const;
 
 /** remudero-site (DECISIONS.md "W12-T1: THE SITE IS A SEPARATE REPOSITORY") — its own `tests/`
  *  root under its own checkout-local pinned Vitest, no forced config path. */
@@ -1368,7 +1361,7 @@ export const PROOF_DIALECT = {
   },
   unitTest: {
     prefixRe: DIALECT_TEST_RE,
-    form: 'unit test: "test/<name>.test.ts" or "apps/dashboard/src/<name>.test.tsx" (runs that file) or a bare test title (name-filtered)',
+    form: 'unit test: "test/<name>.test.ts" (runs that file) or a bare test title (name-filtered)',
     exactPathRe: TEST_PATH_EXACT_RE,
     refusals: [
       { when: "empty body", message: "empty `unit test:` body — nothing to run" },
@@ -1570,6 +1563,13 @@ export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs)
     encoding: "utf8",
   });
 
+/** W1-T4587: checkouts the reviewer itself created for proof execution (the PR head and base
+ *  worktrees). {@link ensureDeps} may replace a partial node_modules only in one of these. */
+const reviewerOwnedCheckouts = new Set<string>();
+export function registerReviewerCheckout(path: string): void {
+  reviewerOwnedCheckouts.add(resolve(path));
+}
+
 /** `npm ci` a fresh checkout ONCE before its first test proof, since fresh worktrees have no node_modules.
  *  When a proof names a checkout-local runner, return whether that exact path exists after priming.
  *  A linked `node_modules` is deliberately NEVER reinstalled: `npm ci` would clear its shared target.
@@ -1603,6 +1603,9 @@ export function ensureDeps(
   // node_modules remains sufficient exactly as before. A Vitest proof instead asks whether its
   // specific entrypoint is present, so a partial real directory receives a fresh install.
   if (requiredRunnerPath === undefined ? existsSync(nodeModules) : runnerIsPresent()) return true;
+  // W1-T4587: ...but only in a checkout the REVIEWER created. An existing node_modules anywhere else
+  // is a caller's live tree: reinstalling it wiped this repository's own node_modules mid-suite.
+  if (existsSync(nodeModules) && !reviewerOwnedCheckouts.has(resolve(cwd))) return runnerIsPresent();
 
   try {
     // W1-T3266: same untrappable bound as the proof spawner above — a wedged install must not

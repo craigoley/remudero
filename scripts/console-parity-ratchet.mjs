@@ -163,9 +163,6 @@ export const CLI_ONLY = {
   serve:
     "bootstraps the console server itself — there is no console route to start the process " +
     "that serves the console's own routes",
-  "console-url":
-    "prints a locally-held secret bearer token; the console cannot hand out its own credential " +
-    "over an authenticated session of itself",
   escalate:
     "creates the escalation (opens a needs-human GitHub issue and, for MANUAL/HARD_STOP, fires " +
     "a real-time ping); the console can only act on one already raised (POST " +

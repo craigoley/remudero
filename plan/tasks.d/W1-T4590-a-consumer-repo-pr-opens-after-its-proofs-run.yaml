@@ -1,0 +1,44 @@
+- id: W1-T4590
+  title: "EVERY CONSUMER-REPO BUILD FAILS TO OPEN ITS PULL REQUEST — the checked PR opener runs core's check-proof as `node --import tsx src/run-task.ts` inside the CONSUMER's worktree, which has neither, so 19 console and site builds since 2026-09-25 died at PR open"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-26: found while diagnosing why CONSOLE-T84 never opened a PR"
+  files:
+    - src/lib/pr-open.ts
+    - src/run-task.ts
+    - test/a-consumer-repo-pr-opens-after-its-proofs-run.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-26 in the consumer daemons' ledgers (every rotation form): 15 run.error rows in
+    remudero-console-state (CONSOLE-T75, T78, T80, T82, T84) and 4 in site-state (PORTAL-T32, T33,
+    T34, T36), first 2026-09-25T19:46Z, all 'openPullRequestChecked: <id> proof did not pass against
+    merge base (...): Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'tsx' imported from
+    /home/node/Remudero/worktrees/run-<id>-.../'. src/lib/pr-open.ts defaultProofRunner spawns
+    process.execPath with ['--import', 'tsx', 'src/run-task.ts', 'check-proof', ...] and cwd = the
+    worktree being published; for a consumer repository that tree carries no tsx and no src/run-
+    task.ts, so no proof ever runs and the whole build is discarded. The same function also parses
+    each proof with parseWhitelistedProof(proof) and no target, so a consumer's own `unit test:
+    tests/...` proof is refused as unexecutable before it is run. CONSOLE-T84's build then retried,
+    tripped the dispatch circuit breaker and escalated (#1769 in remudero-console).
+  design: |
+    (i) defaultProofRunner runs rmd's OWN check-proof from rmd's own install: the tsx loader
+    resolved from this module (import.meta.resolve) and the absolute path of rmd's src/run-task.ts,
+    with cwd still the tree being published. (ii) openPullRequestChecked takes the resolved target
+    (owner/repo, which ghPrCreateFillCommand already holds) and parses every proof against it, as
+    the reviewer does (W1-T3525). (iii) check-proof accepts --repo <owner/name> and threads it into
+    parseWhitelistedProof and execution, so a consumer's registered suite root resolves identically
+    at PR open and at review. Omitted, every existing core caller is byte-identical.
+  acceptance:
+    - claim: "a consumer repository's filed proofs run at PR open from rmd's own install and resolve against that repository's registered suite roots"
+      proof: "unit test: test/a-consumer-repo-pr-opens-after-its-proofs-run.test.ts"
+  falsifier: |
+    Spawn the default runner against a fixture consumer checkout with no tsx and no src/: the
+    unfixed runner fails with Cannot find package 'tsx'; the fixed one runs the grep proof and
+    passes.
