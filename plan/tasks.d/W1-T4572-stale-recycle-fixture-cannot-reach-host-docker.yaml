@@ -1,0 +1,35 @@
+- id: W1-T4572
+  title: "A STALE RECYCLE FIXTURE CAN STOP THE LIVE CORE — fence host Docker mutations from test contexts"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator incident 2026-09-26: an old checkout's recycle test bypassed its Docker stub and stopped the live remudero-daemon twice"
+  plan_refs: ["W1-T3087", "deploy/recycle-container.sh"]
+  files:
+    - deploy/docker-fixture-fence.sh
+    - test/docker-fixture-fence.test.ts
+  status: queued
+  rationale: |
+    The current recycle script refuses to run inside a container, but a stale host checkout
+    can have a test fixture that overrides its in-container marker and accidentally reaches
+    the host Docker client. On 2026-09-26 that path stopped the live core twice. A fix only
+    in the current test file cannot protect an older checkout. The host's Docker command
+    path needs an independent guard for the marker override and disposable state roots.
+  design: |
+    Install a small wrapper ahead of /usr/bin/docker on the core host. When a recycle-test
+    marker override or known temporary state root is present, reject Docker mutations
+    before delegating to the real client. Keep read-only Docker commands available in
+    fixtures and let ordinary production recycle commands reach the real client. Track
+    the wrapper and its executable behavior in source; verify the installed wrapper on
+    the host without stopping a container.
+  acceptance:
+    - claim: "a stale recycle fixture cannot reach the host Docker client for stop, remove, run or container stop, while normal Docker use remains available"
+      proof: "unit test: test/docker-fixture-fence.test.ts"
+  falsifier: |
+    Remove the fixture-context refusal from the wrapper: the test's fake backing Docker
+    records a stop call and the test fails. Restore it: no fixture mutation reaches Docker.
