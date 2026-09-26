@@ -27,7 +27,7 @@ test("a failed containment preflight returns a terminal blocked_containment verd
   const failBlockMatch = /ContainmentError[\s\S]*?return \{ taskId, runId, merged: false, costUsd, verdict: "blocked_containment" \};/;
   assert.match(runTaskSrc, failBlockMatch, "the ContainmentError catch must return a terminal blocked_containment verdict");
   const returnIdx = runTaskSrc.search(failBlockMatch);
-  const worktreeAddIdx = runTaskSrc.indexOf("worktreeAdd(");
+  const worktreeAddIdx = runTaskSrc.indexOf("await worktreeAddAsync(");
   assert.ok(returnIdx >= 0 && returnIdx < worktreeAddIdx, "the fail-closed return must be BEFORE worktreeAdd");
 });
 

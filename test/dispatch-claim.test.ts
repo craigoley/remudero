@@ -302,7 +302,7 @@ test("W1-T1268 WIRED: run-task.ts calls decideDispatchClaim, after the inflight 
   assert.match(RUN_TASK_SRC, /decideDispatchClaim\(/, "run-task.ts must call decideDispatchClaim");
   const inflightIdx = RUN_TASK_SRC.indexOf("acquireInflightLock(");
   const claimIdx = RUN_TASK_SRC.indexOf("decideDispatchClaim(");
-  const worktreeAddIdx = RUN_TASK_SRC.indexOf("worktreeAdd(repoDir");
+  const worktreeAddIdx = RUN_TASK_SRC.indexOf("await worktreeAddAsync(repoDir");
   const reconIdx = RUN_TASK_SRC.indexOf('"recon worker"');
   assert.ok(inflightIdx >= 0 && claimIdx >= 0 && worktreeAddIdx >= 0 && reconIdx >= 0);
   assert.ok(inflightIdx < claimIdx, "the same-host inflight lock is still acquired first (cheapest, purely local)");
