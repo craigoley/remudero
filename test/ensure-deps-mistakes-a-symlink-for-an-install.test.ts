@@ -15,11 +15,14 @@ import {
 import { makeTempDir } from "../src/lib/tmp.js";
 import { absentRunnerCheckout, checkoutWithPackage } from "./helpers/proof-runner-checkout.js";
 
-const PROOF = "unit test: apps/dashboard/src/App.test.tsx";
+// W1-T4585: a checkout-local Vitest proof now comes from a repository that runs Vitest (remudero-site);
+// core's own apps/dashboard root was retired with the dashboard.
+const SITE = { owner: "craigoley", repo: "remudero-site" } as const;
+const PROOF = "unit test: tests/App.test.ts";
 
 function dashboardProof() {
-  const proof = parseWhitelistedProof(PROOF);
-  assert.ok(proof, "the dashboard proof must resolve before its runner can be checked");
+  const proof = parseWhitelistedProof(PROOF, SITE);
+  assert.ok(proof, "the Vitest proof must resolve before its runner can be checked");
   assert.equal(proof!.runner, "vitest", "the resolver must name the checkout-local runner it needs");
   return proof!;
 }
@@ -57,7 +60,7 @@ test("W1-T3312: an absent checkout-local runner grades not_executable, names the
     { claim: "the dashboard proof is independently checkable", proof: PROOF },
     new Set(["dashboard", "proof", "checkable"]),
     undefined,
-    { cwd, exec: execWhitelistedProof },
+    { cwd, exec: execWhitelistedProof, target: SITE },
   );
   assert.equal(verdict.proof_exec, "not_executable", "a host tool gap is not a failing assertion");
   assert.equal(verdict.proof_skip, "runner-absent");

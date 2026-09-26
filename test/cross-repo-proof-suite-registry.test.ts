@@ -73,7 +73,7 @@ test("W1-T3525: a target repo absent from the registry is refused with the diale
   assert.match(why!, /someone-else\/unregistered-repo/, "it names the UNREGISTERED target, not this repo's own roots");
 });
 
-test("W1-T3525: the default target's test/ node --test argv and the dashboard's Vitest argv stay byte-for-byte unchanged", () => {
+test("W1-T3525: the default target's test/ node --test argv stays byte-for-byte unchanged, and the retired dashboard root refuses", () => {
   // THE REGRESSION THAT WOULD RE-GRADE THE WHOLE CORPUS. Every pure-path proof in the plan runs
   // through this arm; a changed flag, a changed order or a dropped import re-grades all of them.
   const nodeProof = parseWhitelistedProof("unit test: test/deny-floor.test.ts");
@@ -85,19 +85,13 @@ test("W1-T3525: the default target's test/ node --test argv and the dashboard's 
   );
   assert.equal(nodeProof!.nameFiltered, undefined);
 
-  const dashboardProof = parseWhitelistedProof("unit test: apps/dashboard/src/App.test.tsx");
-  assert.ok(dashboardProof);
-  assert.deepEqual(
-    dashboardProof!.args,
-    [pinnedVitestCli(process.cwd()), "run", "--config", "apps/dashboard/vite.config.ts", "apps/dashboard/src/App.test.tsx"],
-    "dashboard Vitest argv unchanged by the registry's introduction",
-  );
+  // W1-T4585: the default target's retired apps/dashboard root is gone; such a path refuses.
+  assert.equal(parseWhitelistedProof("unit test: apps/dashboard/src/App.test.tsx"), null);
 
   // Naming the default target EXPLICITLY must resolve identically to naming none at all.
   const explicitNode = parseWhitelistedProof("unit test: test/deny-floor.test.ts", REMUDERO);
   assert.deepEqual(explicitNode!.args, nodeProof!.args);
-  const explicitDashboard = parseWhitelistedProof("unit test: apps/dashboard/src/App.test.tsx", REMUDERO);
-  assert.deepEqual(explicitDashboard!.args, dashboardProof!.args);
+  assert.equal(parseWhitelistedProof("unit test: apps/dashboard/src/App.test.tsx", REMUDERO), null);
 
   // The bare-TITLE arm for the default target is also untouched — still node --test, still name-filtered.
   const title = parseWhitelistedProof("unit test: a bare title unrelated to any suite root");
