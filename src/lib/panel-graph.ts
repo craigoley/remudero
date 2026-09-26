@@ -17,9 +17,10 @@
  */
 
 import { adoptionFindingGone, adoptionLatestPath, readAdoptionLatest } from "./measurement-cadence.js";
+import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
@@ -85,7 +86,9 @@ import {
   type Policy,
 } from "./policy.js";
 import { buildActionResultsRoute } from "./action-results.js";
-import { createLedgerRotationMemo } from "./ledger-union.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
+import { InflightLockError, withInflightLock } from "./inflight-lock.js";
 import { fleetLaneDecisions, readFleetLaneStore, writeClassificationSnapshot, type FleetLaneDecision } from "./fleet-lane.js";
 import { inboxOwner } from "./inbox-owner.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
@@ -97,7 +100,7 @@ import {
   threadDetailView,
   type InboxThreadItem,
 } from "./inbox-responder.js";
-import { appendThreadMessage, inboxThreadIdentity, proposalIdOfThread, readAllThreads } from "./inbox-thread.js";
+import { appendThreadMessage, appendThreadReplyOnce, inboxThreadIdentity, proposalIdOfThread, readAllThreads, readThread } from "./inbox-thread.js";
 import {
   beginFragmentPass,
   cachedAnchorGrep,
@@ -131,6 +134,10 @@ export interface PanelGraphDeps {
    *  path-based rendering helpers may also consult it independently. */
   planPath: string;
   ledgerPath: string;
+  /** Fault seam for the reply's second durable write; production uses appendPanelLedger. */
+  appendInboxReplyAudit?: typeof appendPanelLedger;
+  /** Fault seam for the first durable write; a pre-write failure is not a delivered reply. */
+  appendInboxReplyMessage?: typeof appendThreadReplyOnce;
   /** GitHub PR lookups the trace chain needs (lib/trace.ts's `TraceGithub`), injected for tests. */
   github: TraceGithub;
   /** The status-derivation gateway (status.ts's `GitHub`) — a different shape from `github`
@@ -1841,6 +1848,7 @@ export function buildInboxThreadRoute(deps: PanelGraphDeps, readPlanSnapshot?: (
 interface ThreadReplyInput {
   threadId: string;
   text: string;
+  intentId?: string;
 }
 
 function validateThreadReply(body: unknown): { error: string } | ThreadReplyInput {
@@ -1848,7 +1856,10 @@ function validateThreadReply(body: unknown): { error: string } | ThreadReplyInpu
   if (typeof body.threadId !== "string" || !proposalIdOfThread(body.threadId)) return { error: "threadId must name an inbox thread" };
   if (typeof body.text !== "string" || !body.text.trim()) return { error: "text is required" };
   if (body.text.length > 4000) return { error: "text must be 4000 characters or fewer" };
-  return { threadId: body.threadId, text: body.text.trim() };
+  if (body.intentId !== undefined && (typeof body.intentId !== "string" || !/^[A-Za-z0-9._:-]{8,128}$/.test(body.intentId))) {
+    return { error: "intentId must be 8-128 ASCII identifier characters" };
+  }
+  return { threadId: body.threadId, text: body.text.trim(), intentId: body.intentId as string | undefined };
 }
 
 /** The operator's display name the console passes (audit only, never an authorisation input). */
@@ -1856,6 +1867,32 @@ function operatorName(req: IncomingMessage): string | undefined {
   const raw = req.headers["x-remudero-operator"];
   const name = typeof raw === "string" ? raw.trim() : "";
   return name && name.length <= 80 && /^[\x20-\x7e]+$/.test(name) ? name : undefined;
+}
+
+/** A duplicate needs positive evidence before it can skip or repair an audit. The live file is
+ * checked first; older rotations are capped, and an incomplete read returns unknown rather than
+ * risking duplicate audit credit. An offline reconciliation can use the durable reply id. */
+function inboxReplyAuditState(ledgerPath: string, replyId: string): "recorded" | "absent" | "unverified" {
+  if (basename(ledgerPath) !== LEDGER_FILENAME) return "unverified";
+  try {
+    // ledger-read-intent: live — fast positive control before the bounded archive union.
+    const live = readLedgerLines(ledgerPath);
+    if (live.some((row) => row.step === "inbox.thread_replied" && row.reply_id === replyId)) return "recorded";
+    if (live.torn > 0) return "unverified";
+    const maxRotations = 24;
+    const rotated = readLedgerUnionRecordsSync(dirname(ledgerPath), {
+      pattern: new RegExp(replyId), step: "inbox.thread_replied", liveFirst: true,
+      order: "newest-first", maxRotations, dedupe: false,
+    });
+    if (rotated.rows.some((row) => row.reply_id === replyId)) return "recorded";
+    if (rotated.archiveCount > maxRotations || rotated.unread.length > 0 || rotated.unclassified.length > 0 || rotated.torn > 0) {
+      return "unverified";
+    }
+    return "absent";
+  } catch {
+    // An unreadable audit corpus cannot establish absence; no repair write may risk double credit.
+    return "unverified";
+  }
 }
 
 /** POST /v1/inbox/thread/reply — the operator writes on a thread. LOW: it only adds a message; the
@@ -1877,15 +1914,49 @@ export function buildInboxThreadReplyRoute(deps: PanelGraphDeps): Route {
         return;
       }
       const operator = operatorName(req);
-      appendThreadMessage(
-        inboxThreadIdentity(proposalId),
-        "reply",
-        input.text,
-        { threadStorePath: inboxThreadStorePath(deps.inboxRoot) },
-        operator ? { operator } : undefined,
-      );
-      appendPanelLedger(deps.ledgerPath, "inbox.thread_replied", proposalId, bearerTokenId(req), { thread_id: input.threadId });
-      sendJson(res, 200, { ok: true, threadId: input.threadId, waitingOn: "daemon" });
+      const actor = bearerTokenId(req);
+      const replyId = createHash("sha256").update(`${actor}\0${input.threadId}\0${input.intentId ?? randomUUID()}`).digest("hex");
+      const store = { threadStorePath: inboxThreadStorePath(deps.inboxRoot) };
+      const lockId = createHash("sha256").update(input.threadId).digest("hex");
+      try {
+        withInflightLock(join(dirname(store.threadStorePath), "reply-locks"), lockId, () => {
+          let stored: { kind: "appended" | "existing" | "conflict"; seq: number };
+          try {
+            stored = (deps.appendInboxReplyMessage ?? appendThreadReplyOnce)(inboxThreadIdentity(proposalId), input.text, replyId, store, operator ? { operator } : {});
+          } catch {
+            const check = readThread(input.threadId, store);
+            const prior = check.status === "ok" ? check.messages.find((message) => message.role === "reply" && message.extra?.replyId === replyId) : undefined;
+            if (!prior) {
+              sendJson(res, 503, { error: "reply_store_unavailable", delivery: check.status === "ok" ? "not_delivered" : "unverified", replyId });
+              return;
+            }
+            stored = { kind: prior.body === input.text ? "existing" : "conflict", seq: prior.seq };
+          }
+          if (stored.kind === "conflict") {
+            sendJson(res, 409, { error: "reply_intent_conflict", delivery: "delivered", replyId });
+            return;
+          }
+          const priorAudit = stored.kind === "existing" ? inboxReplyAuditState(deps.ledgerPath, replyId) : "absent";
+          if (priorAudit === "unverified") {
+            sendJson(res, 200, { ok: true, delivery: "delivered", audit: "unverified", replyId, threadId: input.threadId, waitingOn: "daemon", duplicate: true });
+            return;
+          }
+          if (priorAudit === "absent") {
+            try {
+              (deps.appendInboxReplyAudit ?? appendPanelLedger)(deps.ledgerPath, "inbox.thread_replied", proposalId, actor, {
+                thread_id: input.threadId, reply_id: replyId, message_seq: stored.seq,
+              });
+            } catch {
+              sendJson(res, 200, { ok: true, delivery: "delivered", audit: "gap", replyId, threadId: input.threadId, waitingOn: "daemon", duplicate: stored.kind === "existing" });
+              return;
+            }
+          }
+          sendJson(res, 200, { ok: true, delivery: "delivered", audit: "recorded", replyId, threadId: input.threadId, waitingOn: "daemon", duplicate: stored.kind === "existing" });
+        }, { run_id: replyId });
+      } catch (error) {
+        if (!(error instanceof InflightLockError)) throw error;
+        sendJson(res, 409, { error: "reply_in_progress", delivery: "unverified", replyId });
+      }
     }),
   };
 }
