@@ -29,11 +29,12 @@ export type OpenPullRequestProofRunner = (
   target?: SuiteRegistryTarget,
 ) => OpenPullRequestProofResult;
 
-/** W1-T4590: rmd's OWN tsx loader and CLI entrypoint, resolved from this module rather than from the
- *  tree being published — a consumer repository carries neither, which failed every console and
- *  site PR open (19 builds, 2026-09-25..26) with "Cannot find package 'tsx'". */
-const RMD_TSX_LOADER = import.meta.resolve("tsx");
-const RMD_CLI_ENTRY = fileURLToPath(new URL("../run-task.ts", import.meta.url));
+/** W1-T4590: rmd's OWN launcher, resolved from this module rather than from the tree being
+ *  published — a consumer repository carries neither tsx nor src/run-task.ts, which failed every
+ *  console and site PR open (19 builds, 2026-09-25..26) with "Cannot find package 'tsx'". bin/rmd
+ *  runs its own node_modules/.bin/tsx on its own src/run-task.ts. (`import.meta.resolve` is not
+ *  available when tsx loads this module through its CommonJS path, so it is not used here.) */
+const RMD_BIN = fileURLToPath(new URL("../../bin/rmd", import.meta.url));
 
 const TASK_ID_SHAPE = /^(?:W\d+|[A-Z][A-Z0-9_]*)-T\d+$/;
 
@@ -51,8 +52,8 @@ export function defaultProofRunner(
 ): OpenPullRequestProofResult {
   const repo = target ? ["--repo", `${target.owner}/${target.repo}`] : [];
   const result = spawnSync(
-    process.execPath,
-    ["--import", RMD_TSX_LOADER, RMD_CLI_ENTRY, "check-proof", proof, "--base", mergeBase, ...repo],
+    RMD_BIN,
+    ["check-proof", proof, "--base", mergeBase, ...repo],
     // A PR proof runs on the branch being published. The child already receives its exact base
     // and must inspect that branch, not ask self-sync to fast-forward it to origin/main.
     { cwd: repoRoot, encoding: "utf8", maxBuffer: 16 * 1024 * 1024, env: { ...process.env, [SELF_SYNC_GUARD_ENV]: "1" } },
