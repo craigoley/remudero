@@ -1570,6 +1570,13 @@ export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs)
     encoding: "utf8",
   });
 
+/** W1-T4587: checkouts the reviewer itself created for proof execution (the PR head and base
+ *  worktrees). {@link ensureDeps} may replace a partial node_modules only in one of these. */
+const reviewerOwnedCheckouts = new Set<string>();
+export function registerReviewerCheckout(path: string): void {
+  reviewerOwnedCheckouts.add(resolve(path));
+}
+
 /** `npm ci` a fresh checkout ONCE before its first test proof, since fresh worktrees have no node_modules.
  *  When a proof names a checkout-local runner, return whether that exact path exists after priming.
  *  A linked `node_modules` is deliberately NEVER reinstalled: `npm ci` would clear its shared target.
@@ -1603,6 +1610,9 @@ export function ensureDeps(
   // node_modules remains sufficient exactly as before. A Vitest proof instead asks whether its
   // specific entrypoint is present, so a partial real directory receives a fresh install.
   if (requiredRunnerPath === undefined ? existsSync(nodeModules) : runnerIsPresent()) return true;
+  // W1-T4587: ...but only in a checkout the REVIEWER created. An existing node_modules anywhere else
+  // is a caller's live tree: reinstalling it wiped this repository's own node_modules mid-suite.
+  if (existsSync(nodeModules) && !reviewerOwnedCheckouts.has(resolve(cwd))) return runnerIsPresent();
 
   try {
     // W1-T3266: same untrappable bound as the proof spawner above — a wedged install must not
