@@ -3047,6 +3047,93 @@ components:
           type: string
           description: Opaque server-configured provider profile id; never a credential or path.
 
+    BenchmarkQualityCoverage:
+      type: object
+      additionalProperties: false
+      required: [denominator, observed, noTerminal, notRecorded]
+      properties:
+        denominator: { type: integer }
+        observed: { type: integer }
+        noTerminal: { type: integer }
+        notRecorded: { type: integer }
+
+    BenchmarkQualityProjection:
+      type: object
+      additionalProperties: false
+      description: >
+        Internal evidence coverage, not a causal model score or public release. Local assignment
+        and run identifiers are join keys only and never appear in this response. API request
+        estimates and subscription notional amounts are separate; neither is an invoice.
+      required: [version, state, asOf, latestSourceAt, sourceRows, assignments,
+        joinedTerminalOutcomes, assignmentsWithoutTerminal, terminalsWithoutAssignment,
+        duplicates, outcomes, modelEvidence, experimentalCrossover, coverage, accounting]
+      properties:
+        version: { type: string, enum: [benchmark-quality-v1] }
+        state: { type: string, enum: [observed, unavailable] }
+        reason: { type: string }
+        asOf: { type: [string, "null"] }
+        latestSourceAt: { type: [string, "null"] }
+        sourceRows:
+          type: object
+          required: [assignments, terminals, invalidAssignments, terminalsWithoutAssignmentId]
+          properties:
+            assignments: { type: integer }
+            terminals: { type: integer }
+            invalidAssignments: { type: integer }
+            terminalsWithoutAssignmentId: { type: integer }
+        assignments: { type: integer }
+        joinedTerminalOutcomes: { type: integer }
+        assignmentsWithoutTerminal: { type: integer }
+        terminalsWithoutAssignment: { type: integer }
+        duplicates:
+          type: object
+          required: [assignmentRows, terminalRows]
+          properties:
+            assignmentRows: { type: integer }
+            terminalRows: { type: integer }
+        outcomes:
+          type: object
+          required: [success, failure, unavailable]
+          properties:
+            success: { type: integer }
+            failure: { type: integer }
+            unavailable: { type: integer }
+        modelEvidence:
+          type: object
+          required: [requestedDifferentFromSelected, servedDifferentFromSelected]
+          properties:
+            requestedDifferentFromSelected: { type: integer }
+            servedDifferentFromSelected: { type: integer }
+        experimentalCrossover: { type: string, enum: [unavailable-no-random-allocation-receipt] }
+        coverage:
+          type: object
+          required: [taskClass, risk, requestedModel, selectedModel, provider, effort,
+            outcome, servedModel, tokens, duration, billingMode, cost]
+          properties:
+            taskClass: { $ref: "#/components/schemas/BenchmarkQualityCoverage" }
+            risk: { $ref: "#/components/schemas/BenchmarkQualityCoverage" }
+            requestedModel: { $ref: "#/components/schemas/BenchmarkQualityCoverage" }
+            selectedModel: { $ref: "#/components/schemas/BenchmarkQualityCoverage" }
+            provider: { $ref: "#/components/schemas/BenchmarkQualityCoverage" }
+            effort: { $ref: "#/components/schemas/BenchmarkQualityCoverage" }
+            outcome: { $ref: "#/components/schemas/BenchmarkQualityCoverage" }
+            servedModel: { $ref: "#/components/schemas/BenchmarkQualityCoverage" }
+            tokens: { $ref: "#/components/schemas/BenchmarkQualityCoverage" }
+            duration: { $ref: "#/components/schemas/BenchmarkQualityCoverage" }
+            billingMode: { $ref: "#/components/schemas/BenchmarkQualityCoverage" }
+            cost: { $ref: "#/components/schemas/BenchmarkQualityCoverage" }
+        accounting:
+          type: object
+          required: [source, apiRequestsWithCost, apiRequestCostUsd,
+            subscriptionCallsWithNotionalCost, subscriptionNotionalCostUsd, unclassifiedCostRows]
+          properties:
+            source: { type: string, enum: [worker-result-estimate-not-invoice] }
+            apiRequestsWithCost: { type: integer }
+            apiRequestCostUsd: { type: number }
+            subscriptionCallsWithNotionalCost: { type: integer }
+            subscriptionNotionalCostUsd: { type: number }
+            unclassifiedCostRows: { type: integer }
+
   responses:
     Unauthorized:
       description: No or unrecognized bearer token.
@@ -3086,6 +3173,32 @@ components:
 # DECISIONS feed, escalation inbox, question backlog, cost meter) describes is explicit
 # follow-on work, not added here.
 paths:
+  /v1/analytics:
+    get:
+      summary: Read the internal benchmark evidence-quality projection.
+      description: >
+        This operation documents the benchmark-quality-v1 query only. The legacy full and
+        console analytics projections remain available on the same route. Missing evidence is
+        explicit; this endpoint performs no ledger scan, public upload, or routing change.
+      parameters:
+        - name: projectionVersion
+          in: query
+          required: true
+          schema: { type: string, enum: [benchmark-quality-v1] }
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: A versioned aggregate of retained evidence quality.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BenchmarkQualityProjection"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /v1/provider-auth:
     post:
       summary: Start a server-owned provider browser-auth handoff.

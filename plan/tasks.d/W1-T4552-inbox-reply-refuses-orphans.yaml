@@ -1,0 +1,49 @@
+- id: W1-T4552
+  title: "INBOX WRITES CAN ACKNOWLEDGE AN ORPHAN REPLY OR HIDE FUTURE MESSAGES — validate reply targets and bound read marks to observed sequence"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-25 operator request: trace Inbox from list through message and reply response"
+  plan_refs: [W1-T4088, W1-T4471]
+  files: [src/lib/panel-graph.ts, test/inbox-reply-refuses-orphans.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Source audit on 2026-09-25: GET /v1/inbox/thread requires an operator-owned item in
+    operatorThreadItems and returns 404 when it is absent. POST /v1/inbox/thread/reply checks
+    only proposalIdOfThread's syntax, appends to inbox-threads.jsonl and returns 200. The
+    responder then finds no item and returns undefined without a daemon answer. A stale or
+    non-operator thread therefore looks delivered at the browser but waits forever. The
+    existing conversation test covers invalid syntax, not a syntactically valid orphan.
+    Separately, POST /v1/inbox/thread/read accepts any nonnegative sequence, including one
+    far beyond the current last message. markThreadRead persists that number, so later daemon
+    messages can be incorrectly marked read without ever being viewed.
+  design: |
+    Resolve the proposed thread against the same operator-owned item set the detail route
+    uses before appending or recording inbox.thread_replied. A missing item returns a typed
+    non-success response; a failure to read classification does not become a successful
+    append. Preserve valid operator replies, including declined items that can be restored.
+    Do not infer that a 200 means the daemon has answered: it acknowledges only a persisted
+    operator message. Keep the write-tier and bearer authorization gates unchanged.
+    For a read mark, require the same current operator thread and refuse a sequence above
+    its observed last message. A failed read or unreadable store must not advance the mark.
+  acceptance:
+    - claim: "a syntactically valid orphan thread is refused before any message or ledger write"
+      proof: "unit test: test/inbox-reply-refuses-orphans.test.ts"
+    - claim: "a proposal owned by someone other than the operator cannot receive an operator inbox reply"
+      proof: 'grep: assert\.equal(nonOperatorReply\.status, 404) in test/inbox-reply-refuses-orphans.test.ts'
+    - claim: "a current operator thread still accepts a reply for the daemon responder"
+      proof: 'grep: assert\.equal(validReply\.status, 200) in test/inbox-reply-refuses-orphans.test.ts'
+    - claim: "the rejected request leaves both the thread store and reply ledger unchanged"
+      proof: 'grep: assert\.deepEqual(after, before) in test/inbox-reply-refuses-orphans.test.ts'
+    - claim: "an ahead-of-thread read mark is refused and cannot hide a later daemon message"
+      proof: 'grep: assert\.equal(aheadRead\.status, 409) in test/inbox-reply-refuses-orphans.test.ts'
+  falsifier: |
+    Remove the item-existence check: the orphan POST returns 200 and the test finds a
+    stored reply the responder cannot attach to a current operator item.

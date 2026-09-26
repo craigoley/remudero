@@ -33,7 +33,7 @@ const OTHER = "file/renumber-the-read-only-fix";
 function consoleReview(reserved: Record<string, string>, baseline?: string): { head: GitRepo; bare: GitRepo } {
   const bare = gitRepo({ bare: true, kind: "own-reservation-origin" });
   const work = gitRepo({ kind: "own-reservation-work" });
-  const files: Record<string, string> = { "plan/tasks.d/CONSOLE-T57-x.yaml": "- id: CONSOLE-T57\n" };
+  const files: Record<string, string> = { "plan/tasks.yaml": "- id: W1-T57\n  title: seed\n", "plan/tasks.d/CONSOLE-T57-x.yaml": "- id: CONSOLE-T57\n" };
   if (baseline !== undefined) files["plan/task-id-reservation-baseline.json"] = baseline;
   for (const [rel, text] of Object.entries(files)) {
     mkdirSync(dirname(join(work.dir, rel)), { recursive: true });
@@ -182,11 +182,18 @@ test("a reservation minted with --branch names that branch as its holder", async
 test("W1-T4414: a default-family mint with --branch records that branch too", async () => {
   const { bare } = consoleReview({});
   const clone = gitRepo({ cloneFrom: bare.dir, kind: "own-reservation-w1" });
+  // Keep the mint's plan in this fixture. The checkout running this test may
+  // legitimately trail origin/main, which makes a real-plan mint return a
+  // degraded freshness code unrelated to the branch reservation under test.
+  const fixturePlan = join(clone.dir, "plan", "tasks.yaml");
+  writeFileSync(fixturePlan, "- id: W1-T57\n");
   const log = console.log;
-  console.log = () => {};
+  const output: string[] = [];
+  console.log = (...args: unknown[]) => { output.push(args.map(String).join(" ")); };
   let code: number;
   try {
     code = await nextTaskIdCommand(["--branch", HEAD], {}, {
+      repoRoot: clone.dir,
       runGit: (args: string[]) => {
         try {
           return { status: 0, stdout: clone.git(...args), stderr: "" };
@@ -200,7 +207,7 @@ test("W1-T4414: a default-family mint with --branch records that branch too", as
   } finally {
     console.log = log;
   }
-  assert.equal(code, 0);
+  assert.equal(code, 0, output.join("\n"));
   const refs = bare.git("for-each-ref", "--format=%(refname)", "refs/rmd-id/W1-T*").split("\n").filter(Boolean);
   assert.equal(refs.length, 1);
   assert.equal(reservationHolderBranch(bare.git("log", "-1", "--format=%B", refs[0])), HEAD);

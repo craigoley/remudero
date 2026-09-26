@@ -17,10 +17,18 @@
  * the refusal it applies first.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 import { nextTaskIdCommand, validateReserveArgs } from "../src/run-task.js";
 import type { RemoteRefReserver, RemoteReserveOutcome } from "../src/lib/task-id-reservation.js";
+import { gitRepo } from "./helpers/git-repo.js";
+
+const mintRepo = gitRepo({ kind: "default-claim-plan" });
+mkdirSync(join(mintRepo.dir, "plan"), { recursive: true });
+writeFileSync(join(mintRepo.dir, "plan", "tasks.yaml"), "- id: W1-T3091\n  title: seed\n");
+mintRepo.git("add", "plan/tasks.yaml");
+mintRepo.git("commit", "--quiet", "-m", "fixture plan");
 
 const DOCS = readFileSync(new URL("../docs/cli-reference.md", import.meta.url), "utf8");
 
@@ -119,7 +127,7 @@ async function run(rest: string[]): Promise<{ out: string; err: string; tried: s
   const cap = captureConsole();
   let code = -1;
   try {
-    code = await nextTaskIdCommand(rest, {}, { reserver, holderOf: () => "unknown", openPrTexts: () => [] });
+    code = await nextTaskIdCommand(rest, {}, { repoRoot: mintRepo.dir, reserver, holderOf: () => "unknown", openPrTexts: () => [] });
   } finally {
     cap.restore();
   }
@@ -143,11 +151,7 @@ test("EXECUTED: a bare mint reaches the reserver, and --no-reserve does not", as
 
 test("EXECUTED: --offline mints without claiming and does not refuse", async () => {
   const offline = await run(["--offline"]);
-  // NOT an exit-code-0 assertion: an offline mint legitimately exits 1 when a SOURCE IS DEGRADED
-  // (this checkout's plan half can be behind origin's), which is pre-existing behaviour and says
-  // so in its own output. The thing under test is that it is not REFUSED by argument validation,
-  // and a usage refusal is exit 2 with a message on stderr — so that is what this discriminates.
-  assert.notEqual(offline.code, 2, `--offline must not be refused as a usage error; stderr=${offline.err}`);
+  assert.equal(offline.code, 0, `the fixture plan is readable; stderr=${offline.err}`);
   assert.doesNotMatch(offline.err, /contradictory/, "--offline alone is not a contradiction");
   assert.deepEqual(offline.tried, [], "--offline cannot push to an origin it declines to read");
   assert.match(offline.out, /W1-T[0-9]+/, "it still prints a floor");

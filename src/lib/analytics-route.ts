@@ -91,6 +91,14 @@ import {
   type UsageProjection,
   type UsageTelemetryState,
 } from "./usage-telemetry.js";
+import {
+  BENCHMARK_QUALITY_VERSION,
+  deriveBenchmarkEvidence,
+  unavailableBenchmarkEvidence,
+  type BenchmarkAssignmentEvidence,
+  type BenchmarkEvidenceSnapshot,
+  type BenchmarkTerminalEvidence,
+} from "./benchmark-evidence.js";
 
 /** One (lane, model) bucket of question 2 — worker counts and cost by lane/model. */
 export interface WorkerLaneModelBucket {
@@ -317,6 +325,7 @@ export interface AnalyticsSnapshot {
   consoleV1: ConsoleV1Projection;
   /** Bounded routing policy/receipt attribution for the operator console. */
   routingTelemetry: RoutingTelemetrySnapshot;
+  benchmarkEvidence: BenchmarkEvidenceSnapshot;
   /** Current process-owned queue/provider signals; historical trends remain explicitly uncollected. */
   queue: LiveAnalyticsMetrics["queue"];
   provider: LiveAnalyticsMetrics["provider"];
@@ -636,7 +645,19 @@ type AnalyticsCheckpointState = {
   workerDurationsMeasured: boolean;
   tokensTotal: CacheHitTokens & { output: number };
   routingTelemetry: {
+    benchmarkVersion?: typeof BENCHMARK_QUALITY_VERSION;
+    benchmarkCounters?: {
+      assignmentRowsSeen: number;
+      terminalRowsSeen: number;
+      invalidAssignmentRows: number;
+      terminalsWithoutAssignmentId: number;
+      duplicateAssignmentRows: number;
+      duplicateTerminalRows: number;
+      latestSourceAt: string | null;
+    };
     taskTypesByRun: Array<[string, string]>;
+    taskClassesByRun?: Array<[string, string]>;
+    risksByRun?: Array<[string, string]>;
     assignmentsById: Array<[string, RoutingAssignment]>;
     terminalsByAssignmentId: Array<[string, RoutingTerminalReceipt]>;
     pendingTerminalsByAssignmentId: Array<[string, RoutingTerminalReceipt]>;
@@ -684,6 +705,11 @@ type RoutingAssignment = {
   id: string;
   provider: string;
   model: string;
+  selectedModel: string;
+  requestedModel?: string;
+  effort?: string;
+  taskClass?: string;
+  risk?: string;
   taskType: string;
   routingRule: string;
   preferenceBypassed: boolean;
@@ -696,8 +722,10 @@ type RoutingAssignment = {
 type RoutingTerminalReceipt = {
   success?: boolean;
   tokens: number;
-  durationMs: number;
-  costUsd: number;
+  tokensMeasured: boolean;
+  durationMs?: number;
+  costUsd?: number;
+  billingMode?: "api" | "subscription";
   servedModel?: string;
   capabilityFallback: boolean;
   day?: string;
@@ -709,6 +737,18 @@ type RoutingTelemetryBucketState = Omit<RoutingTelemetryBucket, "fallbackReasons
 
 interface RoutingTelemetryAccumulator {
   taskTypesByRun: Map<string, string>;
+  taskClassesByRun: Map<string, string>;
+  risksByRun: Map<string, string>;
+  sourceUnavailableReason?: "ledger-source-unreadable" | "ledger-source-missing";
+  benchmarkCounters: {
+    assignmentRowsSeen: number;
+    terminalRowsSeen: number;
+    invalidAssignmentRows: number;
+    terminalsWithoutAssignmentId: number;
+    duplicateAssignmentRows: number;
+    duplicateTerminalRows: number;
+    latestSourceAt: string | null;
+  };
   assignmentsById: Map<string, RoutingAssignment>;
   terminalsByAssignmentId: Map<string, RoutingTerminalReceipt>;
   pendingTerminalsByAssignmentId: Map<string, RoutingTerminalReceipt>;
@@ -731,6 +771,17 @@ interface RoutingTelemetryAccumulator {
 function routingTelemetryAccumulator(): RoutingTelemetryAccumulator {
   return {
     taskTypesByRun: new Map(),
+    taskClassesByRun: new Map(),
+    risksByRun: new Map(),
+    benchmarkCounters: {
+      assignmentRowsSeen: 0,
+      terminalRowsSeen: 0,
+      invalidAssignmentRows: 0,
+      terminalsWithoutAssignmentId: 0,
+      duplicateAssignmentRows: 0,
+      duplicateTerminalRows: 0,
+      latestSourceAt: null,
+    },
     assignmentsById: new Map(),
     terminalsByAssignmentId: new Map(),
     pendingTerminalsByAssignmentId: new Map(),
@@ -1112,6 +1163,12 @@ function routingAssignmentFromLine(acc: RoutingTelemetryAccumulator, line: Recor
     id,
     provider,
     model,
+    selectedModel: model,
+    ...(str((raw.requested as Record<string, unknown> | undefined)?.model)
+      ? { requestedModel: str((raw.requested as Record<string, unknown>).model) } : {}),
+    ...(str(selection.effort) ? { effort: str(selection.effort) } : {}),
+    ...(runId && acc.taskClassesByRun.has(runId) ? { taskClass: acc.taskClassesByRun.get(runId) } : {}),
+    ...(runId && acc.risksByRun.has(runId) ? { risk: acc.risksByRun.get(runId) } : {}),
     taskType: (runId && acc.taskTypesByRun.get(runId)) ?? "unknown",
     routingRule: boundedRoutingRule(raw),
     preferenceBypassed,
@@ -1154,11 +1211,20 @@ function accumulateStepUp(acc: RoutingTelemetryAccumulator, line: Record<string,
 
 function routingTerminalReceipt(line: Record<string, unknown>): RoutingTerminalReceipt {
   const ts = str(line.ts);
+  const rawTokens = line.tokens && typeof line.tokens === "object" ? line.tokens as Record<string, unknown> : undefined;
+  const inputTokens = num(rawTokens?.input);
+  const outputTokens = num(rawTokens?.output);
+  const tokensMeasured = inputTokens !== undefined && inputTokens >= 0 && outputTokens !== undefined && outputTokens >= 0;
+  const durationMs = num(line.worker_duration_ms);
+  const costUsd = num(line.total_cost_usd);
+  const billingMode = line.billing_mode === "api" || line.billing_mode === "subscription" ? line.billing_mode : undefined;
   return {
     ...(typeof line.success === "boolean" ? { success: line.success } : {}),
     tokens: tokensOnLine(line),
-    durationMs: num(line.worker_duration_ms) ?? 0,
-    costUsd: num(line.total_cost_usd) ?? 0,
+    tokensMeasured,
+    ...(durationMs !== undefined && durationMs >= 0 ? { durationMs } : {}),
+    ...(costUsd !== undefined && costUsd >= 0 ? { costUsd } : {}),
+    ...(billingMode ? { billingMode } : {}),
     ...(str(line.served_model) ? { servedModel: str(line.served_model) } : {}),
     capabilityFallback: Boolean(line.codex_capability_fallback && typeof line.codex_capability_fallback === "object"),
     ...(ts && Number.isFinite(Date.parse(ts)) ? { day: utcDayFromTimestamp(Date.parse(ts)) } : {}),
@@ -1184,8 +1250,8 @@ function applyRoutingTerminal(
   if (terminal.success === true) bucket.successes += 1;
   else if (terminal.success === false) bucket.failures += 1;
   bucket.totalTokens += terminal.tokens;
-  bucket.totalDurationMs += terminal.durationMs;
-  bucket.totalCostUsd += terminal.costUsd;
+  bucket.totalDurationMs += terminal.durationMs ?? 0;
+  bucket.totalCostUsd += terminal.costUsd ?? 0;
   for (const reason of terminalFallbackReasons(assignment, terminal)) {
     bucket.fallbackReasons.set(reason, (bucket.fallbackReasons.get(reason) ?? 0) + 1);
   }
@@ -1193,7 +1259,7 @@ function applyRoutingTerminal(
     const current = acc.daysByDay.get(terminal.day) ?? { day: terminal.day, terminalResults: 0, totalTokens: 0, totalCostUsd: 0 };
     current.terminalResults += 1;
     current.totalTokens += terminal.tokens;
-    current.totalCostUsd += terminal.costUsd;
+    current.totalCostUsd += terminal.costUsd ?? 0;
     acc.daysByDay.set(terminal.day, current);
   }
 }
@@ -1204,11 +1270,26 @@ function accumulateRoutingTelemetryLine(acc: RoutingTelemetryAccumulator, line: 
     const runId = str(line.run_id);
     const taskType = str(line.type);
     if (runId && taskType) acc.taskTypesByRun.set(runId, taskType);
+    const taskClass = str(line.task_class);
+    const risk = str(line.risk);
+    if (runId && taskClass) acc.taskClassesByRun.set(runId, taskClass);
+    if (runId && risk) acc.risksByRun.set(runId, risk);
   }
+
+  if (line.step === "worker.assignment" || (line.step === "verdict" && (str(line.selection_assignment_id) || str(line.model)))) {
+    const ts = str(line.ts);
+    if (ts && Number.isFinite(Date.parse(ts)) && (!acc.benchmarkCounters.latestSourceAt || ts > acc.benchmarkCounters.latestSourceAt)) {
+      acc.benchmarkCounters.latestSourceAt = ts;
+    }
+  }
+  if (line.step === "worker.assignment") acc.benchmarkCounters.assignmentRowsSeen += 1;
 
   const assignment = routingAssignmentFromLine(acc, line);
   if (assignment) {
-    if (acc.assignmentsById.has(assignment.id)) return;
+    if (acc.assignmentsById.has(assignment.id)) {
+      acc.benchmarkCounters.duplicateAssignmentRows += 1;
+      return;
+    }
     acc.assignmentsById.set(assignment.id, assignment);
     routingBucketFor(acc, assignment).assignments += 1;
     accumulateRoutingDecision(acc, assignment);
@@ -1220,6 +1301,7 @@ function accumulateRoutingTelemetryLine(acc: RoutingTelemetryAccumulator, line: 
     }
     return;
   }
+  if (line.step === "worker.assignment") acc.benchmarkCounters.invalidAssignmentRows += 1;
 
   // `workerLedgerFields` appears on intermediate worker rows such as `implement.done` as
   // well as on the run's final `verdict`. The assignment is a pre-execution policy fact, but
@@ -1228,7 +1310,16 @@ function accumulateRoutingTelemetryLine(acc: RoutingTelemetryAccumulator, line: 
   // token/duration/cost envelope.
   if (line.step !== "verdict") return;
   const assignmentId = str(line.selection_assignment_id);
-  if (!assignmentId || acc.terminalsByAssignmentId.has(assignmentId) || acc.pendingTerminalsByAssignmentId.has(assignmentId)) return;
+  if (!assignmentId && !str(line.model)) return;
+  acc.benchmarkCounters.terminalRowsSeen += 1;
+  if (!assignmentId) {
+    acc.benchmarkCounters.terminalsWithoutAssignmentId += 1;
+    return;
+  }
+  if (acc.terminalsByAssignmentId.has(assignmentId) || acc.pendingTerminalsByAssignmentId.has(assignmentId)) {
+    acc.benchmarkCounters.duplicateTerminalRows += 1;
+    return;
+  }
   const terminal = routingTerminalReceipt(line);
   const selected = acc.assignmentsById.get(assignmentId);
   if (selected) {
@@ -1270,6 +1361,21 @@ function snapshotRoutingTelemetry(acc: RoutingTelemetryAccumulator): RoutingTele
       (left, right) => right.count - left.count || left.preferredProvider.localeCompare(right.preferredProvider) || left.selectedModel.localeCompare(right.selectedModel),
     ),
   };
+}
+
+function snapshotBenchmarkEvidence(acc: RoutingTelemetryAccumulator, asOf: string): BenchmarkEvidenceSnapshot {
+  const assignments: ReadonlyMap<string, BenchmarkAssignmentEvidence> = acc.assignmentsById;
+  const joinedTerminals: ReadonlyMap<string, BenchmarkTerminalEvidence> = acc.terminalsByAssignmentId;
+  const unmatchedTerminals: ReadonlyMap<string, BenchmarkTerminalEvidence> = acc.pendingTerminalsByAssignmentId;
+  return deriveBenchmarkEvidence({
+    assignments,
+    joinedTerminals,
+    unmatchedTerminals,
+    ...acc.benchmarkCounters,
+    asOf,
+    latestSourceAt: acc.benchmarkCounters.latestSourceAt,
+    ...(acc.sourceUnavailableReason ? { sourceUnavailableReason: acc.sourceUnavailableReason } : {}),
+  });
 }
 
 /** Fold one logical ledger event into all four analytics questions in one pass. */
@@ -1399,6 +1505,7 @@ function snapshotFromAccumulator(
       }),
     }),
     routingTelemetry: snapshotRoutingTelemetry(acc.routingTelemetry),
+    benchmarkEvidence: snapshotBenchmarkEvidence(acc.routingTelemetry, nowIso),
     ...emptyLiveAnalyticsMetrics(),
     timeSeries: acc.checkpointHydrated
       ? checkpointTimeSeries(acc.checkpointHistory, nowIso)
@@ -1416,6 +1523,11 @@ function snapshotFromAccumulator(
   attachUsageProjection(out, acc.usage);
   Object.defineProperty(out, "operatorAgentMemory", {
     value: out.operatorAgentMemory,
+    enumerable: false,
+    writable: false,
+  });
+  Object.defineProperty(out, "benchmarkEvidence", {
+    value: out.benchmarkEvidence,
     enumerable: false,
     writable: false,
   });
@@ -1474,12 +1586,23 @@ export async function deriveAnalyticsSnapshotFromLedger(
   signal?: AbortSignal,
   options: AnalyticsDeriveOptions = {},
 ): Promise<AnalyticsSnapshot> {
-  return deriveAnalyticsSnapshotFromStream(
-    openLedgerUnion(stateDir, { dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP, signal }),
-    clock,
+  const acc = analyticsAccumulator();
+  const source = checkpointSource(stateDir);
+  if (source === undefined || (source.archives.length === 0 && source.live === null)) {
+    acc.routingTelemetry.sourceUnavailableReason = "ledger-source-missing";
+  }
+  let unreadArchives = 0;
+  for await (const line of openLedgerUnion(stateDir, {
+    dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
     signal,
-    options,
-  );
+    onUnreadArchive: () => { unreadArchives += 1; },
+  })) {
+    signal?.throwIfAborted();
+    accumulateAnalyticsLine(acc, line);
+  }
+  signal?.throwIfAborted();
+  if (unreadArchives > 0) acc.routingTelemetry.sourceUnavailableReason = "ledger-source-unreadable";
+  return snapshotFromAccumulator(acc, clock.iso(), options);
 }
 
 function checkpointPath(stateDir: string): string {
@@ -1528,7 +1651,11 @@ function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpoin
     workerDurationsMeasured: acc.workerDurationsMeasured,
     tokensTotal: { ...acc.tokensTotal },
     routingTelemetry: {
+      benchmarkVersion: BENCHMARK_QUALITY_VERSION,
+      benchmarkCounters: { ...acc.routingTelemetry.benchmarkCounters },
       taskTypesByRun: [...acc.routingTelemetry.taskTypesByRun.entries()],
+      taskClassesByRun: [...acc.routingTelemetry.taskClassesByRun.entries()],
+      risksByRun: [...acc.routingTelemetry.risksByRun.entries()],
       assignmentsById: [...acc.routingTelemetry.assignmentsById.entries()].map(([key, value]) => [key, { ...value }]),
       terminalsByAssignmentId: [...acc.routingTelemetry.terminalsByAssignmentId.entries()].map(([key, value]) => [key, { ...value }]),
       pendingTerminalsByAssignmentId: [...acc.routingTelemetry.pendingTerminalsByAssignmentId.entries()].map(([key, value]) => [key, { ...value }]),
@@ -1572,6 +1699,9 @@ function hydrateCheckpointState(state: AnalyticsCheckpointState): AnalyticsAccum
   acc.workerDurationsMeasured = state.workerDurationsMeasured;
   acc.tokensTotal = { ...state.tokensTotal };
   acc.routingTelemetry.taskTypesByRun = new Map(state.routingTelemetry.taskTypesByRun);
+  acc.routingTelemetry.taskClassesByRun = new Map(state.routingTelemetry.taskClassesByRun ?? []);
+  acc.routingTelemetry.risksByRun = new Map(state.routingTelemetry.risksByRun ?? []);
+  acc.routingTelemetry.benchmarkCounters = { ...acc.routingTelemetry.benchmarkCounters, ...state.routingTelemetry.benchmarkCounters };
   acc.routingTelemetry.assignmentsById = new Map(state.routingTelemetry.assignmentsById.map(([key, value]) => [key, { ...value }]));
   acc.routingTelemetry.terminalsByAssignmentId = new Map(state.routingTelemetry.terminalsByAssignmentId.map(([key, value]) => [key, { ...value }]));
   acc.routingTelemetry.pendingTerminalsByAssignmentId = new Map(state.routingTelemetry.pendingTerminalsByAssignmentId.map(([key, value]) => [key, { ...value }]));
@@ -1663,7 +1793,10 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
   options: AnalyticsDeriveOptions = {},
 ): Promise<AnalyticsSnapshotReadResult> {
   const currentSource = checkpointSource(stateDir);
-  const canResume = priorCheckpoint !== undefined && priorCheckpoint.state.usage !== undefined && currentSource !== undefined && checkpointSourceCanResume(priorCheckpoint.source, currentSource);
+  const canResume = priorCheckpoint !== undefined && priorCheckpoint.state.usage !== undefined &&
+    priorCheckpoint.state.routingTelemetry.benchmarkVersion === BENCHMARK_QUALITY_VERSION &&
+    priorCheckpoint.state.routingTelemetry.benchmarkCounters !== undefined &&
+    currentSource !== undefined && checkpointSourceCanResume(priorCheckpoint.source, currentSource);
   let acc: AnalyticsAccumulator;
   let resumeCheckpoint: AnalyticsCheckpoint | undefined;
   let resumeSource: AnalyticsCheckpointSource | undefined;
@@ -1682,15 +1815,20 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
   } else {
     acc = analyticsAccumulator();
   }
+  if (currentSource === undefined || (currentSource.archives.length === 0 && currentSource.live === null)) {
+    acc.routingTelemetry.sourceUnavailableReason = "ledger-source-missing";
+  }
   const liveOffset = resumeCheckpoint !== undefined && resumeSource !== undefined && resumeCheckpoint.source.live !== null && resumeSource.live !== null && resumeSource.live.size < resumeCheckpoint.source.liveOffset
     ? 0
     : resumeCheckpoint?.source.liveOffset ?? 0;
   const accepted: Array<{ step: string; fingerprint: string }> = [];
+  let unreadArchives = 0;
   const union = openLedgerUnion(stateDir, {
     dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
     signal,
     ...(resumeCheckpoint !== undefined && resumeCheckpoint.source.lastArchive !== null ? { afterRotation: resumeCheckpoint.source.lastArchive } : {}),
     ...(resumeCheckpoint ? { liveStartOffset: liveOffset, dedupeSeed: resumeCheckpoint.tail } : {}),
+    onUnreadArchive: () => { unreadArchives += 1; },
     onAcceptedRecord: (row, raw) => {
       const step = str(row.step);
       if (step) accepted.push({ step, fingerprint: fingerprintLedgerLine(raw) });
@@ -1701,6 +1839,7 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
     accumulateAnalyticsLine(acc, line);
   }
   signal?.throwIfAborted();
+  if (unreadArchives > 0) acc.routingTelemetry.sourceUnavailableReason = "ledger-source-unreadable";
   const snapshot = snapshotFromAccumulator(acc, clock.iso(), options);
   const source = checkpointSource(stateDir) ?? currentSource ?? { archives: [], live: null, lastArchive: null, liveOffset: 0 };
   const checkpoint: AnalyticsCheckpoint = {
@@ -1751,6 +1890,13 @@ function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
   if (!value.operatorAgentMemory) {
     Object.defineProperty(value, "operatorAgentMemory", {
       value: { state: value.asOf === null ? "cold" : "ready", asOf: value.asOf, rows: [] },
+      enumerable: false,
+      writable: false,
+    });
+  }
+  if (!value.benchmarkEvidence) {
+    Object.defineProperty(value, "benchmarkEvidence", {
+      value: unavailableBenchmarkEvidence("quality-projection-refresh-pending"),
       enumerable: false,
       writable: false,
     });
@@ -1853,6 +1999,14 @@ function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
   for (const day of value.routingTelemetry.daily) Object.freeze(day);
   Object.freeze(value.routingTelemetry.daily);
   Object.freeze(value.routingTelemetry);
+  for (const field of Object.values(value.benchmarkEvidence.coverage)) Object.freeze(field);
+  Object.freeze(value.benchmarkEvidence.coverage);
+  Object.freeze(value.benchmarkEvidence.sourceRows);
+  Object.freeze(value.benchmarkEvidence.duplicates);
+  Object.freeze(value.benchmarkEvidence.outcomes);
+  Object.freeze(value.benchmarkEvidence.modelEvidence);
+  Object.freeze(value.benchmarkEvidence.accounting);
+  Object.freeze(value.benchmarkEvidence);
   for (const row of value.operatorAgentMemory.rows) Object.freeze(row);
   Object.freeze(value.operatorAgentMemory.rows);
   Object.freeze(value.operatorAgentMemory);
@@ -1892,6 +2046,7 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
       stepUps: { total: 0, byStep: [], byTargetModel: [] },
       preferenceOutcomes: [],
     },
+    benchmarkEvidence: unavailableBenchmarkEvidence("no-ledger-union-refresh-yet"),
     ...emptyLiveAnalyticsMetrics(),
     timeSeries: buildAnalyticsTimeSeries([], null),
     spend: { cash: notCollectedCashSpend("no ledger-union refresh has completed yet") },
@@ -1906,6 +2061,7 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
     dimensions: { value: snapshot.dimensions, enumerable: false, writable: false },
     drilldowns: { value: snapshot.drilldowns, enumerable: false, writable: false },
     operatorAgentMemory: { value: snapshot.operatorAgentMemory, enumerable: false, writable: false },
+    benchmarkEvidence: { value: snapshot.benchmarkEvidence, enumerable: false, writable: false },
   });
   Object.defineProperties(snapshot.routingTelemetry, {
     stepUps: { value: snapshot.routingTelemetry.stepUps, enumerable: false, writable: false },
@@ -1995,10 +2151,11 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
         refreshController.signal.throwIfAborted();
         const next = "snapshot" in result ? result.snapshot : result;
         if ("snapshot" in result) {
-          checkpoint = result.checkpoint;
+          const sourceReadable = next.benchmarkEvidence?.reason !== "ledger-source-unreadable";
+          if (sourceReadable) checkpoint = result.checkpoint;
           const hasRetainedEvidence = result.checkpoint.source.archives.length > 0 ||
             (result.checkpoint.source.live?.size ?? 0) > 0;
-          if (hasRetainedEvidence) writeAnalyticsCheckpoint(deps.stateDir, result.checkpoint);
+          if (hasRetainedEvidence && sourceReadable) writeAnalyticsCheckpoint(deps.stateDir, result.checkpoint);
         }
         value = freezeAnalyticsSnapshot(next);
         log("serve.analytics_refresh.completed", {
@@ -2080,6 +2237,10 @@ export function buildAnalyticsRoute(deps: {
       // refresh; say so explicitly rather than let the field vanish from the payload.
       if (requestedVersion === CONSOLE_SIGNALS_PROJECTION_VERSION) {
         sendJson(res, 200, buildConsoleSignalsProjection(base, live));
+        return;
+      }
+      if (requestedVersion === BENCHMARK_QUALITY_VERSION) {
+        sendJson(res, 200, base.benchmarkEvidence ?? unavailableBenchmarkEvidence("quality-projection-refresh-pending"));
         return;
       }
       if (requestedVersion === USAGE_PROJECTION_VERSION) {

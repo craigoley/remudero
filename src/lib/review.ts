@@ -8362,6 +8362,7 @@ type ReviewerCodeFreshness =
 
 export interface PostReviewStatusGuardedResult {
   posted: boolean;
+  lifecycle?: "merged" | "closed";
   conflict?: boolean;
   replayed?: boolean;
   effectiveState?: ReviewState;
@@ -8506,7 +8507,11 @@ export async function postReviewStatusGuarded(
         ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
         ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
       });
-      return { posted: false, reason: decision.reason };
+      return {
+        posted: false,
+        reason: decision.reason,
+        ...(lifecycle.merged ? { lifecycle: "merged" as const } : lifecycle.closed ? { lifecycle: "closed" as const } : {}),
+      };
     }
     try {
       await post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, state: opts.state, description: statusDescription });
@@ -8585,6 +8590,7 @@ export interface PostReviewPendingOpts {
 export interface PostReviewPendingResult {
   posted: boolean;
   reason?: string;
+  lifecycle?: "merged" | "closed";
 }
 
 /** THE ONE PENDING-POST ENTRY POINT (design (a)/(d)): every detector — `runReview`'s own start, `reviewCommand`'s own
