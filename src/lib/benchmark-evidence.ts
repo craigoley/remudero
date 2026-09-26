@@ -33,8 +33,16 @@ export interface BenchmarkEvidenceInput {
   duplicateTerminalRows: number;
   asOf: string | null;
   latestSourceAt: string | null;
-  /** An unreadable source invalidates all partial counts; never publish healthy/empty. */
-  sourceUnavailableReason?: "ledger-source-unreadable" | "ledger-source-missing";
+  /** A partial source invalidates all partial counts; never publish healthy/empty. */
+  sourceUnavailableReason?: "ledger-source-unreadable" | "ledger-source-missing" | "ledger-source-malformed" | "ledger-live-torn-tail";
+  sourceQuality?: BenchmarkSourceQuality;
+}
+
+export interface BenchmarkSourceQuality {
+  malformedRows: number;
+  malformedSources: number;
+  byForm: { gzip: number; plain: number; live: number };
+  liveTornTailRows: number;
 }
 
 export interface BenchmarkFieldCoverage {
@@ -53,6 +61,7 @@ export interface BenchmarkEvidenceSnapshot {
   version: typeof BENCHMARK_QUALITY_VERSION;
   state: "observed" | "unavailable";
   reason?: string;
+  sourceQuality?: BenchmarkSourceQuality;
   asOf: string | null;
   latestSourceAt: string | null;
   sourceRows: { assignments: number; terminals: number; invalidAssignments: number; terminalsWithoutAssignmentId: number };
@@ -111,11 +120,12 @@ function usd(value: number): number {
   return Math.round(value * 1e6) / 1e6;
 }
 
-export function unavailableBenchmarkEvidence(reason: string): BenchmarkEvidenceSnapshot {
+export function unavailableBenchmarkEvidence(reason: string, sourceQuality?: BenchmarkSourceQuality): BenchmarkEvidenceSnapshot {
   return {
     version: BENCHMARK_QUALITY_VERSION,
     state: "unavailable",
     reason,
+    ...(sourceQuality ? { sourceQuality } : {}),
     asOf: null,
     latestSourceAt: null,
     sourceRows: { assignments: 0, terminals: 0, invalidAssignments: 0, terminalsWithoutAssignmentId: 0 },
@@ -141,7 +151,7 @@ export function unavailableBenchmarkEvidence(reason: string): BenchmarkEvidenceS
 
 /** This is intentionally a second pass over compact local join state, never over the ledger. */
 export function deriveBenchmarkEvidence(input: BenchmarkEvidenceInput): BenchmarkEvidenceSnapshot {
-  if (input.sourceUnavailableReason) return unavailableBenchmarkEvidence(input.sourceUnavailableReason);
+  if (input.sourceUnavailableReason) return unavailableBenchmarkEvidence(input.sourceUnavailableReason, input.sourceQuality);
   if (input.assignmentRowsSeen === 0 && input.terminalRowsSeen === 0) {
     return unavailableBenchmarkEvidence("no-assignment-or-terminal-evidence-in-retained-ledger");
   }

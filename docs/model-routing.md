@@ -84,6 +84,13 @@ alter `routing-v1`, or add bytes to the full analytics response. The first refre
 an older checkpoint replays the existing archive/live union once to establish complete coverage;
 subsequent refreshes resume the same cursor. A missing or unreadable source is `unavailable`, not an
 empty healthy cohort. Intermediate `implement.done` rows are never terminal worker outcomes.
+Malformed or non-object archive rows likewise make benchmark quality `ledger-source-malformed`;
+the local audit records source path, form, first/last line ordinal and count without retaining
+the bad payload. The benchmark response exposes only counts by source form, never paths. Its
+checkpoint retains the finding across cursor resumes and rechecks a changed archive. An incomplete
+live final line is a distinct `ledger-live-torn-tail`: the cursor resumes at that line's starting
+byte so a later completed write can recover. The dispatch-history audit keeps its prior
+best-effort posture; source-quality uncertainty does not stop a worker, review, or PR.
 Each dispatch worker now emits a distinct `worker.attempt` receipt at the shared spawn boundary;
 the projection prefers it over a run `verdict` for the same assignment. Older verdict-only rows
 remain labeled legacy evidence. A call that returned successfully is not a verified task fix.
