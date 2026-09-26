@@ -10,6 +10,7 @@ import {
   selectLearnings,
   type LearningEntry,
 } from "../src/lib/learnings.js";
+import { testPinnedLearnings } from "../src/lib/knowledge-gardener.js";
 
 // W1-T2507 — THE PER-SESSION CONTEXT TAX IS PAID ON RULES THE WORKER CANNOT ACT ON.
 //
@@ -29,6 +30,29 @@ function migratedEntries(): LearningEntry[] {
   return entries.filter((e) => /migrated from CLAUDE\.md/.test(e.src));
 }
 
+// Keep these literal: the gardener discovers test pins by scanning string literals, while the
+// selection test below iterates the corpus dynamically. A new migrated rule must be added here.
+const MIGRATED_RULE_IDS = [
+  "verify-pr-body-against-diff-not-memory",
+  "grep-in-path-lazy-split-hazard",
+  "plan-only-pr-not-auto-capped",
+  "no-rewriting-proofs-on-verify-human",
+  "operator-message-standard-is-tested-verbatim",
+  "coverage-test-needs-own-file",
+  "next-task-id-max-across-both-plan-sources",
+  "warn-never-reaches-lint-plan-exit-code",
+  "next-task-id-needs-a-fresh-pull",
+  "hand-mint-uses-the-plain-refspec",
+  "rule19-span-and-never-file-empty-files-list",
+  "remudero-review-is-a-commit-status",
+  "ledger-step-name-is-a-claim-not-evidence",
+  "state-is-scratch-land-findings-in-a-tracked-artifact",
+  "trace-the-runtime-value-not-the-declarative-source",
+  "check-absence-is-not-a-passed-check",
+  "run-task-has-zero-catch-erasure-headroom",
+  "serve-client-js-template-literal-backtick-trap",
+];
+
 // ── acceptance: "every migrated rule reaches a task whose files it governs" ────────────────────
 
 test("every migrated learnings entry is selected for a task whose files: hit its own glob", () => {
@@ -43,6 +67,15 @@ test("every migrated learnings entry is selected for a task whose files: hit its
       selected.some((s) => s.id === entry.id),
       `${entry.id}: a task touching '${governedPath}' must have this migrated fact injected`,
     );
+  }
+});
+
+test("migrated rules are pinned for gardener retirement screening", () => {
+  const migrated = migratedEntries();
+  assert.deepEqual(migrated.map((e) => e.id), MIGRATED_RULE_IDS);
+  const pins = testPinnedLearnings(REPO_ROOT, migrated.map((e) => e.id));
+  for (const entry of migrated) {
+    assert.ok(pins[entry.id], `${entry.id}: the gardener must see this migrated rule as test-pinned`);
   }
 });
 
