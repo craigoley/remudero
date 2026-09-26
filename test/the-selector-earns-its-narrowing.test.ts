@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, readFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -19,6 +19,7 @@ import {
   type SelectorShadowRun,
 } from "../src/lib/selector-shadow-gardener.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import { daemonCommand } from "../src/run-task.js";
 
@@ -228,8 +229,6 @@ test("a self-hosting daemon keeps timers alive while selector-shadow reads a run
   const oldHome = process.env.HOME;
   const oldPath = process.env.PATH;
   const oldFloor = process.env.RMD_GH_TRANSPORT_FLOOR;
-  const oldStarted = process.env.RMD_SELECTOR_SHADOW_FAKE_STARTED;
-  const oldDone = process.env.RMD_SELECTOR_SHADOW_FAKE_DONE;
   process.env.HOME = home;
   let captured: DaemonDeps | undefined;
   try {
@@ -242,36 +241,19 @@ test("a self-hosting daemon keeps timers alive while selector-shadow reads a run
     // plan, gate, test, config, export, ci-friction, then this gardener.
     const start = captured?.gardens?.[6];
     assert.ok(start, "a seventh garden is wired after the ci-friction gardener");
-    const bin = join(home, "bin");
-    mkdirSync(bin);
-    const fakeGh = join(bin, "gh");
-    writeFileSync(fakeGh, [
-      "#!/bin/sh",
-      "if [ \"$1\" = api ]; then",
-      "  printf '%s\\n' '{\"workflow_runs\":[{\"id\":42,\"head_sha\":\"abc123\"}]}'",
-      "elif [ \"$1\" = run ]; then",
-      "  : > \"$RMD_SELECTOR_SHADOW_FAKE_STARTED\"",
-      "  sleep 0.5",
-      "  : > \"$RMD_SELECTOR_SHADOW_FAKE_DONE\"",
-      "  printf 'unparseable log\\n'",
-      "else",
-      "  exit 2",
-      "fi",
-      "",
-    ].join("\n"));
-    chmodSync(fakeGh, 0o755);
-    const started = join(home, "log-started");
     const done = join(home, "log-done");
-    process.env.PATH = `${bin}:${oldPath ?? ""}`;
+    const shim = ghShim([
+      { when: "actions/workflows/ci.yml/runs", stdout: JSON.stringify({ workflow_runs: [{ id: 42, head_sha: "abc123" }] }) },
+      { when: "run view 42", stdout: "unparseable log", delaySeconds: 0.5, doneFile: done },
+    ], { kind: "selector-shadow-log" });
+    process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
     process.env.RMD_GH_TRANSPORT_FLOOR = "advisory";
-    process.env.RMD_SELECTOR_SHADOW_FAKE_STARTED = started;
-    process.env.RMD_SELECTOR_SHADOW_FAKE_DONE = done;
     const garden = start!(60_000);
     try {
-      for (let waited = 0; !existsSync(started) && waited < 5_000; waited += 10) {
+      for (let waited = 0; !shim.calls().some((call) => call.includes("run view 42")) && waited < 5_000; waited += 10) {
         await new Promise((r) => setTimeout(r, 10));
       }
-      assert.ok(existsSync(started), "the installed reader reached the fake run-log child");
+      assert.ok(shim.calls().some((call) => call.includes("run view 42")), "the installed reader reached the fake run-log child");
       await new Promise((r) => setTimeout(r, 20));
       assert.equal(existsSync(done), false, "the daemon event loop ran before the log child finished");
     } finally {
@@ -284,9 +266,5 @@ test("a self-hosting daemon keeps timers alive while selector-shadow reads a run
     else process.env.PATH = oldPath;
     if (oldFloor === undefined) delete process.env.RMD_GH_TRANSPORT_FLOOR;
     else process.env.RMD_GH_TRANSPORT_FLOOR = oldFloor;
-    if (oldStarted === undefined) delete process.env.RMD_SELECTOR_SHADOW_FAKE_STARTED;
-    else process.env.RMD_SELECTOR_SHADOW_FAKE_STARTED = oldStarted;
-    if (oldDone === undefined) delete process.env.RMD_SELECTOR_SHADOW_FAKE_DONE;
-    else process.env.RMD_SELECTOR_SHADOW_FAKE_DONE = oldDone;
   }
 });

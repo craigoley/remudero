@@ -31,6 +31,10 @@ export interface GhShimRoute {
   stderr?: string;
   /** Exit code. Default 0. */
   exit?: number;
+  /** Hold the child open while a caller proves its event loop remains responsive. */
+  delaySeconds?: number;
+  /** Optional completion marker written after the delay, before the child exits. */
+  doneFile?: string;
 }
 
 export interface GhShim {
@@ -48,7 +52,13 @@ export interface GhShim {
 function renderScript(routes: GhShimRoute[], callsPath: string): string {
   const cases = routes
     .map((r) => {
+      if (r.delaySeconds !== undefined && (!Number.isFinite(r.delaySeconds) || r.delaySeconds < 0)) {
+        throw new Error("gh shim route delay must be a non-negative finite number");
+      }
+      const doneFile = r.doneFile?.replaceAll("'", "'\"'\"'");
       const body = [
+        r.delaySeconds !== undefined ? `sleep ${r.delaySeconds}` : "",
+        doneFile !== undefined ? `: > '${doneFile}'` : "",
         r.stderr !== undefined ? `echo ${JSON.stringify(r.stderr)} 1>&2` : "",
         r.stdout !== undefined ? `echo ${JSON.stringify(r.stdout)}` : "",
         `exit ${r.exit ?? 0}`,
