@@ -1785,7 +1785,6 @@ export function buildSweepEffects(
      *  `buildSweepEffectsFromLib`, so `sweep.ts`'s own `BuildSweepEffectsDeps` never has to know
      *  this field exists. */
     reviewerCodeFreshnessImpl?: () => ReviewerCodeFreshness;
-    /** Fixture for the registry read; production reads the tracked instance registry. */
     instanceRegistryTextImpl?: () => string | undefined;
   },
 ): Pick<
@@ -3681,14 +3680,12 @@ export function fillDerivedBody(worktreePath: string): string {
   }
 }
 
-/** W1-T4265 — the `shadow.verdict` counterfactual, PURE over the SAME `armed`/reason a live arm
- *  decision carries, so it can never disagree with what a live instance would have done. */
+/** Counterfactual over the same arm decision the live instance uses. */
 export function shadowLiveWouldHaveDone(armed: boolean, reason?: string): { would: "would_merge" | "would_block"; reason?: string } {
   return armed ? { would: "would_merge" } : { would: "would_block", reason };
 }
 
-/** W1-T4265 — a shadow instance's arm decision, in {@link resolveWipeTestArmPermission}'s
- *  `{ armed, reason? }` shape. A shadow instance never calls `armAutoMergeAtOpen`. */
+/** A shadow instance's arm decision, in the live arm decision's shape. */
 export function resolveShadowInstanceArmPermission(shadowInstance: boolean): { armed: boolean; reason?: string } {
   return shadowInstance
     ? { armed: false, reason: "shadow instance — never arms or merges a pull request (W1-T4265)" }
@@ -3722,10 +3719,7 @@ export function resolveShadowInstanceArmPermission(shadowInstance: boolean): { a
  *
  * DECISION (design point iii): the body is {@link fillDerivedBody} — REST's lack of
  * `--fill`'s autofill costs this small local helper, not an invented body.
- *
- * NO `draft` PARAMETER (W1-T4265): the design asked for shadow PRs to open as drafts, but the
- * W1-T4415 ruling (`scripts/no-draft-pull-request-census.mjs`) forbids drafts. A shadow PR opens
- * READY and is reviewed like any other; it just never reaches an arm call (`instanceMode`).
+ * Shadow PRs stay ready; `instanceMode` enforces the no-arm boundary (W1-T4415).
  */
 export function ghPrCreateFillCommand(
   worktreePath: string,
@@ -13987,7 +13981,6 @@ async function runTask(
     worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
     /** W1-T4356: reinstalls a fast-forwarded managed checkout; default {@link ensureInstallFresh}'s `npm ci`. */
     managedCheckoutInstall?: (repoDir: string) => void;
-    /** Offline shadow-run fixture; production reads the registry from this checkout. */
     instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
   } = {},
 ): Promise<RunResult> {
@@ -14391,8 +14384,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   const cashContainmentState = ctx.cashContainmentState ?? { contained: false };
   const cashContainmentBoundary = ctx.cashContainmentBoundary ?? assertOpenWeightToolBoundary;
 
-  // W1-T4265: ASKED ONCE, HELD FOR THE WHOLE RUN, so a concurrent registry edit cannot flip the
-  // deferred arm block's decision mid-run (see instanceMode).
+  // Hold the instance mode for the run so a registry edit cannot flip its deferred arm decision.
   const shadowInstance = instanceMode(`${owner}/${task.repo}`, (opts.instanceRegistryTextImpl ?? readInstanceRegistryText)(repoRoot)) === "shadow";
 
   // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
@@ -16749,9 +16741,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // wipe-test.ts (`resolveWipeTestArmPermission`); this call site only consults it and skips
     // `armAutoMergeAtOpen` outright when it refuses, so a wipe-test PR is never armed and can
     // never merge out from under the pair it belongs to.
-    // W1-T4265: a shadow instance never reaches `armAutoMergeAtOpen` — checked FIRST, ahead of the
-    // wipe-test boundary, so the two refusals never both claim one PR. Reaching here means a live
-    // instance would arm unconditionally, so the `shadow.verdict` row always names `would_merge`.
+    // Check shadow before wipe-test; the counterfactual uses this same live arm decision.
     if (shadowInstance) {
       const shadowVerdict = shadowLiveWouldHaveDone(true);
       log("shadow.verdict", {
