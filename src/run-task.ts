@@ -2204,6 +2204,7 @@ import {
   excludeNodeModulesFromGit,
   linkWorktreeNodeModules, resolveNodeModulesSource,
   worktreeAdd,
+  worktreeAddAsync,
   worktreeLockIsPidAlive,
   worktreeRemove,
   worktreesDir,
@@ -14953,7 +14954,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // `worktree.add` line (three-way base reading + `behind`) and, on the fail-open branch,
     // `worktree.base_uncheckable` — see both functions' own docs in lib/worker.ts.
     // W1-T4193: the implement lane, and only it, refuses a same-package lockfile mismatch (the arm below defers it).
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
+    await worktreeAddAsync(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
     // LIVENESS TOKEN: mark this worktree ALIVE so a concurrent pruneStaleRuns (another
     // drain, a manual run-task) skips it instead of `--force`-removing it mid-run. The
     // lock is a SIBLING file (never inside the worktree ⇒ never committed into the PR),
@@ -44333,7 +44334,7 @@ export interface AlertFixDispatchDeps {
     branch: string,
     startPoint: string,
     deps?: { log?: (step: string, extra?: Record<string, unknown>) => void },
-  ) => void;
+  ) => void | Promise<void>;
   worktreeRemove: (repoDir: string, worktreePath: string) => void;
   renderWorkerSettings: typeof renderWorkerSettings;
   loadMounts: typeof loadMounts;
@@ -44372,7 +44373,7 @@ export function checkAlertFixAcceptance(
 }
 
 const REAL_ALERT_FIX_DISPATCH_DEPS: AlertFixDispatchDeps = {
-  worktreeAdd,
+  worktreeAdd: worktreeAddAsync,
   worktreeRemove,
   renderWorkerSettings,
   loadMounts,
@@ -44409,7 +44410,7 @@ export async function dispatchAlertFixRun(
   const branch = `alert-fix-${originId}-${Date.now()}`;
   const worktreePath = join(worktreesDir(config), branch);
   try {
-    deps.worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
+    await deps.worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
     const settingsFile = deps.renderWorkerSettings({
       templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
       hooksDir: join(resolveInstallRoot(config), "hooks"),

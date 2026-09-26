@@ -33,7 +33,7 @@ test("the run path INVOKES assertLintClean right after assertRunnable (the pre-d
 test("the lint guard runs BEFORE the inflight lock and BEFORE any worktree/worker work — no spawn on a linter-failing task", () => {
   const lintIdx = runTaskSrc.indexOf("assertLintClean(");
   const inflightIdx = runTaskSrc.indexOf("acquireInflightLock(");
-  const worktreeAddIdx = runTaskSrc.indexOf("worktreeAdd(");
+  const worktreeAddIdx = runTaskSrc.indexOf("await worktreeAddAsync(");
   const reconIdx = runTaskSrc.indexOf('"recon worker"');
   assert.ok(lintIdx >= 0, "assertLintClean must be called somewhere in run-task.ts");
   assert.ok(lintIdx < inflightIdx, "the lint guard must precede the inflight lock");

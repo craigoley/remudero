@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -23,6 +23,7 @@ import fs from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { createSdkMcpServer, query, tool, type Options, type PermissionMode, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { detectUsageLimitRefusal } from "./classify.js";
@@ -4522,6 +4523,21 @@ export function worktreeAdd(
     log: deps.log,
     countBehind: (b, remoteHead) => defaultCountBehind(repoDir, b, remoteHead),
   });
+  logAddedWorktree(deps, branch, worktreePath, createdBase, localRefHead, ref, currency);
+  execFileSync("git", ["-C", worktreePath, "config", "--worktree", "core.hooksPath", "hooks"]);
+  finishWorktreeAdd(repoDir, worktreePath, deps);
+  recordCanonicalCheckoutDrift(repoDir, ref, { warn: deps.warn });
+}
+
+function logAddedWorktree(
+  deps: WorktreeAddDepsArg,
+  branch: string,
+  worktreePath: string,
+  createdBase: string,
+  localRefHead: string,
+  ref: string,
+  currency: { remoteHead: string; behind: number | "unknown" },
+): void {
   // ONE line per creation: three readings plus the distance. A stale base never reaches here, because
   // assertWorktreeBaseCurrent throws first, so this is the "passed or degraded-but- proceeded" line and is never emitted for
   // a refusal (W1-T2621).
@@ -4534,14 +4550,17 @@ export function worktreeAdd(
     ref,
     behind: currency.behind,
   });
-  // Point this worktree at the repo's tracked hooks/ dir so `hooks/commit-msg` fires on every commit a worker authors itself.
-  // A RELATIVE core.hooksPath resolves against each worktree's OWN top-level dir (verified against git 2.54), so "hooks" is
-  // correct. `--worktree` keeps the setting in this linked worktree's config rather than taking
-  // the parent checkout's shared `.git/config.lock` on every worker creation (W1-T3308).
-  execFileSync("git", ["-C", worktreePath, "config", "--worktree", "core.hooksPath", "hooks"]);
+}
+
+function finishWorktreeAdd(
+  repoDir: string,
+  worktreePath: string,
+  deps: WorktreeAddDepsArg,
+  exclude: () => void = () => { excludeNodeModulesFromGit(worktreePath); },
+): void {
   // …and give that hook the `commitlint` it resolves, or it rejects every commit made here. Must run AFTER the hooksPath line
   // and AFTER the worktree exists, and excluding FIRST keeps the link from ever being visible to git as an untracked file.
-  excludeNodeModulesFromGit(worktreePath);
+  exclude();
   if (deps.refuseSamePackageLockfileMismatch) assertSamePackageInstallInputs(repoDir, worktreePath, deps.log);
   // A satellite on core's install root gets its OWN lockfile-keyed tree instead; every other worktree links exactly as
   // before, through the unchanged call below (W1-T4260).
@@ -4558,10 +4577,114 @@ export function worktreeAdd(
       incomplete: workspaceNodeModulesIncomplete(workspaceLinkResults),
     });
   }
-  // The link above ties this worktree's node_modules to repoDir's tree, so measure how far that tree sits behind the
-  // origin/<ref> the fetch already moved, here where the coupling is real. `ref` is computed above and no new fetch happens
-  // (W1-T2618).
-  recordCanonicalCheckoutDrift(repoDir, ref, { warn: deps.warn });
+}
+
+const execFilePromise = promisify(execFile);
+
+/** Async Git calls used by daemon worktree creation. The two commands whose sync form inherits stdio
+ * forward both streams to stderr, including output produced before a failure. */
+async function worktreeGit(args: string[], forwardOutput = false): Promise<string> {
+  try {
+    const { stdout, stderr } = await execFilePromise("git", args, { encoding: "utf8" });
+    if (forwardOutput) {
+      if (stdout) process.stderr.write(stdout);
+      if (stderr) process.stderr.write(stderr);
+    }
+    return stdout;
+  } catch (error) {
+    if (forwardOutput) {
+      const output = error as Error & { stdout?: string; stderr?: string };
+      if (output.stdout) process.stderr.write(output.stdout);
+      if (output.stderr) process.stderr.write(output.stderr);
+    }
+    throw error;
+  }
+}
+
+/** Daemon-safe counterpart to {@link worktreeAdd}: identical order, ledger rows and refusals,
+ * with Git subprocesses awaited so the event loop can service other dispatch work. */
+export async function worktreeAddAsync(
+  repoDir: string,
+  worktreePath: string,
+  branch: string,
+  base = "origin/main",
+  deps: WorktreeAddDepsArg = {},
+): Promise<void> {
+  let enabled: string | undefined;
+  try {
+    enabled = (await worktreeGit(["-C", repoDir, "config", "--local", "--get", "extensions.worktreeConfig"])).trim();
+  } catch {
+    // An absent setting takes the same migration path as the sync form.
+  }
+  if (enabled !== "true") {
+    await worktreeGit(["-C", repoDir, "config", "--local", "extensions.worktreeConfig", "true"]);
+  }
+  await worktreeGit(["-C", repoDir, "fetch", "origin", "--quiet"], true);
+  const ref = base.replace(/^origin\//, "");
+  let localRefHead: string;
+  try {
+    localRefHead = (await worktreeGit(["-C", repoDir, "rev-parse", `refs/remotes/origin/${ref}`])).trim();
+  } catch {
+    localRefHead = "unreadable";
+  }
+  await worktreeGit(["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base], true);
+  const createdBase = (await worktreeGit(["-C", worktreePath, "rev-parse", "HEAD"])).trim();
+  recordWorktreeBase(worktreePath, createdBase);
+
+  let remoteHead: string | undefined;
+  let remoteError: unknown;
+  try {
+    if (deps.readRemoteHead) remoteHead = deps.readRemoteHead(repoDir, ref);
+    else {
+      const output = await worktreeGit(["-C", repoDir, "ls-remote", "--exit-code", "origin", `refs/heads/${ref}`]);
+      remoteHead = output.split(/\s+/)[0]?.trim();
+      if (!remoteHead) throw new Error(`empty ls-remote output for refs/heads/${ref}`);
+    }
+  } catch (error) {
+    remoteError = error;
+  }
+  let behind: number | "unknown" = "unknown";
+  if (remoteHead !== undefined && remoteHead !== createdBase) {
+    try {
+      const raw = await worktreeGit(["-C", repoDir, "rev-list", "--count", `${createdBase}..${remoteHead}`]);
+      const parsed = Number.parseInt(raw.trim(), 10);
+      if (Number.isInteger(parsed) && parsed >= 0) behind = parsed;
+    } catch {
+      // The remote object can be absent locally; the sync form reports an unknown distance.
+    }
+  }
+  const currency = assertWorktreeBaseCurrent(createdBase, ref, {
+    readRemoteHead: () => {
+      if (remoteError !== undefined) throw remoteError;
+      return remoteHead!;
+    },
+    warn: deps.warn,
+    log: deps.log,
+    countBehind: () => behind,
+  });
+  logAddedWorktree(deps, branch, worktreePath, createdBase, localRefHead, ref, currency);
+  await worktreeGit(["-C", worktreePath, "config", "--worktree", "core.hooksPath", "hooks"]);
+
+  let commonDir: string | undefined;
+  try {
+    commonDir = (await worktreeGit(["-C", worktreePath, "rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
+  } catch {
+    // Excluding node_modules is best-effort, as in the sync form.
+  }
+  finishWorktreeAdd(repoDir, worktreePath, deps, () => {
+    excludeNodeModulesFromGit(worktreePath, { commonDir: () => {
+      if (commonDir === undefined) throw new Error("git common dir unreadable");
+      return commonDir;
+    } });
+  });
+  let drift: CanonicalCheckoutDriftResult;
+  try {
+    const raw = await worktreeGit(["-C", repoDir, "rev-list", "--count", `HEAD..origin/${ref}`]);
+    drift = measureCanonicalCheckoutDrift(repoDir, ref, { revListCount: () => raw });
+  } catch (error) {
+    drift = { status: "unknown", reason: String((error as Error)?.message ?? error) };
+  }
+  recordCanonicalCheckoutDrift(repoDir, ref, { warn: deps.warn, measure: () => drift });
 }
 
 /** Does a local branch named `branch` already exist in `repoDir`? A cheap, read-only `show-ref` check — unlike `git branch -D`
