@@ -24,46 +24,19 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { renderConsoleShellScript } from "../src/lib/console-shell-script.js";
 import { buildPanelGraphRoutes, type PanelGraphDeps, type RatifyCliGateway } from "../src/lib/panel-graph.js";
-import { renderShellHtml } from "../src/lib/serve.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
 
-const HTML = renderShellHtml();
 
 // ── extraction (verbatim from the shipped shell) ────────────────────────────────────────────
 
-function clientFn(name: string): string {
-  const re = new RegExp("function " + name + "\\([^)]*\\) \\{[\\s\\S]*?\\n  \\}");
-  const src = HTML.match(re)?.[0];
-  assert.ok(src, `the shell's inline script must define ${name}()`);
-  return src as string;
-}
 
 interface Journey {
   journeyGraphSvg: (chain: unknown) => string;
   journeyHtml: (chain: unknown) => string;
 }
 
-/** A fresh sandbox around the REAL journeyGraphSvg/journeyHtml + their real collaborators
- *  (escapeHtml, journeyRunHtml, journeyTaskHtml), extracted verbatim -- mirrors
- *  test/console-shell-unknowns.test.ts's bannerHarness for the same reason: a sandbox holding
- *  only journeyHtml throws "escapeHtml is not defined" before any assertion below can run. */
-function journeyHarness(): Journey {
-  const factory = new Function(
-    [
-      // W1-T2731: every PURE helper this sandbox needs now comes from
-      // lib/console-shell-script.ts, through the SAME `renderConsoleShellScript()` the shell
-      // itself splices in — so this is still the real shipped code, not a stand-in. `clientFn`
-      // could not reach them any more in any case: tsx MINIFIES the transpiled module, so the
-      // emitted text is one line per function and no source regex can carve it up.
-      renderConsoleShellScript(),
-      "return { journeyGraphSvg: journeyGraphSvg, journeyHtml: journeyHtml };",
-    ].join("\n"),
-  ) as () => Journey;
-  return factory();
-}
 
 // ── fixtures ─────────────────────────────────────────────────────────────────────────────────
 
@@ -98,26 +71,9 @@ const EMPTY_CHAIN = { direction: "reverse", tasks: [] };
 
 // ── (1) the console emits an SVG rendering of the graph the routes already return ──────────────
 
-test("W1-T2489: journeyHtml draws the populated chain as an inline <svg> node graph, alongside the existing text rendering", () => {
-  const { journeyHtml } = journeyHarness();
-  const html = journeyHtml(POPULATED_CHAIN);
-  assert.match(html, /<svg[^>]*class="journey-graph"/, "the populated chain must draw an inline SVG");
-  assert.match(html, /role="img"/, "the graph must be an accessible image, not decoration only");
-  // the pre-existing text rendering (W1-T222) still renders too -- this is an addition, not a
-  // replacement (see criterion 3/4/8 below for why the text is unconditional).
-  assert.match(html, /direction: reverse/);
-  assert.match(html, /journey-task-link/);
-});
 
 // ── (2) the drawing reads the existing payload and adds no new route ───────────────────────────
 
-test("W1-T2489: journeyGraphSvg draws from the SAME { feedback, tasks } shape journeyHtml already receives off GET /v1/trace -- no second fetch, no new field", () => {
-  const { journeyGraphSvg } = journeyHarness();
-  // the exact fixture shape TraceChain (lib/trace.ts) already carries -- nothing this function
-  // reads is absent from what buildTraceRoute (panel-graph.ts) already returns today.
-  const svg = journeyGraphSvg({ feedback: POPULATED_CHAIN.feedback, tasks: POPULATED_CHAIN.tasks });
-  assert.match(svg, /<svg/);
-});
 
 function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "rmd-console-graph-"));
@@ -179,74 +135,18 @@ test("W1-T2489: buildPanelGraphRoutes retains the existing routes alongside the 
 
 // ── (3) an empty graph falls back to the text rendering rather than a blank panel ───────────────
 
-test("W1-T2489: an empty graph (no feedback, no tasks) draws no <svg> at all -- journeyHtml falls back to the pre-existing text rendering, never a blank panel", () => {
-  const { journeyHtml } = journeyHarness();
-  const html = journeyHtml(EMPTY_CHAIN);
-  assert.doesNotMatch(html, /<svg/, "nothing to draw -- no empty <svg> shell either");
-  assert.match(html, /direction: reverse/);
-  assert.match(html, /\(no tasks yet\)/, "the SAME text fallback W1-T222 shipped");
-  assert.notEqual(html.trim(), "", "the panel must never render blank");
-});
 
 // ── (4) an unreadable payload falls back to the text rendering ──────────────────────────────────
 
-test("W1-T2489: a chain shape journeyGraphSvg cannot read (tasks not an array, feedback not an object, or the whole chain malformed) still renders the text fallback, never throws, never blanks", () => {
-  const { journeyHtml } = journeyHarness();
-  const malformed = [
-    { direction: "reverse", tasks: "not-an-array", feedback: 42 },
-    { direction: "reverse", tasks: [{ id: "W1-T9", title: "ok", runs: "not-an-array" }] },
-    null,
-    "a bare string, not even an object",
-    undefined,
-  ];
-  for (const bad of malformed) {
-    let html = "";
-    assert.doesNotThrow(() => {
-      html = journeyHtml(bad);
-    }, `journeyHtml must never throw on an unreadable payload: ${JSON.stringify(bad)}`);
-    assert.notEqual(html.trim(), "", "an unreadable payload must degrade to text, never render blank");
-    assert.match(html, /direction:/, "the text fallback (direction: ...) must still be present");
-  }
-});
 
 // ── (5) the rendered shell's client script still parses ─────────────────────────────────────────
 
-test("W1-T2489: the rendered shell's entire inline <script> still parses -- the backtick/${} hazard this file's own rationale names (a stray backtick or unescaped ${} in SVG markup terminates the outer template literal and breaks the build)", () => {
-  const script = /<script\b[^>]*>([\s\S]*?)<\/script>/.exec(HTML)?.[1];
-  assert.ok(script, "the shell must still emit its inline <script>");
-  assert.doesNotThrow(() => new Function(script as string), "the full client script must remain syntactically valid JS");
-});
 
 // ── (6) the drawing loads no script or stylesheet over the network ──────────────────────────────
 
-test("W1-T2489: the graph is inline SVG in the SAME markup/stylesheet the shell already ships -- no <script src> or external <link rel=stylesheet> was added", () => {
-  assert.doesNotMatch(HTML, /<script\s[^>]*\bsrc=/i, "no externally-loaded script");
-  assert.doesNotMatch(HTML, /<link[^>]*\brel=["']?stylesheet["']?[^>]*\bhref=/i, "no externally-loaded stylesheet");
-  const { journeyGraphSvg } = journeyHarness();
-  const svg = journeyGraphSvg({ feedback: POPULATED_CHAIN.feedback, tasks: POPULATED_CHAIN.tasks });
-  assert.doesNotMatch(svg, /<image\b/i, "no <image> element (a network-loadable resource)");
-  assert.doesNotMatch(svg, /https?:\/\//i, "no remote reference of any kind inside the drawing itself");
-});
 
 // ── (7) every node the payload names is reachable in the rendered output ────────────────────────
 
-test("W1-T2489: every feedback/task/run id the chain names is reachable inside the drawn <svg>", () => {
-  const { journeyGraphSvg } = journeyHarness();
-  const svg = journeyGraphSvg({ feedback: POPULATED_CHAIN.feedback, tasks: POPULATED_CHAIN.tasks });
-  assert.match(svg, /FB1/, "the feedback node");
-  assert.match(svg, /W1-T2\b/, "the first task node");
-  assert.match(svg, /W1-T3\b/, "the second task node");
-  assert.match(svg, /W1-T2-1/, "the first run node");
-  assert.match(svg, /W1-T3-1/, "the second run node");
-  // the failing run is visually distinguished too (mirrors journeyRunHtml's own .journey-fail,
-  // under its own class so the two never collide in a caller's element count).
-  assert.match(svg, /journey-graph-fail/);
-});
 
 // ── (8) removing the fallback makes the empty-graph case render nothing ─────────────────────────
 
-test("W1-T2489: journeyGraphSvg called on its OWN (no journeyHtml wrapper) renders NOTHING for an empty graph -- proving the text fallback in journeyHtml, not journeyGraphSvg itself, is what keeps the panel non-blank", () => {
-  const { journeyGraphSvg } = journeyHarness();
-  assert.equal(journeyGraphSvg({ feedback: null, tasks: [] }), "", "no wrapper, no fallback: an empty graph draws literally nothing");
-  assert.equal(journeyGraphSvg({}), "", "same for a chain shape carrying neither field at all");
-});

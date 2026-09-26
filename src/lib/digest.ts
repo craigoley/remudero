@@ -813,13 +813,12 @@ export function renderLedgerWriters(writers: readonly LedgerWriterFlag[]): strin
   return `top ledger writers: ${writers.map(one).join(", ")}`;
 }
 
-/**
- * Deep-link a task id to its console card (W1-T144). A hash route (`#task=<id>`) so the link
- * never leaves the client and layers on top of whatever base URL the operator has bookmarked.
- * `consoleBaseUrl` is a full origin; a trailing slash is tolerated. `taskId` is percent-encoded.
- */
+/** A task's page on the operator console (app.remudero.com's `/task/[taskId]`, W1-T4563), for a
+ *  link pushed into a message app. `consoleBaseUrl` is the CONSOLE's base ({@link
+ *  import("./config.js").consoleAppUrl}), never the control gateway's: the daemon serves no
+ *  console, so the old `<gateway>/#task=<id>` hash link opened nothing. */
 export function consoleCardUrl(consoleBaseUrl: string, taskId: string): string {
-  return `${consoleBaseUrl.replace(/\/+$/, "")}/#task=${encodeURIComponent(taskId)}`;
+  return `${consoleBaseUrl.replace(/\/+$/, "")}/task/${encodeURIComponent(taskId)}`;
 }
 
 /**

@@ -72,23 +72,3 @@ test("W1-T2240: mergedToday is untouched by this task -- still counts verdict:'m
   assert.equal(glance.mergedToday, 1, "only R2 -- merged AND dated today; R1 is merged but yesterday, R3 is not merged");
 });
 
-test("W1-T2240: the existing refusal to fabricate an unknown spend still holds -- serve.ts's latestSpend ? costLabel(...) : \"…\" guard is untouched by this task", () => {
-  // W1-T2902: this guard's actual call site moved out of serve.ts's template literal into
-  // lib/console-shell-client.ts, a real module — see that file's own header.
-  const src = readFileSync(fileURLToPath(new URL("../src/lib/console-shell-client.ts", import.meta.url)), "utf8");
-  assert.match(
-    src,
-    /latestSpend \? latestSpend\.mergedToday : "…"/,
-    "merged-today must still render an ellipsis, never a fabricated 0, before any snapshot has landed",
-  );
-  assert.match(
-    src,
-    /latestSpend \? costLabel\(latestSpend\.spendTodayUsd\) : "…"/,
-    "spend-today must still refuse to fabricate a value when latestSpend is not yet known",
-  );
-  assert.match(
-    src,
-    /latestSpend \? costLabel\(latestSpend\.spendWeekUsd\) : "…"/,
-    "spend-week must still refuse to fabricate a value when latestSpend is not yet known",
-  );
-});

@@ -70,6 +70,7 @@ export interface Config {
   dailyCapUsd?: number | { normal: number; squeezed: number } | null;
   fixStrikeCap?: number;
   consoleUrl?: string;
+  consoleAppUrl?: string;
   /** `rmd board`'s default repository set (W1-T3685) — `owner/repo` strings, read when no
    *  `--repo` flag is given. A fourth repository needs an edit HERE, never a `pr-board.ts` code
    *  change: this is the one field that makes "configuration, never a hardcoded list" true for
@@ -302,7 +303,8 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
     value: numberShape,
   }),
   configField("fixStrikeCap", "number", true, 2, "config.json", "Blocked-review fix rung strike cap.", numberShape),
-  configField("consoleUrl", "string", true, "http://localhost:4317", "config.json", "Operator console base URL.", stringShape),
+  configField("consoleUrl", "string", true, "http://localhost:4317", "config.json", "Control gateway base URL (rmd serve): the host signed answer links resolve against.", stringShape),
+  configField("consoleAppUrl", "string", true, "https://app.remudero.com", "config.json", "Operator console (app.remudero.com) base URL for task deep links.", stringShape),
   configField(
     "fleetRepos",
     "string[]",

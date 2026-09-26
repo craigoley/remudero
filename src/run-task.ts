@@ -21,6 +21,7 @@ const GIT_UNTRACKED_FILES_ALL = "--untracked-files=all";
 import {
   architectModel,
   configPath as instanceConfigPath,
+  consoleAppUrl,
   consoleUrl,
   fixStrikeCap,
   globalArtifactPath,
@@ -623,12 +624,9 @@ import {
   resolveServiceTokens,
   SERVE_EXPECTED_BRANCH,
   serviceTokensPath,
-  consoleBuildBannerLine,
-  consoleBuildRealpath,
-  consoleBuildStatus,
+  defaultIsListening,
 } from "./lib/serve.js";
 import { runRelayClient } from "./lib/relay-client.js";
-import { consoleUrlCommand, defaultIsListening } from "./lib/console-url.js";
 import { assertProposedPlanLoads,
   buildGrillEscalation,
   decideTriage,
@@ -26735,7 +26733,7 @@ export function buildDigestCadenceDaemonHooks(deps: {
           taskId: "DIGEST",
           channelName: "inbox",
         },
-        consoleBaseUrl: consoleUrl(config),
+        consoleBaseUrl: consoleAppUrl(config),
         // A REPORT, NEVER A MINTER (this task's own rationale): `suggestions` is the seam
         // `runDigestCadenceReport` already offers a caller-produced item through — see that
         // function's own doc ("if a caller wants a generative half, it must have already produced
@@ -29736,8 +29734,8 @@ export function pushDrainRundown(
   const rundown = buildRundown(summary, ledgerLines);
   (deps.print ?? ((line: string) => console.log(line)))("\n" + renderRundown(rundown));
   // W1-T144: the SAME sendRundown -> notify() path rmd digest/MANUAL/HARD_STOP escalations
-  // ride, each non-merged line deep-linking to its console card via consoleUrl(config).
-  return sendRundown(rundown, consoleUrl(config), {
+  // ride, each non-merged line deep-linking to its console card via consoleAppUrl(config).
+  return sendRundown(rundown, consoleAppUrl(config), {
     channel: deps.channel,
     ledgerPath: deps.ledgerPath,
     runId: deps.runId,
@@ -33671,7 +33669,6 @@ export interface UpDeps {
   loadServeService?: (plistPath: string) => void;
   servePlistExists?: (path: string) => boolean;
   sleep?: (ms: number) => Promise<void>;
-  consoleUrlCommand?: typeof consoleUrlCommand;
   liveInflightRuns?: () => LiveInflightRun[];
   planLifecycleCounts?: () => LifecycleCounts | null;
   bootPollAttempts?: number;
@@ -33688,9 +33685,8 @@ export interface UpDeps {
  * exists for: never resume a fleet against branch code) unless `--allow-off-main` is given
  * explicitly. (3) Loads the daemon launchd service. (4) Confirms/starts the serve launchd
  * service (never a foreground spawn — T152 already makes serve a service; this CONFIRMS it).
- * (5) Prints the resume report: daemon pid, the console URL WITH its READ token (via the
- * already-hardened `rmd console-url`, never a second URL-assembly implementation — and
- * deliberately the READ token, never the write one, per standing rule 24 / R-5), the
+ * (5) Prints the resume report: daemon pid, where the console is (app.remudero.com -- W1-T4563
+ * retired the daemon's own console, so no tokened localhost URL is printed any more), the
  * in-flight/queued head, and the needs-human count.
  *
  * IDEMPOTENT: when the daemon service is already loaded and serve is already listening, this
@@ -33788,9 +33784,8 @@ export async function upCommand(rest: string[], deps: UpDeps = {}): Promise<numb
           : "not listening — not installed (run `rmd serve-plist --write` first)"
     }`,
   );
-  if (serveListening) {
-    await (deps.consoleUrlCommand ?? consoleUrlCommand)(["--port", String(port), "--host", hosts.join(",")], config, { out, err });
-  }
+  // W1-T4563: the gateway serves /v1/* only; the console is its own application.
+  out(`    console:         ${consoleAppUrl(config)}`);
   out(`    in-flight/queued: ${live.length > 0 ? live.map((r) => `${r.taskId} (run ${r.runId})`).join(", ") : "none in flight"}`);
   out(`    needs-human:      ${counts ? counts.needsHuman : "unknown (GitHub unreachable)"}`);
 
@@ -34243,20 +34238,10 @@ export async function serveCommand(
   });
 
   // NO TOKEN IS PRINTED. In a container stdout is `docker logs`, readable by anyone in the docker
-  // group and kept past the process, so the banner names the tokens file and `rmd console-url`
-  // prints the tokened bookmark on demand. See resolveServiceTokens for rotation.
+  // group and kept past the process, so the banner names the tokens file. See resolveServiceTokens for rotation.
   console.log(`### rmd serve — listening on ${hosts.map((h) => `http://${h}:${port}`).join(", ")} (repo ${self.owner}/${self.repo})`);
-  for (const h of hosts) console.log(`    console:     http://${h}:${port}/ (tokened bookmark: rmd console-url)`);
-  // W1-T3176 — the console BUILD's state, on the line under the console URL, because the failure
-  // this prevents is an operator opening that URL and getting a blank tab. Absent when no build is
-  // configured (`RMD_CONSOLE_BUILD_ROOT` unset), so a daemon serving only the string shell says
-  // nothing rather than reporting a missing build it was never asked for.
-  {
-    const line = consoleBuildBannerLine(
-      consoleBuildStatus(process.env.RMD_CONSOLE_BUILD_ROOT, { realpath: consoleBuildRealpath }),
-    );
-    if (line) console.log(line);
-  }
+  // W1-T4563: this process serves the /v1 control gateway only; the console is app.remudero.com.
+  console.log(`    console:     ${consoleAppUrl(config)} (this host serves the /v1 gateway only)`);
   console.log(`    write token: ${serviceTokensPath(config.root)} (0600, not printed)`);
 
   await new Promise<void>((resolve) => {
@@ -40308,7 +40293,7 @@ export async function escalateCommand(
           taskId,
           summary,
           issueUrl: url,
-          cardUrl: consoleCardUrl(consoleUrl(config), taskId),
+          cardUrl: consoleCardUrl(consoleAppUrl(config), taskId),
           options: parseOptionFlags(rest),
         },
         { secret: linkSecret, baseUrl: consoleUrl(config), nowMs: Date.now() },
@@ -45984,19 +45969,13 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "serve",
     syntax: "rmd serve [--port <n>] [--host <addr>]",
     summary: "The operator console front door: board, fleet-control, feedback inbox over HTTP.",
-    detail: "the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317 (matches apps/dashboard's own default); --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the console can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM",
+    detail: "the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and, at GET /, a one-line JSON pointer to the console at app.remudero.com (W1-T4563 retired the in-process console); bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317; --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the gateway can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM",
   },
   {
     name: "relay",
     syntax: "rmd relay",
     summary: "Tier-2 relay client: tunnel the local `rmd serve` surface out to a relay URL.",
     detail: "W1-T431: the Tier-2 relay CLIENT (MASTER-PLAN §7A/§6A, D-11) — dials OUT to the relay URL + enrollment token in per-instance config (relay.url/relay.token; never a flag, never committed) and holds a reconnecting tunnel that forwards the LOCAL rmd serve surface (REST + SSE) as a transparent byte proxy, adding no scope of its own (the console's own W1-T430 identity seam decides every grant, exactly as a direct call would). Never binds a port — outbound-only, tested invariant. Refuses (spawns nothing) when relay.url or relay.token is absent. Blocks until SIGINT/SIGTERM, same shape as `rmd serve`; `rmd serve` is a separate process and is completely unaffected whether or not this ever runs.",
-  },
-  {
-    name: "console-url",
-    syntax: "rmd console-url [--port <n>] [--host <addr>] [--write]",
-    summary: "Print the console URL carrying the read token (--write also prints the write token).",
-    detail: "print the console URL carrying the READ token — the bookmark that gets you in, one command instead of hand-extracting <config.root>/state/service-tokens.json (fb-1784772988510-da3712); prints one URL per bound interface, resolving port/host EXACTLY as `rmd serve` does (flag > RMD_SERVE_HOST > config.serve.* > 127.0.0.1:4317); --write additionally prints the WRITE token as a bare value to paste into the console (never in a URL), and REFUSES unless stdout is a TTY, because a redirected stdout becomes a file that outlives the process (R-5); reads the 0600 tokens file but never creates one — if the console has never run it says so and names the remedy; spawns nothing",
   },
   {
     name: "serve-plist",
@@ -46014,7 +45993,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "up",
     syntax: "rmd up [--port <n>] [--host <addr>] [--allow-off-main]",
     summary: "Full resume: install freshness, load daemon + serve, print a resume report.",
-    detail: "full resume (W1-T169): runs install-freshness FIRST (W1-T151 — a lockfile-changing pull triggers `npm ci` before anything starts), REFUSES to resume an off-main checkout unless --allow-off-main is given, loads the daemon launchd service, confirms/starts the serve launchd service, and prints a resume report (daemon pid, the console URL WITH its READ token via `rmd console-url`, the in-flight/queued head, needs-human count). IDEMPOTENT: already-up verifies + reports the running state, never a double start.",
+    detail: "full resume (W1-T169): runs install-freshness FIRST (W1-T151 — a lockfile-changing pull triggers `npm ci` before anything starts), REFUSES to resume an off-main checkout unless --allow-off-main is given, loads the daemon launchd service, confirms/starts the serve launchd service, and prints a resume report (daemon pid, where the console is (app.remudero.com), the in-flight/queued head, needs-human count). IDEMPOTENT: already-up verifies + reports the running state, never a double start.",
   },
   {
     name: "sync",
@@ -46852,7 +46831,6 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["install-checkout", async (rest) => await installCheckoutCommand(rest)],
   ["serve", async (rest) => await serveCommand(rest)],
   ["relay", async (rest) => await relayConnectCommand(rest)],
-  ["console-url", async (rest) => await consoleUrlCommand(rest, loadConfig())],
   ["serve-plist", async (rest) => await servePlistCommand(rest)],
   ["down", async (rest) => await downCommand(rest)],
   ["up", async (rest) => await upCommand(rest)],

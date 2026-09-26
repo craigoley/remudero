@@ -15,30 +15,10 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, write
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { askTypeFromEscalationTitle, draftedTasksHtml } from "../src/lib/console-shell-script.js";
 import { classifyAskRecordItem } from "../src/lib/ask-classification.js";
-// W1-T2731: the shell's pure helpers are a real module now; these sandboxes take them from it
-// (via the SAME emitter the shell uses) instead of regexing them out of the rendered HTML.
-import { renderConsoleShellScript } from "../src/lib/console-shell-script.js";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
-import {
-  buildServeRoutes,
-  resolveConsoleSha,
-  CONSOLE_SHA_UNKNOWN,
-  buildServeServer,
-  DEFAULT_BOARD_PREWARM_MS,
-  DEFAULT_SERVE_PORT,
-  prewarmBoardGithub,
-  renderShellHtml,
-  resolveServePort,
-  resolveServeHost,
-  resolveServeHosts,
-  DEFAULT_SERVE_HOST,
-  resolveServiceTokens,
-  serviceTokensPath,
-  type ServeDeps,
-} from "../src/lib/serve.js";
+import { buildServeRoutes, resolveConsoleSha, CONSOLE_SHA_UNKNOWN, buildServeServer, DEFAULT_BOARD_PREWARM_MS, DEFAULT_SERVE_PORT, prewarmBoardGithub, resolveServePort, resolveServeHost, resolveServeHosts, DEFAULT_SERVE_HOST, resolveServiceTokens, serviceTokensPath, type ServeDeps } from "../src/lib/serve.js";
 import type { Route } from "../src/lib/service.js";
 import { isPaused, pauseDetail } from "../src/lib/fleet-control.js";
 import type { Plan, Task } from "../src/lib/plan.js";
@@ -363,20 +343,6 @@ test("buildServeServer: with panelGraph.ratify OMITTED, POST /v1/inbox/approve o
 
 // ── (1) GET / -- the HTML shell mounts the board + links the panel/graph ────────────────────
 
-test("GET /: 200, HTML shell referencing the board mount and panel/graph links", async () => {
-  const root = tmpRoot();
-  await withServeServer(depsFor(root, planOf([task({ id: "A" })])), async (base) => {
-    const res = await get(base, "/", READ_TOKEN);
-    assert.equal(res.status, 200);
-    assert.match(res.headers.get("content-type") ?? "", /text\/html/);
-    const body = await res.text();
-    assert.match(body, /id="now"/); // the live NOW section (W1-T153's operator-priority IA)
-    assert.match(body, /\/v1\/feedback/); // panel-graph inbox link
-    assert.match(body, /\/v1\/trace/); // panel-graph trace link
-    assert.match(body, /\/v1\/control\/pause/); // panel-actions wiring
-  });
-});
-
 test("GET /: no bearer token -> 401, same as every other route on this surface", async () => {
   const root = tmpRoot();
   await withServeServer(depsFor(root, planOf([task()])), async (base) => {
@@ -389,16 +355,6 @@ test("GET /: no bearer token -> 401, same as every other route on this surface",
 // The original auth probe used `get()` (always sends the Authorization header) and so never
 // exercised the one client that matters — a browser opening `/?token=...` by URL, which CANNOT
 // send a header. These three use `navigate()` (header-less) to pin the fix.
-
-test("GET /?token=<read> with NO Authorization header returns the shell (browser-navigation fixture)", async () => {
-  const root = tmpRoot();
-  await withServeServer(depsFor(root, planOf([task({ id: "A" })])), async (base) => {
-    const res = await navigate(base, `/?token=${READ_TOKEN}`);
-    assert.equal(res.status, 200);
-    assert.match(res.headers.get("content-type") ?? "", /text\/html/);
-    assert.match(await res.text(), /id="now"/); // the real shell, not a stub
-  });
-});
 
 test("GET / with neither header nor ?token= -> 401 (the shell stays authenticated, never served open)", async () => {
   const root = tmpRoot();
@@ -416,11 +372,6 @@ test("GET /v1/status with ONLY ?token= (no header) -> 401: query-param auth must
   });
 });
 
-test("renderShellHtml is pure and matches what GET / serves", () => {
-  const html = renderShellHtml();
-  assert.match(html, /<!doctype html>/i);
-  assert.match(html, /id="now"/);
-});
 
 // ── Board-hang regression (GET /v1/status over the FULL plan) ────────────────────────────────────
 // The board hung at "loading…" because computeBoardSnapshot -> projectPlan -> deriveStatus PER TASK,
@@ -920,57 +871,13 @@ test("GET /v1/feedback and GET /v1/trace (assembled server): the plan graph is r
 // bootstrap-paradox recurring at the LINK layer (the 4th catch for probe-must-exercise-real-consuming
 // -client — every navigable href is itself a consuming-client surface). Fix: in-shell panels.
 
-test("shell nav uses in-shell PANELS (buttons + authorized fetch), not <a href> hops to header-only /v1/* routes", () => {
-  const html = renderShellHtml();
-  // the feedback nav item is a button whose JS fetches WITH the header, not a navigable link.
-  // The v0 "Plan→task→PR graph" id-textbox panel (#359) is RETIRED by W1-T158 in favor of a
-  // per-row Journey affordance — see the dedicated retirement test below.
-  assert.match(html, /<button id="feedback-btn"/);
-  assert.match(html, /fetch\("\/v1\/feedback", \{ headers: authHeaders \}\)|getJson\("\/v1\/feedback"\)/);
-  // LINK-CRAWL: every <a href> the shell emits is in-page, external (target=_blank PR link), or the
-  // allowQueryToken GET / route — NEVER a header-only /v1/* route (a bare navigation there 401s).
-  const hrefs = [...html.matchAll(/<a\s[^>]*href=["']([^"']+)["']/g)].map((m) => m[1]);
-  for (const href of hrefs) {
-    assert.doesNotMatch(
-      href,
-      /^\/v1\//,
-      `shell emits <a href="${href}"> at a header-only API route — a bare navigation 401s; use an in-shell panel`,
-    );
-    const inPage = href.startsWith("#");
-    const external = /^https?:\/\//.test(href) || href.includes("${"); // runtime PR link (github, target=_blank)
-    const shellDoc = href === "/" || href.startsWith("/?"); // the allowQueryToken HTML route
-    assert.ok(inPage || external || shellDoc, `shell emits an unclassifiable <a href="${href}">`);
-  }
-});
 
 // ── W1-T158: the v0 id-textbox trace panel is RETIRED; every task row instead carries its own
 // inline expand affordance, and GET /v1/task backs a new row-click card. W1-T222 (a RULE-21
 // successor to W1-T158, not an amendment) then retires W1-T158's OWN #task-detail/#journey-view
 // bottom-panel pair in turn — the card now opens INLINE, directly beneath its own row. ──────────
 
-test("W1-T158: the v0 'Plan→task→PR graph' id-textbox panel is retired — no graph-btn/trace-id/trace-btn in the shell", () => {
-  const html = renderShellHtml();
-  assert.doesNotMatch(html, /id="graph-btn"/);
-  assert.doesNotMatch(html, /id="trace-id"/);
-  assert.doesNotMatch(html, /id="trace-btn"/);
-  // its replacement: every row is itself the expand trigger (a chevron affordance, keyed off the
-  // row's own aria-expanded), never a per-row Journey button or a bottom-panel pair.
-  assert.match(html, /class="row-chevron"/);
-});
 
-test("W1-T222: the bottom-panel #task-detail/#journey-view pair W1-T158 shipped is retired — the card opens INLINE, as a sibling '.row-detail' beneath its own row", () => {
-  const html = renderShellHtml();
-  assert.doesNotMatch(html, /id="task-detail"/);
-  assert.doesNotMatch(html, /id="journey-view"/);
-  assert.doesNotMatch(html, /class="row-journey-btn"/);
-  // its replacement: reconcileRows glues a SINGLE open '.row-detail[data-detail-for]' sibling to
-  // its own row and never lets a background render collapse it (see reconcileRows's own doc).
-  assert.match(html, /row\.className = "row-detail"|detailEl\.className = "row-detail"/);
-  assert.match(html, /data-detail-for/);
-  // the journey view lazy-loads INSIDE that card on demand, never eagerly and never its own panel.
-  assert.match(html, /class="card-journey-toggle"/);
-  assert.match(html, /class="card-journey-body"/);
-});
 
 test("the panel data routes are header-only (bare navigation 401s) — the shell must fetch, never link them", async () => {
   const root = tmpRoot();
@@ -992,59 +899,10 @@ test("the panel data routes are header-only (bare navigation 401s) — the shell
 // interaction — live in test/serve.shell-ux.test.ts, a real browser being the only honest
 // client for "no horizontal scroll"/"computed contrast"/"a click fires no POST until confirmed").
 
-test("the operator-priority sections exist, in order, top to bottom; the old flat file-order table is GONE", () => {
-  const html = renderShellHtml();
-  const order = ["id=\"now\"", "id=\"inbox\"", "id=\"change-management\"", "id=\"up-next\"", "id=\"recent\"", "id=\"rest\""];
-  const indices = order.map((needle) => html.indexOf(needle));
-  for (const [i, idx] of indices.entries()) assert.ok(idx >= 0, `missing section marker ${order[i]}`);
-  for (let i = 1; i < indices.length; i++) {
-    assert.ok(indices[i] > indices[i - 1], `section ${order[i]} does not come after ${order[i - 1]} (NOW, INBOX, CHANGE MANAGEMENT, UP NEXT, RECENT, rest — top to bottom)`);
-  }
-  // the falsifier: the v0 shell's single flat <table id="board-table"> (file-order rows) is gone —
-  // every task now renders inside one of the operator-priority sections above, never a raw plan/file-order dump.
-  assert.doesNotMatch(html, /<table/);
-  assert.doesNotMatch(html, /id="board-table"/);
-});
-
-test("status color tokens: five DISTINCT, stable CSS custom properties, reused everywhere via .status-dot/.status-label classes — never an inline color", () => {
-  const html = renderShellHtml();
-  const keys = ["running", "blocked", "needs-human", "merged", "queued"];
-  const values = new Map<string, string>();
-  for (const key of keys) {
-    const m = new RegExp(`--status-${key}:\\s*(#[0-9a-fA-F]{3,8})`).exec(html);
-    assert.ok(m, `no --status-${key} custom property defined`);
-    values.set(key, m![1].toLowerCase());
-  }
-  // no two states share a token (the falsifier).
-  const distinct = new Set(values.values());
-  assert.equal(distinct.size, keys.length, `expected ${keys.length} distinct status colors, got ${[...values.entries()]}`);
-  // every state's color is reused via its class selector, never re-declared as a second literal hex.
-  for (const key of keys) {
-    assert.match(html, new RegExp(`\\.status-dot\\.status-${key}[^}]*var\\(--status-${key}\\)`), `status-dot for ${key} does not reuse the token`);
-    assert.match(html, new RegExp(`\\.status-label\\.status-${key}[^}]*var\\(--status-${key}\\)`), `status-label for ${key} does not reuse the token`);
-  }
-  // the falsifier: no ad-hoc inline `style="color:` / `style="background` anywhere in the shell.
-  assert.doesNotMatch(html, /style="[^"]*(color|background)\s*:/);
-});
-
-test("dark theme is applied by default (no light-mode flash, no JS branch required)", () => {
-  const html = renderShellHtml();
-  assert.match(html, /:root\s*\{[^}]*color-scheme:\s*dark/);
-  assert.match(html, /<meta name="color-scheme" content="dark"\s*\/>/);
-});
 
 
-test("STOP requires an explicit second ('Confirm STOP') click before it POSTs /v1/control/stop — never fires on the first click", () => {
-  const html = renderShellHtml();
-  assert.match(html, /dataset\.confirming/);
-  assert.match(html, /Confirm STOP/);
-  // the POST only appears INSIDE the confirmed branch (after the early-return on the first click) —
-  // structurally: the confirming check `return`s before the postJson("/v1/control/stop", ...) call.
-  const stopHandler = /stop-btn"\)\.addEventListener\("click", \(\) => \{([\s\S]*?)\n\s*\}\);/.exec(html);
-  assert.ok(stopHandler, "no stop-btn click handler found");
-  assert.match(stopHandler![1], /if \(btn\.dataset\.confirming !== "true"\) \{[\s\S]*?return;\s*\}/);
-  assert.match(stopHandler![1], /postJson\("\/v1\/control\/stop"/);
-});
+
+
 
 test("GET /v1/control/status (assembled server): reads back the REAL fleet-control tri-state, not a stateless echo", async () => {
   const root = tmpRoot();
@@ -1170,67 +1028,11 @@ test("GET /v1/inbox (assembled server): the W1-T110 ratification inbox's READY t
 // consuming client" house rule). The five-section-order test above still passes UNMODIFIED — the
 // FIND layer is an in-place enhancement of #rest, never a sixth section.
 
-test("W1-T157: the FIND layer's search bar, faceted filters, and sortable columns live inside the #rest section", () => {
-  const html = renderShellHtml();
-  // the fuzzy search input (over id + title), inside #rest-detail
-  assert.match(html, /<input id="find-search"[^>]*role="searchbox"/);
-  // the live-count facet container + a sort control per column (id/status/recency/age)
-  assert.match(html, /id="find-facets"/);
-  assert.match(html, /data-sort="id"/);
-  assert.match(html, /data-sort="status"/);
-  assert.match(html, /data-sort="recency"/);
-  assert.match(html, /data-sort="age"/);
-  // the FIND UI is an enhancement of #rest, not a new section — #rest is still the LAST section.
-  assert.ok(html.indexOf('id="find-search"') > html.indexOf('id="rest"'));
-});
 
-test("W1-T157: exactly ONE shared fuzzy scorer backs both the FIND search and the cmd+K palette", () => {
-  const html = renderShellHtml();
-  assert.match(html, /function fuzzyScore\(/);
-  assert.equal((html.match(/function fuzzyScore\(/g) ?? []).length, 1, "fuzzyScore must be defined once (shared), not duplicated");
-});
 
-test("W1-T157: the five facets each have live-count support and derive workstream client-side from the id prefix", () => {
-  const html = renderShellHtml();
-  assert.match(html, /function facetCount\(/); // live per-value counts
-  assert.match(html, /function taskWorkstream\(/); // workstream derived from id (no server field)
-  for (const g of ["status", "workstream", "risk", "hasPr", "needsMe"]) {
-    assert.ok(html.includes(`"${g}"`), `facet group ${g} missing from FIND state`);
-  }
-});
 
-test("W1-T157: view state round-trips through the URL via history.replaceState, preserving the existing token param", () => {
-  const html = renderShellHtml();
-  assert.match(html, /history\.replaceState/);
-  assert.doesNotMatch(html, /history\.pushState/); // never spam browser history on a keystroke/toggle
-  // writeFindStateToUrl seeds URLSearchParams from window.location.search (preserving ?token=…),
-  // and the load path restores BEFORE first paint.
-  assert.match(html, /function writeFindStateToUrl\(/);
-  assert.match(html, /function readFindStateFromUrl\(/);
-  assert.match(html, /new URLSearchParams\(window\.location\.search\)/);
-});
 
-test("W1-T157: cmd+K opens a global, accessible command palette bound on metaKey AND ctrlKey", () => {
-  const html = renderShellHtml();
-  assert.match(html, /id="cmdk-overlay"/);
-  assert.match(html, /role="dialog"/);
-  assert.match(html, /aria-modal="true"/);
-  // one document-level keydown listener, bound on both Meta (Mac) and Ctrl (Win/Linux) + "k",
-  // with preventDefault so the browser's own Cmd/Ctrl+K never swallows it.
-  assert.match(html, /document\.addEventListener\("keydown"/);
-  assert.match(html, /e\.metaKey \|\| e\.ctrlKey/);
-  assert.match(html, /e\.preventDefault\(\)/);
-});
 
-test("W1-T157: palette actions fire through the EXISTING buttons (one implementation each), never a second copy", () => {
-  const html = renderShellHtml();
-  // each palette action clicks the real fleet/panel button — so STOP's two-click confirm etc. is reused, never bypassed.
-  assert.match(html, /getElementById\("pause-btn"\)\.click\(\)/);
-  assert.match(html, /getElementById\("resume-btn"\)\.click\(\)/);
-  assert.match(html, /getElementById\("stop-btn"\)\.click\(\)/);
-  assert.match(html, /getElementById\("feedback-btn"\)\.click\(\)/);
-  assert.match(html, /getElementById\("graph-btn"\)\.click\(\)/);
-});
 
 // ── W1-T182/W1-T193: NEEDS ME dispatches the Approve affordance BY ITEM TYPE, never one row
 // template for every kind. Structural proof over the row-template function BODIES (the DOM/
@@ -1241,61 +1043,9 @@ test("W1-T157: palette actions fire through the EXISTING buttons (one implementa
 // button+form wired to the write-token API (W1-T193 replaces the earlier CLI-only prose --
 // panel-graph.ts's POST /v1/inbox/approve + POST /v1/inbox/reframe now exist).
 
-test("W1-T182/W1-T193: an Approve control NEVER renders on an escalation row, while the P## inbox-proposal row renders a REAL Approve button + Reframe textarea wired to the write-token API", () => {
-  const html = renderShellHtml();
-  const taskRowFn = html.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0];
-  const inboxRowFn = html.match(/function needsMeInboxHtml\(p\) \{[\s\S]*?\n  \}/)?.[0];
-  assert.ok(taskRowFn, "needsMeTaskRowHtml (the escalation row template) must exist");
-  assert.ok(inboxRowFn, "needsMeInboxHtml (the P## proposal row template) must exist");
 
-  // The escalation template: no Approve control, anywhere, in any form (button, form, label).
-  assert.doesNotMatch(taskRowFn, /Approve/i, "an escalation row template must never render an Approve control");
-  assert.doesNotMatch(taskRowFn, /<input[^>]*type="url"/i, "never solicit a URL the ledger already holds");
-  assert.match(taskRowFn, /view issue/i, "must render a direct link to the issue");
-  assert.match(taskRowFn, /Mark handled/i, "must render the escalation's OWN affordance, not a borrowed one");
 
-  // The P## proposal template: a REAL Approve button (arm-then-confirm, never CLI prose) and a
-  // REFRAME textarea, never a bare `rmd approve`/`rmd reframe` command string.
-  assert.match(inboxRowFn, /class="proposal-approve-btn"/, "a READY card must render a REAL Approve button, not CLI prose");
-  assert.match(inboxRowFn, /data-confirming="false"/, "the Approve button starts UNARMED");
-  assert.match(inboxRowFn, /data-read-back=/, "the Approve button must carry a read-back of what it approves");
-  assert.match(inboxRowFn, /<textarea[^>]*required/, "REFRAME must be a required textarea, not a link to a terminal");
-  assert.doesNotMatch(inboxRowFn, /<code>rmd (approve|reframe)/, "the CLI-only prose affordance must be gone");
-});
 
-test("W1-T193: a READY card renders each drafted task's id AND title (never just the opaque proposal id)", () => {
-  const html = renderShellHtml();
-  const inboxRowFn = html.match(/function needsMeInboxHtml\(p\) \{[\s\S]*?\n  \}/)?.[0];
-  assert.ok(inboxRowFn, "needsMeInboxHtml must exist");
-  assert.match(inboxRowFn, /draftedTasksHtml/, "must render the drafted-tasks summary");
-
-  // W1-T2731: `draftedTasksHtml` is a real export now, so this asserts its OUTPUT rather than its
-  // source text. The claim ("id AND title, never just the opaque proposal id") is a claim about
-  // what an operator SEES, and the rendered row states it directly — the old `.id`/`.title`
-  // source match could have passed on a function that read both fields and printed neither.
-  const drafted = draftedTasksHtml([{ id: "W1-T4242", title: "rotate the deploy key" }]);
-  assert.match(drafted, /W1-T4242/, "the id");
-  assert.match(drafted, /rotate the deploy key/, "AND the title — the whole point of W1-T193");
-  assert.equal(draftedTasksHtml([]), "", "no drafted tasks renders nothing, not an empty list shell");
-});
-
-test("W1-T193: the APPROVE click handler ARMS on the first click (data-confirming) and only POSTs /v1/inbox/approve on a second click, mirroring STOP's arm-then-confirm exactly", () => {
-  const html = renderShellHtml();
-  assert.match(html, /class="proposal-approve-btn"/);
-  const clickHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("click", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(clickHandler, "no inbox-list click handler found");
-  assert.match(clickHandler, /approveBtn\.dataset\.confirming !== "true"/, "first click must only ARM, never act");
-  assert.match(clickHandler, /setTimeout\(\(\) => resetApproveButton\(approveBtn\), 8000\)/, "must reset after 8s, same window as STOP");
-  assert.match(clickHandler, /postJson\("\/v1\/inbox\/approve", \{ proposalId \}\)/, "the second click posts to the write-token API");
-});
-
-test("W1-T193: REFRAME submits the textarea's value VERBATIM to POST /v1/inbox/reframe", () => {
-  const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(submitHandler, "no inbox-list submit handler found");
-  assert.match(submitHandler, /needs-me-reframe/);
-  assert.match(submitHandler, /postJson\("\/v1\/inbox\/reframe", \{ proposalId, feedback \}\)/);
-});
 
 // ── W1-T350: the feedback interpreter's visible round trip — the Answer control becomes
 // arm-then-confirm with a preview read-back, "File raw" stays a one-click escape ─────────────
@@ -1305,42 +1055,8 @@ test("W1-T193: REFRAME submits the textarea's value VERBATIM to POST /v1/inbox/r
 // unseen rewrite." Structural proof over the row template + the two event-delegated handler
 // BODIES, the same discipline W1-T193's own APPROVE tests above use for the identical idiom.
 
-test("W1-T350: the Answer control renders UNARMED, with a 'File raw' escape one click away", () => {
-  const html = renderShellHtml();
-  const grillFn = html.match(/function needsMeGrillHtml\(e\) \{[\s\S]*?\n  \}/)?.[0];
-  assert.ok(grillFn, "needsMeGrillHtml must exist");
-  assert.match(grillFn, /class="needs-me-answer-submit" data-confirming="false"/, "the Answer button starts UNARMED");
-  assert.match(grillFn, /class="needs-me-answer-raw"/, "a File-raw escape must render one click away");
-});
 
-test("W1-T350: the FIRST Answer submit PREVIEWS the expansion (POST /v1/feedback/preview) before anything files", () => {
-  const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(submitHandler, "no inbox-list submit handler found");
-  assert.match(submitHandler, /needs-me-answer-submit/);
-  // W1-T2301: this call now opts OUT of postJson's automatic ack ({ suppressAck: true }) -- the
-  // preview's own "nothing is filed yet" ack must never paint on the fail-open leg that files
-  // right behind it on this same click; the armed leg fires it manually once it has the
-  // expansion in hand (see the acceptance tests in test/serve.write-ack.test.ts).
-  assert.match(
-    submitHandler,
-    /postJson\("\/v1\/feedback\/preview", \{ text: answer, replyTo \}, \{ suppressAck: true \}\)/,
-    "must preview before the confirmed file",
-  );
-});
 
-test("W1-T350: a SECOND submit while armed files WITH the previewed expansion, reading its claim back in the button label — never a bare 'Confirm?'", () => {
-  const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(submitHandler);
-  assert.match(submitHandler, /submitBtn\.dataset\.confirming === "true"/, "a second submit must be distinguished from the first");
-  assert.match(
-    submitHandler,
-    /postJson\("\/v1\/feedback", \{ text: answer, replyTo, expansion, submissionKey \}\)/,
-    "the confirmed submit must file WITH the previewed expansion AND the per-submission key (W1-T2302)",
-  );
-  assert.match(submitHandler, /submitBtn\.textContent =\s*\n?\s*`Confirm: \$\{expansion\.claim\}/, "the armed label must read back the expansion");
-});
 
 // ── W1-T2206: the preview leg used to be an unguarded await with no spinner, no disable and no
 // label change — the button read as dead for the whole model call, a second click launched a
@@ -1348,300 +1064,24 @@ test("W1-T350: a SECOND submit while armed files WITH the previewed expansion, r
 // silently. These tests prove the click-to-file machine is legible at every step, over the SAME
 // extracted handler-body source the W1-T350 tests above already use.
 
-test("W1-T2206: the preview call renders a visible PENDING state (disabled + a plain-language label) for its whole duration, and clears it on EVERY exit — expansion, no expansion, and a rejected preview", () => {
-  const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(submitHandler);
-  // Entered BEFORE the preview fetch: the button must go pending before the model call starts,
-  // not after it settles.
-  const beforePreview = submitHandler.slice(0, submitHandler.indexOf('postJson("/v1/feedback/preview"'));
-  assert.match(beforePreview, /setAnswerPending\(submitBtn, true\)/, "the pending state must be entered before the preview fetch fires");
-  assert.match(beforePreview, /answerPending\.add\(replyTo\)/, "the in-flight guard must be armed before the preview fetch fires");
-  // The preview call itself is wrapped in try/catch/finally, and the finally clears pending on
-  // every exit -- a thrown/rejected fetch must not leave the control stuck disabled.
-  const previewBlock = submitHandler.match(/try \{([\s\S]*?)\} catch \{([\s\S]*?)\} finally \{([\s\S]*?)\}/);
-  assert.ok(previewBlock, "the preview fetch must be wrapped in try/catch/finally");
-  assert.match(previewBlock[3], /answerPending\.delete\(replyTo\)/, "finally must release the in-flight guard for EVERY exit");
-  assert.match(previewBlock[3], /setAnswerPending\(submitBtn, false\)/, "finally must clear the pending state for EVERY exit, including a rejected fetch");
-  // setAnswerPending itself must actually disable the control and change its label/announcement
-  // -- a class alone (easy to miss) is not a pending state.
-  const setAnswerPendingFn = html.match(/function setAnswerPending\(btn, pending\) \{[\s\S]*?\n  \}/)?.[0];
-  assert.ok(setAnswerPendingFn, "setAnswerPending must exist");
-  assert.match(setAnswerPendingFn, /btn\.disabled = pending/, "the control itself must be disabled while pending");
-  assert.match(setAnswerPendingFn, /textContent = "Expanding your answer/, "must name what is happening, in the operator's terms");
-});
 
-test("W1-T2206: a second submit for the SAME replyTo while its preview is still in flight starts no second preview and files nothing, checked BEFORE the armed/confirm branch — while a different replyTo stays independently submittable", () => {
-  const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(submitHandler);
-  const guardIdx = submitHandler.indexOf("answerPending.has(replyTo)");
-  const confirmingIdx = submitHandler.indexOf('submitBtn.dataset.confirming === "true"');
-  const previewIdx = submitHandler.indexOf('postJson("/v1/feedback/preview"');
-  assert.ok(guardIdx >= 0, "the re-entry guard must exist");
-  assert.ok(guardIdx < confirmingIdx && guardIdx < previewIdx, "the re-entry guard must run before EITHER the armed-confirm branch or the preview fetch, refusing re-entry outright");
-  assert.match(submitHandler, /if \(answerPending\.has\(replyTo\)\) return;/, "re-entry while pending must refuse silently -- no preview, no file");
-  // Keyed by a Set (membership per replyTo), the SAME per-key discipline as
-  // answerConfirmTimers/answerExpansions -- never a single shared in-flight flag, which would
-  // block a second, DIFFERENT grill answer mid-preview too.
-  assert.match(html, /const answerPending = new Set\(\);/, "the in-flight guard must be keyed per replyTo, not a single shared flag");
-});
 
-test("W1-T2206: the armed control states plainly that NOTHING IS FILED YET and the NEXT click files -- the exact ambiguity the operator hit", () => {
-  const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(submitHandler);
-  assert.match(
-    submitHandler,
-    /`Confirm: \$\{expansion\.claim\} \(RECON \$\{expansion\.recon\.length\}\) — nothing filed yet, click to file`/,
-    "the armed label must state the read-back AND the consequence together, in the control itself",
-  );
-});
 
-test("W1-T2206: the fail-open leg (no expansion) gets its OWN signal, distinct from the armed vocabulary", () => {
-  const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(submitHandler);
-  const noExpansionBranch = submitHandler.match(/if \(!expansion\) \{([\s\S]*?)return;\s*\n\s*\}/)?.[1];
-  assert.ok(noExpansionBranch, "no `if (!expansion)` fallback branch found");
-  assert.match(noExpansionBranch, /submitBtn\.textContent = "Filed/, "the fail-open leg must say something happened");
-  assert.doesNotMatch(noExpansionBranch, /Confirm:/, "the fail-open leg must never borrow the armed 'Confirm: ...' vocabulary -- no confirm was ever shown");
-});
 
-test("W1-T2206: the 8s arm window (too short to read a four-section expansion) is widened, AND a lapsed arm is made VISIBLE so it is never presented as a fresh, un-clicked 'Answer'", () => {
-  const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(submitHandler);
-  assert.match(
-    submitHandler,
-    /setTimeout\(\(\) => resetAnswerButton\(submitBtn, \{ expired: true \}\), 30000\)/,
-    "the arm window must be widened past 8000ms AND flag the reset as expired, not a bare silent reset",
-  );
-  const resetAnswerButtonFn = html.match(/function resetAnswerButton\(btn, opts\) \{[\s\S]*?\n  \}/)?.[0];
-  assert.ok(resetAnswerButtonFn, "resetAnswerButton must exist");
-  assert.match(resetAnswerButtonFn, /classList\.toggle\("lapsed", expired\)/, "an expired reset must be visually distinct from a plain one");
-  assert.match(resetAnswerButtonFn, /expired \? "Answer \(expired/, "an expired reset's label must say so, never the plain 'Answer' a never-armed button also shows");
-});
 
-test("W1-T350: an expander failure/outage (nothing to show) leaves the FIRST click filing the plain submission, unchanged from before this task", () => {
-  const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(submitHandler);
-  const noExpansionBranch = submitHandler.match(/if \(!expansion\) \{([\s\S]*?)return;\s*\n\s*\}/)?.[1];
-  assert.ok(noExpansionBranch, "no `if (!expansion)` fallback branch found");
-  assert.match(
-    noExpansionBranch,
-    /postJson\("\/v1\/feedback", \{ text: answer, replyTo, submissionKey \}\)/,
-    "must file WITHOUT an expansion key (pre-W1-T350 shape) but WITH the per-submission key (W1-T2302)",
-  );
-  assert.doesNotMatch(noExpansionBranch, /\{ text: answer, replyTo, expansion/, "the fallback file must never send a null/undefined expansion field either");
-});
 
 // ── W1-T2302: the console mints a per-submission key and sends it on the filing click from
 // BOTH the confirm leg and the fail-open leg (acceptance 4) — the identity a repeat POST
 // /v1/feedback (a reload, a second tab, a re-entrant click) is recognised BY server-side.
 
-test("W1-T2302: a per-replyTo submissionKey map + mint function exist, and the key is minted BEFORE either the fail-open leg or the later confirm leg can fire", () => {
-  const html = renderShellHtml();
-  assert.match(html, /const answerSubmissionKeys = new Map\(\);/, "keyed per replyTo, the same discipline as answerConfirmTimers/answerExpansions");
-  assert.match(
-    html,
-    /function mintSubmissionKey\(\) \{[\s\S]*?randomUUID[\s\S]*?\n  \}/,
-    "must mint an opaque per-submission id, never derived from the answer text",
-  );
-  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(submitHandler);
-  const mintIdx = submitHandler.indexOf("answerSubmissionKeys.set(replyTo, mintSubmissionKey())");
-  const previewIdx = submitHandler.indexOf('postJson("/v1/feedback/preview"');
-  assert.ok(mintIdx >= 0, "the key must be minted (or reused) somewhere in the submit handler");
-  assert.ok(mintIdx < previewIdx, "the key must exist before the preview fetch fires, so BOTH the fail-open leg right after it and the confirm leg on a later click can read the SAME one back");
-});
 
-test("W1-T2302: the fail-open leg sends the minted submissionKey on the filing POST (acceptance 4)", () => {
-  const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(submitHandler);
-  const noExpansionBranch = submitHandler.match(/if \(!expansion\) \{([\s\S]*?)return;\s*\n\s*\}/)?.[1];
-  assert.ok(noExpansionBranch);
-  assert.match(noExpansionBranch, /const submissionKey = answerSubmissionKeys\.get\(replyTo\)/);
-  assert.match(noExpansionBranch, /postJson\("\/v1\/feedback", \{ text: answer, replyTo, submissionKey \}\)/);
-});
 
-test("W1-T2302: the confirm leg sends the SAME per-replyTo submissionKey on the filing POST, reading it back rather than minting a fresh one (acceptance 4)", () => {
-  const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(submitHandler);
-  assert.match(
-    submitHandler,
-    /if \(submitBtn\.dataset\.confirming === "true"\) \{[\s\S]*?if \(!answerSubmissionKeys\.has\(replyTo\)\) answerSubmissionKeys\.set\(replyTo, mintSubmissionKey\(\)\);[\s\S]*?const submissionKey = answerSubmissionKeys\.get\(replyTo\);[\s\S]*?postJson\("\/v1\/feedback", \{ text: answer, replyTo, expansion, submissionKey \}\)/,
-    "the confirm leg must read the key back (lazily minting only if somehow absent), never mint a fresh one unconditionally",
-  );
-});
 
-test("W1-T350: 'File raw' ALWAYS skips the preview and files immediately — never armed, never a second click", () => {
-  const html = renderShellHtml();
-  const clickHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("click", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(clickHandler, "no inbox-list click handler found");
-  assert.match(clickHandler, /needs-me-answer-raw/);
-  const rawBranch = clickHandler.match(/if \(rawBtn\) \{([\s\S]*?)\n\s*\} else if/)?.[1];
-  assert.ok(rawBranch, "no rawBtn branch found");
-  assert.doesNotMatch(rawBranch, /\/v1\/feedback\/preview/, "File raw must never call the preview endpoint");
-  assert.match(rawBranch, /postJson\("\/v1\/feedback", \{ text: answer, replyTo \}\)/, "File raw files WITHOUT an expansion, exactly today's pre-W1-T350 shape");
-});
 
-test("W1-T193: needsMeDraftingHtml still names the DRAFTING state and its spawn timestamp (kept for a future RECORD-side renderer)", () => {
-  const html = renderShellHtml();
-  const draftingFn = html.match(/function needsMeDraftingHtml\(p\) \{[\s\S]*?\n  \}/)?.[0];
-  assert.ok(draftingFn, "needsMeDraftingHtml must exist");
-  assert.match(draftingFn, /DRAFTING/);
-  assert.match(draftingFn, /data-started="\$\{escapeHtml\(p\.spawnedAt\)\}"/, "must carry the real spawn timestamp, live-ticking off the SAME .elapsed mechanism NOW uses");
-  assert.match(html, /renderNeedsMe\(tasks, latestFeedbackEntries, latestInboxReady, latestInboxDrafting\)/);
-});
 
-// W1-T3395 (ratifies W1-T3186 (ii), the criterion-3 cross-section falsifier): a DRAFTING
-// proposal already has an operator decision behind it (rmd approve already ran) --
-// classifyAskRecordItem's proposal arm classifies state "drafting" RECORD, not ASK, so it must
-// be ABSENT from INBOX now -- the opposite of the "never nothing" claim the superseded test
-// above once made about this exact row kind. This is the dissolved behavior, not a rename.
-test("W1-T3395: a DRAFTING proposal no longer reaches INBOX -- classifyAskRecordItem's RECORD verdict is honored, not just declared", () => {
-  const html = renderShellHtml();
-  const askRowSrc = html.match(/function askRow\(classifierItem, key, html, extra\) \{[\s\S]*?\n  \}/)?.[0];
-  assert.ok(askRowSrc, "askRow must exist in the shell's inline script");
-  const fn = new Function(
-    "classifyAskRecordItem",
-    `${askRowSrc}\nreturn askRow({ kind: "proposal", state: "drafting" }, "inbox-drafting:P1", "drafting-html", { ts: "2026-01-01T00:00:00.000Z" });`,
-  ) as (classify: typeof classifyAskRecordItem) => unknown;
-  assert.equal(fn(classifyAskRecordItem), null, "a drafting-state proposal must never become an ask row");
-  // Contrast: a READY proposal, the same call shape, DOES render -- proving the exclusion above
-  // is `classifyAskRecordItem`'s own verdict, not askRow silently rejecting every proposal.
-  const readyFn = new Function(
-    "classifyAskRecordItem",
-    `${askRowSrc}\nreturn askRow({ kind: "proposal", state: "ready" }, "inbox:P1", "ready-html");`,
-  ) as (classify: typeof classifyAskRecordItem) => unknown;
-  assert.notEqual(readyFn(classifyAskRecordItem), null, "a ready-state proposal must still become an ask row");
-});
 
-// ── W1-T182: the row template proven over its ACTUAL RENDERED OUTPUT, not just its source
-// text — a browser-driven DOM proof already exists (test/serve.live-state.test.ts), but that
-// requires launching a real headless browser; this test proves the exact same claim (the
-// issue's real ask + a direct link + no free-text/URL input of any kind, not merely no
-// `type="url"` one) by extracting the row template's own small, pure helper functions
-// (escapeHtml/statusBadge/prLink/rowChevronHtml/needsMeTaskRowHtml — none of them touch
-// `document`) straight out of the served shell and calling them with real StatusProjection
-// shapes, so the proof runs anywhere Node does, no browser required.
-test("W1-T182: needsMeTaskRowHtml's ACTUAL rendered output shows the issue's real ask + a direct link, and contains NO <input> of any kind — never solicits data the ledger (escalation.issue_opened's issue_url) already holds", () => {
-  const html = renderShellHtml();
-  const parts: Record<string, string | undefined> = {
-    STATUS_LABELS: html.match(/const STATUS_LABELS = \{[\s\S]*?\};/)?.[0],
-    statusBadge: html.match(/function statusBadge\(key\) \{[\s\S]*?\n  \}/)?.[0],
-    prLink: html.match(/function prLink\(t\) \{[\s\S]*?\n  \}/)?.[0],
-    // W1-T202: needsMeTaskRowHtml's markHandledBtn now calls writeGateAttrs() (the disabled/
-    // reason attributes a read-only session's write affordances carry) -- pulled in here too so
-    // this isolated eval has the same closure the real served script does.
-    writeGateAttrs: html.match(/function writeGateAttrs\(\) \{[\s\S]*?\n  \}/)?.[0],
-    // W1-T346: needsMeTaskRowHtml now calls askTypeFromEscalationTitle() -- pulled in here too
-    // so this isolated eval has the same closure the real served script does.
-    needsMeTaskRowHtml: html.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0],
-  };
-  for (const [name, src] of Object.entries(parts)) assert.ok(src, `${name} must exist in the shell's inline script`);
 
-  const renderRow = new Function(
-    // W1-T2731: the pure collaborators (escapeHtml, rowChevronHtml, askTypeFromEscalationTitle …)
-    // come from lib/console-shell-script.ts via the SAME emitter the shell splices in; the
-    // state-reading ones (STATUS_LABELS, statusBadge, prLink, writeGateAttrs, needsMeTaskRowHtml)
-    // are still inline in the template and still extracted from the shipped script verbatim.
-    `let hasWriteScope = false;\n${renderConsoleShellScript()}\n${parts.STATUS_LABELS}\n${parts.statusBadge}\n${parts.prLink}\n${parts.writeGateAttrs}\n${parts.needsMeTaskRowHtml}\nreturn needsMeTaskRowHtml(arguments[0]);`,
-  ) as (t: Record<string, unknown>) => string;
 
-  // A CONFIRMED-open escalation, live issue title flowing through escalationTitle.
-  const issueUrl = "https://github.com/o/r/issues/393";
-  const openRow = renderRow({
-    taskId: "W1-T1",
-    needsHuman: true,
-    escalationTitle: "[BLOCKED] W1-T1: needs a decision",
-    escalationIssueUrl: issueUrl,
-  });
-  assert.match(openRow, /needs a decision/, "renders the issue's ACTUAL one-line ask, not a generic label");
-  assert.match(openRow, new RegExp(`href="${issueUrl.replace(/[/.]/g, "\\$&")}"`), "a direct link to the issue");
-  assert.match(openRow, /Mark handled/);
-  assert.doesNotMatch(openRow, /Approve/i, "no defined verb for an escalation of any class");
-  assert.doesNotMatch(openRow, /<input\b/i, "must render NO input of any kind — free-text or url — the ledger already holds issue_url");
-
-  // An UNVERIFIED escalation with no title yet resolved and no issue url at all (a malformed
-  // ledger line) — still renders, generic ask, still no link, still no input anywhere.
-  const unverifiedRow = renderRow({ taskId: "W1-T2", needsHuman: true, escalationUnverified: true });
-  assert.match(unverifiedRow, /needs human attention \(escalated\)/, "falls back to a generic ask only when no issue title is available");
-  assert.match(unverifiedRow, /unverified/i);
-  assert.doesNotMatch(unverifiedRow, /view issue/i, "no issue url to join against -> no link rendered");
-  assert.doesNotMatch(unverifiedRow, /<input\b/i);
-});
-
-// ── W1-T346: the NEEDS ME list renders an ACTION ask and a QUESTION ask with distinct
-// affordances, while an untyped legacy item (no escalationTitle at all) keeps today's row
-// byte-identical — the same "extracted, evaluated, asserted on real output" discipline as
-// the W1-T182 test directly above.
-test("W1-T346: askTypeFromEscalationTitle is deterministic over the title's own [CLASS] prefix — GRILL is a question, every other named class defaults to action, no prefix classifies nothing", () => {
-  const html = renderShellHtml();
-  // W1-T2731: the real export. The shell still ships it — asserted directly below — but its
-  // emitted form is minified and ASCII-escaped by tsx/esbuild, so no source regex can carve it out.
-  assert.match(html, /function askTypeFromEscalationTitle\(title\)/, "the shell really emits it");
-  const askType = askTypeFromEscalationTitle;
-
-  assert.equal(askType("[MANUAL] W1-T1: rotate the deploy key"), "action");
-  assert.equal(askType("[GRILL] TRIAGE-fb-1: cli flag or config default?"), "question");
-  assert.equal(askType("[BLOCKED] W1-T1: needs a decision"), "action", "no options data reaches this row — defaults action");
-  assert.equal(askType("[HARD_STOP] daemon: weekly headroom reserve reached"), "action");
-  assert.equal(askType(undefined), undefined, "no title at all classifies nothing — never a badge on a row with no data");
-  assert.equal(askType("needs human attention (escalated)"), undefined, "no recognizable [CLASS] prefix classifies nothing either");
-});
-
-test("W1-T346: needsMeTaskRowHtml renders an ACTION row and a QUESTION row with DISTINCT affordances, while a legacy (untyped) row stays byte-identical to before this task", () => {
-  const html = renderShellHtml();
-  const parts: Record<string, string | undefined> = {
-    STATUS_LABELS: html.match(/const STATUS_LABELS = \{[\s\S]*?\};/)?.[0],
-    statusBadge: html.match(/function statusBadge\(key\) \{[\s\S]*?\n  \}/)?.[0],
-    prLink: html.match(/function prLink\(t\) \{[\s\S]*?\n  \}/)?.[0],
-    writeGateAttrs: html.match(/function writeGateAttrs\(\) \{[\s\S]*?\n  \}/)?.[0],
-    needsMeTaskRowHtml: html.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0],
-  };
-  for (const [name, part] of Object.entries(parts)) assert.ok(part, `${name} must exist in the shell's inline script`);
-
-  const renderRow = new Function(
-    // W1-T2731: the pure collaborators (escapeHtml, rowChevronHtml, askTypeFromEscalationTitle …)
-    // come from lib/console-shell-script.ts via the SAME emitter the shell splices in; the
-    // state-reading ones (STATUS_LABELS, statusBadge, prLink, writeGateAttrs, needsMeTaskRowHtml)
-    // are still inline in the template and still extracted from the shipped script verbatim.
-    `let hasWriteScope = false;\n${renderConsoleShellScript()}\n${parts.STATUS_LABELS}\n${parts.statusBadge}\n${parts.prLink}\n${parts.writeGateAttrs}\n${parts.needsMeTaskRowHtml}\nreturn needsMeTaskRowHtml(arguments[0]);`,
-  ) as (t: Record<string, unknown>) => string;
-
-  // ACTION row (MANUAL — action by definition): leads with a "Do" affordance.
-  const actionRow = renderRow({
-    taskId: "W1-T1",
-    needsHuman: true,
-    escalationTitle: "[MANUAL] W1-T1: rotate the deploy key",
-    escalationIssueUrl: "https://github.com/o/r/issues/1",
-  });
-  assert.match(actionRow, /class="ask-type-badge ask-type-action"/);
-  assert.match(actionRow, />Do</);
-
-  // QUESTION row (GRILL — question by definition): leads with a "Decide" affordance,
-  // a DISTINCT class/text from the action row above.
-  const questionRow = renderRow({
-    taskId: "TRIAGE-fb-1",
-    needsHuman: true,
-    escalationTitle: "[GRILL] TRIAGE-fb-1: cli flag or config default?",
-    escalationIssueUrl: "https://github.com/o/r/issues/2",
-  });
-  assert.match(questionRow, /class="ask-type-badge ask-type-question"/);
-  assert.match(questionRow, />Decide</);
-  assert.doesNotMatch(questionRow, /ask-type-action/, "the two affordances never share a class");
-
-  // LEGACY row — no escalationTitle at all (predates any classification, or unresolved) —
-  // renders with NO ask-type badge whatsoever, byte-identical to today's row.
-  const legacyRow = renderRow({ taskId: "W1-T2", needsHuman: true, escalationUnverified: true });
-  assert.doesNotMatch(legacyRow, /ask-type-badge/, "an untyped legacy item carries no ask-type affordance at all");
-  assert.match(legacyRow, /needs human attention \(escalated\)/);
-});
 
 // ── resolveServeHost: exposure must be typed, never inherited (R-4) ─────────
 // `server.listen(port)` with no host binds `::` — every interface — while the
@@ -1683,13 +1123,13 @@ test("resolveServeHost: a following FLAG is rejected rather than bound as an add
 // credential to a world-readable file that outlives the process. Both tokens
 // were printed, and the console URL carried the WRITE one. A source-level
 // guard because the banner is the regression surface and it is one line long.
-test("serveCommand's startup banner prints no token — the bookmark comes from rmd console-url", () => {
+test("serveCommand's startup banner prints no token — and names app.remudero.com, not a tokened bookmark", () => {
   const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
   const banner = src.slice(src.indexOf("### rmd serve — listening on"));
   const printed = banner.slice(0, banner.indexOf("await new Promise"));
   assert.ok(
-    !printed.includes("${tokens.read}") && printed.includes("rmd console-url"),
-    "a container's stdout is docker logs, so the banner points at `rmd console-url` instead of printing the read token",
+    !printed.includes("${tokens.read}") && printed.includes("consoleAppUrl(config)") && !printed.includes("rmd console-url"),
+    "a container's stdout is docker logs; W1-T4563 retired the daemon's console, so the banner names the real one",
   );
   assert.ok(
     !printed.includes("${tokens.write}"),
@@ -1804,12 +1244,23 @@ test("console version: GET /v1/version is READ-scoped, so a staleness check neve
   assert.equal(version.method, "GET");
 });
 
-test("console version: the shell renders the captured sha server-side, so the operator sees it without curl", () => {
-  const html = renderShellHtml(undefined, "abcdef1234567890abcdef1234567890abcdef12");
-  assert.match(html, /console build/);
-  assert.match(html, /abcdef123456/, "the short sha is rendered into the shell");
-  assert.match(html, /id="console-sha"/);
-
-  const unknown = renderShellHtml(undefined, CONSOLE_SHA_UNKNOWN);
-  assert.match(unknown, /unknown/, "and an unresolvable sha renders honestly rather than blank");
+// ── W1-T4563: `/` is no longer a console ─────────────────────────────────────
+test("W1-T4563: GET / answers what this surface is and where the console lives, never an HTML shell", async () => {
+  const { CANONICAL_CONSOLE_URL } = await import("../src/lib/serve.js");
+  assert.equal(CANONICAL_CONSOLE_URL, "https://app.remudero.com");
+  const root = tmpRoot();
+  await withServeServer(depsFor(root, { tasks: [], byId: new Map() }), async (base) => {
+    const res = await get(base, "/", READ_TOKEN);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+    assert.deepEqual(await res.json(), { service: "remudero control gateway", console: "https://app.remudero.com", api: "/v1", version: "/v1/version" });
+    // No query-string token is honoured at `/` any more: that was the old shell's bookmark.
+    const byQuery = await fetch(`${base}/?token=${READ_TOKEN}`);
+    assert.equal(byQuery.status, 401);
+    // And the retired surfaces are gone, not merely hidden.
+    for (const path of ["/console/", "/console/index.html", "/v1/console/write-grant", "/v1/auth/scope"]) {
+      const gone = await get(base, path, WRITE_TOKEN);
+      assert.equal(gone.status, 404, path);
+    }
+  });
 });

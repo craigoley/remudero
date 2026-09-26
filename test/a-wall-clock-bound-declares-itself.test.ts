@@ -10,8 +10,10 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HELPER = "test/helpers/wall-clock-bound.js";
 const THIS_FILE = "test/a-wall-clock-bound-declares-itself.test.ts";
 const HELPER_IMPORT = "helpers/wall-clock-bound.js";
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 20;
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 30;
+// W1-T4563: 20 -> 19 files and one site fewer -- test/console-write-entry.test.ts's latency test
+// measured GET /v1/console/write-grant, a route retired with the daemon's console.
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 19;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 29;
 const WALL_CLOCK_BOUND_FILE_FLOOR = 3;
 const WALL_CLOCK_BOUND_SITE_FLOOR = 4;
 

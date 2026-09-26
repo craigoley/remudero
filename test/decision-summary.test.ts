@@ -23,7 +23,6 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before } from "node:test";
 import { BROWSER_SKIP, browserTest as test } from "./browser-absence.js";
-import { decisionSummaryHtml } from "../src/lib/console-shell-script.js";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import {
@@ -499,19 +498,6 @@ test("W1-T313 criterion 5: the summary is written once at creation -- re-reading
   assert.equal(calls, 1, "no re-invocation on subsequent reads");
 });
 
-test("W1-T313 criterion 5 (structural): the client's decision-summary renderer is synchronous and makes no network calls by construction", () => {
-  // W1-T2731: asserted against the REAL function object rather than a regex over serve.ts's
-  // source. That is what "by construction" actually means here, and it is stronger: an
-  // AsyncFunction is refused by its own constructor name, not by hoping the word `async` fails to
-  // appear in a slice of text. (The old regex also could not survive the move to
-  // lib/console-shell-script.ts, nor the minification the shell now emits.)
-  assert.notEqual(decisionSummaryHtml.constructor.name, "AsyncFunction", "synchronous BY CONSTRUCTION, not by convention");
-  assert.doesNotMatch(
-    decisionSummaryHtml.toString(),
-    /await |fetch\(|async /,
-    "purely synchronous string building — reads the cache, never invokes a summarizer",
-  );
-});
 
 // ── Criterion 3 + console-side criterion 4/5: proven over a REAL browser ────────────────────
 // (learnings#probe-must-exercise-the-real-consuming-client — the same discipline

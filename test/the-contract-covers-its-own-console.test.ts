@@ -64,34 +64,6 @@ test("W1-T3174: the uncovered count is a ratchet — it may FALL and never RISE"
   assert.match(rose, /UNDECLARED:/, "naming the routes, because a bare count is not actionable");
 });
 
-// @source-text-subject — this test's SUBJECT genuinely IS a source file's text, in the sense
-// W1-T2905's census carves out. The tool under test is a source-text census: `routesCalled` finds
-// `fetch("/v1/…")` literals by scanning code. The read below is not a prose assertion standing in
-// for behaviour — it is a POSITIVE CONTROL ON THE REAL CORPUS, feeding the live client's actual
-// bytes through the extractor so that an extractor which stops matching fails HERE instead of
-// reporting an empty uncovered set as a clean sheet. Asserting on behaviour instead is not
-// available: the behaviour IS reading source text, and a synthetic fixture cannot catch the
-// regression this control exists for.
-test("W1-T3174: the census reads the STRING console too, not only where the fetch gate looks", () => {
-  // COUNTING ONLY `apps/` REPORTS A CLEAN SHEET while 28 routes are in daily use: the live
-  // console's client is src/lib/console-shell-client.ts, which is not under apps/ and is the
-  // largest consumer in the tree.
-  assert.ok(
-    mod.CLIENT_SOURCES.includes("src/lib/console-shell-client.ts"),
-    "the string console must be in the census population",
-  );
-  assert.ok(mod.CLIENT_SOURCES.some((s) => s.startsWith("apps/")), "and so must the new stack");
-
-  // A POSITIVE CONTROL ON THE REAL CORPUS: that file really does call routes, so a census that
-  // stops matching fails HERE rather than reporting an empty uncovered set as success.
-  const live = readFileSync(join(ROOT, "src", "lib", "console-shell-client.ts"), "utf8");
-  const inLive = mod.routesCalled(["x"], tree({ x: [live] }));
-  assert.ok(inLive.length > 20, `the live client must still show its routes — measured ${inLive.length}`);
-
-  const spec = mod.routesDeclared(readFileSync(join(ROOT, "openapi", "daemon.yaml"), "utf8"));
-  assert.ok(spec.length > 0, "and the spec extraction must still see its paths");
-});
-
 test("W1-T3174: the FELL direction names the ceiling to lower — an improvement that is not locked in is not kept", () => {
   // The sibling above covers ROSE. This arm was uncovered, and it is the half that matters for
   // RATCHETING: a census that reports an improvement without saying to record it lets the next PR

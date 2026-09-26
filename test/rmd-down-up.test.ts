@@ -391,10 +391,6 @@ function upDeps(over: Partial<UpDeps> = {}): { out: string[]; err: string[]; ord
     },
     liveInflightRuns: () => [],
     planLifecycleCounts: () => ({ openPr: 0, needsHuman: 0 }),
-    consoleUrlCommand: async (_rest, _config, d) => {
-      d?.out?.(`    console:     http://127.0.0.1:4317/?token=synthetic`);
-      return 0;
-    },
     sleep: noopSleep,
     bootPollAttempts: 1,
     bootPollDelayMs: 0,
@@ -448,13 +444,15 @@ test("up: already up (daemon loaded, serve listening) verifies + reports — nev
   assert.match(text, /serve \(:\d+\):\s+listening \(already up\)/);
 });
 
-test("up: the resume report includes the console URL WITH its token", async () => {
+test("W1-T4563: the resume report names app.remudero.com as the console and prints no token", async () => {
   const { out, deps } = upDeps();
   const rc = await upCommand([], deps);
   assert.equal(rc, 0);
   const consoleLine = out.find((l) => l.includes("console:"));
   assert.ok(consoleLine, "a console: line must be printed in the resume report");
-  assert.match(consoleLine!, /token=/);
+  assert.match(consoleLine!, /https:\/\/app\.remudero\.com/);
+  // The daemon serves no console of its own any more, so no tokened localhost bookmark is printed.
+  assert.doesNotMatch(out.join("\n"), /token=|localhost:\d+\/\?/);
 });
 
 test("up: a daemon plist that was never generated is reported as not installed, never a crash", async () => {
