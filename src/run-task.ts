@@ -2523,22 +2523,11 @@ export function writeSyncLine(fd: 1 | 2, line: string): void {
  *  enforces for every other step in that set. */
 export const WORKER_STATE_LEDGER_STEP = "worker.state";
 
-/**
- * W1-T2557: THE MID-FLIGHT TURN-COUNT ROW — appended the instant {@link
- * WorkerStateTracker.turnsSoFar} CHANGES, independent of `worker.state`'s own TRANSITION-only
- * cadence (design note iii, above). A worker that stays continuously `working` for the whole
- * run would otherwise emit exactly ONE `worker.state` row for the entire spawn — this is the row
- * that stays fresh while the run is happening, closing the gap this task's own rationale names:
- * "every cost signal there is fires AFTER `implement.done`". Also deliberately NOT added to
- * `DECISION_RELEVANT_LEDGER_STEPS` — nothing decides off it, same reasoning as `worker.state`.
- */
-export const WORKER_TURNS_LEDGER_STEP = "worker.turns";
-
-/** One bounded, structured row per observed stream event. Unlike `worker.state` (transitions)
- *  and `worker.turns` (count changes), this is the operator-facing activity ledger: it gives the
- *  console a real tool name, a bounded rationale, tool timing/outcome, and heartbeat cadence
- *  without exposing prompts, tool arguments, or tool output. It is diagnostic telemetry only and
- *  must never become a dispatch decision input. */
+/** One bounded, structured row per observed stream event. Unlike `worker.state` (transitions),
+ *  this carries `turns_so_far` whenever the stream event supplies it, keeping the running count
+ *  visible during a spawn. It gives the console a real tool name, a bounded rationale, tool
+ *  timing/outcome, and heartbeat cadence without exposing prompts, tool arguments, or tool
+ *  output. It is diagnostic telemetry only and must never become a dispatch decision input. */
 export const WORKER_ACTIVITY_LEDGER_STEP = "worker.activity";
 
 /**
@@ -2681,7 +2670,6 @@ export function buildWorkerStateSensor(args: {
   // site resolves one (or a derivation failure leaves it unset), meaning the runaway signal
   // stays silent rather than guessing.
   let runawayBoundTurns: number | undefined;
-  let lastEmittedTurns: number | undefined;
   let runawaySignaled = false;
   let lastWorkerText: string | undefined;
   let activeTool: { name: string; startedAtMs: number; reason?: string } | undefined;
@@ -2703,33 +2691,12 @@ export function buildWorkerStateSensor(args: {
   };
 
   /**
-   * W1-T2557: THE MID-FLIGHT VISIBILITY THIS TASK ADDS — called on EVERY observed stream event
-   * (the observer already parses every one; this task's own rationale calls a running count on
-   * the row it already writes "close to free"), never gated behind a `worker.state` TRANSITION
-   * (which a continuously-`working` worker can go the WHOLE run without firing again — exactly
-   * the invisible-while-spending gap this task exists to close). Two independent, best-effort,
-   * NEVER-ACTING appends:
-   *   - `worker.turns`, the instant the running count CHANGES (never a duplicate row for the
-   *     same count — the same "only on change" discipline `recordTransition` already keeps).
-   *   - `worker.runaway_turns`, AT MOST ONCE per run, the instant the count first clears
-   *     `runawayBoundTurns` — a REPORT, never a kill/defer: this function has no kill/defer
-   *     affordance to reach for even if it wanted to (acceptance: "it observes and never acts").
+   * W1-T2557: check the running count on every observed stream event. `worker.activity` already
+   * carries the event's count while the spawn is in flight. Append `worker.runaway_turns` AT MOST
+   * ONCE per run, when the count first clears `runawayBoundTurns` — a report, never a kill/defer.
    */
   const observeTurns = (): void => {
     const current = tracker.turnsSoFar();
-    if (current !== lastEmittedTurns) {
-      lastEmittedTurns = current;
-      try {
-        appendLedger(args.ledgerPath, {
-          run_id: args.runId,
-          task_id: args.taskId,
-          step: WORKER_TURNS_LEDGER_STEP,
-          turns_so_far: current,
-        });
-      } catch {
-        // Best-effort — same discipline as `recordTransition`'s own catch above.
-      }
-    }
     if (!runawaySignaled && runawayBoundTurns !== undefined && current > runawayBoundTurns) {
       runawaySignaled = true;
       try {
