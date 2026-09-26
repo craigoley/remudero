@@ -297,8 +297,8 @@ function siteDeclaredIn(root: string, file: string, site: string): boolean {
   return declRe.test(text);
 }
 
-/** `worktreeAdd`'s own file and site name — the raw invocation inside its body is the routing
- *  TARGET, not a site that itself needs a registry row. */
+/** Both canonical implementations own their raw invocation and apply the same base guard;
+ * neither needs an exemption row. */
 const CANONICAL_FILE = "src/lib/worker.ts";
 const CANONICAL_SITES = new Set(["worktreeAdd", "worktreeAddAsync"]);
 

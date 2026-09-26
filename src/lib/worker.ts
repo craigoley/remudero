@@ -4625,6 +4625,7 @@ export async function worktreeAddAsync(
   try {
     localRefHead = (await worktreeGit(["-C", repoDir, "rev-parse", `refs/remotes/origin/${ref}`])).trim();
   } catch {
+    // This is only an observability read; its unreadable marker keeps failure distinct in the row.
     localRefHead = "unreadable";
   }
   await worktreeGit(["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base], true);
@@ -4641,6 +4642,7 @@ export async function worktreeAddAsync(
       if (!remoteHead) throw new Error(`empty ls-remote output for refs/heads/${ref}`);
     }
   } catch (error) {
+    // Preserve the failure for assertWorktreeBaseCurrent's warning and base_uncheckable row.
     remoteError = error;
   }
   let behind: number | "unknown" = "unknown";
