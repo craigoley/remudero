@@ -454,6 +454,45 @@ test("forceRefresh bypasses success, failure-backoff, and an ordinary in-flight 
   assert.equal(kills, 2);
 });
 
+test("an overdue Codex deadline drains a queued app-server reply before declaring headroom unreadable", async () => {
+  let monotonicMs = 0;
+  let kills = 0;
+  const pending = readCodexRuntime(config("/tmp/codex-overdue-stdout"), "/bin/sh", {
+    timeoutMs: 5,
+    monotonicNow: () => monotonicMs,
+    spawn: () => fakeAppServer((request, { stdout }) => {
+      if (request.id === 1) setImmediate(() => stdout.write(`${JSON.stringify({ id: 1, result: {} })}\n`));
+      if (request.id === 2) stdout.write(`${JSON.stringify({ id: 2, result: LIMITS })}\n`);
+      if (request.id === 3) stdout.write(`${JSON.stringify({ id: 3, result: { data: MODELS, nextCursor: null } })}\n`);
+    }, () => { kills += 1; }) as never,
+  });
+  monotonicMs = 2_000;
+  const resumeAfter = Date.now() + 20;
+  while (Date.now() < resumeAfter) { /* force the overdue timer ahead of setImmediate */ }
+  const result = await pending;
+  assert.equal("provider" in result, false, "a valid queued reply must remain readable");
+  if (!("provider" in result)) assert.equal(result.models.length, MODELS.length);
+  assert.equal(kills, 1, "the completed child is reaped once");
+});
+
+test("an overdue Codex deadline with no reply still fails closed after the stdout grace", async () => {
+  let kills = 0;
+  let monotonicMs = 0;
+  const pending = readCodexRuntime(config("/tmp/codex-overdue-no-reply"), "/bin/sh", {
+    timeoutMs: 5,
+    monotonicNow: () => monotonicMs,
+    spawn: () => fakeAppServer(() => undefined, () => { kills += 1; }) as never,
+  });
+  monotonicMs = 2_000;
+  const result = await pending;
+  assert.equal("provider" in result, true);
+  if ("provider" in result) {
+    assert.equal(result.readable, false);
+    assert.match(result.detail ?? "", /stdout grace/);
+  }
+  assert.equal(kills, 1);
+});
+
 test("timeout diagnostics name only the app-server phases still unfinished at the bound", async () => {
   const cases: Array<{
     name: string;

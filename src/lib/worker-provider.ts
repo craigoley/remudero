@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile as execFileChild, execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants as fsConstants, accessSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { promisify } from "node:util";
 import {
   verifyCapabilityGrant,
   type CapabilityGrantStore,
@@ -1178,6 +1179,7 @@ interface CodexRuntimeFailure extends ProviderCapacity {
  * zero allocation, and every lane silently migrates onto the Claude subscription.
  */
 const CODEX_DEADLINE_OVERRUN_MS = 1_000;
+const CODEX_OVERDUE_STDOUT_GRACE_MS = 1_000;
 
 type CodexRuntimeResult = CodexRuntimeReading | CodexRuntimeFailure;
 
@@ -1252,6 +1254,7 @@ export async function readCodexRuntime(
 
   return new Promise<CodexRuntimeResult>((resolve) => {
     let settled = false;
+    let overrunGraceTimer: NodeJS.Timeout | undefined;
     let buffer = "";
     let stderr = "";
     let rateLimits: unknown;
@@ -1264,6 +1267,7 @@ export async function readCodexRuntime(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (overrunGraceTimer) clearTimeout(overrunGraceTimer);
       deps.signal?.removeEventListener("abort", onAbort);
       child.kill("SIGKILL");
       resolve(result);
@@ -1284,11 +1288,14 @@ export async function readCodexRuntime(
       // observed nothing about Codex and must not be reported as evidence against it.
       const elapsedMs = monotonicNow() - deadlineSetAt;
       if (malformedStdoutLines === 0 && elapsedMs >= timeoutMs + CODEX_DEADLINE_OVERRUN_MS) {
-        finish(codexRuntimeFailure(
-          `app-server deadline overran: ${timeoutMs}ms budget fired after ${elapsedMs}ms, so this process was stalled ` +
-            `and the child was never given a readable turn; unfinished: ${unfinishedPhases().join(", ") || "response validation"}`,
-          "starved",
-        ));
+        // Timers run before the poll phase that delivers child stdout. Give a reply already
+        // waiting in that phase one bounded turn before killing the child. Otherwise every
+        // concurrent probe can declare Codex unreadable after the same event-loop stall.
+        overrunGraceTimer = setTimeout(() => finish(codexRuntimeFailure(
+          `app-server deadline overran: ${timeoutMs}ms budget fired after ${elapsedMs}ms, so this process was stalled; ` +
+            `unfinished after ${CODEX_OVERDUE_STDOUT_GRACE_MS}ms stdout grace: ${unfinishedPhases().join(", ") || "response validation"}`,
+          malformedStdoutLines > 0 ? "terminal" : "starved",
+        )), CODEX_OVERDUE_STDOUT_GRACE_MS);
         return;
       }
       finish(codexRuntimeFailure(
@@ -2750,7 +2757,7 @@ export interface OpenWeightSpawnArgs {
    * in a fresh user and network namespace; tests use this port to exercise child-env handling on
    * hosts where bubblewrap is intentionally unavailable.
    */
-  runCheck?: (input: OpenWeightCheckInput) => string;
+  runCheck?: (input: OpenWeightCheckInput) => string | Promise<string>;
   /** Test-only clock port; production records duration from the system clock. `iso` rides beside
    *  `now` because the daily allowance keys on a UTC calendar day, which is read off the ISO
    *  instant rather than re-derived from milliseconds. */
@@ -2952,15 +2959,17 @@ export function openWeightCheckSandboxArgv(
 }
 
 /** The only production route for `RunCheck`: no fallback can execute an unchecked process. */
-export function runOpenWeightCheck(input: OpenWeightCheckInput): string {
-  return execFileSync(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv(input), {
+const execFileAsync = promisify(execFileChild);
+
+export async function runOpenWeightCheck(input: OpenWeightCheckInput): Promise<string> {
+  const { stdout } = await execFileAsync(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv(input), {
     cwd: realpathSync(input.cwd),
     env: input.env,
     encoding: "utf8",
     timeout: OPENWEIGHT_CHECK_TIMEOUT_MS,
     maxBuffer: 8 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
   });
+  return stdout;
 }
 
 /** Raised INSTEAD of executing an unlisted check, before any process spawns. */
@@ -3081,14 +3090,14 @@ function objectArguments(raw: unknown): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-function executeOpenWeightTool(
+async function executeOpenWeightTool(
   name: string,
   args: Record<string, unknown>,
   cwd: string,
   checkEnv: Record<string, string>,
   workerHome: string,
-  runCheck: ((input: OpenWeightCheckInput) => string) | undefined,
-): unknown {
+  runCheck: ((input: OpenWeightCheckInput) => string | Promise<string>) | undefined,
+): Promise<unknown> {
   switch (name) {
     case "read_file":
       return { content: readFileSync(openWeightContainedPath(cwd, args.path), "utf8") };
@@ -3116,7 +3125,7 @@ function executeOpenWeightTool(
       // fresh network namespace before it runs.
       const argv = openWeightCheckArgv(args.check, args.paths);
       try {
-        const stdout = (runCheck ?? runOpenWeightCheck)({
+        const stdout = await (runCheck ?? runOpenWeightCheck)({
           argv,
           cwd: realpathSync(cwd),
           workerHome,
@@ -3126,9 +3135,10 @@ function executeOpenWeightTool(
       } catch (err) {
         // A FAILING CHECK IS A RESULT, NOT AN ERROR — the lane must read its own red. A refusal above
         // still throws, because that is not a result.
-        const e = err as { status?: number; stdout?: string | Buffer; stderr?: string | Buffer };
+        const e = err as { status?: number; code?: number | string; stdout?: string | Buffer; stderr?: string | Buffer };
         const out = `${String(e.stdout ?? "")}${String(e.stderr ?? "")}`;
-        return { check: args.check, exitCode: typeof e.status === "number" ? e.status : 1, output: out.slice(-20_000) };
+        const exitCode = typeof e.status === "number" ? e.status : typeof e.code === "number" ? e.code : 1;
+        return { check: args.check, exitCode, output: out.slice(-20_000) };
       }
     }
     case "grep_files": {
@@ -3484,7 +3494,7 @@ export async function spawnFoundryOpusWorker(
         }
         let result: unknown;
         try {
-          result = executeOpenWeightTool(call.name, call.input as Record<string, unknown>, args.cwd, checkEnv, args.workerHome, args.runCheck);
+          result = await executeOpenWeightTool(call.name, call.input as Record<string, unknown>, args.cwd, checkEnv, args.workerHome, args.runCheck);
         } catch (error) {
           // A failed tool invalidates this chain; never turn its error into success.
           throw new Error(`cash Opus tool ${call.name} failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -3730,7 +3740,7 @@ export async function spawnOpenWeightWorker(
                   },
                 }),
               )
-            : JSON.stringify(executeOpenWeightTool(
+            : JSON.stringify(await executeOpenWeightTool(
                 name,
                 objectArguments(call.function?.arguments),
                 args.cwd,

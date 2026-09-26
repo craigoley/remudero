@@ -553,21 +553,110 @@ test("cash containment recovery refuses rather than pinning a run whose later fi
   }
 });
 
-test("a cash RunCheck reaches the Linux bubblewrap runner and refuses rather than running unsandboxed when it is absent", () => {
+test("a cash RunCheck reaches the Linux bubblewrap runner and refuses rather than running unsandboxed when it is absent", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-cash-check-runner-"));
   try {
-    assert.throws(
-      () => runOpenWeightCheck({
+    await assert.rejects(
+      runOpenWeightCheck({
         argv: ["/bin/true"],
         cwd: root,
         workerHome: root,
-        env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+        env: { PATH: root },
         // The macOS test host deliberately lacks bwrap. Making the argv look Linux reaches the
-        // real execFileSync default, which must fail rather than silently running `/bin/true`.
+        // real async execFile default, which must fail rather than silently running `/bin/true`.
         platform: "linux",
       }),
       /bwrap/,
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a cash RunCheck yields the daemon event loop while its bounded child runs", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cash-check-yields-"));
+  try {
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    const fakeBwrap = join(bin, "bwrap");
+    writeFileSync(fakeBwrap, "#!/bin/sh\nsleep 0.1\nprintf CHECK_DONE\n");
+    chmodSync(fakeBwrap, 0o755);
+    let timerFired = false;
+    const pending = runOpenWeightCheck({
+      argv: ["/bin/true"],
+      cwd: root,
+      workerHome: root,
+      env: { PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}` },
+      platform: "linux",
+    });
+    setTimeout(() => { timerFired = true; }, 10);
+    assert.equal(await pending, "CHECK_DONE");
+    assert.equal(timerFired, true, "a running check must not block Codex capacity callbacks");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failing async cash RunCheck keeps the child's exit code and output", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cash-check-failed-child-"));
+  try {
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    const fakeBwrap = join(bin, "bwrap");
+    writeFileSync(fakeBwrap, "#!/bin/sh\nprintf CHECK_STDOUT\nprintf CHECK_STDERR >&2\nexit 7\n");
+    chmodSync(fakeBwrap, 0o755);
+    await assert.rejects(runOpenWeightCheck({
+      argv: ["/bin/true"],
+      cwd: root,
+      workerHome: root,
+      env: { PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}` },
+      platform: "linux",
+    }), (error: unknown) => {
+      const failed = error as { code?: number; stdout?: string; stderr?: string };
+      assert.equal(failed.code, 7);
+      assert.equal(failed.stdout, "CHECK_STDOUT");
+      assert.equal(failed.stderr, "CHECK_STDERR");
+      return true;
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a rejected async cash RunCheck reports its exit code and output to the model", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cash-check-red-"));
+  try {
+    let turn = 0;
+    const requests: string[] = [];
+    const result = await spawnOpenWeightWorker({
+      cwd: root,
+      workerHome: join(root, "worker-home"),
+      prompt: "run the declared typecheck",
+      tools: ["RunCheck"],
+      maxTurns: 2,
+      env: { RMD_OPENWEIGHT_API_KEY: "fake-test-key" },
+      runCheck: async () => {
+        throw Object.assign(new Error("check failed"), { code: 7, stdout: "RED_STDOUT", stderr: "RED_STDERR" });
+      },
+      fetchImpl: async (_input, init) => {
+        requests.push(String(init?.body ?? ""));
+        turn += 1;
+        const message = turn === 1
+          ? { tool_calls: [{ id: "check-1", type: "function", function: { name: "run_check", arguments: JSON.stringify({ check: "typecheck" }) } }] }
+          : { content: "reported red check" };
+        return new Response(JSON.stringify({
+          id: `turn-${turn}`,
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+          choices: [{ message, finish_reason: "stop" }],
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    }, cashContainmentConfig(root), { model: "gpt-oss-120b", effort: "low" });
+    assert.equal(result.isError, false);
+    assert.equal(requests.length, 2);
+    const second = JSON.parse(requests[1]!) as { messages: Array<{ role: string; content: string }> };
+    const toolResult = second.messages.find((message) => message.role === "tool");
+    assert.ok(toolResult);
+    assert.deepEqual(JSON.parse(toolResult.content), { check: "typecheck", exitCode: 7, output: "RED_STDOUTRED_STDERR" });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
