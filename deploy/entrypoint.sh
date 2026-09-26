@@ -591,7 +591,9 @@ idle_starved_wait() {
     if [ "$probe_rc" -ne 0 ]; then
       log "idle_starved: wake ($slug probe exit $probe_rc); resuming full daemon"
       if [ "$probe_rc" -eq 10 ]; then return 1; fi
-      return 2
+      # An uncertain remote read is not a broken supervisor setup. Let the daemon re-evaluate
+      # with its full readers, then re-enter quiet mode if it confirms the queue is still empty.
+      return 3
     fi
     log "idle_starved: $slug remains empty"
   done
@@ -645,8 +647,10 @@ while :; do
       exit 0
     fi
     if [ "$idle_rc" -eq 2 ]; then
-      log "idle_starved: probe setup/clock failed; disabling quiet mode for this process and resuming normally"
+      log "idle_starved: supervisor setup/clock failed; disabling quiet mode for this process and resuming normally"
       export RMD_IDLE_STARVED_SUPERVISED=0
+    elif [ "$idle_rc" -eq 3 ]; then
+      log "idle_starved: remote probe uncertain; daemon will re-evaluate and may return to quiet mode"
     fi
     sync_tree
     resolve_rmd_on_path

@@ -829,6 +829,40 @@ test("idle_starved: supervised entrypoint stays asleep on an empty probe, then w
   assert.equal(ledger.split("daemon.idle_starved.pulse").length - 1, 12, "two 30-minute windows emit six pulses each");
 });
 
+test("idle_starved: an uncertain remote probe wakes Node without permanently disabling quiet mode", () => {
+  const origin = makeOrigin();
+  mkdirSync(join(origin, "deploy"), { recursive: true });
+  writeFileSync(join(origin, "deploy", "idle-starved-probe.sh"), readFileSync(join(REPO_ROOT, "deploy", "idle-starved-probe.sh")));
+  writeFileSync(join(origin, "bin", "rmd"), [
+    "#!/usr/bin/env bash",
+    'state="$HOME/Remudero/state"',
+    'mkdir -p "$state" "$HOME/Remudero/repos"',
+    'if [ ! -e "$state/first-run" ]; then',
+    '  touch "$state/first-run"',
+    '  git clone -q "$RMD_REPO_URL" "$HOME/Remudero/repos/remudero-site"',
+    `  exit ${DAEMON_EXIT_IDLE_STARVED}`,
+    "fi",
+    'printf "%s" "$RMD_IDLE_STARVED_SUPERVISED" > "$state/quiet-flag-after-uncertain-probe"',
+    "exit 0",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  git(origin, ["add", "-A"]);
+  commit(origin, "uncertain idle probe fixture");
+  const home = freshHome();
+  const run = boot(home, origin, {
+    cmd: ["./bin/rmd", "daemon", "--repo", "fake/remudero-site"],
+    env: { RMD_RESTART_THROTTLE_S: "1", GH_TOKEN: "fixture-token" },
+    stubs: {
+      sleep: "#!/usr/bin/env bash\nexit 0\n",
+      gh: "#!/usr/bin/env bash\nprintf '{bad json'\n",
+    },
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stderr, /idle_starved: remote probe uncertain/);
+  assert.equal(readFileSync(join(home, "Remudero", "state", "quiet-flag-after-uncertain-probe"), "utf8"), "1",
+    "a transient API failure must not spend the container's ability to return to zero-token idle");
+});
+
 test("idle_starved: plan/main movement and unreadable PR data both wake the probe", () => {
   const origin = makeOrigin();
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}idle-starved-probe-`));
