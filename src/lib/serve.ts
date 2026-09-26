@@ -82,7 +82,7 @@ import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
-import { buildOperatorAgentAnswer, buildOperatorAgentAnswerRoute } from "./operator-agent-answer.js";
+import { buildOperatorAgentAnswer, buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
 import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
@@ -4084,13 +4084,12 @@ function assembleServeRoutes(
     ...operatorAgentRoutes,
     // Read-scoped despite POST: this route projects only the process-owned analytics snapshot.
     // The repository comes from server configuration, never the caller's JSON body.
-    buildOperatorAgentAnswerRoute({
+    buildOperatorAgentAnswerRoute(() => ({
       repository: deps.githubEventWake?.repository,
       instance: deps.instances?.coreInstance ?? CORE_INSTANCE,
-      snapshot: currentAnalyticsSnapshot,
-      inboxStorePath: inboxThreadStorePath(deps.fleetControlRoot),
-      project: (input) => buildOperatorAgentAnswer(input),
-    }),
+      snapshot: currentAnalyticsSnapshot(),
+      inbox: readInboxAnswerEvidence(inboxThreadStorePath(deps.fleetControlRoot)),
+    }), (input) => buildOperatorAgentAnswer(input)),
     ...contextControlsRoutes,
     ...buildPanelGraphRoutes(panelGraphDeps, () => deps.board.plan),
     // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,

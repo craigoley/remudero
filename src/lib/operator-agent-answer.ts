@@ -236,7 +236,10 @@ export function buildOperatorAgentAnswer(input: AnswerInput): OperatorAgentAnswe
   };
 }
 
-export function buildOperatorAgentAnswerRoute(deps: { repository?: string; instance: string; snapshot: () => AnswerInput["snapshot"]; inboxStorePath?: string; now?: () => number; project?: typeof buildOperatorAgentAnswer }): Route {
+export function buildOperatorAgentAnswerRoute(
+  readServerContext: () => Omit<AnswerInput, "question">,
+  project: typeof buildOperatorAgentAnswer = buildOperatorAgentAnswer,
+): Route {
   return {
     method: "POST", path: "/v1/operator-agent/ask", scope: "read", sensitivity: "sensitive",
     handler: jsonAction((body: unknown): { question: string } | { error: string } => {
@@ -247,7 +250,7 @@ export function buildOperatorAgentAnswerRoute(deps: { repository?: string; insta
       if (typeof question !== "string" || !question.trim() || question.length > MAX_QUESTION) return { error: "question must be 1 to 500 characters" };
       return { question: question.trim() };
     }, (input, _req, res) => {
-      const answer = (deps.project ?? buildOperatorAgentAnswer)({ ...input, repository: deps.repository, instance: deps.instance, snapshot: deps.snapshot(), inbox: deps.inboxStorePath ? readInboxAnswerEvidence(deps.inboxStorePath) : undefined, now: deps.now?.() });
+      const answer = project({ ...readServerContext(), ...input });
       sendJson(res, 200, answer);
     }),
   };

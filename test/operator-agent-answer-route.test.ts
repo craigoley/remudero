@@ -33,7 +33,7 @@ function ask(base: string, token: string | undefined, body: unknown): Promise<Re
 }
 
 test("agent ask route rejects oversized and forged repository scope", async () => {
-  const route = buildOperatorAgentAnswerRoute({ repository: "owner/repo", instance: "core", snapshot: coldAnalyticsSnapshot });
+  const route = buildOperatorAgentAnswerRoute(() => ({ repository: "owner/repo", instance: "core", snapshot: coldAnalyticsSnapshot() }));
   await serve([route], async (base) => {
     assert.equal((await ask(base, undefined, { question: "proof?" })).status, 401);
     assert.equal((await ask(base, READ, { question: "x".repeat(501) })).status, 400);
