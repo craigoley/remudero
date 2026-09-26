@@ -28,7 +28,7 @@ import {
   type ProviderCapacity,
 } from "../src/lib/worker-provider.js";
 import { readLedgerLines } from "../src/lib/status.js";
-import { buildServeServer, renderShellHtml, type ServeDeps } from "../src/lib/serve.js";
+import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 
 const NOW = Date.parse("2026-09-02T18:00:00.000Z");
 const READ_TOKEN = "codex-model-read-token";
@@ -306,71 +306,3 @@ function publishDecision(root: string, observedAtMs = NOW): void {
   });
 }
 
-test("the console exposes the broker and refuses stale, free-form, or unmapped model activation", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rmd-codex-model-console-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  publishDecision(root, NOW - 120_000);
-  const deps = serveDeps(root);
-  const server = buildServeServer(deps);
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => server.close());
-  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const setPath = "/v1/policy/provider-routing";
-  const clearPath = "/v1/policy/provider-routing/clear";
-
-  const withoutNonce = await fetch(`${base}${setPath}`, {
-    method: "POST",
-    headers: identityHeaders(),
-    body: JSON.stringify(policyBody("gpt-5.6-terra")),
-  });
-  assert.equal(withoutNonce.status, 403);
-
-  const stale = await confirmedPost(base, setPath, policyBody("gpt-5.6-terra"));
-  assert.equal(stale.status, 409);
-  assert.equal((await stale.json() as { error: string }).error, "codex_model_inventory_stale");
-  assert.equal(existsSync(providerRoutingPolicyOverridePath(root)), false);
-
-  publishDecision(root);
-  const unmapped = await confirmedPost(base, setPath, policyBody("gpt-5.6-luna"));
-  assert.equal(unmapped.status, 400);
-  assert.equal((await unmapped.json() as { error: string }).error, "codex_model_not_eligible");
-  assert.equal(existsSync(providerRoutingPolicyOverridePath(root)), false);
-
-  const freeText = await confirmedPost(base, setPath, policyBody("not a model argument --danger"));
-  assert.equal(freeText.status, 400);
-  assert.equal(existsSync(providerRoutingPolicyOverridePath(root)), false);
-
-  const written = await confirmedPost(base, setPath, policyBody("gpt-5.6-terra"));
-  assert.equal(written.status, 200);
-  assert.deepEqual(
-    JSON.parse(readFileSync(providerRoutingPolicyOverridePath(root), "utf8")).codexModelPreference,
-    { capability: "balanced", effort: "high", model: "gpt-5.6-terra" },
-  );
-  const audit = readLedgerLines(deps.ledgerPath).filter((line) => line.step === "console.provider_routing_policy_written");
-  assert.deepEqual(audit[0]?.to_policy && (audit[0].to_policy as Record<string, unknown>).codex_model_preference, {
-    capability: "balanced",
-    effort: "high",
-    model: "gpt-5.6-terra",
-  });
-  assert.doesNotMatch(JSON.stringify(audit[0]), /codex-model-write-token|acct-must-not-reach-console|Authorization/);
-
-  const cleared = await confirmedPost(base, clearPath, {});
-  assert.equal(cleared.status, 200);
-  assert.equal(existsSync(providerRoutingPolicyOverridePath(root)), false);
-  assert.equal(readLedgerLines(deps.ledgerPath).filter((line) => line.step === "console.provider_routing_policy_written").length, 2);
-  assert.equal(clearProviderRoutingPolicyOverride(root), false);
-
-  const readBack = await fetch(`${base}/v1/provider-routing`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
-  assert.equal(readBack.status, 200);
-  assert.equal((await readBack.json() as { providers?: unknown[] }).providers?.length, 1);
-
-  const html = renderShellHtml();
-  assert.match(html, /Codex model broker/);
-  assert.match(html, /id="provider-policy-codex-model"/);
-  assert.match(html, /unmapped Codex models remain read-only proposal seeds/i);
-  assert.match(html, /\.remudero\/mounts\.yaml/);
-  assert.match(html, /promotion requires \.remudero\/mounts\.yaml PR \(proposal seed:/);
-  const serveSource = readFileSync(new URL("../src/lib/serve.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(serveSource, /readCodexCapacity|app-server|CODEX_HOME|OPENAI_API_KEY/);
-  assert.doesNotMatch(serveSource, /gpt-5\./, "Serve must not hard-code an OpenAI model catalog");
-});

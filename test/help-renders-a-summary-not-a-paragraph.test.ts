@@ -134,7 +134,7 @@ test("commandHelp(spec) contains that command's full detail verbatim, for every 
 // this reviewed inventory as part of the command addition.
 const BASELINE_COMMAND_NAMES = [
   "alert-fix", "approve", "authority", "autonomy-rate", "away", "board", "bundle", "caller-sweep", "check-acceptance", "check-proof",
-  "census-membership", "ci-failures", "ci-learning", "console-url", "correct", "coverage-improve", "daemon", "daemon-plist", "decline", "dep-review",
+  "census-membership", "ci-failures", "ci-learning", "correct", "coverage-improve", "daemon", "daemon-plist", "decline", "dep-review",
   "deploy", "deploy-plist", "deploy-run", "digest", "digest-plist", "doctor", "down", "drain",
   "emissions", "escalate", "feedback", "feedback-reconcile", "fix", "hand-runs", "inbox", "init", "install-checkout", "issues",
   "knowledge",

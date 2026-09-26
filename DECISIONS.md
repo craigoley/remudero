@@ -2735,6 +2735,34 @@ Clerk does not. Nothing here asks for it to be removed or rebuilt.
 **Rollback:** revert this entry and re-open the retired tasks by clearing their `retirement:` key.
 No gate, predicate or build changes either way — this entry records a decision.
 
+## 2026-09-26 — OPERATOR RULING: the daemon's localhost console is REMOVED; the diagnostic page does not stay
+
+*Operator-authored, recorded at the operator's instruction on 2026-09-26: "there is still an old
+localhost console that needs to be removed", then "feel free to cleanup the old localhost console
+to make this all less confusing and migrate over anything that hasn't been migrated".*
+
+**SUPERSEDES ONE CLAUSE OF THE 2026-09-16 RULING.** That ruling made app.remudero.com the console
+and kept "a minimal diagnostic page at `GET /`", reasoning that it needs no identity provider and
+no deploy step. The page was never minimal: `GET /` still served the full 4,108-line client shell,
+`/console/*` still served the `apps/dashboard` bundle, and `rmd console-url` still printed a tokened
+localhost bookmark. Two consoles were confusing the operator, which is the reason given.
+
+**MIGRATE FIRST, THEN REMOVE.** A parity audit (2026-09-26) found 15 core write routes and 5 readings
+reachable only from the old shell. They are ported to app.remudero.com as CONSOLE-T81 (low-tier
+controls), CONSOLE-T82 (middle/high controls behind the signed-in operator's step-up) and CONSOLE-T83
+(readings), after which the console's write-parity baseline is empty. W1-T4563 removes the daemon's
+console only after those ship.
+
+**WHAT REMAINS AT THE DAEMON:** `/v1/*`, the control gateway app.remudero.com calls, unchanged. `GET /`
+answers a one-line JSON pointer to the console. The fallback when Vercel or Clerk is down is the CLI
+(`rmd pause|stop|resume|status`), which needs neither.
+
+**A SECURITY FINDING RETIRED WITH IT.** `GET /v1/console/write-grant` returned the WRITE bearer to any
+caller holding the READ token, the token the old design put in bookmark URLs. It existed only for the
+old shell and is removed with it.
+
+**Rollback:** revert W1-T4563's PR. app.remudero.com is unaffected either way.
+
 ## 2026-09-16 — OPERATOR RULING: the implement lane runs on ANY provider, per-provider, not Claude-only
 
 **Operator-authored.** An agent proposed the opposite ruling in this session and was overruled; this

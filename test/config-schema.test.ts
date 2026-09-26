@@ -94,6 +94,7 @@ test("CONFIG_SCHEMA declares the config field shape as metadata", () => {
     "dailyCapUsd",
     "fixStrikeCap",
     "consoleUrl",
+    "consoleAppUrl",
     "fleetRepos",
     "serve",
     "relay",

@@ -6253,7 +6253,7 @@ test("pushDrainRundown builds the classified rundown, prints it, and pushes ONE 
     costUsd: 1.25,
     resumeCommand: "rmd drain",
   };
-  const config = { root, consoleUrl: "http://100.64.1.2:4317" } as never;
+  const config = { root, consoleUrl: "http://100.64.1.2:4317", consoleAppUrl: "https://console.example.test" } as never;
   try {
     const text = pushDrainRundown(summary, [{ step: "escalation.issue_opened", task_id: "W1-B", issue_url: "https://github.com/craigoley/remudero/issues/9", class: "BLOCKED" }], config, {
       channel: channel as never,
@@ -6264,8 +6264,10 @@ test("pushDrainRundown builds the classified rundown, prints it, and pushes ONE 
     assert.equal(sent.length, 1, "exactly ONE push through the channel — one transport, not two");
     assert.equal(sent[0], text, "the returned text is exactly what was sent");
     assert.ok(printed.length >= 1, "the rundown is also printed to the terminal");
-    // The deep link consoleUrl(config) + consoleCardUrl builds for the blocked task.
-    assert.match(text, /http:\/\/100\.64\.1\.2:4317\/#task=W1-B/, "the escalated line carries ITS OWN console deep link");
+    // The deep link consoleAppUrl(config) + consoleCardUrl builds for the blocked task (W1-T4563:
+    // the console's /task/<id> page, never the gateway's retired #task= shell).
+    assert.match(text, /https:\/\/console\.example\.test\/task\/W1-B/, "the escalated line carries ITS OWN console deep link");
+    assert.doesNotMatch(text, /100\.64\.1\.2:4317/, "the gateway base is never used for a console link");
     rmSync(root, { recursive: true, force: true });
   } catch (e) {
     rmSync(root, { recursive: true, force: true });
@@ -6393,7 +6395,7 @@ test("escalateCommand (W1-T144): a MANUAL escalation's real-time ping threads th
     );
     assert.equal(code, 0);
     assert.equal(sent.length, 1, "the MANUAL ping fired once through the injected channel");
-    assert.match(sent[0], /#task=W1-TX/, "the ping carries the console deep link for the escalated task");
+    assert.match(sent[0], /https:\/\/app\.remudero\.com\/task\/W1-TX/, "the ping carries the console deep link for the escalated task (W1-T4563: app.remudero.com by default)");
   } finally {
     process.env.HOME = oldHome;
     rmSync(root, { recursive: true, force: true });

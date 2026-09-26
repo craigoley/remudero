@@ -8,7 +8,6 @@ import {
 } from "../src/lib/board.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
-import { renderShellHtml } from "../src/lib/serve.js";
 
 function task(id: string): Task {
   return {
@@ -218,51 +217,7 @@ test("queue order is actionable, active, ready or held, waiting, then unknown; n
   assert.equal(queue.find((row) => row.prNumber === 62)?.held, true, "an operator-held PR is represented in the ready/held class");
 });
 
-test("the rendered queue filters execute against loaded rows and never hide an unknown classification", () => {
-  const html = renderShellHtml();
-  const functionSource = html.match(/function filteredPrQueueRows\(rows\) \{[\s\S]*?\n  \}/)?.[0];
-  assert.ok(functionSource, "the consuming client filter function is present");
-  const buildFilter = (filters: { actionability: string; review: string; task: string }) =>
-    new Function("prQueueFilters", `${functionSource}; return filteredPrQueueRows;`)(filters) as (rows: unknown[]) => Array<{ prNumber: number }>;
-  const rows = [
-    { prNumber: 40, queueClass: "actionable", reviewState: "failure", taskId: "W1-T40" },
-    { prNumber: 50, queueClass: "active", reviewState: "pending", taskId: "W1-T50" },
-    { prNumber: 60, queueClass: "ready-held", reviewState: "success", taskId: "W1-T60" },
-    { prNumber: 70, queueClass: "waiting", reviewState: "none", taskId: undefined },
-    { prNumber: 80, queueClass: "unknown", reviewState: "none", taskId: "W1-T80" },
-  ];
 
-  const numbers = (filtered: Array<{ prNumber: number }>) => filtered.map((row) => row.prNumber);
-  assert.deepEqual(numbers(buildFilter({ actionability: "actionable", review: "all", task: "all" })(rows)), [40, 80]);
-  assert.deepEqual(numbers(buildFilter({ actionability: "all", review: "success", task: "all" })(rows)), [60, 80]);
-  assert.deepEqual(numbers(buildFilter({ actionability: "all", review: "all", task: "unattributed" })(rows)), [70, 80]);
-  assert.deepEqual(numbers(buildFilter({ actionability: "all", review: "all", task: "W1-T60" })(rows)), [60, 80]);
-});
 
-test("the Queue tab filters the already-loaded atomic snapshot and adds no write or polling route", () => {
-  const html = renderShellHtml();
-  for (const marker of [
-    'data-tab="queue"',
-    'id="pr-queue"',
-    'id="pr-queue-list"',
-    'id="pr-queue-actionability"',
-    'id="pr-queue-review"',
-    'id="pr-queue-task"',
-    "function renderPrQueue",
-  ]) assert.match(html, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.match(html, /latestPrQueue = statusSnap\.prQueue/);
-  assert.doesNotMatch(html, /getJson\("\/v1\/pr-queue/);
-  assert.doesNotMatch(html, /postJson\("\/v1\/pr-queue/);
-  assert.doesNotMatch(html, /setInterval\([^)]*renderPrQueue/);
-});
-
-test("queue rows preserve the exact reason and expose the latest transition in expandable detail", () => {
-  const html = renderShellHtml();
-  const source = html.match(/function prQueueRowHtml\(row\) \{[\s\S]*?\n  \}/)?.[0];
-  assert.ok(source);
-  assert.match(source!, /row\.reason/);
-  assert.match(source!, /row\.observedAt/);
-  assert.match(source!, /<details/);
-});
 
 void (undefined as unknown as PrQueueRow);

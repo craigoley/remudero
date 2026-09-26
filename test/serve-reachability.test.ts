@@ -218,48 +218,12 @@ test("W1-T915: a reachable console with a bad credential still refuses", async (
 
     // And the READ token specifically must not reach a WRITE route -- widening the BIND must
     // never widen SCOPE. GET /v1/auth/scope is write-gated (buildAuthScopeRoute's own doc).
-    const readOnWrite = await fetch(`${base}/v1/auth/scope`, { headers: { authorization: `Bearer ${deps.tokens.read}` } });
+    // W1-T4563 retired GET /v1/auth/scope with the daemon's console; any write route shows the same
+    // property, and this one is refused before its handler runs, so the probe writes nothing.
+    const readOnWrite = await fetch(`${base}/v1/control/pause`, { method: "POST", headers: { authorization: `Bearer ${deps.tokens.read}`, "content-type": "application/json" }, body: "{}" });
     assert.equal(readOnWrite.status, 403, "a read-scope token on a write route is forbidden, not merely unauthorized");
   });
 });
 
 // ── 4. the needs-me queue and its escalation rows are left unchanged ───────────────────────
 
-test("W1-T915: the needs-me escalation rows are untouched by the reach change", async () => {
-  const root = tmpRoot();
-  const deps = depsFor(root);
-
-  // The shell (GET /?token=) is served byte-identically off a loopback-only bind and off the
-  // new container-wide bind -- this task changes WHO can reach the process, never WHAT it
-  // serves. Fetched through the real assembled server both times, never renderShellHtml() called
-  // directly, so a divergence introduced anywhere in the request path would show up here too.
-  const loopbackHtml = await withServeServerOn(deps, DEFAULT_SERVE_HOST, async (base) => {
-    const res = await fetch(`${base}/?token=${deps.tokens.read}`);
-    assert.equal(res.status, 200);
-    return res.text();
-  });
-  const wideHtml = await withServeServerOn(deps, CONTAINER_ALL_INTERFACES_HOST, async (base) => {
-    const res = await fetch(`${base}/?token=${deps.tokens.read}`);
-    assert.equal(res.status, 200);
-    return res.text();
-  });
-  assert.equal(wideHtml, loopbackHtml, "FALSIFIER: the reach change must not alter a single byte the shell serves");
-
-  // And the specific mechanism this task's own design (iii) forbids touching is still there,
-  // unmodified: `renderNeedsMe` keys off `needsHuman` + `escalationOpenedAt` (board.ts's writer
-  // contract), and `needsMeTaskRowHtml` still falls back to the escalation's OWN title when no
-  // plan task owns the row -- the exact fallback rationale (1) cites as already-shipped work
-  // this task must not re-touch.
-  const renderNeedsMeFn = wideHtml.match(/function renderNeedsMe\(tasks, feedbackEntries, inboxReady, inboxDrafting\) \{[\s\S]*?\n  \}/)?.[0];
-  assert.ok(renderNeedsMeFn, "renderNeedsMe must still exist in the served shell");
-  assert.match(renderNeedsMeFn!, /if \(!t\.needsHuman\) continue;/, "still keyed off needsHuman, unwidened");
-  assert.match(renderNeedsMeFn!, /t\.escalationOpenedAt \?\? t\.startedAt/, "still ages off the escalation's own open time");
-
-  const needsMeTaskRowFn = wideHtml.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0];
-  assert.ok(needsMeTaskRowFn, "needsMeTaskRowHtml must still exist in the served shell");
-  assert.match(
-    needsMeTaskRowFn!,
-    /t\.escalationTitle \? escapeHtml\(t\.escalationTitle\) : "needs human attention \(escalated\)"/,
-    "still falls back to the escalation's own title when no plan task owns the row",
-  );
-});

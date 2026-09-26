@@ -90,10 +90,9 @@ test("W1-T2680: the three suites that went red in CI on 2026-09-05, after a call
     "a NEW src/lib file joins the `_RE` validator census (PR #4072)",
   );
   const serveChange = censusSuiteFiles(["src/lib/serve.ts"], REPO_ROOT);
-  assert.ok(
-    serveChange.includes("test/console-stopped-counts.test.ts"),
-    "console-stopped-counts reads serve.ts's SOURCE TEXT and went red on it (PR #4073)",
-  );
+  // console-stopped-counts.test.ts read serve.ts's SOURCE TEXT and went red on it (PR #4073); the
+  // test that did so measured the daemon's retired console and left with it (W1-T4563), so it is no
+  // longer asserted here -- the same "pin the tree, not history" rule as the paragraph below.
   // decision-summary.test.ts went red for the SAME reason in the same PR, and is deliberately NOT
   // asserted here: its repair replaced the `readFileSync(serve.ts)` with an assertion on the real
   // function object, so it no longer carries the shape at all. Pinning it would be pinning history
@@ -102,7 +101,9 @@ test("W1-T2680: the three suites that went red in CI on 2026-09-05, after a call
   // The CLASS is what matters and it is very much alive: every suite that still reads serve.ts as
   // text is reachable only this way. Asserted as a population so the claim cannot quietly decay to
   // one lucky file.
-  const stillReadServe = ["test/codex-model-console.test.ts", "test/console-token-refresh.test.ts", "test/provider-routing-console.test.ts"];
+  // W1-T4563: codex-model-console and console-token-refresh read serve.ts only for the retired
+  // console shell; two suites that still read it as text replace them, keeping a population of three.
+  const stillReadServe = ["test/a-successful-leaf-check-is-not-a-full-sweep.test.ts", "test/provider-routing-console.test.ts", "test/runtime-adoption-is-reported-not-gated.test.ts"];
   for (const suite of stillReadServe) {
     assert.ok(serveChange.includes(suite), `${suite} reads serve.ts as text and no symbol sweep can reach it`);
   }

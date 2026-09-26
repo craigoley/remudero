@@ -216,20 +216,20 @@ test("sendDigest delivers the built text over the notify channel and ledgers it"
 
 // ── W1-T144: console push — deep links + the drain-rundown push ──────────────────────────────
 
-test("consoleCardUrl: a HASH route naming exactly the given task id, tolerating a trailing slash on the base", () => {
-  assert.equal(consoleCardUrl("http://100.64.1.2:4317", "W1-T3"), "http://100.64.1.2:4317/#task=W1-T3");
-  assert.equal(consoleCardUrl("http://100.64.1.2:4317/", "W1-T3"), "http://100.64.1.2:4317/#task=W1-T3");
+test("consoleCardUrl: the console's /task/<id> page naming exactly the given task id, tolerating a trailing slash on the base", () => {
+  assert.equal(consoleCardUrl("http://100.64.1.2:4317", "W1-T3"), "http://100.64.1.2:4317/task/W1-T3");
+  assert.equal(consoleCardUrl("http://100.64.1.2:4317/", "W1-T3"), "http://100.64.1.2:4317/task/W1-T3");
 });
 
 test("consoleCardUrl: percent-encodes the task id so a link for task X can never collide with another id", () => {
-  assert.equal(consoleCardUrl("http://localhost:4317", "W1/T3"), "http://localhost:4317/#task=W1%2FT3");
+  assert.equal(consoleCardUrl("http://localhost:4317", "W1/T3"), "http://localhost:4317/task/W1%2FT3");
 });
 
 test("consoleCardUrl (falsifier): links for two different task ids are never equal, and each names ONLY its own id", () => {
   const a = consoleCardUrl("http://localhost:4317", "W1-T3");
   const b = consoleCardUrl("http://localhost:4317", "W1-T9");
   assert.notEqual(a, b);
-  assert.match(a, /task=W1-T3$/);
+  assert.match(a, /\/task\/W1-T3$/);
   assert.doesNotMatch(a, /W1-T9/);
 });
 
@@ -244,19 +244,19 @@ test("renderDigest: a consoleBaseUrl appends that task's console deep link to it
   const text = renderDigest(s, "http://100.64.1.2:4317");
   assert.match(
     text,
-    /escalations: \[BLOCKED\] W1-T3 — https:\/\/github\.com\/craigoley\/remudero\/issues\/5 — http:\/\/100\.64\.1\.2:4317\/#task=W1-T3/,
+    /escalations: \[BLOCKED\] W1-T3 — https:\/\/github\.com\/craigoley\/remudero\/issues\/5 — http:\/\/100\.64\.1\.2:4317\/task\/W1-T3/,
   );
 });
 
 test("buildDigest/sendDigest: consoleBaseUrl threads through to the delivered text", () => {
   const path = ledgerFile(LINES);
   const viaBuild = buildDigest(path, "2026-07-14T00:00:00.000Z", "http://100.64.1.2:4317");
-  assert.match(viaBuild, /#task=W1-T3/);
+  assert.match(viaBuild, /\/task\/W1-T3/);
 
   const channel = fakeChannel();
   const sent = sendDigest(path, "2026-07-14T00:00:00.000Z", { channel, ledgerPath: path, runId: "D-1", taskId: "DIGEST" }, "http://100.64.1.2:4317");
   assert.equal(channel.sent[0], sent);
-  assert.match(sent, /#task=W1-T3/);
+  assert.match(sent, /\/task\/W1-T3/);
 });
 
 const RUNDOWN_LINES: RundownLine[] = [
@@ -268,11 +268,11 @@ const RUNDOWN_LINES: RundownLine[] = [
 test("renderRundownPush: merged stays a bare confirmation; blocked/escalated each carry the console deep link for THEIR OWN task", () => {
   const text = renderRundownPush(RUNDOWN_LINES, "http://100.64.1.2:4317");
   assert.match(text, /merged     : W1-T1$/m);
-  assert.doesNotMatch(text.split("\n").find((l) => l.includes("W1-T1")) ?? "", /#task=/);
-  assert.match(text, /blocked    : W1-T2 — W1-T2 → blocked_ci — http:\/\/100\.64\.1\.2:4317\/#task=W1-T2/);
+  assert.doesNotMatch(text.split("\n").find((l) => l.includes("W1-T1")) ?? "", /\/task\//);
+  assert.match(text, /blocked    : W1-T2 — W1-T2 → blocked_ci — http:\/\/100\.64\.1\.2:4317\/task\/W1-T2/);
   assert.match(
     text,
-    /escalated  : W1-T3 — \[BLOCKED\] https:\/\/github\.com\/craigoley\/remudero\/issues\/5 — http:\/\/100\.64\.1\.2:4317\/#task=W1-T3/,
+    /escalated  : W1-T3 — \[BLOCKED\] https:\/\/github\.com\/craigoley\/remudero\/issues\/5 — http:\/\/100\.64\.1\.2:4317\/task\/W1-T3/,
   );
 });
 
@@ -288,8 +288,8 @@ test("sendRundown: delivers over the SAME notify() emit path as sendDigest — o
   const text = sendRundown(RUNDOWN_LINES, "http://100.64.1.2:4317", { channel, ledgerPath: path, runId: "DRAIN-1", taskId: "DRAIN" });
   assert.equal(channel.sent.length, 1);
   assert.equal(channel.sent[0], text);
-  assert.match(text, /#task=W1-T2/);
-  assert.match(text, /#task=W1-T3/);
+  assert.match(text, /\/task\/W1-T2/);
+  assert.match(text, /\/task\/W1-T3/);
   // notify() itself ledgers `notify.sent` — the same trace a digest send leaves — proving
   // this went through the identical emit path, not a bespoke sender.
   const ledgerLines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));

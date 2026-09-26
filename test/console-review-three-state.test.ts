@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { computeBoardSnapshot, deriveReviewState, type BoardDeps } from "../src/lib/board.js";
 import { buildBatchedGithub, type GitHub, type PrRef } from "../src/lib/status.js";
-import { renderShellHtml } from "../src/lib/serve.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 
 // ── W1-T914 (feedback fb-1784901239119-1be356 clause c / fb-1784919225707-0fab8b) ──────────
@@ -277,58 +276,6 @@ test("W1-T914: buildBatchedGithub.reviewState returns undefined (unreadable) whe
 // like the existing W1-T182/W1-T346 row-template proofs (test/serve.test.ts) — proven over the
 // ACTUAL rendered output, not merely that a field is threaded through. ──────────────────────
 
-function extractPrLinkRenderer(): (t: Record<string, unknown>) => string {
-  const html = renderShellHtml();
-  const parts = {
-    REVIEW_STATE_LABELS: html.match(/const REVIEW_STATE_LABELS = \{[\s\S]*?\};/)?.[0],
-    reviewBadge: html.match(/function reviewBadge\(state\) \{[\s\S]*?\n  \}/)?.[0],
-    prLink: html.match(/function prLink\(t\) \{[\s\S]*?\n  \}/)?.[0],
-  };
-  for (const [name, src] of Object.entries(parts)) assert.ok(src, `${name} must exist in the shell's inline script`);
-  return new Function(
-    `${parts.REVIEW_STATE_LABELS}\n${parts.reviewBadge}\n${parts.prLink}\nreturn prLink(arguments[0]);`,
-  ) as (t: Record<string, unknown>) => string;
-}
 
-test("W1-T914 RENDER: prLink renders reviewed-green, reviewed-red and review-in-progress with THREE distinct CSS classes/labels — pending never carries the success class or label", () => {
-  const prLink = extractPrLinkRenderer();
 
-  const success = prLink({ prUrl: "https://github.com/o/r/pull/1", prNumber: 1, reviewState: "success" });
-  const failure = prLink({ prUrl: "https://github.com/o/r/pull/1", prNumber: 1, reviewState: "failure" });
-  const pending = prLink({ prUrl: "https://github.com/o/r/pull/1", prNumber: 1, reviewState: "pending" });
 
-  assert.match(success, /class="review-dot review-success"/);
-  assert.match(success, /review passed/);
-  assert.match(failure, /class="review-dot review-failure"/);
-  assert.match(failure, /review failed/);
-  assert.match(pending, /class="review-dot review-pending"/);
-  assert.match(pending, /review pending/);
-
-  // The falsifier: a pending review must never render with the success class or label.
-  assert.doesNotMatch(pending, /review-success/);
-  assert.doesNotMatch(pending, /review passed/);
-  assert.doesNotMatch(failure, /review-success/);
-});
-
-test("W1-T914 RENDER: an absent review (\"none\") and an unreadable read each render their OWN distinct badge — never re-using the pending or success badge", () => {
-  const prLink = extractPrLinkRenderer();
-
-  const none = prLink({ prUrl: "https://github.com/o/r/pull/2", prNumber: 2, reviewState: "none" });
-  const unreadable = prLink({ prUrl: "https://github.com/o/r/pull/2", prNumber: 2, reviewState: "unreadable" });
-
-  assert.match(none, /class="review-dot review-none"/);
-  assert.match(none, /not yet reviewed/);
-  assert.doesNotMatch(none, /review-pending/);
-  assert.doesNotMatch(none, /review-success/);
-
-  assert.match(unreadable, /class="review-dot review-unreadable"/);
-  assert.match(unreadable, /review status unreadable/);
-  assert.doesNotMatch(unreadable, /review-none/);
-  assert.doesNotMatch(unreadable, /review-success/);
-});
-
-test("W1-T914 RENDER: a row with a PR but no reviewState (an older snapshot payload) renders the bare link, byte-identical to before this task — and a row with no PR renders nothing", () => {
-  const prLink = extractPrLinkRenderer();
-  assert.equal(prLink({ prUrl: "https://github.com/o/r/pull/3", prNumber: 3 }), ' · <a href="https://github.com/o/r/pull/3" target="_blank" rel="noreferrer">#3</a>');
-  assert.equal(prLink({}), "");
-});

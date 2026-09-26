@@ -23,14 +23,7 @@ import {
 import { readLedgerLines } from "../src/lib/status.js";
 import { ProviderCapacityBlockedError, type ProviderCapacity } from "../src/lib/worker-provider.js";
 import { createClaudeExecutableCache, spawnWorker } from "../src/lib/worker.js";
-import {
-  buildClearProviderRoutingPolicyRoute,
-  buildServeRoutes,
-  buildServeServer,
-  buildSetProviderRoutingPolicyRoute,
-  renderShellHtml,
-  type ServeDeps,
-} from "../src/lib/serve.js";
+import { buildClearProviderRoutingPolicyRoute, buildServeRoutes, buildServeServer, buildSetProviderRoutingPolicyRoute, type ServeDeps } from "../src/lib/serve.js";
 import { daemonCommand } from "../src/run-task.js";
 
 const NOW = Date.parse("2026-09-02T15:00:00.000Z");
@@ -546,29 +539,3 @@ test("real set/clear routes are high-tier, mounted, nonce-gated, audited, and va
   });
 });
 
-test("console renders provenance and exposes bounded next-dispatch controls without lifecycle verbs or provider secrets", () => {
-  const html = renderShellHtml();
-  for (const id of [
-    "provider-policy-status",
-    "provider-policy-preference",
-    "provider-policy-reserve",
-    "provider-policy-enabled-claude",
-    "provider-policy-enabled-codex",
-    "provider-policy-park-claude",
-    "provider-policy-park-codex",
-    "provider-policy-expiry",
-    "provider-policy-apply-btn",
-    "provider-policy-clear-btn",
-  ]) assert.match(html, new RegExp(`id="${id}"`));
-  assert.match(html, /effective on the next dispatch/i);
-  assert.match(html, /does not start, stop, restart, recycle or deploy/i);
-  assert.match(html, /\/v1\/policy\/provider-routing/);
-  assert.match(html, /\/v1\/policy\/provider-routing\/clear/);
-
-  // W1-T2902: HIGH_TIER_WRITE_PATHS (and the rest of the client script) moved out of serve.ts's
-  // template literal into lib/console-shell-client.ts, a real module — see that file's header.
-  const source = readFileSync(new URL("../src/lib/console-shell-client.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /readCodexCapacity|readClaudeProviderCapacity/);
-  assert.doesNotMatch(source, /OPENAI_API_KEY|ANTHROPIC_API_KEY|CODEX_HOME/);
-  assert.match(source, /HIGH_TIER_WRITE_PATHS[\s\S]*\/v1\/policy\/provider-routing[\s\S]*\/v1\/policy\/provider-routing\/clear/);
-});
