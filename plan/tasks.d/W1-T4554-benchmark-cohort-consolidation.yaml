@@ -1,7 +1,7 @@
 - id: W1-T4554
   title: "AN EVIDENCE GARDENER THAT COUNTS BEFORE IT INTERPRETS — incremental cohort rollups, late-data repair, and measured storage pressure"
   repo: remudero
-  depends_on: [W1-T4553]
+  depends_on: [W1-T4553, W1-T4557]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -14,15 +14,18 @@
     - src/lib/benchmark-cohort.ts
     - src/lib/benchmark-evidence.ts
     - src/lib/daemon.ts
+    - src/run-task.ts
     - test/benchmark-cohort.test.ts
     - test/daemon-benchmark-cohort.test.ts
+    - test/run-task-benchmark-cohort-wiring.test.ts
     - docs/model-routing.md
   status: queued
   rationale: |
     W1-T4553 makes the quality of assignment/terminal evidence explicit, but a growing fleet
     cannot rescan and interpret every raw ledger rotation for every chart or insight pass.
     `ledger-compact` already owns exact raw archive compaction and its recoverable cold store;
-    `gardener.ts` already owns proposal/outcome feedback. This task adds the deterministic local
+    `gardener.ts` already owns proposal/outcome feedback. W1-T4557 supplies the source-selective
+    reader cursor and unreadable-live signal needed for bounded, audited scans. This task adds the deterministic local
     layer between them, not another raw store, public uploader, or LLM rewrite of facts.
   design: |
     Consume W1-T4553's evidence classification through the established three-form ledger union's
@@ -45,7 +48,8 @@
     remains the sole owner of raw archive compaction and retention. High-cardinality run/task IDs
     stay local as join keys, never metric labels or public aggregate dimensions.
 
-    Wire one best-effort daemon cadence pass through an injected seam so a failed projection is
+    Wire the real daemon state root in `src/run-task.ts` and one best-effort daemon cadence pass
+    through an injected seam so a failed projection is
     observable but cannot stop dispatch, review, merge, or the existing analytics route. The
     semantic insight gardener may later consume only these bounded cohorts, propose one
     evidence-linked experiment/follow-up at a time, and score its usefulness after verification;
@@ -60,6 +64,8 @@
       proof: "unit test: benchmark cohorts account for storage pressure without raw deletion"
     - claim: "the daemon's real cadence reaches one bounded pass and logs failure without blocking normal work"
       proof: "unit test: daemon benchmark cohort pass is best effort and production wired"
+    - claim: "the real command passes its own state root to the cohort cadence"
+      proof: "unit test: run task wires benchmark cohort state root"
     - claim: "the production daemon path invokes the derived cohort consolidator"
       proof: "grep: runBenchmarkCohortPass( in src/lib/daemon.ts"
   falsifier: |

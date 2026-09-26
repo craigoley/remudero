@@ -1,0 +1,40 @@
+- id: W1-T4557
+  title: "AUDIT ONE LEDGER SOURCE AT A TIME — rotation upper bound and explicit live-read failure"
+  repo: remudero
+  depends_on: [W1-T4553]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: medium
+  band_meaning: blast-radius
+  origin: "W1-T4554 implementation research 2026-09-26: openLedgerUnion can resume after a rotation but cannot stop at one"
+  plan_refs: ["W1-T4554", "docs/research/model-evidence-program.md"]
+  files:
+    - src/lib/ledger-union.ts
+    - test/ledger-union.test.ts
+  status: queued
+  rationale: |
+    W1-T4554 needs a source-at-a-time, resumable scan. Today `afterRotation` still opens every
+    later archive, so a supposed bounded cohort pass can unexpectedly rescan the whole corpus.
+    The reader also swallows an unreadable live source without an audit signal, making an
+    incomplete projection look like an empty but healthy one. This task only extends the shared
+    reader; it does not change the default union behavior or add a PR gate.
+  design: |
+    Add an inclusive `throughRotation` archive selector that composes with `afterRotation` and
+    `includeLive: false`, so a caller can scan exactly one selected gzip or plain rotation and
+    checkpoint only after that whole source succeeds. Preserve the default three-form union.
+    Add an optional `onUnreadLive` callback for audit callers, parallel to `onUnreadArchive`;
+    ordinary best-effort readers keep their existing behavior. A live-only pass uses
+    `afterRotation` set to the newest rotation. The caller must still check source identity and
+    reconcile counts before treating a derived snapshot as complete; this task supplies the
+    reader primitive, not the cohort itself.
+  acceptance:
+    - claim: "the cursor selects one archive at a time and an audit caller can observe unreadable live evidence"
+      proof: "unit test: ledger union selects one source and reports unreadable live evidence"
+    - claim: "the default reader still sees the three forms exactly once"
+      proof: "unit test: openLedgerUnion yields gzip rotation, plain rotation and live rows exactly once"
+  falsifier: |
+    With `throughRotation` set to the first archive, opening the second or the live file fails;
+    with the live source unreadable, omitting the callback fails. Existing three-form readers
+    must continue to see both rotations and live rows with exact replay deduplication.
