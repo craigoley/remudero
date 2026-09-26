@@ -63,6 +63,9 @@ function fakeExec(names: () => string[], calls: string[][]): (cmd: string, args:
   return (cmd, args) => {
     calls.push([cmd, ...args]);
     if (args[0] === "ls-remote") return names().map((name) => `sha-${name}\trefs/heads/${name}`).join("\n");
+    if (args[0] === "for-each-ref") return args.includes("--merged=origin/main")
+      ? names().map((name) => `origin/${name}`).join("\n")
+      : names().map((name) => `origin/${name}\tsha-${name}\t1`).join("\n");
     if (args[0] === "merge-base") return "";
     if (args[0] === "log") return "1\n";
     if (args[0] === "rev-parse") return "deadbeef\n";
