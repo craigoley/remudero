@@ -13911,17 +13911,27 @@ export function recordBenchmarkWorkerAttempt(
 }
 
 /** Ledger non-dispatch assignments before execution; the worker catches sink failures. */
+function ledgerNonDispatchAssignment(
+  lane: string,
+  assignment: Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0],
+  config?: Config,
+  runId?: string,
+  taskId?: string,
+): void {
+  appendLedger(ledgerPathFor(config ?? loadConfig()), {
+    run_id: runId ?? `${lane}-${assignment.id}`,
+    task_id: taskId ?? lane.toUpperCase(),
+    step: "worker.assignment",
+    lane,
+    worker_assignment: assignment,
+  });
+}
+
 export function ledgeredNonDispatchSpawn(lane: string, raw: typeof spawnWorker = spawnWorker): typeof spawnWorker {
   return (args) => raw({
     ...args,
     onSelectionAssignment: (assignment) => {
-      appendLedger(ledgerPathFor(args.config ?? loadConfig()), {
-        run_id: args.runId ?? `${lane}-${assignment.id}`,
-        task_id: args.taskId ?? lane.toUpperCase(),
-        step: "worker.assignment",
-        lane,
-        worker_assignment: assignment,
-      });
+      ledgerNonDispatchAssignment(lane, assignment, args.config, args.runId, args.taskId);
       args.onSelectionAssignment?.(assignment);
     },
   });
@@ -41723,6 +41733,7 @@ export function buildInboxDraftSpawnArgs(args: {
     config: args.config,
     prompt: args.prompt,
     tools: INBOX_DRAFT_WORKER_TOOLS,
+    onSelectionAssignment: (assignment) => ledgerNonDispatchAssignment("inbox-draft", assignment, args.config),
   };
 }
 
@@ -41822,7 +41833,7 @@ export async function draftProposalBatch(
       planText,
       {
         spawn: (_proposal, prompt) =>
-          ledgeredNonDispatchSpawn("inbox-draft")(buildInboxDraftSpawnArgs({
+          spawnWorker(buildInboxDraftSpawnArgs({
             cwd: worktreePath,
             settingsFile,
             mount: inboxDraftMount,
