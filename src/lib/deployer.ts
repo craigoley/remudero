@@ -623,6 +623,14 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
       reason: `${why} but ${i.autoRestartPressure.reason}`,
     };
   }
+  // W1-T4589: when image drift is the only staleness, auto mode waits for the build exactly like the
+  // default fleet above; recycling before publication restarts onto the old :latest image.
+  if (i.autoMode && imageStale && !restartReasons && i.imagePublished !== true) {
+    return {
+      deploy: false,
+      reason: `auto: ${why}, but the new image is ${i.imagePublished === false ? "not published yet" : "of unknown publication"} — waiting for the build`,
+    };
+  }
   if (i.autoMode) return { deploy: true, reason: `auto mode + ${why}` };
   return { deploy: false, reason: `${why} but no operator marker (human-gated; run rmd deploy)` };
 }
