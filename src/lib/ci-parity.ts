@@ -2113,6 +2113,7 @@ export const FAST_GATE_CENSUS_REFERENCE_FLOOR_MS = 1000;
  *  refused as RUNAWAY. Sized against the measured spread (2026-08-31: 960/1128/2344/2615ms), so a
  *  merely-grown suite passes and one doing several times its typical sibling's work does not. */
 export const FAST_GATE_CENSUS_RUNAWAY_MULTIPLE = 4;
+export const FAST_GATE_CENSUS_REMEASURE_MARGIN = 1.1;
 
 /** The middle value of `values` sorted ascending — the mean of the two middle values when `values`
  *  has even length. Unlike `Math.min`/`Math.max`, a single extreme entry (unusually cheap OR
@@ -3414,7 +3415,8 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   // the entry costing several times the run's TYPICAL (median) entry — a ratio neither a slow
   // runner nor one accidentally-fast sibling can manufacture (W1-T3408). An entry whose own
   // command FAILED is left alone. TIERED: a first crossing is re-measured once, alone; only a
-  // SECOND crossing refuses — a loaded runner crossed by 2% on PR #6821 with a PASSing command.
+  // SECOND crossing beyond a 10% confirmation margin refuses — a loaded runner crossed by 2%
+  // on PR #6821, and current no-draft census crossed by 0.7–5.7%, with PASSing commands.
   const threshold = censusRunawayThresholdMs([...censusCosts.values()]);
   if (threshold !== undefined) {
     for (const [i, firstMs] of censusCosts) {
@@ -3430,10 +3432,11 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
         steps[i] = { ...again, detail: `${again.detail} (on the re-measure after ${firstMs}ms crossed ${threshold}ms)` };
         continue;
       }
-      if (againMs <= threshold) {
+      const confirmationThreshold = Math.ceil(threshold * FAST_GATE_CENSUS_REMEASURE_MARGIN);
+      if (againMs <= confirmationThreshold) {
         steps[i] = {
           ...steps[i],
-          detail: `${steps[i].detail} — RE-MEASURED: ${firstMs}ms crossed the ${threshold}ms runaway bound once; one re-run took ${againMs}ms, under it (passed)`,
+          detail: `${steps[i].detail} — RE-MEASURED: ${firstMs}ms crossed the ${threshold}ms runaway bound once; one re-run took ${againMs}ms, within the ${confirmationThreshold}ms confirmation margin (passed)`,
         };
         continue;
       }
@@ -3442,7 +3445,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
         ...steps[i],
         ok: false,
         detail:
-          `${job}: RUNAWAY — npm run --silent ${script} took ${measured}, both over ${threshold}ms ` +
+          `${job}: RUNAWAY — npm run --silent ${script} took ${measured}, the re-measure over ${confirmationThreshold}ms ` +
           `(${FAST_GATE_CENSUS_RUNAWAY_MULTIPLE}x this run's median census cost, floored at ` +
           `${FAST_GATE_CENSUS_REFERENCE_FLOOR_MS}ms); its own result would have PASSed. Refused by a bound ` +
           `derived from this run's own measurements, never by a written constant a growing corpus outgrows`,

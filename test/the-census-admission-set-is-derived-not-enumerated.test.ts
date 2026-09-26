@@ -12,6 +12,7 @@ import {
   FAST_GATE_CENSUS_BOUND_MS,
   FAST_GATE_CENSUS_REFERENCE_FLOOR_MS,
   FAST_GATE_CENSUS_RUNAWAY_MULTIPLE,
+  FAST_GATE_CENSUS_REMEASURE_MARGIN,
   FAST_GATE_STEPS,
   censusPopulationDrift,
   censusRunawayThresholdMs,
@@ -349,6 +350,20 @@ test("runPreflightFast: mocked timings — an entry costing several times the ru
     assert.equal(step.ok, true, `expected ${step.name} to remain PASS: ${step.detail}`);
   }
   assert.equal(result.ok, false);
+});
+
+test("runPreflightFast: a passing census just above the bound twice clears the narrow confirmation margin", () => {
+  const steps = CENSUS_STEPS.map((s) => ({ ...s, boundMs: 999_999 }));
+  const { spawn } = recordingSpawn();
+  const result = runPreflightFast(REPO_ROOT, {
+    spawn,
+    steps,
+    packageJsonText: packageJsonTextFor(steps),
+    now: fakeNow([900, 1600, 1700, 1750, 1800, 1850, 7450, 7450]),
+  });
+  assert.equal(FAST_GATE_CENSUS_REMEASURE_MARGIN, 1.1);
+  assert.equal(result.ok, true, result.steps.at(-1)?.detail);
+  assert.match(result.steps.at(-1)!.detail, /confirmation margin/);
 });
 
 test("src/lib/ci-parity.ts documents the bound as a PRIMARY CONTROL and never labels it a backstop", () => {
