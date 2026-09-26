@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import type { Worker } from "node:worker_threads";
 import {
   clearCodexCapacityCache,
   readCodexCapacity,
   readCodexRuntime,
+  readCodexRuntimeOffThread,
 } from "../src/lib/worker-provider.js";
 import type { Config } from "../src/lib/config.js";
 import type { CapabilityLadder } from "../src/lib/mounts.js";
@@ -491,6 +495,117 @@ test("an overdue Codex deadline with no reply still fails closed after the stdou
     assert.match(result.detail ?? "", /stdout grace/);
   }
   assert.equal(kills, 1);
+});
+
+test("a real Codex capacity exchange completes while the daemon event loop is blocked", async () => {
+  clearCodexCapacityCache();
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-isolated-capacity-"));
+  const bin = join(root, "fake-codex");
+  const started = join(root, "started");
+  const release = join(root, "release");
+  const completed = join(root, "completed");
+  writeFileSync(bin, `#!/usr/bin/env node
+const { existsSync, writeFileSync } = require("node:fs");
+writeFileSync(${JSON.stringify(started)}, "started");
+let buffer = "";
+let replies = 0;
+process.stdin.on("data", (chunk) => {
+  buffer += chunk.toString("utf8");
+  for (;;) {
+    const end = buffer.indexOf("\\n");
+    if (end < 0) break;
+    const line = buffer.slice(0, end);
+    buffer = buffer.slice(end + 1);
+    const request = JSON.parse(line);
+    if (request.id === 1) {
+      const timer = setInterval(() => {
+        if (!existsSync(${JSON.stringify(release)})) return;
+        clearInterval(timer);
+        process.stdout.write(JSON.stringify({ id: 1, result: {} }) + "\\n");
+      }, 5);
+    }
+    if (request.id === 2) {
+      process.stdout.write(JSON.stringify({ id: 2, result: ${JSON.stringify(LIMITS)} }) + "\\n");
+      replies += 1;
+    }
+    if (request.id === 3) {
+      process.stdout.write(JSON.stringify({ id: 3, result: { data: ${JSON.stringify(MODELS)}, nextCursor: null } }) + "\\n");
+      replies += 1;
+    }
+    if (replies === 2) writeFileSync(${JSON.stringify(completed)}, "complete");
+  }
+});
+`);
+  chmodSync(bin, 0o755);
+  const cfg = config(root);
+  cfg.workerProviders!.codexBin = bin;
+  let pending: Promise<Awaited<ReturnType<typeof readCodexCapacity>>> | undefined;
+  try {
+    pending = readCodexCapacity(cfg, { capabilities: CAPABILITIES, requestedModel: "sonnet", requestedEffort: "medium", timeoutMs: 3_000 });
+    const startDeadline = Date.now() + 5_000;
+    while (!existsSync(started) && Date.now() < startDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(existsSync(started), "the app-server child must start before the parent is blocked");
+    writeFileSync(release, "go");
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_000);
+    assert.ok(existsSync(completed), "the isolated exchange must finish both RPCs while the daemon cannot read stdout");
+    const result = await pending;
+    assert.equal(result.readable, true, result.detail);
+    assert.equal(result.model, "gpt-5.6-terra");
+  } finally {
+    await pending?.catch(() => undefined);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an isolated Codex app-server that exits before its reply leaves headroom unreadable", async () => {
+  clearCodexCapacityCache();
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-isolated-exit-"));
+  const bin = join(root, "fake-codex");
+  writeFileSync(bin, "#!/usr/bin/env node\nprocess.exit(9);\n");
+  chmodSync(bin, 0o755);
+  const cfg = config(root);
+  cfg.workerProviders!.codexBin = bin;
+  try {
+    const result = await readCodexCapacity(cfg, { capabilities: CAPABILITIES, timeoutMs: 500 });
+    assert.equal(result.readable, false);
+    assert.deepEqual(result.windows, []);
+    assert.match(result.detail ?? "", /app-server exited 9/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an isolated Codex probe reports a worker construction failure", async () => {
+  const result = await readCodexRuntimeOffThread(config("/tmp"), "/unused", 100, () => {
+    throw new Error("worker constructor failed");
+  });
+  assert.ok("provider" in result);
+  assert.equal(result.readable, false);
+  assert.match(result.detail ?? "", /worker failed to start: worker constructor failed/);
+});
+
+test("an isolated Codex probe rejects malformed worker replies and reports cleanup failure", async (t) => {
+  const diagnostics: string[] = [];
+  t.mock.method(console, "error", (...parts: unknown[]) => diagnostics.push(parts.map(String).join(" ")));
+  const probe = Object.assign(new EventEmitter(), {
+    terminate: () => Promise.reject(new Error("cleanup failed")),
+  });
+  const pending = readCodexRuntimeOffThread(config("/tmp"), "/unused", 100, () => probe as unknown as Worker);
+  probe.emit("message", { unexpected: true });
+  const result = await pending;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok("provider" in result);
+  assert.equal(result.readable, false);
+  assert.match(result.detail ?? "", /worker returned a malformed result/);
+  assert.match(diagnostics.join("\n"), /codex.capacity_probe.terminate_failed.*cleanup failed/);
+});
+
+test("an isolated Codex probe fails closed when its outer watchdog expires", async () => {
+  const probe = Object.assign(new EventEmitter(), { terminate: async () => 0 });
+  const result = await readCodexRuntimeOffThread(config("/tmp"), "/unused", 100, () => probe as unknown as Worker, 20);
+  assert.ok("provider" in result);
+  assert.equal(result.readable, false);
+  assert.match(result.detail ?? "", /worker exceeded its outer deadline/);
 });
 
 test("timeout diagnostics name only the app-server phases still unfinished at the bound", async () => {

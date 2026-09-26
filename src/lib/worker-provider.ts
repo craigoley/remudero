@@ -4,6 +4,7 @@ import { constants as fsConstants, accessSync, existsSync, mkdirSync, readFileSy
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import { Worker } from "node:worker_threads";
 import {
   verifyCapabilityGrant,
   type CapabilityGrantStore,
@@ -1376,7 +1377,7 @@ function codexCapacityHedgeDelay(timeoutMs: number): number {
  * The hedge is inside the raw exchange, so ordinary single-flight callers still share one attempt
  * pair and a successful result is always freshly read from the winning child.
  */
-async function readCodexRuntimeWithTimeoutHedge(
+export async function readCodexRuntimeWithTimeoutHedge(
   config: Config,
   bin: string,
   deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & { clock: Pick<Clock, "now"> },
@@ -1472,6 +1473,56 @@ async function readCodexRuntimeWithTimeoutHedge(
   });
 }
 
+export function readCodexRuntimeOffThread(
+  config: Config,
+  bin: string,
+  timeoutMs: number,
+  workerFactory: (url: URL, options: ConstructorParameters<typeof Worker>[1]) => Worker = (url, options) => new Worker(url, options),
+  outerDeadlineMs = 2 * timeoutMs + 5_000,
+): Promise<CodexRuntimeResult> {
+  return new Promise((resolve) => {
+    let probe: Worker;
+    try {
+      probe = workerFactory(new URL("./codex-capacity-probe.mjs", import.meta.url), {
+        workerData: { bin, codexHome: codexHome(config), timeoutMs },
+        execArgv: ["--import", "tsx"],
+      });
+    } catch (error) {
+      const reason = `app-server probe worker failed to start: ${String((error as Error).message ?? error)}`;
+      resolve(codexRuntimeFailure(reason));
+      return;
+    }
+    let settled = false;
+    const finish = (result: CodexRuntimeResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      void probe.terminate().catch((error) => {
+        console.error(JSON.stringify({ event: "codex.capacity_probe.terminate_failed", error: String(error) }));
+      });
+      resolve(result);
+    };
+    const watchdog = setTimeout(() => {
+      setImmediate(() => finish(codexRuntimeFailure("app-server probe worker exceeded its outer deadline")));
+    }, outerDeadlineMs);
+    probe.once("message", (result: CodexRuntimeResult) => {
+      if (!result || typeof result !== "object" || !("provider" in result || "rateLimits" in result)) {
+        finish(codexRuntimeFailure("app-server probe worker returned a malformed result"));
+      } else {
+        finish(result);
+      }
+    });
+    probe.once("error", (error) => finish(codexRuntimeFailure(`app-server probe worker error: ${error.message}`)));
+    probe.once("exit", (code) => finish(codexRuntimeFailure(`app-server probe worker exited ${code} before reporting`)));
+  });
+}
+
+function startCodexRuntime(config: Config, bin: string, deps: CodexCapacityDeps, now: Clock["now"]): Promise<CodexRuntimeResult> {
+  return deps.spawn
+    ? readCodexRuntimeWithTimeoutHedge(config, bin, { ...deps, clock: { now } })
+    : readCodexRuntimeOffThread(config, bin, deps.timeoutMs ?? 10_000);
+}
+
 function selectCodexRuntime(
   value: CodexRuntimeReading,
   config: Config,
@@ -1531,11 +1582,11 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
     if (active) {
       exchange = active;
     } else {
-      exchange = readCodexRuntimeWithTimeoutHedge(config, bin, { ...deps, clock: { now } });
+      exchange = startCodexRuntime(config, bin, deps, now);
       codexCapacityInFlight.set(cacheKey, exchange);
     }
   } else {
-    exchange = readCodexRuntimeWithTimeoutHedge(config, bin, { ...deps, clock: { now } });
+    exchange = startCodexRuntime(config, bin, deps, now);
   }
 
   let value: CodexRuntimeResult;
