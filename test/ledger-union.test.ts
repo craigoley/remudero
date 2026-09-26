@@ -58,6 +58,10 @@ test("ledger union distinguishes live torn tail from unread archive", async () =
     assert.deepEqual(seen, ["complete"]);
     assert.deepEqual(findings, [{ path: live, form: "live", rowOrdinal: 2,
       kind: "live-torn-tail", resumeOffset: Buffer.byteLength(complete) }]);
+    const archiveAudit = await auditLedgerUnion(dir, { dedupeWindowPerStep: 200,
+      strictMalformed: true, onRecord: () => undefined });
+    assert.equal(archiveAudit.ok, false, "a live-only corpus cannot stand in for an archive audit");
+    assert.deepEqual(archiveAudit.malformed, []);
     appendFileSync(live, '"}\n');
     const recovered: string[] = [];
     const laterFindings: unknown[] = [];
