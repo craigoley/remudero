@@ -251,11 +251,17 @@ export function notifyRecipient(config: Config): string {
   return config.notifyRecipient ?? "craigoley@gmail.com";
 }
 
-/** Base URL for the operator console's deep links (W1-T144). Default `http://localhost:4317`;
- *  override via `consoleUrl` with a tailnet/LAN address so a pushed link resolves from
- *  wherever the message channel is read. */
+/** Base URL of the CONTROL GATEWAY (`rmd serve`) -- what a signed escalation answer link
+ *  (`/v1/escalation/confirm`) resolves against. Default `http://localhost:4317`; override via
+ *  `consoleUrl` with the address a phone can reach. W1-T4563: it no longer names a console. */
 export function consoleUrl(config: Config): string {
   return config.consoleUrl ?? "http://localhost:4317";
+}
+
+/** Base URL of the operator console, app.remudero.com (W1-T4563) -- where a pushed task link
+ *  opens. The daemon serves no console of its own any more. Override via `consoleAppUrl`. */
+export function consoleAppUrl(config: Config): string {
+  return config.consoleAppUrl ?? "https://app.remudero.com";
 }
 
 /**

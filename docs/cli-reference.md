@@ -58,7 +58,6 @@ usage:
   rmd install-checkout [--write]   # Provision or refuse the daemon's dedicated install checkout.
   rmd serve [--port <n>] [--host <addr>]   # The operator console front door: board, fleet-control, feedback inbox over HTTP.
   rmd relay   # Tier-2 relay client: tunnel the local `rmd serve` surface out to a relay URL.
-  rmd console-url [--port <n>] [--host <addr>] [--write]   # Print the console URL carrying the read token (--write also prints the write token).
   rmd serve-plist [--port <n>] [--host <addr>] [--write]   # Generate the launchd unit that runs the operator console as a background service.
   rmd down [--port <n>] [--host <addr>]   # Graceful wind-down of the daemon + serve services for restart or maintenance.
   rmd up [--port <n>] [--host <addr>] [--allow-off-main]   # Full resume: install freshness, load daemon + serve, print a resume report.
@@ -533,7 +532,7 @@ The operator console front door: board, fleet-control, feedback inbox over HTTP.
 rmd serve [--port <n>] [--host <addr>]
 ```
 
-the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317 (matches apps/dashboard's own default); --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the console can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM
+the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and, at GET /, a one-line JSON pointer to the console at app.remudero.com (W1-T4563 retired the in-process console); bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317; --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the gateway can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM
 
 ### `rmd relay`
 
@@ -544,16 +543,6 @@ rmd relay
 ```
 
 W1-T431: the Tier-2 relay CLIENT (MASTER-PLAN §7A/§6A, D-11) — dials OUT to the relay URL + enrollment token in per-instance config (relay.url/relay.token; never a flag, never committed) and holds a reconnecting tunnel that forwards the LOCAL rmd serve surface (REST + SSE) as a transparent byte proxy, adding no scope of its own (the console's own W1-T430 identity seam decides every grant, exactly as a direct call would). Never binds a port — outbound-only, tested invariant. Refuses (spawns nothing) when relay.url or relay.token is absent. Blocks until SIGINT/SIGTERM, same shape as `rmd serve`; `rmd serve` is a separate process and is completely unaffected whether or not this ever runs.
-
-### `rmd console-url`
-
-Print the console URL carrying the read token (--write also prints the write token).
-
-```
-rmd console-url [--port <n>] [--host <addr>] [--write]
-```
-
-print the console URL carrying the READ token — the bookmark that gets you in, one command instead of hand-extracting <config.root>/state/service-tokens.json (fb-1784772988510-da3712); prints one URL per bound interface, resolving port/host EXACTLY as `rmd serve` does (flag > RMD_SERVE_HOST > config.serve.* > 127.0.0.1:4317); --write additionally prints the WRITE token as a bare value to paste into the console (never in a URL), and REFUSES unless stdout is a TTY, because a redirected stdout becomes a file that outlives the process (R-5); reads the 0600 tokens file but never creates one — if the console has never run it says so and names the remedy; spawns nothing
 
 ### `rmd serve-plist`
 
@@ -583,7 +572,7 @@ Full resume: install freshness, load daemon + serve, print a resume report.
 rmd up [--port <n>] [--host <addr>] [--allow-off-main]
 ```
 
-full resume (W1-T169): runs install-freshness FIRST (W1-T151 — a lockfile-changing pull triggers `npm ci` before anything starts), REFUSES to resume an off-main checkout unless --allow-off-main is given, loads the daemon launchd service, confirms/starts the serve launchd service, and prints a resume report (daemon pid, the console URL WITH its READ token via `rmd console-url`, the in-flight/queued head, needs-human count). IDEMPOTENT: already-up verifies + reports the running state, never a double start.
+full resume (W1-T169): runs install-freshness FIRST (W1-T151 — a lockfile-changing pull triggers `npm ci` before anything starts), REFUSES to resume an off-main checkout unless --allow-off-main is given, loads the daemon launchd service, confirms/starts the serve launchd service, and prints a resume report (daemon pid, where the console is (app.remudero.com), the in-flight/queued head, needs-human count). IDEMPOTENT: already-up verifies + reports the running state, never a double start.
 
 ### `rmd sync`
 

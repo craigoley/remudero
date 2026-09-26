@@ -3,7 +3,6 @@ import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { isBlockedRow as clientIsBlockedRow } from "../src/lib/console-shell-script.js";
 import type { AddressInfo } from "node:net";
 import { createService } from "../src/lib/service.js";
 import {
@@ -138,35 +137,6 @@ test("needs-me is a STRICT SUBSET of blocked — the two strip numbers nest rath
   assert.ok(blocked.length > needsMe.length, "and blocked must be able to exceed needs-me (B1 has no issue to act on)");
 });
 
-test("the GLANCE strip's own client-side predicate is the SAME as board.ts's — the number the operator READS", () => {
-  // counts.blocked has NO consumer on the page (renderGlanceStrip recomputes client-side), so a
-  // server-only fix would have changed nothing he can see. This locks the mirror.
-  const shell = readFileSync(new URL("../src/lib/serve.ts", import.meta.url), "utf8");
-  // W1-T2731: the client predicate is a REAL export of lib/console-shell-script.ts now, so "the
-  // SAME predicate" is asserted where it actually lives — over BEHAVIOUR, across the whole cross
-  // product of the two fields either predicate reads. The old assertion matched the client
-  // function's SOURCE TEXT inside serve.ts, which could only ever prove the two were spelled
-  // alike; a mirror that drifted in meaning while keeping its shape would have passed it. It also
-  // could not survive the move, and could not have survived a transpiler change either: the shell
-  // now emits this function minified.
-  for (const status of ["blocked", "queued", "running", "merged", "done", undefined]) {
-    for (const needsHuman of [true, false, undefined]) {
-      const row = { status, needsHuman } as { status?: string; needsHuman?: boolean };
-      assert.equal(
-        clientIsBlockedRow(row),
-        isBlockedRow(row as Parameters<typeof isBlockedRow>[0]),
-        `the console and board.ts must agree on {status: ${String(status)}, needsHuman: ${String(needsHuman)}} — otherwise the strip shows a number board.ts never computed`,
-      );
-    }
-  }
-  // AND THE WIRING, so this can never pass over a predicate the shell does not actually ship. The
-  // "must USE it" half moved to test/console-shell-client.test.ts (W1-T2902: setGlanceValue's own
-  // call site lives in lib/console-shell-client.ts now, a real module) and asserts on BEHAVIOUR —
-  // the actual rendered #glance-blocked value — rather than a second readFileSync-as-text check
-  // here (test/source-text-assertion-census.test.ts's own ratchet: assert behaviour, not prose).
-  assert.match(shell, /\$\{renderConsoleShellScript\(\)\}/, "the shell splices the module that defines it");
-  assert.match(shell, /\$\{consoleShellClientSource\(/, "the shell splices the module that USES it");
-});
 
 // ── The idle buckets are a DIFFERENT partition, in a different module, and must not move ───────
 
@@ -268,17 +238,3 @@ test("repeated automatic polls do NOT advance the marker; an explicit acknowledg
   });
 });
 
-test("the shell asks for an ack on exactly the fetch whose recap it renders, and never on a later poll", () => {
-  // W1-T2902: refreshAll (and the fetch this asserts on) moved out of serve.ts's template
-  // literal into lib/console-shell-client.ts, a real module — see that file's own header.
-  const shell = readFileSync(new URL("../src/lib/console-shell-client.ts", import.meta.url), "utf8");
-  assert.match(
-    shell,
-    /extraHeaders: recapRendered \? undefined : \{ "x-rmd-recap-ack": "1" \}/,
-    "the first fetch of a page load acks; every later poll does not",
-  );
-  assert.ok(
-    !/\/v1\/status\?/.test(shell),
-    "the URL must stay BARE — a query string slips past every page.route(\"**/v1/status\") interception in the suite",
-  );
-});

@@ -347,6 +347,7 @@ test("serve's banner never prints the read token, which a container writes to do
   while (Date.now() < deadline && !stdout.some((l) => l.includes("console:"))) await sleep(100);
   const banner = stdout.join("\n");
   const tokens = JSON.parse(readFileSync(join(root, "state", "service-tokens.json"), "utf8")) as { read: string };
-  assert.match(banner, /console: {5}http:\/\/127\.0\.0\.1:\d+\/ \(tokened bookmark: rmd console-url\)/);
+  // W1-T4563: the daemon serves the /v1 gateway only; the banner names the console that exists.
+  assert.match(banner, /console: {5}https:\/\/app\.remudero\.com \(this host serves the \/v1 gateway only\)/);
   assert.ok(!banner.includes(tokens.read), "the read token never reaches stdout");
 });
