@@ -1,0 +1,66 @@
+- id: W1-T4580
+  title: "NO INVISIBLE WORKERS — audit every non-dispatch spawn and join its model-attempt evidence"
+  repo: remudero
+  depends_on: [W1-T4457, W1-T4578]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  risk: high
+  band_meaning: span
+  origin: "human request 2026-09-26: every daemon, task, cycle, worker and run should improve model field-trial evidence"
+  plan_refs: ["W1-T4457", "W1-T4554", "W1-T4560", "W1-T4578", "docs/research/model-evidence-program.md"]
+  files:
+    - src/lib/benchmark-run.ts
+    - src/lib/worker.ts
+    - src/lib/sweep.ts
+    - src/lib/verify-human-judge.ts
+    - src/lib/specialist-panel.ts
+    - src/lib/flight-judge.ts
+    - src/run-task.ts
+    - src/lib/analytics-route.ts
+    - test/benchmark-worker-caller-census.test.ts
+    - test/benchmark-nondispatch-attempts.test.ts
+    - docs/model-routing.md
+  status: queued
+  rationale: |
+    W1-T4578 covers every worker call through run-task's dispatch wrapper, not all worker
+    entrypoints. W1-T4457 separately owns missing selection assignments in non-dispatch
+    run-task lanes. Source census shows direct or injected spawn paths in sweep review,
+    verify-human judge, specialist panel, flight judge, retro, triage and inbox drafting.
+    A future cohort that counts only dispatch attempts will appear cleaner than it is and
+    understate cash-lane and auxiliary-agent usage. This task owns the remaining worker
+    coverage, after the two prerequisites land, without changing which model is routed.
+  design: |
+    Build a source-and-runtime caller census from the central worker boundary outward,
+    including recursive provider fallback, injected spawns, and the three enrolled daemon
+    instances. Classify each caller as a model call with an assignment and outcome receipt,
+    a model call with a named coverage gap, or a non-model operation. A positive control
+    must prove cash, review/fix, triage, and standalone judge/specialist paths are in the
+    population; a newly added unclassified call site produces a named local coverage-debt
+    finding and a follow-up proposal, never a new PR-stopping census gate.
+
+    Reuse W1-T4578's metadata-only attempt semantics at each non-dispatch worker boundary:
+    immutable assignment ID when present, run/lane join locally, requested/selected/served
+    model separately, worker-call versus verified-task outcome separately, explicit unknown
+    resource and outcome reasons, API cash versus subscription notional independently.
+    W1-T4457's assignment producer is authoritative for those lanes; do not infer a join
+    from a model label, task title, or GitHub merge. If a caller cannot supply a safe durable
+    sink, record a coverage-debt reason in the local daemon ledger and exclude it from a
+    model-performance denominator. No raw prompt, repo path, account, or high-cardinality ID
+    enters public aggregate labels. A failed receipt cannot change the worker, reviewer,
+    cash retry, PR result, or model route. The cohort gardener, not a synchronous PR gate,
+    reconciles all three instances and proposes a follow-up for any residual gap.
+  acceptance:
+    - claim: "a source census names every model worker entrypoint and detects a new unclassified caller"
+      proof: "unit test: benchmark worker caller census catches an unclassified spawn"
+    - claim: "cash, review/fix, triage and judge calls receive assignment-linked attempts or explicit coverage debt"
+      proof: "unit test: non-dispatch benchmark attempts cover cash review triage and judge lanes"
+    - claim: "fallbacks and retries remain separate calls without becoming independent task successes"
+      proof: "unit test: non-dispatch benchmark attempts separate fallback calls from task outcomes"
+    - claim: "missing telemetry remains visible and cannot interrupt worker or PR flow"
+      proof: "unit test: non-dispatch benchmark receipt failure preserves normal flow"
+  falsifier: |
+    A new spawn caller silently bypasses the census; cash fallback is credited as a
+    subscription model win; a reviewer outcome becomes verified task completion; a missing
+    assignment is guessed from a model name; or a failed telemetry sink stalls a healthy PR.
