@@ -163,7 +163,9 @@ test("run branches receive the Remudero-Task body trailer before REST pull creat
       "r",
       branch,
       "feat(pr): open checked pull requests",
-      undefined,
+      // W1-T4577: an explicit (empty) body, so the drafted body never comes from this checkout's own
+      // commits -- a branch whose commit carries another task's trailer used to fail this test.
+      "",
       (proof) => {
         checkedProofs.push(proof);
         return { status: 0 };
