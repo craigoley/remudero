@@ -166,7 +166,7 @@ test("a dependabot branch with a non-bump subject is refused", () => {
 });
 
 test("the manifest predicate admits workspace manifests and rejects everything else", () => {
-  for (const ok of ["package.json", "package-lock.json", "apps/web/package.json", ".github/workflows/ci.yml"]) {
+  for (const ok of ["package.json", "package-lock.json", "packages/web/package.json", ".github/workflows/ci.yml"]) {
     assert.equal(isDependencyManifestPath(ok), true, `${ok} is a manifest`);
   }
   for (const no of ["src/run-task.ts", "package.json.bak", ".github/dependabot.yml", "deploy/Dockerfile", ""]) {
