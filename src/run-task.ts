@@ -882,6 +882,7 @@ import {
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
+import { benchmarkRunAssignmentReceipt, benchmarkRunTerminalReceipt } from "./lib/benchmark-run.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -13811,6 +13812,41 @@ export function predecessorTranscriptPromptLines(paths: readonly string[]): stri
   ];
 }
 
+export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<string, unknown>) => void) {
+  const assignments = new Set<string>();
+  let work: { taskClass?: string; risk?: string } = {};
+  return (step: string, extra: Record<string, unknown> = {}): void => {
+    if (step === "run.start") {
+      work = {
+        ...(typeof extra.task_class === "string" ? { taskClass: extra.task_class } : {}),
+        ...(typeof extra.risk === "string" ? { risk: extra.risk } : {}),
+      };
+    }
+    let fields: Record<string, unknown>;
+    try {
+      const assignment = step === "worker.assignment" ? extra.worker_assignment : undefined;
+      let benchmarkRun: ReturnType<typeof benchmarkRunAssignmentReceipt> | ReturnType<typeof benchmarkRunTerminalReceipt>;
+      if (assignment && typeof assignment === "object" && !Array.isArray(assignment)) {
+        const selected = assignment as Parameters<typeof benchmarkRunAssignmentReceipt>[0];
+        if (typeof selected.id === "string" && selected.id.length > 0 && selected.requested && selected.selected) {
+          benchmarkRun = benchmarkRunAssignmentReceipt(selected, work);
+          assignments.add(selected.id);
+        }
+      } else if (step === "verdict") {
+        benchmarkRun = benchmarkRunTerminalReceipt(
+          { step, ...extra },
+          typeof extra.selection_assignment_id === "string" && assignments.has(extra.selection_assignment_id),
+        );
+      }
+      fields = { ...extra, ...(benchmarkRun ? { benchmark_run: benchmarkRun } : {}) };
+    } catch {
+      // Keep the source row and mark the receipt unavailable; telemetry cannot block dispatch.
+      fields = { ...extra, benchmark_run_unavailable_reason: "receipt-build-failed" };
+    }
+    write(step, fields);
+  };
+}
+
 async function runTask(
   taskId: string,
   opts: {
@@ -14019,8 +14055,8 @@ async function runTask(
   // W1-T2528: not routed through `nextLaneEpochMs` — `taskId` is already the per-rung
   // component, and same-taskId reruns are refused earlier by the dispatch claim/inflight check.
   const runId = `${taskId}-${Date.now()}`;
-  const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...extra });
+  const log = benchmarkRunLedgerLogger((step, fields) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...fields }));
 
   // W1-T942: ONE worker-state sensor for THIS run's whole lifetime — recon, implement, and the
   // DECISION_REQUEST resume below all share it (see `buildWorkerStateSensor`'s own doc for why
