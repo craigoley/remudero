@@ -1,0 +1,30 @@
+- id: W1-T4589
+  title: "DEPLOY_AUTO RECYCLES ON IMAGE DRIFT BEFORE THE NEW IMAGE IS PUBLISHED — decideDeployTrigger's image-drift branch checks imagePublished only for the default fleet; an auto-mode host falls through to deploy: true"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: medium
+  origin: "operator session 2026-09-26: old-console follow-up audit (operator: 'file items that need filed, fix items that need fixed')"
+  files:
+    - src/lib/deployer.ts
+    - test/auto-mode-waits-for-a-published-image.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    src/lib/deployer.ts decideDeployTrigger: the automatic image recycle (operator ruling
+    2026-09-22) requires imagePublished === true but is guarded by !autoMode; with state/DEPLOY_AUTO
+    set, image drift reaches the bare 'auto mode' return with no publication check, so such a host
+    can recycle while acr-build is still running and restart onto the old :latest image, spending a
+    recycle and a health check for nothing.
+  design: |
+    Apply the same published-image requirement to auto mode when the staleness is image drift: auto
+    mode waits for the build exactly like the default fleet, and still deploys immediately for
+    mounted-source staleness.
+  acceptance:
+    - claim: "an auto-mode host with image drift and an unpublished image waits for the build, and still deploys for mounted staleness"
+      proof: "unit test: test/auto-mode-waits-for-a-published-image.test.ts"
+  falsifier: |
+    Auto mode, image drift, imagePublished false: the unfixed decision deploys; the fixed one waits.

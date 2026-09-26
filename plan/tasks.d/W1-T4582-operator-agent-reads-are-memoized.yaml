@@ -1,0 +1,33 @@
+- id: W1-T4582
+  title: "SIX OPERATOR-AGENT READ ROUTES RE-OPEN EVERY LEDGER ARCHIVE ON EVERY REQUEST — consequences, context, experiments, promotions, proposals and settings are the non-operator-activity rows of CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-26: old-console follow-up audit (operator: 'file items that need filed, fix items that need fixed')"
+  files:
+    - src/lib/operator-agent.ts
+    - src/lib/serve.ts
+    - test/operator-agent-reads-are-memoized.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T4576's reach census (test/every-get-read-route-is-bounded-by-reach.test.ts) measured seven
+    GET routes that re-open rotated ledger archives on a warm request; /v1/operator-activity belongs
+    to W1-T4452. The other six are the /v1/operator-agent/* reads in src/lib/operator-agent.ts, each
+    scanning the ledger union per request against a corpus of 383 gzip rotations (2.69M rows) on the
+    live host.
+  design: |
+    Route each of the six through a rotation memo the way W1-T4567 bounded follow-ups
+    (readLedgerUnionRecordsMemoized: a rotation parsed once per size:mtime, only the live file re-
+    read), prewarmed at route build. Remove each from CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE as it
+    is bounded; the census then refuses its regression.
+  acceptance:
+    - claim: "each of the six operator-agent reads answers a warm request without opening a ledger archive and leaves the unbounded baseline"
+      proof: "unit test: test/operator-agent-reads-are-memoized.test.ts"
+  falsifier: |
+    Route one of the six back through its per-request union read; the reach census names it.
