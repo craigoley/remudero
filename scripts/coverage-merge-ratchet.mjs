@@ -52,12 +52,12 @@ function loadTestCoverage() {
   }
 }
 
-export function stageRawCoverageFile(file, staged) {
+export function stageRawCoverageFile(file, staged, { link = linkSync, copy = copyFileSync } = {}) {
   try {
-    linkSync(file, staged);
+    link(file, staged);
   } catch (error) {
     if (error.code !== 'EXDEV') throw error;
-    copyFileSync(file, staged);
+    copy(file, staged);
   }
 }
 
