@@ -114,7 +114,7 @@ build step to run first — the CLI runs from source. Runtime configuration live
 rmd doctor                 # read-only health check: toolchain, auth, checkout state (exit 0/1/2)
 rmd init                   # first-run wizard: subscription tier -> mount policy (headless-safe)
 rmd status                 # "is it running, and why is it stalled" from one read model
-rmd serve                  # the operator console on 127.0.0.1; `rmd console-url` prints the URL
+rmd serve                  # the /v1 control gateway the console (app.remudero.com) reads
 rmd run-task <task-id>     # dispatch ONE task end to end: recon -> implement -> PR -> review -> merge
 rmd daemon --repo <name>   # the persistent, self-pacing loop over the same machinery
 ```
