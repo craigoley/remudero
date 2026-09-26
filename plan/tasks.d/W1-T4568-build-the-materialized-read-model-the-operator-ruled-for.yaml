@@ -1,0 +1,47 @@
+- id: W1-T4568
+  title: "BUILD THE MATERIALIZED READ MODEL W1-T3196 RULED FOR — its prerequisites shipped, the fleet now runs four daemons behind one gateway, and serve still learns what a daemon wrote only by re-reading files on a timer; choose the store, then project the ledger into it incrementally"
+  repo: remudero
+  depends_on: [W1-T4454, W1-T4567]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator question 2026-09-26: 'do we need a lightweight db between the console and the daemon to make things more sustainable?'"
+  plan_refs: ["W1-T3196", "W1-T3192", "W1-T3193", "W1-T4451", "W1-T4454", "W1-T4554", "W1-T4557"]
+  files:
+    - DECISIONS.md
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3196 (operator ruling, 2026-09-08) made the read side an incrementally maintained,
+    rebuildable projection over the ledger and sequenced it LAST, behind W1-T3192 and W1-T3193.
+    Both have merged, and so has W1-T4451's snapshot cache. MEASURED 2026-09-26, the shape the
+    ruling predicted has kept accreting: console-snapshot-store.ts persists keyed records with a
+    contract version and code revision; console-snapshot-cache.ts keeps per-viewer views with TTLs,
+    duty-cycle throttling and idle eviction; ConsoleWriteGeneration invalidates on writes THROUGH
+    serve only, so a daemon-written change is discovered by a 2-15 s clock; inboxFingerprint keys a
+    cache on four files' size/mtime/inode plus plan, ledger, projection and origin/main digests; the
+    state directory holds 81 hand-rolled JSON artifacts, each with its own lock or atomic write; and
+    serve restarts about 10 times in 3 h (its own store's comment), losing the in-memory views each
+    time. serve and each daemon run in separate containers over a shared bind mount; the gateway
+    fronts four instances. The ledger is 2.69 M rows across 383 archives, and MAX_RETAINED_LINES_PER_STEP
+    = 200 exists because reads are linear scans.
+  design: |
+    OPERATOR DECISION FIRST (verify: human): the store. Recommended: `node:sqlite` in WAL mode on
+    the existing state mount, WRITTEN BY THE DAEMON, READ BY SERVE -- no new process, port or
+    dependency (it loads on the pinned Node 22 with an ExperimentalWarning; Node 24 makes it stable).
+    Alternative: W1-T4554-style versioned snapshot files. Whichever is chosen: (i) the ledger stays
+    the only source of truth and the write path is unchanged; (ii) the store is disposable and
+    rebuilt from the ledger (a bounded, measured cold rebuild); (iii) a monotonic data version the
+    DAEMON bumps is what serve's caches key on, replacing TTL discovery of daemon writes; (iv) first
+    projections: the per-step recent rows the console reads, then status; (v) folding state/*.json
+    artifacts in is a separate, later task per artifact. This task records the decision in DECISIONS.md;
+    implementation tasks are filed from it.
+  acceptance:
+    - claim: "DECISIONS.md records the chosen read-model store and why"
+      proof: "grep: READ-MODEL STORE in DECISIONS.md"
+  falsifier: |
+    CLOSE IF the operator rules the maintained projection unnecessary given W1-T4454's worker-thread
+    projections, and record that ruling instead.
