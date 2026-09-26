@@ -94,12 +94,13 @@ interface AnswerInput {
 
 function topicFor(question: string): "proof" | "outcomes" | "capacity" | "decisions" | "cost" | "inbox" | "unsupported" {
   const q = question.toLowerCase();
+  if (/\bwhy\b|what caused|\breason for\b|\bhow do i\b|\bwhere (is|can)\b|\bnavigate\b/.test(q)) return "unsupported";
   if (/\binbox|message|reply|thread\b/.test(q)) return "inbox";
   if (/\bproof|validation|test failure\b/.test(q)) return "proof";
   if (/\brevert|task outcome|follow.?up fix\b/.test(q)) return "outcomes";
   if (/\bapproval|approve|accept|reject|hold|operator decision\b/.test(q)) return "decisions";
   if (/\bworker|fleet|capacity|queue|utilization|scale\b/.test(q)) return "capacity";
-  if (/\btoken|spend|cost|run|repository|repo\b/.test(q)) return "cost";
+  if (/\b(token|spend|cost)\b|\bruns? completed\b|\bhow many runs\b/.test(q)) return "cost";
   return "unsupported";
 }
 
@@ -179,12 +180,25 @@ export function buildOperatorAgentAnswer(input: AnswerInput): OperatorAgentAnswe
       add("/v1/analytics#consoleV1.operatorAgent.outcomes", "Classified task arms", `${outcomes.armsClassified} of ${outcomes.armsSeen}`);
       answer = `For ${repository}, ${outcomes.armsClassified} of ${outcomes.armsSeen} task arms have classified outcomes.`;
       if (outcomes.armsClassified < outcomes.armsSeen) missing("/v1/analytics#consoleV1.operatorAgent.outcomes.unmeasurable", `${outcomes.armsSeen - outcomes.armsClassified} arms lack a classified outcome`);
+      if (/\btrend|\brate\b/i.test(input.question)) {
+        missing("/v1/analytics#task-outcome-trend", "this bounded answer has no longitudinal task-outcome series");
+        answer += " This count is not a time trend or revert rate.";
+      }
     } else missing("/v1/analytics#consoleV1.operatorAgent.outcomes", outcomes.unavailableReason ?? "task-outcome joins are not collected");
   } else if (topic === "decisions") {
     const decisions = agent.decisions;
     if (decisions.status === "measured") {
       add("/v1/analytics#consoleV1.operatorAgent.decisions", "Explicit operator decisions", String(decisions.explicitDecisionCount));
       answer = `For ${repository}, ${decisions.explicitDecisionCount} explicit operator decisions were measured. Automatic merge events are separate and do not count as operator approvals.`;
+      if (/\bapprov|accept/i.test(input.question)) {
+        if (decisions.classes.length === 0) missing("/v1/analytics#consoleV1.operatorAgent.decisions.classes", "class-attributed approval counts are unavailable");
+        else {
+          const approvals = decisions.classes.reduce((total, row) => total + row.approvedCount + row.acceptedCount, 0);
+          add("/v1/analytics#consoleV1.operatorAgent.decisions.classes", "Class-attributed approvals and acceptances", String(approvals));
+          answer += ` ${approvals} of the class-attributed decisions were approvals or acceptances.`;
+          if (decisions.unmeasurableCount > 0) missing("/v1/analytics#consoleV1.operatorAgent.decisions.unmeasurable", `${decisions.unmeasurableCount} decisions lack class attribution`);
+        }
+      }
     } else missing("/v1/analytics#consoleV1.operatorAgent.decisions", "explicit operator decisions are not collected");
   } else if (topic === "capacity") {
     const capacity = agent.capacity;
@@ -192,6 +206,10 @@ export function buildOperatorAgentAnswer(input: AnswerInput): OperatorAgentAnswe
     if (capacity.status === "measured" && measured) {
       add("/v1/analytics#consoleV1.operatorAgent.capacity", "Workers and queue", `${measured.activeWorkers}/${measured.configuredCapacity} active; ${measured.queuedWork} queued`, measured.windowEnd);
       answer = `For ${repository}, ${measured.activeWorkers} of ${measured.configuredCapacity} workers were active and ${measured.queuedWork} tasks were queued in the measured window.`;
+      if (/\bshould\b|\brecommend|\bscale\b/i.test(input.question)) {
+        missing("/v1/operator-agent/proposals", "a capacity observation is not an approved scaling recommendation");
+        answer += " This observation alone is not an approved scaling change.";
+      }
     } else {
       missing("/v1/analytics#consoleV1.operatorAgent.capacity", "a complete worker-capacity window was not measured for this repository");
       const queue = input.snapshot.queue.pending;
@@ -208,6 +226,7 @@ export function buildOperatorAgentAnswer(input: AnswerInput): OperatorAgentAnswe
     if (cost?.value !== null && cost?.value !== undefined) add("/v1/analytics#consoleV1.cost.modeled.usd", "Modeled cost USD", String(cost.value));
     else missing("/v1/analytics#consoleV1.cost.modeled.usd", cost?.notCollectedReason ?? "modeled cost not collected");
     if (citations.length > 0) answer = `For ${repository}, the observed total is ${tokens?.value ?? "unavailable"} provider-reported tokens and $${cost?.value ?? "unavailable"} modeled cost. This is not a cash-spend receipt.`;
+    if (/\bcash\b|\bactual\b|\bpaid\b/i.test(input.question)) missing("/v1/analytics#spend.cash", "modeled cost is not a cash-spend receipt");
   }
   if (snapshotFreshness === "stale") missing("/v1/analytics#asOf", "the latest analytics snapshot is stale");
   if (citations.length === 0) return { ...base, coverage: "unavailable", answer: "I can't verify that from the available evidence for this repository.", citations, missingSources };

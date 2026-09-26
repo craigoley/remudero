@@ -47,7 +47,7 @@ test("answer-v1 cites a fresh, bounded proof observation under the server-owned 
 });
 
 test("unavailable evidence never produces a verified operator answer", () => {
-  const cold = answer("Why do proofs fail?", snapshot(null));
+  const cold = answer("How many proofs failed?", snapshot(null));
   assert.equal(cold.coverage, "unavailable");
   assert.equal(cold.citations.length, 0);
   assert.match(cold.missingSources[0]?.reason ?? "", /refresh/);
@@ -68,6 +68,8 @@ test("another repository and an unsupported question cannot become local verifie
   assert.equal(foreign.coverage, "unsupported");
   assert.equal(foreign.citations.length, 0);
   assert.equal(answer("What is the weather?").coverage, "unsupported");
+  assert.equal(answer("Who owns this repo?").coverage, "unsupported");
+  assert.equal(answer("Why did proofs fail?").coverage, "unsupported");
   const inbox = answer("Which inbox replies need my response?");
   assert.equal(inbox.coverage, "unavailable");
   assert.match(inbox.missingSources[0]?.sourceId ?? "", /inbox/);
@@ -94,17 +96,24 @@ test("task outcomes and operator decisions use separate measured populations", (
       operatorAgent: {
         ...agent,
         outcomes: { ...agent.outcomes, status: "measured" as const, armsSeen: 4, armsClassified: 3 },
-        decisions: { ...agent.decisions, status: "measured" as const, explicitDecisionCount: 2, automaticMergeEventCount: 100 },
+        decisions: { ...agent.decisions, status: "measured" as const, explicitDecisionCount: 2, automaticMergeEventCount: 100,
+          classes: [{ taskClass: "chores", approvedCount: 2, acceptedCount: 0, rejectedCount: 0, heldCount: 0, releasedCount: 0,
+            approvalDenominator: 2, approvalRate: 1, taskIds: [], actorIds: [] }] },
       },
     },
   };
   const outcomes = answer("What is the task outcome trend?", enriched);
   assert.equal(outcomes.coverage, "partial", "an unclassified arm is a missing source, not a verified complete trend");
   assert.match(outcomes.answer, /3 of 4/);
+  assert.ok(outcomes.missingSources.some((gap) => gap.sourceId.endsWith("task-outcome-trend")));
   const decisions = answer("How many operator approvals were there?", enriched);
   assert.equal(decisions.coverage, "verified");
   assert.match(decisions.answer, /2 explicit operator decisions/);
+  assert.match(decisions.answer, /2 of the class-attributed decisions were approvals/);
   assert.doesNotMatch(decisions.answer, /100/);
+  const noClasses = { ...enriched, consoleV1: { ...enriched.consoleV1, operatorAgent: { ...enriched.consoleV1.operatorAgent,
+    decisions: { ...enriched.consoleV1.operatorAgent.decisions, classes: [] } } } };
+  assert.equal(answer("How many approvals?", noClasses).coverage, "partial");
   assert.equal(answer("Show task outcomes", source).coverage, "unavailable");
   assert.equal(answer("Show approvals", source).coverage, "unavailable");
 });
@@ -124,6 +133,9 @@ test("capacity citations use the underlying measurement window rather than the r
   assert.equal(result.citations[0]?.observedAt, oldWindow);
   assert.equal(result.citations[0]?.freshness, "stale");
   assert.match(result.answer, /3 of 4 workers/);
+  const freshCapacity = { ...capacity, measurements: capacity.measurements.map((row) => ({ ...row, windowEnd: new Date(NOW).toISOString() })) };
+  const freshSource = { ...source, consoleV1: { ...source.consoleV1, operatorAgent: { ...source.consoleV1.operatorAgent, capacity: freshCapacity } } };
+  assert.equal(answer("Should we scale the worker fleet?", freshSource).coverage, "partial");
   assert.equal(answer("How is fleet capacity?", source).coverage, "unavailable");
 });
 
@@ -133,6 +145,7 @@ test("modeled cost is labeled as modeled, and absent metrics remain partial or u
   assert.equal(measured.coverage, "verified");
   assert.match(measured.answer, /modeled cost/);
   assert.match(measured.answer, /not a cash-spend receipt/);
+  assert.equal(answer("What was the actual cash spend?", source).coverage, "partial");
   const noMetrics = { ...source, consoleV1: { ...source.consoleV1, metrics: [] } };
   assert.equal(answer("What is the cost?", noMetrics).coverage, "unavailable");
   const noIdentity = buildOperatorAgentAnswer({ question: "proof?", instance: "core", snapshot: source, now: NOW });
