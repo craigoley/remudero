@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,12 +8,11 @@ import { benchmarkRunLedgerLogger, runTask } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { spawnWorker } from "../src/lib/worker.js";
+import type { WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 test("run task wires benchmark run receipts at assignment and terminal", () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  assert.match(source, /const log = benchmarkRunLedgerLogger\(\(step, fields\) =>\s*appendLedger\(ledgerPath,/);
-  assert.match(source, /onSelectionAssignment: \(assignment\) => \{[\s\S]*?log\("worker\.assignment",/);
-
   const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
   const log = benchmarkRunLedgerLogger((step, fields) => rows.push({ step, fields }));
   const assignment = {
@@ -40,6 +40,77 @@ test("run task wires benchmark run receipts at assignment and terminal", () => {
     get selected(): never { throw new Error("instrumentation field unavailable"); } };
   assert.doesNotThrow(() => log("worker.assignment", { worker_assignment: badAssignment }));
   assert.equal(rows.at(-1)?.fields.benchmark_run_unavailable_reason, "receipt-build-failed");
+});
+
+test("real dispatch records benchmark assignment and terminal receipts", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-dispatch-"));
+  const bare = gitRepo({ bare: true, kind: "benchmark-dispatch-origin" });
+  const seed = gitRepo({ kind: "benchmark-dispatch-seed" });
+  seed.addRemote("origin", bare.dir);
+  seed.git("push", "--quiet", "origin", "main");
+  const repoDir = join(root, "repos", "remudero");
+  mkdirSync(join(root, "repos"), { recursive: true });
+  execFileSync("git", ["clone", "--quiet", bare.dir, repoDir]);
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, `- id: T-BENCHMARK-DISPATCH
+  title: benchmark dispatch fixture
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  origin: fixture
+  files: [src/lib/daemon.ts]
+  status: queued
+`);
+  const assignment: WorkerSelectionAssignment = {
+    version: 1, id: "bench-assignment-1", phase: "pre-execution",
+    requested: { model: "requested-model", effort: "high", maxTurns: null },
+    selected: { provider: "codex", model: "selected-model", effort: "high" },
+    routing: { mode: "multi-provider", policy: { preference: "automatic", reservePercent: 5, provenance: "default" } },
+    candidates: [],
+  };
+  let calls = 0;
+  const spawn: typeof spawnWorker = async (args) => {
+    calls++;
+    args.onSelectionAssignment?.(assignment);
+    const worker: WorkerResult = {
+      sessionId: `bench-session-${calls}`, costUsd: 0.25, numTurns: 1,
+      text: calls === 1 ? "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n" : "REPORT\nno PR opened\n",
+      blocks: [], stderr: "", subtype: "success", isError: false, apiError: false,
+      permissionDenials: [], childEnvKeys: [], model: "selected-model", servedModel: "served-model",
+      effort: "high", tokens: { input: 10, output: 5, cacheRead: 0, cacheCreation: 0 },
+      modelUsage: {}, compactionEvents: [], qualitySuspect: false,
+      selectionAssignmentId: assignment.id, workerDurationMs: 27,
+    };
+    return worker;
+  };
+  try {
+    const outcome = await withLiveWritesAllowed(() => runTask("T-BENCHMARK-DISPATCH", {
+      skipGitSync: true, planPath,
+      config: { claudeBin: "/bin/true", root, installRoot: process.cwd() } as Config,
+      github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
+      spawn,
+      containmentExec: async (token) => ({ transcript: `touch ../${token}.txt: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
+      isolationExec: async () => ({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
+    }));
+    assert.equal(outcome.verdict, "no_pr");
+    assert.ok(calls >= 2);
+    const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const assigned = rows.filter((row) => row.step === "worker.assignment");
+    assert.equal(assigned.length, calls);
+    assert.ok(assigned.every((row) => (row.benchmark_run as Record<string, unknown>)?.phase === "assignment"));
+    const terminal = rows.find((row) => row.step === "verdict" && row.verdict === "no_pr");
+    assert.ok(terminal);
+    const receipt = terminal.benchmark_run as Record<string, unknown>;
+    assert.equal(receipt.phase, "terminal");
+    assert.deepEqual(receipt.servedModel, { state: "observed", value: "served-model" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    seed.cleanup();
+    bare.cleanup();
+  }
 });
 
 test("real dispatch reaches the benchmark logger without making a lint refusal into a benchmark outcome", async () => {
