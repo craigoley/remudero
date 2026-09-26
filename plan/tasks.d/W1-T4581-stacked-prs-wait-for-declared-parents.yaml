@@ -43,6 +43,7 @@
     stacked-PR parent order. These files are the existing integration choke points, so this task
     adds the missing stack prerequisite rather than duplicating those behaviors.
     reservation hand-off: run-W1-T4581-1790453507000 -> plan/W1-T4581-stacked-prs-1790463403
+    reservation hand-off: run-W1-T4581-1790453507000 -> run-W1-T4581-impl-1790463403
   acceptance:
     - claim: "a stacked child is refused before any GitHub merge/arm effect unless all declared parents are merged"
       proof: "unit test: W1-T4581 open-time and ledger-gated arms refuse with an unmerged parent"
