@@ -1,0 +1,32 @@
+- id: W1-T4584
+  title: "THE ROUTE-LIST HELPER IS BLIND TO A ROUTE WHOSE METHOD AND PATH SHARE A LINE — test/helpers/declared-routes.ts misses /v1/operator-agent/ask, so console-parity (which reads it) undercounts routes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-26: old-console follow-up audit (operator: 'file items that need filed, fix items that need fixed')"
+  files:
+    - test/helpers/declared-routes.ts
+    - test/declared-routes-sees-every-route-shape.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-26: declaredConsoleRoutes() found 86 distinct /v1 paths while the assembled
+    table (buildServeRoutes plus buildStatusStream) serves 91; /v1/operator-agent/ask is declared
+    with method and path on one line in src/lib/operator-agent-answer.ts and the source scan does
+    not see it. scripts/console-parity-ratchet.mjs imports this helper, so a verb whose only route
+    has that shape reads as cli-only.
+  design: |
+    Derive the list from the assembled table (buildServeRoutes with a minimal deps fixture, plus SSE
+    routes) -- the same source W1-T4579's contract census reads -- or make the source scan shape-
+    independent; assert the helper's set equals the assembled table's so a future shape cannot hide
+    a route.
+  acceptance:
+    - claim: "the helper's route set equals the assembled route table's, including a route declared on one line"
+      proof: "unit test: test/declared-routes-sees-every-route-shape.test.ts"
+  falsifier: |
+    Revert to the line-oriented scan; /v1/operator-agent/ask is missing and the equality fails.

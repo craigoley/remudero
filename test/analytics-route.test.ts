@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -781,6 +781,122 @@ test("benchmark quality reports an unreadable archive as unavailable, not an emp
     assert.equal(snapshot.benchmarkEvidence.state, "unavailable");
     assert.equal(snapshot.benchmarkEvidence.reason, "ledger-source-unreadable");
     assert.equal(snapshot.routingTelemetry.assignmentsObserved, 1, "existing routing telemetry stays best effort");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("benchmark quality refuses a malformed archived ledger source", async () => {
+  const dir = tmpStateDir("benchmark-quality-malformed-");
+  try {
+    const assignment = JSON.stringify({ ts: "2026-09-25T19:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: "a", selected: { provider: "codex", model: "model-a" }, routing: { mode: "multi-provider" } } });
+    writeGzArchive(dir, "ledger.2026-09-25T19-01-00-000Z.ndjson.gz", [assignment, "{broken", "[]"]);
+    writePlainArchive(dir, "ledger.2026-09-25T19-02-00-000Z.ndjson", ["{broken"]);
+    writeLive(dir, [JSON.stringify({ ts: "2026-09-25T19:02:00.000Z", step: "daemon.tick" })]);
+    const snapshot = await deriveAnalyticsSnapshotFromLedger(dir, fixedClock(Date.parse("2026-09-25T20:00:00.000Z")));
+    assert.equal(snapshot.benchmarkEvidence.state, "unavailable");
+    assert.equal(snapshot.benchmarkEvidence.reason, "ledger-source-malformed");
+    assert.deepEqual(snapshot.benchmarkEvidence.sourceQuality, {
+      malformedRows: 3, malformedSources: 2, byForm: { gzip: 2, plain: 1, live: 0 }, liveTornTailRows: 0,
+    });
+    assert.equal(snapshot.routingTelemetry.assignmentsObserved, 1, "operational telemetry still reads valid rows");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("benchmark quality refuses an unreadable live source beside a readable archive", async () => {
+  const dir = tmpStateDir("benchmark-quality-live-unreadable-");
+  try {
+    const assignment = JSON.stringify({ ts: "2026-09-25T19:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: "a", selected: { provider: "codex", model: "model-a" }, routing: { mode: "multi-provider" } } });
+    writeGzArchive(dir, "ledger.2026-09-25T19-01-00-000Z.ndjson.gz", [assignment]);
+    const livePath = join(dir, "ledger.ndjson");
+    mkdirSync(livePath);
+    const clock = fixedClock(Date.parse("2026-09-25T20:00:00.000Z"));
+    const direct = await deriveAnalyticsSnapshotFromLedger(dir, clock);
+    assert.equal(direct.benchmarkEvidence.reason, "ledger-live-unreadable");
+    assert.equal(direct.routingTelemetry.assignmentsObserved, 1, "archive rows remain available to operational readers");
+    const checkpointed = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock);
+    assert.equal(checkpointed.snapshot.benchmarkEvidence.reason, "ledger-live-unreadable");
+    rmSync(livePath, { recursive: true });
+    writeLive(dir, [JSON.stringify({ ts: "2026-09-25T19:02:00.000Z", step: "daemon.tick" })]);
+    const repaired = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock, undefined, checkpointed.checkpoint);
+    assert.equal(repaired.snapshot.benchmarkEvidence.state, "observed");
+    assert.equal(repaired.snapshot.benchmarkEvidence.assignments, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("analytics checkpoint remembers malformed archive evidence across resume", async () => {
+  const dir = tmpStateDir("benchmark-quality-malformed-checkpoint-");
+  try {
+    const archive = "ledger.2026-09-25T19-01-00-000Z.ndjson.gz";
+    const assignment = JSON.stringify({ ts: "2026-09-25T19:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: "a", selected: { provider: "codex", model: "model-a" }, routing: { mode: "multi-provider" } } });
+    writeGzArchive(dir, archive, [assignment, "{broken"]);
+    writeLive(dir, [JSON.stringify({ ts: "2026-09-25T19:02:00.000Z", step: "daemon.tick" })]);
+    const clock = fixedClock(Date.parse("2026-09-25T20:00:00.000Z"));
+    const first = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock);
+    assert.equal(first.snapshot.benchmarkEvidence.reason, "ledger-source-malformed");
+    appendFileSync(join(dir, "ledger.ndjson"), `${JSON.stringify({ ts: "2026-09-25T19:03:00.000Z", step: "daemon.tick" })}\n`);
+    const resumed = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock, undefined, first.checkpoint);
+    assert.equal(resumed.snapshot.benchmarkEvidence.reason, "ledger-source-malformed");
+    assert.equal(resumed.snapshot.benchmarkEvidence.sourceQuality?.malformedRows, 1);
+    const legacy = JSON.parse(JSON.stringify(first.checkpoint)) as typeof first.checkpoint;
+    delete legacy.state.routingTelemetry.malformedSources;
+    const migrated = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock, undefined, legacy);
+    assert.equal(migrated.snapshot.benchmarkEvidence.reason, "ledger-source-malformed",
+      "a pre-audit checkpoint must force a full source scan, not silently inherit a healthy claim");
+    const corrupt = JSON.parse(JSON.stringify(first.checkpoint)) as typeof first.checkpoint;
+    delete (corrupt.state as Partial<typeof corrupt.state>).routingTelemetry;
+    const rebuilt = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock, undefined, corrupt);
+    assert.equal(rebuilt.snapshot.benchmarkEvidence.reason, "ledger-source-malformed",
+      "a structurally incomplete checkpoint must fall back to the full union, not throw or claim healthy data");
+    writeGzArchive(dir, archive, [assignment]);
+    const repaired = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock, undefined, resumed.checkpoint);
+    assert.equal(repaired.snapshot.benchmarkEvidence.state, "observed", "a changed archive forces a full re-audit");
+    assert.equal(repaired.snapshot.benchmarkEvidence.sourceQuality, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("analytics checkpoint resumes a completed live torn tail without inventing a source repair", async () => {
+  const dir = tmpStateDir("benchmark-quality-live-tail-");
+  try {
+    const complete = `${JSON.stringify({ ts: "2026-09-25T19:00:00.000Z", step: "daemon.tick" })}\n`;
+    writeFileSync(join(dir, "ledger.ndjson"), complete + '{"ts":"2026-09-25T19:01:00.000Z","step":"worker.assignment","worker_assignment":');
+    const clock = fixedClock(Date.parse("2026-09-25T20:00:00.000Z"));
+    const first = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock);
+    assert.equal(first.snapshot.benchmarkEvidence.reason, "ledger-live-torn-tail");
+    assert.equal(first.checkpoint.source.liveOffset, Buffer.byteLength(complete));
+    appendFileSync(join(dir, "ledger.ndjson"), '{"id":"a","selected":{"provider":"codex","model":"model-a"}}}\n');
+    const resumed = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock, undefined, first.checkpoint);
+    assert.equal(resumed.snapshot.benchmarkEvidence.state, "observed");
+    assert.equal(resumed.snapshot.benchmarkEvidence.assignments, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("analytics checkpoint re-audits a malformed live row when it rotates", async () => {
+  const dir = tmpStateDir("benchmark-quality-live-rotation-");
+  try {
+    const assignment = JSON.stringify({ ts: "2026-09-25T19:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: "a", selected: { provider: "codex", model: "model-a" }, routing: { mode: "multi-provider" } } });
+    writeLive(dir, ["{broken", assignment]);
+    const clock = fixedClock(Date.parse("2026-09-25T20:00:00.000Z"));
+    const first = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock);
+    assert.deepEqual(first.snapshot.benchmarkEvidence.sourceQuality?.byForm, { gzip: 0, plain: 0, live: 1 });
+    writeGzArchive(dir, "ledger.2026-09-25T19-01-00-000Z.ndjson.gz", ["{broken", assignment]);
+    writeLive(dir, [JSON.stringify({ ts: "2026-09-25T19:02:00.000Z", step: "daemon.tick" })]);
+    const resumed = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock, undefined, first.checkpoint);
+    assert.equal(resumed.snapshot.benchmarkEvidence.reason, "ledger-source-malformed");
+    assert.deepEqual(resumed.snapshot.benchmarkEvidence.sourceQuality?.byForm, { gzip: 1, plain: 0, live: 0 },
+      "one physical bad row cannot remain charged to both old live and new archive sources");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

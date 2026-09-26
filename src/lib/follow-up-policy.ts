@@ -9,7 +9,7 @@ import {
   FOLLOW_UP_RECEIPT_STEP,
   FOLLOW_UP_STATE_STEP,
 } from "./ledger.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { systemClock, type Clock } from "./clock.js";
 
 export const FOLLOW_UP_POLICY_VERSION = "follow-up-policy-v1" as const;
@@ -337,7 +337,23 @@ export function followUpReceipt(
 }
 
 export function readFollowUpHistory(ledgerPath: string, now: number = systemClock.now()): FollowUpHistory[] {
-  const rows = readLedgerUnionRecordsSync(dirname(ledgerPath), { step: [...FOLLOW_UP_STEPS] }).rows;
+  return foldFollowUpHistory(readLedgerUnionRecordsSync(dirname(ledgerPath), { step: [...FOLLOW_UP_STEPS] }).rows, now);
+}
+
+/**
+ * W1-T4567 — {@link readFollowUpHistory} for a request path. The history is durable, so every rotation
+ * still counts; but a rotation never changes after it is cut, so its follow-up rows are memoized and a
+ * repeated read parses only the live file. MEASURED 2026-09-26 on the live gateway before this: GET
+ * /v1/operator-agent/follow-ups took 5.76 s to answer 34 bytes, re-parsing every archive per request.
+ */
+export function createFollowUpHistoryReader(): (ledgerPath: string, now?: number) => Promise<FollowUpHistory[]> {
+  const steps = new Set<string>(FOLLOW_UP_STEPS);
+  const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.has(row.step)));
+  return async (ledgerPath, now = systemClock.now()) =>
+    foldFollowUpHistory((await readLedgerUnionRecordsMemoized(dirname(ledgerPath), memo, { step: [...FOLLOW_UP_STEPS] })).rows, now);
+}
+
+function foldFollowUpHistory(rows: ReadonlyArray<Record<string, unknown>>, now: number): FollowUpHistory[] {
   const candidates = new Map<string, FollowUpCandidate>();
   const events = new Map<string, FollowUpEvent[]>();
   for (const row of rows) {

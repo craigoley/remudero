@@ -13,18 +13,14 @@
 // bearer header included, to a host of the attacker's choosing. This is credential exfiltration by
 // query parameter, not a lint nit.
 //
-// TWO LAYERS, because either alone is insufficient:
-//   1. the CLIENT validates the base URL's shape and pins an origin every request must stay inside.
-//      Necessary, NOT sufficient — `https://evil.example` is a well-formed https URL.
-//   2. the DASHBOARD allow-lists which hosts a `?daemon=` may name at all. This is the layer that
-//      actually stops the attack; layer 1 is what stops it being reintroduced somewhere else.
-//
-// Both layers are asserted here, in that order, so neither can be removed while the other passes.
+// TWO LAYERS closed it: (1) the CLIENT validates the base URL's shape and pins an origin every
+// request must stay inside; (2) the dashboard allow-listed which hosts a `?daemon=` could name.
+// W1-T4566 deleted apps/dashboard, and with it the `?daemon=` taint source and layer 2. Layer 1 is
+// asserted here so the shape cannot be reintroduced by the next client.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createDaemonClient, requestUrl } from "../packages/api-client/src/client.js";
-import { applyDaemonRejection, DEFAULT_DAEMON_URL, isAllowedDaemonUrl, readConfig, wireControls } from "../apps/dashboard/src/main.js";
 
 /** A fetch stand-in that records the URL it was asked for and never touches the network. */
 function recordingFetch(): { calls: string[]; impl: typeof fetch } {
@@ -109,53 +105,6 @@ test("a trailing slash on baseUrl does not double up or change the requested pat
   }
 });
 
-// ── LAYER 2: the dashboard allow-lists which hosts a ?daemon= may name ───────────────
-
-test("a hostile daemon parameter is refused and the default is used instead", () => {
-  const cfg = readConfig("?daemon=https://evil.example&token=SECRET", "https://console.example.ts.net");
-
-  assert.equal(cfg.baseUrl, DEFAULT_DAEMON_URL, "the attacker's host is NOT used");
-  assert.equal(cfg.rejectedDaemon, "https://evil.example", "and the refusal is reported, not silent");
-  // The token is still read — the operator's own token is not the thing being rejected, the
-  // destination is. Refusing to carry it forward would break the legitimate fallback.
-  assert.equal(cfg.token, "SECRET");
-});
-
-test("the allow-list matches on the parsed hostname, so a lookalike host cannot slip through", () => {
-  const origin = "https://console.example.ts.net";
-
-  // Admissible: the page's own origin, loopback, and real tailnet names.
-  assert.equal(isAllowedDaemonUrl("https://console.example.ts.net", origin), true);
-  assert.equal(isAllowedDaemonUrl("http://localhost:4317", origin), true);
-  assert.equal(isAllowedDaemonUrl("http://127.0.0.1:4317", origin), true);
-  assert.equal(isAllowedDaemonUrl("https://daemon.example.ts.net", origin), true);
-
-  // Refused. Each of these defeats a WEAKER check that a careless implementation might use:
-  //   substring test on the raw URL   -> beaten by the query-string and fragment cases
-  //   endsWith on the raw URL         -> beaten by the path case
-  //   endsWith("ts.net") on hostname  -> beaten by the hyphenated lookalike
-  assert.equal(isAllowedDaemonUrl("https://evil.example/?x=.ts.net", origin), false, "query-string decoy");
-  assert.equal(isAllowedDaemonUrl("https://evil.example#localhost", origin), false, "fragment decoy");
-  assert.equal(isAllowedDaemonUrl("https://evil.example/localhost", origin), false, "path decoy");
-  assert.equal(isAllowedDaemonUrl("https://nottailscale-ts.net", origin), false, "hyphenated lookalike");
-  assert.equal(isAllowedDaemonUrl("https://ts.net.evil.example", origin), false, "prefix lookalike");
-  assert.equal(isAllowedDaemonUrl("https://localhost.evil.example", origin), false, "loopback lookalike");
-  assert.equal(isAllowedDaemonUrl("javascript:alert(1)", origin), false, "not a transport");
-  assert.equal(isAllowedDaemonUrl("garbage", origin), false, "unparseable");
-});
-
-test("an absent daemon parameter still yields the documented local default", () => {
-  const cfg = readConfig("?token=t", "https://console.example.ts.net");
-  assert.equal(cfg.baseUrl, DEFAULT_DAEMON_URL);
-  assert.equal(cfg.rejectedDaemon, undefined, "nothing was rejected, so nothing is reported");
-});
-
-test("an allowed daemon parameter is honoured unchanged", () => {
-  const cfg = readConfig("?daemon=https://daemon.example.ts.net&token=t", "https://console.example.ts.net");
-  assert.equal(cfg.baseUrl, "https://daemon.example.ts.net");
-  assert.equal(cfg.rejectedDaemon, undefined);
-});
-
 
 test("requestUrl refuses a path that escapes the pinned origin", () => {
   // The belt-and-braces arm. Today every call site passes a hardcoded literal so this cannot fire
@@ -172,60 +121,3 @@ test("requestUrl refuses a path that escapes the pinned origin", () => {
   assert.equal(requestUrl(base, "/v1/../v1/status").toString(), "https://daemon.example.ts.net/v1/status");
 });
 
-test("applyDaemonRejection names the refused host and warns the token may be compromised", () => {
-  // A minimal Document stand-in — the same no-DOM idiom test/dashboard-main.test.ts already uses.
-  const banner = { textContent: "" };
-  const doc = { getElementById: (id: string) => (id === "controls-status" ? banner : null) } as unknown as Document;
-
-  applyDaemonRejection(doc, { rejectedDaemon: "https://evil.example" });
-  assert.match(banner.textContent, /Refused the \?daemon= in this link \(https:\/\/evil\.example\)/);
-  assert.match(banner.textContent, /Using http:\/\/localhost:4317/, "it says what it used instead");
-  assert.match(banner.textContent, /treat the token in it as compromised/, "it names the real consequence");
-});
-
-test("applyDaemonRejection stays silent when nothing was refused", () => {
-  const banner = { textContent: "" };
-  const doc = { getElementById: () => banner } as unknown as Document;
-  applyDaemonRejection(doc, {});
-  assert.equal(banner.textContent, "", "an ordinary load shows no warning");
-});
-
-
-test("wireControls raises the refusal on the page it is wiring", () => {
-  // wireControls is where the warning is raised, because the `typeof document` entry block cannot
-  // be entered by any test. A uniform element stub satisfies every requiredEl lookup; the assertion
-  // is that #controls-status carries the refusal by the time wiring returns.
-  const banner = { textContent: "" };
-  const el = () => ({ textContent: "", value: "", checked: false, addEventListener() {} });
-  const els = new Map<string, unknown>();
-  const doc = {
-    getElementById: (id: string) => {
-      if (id === "controls-status") return banner;
-      if (!els.has(id)) els.set(id, el());
-      return els.get(id);
-    },
-  } as unknown as Document;
-  const search = "?daemon=https://evil.example&token=SECRET";
-  const saved = globalThis.window;
-  (globalThis as { window?: unknown }).window = { location: { search, origin: "https://console.example.ts.net" } };
-  try {
-    wireControls(doc, {} as never);
-    assert.match(banner.textContent, /Refused the \?daemon=/);
-    assert.match(banner.textContent, /treat the token in it as compromised/);
-  } finally {
-    if (saved === undefined) delete (globalThis as { window?: unknown }).window;
-    else (globalThis as { window?: unknown }).window = saved;
-  }
-});
-
-// ── the two layers compose: a refused host never becomes a request ───────────────────
-
-test("the refused daemon host is never contacted even though a client is still constructed", async () => {
-  const cfg = readConfig("?daemon=https://evil.example&token=SECRET", "https://console.example.ts.net");
-  const { calls, impl } = recordingFetch();
-  await createDaemonClient({ ...cfg, fetchImpl: impl }).getStatus();
-
-  assert.equal(calls.length, 1);
-  assert.equal(new URL(calls[0]).origin, "http://localhost:4317", "the default, not the attacker's host");
-  assert.ok(!calls[0].includes("evil.example"), "the attacker's host appears in no request");
-});

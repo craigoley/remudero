@@ -1,0 +1,33 @@
+- id: W1-T4583
+  title: "CORE'S CONTRACT-COVERAGE RATCHET NOW MEASURES A DECLARED-EMPTY POPULATION — W1-T4566 deleted the last in-repo console client, so the gate runs on every PR and censuses nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: medium
+  origin: "operator session 2026-09-26: old-console follow-up audit (operator: 'file items that need filed, fix items that need fixed')"
+  files:
+    - scripts/contract-coverage-ratchet.mjs
+    - test/the-contract-census-lives-with-its-consumer.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    scripts/contract-coverage-ratchet.mjs (W1-T3174) counted /v1 routes an IN-REPO client calls that
+    openapi/daemon.yaml does not declare. W1-T4563 and W1-T4566 deleted both in-repo consoles, so
+    CLIENT_SOURCES is declared empty and main prints 'nothing to census'. The question moved:
+    W1-T4579 checks served routes against the spec (producer side) and CONSOLE-T84 checks the live
+    console's calls against a pinned copy (consumer side). A gate that measures nothing still costs
+    a CI step, a gardener probe (lib/gate-gardener.ts contractCandidates) and a gate-posture row.
+  design: |
+    After W1-T4579 lands, retire the ratchet: delete the script and its baseline, its ci.yml step
+    and report argument, its gate-posture row, and the gardener's contractCandidates probe, with the
+    tests that exercised them. Record the retirement in DECISIONS.md naming W1-T4579 and CONSOLE-T84
+    as the replacement.
+  acceptance:
+    - claim: "no CI step, gardener probe or gate-posture row runs the retired contract-coverage census"
+      proof: "unit test: test/the-contract-census-lives-with-its-consumer.test.ts"
+  falsifier: |
+    Leave the ci.yml step with the script deleted and CI reds; keep the gardener probe and its
+    loader throws.

@@ -1,0 +1,42 @@
+- id: W1-T4565
+  title: "THE SWEEP CLOSES A PR FOR AN UNMET DEPENDENCY THAT MERGED MINUTES EARLIER — the W1-T3585 resequence close reads only the daemon's lastProj, which lags a real merge by 13-28 minutes, and ignores the projection's own indeterminate flag; two builds were silently lost and a third PR was closed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-26: old-console follow-up audit (operator: 'file items that need filed, fix items that need fixed')"
+  files:
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - test/a-resequence-close-needs-a-corroborated-unmet-dependency.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED in the core daemon's ledger (rmd-state2, every rotation form): W1-T4567 merged as #7320
+    at 2026-09-26T20:28:54Z; at 20:38:57 the sweep itself wrote verdict.merged for it
+    (sweep.credit_backfill); from 20:41:35 to 20:54:27 the same sweep disposed #7333 (W1-T4576) as
+    stale -- 'unmet dependency in the current plan: W1-T4567' -- and closed it at 20:42:26. The same
+    message closed #7023 (W1-T4452) and #7025 (W1-T4454) at 2026-09-24T15:19 and 15:30, 17 and 28
+    minutes after their dependency W1-T4451 merged as #6993; its own text says current dispatch will
+    not rebuild them, and nothing did for two days. The close's resolver is (t) =>
+    lastProj?.get(t.id)?.merged ?? false (buildSweepHook wiring), which treats a lagging or
+    indeterminate projection as unmerged, although StatusProjection's own doc requires indeterminate
+    to mean DO NOT ACT.
+  design: |
+    A destructive close must not rest on one lagging read. (i) The resolver handed to the sweep
+    treats a projection marked indeterminate as NOT unmet (no authority to close). (ii) When
+    currentPlanIneligibilityReason names unmet dependencies, buildOpenPrViews corroborates them
+    against the ledger's merge credit for exactly those ids (readMergeCreditedTaskIds with
+    candidates -- the walk credit_backfill already trusts); a dependency credited there is met. Only
+    a dependency unmerged in the projection, not indeterminate, and uncredited in the ledger keeps
+    close authority. Both only remove closes; the extra walk runs only when a close is proposed.
+  acceptance:
+    - claim: "a resequence close names only a dependency that is unmerged in the projection, not indeterminate, and uncredited in the ledger"
+      proof: "unit test: test/a-resequence-close-needs-a-corroborated-unmet-dependency.test.ts"
+  falsifier: |
+    Replay #7333: a projection saying W1-T4567 is unmerged beside a ledger carrying verdict.merged
+    for it; the unfixed producer marks the PR ineligible, the fixed one does not.

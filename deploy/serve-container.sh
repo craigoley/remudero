@@ -133,7 +133,6 @@ DAEMON_REPO="${RMD_DAEMON_REPO:-remudero}"
 STATE_MOUNT_DEST="/home/node/Remudero"
 DAEMON_REPO_DIR="${STATE_MOUNT_DEST}/${DAEMON_REPO}"
 SERVE_REPO_DIR="${RMD_SERVE_REPO_DIR:-${HOME:-/root}/rmd-serve-repo}"
-CONSOLE_BUILD_ROOT="${DAEMON_REPO_DIR}/apps/dashboard/dist"
 # W1-T2434: the host-side account file and where it lands in the container — see the header note
 # above. Derived from `${HOME}` the same way `recycle-container.sh`'s `CRED_DIR` derives the
 # daemon's credential directory, so both containers agree on whose `.claude.json` is authoritative
@@ -233,7 +232,6 @@ if [ -n "${INSTANCE_NAME}" ]; then
 fi
 
 DAEMON_REPO_DIR="${STATE_MOUNT_DEST}/${DAEMON_REPO}"
-CONSOLE_BUILD_ROOT="${DAEMON_REPO_DIR}/apps/dashboard/dist"
 
 # ── 1. REFUSE TO RUN INSIDE A CONTAINER ─────────────────────────────────────────────────────────
 # Same refusal, same reason, as recycle-container.sh section 1: this file is COPYed into the image
@@ -630,7 +628,6 @@ RUN_ARGS=(
   -e GH_APP_INSTALLATION_ID
   -e GH_APP_PRIVATE_KEY_PATH
   -e "RMD_SERVE_NETWORK=${SERVE_NETWORK_ENV_VALUE}"
-  -e "RMD_CONSOLE_BUILD_ROOT=${CONSOLE_BUILD_ROOT}"
   -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
   -v "${SERVE_REPO_DIR}:${DAEMON_REPO_DIR}"
   "${INSTANCE_STATE_ARGS[@]+"${INSTANCE_STATE_ARGS[@]}"}"

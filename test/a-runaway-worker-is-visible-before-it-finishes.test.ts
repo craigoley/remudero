@@ -1,18 +1,18 @@
 // W1-T2557: A RUNAWAY WORKER IS INVISIBLE UNTIL IT HAS FINISHED SPENDING — mid-flight the fleet
 // sampled LIVENESS (worker.state, working/quiet/unknown) but never COST, and every cost signal
 // that exists (scope_guard.overrun, budget.warning, cost.anomaly) fired AFTER implement.done. This
-// proves the fix: a running turn count observable from the ledger WHILE a spawn is still in
+// proves the fix: a running turn count on worker.activity WHILE a spawn is still in
 // flight, and a non-fatal, OBSERVE-ONLY runaway signal sized against an observed class
 // distribution — never a source literal, and never a lowered `max_turns` cliff.
 //
 // Seven acceptance claims, all proven here:
 //   1. a worker's turn count is observable from the ledger WHILE the spawn is still in flight
-//   2. the mid-flight row is emitted before the spawn settles, not only at implement.done
+//   2. the mid-flight activity row is emitted before the spawn settles, not only at implement.done
 //   3. a normal-length run emits no runaway signal — the bound does not fire on a healthy population
 //   4. the runaway threshold is derived from an observed class distribution, never a source literal
 //   5. max_turns stays a flat 400 runaway cliff — no ceiling is lowered by this change
 //   6. no worker is killed or deferred by this change: it observes and never acts
-//   7. removing the mid-flight emission makes the in-flight visibility assertion fail
+//   7. removing the count from mid-flight activity makes the visibility assertion fail
 
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
@@ -26,8 +26,8 @@ import {
   buildWorkerStateSensor,
   deriveRunawayTurnBound,
   ledgerPathFor,
+  WORKER_ACTIVITY_LEDGER_STEP,
   WORKER_RUNAWAY_TURNS_LEDGER_STEP,
-  WORKER_TURNS_LEDGER_STEP,
 } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 
@@ -43,7 +43,7 @@ function fakeConfig(root: string): Config {
 
 // ── acceptance 1 & 2: turn count observable from the ledger WHILE the spawn is in flight ────
 
-test("a worker's turn count is observable from the ledger while the spawn is still in flight — never gated behind settle", () => {
+test("the in-flight turn count is carried on worker activity rows", () => {
   const root = tmpRoot("runaway-visible-mid-flight");
   const config = fakeConfig(root);
   const ledgerPath = ledgerPathFor(config);
@@ -59,45 +59,55 @@ test("a worker's turn count is observable from the ledger while the spawn is sti
     sensor.observer({ kind: "working", tsMs: turn * 1000, turnsSoFar: turn });
   }
 
-  const rows = readLedgerLines(ledgerPath).filter((l) => l.step === WORKER_TURNS_LEDGER_STEP);
+  const rows = readLedgerLines(ledgerPath).filter((l) => l.step === WORKER_ACTIVITY_LEDGER_STEP);
   assert.ok(rows.length > 0, "the turn count must already be in the ledger before the spawn ever settles");
   assert.equal(rows[rows.length - 1].turns_so_far, 5, "the LATEST mid-flight row must carry the running count");
+  assert.deepEqual(rows.map((r) => r.turns_so_far), [1, 2, 3, 4, 5]);
   for (const r of rows) {
     assert.equal(r.run_id, runId);
     assert.equal(r.task_id, taskId);
   }
 });
 
-// ── acceptance 7: removing the mid-flight emission makes the in-flight visibility assertion fail ──
+// ── acceptance 7: removing the count from activity breaks mid-flight visibility ─────────────
 
-test("worker.turns rows are emitted on EVERY change in the running count — exactly one row per distinct count, not one at the end", () => {
+test("every distinct running count appears on a worker activity row before settle", () => {
   const root = tmpRoot("runaway-turns-per-change");
   const config = fakeConfig(root);
   const ledgerPath = ledgerPathFor(config);
   const sensor = buildWorkerStateSensor({ ledgerPath, runId: "T-run-per-change", taskId: "T-task-per-change", root });
 
   // 8 distinct turn counts, some repeated (a message with both a text and a tool_use block
-  // reports the SAME turnsSoFar twice — see worker.ts's collectWorkerResult) — the repeats must
-  // NOT multiply the row count, and if the mid-flight emission were removed entirely the count
-  // below would be 0 instead of 8, which is exactly what this assertion pins.
+  // reports the SAME turnsSoFar twice — see worker.ts's collectWorkerResult). Activity has one
+  // row per event, including repeats; each new count must already be visible before settle.
   const turnsSequence = [1, 1, 2, 3, 3, 3, 4, 5, 6, 7, 8];
   for (const t of turnsSequence) sensor.observer({ kind: "working", tsMs: t, turnsSoFar: t });
 
-  const rows = readLedgerLines(ledgerPath).filter((l) => l.step === WORKER_TURNS_LEDGER_STEP);
+  const rows = readLedgerLines(ledgerPath).filter((l) => l.step === WORKER_ACTIVITY_LEDGER_STEP);
   assert.deepEqual(
     rows.map((r) => r.turns_so_far),
-    [1, 2, 3, 4, 5, 6, 7, 8],
-    "one row per distinct count, in order, never a duplicate for an unchanged count and never zero rows",
+    turnsSequence,
+    "every event carries its observed count, including repeats and every new count",
   );
 });
 
-test("a sensor whose observer never fires appends NO worker.turns row — mirrors the worker.state UNKNOWN polarity, never a fabricated zero", () => {
+test("the worker state sensor writes no separate turn count row", () => {
+  const root = tmpRoot("runaway-no-separate-turns");
+  const ledgerPath = ledgerPathFor(fakeConfig(root));
+  const sensor = buildWorkerStateSensor({ ledgerPath, runId: "T-run-no-separate-turns", taskId: "T-task-no-separate-turns", root });
+  for (const turn of [1, 1, 2, 3]) sensor.observer({ kind: "working", tsMs: turn, turnsSoFar: turn });
+  const rows = readLedgerLines(ledgerPath);
+  assert.equal(rows.filter((l) => l.step === "worker.turns").length, 0);
+  assert.deepEqual(rows.filter((l) => l.step === WORKER_ACTIVITY_LEDGER_STEP).map((l) => l.turns_so_far), [1, 1, 2, 3]);
+});
+
+test("a sensor whose observer never fires appends no worker activity row or fabricated count", () => {
   const root = tmpRoot("runaway-turns-never-fired");
   const config = fakeConfig(root);
   const ledgerPath = ledgerPathFor(config);
   buildWorkerStateSensor({ ledgerPath, runId: "T-run-never-fired", taskId: "T-task-never-fired", root });
-  const rows = readLedgerLines(ledgerPath).filter((l) => l.step === WORKER_TURNS_LEDGER_STEP);
-  assert.equal(rows.length, 0);
+  const rows = readLedgerLines(ledgerPath);
+  assert.equal(rows.present, false);
 });
 
 // ── acceptance 4: the runaway threshold is derived from an observed class distribution ──────
@@ -156,7 +166,7 @@ test("a run with no bound configured (setRunawayBound never called, or a derivat
 
 // ── acceptance 1 (runaway half) + 6: the runaway signal fires mid-flight, exactly once, and acts on nothing ──
 
-test("a run that clears the bound gets EXACTLY ONE worker.runaway_turns row, mid-flight, never repeated", () => {
+test("the runaway turn row still fires once without a separate turn count row", () => {
   const root = tmpRoot("runaway-fires-once");
   const config = fakeConfig(root);
   const ledgerPath = ledgerPathFor(config);
@@ -172,6 +182,7 @@ test("a run that clears the bound gets EXACTLY ONE worker.runaway_turns row, mid
 
   const runawayRows = readLedgerLines(ledgerPath).filter((l) => l.step === WORKER_RUNAWAY_TURNS_LEDGER_STEP);
   assert.equal(runawayRows.length, 1, "the signal must fire exactly once per run, never once per subsequent turn");
+  assert.equal(readLedgerLines(ledgerPath).filter((l) => l.step === "worker.turns").length, 0);
   assert.equal(runawayRows[0].bound_turns, bound);
   assert.ok(
     typeof runawayRows[0].turns_so_far === "number" && (runawayRows[0].turns_so_far as number) > (bound as number),
@@ -199,10 +210,10 @@ test("no worker is killed or deferred by this change: buildWorkerStateSensor exp
   for (let turn = 1; turn <= 300; turn++) {
     assert.doesNotThrow(() => sensor.observer({ kind: "working", tsMs: turn, turnsSoFar: turn }));
   }
-  // Ordinary worker.state / worker.turns visibility must be completely unaffected by having
+  // Ordinary worker.state / worker.activity visibility must be completely unaffected by having
   // cleared the runaway bound — the run keeps being observed exactly as before.
-  const turnsRows = readLedgerLines(ledgerPath).filter((l) => l.step === WORKER_TURNS_LEDGER_STEP);
-  assert.equal(turnsRows[turnsRows.length - 1].turns_so_far, 300, "observation continues past the bound, unthrottled");
+  const activityRows = readLedgerLines(ledgerPath).filter((l) => l.step === WORKER_ACTIVITY_LEDGER_STEP);
+  assert.equal(activityRows[activityRows.length - 1].turns_so_far, 300, "observation continues past the bound, unthrottled");
 });
 
 // ── acceptance 5: max_turns stays a flat 400 runaway cliff — no ceiling is lowered ───────────

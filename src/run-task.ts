@@ -880,7 +880,7 @@ import {
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
-import { benchmarkRunAssignmentReceipt, benchmarkRunTerminalReceipt } from "./lib/benchmark-run.js";
+import { benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources } from "./lib/benchmark-run.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -2202,6 +2202,7 @@ import {
   excludeNodeModulesFromGit,
   linkWorktreeNodeModules, resolveNodeModulesSource,
   worktreeAdd,
+  worktreeAddAsync,
   worktreeLockIsPidAlive,
   worktreeRemove,
   worktreesDir,
@@ -2522,22 +2523,11 @@ export function writeSyncLine(fd: 1 | 2, line: string): void {
  *  enforces for every other step in that set. */
 export const WORKER_STATE_LEDGER_STEP = "worker.state";
 
-/**
- * W1-T2557: THE MID-FLIGHT TURN-COUNT ROW — appended the instant {@link
- * WorkerStateTracker.turnsSoFar} CHANGES, independent of `worker.state`'s own TRANSITION-only
- * cadence (design note iii, above). A worker that stays continuously `working` for the whole
- * run would otherwise emit exactly ONE `worker.state` row for the entire spawn — this is the row
- * that stays fresh while the run is happening, closing the gap this task's own rationale names:
- * "every cost signal there is fires AFTER `implement.done`". Also deliberately NOT added to
- * `DECISION_RELEVANT_LEDGER_STEPS` — nothing decides off it, same reasoning as `worker.state`.
- */
-export const WORKER_TURNS_LEDGER_STEP = "worker.turns";
-
-/** One bounded, structured row per observed stream event. Unlike `worker.state` (transitions)
- *  and `worker.turns` (count changes), this is the operator-facing activity ledger: it gives the
- *  console a real tool name, a bounded rationale, tool timing/outcome, and heartbeat cadence
- *  without exposing prompts, tool arguments, or tool output. It is diagnostic telemetry only and
- *  must never become a dispatch decision input. */
+/** One bounded, structured row per observed stream event. Unlike `worker.state` (transitions),
+ *  this carries `turns_so_far` whenever the stream event supplies it, keeping the running count
+ *  visible during a spawn. It gives the console a real tool name, a bounded rationale, tool
+ *  timing/outcome, and heartbeat cadence without exposing prompts, tool arguments, or tool
+ *  output. It is diagnostic telemetry only and must never become a dispatch decision input. */
 export const WORKER_ACTIVITY_LEDGER_STEP = "worker.activity";
 
 /**
@@ -2680,7 +2670,6 @@ export function buildWorkerStateSensor(args: {
   // site resolves one (or a derivation failure leaves it unset), meaning the runaway signal
   // stays silent rather than guessing.
   let runawayBoundTurns: number | undefined;
-  let lastEmittedTurns: number | undefined;
   let runawaySignaled = false;
   let lastWorkerText: string | undefined;
   let activeTool: { name: string; startedAtMs: number; reason?: string } | undefined;
@@ -2702,33 +2691,12 @@ export function buildWorkerStateSensor(args: {
   };
 
   /**
-   * W1-T2557: THE MID-FLIGHT VISIBILITY THIS TASK ADDS — called on EVERY observed stream event
-   * (the observer already parses every one; this task's own rationale calls a running count on
-   * the row it already writes "close to free"), never gated behind a `worker.state` TRANSITION
-   * (which a continuously-`working` worker can go the WHOLE run without firing again — exactly
-   * the invisible-while-spending gap this task exists to close). Two independent, best-effort,
-   * NEVER-ACTING appends:
-   *   - `worker.turns`, the instant the running count CHANGES (never a duplicate row for the
-   *     same count — the same "only on change" discipline `recordTransition` already keeps).
-   *   - `worker.runaway_turns`, AT MOST ONCE per run, the instant the count first clears
-   *     `runawayBoundTurns` — a REPORT, never a kill/defer: this function has no kill/defer
-   *     affordance to reach for even if it wanted to (acceptance: "it observes and never acts").
+   * W1-T2557: check the running count on every observed stream event. `worker.activity` already
+   * carries the event's count while the spawn is in flight. Append `worker.runaway_turns` AT MOST
+   * ONCE per run, when the count first clears `runawayBoundTurns` — a report, never a kill/defer.
    */
   const observeTurns = (): void => {
     const current = tracker.turnsSoFar();
-    if (current !== lastEmittedTurns) {
-      lastEmittedTurns = current;
-      try {
-        appendLedger(args.ledgerPath, {
-          run_id: args.runId,
-          task_id: args.taskId,
-          step: WORKER_TURNS_LEDGER_STEP,
-          turns_so_far: current,
-        });
-      } catch {
-        // Best-effort — same discipline as `recordTransition`'s own catch above.
-      }
-    }
     if (!runawaySignaled && runawayBoundTurns !== undefined && current > runawayBoundTurns) {
       runawaySignaled = true;
       try {
@@ -13824,15 +13792,22 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
       };
     }
     let fields: Record<string, unknown>;
+    let durableAssignmentId: string | undefined;
     try {
       const assignment = step === "worker.assignment" ? extra.worker_assignment : undefined;
-      let benchmarkRun: ReturnType<typeof benchmarkRunAssignmentReceipt> | ReturnType<typeof benchmarkRunTerminalReceipt>;
+      let benchmarkRun: ReturnType<typeof benchmarkRunAssignmentReceipt> | ReturnType<typeof benchmarkRunTerminalReceipt>
+        | ReturnType<typeof benchmarkRunAttemptReceipt>;
       if (assignment && typeof assignment === "object" && !Array.isArray(assignment)) {
         const selected = assignment as Parameters<typeof benchmarkRunAssignmentReceipt>[0];
         if (typeof selected.id === "string" && selected.id.length > 0 && selected.requested && selected.selected) {
           benchmarkRun = benchmarkRunAssignmentReceipt(selected, work);
-          assignments.add(selected.id);
+          durableAssignmentId = selected.id;
         }
+      } else if (step === "worker.attempt") {
+        const id = typeof extra.selection_assignment_id === "string" ? extra.selection_assignment_id : undefined;
+        benchmarkRun = benchmarkRunAttemptReceipt({
+          step, ...extra, assignment_observed: extra.assignment_observed !== false && id !== undefined && assignments.has(id),
+        });
       } else if (step === "verdict") {
         benchmarkRun = benchmarkRunTerminalReceipt(
           { step, ...extra },
@@ -13844,8 +13819,62 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
       // Keep the source row and mark the receipt unavailable; telemetry cannot block dispatch.
       fields = { ...extra, benchmark_run_unavailable_reason: "receipt-build-failed" };
     }
-    write(step, fields);
+    if (step === "worker.attempt") {
+      // A metric write is never allowed to change a worker's actual result or retry path.
+      try { write(step, fields); } catch { /* measured as absent on the next source audit */ }
+    } else {
+      write(step, fields);
+      if (durableAssignmentId) assignments.add(durableAssignmentId);
+    }
   };
+}
+
+/** Owns the one worker-attempt receipt on every dispatch path through the shared spawn wrapper.
+ * The call/result/error is authoritative; evidence collection cannot change any of them. */
+export function recordBenchmarkWorkerAttempt(
+  call: () => Promise<WorkerResult>,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  selected: () => { id: string } | undefined,
+  stopPolling: () => void,
+): Promise<WorkerResult> {
+  const failed = (): void => {
+    try {
+      const assignment = selected();
+      log("worker.attempt", {
+        ...(assignment ? { selection_assignment_id: assignment.id } : {}),
+        success: false,
+        worker_failure: "spawn-threw-before-result",
+      });
+    } catch { /* preserve the original worker error */ }
+  };
+  let workerCall: Promise<WorkerResult>;
+  try {
+    workerCall = call();
+  } catch (error) {
+    failed();
+    stopPolling();
+    throw error;
+  }
+  return workerCall.then((result) => {
+    try {
+      const resultId = result.selectionAssignmentId;
+      const selection = selected();
+      const assignmentId = resultId ?? selection?.id;
+      const resultEnvelopeObserved = typeof result.subtype === "string" && result.subtype.length > 0;
+      log("worker.attempt", {
+        ...(assignmentId ? { selection_assignment_id: assignmentId } : {}),
+        ...(resultId && selection && resultId !== selection.id ? { assignment_observed: false } : {}),
+        ...(result.isError || result.apiError || result.usageRefusal
+          ? { success: false }
+          : resultEnvelopeObserved ? { success: true } : {}),
+        ...benchmarkWorkerAttemptResources(result),
+      });
+    } catch { /* telemetry cannot alter the returned worker result */ }
+    return result;
+  }, (error: unknown) => {
+    failed();
+    throw error;
+  }).finally(stopPolling);
 }
 
 async function runTask(
@@ -14092,7 +14121,7 @@ async function runTask(
     const stopPolling = workerStateSensor.startPolling();
     let selectionAssignment: Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0] | undefined;
     const baseStreamObserver = effectiveSpawnArgs.streamObserver ?? workerStateSensor.observer;
-    return rawSpawn({
+    return recordBenchmarkWorkerAttempt(() => rawSpawn({
       ...effectiveSpawnArgs,
       // Every dispatch-phase worker inherits the run identity at the ONE wrapper that already owns its state/error telemetry, so the
       // routing assignment and terminal worker row join without inferring a task; an injected observer still runs, but after the ledger.
@@ -14123,7 +14152,7 @@ async function runTask(
       // its own `clockBound` (none exist today) is respected; every future dispatch call site
       // through this wrapper is covered without remembering to add it individually.
       clockBound: effectiveSpawnArgs.clockBound ?? { boundMs: workerAbandonMs },
-    }).finally(stopPolling);
+      }), log, () => selectionAssignment, stopPolling);
   };
   // W1-T143: a raw synchronous write, not console.log — this narration is exactly what the
   // daemon's `runOne` exercises on every dispatch, and console.log's async, non-TTY-buffered
@@ -14951,7 +14980,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // `worktree.add` line (three-way base reading + `behind`) and, on the fail-open branch,
     // `worktree.base_uncheckable` — see both functions' own docs in lib/worker.ts.
     // W1-T4193: the implement lane, and only it, refuses a same-package lockfile mismatch (the arm below defers it).
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
+    await worktreeAddAsync(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
     // LIVENESS TOKEN: mark this worktree ALIVE so a concurrent pruneStaleRuns (another
     // drain, a manual run-task) skips it instead of `--force`-removing it mid-run. The
     // lock is a SIBLING file (never inside the worktree ⇒ never committed into the PR),
@@ -44318,7 +44347,7 @@ export interface AlertFixDispatchDeps {
     branch: string,
     startPoint: string,
     deps?: { log?: (step: string, extra?: Record<string, unknown>) => void },
-  ) => void;
+  ) => void | Promise<void>;
   worktreeRemove: (repoDir: string, worktreePath: string) => void;
   renderWorkerSettings: typeof renderWorkerSettings;
   loadMounts: typeof loadMounts;
@@ -44357,7 +44386,7 @@ export function checkAlertFixAcceptance(
 }
 
 const REAL_ALERT_FIX_DISPATCH_DEPS: AlertFixDispatchDeps = {
-  worktreeAdd,
+  worktreeAdd: worktreeAddAsync,
   worktreeRemove,
   renderWorkerSettings,
   loadMounts,
@@ -44394,7 +44423,7 @@ export async function dispatchAlertFixRun(
   const branch = `alert-fix-${originId}-${Date.now()}`;
   const worktreePath = join(worktreesDir(config), branch);
   try {
-    deps.worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
+    await deps.worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
     const settingsFile = deps.renderWorkerSettings({
       templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
       hooksDir: join(resolveInstallRoot(config), "hooks"),
