@@ -20,7 +20,9 @@
     - test/reap-cadence.test.ts
     - test/branch-reap-names-what-it-holds.test.ts
     - test/branch-reap-batched-facts.test.ts
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4476 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     MEASURED 2026-09-24 in a live CPU profile of the core daemon (the one that led to #7011, #7016 and #7017): the

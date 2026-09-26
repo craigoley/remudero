@@ -10,7 +10,9 @@
   origin: "followup#commit-count-mismatch-2026-09-13"
   plan_refs: ["§12A"]
   files: [LEARNINGS.md]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4549 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     FROM W1-T3524 (run DAEMON-1789309323091, PR #5400). The commits that shipped the routed-followups

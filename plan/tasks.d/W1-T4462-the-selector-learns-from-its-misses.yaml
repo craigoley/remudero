@@ -12,7 +12,9 @@
   origin: "operator ask 2026-09-24: no stuck PRs — automated flow and self-improvement; fix-lane investigation of 65 fix rounds"
   plan_refs: [W1-T4404, W1-T4406, W1-T4439]
   files: [scripts/diff-class.mjs, src/lib/affected-suites.ts, .github/workflows/ci.yml, test/the-selector-learns-from-its-misses.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4462 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     MEASURED 2026-09-24: the W1-T4404 shadow selector's first day of records (see the rationale below).
