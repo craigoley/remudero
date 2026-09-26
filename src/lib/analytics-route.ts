@@ -659,6 +659,8 @@ type AnalyticsCheckpointState = {
     taskClassesByRun?: Array<[string, string]>;
     risksByRun?: Array<[string, string]>;
     assignmentsById: Array<[string, RoutingAssignment]>;
+    /** Worker-call outcomes outrank legacy run-verdict proxies for benchmark evidence. */
+    attemptsByAssignmentId?: Array<[string, RoutingTerminalReceipt]>;
     terminalsByAssignmentId: Array<[string, RoutingTerminalReceipt]>;
     pendingTerminalsByAssignmentId: Array<[string, RoutingTerminalReceipt]>;
     buckets: Array<Omit<RoutingTelemetryBucketState, "fallbackReasons"> & { fallbackReasons: Array<[string, number]> }>;
@@ -750,6 +752,7 @@ interface RoutingTelemetryAccumulator {
     latestSourceAt: string | null;
   };
   assignmentsById: Map<string, RoutingAssignment>;
+  attemptsByAssignmentId: Map<string, RoutingTerminalReceipt>;
   terminalsByAssignmentId: Map<string, RoutingTerminalReceipt>;
   pendingTerminalsByAssignmentId: Map<string, RoutingTerminalReceipt>;
   bucketsByKey: Map<string, RoutingTelemetryBucketState>;
@@ -783,6 +786,7 @@ function routingTelemetryAccumulator(): RoutingTelemetryAccumulator {
       latestSourceAt: null,
     },
     assignmentsById: new Map(),
+    attemptsByAssignmentId: new Map(),
     terminalsByAssignmentId: new Map(),
     pendingTerminalsByAssignmentId: new Map(),
     bucketsByKey: new Map(),
@@ -1276,7 +1280,8 @@ function accumulateRoutingTelemetryLine(acc: RoutingTelemetryAccumulator, line: 
     if (runId && risk) acc.risksByRun.set(runId, risk);
   }
 
-  if (line.step === "worker.assignment" || (line.step === "verdict" && (str(line.selection_assignment_id) || str(line.model)))) {
+  if (line.step === "worker.assignment" || line.step === "worker.attempt"
+    || (line.step === "verdict" && (str(line.selection_assignment_id) || str(line.model)))) {
     const ts = str(line.ts);
     if (ts && Number.isFinite(Date.parse(ts)) && (!acc.benchmarkCounters.latestSourceAt || ts > acc.benchmarkCounters.latestSourceAt)) {
       acc.benchmarkCounters.latestSourceAt = ts;
@@ -1302,6 +1307,21 @@ function accumulateRoutingTelemetryLine(acc: RoutingTelemetryAccumulator, line: 
     return;
   }
   if (line.step === "worker.assignment") acc.benchmarkCounters.invalidAssignmentRows += 1;
+
+  if (line.step === "worker.attempt") {
+    acc.benchmarkCounters.terminalRowsSeen += 1;
+    const assignmentId = str(line.selection_assignment_id);
+    if (!assignmentId || line.assignment_observed === false) {
+      acc.benchmarkCounters.terminalsWithoutAssignmentId += 1;
+      return;
+    }
+    if (acc.attemptsByAssignmentId.has(assignmentId)) {
+      acc.benchmarkCounters.duplicateTerminalRows += 1;
+      return;
+    }
+    acc.attemptsByAssignmentId.set(assignmentId, routingTerminalReceipt(line));
+    return;
+  }
 
   // `workerLedgerFields` appears on intermediate worker rows such as `implement.done` as
   // well as on the run's final `verdict`. The assignment is a pre-execution policy fact, but
@@ -1365,8 +1385,17 @@ function snapshotRoutingTelemetry(acc: RoutingTelemetryAccumulator): RoutingTele
 
 function snapshotBenchmarkEvidence(acc: RoutingTelemetryAccumulator, asOf: string): BenchmarkEvidenceSnapshot {
   const assignments: ReadonlyMap<string, BenchmarkAssignmentEvidence> = acc.assignmentsById;
-  const joinedTerminals: ReadonlyMap<string, BenchmarkTerminalEvidence> = acc.terminalsByAssignmentId;
-  const unmatchedTerminals: ReadonlyMap<string, BenchmarkTerminalEvidence> = acc.pendingTerminalsByAssignmentId;
+  // A run verdict can proxy for the last worker only on old ledgers. A per-call receipt
+  // supersedes it for that assignment, but the verdict remains a separate task outcome.
+  const allTerminals = new Map<string, BenchmarkTerminalEvidence>([
+    ...acc.terminalsByAssignmentId, ...acc.pendingTerminalsByAssignmentId,
+    ...acc.attemptsByAssignmentId,
+  ]);
+  const joinedTerminals = new Map<string, BenchmarkTerminalEvidence>();
+  const unmatchedTerminals = new Map<string, BenchmarkTerminalEvidence>();
+  for (const [id, receipt] of allTerminals) {
+    (assignments.has(id) ? joinedTerminals : unmatchedTerminals).set(id, receipt);
+  }
   return deriveBenchmarkEvidence({
     assignments,
     joinedTerminals,
@@ -1657,6 +1686,7 @@ function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpoin
       taskClassesByRun: [...acc.routingTelemetry.taskClassesByRun.entries()],
       risksByRun: [...acc.routingTelemetry.risksByRun.entries()],
       assignmentsById: [...acc.routingTelemetry.assignmentsById.entries()].map(([key, value]) => [key, { ...value }]),
+      attemptsByAssignmentId: [...acc.routingTelemetry.attemptsByAssignmentId.entries()].map(([key, value]) => [key, { ...value }]),
       terminalsByAssignmentId: [...acc.routingTelemetry.terminalsByAssignmentId.entries()].map(([key, value]) => [key, { ...value }]),
       pendingTerminalsByAssignmentId: [...acc.routingTelemetry.pendingTerminalsByAssignmentId.entries()].map(([key, value]) => [key, { ...value }]),
       buckets: [...acc.routingTelemetry.bucketsByKey.values()].map((bucket) => ({
@@ -1703,6 +1733,7 @@ function hydrateCheckpointState(state: AnalyticsCheckpointState): AnalyticsAccum
   acc.routingTelemetry.risksByRun = new Map(state.routingTelemetry.risksByRun ?? []);
   acc.routingTelemetry.benchmarkCounters = { ...acc.routingTelemetry.benchmarkCounters, ...state.routingTelemetry.benchmarkCounters };
   acc.routingTelemetry.assignmentsById = new Map(state.routingTelemetry.assignmentsById.map(([key, value]) => [key, { ...value }]));
+  acc.routingTelemetry.attemptsByAssignmentId = new Map((state.routingTelemetry.attemptsByAssignmentId ?? []).map(([key, value]) => [key, { ...value }]));
   acc.routingTelemetry.terminalsByAssignmentId = new Map(state.routingTelemetry.terminalsByAssignmentId.map(([key, value]) => [key, { ...value }]));
   acc.routingTelemetry.pendingTerminalsByAssignmentId = new Map(state.routingTelemetry.pendingTerminalsByAssignmentId.map(([key, value]) => [key, { ...value }]));
   for (const bucket of state.routingTelemetry.buckets) {
