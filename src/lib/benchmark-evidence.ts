@@ -34,7 +34,7 @@ export interface BenchmarkEvidenceInput {
   asOf: string | null;
   latestSourceAt: string | null;
   /** A partial source invalidates all partial counts; never publish healthy/empty. */
-  sourceUnavailableReason?: "ledger-source-unreadable" | "ledger-source-missing" | "ledger-source-malformed" | "ledger-live-torn-tail";
+  sourceUnavailableReason?: "ledger-source-unreadable" | "ledger-source-missing" | "ledger-source-malformed" | "ledger-live-unreadable" | "ledger-live-torn-tail";
   sourceQuality?: BenchmarkSourceQuality;
 }
 

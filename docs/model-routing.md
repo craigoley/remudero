@@ -89,7 +89,9 @@ the local audit records source path, form, first/last line ordinal and count wit
 the bad payload. The benchmark response exposes only counts by source form, never paths. Its
 checkpoint retains the finding across cursor resumes and rechecks a changed archive. An incomplete
 live final line is a distinct `ledger-live-torn-tail`: the cursor resumes at that line's starting
-byte so a later completed write can recover. The dispatch-history audit keeps its prior
+byte so a later completed write can recover. An existing live path that cannot be read is
+`ledger-live-unreadable`, even when an archive still yields valid rows; repair triggers recheck.
+The dispatch-history audit keeps its prior
 best-effort posture; source-quality uncertainty does not stop a worker, review, or PR.
 Each dispatch worker now emits a distinct `worker.attempt` receipt at the shared spawn boundary;
 the projection prefers it over a run `verdict` for the same assignment. Older verdict-only rows

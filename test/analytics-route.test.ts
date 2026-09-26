@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -801,6 +801,30 @@ test("benchmark quality refuses a malformed archived ledger source", async () =>
       malformedRows: 3, malformedSources: 2, byForm: { gzip: 2, plain: 1, live: 0 }, liveTornTailRows: 0,
     });
     assert.equal(snapshot.routingTelemetry.assignmentsObserved, 1, "operational telemetry still reads valid rows");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("benchmark quality refuses an unreadable live source beside a readable archive", async () => {
+  const dir = tmpStateDir("benchmark-quality-live-unreadable-");
+  try {
+    const assignment = JSON.stringify({ ts: "2026-09-25T19:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: "a", selected: { provider: "codex", model: "model-a" }, routing: { mode: "multi-provider" } } });
+    writeGzArchive(dir, "ledger.2026-09-25T19-01-00-000Z.ndjson.gz", [assignment]);
+    const livePath = join(dir, "ledger.ndjson");
+    mkdirSync(livePath);
+    const clock = fixedClock(Date.parse("2026-09-25T20:00:00.000Z"));
+    const direct = await deriveAnalyticsSnapshotFromLedger(dir, clock);
+    assert.equal(direct.benchmarkEvidence.reason, "ledger-live-unreadable");
+    assert.equal(direct.routingTelemetry.assignmentsObserved, 1, "archive rows remain available to operational readers");
+    const checkpointed = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock);
+    assert.equal(checkpointed.snapshot.benchmarkEvidence.reason, "ledger-live-unreadable");
+    rmSync(livePath, { recursive: true });
+    writeLive(dir, [JSON.stringify({ ts: "2026-09-25T19:02:00.000Z", step: "daemon.tick" })]);
+    const repaired = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock, undefined, checkpointed.checkpoint);
+    assert.equal(repaired.snapshot.benchmarkEvidence.state, "observed");
+    assert.equal(repaired.snapshot.benchmarkEvidence.assignments, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

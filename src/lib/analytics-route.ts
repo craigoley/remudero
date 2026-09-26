@@ -742,7 +742,7 @@ interface RoutingTelemetryAccumulator {
   taskTypesByRun: Map<string, string>;
   taskClassesByRun: Map<string, string>;
   risksByRun: Map<string, string>;
-  sourceUnavailableReason?: "ledger-source-unreadable" | "ledger-source-missing" | "ledger-source-malformed" | "ledger-live-torn-tail";
+  sourceUnavailableReason?: "ledger-source-unreadable" | "ledger-source-missing" | "ledger-source-malformed" | "ledger-live-unreadable" | "ledger-live-torn-tail";
   malformedSources: Map<string, { form: "gzip" | "plain" | "live"; count: number; firstRowOrdinal: number; lastRowOrdinal: number }>;
   liveTornTailRows: number;
   benchmarkCounters: {
@@ -1432,8 +1432,9 @@ function recordBenchmarkSourceFinding(acc: RoutingTelemetryAccumulator, finding:
   }
 }
 
-function finishBenchmarkSourceQuality(acc: RoutingTelemetryAccumulator, unreadArchives: number): void {
+function finishBenchmarkSourceQuality(acc: RoutingTelemetryAccumulator, unreadArchives: number, unreadLive: number): void {
   if (unreadArchives > 0) acc.sourceUnavailableReason = "ledger-source-unreadable";
+  else if (unreadLive > 0) acc.sourceUnavailableReason = "ledger-live-unreadable";
   else if (acc.malformedSources.size > 0) acc.sourceUnavailableReason = "ledger-source-malformed";
   else if (acc.liveTornTailRows > 0) acc.sourceUnavailableReason = "ledger-live-torn-tail";
 }
@@ -1652,17 +1653,19 @@ export async function deriveAnalyticsSnapshotFromLedger(
     acc.routingTelemetry.sourceUnavailableReason = "ledger-source-missing";
   }
   let unreadArchives = 0;
+  let unreadLive = 0;
   for await (const line of openLedgerUnion(stateDir, {
     dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
     signal,
     onUnreadArchive: () => { unreadArchives += 1; },
+    onUnreadLive: () => { unreadLive += 1; },
     onMalformedRow: (finding) => recordBenchmarkSourceFinding(acc.routingTelemetry, finding),
   })) {
     signal?.throwIfAborted();
     accumulateAnalyticsLine(acc, line);
   }
   signal?.throwIfAborted();
-  finishBenchmarkSourceQuality(acc.routingTelemetry, unreadArchives);
+  finishBenchmarkSourceQuality(acc.routingTelemetry, unreadArchives, unreadLive);
   return snapshotFromAccumulator(acc, clock.iso(), options);
 }
 
@@ -1891,6 +1894,7 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
     : resumeCheckpoint?.source.liveOffset ?? 0;
   const accepted: Array<{ step: string; fingerprint: string }> = [];
   let unreadArchives = 0;
+  let unreadLive = 0;
   let tornLiveStartOffset: number | undefined;
   const union = openLedgerUnion(stateDir, {
     dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
@@ -1898,6 +1902,7 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
     ...(resumeCheckpoint !== undefined && resumeCheckpoint.source.lastArchive !== null ? { afterRotation: resumeCheckpoint.source.lastArchive } : {}),
     ...(resumeCheckpoint ? { liveStartOffset: liveOffset, dedupeSeed: resumeCheckpoint.tail } : {}),
     onUnreadArchive: () => { unreadArchives += 1; },
+    onUnreadLive: () => { unreadLive += 1; },
     onMalformedRow: (finding) => {
       recordBenchmarkSourceFinding(acc.routingTelemetry, finding);
       if (finding.kind === "live-torn-tail" && finding.resumeOffset !== undefined) {
@@ -1915,7 +1920,7 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
     accumulateAnalyticsLine(acc, line);
   }
   signal?.throwIfAborted();
-  finishBenchmarkSourceQuality(acc.routingTelemetry, unreadArchives);
+  finishBenchmarkSourceQuality(acc.routingTelemetry, unreadArchives, unreadLive);
   const snapshot = snapshotFromAccumulator(acc, clock.iso(), options);
   const source = checkpointSource(stateDir) ?? currentSource ?? { archives: [], live: null, lastArchive: null, liveOffset: 0 };
   if (tornLiveStartOffset !== undefined) source.liveOffset = Math.min(source.liveOffset, tornLiveStartOffset);
