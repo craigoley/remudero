@@ -579,6 +579,7 @@ export function exerciseOrphanSweepSigkill(mode, opts = {}) {
     if (!pid) return unreachable("spawned child reported no pid");
     child.unref();
 
+    let groupConfirmedGone = false;
     try {
       const runId = "recovery-drill-orphan-run";
       const taskId = "RECOVERY-DRILL-ORPHAN";
@@ -599,13 +600,14 @@ export function exerciseOrphanSweepSigkill(mode, opts = {}) {
 
       const reportedKilled = report.killed.some((k) => k.pid === pid);
       const actuallyDead = awaitProcessGroupGoneSync(pid, mode === "healthy" ? 5000 : 500);
+      groupConfirmedGone = actuallyDead;
       if (mode === "healthy") {
         return ran(reportedKilled && actuallyDead, `reported-killed=${reportedKilled} actually-dead=${actuallyDead}`);
       }
       const falseClean = reportedKilled && !actuallyDead;
       return ran(!falseClean, `reported-killed=${reportedKilled} actually-dead=${actuallyDead}`);
     } finally {
-      killProcessGroup(pid); // best-effort real cleanup, regardless of mode or outcome above
+      if (!groupConfirmedGone) killProcessGroup(pid);
     }
   });
 }

@@ -227,7 +227,7 @@ test("W1-T2699 (3): the credential helper answers over the socket with a per-req
 
     // Nothing was written into either the worktree or the scratch dir the socket itself lives in —
     // the reply travels ONLY over the connection.
-    assert.deepEqual(readdirSync(scratch).sort(), before.length ? before : ["cred.sock"], "no new file must appear beside the socket");
+    assert.deepEqual(readdirSync(scratch).filter((name) => name !== "cred.sock").sort(), before, "no new file must appear beside the socket");
     assert.throws(() => readdirSync(worktree), "the worktree directory must never even be created by this helper");
   } finally {
     await handle.close();
