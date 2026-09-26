@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { parseInstanceRegistry } from "../src/lib/instance-registry.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { OpenPrView } from "../src/lib/sweep.js";
 import type { Config } from "../src/lib/config.js";
@@ -62,7 +63,7 @@ test("an instance with no mode stays live", () => {
 test("an invalid or unreadable registry does not invent shadow mode", () => {
   assert.throws(() => parseInstanceRegistry(registry("bogus")), /not "shadow" or "live"/);
   assert.equal(instanceMode("owner/repo", registry("bogus")), "live");
-  const root = mkdtempSync(join(tmpdir(), "shadow-registry-absent-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}shadow-registry-absent-`));
   try {
     assert.equal(readInstanceRegistryText(root), undefined);
   } finally {
