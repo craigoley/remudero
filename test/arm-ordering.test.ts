@@ -160,7 +160,7 @@ test("a refusal's ledgered reason describes the refusal, never the semantic gate
 test("armOutcomeReason maps every outcome to a reason about that outcome", () => {
   const all: Array<ArmOutcome | "skipped"> = [
     "armed", "direct-merged", "ledger-refused", "no-task-id",
-    "head-unavailable", "direct-merge-failed", "arm-error-ignored", "skipped",
+    "head-unavailable", "direct-merge-failed", "arm-error-ignored", "stack-parent-refused", "skipped",
   ];
 
   const reasons = all.map((o) => armOutcomeReason(o, "verdict is a full PASS"));

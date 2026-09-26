@@ -8,10 +8,12 @@ import {
   armFailureAction,
   disarmAutoMerge,
   logArmAttribution,
+  stackPrerequisiteFromRest,
   type ArmAttemptResult,
   type ArmLane,
   type ArmOutcome,
   type DisarmOutcome,
+  type StackPrerequisiteCheck,
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
@@ -1324,6 +1326,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "updateBranch",
   "captureRepairFeedback",
   "disarmAutoMerge",
+  "stackPrerequisite",
+  "withdrawStackAutoMerge",
   "requeueCheck",
   "escalateCancelledCheck",
   "escalateInfrastructureCheck",
@@ -1368,6 +1372,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readyDraft"
   | "captureRepairFeedback"
   | "disarmAutoMerge"
+  | "stackPrerequisite"
+  | "withdrawStackAutoMerge"
   | "requeueCheck"
   | "escalateCancelledCheck"
   | "escalateInfrastructureCheck"
@@ -1850,6 +1856,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     disarmAutoMerge: (pr) => {
       disarmImpl(pr.prUrl);
     },
+
+    // W1-T4581 — a pre-existing GitHub auto-merge request can land without another arm attempt.
+    stackPrerequisite: (pr) => stackPrerequisiteFromRest(pr.prUrl, ghJsonForBuild),
+    withdrawStackAutoMerge: (pr) => disarmImpl(pr.prUrl),
 
     repairMissingTaskTrailer: async (pr, repair) => {
       await updatePrBodyImpl(pr.prUrl, repair.repairedBody);
@@ -7612,7 +7622,9 @@ export type ArmOutcomeName =
   | "hold-refused"
   // W1-T3551: refused because the PR is a draft — GitHub refuses auto-merge on a draft. A
   // deliberate refusal, mirrored here for the same reason every other member is.
-  | "draft-refused";
+  | "draft-refused"
+  // W1-T4581: declared stack parents are not all merged, or their state could not be read.
+  | "stack-parent-refused";
 
 /** W1-T1117: `armFailureAction`'s return, mirrored here for the same reason
  *  {@link ArmOutcomeName} is. `"direct-merge"` is deliberately absent: that class never reaches an
@@ -7661,6 +7673,10 @@ export interface SweepDeps {
    *  GitHub's live armed bit, so this fires EVERY pass the hold stands and the PR reads armed, and
    *  zero times once that bit reads false. SAFE WHEN NOT ARMED, so no extra probe is needed. */
   disarmAutoMerge?: (pr: OpenPrView, hold: AutomergeHold) => void | Promise<void>;
+  /** W1-T4581 — inspect an already-armed PR's explicit stack chain before GitHub can merge it. */
+  stackPrerequisite?: (pr: OpenPrView) => StackPrerequisiteCheck;
+  /** W1-T4581 — withdraw an already-armed PR whose declared parent chain is not fully merged. */
+  withdrawStackAutoMerge?: (pr: OpenPrView) => DisarmOutcome | void | Promise<DisarmOutcome | void>;
   /** W1-T4415 — mark one open draft PR ready for review. Called for EVERY draft, whatever its checks. */
   readyDraft?: (pr: OpenPrView) => void | Promise<void>;
   /** Close a superseded/abandoned PR with a stated reason. */
@@ -8209,6 +8225,18 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const absentRepushes = new Map<number, { count: number; shas: Set<string> }>();
   const missingTaskTrailerRepairs = new Set<string>();
   for (const line of lines) {
+    // W1-T4581 — a stack-parent refusal can follow an earlier successful arm on this exact head.
+    // The refusal/withdrawal invalidates that old dedup marker; otherwise the child would remain
+    // suppressed even after its parents merge and GitHub's auto-merge bit is false.
+    if (
+      line.step === "automerge.arm_skipped" &&
+      line.outcome === "stack-parent-refused" &&
+      typeof line.pr_number === "number" &&
+      typeof line.head_sha === "string"
+    ) {
+      armed.delete(`${line.pr_number}@${line.head_sha}`);
+      continue;
+    }
     // W1-T254/W1-T1213: OUTCOME-KEYED, off the review lane's OWN ledger lines — never
     // `sweep.disposed`. See PriorActions.reviewDelivered/reviewRefused's docs.
     if (line.step === "review.posted" || line.step === "review.post_refused") {
@@ -9473,6 +9501,51 @@ export async function runSweep(
     // `undefined` on a lazy-recompute miss and a conflicted PR (zero check runs, by construction)
     // fell through to the checks-none rules meant for a genuinely mergeable-but-quiet head.
     const { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines);
+    let stackParentWithdrawal:
+      | { check: StackPrerequisiteCheck; outcome?: DisarmOutcome; error?: string }
+      | undefined;
+    // W1-T4581 — GitHub can merge an already-armed PR without another daemon arm attempt. Inspect
+    // every observed arm before this PR's disposition can run; unreadable stack state withdraws
+    // just like an unmerged parent. An explicit operator hold owns its existing withdrawal path.
+    if (
+      deps.dryRun !== true &&
+      pr.autoMergeArmed === true &&
+      automergeHoldFromLedger(ledgerLines, pr.prNumber) === undefined &&
+      deps.stackPrerequisite &&
+      deps.withdrawStackAutoMerge
+    ) {
+      let check: StackPrerequisiteCheck;
+      try {
+        check = deps.stackPrerequisite(pr);
+      } catch (e) {
+        // A failed stack read must remain a refusal, not become permission for GitHub to merge.
+        check = {
+          state: "unreadable",
+          parentNumbers: [],
+          detail: `stack prerequisite read threw: ${String((e as Error)?.message ?? e)}`,
+        };
+      }
+      if (check.state !== "unstacked" && check.state !== "ready") {
+        let outcome: DisarmOutcome | void = undefined;
+        let error: string | undefined;
+        try {
+          outcome = await deps.withdrawStackAutoMerge(pr);
+        } catch (e) {
+          // Keep withdrawal failure visible so an operator can distinguish it from a successful disarm.
+          error = String((e as Error)?.message ?? e);
+        }
+        stackParentWithdrawal = { check, ...(outcome !== undefined ? { outcome } : {}), ...(error ? { error } : {}) };
+        logArmAttribution(log, "stack-parent-refused", pr.prUrl, pr.taskId, "sweep", {
+          outcome: "stack-parent-refused",
+          reason: check.detail ?? "a declared stack parent is not merged or its state is unreadable",
+          decision_reason: "an existing GitHub auto-merge request was withdrawn before the stack was ready",
+          head_sha: pr.headSha,
+          stack_parent_numbers: check.parentNumbers,
+          withdrawal: error ? "error" : outcome ?? "unknown",
+          ...(error ? { withdrawal_error: error } : {}),
+        });
+      }
+    }
     let { disposition, reason } = postReviewFailureHistoryDisposition(pr, prior, policy, now) ?? deriveDisposition(pr, policy, now);
     if (inheritedMergeState) {
       reason =
@@ -9605,7 +9678,10 @@ export async function runSweep(
         // correctly-held #2432 as a never-clearing dedup. Order matches the `||` above, so a reader
         // learns the FIRST true disjunct — the one that actually short-circuited `alreadyDone`.
         if (armedByGitHub) {
-          dedupStandDownReason = "auto-merge already armed (observed on GitHub) — nothing to re-arm";
+          dedupStandDownReason = stackParentWithdrawal
+            ? `existing auto-merge withdrawal ${stackParentWithdrawal.error ? "failed" : stackParentWithdrawal.outcome ?? "attempted"}: ` +
+              (stackParentWithdrawal.check.detail ?? "declared stack parents are not all merged")
+            : "auto-merge already armed (observed on GitHub) — nothing to re-arm";
         } else if (armedByPriorPass) {
           dedupStandDownReason = `auto-merge already armed by a prior sweep pass at this head (${pr.headSha.slice(0, 7)})`;
         } else if (refused) {
