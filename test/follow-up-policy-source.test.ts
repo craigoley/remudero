@@ -51,7 +51,7 @@ test("notification policy rejects an invalid timezone and the operator-agent pat
   assert.equal(evaluateOperatorAgentFollowUp(candidate, Date.parse("2026-09-21T11:00:00.000Z")).state, "eligible");
 });
 
-test("the operator-agent follow-up read route returns durable ledger history", () => {
+test("the operator-agent follow-up read route returns durable ledger history", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-follow-up-route-"));
   try {
     const ledgerPath = join(root, "state", "ledger.ndjson");
@@ -64,7 +64,8 @@ test("the operator-agent follow-up read route returns durable ledger history", (
       },
     } as unknown as import("node:http").ServerResponse;
     const route = buildOperatorAgentFollowUpReadRoute({ ledgerPath, now: () => Date.parse("2026-09-21T11:00:00.000Z") });
-    route.handler({} as import("node:http").IncomingMessage, response, { params: {} });
+    // W1-T4567: the route reads through a rotation memo, so its handler is async.
+    await route.handler({} as import("node:http").IncomingMessage, response, { params: {} });
     assert.deepEqual(JSON.parse(body), { followUps: [{ ...candidate, state: "scheduled", attempts: 0, events: [] }], source: "ledger" });
   } finally {
     rmSync(root, { recursive: true, force: true });

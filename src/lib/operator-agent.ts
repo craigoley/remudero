@@ -52,9 +52,8 @@ import {
 } from "./experiment-promotion.js";
 import {
   evaluateFollowUpPolicy,
-  readFollowUpHistory,
+  createFollowUpHistoryReader,
   type FollowUpCandidate,
-  type FollowUpHistory,
 } from "./follow-up-policy.js";
 import {
   classifyConsequenceAction,
@@ -2406,10 +2405,6 @@ export function buildOperatorAgentConsequencesWriteRefusalRoutes(): Route[] {
   }));
 }
 
-function followUpHistory(deps: OperatorAgentRouteDependencies): FollowUpHistory[] {
-  return readFollowUpHistory(deps.ledgerPath, clockFromMillisFn(deps.now).now());
-}
-
 /** The operator-agent execution seam delegates policy decisions to the durable follow-up module. */
 export function evaluateOperatorAgentFollowUp(candidate: FollowUpCandidate, now?: number) {
   return evaluateFollowUpPolicy(candidate, { now });
@@ -2417,11 +2412,18 @@ export function evaluateOperatorAgentFollowUp(candidate: FollowUpCandidate, now?
 
 /** GET /v1/operator-agent/follow-ups — durable follow-up candidates and receipts. */
 export function buildOperatorAgentFollowUpReadRoute(deps: OperatorAgentRouteDependencies): Route {
+  // W1-T4567: one rotation memo per route, so a repeated read parses only the live file.
+  const readHistory = createFollowUpHistoryReader();
+  // Prewarm the memo off the request path, so the first read after a restart is not the one that pays.
+  readHistory(deps.ledgerPath, clockFromMillisFn(deps.now).now()).catch(() => undefined /* deliberate: a failed prewarm only means the first request loads the memo itself, and that request surfaces its own read failure */);
   return {
     method: "GET",
     path: "/v1/operator-agent/follow-ups",
     scope: "read",
-    handler: (_req, res) => sendJson(res, 200, { followUps: followUpHistory(deps), source: "ledger" }),
+    handler: async (_req, res) => {
+      const followUps = await readHistory(deps.ledgerPath, clockFromMillisFn(deps.now).now());
+      sendJson(res, 200, { followUps, source: "ledger" });
+    },
   };
 }
 

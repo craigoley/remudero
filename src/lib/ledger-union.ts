@@ -843,6 +843,29 @@ export function readLedgerUnionRecordsSync(
   };
 }
 
+/**
+ * W1-T4567 — {@link readLedgerUnionRecordsSync} over EVERY rotation, answered from a
+ * {@link createLedgerRotationMemo}: a repeated request parses only the live file, because a rotation is
+ * written once. The first request, and any request after a new rotation lands, loads what the memo is
+ * missing off the event loop (`load`) and reads again. `status.ts`'s `readLedgerUnionMemoized` is the
+ * same loop for the capped board window; this one keeps the full corpus a durable history needs.
+ */
+export async function readLedgerUnionRecordsMemoized(
+  stateDir: string,
+  memo: LedgerRotationMemo,
+  opts: LedgerUnionRecordReadOptions = {},
+  fsDeps: LedgerGrepFsDeps = realLedgerFs,
+): Promise<LedgerUnionRecordRead> {
+  let pass = memo.pass();
+  let read = readLedgerUnionRecordsSync(stateDir, { ...opts, rotationRecords: pass.rotationRecords }, fsDeps);
+  while (!pass.complete()) {
+    await memo.load(pass.missing());
+    pass = memo.pass();
+    read = readLedgerUnionRecordsSync(stateDir, { ...opts, rotationRecords: pass.rotationRecords }, fsDeps);
+  }
+  return read;
+}
+
 export function resolveLedgerUnion(
   stateDir: string,
   pattern: string | RegExp,
