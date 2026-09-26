@@ -176,6 +176,7 @@ test("run branches receive the Remudero-Task body trailer before REST pull creat
   assert.ok(bodyArg, "the REST create must carry the checked body");
   const body = bodyArg.slice("body=".length);
   assert.match(body, /^Remudero-Task: W1-T4420$/m, "the branch's task trailer must be in the body before POST");
+  assert.equal((body.match(/^Remudero-Task:/gm) ?? []).length, 1, "W1-T4577: the only trailer is the branch's own, never one read from this checkout's commits");
   assert.deepEqual(parseAcceptanceBlock(body), criteria.map(({ claim, proof }) => ({ claim, proof })));
   assert.deepEqual(checkedProofs, criteria.map((criterion) => criterion.proof));
   assert.deepEqual(built.args.slice(0, 4), ["api", "--method", "POST", "repos/o/r/pulls"]);
