@@ -27,9 +27,6 @@
 // cannot quietly reintroduce the discard this task closes.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-// W1-T2731: a real import — see the note above `extractClientSlice`, which stays for
-// `renderAccountUsage`, a DOM-driving function that could not travel to the module.
-import { usageWindowLabel } from "../src/lib/console-shell-script.js";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -42,7 +39,7 @@ import {
   readAccountUsageFile,
   type AccountUsageInput,
 } from "../src/lib/account-usage.js";
-import { ACCOUNT_FILE_PATH_ENV, renderShellHtml, resolveAccountFilePath } from "../src/lib/serve.js";
+import { ACCOUNT_FILE_PATH_ENV, resolveAccountFilePath } from "../src/lib/serve.js";
 
 const FIXTURE = fileURLToPath(new URL("./fixtures/account-usage/claude-json.json", import.meta.url));
 const CAPTURED_AT = 1785516413209;
@@ -204,82 +201,6 @@ test("W1-T2434: identity is returned for every usage-unknown reason EXCEPT unrea
     "undefined",
     "the account-mismatch guard's own input is absent on the unreadable branch — this is why fixing the path matters beyond display",
   );
-});
-
-// ── (4) EVERY FIELD THAT GOES UNKNOWN NOW CARRIES ITS REASON, NOT A BARE WORD ────────────────────
-// Pulled out of the REAL rendered shell, never a reimplementation — the same `new Function`
-// verbatim-extraction discipline test/account-usage.test.ts and test/console-shell-unknowns.test.ts
-// already use for this exact template.
-
-function extractClientSlice(startMarker: string, endMarker: string): string {
-  const script = [...renderShellHtml().matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)]
-    .map((match) => match[1]!)
-    .find((candidate) => candidate.includes(startMarker)) ?? "";
-  const start = script.indexOf(startMarker);
-  const end = script.indexOf(endMarker, start);
-  assert.ok(start >= 0 && end > start, `expected to find ${startMarker}…${endMarker} in the rendered shell`);
-  return script.slice(start, end);
-}
-
-test("W1-T2434: the five-hour and seven-day fields render the unknown REASON, not a bare 'unknown'", () => {
-  // W1-T2731: a real import now — see this file's own note above `extractClientSlice`, which
-  // remains for `renderAccountUsage`, a DOM-driving function that could NOT travel to the module.
-  const label = usageWindowLabel as (w: unknown, reason?: string) => string;
-
-  assert.equal(label(undefined, "too-old"), "unknown (too-old)", "the reason travels onto the five-hour/seven-day fields now");
-  assert.equal(label(undefined, "unreadable"), "unknown (unreadable)");
-  assert.equal(label(undefined, "account-mismatch"), "unknown (account-mismatch)");
-  assert.equal(label(undefined, "no-cache"), "unknown (no-cache)");
-  // No reason supplied (the reading is simply absent from a caller that never had one) still
-  // degrades to the bare word — never fabricates a reason that was not on the payload.
-  assert.equal(label(undefined, undefined), "unknown");
-  // A GENUINE reading is unaffected by the reason argument — the reason only ever explains an
-  // absence, it never overrides a real number.
-  assert.equal(label({ percentUsed: 0, resetsAt: "2026-08-02T04:59:59.209129+00:00" }, "too-old").startsWith("0%"), true);
-});
-
-test("W1-T2434: the account line itself carries the reason when identity is the thing that went unknown", () => {
-  const slice = extractClientSlice("function renderAccountUsage", "/** W1-T364");
-  const factory = new Function(
-    "elements",
-    [
-      "var document = { getElementById: function (id) { return elements[id] === undefined ? null : elements[id]; } };",
-      "function setGlanceValue(id, text) { var e = document.getElementById(id); if (e) e.textContent = text; }",
-      "function usageWindowLabel(w, reason) { if (!w || w.percentUsed == null) return reason ? `unknown (${reason})` : 'unknown'; return String(w.percentUsed) + '%'; }",
-      "function formatRelative() { return ''; }",
-      "function formatTimestamp() { return ''; }",
-      "function costLabel(v) { return v == null ? 'unknown' : ('$' + v); }",
-      slice,
-      "return { renderAccountUsage: renderAccountUsage };",
-    ].join("\n"),
-  ) as (els: unknown) => { renderAccountUsage: (a: unknown) => void };
-
-  function el() {
-    return { textContent: "" };
-  }
-  const elements: Record<string, { textContent: string }> = {
-    "au-account": el(),
-    "au-five-hour": el(),
-    "au-seven-day": el(),
-    "au-governor": el(),
-    "au-cost-governor": el(),
-    "au-queue-governor": el(),
-    "au-cost-ceiling": el(),
-    "au-cost-ceiling-audit": el(),
-    "au-as-of": el(),
-    "au-measures": el(),
-  };
-  const built = factory(elements);
-
-  // Identity present (every reason except "unreadable") — the real account renders, no reason text.
-  built.renderAccountUsage({ accountEmail: "operator@example.com", usageUnknownReason: "too-old", governor: "unknown", costGovernor: "unknown", queueGovernor: "unknown" });
-  assert.equal(elements["au-account"]!.textContent, "operator@example.com", "a known identity is never annotated with a usage reason");
-
-  // Identity absent — the ONLY case is "unreadable" — the account line now carries the reason,
-  // rather than the bare "unknown" the measured strip showed before this task.
-  built.renderAccountUsage({ usageUnknownReason: "unreadable", governor: "unknown", costGovernor: "unknown", queueGovernor: "unknown" });
-  assert.equal(elements["au-account"]!.textContent, "unknown (unreadable)");
-  assert.notEqual(elements["au-account"]!.textContent, "unknown", "a bare word is no longer acceptable here");
 });
 
 // ── (7) NO CREDENTIAL FIELD IS COPIED OUT, AND THE PARSED OBJECT NEVER ESCAPES ───────────────────

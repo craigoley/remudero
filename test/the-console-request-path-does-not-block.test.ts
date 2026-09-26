@@ -333,20 +333,6 @@ test("a throwing cached JSON route returns its stale fallback with the failure r
   assert.equal(body.staleness?.reason, "refresh exploded");
 });
 
-test("the document shell is served live and reports an unreadable checkout sha", async () => {
-  const deps = depsFor(tmpRoot());
-  deps.resolveCurrentSha = () => {
-    throw new Error("git unavailable");
-  };
-  await withServeServer(deps, async (base) => {
-    const res = await fetch(`${base}/`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
-    assert.equal(res.headers.get("x-rmd-cache-state"), null);
-    const html = await res.text();
-    assert.match(html, /data-idle-reasons="unknown"/);
-    assert.match(html, /console-code-unknown/);
-  });
-});
-
 test("an injected inbox digest reader returns directly through the real route", async () => {
   const route = buildInboxDigestsRoute({
     root: tmpRoot(),

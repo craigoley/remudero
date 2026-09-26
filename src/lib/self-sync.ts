@@ -539,6 +539,39 @@ function reviewerGit(repoDir: string, deps: ReviewerCodeFreshnessOptions): GitRu
   return deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], options));
 }
 
+/** Only the merge-base..main side can make loaded reviewer code stale. */
+function reviewerMainAdvance(
+  git: GitRunner,
+  codeSha: string,
+  originMainSha: string,
+  knownBehindPaths?: readonly string[],
+  knownDiffError?: string,
+): ReviewerCodeFreshness {
+  let base: string;
+  try {
+    base = git(["merge-base", codeSha, originMainSha]).trim();
+  } catch (error) {
+    return { status: "unreadable", reason: `could not inspect reviewer code ancestry: ${String(error)}` };
+  }
+  if (!base) return { status: "unreadable", reason: "could not inspect reviewer code ancestry: empty merge base" };
+  if (base === originMainSha) return { status: "fresh", codeSha, originMainSha, advance: "none" };
+  if (base === codeSha && knownDiffError) {
+    return { status: "unreadable", reason: `could not inspect reviewer code advance: ${knownDiffError}` };
+  }
+  let changedPaths: string[];
+  try {
+    changedPaths = base === codeSha && knownBehindPaths !== undefined
+      ? [...knownBehindPaths]
+      : git(["diff", "--name-only", `${base}..${originMainSha}`]).split("\n").map((path) => path.trim()).filter(Boolean);
+  } catch (error) {
+    return { status: "unreadable", reason: `could not inspect reviewer code advance: ${String(error)}` };
+  }
+  if (reviewAdvanceIsMaterialAt(changedPaths, git, base, originMainSha)) {
+    return { status: "stale", codeSha, originMainSha, changedPaths, ...(knownBehindPaths !== undefined ? { diffUnreadable: knownDiffError } : {}) };
+  }
+  return { status: "fresh", codeSha, originMainSha, advance: "immaterial" };
+}
+
 function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFreshnessOptions): ReviewerCodeFreshness {
   const git = reviewerGit(repoDir, deps);
   try {
@@ -555,20 +588,7 @@ function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFr
     return { status: "unreadable", reason: `could not resolve HEAD/origin/main in ${repoDir}: ${String(error)}` };
   }
   if (codeSha === originMainSha) return { status: "fresh", codeSha, originMainSha, advance: "none" };
-  let changedPaths: string[] | undefined;
-  let diffUnreadable: string | undefined;
-  try {
-    changedPaths = git(["diff", "--name-only", `${codeSha}..${originMainSha}`])
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
-  } catch (error) {
-    return { status: "unreadable", reason: `could not inspect reviewer code advance: ${String(error)}` };
-  }
-  if (reviewAdvanceIsMaterialAt(changedPaths, git, codeSha, originMainSha)) {
-    return { status: "stale", codeSha, originMainSha, changedPaths };
-  }
-  return { status: "fresh", codeSha, originMainSha, advance: "immaterial" };
+  return reviewerMainAdvance(git, codeSha, originMainSha);
 }
 
 /**
@@ -816,10 +836,7 @@ export function checkReviewerCodeFreshness(
 
   if (service.behind) {
     const { oldSha, newSha, changedPaths, diffUnreadable } = service.behind;
-    if (reviewAdvanceIsMaterialAt(changedPaths, reviewerGit(repoDir, deps), oldSha, newSha)) {
-      return { status: "stale", codeSha: oldSha, originMainSha: newSha, changedPaths, diffUnreadable };
-    }
-    return { status: "fresh", codeSha: oldSha, originMainSha: newSha, advance: "immaterial" };
+    return reviewerMainAdvance(reviewerGit(repoDir, deps), oldSha, newSha, changedPaths, diffUnreadable);
   }
 
   const resolveHeadSha =

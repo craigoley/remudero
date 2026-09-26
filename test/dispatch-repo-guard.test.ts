@@ -3,7 +3,6 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { normalizeRepoName, taskTargetsRepo, runnableCandidates, tallyDispatchFilters } from "../src/lib/drain.js";
-import { IDLE_REASON_ORDER } from "../src/lib/idle-reasons-panel.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { DispatchFilterReason } from "../src/lib/drain.js";
 
@@ -137,13 +136,6 @@ test("W1-T988: the repo refusal is counted in the daemon idle reasons row", () =
   assert.equal(total, 1, `exactly one decline across every bucket; got ${JSON.stringify(snapshot)}`);
 });
 
-test("W1-T988: the panel's own order is deliberately NOT extended, or every historical row breaks", () => {
-  // The panel returns `kind: "unknown"` the moment any LISTED key is missing from a row, so adding
-  // the new key to IDLE_REASON_ORDER would make EVERY historical row unreadable. The asymmetry is
-  // load-bearing and already exists: `continued-this-pass` is in the union and not in this order.
-  assert.ok(!(IDLE_REASON_ORDER as readonly string[]).includes("foreign-repo"), "the new reason must NOT be in the panel order");
-  assert.ok(!(IDLE_REASON_ORDER as readonly string[]).includes("continued-this-pass"), "control: the precedent for that asymmetry is already here");
-});
 
 test("W1-T988: the daemon threads its target to the gate, and run-task threads it to the daemon", () => {
   // WITHOUT THIS THE WIRING IS UNPROVEN. Every test above drives `runnableCandidates` with an

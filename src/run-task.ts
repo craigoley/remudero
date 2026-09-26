@@ -21,6 +21,7 @@ const GIT_UNTRACKED_FILES_ALL = "--untracked-files=all";
 import {
   architectModel,
   configPath as instanceConfigPath,
+  consoleAppUrl,
   consoleUrl,
   fixStrikeCap,
   globalArtifactPath,
@@ -623,12 +624,9 @@ import {
   resolveServiceTokens,
   SERVE_EXPECTED_BRANCH,
   serviceTokensPath,
-  consoleBuildBannerLine,
-  consoleBuildRealpath,
-  consoleBuildStatus,
+  defaultIsListening,
 } from "./lib/serve.js";
 import { runRelayClient } from "./lib/relay-client.js";
-import { consoleUrlCommand, defaultIsListening } from "./lib/console-url.js";
 import { assertProposedPlanLoads,
   buildGrillEscalation,
   decideTriage,
@@ -882,6 +880,7 @@ import {
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
+import { benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources } from "./lib/benchmark-run.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -1221,6 +1220,7 @@ import {
   reviewEvidenceStrength,
   claimReviewDecision,
   reviewDecisionDigest,
+  reviewReservationOwnershipEvidence,
   reviewContractDigest,
   reviewInputDigest,
   cappedReason,
@@ -2202,6 +2202,7 @@ import {
   excludeNodeModulesFromGit,
   linkWorktreeNodeModules, resolveNodeModulesSource,
   worktreeAdd,
+  worktreeAddAsync,
   worktreeLockIsPidAlive,
   worktreeRemove,
   worktreesDir,
@@ -2522,22 +2523,11 @@ export function writeSyncLine(fd: 1 | 2, line: string): void {
  *  enforces for every other step in that set. */
 export const WORKER_STATE_LEDGER_STEP = "worker.state";
 
-/**
- * W1-T2557: THE MID-FLIGHT TURN-COUNT ROW — appended the instant {@link
- * WorkerStateTracker.turnsSoFar} CHANGES, independent of `worker.state`'s own TRANSITION-only
- * cadence (design note iii, above). A worker that stays continuously `working` for the whole
- * run would otherwise emit exactly ONE `worker.state` row for the entire spawn — this is the row
- * that stays fresh while the run is happening, closing the gap this task's own rationale names:
- * "every cost signal there is fires AFTER `implement.done`". Also deliberately NOT added to
- * `DECISION_RELEVANT_LEDGER_STEPS` — nothing decides off it, same reasoning as `worker.state`.
- */
-export const WORKER_TURNS_LEDGER_STEP = "worker.turns";
-
-/** One bounded, structured row per observed stream event. Unlike `worker.state` (transitions)
- *  and `worker.turns` (count changes), this is the operator-facing activity ledger: it gives the
- *  console a real tool name, a bounded rationale, tool timing/outcome, and heartbeat cadence
- *  without exposing prompts, tool arguments, or tool output. It is diagnostic telemetry only and
- *  must never become a dispatch decision input. */
+/** One bounded, structured row per observed stream event. Unlike `worker.state` (transitions),
+ *  this carries `turns_so_far` whenever the stream event supplies it, keeping the running count
+ *  visible during a spawn. It gives the console a real tool name, a bounded rationale, tool
+ *  timing/outcome, and heartbeat cadence without exposing prompts, tool arguments, or tool
+ *  output. It is diagnostic telemetry only and must never become a dispatch decision input. */
 export const WORKER_ACTIVITY_LEDGER_STEP = "worker.activity";
 
 /**
@@ -2680,7 +2670,6 @@ export function buildWorkerStateSensor(args: {
   // site resolves one (or a derivation failure leaves it unset), meaning the runaway signal
   // stays silent rather than guessing.
   let runawayBoundTurns: number | undefined;
-  let lastEmittedTurns: number | undefined;
   let runawaySignaled = false;
   let lastWorkerText: string | undefined;
   let activeTool: { name: string; startedAtMs: number; reason?: string } | undefined;
@@ -2702,33 +2691,12 @@ export function buildWorkerStateSensor(args: {
   };
 
   /**
-   * W1-T2557: THE MID-FLIGHT VISIBILITY THIS TASK ADDS — called on EVERY observed stream event
-   * (the observer already parses every one; this task's own rationale calls a running count on
-   * the row it already writes "close to free"), never gated behind a `worker.state` TRANSITION
-   * (which a continuously-`working` worker can go the WHOLE run without firing again — exactly
-   * the invisible-while-spending gap this task exists to close). Two independent, best-effort,
-   * NEVER-ACTING appends:
-   *   - `worker.turns`, the instant the running count CHANGES (never a duplicate row for the
-   *     same count — the same "only on change" discipline `recordTransition` already keeps).
-   *   - `worker.runaway_turns`, AT MOST ONCE per run, the instant the count first clears
-   *     `runawayBoundTurns` — a REPORT, never a kill/defer: this function has no kill/defer
-   *     affordance to reach for even if it wanted to (acceptance: "it observes and never acts").
+   * W1-T2557: check the running count on every observed stream event. `worker.activity` already
+   * carries the event's count while the spawn is in flight. Append `worker.runaway_turns` AT MOST
+   * ONCE per run, when the count first clears `runawayBoundTurns` — a report, never a kill/defer.
    */
   const observeTurns = (): void => {
     const current = tracker.turnsSoFar();
-    if (current !== lastEmittedTurns) {
-      lastEmittedTurns = current;
-      try {
-        appendLedger(args.ledgerPath, {
-          run_id: args.runId,
-          task_id: args.taskId,
-          step: WORKER_TURNS_LEDGER_STEP,
-          turns_so_far: current,
-        });
-      } catch {
-        // Best-effort — same discipline as `recordTransition`'s own catch above.
-      }
-    }
     if (!runawaySignaled && runawayBoundTurns !== undefined && current > runawayBoundTurns) {
       runawaySignaled = true;
       try {
@@ -6412,8 +6380,9 @@ async function runReview(args: {
   const diff = ghExec(["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
   const scopeContext = reviewScopeContext(diff, task.files);
   const criteria = task.acceptance ?? [];
+  const ownership = reviewReservationOwnershipEvidence(diff, args.headRefName, args.headCheckoutDir);
   const decisionDigest = reviewDecisionDigest({
-    headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files,
+    headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership,
   });
   const decisionClaim = await claimReviewDecision({
     ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest, headCheckoutDir: args.headCheckoutDir,
@@ -6616,6 +6585,7 @@ async function runReview(args: {
     report,
     planLint,
     headRefName: args.headRefName,
+    reservationOwnership: ownership,
     implementationReport: args.implementationReport,
     target: { owner, repo },
     // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
@@ -13811,6 +13781,102 @@ export function predecessorTranscriptPromptLines(paths: readonly string[]): stri
   ];
 }
 
+export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<string, unknown>) => void) {
+  const assignments = new Set<string>();
+  let work: { taskClass?: string; risk?: string } = {};
+  return (step: string, extra: Record<string, unknown> = {}): void => {
+    if (step === "run.start") {
+      work = {
+        ...(typeof extra.task_class === "string" ? { taskClass: extra.task_class } : {}),
+        ...(typeof extra.risk === "string" ? { risk: extra.risk } : {}),
+      };
+    }
+    let fields: Record<string, unknown>;
+    let durableAssignmentId: string | undefined;
+    try {
+      const assignment = step === "worker.assignment" ? extra.worker_assignment : undefined;
+      let benchmarkRun: ReturnType<typeof benchmarkRunAssignmentReceipt> | ReturnType<typeof benchmarkRunTerminalReceipt>
+        | ReturnType<typeof benchmarkRunAttemptReceipt>;
+      if (assignment && typeof assignment === "object" && !Array.isArray(assignment)) {
+        const selected = assignment as Parameters<typeof benchmarkRunAssignmentReceipt>[0];
+        if (typeof selected.id === "string" && selected.id.length > 0 && selected.requested && selected.selected) {
+          benchmarkRun = benchmarkRunAssignmentReceipt(selected, work);
+          durableAssignmentId = selected.id;
+        }
+      } else if (step === "worker.attempt") {
+        const id = typeof extra.selection_assignment_id === "string" ? extra.selection_assignment_id : undefined;
+        benchmarkRun = benchmarkRunAttemptReceipt({
+          step, ...extra, assignment_observed: extra.assignment_observed !== false && id !== undefined && assignments.has(id),
+        });
+      } else if (step === "verdict") {
+        benchmarkRun = benchmarkRunTerminalReceipt(
+          { step, ...extra },
+          typeof extra.selection_assignment_id === "string" && assignments.has(extra.selection_assignment_id),
+        );
+      }
+      fields = { ...extra, ...(benchmarkRun ? { benchmark_run: benchmarkRun } : {}) };
+    } catch {
+      // Keep the source row and mark the receipt unavailable; telemetry cannot block dispatch.
+      fields = { ...extra, benchmark_run_unavailable_reason: "receipt-build-failed" };
+    }
+    if (step === "worker.attempt") {
+      // A metric write is never allowed to change a worker's actual result or retry path.
+      try { write(step, fields); } catch { /* measured as absent on the next source audit */ }
+    } else {
+      write(step, fields);
+      if (durableAssignmentId) assignments.add(durableAssignmentId);
+    }
+  };
+}
+
+/** Owns the one worker-attempt receipt on every dispatch path through the shared spawn wrapper.
+ * The call/result/error is authoritative; evidence collection cannot change any of them. */
+export function recordBenchmarkWorkerAttempt(
+  call: () => Promise<WorkerResult>,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  selected: () => { id: string } | undefined,
+  stopPolling: () => void,
+): Promise<WorkerResult> {
+  const failed = (): void => {
+    try {
+      const assignment = selected();
+      log("worker.attempt", {
+        ...(assignment ? { selection_assignment_id: assignment.id } : {}),
+        success: false,
+        worker_failure: "spawn-threw-before-result",
+      });
+    } catch { /* preserve the original worker error */ }
+  };
+  let workerCall: Promise<WorkerResult>;
+  try {
+    workerCall = call();
+  } catch (error) {
+    failed();
+    stopPolling();
+    throw error;
+  }
+  return workerCall.then((result) => {
+    try {
+      const resultId = result.selectionAssignmentId;
+      const selection = selected();
+      const assignmentId = resultId ?? selection?.id;
+      const resultEnvelopeObserved = typeof result.subtype === "string" && result.subtype.length > 0;
+      log("worker.attempt", {
+        ...(assignmentId ? { selection_assignment_id: assignmentId } : {}),
+        ...(resultId && selection && resultId !== selection.id ? { assignment_observed: false } : {}),
+        ...(result.isError || result.apiError || result.usageRefusal
+          ? { success: false }
+          : resultEnvelopeObserved ? { success: true } : {}),
+        ...benchmarkWorkerAttemptResources(result),
+      });
+    } catch { /* telemetry cannot alter the returned worker result */ }
+    return result;
+  }, (error: unknown) => {
+    failed();
+    throw error;
+  }).finally(stopPolling);
+}
+
 async function runTask(
   taskId: string,
   opts: {
@@ -14019,8 +14085,8 @@ async function runTask(
   // W1-T2528: not routed through `nextLaneEpochMs` — `taskId` is already the per-rung
   // component, and same-taskId reruns are refused earlier by the dispatch claim/inflight check.
   const runId = `${taskId}-${Date.now()}`;
-  const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...extra });
+  const log = benchmarkRunLedgerLogger((step, fields) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...fields }));
 
   // W1-T942: ONE worker-state sensor for THIS run's whole lifetime — recon, implement, and the
   // DECISION_REQUEST resume below all share it (see `buildWorkerStateSensor`'s own doc for why
@@ -14055,7 +14121,7 @@ async function runTask(
     const stopPolling = workerStateSensor.startPolling();
     let selectionAssignment: Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0] | undefined;
     const baseStreamObserver = effectiveSpawnArgs.streamObserver ?? workerStateSensor.observer;
-    return rawSpawn({
+    return recordBenchmarkWorkerAttempt(() => rawSpawn({
       ...effectiveSpawnArgs,
       // Every dispatch-phase worker inherits the run identity at the ONE wrapper that already owns its state/error telemetry, so the
       // routing assignment and terminal worker row join without inferring a task; an injected observer still runs, but after the ledger.
@@ -14086,7 +14152,7 @@ async function runTask(
       // its own `clockBound` (none exist today) is respected; every future dispatch call site
       // through this wrapper is covered without remembering to add it individually.
       clockBound: effectiveSpawnArgs.clockBound ?? { boundMs: workerAbandonMs },
-    }).finally(stopPolling);
+      }), log, () => selectionAssignment, stopPolling);
   };
   // W1-T143: a raw synchronous write, not console.log — this narration is exactly what the
   // daemon's `runOne` exercises on every dispatch, and console.log's async, non-TTY-buffered
@@ -14914,7 +14980,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // `worktree.add` line (three-way base reading + `behind`) and, on the fail-open branch,
     // `worktree.base_uncheckable` — see both functions' own docs in lib/worker.ts.
     // W1-T4193: the implement lane, and only it, refuses a same-package lockfile mismatch (the arm below defers it).
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
+    await worktreeAddAsync(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
     // LIVENESS TOKEN: mark this worktree ALIVE so a concurrent pruneStaleRuns (another
     // drain, a manual run-task) skips it instead of `--force`-removing it mid-run. The
     // lock is a SIBLING file (never inside the worktree ⇒ never committed into the PR),
@@ -26696,7 +26762,7 @@ export function buildDigestCadenceDaemonHooks(deps: {
           taskId: "DIGEST",
           channelName: "inbox",
         },
-        consoleBaseUrl: consoleUrl(config),
+        consoleBaseUrl: consoleAppUrl(config),
         // A REPORT, NEVER A MINTER (this task's own rationale): `suggestions` is the seam
         // `runDigestCadenceReport` already offers a caller-produced item through — see that
         // function's own doc ("if a caller wants a generative half, it must have already produced
@@ -29699,8 +29765,8 @@ export function pushDrainRundown(
   const rundown = buildRundown(summary, ledgerLines);
   (deps.print ?? ((line: string) => console.log(line)))("\n" + renderRundown(rundown));
   // W1-T144: the SAME sendRundown -> notify() path rmd digest/MANUAL/HARD_STOP escalations
-  // ride, each non-merged line deep-linking to its console card via consoleUrl(config).
-  return sendRundown(rundown, consoleUrl(config), {
+  // ride, each non-merged line deep-linking to its console card via consoleAppUrl(config).
+  return sendRundown(rundown, consoleAppUrl(config), {
     channel: deps.channel,
     ledgerPath: deps.ledgerPath,
     runId: deps.runId,
@@ -33636,7 +33702,6 @@ export interface UpDeps {
   loadServeService?: (plistPath: string) => void;
   servePlistExists?: (path: string) => boolean;
   sleep?: (ms: number) => Promise<void>;
-  consoleUrlCommand?: typeof consoleUrlCommand;
   liveInflightRuns?: () => LiveInflightRun[];
   planLifecycleCounts?: () => LifecycleCounts | null;
   bootPollAttempts?: number;
@@ -33653,9 +33718,8 @@ export interface UpDeps {
  * exists for: never resume a fleet against branch code) unless `--allow-off-main` is given
  * explicitly. (3) Loads the daemon launchd service. (4) Confirms/starts the serve launchd
  * service (never a foreground spawn — T152 already makes serve a service; this CONFIRMS it).
- * (5) Prints the resume report: daemon pid, the console URL WITH its READ token (via the
- * already-hardened `rmd console-url`, never a second URL-assembly implementation — and
- * deliberately the READ token, never the write one, per standing rule 24 / R-5), the
+ * (5) Prints the resume report: daemon pid, where the console is (app.remudero.com -- W1-T4563
+ * retired the daemon's own console, so no tokened localhost URL is printed any more), the
  * in-flight/queued head, and the needs-human count.
  *
  * IDEMPOTENT: when the daemon service is already loaded and serve is already listening, this
@@ -33753,9 +33817,8 @@ export async function upCommand(rest: string[], deps: UpDeps = {}): Promise<numb
           : "not listening — not installed (run `rmd serve-plist --write` first)"
     }`,
   );
-  if (serveListening) {
-    await (deps.consoleUrlCommand ?? consoleUrlCommand)(["--port", String(port), "--host", hosts.join(",")], config, { out, err });
-  }
+  // W1-T4563: the gateway serves /v1/* only; the console is its own application.
+  out(`    console:         ${consoleAppUrl(config)}`);
   out(`    in-flight/queued: ${live.length > 0 ? live.map((r) => `${r.taskId} (run ${r.runId})`).join(", ") : "none in flight"}`);
   out(`    needs-human:      ${counts ? counts.needsHuman : "unknown (GitHub unreachable)"}`);
 
@@ -34208,20 +34271,10 @@ export async function serveCommand(
   });
 
   // NO TOKEN IS PRINTED. In a container stdout is `docker logs`, readable by anyone in the docker
-  // group and kept past the process, so the banner names the tokens file and `rmd console-url`
-  // prints the tokened bookmark on demand. See resolveServiceTokens for rotation.
+  // group and kept past the process, so the banner names the tokens file. See resolveServiceTokens for rotation.
   console.log(`### rmd serve — listening on ${hosts.map((h) => `http://${h}:${port}`).join(", ")} (repo ${self.owner}/${self.repo})`);
-  for (const h of hosts) console.log(`    console:     http://${h}:${port}/ (tokened bookmark: rmd console-url)`);
-  // W1-T3176 — the console BUILD's state, on the line under the console URL, because the failure
-  // this prevents is an operator opening that URL and getting a blank tab. Absent when no build is
-  // configured (`RMD_CONSOLE_BUILD_ROOT` unset), so a daemon serving only the string shell says
-  // nothing rather than reporting a missing build it was never asked for.
-  {
-    const line = consoleBuildBannerLine(
-      consoleBuildStatus(process.env.RMD_CONSOLE_BUILD_ROOT, { realpath: consoleBuildRealpath }),
-    );
-    if (line) console.log(line);
-  }
+  // W1-T4563: this process serves the /v1 control gateway only; the console is app.remudero.com.
+  console.log(`    console:     ${consoleAppUrl(config)} (this host serves the /v1 gateway only)`);
   console.log(`    write token: ${serviceTokensPath(config.root)} (0600, not printed)`);
 
   await new Promise<void>((resolve) => {
@@ -40273,7 +40326,7 @@ export async function escalateCommand(
           taskId,
           summary,
           issueUrl: url,
-          cardUrl: consoleCardUrl(consoleUrl(config), taskId),
+          cardUrl: consoleCardUrl(consoleAppUrl(config), taskId),
           options: parseOptionFlags(rest),
         },
         { secret: linkSecret, baseUrl: consoleUrl(config), nowMs: Date.now() },
@@ -44298,7 +44351,7 @@ export interface AlertFixDispatchDeps {
     branch: string,
     startPoint: string,
     deps?: { log?: (step: string, extra?: Record<string, unknown>) => void },
-  ) => void;
+  ) => void | Promise<void>;
   worktreeRemove: (repoDir: string, worktreePath: string) => void;
   renderWorkerSettings: typeof renderWorkerSettings;
   loadMounts: typeof loadMounts;
@@ -44337,7 +44390,7 @@ export function checkAlertFixAcceptance(
 }
 
 const REAL_ALERT_FIX_DISPATCH_DEPS: AlertFixDispatchDeps = {
-  worktreeAdd,
+  worktreeAdd: worktreeAddAsync,
   worktreeRemove,
   renderWorkerSettings,
   loadMounts,
@@ -44374,7 +44427,7 @@ export async function dispatchAlertFixRun(
   const branch = `alert-fix-${originId}-${Date.now()}`;
   const worktreePath = join(worktreesDir(config), branch);
   try {
-    deps.worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
+    await deps.worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
     const settingsFile = deps.renderWorkerSettings({
       templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
       hooksDir: join(resolveInstallRoot(config), "hooks"),
@@ -45949,19 +46002,13 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "serve",
     syntax: "rmd serve [--port <n>] [--host <addr>]",
     summary: "The operator console front door: board, fleet-control, feedback inbox over HTTP.",
-    detail: "the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317 (matches apps/dashboard's own default); --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the console can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM",
+    detail: "the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and, at GET /, a one-line JSON pointer to the console at app.remudero.com (W1-T4563 retired the in-process console); bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317; --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the gateway can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM",
   },
   {
     name: "relay",
     syntax: "rmd relay",
     summary: "Tier-2 relay client: tunnel the local `rmd serve` surface out to a relay URL.",
     detail: "W1-T431: the Tier-2 relay CLIENT (MASTER-PLAN §7A/§6A, D-11) — dials OUT to the relay URL + enrollment token in per-instance config (relay.url/relay.token; never a flag, never committed) and holds a reconnecting tunnel that forwards the LOCAL rmd serve surface (REST + SSE) as a transparent byte proxy, adding no scope of its own (the console's own W1-T430 identity seam decides every grant, exactly as a direct call would). Never binds a port — outbound-only, tested invariant. Refuses (spawns nothing) when relay.url or relay.token is absent. Blocks until SIGINT/SIGTERM, same shape as `rmd serve`; `rmd serve` is a separate process and is completely unaffected whether or not this ever runs.",
-  },
-  {
-    name: "console-url",
-    syntax: "rmd console-url [--port <n>] [--host <addr>] [--write]",
-    summary: "Print the console URL carrying the read token (--write also prints the write token).",
-    detail: "print the console URL carrying the READ token — the bookmark that gets you in, one command instead of hand-extracting <config.root>/state/service-tokens.json (fb-1784772988510-da3712); prints one URL per bound interface, resolving port/host EXACTLY as `rmd serve` does (flag > RMD_SERVE_HOST > config.serve.* > 127.0.0.1:4317); --write additionally prints the WRITE token as a bare value to paste into the console (never in a URL), and REFUSES unless stdout is a TTY, because a redirected stdout becomes a file that outlives the process (R-5); reads the 0600 tokens file but never creates one — if the console has never run it says so and names the remedy; spawns nothing",
   },
   {
     name: "serve-plist",
@@ -45979,7 +46026,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "up",
     syntax: "rmd up [--port <n>] [--host <addr>] [--allow-off-main]",
     summary: "Full resume: install freshness, load daemon + serve, print a resume report.",
-    detail: "full resume (W1-T169): runs install-freshness FIRST (W1-T151 — a lockfile-changing pull triggers `npm ci` before anything starts), REFUSES to resume an off-main checkout unless --allow-off-main is given, loads the daemon launchd service, confirms/starts the serve launchd service, and prints a resume report (daemon pid, the console URL WITH its READ token via `rmd console-url`, the in-flight/queued head, needs-human count). IDEMPOTENT: already-up verifies + reports the running state, never a double start.",
+    detail: "full resume (W1-T169): runs install-freshness FIRST (W1-T151 — a lockfile-changing pull triggers `npm ci` before anything starts), REFUSES to resume an off-main checkout unless --allow-off-main is given, loads the daemon launchd service, confirms/starts the serve launchd service, and prints a resume report (daemon pid, where the console is (app.remudero.com), the in-flight/queued head, needs-human count). IDEMPOTENT: already-up verifies + reports the running state, never a double start.",
   },
   {
     name: "sync",
@@ -46817,7 +46864,6 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["install-checkout", async (rest) => await installCheckoutCommand(rest)],
   ["serve", async (rest) => await serveCommand(rest)],
   ["relay", async (rest) => await relayConnectCommand(rest)],
-  ["console-url", async (rest) => await consoleUrlCommand(rest, loadConfig())],
   ["serve-plist", async (rest) => await servePlistCommand(rest)],
   ["down", async (rest) => await downCommand(rest)],
   ["up", async (rest) => await upCommand(rest)],

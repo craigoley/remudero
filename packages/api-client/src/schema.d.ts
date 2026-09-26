@@ -898,17 +898,6 @@ export interface components {
       nextQuestion?: string;
       createdAt: string;
     };
-    FollowUpEvaluation: {
-      version: "follow-up-policy-v1";
-      candidateId: string;
-      deduplicationKey: string;
-      state: "scheduled" | "eligible" | "snoozed" | "suppressed" | "asked" | "accepted" | "rejected" | "expired" | "blocked";
-      reason: string;
-      at: string;
-      attempts: number;
-      nextAction?: string;
-      nextQuestion?: string;
-    };
     FollowUpReceipt: {
       delivered: boolean;
       answered?: boolean;
@@ -944,24 +933,6 @@ export interface components {
     FollowUpList: {
       followUps: (FollowUpHistory)[];
       source: "ledger";
-    };
-    FollowUpEvaluationRequest: {
-      candidate: FollowUpCandidate;
-      sourceTerminal?: boolean;
-      dependencyAvailable?: boolean;
-      notificationPolicy?: FollowUpNotificationPolicy;
-    };
-    FollowUpControlRequest: {
-      candidateId: string;
-      control: "snooze" | "reject" | "revoke" | "policy";
-      until?: string;
-      notificationPolicy?: FollowUpNotificationPolicy;
-    };
-    FollowUpDeliveryRequest: {
-      candidateId: string;
-      answered?: boolean;
-      systemActed?: boolean;
-      authority?: string;
     };
     /** One `.remudero/skills/<name>.yaml` entry (lib/skill.ts's `Skill`) -- the panel button IS this registry entry (MASTER-PLAN §5B). `name` is the file's basename, never a `name:` field inside the body, so it can never drift from what `rmd skill list` reports it under. */
     SkillEntry: {
@@ -1640,44 +1611,6 @@ export interface paths {
           "200": FollowUpList;
           "401": Error;
           "403": Error;
-        };
-    };
-  };
-  "/v1/operator-agent/follow-ups/evaluate": {
-    post: {
-      responses: {
-          "200": FollowUpEvaluation;
-          "400": Error;
-          "401": Error;
-          "403": Error;
-        };
-    };
-  };
-  "/v1/operator-agent/follow-ups/control": {
-    post: {
-      responses: {
-          "200": undefined;
-          "400": Error;
-          "401": Error;
-          "403": Error;
-          "404": Error;
-          "409": Error;
-        };
-    };
-  };
-  "/v1/operator-agent/follow-ups/delivery": {
-    post: {
-      responses: {
-          "200": {
-            ok: boolean;
-            state: "asked";
-            receipt: FollowUpReceipt;
-          };
-          "400": Error;
-          "401": Error;
-          "403": Error;
-          "404": Error;
-          "409": Error;
         };
     };
   };

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { runReview } from "../src/run-task.js";
@@ -10,7 +10,6 @@ import type { Mount } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
-const REPO_ROOT = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const REVIEWER_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
 const SOURCE_TEXT_SUBJECT_MARKER = "@source-text-subject";
 
@@ -39,7 +38,14 @@ async function reviewSiteProof(): Promise<Awaited<ReturnType<typeof runReview>>>
     mkdirSync(join(checkout, "tests"), { recursive: true });
     writeFileSync(join(root, "settings.json"), "{}", "utf8");
     writeFileSync(join(checkout, "package.json"), '{"type":"module"}\n', "utf8");
-    symlinkSync(join(REPO_ROOT, "node_modules"), join(checkout, "node_modules"), "dir");
+    // W1-T4566: this repository no longer installs Vitest, so the site checkout carries a stub of
+    // its pinned entrypoint. The subject is the owner/repo target reaching judgeReview, not Vitest.
+    mkdirSync(join(checkout, "node_modules", "vitest"), { recursive: true });
+    writeFileSync(
+      join(checkout, "node_modules", "vitest", "vitest.mjs"),
+      'process.stdout.write("TAP version 13\\n1..1\\nok 1 - site registered suite proof reaches vitest\\n");\n',
+      "utf8",
+    );
     writeFileSync(
       join(checkout, "tests", "site-target.test.ts"),
       [

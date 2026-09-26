@@ -71,6 +71,10 @@ function workerResult(over: Partial<WorkerResult> = {}): WorkerResult {
 
 function materialStale() {
   return checkReviewerCodeFreshness("/unused", {}, {
+    git: (args) => {
+      if (args[0] === "merge-base") return OLD;
+      throw new Error(`unexpected git call: ${args.join(" ")}`);
+    },
     checkServiceFreshness: () => ({
       status: "assessed",
       dirty: true,
@@ -81,6 +85,10 @@ function materialStale() {
 
 function immaterialAdvance() {
   return checkReviewerCodeFreshness("/unused", {}, {
+    git: (args) => {
+      if (args[0] === "merge-base") return OLD;
+      throw new Error(`unexpected git call: ${args.join(" ")}`);
+    },
     checkServiceFreshness: () => ({
       status: "assessed",
       dirty: true,
@@ -98,12 +106,13 @@ test("W1-T3337: the CLI self-reexec guard never suppresses the reviewer code pro
       if (args[0] === "fetch") return "";
       if (args.join(" ") === "rev-parse HEAD") return OLD;
       if (args.join(" ") === "rev-parse origin/main") return MAIN;
+      if (args[0] === "merge-base") return OLD;
       if (args[0] === "diff") return "src/lib/review.ts\n";
       throw new Error(`unexpected git call: ${args.join(" ")}`);
     },
   });
   assert.equal(result.status, "stale");
-  assert.deepEqual(calls, ["fetch --quiet origin", "rev-parse HEAD", "rev-parse origin/main", `diff --name-only ${OLD}..${MAIN}`]);
+  assert.deepEqual(calls, ["fetch --quiet origin", "rev-parse HEAD", "rev-parse origin/main", `merge-base ${OLD} ${MAIN}`, `diff --name-only ${OLD}..${MAIN}`]);
 });
 
 test("W1-T3337: an unreadable guarded diff withholds the terminal verdict", () => {
@@ -113,6 +122,7 @@ test("W1-T3337: an unreadable guarded diff withholds the terminal verdict", () =
       if (args[0] === "fetch") return "";
       if (args.join(" ") === "rev-parse HEAD") return OLD;
       if (args.join(" ") === "rev-parse origin/main") return MAIN;
+      if (args[0] === "merge-base") return OLD;
       throw new Error("diff unavailable");
     },
   });

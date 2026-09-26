@@ -1,0 +1,37 @@
+- id: W1-T4562
+  title: "A POLICY THAT ENABLES CASH READS AS MALFORMED — the provider-routing reader accepts only claude/codex in the policy block the daemon writes, so GET /v1/provider-routing is 'unknown' and every policy write refuses provider_policy_unavailable"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: medium
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-26: old-console retirement parity audit — GET /v1/provider-routing on the live gateway answered {state: unknown, reason: malformed}"
+  plan_refs: ["W1-T4563"]
+  files:
+    - src/lib/provider-routing-status.ts
+    - test/a-policy-that-enables-cash-still-reads.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-26 on the live core gateway: GET /v1/provider-routing returned
+    {"version":1,"state":"unknown","freshness":"unknown","reason":"malformed"} while
+    state/provider-routing-status.json held a well-formed selected projection. Reproduced at
+    bf02aab7 with readProviderRoutingStatus over that file; deleting only its `policy` key read back
+    `selected`. The committed host policy enables ["claude","codex","cash"], and the reader's
+    `providerId` (claude|codex only) guards the policy's provider lists, parks and preference —
+    WORKER_PROVIDER_IDS is ["claude","codex","cash","openweight"]. The writer and reader disagree
+    on the policy's vocabulary, so every projection since cash was enabled reads malformed, and
+    `providerPolicyContext` then refuses every POST /v1/policy/provider-routing[/clear] with 409
+    provider_policy_unavailable.
+  design: |
+    Read POLICY provider ids against the configured vocabulary (WORKER_PROVIDER_IDS) through a
+    policy-only check; capacity rows keep the claude/codex check, so what the writer emits for
+    capacities is unchanged. An unknown id is still refused as malformed.
+  acceptance:
+    - claim: "a projection whose committed policy enables cash (or its openweight alias) reads back as a policy, not malformed, while an unknown provider is still refused"
+      proof: "unit test: test/a-policy-that-enables-cash-still-reads.test.ts"
+  falsifier: |
+    Revert src/lib/provider-routing-status.ts and both tests fail (measured: 0/2 pass).

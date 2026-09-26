@@ -67,7 +67,7 @@ test("runTaskBody calls logDiskReclaimRung — AFTER logWorktreeReapBootSurvey, 
   assert.ok(diskReclaimIdx > bodyIdx, "runTaskBody must call logDiskReclaimRung — the W1-T411 rung");
   assert.ok(diskReclaimIdx > reapBootIdx, "the disk-reclaim rung must run AFTER logWorktreeReapBootSurvey");
 
-  const worktreeAddIdx = runTaskSrc.indexOf("worktreeAdd(", bodyIdx);
+  const worktreeAddIdx = runTaskSrc.indexOf("await worktreeAddAsync(", bodyIdx);
   assert.ok(worktreeAddIdx > diskReclaimIdx, "the disk-reclaim rung must run BEFORE this run's own worktreeAdd");
 });
 

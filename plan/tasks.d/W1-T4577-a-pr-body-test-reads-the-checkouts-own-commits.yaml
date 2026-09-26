@@ -1,0 +1,34 @@
+- id: W1-T4577
+  title: "A PR-BODY TEST READS THE CHECKOUT'S OWN COMMITS — 'run branches receive the Remudero-Task body trailer before REST pull creation' fails locally on any branch whose one commit ahead of origin/main carries a Remudero-Task trailer, and passes in CI"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: low
+  origin: "operator session 2026-09-26: local preflight on W1-T4567's branch"
+  plan_refs: ["W1-T4420"]
+  files:
+    - test/a-pr-opens-with-a-judgeable-body.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The test calls `ghPrCreateFillCommand(REPO_ROOT, ...)` with branch `run-W1-T4420-<ms>`.
+    `fillDerivedBody` reads `git log origin/main..HEAD` of REPO_ROOT, the checkout the suite runs in,
+    so on a branch with one commit whose body carries `Remudero-Task: <other id>` the drafted body
+    names that id and `openPullRequestChecked` rejects it: "run branch names W1-T4420, but the body
+    trailer names W1-T4567". MEASURED 2026-09-26: fails on run-W1-T4567-* and on the same tree
+    detached; passes at its merge base, where origin/main..HEAD is empty. The result depends on the
+    ambient checkout, not on the code under test, and `rmd preflight --ci-parity` reports it red
+    on every such branch.
+  design: |
+    Pass a bodyOverride (or a fixture repo) so the drafted body does not come from the ambient
+    checkout's commits; keep asserting the trailer and the filed criteria are added. Cite W1-T4577
+    in the repaired test's title.
+  acceptance:
+    - claim: "the trailer test no longer reads the ambient checkout's commits"
+      proof: "grep: W1-T4577 in test/a-pr-opens-with-a-judgeable-body.test.ts"
+  falsifier: |
+    Revert to REPO_ROOT's derived body and run the suite on a branch whose single commit carries a
+    different Remudero-Task trailer; it fails.

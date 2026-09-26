@@ -1,0 +1,41 @@
+- id: W1-T4576
+  title: "THE BLOCKING-READ GATE READS HANDLER TEXT, NOT REACH — consoleBlockingRequestPathViolations greps each GET handler's own toString() for fs symbols, so a handler that calls one function which scans every ledger archive passes it; W1-T4567 bounded two such routes but proved only those two"
+  repo: remudero
+  depends_on: [W1-T4567]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-26: gap left by W1-T4567's build (#7320), whose design (iii) asked for this gate"
+  plan_refs: ["W1-T4567", "W1-T4452", "W1-T4454", "W1-T4557"]
+  files:
+    - src/lib/serve.ts
+    - src/lib/ledger-union.ts
+    - test/every-get-read-route-is-bounded-by-reach.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    `consoleBlockingRequestPathViolations` (src/lib/serve.ts) tests each GET read route's
+    `handler.toString()` against BLOCKING_REQUEST_PATH_SYMBOLS. A handler that delegates to one helper
+    carries none of those symbols in its own text, so a full-corpus read passes a gate whose baseline is
+    0. MEASURED 2026-09-26 on the live gateway (383 gz archives, 2.69M rows): /v1/self-measurement
+    2.6-3.0 s, /v1/operator-agent/follow-ups 5.76 s, /v1/operator-activity 14.8 s -- all three passed
+    the gate. W1-T4567 (#7320) memoized the first two and proved it with a reach falsifier over THOSE
+    TWO routes only; its design (iii), a gate over every route, was not built. /v1/operator-activity
+    is still unbounded (W1-T4452/W1-T4454 queued).
+  design: |
+    (i) Drive every GET read route the assembled route table exposes (the same table
+    `consoleBlockingRequestPathViolations` receives) against a fixture state dir with ledger
+    rotations, with the ledger-union readers counting archive opens per request. After one warm
+    request, a second request that re-opens any archive is a violation naming the route. (ii) The
+    routes already bounded or cached pass; each still-unbounded route is recorded in a named
+    baseline that may only shrink, so the gate lands green and refuses a NEW full-corpus route.
+    (iii) Keep the text gate: it is cheap and catches direct fs calls; this adds reach beside it.
+  acceptance:
+    - claim: "a GET read route that re-opens ledger archives on a warm request is refused by name"
+      proof: "unit test: test/every-get-read-route-is-bounded-by-reach.test.ts"
+  falsifier: |
+    Route /v1/self-measurement back through latestMeasurementRows's full-union read; the suite names
+    it. Delete a route from the baseline that is still unbounded; the suite names that one too.

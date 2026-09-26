@@ -1,0 +1,50 @@
+- id: W1-T4564
+  title: "A REVIEWER AHEAD OF MAIN IS NOT STALE — ancestry must precede review-material diff classification"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "PR #7290 2026-09-26: its own reviewer checkout computed success but withheld the post as materially behind 9cc0ec8, which is an ancestor of its head cf1ae85"
+  plan_refs: ["W1-T4469", "W1-T3735", "W1-T228", "docs/forensics/self-sync.md"]
+  files:
+    - src/lib/self-sync.ts
+    - test/a-reviewer-ahead-of-main-is-fresh.test.ts
+    - test/a-stale-gate-cannot-publish-a-verdict.test.ts
+    - test/a-reviewer-verdict-survives-unrelated-main-churn.test.ts
+    - test/a-run-task-advance-is-classified-by-review-path.test.ts
+  status: queued
+  rationale: |
+    checkReviewerCodeFreshness compares HEAD..origin/main whenever SHAs differ. On #7290,
+    origin/main was already an ancestor of the PR checkout; the reverse diff therefore
+    contained the PR's own review.ts and run-task.ts changes and was misreported as a
+    material MAIN advance. The same-head computed 4/4 success was withheld. A normal
+    reviewer run from current main posted success, but the branch-local refusal is a
+    repeatable stuck-review path. W1-T4469 narrowed run-task hunk classification for
+    genuine main advances; it did not distinguish ahead, behind, and diverged ancestry.
+    Existing freshness fixtures use synthetic SHA pairs and must be updated to state
+    their ancestry explicitly; their old assumptions cannot prove this distinction.
+    Each acceptance proof executes the new test file by path: its absence on base is a real
+    failure, whereas title-matching a file absent on base produces Node's passing wrapper.
+  design: |
+    Read the merge base of the loaded reviewer code SHA and origin/main before applying
+    reviewAdvanceIsMaterialAt. If origin/main is an ancestor of code, this reviewer is
+    fresh with respect to main regardless of its own PR hunks. If code is behind, keep
+    the existing materiality/refusal semantics. For diverged histories, classify only
+    the merge-base..origin/main advance; never count the reviewer's own changes as a
+    main advance. An unreadable merge base or diff is unknown and withholds a terminal
+    verdict, not a fabricated fresh result. Apply the same rule to guarded/CLI and
+    unguarded/service review freshness paths without weakening head-identity, pending,
+    lifecycle, or conflicting-verdict guards. Do not add a worker call, PR gate, no-op
+    commit, body-edit workaround, or manual status override.
+  acceptance:
+    - claim: "reviewer freshness distinguishes ahead, behind, diverged, and unreadable ancestry in both guarded and service paths"
+      proof: "unit test: test/a-reviewer-ahead-of-main-is-fresh.test.ts"
+  falsifier: |
+    From a checkout whose HEAD contains origin/main plus a PR-only runReview hunk,
+    checkReviewerCodeFreshness must return fresh. From a parent of a material main
+    reviewer change, it must remain stale. A diverged branch with only a PR-side
+    review hunk must not be called behind; an unreadable merge-base must not pass.

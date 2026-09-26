@@ -84,6 +84,18 @@ alter `routing-v1`, or add bytes to the full analytics response. The first refre
 an older checkpoint replays the existing archive/live union once to establish complete coverage;
 subsequent refreshes resume the same cursor. A missing or unreadable source is `unavailable`, not an
 empty healthy cohort. Intermediate `implement.done` rows are never terminal worker outcomes.
+Malformed or non-object archive rows likewise make benchmark quality `ledger-source-malformed`;
+the local audit records source path, form, first/last line ordinal and count without retaining
+the bad payload. The benchmark response exposes only counts by source form, never paths. Its
+checkpoint retains the finding across cursor resumes and rechecks a changed archive. An incomplete
+live final line is a distinct `ledger-live-torn-tail`: the cursor resumes at that line's starting
+byte so a later completed write can recover. An existing live path that cannot be read is
+`ledger-live-unreadable`, even when an archive still yields valid rows; repair triggers recheck.
+The dispatch-history audit keeps its prior
+best-effort posture; source-quality uncertainty does not stop a worker, review, or PR.
+Each dispatch worker now emits a distinct `worker.attempt` receipt at the shared spawn boundary;
+the projection prefers it over a run `verdict` for the same assignment. Older verdict-only rows
+remain labeled legacy evidence. A call that returned successfully is not a verified task fix.
 
 The assignment-based coverage denominators name missing task class, risk, requested/selected/served
 model, provider, effort, outcome, tokens, duration, billing mode, and cost separately. No terminal
@@ -99,6 +111,24 @@ zero, and a subscription call with zero notional dollars is still a call consumi
 configured model differing from the provider-served model is counted as routing evidence; it is
 **not** called an experimental crossover because no random-allocation receipt exists yet. This
 projection cannot support a public causal model ranking on its own.
+
+The private `benchmark-run-v1` envelope rides the existing `worker.assignment`, per-call
+`worker.attempt`, and run `verdict` rows; it is not an extra worker call or a public endpoint. It freezes the
+assignment-time task class, risk, requested and selected stack, with explicit unavailable
+prompt/tool/harness/scorer/environment revisions until the harness can pin those independently.
+Rights are private without a local consent receipt, and allocation is observational without a
+randomization receipt. An attempt envelope names worker-call outcome and per-field missingness;
+observed zero tokens, duration, or cost differ from absent measurements. API request estimates
+and subscription notional cost occupy separate fields. Intermediate worker rows and verdicts
+without a matching assignment cannot become joined benchmark outcomes. This metadata is a
+producer contract for the later cohort gardener, not a model score or publication authorization.
+The run verdict stays a separate end-to-end phase; a thrown spawn emits a failed call with unknown
+usage, and a failed telemetry write cannot affect the worker or PR path. A daemon cycle without a
+model call contributes source freshness and coverage, never a synthetic model trial.
+The enclosing run/assignment IDs remain local ledger join keys, never metric labels. If a later
+OpenTelemetry export uses bounded dimensions, its overflow bucket must be reported as lost
+dimension coverage, not a trustworthy provider/model slice: the SDK retains the total but strips
+the overflowing measurement's original attributes ([OpenTelemetry cardinality guidance](https://opentelemetry.io/blog/2026/cardinality-limits-in-opentelemetry/)).
 
 ## Baseline and savings
 

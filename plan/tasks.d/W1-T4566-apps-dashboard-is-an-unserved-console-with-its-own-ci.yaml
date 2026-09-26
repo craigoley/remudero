@@ -1,0 +1,53 @@
+- id: W1-T4566
+  title: "APPS/DASHBOARD IS AN UNSERVED THIRD CONSOLE THAT STILL RUNS IN CI — after W1-T4563 nothing mounts its build, yet ci.yml typechecks, tests and bundles it on every PR and entrypoint.sh builds it at boot; delete it with its CI step, its ci-parity mirror and its workspace, as the sequenced pair Standing rule 25 requires"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-26: old-console retirement follow-up"
+  plan_refs: ["W1-T4563", "W1-T3173", "W1-T3175", "W1-T3177"]
+  files:
+    - .github/workflows/ci.yml
+    - .github/workflows/ci-gate.yml
+    - src/lib/ci-parity.ts
+    - src/lib/gate-posture.ts
+    - package.json
+    - package-lock.json
+    - deploy/entrypoint.sh
+    - deploy/serve-container.sh
+    - scripts/contract-coverage-ratchet.mjs
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-26 at core main 9cc0ec8c. apps/dashboard is the React SPA from the W1-T3173 ruling,
+    which was withdrawn when the console became its own repository (DECISIONS 2026-09-15); W1-T3175
+    (serve it) is retired. W1-T4563 removes the /console/* mount, the only thing that served its
+    build. It still costs every PR: ci.yml's consolidated job runs `typecheck:dashboard`,
+    `test:dashboard` and `build:console` as the `dashboard` gate (ADVISORY in ci-gate.yml);
+    src/lib/ci-parity.ts mirrors it; entrypoint.sh builds it at boot when RMD_CONSOLE_BUILD_ROOT is
+    set; serve-container.sh sets that variable; scripts/contract-coverage-ratchet.mjs scans
+    apps/dashboard/src. The ci-gate.yml comment itself records that removing the job touches
+    ci-parity.ts and gate-posture.ts, which Standing rule 25 refuses in one change with a workflow.
+  design: |
+    Start only after W1-T4563 has merged (it removes the /console/* mount this build fed). Two PRs,
+    in this order. (1) INSTRUMENT: drop the `dashboard` step, its report line, its `needs`
+    entry and its stub job from ci.yml; drop "dashboard" from ci-gate.yml's ADVISORY list; drop
+    apps/dashboard/src from contract-coverage-ratchet.mjs's scan sources. (2) PRODUCT: delete
+    apps/dashboard, the `dashboard:ci`/`build:console`/`test:dashboard`/`typecheck:dashboard`
+    scripts, the `apps/*` workspace entry (regenerate the lockfile), ci-parity.ts's dashboard entry
+    and any gate-posture.ts reference, and the RMD_CONSOLE_BUILD_ROOT build step and variable in
+    deploy/. entrypoint.sh is a BAKED path (CLAUDE.md), so the deploy change ships on the next image
+    rebuild. review.ts's `apps/dashboard/src/` vitest proof arm stays until a separate review-gate
+    change removes it.
+  acceptance:
+    - claim: "no CI job or ci-parity entry runs the dashboard"
+      proof: "unit test: W1-T4566: no CI job or parity entry runs the retired dashboard"
+    - claim: "the repository has no apps/dashboard workspace"
+      proof: "unit test: W1-T4566: the workspace set no longer names apps"
+  falsifier: |
+    Leave the ci.yml step with the scripts deleted and CI reds; delete the job but keep the
+    ci-parity entry and the parity suite reds.

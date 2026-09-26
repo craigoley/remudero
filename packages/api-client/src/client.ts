@@ -143,10 +143,9 @@ const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
  *
  * WHY THIS IS A REAL FIX AND NOT A LINT SILENCER. Every request this client makes carries
  * `authHeaders(opts.token)`, so the host named by `baseUrl` receives the operator's bearer token.
- * `baseUrl` is not a constant: `apps/dashboard/src/main.ts`'s `readConfig()` reads it from the
- * `?daemon=` QUERY PARAMETER, with `?token=` beside it. A crafted link therefore aimed an
- * authenticated request — token included — at any host the link's author chose. Concatenating an
- * unvalidated string into a request URL was the mechanism; this is where it stops.
+ * `baseUrl` is not a constant: the retired apps/dashboard (deleted by W1-T4566) read it from a
+ * `?daemon=` QUERY PARAMETER, with `?token=` beside it, so a crafted link aimed an authenticated
+ * request at any host its author chose. Any future caller can do the same; this is where it stops.
  *
  * Rejecting rather than coercing is deliberate. A silently-corrected base URL would send requests
  * somewhere the caller did not ask for, which is the same class of surprise in the other

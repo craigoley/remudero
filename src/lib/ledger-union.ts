@@ -44,6 +44,22 @@ export interface LedgerUnionOptions {
 
 export type LedgerFileForm = "gzip" | "plain";
 
+export interface LedgerMalformedRowFinding {
+  path: string;
+  form: LedgerFileForm | "live";
+  rowOrdinal: number;
+  kind: "invalid-json" | "non-object" | "live-torn-tail";
+  resumeOffset?: number;
+}
+
+export interface LedgerMalformedSource {
+  path: string;
+  form: LedgerFileForm;
+  count: number;
+  firstRowOrdinal: number;
+  lastRowOrdinal: number;
+}
+
 export interface LedgerCorpusEntry {
   path: string;
   form: LedgerFileForm;
@@ -184,6 +200,8 @@ export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
   onUnreadArchive?: (path: string) => void;
   /** A live read failure is not an empty corpus to an audited projection. Ordinary readers may omit this. */
   onUnreadLive?: (path: string) => void;
+  /** Metadata only: never pass the offending NDJSON text to an audit or public projection. */
+  onMalformedRow?: (finding: LedgerMalformedRowFinding) => void;
   /** Called only for a row that survived the union's exact replay dedupe. The normalized raw
    * line lets a bounded audit projection seed a later live-file overlay without reserializing
    * JSON and changing its identity. */
@@ -291,6 +309,11 @@ export async function* openLedgerUnion(
     let input: Readable | undefined;
     let rl: ReturnType<typeof createInterface> | undefined;
     let archiveUnread = false;
+    let rowOrdinal = 0;
+    let pendingLiveBad: LedgerMalformedRowFinding | undefined;
+    let liveBytes = Math.max(0, opts.liveStartOffset ?? 0);
+    let lastLineStartOffset = liveBytes;
+    let lastLiveByte: number | undefined;
     try {
       const liveStartOffset = entry.path === livePath && opts.liveStartOffset !== undefined
         ? Math.max(0, opts.liveStartOffset)
@@ -299,6 +322,13 @@ export async function* openLedgerUnion(
         entry.path,
         liveStartOffset === undefined ? undefined : { start: liveStartOffset },
       );
+      if (entry.path === livePath) source.on("data", (chunk: Buffer | string) => {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        const newline = bytes.lastIndexOf(0x0a);
+        if (newline >= 0) lastLineStartOffset = liveBytes + newline + 1;
+        liveBytes += bytes.length;
+        if (bytes.length > 0) lastLiveByte = bytes[bytes.length - 1];
+      });
       // `error` is otherwise only observable through readline's async iterator. Keep this
       // explicit so an audited reader can refuse a partial archive corpus rather than treating
       // a silently skipped rotation as proof that old attempts never happened.
@@ -317,25 +347,46 @@ export async function* openLedgerUnion(
       rl = createInterface({ input, crlfDelay: Infinity });
       for await (const raw of rl) {
         opts.signal?.throwIfAborted();
+        rowOrdinal += 1;
+        if (pendingLiveBad) {
+          opts.onMalformedRow?.(pendingLiveBad);
+          pendingLiveBad = undefined;
+        }
         const line = String(raw).trim();
         if (!line) continue;
+        let parsed: Record<string, unknown> | undefined;
+        let badKind: LedgerMalformedRowFinding["kind"] | undefined;
+        try {
+          parsed = parseObject(line);
+        } catch {
+          // The malformed-row callback below carries this failure as source-quality evidence;
+          // later valid rows still need to be read from the same archive.
+          badKind = "invalid-json";
+        }
+        if (parsed === undefined) {
+          const finding: LedgerMalformedRowFinding = {
+            path: entry.path,
+            form: entry.path === livePath ? "live" : entry.form,
+            rowOrdinal,
+            kind: badKind ?? "non-object",
+          };
+          if (entry.path === livePath) pendingLiveBad = finding;
+          else opts.onMalformedRow?.(finding);
+          continue;
+        }
         if (opts.dedupe !== false && opts.dedupeWindowPerStep === undefined) {
           if (seen.has(line)) continue;
           seen.add(line);
         }
-        let parsed: Record<string, unknown> | undefined;
-        try {
-          parsed = parseObject(line);
-        } catch {
-          // deliberate: a torn ledger line is dropped without aborting the stream.
-          continue;
-        }
-        if (parsed === undefined || !recordMatchesFilters(parsed, opts, minimumTs)) continue;
+        if (!recordMatchesFilters(parsed, opts, minimumTs)) continue;
         const step = typeof parsed.step === "string" ? parsed.step : "";
         if (replayedInsideWindow(step, opts.dedupeSeed === undefined ? line : fingerprintLedgerLine(line))) continue;
         opts.onAcceptedRecord?.(parsed, line);
         yield parsed;
       }
+      if (pendingLiveBad) opts.onMalformedRow?.(lastLiveByte !== 0x0a
+        ? { ...pendingLiveBad, kind: "live-torn-tail", resumeOffset: lastLineStartOffset }
+        : pendingLiveBad);
     } catch (error) {
       if (opts.signal?.aborted) throw opts.signal.reason ?? error;
       // deliberate: an unreadable file costs that file, not the whole best-effort stream.
@@ -363,6 +414,7 @@ export interface AuditedLedgerUnionResult {
   archiveFiles: string[];
   archiveCount: number;
   unread: string[];
+  malformed: LedgerMalformedSource[];
   unclassified: string[];
   records: number;
   ok: boolean;
@@ -371,6 +423,8 @@ export interface AuditedLedgerUnionResult {
 export interface AuditedLedgerUnionOptions extends LedgerUnionOptions {
   /** Required: exact replay dedupe must remain bounded to the producer retention width. */
   dedupeWindowPerStep: number;
+  /** Opt in only for benchmark/public completeness. Operational history keeps its prior posture. */
+  strictMalformed?: boolean;
   onRecord: (row: Record<string, unknown>, raw: string) => void;
 }
 
@@ -387,9 +441,10 @@ export async function auditLedgerUnion(
 ): Promise<AuditedLedgerUnionResult> {
   const { rotations, unclassified } = listedLedgerFiles(stateDir, io);
   const unread: string[] = [];
+  const malformedByPath = new Map<string, LedgerMalformedSource>();
   let records = 0;
   if (rotations.length === 0) {
-    return { stateDir, archiveFiles: [], archiveCount: 0, unread, unclassified, records, ok: false };
+    return { stateDir, archiveFiles: [], archiveCount: 0, unread, malformed: [], unclassified, records, ok: false };
   }
   for await (const row of openLedgerUnion(
     stateDir,
@@ -397,6 +452,17 @@ export async function auditLedgerUnion(
       ...opts,
       includeLive: false,
       onUnreadArchive: (path) => unread.push(path),
+      onMalformedRow: (finding) => {
+        if (finding.form === "live") return;
+        const previous = malformedByPath.get(finding.path);
+        if (previous) {
+          previous.count += 1;
+          previous.lastRowOrdinal = finding.rowOrdinal;
+        } else {
+          malformedByPath.set(finding.path, { path: finding.path, form: finding.form,
+            count: 1, firstRowOrdinal: finding.rowOrdinal, lastRowOrdinal: finding.rowOrdinal });
+        }
+      },
       onAcceptedRecord: (accepted, raw) => {
         records += 1;
         opts.onRecord(accepted, raw);
@@ -413,9 +479,10 @@ export async function auditLedgerUnion(
     archiveFiles: rotations.map((entry) => entry.path),
     archiveCount: rotations.length,
     unread,
+    malformed: [...malformedByPath.values()],
     unclassified,
     records,
-    ok: unread.length === 0,
+    ok: unread.length === 0 && (!opts.strictMalformed || malformedByPath.size === 0),
   };
 }
 
@@ -841,6 +908,29 @@ export function readLedgerUnionRecordsSync(
     torn,
     filesRead,
   };
+}
+
+/**
+ * W1-T4567 — {@link readLedgerUnionRecordsSync} over EVERY rotation, answered from a
+ * {@link createLedgerRotationMemo}: a repeated request parses only the live file, because a rotation is
+ * written once. The first request, and any request after a new rotation lands, loads what the memo is
+ * missing off the event loop (`load`) and reads again. `status.ts`'s `readLedgerUnionMemoized` is the
+ * same loop for the capped board window; this one keeps the full corpus a durable history needs.
+ */
+export async function readLedgerUnionRecordsMemoized(
+  stateDir: string,
+  memo: LedgerRotationMemo,
+  opts: LedgerUnionRecordReadOptions = {},
+  fsDeps: LedgerGrepFsDeps = realLedgerFs,
+): Promise<LedgerUnionRecordRead> {
+  let pass = memo.pass();
+  let read = readLedgerUnionRecordsSync(stateDir, { ...opts, rotationRecords: pass.rotationRecords }, fsDeps);
+  while (!pass.complete()) {
+    await memo.load(pass.missing());
+    pass = memo.pass();
+    read = readLedgerUnionRecordsSync(stateDir, { ...opts, rotationRecords: pass.rotationRecords }, fsDeps);
+  }
+  return read;
 }
 
 export function resolveLedgerUnion(

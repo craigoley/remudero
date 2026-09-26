@@ -1,0 +1,42 @@
+- id: W1-T4579
+  title: "THE CONTRACT DECLARES 46 OF 86 SERVED ROUTES, AND FOUR IT DECLARES ARE NO LONGER SERVED — openapi/daemon.yaml is checked only against in-repo CLIENTS, and W1-T4566 deletes the last one, so nothing measures whether the spec describes the gateway app.remudero.com actually calls"
+  repo: remudero
+  depends_on: [W1-T4566]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-26: W1-T4566 empties scripts/contract-coverage-ratchet.mjs's client population"
+  plan_refs: ["W1-T3174", "W1-T4566", "W1-T2926"]
+  files:
+    - test/every-served-route-is-in-the-contract.test.ts
+    - scripts/openapi-route-baseline.json
+    - openapi/daemon.yaml
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-26 at core main 7cee238 through test/helpers/declared-routes.ts's
+    declaredConsoleRoutes() (the route table console-parity already reads): 86 distinct /v1 paths
+    served, 46 declared in openapi/daemon.yaml, 44 served but undeclared, and 4 declared but no
+    longer served. The live console (remudero-console) calls 63 distinct /v1 paths; 38 are absent
+    from the spec. scripts/contract-coverage-ratchet.mjs (W1-T3174) measured the other direction --
+    routes an IN-REPO client calls -- and W1-T4566 deletes the last in-repo client, leaving it a
+    declared-empty census. The consumer is now another repository, so the producer has to state
+    its own surface: a spec that is checked against what is SERVED is the only one a remote
+    consumer can pin and trust.
+  design: |
+    (i) A census test over declaredConsoleRoutes(): every served /v1 path (parameters normalised)
+    is declared in openapi/daemon.yaml or named in scripts/openapi-route-baseline.json, a set that
+    may only SHRINK; every declared path is served (the four stale ones are deleted from the spec,
+    not baselined). (ii) The baseline starts at today's 44 so the gate lands green and refuses a
+    NEW undeclared route. (iii) Once it lands, retire scripts/contract-coverage-ratchet.mjs and
+    its wiring in a separate change -- its question is answered from the consumer side
+    (remudero-console pinning this spec), and a gate that measures an empty population is noise.
+  acceptance:
+    - claim: "a served /v1 route absent from both the spec and the baseline is refused by name, and a declared route nothing serves is refused too"
+      proof: "unit test: test/every-served-route-is-in-the-contract.test.ts"
+  falsifier: |
+    Add a GET route to serve.ts with no spec entry and no baseline row; the suite names it. Remove
+    a served route while its spec entry stays; the suite names that too.

@@ -1,9 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-// W1-T2731: a real import — renderShellHtml emits THIS function object via `.toString()`, so
-// the old slice-out-of-the-shell technique's guarantee (no hand-copied stand-in can drift) is
-// now structural rather than textual.
-import { usageWindowLabel } from "../src/lib/console-shell-script.js";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import type { ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
@@ -18,7 +14,7 @@ import {
   type AccountUsageInput,
   type AccountUsageSnapshot,
 } from "../src/lib/account-usage.js";
-import { ACCOUNT_FILE_PATH_ENV, renderShellHtml, resolveAccountFilePath } from "../src/lib/serve.js";
+import { ACCOUNT_FILE_PATH_ENV, resolveAccountFilePath } from "../src/lib/serve.js";
 
 /**
  * The console's ACCOUNT strip — which Anthropic account the fleet is spending, and how much of
@@ -219,51 +215,6 @@ test("an absent dispatch-governor reading is UNKNOWN, never zero or under-ceilin
   assert.equal(noise.queueGovernor, "unknown");
 });
 
-test("a stale or missing reading renders as unknown and never as 0% or as a stale value presented as current", () => {
-  const input = readAccountUsageFile(FIXTURE);
-
-  // (1) TOO OLD — one millisecond past the bound. The numbers are WITHHELD, not aged-and-shown.
-  const old = deriveAccountUsage(input, [ARMED_LINE], CAPTURED_AT + USAGE_CACHE_MAX_AGE_MS + 1);
-  assert.equal(old.usageUnknownReason, "too-old");
-  assert.equal(old.fiveHour, undefined, "a too-old window must be ABSENT, so no render can show its number");
-  assert.equal(old.sevenDay, undefined);
-  assert.equal(old.usageAsOf, undefined);
-  // …but identity survives: the panel can still answer "which account" when it cannot answer
-  // "how much", which is exactly the split the operator needs after a switch.
-  assert.equal(old.accountEmail, "operator@example.com");
-
-  // (2) ACCOUNT MISMATCH — the switch guard. The cache still holds the PREVIOUS account's numbers
-  // until some Claude Code process rewrites it; rendering them under the new account's name is
-  // the precise failure this panel exists to avoid.
-  const switched: AccountUsageInput = { ...input, uuid: "99999999-8888-7777-6666-555555555555" };
-  const mismatch = deriveAccountUsage(switched, [ARMED_LINE], CAPTURED_AT);
-  assert.equal(mismatch.usageUnknownReason, "account-mismatch");
-  assert.equal(mismatch.fiveHour, undefined);
-  assert.equal(mismatch.accountUuid, "99999999-8888-7777-6666-555555555555", "identity is the CURRENT account, not the cache's");
-
-  // (3) UNREADABLE FILE — a missing path fails soft, and still never fabricates.
-  const missing = readAccountUsageFile("/nonexistent/definitely-not-here.json");
-  assert.deepEqual(missing, { unreadable: true });
-  const unreadable = deriveAccountUsage(missing, [], CAPTURED_AT);
-  assert.equal(unreadable.usageUnknownReason, "unreadable");
-  assert.equal(unreadable.fiveHour, undefined);
-  assert.equal(unreadable.accountEmail, undefined);
-  assert.equal(unreadable.governor, "unknown", "no headroom line at all ⇒ the posture is unknown, never a default");
-
-  // (4) NO AS-OF — a cache with no `fetchedAtMs` cannot be aged, so it can never be shown.
-  const unageable = deriveAccountUsage({ ...input, cacheFetchedAtMs: undefined }, [ARMED_LINE], CAPTURED_AT);
-  assert.equal(unageable.usageUnknownReason, "no-cache");
-  assert.equal(unageable.fiveHour, undefined);
-
-  // THE RENDERED TEXT, asserted rather than inferred. `usageWindowLabel` is the client function
-  // that turns a window into a string; it is inside serve.ts's client template literal, so it is
-  // pulled out of the RENDERED shell and executed — the same technique that proves the script
-  // parses at all. An unknown window must read the literal word "unknown", never "0%".
-  const label = usageWindowLabel as (w: unknown) => string;
-  assert.equal(label(undefined), "unknown", "an ABSENT window renders the word unknown");
-  assert.equal(label({}), "unknown", "a window with no percent renders unknown, never 0%");
-  assert.equal(label({ percentUsed: 0, resetsAt: "2026-08-02T04:59:59.209129+00:00" }).startsWith("0%"), true, "a GENUINE zero still renders as 0% — unknown and zero are different states");
-});
 
 test("the governor posture is a tri-state — a headroom line with no enforced key reads unknown, never telemetry-only", () => {
   const input = readAccountUsageFile(FIXTURE);

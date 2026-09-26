@@ -1,0 +1,63 @@
+- id: W1-T4563
+  title: "THE DAEMON STILL SERVES A SECOND CONSOLE — GET / is a 4,108-line client shell, /console/* mounts the apps/dashboard bundle, rmd console-url prints a tokened localhost bookmark, and GET /v1/console/write-grant hands the WRITE token to any READ-token holder; retire all of it now that app.remudero.com carries every control"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator 2026-09-26: 'there is still an old localhost console that needs to be removed' and 'cleanup the old localhost console ... and migrate over anything that hasn't been migrated'"
+  plan_refs: ["W1-T4569", "W1-T3196", "console CONSOLE-T81", "console CONSOLE-T82", "console CONSOLE-T83", "DECISIONS 2026-09-16 app.remudero.com is the console"]
+  files:
+    - src/lib/serve.ts
+    - src/lib/service.ts
+    - src/lib/config.ts
+    - src/lib/config-schema.ts
+    - src/lib/digest.ts
+    - src/lib/report-commands.ts
+    - src/run-task.ts
+    - DECISIONS.md
+    - docs/cli-reference.md
+    - test/serve.test.ts
+    - test/console-write-entry.test.ts
+    - test/digest.test.ts
+    - test/rmd-down-up.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-26 on the live gateway and core main 9cc0ec8c. The 2026-09-16 ruling made
+    app.remudero.com the console and kept "a minimal diagnostic page" at GET /. What GET / actually
+    served was the whole old console: renderShellHtml plus lib/console-shell-client.ts (4,108 lines),
+    polling twelve /v1 reads every 3 s, including /v1/self-measurement (8,040,418 bytes, 2.6-3.0 s,
+    a full scan of every ledger archive per request). /console/* still mounted apps/dashboard's
+    build, `rmd console-url` still printed a tokened localhost bookmark, digest links still pointed
+    at `<gateway>/#task=<id>`, which opens nothing now, and GET /v1/console/write-grant returned the
+    WRITE bearer to any caller holding only the READ token. The operator asked for the old console
+    to be removed. Its 15 write routes and 5 readings that app.remudero.com lacked are ported there
+    first (console CONSOLE-T81/T82/T83).
+  design: |
+    Remove GET / and its renderers, the four shell modules (console-shell-client, console-shell-script,
+    console-freshness, idle-reasons-panel), the /console/* static mount (serve + service.ts), GET
+    /v1/console/write-grant, GET /v1/auth/scope, and `rmd console-url` (its TCP probe moves into
+    serve.ts for rmd up/down). GET / answers a one-line JSON pointer to app.remudero.com.
+    Task deep links use a new `consoleAppUrl` (default https://app.remudero.com) and the console's
+    /task/<id> page; `consoleUrl` keeps naming the gateway, because signed escalation answer links
+    resolve against /v1/escalation/confirm. Banners name app.remudero.com and print no token. /v1/*
+    is otherwise untouched. MERGE ORDER: after console CONSOLE-T81/T82/T83 are live, so no control
+    is ever without a button; W1-T4569 first (Standing rule 25). apps/dashboard itself is W1-T4566.
+  acceptance:
+    - claim: "GET / answers a JSON pointer to app.remudero.com and the retired console surfaces are gone"
+      proof: "unit test: W1-T4563: GET / answers what this surface is and where the console lives, never an HTML shell"
+    - claim: "the read token can no longer obtain the write token, and still cannot write"
+      proof: "unit test: W1-T4563: the read token can no longer obtain the write token, and still cannot write"
+    - claim: "rmd up names app.remudero.com as the console and prints no token"
+      proof: "unit test: W1-T4563: the resume report names app"
+    - claim: "a pushed task link opens the console's /task/<id> page"
+      proof: "unit test: consoleCardUrl: the console's /task/<id> page naming exactly the given task id"
+    - claim: "the gateway names app.remudero.com as the canonical console"
+      proof: "unit test: W1-T4563: the gateway names app.remudero.com as the canonical console"
+  falsifier: |
+    Restore buildShellRoute or buildConsoleWriteGrantRoute and the first two proofs fail; revert
+    consoleCardUrl to the #task= hash and the fourth fails.

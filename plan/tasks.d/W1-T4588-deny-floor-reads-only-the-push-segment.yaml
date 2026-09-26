@@ -1,0 +1,31 @@
+- id: W1-T4588
+  title: "THE DENY-FLOOR'S FORCE-PUSH RULE READS THE WHOLE COMMAND LINE — a plain push beside a gh api call carrying -f base=main is refused as a force-push to a default branch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: medium
+  origin: "operator session 2026-09-26: old-console follow-up audit (operator: 'file items that need filed, fix items that need fixed')"
+  files:
+    - hooks/deny-floor.sh
+    - test/deny-floor-reads-only-the-push-segment.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-26, four times in one session: a non-forced push of a feature branch chained
+    with a REST pull-request create (gh api with -f title=... -f base=main) was refused by rule 1 of
+    hooks/deny-floor.sh. The rule greps the entire command for (--force|-f) and separately for main
+    anywhere, so gh's -f field flag and a base=main field satisfy both. It even refused a command
+    that only wrote this shard, because the shard's text quoted such a command. Workaround was
+    splitting the push and the PR call.
+  design: |
+    Evaluate rule 1 per command segment: split on && || ; and |, and require the force flag and the
+    default-branch refspec in the SAME git push segment. Keep it a tripwire (the file header's own
+    framing); every existing refusal case must still refuse.
+  acceptance:
+    - claim: "a non-forced push beside a gh call carrying -f base=main is allowed, and a forced push to main in any segment is still refused"
+      proof: "unit test: test/deny-floor-reads-only-the-push-segment.test.ts"
+  falsifier: |
+    Restore the whole-line grep; the mixed push-plus-gh command is refused again.

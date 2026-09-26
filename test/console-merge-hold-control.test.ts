@@ -5,11 +5,10 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { mergeHoldConfirmationText } from "../src/lib/console-shell-script.js";
 import { computeBoardSnapshot, type BoardDeps } from "../src/lib/board.js";
 import { buildMergeHoldRoute } from "../src/lib/panel-actions.js";
 import { automergeHoldFromLedger } from "../src/lib/review.js";
-import { buildServeRoutes, buildServeServer, renderShellHtml, type ServeDeps } from "../src/lib/serve.js";
+import { buildServeRoutes, buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
 const READ_TOKEN = "merge-hold-read-token";
@@ -236,38 +235,3 @@ test("malformed merge-hold bodies are refused before any append", async () => {
   assert.equal(readFileSync(ledgerPath, "utf8"), "");
 });
 
-test("the console renders fleet and PR controls, exact confirmations and no merge or lifecycle primitive", () => {
-  const html = renderShellHtml();
-  for (const marker of [
-    'id="merge-hold-fleet"',
-    'id="merge-hold-fleet-reason"',
-    'id="merge-hold-fleet-btn"',
-    "function needsMeMergeHeldRowHtml",
-    "function mergeHoldActionHtml",
-    'postJson("/v1/merge-hold"',
-  ]) assert.match(html, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  // W1-T2731: a real import. The shell still SHIPS this function — the marker loop above already
-  // asserts `function mergeHoldConfirmationText` is in the rendered HTML — but its emitted form is
-  // minified and ASCII-escaped by tsx/esbuild, so no source regex can carve it back out. Calling
-  // the real export tests the behaviour instead, over the same single definition the shell emits.
-  const confirmation = mergeHoldConfirmationText;
-  assert.equal(
-    confirmation("engage", "the whole fleet", "incident freeze"),
-    "Confirm ENGAGE automatic-merge hold for the whole fleet — reason: incident freeze?",
-  );
-  assert.equal(
-    confirmation("release", "PR #3708", "manual read complete"),
-    "Confirm RELEASE automatic-merge hold for PR #3708 — reason: manual read complete?",
-  );
-  assert.match(html, /latestMergeHeld = statusSnap\.mergeHeld \?\? \[\]/);
-  assert.match(html, /HIGH_TIER_WRITE_PATHS[\s\S]*\/v1\/merge-hold/);
-  assert.match(
-    html,
-    /for \(const r of latestBlockedPrs[\s\S]*needsMeBlockedPrRowHtml\(r\) \+ mergeHoldActionHtml\(r\.prNumber\)/,
-    "every live blocked-PR queue row carries the existing hold control",
-  );
-  const mergeHoldHandler = html.match(/\/\/ ── W1-T2719:[\s\S]*?\/\/ ── UP NEXT/)?.[0];
-  assert.ok(mergeHoldHandler);
-  assert.match(mergeHoldHandler, /response && response\.ok[\s\S]*await refreshAll\(\)/);
-  assert.doesNotMatch(mergeHoldHandler, /postJson\("\/v1\/(?:merge"|control\/(?:start|stop|restart)"|deploy")/);
-});

@@ -25,7 +25,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
-  consoleUrl,
+  consoleAppUrl,
   enabledWorkerProviders,
   globalArtifactPath,
   globalLearningsHome,
@@ -1127,7 +1127,7 @@ export async function digestCommand(
 
   if (explicitSince !== undefined) {
     if (rest.includes("--dry-run")) {
-      console.log(buildDigest(ledgerPath, explicitSince, consoleUrl(config)));
+      console.log(buildDigest(ledgerPath, explicitSince, consoleAppUrl(config)));
       return 0;
     }
     const text = sendDigest(
@@ -1139,7 +1139,7 @@ export async function digestCommand(
         runId: `DIGEST-${Date.now()}`,
         taskId: "DIGEST",
       },
-      consoleUrl(config),
+      consoleAppUrl(config),
     );
     console.log(text);
     return 0;
@@ -1149,7 +1149,7 @@ export async function digestCommand(
   const store = createLastSeenStore(lastSeenPath(config.root));
   const nowIso = new Date().toISOString();
   if (rest.includes("--dry-run")) {
-    console.log(buildMarkerAwareDigest(ledgerPath, store, tokenId, nowIso, consoleUrl(config)).text);
+    console.log(buildMarkerAwareDigest(ledgerPath, store, tokenId, nowIso, consoleAppUrl(config)).text);
     return 0;
   }
   const text = sendMarkerAwareDigest(
@@ -1163,7 +1163,7 @@ export async function digestCommand(
       taskId: "DIGEST",
     },
     nowIso,
-    consoleUrl(config),
+    consoleAppUrl(config),
   );
   console.log(text);
   return 0;

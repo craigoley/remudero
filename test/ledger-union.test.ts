@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -7,11 +7,73 @@ import { test } from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
 import {
+  auditLedgerUnion,
   openLedgerUnion,
   readLedgerUnionRecords,
   readLedgerUnionRecordsSync,
   type LedgerGrepFsDeps,
 } from "../src/lib/ledger-union.js";
+
+test("ledger union audits malformed rows without losing later records", async () => {
+  const dir = tmpStateDir();
+  try {
+    const gzip = join(dir, "ledger.2026-01-01T00-00-00-000Z.ndjson.gz");
+    const plain = join(dir, "ledger.2026-01-02T00-00-00-000Z.ndjson");
+    writeFileSync(gzip, gzipSync(`${row("before")}\n{not-json}\n[]\n${row("after")}\n`));
+    writeFileSync(plain, `{not-json}\n${row("plain")}\n`);
+    const seen: string[] = [];
+    const audit = await auditLedgerUnion(dir, {
+      dedupeWindowPerStep: 200,
+      strictMalformed: true,
+      onRecord: (record) => seen.push(String(record.marker)),
+    });
+    assert.deepEqual(seen, ["before", "after", "plain"]);
+    assert.equal(audit.archiveCount, 2);
+    assert.equal(audit.records, 3);
+    assert.deepEqual(audit.unread, []);
+    assert.equal(audit.ok, false);
+    assert.deepEqual(audit.malformed, [
+      { path: gzip, form: "gzip", count: 2, firstRowOrdinal: 2, lastRowOrdinal: 3 },
+      { path: plain, form: "plain", count: 1, firstRowOrdinal: 1, lastRowOrdinal: 1 },
+    ]);
+    assert.ok(!JSON.stringify(audit).includes("not-json"), "audit retains positions, not raw bad payloads");
+    const operational = await auditLedgerUnion(dir, { dedupeWindowPerStep: 200, onRecord: () => undefined });
+    assert.equal(operational.ok, true, "a benchmark-only completeness rule cannot change dispatch history");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ledger union distinguishes live torn tail from unread archive", async () => {
+  const dir = tmpStateDir();
+  try {
+    const live = join(dir, LEDGER_FILENAME);
+    const complete = `${row("complete")}\n`;
+    writeFileSync(live, complete + '{"ts":"2026-01-01T00:00:00.000Z","step":"run.start","marker":"late');
+    const findings: Array<{ kind: string; resumeOffset?: number }> = [];
+    const seen: string[] = [];
+    for await (const record of openLedgerUnion(dir, { onMalformedRow: (finding) => findings.push(finding) })) {
+      seen.push(String(record.marker));
+    }
+    assert.deepEqual(seen, ["complete"]);
+    assert.deepEqual(findings, [{ path: live, form: "live", rowOrdinal: 2,
+      kind: "live-torn-tail", resumeOffset: Buffer.byteLength(complete) }]);
+    const archiveAudit = await auditLedgerUnion(dir, { dedupeWindowPerStep: 200,
+      strictMalformed: true, onRecord: () => undefined });
+    assert.equal(archiveAudit.ok, false, "a live-only corpus cannot stand in for an archive audit");
+    assert.deepEqual(archiveAudit.malformed, []);
+    appendFileSync(live, '"}\n');
+    const recovered: string[] = [];
+    const laterFindings: unknown[] = [];
+    for await (const record of openLedgerUnion(dir, {
+      liveStartOffset: Buffer.byteLength(complete), onMalformedRow: (finding) => laterFindings.push(finding),
+    })) recovered.push(String(record.marker));
+    assert.deepEqual(recovered, ["late"]);
+    assert.deepEqual(laterFindings, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 function tmpStateDir(): string {
   return mkdtempSync(join(tmpdir(), "rmd-ledger-union-"));

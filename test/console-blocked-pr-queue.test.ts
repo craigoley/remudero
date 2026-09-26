@@ -19,11 +19,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-// W1-T2731: the shell's pure helpers are a real module now; these sandboxes take them from it
-// (via the SAME emitter the shell uses) instead of regexing them out of the rendered HTML.
-import { renderConsoleShellScript } from "../src/lib/console-shell-script.js";
 import { computeBoardSnapshot, type BoardDeps } from "../src/lib/board.js";
-import { renderShellHtml } from "../src/lib/serve.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
 
@@ -195,80 +191,10 @@ test("W1-T1006: the escalation and verify human groups keep their rows unchanged
 // source, the same discipline test/serve.test.ts's W1-T182/W1-T346 tests already use, plus the
 // row template's ACTUAL rendered output carrying no expand-chevron glyph either.
 
-test("W1-T1006: a blocked PR row offers no card link for a cardless id", () => {
-  const html = renderShellHtml();
-
-  const renderNeedsMeFn = html.match(/function renderNeedsMe\(tasks, feedbackEntries, inboxReady, inboxDrafting\) \{[\s\S]*?\n  \}/)?.[0];
-  assert.ok(renderNeedsMeFn, "renderNeedsMe must exist in the shell's inline script");
-  const blockedPrPush = renderNeedsMeFn!.match(/for \(const r of latestBlockedPrs[\s\S]*?\}\);/)?.[0];
-  assert.ok(blockedPrPush, "renderNeedsMe must push a row for each latestBlockedPrs entry");
-  assert.doesNotMatch(
-    blockedPrPush!,
-    /taskId/,
-    "a blocked-PR row push must never carry a taskId -- that field ALONE is what wires reconcileRows' card-fetch affordance",
-  );
-  // Contrast: the escalation/verify-human pushes DO carry taskId -- proving the omission above
-  // is a deliberate asymmetry, not an accidental one shared by every row kind. W1-T3395: the
-  // escalation row is now built via the shared askRow() gate rather than a bare rows.push(...).
-  const escalationPush = renderNeedsMeFn!.match(/askRow\(\{ kind: "escalation", resolved: false \}, `task:\$\{t\.taskId\}`[\s\S]*?\);/)?.[0];
-  assert.match(escalationPush ?? "", /taskId: t\.taskId/, "sanity: the escalation row DOES carry taskId -- it legitimately resolves a real plan task");
-
-  // The row's ACTUAL rendered HTML carries no expand-chevron glyph either -- belt and braces
-  // over the structural proof above.
-  const parts: Record<string, string | undefined> = {
-    STATUS_LABELS: html.match(/const STATUS_LABELS = \{[\s\S]*?\};/)?.[0],
-    statusBadge: html.match(/function statusBadge\(key\) \{[\s\S]*?\n  \}/)?.[0],
-    needsMeBlockedPrRowHtml: html.match(/function needsMeBlockedPrRowHtml\(r\) \{[\s\S]*?\n  \}/)?.[0],
-  };
-  for (const [name, src] of Object.entries(parts)) assert.ok(src, `${name} must exist in the shell's inline script`);
-
-  const renderRow = new Function(
-    `${renderConsoleShellScript()}\n${parts.STATUS_LABELS}\n${parts.statusBadge}\n${parts.needsMeBlockedPrRowHtml}\nreturn needsMeBlockedPrRowHtml(arguments[0]);`,
-  ) as (r: Record<string, unknown>) => string;
-
-  // A row whose ledger line named a taskId that is NOT one of the 27 the plan actually holds
-  // (design (v)'s own measured population, e.g. a TRIAGE-* id) -- still no card link renders.
-  const rowHtml = renderRow({
-    prNumber: 2097,
-    prUrl: "https://github.com/o/r/pull/2097",
-    disposition: "blocked-ambiguous",
-    reason: "review orphaned by a push, again",
-    taskId: "TRIAGE-fb-999",
-  });
-  assert.doesNotMatch(rowHtml, /row-chevron/, "no expand-chevron glyph -- this row offers no card affordance to click");
-  assert.match(rowHtml, /PR #2097/);
-  assert.match(rowHtml, /blocked-ambiguous/);
-});
 
 // ── The falsifier named in design (iii), also proven over the ACTUAL client render output: an
 // unverified withholding and a checkable reason must render as textually DISTINCT rows ────────
 
-test("W1-T1006: needsMeBlockedPrRowHtml and needsMeBlockedPrUnverifiedHtml render distinct output for the checkable vs. withheld cases", () => {
-  const html = renderShellHtml();
-  const parts: Record<string, string | undefined> = {
-    STATUS_LABELS: html.match(/const STATUS_LABELS = \{[\s\S]*?\};/)?.[0],
-    statusBadge: html.match(/function statusBadge\(key\) \{[\s\S]*?\n  \}/)?.[0],
-    needsMeBlockedPrRowHtml: html.match(/function needsMeBlockedPrRowHtml\(r\) \{[\s\S]*?\n  \}/)?.[0],
-    needsMeBlockedPrUnverifiedHtml: html.match(/function needsMeBlockedPrUnverifiedHtml\(reason\) \{[\s\S]*?\n  \}/)?.[0],
-  };
-  for (const [name, src] of Object.entries(parts)) assert.ok(src, `${name} must exist in the shell's inline script`);
-
-  const renderRow = new Function(
-    `${renderConsoleShellScript()}\n${parts.STATUS_LABELS}\n${parts.statusBadge}\n${parts.needsMeBlockedPrRowHtml}\nreturn needsMeBlockedPrRowHtml(arguments[0]);`,
-  ) as (r: Record<string, unknown>) => string;
-  const renderUnverified = new Function(
-    `${renderConsoleShellScript()}\n${parts.STATUS_LABELS}\n${parts.statusBadge}\n${parts.needsMeBlockedPrUnverifiedHtml}\nreturn needsMeBlockedPrUnverifiedHtml(arguments[0]);`,
-  ) as (reason: string) => string;
-
-  const checkable = renderRow({ prNumber: 2097, disposition: "blocked-ambiguous", reason: "review orphaned by a push, again" });
-  assert.match(checkable, /review orphaned by a push, again/);
-  assert.doesNotMatch(checkable, /unverified/i);
-
-  const withheld = renderUnverified("1 blocked-PR ledger entry could not be checked against live GitHub state (rate_limit) -- withheld rather than replay possibly-stale history as current");
-  assert.match(withheld, /unverified/i);
-  assert.match(withheld, /rate_limit/);
-  assert.doesNotMatch(withheld, /review orphaned/, "the withheld row must never leak the raw ledger reason it declined to print");
-});
 
 // ── ACCEPTANCE 6 (grep, not a unit test per the task's own acceptance table): "blocked_pr in
 // src/lib/board.ts" is satisfied by board.ts's own BoardSnapshot.blockedPrs field + the

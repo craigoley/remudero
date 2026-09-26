@@ -1,0 +1,35 @@
+- id: W1-T4587
+  title: "PROOF PRIMING RUNS A REAL npm ci IN WHATEVER CHECKOUT IT IS HANDED — ensureDeps installs when a Vitest runner is absent, so a test pointing execWhitelistedProof at this repository wiped node_modules mid-suite"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-26: old-console follow-up audit (operator: 'file items that need filed, fix items that need fixed')"
+  files:
+    - src/lib/review.ts
+    - test/proof-priming-never-installs-into-the-callers-checkout.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-26 during W1-T4566: with Vitest no longer installed in core, test/cross-repo-
+    proof-suite-registry.test.ts called execWhitelistedProof with this repository as cwd; ensureDeps
+    (src/lib/review.ts) found the runner absent and ran npm ci there, replacing node_modules while
+    the suite ran, and every file scheduled after it failed at file level with 'Cannot find package
+    tsx'. The test was fixed to use a fixture checkout, but the mechanism remains: any caller that
+    passes a live working tree gets an install.
+  design: |
+    Priming installs only into a checkout the reviewer itself created for the proof (a proof
+    worktree or base checkout it owns), never into the process's own repository or an arbitrary
+    caller path; for any other cwd an absent runner is ProofRunnerUnavailableError, not an install.
+    Prove it by pointing the primer at a directory standing in for the caller's own tree and
+    asserting no install command runs.
+  acceptance:
+    - claim: "proof priming never runs an install in a checkout the reviewer did not create, and reports the runner unavailable instead"
+      proof: "unit test: test/proof-priming-never-installs-into-the-callers-checkout.test.ts"
+  falsifier: |
+    Point ensureDeps at a stand-in for the caller's own tree with no runner; the unfixed primer runs
+    npm ci, the fixed one refuses.

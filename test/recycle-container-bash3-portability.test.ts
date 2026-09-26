@@ -204,15 +204,23 @@ function publish(origin: ReturnType<typeof gitRepo>, relPath: string, content: s
   origin.git("commit", "--quiet", "-m", `update ${relPath}`);
 }
 
-function runRecycleOnStateDir(stateDir: string): { status: number; stdout: string; stderr: string } {
- const cashKeyPath = join(stateDir, "openweight-api-key");
- writeFileSync(cashKeyPath, "fixture-durable-openweight-key\n", { mode: 0o600 });
- chmodSync(cashKeyPath, 0o600);
+function runRecycleOnStateDir(stateDir: string): { status: number; stdout: string; stderr: string; dockerCalls: string } {
+  const cashKeyPath = join(stateDir, "openweight-api-key");
+  writeFileSync(cashKeyPath, "fixture-durable-openweight-key\n", { mode: 0o600 });
+  chmodSync(cashKeyPath, 0o600);
+  const stubDir = join(stateDir, "fixture-bin");
+  const dockerCalls = join(stateDir, "docker-calls");
+  mkdirSync(stubDir, { recursive: true });
+  writeFileSync(dockerCalls, "");
+  const dockerStub = join(stubDir, "docker");
+  writeFileSync(dockerStub, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(dockerCalls)}\nexit 97\n`);
+  chmodSync(dockerStub, 0o755);
   const r = spawnSync("bash", [SCRIPT], {
     encoding: "utf8",
     timeout: 60000,
     env: {
       ...process.env,
+      PATH: `${stubDir}:${process.env.PATH ?? ""}`,
       HOME: process.env.HOME ?? "/tmp",
       RMD_STATE_DIR: stateDir,
       RMD_OPENWEIGHT_API_KEY_PATH: cashKeyPath,
@@ -220,7 +228,7 @@ function runRecycleOnStateDir(stateDir: string): { status: number; stdout: strin
       ...NEUTRAL_CREDENTIAL_ENV,
     },
   });
-  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", dockerCalls: readFileSync(dockerCalls, "utf8") };
 }
 
 test("W1-T3595: a shared-checkout collision reaches the named refusal, not an unsupported Bash builtin failure", () => {
@@ -244,7 +252,7 @@ test("W1-T3595: a shared-checkout collision reaches the named refusal, not an un
   assert.doesNotMatch(run.stderr, /declare: -A: invalid option/);
 });
 
-test("W1-T3595: a dirty path OUTSIDE the incoming diff does not block the recycle — the negative control for the same arrays", () => {
+test("a disjoint recycle fixture uses only its Docker stub before the credential refusal", () => {
   const { stateDir, daemonTree, origin } = checkoutFixture();
   // Local, uncommitted edit to a tracked file...
   writeFileSync(join(daemonTree, "shared.txt"), "LOCAL EDIT, NEVER PUBLISHED\n", "utf8");
@@ -262,6 +270,7 @@ test("W1-T3595: a dirty path OUTSIDE the incoming diff does not block the recycl
   // above) — proving the guard actually let execution continue past section 1.6 rather than the
   // process merely having crashed before reaching it.
   assert.match(run.stderr, /REFUSING — no GH_TOKEN could be captured/);
+  assert.match(run.dockerCalls, /inspect remudero-daemon/, "the negative control must use only its fixture Docker stub");
 });
 
 // ── Group B: runtime-environment capture (section 3) — was built from `declare -A CAPTURED`/

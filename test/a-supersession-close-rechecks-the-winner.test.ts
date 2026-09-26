@@ -13,7 +13,7 @@ import {
 } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
-const NOW = Date.parse("2026-09-19T14:00:00Z");
+const NOW = Date.now();
 
 function supersededPr(over: Partial<OpenPrView> = {}): OpenPrView {
   return {
@@ -24,7 +24,7 @@ function supersededPr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-18T14:00:00Z",
+    lastActivityAt: new Date(NOW - 24 * 60 * 60 * 1000).toISOString(),
     headSha: "loser-head",
     supersededBy: 6071,
     supersessionVerdict: {

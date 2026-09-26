@@ -297,10 +297,10 @@ function siteDeclaredIn(root: string, file: string, site: string): boolean {
   return declRe.test(text);
 }
 
-/** `worktreeAdd`'s own file and site name — the raw invocation inside its body is the routing
- *  TARGET, not a site that itself needs a registry row. */
+/** Both canonical implementations own their raw invocation and apply the same base guard;
+ * neither needs an exemption row. */
 const CANONICAL_FILE = "src/lib/worker.ts";
-const CANONICAL_SITE = "worktreeAdd";
+const CANONICAL_SITES = new Set(["worktreeAdd", "worktreeAddAsync"]);
 
 /** The full bidirectional diff between what `src/` actually contains and what the registry
  *  declares. Pure — takes `srcDir`/`root` so a test can point it at a fixture tree instead of the
@@ -324,7 +324,7 @@ export function censusWorktreeSites(
   registry: readonly WorktreeSiteRow[] = WORKTREE_SITE_REGISTRY,
 ): WorktreeCensusResult {
   const rawSites = findRawWorktreeAddSites(srcDir, root).filter(
-    (s) => !(s.file === CANONICAL_FILE && s.site === CANONICAL_SITE),
+    (s) => !(s.file === CANONICAL_FILE && CANONICAL_SITES.has(s.site)),
   );
 
   const exemptRows = registry.filter((r) => r.disposition.kind === "exempt");

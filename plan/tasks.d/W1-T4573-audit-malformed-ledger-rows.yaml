@@ -1,0 +1,62 @@
+- id: W1-T4573
+  title: "A PARSEABLE ARCHIVE IS NOT A COMPLETE LEDGER — surface malformed rows in benchmark source audits"
+  repo: remudero
+  depends_on: [W1-T4553, W1-T4557]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator 2026-09-26: Azure three-instance field-trials audit found one malformed NDJSON row inside a gzip-valid core archive"
+  plan_refs: ["W1-T100001", "W1-T4553", "W1-T4554", "docs/research/model-evidence-program.md"]
+  files:
+    - src/lib/ledger-union.ts
+    - src/lib/analytics-route.ts
+    - src/lib/benchmark-evidence.ts
+    - test/ledger-union.test.ts
+    - test/analytics-route.test.ts
+    - docs/model-routing.md
+  status: queued
+  rationale: |
+    The streaming ledger union deliberately drops invalid JSON and continues. Its audit reports
+    unread archives but currently calls a gzip-valid archive healthy even when an interior NDJSON
+    row is malformed. The 2026-09-26 read-only Azure sweep found one such row in the core corpus;
+    site and console corpora parsed clean. The bad row did not match worker.assignment, but its
+    event type and effect on benchmark joins are unknown. An observed-complete benchmark cohort
+    is therefore not defensible merely because gzip and the other rows read successfully.
+    W1-T4557 added bounded cursors and unread-source reporting, but did not report parseable
+    archives containing malformed NDJSON or preserve that finding through checkpoint resume.
+  design: |
+    Count malformed and non-object ledger rows per source during the existing three-form union
+    stream and expose source path, form, row ordinal, and count to audit callers without retaining
+    or printing raw row contents. Continue processing later rows, but make archive audits report
+    an explicit partial-source state and make benchmark quality unavailable, with the count and
+    source class visible, rather than silently dropping evidence. Unread archives, malformed
+    archive rows, and a mutable live torn tail remain distinct reasons. A partial live tail can
+    recover on a later scan after its newline appears; an interior archived bad row stays flagged
+    until an explicit, audited repair or relevance determination. Do not edit or delete raw
+    archives automatically.
+
+    A resumable analytics checkpoint must retain malformed-source state across later cursors and
+    schema upgrades; it must not turn a previously partial archive into an observed-complete
+    snapshot simply because the next pass does not reread that archive. Add a migration/full
+    audit strategy with positive controls for gzip, plain, and live forms and exact replay dedupe.
+    The source-quality finding only limits benchmark/public claims. It must never stop the daemon,
+    worker assignment, review, merge, or PR CI. Existing operational best-effort readers can still
+    emit valid rows with a visible quality warning.
+  acceptance:
+    - claim: "a malformed interior row is counted without exposing its payload and never hides later valid rows"
+      proof: "unit test: ledger union audits malformed rows without losing later records"
+    - claim: "a gzip-valid archive with malformed NDJSON cannot be called a complete benchmark source"
+      proof: "unit test: benchmark quality refuses a malformed archived ledger source"
+    - claim: "checkpoint resume retains partial-source evidence until an audited repair or full recheck"
+      proof: "unit test: analytics checkpoint remembers malformed archive evidence across resume"
+    - claim: "a transient live tail and an unread archive remain distinguishable and recoverable"
+      proof: "unit test: ledger union distinguishes live torn tail from unread archive"
+    - claim: "the producer and consumer agree on a dedicated malformed-source reason"
+      proof: "grep: ledger-source-malformed in src/lib/analytics-route.ts"
+  falsifier: |
+    A syntactically valid gzip file with one invalid NDJSON row returns audit.ok=true or a
+    benchmarkEvidence.state=observed; a resume clears the warning without rereading/repairing
+    the archive; a raw bad row appears in a public or log payload; or a malformed row holds a PR.

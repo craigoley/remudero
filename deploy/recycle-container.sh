@@ -444,6 +444,16 @@ if [ -f "${DOCKERENV_PATH}" ]; then
   echo "  image it is about to remove cannot outlive the 'docker rm' it would issue on itself." >&2
   exit 1
 fi
+# A test may override the marker while running inside a container. That override must resolve
+# `docker` to a temporary fixture stub. A missing stub once let a recycle fixture reach the live
+# Docker socket and replace the core daemon with the fixture's short-lived checkout.
+if [ -f /.dockerenv ] && [ "${DOCKERENV_PATH}" != "/.dockerenv" ]; then
+  DOCKER_BIN="$(command -v docker 2>/dev/null || true)"
+  case "${DOCKER_BIN}" in
+    /tmp/*|/private/tmp/*|/mnt/rmd/tmp/*) : ;;
+    *) echo "recycle-container: REFUSING — an in-container marker override requires a temporary Docker fixture stub." >&2; exit 1 ;;
+  esac
+fi
 
 # ── 1.5. STATE_DIR MUST ALREADY BE A CHECKOUT — OR THE OPERATOR MUST SAY THIS IS A FIRST BOOT ───
 # W1-T2555: MEASURED 2026-09-01. STATE_DIR was never tested for existence, and `find` over a

@@ -44,7 +44,7 @@ test("runTaskBody calls logWorktreeReapBootSurvey — AFTER pruneStaleRuns, BEFO
   assert.ok(reapBootIdx > bodyIdx, "runTaskBody must call logWorktreeReapBootSurvey — the W1-T406 boot rung");
   assert.ok(reapBootIdx > pruneIdx, "the boot rung must run AFTER pruneStaleRuns, its sibling debris-reclaim step");
 
-  const worktreeAddIdx = runTaskSrc.indexOf("worktreeAdd(", bodyIdx);
+  const worktreeAddIdx = runTaskSrc.indexOf("await worktreeAddAsync(", bodyIdx);
   assert.ok(worktreeAddIdx > reapBootIdx, "the boot rung must run BEFORE this run's own worktreeAdd — never race its own new worktree");
 });
 

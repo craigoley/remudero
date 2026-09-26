@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildShellRoute, resolveConsoleSha } from "../src/lib/serve.js";
+import { resolveConsoleSha } from "../src/lib/serve.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "serve-container.sh");
@@ -71,21 +71,7 @@ test("loaded console code identity ignores mutable cwd", () => {
   }
 });
 
-test("stale loaded code remains readable", () => {
-  const route = buildShellRoute(undefined as never, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", {}, undefined, () => "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-  let body = "";
-  route.handler({} as never, { writeHead: () => {}, end: (html: string) => (body = html) } as never, {} as never);
-  assert.match(body, /STALE — serving aaaaaaaaaaaa while the checkout reads bbbbbbbbbbbb/);
-  assert.match(body, /loaded code/);
-});
 
-test("off main loaded code still serves", () => {
-  const route = buildShellRoute(undefined as never, "cccccccccccccccccccccccccccccccccccccccc", {}, undefined, () => "cccccccccccccccccccccccccccccccccccccccc");
-  let body = "";
-  route.handler({} as never, { writeHead: () => {}, end: (html: string) => (body = html) } as never, {} as never);
-  assert.match(body, /loaded code/);
-  assert.match(body, /console-code-current/);
-});
 
 test("dedicated checkout overlays daemon checkout", () => {
   const stateRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t3369-state-`));
@@ -95,7 +81,7 @@ test("dedicated checkout overlays daemon checkout", () => {
     const result = runDry({ stateDir: stateRoot, serveRepoDir: serveRepo });
     assert.equal(result.status, 0, result.out);
     assert.ok(result.out.includes(`-v ${serveRepo}:/home/node/Remudero/remudero`));
-    assert.match(result.out, /-e RMD_CONSOLE_BUILD_ROOT=\/home\/node\/Remudero\/remudero\/apps\/dashboard\/dist/);
+    assert.equal(result.out.includes("RMD_CONSOLE_BUILD_ROOT"), false, "W1-T4566: no console build is wired into the serve container");
     assert.ok(result.out.includes(`-v ${stateRoot}:/home/node/Remudero`));
     assert.equal(existsSync(serveRepo), false, "dry-run must not create the dedicated checkout");
   } finally {
