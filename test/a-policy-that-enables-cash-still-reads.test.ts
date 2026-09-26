@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { resolveProviderRoutingPolicy } from "../src/lib/provider-routing-policy.js";
+import { resolveProviderRoutingPolicy, writeProviderRoutingPolicyOverride } from "../src/lib/provider-routing-policy.js";
 import { providerRoutingStatusPath, readProviderRoutingStatus, writeProviderRoutingStatus } from "../src/lib/provider-routing-status.js";
 
 const NOW = Date.parse("2026-09-26T14:00:00.000Z");
@@ -42,6 +42,37 @@ test("W1-T4562: a projection whose committed policy enables cash reads back as a
     assert.notEqual(status.state, "unknown", `read back ${JSON.stringify({ state: status.state, reason: status.reason })}`);
     assert.deepEqual(status.policy?.committed.enabledProviders, ["claude", "codex", "cash"]);
     assert.deepEqual(status.policy?.enabledProviders, ["claude", "codex", "cash"]);
+  });
+});
+
+test("W1-T4562: a policy park for cash reads back with its configured provider id", () => {
+  withRoot((root) => {
+    const config = { workerProviders: { enabled: ["claude", "codex", "cash"], reservePercent: 5 } } as never;
+    const parks = [{ provider: "cash" as const, until: new Date(NOW + 60_000).toISOString() }];
+    writeProviderRoutingPolicyOverride(
+      root,
+      {
+        enabledProviders: ["claude", "codex", "cash"],
+        preference: "automatic",
+        reservePercent: 5,
+        parks,
+        expiresAt: new Date(NOW + 120_000).toISOString(),
+      },
+      { config, writerFingerprint: "unknown", now: () => NOW },
+    );
+    const policy = resolveProviderRoutingPolicy(root, config, { now: () => NOW });
+    writeProviderRoutingStatus(root, {
+      state: "not-probed",
+      enabledProviders: ["claude", "codex"],
+      reservePercent: 5,
+      observedAtMs: NOW,
+      cacheValidMs: 60_000,
+      policy,
+    });
+
+    const status = readProviderRoutingStatus(root, { now: () => NOW });
+    assert.notEqual(status.state, "unknown", `read back ${JSON.stringify({ state: status.state, reason: status.reason })}`);
+    assert.deepEqual(status.policy?.parks, parks);
   });
 });
 
