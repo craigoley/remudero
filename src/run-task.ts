@@ -3699,7 +3699,7 @@ export function instanceMode(ownerRepo: string, registryText: string | undefined
 
 /** W1-T4265 — the registry text ({@link daemonInstanceRegistryPath}) for {@link instanceMode};
  *  `undefined`, never a throw, when absent or unreadable, which reads as `"live"`. */
-function readInstanceRegistryText(repoRoot: string): string | undefined {
+export function readInstanceRegistryText(repoRoot: string): string | undefined {
   try {
     return readFileSync(daemonInstanceRegistryPath(repoRoot), "utf8");
   } catch {
@@ -13294,6 +13294,7 @@ export function resolveRunMounts(
 }
 
 interface RunTaskBodyOptions {
+  instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
   armAdhocLaneReap?: boolean;
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
   claimReserver?: DispatchClaimReserver;
@@ -14013,6 +14014,8 @@ async function runTask(
     worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
     /** W1-T4356: reinstalls a fast-forwarded managed checkout; default {@link ensureInstallFresh}'s `npm ci`. */
     managedCheckoutInstall?: (repoDir: string) => void;
+    /** Offline shadow-run fixture; production reads the registry from this checkout. */
+    instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
@@ -14417,7 +14420,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
 
   // W1-T4265: ASKED ONCE, HELD FOR THE WHOLE RUN, so a concurrent registry edit cannot flip the
   // deferred arm block's decision mid-run (see instanceMode).
-  const shadowInstance = instanceMode(`${owner}/${task.repo}`, readInstanceRegistryText(repoRoot)) === "shadow";
+  const shadowInstance = instanceMode(`${owner}/${task.repo}`, (opts.instanceRegistryTextImpl ?? readInstanceRegistryText)(repoRoot)) === "shadow";
 
   // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
   // DEFAULT_BUDGET_USD ($100 — an order of magnitude above any observed task) when a

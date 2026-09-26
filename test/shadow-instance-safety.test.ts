@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { parseInstanceRegistry } from "../src/lib/instance-registry.js";
@@ -10,6 +13,7 @@ import {
   buildSweepEffects,
   ghPrCreateFillCommand,
   instanceMode,
+  readInstanceRegistryText,
   resolveShadowInstanceArmPermission,
   shadowLiveWouldHaveDone,
 } from "../src/run-task.js";
@@ -53,6 +57,17 @@ test("a shadow run records what a live instance would have done", () => {
 test("an instance with no mode stays live", () => {
   assert.equal(instanceMode("owner/repo", undefined), "live");
   assert.equal(instanceMode("owner/repo", registry()), "live");
+});
+
+test("an invalid or unreadable registry does not invent shadow mode", () => {
+  assert.throws(() => parseInstanceRegistry(registry("bogus")), /not "shadow" or "live"/);
+  assert.equal(instanceMode("owner/repo", registry("bogus")), "live");
+  const root = mkdtempSync(join(tmpdir(), "shadow-registry-absent-"));
+  try {
+    assert.equal(readInstanceRegistryText(root), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("the independent sweep path cannot arm a shadow instance", () => {
