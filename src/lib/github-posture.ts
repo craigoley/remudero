@@ -114,8 +114,7 @@ export interface GithubPostureCapabilityDescriptor {
 
 /**
  * The eight `security_and_analysis` keys (task rationale (2)) + `enforce_admins` (branch
- * protection, read separately — GitHub does not fold it into the repo payload) + `code_quality`
- * (a run-history entry: workflow state is not trusted, see {@link GITHUB_POSTURE_ALLOWLIST}) +
+ * protection, read separately — GitHub does not fold it into the repo payload) + `code_quality` +
  * `squash_merge_commit_message` (W1-T2448: a `"merge_settings"` entry read off the SAME repo-root
  * payload `security_and_analysis` already reads — no new GET). It is the only reason 611 anchored
  * commit trailers exist on `main` (`buildCommitTrailerIndex`, `status.ts`), named nowhere under
@@ -141,7 +140,6 @@ export const GITHUB_POSTURE_CAPABILITIES: readonly GithubPostureCapabilityDescri
  *  carries the trailers `buildCommitTrailerIndex` anchors on (W1-T2448 rationale, Q1/Q3) — a
  *  live read of anything else is the flip that would otherwise go unasserted. */
 export const GITHUB_POSTURE_SQUASH_MERGE_COMMIT_MESSAGE_EXPECTED = "COMMIT_MESSAGES";
-/** The dynamic Code Quality workflow is GitHub-managed and is omitted from the repo workflow inventory. */
 export const GITHUB_POSTURE_CODE_QUALITY_WORKFLOW_ID = 343193516;
 
 export type GithubPostureCapabilityStatus = "enabled" | "disabled";
@@ -150,15 +148,12 @@ export type GithubPostureCapabilityStatus = "enabled" | "disabled";
  *  present — a key the live payload omits or malforms is simply absent, never defaulted. */
 export type GithubPostureSnapshot = Record<string, GithubPostureCapabilityStatus>;
 
-/** The read-only GitHub surface this module uses — see the module header's DETECTION ONLY note. */
 export interface GithubPostureGateway {
   /** `gh api repos/{owner}/{repo}` — carries `security_and_analysis`. */
   getRepo(owner: string, repo: string): unknown;
   /** `gh api repos/{owner}/{repo}/branches/{branch}/protection/enforce_admins`. */
   getEnforceAdmins(owner: string, repo: string, branch: string): unknown;
-  /** `gh api` workflow inventory plus the known GitHub-managed Code Quality workflow's runs. */
   getCodeQualityRuns?(owner: string, repo: string, since: string): unknown;
-  /** Internal read context used by `run-task.ts`'s existing gateway-forwarding seam. */
   workflowRunsSince?: string;
 }
 
@@ -259,7 +254,7 @@ function defaultExec(args: string[]): string {
 }
 
 function statusFrom(raw: unknown, descriptor: GithubPostureCapabilityDescriptor): GithubPostureCapabilityStatus | undefined {
-  if (descriptor.source === "workflow_runs") return undefined; // Code Quality activity is folded from run history below.
+  if (descriptor.source === "workflow_runs") return undefined;
   if (raw === undefined || raw === null || typeof raw !== "object") return undefined;
   if (descriptor.source === "enforce_admins") {
     const enabled = (raw as { enabled?: unknown }).enabled;
@@ -282,8 +277,7 @@ function statusFrom(raw: unknown, descriptor: GithubPostureCapabilityDescriptor)
 }
 
 /**
- * The read (task rationale (i)): repo settings, branch protection, and recent dynamic Code
- * Quality workflow runs, folded into a {@link GithubPostureSnapshot}. Returns `undefined`
+ * The read folds settings and run history into {@link GithubPostureSnapshot}. Returns `undefined`
  * when the repo read itself is unreadable — the primary source for 10 of 11 capabilities,
  * `squash_merge_commit_message` (W1-T2448) included — so a caller degrades to "no finding"
  * rather than manufacturing a false all-clear from a half read. `enforce_admins` alone being
@@ -312,6 +306,7 @@ export function readGithubPosture(
     try {
       activity = gateway.getCodeQualityRuns(owner, repo, since);
     } catch {
+      // An unreadable Actions run read is unknown, not evidence that Code Quality is off.
       return undefined;
     }
     const codeQualityActive = recentCodeQualityRun(activity, since);

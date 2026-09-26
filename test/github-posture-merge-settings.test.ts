@@ -120,7 +120,7 @@ test("W1-T2448: the finding is a plain classifyGithubPosture entry — the SAME 
 
 // ── (3) no setting is ever written and the gateway stays GET-only ───────────────────────────
 
-test("W1-T2448: reading squash_merge_commit_message issues no new GET and no write flag/verb", () => {
+test("W1-T2448: reading squash_merge_commit_message reuses the repo-root GET and issues no write", () => {
   const calls: string[][] = [];
   const execSpy = (args: string[]): string => {
     calls.push(args);
@@ -129,17 +129,18 @@ test("W1-T2448: reading squash_merge_commit_message issues no new GET and no wri
   };
   const snapshot = readGithubPosture("craigoley", "remudero", { gateway: ghPostureGateway(execSpy) });
   assert.equal(snapshot?.squash_merge_commit_message, "disabled", "the flipped value is still read off the SAME repo-root call");
-  assert.equal(calls.length, 2, "still exactly the two GETs this module has ever issued — no third call for the merge setting");
+  assert.equal(calls.filter((args) => args[1] === "repos/craigoley/remudero").length, 1, "the merge setting still needs only the shared repo-root GET");
+  assert.equal(calls.filter((args) => args[1]?.includes("branches/")).length, 1, "branch protection keeps its existing GET");
+  assert.equal(calls.length, 2, "without a Code Quality time window, no Actions read is needed for the merge setting");
   for (const args of calls) {
     assert.deepEqual(args.slice(0, 1), ["api"], "every call remains a bare `gh api` read");
     for (const flag of ["-X", "--method", "-f", "-F", "--input", "PUT", "POST", "PATCH", "DELETE"]) {
       assert.ok(!args.includes(flag), `no write flag/verb (${flag}) is ever passed for the merge-settings capability`);
     }
   }
-  // The gateway's own type surface: still exactly the two GET methods — no write method was
-  // added to carry this capability.
+  // Code Quality adds a read method, never a write method for the merge setting.
   const gateway = ghPostureGateway(execSpy);
-  assert.deepEqual(Object.keys(gateway).sort(), ["getEnforceAdmins", "getRepo"], "the gateway interface gained no third (write) method");
+  assert.deepEqual(Object.keys(gateway).sort(), ["getCodeQualityRuns", "getEnforceAdmins", "getRepo"]);
 });
 
 // ── (4) an unreadable settings payload degrades to no finding rather than a false all-clear ─
