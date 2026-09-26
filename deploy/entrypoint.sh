@@ -591,8 +591,6 @@ idle_starved_wait() {
     if [ "$probe_rc" -ne 0 ]; then
       log "idle_starved: wake ($slug probe exit $probe_rc); resuming full daemon"
       if [ "$probe_rc" -eq 10 ]; then return 1; fi
-      # An uncertain remote read is not a broken supervisor setup. Let the daemon re-evaluate
-      # with its full readers, then re-enter quiet mode if it confirms the queue is still empty.
       return 3
     fi
     log "idle_starved: $slug remains empty"

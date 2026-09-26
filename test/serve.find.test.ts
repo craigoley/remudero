@@ -234,9 +234,11 @@ test("W1-T157 (1): each facet narrows the FIND set to EXACTLY the matching subse
       const page = await openShell(base);
       await expandFind(page);
       const sel = `#find-facets button[data-group="${group}"][data-value="${value}"]`;
+      // The badge predicts the result of selecting this facet. Read it before the click, since
+      // applyFindState replaces the facet controls while the rendered rows are updated.
+      const countText = (await page.textContent(`${sel} .facet-count`)) ?? "";
       await page.click(sel);
       const ids = (await restListIds(page)).sort();
-      const countText = (await page.textContent(`${sel} .facet-count`)) ?? "";
       const pressed = await page.getAttribute(sel, "aria-pressed");
       await page.context().close();
       return { ids, count: Number(countText.replace(/\D/g, "")), pressed };
