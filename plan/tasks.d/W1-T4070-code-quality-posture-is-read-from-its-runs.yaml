@@ -15,6 +15,7 @@
     - test/code-quality-posture-is-read-from-its-runs.test.ts
     - scripts/test-tier-manifest.json
     - scripts/clock-signature-baseline.json
+    - test/github-posture-merge-settings.test.ts
   status: queued
   attempts: 0
   rationale: |
