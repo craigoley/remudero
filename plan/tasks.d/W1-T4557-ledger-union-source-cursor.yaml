@@ -33,7 +33,7 @@
     - claim: "the cursor selects one archive at a time and an audit caller can observe unreadable live evidence"
       proof: "unit test: ledger union selects one source and reports unreadable live evidence"
     - claim: "the default reader still sees the three forms exactly once"
-      proof: "unit test: openLedgerUnion yields gzip rotation, plain rotation and live rows exactly once"
+      proof: "unit test: ledger union keeps three-form defaults with and without a cursor"
   falsifier: |
     With `throughRotation` set to the first archive, opening the second or the live file fails;
     with the live source unreadable, omitting the callback fails. Existing three-form readers
