@@ -37,13 +37,13 @@ test("run task wires best effort benchmark attempt receipts for every dispatch s
     const assignment: WorkerSelectionAssignment = {
       version: 1, id, phase: "pre-execution",
       requested: { model: "requested", effort: "high", maxTurns: null },
-      selected: { provider: "codex", model: "selected", effort: "high" },
+      selected: { provider: calls === 1 ? "codex" : "cash", model: "selected", effort: "high" },
       routing: { mode: "multi-provider", policy: { preference: "automatic", reservePercent: 5, provenance: "default" } },
       candidates: [],
     };
     args.onSelectionAssignment?.(assignment);
     const result: WorkerResult = {
-      sessionId: `session-${calls}`, costUsd: 0.25, numTurns: 1,
+      provider: calls === 1 ? "codex" : "cash", sessionId: `session-${calls}`, costUsd: 0.25, numTurns: 1,
       text: calls === 1 ? "RECON REPORT\nOBSERVED: none\nINFERRED: none\nCOULDN'T-VERIFY: none\n" : "REPORT\nno PR opened\n",
       blocks: [], stderr: "", subtype: calls === 1 ? "" : "success", isError: false, apiError: false,
       permissionDenials: [], childEnvKeys: [], model: "selected", servedModel: "served",
@@ -77,6 +77,10 @@ test("run task wires best effort benchmark attempt receipts for every dispatch s
     assert.deepEqual(firstReceipt.workerCall, { state: "unavailable", reason: "worker-outcome-not-reported" });
     assert.deepEqual(firstReceipt.tokens, { state: "unavailable", reason: "worker-tokens-not-reported" });
     assert.equal((firstReceipt.accounting as Record<string, { state: string }>).apiCostUsd.state, "unavailable");
+    const cashReceipt = attempts[1]!.benchmark_run as Record<string, unknown>;
+    assert.deepEqual((cashReceipt.accounting as Record<string, unknown>).apiCostUsd,
+      { state: "observed", value: 0.25 });
+    assert.equal(((cashReceipt.accounting as Record<string, unknown>).subscriptionNotionalUsd as Record<string, unknown>).state, "unavailable");
     assert.equal(rows.filter((row) => row.step === "verdict" && (row.benchmark_run as Record<string, unknown>)?.phase === "terminal").length, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
