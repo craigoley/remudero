@@ -156,9 +156,25 @@ test("bounded inbox evidence summarizes stored threads but never claims a reply 
     assert.doesNotMatch(JSON.stringify(result), /private details/);
     writeFileSync(storePath, "broken-json\n");
     assert.equal(readInboxAnswerEvidence(storePath).status, "unavailable");
+    writeFileSync(storePath, JSON.stringify({ threadId, seq: 0, role: "reply", ts: NOW }) + "\n");
+    assert.equal(readInboxAnswerEvidence(storePath).status, "unavailable", "a syntactically valid but malformed row is not an empty thread");
+    assert.equal(readInboxAnswerEvidence(storePath, () => { throw new Error("read failed"); }).status, "unavailable");
     writeFileSync(storePath, "x".repeat(256 * 1024 + 1));
     assert.equal(readInboxAnswerEvidence(storePath).status, "unavailable");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("an invalid source timestamp cannot produce a citation or a verified answer", () => {
+  const source = snapshot();
+  const agent = source.consoleV1.operatorAgent;
+  const capacity = { ...agent.capacity, status: "measured" as const, measurements: [{
+    repo: "owner/repo", configuredCapacity: 4, admittedLanes: 4, activeWorkers: 3, queuedWork: 2,
+    utilizationRatio: 0.75, windowStart: "not-a-date", windowEnd: "not-a-date", recommendation: "balanced" as const,
+  }] };
+  const result = answer("How is worker capacity?", { ...source, consoleV1: { ...source.consoleV1, operatorAgent: { ...agent, capacity } } });
+  assert.equal(result.coverage, "unavailable");
+  assert.equal(result.citations.length, 0);
+  assert.match(result.missingSources[0]?.reason ?? "", /observation time is invalid/);
 });

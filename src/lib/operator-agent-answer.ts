@@ -17,7 +17,7 @@ export type InboxAnswerEvidence =
   | { status: "unavailable"; reason: string };
 
 /** Read only a small, server-owned thread store; never serialize message bodies or claim actionability. */
-export function readInboxAnswerEvidence(path: string): InboxAnswerEvidence {
+export function readInboxAnswerEvidence(path: string, readBytes: typeof readSync = readSync): InboxAnswerEvidence {
   let fd: number;
   try {
     fd = openSync(path, "r");
@@ -30,7 +30,7 @@ export function readInboxAnswerEvidence(path: string): InboxAnswerEvidence {
     const buffer = Buffer.alloc(info.size);
     let offset = 0;
     while (offset < buffer.length) {
-      const read = readSync(fd, buffer, offset, buffer.length - offset, offset);
+      const read = readBytes(fd, buffer, offset, buffer.length - offset, offset);
       if (read === 0) return { status: "unavailable", reason: "the thread-message store changed during the bounded read" };
       offset += read;
     }
