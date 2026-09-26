@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, rmSync } from "node:fs";
 import { test } from "node:test";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 import {
   checkGithubPosture,
@@ -262,33 +260,20 @@ test("W1-T4070: a throwing Code Quality read leaves the posture baseline untouch
 });
 
 test("W1-T4070: the default Code Quality gateway really shells out through gh", () => {
-  const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}github-posture-gh-`));
-  const ghPath = join(bin, "gh");
-  writeFileSync(
-    ghPath,
-    [
-      "#!/bin/sh",
-      'endpoint=""',
-      'for arg in "$@"; do endpoint="$arg"; done',
-      'case "$endpoint" in',
-      '  *actions/workflows\\?per_page=100) printf \'%s\\n\' \'[{"total_count":1,"workflows":[{"id":1,"path":".github/workflows/codeql.yml","state":"active"}]}]\' ;;',
-      `  repos/${OWNER}/${REPO}/actions/workflows/${CODE_QUALITY_WORKFLOW_ID}) printf '%s\\n' '{"id":${CODE_QUALITY_WORKFLOW_ID},"path":"dynamic/github-code-quality/codeql"}' ;;`,
-      `  *actions/workflows/${CODE_QUALITY_WORKFLOW_ID}/runs\\?created=*) printf '%s\\n' '[{"total_count":0,"workflow_runs":[]}]' ;;`,
-      "  *) exit 9 ;;",
-      "esac",
-      "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
-  chmodSync(ghPath, 0o755);
+  const shim = ghShim([
+    { when: `actions/workflows/${CODE_QUALITY_WORKFLOW_ID}/runs?created=`, stdout: '[{"total_count":0,"workflow_runs":[]}]' },
+    { when: `actions/workflows/${CODE_QUALITY_WORKFLOW_ID}`, stdout: JSON.stringify({ id: CODE_QUALITY_WORKFLOW_ID, path: "dynamic/github-code-quality/codeql" }) },
+    { when: "actions/workflows?per_page=100", stdout: '[{"total_count":1,"workflows":[{"id":1,"path":".github/workflows/codeql.yml","state":"active"}]}]' },
+  ]);
   const previousPath = process.env.PATH;
-  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  process.env.PATH = `${shim.dir}:${previousPath ?? ""}`;
   try {
     const activity = ghPostureGateway().getCodeQualityRuns?.(OWNER, REPO, SINCE);
     assert.deepEqual(activity, { codeqlWorkflowActive: true, workflow_runs: [] });
+    assert.equal(shim.calls().length, 3);
   } finally {
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;
-    rmSync(bin, { recursive: true, force: true });
+    rmSync(shim.dir, { recursive: true, force: true });
   }
 });
