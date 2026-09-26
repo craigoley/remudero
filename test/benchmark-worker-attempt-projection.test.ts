@@ -45,6 +45,20 @@ test("benchmark quality reconciles attempt and legacy verdict receipts", () => {
   assert.equal(legacy.accounting.apiRequestCostUsd, 0.5);
 });
 
+test("benchmark quality keeps unjoined worker attempts out of model outcomes", () => {
+  const snapshot = deriveAnalyticsSnapshot([
+    assignment("a1", "m1"),
+    { ts: at, step: "worker.attempt", success: true, served_model: "m1" },
+    { ts: at, step: "worker.attempt", selection_assignment_id: "a1",
+      assignment_observed: false, success: true, served_model: "m1" },
+  ], at).benchmarkEvidence;
+  assert.equal(snapshot.sourceRows.terminals, 2);
+  assert.equal(snapshot.sourceRows.terminalsWithoutAssignmentId, 2);
+  assert.equal(snapshot.assignmentsWithoutTerminal, 1);
+  assert.equal(snapshot.joinedTerminalOutcomes, 0);
+  assert.equal(snapshot.outcomes.success, 0);
+});
+
 test("benchmark attempt checkpoint replay keeps the worker outcome distinct from a late run verdict", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-attempt-checkpoint-"));
   const live = join(dir, "ledger.ndjson");
