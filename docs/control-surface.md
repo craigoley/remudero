@@ -95,9 +95,8 @@ KeepAlive-restarted forever.
 Two browser surfaces exist against this daemon, and they are **not** the same thing under a
 different name:
 
-- **The console shell** (`rmd serve`, `src/lib/serve.ts`'s `renderShellHtml`) is a single
-  self-contained HTML page the daemon serves inline over its own bearer-authed routes — the
-  day-to-day operator board this doc's control commands feed into.
+- **The console** is app.remudero.com (repo `remudero-console`), which reads this daemon's `/v1`
+  gateway (`rmd serve`) server-side. The daemon's own inline shell was retired by W1-T4563.
 - **`apps/dashboard`** is a *separate*, portable static page (`index.html` + a compiled
   `main.js`, no bundler by design) meant to be opened standalone or wrapped by a native shell
   (the Tauri macOS/iOS clients MASTER-PLAN §7 names) and pointed at *any* reachable daemon via

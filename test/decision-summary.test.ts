@@ -23,7 +23,6 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before } from "node:test";
 import { BROWSER_SKIP, browserTest as test } from "./browser-absence.js";
-import { decisionSummaryHtml } from "../src/lib/console-shell-script.js";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import {
@@ -499,19 +498,6 @@ test("W1-T313 criterion 5: the summary is written once at creation -- re-reading
   assert.equal(calls, 1, "no re-invocation on subsequent reads");
 });
 
-test("W1-T313 criterion 5 (structural): the client's decision-summary renderer is synchronous and makes no network calls by construction", () => {
-  // W1-T2731: asserted against the REAL function object rather than a regex over serve.ts's
-  // source. That is what "by construction" actually means here, and it is stronger: an
-  // AsyncFunction is refused by its own constructor name, not by hoping the word `async` fails to
-  // appear in a slice of text. (The old regex also could not survive the move to
-  // lib/console-shell-script.ts, nor the minification the shell now emits.)
-  assert.notEqual(decisionSummaryHtml.constructor.name, "AsyncFunction", "synchronous BY CONSTRUCTION, not by convention");
-  assert.doesNotMatch(
-    decisionSummaryHtml.toString(),
-    /await |fetch\(|async /,
-    "purely synchronous string building — reads the cache, never invokes a summarizer",
-  );
-});
 
 // ── Criterion 3 + console-side criterion 4/5: proven over a REAL browser ────────────────────
 // (learnings#probe-must-exercise-the-real-consuming-client — the same discipline
@@ -595,93 +581,3 @@ function decisionSummaryFixture(): DecisionSummary {
   return s;
 }
 
-test("W1-T313 criterion 3: a proposed entry WITH a cached summary renders the summary first, raw payload byte-identical but collapsed behind Details", async () => {
-  const r = tmpRoot();
-  const deps = fixtureDeps(r);
-  const entry = captureFeedback(r, { raw: "console is really wordy and hard to understand, RAW-PAYLOAD-MARKER", origin: "cli" });
-  setFeedbackStatus(r, entry.id, "proposed", { proposalPr: "https://github.com/o/r/pull/1", summary: decisionSummaryFixture() });
-
-  await withShell(deps, async (base) => {
-    const { context, page } = await openShell(base);
-    try {
-      await page.waitForFunction(() => (document.getElementById("inbox-list")?.textContent ?? "").includes("Simplify the console's wording"));
-
-      const visibleText = await page.locator("#inbox-list").innerText();
-      // The falsifier: a card whose FIRST text is the raw payload. The raw marker text is not
-      // part of the VISIBLE text while the <details> stays collapsed.
-      assert.doesNotMatch(visibleText, /RAW-PAYLOAD-MARKER/, "the raw payload is not visible text while <details> is collapsed");
-      assert.match(visibleText, /Simplify the console's wording/, "the summary headline is visible");
-
-      // But the raw payload is still THERE, byte-identical, one click away.
-      const html = await page.locator("#inbox-list").innerHTML();
-      assert.match(html, /RAW-PAYLOAD-MARKER/, "the raw payload is present in the DOM, just collapsed");
-      assert.match(html, /<details class="decision-raw">/, "behind an expandable Details");
-
-      await page.click(`#inbox-list details.decision-raw summary`);
-      const afterExpand = await page.locator("#inbox-list").innerText();
-      assert.match(afterExpand, /RAW-PAYLOAD-MARKER/, "expanding Details reveals the byte-identical raw payload");
-    } finally {
-      await context.close();
-    }
-  });
-});
-
-test("W1-T313 criterion 4 (console): a proposed entry with NO cached summary renders exactly as before -- raw payload directly, no summary wrapper", async () => {
-  const r = tmpRoot();
-  const deps = fixtureDeps(r);
-  const entry = captureFeedback(r, { raw: "an entry with no summary yet", origin: "cli" });
-  setFeedbackStatus(r, entry.id, "proposed", { proposalPr: "https://github.com/o/r/pull/2" });
-
-  await withShell(deps, async (base) => {
-    const { context, page } = await openShell(base);
-    try {
-      await page.waitForFunction(() => (document.getElementById("inbox-list")?.textContent ?? "").includes("an entry with no summary yet"));
-      const visibleText = await page.locator("#inbox-list").innerText();
-      assert.match(visibleText, /proposes: an entry with no summary yet/, "degrades to exactly today's raw rendering");
-      const html = await page.locator("#inbox-list").innerHTML();
-      assert.doesNotMatch(html, /decision-summary/, "no summary wrapper when there is no cached summary");
-    } finally {
-      await context.close();
-    }
-  });
-});
-
-test("W1-T313 criterion 5 (console): rendering a cached summary triggers NO extra network requests -- the console render never invokes the summarizer", async () => {
-  const rootWith = tmpRoot();
-  const depsWith = fixtureDeps(rootWith);
-  const withSummaryEntry = captureFeedback(rootWith, { raw: "entry with summary", origin: "cli" });
-  setFeedbackStatus(rootWith, withSummaryEntry.id, "proposed", { proposalPr: "https://github.com/o/r/pull/3", summary: decisionSummaryFixture() });
-
-  const rootWithout = tmpRoot();
-  const depsWithout = fixtureDeps(rootWithout);
-  const withoutSummaryEntry = captureFeedback(rootWithout, { raw: "entry without summary", origin: "cli" });
-  setFeedbackStatus(rootWithout, withoutSummaryEntry.id, "proposed", { proposalPr: "https://github.com/o/r/pull/4" });
-
-  const pathsFor = (deps: ServeDeps, waitText: string): Promise<string[]> =>
-    withShell(deps, async (base) => {
-      const context = await browser.newContext();
-      const page = await context.newPage();
-      const paths: string[] = [];
-      page.on("request", (req) => {
-        const url = new URL(req.url());
-        if (url.hostname === "127.0.0.1") paths.push(url.pathname);
-      });
-      await page.addInitScript((writeToken) => {
-        window.sessionStorage.setItem("rmd-console-write-token", writeToken);
-      }, WRITE_TOKEN);
-      await page.goto(`${base}/?token=${READ_TOKEN}`);
-      await page.waitForFunction(shellBootReady);
-      await page.waitForFunction((t) => (document.getElementById("inbox-list")?.textContent ?? "").includes(t), waitText);
-      await context.close();
-      return Array.from(new Set(paths)).sort();
-    });
-
-  const withSummaryPaths = await pathsFor(depsWith, "entry with summary");
-  const withoutSummaryPaths = await pathsFor(depsWithout, "entry without summary");
-
-  assert.deepEqual(
-    withSummaryPaths,
-    withoutSummaryPaths,
-    "the SAME set of routes fires whether or not the entry carries a cached summary — no extra work at render time",
-  );
-});

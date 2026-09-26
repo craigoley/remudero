@@ -29,7 +29,7 @@ import { clockFromMillisFn } from "../src/lib/clock.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
 import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
 import type { Plan } from "../src/lib/plan.js";
-import { buildConsoleTimeSeries, buildServeServer, type ServeDeps } from "../src/lib/serve.js";
+import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { createService } from "../src/lib/service.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
@@ -179,30 +179,6 @@ test("ignored and duplicate deliveries flush as one summary row per minute with 
   }
 });
 
-test("the console wake-volume series totals the same with summary rows as with one row per delivery", async () => {
-  const script = async ({ markerPath, send }: Harness) => {
-    for (const id of ["a", "b", "c"]) await send(id);
-    await send("x", "issues", "opened");
-    await send("b");
-    consumeSweepWakeMarker(markerPath);
-    for (const id of ["d", "e"]) await send(id);
-  };
-  const stamp = (rows: Row[]) => rows.map((r) => ({ ts: new Date(NOW_MS - 60_000).toISOString(), ...r }));
-  const wakeTotal = (rows: Row[]) =>
-    buildConsoleTimeSeries(stamp(rows), { nowMs: NOW_MS })
-      .series.find((s) => s.id === "wake-volume")!
-      .points.reduce((n, p) => n + p.value, 0);
-
-  const perDelivery = await withWake(undefined, script);
-  const counters = createWakeCounters();
-  const counted = await withWake(counters, script);
-  counted.push({ step: "github.wake.summary", ...wakeSummaryRow(counters, { start: "s", end: "e" }) });
-
-  assert.equal(perDelivery.filter((r) => r.step === "github.wake.accepted").length, 5, "control: five accepted deliveries");
-  assert.ok(counted.length < perDelivery.length, "sanity: the counted run wrote fewer rows");
-  assert.equal(wakeTotal(perDelivery), 5);
-  assert.equal(wakeTotal(counted), 5, "full rows plus the summary's coalesced count total the same");
-});
 
 test("the served gateway counts a routine delivery and flushes its summary when it closes", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}wake-serve-`));

@@ -74,21 +74,6 @@
     "dateNow": 1,
     "newDate": 4
   },
-  "src/lib/console-freshness.ts": {
-    "legacy": 0,
-    "dateNow": 0,
-    "newDate": 1
-  },
-  "src/lib/console-shell-client.ts": {
-    "legacy": 0,
-    "dateNow": 12,
-    "newDate": 6
-  },
-  "src/lib/console-shell-script.ts": {
-    "legacy": 0,
-    "dateNow": 2,
-    "newDate": 5
-  },
   "src/lib/containment.ts": {
     "legacy": 0,
     "dateNow": 1,
@@ -345,9 +330,9 @@
     "newDate": 4
   },
   "src/lib/serve.ts": {
-    "legacy": 7,
+    "legacy": 6,
     "dateNow": 1,
-    "newDate": 1
+    "newDate": 0
   },
   "src/lib/service.ts": {
     "legacy": 3,

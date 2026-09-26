@@ -289,7 +289,6 @@ const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
   "src/lib/board.ts": 3,
   "src/lib/ci-parity.ts": 3,
   "src/lib/clone-reaper.ts": 5,
-  "src/lib/console-url.ts": 2,
   "src/lib/containment.ts": 2,
   "src/lib/coverage-improvement.ts": 1,
   "src/lib/daemon-health.ts": 3,

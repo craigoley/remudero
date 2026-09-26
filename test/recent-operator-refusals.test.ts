@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { computeRecentActivity, createRecentActivityCache, type BoardDeps } from "../src/lib/board.js";
 import type { Plan, Task } from "../src/lib/plan.js";
-import { renderShellHtml } from "../src/lib/serve.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 
 /**
@@ -94,18 +93,6 @@ test("a DAEMON-attributed refusal of an operator Run appears in the feed, naming
   assert.equal(feed[0].ts, "2026-07-31T11:18:10.571Z");
 });
 
-test("the rendered row reads as a reply to the operator: the client labels run-refused as Run refused", () => {
-  const shell = renderShellHtml();
-
-  // The projection above supplies verb + detail + title; these two maps are what turn them into
-  // the sentence on screen. Asserted here rather than assumed because the verb is a NEW member of
-  // a closed union and the client's lookups both fall back silently (`?? e.verb`, `?? "queued"`),
-  // so a missing entry would render a raw slug and no test would notice.
-  assert.match(shell, /"run-refused": "Run refused"/, "verb label");
-  assert.match(shell, /"run-refused": "blocked"/, "badge key — a refused Run reuses the blocked dot");
-  assert.match(shell, /"run-started": "Run started"/);
-  assert.match(shell, /"run-started": "running"/);
-});
 
 test("a refusal naming a task that is not in the plan still renders, falling back to the bare id", () => {
   // `refuse("unknown task id")` fires for exactly this case, and it is the one refusal where the

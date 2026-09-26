@@ -52,7 +52,9 @@ function browserLaunchingSuites(): string[] {
 
 test("every browser-launching serve suite launches exactly ONCE — no retry-around-the-launch may creep back in", () => {
   const suites = browserLaunchingSuites();
-  assert.ok(suites.length >= 5, `expected the serve browser suites to be discoverable, found ${suites.length}`);
+  // W1-T4563 retired the daemon's in-process console and the Chromium suites that drove it; the
+  // remaining browser-launching suites keep this floor non-vacuous.
+  assert.ok(suites.length >= 4, `expected the serve browser suites to be discoverable, found ${suites.length}`);
   for (const f of suites) {
     const src = readFileSync(join(REPO_ROOT, f), "utf8");
     const launches = src.split(LAUNCH_CALL).length - 1;

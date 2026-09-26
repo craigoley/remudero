@@ -42,7 +42,9 @@ function browserLaunchingTestFiles(): string[] {
 
 test("every browser-launching test file awaits the launch PROMISE in teardown, never the resolved handle", () => {
   const files = browserLaunchingTestFiles();
-  assert.ok(files.length >= 6, `expected at least the six known browser suites, found ${files.length}`);
+  // W1-T4563 retired the daemon's in-process console with the eleven suites that drove it in a
+  // browser; four browser-launching suites remain (the corpus control this floor exists for).
+  assert.ok(files.length >= 4, `expected at least the four known browser suites, found ${files.length}`);
   for (const f of files) {
     const src = readFileSync(join(REPO_ROOT, f), "utf8");
     assert.match(
@@ -87,7 +89,7 @@ test("a zero-match name filter over a browser-launching suite exits 0 promptly i
   const started = Date.now();
   execFileSync(
     process.execPath,
-    ["--test", "--import", "tsx", "--test-name-pattern", "zzz no such test title zzz", "test/serve.find.test.ts"],
+    ["--test", "--import", "tsx", "--test-name-pattern", "zzz no such test title zzz", "test/console-write-state.test.ts"],
     { cwd: REPO_ROOT, timeout: 90_000, stdio: "pipe", encoding: "utf8", env: cleanTestEnv() },
   );
   const elapsedMs = Date.now() - started;

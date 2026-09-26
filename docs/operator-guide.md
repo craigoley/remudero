@@ -85,9 +85,8 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd deploy-run [--dry-run]` | One deploy-supervisor cycle (what the `launchd` unit runs on its interval): no-op unless a deploy is triggered AND the daemon is idle. |
 | `rmd deploy-plist [--interval <s>] [--write]` | Generate the deploy-supervisor `launchd` unit (default every 120s). Loading it is an operator action. |
 | `rmd install-checkout [--write]` | Provision or refuse the daemon's dedicated install checkout (resolved from `config.installRoot`, default `<config.root>/daemon-install` — never the checkout the command was invoked from), the tree `rmd deploy-run` fast-forwards. Prints the current state + the migration sequence by default; `--write` actually acts: clones origin/main if absent, fast-forwards if healthy, and refuses (mutating nothing) if dirty, off-`main`/detached, diverged, or not a git checkout at all. |
-| `rmd serve [--port <n>] [--host <addr>]` | The operator console front door — see [The console](#the-console-what-it-binds-and-rotating-its-tokens) below. |
+| `rmd serve [--port <n>] [--host <addr>]` | The `/v1` control gateway the console at app.remudero.com reads — see [The console](#the-console-what-it-binds-and-rotating-its-tokens) below. |
 | `rmd relay` | The Tier-2 relay **client**: dials OUT to the relay URL + enrollment token in `~/.config/remudero/config.json`'s `relay.url`/`relay.token` (never a flag, never committed) and holds a reconnecting tunnel that forwards the local `rmd serve` surface (REST + SSE) as a transparent byte proxy — the console's own identity seam decides every grant, so the relay adds no scope of its own. Never binds a port. Refuses (spawns nothing) when `relay.url`/`relay.token` is absent. Blocks until SIGINT/SIGTERM, same shape as `rmd serve`; `rmd serve` is a separate process and is unaffected whether or not this ever runs. |
-| `rmd console-url [--port <n>] [--host <addr>] [--write]` | Print the console URL carrying the **read** token — one command instead of hand-extracting `state/service-tokens.json`. One URL per bound interface, resolving port/host exactly as `rmd serve` does. `--write` also prints the **write** token to paste into the console, and refuses unless stdout is a TTY (a redirected stdout becomes a file that outlives the process). See [The console](#the-console-what-it-binds-and-rotating-its-tokens). |
 | `rmd serve-plist [--port <n>] [--host <addr>] [--write]` | Generate the `launchd` unit that runs the console as a background **service** (KeepAlive + ThrottleInterval 60, logs 0600 under `state/logs/`). Loading it is an operator action. |
 | `rmd down [--port <n>] [--host <addr>]` | Graceful wind-down for restart/maintenance: unloads the daemon `launchd` service (waiting a bounded window for any in-flight task to reach a safe boundary, else reporting its run id + recoverability), stops `rmd serve` **by port** with a reap-wait (never an argv/pattern kill), and prints a wind-down summary (in-flight state, open-PR count, needs-human count, safe-to-restart). Idempotent — already down is a no-op honest report. |
 | `rmd up [--port <n>] [--host <addr>] [--allow-off-main]` | Full resume: runs install-freshness first, refuses to resume an off-`main` checkout unless `--allow-off-main` is given, loads the daemon `launchd` service, confirms/starts the serve `launchd` service, and prints a resume report (daemon pid, the console URL with its read token, the in-flight/queued head, needs-human count). Idempotent — already up verifies and reports, never a double start. |
@@ -347,8 +346,9 @@ work, not yet built.
 
 ## The console: what it binds, and rotating its tokens
 
-`rmd serve` is the operator console's front door. Two things about it are security-relevant
-and were previously either wrong or undocumented.
+`rmd serve` is the `/v1` control gateway; the console itself is app.remudero.com, which reads it
+server-side (W1-T4563 retired the page this process used to serve at `/`). Two things about it are
+security-relevant and were previously either wrong or undocumented.
 
 **It binds the interfaces you name, and only those.** `--host` defaults to `127.0.0.1`, also reads
 `RMD_SERVE_HOST`, accepts a comma-separated list, and *refuses* wildcards such as `0.0.0.0`
@@ -385,24 +385,22 @@ resolve to (put the pair in `~/.config/remudero/config.json` as `"serve": {"host
 label or path — so it installs and keeps running with the daemon deliberately stopped.
 
 Its logs are `~/Remudero/state/logs/serve.out.log` / `serve.err.log`, forced to 0600 both at
-install and at every boot, because the startup banner carries the read token and launchd would
-otherwise create those files world-readable.
+install and at every boot, so a token that ever reaches them is not world-readable.
 
-**The banner prints the read token only.** There are two bearer tokens: the read token grants a
-view-only board, the write token additionally arms fleet-control and question/approve actions.
-The startup banner prints the console URL carrying the **read** token, and never prints the write
-token, because `serve`'s stdout is commonly redirected to a log file that outlives the process.
-Read the write token from the tokens file when you need to arm a write action.
+**The banner prints no token.** There are two bearer tokens: the read token grants the `/v1` read
+routes, the write token additionally arms fleet-control and question/approve actions. The startup
+banner names the tokens file and prints neither, because `serve`'s stdout is commonly redirected to
+a log file that outlives the process.
 
 **Rotating the tokens.** Token generation is create-once/read-thereafter, so rotation is a delete:
 
 ```
 lsof -ti :4317 | xargs kill
 rm ~/Remudero/state/service-tokens.json
-RMD_SERVE_HOST=127.0.0.1,100.x.y.z rmd serve   # mints a fresh 0600 pair, prints the new console URL
+RMD_SERVE_HOST=127.0.0.1,100.x.y.z rmd serve   # mints a fresh 0600 pair
 ```
 
-Your console bookmark changes every time you rotate, because the token is in the URL.
+After a rotation, update the console deployment's `RMD_CONTROL_READ_TOKEN` and `RMD_CONTROL_WRITE_TOKEN`.
 
 Rotate whenever a token has been exposed. Treat *exposed* broadly: a token that reached a log
 file, a terminal transcript, a screenshot, or a chat window is compromised and must be rotated

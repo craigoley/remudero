@@ -154,7 +154,9 @@ const THE_FALSIFIER = "test/workflow-playwright-install.test.ts";
 
 test("every browser-launching suite EXCEPT W1-T1027's falsifier routes its tests through the absence-aware wrapper", () => {
   const suites = browserLaunchingSuites();
-  assert.ok(suites.length >= 15, `expected the browser suites to be discoverable, found ${suites.length}`);
+  // W1-T4563 retired the daemon's in-process console and the Chromium suites that drove it; the
+  // remaining browser-launching suites are the corpus control here (it must not read as vacuous).
+  assert.ok(suites.length >= 4, `expected the browser suites to be discoverable, found ${suites.length}`);
   assert.ok(suites.includes(THE_FALSIFIER), "the falsifier must still be in the population this reasons about");
 
   for (const f of suites) {

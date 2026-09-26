@@ -15,7 +15,7 @@ import {
 } from "../src/lib/provider-routing-status.js";
 import { ProviderCapacityBlockedError, type ProviderCapacity } from "../src/lib/worker-provider.js";
 import { createClaudeExecutableCache, spawnWorker } from "../src/lib/worker.js";
-import { buildProviderRoutingRoute, buildServeRoutes, renderShellHtml, type ServeDeps } from "../src/lib/serve.js";
+import { buildProviderRoutingRoute, buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
 import type { Route } from "../src/lib/service.js";
 import { daemonCommand } from "../src/run-task.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
@@ -386,43 +386,6 @@ function clientSlice(html: string, start: string, end: string): string {
   return html.slice(a, b);
 }
 
-test("the console panel renders reserve, both windows/resets, selected model/effort, refusal, as-of and stale-last-decision", () => {
-  const html = renderShellHtml();
-  assert.match(html, /id="provider-routing"/);
-  const slice = clientSlice(html, "function renderProviderRouting", "/** Renders GET /v1/plan/view");
-  const factory = new Function(
-    "elements",
-    [
-      "var document = { getElementById: function (id) { return elements[id] || null; } };",
-      "function setGlanceValue(id, text) { var e = document.getElementById(id); if (e) e.textContent = text; }",
-      "function formatTimestamp(v) { return 'at ' + v; }",
-      "function formatClock(v) { return 'reset ' + v; }",
-      slice,
-      "return renderProviderRouting;",
-    ].join("\n"),
-  ) as (elements: Record<string, { textContent: string }>) => (value: unknown) => void;
-  const elements = Object.fromEntries(["pr-state", "pr-reserve", "pr-selected", "pr-providers", "pr-as-of"].map((id) => [id, { textContent: "" }]));
-  const render = factory(elements);
-  const snapshot = readProviderRoutingStatus((() => {
-    const root = mkdtempSync(join(tmpdir(), "rmd-provider-render-"));
-    writeProviderRoutingStatus(root, selectedInput());
-    return root;
-  })(), { now: () => NOW + 60_001 });
-  render(snapshot);
-  assert.equal(elements["pr-state"]!.textContent, "stale last decision");
-  assert.equal(elements["pr-reserve"]!.textContent, "5%");
-  assert.match(elements["pr-selected"]!.textContent, /codex.*gpt-5\.6-terra.*high.*24% remaining.*40\.6% automatic target share/);
-  assert.match(elements["pr-providers"]!.textContent, /claude.*model headroom.*72%.*codex.*model headroom.*25%.*provider allocation.*76%/);
-  assert.match(elements["pr-as-of"]!.textContent, /^at /);
-
-  render({ ...snapshot, policy: { preference: "codex" } });
-  assert.match(elements["pr-selected"]!.textContent, /40\.6% explicit target share/);
-
-  render({ version: 1, state: "blocked", freshness: "fresh", enabledProviders: ["claude", "codex"], reservePercent: 5, observedAt: "2026-09-02T12:00:00.000Z", freshUntil: "2026-09-02T12:01:00.000Z", providers: [], blockedReason: "no-provider-headroom" });
-  assert.match(elements["pr-state"]!.textContent, /blocked.*no-provider-headroom/);
-  assert.match(elements["pr-providers"]!.textContent, /enabled claude, codex/);
-  assert.doesNotMatch(Object.values(elements).map((e) => e.textContent).join(" "), /0%/);
-});
 
 test("serve is a projection only: no provider probes or credentials/config mount cross into the console", () => {
   const serve = readFileSync(fileURLToPath(new URL("../src/lib/serve.ts", import.meta.url)), "utf8");

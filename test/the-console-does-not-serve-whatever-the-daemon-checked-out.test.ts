@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildShellRoute, resolveConsoleSha } from "../src/lib/serve.js";
+import { resolveConsoleSha } from "../src/lib/serve.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "serve-container.sh");
@@ -71,21 +71,7 @@ test("loaded console code identity ignores mutable cwd", () => {
   }
 });
 
-test("stale loaded code remains readable", () => {
-  const route = buildShellRoute(undefined as never, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", {}, undefined, () => "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-  let body = "";
-  route.handler({} as never, { writeHead: () => {}, end: (html: string) => (body = html) } as never, {} as never);
-  assert.match(body, /STALE — serving aaaaaaaaaaaa while the checkout reads bbbbbbbbbbbb/);
-  assert.match(body, /loaded code/);
-});
 
-test("off main loaded code still serves", () => {
-  const route = buildShellRoute(undefined as never, "cccccccccccccccccccccccccccccccccccccccc", {}, undefined, () => "cccccccccccccccccccccccccccccccccccccccc");
-  let body = "";
-  route.handler({} as never, { writeHead: () => {}, end: (html: string) => (body = html) } as never, {} as never);
-  assert.match(body, /loaded code/);
-  assert.match(body, /console-code-current/);
-});
 
 test("dedicated checkout overlays daemon checkout", () => {
   const stateRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t3369-state-`));

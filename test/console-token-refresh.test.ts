@@ -20,14 +20,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 
-import {
-  buildReadyServeServer,
-  buildServeRoutes,
-  buildServeServer,
-  buildVersionRoute,
-  renderShellHtml,
-  type ServeDeps,
-} from "../src/lib/serve.js";
+import { buildReadyServeServer, buildServeRoutes, buildServeServer, buildVersionRoute, type ServeDeps } from "../src/lib/serve.js";
 import {
   GH_APP_ID_ENV,
   GH_APP_INSTALLATION_ID_ENV,
@@ -309,24 +302,6 @@ test("W1-T2269: a configured console arms its OWN in-process refresh loop, never
   buildServeRoutes(depsFor(root, { githubAppRefresh: { start: fakeStart, env } }));
   assert.equal(started, true, "buildServeRoutes must arm the console's OWN refresh loop");
   assert.equal(observedEnv, env, "the refresh loop must read the CONSOLE's own env, not a daemon's");
-});
-
-test("W1-T2269: an armed, never-failed console reports 'refreshing (App)' on the shell", async () => {
-  const root = tmpRoot();
-  const env = {
-    [GH_APP_ID_ENV]: "app-1",
-    [GH_APP_INSTALLATION_ID_ENV]: "inst-1",
-    [GH_APP_PRIVATE_KEY_PATH_ENV]: "/fake/key.pem",
-  };
-  const deps = depsFor(root, {
-    githubAppRefresh: { start: () => ({ armed: true }), env },
-  });
-  await withServeServer(deps, async (base) => {
-    const res = await get(base, "/", READ_TOKEN);
-    assert.equal(res.status, 200);
-    const shell = await res.text();
-    assert.match(shell, /refreshing \(App\)/, "an armed console with no recorded failure must read as actively refreshing");
-  });
 });
 
 test("W1-T2269: deploy/serve-container.sh carries a passthrough for all three GH_APP_* names", () => {
@@ -716,61 +691,6 @@ test("W1-T2837: an explicit webhook-secret path overrides the outgoing container
 
 // ── (2) A CREDENTIAL THAT CANNOT BE REPLACED IS REPORTED, NOT PRESENTED AS A WORKING BOARD ──────
 
-test("W1-T2269: an unconfigured console reports 'static' on the board, not silence", async () => {
-  const root = tmpRoot();
-  const deps = depsFor(root, { githubAppRefresh: { env: {} } });
-  await withServeServer(deps, async (base) => {
-    const shell = await (await get(base, "/", READ_TOKEN)).text();
-    assert.match(shell, /github-credential/, "the shell must render a github-credential chip");
-    assert.match(shell, /static \(no renewal configured\)/, "an unconfigured console must NAME itself static, not look like a healthy board");
-  });
-});
-
-test("W1-T2269: a refresh failure is named on the board, with github-app.ts's own reason", async () => {
-  const root = tmpRoot();
-  const FAIL_REASON = "exchange rejected: 403";
-  const fakeStart = (opts: { log?: RefreshOptions["log"] }) => {
-    opts.log?.(TOKEN_REFRESH_FAILED_STEP, { reason: FAIL_REASON });
-    return { armed: true };
-  };
-  const deps = depsFor(root, {
-    githubAppRefresh: {
-      start: fakeStart,
-      env: { [GH_APP_ID_ENV]: "1", [GH_APP_INSTALLATION_ID_ENV]: "2", [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem" },
-    },
-  });
-  await withServeServer(deps, async (base) => {
-    const shell = await (await get(base, "/", READ_TOKEN)).text();
-    assert.match(shell, new RegExp(`refresh failed: ${FAIL_REASON}`), "a failed refresh must be named on the board, not hidden behind a healthy chip");
-  });
-});
-
-test("W1-T2269: a later SUCCESS clears a previously-reported failure on the board — never a stuck stale warning", async () => {
-  const root = tmpRoot();
-  let log: RefreshOptions["log"] | undefined;
-  const fakeStart = (opts: { log?: RefreshOptions["log"] }) => {
-    log = opts.log;
-    opts.log?.(TOKEN_REFRESH_FAILED_STEP, { reason: "exchange timed out" });
-    return { armed: true };
-  };
-  const deps = depsFor(root, {
-    githubAppRefresh: {
-      start: fakeStart,
-      env: { [GH_APP_ID_ENV]: "1", [GH_APP_INSTALLATION_ID_ENV]: "2", [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem" },
-    },
-  });
-  await withServeServer(deps, async (base) => {
-    const before = await (await get(base, "/", READ_TOKEN)).text();
-    assert.match(before, /refresh failed: exchange timed out/);
-
-    log?.(TOKEN_REFRESHED_STEP, { installation_id: "2", expires_at: "2026-08-25T12:00:00Z" });
-
-    const after = await (await get(base, "/", READ_TOKEN)).text();
-    assert.doesNotMatch(after, /refresh failed/, "a fresh success must clear the stale failure");
-    assert.match(after, /refreshing \(App\)/, "and read as actively refreshing again");
-  });
-});
-
 // ── (3) WRITE ROUTES KEEP THE TIERS AND SCOPES THEY ALREADY HAVE ────────────────────────────────
 
 test("W1-T2269: arming (or not arming) the credential refresh changes NOTHING about route scopes/tiers", () => {
@@ -854,25 +774,6 @@ function extractFunctionBody(src: string, name: string): string {
   return src.slice(startIdx, closeIdx);
 }
 
-test("W1-T2269: serve.ts's new credential-refresh wiring makes no HTTP call of its own (it only arms github-app.ts's)", () => {
-  const src = readFileSync(fileURLToPath(new URL("../src/lib/serve.ts", import.meta.url)), "utf8");
-  const trackerBody = extractFunctionBody(src, "trackGithubCredentialState");
-  const rendererBody = extractFunctionBody(src, "renderGithubCredentialHtml");
-  const armStart = src.indexOf("const githubCredential = trackGithubCredentialState(deps.log);");
-  assert.ok(armStart >= 0, "the arming call site must exist in assembleServeRoutes");
-  const armEndMarker = "githubCredential.state.armed = githubAppRefresh.armed;";
-  const armEnd = src.indexOf(armEndMarker, armStart);
-  assert.ok(armEnd >= 0, "the arming call site must retain the refresh result without adding its own exchange");
-  const armBlock = src.slice(armStart, armEnd + armEndMarker.length);
-  for (const [label, code] of [
-    ["trackGithubCredentialState", trackerBody],
-    ["renderGithubCredentialHtml", rendererBody],
-    ["assembleServeRoutes's arming call site", armBlock],
-  ] as const) {
-    assert.ok(!/\bfetch\(/.test(code), `${label} must not itself fetch anything — only github-app.ts's own exchange may`);
-  }
-});
-
 // ── (5) NO CREDENTIAL VALUE REACHES A LOG LINE, A LEDGER ROW, OR DISK ───────────────────────────
 
 test("W1-T2269: a secret written into GH_TOKEN never appears in the rendered shell, /v1/version, or the ledger log", async () => {
@@ -912,11 +813,6 @@ test("W1-T2269: a secret written into GH_TOKEN never appears in the rendered she
   }
 });
 
-test("W1-T2269: renderShellHtml's credential param is a plain server-rendered span — no new client-script field", () => {
-  const html = renderShellHtml(undefined, undefined, "", '<span class="gh-credential-failed">refresh failed: boom</span>');
-  assert.match(html, /id="github-credential"/);
-  assert.match(html, /refresh failed: boom/);
-});
 
 test("W1-T2269: GET /v1/version stays exactly {sha} — the credential state is reported on the shell, never on this JSON surface", async () => {
   // A pre-existing invariant test (test/serve.test.ts, "the served payload carries the sha and NO

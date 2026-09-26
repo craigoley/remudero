@@ -128,7 +128,7 @@ test("claim 2 (falsifier): ATTENDED (the default, no AWAY flag) delivers a HARD_
     );
     assert.equal(code, 0);
     assert.equal(sent.length, 1, "ATTENDED still fires the real-time ping for HARD_STOP, unchanged");
-    assert.match(sent[0], /#task=W1-TY/, "the ping still carries the console deep link, exactly as before");
+    assert.match(sent[0], /https:\/\/app\.remudero\.com\/task\/W1-TY/, "the ping still carries the console deep link (W1-T4563: the console's /task/<id> page)");
 
     const lines = readLedger(root);
     assert.ok(lines.some((l) => l.step === "escalation.issue_opened"));
