@@ -41,7 +41,7 @@ const HEALTHY_CHECKOUT = {
 };
 
 test("W1-T3240: a stale image is seen when install and running heads are both current", () => {
-  const d = decideDeployTrigger({ ...HEALTHY_CHECKOUT, imageBakedCommitsBehind: 1 });
+  const d = decideDeployTrigger({ ...HEALTHY_CHECKOUT, imageBakedCommitsBehind: 1, imagePublished: true });
 
   assert.equal(d.deploy, true, "a published-but-unrunning baked-path fix must trigger a deploy");
   // The reason must name the IMAGE. "install behind origin/main" would send the reader to the

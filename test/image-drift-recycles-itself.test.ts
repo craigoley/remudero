@@ -82,7 +82,7 @@ test("mount staleness alone is still the daemon's own job, and the operator's fu
 
 test("in DEPLOY_AUTO, low source-change pressure no longer vetoes an image the tick found stale", () => {
   const pressureLow = { restart: false, reason: "restart pressure 1/18 below threshold", total: 1, threshold: 18 };
-  const d = decideDeployTrigger({ ...tick, autoMode: true, autoRestartPressure: pressureLow });
+  const d = decideDeployTrigger({ ...tick, autoMode: true, autoRestartPressure: pressureLow, imagePublished: true });
   assert.equal(d.deploy, true);
   const mountOnly = decideDeployTrigger({ ...tick, autoMode: true, imageDriftOnly: undefined, imageBakedCommitsBehind: 0, originMain: "d".repeat(40), autoRestartPressure: pressureLow });
   assert.equal(mountOnly.deploy, false, "control: pressure still governs mounted staleness");

@@ -148,6 +148,7 @@ test("W1-T3245's separation is preserved — the tick does not restart on runnin
     daemonAlive: true,
     imageDriftOnly: true,
     imageBakedCommitsBehind: 1,
+    imagePublished: true, // W1-T4589: auto mode recycles on image drift once the image is published
   });
   assert.equal(imageDrifted.deploy, true, "image drift still fires the tick's own recycle, unaffected by runningStale");
 });
