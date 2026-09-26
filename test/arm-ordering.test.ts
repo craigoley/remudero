@@ -173,6 +173,13 @@ test("armOutcomeReason maps every outcome to a reason about that outcome", () =>
   }
 });
 
+test("W1-T4581 stack-parent refusal is non-armed and has a specific reason", () => {
+  const reason = armOutcomeReason("stack-parent-refused", "verdict is a full PASS");
+
+  assert.notEqual(reason, "verdict is a full PASS", "a refused outcome must not carry the semantic approval reason");
+  assert.match(reason, /stacked parents that are not all merged.*W1-T4581.*arm and direct merge both refused/);
+});
+
 // ── 8: TRAP 2 — the withdrawal still beats the post; the arm still follows it ───────
 // W1-T2232 MOVED THIS FROM SOURCE TEXT TO BEHAVIOUR: this used to slice `runReview`'s body out
 // of `run-task.ts` and order four call-site literals (`withdrawArmIfVerdictRefuses(`, `await
