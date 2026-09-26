@@ -3131,6 +3131,8 @@ Microsoft Foundry Claude Messages API and deployment guidance; Anthropic Opus 5.
 
 ## 2026-09-26 — W1-T4583: the in-repo contract-coverage ratchet is RETIRED; the contract is checked where it is served and where it is consumed
 
+*Operator direction record: carried out under the operator's 2026-09-26 instruction to "file items that need filed, fix items that need fixed, build items that need built" for the old-console follow-up audit that named this ratchet as measuring nothing.*
+
 `scripts/contract-coverage-ratchet.mjs` (W1-T3174) counted `/v1` routes an IN-REPO client called that
 `openapi/daemon.yaml` did not declare. W1-T4563 and W1-T4566 deleted both in-repo consoles, so its client
 population was declared empty and it censused nothing while still costing a CI step, a gate-gardener
