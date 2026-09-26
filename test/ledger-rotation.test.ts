@@ -392,6 +392,36 @@ test("rotateLedger: every decision-relevant step survives into the live view, de
   }
 });
 
+test("W1-T4581 criterion 5: a stack-parent arm refusal survives a real ledger rotation", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const refusal = {
+      run_id: "run-stack-order",
+      task_id: "W1-T4581",
+      step: "automerge.arm_skipped",
+      outcome: "stack-parent-refused",
+      pr_number: 1766,
+      head_sha: "child-head",
+    } as LedgerLine;
+    appendLedger(ledgerPath, refusal, { ceilingBytes: Number.MAX_SAFE_INTEGER });
+    writeFileSync(ledgerPath, noiseBlock(300), { flag: "a" });
+
+    assert.equal(ledgerExceedsRotationCeiling(ledgerPath, 2_000), true, "test setup exceeds the rotation ceiling");
+    const result = rotateLedger(ledgerPath, { ceilingBytes: 2_000 });
+
+    assert.equal(result.rotated, true);
+    assert.ok(
+      readLedgerLines(ledgerPath).some(
+        (line) => line.step === "automerge.arm_skipped" && line.outcome === "stack-parent-refused" && line.pr_number === 1766,
+      ),
+      "the guard's dedup-reset event must remain live after rotation",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("rotateLedger: the dispatch breaker's own predicates read identically for a task's history before and after rotation", () => {
   const dir = tmpDir();
   try {

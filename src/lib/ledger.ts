@@ -674,6 +674,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T1215: `armRunIdFromLedger` (run-task.ts) reads these rows to name WHICH lane armed a PR
   // that merged behind a refused verdict; dropping them turns that attribution into "unattributed".
   "automerge.armed",
+  "automerge.arm_skipped",
   // W1-T968: `priorArmOnHead` (run-task.ts) reads a withdrawal on the same head as superseding the
   // arm before it. Archive this row while `automerge.armed` is retained and the operator's console
   // line reports a PR armed that a later verdict already disarmed.

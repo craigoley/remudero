@@ -1,0 +1,63 @@
+- id: W1-T4581
+  title: "STACKED PRS MUST WAIT FOR EVERY DECLARED PARENT — an auto-merge child landed first and stranded its parent as a conflict"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-26: console PR #1766 merged before its declared parent #1765, leaving #1765 conflicting"
+  files:
+    - src/lib/arm-auto-merge.ts
+    - src/lib/ledger.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/arm-auto-merge.test.ts
+    - test/arm-ordering.test.ts
+    - test/automerge-hold.test.ts
+    - test/ledger-rotation.test.ts
+  plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168"]
+  status: queued
+  attempts: 0
+  rationale: |
+    Observed on craigoley/remudero-console: #1766's body declared "Stacked on #1765 → #1764";
+    #1765 and #1766 both had auto-merge armed. Once checks were green, #1766 merged at
+    2026-09-26T19:33:13Z while #1765 was still open. The child squash included the parent's
+    feature, but the parent PR remained open and then became conflicting. The shared core arm
+    choke point does not currently read a PR's declared stack parents, so an "auto-merge" request
+    carries no ordering constraint.
+  design: |
+    At attemptArm's shared choke point, read the current PR body and parse the explicit
+    "Stacked on #N → #M" declaration. Require every listed parent to read MERGED over REST before
+    allowing either auto-merge or its clean-status direct-merge fallback. An open/closed-unmerged
+    parent blocks; an unreadable/malformed body or parent state fails closed. A PR without the
+    declaration keeps the existing path. Both at-open and ledger-gated attempts already converge
+    on attemptArm. The sweep also checks every already-armed PR and withdraws the GitHub arm if its
+    parent chain is blocked or unreadable, since GitHub can merge an existing request without
+    another daemon arm attempt. Record a distinct refusal outcome and reason. Do not change GitHub
+    branch protection or attempt to reorder/undo already-merged PRs.
+    The cited live plan records share the broad sweep/entrypoint surfaces but govern adjacent
+    behaviors: W1-T77 is the PR-pipeline sweep, W1-T78 clarification, W1-T100 blocked-CI routing,
+    W1-T150 credit backfill, and W1-T168 review no-progress. None defines or enforces declared
+    stacked-PR parent order. These files are the existing integration choke points, so this task
+    adds the missing stack prerequisite rather than duplicating those behaviors.
+  acceptance:
+    - claim: "a stacked child is refused before any GitHub merge/arm effect unless all declared parents are merged"
+      proof: "unit test: W1-T4581 open-time and ledger-gated arms refuse with an unmerged parent"
+    - claim: "both open-time and ledger-gated arm paths share the parent-order gate, and unreadable stack metadata fails closed"
+      proof: "unit test: W1-T4581 REST reader requires every parent merged and fails closed on unreadable data"
+    - claim: "a pre-existing auto-merge request is withdrawn when a parent is unmerged or unreadable, while an unstacked request is left alone"
+      proof: "unit test: W1-T4581 an already-armed stacked child is withdrawn before its declared parents merge"
+    - claim: "withdrawing a child invalidates its old arm dedup so it can arm after the parent chain becomes ready"
+      proof: "unit test: W1-T4581 criterion 4"
+    - claim: "the ledgered stack-parent refusal survives rotation so the child can re-arm after its parents merge"
+      proof: "unit test: W1-T4581 criterion 5"
+    - claim: "the production sweep effect surface invokes the REST stack prerequisite reader"
+      proof: "grep: stackPrerequisiteFromRest( in src/lib/sweep.ts"
+    - claim: "the refusal is represented as a non-armed outcome with an outcome-specific reason"
+      proof: "unit test: armOutcomeReason maps every outcome to a reason about that outcome"
+  falsifier: |
+    With #1765 merged and #1764 still open, arm a PR whose body says
+    "Stacked on #1765 → #1764"; if it can remain armed, or a later attempt issues an arm/direct
+    merge, the guard is bypassed.
