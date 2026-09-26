@@ -1,0 +1,60 @@
+- id: W1-T4578
+  title: "EVERY WORKER CALL COUNTS — emit joined attempt receipts before the run verdict"
+  repo: remudero
+  depends_on: [W1-T4560]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: high
+  band_meaning: span
+  origin: "human request 2026-09-26: every daemon, task, cycle, worker and run should improve model field-trial evidence"
+  plan_refs: ["W1-T4553", "W1-T4554", "W1-T4560", "docs/research/model-evidence-program.md"]
+  files:
+    - src/lib/benchmark-run.ts
+    - src/lib/analytics-route.ts
+    - src/run-task.ts
+    - test/benchmark-worker-attempt.test.ts
+    - test/benchmark-worker-attempt-projection.test.ts
+    - test/benchmark-worker-attempt-wiring.test.ts
+    - docs/model-routing.md
+  status: queued
+  rationale: |
+    W1-T4560 established the assignment and run-verdict envelope; this extends that same
+    surface to each worker call rather than redoing the earlier receipt.
+    One run can spawn recon, implementation, repair and other workers, but benchmark-run-v1
+    currently emits one terminal receipt only from the run's final verdict. Earlier assignments
+    become falsely outcome-missing, and a run verdict can be mistaken for the result of one
+    model call. This damages model-by-task funnels and obscures cash spend across attempts.
+    The shared dispatch wrapper already observes every worker selection; the same boundary can
+    emit an attempt receipt on success, provider error, or throw without changing work flow.
+  design: |
+    Emit one metadata-only, versioned worker-attempt completion row per actual spawn from the
+    wrap-once run-task boundary. Join with the immutable selection assignment ID when observed;
+    otherwise preserve an explicit unjoined reason. Record requested, selected and served model
+    separately; preserve missing tokens, duration and cost as unavailable, and API cash versus
+    subscription notional as separate fields. A thrown call is a failed worker attempt, not a
+    failed task, and has no invented usage. Keep the run verdict and later verified outcome as
+    separate phases. The telemetry writer must be best-effort and never alter the worker result,
+    retry, dispatch, review or PR flow.
+
+    Teach benchmark quality to count one worker-attempt result per assignment, dedupe exact
+    receipt replays, and use legacy verdict-only rows only where no attempt receipt exists.
+    Keep source provenance and unknown/duplicate counts visible. An assignment with no observed
+    completion stays censored/unavailable. Do not promote worker-call success, merge or green CI
+    to verified task success. This task does not publish or rank models or start a paid trial.
+  acceptance:
+    - claim: "multiple workers in one run each produce a distinct assignment-joined attempt receipt"
+      proof: "unit test: benchmark worker attempts join each spawn without duplicating the run verdict"
+    - claim: "a thrown or provider-error worker remains an attempt with unknown usage, not a task verdict"
+      proof: "unit test: benchmark worker attempts preserve failure and missing resource evidence"
+    - claim: "cash and subscription-notional estimates remain separate at the per-call boundary"
+      proof: "unit test: benchmark worker attempts separate cash from notional cost"
+    - claim: "projection prefers attempt receipts and exposes legacy verdict fallback without double-counting"
+      proof: "unit test: benchmark quality reconciles attempt and legacy verdict receipts"
+    - claim: "the real dispatch wrapper emits attempt receipts and logging failures never block the worker"
+      proof: "unit test: run task wires best effort benchmark attempt receipts for every dispatch spawn"
+  falsifier: |
+    Two workers in one task produce two assignments but only one completion; an intermediate
+    worker call and the final verdict are counted as two model wins; a missing cost becomes zero;
+    a telemetry write error changes the worker result; or a thrown spawn becomes a failed task.
