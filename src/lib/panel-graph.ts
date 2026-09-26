@@ -1869,6 +1869,13 @@ export function buildInboxThreadReplyRoute(deps: PanelGraphDeps): Route {
     tier: "low",
     handler: jsonAction(validateThreadReply, (input, req, res) => {
       const proposalId = proposalIdOfThread(input.threadId)!;
+      // The detail route and daemon responder both require a current operator-owned item.
+      // A syntactically valid but orphaned id must not receive a success receipt for a
+      // message the responder will silently have no item to answer.
+      if (!operatorThreadItems(deps).some((item) => item.proposalId === proposalId)) {
+        sendJson(res, 404, { error: "not_found", detail: "operator inbox thread is unavailable" });
+        return;
+      }
       const operator = operatorName(req);
       appendThreadMessage(
         inboxThreadIdentity(proposalId),
@@ -1904,6 +1911,19 @@ export function buildInboxThreadReadRoute(deps: PanelGraphDeps): Route {
     // W1-T404: LOW — a read mark; changes nothing but the unread flag.
     tier: "low",
     handler: jsonAction(validateThreadRead, (input, _req, res) => {
+      const proposalId = proposalIdOfThread(input.threadId)!;
+      const item = operatorThreadItems(deps).find((candidate) => candidate.proposalId === proposalId);
+      if (!item) {
+        sendJson(res, 404, { error: "not_found", detail: "operator inbox thread is unavailable" });
+        return;
+      }
+      const threads = readThreadsOr500(deps, res);
+      if (!threads) return;
+      const lastSeq = threadDetailView(item, threads, {}).messages.at(-1)?.seq ?? 0;
+      if (input.seq > lastSeq) {
+        sendJson(res, 409, { error: "seq_ahead", detail: "read mark exceeds the last observed message" });
+        return;
+      }
       markThreadRead(readMarksPath(join(deps.inboxRoot, "state")), input.threadId, input.seq);
       sendJson(res, 200, { ok: true });
     }),
