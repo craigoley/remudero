@@ -1,18 +1,21 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { inboxThreadId, readAllThreads } from "../src/lib/inbox-thread.js";
-import { buildInboxThreadReplyRoute, inboxThreadStorePath, type PanelGraphDeps } from "../src/lib/panel-graph.js";
+import { appendThreadReplyOnce, inboxThreadId, readAllThreads } from "../src/lib/inbox-thread.js";
+import { acquireInflightLock } from "../src/lib/inflight-lock.js";
+import { buildInboxThreadReplyRoute, inboxReplyAuditState, inboxThreadStorePath, type PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { createService } from "../src/lib/service.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const PROPOSAL = "verify-human:W1-T235";
 const THREAD = inboxThreadId(PROPOSAL);
 const INTENT = "operator-20260926-12345678";
+const archiveName = (offsetMs: number) => `ledger.${new Date(Date.now() + offsetMs).toISOString().replace(/[:.]/g, "-")}.ndjson`;
 
 async function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reply-receipt-`));
@@ -104,6 +107,7 @@ test("W1-T4558: successful reply records one message and one audit row", async (
   assert.equal(f.audits()[0]?.reply_id, result.body.replyId);
   const collision = await f.reply("Changed meaning", INTENT);
   assert.equal(collision.status, 409, "one intent cannot be silently repurposed for different text");
+  assert.equal(collision.body.delivery, "not_delivered", "the changed draft was not sent");
   assert.equal(f.messages().length, 1);
   assert.equal(f.audits().length, 1);
   assert.equal((await f.reply("A new message", "short")).status, 400, "invalid intent is refused before either write");
@@ -117,11 +121,64 @@ test("W1-T4558: incomplete audit history cannot authorize duplicate credit on re
   assert.equal(delivered.body.audit, "gap");
   f.deps.appendInboxReplyAudit = undefined;
   for (let second = 0; second < 25; second++) {
-    writeFileSync(join(dirname(f.ledgerPath), `ledger.2026-09-26T12-00-${String(second).padStart(2, "0")}-000Z.ndjson`), "");
+    writeFileSync(join(dirname(f.ledgerPath), archiveName(86_400_000 + second * 1000)), "");
   }
   const retry = await f.reply();
   assert.equal(retry.status, 200);
   assert.equal(retry.body.audit, "unverified", "a capped archive read cannot prove audit absence");
   assert.equal(f.messages().length, 1);
   assert.equal(f.audits().length, 0, "uncertainty must not create duplicate audit credit");
+});
+
+test("W1-T4558: old hidden rotations cannot hold a later reply audit", async (t) => {
+  const f = await fixture(t);
+  f.deps.appendInboxReplyAudit = () => { throw new Error("injected audit outage"); };
+  assert.equal((await f.reply()).body.audit, "gap");
+  f.deps.appendInboxReplyAudit = undefined;
+  for (let second = 0; second < 25; second++) {
+    writeFileSync(join(dirname(f.ledgerPath), archiveName(-86_400_000 + second * 1000)), "");
+  }
+  const retry = await f.reply();
+  assert.equal(retry.body.audit, "recorded", "archives cut before the message cannot hide its audit");
+  assert.equal(f.messages().length, 1);
+  assert.equal(f.audits().length, 1);
+});
+
+test("W1-T4558: an append that commits and then throws is still a delivered reply", async (t) => {
+  const f = await fixture(t);
+  f.deps.appendInboxReplyMessage = (...args) => {
+    appendThreadReplyOnce(...args);
+    throw new Error("injected post-write error");
+  };
+  const result = await f.reply();
+  assert.equal(result.status, 200);
+  assert.equal(result.body.delivery, "delivered");
+  assert.equal(f.messages().length, 1);
+  assert.equal(f.audits().length, 1);
+  assert.equal((await f.reply()).status, 200);
+  assert.equal(f.messages().length, 1);
+  assert.equal(f.audits().length, 1);
+});
+
+test("W1-T4558: an unreadable audit and a contested lock never assert a new delivery", async (t) => {
+  const f = await fixture(t);
+  mkdirSync(f.ledgerPath);
+  assert.equal(inboxReplyAuditState(f.ledgerPath, "a".repeat(64)), "unverified");
+  rmSync(f.ledgerPath, { recursive: true, force: true });
+  const lockId = createHash("sha256").update(THREAD).digest("hex");
+  const lockDir = join(dirname(f.storePath), "reply-locks");
+  const lock = acquireInflightLock(lockDir, lockId, { run_id: "held-by-test" });
+  try {
+    const blocked = await f.reply();
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.body.delivery, "unverified");
+    assert.equal(f.messages().length, 0);
+  } finally {
+    lock.release();
+  }
+  rmdirSync(lockDir);
+  writeFileSync(lockDir, "not a directory");
+  const brokenLock = await f.reply();
+  assert.equal(brokenLock.status, 500, "an unexpected lock filesystem failure must not be relabeled as contention");
+  assert.equal(f.messages().length, 0);
 });

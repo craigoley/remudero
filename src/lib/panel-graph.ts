@@ -86,7 +86,7 @@ import {
   type Policy,
 } from "./policy.js";
 import { buildActionResultsRoute } from "./action-results.js";
-import { createLedgerRotationMemo, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsSync, rotationStampIso } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
 import { fleetLaneDecisions, readFleetLaneStore, writeClassificationSnapshot, type FleetLaneDecision } from "./fleet-lane.js";
@@ -1872,7 +1872,7 @@ function operatorName(req: IncomingMessage): string | undefined {
 /** A duplicate needs positive evidence before it can skip or repair an audit. The live file is
  * checked first; older rotations are capped, and an incomplete read returns unknown rather than
  * risking duplicate audit credit. An offline reconciliation can use the durable reply id. */
-function inboxReplyAuditState(ledgerPath: string, replyId: string): "recorded" | "absent" | "unverified" {
+export function inboxReplyAuditState(ledgerPath: string, replyId: string, messageTs?: number): "recorded" | "absent" | "unverified" {
   if (basename(ledgerPath) !== LEDGER_FILENAME) return "unverified";
   try {
     // ledger-read-intent: live — fast positive control before the bounded archive union.
@@ -1885,7 +1885,11 @@ function inboxReplyAuditState(ledgerPath: string, replyId: string): "recorded" |
       order: "newest-first", maxRotations, dedupe: false,
     });
     if (rotated.rows.some((row) => row.reply_id === replyId)) return "recorded";
-    if (rotated.archiveCount > maxRotations || rotated.unread.length > 0 || rotated.unclassified.length > 0 || rotated.torn > 0) {
+    const oldestRead = rotated.archiveFiles[rotated.archiveCount - maxRotations];
+    const oldestStamp = oldestRead ? rotationStampIso(basename(oldestRead)) : undefined;
+    const unseenCouldContainReply = rotated.archiveCount > maxRotations &&
+      !(oldestStamp && messageTs !== undefined && Date.parse(oldestStamp) < messageTs);
+    if (unseenCouldContainReply || rotated.unread.length > 0 || rotated.unclassified.length > 0 || rotated.torn > 0) {
       return "unverified";
     }
     return "absent";
@@ -1920,7 +1924,7 @@ export function buildInboxThreadReplyRoute(deps: PanelGraphDeps): Route {
       const lockId = createHash("sha256").update(input.threadId).digest("hex");
       try {
         withInflightLock(join(dirname(store.threadStorePath), "reply-locks"), lockId, () => {
-          let stored: { kind: "appended" | "existing" | "conflict"; seq: number };
+          let stored: { kind: "appended" | "existing" | "conflict"; seq: number; ts?: number };
           try {
             stored = (deps.appendInboxReplyMessage ?? appendThreadReplyOnce)(inboxThreadIdentity(proposalId), input.text, replyId, store, operator ? { operator } : {});
           } catch {
@@ -1930,13 +1934,13 @@ export function buildInboxThreadReplyRoute(deps: PanelGraphDeps): Route {
               sendJson(res, 503, { error: "reply_store_unavailable", delivery: check.status === "ok" ? "not_delivered" : "unverified", replyId });
               return;
             }
-            stored = { kind: prior.body === input.text ? "existing" : "conflict", seq: prior.seq };
+            stored = { kind: prior.body === input.text ? "existing" : "conflict", seq: prior.seq, ts: prior.ts };
           }
           if (stored.kind === "conflict") {
-            sendJson(res, 409, { error: "reply_intent_conflict", delivery: "delivered", replyId });
+            sendJson(res, 409, { error: "reply_intent_conflict", delivery: "not_delivered", priorReplyId: replyId });
             return;
           }
-          const priorAudit = stored.kind === "existing" ? inboxReplyAuditState(deps.ledgerPath, replyId) : "absent";
+          const priorAudit = stored.kind === "existing" ? inboxReplyAuditState(deps.ledgerPath, replyId, stored.ts) : "absent";
           if (priorAudit === "unverified") {
             sendJson(res, 200, { ok: true, delivery: "delivered", audit: "unverified", replyId, threadId: input.threadId, waitingOn: "daemon", duplicate: true });
             return;

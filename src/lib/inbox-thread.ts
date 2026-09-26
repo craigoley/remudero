@@ -183,11 +183,11 @@ export function appendThreadReplyOnce(
   replyId: string,
   deps: ThreadStoreDeps,
   extra: ThreadMessageExtra = {},
-): { kind: "appended" | "existing" | "conflict"; seq: number } {
+): { kind: "appended" | "existing" | "conflict"; seq: number; ts?: number } {
   const current = readThread(deriveThreadId(identity), deps);
   if (current.status === "unresolved") throw new Error(`inbox-thread: ${current.reason}`);
   const prior = current.messages.find((message) => message.role === "reply" && message.extra?.replyId === replyId);
-  if (prior) return { kind: prior.body === body ? "existing" : "conflict", seq: prior.seq };
+  if (prior) return { kind: prior.body === body ? "existing" : "conflict", seq: prior.seq, ts: prior.ts };
   appendThreadMessage(identity, "reply", body, deps, { ...extra, replyId });
   return { kind: "appended", seq: current.messages.length + 1 };
 }
