@@ -19,6 +19,10 @@
     solely to exercise the plan-only branch. Its exact PASS expectation is now false for an
     unrelated reason, causing #7290's instrumented coverage suite to fail and its PR to stall.
     Weakening the production reservation guard would make a missing authority look valid.
+    Its prior exact-title acceptance proof also passed on the base tree, so #7300's governed
+    review recorded 0/1 discriminating proofs and correctly refused to arm auto-merge.
+    The replacement anchors on the driven fixture must not require a reservation assertion,
+    absent from base and exercised by the declaration-control fixture suite.
   design: |
     Make the fixture a plan-only amendment to an existing synthetic task rather than a new ID
     declaration. Keep the same plan-only versus plan-plus-source boundary and the driven spawn
@@ -27,8 +31,8 @@
     This is a test-only fixture correction; it does not change reviewer production behavior or
     add a PR gate. Merge this before updating #7290 to the then-current main tree.
   acceptance:
-    - claim: "the driven plan-only verdict stays deterministic without a reservation-dependent task filing"
-      proof: "unit test: DRIVEN: the plan-only verdict summary still reads as deterministically gated, unchanged by the skip"
+    - claim: "the plan-only fixture asserts that it adds no reservation-dependent task ID"
+      proof: "grep: the driven fixture must not require a reservation in test/review-skips-spawn-on-plan-only.test.ts"
   falsifier: |
     Restore the fixture's added - id: W1-T9999 line: the declaration control must fail, and
     W1-T4561's strict ownership check must still withhold the driven PASS. With the amendment
