@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { gzipSync } from "node:zlib";
 
 import {
   CASH_TRIAL_ID,
@@ -74,11 +75,16 @@ const verdict = (run: string, pr: boolean, id?: string, cost?: number, ts = "202
   ...(id ? { selection_assignment_id: id } : {}),
   ...(cost !== undefined ? { cost_usd: cost } : {}),
 });
+const cashCall = (run: string, id: string, cost: number | undefined, ts = "2026-09-24T01:30:00Z", over: Record<string, unknown> = {}) => ({
+  ts, run_id: run, step: "implement.done", selection_assignment_id: id,
+  provider: "cash", billing_mode: "api",
+  ...(cost === undefined ? {} : { total_cost_usd: cost }), ...over,
+});
 
 test("the ledger fold counts PRs per arm and today's cash spend", () => {
   const rows = [
-    tagged("r1", "a1", "cash"), verdict("r1", true, "a1", 0.2),
-    tagged("r2", "a2", "cash"), verdict("r2", false, "a2", 0.3, "2026-09-23T02:00:00Z"),
+    tagged("r1", "a1", "cash"), cashCall("r1", "a1", 0.2), verdict("r1", true, "a1", 0.2),
+    { ...tagged("r2", "a2", "cash"), ts: "2026-09-23T01:00:00Z" }, cashCall("r2", "a2", 0.3, "2026-09-23T01:30:00Z"), verdict("r2", false, "a2", 0.3, "2026-09-23T02:00:00Z"),
     tagged("r3", "a3", "control"), verdict("r3", true, "a3", 5),
     tagged("r4", "a4", "held"), verdict("r4", true),
     tagged("r5", "a5", "cash"),
@@ -89,7 +95,114 @@ test("the ledger fold counts PRs per arm and today's cash spend", () => {
     cash: { runs: 2, prs: 1 },
     control: { runs: 1, prs: 0 + 1 },
     spentTodayUsd: 0.2,
+    spendUnavailableReason: "cash assignment has no worker-call cost receipt",
   });
+});
+
+test("cash trial budget attributes per-call API spend without mixed run cost", () => {
+  const rows = [
+    tagged("cash-run", "cash-id", "cash"), cashCall("cash-run", "cash-id", 0.35),
+    verdict("cash-run", true, "cash-id", 12),
+    tagged("control-run", "control-id", "control"),
+    cashCall("control-run", "control-id", 9, undefined, { provider: "claude", billing_mode: "subscription" }),
+    verdict("control-run", true, "control-id", 9),
+  ];
+  const result = summarizeCashTrial(rows, "2026-09-24");
+  assert.equal(result.spentTodayUsd, 0.35, "whole-run and subscription notional costs are not trial cash");
+  assert.equal(result.cash.prs, 1);
+  assert.equal(result.control.prs, 1);
+});
+
+test("cash trial reads three ledger forms and deduplicates replayed spend", () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-cash-trial-three-forms-"));
+  const today = "2026-09-25";
+  const assignment = (run: string, id: string, ts: string) => ({ ...tagged(run, id, "cash"), ts });
+  const plainRows = [assignment("plain", "a-plain", `${today}T10:00:00Z`), cashCall("plain", "a-plain", 1, `${today}T10:01:00Z`)];
+  const gzipRows = [assignment("gzip", "a-gzip", `${today}T11:00:00Z`), cashCall("gzip", "a-gzip", 1, `${today}T11:01:00Z`)];
+  const liveRows = [assignment("live", "a-live", `${today}T12:00:00Z`), cashCall("live", "a-live", 1, `${today}T12:01:00Z`), ...plainRows];
+  try {
+    writeFileSync(join(stateDir, "ledger.2026-09-25T10-30-00-000Z.ndjson"), plainRows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    writeFileSync(join(stateDir, "ledger.2026-09-25T11-30-00-000Z.ndjson.gz"), gzipSync(gzipRows.map((row) => JSON.stringify(row)).join("\n") + "\n"));
+    writeFileSync(join(stateDir, "ledger.ndjson"), liveRows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    const decision = decideCashTrial({ task: docsTask, taskClass: "docs", config: config({}, { sharePercent: 100 }), harnessCommits: true, stateDir, today });
+    assert.equal(decision?.arm, "held", "three $1 receipts exceed the $2.50 pilot share of a $25 daily cap");
+    assert.match(decision!.reason, /\$3\.00 of \$2\.50/);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("cash trial rolling window releases an expired failure hold from the live ledger", () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-cash-trial-window-"));
+  try {
+    const old = Array.from({ length: 5 }, (_, i) => [
+      { ...tagged(`old-${i}`, `old-id-${i}`, "cash"), ts: "2026-09-01T01:00:00Z" },
+      verdict(`old-${i}`, false, `old-id-${i}`, 0.1, "2026-09-01T02:00:00Z"),
+    ]).flat();
+    writeFileSync(join(stateDir, "ledger.ndjson"), old.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    const decision = decideCashTrial({ task: docsTask, taskClass: "docs", config: config({}, { sharePercent: 100 }), harnessCommits: true, stateDir, today: "2026-09-25" });
+    assert.equal(decision?.arm, "cash", "expired failures do not permanently strand the trial");
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("cash trial holds paid arm on incomplete spend evidence without stopping control", () => {
+  const base = { task: docsTask, taskClass: "docs", harnessCommits: true, stateDir: "/unused", today: "2026-09-24" };
+  const incomplete = [tagged("cash-run", "cash-id", "cash"), cashCall("cash-run", "cash-id", undefined)];
+  const cash = decideCashTrial({ ...base, config: config({}, { sharePercent: 100 }), readRows: () => incomplete });
+  assert.equal(cash?.arm, "held");
+  assert.match(cash!.reason, /cost receipt|spend evidence/i);
+  const control = decideCashTrial({ ...base, config: config({}, { sharePercent: 0 }), readRows: () => incomplete });
+  assert.equal(control?.arm, "control", "an unmeasured paid arm cannot stall subscription control work");
+  const mislabeled = decideCashTrial({ ...base, config: config({}, { sharePercent: 100 }),
+    readRows: () => [tagged("cash-run", "cash-id", "cash"), cashCall("cash-run", "cash-id", 0.5, undefined, { billing_mode: "subscription" })] });
+  assert.match(mislabeled!.reason, /inconsistent/);
+  const conflicting = decideCashTrial({ ...base, config: config({}, { sharePercent: 100 }),
+    readRows: () => [tagged("cash-run", "cash-id", "cash"), cashCall("cash-run", "cash-id", 0.5), cashCall("cash-run", "cash-id", 0.75)] });
+  assert.match(conflicting!.reason, /inconsistent/);
+
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-cash-trial-unreadable-"));
+  try {
+    writeFileSync(join(stateDir, "ledger.2026-09-24T01-00-00-000Z.ndjson.gz"), "not gzip");
+    writeFileSync(join(stateDir, "ledger.ndjson"), JSON.stringify(tagged("cash-run", "cash-id", "cash")) + "\n");
+    const held = decideCashTrial({ ...base, stateDir, config: config({}, { sharePercent: 100 }) });
+    assert.equal(held?.arm, "held");
+    assert.match(held!.reason, /unreadable|incomplete/);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+  const unreadLiveDir = mkdtempSync(join(tmpdir(), "rmd-cash-trial-unreadable-live-"));
+  try {
+    mkdirSync(join(unreadLiveDir, "ledger.ndjson"));
+    const held = decideCashTrial({ ...base, stateDir: unreadLiveDir, config: config({}, { sharePercent: 100 }) });
+    assert.equal(held?.arm, "held");
+    assert.match(held!.reason, /unreadable|incomplete/);
+  } finally {
+    rmSync(unreadLiveDir, { recursive: true, force: true });
+  }
+});
+
+test("cash trial treats malformed or undated ledger evidence as unavailable", () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-cash-trial-malformed-"));
+  const input = { task: docsTask, taskClass: "docs", config: config({}, { sharePercent: 100 }), harnessCommits: true, stateDir, today: "2026-09-25" };
+  try {
+    writeFileSync(join(stateDir, "ledger.ndjson"), '{"step":"worker.assignment","trial":"cash-simple"\n');
+    const malformed = decideCashTrial(input);
+    assert.equal(malformed?.arm, "held");
+    assert.match(malformed!.reason, /invalid-json/);
+
+    writeFileSync(join(stateDir, "ledger.ndjson"), JSON.stringify({ ...tagged("run", "a", "cash"), ts: "not-a-date" }) + "\n");
+    const undated = decideCashTrial(input);
+    assert.equal(undated?.arm, "held");
+    assert.match(undated!.reason, /ledger row unreadable/);
+
+    const invalidWindow = decideCashTrial({ ...input, config: config({}, { sharePercent: 100, windowDays: 1e12 }) });
+    assert.equal(invalidWindow?.arm, "held");
+    assert.match(invalidWindow!.reason, /window is invalid/);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
 });
 
 const evidence = (cash: [number, number], control: [number, number], spent = 0): CashTrialEvidence => ({
@@ -128,8 +241,11 @@ test("a trial decision is held with its reason until every precondition holds", 
   assert.match(decideCashTrial({ ...base, config: config({}, { enabled: false }) })!.reason, /enabled is false/);
   assert.match(decideCashTrial({ ...base, config: config({ workerProviders: { enabled: ["claude"] } }) })!.reason, /cash is not an enabled/);
   assert.match(decideCashTrial({ ...base, config: config({ dailyCapUsd: undefined }) })!.reason, /unbounded/);
+  assert.match(decideCashTrial({ ...base, config: config({ dailyCapUsd: -1 }) })!.reason, /invalid/);
+  assert.match(decideCashTrial({ ...base, config: config({}, { budgetShareOfDailyCap: 2 }) })!.reason, /invalid/);
+  assert.match(decideCashTrial({ ...base, config: config({}, { windowDays: -1 }) })!.reason, /invalid/);
   assert.match(decideCashTrial({ ...base, harnessCommits: false, config: config() })!.reason, /harnessCommitsImplement/);
-  const failing = Array.from({ length: 5 }, (_, i) => [tagged(`f${i}`, `x${i}`, "cash"), verdict(`f${i}`, false)]).flat();
+  const failing = Array.from({ length: 5 }, (_, i) => [tagged(`f${i}`, `x${i}`, "cash"), cashCall(`f${i}`, `x${i}`, 0.1), verdict(`f${i}`, false)]).flat();
   const stopped = decideCashTrial({ ...base, readRows: () => failing, config: config() });
   assert.equal(stopped?.arm, "held");
   assert.match(stopped!.reason, /failed cash runs/);
@@ -140,9 +256,9 @@ test("a trial decision is held with its reason until every precondition holds", 
 test("the trial reads its window from the real ledger union", () => {
   const stateDir = mkdtempSync(join(tmpdir(), "rmd-cash-trial-state-"));
   try {
-    const failing = Array.from({ length: 5 }, (_, i) => [tagged(`f${i}`, `x${i}`, "cash"), verdict(`f${i}`, false)]).flat();
-    writeFileSync(join(stateDir, "ledger.ndjson"), [...failing.map((row) => JSON.stringify(row)), '{"trial":"cash-simple","run_id":"torn'].join("\n") + "\n");
-    const decision = decideCashTrial({ task: docsTask, taskClass: "docs", config: config(), harnessCommits: true, stateDir });
+    const failing = Array.from({ length: 5 }, (_, i) => [tagged(`f${i}`, `x${i}`, "cash"), cashCall(`f${i}`, `x${i}`, 0.1), verdict(`f${i}`, false)]).flat();
+    writeFileSync(join(stateDir, "ledger.ndjson"), failing.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    const decision = decideCashTrial({ task: docsTask, taskClass: "docs", config: config(), harnessCommits: true, stateDir, today: "2026-09-24" });
     assert.equal(decision?.arm, "held", "five failed cash runs on disk stop the trial");
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
