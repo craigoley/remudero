@@ -31,6 +31,15 @@ import { test } from "node:test";
 import { nextTaskIdCommand, openPrMintTexts } from "../src/run-task.js";
 import { openPrsRestArgs, type GhApiFetcher } from "../src/lib/open-prs-rest.js";
 import { type RemoteRefReserver, type RemoteReserveOutcome } from "../src/lib/task-id-reservation.js";
+import { gitRepo } from "./helpers/git-repo.js";
+
+// W1-T4473: every default-plan mint below reads THIS fixture's plan, never the checkout's — a
+// checkout whose plan is behind origin's would otherwise degrade the mint and flip its exit code.
+const mintRepo = gitRepo({ kind: "open-pr-surface-mint-plan" });
+mkdirSync(join(mintRepo.dir, "plan"), { recursive: true });
+writeFileSync(join(mintRepo.dir, "plan", "tasks.yaml"), "- id: W1-T2324\n  title: seed\n");
+mintRepo.git("add", "plan/tasks.yaml");
+mintRepo.git("commit", "--quiet", "-m", "fixture plan");
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -132,6 +141,7 @@ test("W1-T2324 (Q2): --reserve REFUSES when the open-PR surface cannot be read a
       ["--reserve"],
       {},
       {
+        repoRoot: mintRepo.dir,
         reserver,
         holderOf: () => "unknown",
         openPrTexts: () => {
@@ -156,7 +166,7 @@ test("W1-T2324 (Q2) CONTROL: --reserve still claims the id when the open-PR surf
   const cap = capture();
   let code: number;
   try {
-    code = await nextTaskIdCommand(["--reserve"], {}, { reserver, holderOf: () => "unknown", openPrTexts: () => [] });
+    code = await nextTaskIdCommand(["--reserve"], {}, { repoRoot: mintRepo.dir, reserver, holderOf: () => "unknown", openPrTexts: () => [] });
   } finally {
     cap.restore();
   }
@@ -207,6 +217,7 @@ test("W1-T2324 (Q2): the unflagged verb and the read-fine-but-uncorroborated arm
       ["--no-reserve", ],
       {},
       {
+        repoRoot: mintRepo.dir,
         reserver,
         openPrTexts: () => {
           throw new Error("boom");
@@ -250,7 +261,7 @@ test("W1-T2324 (Q2): with NO reserver injected the claim still runs through rese
   const cap = capture();
   let code: number;
   try {
-    code = await nextTaskIdCommand(["--reserve"], {}, { runGit: git.run, holderOf: () => "unknown", openPrTexts: () => [] });
+    code = await nextTaskIdCommand(["--reserve"], {}, { repoRoot: mintRepo.dir, runGit: git.run, holderOf: () => "unknown", openPrTexts: () => [] });
   } finally {
     cap.restore();
   }
@@ -275,6 +286,7 @@ test("W1-T2324 (Q2): the open-PR refusal returns BEFORE that path — no anchor 
       ["--reserve"],
       {},
       {
+        repoRoot: mintRepo.dir,
         runGit: git.run,
         holderOf: () => "unknown",
         openPrTexts: () => {

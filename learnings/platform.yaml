@@ -123,7 +123,8 @@
 
 - id: maxbudget-between-turns
   subsystem: budget
-  lifecycle: active
+  # knowledge gardener: retire maxbudget-between-turns
+  lifecycle: superseded
   files: [src/run-task.ts]
   fact: >-
     maxBudgetUsd is checked BETWEEN turns (a $0.01 budget produced $0.21 of spend): a circuit breaker

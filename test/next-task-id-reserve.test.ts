@@ -21,6 +21,8 @@
  * is proven in test/mint-open-pr-surface-is-rest.test.ts, against `nextTaskIdCommand` directly.
  */
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -28,11 +30,24 @@ import {
   gitRunAdapter,
   describeContestedId,
   describeReservationRefusal,
-  nextTaskIdCommand,
+  nextTaskIdCommand as runNextTaskIdCommand,
   readReservationHolder,
   validateReserveArgs,
 } from "../src/run-task.js";
 import { type RemoteRefReserver, type RemoteReserveOutcome } from "../src/lib/task-id-reservation.js";
+import { gitRepo } from "./helpers/git-repo.js";
+
+const mintRepo = gitRepo({ kind: "reserve-mint-plan" });
+mkdirSync(join(mintRepo.dir, "plan"), { recursive: true });
+writeFileSync(join(mintRepo.dir, "plan", "tasks.yaml"), "- id: W1-T1055\n  title: seed\n");
+mintRepo.git("add", "plan/tasks.yaml");
+mintRepo.git("commit", "--quiet", "-m", "fixture plan");
+
+const nextTaskIdCommand = (
+  rest: Parameters<typeof runNextTaskIdCommand>[0],
+  overlapDeps: Parameters<typeof runNextTaskIdCommand>[1],
+  deps: Parameters<typeof runNextTaskIdCommand>[2],
+) => runNextTaskIdCommand(rest, overlapDeps, { ...deps, repoRoot: mintRepo.dir });
 
 /** A reserver that rejects the ids in `taken` and creates the first one that is not. */
 function stubReserver(taken: Set<string>, unreachableFor?: (id: string) => boolean): RemoteRefReserver & { tried: string[] } {
@@ -92,7 +107,7 @@ test("W1-T1055: --reserve claims the id on the remote", async () => {
   const text = cap.out.join("\n");
   assert.match(text, /^RESERVED W1-T\d+ on origin \(refs\/rmd-id\/W1-T\d+\) after 1 attempt\(s\)$/m);
   assert.equal(reserver.tried.length, 1, "an uncontested first candidate is claimed in one attempt");
-  assert.ok(code === 0 || code === 1, "the mint's own degraded exit code is preserved");
+  assert.equal(code, 0, "the fixture plan has no degraded source");
 });
 
 // ── criterion 2 — the id actually HELD, never the one first tried ──────────────────────────────

@@ -27,7 +27,7 @@ const HOLDER = "operator-filing-1790000000000";
 
 /** A console-shaped origin: CONSOLE-T57 in its plan, CONSOLE-T59 reserved, and CONSOLE-T60 held by
  *  a live branch — the ref a racing minter pushed after this mint listed the namespace. */
-function consoleOrigin(): { bare: GitRepo; heldSha: string } {
+function consoleOrigin(): { bare: GitRepo; work: GitRepo; heldSha: string } {
   const bare = gitRepo({ bare: true, kind: "prefix-origin" });
   const work = gitRepo({ kind: "prefix-work" });
   mkdirSync(join(work.dir, "plan", "tasks.d"), { recursive: true });
@@ -40,7 +40,7 @@ function consoleOrigin(): { bare: GitRepo; heldSha: string } {
   const tree = work.git("hash-object", "-t", "tree", "/dev/null");
   const heldSha = work.git("commit-tree", tree, "-m", formatReservationAnchorMessage({ branch: HOLDER, pid: 1, host: "h", startedAt: "2026-09-23T00:00:00.000Z" }));
   work.git("push", "--quiet", "origin", `${heldSha}:refs/rmd-id/CONSOLE-T60`);
-  return { bare, heldSha };
+  return { bare, work, heldSha };
 }
 
 /** The target checkout, with CONSOLE-T60 hidden from the namespace listing to stage the race. */
@@ -113,6 +113,7 @@ test("W1-T4388: a prefixed mint reserves the id on the target repo's origin and 
 });
 
 test("W1-T4388: a W1-T mint without a prefix is unchanged", async () => {
+  const { work } = consoleOrigin();
   const tried: string[] = [];
   const reserver: RemoteRefReserver = {
     mintAnchor: () => "ANCHOR-SHA",
@@ -124,6 +125,7 @@ test("W1-T4388: a W1-T mint without a prefix is unchanged", async () => {
   const cap = capture();
   try {
     await nextTaskIdCommand(["--reserve"], {}, {
+      repoRoot: work.dir,
       reserver,
       holderOf: () => "unknown",
       openPrTexts: () => [],
@@ -154,6 +156,7 @@ test("W1-T4388: prefixed ids are read only for their own family and bound", () =
 });
 
 test("W1-T4388: a prefixed mint refuses malformed or contradictory arguments", async () => {
+  const { work } = consoleOrigin();
   for (const args of [
     ["--prefix", "CONSOLE"],
     ["--repo", REPO],
@@ -165,7 +168,7 @@ test("W1-T4388: a prefixed mint refuses malformed or contradictory arguments", a
     const cap = capture();
     let code: number;
     try {
-      code = await nextTaskIdCommand(args, {}, { openTargetRepo: () => assert.fail(`opened a repo for ${args.join(" ")}`) });
+      code = await nextTaskIdCommand(args, {}, { repoRoot: work.dir, openTargetRepo: () => assert.fail(`opened a repo for ${args.join(" ")}`) });
     } finally {
       cap.restore();
     }

@@ -17,6 +17,12 @@ import {
 } from "../src/lib/task-id-reservation.js";
 import { classifyReservationAnchor, describeContestedId, nextTaskIdCommand, readReservationHolder } from "../src/run-task.js";
 
+const mintRepo = gitRepo({ kind: "holder-mint-plan" });
+mkdirSync(join(mintRepo.dir, "plan"), { recursive: true });
+writeFileSync(join(mintRepo.dir, "plan", "tasks.yaml"), "- id: W1-T3100\n  title: seed\n");
+mintRepo.git("add", "plan/tasks.yaml");
+mintRepo.git("commit", "--quiet", "-m", "fixture plan");
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 const gate = await import(pathToFileURL(join(REPO_ROOT, "scripts", "task-id-existence-check.mjs")).href);
@@ -130,7 +136,7 @@ test("W1-T3100: next-task-id prints the holder branch for every held id it repor
   const control = captureConsole();
   let first = "";
   try {
-    await nextTaskIdCommand(["--reserve"], {}, { reserver: stubReserver(new Set()), holderOf: () => "unknown", openPrTexts: NO_OPEN_PRS });
+    await nextTaskIdCommand(["--reserve"], {}, { repoRoot: mintRepo.dir, reserver: stubReserver(new Set()), holderOf: () => "unknown", openPrTexts: NO_OPEN_PRS });
     first = /RESERVED (W1-T[0-9]+)/.exec(control.out.join("\n"))?.[1] ?? "";
   } finally {
     control.restore();
@@ -141,6 +147,7 @@ test("W1-T3100: next-task-id prints the holder branch for every held id it repor
   const cap = captureConsole();
   try {
     await nextTaskIdCommand(["--reserve"], {}, {
+      repoRoot: mintRepo.dir,
       reserver,
       holderOf: () => ({ branch: "run-W1-T3100-other", source: "automatic" }),
       openPrTexts: NO_OPEN_PRS,

@@ -1,6 +1,3 @@
-- id: sdk-builtin-tools-are-the-boundary
-  # knowledge gardener: retire sdk-builtin-tools-are-the-boundary
-  lifecycle: superseded
-- id: askuserquestion-auto-resolves-empty-headless
-  # knowledge gardener: retire askuserquestion-auto-resolves-empty-headless
+- id: maxbudget-between-turns
+  # knowledge gardener: retire maxbudget-between-turns
   lifecycle: superseded
