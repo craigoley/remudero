@@ -57,7 +57,7 @@
     - claim: "a pushed task link opens the console's /task/<id> page"
       proof: "unit test: consoleCardUrl: the console's /task/<id> page naming exactly the given task id"
     - claim: "the gateway names app.remudero.com as the canonical console"
-      proof: 'grep: CANONICAL_CONSOLE_URL = "https://app\.remudero\.com" in src/lib/serve.ts'
+      proof: "unit test: W1-T4563: the gateway names app.remudero.com as the canonical console"
   falsifier: |
     Restore buildShellRoute or buildConsoleWriteGrantRoute and the first two proofs fail; revert
     consoleCardUrl to the #task= hash and the fourth fails.
