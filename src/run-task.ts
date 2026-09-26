@@ -6515,9 +6515,10 @@ async function runReview(args: {
         const reviewerClockBoundMs =
           args.reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon;
         const reviewerClockBound = { clockBound: { boundMs: reviewerClockBoundMs } };
+        const reviewerSpawnWorker = args.reviewerSpawnWorker ?? ledgeredNonDispatchSpawn("review");
         try {
           reviewer = args.account(
-            await (args.reviewerSpawnWorker ?? ledgeredNonDispatchSpawn("review"))({
+            await reviewerSpawnWorker({
             cwd: snapshot.cwd,
             permissionMode: "bypassPermissions",
             settingsFile: args.settingsFile,
