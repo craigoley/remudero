@@ -1861,11 +1861,11 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
   options: AnalyticsDeriveOptions = {},
 ): Promise<AnalyticsSnapshotReadResult> {
   const currentSource = checkpointSource(stateDir);
-  const priorLiveMalformed = priorCheckpoint?.state.routingTelemetry.malformedSources?.some(([, finding]) => finding.form === "live") ?? false;
+  const priorLiveMalformed = priorCheckpoint?.state.routingTelemetry?.malformedSources?.some(([, finding]) => finding.form === "live") ?? false;
   const canResume = priorCheckpoint !== undefined && priorCheckpoint.state.usage !== undefined &&
-    priorCheckpoint.state.routingTelemetry.benchmarkVersion === BENCHMARK_QUALITY_VERSION &&
-    priorCheckpoint.state.routingTelemetry.benchmarkCounters !== undefined &&
-    Array.isArray(priorCheckpoint.state.routingTelemetry.malformedSources) &&
+    priorCheckpoint.state.routingTelemetry?.benchmarkVersion === BENCHMARK_QUALITY_VERSION &&
+    priorCheckpoint.state.routingTelemetry?.benchmarkCounters !== undefined &&
+    Array.isArray(priorCheckpoint.state.routingTelemetry?.malformedSources) &&
     !(priorLiveMalformed && currentSource?.archives.length !== priorCheckpoint.source.archives.length) &&
     currentSource !== undefined && checkpointSourceCanResume(priorCheckpoint.source, currentSource);
   let acc: AnalyticsAccumulator;

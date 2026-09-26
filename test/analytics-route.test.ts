@@ -850,6 +850,11 @@ test("analytics checkpoint remembers malformed archive evidence across resume", 
     const migrated = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock, undefined, legacy);
     assert.equal(migrated.snapshot.benchmarkEvidence.reason, "ledger-source-malformed",
       "a pre-audit checkpoint must force a full source scan, not silently inherit a healthy claim");
+    const corrupt = JSON.parse(JSON.stringify(first.checkpoint)) as typeof first.checkpoint;
+    delete (corrupt.state as Partial<typeof corrupt.state>).routingTelemetry;
+    const rebuilt = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock, undefined, corrupt);
+    assert.equal(rebuilt.snapshot.benchmarkEvidence.reason, "ledger-source-malformed",
+      "a structurally incomplete checkpoint must fall back to the full union, not throw or claim healthy data");
     writeGzArchive(dir, archive, [assignment]);
     const repaired = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock, undefined, resumed.checkpoint);
     assert.equal(repaired.snapshot.benchmarkEvidence.state, "observed", "a changed archive forces a full re-audit");
