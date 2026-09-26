@@ -4019,6 +4019,84 @@ paths:
               schema:
                 $ref: "#/components/schemas/ContextExportResult"
 
+  /v1/operator-agent/ask:
+    post:
+      summary: Read-only, evidence-cited answer-v1 for this serving instance's repository.
+      description: >
+        Authenticated read operation despite POST. The server owns repository and instance scope;
+        request JSON accepts only a bounded question. Cross-repository aggregation and navigation
+        belong to the console. No action, approval, proposal, task, or ledger write occurs here.
+        Unsupported or missing evidence is explicit, not converted into a confident answer.
+      security:
+        - bearerRead: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [question]
+              properties:
+                question:
+                  type: string
+                  minLength: 1
+                  maxLength: 500
+      responses:
+        "200":
+          description: answer-v1 with verified, partial, unavailable, or unsupported coverage.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, repository, instance, lens, coverage, answer, citations, missingSources, generatedAt]
+                properties:
+                  version:
+                    type: string
+                    enum: [answer-v1]
+                  repository:
+                    type: [string, "null"]
+                  instance:
+                    type: string
+                  lens:
+                    type: string
+                    enum: [current-repository]
+                  coverage:
+                    type: string
+                    enum: [verified, partial, unavailable, unsupported]
+                  answer:
+                    type: string
+                    maxLength: 700
+                  generatedAt:
+                    type: string
+                    format: date-time
+                  citations:
+                    type: array
+                    maxItems: 4
+                    items:
+                      type: object
+                      required: [sourceId, observedAt, freshness, label, value]
+                      properties:
+                        sourceId: { type: string }
+                        observedAt: { type: string, format: date-time }
+                        freshness: { type: string, enum: [verified, stale] }
+                        label: { type: string }
+                        value: { type: string }
+                  missingSources:
+                    type: array
+                    items:
+                      type: object
+                      required: [sourceId, reason]
+                      properties:
+                        sourceId: { type: string }
+                        reason: { type: string }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /v1/operator-agent/proposals:
     get:
       summary: Read durable operator-agent proposals and decision history.
