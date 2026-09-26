@@ -6347,14 +6347,14 @@ async function runReview(args: {
   // worktree materialization consume the review's own latency budget. Before this, the required
   // context stayed genuinely ABSENT (GitHub renders "Expected") for that whole interval, so the PR
   // read green-at-a-glance among ~22 other checks while the review had not run at all. Goes
-  // through the ONE guarded post site (postReviewPending -> postReviewStatusGuarded); a refused
-  // `{posted:false}` result is ALREADY ledgered by that call. A THROW (e.g. a transient lifecycle
+  // through the ONE guarded post site (postReviewPending -> postReviewStatusGuarded). A closed
+  // lifecycle refusal ends this review before the diff, claim, reviewer and proofs. A THROW (e.g. a transient lifecycle
   // read failure — `fetchLifecycle` has no retry of its own, unlike the post itself) is caught
   // HERE and degrades the SAME way: legibility is strictly additive, so a pending-post hiccup must
   // never abort the review it exists to make visible — the terminal post below still runs and is
   // what actually gates the merge, exactly as it always has.
   try {
-    await postReviewPending({
+    const pending = await postReviewPending({
       owner,
       repo,
       sha: headSha,
@@ -6366,6 +6366,16 @@ async function runReview(args: {
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
       fetchLifecycle: () => fetchPrLifecycle(prUrl),
     });
+    if (!pending.posted && pending.lifecycle !== undefined) {
+      const reason = `pr_${pending.lifecycle}`;
+      log("review.stood_down", { reason, head_sha: headSha, pr_url: prUrl });
+      return {
+        state: "failure", criteria: [], testTheater: false,
+        summary: `review stood down: PR already ${pending.lifecycle}`,
+        floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
+        headSha, reviewerOutcome: `not_attempted_${reason}`, verdictWithheld: reason,
+      };
+    }
   } catch (e) {
     log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
   }
