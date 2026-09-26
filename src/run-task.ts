@@ -626,6 +626,7 @@ import {
   serviceTokensPath,
   defaultIsListening,
 } from "./lib/serve.js";
+import { consoleProjectionWorker } from "./lib/console-snapshot-cache.js";
 import { runRelayClient } from "./lib/relay-client.js";
 import { assertProposedPlanLoads,
   buildGrillEscalation,
@@ -1247,6 +1248,7 @@ import {
   type PlanLintOutcome,
   type ReviewEvaluatorProvenance,
   type NameFilterResolution,
+  registerReviewerCheckout,
 } from "./lib/review.js";
 import {
   proofQueueAudit,
@@ -6484,9 +6486,10 @@ async function runReview(args: {
         const reviewerClockBoundMs =
           args.reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon;
         const reviewerClockBound = { clockBound: { boundMs: reviewerClockBoundMs } };
+        const reviewerSpawnWorker = args.reviewerSpawnWorker ?? ledgeredNonDispatchSpawn("review");
         try {
           reviewer = args.account(
-            await (args.reviewerSpawnWorker ?? spawnWorker)({
+            await reviewerSpawnWorker({
             cwd: snapshot.cwd,
             permissionMode: "bypassPermissions",
             settingsFile: args.settingsFile,
@@ -13879,6 +13882,33 @@ export function recordBenchmarkWorkerAttempt(
   }).finally(stopPolling);
 }
 
+/** Ledger non-dispatch assignments before execution; the worker catches sink failures. */
+function ledgerNonDispatchAssignment(
+  lane: string,
+  assignment: Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0],
+  config?: Config,
+  runId?: string,
+  taskId?: string,
+): void {
+  appendLedger(ledgerPathFor(config ?? loadConfig()), {
+    run_id: runId ?? `${lane}-${assignment.id}`,
+    task_id: taskId ?? lane.toUpperCase(),
+    step: "worker.assignment",
+    lane,
+    worker_assignment: assignment,
+  });
+}
+
+export function ledgeredNonDispatchSpawn(lane: string, raw: typeof spawnWorker = spawnWorker): typeof spawnWorker {
+  return (args) => raw({
+    ...args,
+    onSelectionAssignment: (assignment) => {
+      ledgerNonDispatchAssignment(lane, assignment, args.config, args.runId, args.taskId);
+      args.onSelectionAssignment?.(assignment);
+    },
+  });
+}
+
 async function runTask(
   taskId: string,
   opts: {
@@ -17169,6 +17199,7 @@ export function buildBaseProofDir(
   let worktreeFailure: string;
   try {
     addWorktree(headCheckoutDir, dir, base);
+    registerReviewerCheckout(dir);
     // (W1-T3098) THE DIFFERENTIAL RUN: a bare `git worktree add --detach <dir> <base>` (R-11) is a
     // checkout of the MERGE-BASE and so never contains a test the PR itself added — `node --test`
     // there finds nothing, exits nonzero, and the classifier used to read that as `discriminates`.
@@ -17418,6 +17449,7 @@ export function materializeReviewWorktree(
         "a stale fetch or a moved ref; refusing to review a possibly-wrong tree rather than posting a false verdict",
     );
   }
+  registerReviewerCheckout(worktreePath);
   return { worktreePath };
 }
 
@@ -27453,7 +27485,7 @@ export function realPromotionJudge(opts: {
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): PromotionJudgeDeps["judge"] {
-  const spawn = opts.spawn ?? spawnWorker;
+  const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("promotion-judge");
   return async (entry) => {
     const result = await spawn(
       buildPromotionJudgeSpawnArgs({ entry, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile }),
@@ -27770,7 +27802,7 @@ async function retroCommand(
   } = {},
 ): Promise<number> {
   const dryRun = rest.includes("--dry-run");
-  const spawn = opts.spawn ?? spawnWorker;
+  const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("retro");
   const config = loadConfig();
   const ledgerPath = ledgerPathFor(config);
   const markerPath = join(config.root, "state", "last-retro.json");
@@ -34085,7 +34117,7 @@ export async function serveCommand(
       mount: feedbackExpansionMount,
       cwd: repoRoot,
       settingsFile: feedbackExpanderSettingsFile,
-      spawn: deps.spawn ?? spawnWorker,
+      spawn: deps.spawn ?? ledgeredNonDispatchSpawn("serve-feedback"),
     });
     log("serve.feedback_expander_resolved", { model: feedbackExpansionMount.model, effort: feedbackExpansionMount.effort });
   } catch (e) {
@@ -34159,6 +34191,7 @@ export async function serveCommand(
     identity,
     log,
     consoleSnapshots: { dir: join(config.root, "state", "console-snapshots"), prewarmPaths: ["/v1/operator-activity", "/v1/action-results"] },
+    projectionWorker: consoleProjectionWorker(),
     // W1-T945: GET /v1/peek's root (config.root, the SAME root buildWorkerStateSensor resolves
     // state/runs/<runId>.tail against) + its liveness predicate, a closure over the REAL
     // liveInflightRuns over the REAL `<config.root>/state/inflight` lock directory — the exact
@@ -40660,7 +40693,7 @@ async function triageCommandLocked(
   const { feedbackId } = parsed;
 
   const config = opts.config ?? loadConfig();
-  const spawn = opts.spawn ?? spawnWorker;
+  const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("triage");
   const { owner, repo } = resolveOwnerRepo();
 
   // W1-T2559: triage ships no code and supervises no worker, so G-17's Tier Invariant — which
@@ -41285,7 +41318,7 @@ export async function planCommand(
   const { mode, brief } = parsed;
 
   const config = opts.config ?? loadConfig();
-  const spawn = opts.spawn ?? spawnWorker;
+  const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("plan");
   const { owner, repo } = resolveOwnerRepo();
 
   // G-17 Tier Invariant: the plan Architect MUST outrank implement workers.
@@ -41675,6 +41708,7 @@ export function buildInboxDraftSpawnArgs(args: {
     config: args.config,
     prompt: args.prompt,
     tools: INBOX_DRAFT_WORKER_TOOLS,
+    onSelectionAssignment: (assignment) => ledgerNonDispatchAssignment("inbox-draft", assignment, args.config),
   };
 }
 
@@ -42685,7 +42719,7 @@ export function productionVerifyHumanRelease(
     }
   });
   const riskJudge = (input: RiskJudgeInput): Promise<RiskJudgeVerdict> => {
-    judge ??= realRiskJudge({ mount: resolveRiskJudgeMount(loadMounts(mountsPath(checkoutRoot))), cwd: checkoutRoot, settingsFile: join(checkoutRoot, "settings", "worker.json"), spawn: options.spawn });
+    judge ??= realRiskJudge({ mount: resolveRiskJudgeMount(loadMounts(mountsPath(checkoutRoot))), cwd: checkoutRoot, settingsFile: join(checkoutRoot, "settings", "worker.json"), spawn: options.spawn ?? ledgeredNonDispatchSpawn("risk-judge") });
     return judge(input);
   };
   return async (shard, verdict) => {
@@ -44393,7 +44427,7 @@ const REAL_ALERT_FIX_DISPATCH_DEPS: AlertFixDispatchDeps = {
   renderWorkerSettings,
   loadMounts,
   resolveMount,
-  spawn: spawnWorker,
+  spawn: ledgeredNonDispatchSpawn("alert-fix"),
   ensureTaskTrailer,
   checkAcceptance: checkAlertFixAcceptance,
 };
@@ -45189,7 +45223,7 @@ export function defaultSynthesizeDraft(
   deps: { config?: Config; spawn?: typeof spawnWorker; probeExec?: ProbeExecutor } = {},
 ): SynthesizeDraftFn {
   const config = deps.config ?? loadConfig();
-  const spawn = deps.spawn ?? spawnWorker;
+  const spawn = deps.spawn ?? ledgeredNonDispatchSpawn("onboard-synthesis");
   let preparedSettingsFile: string | undefined;
 
   const ensureSettingsFile = async (): Promise<string> => {
