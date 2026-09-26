@@ -6,7 +6,8 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 25.00
-  risk: medium
+  risk: high
+  band_meaning: span
   origin: "operator session 2026-09-26: old-console follow-up audit (operator: 'file items that need filed, fix items that need fixed')"
   files:
     - test/helpers/declared-routes.ts
