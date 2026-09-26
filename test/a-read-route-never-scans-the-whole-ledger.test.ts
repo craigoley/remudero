@@ -17,6 +17,7 @@ import { gzipSync } from "node:zlib";
 import { test } from "node:test";
 import { FOLLOW_UP_POLICY_VERSION, appendFollowUpCandidate, type FollowUpCandidate } from "../src/lib/follow-up-policy.js";
 import { buildOperatorAgentFollowUpReadRoute } from "../src/lib/operator-agent.js";
+import { MEASUREMENT_SUMMARY_MAX_STRING, summarizeMeasurementValue } from "../src/lib/measurement-cadence.js";
 import { buildSelfMeasurementRoute } from "../src/lib/serve.js";
 import type { LedgerUnionResult } from "../src/lib/ledger-union.js";
 import type { Route } from "../src/lib/service.js";
@@ -187,4 +188,11 @@ test("W1-T4567: an injected union reader is summarized the same way, and its unr
   const down = JSON.parse((await call(buildSelfMeasurementRoute({ stateDir: "/nonexistent", prewarm: false, ledgerUnion: union([], false) }), "/v1/self-measurement")).body) as { status: string; reason: string };
   assert.equal(down.status, "unreadable");
   assert.match(down.reason, /no ledger archives found/);
+});
+
+test("W1-T4567: a verb whose whole value is a scalar keeps a headline and drops a report-length string", () => {
+  assert.equal(summarizeMeasurementValue(0.57), 0.57);
+  assert.equal(summarizeMeasurementValue(null), null);
+  assert.equal(summarizeMeasurementValue("measured"), "measured");
+  assert.equal(summarizeMeasurementValue("z".repeat(MEASUREMENT_SUMMARY_MAX_STRING + 1)), undefined);
 });
