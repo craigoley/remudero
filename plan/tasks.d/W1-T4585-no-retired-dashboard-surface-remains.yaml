@@ -1,0 +1,39 @@
+- id: W1-T4585
+  title: "THE RETIRED CONSOLES STILL HAVE LIVE REFERENCES — review.ts keeps an apps/dashboard/src/ Vitest proof arm that can no longer run, and three baselines name the deleted console-url verb and module"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-26: old-console follow-up audit (operator: 'file items that need filed, fix items that need fixed')"
+  files:
+    - src/lib/review.ts
+    - scripts/console-parity-baseline.json
+    - scripts/console-parity-ratchet.mjs
+    - scripts/source-size-baseline.json
+    - tsconfig.json
+    - test/no-retired-dashboard-surface-remains.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    On main after W1-T4563/W1-T4566: src/lib/review.ts carries DASHBOARD_VITEST_CONFIG =
+    apps/dashboard/vite.config.ts and a suite root apps/dashboard/src/ with runner vitest (the unit-
+    test dialect still advertises it); core no longer installs Vitest, so such a proof cannot
+    execute. scripts/console-parity-baseline.json and console-parity-ratchet.mjs CLI_ONLY still list
+    console-url (the verb was deleted); scripts/source-size-baseline.json still carries
+    src/lib/console-url.ts; tsconfig.json and packages/daemon-client-smoke comments describe
+    apps/dashboard as present.
+  design: |
+    Remove the apps/dashboard suite-root arm and its config constant from review.ts (the dialect's
+    form string and docs/proof-dialect.md follow), drop the console-url rows from both parity files
+    and the source-size row, and reword the stale comments. A census asserts no tracked live file
+    names apps/dashboard or console-url outside plan/, DECISIONS.md, MASTER-PLAN.md and
+    docs/forensics.
+  acceptance:
+    - claim: "no live code, baseline or config names the retired apps/dashboard surface or the deleted console-url verb"
+      proof: "unit test: test/no-retired-dashboard-surface-remains.test.ts"
+  falsifier: |
+    Restore the review.ts suite-root arm; the census names it.

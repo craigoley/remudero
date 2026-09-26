@@ -1,0 +1,34 @@
+- id: W1-T4586
+  title: "THE SWEEP'S JOB RE-QUEUE CANCELS THE PR'S OTHER CI RUN — two runs on one head share the ci-<pr> concurrency group, so re-running a cancelled job in one cancels the in-progress other, and the sweep re-queues that one next: a ping-pong that cancelled 18 coverage shards on #7333"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-26: old-console follow-up audit (operator: 'file items that need filed, fix items that need fixed')"
+  files:
+    - src/lib/sweep.ts
+    - test/a-requeue-never-cancels-a-sibling-run.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-26 on #7333 (head bd5ae661): a reopen created CI run 36270528934 beside the
+    original 36270214954. ci.yml's concurrency group is ci-<pull request number> with cancel-in-
+    progress on pull_request, so every re-run of one run's cancelled jobs cancelled the other's in-
+    progress shards; the sweep's requeueCheck then re-queued the newly cancelled jobs (attempts 2,
+    3, 4) and spent two ci-log fix strikes on 'coverage-ratchet failed' that was a cancellation. It
+    ended only when a new head was pushed.
+  design: |
+    Before re-queueing a job, requeueCheck must know whether ANOTHER run for the same head is queued
+    or in progress in the same workflow; if so it waits (the sibling is the measurement) rather than
+    re-running, and a cancelled job whose run was superseded is never counted as a failure strike.
+    Prefer the newest run for a head; never re-run an older one while a newer one exists.
+  acceptance:
+    - claim: "a cancelled job is not re-queued while another run for the same head is live, and a superseded cancellation never spends a fix strike"
+      proof: "unit test: test/a-requeue-never-cancels-a-sibling-run.test.ts"
+  falsifier: |
+    Two runs on one head, one in progress: the unfixed rung re-queues the other's cancelled job; the
+    fixed one waits.
