@@ -16,6 +16,7 @@ import {
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./autonomy.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { resolveLedgerUnion, type LedgerUnionOptions, type LedgerUnionResult } from "./ledger-grep.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import {
   buildBoardReview,
   type BoardItem,
@@ -2771,6 +2772,106 @@ export function latestMeasurementRows(
   }
   rows.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
   return { status: "ok", rows: rows.slice(0, Math.max(0, n)) };
+}
+
+// ── W1-T4567: the request-path reader ─────────────────────────────────────────────────────────
+// `latestMeasurementRows` answers the daemon's own cadence off the full union; GET
+// /v1/self-measurement called it per request and returned every verb's whole report. MEASURED
+// 2026-09-26 on the live gateway: 8,040,418 bytes in 2.6-3.0 s for ten rows, one report alone
+// 618 KB, every archive decompressed each time. The route reads through a rotation memo instead,
+// and a row carries each verb's SUMMARY; `?detail=<verb>` returns one report from the newest row.
+
+/** PRIMARY CONTROL: a string field longer than this is a report, not a headline, and is left out of a summary. */
+export const MEASUREMENT_SUMMARY_MAX_STRING = 160;
+
+/**
+ * One verb's value reduced to what a headline reads: its scalar fields (numbers, booleans, null,
+ * short strings), each array as `<key>Count`, and nothing nested. IDEMPOTENT -- a summary summarizes
+ * to itself -- which is what lets a rotation memo apply it slice by slice.
+ */
+export function summarizeMeasurementValue(value: unknown): unknown {
+  if (Array.isArray(value)) return { count: value.length };
+  if (value === null || typeof value !== "object") {
+    return typeof value === "string" && value.length > MEASUREMENT_SUMMARY_MAX_STRING ? undefined : value;
+  }
+  const out: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(value as Record<string, unknown>)) {
+    if (Array.isArray(field)) out[key.endsWith("Count") ? key : `${key}Count`] = field.length;
+    else if (field === null || typeof field === "number" || typeof field === "boolean") out[key] = field;
+    else if (typeof field === "string" && field.length <= MEASUREMENT_SUMMARY_MAX_STRING) out[key] = field;
+  }
+  return out;
+}
+
+function summarizeMeasurementRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    out[key] = MEASUREMENT_CADENCE_ROW_ENVELOPE_KEYS.has(key) ? value : summarizeMeasurementValue(value);
+  }
+  return out;
+}
+
+function measurementEntriesFrom(rows: ReadonlyArray<Record<string, unknown>>, n: number): MeasurementCadenceRowEntry[] {
+  const entries: MeasurementCadenceRowEntry[] = [];
+  for (const row of rows) {
+    if (row.step !== "measurement_cadence.ran" || typeof row.ts !== "string") continue;
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(row)) {
+      if (MEASUREMENT_CADENCE_ROW_ENVELOPE_KEYS.has(key) || value === undefined) continue;
+      result[cadenceRowFieldName(key)] = value;
+    }
+    entries.push({ ts: row.ts, result });
+  }
+  entries.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
+  return entries.slice(0, Math.max(0, n));
+}
+
+/**
+ * The request-path reader: the newest `n` rows, each verb SUMMARIZED, read through a rotation memo
+ * so a repeated request parses only the live file. Same `unreadable` contract as
+ * {@link latestMeasurementRows}: no archive at all, or an archive that cannot be opened, is never an
+ * empty "never measured".
+ */
+export function createLatestMeasurementReader(): (stateDir: string, n: number) => Promise<LatestMeasurementRowsResult> {
+  const memo = createLedgerRotationMemo((rows) =>
+    rows.filter((row) => row.step === "measurement_cadence.ran").map((row) => summarizeMeasurementRow(row)),
+  );
+  return async (stateDir, n) => {
+    const read = await readLedgerUnionRecordsMemoized(stateDir, memo, {
+      step: "measurement_cadence.ran",
+      requireArchives: true,
+      refuseIncomplete: true,
+    });
+    if (!read.ok) {
+      return {
+        status: "unreadable",
+        reason:
+          read.archiveCount === 0
+            ? `no ledger archives found under ${stateDir} — the union cannot be trusted (lib/ledger-union.ts)`
+            : `${read.unread.length} ledger rotation(s) under ${stateDir} could not be read`,
+      };
+    }
+    // The live file is parsed each request and NOT reduced by the memo, so summarize its rows here.
+    return { status: "ok", rows: measurementEntriesFrom(read.rows.map((row) => summarizeMeasurementRow(row)), n) };
+  };
+}
+
+/** One verb's FULL report from the newest row that carries it -- `?detail=<verb>`. Newest-first and
+ *  stops at the first match, so it never opens more rotations than it must. */
+export function latestMeasurementDetail(stateDir: string, verb: string): { ts: string; value: unknown } | undefined {
+  let found: { ts: string; value: unknown } | undefined;
+  readLedgerUnionRecordsSync(stateDir, {
+    step: "measurement_cadence.ran",
+    liveFirst: true,
+    order: "newest-first",
+    onRecord: (row) => {
+      if (typeof row.ts !== "string") return;
+      const entry = measurementEntriesFrom([row], 1)[0];
+      if (entry && verb in entry.result && (!found || entry.ts > found.ts)) found = { ts: entry.ts, value: entry.result[verb] };
+    },
+    satisfied: () => found !== undefined,
+  });
+  return found;
 }
 
 // ── W1-T2959: the daily CI-failure learning rung — its own policy row, its own marker, the SHARED

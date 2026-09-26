@@ -154,7 +154,7 @@ import { createLiveAnalyticsSnapshotCache, type LiveAnalyticsSnapshotCacheOption
 import { inboxDigestsPath } from "./digest.js";
 import { readLedgerLines } from "./status.js";
 import { buildReplay, resolveReplayLedgerLines, type ReplayLedgerRead } from "./ledger-replay.js";
-import { latestMeasurementRows, type LatestMeasurementRowsResult } from "./measurement-cadence.js";
+import { createLatestMeasurementReader, latestMeasurementDetail, latestMeasurementRows, summarizeMeasurementValue, type LatestMeasurementRowsResult } from "./measurement-cadence.js";
 import type { LedgerUnionResult } from "./ledger-grep.js";
 import type { BoardRow, BoardSnapshot } from "./board.js";
 import {
@@ -2246,6 +2246,7 @@ export interface SelfMeasurementRouteDeps {
   stateDir: string;
   n?: number;
   ledgerUnion?: (stateDir: string, pattern: RegExp) => LedgerUnionResult;
+  prewarm?: boolean;
 }
 
 /**
@@ -2253,21 +2254,45 @@ export interface SelfMeasurementRouteDeps {
  * rows (rule-efficacy, verdict-calibration, autonomy-rate, adoption, proof-debt, the verb
  * census), via {@link latestMeasurementRows} (measurement-cadence.ts) — the reader that INVERTS
  * that module's own writer (design (i)) rather than re-describing the row shape here. Returns
- * `latestMeasurementRows`'s own result verbatim as JSON: `{status: "ok", rows: [...]}` or
- * `{status: "unreadable", reason}` — the client-side `renderSelfMeasurement` (renderShellHtml's
- * script) renders the `unreadable` case AS unreadable, and renders each metric's
- * `delta_vs_previous` beside the latest value through the generic figure row, never as a
- * quietly-empty panel (the W1-T119 distinction this reader's own doc states).
+ * `{status: "ok", rows: [...]}` or `{status: "unreadable", reason}` — `unreadable` is never a
+ * quietly-empty answer (the W1-T119 distinction this reader's own doc states). W1-T4567: rows are
+ * read through a rotation memo (prewarmed unless `prewarm: false`) and each verb is summarized to
+ * headlines (8 MB, 2.6-3.0 s per request before); `?detail=<verb>` returns one verb's full report.
  */
 export function buildSelfMeasurementRoute(deps: SelfMeasurementRouteDeps): Route {
+  const readLatest = createLatestMeasurementReader();
+  if (deps.prewarm !== false) readLatest(deps.stateDir, deps.n ?? 10).catch(() => undefined /* deliberate: a failed prewarm only means the first request loads the memo itself, and that request reports its own read failure */);
   return {
     method: "GET",
     path: "/v1/self-measurement",
     scope: "read",
-    handler: (_req, res) => {
-      const result: LatestMeasurementRowsResult = latestMeasurementRows(deps.stateDir, deps.n ?? 10, deps.ledgerUnion);
+    handler: async (req, res) => {
+      const detail = new URL(req.url ?? "/", "http://localhost").searchParams.get("detail");
+      if (detail !== null) {
+        if (!/^[A-Za-z][A-Za-z0-9]{0,63}$/.test(detail)) {
+          sendJson(res, 400, { error: "invalid_request", detail: "detail must name one verb, e.g. autonomyRate" });
+          return;
+        }
+        const found = latestMeasurementDetail(deps.stateDir, detail);
+        sendJson(res, found ? 200 : 404, found ? { verb: detail, ...found } : { error: "not_found", detail: `no measurement row carries ${detail}` });
+        return;
+      }
+      const result: LatestMeasurementRowsResult = deps.ledgerUnion
+        ? summarizedRows(latestMeasurementRows(deps.stateDir, deps.n ?? 10, deps.ledgerUnion))
+        : await readLatest(deps.stateDir, deps.n ?? 10);
       sendJson(res, 200, result);
     },
+  };
+}
+
+function summarizedRows(result: LatestMeasurementRowsResult): LatestMeasurementRowsResult {
+  if (result.status !== "ok") return result;
+  return {
+    status: "ok",
+    rows: result.rows.map((row) => ({
+      ts: row.ts,
+      result: Object.fromEntries(Object.entries(row.result).map(([verb, value]) => [verb, summarizeMeasurementValue(value)])),
+    })),
   };
 }
 /**
