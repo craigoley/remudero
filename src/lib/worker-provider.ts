@@ -1473,11 +1473,17 @@ export async function readCodexRuntimeWithTimeoutHedge(
   });
 }
 
-function readCodexRuntimeOffThread(config: Config, bin: string, timeoutMs: number): Promise<CodexRuntimeResult> {
+export function readCodexRuntimeOffThread(
+  config: Config,
+  bin: string,
+  timeoutMs: number,
+  workerFactory: (url: URL, options: ConstructorParameters<typeof Worker>[1]) => Worker = (url, options) => new Worker(url, options),
+  outerDeadlineMs = 2 * timeoutMs + 5_000,
+): Promise<CodexRuntimeResult> {
   return new Promise((resolve) => {
     let probe: Worker;
     try {
-      probe = new Worker(new URL("./codex-capacity-probe.mjs", import.meta.url), {
+      probe = workerFactory(new URL("./codex-capacity-probe.mjs", import.meta.url), {
         workerData: { bin, codexHome: codexHome(config), timeoutMs },
         execArgv: ["--import", "tsx"],
       });
@@ -1498,7 +1504,7 @@ function readCodexRuntimeOffThread(config: Config, bin: string, timeoutMs: numbe
     };
     const watchdog = setTimeout(() => {
       setImmediate(() => finish(codexRuntimeFailure("app-server probe worker exceeded its outer deadline")));
-    }, 2 * timeoutMs + 5_000);
+    }, outerDeadlineMs);
     probe.once("message", (result: CodexRuntimeResult) => {
       if (!result || typeof result !== "object" || !("provider" in result || "rateLimits" in result)) {
         finish(codexRuntimeFailure("app-server probe worker returned a malformed result"));

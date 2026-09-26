@@ -6,10 +6,12 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import type { Worker } from "node:worker_threads";
 import {
   clearCodexCapacityCache,
   readCodexCapacity,
   readCodexRuntime,
+  readCodexRuntimeOffThread,
 } from "../src/lib/worker-provider.js";
 import type { Config } from "../src/lib/config.js";
 import type { CapabilityLadder } from "../src/lib/mounts.js";
@@ -571,6 +573,39 @@ test("an isolated Codex app-server that exits before its reply leaves headroom u
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("an isolated Codex probe reports a worker construction failure", async () => {
+  const result = await readCodexRuntimeOffThread(config("/tmp"), "/unused", 100, () => {
+    throw new Error("worker constructor failed");
+  });
+  assert.ok("provider" in result);
+  assert.equal(result.readable, false);
+  assert.match(result.detail ?? "", /worker failed to start: worker constructor failed/);
+});
+
+test("an isolated Codex probe rejects malformed worker replies and reports cleanup failure", async (t) => {
+  const diagnostics: string[] = [];
+  t.mock.method(console, "error", (...parts: unknown[]) => diagnostics.push(parts.map(String).join(" ")));
+  const probe = Object.assign(new EventEmitter(), {
+    terminate: () => Promise.reject(new Error("cleanup failed")),
+  });
+  const pending = readCodexRuntimeOffThread(config("/tmp"), "/unused", 100, () => probe as unknown as Worker);
+  probe.emit("message", { unexpected: true });
+  const result = await pending;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok("provider" in result);
+  assert.equal(result.readable, false);
+  assert.match(result.detail ?? "", /worker returned a malformed result/);
+  assert.match(diagnostics.join("\n"), /codex.capacity_probe.terminate_failed.*cleanup failed/);
+});
+
+test("an isolated Codex probe fails closed when its outer watchdog expires", async () => {
+  const probe = Object.assign(new EventEmitter(), { terminate: async () => 0 });
+  const result = await readCodexRuntimeOffThread(config("/tmp"), "/unused", 100, () => probe as unknown as Worker, 20);
+  assert.ok("provider" in result);
+  assert.equal(result.readable, false);
+  assert.match(result.detail ?? "", /worker exceeded its outer deadline/);
 });
 
 test("timeout diagnostics name only the app-server phases still unfinished at the bound", async () => {
