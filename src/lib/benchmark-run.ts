@@ -1,5 +1,7 @@
 /** Private, metadata-only receipts. The enclosing ledger row owns run/assignment IDs; this
  * envelope deliberately contains neither IDs nor content, and grants no publication rights. */
+import { workerLedgerFields, type WorkerResult } from "./worker.js";
+
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
 
 type Evidence<T> = { state: "observed"; value: T } | { state: "unavailable"; reason: string };
@@ -80,6 +82,22 @@ function callEvidence(row: Record<string, unknown>) {
       apiCostUsd: billingMode === "api" ? cost : billingMode ? otherMode : unavailable("billing-mode-not-reported"),
       subscriptionNotionalUsd: billingMode === "subscription" ? cost : billingMode ? otherMode : unavailable("billing-mode-not-reported"),
     },
+  };
+}
+
+/** Keep the billing derivation at the canonical worker boundary, including cash-provider calls.
+ * An empty result envelope carries default usage zeros, not observations. */
+export function benchmarkWorkerAttemptResources(result: WorkerResult) {
+  const fields = workerLedgerFields(result);
+  const observedEnvelope = typeof result.subtype === "string" && result.subtype.length > 0;
+  return {
+    served_model: fields.served_model,
+    worker_duration_ms: fields.worker_duration_ms,
+    ...(observedEnvelope ? {
+      tokens: fields.tokens,
+      billing_mode: fields.billing_mode,
+      total_cost_usd: fields.total_cost_usd,
+    } : {}),
   };
 }
 

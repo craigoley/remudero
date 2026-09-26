@@ -659,7 +659,6 @@ type AnalyticsCheckpointState = {
     taskClassesByRun?: Array<[string, string]>;
     risksByRun?: Array<[string, string]>;
     assignmentsById: Array<[string, RoutingAssignment]>;
-    /** Worker-call outcomes outrank legacy run-verdict proxies for benchmark evidence. */
     attemptsByAssignmentId?: Array<[string, RoutingTerminalReceipt]>;
     terminalsByAssignmentId: Array<[string, RoutingTerminalReceipt]>;
     pendingTerminalsByAssignmentId: Array<[string, RoutingTerminalReceipt]>;
@@ -1385,8 +1384,6 @@ function snapshotRoutingTelemetry(acc: RoutingTelemetryAccumulator): RoutingTele
 
 function snapshotBenchmarkEvidence(acc: RoutingTelemetryAccumulator, asOf: string): BenchmarkEvidenceSnapshot {
   const assignments: ReadonlyMap<string, BenchmarkAssignmentEvidence> = acc.assignmentsById;
-  // A run verdict can proxy for the last worker only on old ledgers. A per-call receipt
-  // supersedes it for that assignment, but the verdict remains a separate task outcome.
   const allTerminals = new Map<string, BenchmarkTerminalEvidence>([
     ...acc.terminalsByAssignmentId, ...acc.pendingTerminalsByAssignmentId,
     ...acc.attemptsByAssignmentId,

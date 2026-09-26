@@ -880,7 +880,7 @@ import {
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
-import { benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt } from "./lib/benchmark-run.js";
+import { benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources } from "./lib/benchmark-run.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -13889,12 +13889,9 @@ export function recordBenchmarkWorkerAttempt(
   }
   return workerCall.then((result) => {
     try {
-      const fields = workerLedgerFields(result);
       const resultId = result.selectionAssignmentId;
       const selection = selected();
       const assignmentId = resultId ?? selection?.id;
-      // A stream without a result envelope carries default zero usage and an empty subtype;
-      // those defaults are not measured zero.
       const resultEnvelopeObserved = typeof result.subtype === "string" && result.subtype.length > 0;
       log("worker.attempt", {
         ...(assignmentId ? { selection_assignment_id: assignmentId } : {}),
@@ -13902,10 +13899,7 @@ export function recordBenchmarkWorkerAttempt(
         ...(result.isError || result.apiError || result.usageRefusal
           ? { success: false }
           : resultEnvelopeObserved ? { success: true } : {}),
-        served_model: fields.served_model,
-        ...(resultEnvelopeObserved ? { tokens: fields.tokens } : {}),
-        worker_duration_ms: fields.worker_duration_ms,
-        ...(resultEnvelopeObserved ? { billing_mode: fields.billing_mode, total_cost_usd: fields.total_cost_usd } : {}),
+        ...benchmarkWorkerAttemptResources(result),
       });
     } catch { /* telemetry cannot alter the returned worker result */ }
     return result;
