@@ -158,7 +158,7 @@ import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "
 import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { startCiFrictionGardener, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
-import { readSelectorShadowChangedPaths, readSelectorShadowRuns, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
+import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
 import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
@@ -32517,7 +32517,7 @@ export async function daemonCommand(
                     openWorkspace: () => gardenCheckout({ name: "selector-shadow", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
                     log,
                   },
-                  () => readSelectorShadowRuns(self.owner, self.repo),
+                  () => readSelectorShadowRunsAsync(self.owner, self.repo),
                   (miss) => readSelectorShadowChangedPaths(self.owner, self.repo, miss),
                   ciLearningTaskIdMinter(repoRoot),
                   intervalMs,

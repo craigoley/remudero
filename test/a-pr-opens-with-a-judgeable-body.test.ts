@@ -241,7 +241,7 @@ function filedTaskFixture(proof = "grep: marker in README.md"): string {
   return dir;
 }
 
-test("the default PR proof runner executes the real check-proof process", () => {
+test("a feature-branch PR proof runner reaches check-proof without self-sync refusing the branch", () => {
   const result = defaultProofRunner(
     "grep: W1_T4420_ABSENT_PROOF_MARKER in src/lib/pr-open.ts",
     "origin/main",
