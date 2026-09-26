@@ -13,7 +13,7 @@
  * ELSE — never a `-X`/`--method`/`-f`/`-F`/`--input` flag, which is what would turn a `gh api`
  * call into a write. The token 403s on the writes anyway, but the prohibition is about intent,
  * not outcome: a future token with more scope must not silently turn this into a remediator.
- * {@link ghPostureGateway}'s two calls are the ONLY network surface this module has.
+ * {@link ghPostureGateway}'s reads are the ONLY network surface this module has.
  *
  * THREE STATES, AND THE API CANNOT TELL THEM APART (rationale (4)). Across 15 org repos / 122
  * status observations the vocabulary is exactly `enabled`/`disabled` — no `unavailable`, no
@@ -78,11 +78,10 @@ function assertNonEmpty(key: string, entry: GithubPostureAllowlistEntry): Github
  * sweep the task's rationale measured — never a guess. `secret_scanning_delegated_alert_dismissal`
  * and `secret_scanning_delegated_bypass` read `disabled` on ALL 14 org repos that carry them: no
  * repo this account owns has ever had either on, the signature of a tier-limited capability
- * rather than a toggle. `code_quality` has NO API surface at all (`repos/{o}/{r}/code-quality`
- * and `.../quality` both 404 against positive 200 controls on sibling endpoints in the same call
- * sequence) — it is annotated here rather than read live, carrying the cost GitHub states for it
- * (Team/Enterprise Cloud, per-committer billing, AI credits + Actions minutes) so a purchase
- * decision never reads the same as a free toggle.
+ * rather than a toggle. `code_quality` has no supported settings endpoint, so W1-T4070 uses
+ * read-only Actions run history as its activity signal. The allowlist still carries GitHub's
+ * cost (Team/Enterprise Cloud, per-committer billing, AI credits + Actions minutes) so duplicate
+ * analysis never reads as a free toggle.
  */
 export const GITHUB_POSTURE_ALLOWLIST: Readonly<Record<string, GithubPostureAllowlistEntry>> = {
   secret_scanning_delegated_alert_dismissal: assertNonEmpty("secret_scanning_delegated_alert_dismissal", {
@@ -95,7 +94,7 @@ export const GITHUB_POSTURE_ALLOWLIST: Readonly<Record<string, GithubPostureAllo
   }),
   code_quality: assertNonEmpty("code_quality", {
     kind: "paid",
-    reason: "no API surface exists for it (repos/{o}/{r}/code-quality and .../quality both 404, W1-T1040 rationale 7) — annotated, never read live",
+    reason: "no supported settings endpoint exposes it; read-only Actions run history is the activity signal (W1-T4070)",
     cost:
       "requires GitHub Team or Enterprise Cloud, bills per active committer, adds AI credits for autofixes " +
       "plus Actions minutes for its own CodeQL scans (W1-T1040 rationale (ii))",
@@ -106,7 +105,7 @@ export const GITHUB_POSTURE_ALLOWLIST: Readonly<Record<string, GithubPostureAllo
 // ── only ─────────────────────────────────────────────────────────────────────────────────────
 
 /** Every capability this module reads or annotates, and where its status comes from. */
-export type GithubPostureCapabilitySource = "security_and_analysis" | "enforce_admins" | "merge_settings" | "static";
+export type GithubPostureCapabilitySource = "security_and_analysis" | "enforce_admins" | "merge_settings" | "workflow_runs";
 
 export interface GithubPostureCapabilityDescriptor {
   key: string;
@@ -115,8 +114,7 @@ export interface GithubPostureCapabilityDescriptor {
 
 /**
  * The eight `security_and_analysis` keys (task rationale (2)) + `enforce_admins` (branch
- * protection, read separately — GitHub does not fold it into the repo payload) + `code_quality`
- * (a `"static"` entry: never read live, see {@link GITHUB_POSTURE_ALLOWLIST}) +
+ * protection, read separately — GitHub does not fold it into the repo payload) + `code_quality` +
  * `squash_merge_commit_message` (W1-T2448: a `"merge_settings"` entry read off the SAME repo-root
  * payload `security_and_analysis` already reads — no new GET). It is the only reason 611 anchored
  * commit trailers exist on `main` (`buildCommitTrailerIndex`, `status.ts`), named nowhere under
@@ -134,7 +132,7 @@ export const GITHUB_POSTURE_CAPABILITIES: readonly GithubPostureCapabilityDescri
   { key: "secret_scanning_delegated_alert_dismissal", source: "security_and_analysis" },
   { key: "secret_scanning_delegated_bypass", source: "security_and_analysis" },
   { key: "enforce_admins", source: "enforce_admins" },
-  { key: "code_quality", source: "static" },
+  { key: "code_quality", source: "workflow_runs" },
   { key: "squash_merge_commit_message", source: "merge_settings" },
 ];
 
@@ -142,6 +140,7 @@ export const GITHUB_POSTURE_CAPABILITIES: readonly GithubPostureCapabilityDescri
  *  carries the trailers `buildCommitTrailerIndex` anchors on (W1-T2448 rationale, Q1/Q3) — a
  *  live read of anything else is the flip that would otherwise go unasserted. */
 export const GITHUB_POSTURE_SQUASH_MERGE_COMMIT_MESSAGE_EXPECTED = "COMMIT_MESSAGES";
+export const GITHUB_POSTURE_CODE_QUALITY_WORKFLOW_ID = 343193516;
 
 export type GithubPostureCapabilityStatus = "enabled" | "disabled";
 
@@ -149,12 +148,13 @@ export type GithubPostureCapabilityStatus = "enabled" | "disabled";
  *  present — a key the live payload omits or malforms is simply absent, never defaulted. */
 export type GithubPostureSnapshot = Record<string, GithubPostureCapabilityStatus>;
 
-/** The two GET calls this module ever issues — see the module header's DETECTION ONLY note. */
 export interface GithubPostureGateway {
   /** `gh api repos/{owner}/{repo}` — carries `security_and_analysis`. */
   getRepo(owner: string, repo: string): unknown;
   /** `gh api repos/{owner}/{repo}/branches/{branch}/protection/enforce_admins`. */
   getEnforceAdmins(owner: string, repo: string, branch: string): unknown;
+  getCodeQualityRuns?(owner: string, repo: string, since: string): unknown;
+  workflowRunsSince?: string;
 }
 
 /**
@@ -172,9 +172,80 @@ export function ghPostureGateway(execFileFn: (args: string[]) => string = defaul
       return undefined;
     }
   }
+  function listItems(raw: unknown, key: "workflows" | "workflow_runs"): unknown[] | undefined {
+    if (!Array.isArray(raw) || raw.length === 0) return undefined;
+    const items: unknown[] = [];
+    let totalCount: number | undefined;
+    for (const page of raw) {
+      if (typeof page !== "object" || page === null || Array.isArray(page)) return undefined;
+      const record = page as Record<string, unknown>;
+      if (!Number.isSafeInteger(record.total_count) || !Array.isArray(record[key])) return undefined;
+      const pageCount = record.total_count as number;
+      if (totalCount !== undefined && pageCount !== totalCount) return undefined;
+      totalCount = pageCount;
+      items.push(...(record[key] as unknown[]));
+    }
+    // The API caps a created-date search at 1,000 runs. A truncated or moving page set is
+    // unknown, never a negative result that could erase evidence of duplicate spend.
+    return totalCount === items.length ? items : undefined;
+  }
+
+  function pathIsCodeQuality(path: string): boolean {
+    const normalized = normalizedWorkflowPath(path);
+    return normalized.startsWith("dynamic/github-code-quality/");
+  }
+
+  function pathIsPrimaryCodeql(path: string): boolean {
+    const normalized = normalizedWorkflowPath(path);
+    return normalized === "codeql.yml" || normalized === "codeql.yaml";
+  }
+
+  function normalizedWorkflowPath(path: string): string {
+    return path.replace(/^\.github\/workflows\//, "").split("@", 1)[0];
+  }
+
   return {
     getRepo: (owner, repo) => tryGet(["api", `repos/${owner}/${repo}`]),
     getEnforceAdmins: (owner, repo, branch) => tryGet(["api", `repos/${owner}/${repo}/branches/${branch}/protection/enforce_admins`]),
+    getCodeQualityRuns: (owner, repo, since) => {
+      const workflowEndpoint = `repos/${owner}/${repo}/actions/workflows?per_page=100`;
+      const workflowRows = listItems(tryGet(["api", "--paginate", "--slurp", workflowEndpoint]), "workflows");
+      if (workflowRows === undefined) return undefined;
+
+      let codeqlWorkflowActive = false;
+      for (const row of workflowRows) {
+        if (typeof row !== "object" || row === null || Array.isArray(row)) return undefined;
+        const workflow = row as Record<string, unknown>;
+        if (typeof workflow.path !== "string" || !Number.isSafeInteger(workflow.id)) return undefined;
+        if (pathIsPrimaryCodeql(workflow.path)) {
+          if (workflow.state === "active") codeqlWorkflowActive = true;
+          else if (typeof workflow.state !== "string" || !(workflow.state.startsWith("disabled_") || workflow.state === "deleted")) {
+            return undefined;
+          }
+        }
+      }
+
+      if (!codeqlWorkflowActive) return { codeqlWorkflowActive: false, workflow_runs: [] };
+
+      const managedWorkflowEndpoint = `repos/${owner}/${repo}/actions/workflows/${GITHUB_POSTURE_CODE_QUALITY_WORKFLOW_ID}`;
+      const managedWorkflow = tryGet(["api", managedWorkflowEndpoint]);
+      if (typeof managedWorkflow !== "object" || managedWorkflow === null || Array.isArray(managedWorkflow)) return undefined;
+      const managedPath = (managedWorkflow as Record<string, unknown>).path;
+      if (typeof managedPath !== "string" || !pathIsCodeQuality(managedPath)) return undefined;
+
+      const created = encodeURIComponent(`>=${since}`);
+      const runsEndpoint = `${managedWorkflowEndpoint}/runs?created=${created}&per_page=100`;
+      const workflowRuns = listItems(tryGet(["api", "--paginate", "--slurp", runsEndpoint]), "workflow_runs");
+      if (workflowRuns === undefined) return undefined;
+      for (const row of workflowRuns) {
+        if (typeof row !== "object" || row === null || Array.isArray(row)) return undefined;
+        const run = row as Record<string, unknown>;
+        if (typeof run.path !== "string" || typeof run.created_at !== "string" || Number.isNaN(Date.parse(run.created_at))) {
+          return undefined;
+        }
+      }
+      return { codeqlWorkflowActive: true, workflow_runs: workflowRuns };
+    },
   };
 }
 
@@ -183,7 +254,7 @@ function defaultExec(args: string[]): string {
 }
 
 function statusFrom(raw: unknown, descriptor: GithubPostureCapabilityDescriptor): GithubPostureCapabilityStatus | undefined {
-  if (descriptor.source === "static") return "disabled"; // code_quality: annotated, never read live.
+  if (descriptor.source === "workflow_runs") return undefined;
   if (raw === undefined || raw === null || typeof raw !== "object") return undefined;
   if (descriptor.source === "enforce_admins") {
     const enabled = (raw as { enabled?: unknown }).enabled;
@@ -206,8 +277,7 @@ function statusFrom(raw: unknown, descriptor: GithubPostureCapabilityDescriptor)
 }
 
 /**
- * The read (task rationale (i)): `GET /repos/{owner}/{repo}` + `GET .../branches/{branch}/
- * protection/enforce_admins`, folded into a {@link GithubPostureSnapshot}. Returns `undefined`
+ * The read folds settings and run history into {@link GithubPostureSnapshot}. Returns `undefined`
  * when the repo read itself is unreadable — the primary source for 10 of 11 capabilities,
  * `squash_merge_commit_message` (W1-T2448) included — so a caller degrades to "no finding"
  * rather than manufacturing a false all-clear from a half read. `enforce_admins` alone being
@@ -217,7 +287,7 @@ function statusFrom(raw: unknown, descriptor: GithubPostureCapabilityDescriptor)
 export function readGithubPosture(
   owner: string,
   repo: string,
-  deps: { gateway?: GithubPostureGateway; branch?: string } = {},
+  deps: { gateway?: GithubPostureGateway; branch?: string; since?: string } = {},
 ): GithubPostureSnapshot | undefined {
   const gateway = deps.gateway ?? ghPostureGateway();
   const branch = deps.branch ?? "main";
@@ -230,7 +300,42 @@ export function readGithubPosture(
     const status = statusFrom(raw, descriptor);
     if (status !== undefined) snapshot[descriptor.key] = status;
   }
+  const since = deps.since ?? gateway.workflowRunsSince;
+  if (gateway.getCodeQualityRuns !== undefined && since !== undefined) {
+    let activity: unknown;
+    try {
+      activity = gateway.getCodeQualityRuns(owner, repo, since);
+    } catch {
+      // An unreadable Actions run read is unknown, not evidence that Code Quality is off.
+      return undefined;
+    }
+    const codeQualityActive = recentCodeQualityRun(activity, since);
+    if (codeQualityActive === undefined) return undefined;
+    if (codeQualityActive) snapshot.code_quality = "enabled";
+  }
   return snapshot;
+}
+
+function recentCodeQualityRun(raw: unknown, since: string): boolean | undefined {
+  const sinceMs = Date.parse(since);
+  if (Number.isNaN(sinceMs) || typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const record = raw as { codeqlWorkflowActive?: unknown; workflow_runs?: unknown };
+  if (typeof record.codeqlWorkflowActive !== "boolean") return undefined;
+  if (!record.codeqlWorkflowActive) return false;
+  const runs = record.workflow_runs;
+  if (!Array.isArray(runs)) return undefined;
+  let found = false;
+  for (const row of runs) {
+    if (typeof row !== "object" || row === null || Array.isArray(row)) return undefined;
+    const run = row as Record<string, unknown>;
+    if (typeof run.path !== "string" || typeof run.created_at !== "string") return undefined;
+    const createdAt = Date.parse(run.created_at);
+    if (Number.isNaN(createdAt)) return undefined;
+    const path = run.path.replace(/^\.github\/workflows\//, "").split("@", 1)[0];
+    if (!path.startsWith("dynamic/github-code-quality/")) return undefined;
+    if (createdAt >= sinceMs) found = true;
+  }
+  return found;
 }
 
 // ── Classification: the three states, over an already-read snapshot ────────────────────────
@@ -245,7 +350,8 @@ export interface GithubPostureFinding {
 }
 
 /**
- * Folds a snapshot into findings: `enabled` never flags; `disabled` flags UNLESS
+ * Folds a snapshot into findings: ordinary `enabled` settings never flag; recent Code Quality
+ * activity is the exception because it duplicates the active `codeql.yml` scan. `disabled` flags UNLESS
  * {@link GITHUB_POSTURE_ALLOWLIST} marks it `"unavailable"` (state c, never flagged) — an entry
  * marked `"paid"` still flags, carrying its cost (state b); anything disabled and unlisted flags
  * plainly (state a). Sorted by capability name for a deterministic finding order.
@@ -253,8 +359,18 @@ export interface GithubPostureFinding {
 export function classifyGithubPosture(snapshot: GithubPostureSnapshot): GithubPostureFinding[] {
   const findings: GithubPostureFinding[] = [];
   for (const [capability, status] of Object.entries(snapshot)) {
-    if (status === "enabled") continue;
     const allow = GITHUB_POSTURE_ALLOWLIST[capability];
+    if (capability === "code_quality" && status === "enabled") {
+      findings.push({
+        capability,
+        kind: "paid",
+        cost:
+          `Recent Code Quality activity duplicates .github/workflows/codeql.yml; if unintended, review ` +
+          `Settings > Security and quality > Code quality. ${allow?.cost ?? ""}`,
+      });
+      continue;
+    }
+    if (status === "enabled") continue;
     if (allow?.kind === "unavailable") continue;
     if (allow?.kind === "paid") {
       findings.push({ capability, kind: "paid", cost: allow.cost });
@@ -378,7 +494,11 @@ export interface GithubPostureCheckDeps {
   branch?: string;
   /** Defaults to {@link readGithubPosture} — a test seam, and the seam `run-task.ts`'s wiring
    *  threads its own `readGithubPosture(...)` call through (see that file's own doc). */
-  read?: (owner: string, repo: string, opts: { gateway?: GithubPostureGateway; branch?: string }) => GithubPostureSnapshot | undefined;
+  read?: (
+    owner: string,
+    repo: string,
+    opts: { gateway?: GithubPostureGateway; branch?: string; since?: string },
+  ) => GithubPostureSnapshot | undefined;
   gateway?: GithubPostureGateway;
   loadBaseline?: (path: string) => GithubPostureBaseline | undefined;
   saveBaseline?: (path: string, baseline: GithubPostureBaseline) => void;
@@ -406,7 +526,17 @@ export function checkGithubPosture(deps: GithubPostureCheckDeps): GithubPostureF
   const cadence = decideGithubPostureCheck({ now, lastCheckedIso: baseline?.checkedAt, minIntervalMinutes });
   if (!cadence.fire) return [];
 
-  const snapshot = read(deps.owner, deps.repo, { gateway: deps.gateway, branch: deps.branch });
+  const since = baseline?.checkedAt ?? new Date(now.getTime() - minIntervalMinutes * 60_000).toISOString();
+  const gateway = deps.gateway ?? ghPostureGateway();
+  const readGateway: GithubPostureGateway =
+    gateway.getCodeQualityRuns === undefined
+      ? gateway
+      : {
+          ...gateway,
+          getCodeQualityRuns: (owner, repo) => gateway.getCodeQualityRuns!(owner, repo, since),
+          workflowRunsSince: since,
+        };
+  const snapshot = read(deps.owner, deps.repo, { gateway: readGateway, branch: deps.branch, since });
   if (snapshot === undefined) return []; // unreadable — no finding, baseline left untouched.
 
   const changed = baseline === undefined || !sameSnapshot(baseline.snapshot, snapshot);

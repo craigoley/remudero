@@ -192,7 +192,7 @@
   "src/lib/github-posture.ts": {
     "legacy": 0,
     "dateNow": 0,
-    "newDate": 1
+    "newDate": 2
   },
   "src/lib/inbox-thread.ts": {
     "legacy": 1,
