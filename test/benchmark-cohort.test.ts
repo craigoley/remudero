@@ -318,3 +318,17 @@ test("benchmark cohorts re-audit a changed live prefix and recover a completed t
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
+
+test("benchmark cohorts distinguish an unreadable state root from a ledger with no sources", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-empty-"));
+  try {
+    const empty = await runBenchmarkCohortPass(stateDir);
+    assert.equal(empty.state, "unavailable");
+    assert.equal(empty.snapshot.reason, "ledger-source-missing");
+    const unreadable = await runBenchmarkCohortPass(join(stateDir, "does-not-exist"));
+    assert.equal(unreadable.state, "unavailable");
+    assert.equal(unreadable.snapshot.reason, "ledger-source-unreadable");
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});

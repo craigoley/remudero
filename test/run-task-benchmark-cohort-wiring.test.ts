@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { daemonCommand } from "../src/run-task.js";
+import { buildBenchmarkCohortDaemonHooks, daemonCommand } from "../src/run-task.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 
 test("run task wires benchmark cohort state root", async () => {
@@ -43,4 +43,15 @@ test("run task wires benchmark cohort state root", async () => {
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("benchmark cohort cadence does not scan again until its interval", () => {
+  let now = 1_000;
+  const hooks = buildBenchmarkCohortDaemonHooks({ now: () => now, intervalMs: 30_000 });
+  assert.equal(hooks.checkBenchmarkCohort(), true);
+  assert.equal(hooks.checkBenchmarkCohort(), false);
+  now += 29_999;
+  assert.equal(hooks.checkBenchmarkCohort(), false);
+  now += 1;
+  assert.equal(hooks.checkBenchmarkCohort(), true);
 });
