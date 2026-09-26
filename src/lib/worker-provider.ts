@@ -1473,7 +1473,6 @@ export async function readCodexRuntimeWithTimeoutHedge(
   });
 }
 
-/** Keep the app-server exchange's deadline and stdout callbacks off the daemon's busy event loop. */
 function readCodexRuntimeOffThread(config: Config, bin: string, timeoutMs: number): Promise<CodexRuntimeResult> {
   return new Promise((resolve) => {
     let probe: Worker;
@@ -1483,7 +1482,8 @@ function readCodexRuntimeOffThread(config: Config, bin: string, timeoutMs: numbe
         execArgv: ["--import", "tsx"],
       });
     } catch (error) {
-      resolve(codexRuntimeFailure(`app-server probe worker failed to start: ${String((error as Error).message ?? error)}`));
+      const reason = `app-server probe worker failed to start: ${String((error as Error).message ?? error)}`;
+      resolve(codexRuntimeFailure(reason));
       return;
     }
     let settled = false;
@@ -1491,12 +1491,11 @@ function readCodexRuntimeOffThread(config: Config, bin: string, timeoutMs: numbe
       if (settled) return;
       settled = true;
       clearTimeout(watchdog);
-      void probe.terminate().catch(() => undefined);
+      void probe.terminate().catch((error) => {
+        console.error(JSON.stringify({ event: "codex.capacity_probe.terminate_failed", error: String(error) }));
+      });
       resolve(result);
     };
-    // The worker owns both bounded app-server attempts. This outer bound catches a worker that
-    // never boots or reports; checking it after a poll turn lets an already-queued message win if
-    // the daemon itself was blocked when the watchdog fired.
     const watchdog = setTimeout(() => {
       setImmediate(() => finish(codexRuntimeFailure("app-server probe worker exceeded its outer deadline")));
     }, 2 * timeoutMs + 5_000);
@@ -1512,8 +1511,7 @@ function readCodexRuntimeOffThread(config: Config, bin: string, timeoutMs: numbe
   });
 }
 
-function startCodexRuntime(config: Config, bin: string, deps: CodexCapacityDeps, now: () => number): Promise<CodexRuntimeResult> {
-  // Synthetic transports stay in-process so protocol tests can control exact RPC timing.
+function startCodexRuntime(config: Config, bin: string, deps: CodexCapacityDeps, now: Clock["now"]): Promise<CodexRuntimeResult> {
   return deps.spawn
     ? readCodexRuntimeWithTimeoutHedge(config, bin, { ...deps, clock: { now } })
     : readCodexRuntimeOffThread(config, bin, deps.timeoutMs ?? 10_000);
