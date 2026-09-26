@@ -684,7 +684,6 @@ const FAST_LANE_WIRED_STEP_IDS = [
   "source-size",
   "comment-load-ratchet",
   "expiring-fixture-census",
-  "contract-coverage-ratchet",
   "console-parity",
 ];
 
@@ -833,7 +832,6 @@ test("W1-T3512 acceptance 4: a SOURCE diff is unaffected — each wired gate's r
     "source-size": /npm run --silent source-size-signal/,
     "comment-load-ratchet": /npm run --silent comment-load-signal/,
     "expiring-fixture-census": /node scripts\/expiring-fixture-census\.mjs/,
-    "contract-coverage-ratchet": /node scripts\/contract-coverage-ratchet\.mjs/,
     "console-parity": /npm run --silent console-parity/,
   };
   for (const [stepId, re] of Object.entries(expectedCommand)) {

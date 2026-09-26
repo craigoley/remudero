@@ -3128,3 +3128,13 @@ $25 squeeze-day cash ceiling.
 
 **Sources read 2026-09-24:** Microsoft Azure GPT-6 launch pricing;
 Microsoft Foundry Claude Messages API and deployment guidance; Anthropic Opus 5.5 price sheet.
+
+## 2026-09-26 — W1-T4583: the in-repo contract-coverage ratchet is RETIRED; the contract is checked where it is served and where it is consumed
+
+`scripts/contract-coverage-ratchet.mjs` (W1-T3174) counted `/v1` routes an IN-REPO client called that
+`openapi/daemon.yaml` did not declare. W1-T4563 and W1-T4566 deleted both in-repo consoles, so its client
+population was declared empty and it censused nothing while still costing a CI step, a gate-gardener
+probe and a gate-posture row. Its question now has two owners: **W1-T4579** (the producer) requires every
+SERVED route to be declared or in a shrink-only baseline and every declared route to be served, and
+**CONSOLE-T84** (the consumer, remudero-console) checks the live console's calls against a reviewed pin
+of the spec. Rollback: restore the script, its baseline and its ci.yml step from the parent of this PR.
