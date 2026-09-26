@@ -8,6 +8,7 @@ import { parse as parseYaml } from "yaml";
 import { readAffectedSuitesInput, selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
 import { ciControlPlaneParity } from "./ci-control-plane.js";
+import { resolveHostPole, type HostPole } from "./host-parity.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
 import { criterionFieldTampered, planOnlyDiff } from "./review.js";
 
@@ -1134,6 +1135,8 @@ function npmScriptEntry(job: string, script: string): CiParityEntry {
  *  this logic with no darwin machine. */
 export interface HostFacts {
   platform: NodeJS.Platform;
+  /** The shared host-parity pole; undefined only when the container marker could not be read. */
+  pole?: HostPole;
   /** `undefined` when `bash` was absent or its version text did not parse: never read as "applies". */
   bashMajorVersion: number | undefined;
   hasProcMeminfo: boolean;
@@ -1154,6 +1157,8 @@ export function parseBashMajorVersion(bashVersionText: string): number | undefin
 /** PURE, on {@link buildPreflightSummary}'s precedent: raw strings in, derived facts out, no spawn. */
 export function computeHostFacts(input: {
   platform: NodeJS.Platform;
+  env?: Record<string, string | undefined>;
+  inContainer?: boolean;
   bashVersionText: string;
   hasProcMeminfo: boolean;
   nodeVersion: string;
@@ -1161,6 +1166,9 @@ export function computeHostFacts(input: {
 }): HostFacts {
   return {
     platform: input.platform,
+    pole: input.inContainer === undefined
+      ? undefined
+      : resolveHostPole({ platform: input.platform, env: input.env ?? {}, inContainer: input.inContainer }),
     bashMajorVersion: parseBashMajorVersion(input.bashVersionText),
     hasProcMeminfo: input.hasProcMeminfo,
     // W1-T2770: STRIP A LEADING `v`. `process.versions.node` reads `"22.22.3"` while `.nvmrc`
@@ -1191,8 +1199,17 @@ export function detectHostFacts(repoRoot: string, spawn: PreflightSpawn, hasFile
     // `undefined` reads as "cannot tell, does not apply". Never guess from a read that did not happen.
     nvmrcText = undefined;
   }
+  let inContainer: boolean | undefined;
+  try {
+    inContainer = hasFile("/.dockerenv");
+  } catch {
+    // An unreadable marker cannot safely be interpreted as "not a container".
+    inContainer = undefined;
+  }
   return computeHostFacts({
     platform: process.platform,
+    env: process.env,
+    inContainer,
     bashVersionText,
     hasProcMeminfo: hasFile("/proc/meminfo"),
     nodeVersion: process.versions.node,
@@ -1430,6 +1447,20 @@ export interface HostCausedSuiteRedEntry {
   appliesTo: (facts: HostFacts) => boolean;
 }
 
+/** One complete-registry measurement, with the provenance needed to audit its scope. */
+export interface HostCausedSuiteRedsPoleMeasurement {
+  pole: HostPole;
+  measuredAt: string;
+  sha: string;
+}
+
+/**
+ * No pole is recorded as measured against the complete registry at a named tree. Historical
+ * mini censuses predate later registry additions and retirements; the Azure evidence is for the
+ * separate observational registry. Populate this data only after a full current-registry run.
+ */
+export const HOST_CAUSED_SUITE_REDS_MEASURED_POLES: readonly HostCausedSuiteRedsPoleMeasurement[] = [];
+
 export const HOST_CAUSED_SUITE_REDS: HostCausedSuiteRedEntry[] = [
   // ── W1-T2776: SEVEN MORE FILES IN THE SAME CLUSTER, all measured 2026-09-03 on the mini ──────
   // The entry above is not the whole cluster and never was. `deploy/recycle-container.sh` is the
@@ -1545,15 +1576,23 @@ export function hostCausedSuiteRedsForFacts(facts: HostFacts): HostCausedSuiteRe
 }
 
 /** The `ci:host-caused-suite-reds` leaf — ALWAYS `ok: true`, naming by file/cause/count what this host produces. */
-export function hostCausedSuiteRedsStep(facts: HostFacts): CiParityLeafResult {
+export function hostCausedSuiteRedsStep(
+  facts: HostFacts,
+  measuredPoles: readonly HostCausedSuiteRedsPoleMeasurement[] = HOST_CAUSED_SUITE_REDS_MEASURED_POLES,
+): CiParityLeafResult {
   const applicable = hostCausedSuiteRedsForFacts(facts);
-  const factsLine = `platform=${facts.platform}, bash-major=${facts.bashMajorVersion ?? "unknown"}, /proc/meminfo=${facts.hasProcMeminfo}`;
+  const measured = facts.pole !== undefined && measuredPoles.some((entry) => entry.pole === facts.pole);
+  const factsLine =
+    `platform=${facts.platform}, pole=${facts.pole ?? "unknown"}, bash-major=${facts.bashMajorVersion ?? "unknown"}, ` +
+    `/proc/meminfo=${facts.hasProcMeminfo}, node=${facts.nodeVersion || "unknown"}, pinned-node=${facts.pinnedNodeVersion ?? "unknown"}`;
   if (applicable.length === 0) {
     return {
       ok: true,
       detail:
         `PASS — 0 of ${HOST_CAUSED_SUITE_REDS.length} known host-caused suite-red cluster(s) apply on this host (${factsLine}); ` +
-        "any ci:test failure here is this diff's own",
+        (measured
+          ? "any ci:test failure here is this diff's own"
+          : "ci:test failures on this unmeasured pole are unclassified against this registry, not attributed to this diff"),
     };
   }
   const total = applicable.reduce((sum, e) => sum + e.count, 0);
@@ -1563,7 +1602,9 @@ export function hostCausedSuiteRedsStep(facts: HostFacts): CiParityLeafResult {
     detail:
       `PASS — ${applicable.length} of ${HOST_CAUSED_SUITE_REDS.length} known host-caused suite-red cluster(s) apply on this host (${factsLine}), ` +
       `~${total} red(s) attributable to the machine, not this diff:\n${lines.join("\n")}\n` +
-      "any ci:test failure NOT matching one of these clusters is this diff's own and must be treated as blocking (W1-T2234)",
+      (measured
+        ? "any ci:test failure NOT matching one of these clusters is this diff's own and must be treated as blocking (W1-T2234)"
+        : "any other ci:test failure on this unmeasured pole is unclassified against this registry, not attributed to this diff"),
   };
 }
 
