@@ -96,7 +96,7 @@ test("a second instance serves its own gateway from its own state directory", ()
     assert.equal(result.status, 0, `${stdout(result)}\n${stderr(result)}`);
     assert.match(stdout(result), /--name remudero-site-serve/);
     assert.match(stdout(result), new RegExp(`-v ${root.state}:/home/node/Remudero`));
-    assert.match(stdout(result), /RMD_CONSOLE_BUILD_ROOT=\/home\/node\/Remudero\/remudero-site\/apps\/dashboard\/dist/);
+    assert.doesNotMatch(stdout(result), /RMD_CONSOLE_BUILD_ROOT/, "W1-T4566: no console build is wired");
     assert.match(stdout(result), /\.\/bin\/rmd serve --host 0\.0\.0\.0 --port 4318/);
     assert.doesNotMatch(stdout(result), /--name remudero-serve(?:\s|$)/, "site must not reuse core's gateway container");
     assert.doesNotMatch(stdout(result), /\/home\/node\/Remudero\/remudero\/apps\/dashboard\/dist/, "site must not point at core's checkout");
@@ -124,7 +124,7 @@ test("the legacy invocation stays the core gateway on port 4317", () => {
     assert.equal(result.status, 0, `${stdout(result)}\n${stderr(result)}`);
     assert.match(stdout(result), /--name remudero-serve/);
     assert.match(stdout(result), /\.\/bin\/rmd serve --host 0\.0\.0\.0 --port 4317/);
-    assert.match(stdout(result), /RMD_CONSOLE_BUILD_ROOT=\/home\/node\/Remudero\/remudero\/apps\/dashboard\/dist/);
+    assert.doesNotMatch(stdout(result), /RMD_CONSOLE_BUILD_ROOT/, "W1-T4566: no console build is wired");
   } finally {
     rmSync(root.root, { recursive: true, force: true });
   }
@@ -139,13 +139,13 @@ test("a gateway answers only for the instance it was launched for", () => {
     assert.equal(console.status, 0, `${stdout(console)}\n${stderr(console)}`);
 
     assert.match(stdout(site), /--name remudero-site-serve/);
-    assert.match(stdout(site), /RMD_CONSOLE_BUILD_ROOT=\/home\/node\/Remudero\/remudero-site\/apps\/dashboard\/dist/);
+    assert.doesNotMatch(stdout(site), /RMD_CONSOLE_BUILD_ROOT/, "W1-T4566: no console build is wired");
     assert.match(stdout(site), /\.\/bin\/rmd serve --host 0\.0\.0\.0 --port 4318/);
     assert.doesNotMatch(stdout(site), /remudero-console|port 4319/);
 
     assert.match(stdout(console), /--name remudero-console-serve/);
     assert.match(stdout(console), /-v .*\/console-state:\/home\/node\/Remudero/);
-    assert.match(stdout(console), /RMD_CONSOLE_BUILD_ROOT=\/home\/node\/Remudero\/remudero-console\/apps\/dashboard\/dist/);
+    assert.doesNotMatch(stdout(console), /RMD_CONSOLE_BUILD_ROOT/, "W1-T4566: no console build is wired");
     assert.match(stdout(console), /\.\/bin\/rmd serve --host 0\.0\.0\.0 --port 4319/);
     assert.doesNotMatch(stdout(console), /remudero-site|port 4318/);
   } finally {

@@ -8,8 +8,7 @@
     "rmd": "bin/rmd"
   },
   "workspaces": [
-    "packages/*",
-    "apps/*"
+    "packages/*"
   ],
   "files": [
     "bin",
@@ -80,7 +79,6 @@
     "clock-signature-ratchet": "node scripts/clock-signature-ratchet.mjs",
     "clock-signature-signal": "node scripts/clock-signature-ratchet.mjs --no-record",
     "comment-load-ratchet": "node scripts/comment-load-ratchet.mjs",
-    "build:console": "npm --prefix apps/dashboard run build",
     "comment-load-signal": "node scripts/comment-load-ratchet.mjs --no-record",
     "comment-load": "node scripts/comment-load-ratchet.mjs --print",
     "console-parity": "node --import tsx scripts/console-parity-ratchet.mjs",
@@ -95,10 +93,7 @@
     "census:no-draft-pr": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/no-draft-pull-request-ever-sits-on-the-board.test.ts",
     "worker-branch-shape:check": "node scripts/worker-branch-shape.mjs",
     "commitlint": "commitlint",
-    "changelog": "commit-and-tag-version",
-    "test:dashboard": "npm --prefix apps/dashboard run test",
-    "typecheck:dashboard": "npm --prefix apps/dashboard run typecheck",
-    "dashboard:ci": "npm run --silent typecheck:dashboard && npm run --silent test:dashboard && npm run --silent build:console"
+    "changelog": "commit-and-tag-version"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.280",

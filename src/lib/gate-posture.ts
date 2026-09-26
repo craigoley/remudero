@@ -526,7 +526,6 @@ export const GATE_POSTURE_DECLARATIONS: Readonly<Record<string, GatePostureDecla
   "ci:containment-probe": close(true, "containment is a harm boundary for sandbox and environment changes"),
   "ci:coverage-ratchet": repair(true, "coverage gaps are repaired by tests or reviewed coverage data"),
   "ci:coverage-ratchet-required": repair(true, "coverage aggregation reflects repairable child coverage checks"),
-  "ci:dashboard": repair(true, "dashboard build/test failures have computable source repairs"),
   "ci:depcruise": repair(true, "dependency violations name the forbidden edge"),
   "ci:flake-retry-aggregate": repair(true, "retry aggregate failures name unstable tests or host clusters"),
   "ci:jscpd-gate": repair(true, "duplication findings name code to extract or justify"),

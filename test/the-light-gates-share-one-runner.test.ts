@@ -102,7 +102,7 @@ test("W1-T4399: the light gates run as steps of one job", () => {
 
   // The moved gates' own former job keys stay registered (ci-parity.ts parity, see ci.yml's own
   // comment) but permanently skipped, never queuing a second runner for the same work.
-  for (const name of ["leak-grep", "learnings-budget-ratchet", "jscpd-gate", "dashboard", "claims", "assertion-discrimination", "lint-plan", "depcruise", "containment-probe", "api-client-drift", "no-hand-rolled-fetch", "prompt-surface-gate", "task-id-existence", "source-size", "comment-load-ratchet", "baseline-monotonic"]) {
+  for (const name of ["leak-grep", "learnings-budget-ratchet", "jscpd-gate", "claims", "assertion-discrimination", "lint-plan", "depcruise", "containment-probe", "api-client-drift", "no-hand-rolled-fetch", "prompt-surface-gate", "task-id-existence", "source-size", "comment-load-ratchet", "baseline-monotonic"]) {
     const stub = doc.jobs[name];
     assert.ok(stub, `ci.yml must still declare the '${name}' job key (ci-parity.ts still expects it)`);
     assert.equal(stub!.if, false, `'${name}'s own job key must be permanently skipped (if: false) — it no longer starts its own runner`);

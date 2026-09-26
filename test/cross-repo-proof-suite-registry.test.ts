@@ -16,6 +16,8 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -242,21 +244,37 @@ test("W1-T3525: VITEST_TAP_SKIP_RE recognises Vitest's `# SKIP` comment and reje
   assert.equal(VITEST_TAP_SKIP_RE.test("ok 3 - gamma skipped # SKIP"), true, "Vitest's own skip marker");
 });
 
+/** A checkout that carries its own pinned Vitest entrypoint. W1-T4566: this repository no longer
+ *  installs Vitest (apps/dashboard was its only user), and a runner-less cwd makes the proof path
+ *  prime the checkout with a real `npm ci` -- so the Vitest routing is proven against a fixture. */
+function vitestCheckout(): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-vitest-checkout-"));
+  writeFileSync(join(dir, "package.json"), "{}\n");
+  mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
+  writeFileSync(join(dir, "node_modules", "vitest", "vitest.mjs"), "");
+  return dir;
+}
+
 test("W1-T3525: execWhitelistedProof routes a Vitest name-filtered proof through the Vitest classifier, not node's", () => {
-  const p = parseWhitelistedProof("unit test: alpha passes", REMUDERO_SITE);
-  assert.ok(p, "a bare title against the site's sole registered (Vitest-only) root must resolve");
-  assert.equal(p!.runner, "vitest");
-  assert.equal(p!.nameFiltered, true);
+  const checkout = vitestCheckout();
+  try {
+    const p = parseWhitelistedProof("unit test: alpha passes", REMUDERO_SITE);
+    assert.ok(p, "a bare title against the site's sole registered (Vitest-only) root must resolve");
+    assert.equal(p!.runner, "vitest");
+    assert.equal(p!.nameFiltered, true);
 
-  const passSpawn: ProofSpawner = () => VITEST_TAP_SELECTED_LEAF_PASSES;
-  assert.equal(execWhitelistedProof(p!, REPO_ROOT, 60_000, passSpawn, NO_BROWSER_PREFLIGHT), "pass");
+    const passSpawn: ProofSpawner = () => VITEST_TAP_SELECTED_LEAF_PASSES;
+    assert.equal(execWhitelistedProof(p!, checkout, 60_000, passSpawn, NO_BROWSER_PREFLIGHT), "pass");
 
-  const skipSpawn: ProofSpawner = () => VITEST_TAP_ALL_SELECTED_SKIPPED;
-  assert.equal(execWhitelistedProof(p!, REPO_ROOT, 60_000, skipSpawn, NO_BROWSER_PREFLIGHT), "no-match");
+    const skipSpawn: ProofSpawner = () => VITEST_TAP_ALL_SELECTED_SKIPPED;
+    assert.equal(execWhitelistedProof(p!, checkout, 60_000, skipSpawn, NO_BROWSER_PREFLIGHT), "no-match");
 
-  // Vitest's own nonzero exit path: execFileSync throws, carrying the same TAP on the error's stdout.
-  const failSpawn: ProofSpawner = () => {
-    throw Object.assign(new Error("Command failed"), { status: 1, signal: null, stdout: VITEST_TAP_SELECTED_LEAF_FAILS });
-  };
-  assert.equal(execWhitelistedProof(p!, REPO_ROOT, 60_000, failSpawn, NO_BROWSER_PREFLIGHT), "fail");
+    // Vitest's own nonzero exit path: execFileSync throws, carrying the same TAP on the error's stdout.
+    const failSpawn: ProofSpawner = () => {
+      throw Object.assign(new Error("Command failed"), { status: 1, signal: null, stdout: VITEST_TAP_SELECTED_LEAF_FAILS });
+    };
+    assert.equal(execWhitelistedProof(p!, checkout, 60_000, failSpawn, NO_BROWSER_PREFLIGHT), "fail");
+  } finally {
+    rmSync(checkout, { recursive: true, force: true });
+  }
 });
