@@ -1,5 +1,5 @@
 - id: W1-T4578
-  title: "EVERY WORKER CALL COUNTS — emit joined attempt receipts before the run verdict"
+  title: "EACH DISPATCH WORKER CALL COUNTS — emit joined attempt receipts before the run verdict"
   repo: remudero
   depends_on: [W1-T4560]
   type: implement
@@ -43,6 +43,11 @@
     Keep source provenance and unknown/duplicate counts visible. An assignment with no observed
     completion stays censored/unavailable. Do not promote worker-call success, merge or green CI
     to verified task success. This task does not publish or rank models or start a paid trial.
+    This wrapper owns run-task dispatch only; standalone review/fix and other daemon-owned
+    worker entrypoints require a separate caller census and instrumentation before the fleet
+    can claim every worker is covered. An idle daemon cycle is freshness evidence, not a model
+    attempt. Count those gaps explicitly in the cohort gardener rather than silently dropping
+    them from a model denominator.
   acceptance:
     - claim: "multiple workers in one run each produce a distinct assignment-joined attempt receipt"
       proof: "unit test: benchmark worker attempts join each spawn without duplicating the run verdict"
