@@ -814,12 +814,12 @@ function coverageShardRoot(repoRoot: string): string {
   return join(repoRoot, "coverage", "raw-shards");
 }
 
-function coverageShardRawDir(repoRoot: string, shard: number): string {
-  return join(coverageShardRoot(repoRoot), `shard-${shard}`, "raw");
+function coverageShardRawDir(shardRoot: string, shard: number): string {
+  return join(shardRoot, `shard-${shard}`, "raw");
 }
 
-function coverageShardLcovPath(repoRoot: string, shard: number): string {
-  return join(coverageShardRoot(repoRoot), `shard-${shard}`, "lcov.info");
+function coverageShardLcovPath(shardRoot: string, shard: number): string {
+  return join(shardRoot, `shard-${shard}`, "lcov.info");
 }
 
 function coverageShardSelectionArgs(repoRoot: string, shard: number, base: string): string[] {
@@ -833,7 +833,7 @@ function coverageShardSelectionArgs(repoRoot: string, shard: number, base: strin
   ];
 }
 
-function coverageShardArgs(repoRoot: string, shard: number, testFiles: readonly string[]): string[] {
+function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly string[]): string[] {
   return [
     "--enable-source-maps",
     "--experimental-test-coverage",
@@ -843,7 +843,7 @@ function coverageShardArgs(repoRoot: string, shard: number, testFiles: readonly 
     "--test-reporter=tap",
     "--test-reporter-destination=stderr",
     "--test-reporter=lcov",
-    `--test-reporter-destination=${coverageShardLcovPath(repoRoot, shard)}`,
+    `--test-reporter-destination=${coverageShardLcovPath(shardRoot, shard)}`,
     "--test",
     "--import",
     "tsx",
@@ -866,13 +866,13 @@ function coverageOutputHasTestSummary(output: string): boolean {
   return /^# tests\s+\d+/m.test(output);
 }
 
-function coverageMergeArgs(repoRoot: string, lcovPath: string): string[] {
+function coverageMergeArgs(repoRoot: string, lcovPath: string, shardRoot: string): string[] {
   return [
     "--expose-internals",
     join(repoRoot, "scripts", "coverage-merge-ratchet.mjs"),
     "--output",
     lcovPath,
-    ...Array.from({ length: CI_COVERAGE_SHARD_COUNT }, (_, i) => coverageShardRawDir(repoRoot, i + 1)),
+    ...Array.from({ length: CI_COVERAGE_SHARD_COUNT }, (_, i) => coverageShardRawDir(shardRoot, i + 1)),
   ];
 }
 
@@ -881,8 +881,8 @@ function testWithCoverageShards(
   spawn: PreflightSpawn,
   lcovPath: string,
   scratchDir: string,
+  shardRoot: string,
 ): CiParityLeafResult {
-  const shardRoot = coverageShardRoot(repoRoot);
   try {
     rmSync(shardRoot, { recursive: true, force: true });
     mkdirSync(shardRoot, { recursive: true });
@@ -897,7 +897,7 @@ function testWithCoverageShards(
     return { ok: false, detail: `FAIL — coverage-ratchet: could not pin the duration-selector base: ${String(error)}` };
   }
   for (let shard = 1; shard <= CI_COVERAGE_SHARD_COUNT; shard += 1) {
-    const rawDir = coverageShardRawDir(repoRoot, shard);
+    const rawDir = coverageShardRawDir(shardRoot, shard);
     mkdirSync(rawDir, { recursive: true });
     const label = `coverage-ratchet:test-with-coverage shard ${shard}/${CI_COVERAGE_SHARD_COUNT}`;
     const selection = shellOut(
@@ -912,7 +912,7 @@ function testWithCoverageShards(
     if (testFiles.length === 0) {
       return { ok: false, detail: `FAIL — ${label} duration-balanced test selection returned no files` };
     }
-    const res = spawn(process.execPath, coverageShardArgs(repoRoot, shard, testFiles), {
+    const res = spawn(process.execPath, coverageShardArgs(shardRoot, shard, testFiles), {
       cwd: repoRoot,
       env: { TMPDIR: scratchDir, NODE_V8_COVERAGE: rawDir },
     });
@@ -924,7 +924,7 @@ function testWithCoverageShards(
   }
   const seamProducedShardEvidence =
     [...outputs.values()].some((output) => output.trim() !== "") ||
-    Array.from({ length: CI_COVERAGE_SHARD_COUNT }, (_, i) => coverageShardRawDir(repoRoot, i + 1)).some(coverageRawDirHasArtifact);
+    Array.from({ length: CI_COVERAGE_SHARD_COUNT }, (_, i) => coverageShardRawDir(shardRoot, i + 1)).some(coverageRawDirHasArtifact);
   if (seamProducedShardEvidence) {
     for (let shard = 1; shard <= CI_COVERAGE_SHARD_COUNT; shard += 1) {
       if (!coverageOutputHasTestSummary(outputs.get(shard) ?? "")) {
@@ -933,7 +933,7 @@ function testWithCoverageShards(
           detail: `FAIL — coverage-ratchet: shard ${shard}/${CI_COVERAGE_SHARD_COUNT} produced no # tests summary; refusing to fold an unverified shard into the coverage total.`,
         };
       }
-      if (!coverageRawDirHasArtifact(coverageShardRawDir(repoRoot, shard))) {
+      if (!coverageRawDirHasArtifact(coverageShardRawDir(shardRoot, shard))) {
         return {
           ok: false,
           detail: `FAIL — coverage-ratchet: expected raw V8 coverage for shard ${shard}; refusing a partial merge.`,
@@ -945,7 +945,7 @@ function testWithCoverageShards(
     spawn,
     "coverage-merge-ratchet.mjs --output coverage/lcov.info (4 coverage shards)",
     process.execPath,
-    coverageMergeArgs(repoRoot, lcovPath),
+    coverageMergeArgs(repoRoot, lcovPath, shardRoot),
     { cwd: repoRoot },
   );
   if (!merge.ok) return merge;
@@ -979,7 +979,8 @@ function testWithCoverageLeaf(repoRoot: string, spawn: PreflightSpawn, lcovPath:
   }
 
   try {
-    return testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir);
+    return testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir,
+      nested ? join(scratchDir, "raw-shards") : coverageShardRoot(repoRoot));
   } finally {
     if (ownedNestedScratch !== undefined) {
       rmSync(ownedNestedScratch, { recursive: true, force: true });
