@@ -27,6 +27,8 @@
     genuine main advances; it did not distinguish ahead, behind, and diverged ancestry.
     Existing freshness fixtures use synthetic SHA pairs and must be updated to state
     their ancestry explicitly; their old assumptions cannot prove this distinction.
+    Each acceptance proof executes the new test file by path: its absence on base is a real
+    failure, whereas title-matching a file absent on base produces Node's passing wrapper.
   design: |
     Read the merge base of the loaded reviewer code SHA and origin/main before applying
     reviewAdvanceIsMaterialAt. If origin/main is an ancestor of code, this reviewer is
@@ -39,16 +41,8 @@
     lifecycle, or conflicting-verdict guards. Do not add a worker call, PR gate, no-op
     commit, body-edit workaround, or manual status override.
   acceptance:
-    - claim: "review code containing current main may judge a PR even if its own review-path files changed"
-      proof: "unit test: reviewer ahead of main on review-path code is fresh"
-    - claim: "a truly behind reviewer still withholds when main changed the review path"
-      proof: "unit test: reviewer behind material main advance is withheld"
-    - claim: "diverged reviewer code classifies only changes made on the main side of the fork"
-      proof: "unit test: diverged reviewer compares only main-side advance"
-    - claim: "an unreadable ancestry or changed-file read never masquerades as a fresh reviewer"
-      proof: "unit test: unreadable reviewer ancestry withholds verdict"
-    - claim: "both guarded CLI and unguarded service reviewer paths use ancestry-aware evidence"
-      proof: "unit test: production freshness paths use merge-base evidence"
+    - claim: "reviewer freshness distinguishes ahead, behind, diverged, and unreadable ancestry in both guarded and service paths"
+      proof: "unit test: test/a-reviewer-ahead-of-main-is-fresh.test.ts"
   falsifier: |
     From a checkout whose HEAD contains origin/main plus a PR-only runReview hunk,
     checkReviewerCodeFreshness must return fresh. From a parent of a material main
