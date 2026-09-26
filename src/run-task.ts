@@ -413,8 +413,9 @@ import {
 import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
-import { daemonInstanceRegistryPath, requestDeploy, runDeployCycle } from "./lib/deployer.js";
-import { parseInstanceRegistry, type InstanceRegistry } from "./lib/instance-registry.js";
+import { requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
+export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
 import {
   assessInstallForDeploy,
@@ -3677,35 +3678,6 @@ export function fillDerivedBody(worktreePath: string): string {
     return subjects.map((s) => `* ${s}`).join("\n");
   } catch {
     return "";
-  }
-}
-
-/**
- * W1-T4265 — the registry's mode for one `owner/repo`. A shadow instance opens real (ready) PRs
- * but never arms or merges one ({@link resolveShadowInstanceArmPermission}). No `mode:`, or an
- * unreadable/unparseable registry, FAILS OPEN to `"live"` ("absent = live"). Pure over the text.
- */
-export function instanceMode(ownerRepo: string, registryText: string | undefined): "shadow" | "live" {
-  if (registryText === undefined) return "live";
-  let registry: InstanceRegistry;
-  try {
-    registry = parseInstanceRegistry(registryText);
-  } catch {
-    // Unparseable ⇒ fail OPEN to live; never invent a shadow mode the text does not declare.
-    return "live";
-  }
-  const match = registry.instances.find((i) => i.repo.toLowerCase() === ownerRepo.toLowerCase());
-  return match?.mode ?? "live";
-}
-
-/** W1-T4265 — the registry text ({@link daemonInstanceRegistryPath}) for {@link instanceMode};
- *  `undefined`, never a throw, when absent or unreadable, which reads as `"live"`. */
-export function readInstanceRegistryText(repoRoot: string): string | undefined {
-  try {
-    return readFileSync(daemonInstanceRegistryPath(repoRoot), "utf8");
-  } catch {
-    // Absent or unreadable (no registry yet, or a pre-W1-T4227 repo): `instanceMode` reads live.
-    return undefined;
   }
 }
 
