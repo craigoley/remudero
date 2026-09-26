@@ -1,0 +1,35 @@
+- id: W1-T4570
+  title: "A PLAN-ONLY SPAWN FIXTURE IS NOT A NEW TASK CLAIM — keep reservation safety and spawn proof independent"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: low
+  band_meaning: blast-radius
+  origin: "PR #7290 coverage-shard 4 failure on 2026-09-26: the plan-only spawn fixture adds W1-T9999 without a reservation or head ref"
+  plan_refs: ["W1-T4561", "W1-T2472"]
+  files:
+    - test/review-skips-spawn-on-plan-only.test.ts
+  status: queued
+  rationale: |
+    W1-T4561 correctly treats a new task ID with unavailable reservation evidence as unknown,
+    withholding the verdict. The older plan-only spawn fixture, however, adds a synthetic ID
+    solely to exercise the plan-only branch. Its exact PASS expectation is now false for an
+    unrelated reason, causing #7290's instrumented coverage suite to fail and its PR to stall.
+    Weakening the production reservation guard would make a missing authority look valid.
+  design: |
+    Make the fixture a plan-only amendment to an existing synthetic task rather than a new ID
+    declaration. Keep the same plan-only versus plan-plus-source boundary and the driven spawn
+    counts, ledger outcome, and byte-exact verdict assertion. Add an explicit declaration check
+    so a future fixture rewrite cannot silently reintroduce a reservation-dependent new ID.
+    This is a test-only fixture correction; it does not change reviewer production behavior or
+    add a PR gate. Merge this before updating #7290 to the then-current main tree.
+  acceptance:
+    - claim: "the driven plan-only verdict stays deterministic without a reservation-dependent task filing"
+      proof: "unit test: DRIVEN: the plan-only verdict summary still reads as deterministically gated, unchanged by the skip"
+  falsifier: |
+    Restore the fixture's added - id: W1-T9999 line: the declaration control must fail, and
+    W1-T4561's strict ownership check must still withhold the driven PASS. With the amendment
+    fixture restored, both the control and the original spawn/summary assertions pass.
