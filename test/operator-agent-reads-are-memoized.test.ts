@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { OPERATOR_AGENT_EXPERIMENT_STEP, readOperatorAgentExperiments, type OperatorAgentExperiment } from "../src/lib/operator-agent.js";
+import { OPERATOR_AGENT_EXPERIMENT_STEP, readOperatorAgentExperiments, settleOperatorAgentUnionLoads, type OperatorAgentExperiment } from "../src/lib/operator-agent.js";
 import { CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE } from "../src/lib/serve.js";
 
 const ARCHIVE_MTIME_S = 1_790_000_000;
@@ -56,7 +56,6 @@ function archive(stateDir: string, name: string, id: string): string {
 }
 
 const ids = (ledgerPath: string): string[] => readOperatorAgentExperiments({ ledgerPath }).map((e) => e.experimentId).sort();
-const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 200));
 
 test("W1-T4582: a warm operator-agent read answers from the memo, not by re-opening the archive", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1t4582-"));
@@ -67,7 +66,7 @@ test("W1-T4582: a warm operator-agent read answers from the memo, not by re-open
   try {
     const path = archive(stateDir, "ledger.2026-09-19T00-00-00-000Z.ndjson.gz", "experiment:repo:archived");
     assert.deepEqual(ids(ledgerPath), ["experiment:repo:archived"], "the cold read is complete");
-    await settle(); // the memo loads the rotation off the request
+    await settleOperatorAgentUnionLoads(); // the memo loads the rotation off the request
 
     // Same length, same mtime, unreadable bytes: only a read that re-opens the archive can notice.
     const before = statSync(path);

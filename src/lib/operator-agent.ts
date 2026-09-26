@@ -531,6 +531,12 @@ function validateContextRegistration(value: unknown): { error: string } | { cont
  *  lacks a rotation reads it as EMPTY, so that request is answered by a full read instead, and the
  *  missing rotations load off the request for the next one. */
 const operatorAgentUnionMemos = new Map<string, LedgerRotationMemo>();
+const operatorAgentUnionLoads = new Set<Promise<void>>();
+
+/** Resolves once every rotation load the operator-agent reads have started has finished. */
+export async function settleOperatorAgentUnionLoads(): Promise<void> {
+  while (operatorAgentUnionLoads.size > 0) await Promise.all([...operatorAgentUnionLoads]);
+}
 
 function readOperatorAgentUnion(
   stateDir: string,
@@ -546,7 +552,11 @@ function readOperatorAgentUnion(
   const pass = memo.pass();
   const read = readLedgerUnionRecordsSync(stateDir, { ...opts, rotationRecords: pass.rotationRecords });
   if (pass.complete()) return read;
-  memo.load(pass.missing()).catch(() => undefined /* deliberate: a failed load only means the next read is full too */);
+  const loading: Promise<void> = memo
+    .load(pass.missing())
+    .catch(() => undefined /* deliberate: a failed load only means the next read is full too */)
+    .finally(() => operatorAgentUnionLoads.delete(loading));
+  operatorAgentUnionLoads.add(loading);
   return readLedgerUnionRecordsSync(stateDir, opts);
 }
 
