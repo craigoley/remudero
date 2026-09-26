@@ -1328,6 +1328,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "escalateCancelledCheck",
   "escalateInfrastructureCheck",
   "readCiGateRollup",
+  "liveCiRunForHead",
   "reaggregateCiGate",
   "readMainTip",
   "readMainRepair",
@@ -1372,6 +1373,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "escalateCancelledCheck"
   | "escalateInfrastructureCheck"
   | "readCiGateRollup"
+  | "liveCiRunForHead"
   | "reaggregateCiGate"
   | "readMainTip"
   | "readMainRepair"
@@ -2008,6 +2010,23 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // `close` above already uses (W1-T921) — no `gh` call this closure makes is unobservable
     // offline. `check.jobId` absent (the rollup's `detailsUrl` carried none) degrades to a NAMED
     // no-op — never a guessed target.
+    // W1-T4586: ONE read, only when the sweep is about to act on red CI. The concurrency group
+    // that cancels a sibling is ci.yml's, so only its runs count.
+    liveCiRunForHead: (pr) => {
+      try {
+        const out = ghRunImpl("gh", [
+          "api",
+          `repos/${owner}/${repo}/actions/runs?head_sha=${pr.headSha}&per_page=50`,
+          "--jq",
+          '[.workflow_runs[] | select(.path == ".github/workflows/ci.yml") | select(.status != "completed")] | length',
+        ]);
+        return Number(String(out ?? "").trim()) > 0;
+      } catch (e) {
+        log("sweep.live_ci_run.error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
+        return false;
+      }
+    },
+
     requeueCheck: (pr, check) => {
       if (!check.jobId) {
         log("sweep.check_requeue.no_job_id", { pr_number: pr.prNumber, check_name: check.name });
@@ -7783,6 +7802,9 @@ export interface SweepDeps {
    *  {@link staleCiGateTransition} must compare against a sibling's CURRENT latest attempt. NOT a
    *  field on `OpenPrView`, whose producer literal would be wrong for a freshly-read value. */
   readCiGateRollup?: (pr: OpenPrView) => (RollupCheckEntry[] | undefined) | Promise<RollupCheckEntry[] | undefined>;
+  /** W1-T4586: whether another CI run for this PR's head is still queued or in progress. Omitted, the
+   *  sweep never waits on one (the behaviour before this field existed). */
+  liveCiRunForHead?: (pr: OpenPrView) => boolean | Promise<boolean>;
   /** W1-T1275 — re-drive `ci-gate`'s OWN job through the same per-job Actions route
    *  {@link requeueCheck} uses, when {@link staleCiGateTransition} names a sibling that reached a
    *  terminal success LATER than the gate's own verdict. AT MOST ONCE per (head, transition). */
@@ -9972,6 +9994,15 @@ export async function runSweep(
                 standDownReason = baseRed.kind === "refresh"
                   ? `base red: ${baseRed.check} failed on main too; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched`
                   : `base red: ${baseRed.check} also fails on main's latest run (${mainSha}) — not this diff's; no fix dispatched, the branch refreshes once main is green`;
+                break;
+              }
+              // W1-T4586 — A LIVE RUN FOR THIS HEAD SUPERSEDES ITS RED. Runs on one head share the
+              // ci-<pr> concurrency group, so re-queueing one run's job cancelled the other, and the
+              // older run's aggregate "failure" (over shards the newer run cancelled) spent fix
+              // strikes: an 18-shard ping-pong on #7333. While a run for the head is live, wait.
+              if (pr.checksState === "red" && deps.liveCiRunForHead && (await deps.liveCiRunForHead(pr))) {
+                acted = false;
+                standDownReason = "another CI run for this head is still queued or in progress — waiting for its result, never re-queueing over it";
                 break;
               }
               // W1-T1275 — CI-GATE'S OWN CONCLUDED VERDICT CAN GO STALE: a required sibling's
