@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { benchmarkRunLedgerLogger } from "../src/run-task.js";
+import { benchmarkRunLedgerLogger, runTask } from "../src/run-task.js";
+import type { Config } from "../src/lib/config.js";
+import type { GitHub } from "../src/lib/status.js";
+import type { spawnWorker } from "../src/lib/worker.js";
 
 test("run task wires benchmark run receipts at assignment and terminal", () => {
   const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
@@ -35,4 +40,35 @@ test("run task wires benchmark run receipts at assignment and terminal", () => {
     get selected(): never { throw new Error("instrumentation field unavailable"); } };
   assert.doesNotThrow(() => log("worker.assignment", { worker_assignment: badAssignment }));
   assert.equal(rows.at(-1)?.fields.benchmark_run_unavailable_reason, "receipt-build-failed");
+});
+
+test("real dispatch reaches the benchmark logger without making a lint refusal into a benchmark outcome", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-run-log-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, `- id: T-BENCHMARK-LOG
+  title: deliberately malformed sizing fixture
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  origin: fixture
+  files: [src/lib/daemon.ts, src/lib/review.ts, src/lib/launchd.ts]
+  acceptance:
+    - claim: no worker may run
+      proof: "unit test: run task wires benchmark run receipts at assignment and terminal"
+  status: queued
+`);
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
+  const github: GitHub = {
+    prByRef: () => null, findMergedByTrailer: () => null,
+    headRefName: () => undefined, prBody: () => undefined,
+  };
+  const spawn = (async () => { throw new Error("pre-dispatch refusal must never spawn"); }) as typeof spawnWorker;
+  const result = await runTask("T-BENCHMARK-LOG", { skipGitSync: true, planPath, config, github, spawn });
+  assert.equal(result.verdict, "blocked_illformed");
+  const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.ok(rows.some((row) => row.step === "lint.blocked"));
+  assert.ok(rows.every((row) => row.benchmark_run === undefined));
 });
