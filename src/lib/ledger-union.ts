@@ -359,6 +359,8 @@ export async function* openLedgerUnion(
         try {
           parsed = parseObject(line);
         } catch {
+          // The malformed-row callback below carries this failure as source-quality evidence;
+          // later valid rows still need to be read from the same archive.
           badKind = "invalid-json";
         }
         if (parsed === undefined) {
