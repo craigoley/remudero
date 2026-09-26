@@ -414,6 +414,8 @@ import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type 
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
+export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
 import {
   assessInstallForDeploy,
@@ -1783,6 +1785,7 @@ export function buildSweepEffects(
      *  `buildSweepEffectsFromLib`, so `sweep.ts`'s own `BuildSweepEffectsDeps` never has to know
      *  this field exists. */
     reviewerCodeFreshnessImpl?: () => ReviewerCodeFreshness;
+    instanceRegistryTextImpl?: () => string | undefined;
   },
 ): Pick<
   SweepDeps,
@@ -1864,7 +1867,7 @@ export function buildSweepEffects(
 
   export function fixRungTaskFor(
   */
-  const { reviewerCodeFreshnessImpl, ...libDeps } = deps;
+  const { reviewerCodeFreshnessImpl, instanceRegistryTextImpl, ...libDeps } = deps;
   // W1-T3723: WIRED, not merely exported. A fresh-tree runner nothing passes is the
   // shipped-unwired shape this repo refuses, and the whole point is that a stale reviewer stops
   // needing a restart — which only happens if production actually gets one.
@@ -2142,6 +2145,10 @@ export function buildSweepEffects(
     fixRungCheckoutRefusedErrorImpl: FixRungCheckoutRefusedError,
     defaultBudgetUsd: DEFAULT_BUDGET_USD,
     ...libDeps,
+    repoMode: libDeps.repoMode ?? instanceMode(
+      `${deps.owner}/${deps.repo}`,
+      instanceRegistryTextImpl ? instanceRegistryTextImpl() : readInstanceRegistryText(repoRoot),
+    ),
   });
   // W1-T2890 holds this surface key-identical to the lib-built one, so the accessor is INJECTED
   // above rather than bolted on here: returning the lib's object unchanged makes that identity
@@ -3681,6 +3688,18 @@ export function fillDerivedBody(worktreePath: string): string {
   }
 }
 
+/** Counterfactual over the same arm decision the live instance uses. */
+export function shadowLiveWouldHaveDone(armed: boolean, reason?: string): { would: "would_merge" | "would_block"; reason?: string } {
+  return armed ? { would: "would_merge" } : { would: "would_block", reason };
+}
+
+/** A shadow instance's arm decision, in the live arm decision's shape. */
+export function resolveShadowInstanceArmPermission(shadowInstance: boolean): { armed: boolean; reason?: string } {
+  return shadowInstance
+    ? { armed: false, reason: "shadow instance — never arms or merges a pull request (W1-T4265)" }
+    : { armed: true };
+}
+
 /**
  * Build the REST create invocation (`gh api --method POST repos/{owner}/{repo}/pulls`)
  * for a plan/triage/retro/implement PR — W1-T1202's transport swap off `gh pr create
@@ -3708,6 +3727,7 @@ export function fillDerivedBody(worktreePath: string): string {
  *
  * DECISION (design point iii): the body is {@link fillDerivedBody} — REST's lack of
  * `--fill`'s autofill costs this small local helper, not an invented body.
+ * Shadow PRs stay ready; `instanceMode` enforces the no-arm boundary (W1-T4415).
  */
 export function ghPrCreateFillCommand(
   worktreePath: string,
@@ -13259,6 +13279,7 @@ export function resolveRunMounts(
 }
 
 interface RunTaskBodyOptions {
+  instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
   armAdhocLaneReap?: boolean;
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
   claimReserver?: DispatchClaimReserver;
@@ -13978,6 +13999,7 @@ async function runTask(
     worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
     /** W1-T4356: reinstalls a fast-forwarded managed checkout; default {@link ensureInstallFresh}'s `npm ci`. */
     managedCheckoutInstall?: (repoDir: string) => void;
+    instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
@@ -14379,6 +14401,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // supplies the shared object so the preflight and its spawn wrapper observe the same decision.
   const cashContainmentState = ctx.cashContainmentState ?? { contained: false };
   const cashContainmentBoundary = ctx.cashContainmentBoundary ?? assertOpenWeightToolBoundary;
+
+  // Hold the instance mode for the run so a registry edit cannot flip its deferred arm decision.
+  const shadowInstance = instanceMode(`${owner}/${task.repo}`, (opts.instanceRegistryTextImpl ?? readInstanceRegistryText)(repoRoot)) === "shadow";
 
   // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
   // DEFAULT_BUDGET_USD ($100 — an order of magnitude above any observed task) when a
@@ -16734,10 +16759,23 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // wipe-test.ts (`resolveWipeTestArmPermission`); this call site only consults it and skips
     // `armAutoMergeAtOpen` outright when it refuses, so a wipe-test PR is never armed and can
     // never merge out from under the pair it belongs to.
+    // Check shadow before wipe-test; the counterfactual uses this same live arm decision.
+    if (shadowInstance) {
+      const shadowVerdict = shadowLiveWouldHaveDone(true);
+      log("shadow.verdict", {
+        pr_url: prUrl,
+        task_id: taskId,
+        review_verdict: review.state,
+        ...shadowVerdict,
+      });
+    }
+    const shadowArmDecision = resolveShadowInstanceArmPermission(shadowInstance);
     const wipeTestArmDecision = resolveWipeTestArmPermission(!!opts.noMerge);
-    const armOutcome: ArmOutcome | "no-merge-boundary-refused" = wipeTestArmDecision.armed
-      ? armAutoMergeAtOpen(prUrl, undefined, irreversible)
-      : "no-merge-boundary-refused";
+    const armOutcome: ArmOutcome | "no-merge-boundary-refused" | "shadow-instance-refused" = !shadowArmDecision.armed
+      ? "shadow-instance-refused"
+      : wipeTestArmDecision.armed
+        ? armAutoMergeAtOpen(prUrl, undefined, irreversible)
+        : "no-merge-boundary-refused";
     // W1-T2258: `review.headSha` — the SAME head captured in `riskJudgeInput` above — is already
     // in scope here and simply was not put on the row; this is the SINGLE LARGEST dropped
     // population (the "run-task" lane, the deferred arm every normal implement-task PR takes).
@@ -16748,7 +16786,6 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       head_sha: review.headSha,
       ...(wipeTestArmDecision.reason ? { reason: wipeTestArmDecision.reason } : {}),
     });
-
     // ── POLL to the gate (W1-T1B).
     // Auto-merge was armed immediately above, now that this run has a verdict it
     // stands behind — this block only observes. The runner NEVER force-merges:
@@ -31513,6 +31550,7 @@ export async function daemonCommand(
   log("daemon.target", {
     repo: target.repo,
     gateway: `${target.owner}/${target.repo}`,
+    instance_mode: instanceMode(`${target.owner}/${target.repo}`, readInstanceRegistryText(repoRoot)),
     plan_path: target.planPath,
     self_host: target.isSelf,
     dry_run: target.dryRun,

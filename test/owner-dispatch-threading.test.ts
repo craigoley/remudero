@@ -394,6 +394,7 @@ test(
       .split("\n")
       .find((l) => l.includes('"step":"daemon.target"'));
     assert.ok(targetLine, "the daemon ledgered its resolved target");
+    assert.equal(JSON.parse(targetLine).instance_mode, "live");
     assert.match(
       targetLine,
       /"gateway":"foreign-owner\/widgets"/,

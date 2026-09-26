@@ -1108,7 +1108,7 @@ test(
  *  read — returning MERGED on its very first poll, so the run reaches a real "merged" verdict
  *  with zero sleeps. `pr merge --auto`/`--disable-auto` are logged exactly like the sibling
  *  fixtures above, which is what lets this test prove the deferred arm actually reached `gh`. */
-function armOpenMergedFakeGh(branch: string, callLogPath: string, headSha: string): string {
+function armOpenMergedFakeGh(branch: string, callLogPath: string, headSha: string, closedUnmerged = false): string {
   const fakeBinDir = mkdtempSync(join(tmpdir(), "arm-open-merged-bin-"));
   const fakeGhPath = join(fakeBinDir, "gh");
   writeFileSync(
@@ -1133,7 +1133,7 @@ function armOpenMergedFakeGh(branch: string, callLogPath: string, headSha: strin
       "if [[ \"$1\" == 'api' ]]; then",
       "  case \"$2\" in",
       `    */pulls/*/files*) echo '[]'; exit 0 ;;`,
-      `    */pulls/*) echo '{"number":702,"state":"closed","merged":true,"merged_at":"2026-01-01T00:00:00Z","head":{"sha":"${headSha}"}}'; exit 0 ;;`,
+      `    */pulls/*) echo '{"number":702,"state":"closed","merged":${!closedUnmerged},"merged_at":${closedUnmerged ? "null" : '"2026-01-01T00:00:00Z"'},"head":{"sha":"${headSha}"}}'; exit 0 ;;`,
       "    */check-runs*)",
       "      echo 'ci-poll' >> \"$CALLLOG\"",
       "      echo '{\"check_runs\":[{\"name\":\"ci\",\"status\":\"completed\",\"conclusion\":\"success\"}]}'",
@@ -1156,7 +1156,7 @@ function armOpenMergedFakeGh(branch: string, callLogPath: string, headSha: strin
   return fakeBinDir;
 }
 
-test("W1-T975: a run that reaches its verdict still arms auto-merge", async (t) => {
+for (const mode of ["live", "shadow"] as const) test(`W1-T975: a ${mode} run records its verdict and ${mode === "live" ? "arms" : "does not arm"} auto-merge`, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "arm-verdict-merged-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN);
@@ -1169,7 +1169,7 @@ test("W1-T975: a run that reaches its verdict still arms auto-merge", async (t) 
   const headSha = "feedface9999";
   const callLogPath = join(root, "gh-calls.log");
   writeFileSync(callLogPath, "");
-  const fakeBinDir = armOpenMergedFakeGh(branch, callLogPath, headSha);
+  const fakeBinDir = armOpenMergedFakeGh(branch, callLogPath, headSha, mode === "shadow");
   const savedPath = process.env.PATH;
   process.env.PATH = `${fakeBinDir}:${savedPath}`;
   const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
@@ -1219,11 +1219,12 @@ test("W1-T975: a run that reaches its verdict still arms auto-merge", async (t) 
         containmentExec: armOpenHoldingContainmentExec,
         isolationExec: armOpenCleanIsolationExec,
         runReview: async () => fullPassVerdict,
+        instanceRegistryTextImpl: () => mode === "shadow" ? "instances:\n  worker:\n    github_repo: craigoley/remudero\n    mode: shadow\n" : undefined,
       }),
     );
 
-    assert.equal(res.verdict, "merged", "a full-pass, low-risk verdict reaches a real merge — the W1-T125 dead-time saving survives");
-    assert.equal(res.merged, true);
+    assert.equal(res.verdict, mode === "live" ? "merged" : "blocked_ci");
+    assert.equal(res.merged, mode === "live");
     assert.equal(
       spawnCalls.length,
       3,
@@ -1234,7 +1235,13 @@ test("W1-T975: a run that reaches its verdict still arms auto-merge", async (t) 
     const armedIdx = ledger.findIndex((l) => l.step === "automerge.armed");
     assert.ok(armedIdx >= 0, "the run must arm once it commits to a verdict — this IS criterion 2, the positive control");
     assert.equal(ledger[armedIdx]?.at, "verdict", "the arm row's `at` field now names the deferred point — never `open` any more");
-    assert.equal(ledger[armedIdx]?.outcome, "armed");
+    assert.equal(ledger[armedIdx]?.outcome, mode === "live" ? "armed" : "shadow-instance-refused");
+    if (mode === "shadow") {
+      const shadow = ledger.find((l) => l.step === "shadow.verdict");
+      assert.equal(shadow?.would, "would_merge");
+      assert.equal(shadow?.task_id, "T-ARM-OPEN");
+      assert.ok(ledger.indexOf(shadow!) < armedIdx, "the counterfactual precedes the arm refusal");
+    }
 
     const decisionIdx = ledger.findIndex((l) => l.step === "risk_judge.decision");
     assert.ok(decisionIdx >= 0, "the risk judge still runs on the happy path — it just PROCEEDS instead of escalating");
@@ -1242,7 +1249,8 @@ test("W1-T975: a run that reaches its verdict still arms auto-merge", async (t) 
     assert.ok(decisionIdx < armedIdx, "the arm follows the risk judge's own PROCEED decision — it must never precede it");
 
     const mergedIdx = ledger.findIndex((l) => l.step === "pr.merged");
-    assert.ok(mergedIdx > armedIdx, "the arm precedes the merge it registered intent for");
+    if (mode === "live") assert.ok(mergedIdx > armedIdx, "the arm precedes the merge it registered intent for");
+    else assert.equal(mergedIdx, -1, "shadow's closed-unmerged fake must not claim a merge");
 
     assert.equal(
       ledger.filter((l) => l.step === "automerge.disarmed").length,
@@ -1251,10 +1259,7 @@ test("W1-T975: a run that reaches its verdict still arms auto-merge", async (t) 
     );
 
     const calls = readFileSync(callLogPath, "utf8").split("\n").filter(Boolean);
-    assert.ok(
-      calls.includes("arm https://github.com/acme/remudero/pull/702"),
-      `expected an 'arm <prUrl>' call in the gh call log; got: ${JSON.stringify(calls)}`,
-    );
+    assert.equal(calls.includes("arm https://github.com/acme/remudero/pull/702"), mode === "live");
   } finally {
     dateNowSpy.mock.restore();
     process.env.PATH = savedPath;
