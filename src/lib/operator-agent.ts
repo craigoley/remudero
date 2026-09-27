@@ -13,7 +13,15 @@ import type { ServerResponse } from "node:http";
 import type { Route } from "./service.js";
 import { clockFromMillisFn, fixedClock } from "./clock.js";
 import { EMERGENCY_STOP_CLEARED_LEDGER_STEP, EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "./ledger.js";
-import { readLedgerUnionRecordsSync, realLedgerFs, type LedgerGrepFsDeps } from "./ledger-union.js";
+import {
+  createLedgerRotationMemo,
+  readLedgerUnionRecordsSync,
+  realLedgerFs,
+  type LedgerGrepFsDeps,
+  type LedgerRotationMemo,
+  type LedgerUnionRecordRead,
+  type LedgerUnionRecordReadOptions,
+} from "./ledger-union.js";
 import {
   appendPanelLedger,
   bearerTokenId,
@@ -517,8 +525,43 @@ function validateContextRegistration(value: unknown): { error: string } | { cont
   return context ? { context } : { error: "context must be a complete bounded context-item-v1 envelope" };
 }
 
+/** W1-T4582: one rotation memo per state dir and step set. The operator-agent reads re-parsed every
+ *  rotated archive on every request (W1-T4576's reach census named six of their routes). A rotation
+ *  is written once: a COMPLETE pass answers from the memo, parsing only the live file. A pass that
+ *  lacks a rotation reads it as EMPTY, so that request is answered by a full read instead, and the
+ *  missing rotations load off the request for the next one. */
+const operatorAgentUnionMemos = new Map<string, LedgerRotationMemo>();
+const operatorAgentUnionLoads = new Set<Promise<void>>();
+
+/** Resolves once every rotation load the operator-agent reads have started has finished. */
+export async function settleOperatorAgentUnionLoads(): Promise<void> {
+  while (operatorAgentUnionLoads.size > 0) await Promise.all([...operatorAgentUnionLoads]);
+}
+
+function readOperatorAgentUnion(
+  stateDir: string,
+  opts: LedgerUnionRecordReadOptions & { step: string | readonly string[] },
+): LedgerUnionRecordRead {
+  const steps = new Set<string>(typeof opts.step === "string" ? [opts.step] : opts.step);
+  const key = `${stateDir}\u0000${[...steps].sort().join(",")}`;
+  let memo = operatorAgentUnionMemos.get(key);
+  if (memo === undefined) {
+    memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.has(row.step)));
+    operatorAgentUnionMemos.set(key, memo);
+  }
+  const pass = memo.pass();
+  const read = readLedgerUnionRecordsSync(stateDir, { ...opts, rotationRecords: pass.rotationRecords });
+  if (pass.complete()) return read;
+  const loading: Promise<void> = memo
+    .load(pass.missing())
+    .catch(() => undefined /* deliberate: a failed load only means the next read is full too */)
+    .finally(() => operatorAgentUnionLoads.delete(loading));
+  operatorAgentUnionLoads.add(loading);
+  return readLedgerUnionRecordsSync(stateDir, opts);
+}
+
 function contextRows(ledgerPath: string): Array<Record<string, unknown>> {
-  return readLedgerUnionRecordsSync(dirname(ledgerPath), {
+  return readOperatorAgentUnion(dirname(ledgerPath), {
     step: [CONTEXT_ITEM_STEP, CONTEXT_REVOKED_STEP, CONTEXT_DELETED_STEP],
   }).rows;
 }
@@ -1035,7 +1078,7 @@ function validateConsequenceDecisionInput(body: unknown): { error: string } | Co
 }
 
 function readExperimentRows(ledgerPath: string): Array<Record<string, unknown>> {
-  return readLedgerUnionRecordsSync(dirname(ledgerPath), {
+  return readOperatorAgentUnion(dirname(ledgerPath), {
     step: [
       OPERATOR_AGENT_EXPERIMENT_STEP,
       OPERATOR_AGENT_EXPERIMENT_DECISION_STEP,
@@ -1046,7 +1089,7 @@ function readExperimentRows(ledgerPath: string): Array<Record<string, unknown>> 
 }
 
 function readPromotionRows(ledgerPath: string): Array<Record<string, unknown>> {
-  return readLedgerUnionRecordsSync(dirname(ledgerPath), {
+  return readOperatorAgentUnion(dirname(ledgerPath), {
     step: [
       OPERATOR_AGENT_PROMOTION_STEP,
       OPERATOR_AGENT_PROMOTION_REPLAY_STEP,
@@ -1172,7 +1215,7 @@ export function createOperatorAgentMemorySource(
 function readRows(deps: OperatorAgentRouteDependencies): ReadonlyArray<Record<string, unknown>> {
   const memory = deps.memory?.current();
   if (memory?.state === "ready") return memory.rows as ReadonlyArray<Record<string, unknown>>;
-  return readLedgerUnionRecordsSync(dirname(deps.ledgerPath), {
+  return readOperatorAgentUnion(dirname(deps.ledgerPath), {
     step: [OPERATOR_AGENT_PROPOSAL_STEP, OPERATOR_AGENT_DECISION_STEP, OPERATOR_AGENT_OUTCOME_STEP],
   }).rows;
 }
@@ -1180,7 +1223,7 @@ function readRows(deps: OperatorAgentRouteDependencies): ReadonlyArray<Record<st
 function readSettingsRows(deps: OperatorAgentRouteDependencies): ReadonlyArray<Record<string, unknown>> {
   const memory = deps.memory?.current();
   if (memory?.state === "ready") return memory.rows as ReadonlyArray<Record<string, unknown>>;
-  return readLedgerUnionRecordsSync(dirname(deps.ledgerPath), { step: OPERATOR_AGENT_SETTINGS_STEP }).rows;
+  return readOperatorAgentUnion(dirname(deps.ledgerPath), { step: OPERATOR_AGENT_SETTINGS_STEP }).rows;
 }
 
 /**
@@ -2167,7 +2210,7 @@ function storedApprovalProjection(value: unknown): ConsequenceApprovalProjection
 }
 
 function consequenceRows(deps: OperatorAgentRouteDependencies): Array<Record<string, unknown>> {
-  return readLedgerUnionRecordsSync(dirname(deps.ledgerPath), {
+  return readOperatorAgentUnion(dirname(deps.ledgerPath), {
     step: [OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP, OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP],
   }).rows;
 }
