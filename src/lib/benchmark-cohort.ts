@@ -703,7 +703,8 @@ export async function runBenchmarkCohortPass(
     for (const key of eligibilityChangeKeys(checkpoint.baselineSources!, checkpoint.sources,
       checkpoint.lastGood.quarantine.sources, checkpoint.sourceFaults)) dirtyKeys.add(key);
   }
-  const prior = checkpoint.sourceFaults.length > 0 && !checkpoint.lastGood?.quarantine
+  const prior = checkpoint.sourceFaults.length > 0 && checkpoint.lastGood !== undefined
+    && checkpoint.lastGood.quarantine === undefined
     ? undefined : checkpoint.lastGood;
   const snapshot = deriveSnapshot(checkpoint.sources, opts.nowIso ?? systemClock.iso(), auditedSourceBytes,
     prior, prior ? dirtyKeys : undefined, live ? { prefixBytes: live.size, tailPendingBytes } : undefined,
