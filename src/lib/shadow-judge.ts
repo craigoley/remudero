@@ -14,6 +14,7 @@ export function shadowJudgeMount(mounts: readonly Mount[], primaryModel: string)
   return mounts.find((mount) => mount.model !== primaryModel);
 }
 
+// PRIMARY CONTROL: hard per-run ceiling for advisory shadow-worker spend.
 export const SHADOW_JUDGE_MAX_BUDGET_USD = 0.10;
 
 export interface ShadowJudgeRequest<T> {
