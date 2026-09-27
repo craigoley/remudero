@@ -399,13 +399,6 @@ export function wakeSummaryRow(counters: WakeCounters, window: { start: string; 
   return { window_start: window.start, window_end: window.end, ...counters, by_event: { ...counters.by_event } };
 }
 
-/** Accepted deliveries one ledger row stands for: 1 for a full accepted row, a summary's coalesced count. */
-export function acceptedWakeCount(line: Record<string, unknown>): number | undefined {
-  if (line.step === "github.wake.accepted") return 1;
-  const n = line.step === "github.wake.summary" ? line.accepted_coalesced : undefined;
-  return typeof n === "number" && n > 0 ? n : undefined;
-}
-
 /** Writes the window since the last successful write each interval, then zeroes `counters`; a throwing
  *  `write` keeps every count and the window start. Unref'd; the returned stop is the shutdown flush. */
 export function startWakeSummaryFlush(opts: {
