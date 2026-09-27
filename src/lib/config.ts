@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { closeSync, mkdirSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { canonicalWorkerProviderId, validateConfigShape, WORKER_PROVIDER_IDS, type Config, type WorkerProviderId } from "./config-schema.js";
 import { createOrReadExclusive } from "./fs-race-safe.js";
 export { canonicalWorkerProviderId, WORKER_PROVIDER_IDS } from "./config-schema.js";
@@ -148,6 +148,10 @@ export function validateConfig(config: Config): void {
     throw new ConfigValidationError(
       'invalid config: workerProviders.enabled includes "cash" (or its deprecated "openweight" spelling) and requires a dailyCapUsd (cash-billed runs must be hard-capped)',
     );
+  }
+  const fleetPath = config.workerProviders?.fleetCashAllowancePath;
+  if (fleetPath !== undefined && (!isAbsolute(fleetPath) || !fleetPath.endsWith(".json"))) {
+    throw new ConfigValidationError("invalid config: workerProviders.fleetCashAllowancePath must be an absolute JSON file path");
   }
   if (providers.length === 0) {
     throw new ConfigValidationError("invalid config: workerProviders.enabled must contain at least one provider");

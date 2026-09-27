@@ -255,6 +255,13 @@ ordinary subscription work continue, and no benchmark check holds a PR. The exis
 daily cash cap is still an independent backstop. Trial PR-open rate is an operational diagnostic,
 not verified completion or a public causal model ranking.
 
+For a three-daemon host, that backstop is a **fleet** cap only after all cash instances use
+the migrated `workerProviders.fleetCashAllowancePath`. Each instance otherwise maintains a
+local allowance. The shared path serializes reservation and settlement across processes and
+refuses missing or unreadable state. The read-only `--report` mode of
+`deploy/migrate-fleet-cash-allowance.sh` shows the combined UTC-day commitment and source mtime;
+it does not report an invoice or grant permission to raise the $25 ceiling.
+
 ## Rollback
 
 The policy switch is the candidate membership and order of `capabilities.codex.balanced` in

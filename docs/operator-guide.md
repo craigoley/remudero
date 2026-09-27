@@ -1486,9 +1486,52 @@ the cash provider enabled, and the task must declare only tools the cash adapter
 frontier mount pinned directly to cash is still refused.
 
 Every Foundry Messages turn reserves against the same UTC-day `dailyCapUsd` as the inexpensive
-cash requests. Opus has an additional $5 ordinary and $10 squeeze-day limit; automatic routing
+cash requests **within one daemon** unless `workerProviders.fleetCashAllowancePath` names one
+host-shared file for every cash instance. Opus has an additional $5 ordinary and $10 squeeze-day limit; automatic routing
 uses it only on squeeze days. Keep the production shared squeezed limit at or below **$25**. A
 missing endpoint/key, unsupported tool, exhausted allowance, or absent deployment leaves the
 task blocked or returns a named error; it does not claim completion. After provisioning, verify
 the running daemon's boot/image SHA, an actual Luna and Foundry response, and the allowance
 receipt before calling either lane live.
+
+### One fleet cash cap across core, site, and console
+
+The shared cash allowance is opt-in and requires a stopped-writer migration. Until it is
+configured on all three daemons, each instance's local `state/openweight-allowance.json` can
+authorize a separate daily cap. The shared mode uses a SQLite `BEGIN IMMEDIATE` lock next to
+the JSON allowance during every reservation and settlement. If the shared file is missing,
+unreadable, behind a later UTC day, or the lock cannot be acquired, it refuses a paid request. A local success does
+not prove that the three containers see one host file.
+
+1. Hold cash dispatch and stop all three cash-capable daemons for the migration window. Suspend
+   their host watchdog timers first: on the current three-daemon host these are
+   `rmd-fleet-watchdog.timer`, `rmd-site-fleet-watchdog.timer`, and
+   `rmd-console-fleet-watchdog.timer`. Otherwise a timer can revive an old local-allowance writer
+   between the snapshot and the config switch. Confirm that no cash writer remains before
+   `--apply`. Record each local allowance path and its inode, UTC day, and mtime. Keep these
+   source files intact, and restore the watchdog timers after all three daemons have restarted
+   successfully on the shared path.
+2. Run `bash deploy/migrate-fleet-cash-allowance.sh --dry-run DEST YYYY-MM-DD 25 CORE SITE CONSOLE`
+   with all three local allowance paths. Inspect the combined request IDs, committed dollars,
+   reserved dollars, settled dollars, and per-deployment figures. Conflicting duplicate IDs,
+   corrupt sources, future dates, or a total over $25 refuse migration.
+3. With all writers still stopped, run the same command with `--apply`. It creates `DEST` once
+   and will not overwrite an existing shared file. It stores the $25 fleet ceiling in that file;
+   each worker enforces the lower of its configured daily cap and this shared ceiling. Preserve
+   the JSON receipt and source files.
+4. Set `workerProviders.fleetCashAllowancePath` in the shared host config to `DEST` as mounted
+   inside **each** container. From a fresh session in each container, verify that the path and
+   its lock directory resolve to the same writable host mount. Confirm all three read the same
+   inode, use the same `dailyCapUsd: 25`, and run the image containing the lock code before
+   allowing cash dispatch again. A mixed old/new fleet must remain held.
+5. After restart, use `bash deploy/migrate-fleet-cash-allowance.sh --report DEST YYYY-MM-DD 25`
+   for a read-only aggregate receipt with mtime and inode read from the same open file. Prove a bounded cash request from one
+   instance appears in that same file when viewed from the other two, then check the report
+   before and after. This reports allowance commitments, not an Azure invoice.
+
+The W1-T4632 `verify: human` release hold applies to the live cutover. Keep the old local
+files and the pre-cutover receipt for recovery; do not reset today's allowance to zero. If a
+restart or path check fails before any request reaches the shared file, restore the prior config
+and local files together. Once any shared request has been made, do not point cash back at the
+old local files: they omit that spend. Hold cash dispatch until an operator reconciles the shared
+and local reservations; restart the daemons with cash disabled so subscription work can continue.
