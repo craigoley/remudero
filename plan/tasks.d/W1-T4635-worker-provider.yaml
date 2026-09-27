@@ -29,6 +29,9 @@
     forceRefresh contract production uses. This follows the adoption report's advisory boundary:
     the finding exposes an unowned mechanism; it does not presume that the mechanism deserves a
     caller.
+    The Claude-capacity cases in test/worker-provider.test.ts are this task's own falsifier: this
+    task rewrites those cache/reset cases to prove the acceptance criteria; the broader provider
+    suite is not being included as an unrelated second concern.
   design: |
     Delete `clearClaudeCapacityCache` from src/lib/worker.ts rather than adding a production call
     site or retaining a renamed test-only export.
