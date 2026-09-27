@@ -170,7 +170,7 @@ test("a full supervisor tick asks the registry only on drift, then recycles thro
   assert.ok(!calls.includes("alert"), "a healthy recycle raises no alert");
 });
 
-test("the real deps read the newest image commit, ask the instance's own image repository, and read the failure time", async (t) => {
+test("real deploy dependency probes recover expired ACR auth without conflating missing or unknown publication", async (t) => {
   const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { realDeployDeps } = await import("../src/lib/deployer.js");
