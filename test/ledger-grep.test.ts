@@ -153,6 +153,7 @@ test("FALSIFIER: zero archives exits non-zero and prints no result line — the 
   // A diagnostic prints the state directory. Its name may contain the task token without
   // any ledger row escaping into the result (including when a worktree is named W1-T4...).
   const dir = tmpStateDir("rmd-W1-T4-ledger-grep-cli-noarchive-");
+  assert.match(dir, /W1-T4/, "positive control: diagnostic path contains the fixture task token");
   const logs: string[] = [];
   const errs: string[] = [];
   const realLog = console.log;
