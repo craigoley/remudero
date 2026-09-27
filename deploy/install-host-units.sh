@@ -137,6 +137,7 @@ GH_APP_KEY_V="${RMD_GH_APP_PRIVATE_KEY_PATH:-/home/node/.claude/rmd-app.pem}"
 CLAUDE_DIR="${RMD_CLAUDE_DIR:-/home/${SERVICE_USER}/.claude}"
 CODEX_DIR="${RMD_CODEX_DIR:-/home/${SERVICE_USER}/.codex}"
 CONTAINER_CONFIG_DIR="${RMD_CONTAINER_CONFIG_DIR:-/home/${SERVICE_USER}/.config/remudero-container}"
+CASH_SECRET_DIR="${RMD_CASH_SECRET_DIR:-/home/${SERVICE_USER}/.local/share/remudero/secrets}"
 UNIT_DIR="${RMD_UNIT_DIR:-/etc/systemd/system}"
 BIN_DIR="${RMD_BIN_DIR:-/usr/local/bin}"
 LAUNCHER="${RMD_LAUNCHER_PATH:-/home/${SERVICE_USER}/rmd-relaunch.sh}"
@@ -237,6 +238,44 @@ require_abs_path "revival_log" "$REVIVAL_LOG"
 require_abs_path "claude_dir" "$CLAUDE_DIR"
 require_abs_path "codex_dir" "$CODEX_DIR"
 require_abs_path "container_config_dir" "$CONTAINER_CONFIG_DIR"
+require_abs_path "cash_secret_dir" "$CASH_SECRET_DIR"
+CASH_SECRET_DIR_SHELL="$(printf '%q' "$CASH_SECRET_DIR")"
+
+# Insert literal shell into the rendered launcher. The outer launcher heredoc is expanded by the
+# installer, so writing dollar signs directly there would read the installer's environment instead
+# of the daemon host's environment at boot.
+render_cash_boot_secrets() {
+  cat <<'CASH_BOOT_SECRETS'
+# A host reboot must recover the same cash credentials as a recycle. Data files are mode 0600;
+# their values stay in this process's environment and never enter docker's argv or a unit file.
+read_cash_boot_secret() {
+  local path="$1" mode value
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  if mode="$(stat -c '%a' "$path" 2>/dev/null)"; then :
+  elif mode="$(stat -f '%Lp' "$path" 2>/dev/null)"; then :
+  else mode=""; fi
+  [ "$mode" = 600 ] || return 1
+  value="$(awk 'NF { count++; last=$0 } END { if (count == 1) print last; else exit 1 }' "$path" 2>/dev/null)" || return 1
+  value="${value%$'\r'}"
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+if [ -z "${RMD_OPENWEIGHT_API_KEY:-}" ]; then
+  RMD_OPENWEIGHT_API_KEY="$(read_cash_boot_secret "${RMD_OPENWEIGHT_API_KEY_PATH:-$CASH_SECRET_DIR/openweight-api-key}")" ||
+    echo "rmd-relaunch: cash API key unavailable; subscription work remains available" >&2
+fi
+if [ -z "${RMD_FOUNDRY_CLAUDE_API_KEY:-}" ]; then
+  RMD_FOUNDRY_CLAUDE_API_KEY="$(read_cash_boot_secret "${RMD_FOUNDRY_CLAUDE_API_KEY_PATH:-$CASH_SECRET_DIR/foundry-claude-api-key}")" ||
+    echo "rmd-relaunch: Foundry key unavailable; cash Opus remains unavailable" >&2
+fi
+if [ -z "${RMD_FOUNDRY_CLAUDE_ENDPOINT:-}" ]; then
+  RMD_FOUNDRY_CLAUDE_ENDPOINT="$(read_cash_boot_secret "${RMD_FOUNDRY_CLAUDE_ENDPOINT_PATH:-$CASH_SECRET_DIR/foundry-claude-endpoint}")" ||
+    echo "rmd-relaunch: Foundry endpoint unavailable; cash Opus remains unavailable" >&2
+fi
+export RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT
+CASH_BOOT_SECRETS
+}
 
 render_launcher() {
   cat <<EOF
@@ -248,6 +287,7 @@ set -euo pipefail
 STATE_DIR=${STATE_DIR}
 IMAGE=${IMAGE}
 REVIVAL_LOG=${REVIVAL_LOG}
+CASH_SECRET_DIR=${CASH_SECRET_DIR_SHELL}
 # W1-T3269 — the checkout this host converges FROM, and the heap the installer requires. Rendered
 # in rather than re-derived, so the converge below uses the same inputs this file was rendered with.
 #
@@ -530,6 +570,8 @@ else
   rm -f "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
 fi
 
+$(render_cash_boot_secrets)
+
 docker rm -f ${CONTAINER_NAME} >/dev/null 2>&1 || true
 
 # --restart=on-failure:5 IS DELIBERATE: exit 0 is a STOP and must not be undone. Reboot survival is
@@ -548,6 +590,9 @@ docker run -d --name ${CONTAINER_NAME} \\
   -e NODE_OPTIONS=--max-old-space-size=${MAX_OLD_SPACE_MB} \\
   -e RMD_RESTART_THROTTLE_S=120 \\
   -e RMD_FRESHNESS_RESTART_MAX=100 \\
+  -e RMD_OPENWEIGHT_API_KEY \\
+  -e RMD_FOUNDRY_CLAUDE_API_KEY \\
+  -e RMD_FOUNDRY_CLAUDE_ENDPOINT \\
   -v ${CODEX_DIR}:/home/node/.codex \\
   -v ${CONTAINER_CONFIG_DIR}:/home/node/.config/remudero \\
   -v "\$STATE_DIR":/home/node/Remudero \\
