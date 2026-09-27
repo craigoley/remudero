@@ -51,6 +51,30 @@ export interface CohortFieldCoverage {
   notRecorded: number;
 }
 
+/** W1-T4618: the task-shape covariates (`benchmark_run.work.shape`, benchmark-run.ts) the cohort
+ * stratifies by. Every assignment lands in exactly one value per dimension; a missing block or
+ * covariate is the explicit value `unavailable:<reason>`, never dropped from the denominator. */
+export const TASK_SHAPE_DIMENSIONS = ["declaredFiles", "topLevelAreas", "acceptanceCriteria", "proofDialects",
+  "dependsOnDepth", "attemptNumber", "priorStrikes", "lane", "repo", "recon", "reconSizeEstimate"] as const;
+export type TaskShapeDimension = typeof TASK_SHAPE_DIMENSIONS[number];
+export const TASK_SHAPE_STRATA_VERSION = "task-shape-strata-v1" as const;
+
+export interface TaskShapeStratum {
+  dimension: TaskShapeDimension;
+  value: string;
+  model: string | null;
+  assignments: number;
+  joinedAttempts: number;
+  workerCallSuccess: number;
+  workerCallFailure: number;
+}
+
+export interface TaskShapeStrata {
+  version: typeof TASK_SHAPE_STRATA_VERSION;
+  strata: TaskShapeStratum[];
+  coverage: Record<TaskShapeDimension, { denominator: number; observed: number; unavailable: number }>;
+}
+
 type CoverageField = "taskClass" | "selectedModel" | "harnessRevision" | "workerCall" | "servedModel" | "billingMode" | "cost";
 
 export interface BenchmarkCohortSnapshot {
@@ -73,6 +97,7 @@ export interface BenchmarkCohortSnapshot {
   coverage: Record<CoverageField, CohortFieldCoverage>;
   verifiedTaskOutcome: "unavailable-no-github-verification-join" | BenchmarkVerifiedOutcome;
   modelDrift: ModelDriftReport;
+  taskShape: TaskShapeStrata;
   experimentEffect: "unavailable-no-randomized-allocation";
   pressure: {
     sourceBytes: number; auditedSourceBytes: number; derivedBytes: number; snapshotGrowthBytes: number | null;
@@ -135,7 +160,8 @@ function validLastGood(value: unknown, sources: SourceRecord[], faults: SourceFa
         minTimestamp: fault.minTimestamp ?? null, maxTimestamp: fault.maxTimestamp ?? null,
         reason: fault.reason }))))
     && object(snapshot.sourceRows) !== undefined && object(snapshot.coverage) !== undefined
-    && object(snapshot.pressure) !== undefined && object(snapshot.modelDrift)?.version === MODEL_DRIFT_VERSION;
+    && object(snapshot.pressure) !== undefined && object(snapshot.modelDrift)?.version === MODEL_DRIFT_VERSION
+    && object(snapshot.taskShape)?.version === TASK_SHAPE_STRATA_VERSION;
 }
 
 function manifest(stateDir: string): ManifestEntry[] {
@@ -238,7 +264,8 @@ function projectRow(row: Record<string, unknown>): Record<string, unknown> {
       ts: row.ts, host: row.host, task_id: row.task_id, run_id: row.run_id, step: row.step,
       worker_assignment: { id: assignment?.id, requested: { model: requested?.model },
         selected: { provider: selected?.provider, model: selected?.model } },
-      benchmark_run: { work: { taskClass: work?.taskClass }, stack: { harnessRevision: stack?.harnessRevision } },
+      benchmark_run: { work: { taskClass: work?.taskClass, ...(work?.shape !== undefined ? { shape: projectTaskShape(work.shape) } : {}) },
+        stack: { harnessRevision: stack?.harnessRevision } },
     };
   }
   return {
@@ -327,6 +354,41 @@ function observedString(value: unknown): string | null {
     ? evidence.value : null;
 }
 
+/** A stratum value the snapshot may carry; anything else is `unavailable:value-not-bounded`. */
+export const TASK_SHAPE_STRATUM_VALUE_RE = /^[A-Za-z0-9+._:()-]{1,160}$/;
+
+/** One covariate's stratum: a bucket, a token, a `+`-joined enum set, or `unavailable:<reason>`. */
+export function taskShapeStratumValue(evidence: unknown): string {
+  const item = object(evidence);
+  const observed = object(item?.value);
+  const value = !item ? "unavailable:not-recorded-at-assignment"
+    : item.state === "unavailable" ? `unavailable:${typeof item.reason === "string" ? item.reason : "reason-missing"}`
+      : item.state !== "observed" ? "unavailable:shape-evidence-invalid"
+        : typeof item.value === "string" ? item.value
+          : Array.isArray(item.value) ? (item.value.length === 0 ? "(none)" : item.value.join("+"))
+            : typeof observed?.bucket === "string" ? observed.bucket : "unavailable:shape-evidence-invalid";
+  return TASK_SHAPE_STRATUM_VALUE_RE.test(value) ? value : "unavailable:value-not-bounded";
+}
+
+/** The checkpoint keeps only each covariate's stratum value, never the block's counts or lists. */
+function projectTaskShape(shape: unknown): Record<string, string> {
+  const block = object(shape);
+  const known = block?.version === "task-shape-v1";
+  return Object.fromEntries(TASK_SHAPE_DIMENSIONS.map((dimension) => [dimension,
+    known ? taskShapeStratumValue(block[dimension]) : `unavailable:${block ? "task-shape-version-unknown" : "task-shape-invalid"}`]));
+}
+
+function taskShapeValues(row: Record<string, unknown>): Record<TaskShapeDimension, string> {
+  const shape = object(object(object(row.benchmark_run)?.work)?.shape);
+  return Object.fromEntries(TASK_SHAPE_DIMENSIONS.map((dimension) => [dimension,
+    typeof shape?.[dimension] === "string" ? shape[dimension] : "unavailable:not-recorded-at-assignment"])) as Record<TaskShapeDimension, string>;
+}
+
+function blankTaskShape(denominator: number): TaskShapeStrata {
+  return { version: TASK_SHAPE_STRATA_VERSION, strata: [], coverage: Object.fromEntries(TASK_SHAPE_DIMENSIONS.map((dimension) =>
+    [dimension, { denominator, observed: 0, unavailable: 0 }])) as TaskShapeStrata["coverage"] };
+}
+
 function finiteCost(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
@@ -340,7 +402,7 @@ function emptySnapshot(reason: string, lastGood?: BenchmarkCohortSnapshot): Benc
       conflictingAssignments: 0, duplicateRows: 0 },
     cohorts: [], coverage: blankCoverage(0),
     verifiedTaskOutcome: "unavailable-no-github-verification-join", modelDrift: unavailableModelDrift(reason),
-    experimentEffect: "unavailable-no-randomized-allocation",
+    taskShape: blankTaskShape(0), experimentEffect: "unavailable-no-randomized-allocation",
     pressure: { sourceBytes: 0, auditedSourceBytes: 0, derivedBytes: 0, snapshotGrowthBytes: null,
       sourceToDerivedRatio: null, evidenceBytesByDay: [], eventsPerAssignment: null, eventsPerRun: null,
       runsWithId: 0, dimensionCardinality: 0, rebuiltPartitions: 0, rebuildMs: 0 },
@@ -581,9 +643,23 @@ function deriveSnapshot(
     if (!dirtyKeys.has(key)) groups.set(key, cohort);
   }
   const coverage = blankCoverage(eligible.size);
+  const taskShape = blankTaskShape(eligible.size);
+  const strata = new Map<string, TaskShapeStratum>();
   for (const [id, row] of assignments) {
     if (!eligible.has(id)) continue;
     const dimensions = dimensionsOf(row);
+    const shapeCall = attempts.get(id) ?? terminals.get(id);
+    for (const [dimension, value] of Object.entries(taskShapeValues(row)) as [TaskShapeDimension, string][]) {
+      taskShape.coverage[dimension][value.startsWith("unavailable:") ? "unavailable" : "observed"] += 1;
+      const stratumKey = JSON.stringify([dimension, value, dimensions.model]);
+      const stratum = strata.get(stratumKey) ?? { dimension, value, model: dimensions.model, assignments: 0,
+        joinedAttempts: 0, workerCallSuccess: 0, workerCallFailure: 0 };
+      stratum.assignments += 1;
+      if (attempts.has(id)) stratum.joinedAttempts += 1;
+      if (shapeCall?.success === true) stratum.workerCallSuccess += 1;
+      if (shapeCall?.success === false) stratum.workerCallFailure += 1;
+      strata.set(stratumKey, stratum);
+    }
     for (const [field, observed] of [
       ["taskClass", dimensions.taskClass !== null],
       ["selectedModel", dimensions.model !== null],
@@ -660,6 +736,7 @@ function deriveSnapshot(
     coverage,
     verifiedTaskOutcome: caseFiles ? joinVerifiedTaskOutcomes(joined, caseFiles, asOf) : "unavailable-no-github-verification-join",
     modelDrift: deriveModelDrift(driftExposures(joined, caseFiles, asOf), asOf),
+    taskShape: { ...taskShape, strata: [...strata.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, stratum]) => stratum) },
     experimentEffect: "unavailable-no-randomized-allocation",
     pressure: { sourceBytes: sources.reduce((sum, source) => sum + source.size, 0), auditedSourceBytes,
       derivedBytes: 0, snapshotGrowthBytes: prior ? 0 : null, sourceToDerivedRatio: null,

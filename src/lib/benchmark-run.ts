@@ -2,6 +2,7 @@
  * envelope deliberately contains neither IDs nor content, and grants no publication rights. */
 import { loadConfig } from "./config.js";
 import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendLedger } from "./ledger.js";
@@ -102,6 +103,235 @@ function observedNonnegative(value: unknown, reason: string): Evidence<number> {
     ? { state: "observed", value } : unavailable(reason);
 }
 
+/** W1-T4618: THE TASK-SHAPE COVARIATE BLOCK. Difficulty is the dominant confounder of every per-model
+ * comparison, and an assignment carried only taskClass and risk. This block is built at assignment from
+ * data already in hand — counts and small enums, never free text, never a path below its top-level area.
+ * A covariate that cannot be computed is `unavailable` with a reason: never 0, never omitted.
+ * Buckets: declared files and acceptance criteria 0 / 1 / 2-3 / 4-7 / 8+; depends_on depth 0 / 1 / 2 / 3+;
+ * attempt number 1 / 2 / 3+; prior strikes 0 / 1 / 2+. Attempt and strike counts read the LIVE ledger
+ * only (`basis: "live-ledger"`), so rotation makes them lower bounds. No recon report carries a size
+ * estimate, so `reconSizeEstimate` is a counted coverage gap whose reason says why. */
+export const TASK_SHAPE_VERSION = "task-shape-v1" as const;
+
+/** BACKSTOP (W1-T4618): the most top-level areas one block names; the tail folds into `other`, so a
+ *  repo-wide task cannot mint an unbounded stratum. */
+export const TASK_SHAPE_AREAS_MAX = 6;
+
+/** BACKSTOP (W1-T4618): the longest depends_on chain walked before depth is recorded unavailable. */
+export const TASK_SHAPE_DEPENDS_DEPTH_MAX = 64;
+
+/** An area, lane or repo name the block may carry verbatim; anything else is not a bounded token. */
+export const TASK_SHAPE_TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
+
+/** The executable proof dialects; a proof with none of these prefixes is prose. */
+export const PROOF_DIALECT_PREFIX_RE = /^(unit test|grep|demonstration):/i;
+
+function cappedBucket(n: number, cap: number): string {
+  return n >= cap ? `${cap}+` : String(n);
+}
+
+export function taskShapeCountBucket(n: number): TaskShapeCountBucket {
+  return n <= 0 ? "0" : n === 1 ? "1" : n <= 3 ? "2-3" : n <= 7 ? "4-7" : "8+";
+}
+
+export type TaskShapeCountBucket = "0" | "1" | "2-3" | "4-7" | "8+";
+export type TaskShapeProofDialect = "unit-test" | "grep" | "demonstration" | "prose" | "absent";
+export type TaskShapeRecon = "ran" | "reused" | "degraded" | "masked";
+export interface TaskShapeTask {
+  id?: string;
+  repo?: string;
+  files?: readonly string[];
+  acceptance?: readonly { proof?: string }[];
+  depends_on?: readonly string[];
+}
+export interface TaskShapeInput {
+  task?: TaskShapeTask;
+  /** The plan's records, for depends_on depth; absent ⇒ depth is unavailable. */
+  tasks?: readonly { id: string; depends_on?: readonly string[] }[];
+  ledgerRows?: ReadonlyArray<Record<string, unknown>>;
+  ledgerUnavailableReason?: string;
+  /** True when this run's own `run.start` is already in `ledgerRows` (the fix rung), false at dispatch. */
+  runStartWritten?: boolean;
+  lane?: string;
+  reconUnavailableReason?: string;
+}
+
+export function topLevelArea(path: string): string {
+  const trimmed = path.trim().replace(/^\.\//, "");
+  const slash = trimmed.indexOf("/");
+  if (slash < 0) return "root";
+  const head = trimmed.slice(0, slash);
+  return TASK_SHAPE_TOKEN_RE.test(head) ? head : "other";
+}
+
+export function proofDialect(proof: unknown): TaskShapeProofDialect {
+  const trimmed = typeof proof === "string" ? proof.trim() : "";
+  if (!trimmed) return "absent";
+  const prefix = PROOF_DIALECT_PREFIX_RE.exec(trimmed)?.[1]?.toLowerCase();
+  return prefix === "unit test" ? "unit-test" : prefix === "grep" ? "grep"
+    : prefix === "demonstration" ? "demonstration" : "prose";
+}
+
+function dependsOnDepth(task: TaskShapeTask, tasks: TaskShapeInput["tasks"]): Evidence<{ depth: number; bucket: string }> {
+  if (!tasks) return unavailable("plan-not-in-hand");
+  if (!Array.isArray(task.depends_on)) return unavailable("depends-on-not-declared");
+  let byId: Map<string, readonly string[]>;
+  const memo = new Map<string, number>();
+  const visiting = new Set<string>([task.id ?? ""]);
+  const walk = (deps: readonly string[], level: number): number => {
+    if (level > TASK_SHAPE_DEPENDS_DEPTH_MAX) throw new RangeError("depends-on-depth-bound");
+    let deepest = 0;
+    for (const id of deps) {
+      if (visiting.has(id)) throw new RangeError("depends-on-cycle");
+      let depth = memo.get(id);
+      if (depth === undefined) {
+        visiting.add(id);
+        depth = 1 + walk(byId.get(id) ?? [], level + 1);
+        visiting.delete(id);
+        memo.set(id, depth);
+      }
+      deepest = Math.max(deepest, depth);
+    }
+    return deepest;
+  };
+  try {
+    byId = new Map(tasks.map((t) => [t.id, t.depends_on ?? []]));
+    const depth = walk(task.depends_on, 1);
+    return { state: "observed", value: { depth, bucket: cappedBucket(depth, 3) } };
+  } catch (error) {
+    const reason = error instanceof RangeError ? error.message : "depends-on-walk-failed";
+    return unavailable(reason);
+  }
+}
+
+function tokenEvidence(value: unknown, missing: string, invalid: string): Evidence<string> {
+  if (typeof value !== "string" || value.length === 0) return unavailable(missing);
+  return TASK_SHAPE_TOKEN_RE.test(value) ? { state: "observed", value } : unavailable(invalid);
+}
+
+/** The bounded covariate block (see {@link TASK_SHAPE_VERSION}). `missing` names why every covariate
+ *  whose source was not supplied at all is unavailable — a lane with no task record says so here. */
+export function taskShapeCovariates(input: TaskShapeInput, missing = "task-not-in-hand") {
+  const task = input.task;
+  const files = task?.files;
+  const acceptance = task?.acceptance;
+  const taskId = typeof task?.id === "string" && task.id.length > 0 ? task.id : undefined;
+  let starts = 0;
+  let strikes = 0;
+  for (const row of input.ledgerRows ?? []) {
+    if (taskId === undefined || row.task_id !== taskId) continue;
+    if (row.step === "run.start") starts += 1;
+    else if (row.step === "fix.dispatch") strikes += 1;
+  }
+  const ledgerMissing = taskId === undefined ? missing : input.ledgerUnavailableReason ?? "ledger-not-in-hand";
+  const attempt = input.runStartWritten ? starts : starts + 1;
+  const areas = [...new Set((files ?? []).map(topLevelArea))].sort();
+  const boundedAreas = areas.length > TASK_SHAPE_AREAS_MAX
+    ? [...new Set([...areas.slice(0, TASK_SHAPE_AREAS_MAX - 1), "other"])].sort() : areas;
+  const reconReason = input.reconUnavailableReason ?? missing;
+  const counted = (count: number) => ({ count, bucket: taskShapeCountBucket(count) });
+  return {
+    version: TASK_SHAPE_VERSION,
+    declaredFiles: !task ? unavailable(missing) : !Array.isArray(files) ? unavailable("files-not-declared")
+      : { state: "observed" as const, value: counted(files.length) },
+    topLevelAreas: !task ? unavailable(missing) : !Array.isArray(files) ? unavailable("files-not-declared")
+      : { state: "observed" as const, value: boundedAreas },
+    acceptanceCriteria: !task ? unavailable(missing) : !Array.isArray(acceptance) ? unavailable("acceptance-not-declared")
+      : { state: "observed" as const, value: counted(acceptance.length) },
+    proofDialects: !task ? unavailable(missing) : !Array.isArray(acceptance) ? unavailable("acceptance-not-declared")
+      : { state: "observed" as const, value: [...new Set(acceptance.map((c) => proofDialect(c?.proof)))].sort() },
+    dependsOnDepth: !task ? unavailable(missing) : dependsOnDepth(task, input.tasks),
+    attemptNumber: !input.ledgerRows || taskId === undefined ? unavailable(ledgerMissing)
+      : attempt < 1 ? unavailable("run-start-not-in-live-ledger")
+        : { state: "observed" as const, value: { count: attempt, bucket: cappedBucket(attempt, 3), basis: "live-ledger" as const } },
+    priorStrikes: !input.ledgerRows || taskId === undefined ? unavailable(ledgerMissing)
+      : { state: "observed" as const, value: { count: strikes, bucket: cappedBucket(strikes, 2), basis: "live-ledger" as const } },
+    lane: tokenEvidence(input.lane, missing, "lane-not-a-token"),
+    repo: !task ? unavailable(missing) : tokenEvidence(task.repo, "repo-not-declared", "repo-not-a-token"),
+    recon: unavailable(reconReason) as Evidence<TaskShapeRecon>,
+    reconSizeEstimate: unavailable(reconReason),
+  };
+}
+
+export type TaskShapeCovariates = ReturnType<typeof taskShapeCovariates>;
+
+function isTaskShape(value: unknown): value is TaskShapeCovariates {
+  return value !== null && typeof value === "object" && (value as { version?: unknown }).version === TASK_SHAPE_VERSION;
+}
+
+/** The task's own rows from the live ledger, or the reason they cannot be counted. A torn line that names
+ *  the task could be one of its run.starts, so it makes the counts unavailable rather than low. */
+function taskLedgerRows(ledgerPath: string, taskId: string): { rows?: Record<string, unknown>[]; reason?: string } {
+  if (!existsSync(ledgerPath)) return { rows: [] };
+  const needle = JSON.stringify(taskId);
+  const rows: Record<string, unknown>[] = [];
+  for (const line of readFileSync(ledgerPath, "utf8").split("\n")) {
+    if (!line.includes(needle)) continue;
+    try {
+      rows.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      const reason = "torn-ledger-line-names-task";
+      return { reason };
+    }
+  }
+  return { rows };
+}
+
+/** The block a dispatching lane records: reads the live ledger itself for attempt and strike counts,
+ *  and never throws — a failure is a block of named gaps, not a blocked dispatch. */
+export function dispatchTaskShape(input: Omit<TaskShapeInput, "ledgerRows" | "ledgerUnavailableReason"> & { ledgerPath?: string }): TaskShapeCovariates {
+  let ledger: { rows?: Record<string, unknown>[]; reason?: string } = { reason: "ledger-not-in-hand" };
+  try {
+    if (input.ledgerPath !== undefined && input.task?.id) ledger = taskLedgerRows(input.ledgerPath, input.task.id);
+  } catch {
+    const reason = "ledger-unreadable";
+    ledger = { reason };
+  }
+  try {
+    return taskShapeCovariates({ ...input, ledgerRows: ledger.rows, ledgerUnavailableReason: ledger.reason });
+  } catch {
+    const reason = "task-shape-build-failed";
+    return taskShapeCovariates({ lane: input.lane }, reason);
+  }
+}
+
+/** The fix rung's block: its task record is in hand and its dispatch's run.start is already ledgered. */
+export function fixLaneBenchmarkWork(task: TaskShapeTask, ledgerPath: string): BenchmarkWorkInput {
+  return { shape: dispatchTaskShape({ task, ledgerPath, lane: "fix", runStartWritten: true,
+    reconUnavailableReason: "fix-lane-does-not-observe-recon" }) };
+}
+
+const RECON_STEP_STATES: Readonly<Record<string, TaskShapeRecon>> = {
+  "recon.done": "ran", "recon.reused": "reused", "recon.degraded": "degraded", "recon.masked": "masked",
+};
+const RECON_SIZE_GAPS: Readonly<Record<TaskShapeRecon, string>> = {
+  ran: "recon-report-has-no-size-estimate", reused: "recon-report-has-no-size-estimate",
+  degraded: "recon-degraded-no-report", masked: "recon-masked",
+};
+
+export interface BenchmarkWorkInput { taskClass?: string; risk?: string; shape?: TaskShapeCovariates }
+
+/** What an assignment receipt knows about the work so far: `run.start` sets class, risk and shape, and
+ *  each recon step marks the shape's recon state for the assignments that follow it. */
+export function observeBenchmarkWork(work: BenchmarkWorkInput, step: string, extra: Record<string, unknown>): BenchmarkWorkInput {
+  if (step === "run.start") {
+    return {
+      ...(typeof extra.task_class === "string" ? { taskClass: extra.task_class } : {}),
+      ...(typeof extra.risk === "string" ? { risk: extra.risk } : {}),
+      ...(isTaskShape(extra.task_shape) ? { shape: extra.task_shape } : {}),
+    };
+  }
+  const recon = Object.hasOwn(RECON_STEP_STATES, step) ? RECON_STEP_STATES[step] : undefined;
+  if (!recon || !work.shape) return work;
+  return { ...work, shape: { ...work.shape, recon: { state: "observed", value: recon },
+    reconSizeEstimate: unavailable(RECON_SIZE_GAPS[recon]) } };
+}
+
+/** A non-dispatch lane has a lane name and no task record: every other covariate is a named gap. */
+export function nonDispatchBenchmarkWork(lane: string): BenchmarkWorkInput {
+  return { shape: taskShapeCovariates({ lane }, "non-dispatch-lane-has-no-task-record") };
+}
+
 export interface BenchmarkRunAssignmentInput {
   id: string;
   requested: { model: string; effort: string };
@@ -110,7 +340,7 @@ export interface BenchmarkRunAssignmentInput {
 
 export function benchmarkRunAssignmentReceipt(
   assignment: BenchmarkRunAssignmentInput,
-  work: { taskClass?: string; risk?: string },
+  work: BenchmarkWorkInput,
   stackEvidence: BenchmarkStackEvidence = {},
 ) {
   // No inference from checkout HEAD, route, or site-level consent: none of those pins the
@@ -121,6 +351,8 @@ export function benchmarkRunAssignmentReceipt(
     work: {
       taskClass: observedString(work.taskClass, "not-recorded-at-assignment"),
       risk: observedString(work.risk, "not-recorded-at-assignment"),
+      shape: isTaskShape(work.shape) ? work.shape
+        : taskShapeCovariates({}, work.shape === undefined ? "task-shape-not-supplied-by-caller" : "task-shape-invalid"),
     },
     stack: {
       provider: observedString(assignment.selected.provider, "routing-provider-unavailable"),
@@ -289,7 +521,7 @@ export function benchmarkNonDispatchSpawn(
         observedAssignmentId = assignment.id;
         try {
           write("worker.assignment", { worker_assignment: assignment,
-            benchmark_run: benchmarkRunAssignmentReceipt(assignment, {}, nonDispatchWorkerStack) });
+            benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane), nonDispatchWorkerStack) });
         } catch {
           observedAssignmentId = priorId;
           console.error(JSON.stringify({ event: "benchmark.non_dispatch_assignment_unavailable", lane, reason: "ledger-write-failed" }));
