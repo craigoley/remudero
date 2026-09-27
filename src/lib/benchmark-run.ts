@@ -222,6 +222,25 @@ export function callerOwnsBenchmarkReceipt(args: SpawnWorkerArgs): boolean {
   return (args as { [CALLER_OWNS_BENCHMARK_RECEIPT]?: boolean })[CALLER_OWNS_BENCHMARK_RECEIPT] === true;
 }
 
+/** PRIMARY CONTROL (W1-T4616): the longest redacted error message a failed-spawn receipt keeps. */
+export const SPAWN_FAILURE_MESSAGE_MAX_CHARS = 240;
+
+/** W1-T4616: the cause of a spawn that threw before returning — its class, code and a bounded message
+ *  with paths, credentials and long tokens redacted — and whether it failed before any model was
+ *  selected, so the attempt is a counted coverage gap rather than a model's failure. */
+export function spawnFailureDetail(error: unknown, assignmentObserved: boolean): Record<string, unknown> {
+  const errorClass = error instanceof Error ? error.constructor.name || "Error" : typeof error;
+  const code = error !== null && typeof error === "object" && typeof (error as { code?: unknown }).code === "string"
+    ? (error as { code: string }).code : undefined;
+  const raw = error instanceof Error ? error.message : String(error);
+  const message = raw
+    .replace(/\b(?:sk|ghp|gho|ghs|ghu|xox[abp])[-_][A-Za-z0-9_-]{6,}/g, "<secret>")
+    .replace(/(?:~|\.{1,2})?(?:\/[^\s/:'"`]+){2,}\/?/g, "<path>")
+    .replace(/[A-Za-z0-9+_=-]{32,}/g, "<token>")
+    .replace(/\s+/g, " ").trim().slice(0, SPAWN_FAILURE_MESSAGE_MAX_CHARS);
+  return { pre_selection: !assignmentObserved, error_class: errorClass, ...(code ? { error_code: code } : {}), error_message: message };
+}
+
 /** Capture an auxiliary worker call without turning telemetry into a worker or PR gate. The
  * caller's existing assignment sink remains authoritative when one is supplied. */
 export function benchmarkNonDispatchSpawn(
@@ -278,7 +297,8 @@ export function benchmarkNonDispatchSpawn(
       } });
     } catch (error) {
       recordAttempt({ ...(observedAssignmentId ? { selection_assignment_id: observedAssignmentId } : {}),
-        success: false, worker_failure: "spawn-threw-before-result" });
+        success: false, worker_failure: "spawn-threw-before-result",
+        ...spawnFailureDetail(error, observedAssignmentId !== undefined) });
       throw error;
     }
     const assignmentId = result.selectionAssignmentId ?? observedAssignmentId;
