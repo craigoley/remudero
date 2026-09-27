@@ -10,6 +10,10 @@
   status: queued
   attempts: 0
   origin: followup:W1-T4081-1790143034676
+  rationale: |
+    P25 ratification is a separate operator decision from task dispatch. Record how the
+    ratified criteria map to the current plan and decision history so later automation
+    can verify the approved scope without inferring intent from status text alone.
   files:
     - plan/tasks.yaml
     - MASTER-PLAN.md

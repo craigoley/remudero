@@ -9,6 +9,10 @@
   status: queued
   attempts: 0
   origin: followup:W1-T4081-1790143034676
+  rationale: |
+    A successor task can be dispatched from a stale plan view while a live PR already owns
+    the same work. Check current origin/main and open PR heads before dispatch so this
+    ratified follow-up does not duplicate a build or erase an in-flight credit.
   files:
     - plan/tasks.yaml
     - MASTER-PLAN.md
