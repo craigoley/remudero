@@ -1,0 +1,54 @@
+- id: W1-T4604
+  title: "A SUPERSEDED CI GATE SURVIVES NORMAL CANCELLATION AND HOLDS THE CURRENT PR HEAD PENDING"
+  repo: remudero
+  depends_on: [W1-T4400, W1-T4406]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator observed PR #7404 CI runs 36312077000 and 36313876752 on 2026-09-27"
+  plan_refs: ["W1-T4400", "W1-T4406", "#7404", "https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation"]
+  files:
+    - .github/workflows/ci.yml
+    - .github/workflows/ci-gate.yml
+    - scripts/ci-gate-from-contract.mjs
+  status: queued
+  rationale: |
+    PR #7404's old e83e410d CI run entered ci-gate at 10:54 UTC after the new
+    96f03ea6 run had been requested at 10:51. The old coverage-ratchet was red,
+    but ci-gate still waited for required contexts. The new run stayed pending
+    with zero jobs. A normal `gh run cancel 36312077000` did not stop the old
+    `if: always()` ci-gate; a targeted GitHub force-cancel did, and the new run
+    immediately acquired jobs. This is a reproducible PR-flow delay, not a
+    reason to push a dummy SHA or relax the current-head required checks.
+  design: |
+    Make the always-run aggregate remain fail-closed when any required check on
+    the CURRENT head fails, is unreadable, or never registers, while allowing a
+    superseded or cancelled workflow to stop promptly. In particular, its job
+    condition must consult cancellation and not defeat GitHub's ordinary
+    cancellation re-evaluation; a cancelled predecessor must release PR-number
+    concurrency to the replacement.
+    If a head check is added inside the aggregator, pin the PR number and SHA
+    from the event, distinguish an unreadable PR head from a confirmed different
+    head, and avoid turning an API failure into a false green. Keep the `edited`
+    re-aggregation contract and merge-group behavior intact. Add focused tests
+    beside the existing CI gate tests when implementing, then extend this
+    task's `files:` scope in the same PR. Replay the observed
+    old-head failure/new-head pending case plus a current-head failure, skipped
+    required check, and transient GitHub read error. Do not cancel a current run,
+    change branch protection, or bypass its review/coverage gates.
+  acceptance:
+    - claim: "a normal cancellation releases a superseded ci-gate and lets replacement-head CI start"
+      proof: "unit test: superseded ci gate stops on cancellation without holding a new head"
+    - claim: "the current head still fails closed on real red, missing, and unreadable required checks"
+      proof: "unit test: current head ci gate remains fail closed after cancellation repair"
+    - claim: "edited re-aggregation and merge-group checks are unchanged"
+      proof: "unit test: ci gate cancellation preserves edited and merge group routes"
+    - claim: "the shipped CI job condition consults cancellation on the live workflow"
+      proof: "grep: cancelled() in .github/workflows/ci.yml"
+  falsifier: |
+    A superseded `always()` job keeps the replacement PR run pending; a current
+    red or unreadable required check becomes green; a merge-group run waits for
+    pull_request-only contexts; or the only workaround is a dummy push.
