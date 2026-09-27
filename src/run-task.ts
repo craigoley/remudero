@@ -1457,6 +1457,8 @@ import {
   creditSubjectIsImplementation,
   planOnlyRunBranchReceipts,
   REGENERABLE_ARTIFACT_GENERATORS,
+  repairLadderCommand,
+  trackRepairLadder,
 } from "./lib/sweep.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -16566,7 +16568,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         openTaskIds,
         reviewerCodeFreshness: () => checkReviewerCodeFreshness(repoRoot, process.env),
         deps: {
-          spawn,
+          // W1-T3718: the SAME repair-ladder tracking the sweep's fix spawn carries.
+          spawn: trackRepairLadder(spawn, { config, log }),
           waitForCiGreen,
           // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
           // non-green — see runFixRung's own doc for why this must happen on
@@ -46203,6 +46206,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T3685: the one question an operator asks first and no other verb answered — `rmd status` renders this daemon's OWN board from local state, `rmd ci-failures` answers a narrower one (failures, one repo, by day). Surveys every repository named by `--repo` (repeatable), or `config.fleetRepos` when none is given, or a three-repository fallback when that is unset too — never a list written into `pr-board.ts` itself. ONE `gh pr list --json ...` call per repository (surveyPullRequestBoard, src/lib/pr-board.ts): a per-PR follow-up read is refused by design, the secondary-rate-limit hazard. A repository that cannot be read prints UNAVAILABLE with the read error, never rendered as zero open — an empty queue and an unreachable one are opposite facts. Each open pull request prints its number, title, draft state, head branch, and the NAMES of its failing and pending checks. REPORT-ONLY: exit code is always 0, whatever the board contains — this verb reports, it does not gate.",
   },
   {
+    name: "repair-ladder",
+    syntax: "rmd repair-ladder [--json]",
+    summary: "Report the repair ladder's live state and price each paid fallback rung; changes nothing.",
+    detail: "W1-T3718: the fix rung can stall with every provider refusing and both paid rungs switched off, and the only trace was one fix.spawn_infra_blocked ledger row. This reports the durable stall record (since when, for how long, and per provider whether it is FULL or CANNOT BE ASKED -- only the first argues for paying) and prices each paid rung: the one config edit that arms it (workerProviders.cashFallbackWhenBlocked, overflow: \"api_key\"), what it bills, its dailyCapUsd ceiling, and what would still refuse it with the switch on. REPORT-ONLY: it never writes config -- enabling a paid fallback spends money and stays an operator act. --json prints the same as one object.",
+  },
+  {
     name: "census-membership",
     syntax: "rmd census-membership [--base <ref>] [--files]",
     summary: "Name the population-walking census suites this diff enters.",
@@ -47128,6 +47137,13 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["ci-failures", (rest) => ciFailuresCommand(rest)],
   ["board", (rest) => boardCommand(rest)],
   ["census-membership", (rest) => censusMembershipCommand(rest)],
+  [
+    "repair-ladder",
+    (rest) => {
+      const config = loadConfig();
+      return repairLadderCommand(rest, config, fixRoundGitOwnership(config).cashTools ?? FIX_WORKER_TOOLS);
+    },
+  ],
   ["caller-sweep", (rest) => callerSweepCommand(rest)],
   ["ci-learning", (rest) => ciLearningCommand(rest)],
   ["rule-efficacy", (rest) => ruleEfficacyCommand(rest)],

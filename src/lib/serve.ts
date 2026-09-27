@@ -134,6 +134,7 @@ import { checkServiceFreshness } from "./self-sync.js";
 import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
+import { readRepairLadderState, type RepairLadderState } from "./worker-provider.js";
 import {
   ProviderRoutingPolicyError,
   clearProviderRoutingPolicyOverride,
@@ -381,6 +382,9 @@ export interface ServeDeps {
     now?: () => number;
     read?: (root: string, deps?: { now?: () => number }) => ProviderRoutingStatus;
   };
+  /** W1-T3718: the repair ladder's fleet state, spliced into `/v1/status` and
+   *  `/v1/daemon-health`. The real reader is rooted at `fleetControlRoot`; a test injects one. */
+  repairLadder?: { read?: (root: string, nowMs: number) => RepairLadderState };
   /** Server-owned provider browser-auth profiles and session store. Credential homes remain on the
    * daemon; the browser receives only provider-auth-v1 projections. */
   providerAuth?: {
@@ -754,15 +758,18 @@ function fallbackStatusSnapshot(deps: BoardDeps, nowMs: number, staleness: Conso
 function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: ConsoleResponseStaleness): unknown {
   const nowMs = systemClock.now();
   const modelApprovals = deps.modelApprovals ?? [];
+  // W1-T3718: a cold or stalled cache still reports the repair ladder -- it is one local file read,
+  // and a console that cannot reach GitHub is exactly when a stalled ladder must stay visible.
+  const repairLadder = (deps.repairLadder?.read ?? readRepairLadderState)(deps.fleetControlRoot, nowMs);
   switch (path) {
     case "/v1/status":
-      return projectConsoleStatusResponse(fallbackStatusSnapshot(deps.board, nowMs, staleness), modelApprovals, nowMs);
+      return { ...(projectConsoleStatusResponse(fallbackStatusSnapshot(deps.board, nowMs, staleness), modelApprovals, nowMs) as object), repairLadder };
     case "/v1/recent":
       return { entries: [], staleness };
     case "/v1/inbox":
       return { ready: [], drafting: [], notReady: [], staleness };
     case "/v1/daemon-health":
-      return { pollIntervalMs: deps.daemonHealth?.defaultPollIntervalMs ?? DEFAULT_POLL_MS, staleness };
+      return { pollIntervalMs: deps.daemonHealth?.defaultPollIntervalMs ?? DEFAULT_POLL_MS, repairLadder, staleness };
     case "/v1/feedback":
       return { entries: [], staleness };
     case "/v1/operator-activity":
@@ -777,6 +784,46 @@ function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: Con
     default:
       return { staleness };
   }
+}
+
+/**
+ * W1-T3718: SPLICE THE REPAIR LADDER'S STATE INTO A SURFACE THE OPERATOR ALREADY READS.
+ *
+ * MEASURED 2026-09-17: the fix rung could not spawn for ~90 minutes and the only trace was one
+ * ledger row among 731 -- not on the board, not in `/v1/status`, not in daemon-health. This adds
+ * no panel: `repairLadder` rides the two responses that already carry honest unavailability,
+ * stating the ladder is down, since when, and for how long -- never a count of refusals.
+ * A non-JSON or non-object body passes through untouched.
+ */
+export function withRepairLadder(route: Route, read: (nowMs: number) => RepairLadderState): Route {
+  return {
+    ...route,
+    handler: async (req, res, ctx) => {
+      const buffer = new RouteResponseBuffer();
+      await route.handler(req, buffer as unknown as import("node:http").ServerResponse, ctx);
+      const nowMs = systemClock.now();
+      const buffered = buffer.buffered(nowMs);
+      const headers = { ...buffered.headers };
+      let body: unknown;
+      if (/application\/json/i.test(headers["content-type"] ?? "")) {
+        try {
+          body = JSON.parse(buffered.body);
+        } catch (error) {
+          // An unparseable JSON body is the route's own defect: it passes through byte-identical.
+          console.error(JSON.stringify({ event: "serve.repair_ladder_splice_skipped", reason: (error as Error).message }));
+          body = undefined;
+        }
+      }
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        res.writeHead(buffered.status, headers);
+        res.end(buffered.body);
+        return;
+      }
+      delete headers["content-length"];
+      res.writeHead(buffered.status, headers);
+      res.end(JSON.stringify({ ...(body as Record<string, unknown>), repairLadder: read(nowMs) }));
+    },
+  };
 }
 
 export function projectConsoleStatusRoute(route: Route, modelApprovals?: readonly ModelApproval[]): Route {
@@ -2468,12 +2515,13 @@ function assembleServeRoutes(
     const nowMs = (deps.ciIncidents?.clock ?? systemClock).now();
     for (const event of outcome.events) appendLedger(deps.ledgerPath, ciIncidentEventLedgerLine(event, nowMs));
   };
+  const readLadder = (nowMs: number): RepairLadderState => (deps.repairLadder?.read ?? readRepairLadderState)(deps.fleetControlRoot, nowMs);
   const rawRoutes = [
-    projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen), modelApprovals),
+    withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen), modelApprovals), readLadder),
     buildRepoDashboardRoute({ root: deps.questionsRoot, ledgerPath: deps.ledgerPath, planPath: deps.panelGraph.planPath }),
     buildRecentRoute(deps.board),
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
-    buildDaemonHealthRoute(daemonHealthDeps),
+    withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),
     buildAccountUsageRoute(accountUsageDeps),
     ...buildProviderAuthRoutes(providerAuthStore, undefined, (input) => startProviderAuthSession(providerAuthStore, input)),
     buildProviderRoutingRoute({ root: deps.fleetControlRoot, ...deps.providerRouting }),
