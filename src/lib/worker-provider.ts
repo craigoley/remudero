@@ -22,6 +22,7 @@ import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { withTempDir } from "./tmp.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
+import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWindow } from "./version-switchback.js";
 import type { ModelApproval } from "./config-schema.js";
 import {
   spawnDetachedGroup,
@@ -175,6 +176,8 @@ export interface CodexModelDecision {
   selectedEffort?: string;
   preferredModel?: string;
   preferenceBypass?: CodexModelPreferenceBypassReason;
+  /** Task-stable overlap assignment, attached only when both versions were eligible. */
+  switchback?: SwitchbackAssignment;
   /** The Claude model this Codex request was routed FOR, e.g. `"claude-opus-5"` — carried here (rather than left to the
    *  caller to re-thread) so a spawn served under {@link capabilityFallbackReason} is attributable to the exact lane that
    *  silently downgraded (W1-T3097). */
@@ -973,7 +976,8 @@ export function selectCodexModel(
   requestedModel?: string,
   requestedEffort?: string,
   capabilities?: CapabilityLadder,
-  policy: { preferredModel?: CodexModelPreference; reservePercent?: number } = {},
+  policy: { preferredModel?: CodexModelPreference; reservePercent?: number;
+    switchback?: { window: VersionSwitchbackWindow; taskId: string; at: string } } = {},
 ): ProviderCapacity {
   const reading = rateLimits && typeof rateLimits === "object" ? rateLimits as CodexRateLimitResult : {};
   const visible: CodexModelInfo[] = [];
@@ -1048,6 +1052,11 @@ export function selectCodexModel(
     const preferredOption = options.find((option) => option.id === scopedPreference.model);
     preferenceBypass = preferredOption?.reason ?? "not-visible";
   }
+  const switchback = !forced && !scopedPreference && policy.switchback?.window.provider === "codex"
+    ? switchbackArmFor(policy.switchback.window, policy.switchback.taskId, policy.switchback.at,
+      eligible.map((candidate) => candidate.option!.id))
+    : null;
+  if (switchback) selected = eligible.find((candidate) => candidate.option?.id === switchback.model);
   selected ??= eligible[0];
   const decisionBase: CodexModelDecision = {
     requestedCapability: tier,
@@ -1057,6 +1066,7 @@ export function selectCodexModel(
     ...(requestedModel ? { requestedModel } : {}),
     ...(scopedPreference ? { preferredModel: scopedPreference.model } : {}),
     ...(preferenceBypass ? { preferenceBypass } : {}),
+    ...(switchback ? { switchback } : {}),
     ...(capabilityFallbackReason ? { capabilityFallbackReason } : {}),
   };
   if (!selected) {
@@ -1160,6 +1170,8 @@ export interface CodexCapacityDeps {
   /** Live model preference and reserve from the provider policy; revalidated against this read. */
   preferredModel?: CodexModelPreference;
   reservePercent?: number;
+  /** Explicit task context for an operator-registered version overlap. */
+  switchback?: { window: VersionSwitchbackWindow; taskId: string; at: string };
   /**
    * Injected capability ladder (W1-T2573), bypassing the `loadMounts` disk read below — for a
    * caller that already holds a validated Mounts table, and for tests. When omitted,
@@ -1567,6 +1579,7 @@ function selectCodexRuntime(
     : selectCodexModel(value.models, value.rateLimits, config, deps.requestedModel, deps.requestedEffort, capabilities, {
       preferredModel: deps.preferredModel,
       reservePercent: deps.reservePercent,
+      switchback: deps.switchback,
     });
   if (!value.retryDetail) return selected;
   return {
