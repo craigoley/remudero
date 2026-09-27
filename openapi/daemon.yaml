@@ -4993,6 +4993,788 @@ components:
         detail:
           type: string
 
+    # ── W1-T4611: the fleet-control writes and ingress -- request/response bodies derived from
+    # each handler's own validator and `sendJson` payload (src/lib/service.ts, panel-actions.ts,
+    # panel-graph.ts, operator-notes.ts, serve.ts, provider-routing-policy.ts,
+    # operator-merge-hold.ts, github-event-wake.ts).
+
+    HighTierRefusal:
+      type: object
+      description: >
+        The 403 body a HIGH-tier write returns from src/lib/service.ts's dispatch gate, before its
+        handler runs. `forbidden` -- the credential lacks write scope (`required_scope`) or its
+        granted write tier is below HIGH (`required_tier: high`; the bearer write token is pinned
+        at LOW, so only a stepped-up operator session reaches HIGH). `confirm_nonce_required` --
+        the tier was granted but no `X-Confirm-Nonce` was presented, or the nonce was unknown,
+        expired (5 minutes), already spent, or bound to a different method, path or raw body.
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          enum:
+            - forbidden
+            - confirm_nonce_required
+        required_scope:
+          type: string
+          enum:
+            - read
+            - write
+        required_tier:
+          type: string
+          enum:
+            - low
+            - middle
+            - high
+
+    ConfirmNonceRequest:
+      type: object
+      description: >
+        POST /v1/confirm's body (src/lib/service.ts's `validateConfirmNonceRequest`) -- names the
+        exact HIGH-tier call the returned nonce will authorize. The nonce is consumed only by a
+        request whose method, path and RAW body bytes equal these fields exactly.
+      required:
+        - method
+        - path
+        - payload
+      properties:
+        method:
+          type: string
+          enum:
+            - GET
+            - POST
+            - PUT
+            - PATCH
+            - DELETE
+        path:
+          type: string
+          description: The target route's path; must start with `/`.
+        payload:
+          type: string
+          description: >
+            The exact raw request body the HIGH-tier call will send, byte for byte (an empty
+            string for a call with no body). It is compared verbatim, never JSON-normalised.
+
+    ConfirmNonceResult:
+      type: object
+      description: >
+        POST /v1/confirm's 200 body. `nonce` is single-use (a wrong guess spends it too) and
+        expires 5 minutes after issue (src/lib/service.ts's `CONFIRM_NONCE_TTL_MS`).
+      required:
+        - nonce
+      properties:
+        nonce:
+          type: string
+          description: 48 hex characters; present it as the `X-Confirm-Nonce` header.
+
+    DrainFeedbackRequest:
+      type: object
+      description: >
+        POST /v1/drain/feedback's body (src/lib/panel-actions.ts's `validateDrainFeedback`) --
+        the post-drain rundown's one-tap verdict on one task (W1-T141).
+      required:
+        - taskId
+        - verdict
+        - drainRunId
+      properties:
+        taskId:
+          type: string
+        verdict:
+          type: string
+          enum:
+            - good
+            - wrong
+            - needs-follow-up
+        drainRunId:
+          type: string
+        note:
+          type: string
+          description: >
+            W1-T435 steering note, at most 2000 characters (a longer one is a 400, never
+            truncated). Quoted into the next fix-rung dispatch only for `wrong` or
+            `needs-follow-up`.
+
+    DrainFeedbackResult:
+      type: object
+      required:
+        - ok
+        - taskId
+        - verdict
+      properties:
+        ok:
+          type: boolean
+          enum:
+            - true
+        taskId:
+          type: string
+        verdict:
+          type: string
+          enum:
+            - good
+            - wrong
+            - needs-follow-up
+
+    KickRequest:
+      type: object
+      description: >
+        POST /v1/drain/kick's body (src/lib/panel-actions.ts's `validateTaskId`). `taskId` must be
+        a non-empty id safe to embed in a marker filename: `^[A-Za-z0-9][A-Za-z0-9._-]{0,126}$`
+        with no `..` (src/lib/fleet-control.ts's `isSafeTaskId`).
+      required:
+        - taskId
+      properties:
+        taskId:
+          type: string
+
+    KickResult:
+      type: object
+      description: >
+        The kick marker was written. `armed` records intent only -- the daemon's own
+        `assertRunnable`-gated dispatch (or refusal) happens at its next poll.
+      required:
+        - armed
+        - taskId
+      properties:
+        armed:
+          type: boolean
+          enum:
+            - true
+        taskId:
+          type: string
+
+    DrainNowResult:
+      type: object
+      description: >
+        The `DRAIN_REQUESTED` marker was written; the daemon runs one dispatch cycle at its next
+        poll. Records intent only.
+      required:
+        - armed
+      properties:
+        armed:
+          type: boolean
+          enum:
+            - true
+
+    DrainPreviewEdge:
+      type: object
+      description: One dependency edge on a drain-preview card (src/lib/drain.ts's `DependencyEdge`).
+      required:
+        - id
+        - title
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+          description: The linked task's title, or its id when the plan does not carry it.
+
+    DrainPreviewCard:
+      type: object
+      description: One would-drain task card (src/lib/drain.ts's `DrainPreviewCard`, W1-T140).
+      required:
+        - id
+        - title
+        - description
+        - dependsOn
+        - dependents
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+          description: The task's plan `note`, or an empty string when it has none.
+        dependsOn:
+          type: array
+          description: Incoming edges -- this task's own `depends_on`.
+          items:
+            $ref: "#/components/schemas/DrainPreviewEdge"
+        dependents:
+          type: array
+          description: Outgoing edges -- tasks that DIRECTLY declare this task as a dependency (one hop).
+          items:
+            $ref: "#/components/schemas/DrainPreviewEdge"
+
+    DrainPreviewResult:
+      type: object
+      description: GET /v1/drain/preview's body -- the would-drain queue in dispatch order.
+      required:
+        - cards
+      properties:
+        cards:
+          type: array
+          items:
+            $ref: "#/components/schemas/DrainPreviewCard"
+
+    FeedbackPreviewRequest:
+      type: object
+      description: >
+        POST /v1/feedback/preview's body (src/lib/panel-graph.ts's `validatePreviewFeedback`).
+        `replyTo`, when present, must name a feedback entry parked at `grilling`, the same rule
+        POST /v1/feedback applies.
+      required:
+        - text
+      properties:
+        text:
+          type: string
+          description: The draft; must be non-blank.
+        replyTo:
+          type: string
+          description: A feedback entry id; non-blank when present.
+
+    FeedbackPreviewResult:
+      type: object
+      description: >
+        POST /v1/feedback/preview's 200 body. `expansion` is null when no expander is wired, the
+        expander threw, or its output failed src/lib/feedback.ts's `validateFeedbackExpansion`
+        bounds -- fail-open, since the console files the draft plain. Nothing is filed either way.
+      required:
+        - expansion
+      properties:
+        expansion:
+          type:
+            - object
+            - "null"
+          description: src/lib/feedback.ts's `FeedbackExpansion`.
+          required:
+            - claim
+            - evidence
+            - recon
+            - falsifying_check
+          properties:
+            claim:
+              type: string
+              description: A falsifiable, plain-language headline; at most 300 characters.
+            evidence:
+              type: string
+              description: Only measured/verbatim specifics the operator stated; may be empty; at most 800 characters.
+            recon:
+              type: array
+              description: At most 10 directives, each at most 300 characters.
+              items:
+                type: string
+            falsifying_check:
+              type: string
+              description: What observation would retire this claim; at most 300 characters.
+
+    GithubWebhookPayload:
+      type: object
+      description: >
+        A GitHub webhook delivery body. Its shape is GitHub's and genuinely open-ended per event;
+        the handler reads only the two fields declared here. Anything else is carried through
+        unread except for `check_run` classification (name, conclusion, head sha).
+      properties:
+        action:
+          type: string
+          description: The event's action, when the event has one (`status` does not).
+        repository:
+          type: object
+          properties:
+            full_name:
+              type: string
+              description: Must equal this daemon's own `owner/repo`, or the delivery is a 403.
+
+    GithubWebhookReceipt:
+      type: object
+      description: >
+        POST /v1/hooks/github's 202 body -- one of four shapes, all a 2xx so GitHub never retries:
+        `{accepted: true}` (the sweep-wake marker was written or coalesced),
+        `{accepted: false, reason: successful_leaf}` (semantic enforce mode: a successful leaf
+        check run, recorded for dedup but no wake), `{duplicate: true}` (this delivery id was
+        already seen; nothing re-written), or `{error: ignored}` (an event/action outside the
+        allowlist; nothing written).
+      properties:
+        accepted:
+          type: boolean
+        reason:
+          type: string
+          enum:
+            - successful_leaf
+        duplicate:
+          type: boolean
+          enum:
+            - true
+        error:
+          type: string
+          enum:
+            - ignored
+
+    GithubWebhookRefusal:
+      type: object
+      description: >
+        POST /v1/hooks/github's refusal body (src/lib/github-event-wake.ts's
+        `createGitHubEventWakeHandler`), checked in this order: `webhook_not_configured` (503, no
+        secret configured -- the route ships dark), `body_too_large` (413, over 1 MiB),
+        `invalid_signature` (401), `invalid_json` (400), `repository_mismatch` (403),
+        `missing_delivery_id` (400).
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          enum:
+            - webhook_not_configured
+            - body_too_large
+            - invalid_signature
+            - invalid_json
+            - repository_mismatch
+            - missing_delivery_id
+
+    MergeHoldRequest:
+      type: object
+      description: >
+        POST /v1/merge-hold's body (src/lib/panel-actions.ts's `validateConsoleMergeHold`).
+        Unknown fields are refused. There is deliberately no identity field: the recorded `by` is
+        the authenticated caller, never the payload.
+      required:
+        - action
+        - reason
+      properties:
+        action:
+          type: string
+          enum:
+            - engage
+            - release
+        reason:
+          type: string
+          description: Non-blank; stored trimmed.
+        prNumber:
+          type: integer
+          description: A positive integer. Omitted means the whole fleet.
+        taskId:
+          type: string
+          description: A `W1-T<n>` id -- board enrichment only, valid only with `prNumber`.
+
+    AutomergeHold:
+      type: object
+      description: The current durable merge hold for a scope (src/lib/review.ts's `AutomergeHold`).
+      required:
+        - by
+        - reason
+      properties:
+        by:
+          type: string
+        reason:
+          type: string
+
+    MergeHoldResult:
+      type: object
+      description: >
+        src/lib/operator-merge-hold.ts's `OperatorMergeHoldResult`. A release of an already-clear
+        scope is an idempotent no-op: `written: false` and neither `prior` nor `current`.
+      required:
+        - action
+        - scope
+        - written
+      properties:
+        action:
+          type: string
+          enum:
+            - engage
+            - release
+        scope:
+          type: string
+          description: "`the whole fleet` or `PR #<n>`."
+        written:
+          type: boolean
+        prior:
+          $ref: "#/components/schemas/AutomergeHold"
+        current:
+          $ref: "#/components/schemas/AutomergeHold"
+
+    MergeHoldRefusal:
+      type: object
+      description: >
+        POST /v1/merge-hold's 403 body: the dispatch gate's HIGH-tier refusals (see
+        HighTierRefusal), plus `bearer_provenance_required` from the handler itself when the
+        caller's identity resolves to `unknown`, so no hold is ever written anonymously.
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          enum:
+            - forbidden
+            - confirm_nonce_required
+            - bearer_provenance_required
+        required_scope:
+          type: string
+          enum:
+            - read
+            - write
+        required_tier:
+          type: string
+          enum:
+            - low
+            - middle
+            - high
+
+    OperatorNote:
+      type: object
+      description: One provenance-stamped operator guidance note (src/lib/operator-notes.ts's `OperatorNoteEntry`).
+      required:
+        - ts
+        - taskId
+        - author
+        - note
+      properties:
+        ts:
+          type: string
+          format: date-time
+          description: Stamped server-side at write time, never client-supplied.
+        taskId:
+          type: string
+        author:
+          type: string
+        note:
+          type: string
+
+    OperatorNotesResult:
+      type: object
+      description: >
+        GET /v1/operator-notes's body -- only the notes scoped to exactly `taskId`, oldest first;
+        an empty list when none exist.
+      required:
+        - taskId
+        - notes
+      properties:
+        taskId:
+          type: string
+        notes:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperatorNote"
+
+    AddOperatorNoteRequest:
+      type: object
+      description: >
+        POST /v1/operator-notes/add's body (src/lib/operator-notes.ts's `validateAddOperatorNote`).
+        `taskId` must be a safe task id (src/lib/fleet-control.ts's `isSafeTaskId`); `author` and
+        `note` must be non-blank and are stored trimmed.
+      required:
+        - taskId
+        - author
+        - note
+      properties:
+        taskId:
+          type: string
+        author:
+          type: string
+        note:
+          type: string
+
+    AddOperatorNoteResult:
+      type: object
+      required:
+        - ok
+        - taskId
+        - author
+        - ts
+      properties:
+        ok:
+          type: boolean
+          enum:
+            - true
+        taskId:
+          type: string
+        author:
+          type: string
+        ts:
+          type: string
+          format: date-time
+
+    OperatorNoteWriteFailure:
+      type: object
+      description: The note store could not be appended to; nothing was ledgered.
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          enum:
+            - write_failed
+
+    SetDailyCostCeilingRequest:
+      type: object
+      description: >
+        POST /v1/policy/daily-cost-ceiling's body. The route adds no bounds check of its own: the
+        store refuses a non-finite value or one outside plan/policy.yaml's
+        `sweep.dailyCostCeilingUsd` bound with a 400, never clamping it.
+      required:
+        - usd
+      properties:
+        usd:
+          type: number
+
+    DailyCostCeilingResult:
+      type: object
+      description: >
+        The RESOLVED effective ceiling after the write (src/lib/policy.ts's
+        `resolveDailyCostCeiling`), never the input echoed back. `provenance: default` after a set
+        means the store could not honour it.
+      required:
+        - ok
+        - usd
+        - provenance
+        - committedDefaultUsd
+      properties:
+        ok:
+          type: boolean
+          enum:
+            - true
+        usd:
+          type: number
+        provenance:
+          type: string
+          enum:
+            - overridden
+            - default
+        committedDefaultUsd:
+          type: number
+          description: plan/policy.yaml's committed default, carried so an override shows what it replaced.
+
+    ProviderRoutingPolicyOverrideRequest:
+      type: object
+      description: >
+        POST /v1/policy/provider-routing's body (src/lib/provider-routing-policy.ts's
+        `ProviderRoutingPolicyOverrideInput`; the store is the one schema authority, so every
+        rule below is a 400 from it). Exactly these keys -- `codexModelPreference` may be omitted
+        (legacy payload, automatic selection). `enabledProviders` is non-empty, duplicate-free
+        and a subset of the committed host config; `preference` is `automatic` or an enabled,
+        unparked provider; `reservePercent` is 0-50; `expiresAt` is a canonical ISO timestamp in
+        the future and at most 24 hours away; each park names an enabled provider once with an
+        `until` in the future and no later than `expiresAt`, and at least one provider stays
+        unparked; a Codex model preference needs Codex enabled and unparked, and must match a
+        fresh, mapped, eligible option in the daemon's Codex model inventory.
+      required:
+        - enabledProviders
+        - preference
+        - reservePercent
+        - parks
+        - expiresAt
+      properties:
+        enabledProviders:
+          type: array
+          items:
+            type: string
+            enum:
+              - claude
+              - codex
+              - cash
+              - openweight
+        preference:
+          type: string
+          enum:
+            - automatic
+            - claude
+            - codex
+            - cash
+            - openweight
+        reservePercent:
+          type: number
+        parks:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProviderPark"
+        codexModelPreference:
+          type:
+            - object
+            - "null"
+          required:
+            - capability
+            - effort
+            - model
+          properties:
+            capability:
+              type: string
+              enum:
+                - economy
+                - balanced
+                - frontier
+            effort:
+              type: string
+            model:
+              type: string
+        expiresAt:
+          type: string
+          format: date-time
+
+    CommittedProviderRoutingPolicy:
+      type: object
+      description: The committed host policy an override narrows (src/lib/provider-routing-policy.ts's `CommittedProviderRoutingPolicy`).
+      required:
+        - enabledProviders
+        - preference
+        - reservePercent
+        - parks
+        - codexModelPreference
+      properties:
+        enabledProviders:
+          type: array
+          items:
+            type: string
+            enum:
+              - claude
+              - codex
+              - cash
+              - openweight
+        preference:
+          type: string
+          enum:
+            - automatic
+        reservePercent:
+          type: number
+        parks:
+          type: array
+          description: Always empty -- the committed policy parks nothing.
+          items:
+            $ref: "#/components/schemas/ProviderPark"
+        codexModelPreference:
+          type:
+            - object
+            - "null"
+          description: Always null -- the committed policy selects Codex models automatically.
+
+    EffectiveProviderRoutingPolicy:
+      type: object
+      description: >
+        The policy the next dispatch will use (src/lib/provider-routing-policy.ts's
+        `resolveProviderRoutingPolicy`). Every invalid stored state fails closed to the committed
+        config with `provenance: default` and a `fallback.reason`.
+      required:
+        - provenance
+        - committed
+        - enabledProviders
+        - routableProviders
+        - preference
+        - reservePercent
+        - parks
+      properties:
+        provenance:
+          type: string
+          enum:
+            - default
+            - overridden
+        committed:
+          $ref: "#/components/schemas/CommittedProviderRoutingPolicy"
+        enabledProviders:
+          type: array
+          items:
+            type: string
+            enum:
+              - claude
+              - codex
+              - cash
+              - openweight
+        routableProviders:
+          type: array
+          description: Enabled providers after active parks are applied.
+          items:
+            type: string
+            enum:
+              - claude
+              - codex
+              - cash
+              - openweight
+        preference:
+          type: string
+          enum:
+            - automatic
+            - claude
+            - codex
+            - cash
+            - openweight
+        reservePercent:
+          type: number
+        parks:
+          type: array
+          description: Only parks still active at resolution time.
+          items:
+            $ref: "#/components/schemas/ProviderPark"
+        codexModelPreference:
+          $ref: "#/components/schemas/CodexModelPreference"
+        overrideExpiresAt:
+          type: string
+          format: date-time
+        writtenAt:
+          type: string
+          format: date-time
+        writerFingerprint:
+          type: string
+        fallback:
+          type: object
+          required:
+            - reason
+          properties:
+            reason:
+              type: string
+              enum:
+                - unreadable
+                - malformed
+                - unsupported-version
+                - expired
+                - incompatible-with-config
+
+    ProviderRoutingPolicyWriteResult:
+      type: object
+      description: The resolved policy after a set or clear; it takes effect on the next dispatch, not in flight.
+      required:
+        - ok
+        - effective
+        - policy
+      properties:
+        ok:
+          type: boolean
+          enum:
+            - true
+        effective:
+          type: string
+          enum:
+            - next dispatch
+        policy:
+          $ref: "#/components/schemas/EffectiveProviderRoutingPolicy"
+
+    ProviderRoutingPolicyRefusal:
+      type: object
+      description: >
+        A provider-routing policy write refused before anything was written or cleared.
+        `invalid_request` (400, the body failed the store's validation), `codex_model_not_eligible`
+        (400, the requested Codex model is not a fresh, mapped, eligible option),
+        `provider_policy_unavailable` (409, the daemon has not published a committed
+        provider-policy projection yet), `codex_model_inventory_stale` (409, a Codex model
+        preference needs a fresh daemon-written model inventory).
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          enum:
+            - invalid_request
+            - codex_model_not_eligible
+            - provider_policy_unavailable
+            - codex_model_inventory_stale
+        detail:
+          type: string
+
+    QuietHoursRequest:
+      type: object
+      description: POST /v1/quiet-hours's body (src/lib/panel-actions.ts's `validateQuietHours`).
+      required:
+        - enabled
+      properties:
+        enabled:
+          type: boolean
+
+    QuietHoursResult:
+      type: object
+      description: The quiet-hours flag as written.
+      required:
+        - quietHours
+      properties:
+        quietHours:
+          type: boolean
+
   responses:
     Unauthorized:
       description: No or unrecognized bearer token.
@@ -5024,6 +5806,35 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+
+# W3-T2 (MASTER-PLAN §7, WS-5a): the read-only live board's first real business routes --
+# a task/ledger-state snapshot (REST) and its live-update companion (SSE). Both are built on
+# the v0 mechanism above (src/lib/service.ts) and existing projection logic (src/lib/status.ts)
+# -- see src/lib/board.ts. Every OTHER route the design (plan render, worker stream tails,
+# DECISIONS feed, escalation inbox, question backlog, cost meter) describes is explicit
+# follow-on work, not added here.
+
+    HighTierForbidden:
+      description: >
+        A HIGH-tier write refused by src/lib/service.ts's dispatch gate before its handler ran --
+        missing write scope, a granted write tier below HIGH, or a missing/invalid/spent
+        `X-Confirm-Nonce` (`confirm_nonce_required`). Nothing was written.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HighTierRefusal"
+
+  parameters:
+    ConfirmNonce:
+      name: X-Confirm-Nonce
+      in: header
+      required: true
+      description: >
+        A nonce from POST /v1/confirm naming this exact method, path and raw request body.
+        Single-use, 5-minute TTL; consumed by src/lib/service.ts's dispatch gate before the
+        handler runs whenever `enforceWriteTiers` is on (`rmd serve` turns it on).
+      schema:
+        type: string
 
 # W3-T2 (MASTER-PLAN §7, WS-5a): the read-only live board's first real business routes --
 # a task/ledger-state snapshot (REST) and its live-update companion (SSE). Both are built on
@@ -7547,3 +8358,568 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InboxRefusal"
+
+  # ── W1-T4611: the fleet-control writes and ingress. Every path below was served (the assembled
+  # route table, test/helpers/declared-routes.ts) but undeclared; each entry is derived from its
+  # handler. A write route's `tier` is quoted in its description; under `rmd serve`'s
+  # `enforceWriteTiers`, the bearer write token is pinned at LOW, an operator session reaches
+  # MIDDLE, and a stepped-up operator session reaches HIGH -- a HIGH route also consumes an
+  # `X-Confirm-Nonce` issued by POST /v1/confirm for its exact method, path and raw body.
+
+  /v1/confirm:
+    post:
+      summary: Issue a single-use confirmation nonce for one exact HIGH-tier call.
+      description: >
+        W1-T404 design (iv) / W1-T500 (src/lib/service.ts's `makeConfirmNonceRoute`, mounted by
+        src/lib/serve.ts's `buildServeRoutes`). Write tier LOW -- requesting a nonce grants
+        nothing; the target route's own tier check and nonce consumption are the real gate. The
+        nonce binds `{method, path, payload}` and expires after 5 minutes.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmNonceRequest"
+      responses:
+        "200":
+          description: A nonce bound to the named call.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfirmNonceResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/drain/feedback:
+    post:
+      summary: Record the operator's one-tap verdict on a post-drain rundown line.
+      description: >
+        W1-T141 / W1-T435 (src/lib/panel-actions.ts's `buildDrainFeedbackRoute`). Write tier LOW.
+        Ledgers an `operator_feedback` record (verdict, drain run id, and the steering note
+        verbatim when present) -- the labeled human signal the learning limb consumes.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DrainFeedbackRequest"
+      responses:
+        "200":
+          description: The verdict was ledgered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DrainFeedbackResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/drain/kick:
+    post:
+      summary: Ask the daemon to dispatch one task by id at its next poll (the per-row "Run").
+      description: >
+        src/lib/panel-actions.ts's `buildKickRoute`. Write tier HIGH -- dispatching a task is real
+        spend -- so the call must carry an `X-Confirm-Nonce` from POST /v1/confirm. Writes a
+        `KICK_REQUESTED-<taskId>` marker and ledgers `console.kick_requested`; it records intent
+        only, and the daemon's own `assertRunnable`-gated path dispatches or refuses the task.
+      security:
+        - bearerWrite: []
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KickRequest"
+      responses:
+        "200":
+          description: The kick marker was written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KickResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HighTierForbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/drain/preview:
+    get:
+      summary: The would-drain queue as ordered task cards.
+      description: >
+        W1-T140 (src/lib/panel-graph.ts's `buildDrainPreviewRoute`). Read-scoped. Reads the
+        process plan snapshot, re-derives merged status through `projectPlan` (the projection
+        GET /v1/status uses), and renders src/lib/drain.ts's `buildDrainPreview` in dispatch order.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: max
+          in: query
+          required: false
+          description: A positive number bounding the preview; absent means drain's own default.
+          schema:
+            type: number
+        - name: until
+          in: query
+          required: false
+          description: Stop the preview at this task id.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The ordered cards.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DrainPreviewResult"
+        "400":
+          description: "`max` was not a positive number."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/drain/run:
+    post:
+      summary: Ask the daemon to run one dispatch cycle at its next poll ("Drain now").
+      description: >
+        src/lib/panel-actions.ts's `buildDrainNowRoute`. Write tier HIGH -- it dispatches paid
+        work fleet-wide -- so the call must carry an `X-Confirm-Nonce` from POST /v1/confirm (its
+        `payload` is the raw body this call sends, an empty string for none). No body is read.
+        Writes the `DRAIN_REQUESTED` marker and ledgers `console.drain_requested`.
+      security:
+        - bearerWrite: []
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      responses:
+        "200":
+          description: The drain marker was written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DrainNowResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HighTierForbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/feedback/preview:
+    post:
+      summary: Expand a feedback draft through the feedback-expansion rung without filing anything.
+      description: >
+        W1-T350 (src/lib/panel-graph.ts's `buildPreviewFeedbackRoute`). Write-scoped because it
+        makes a real model call; write tier LOW because it stores nothing. Fail-open: a missing
+        expander, a throw, or an out-of-bounds response is a 200 with `expansion: null`.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FeedbackPreviewRequest"
+      responses:
+        "200":
+          description: The expansion, or null.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackPreviewResult"
+        "400":
+          description: >
+            The body failed validation, or `replyTo` names no known feedback entry or one not
+            parked at `grilling`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/hooks/github:
+    post:
+      summary: GitHub webhook ingress -- wakes the sweep early on an allowlisted event.
+      description: >
+        W1-T2568 (src/lib/github-event-wake.ts's `createGitHubEventWakeHandler`). SELF-AUTHENTICATED:
+        no bearer token is read and scope/tier dispatch is bypassed entirely. The caller is
+        authenticated by `X-Hub-Signature-256`, GitHub's HMAC-SHA256 of the RAW body under the
+        configured webhook secret, compared constant-time. The route carries a declared LOW tier
+        that dispatch never consults. It validates, then writes or coalesces one durable
+        sweep-wake marker; it never calls GitHub, runs a sweep, or touches the merge hold.
+        Allowlisted: `pull_request` (opened, reopened, synchronize, edited, ready_for_review,
+        converted_to_draft, closed), `check_run` (completed), `status`, and
+        `pull_request_review` (submitted, edited, dismissed).
+      security: []
+      parameters:
+        - name: X-Hub-Signature-256
+          in: header
+          required: true
+          description: "`sha256=<hex>` -- HMAC-SHA256 of the raw request body under the webhook secret."
+          schema:
+            type: string
+        - name: X-GitHub-Event
+          in: header
+          required: true
+          description: The GitHub event name; one outside the allowlist is a 202 `ignored`.
+          schema:
+            type: string
+        - name: X-GitHub-Delivery
+          in: header
+          required: true
+          description: GitHub's delivery id -- the dedup key; missing on an allowlisted event is a 400.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GithubWebhookPayload"
+      responses:
+        "202":
+          description: Accepted, coalesced, deduplicated, or ignored -- never retried by GitHub.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GithubWebhookReceipt"
+        "400":
+          description: "`invalid_json` or `missing_delivery_id`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GithubWebhookRefusal"
+        "401":
+          description: "`invalid_signature` -- the signature header is missing, malformed, or wrong."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GithubWebhookRefusal"
+        "403":
+          description: "`repository_mismatch` -- the payload names another repository."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GithubWebhookRefusal"
+        "413":
+          description: "`body_too_large` -- the body exceeds the 1 MiB bound; it was never buffered."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GithubWebhookRefusal"
+        "503":
+          description: "`webhook_not_configured` -- no webhook secret is configured; nothing is written."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GithubWebhookRefusal"
+
+  /v1/merge-hold:
+    post:
+      summary: Engage or release the durable operator merge hold, fleet-wide or for one PR.
+      description: >
+        src/lib/panel-actions.ts's `buildMergeHoldRoute` over src/lib/operator-merge-hold.ts's
+        `applyOperatorMergeHold`, recorded with authority `console-confirmed`. Write tier HIGH, so
+        the call must carry an `X-Confirm-Nonce` from POST /v1/confirm. The recorded `by` is the
+        authenticated caller. Releasing only removes the refusal; this route never arms or
+        performs a merge.
+      security:
+        - bearerWrite: []
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MergeHoldRequest"
+      responses:
+        "200":
+          description: The decision was written and read back as current, or a release was a no-op.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MergeHoldResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: A HIGH-tier refusal, or a caller whose identity resolves to `unknown`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MergeHoldRefusal"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator-notes:
+    get:
+      summary: List the operator guidance notes scoped to one task.
+      description: >
+        W1-T164 (src/lib/operator-notes.ts's `buildListOperatorNotesRoute`). Read-scoped and
+        task-scoped only -- a missing or blank `taskId` is a 400, never a repo-wide dump.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: taskId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The task's notes, oldest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorNotesResult"
+        "400":
+          description: "`taskId` query param is missing or blank."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/operator-notes/add:
+    post:
+      summary: Add one provenance-stamped operator guidance note to a task.
+      description: >
+        W1-T164 (src/lib/operator-notes.ts's `buildAddOperatorNoteRoute`). Write tier LOW. `ts`
+        is stamped server-side; the note is appended to plan/operator-notes.ndjson and
+        `panel.operator_note_added` is ledgered with the caller's identity as origin.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddOperatorNoteRequest"
+      responses:
+        "200":
+          description: The note was stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddOperatorNoteResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: The note store could not be written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorNoteWriteFailure"
+
+  /v1/policy/daily-cost-ceiling:
+    post:
+      summary: Set the daily-cost-ceiling override; the daemon reads it fresh on its next tick.
+      description: >
+        W1-T364 (src/lib/panel-graph.ts's `buildSetDailyCostCeilingRoute`). Write tier MIDDLE --
+        reversible but a spend force multiplier. The store validates bounds; a refusal is a 400.
+        Ledgers the who/from/to/effective audit line (W1-T333).
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetDailyCostCeilingRequest"
+      responses:
+        "200":
+          description: The resolved effective ceiling after the write.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DailyCostCeilingResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/policy/daily-cost-ceiling/clear:
+    post:
+      summary: Clear the daily-cost-ceiling override, reverting to the committed default.
+      description: >
+        src/lib/panel-graph.ts's `buildClearDailyCostCeilingRoute`. Write tier MIDDLE. No body is
+        read. Idempotent -- clearing an absent override is not an error. Ledgers the same audit
+        line as the set route.
+      security:
+        - bearerWrite: []
+      responses:
+        "200":
+          description: The resolved effective ceiling after the clear.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DailyCostCeilingResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/policy/provider-routing:
+    post:
+      summary: Set one bounded, expiring live provider-routing override for the next dispatch.
+      description: >
+        src/lib/serve.ts's `buildSetProviderRoutingPolicyRoute` over
+        src/lib/provider-routing-policy.ts. Write tier HIGH, so the call must carry an
+        `X-Confirm-Nonce` from POST /v1/confirm. An override can only narrow the committed host
+        policy and expires within 24 hours. Ledgers `console.provider_routing_policy_written`.
+      security:
+        - bearerWrite: []
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProviderRoutingPolicyOverrideRequest"
+      responses:
+        "200":
+          description: The override was written; the resolved policy is returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderRoutingPolicyWriteResult"
+        "400":
+          description: "`invalid_request` or `codex_model_not_eligible`; nothing was written."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderRoutingPolicyRefusal"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HighTierForbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "`provider_policy_unavailable` or `codex_model_inventory_stale`; nothing was written."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderRoutingPolicyRefusal"
+
+  /v1/policy/provider-routing/clear:
+    post:
+      summary: Clear the live provider-routing override, returning to the committed host policy.
+      description: >
+        src/lib/serve.ts's `buildClearProviderRoutingPolicyRoute`. Write tier HIGH, so the call
+        must carry an `X-Confirm-Nonce` from POST /v1/confirm. The body must be an empty JSON
+        object (`{}`) or empty. Ledgers `console.provider_routing_policy_written`.
+      security:
+        - bearerWrite: []
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              description: Must have no keys -- `{}` (or an empty body, read as `{}`).
+      responses:
+        "200":
+          description: The override was cleared; the resolved policy is returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderRoutingPolicyWriteResult"
+        "400":
+          description: "`invalid_request` -- the body was not an empty JSON object."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderRoutingPolicyRefusal"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HighTierForbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "`provider_policy_unavailable` -- nothing was cleared."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderRoutingPolicyRefusal"
+
+  /v1/quiet-hours:
+    post:
+      summary: Turn the quiet-hours flag on or off.
+      description: >
+        src/lib/panel-actions.ts's `buildQuietHoursRoute`. Write tier MIDDLE -- reversible, but a
+        dispatch-throttling preference. Ledgers `panel.quiet_hours_toggled`.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QuietHoursRequest"
+      responses:
+        "200":
+          description: The flag as now written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuietHoursResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
