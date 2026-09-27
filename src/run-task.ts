@@ -8804,27 +8804,15 @@ export function reclaimAbandonedWorker(
   }
 }
 
-/**
- * W1-T4613 — THE FIX WORKER'S OWN RUN ID. Fix rows log under the CALLER's run id (a daemon's is
- * `DAEMON-<ms>`, shared by every fix it runs), which status liveness and reclaim both key on, so
- * neither that id nor the process marker (`SpawnWorkerArgs.runId`, which the orphan sweep matches
- * against held inflight locks) moves. The worker's own id rides as `worker_run_id` instead.
- */
+/** W1-T4613: a fix worker's own run id, logged as `worker_run_id`. The caller's run id (liveness) and the
+ *  process marker (reclaim; the orphan sweep matches it to a held inflight lock) deliberately stay put. */
 export function fixWorkerRunId(callerRunId: string, label: string, startedAtMs: number): string {
   return `${callerRunId}-${label}-${startedAtMs}`;
 }
 
-/**
- * W1-T4613 — ONE FIX WORKER, RECEIPTED LIKE A DISPATCH WORKER. MEASURED 2026-09-27: 0 of 577
- * `fix.done` rows named a provider, model, effort, tokens, duration or assignment, and 1 of 577 fix
- * runs could be matched to an assignment. This wraps one fix-rung spawn in the SAME
- * `worker.assignment` + `worker.attempt` pair dispatch writes (`benchmarkRunLedgerLogger`,
- * `recordBenchmarkWorkerAttempt`, `dispatchFallbackObserver`), each row stamped with the worker's
- * own run id, and marks the args so a receipt-writing spawn beneath it stands aside
- * (`withCallerOwnedReceipt`). `ledgerFields` is `workerLedgerFields` plus the join: the worker run
- * id and the assignment id. Every receipt failure is swallowed and NAMED on that row as an
- * `*_unavailable_reason` field; none can change the worker's result, its retry, or the fix.
- */
+/** W1-T4613: one fix-rung spawn, receipted with dispatch's worker.assignment + worker.attempt pair under its own run id; wrappers
+ *  beneath stand aside (`withCallerOwnedReceipt`). `ledgerFields` = `workerLedgerFields` + the join ids. A receipt failure is
+ *  swallowed and named as an `*_unavailable_reason` field — it never changes the worker's result, its retry, or the fix. */
 export function fixWorkerReceipt(
   spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -8858,8 +8846,7 @@ export function fixWorkerReceipt(
   const ledgerFields = (result: WorkerResult): Record<string, unknown> => {
     let fields: Record<string, unknown>;
     try {
-      // An undefined value stays ABSENT, as JSON would write it: `max_turns` is omitted, never undefined (W1-T2383).
-      fields = Object.fromEntries(Object.entries(workerLedgerFields(result)).filter(([, value]) => value !== undefined));
+      fields = Object.fromEntries(Object.entries(workerLedgerFields(result)).filter(([, value]) => value !== undefined)); // absent, never undefined (W1-T2383)
     } catch {
       fields = { worker_fields_unavailable_reason: "worker-result-fields-unavailable" };
     }
@@ -10440,7 +10427,6 @@ export async function runFixRung(opts: {
         // spawn already takes (spawnFixWorkerBounded) — this dispatch is never a strike (`strikes`
         // is read, never incremented, on this whole path) but it is still a real subprocess and
         // must never be allowed to hang the rung forever.
-        // W1-T4613: this worker is receipted and named like every other fix-rung worker.
         const prerequisiteReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, "prerequisite", systemClock.now()));
         const spawnOutcome = await spawnFixWorkerBounded({ ...deps, spawn: prerequisiteReceipt.spawn }, dispatchArgs, { runId: opts.runId, taskId: opts.taskId });
         const prerequisiteWorker = spawnOutcome.kind === "spawned" ? deps.account(spawnOutcome.result) : undefined;
@@ -10747,7 +10733,6 @@ export async function runFixRung(opts: {
       // Unreadable HEAD: commitCount falls back to 0, as before this task — never a throw mid-dispatch.
     }
     const fixRoundStartedAtMs = systemClock.now();
-    // W1-T4613: this round's worker gets its own run id and the dispatch receipt pair.
     const fixReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs));
     let fixResult: WorkerResult;
     // W1-T1219: the spawn's elapsed ms on the SUCCESS path, the field `fix.spawn_abandoned` carries
@@ -10834,7 +10819,6 @@ export async function runFixRung(opts: {
     ) {
       deps.log("fix.commit_line_requested", { strike: attempt, round });
       deps.say("fix rung: no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
-      // W1-T4613: the re-ask is a second worker call, so it carries its own run id and receipt pair.
       const askReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}-ask`, systemClock.now()));
       const asked = await spawnFixWorkerBounded(
         { ...deps, spawn: askReceipt.spawn },
@@ -10976,9 +10960,7 @@ export async function runFixRung(opts: {
       });
     }
     deps.log("fix.done", {
-      // W1-T4613: the standard worker fields plus the join (worker_run_id, selection_assignment_id),
-      // spread FIRST so every field this row already carried keeps its value.
-      ...fixReceipt.ledgerFields(fixResult),
+      ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
       strike: strikes,
       round,
       session_id: fixResult.sessionId,
@@ -14296,8 +14278,7 @@ async function runTask(
     const stopPolling = workerStateSensor.startPolling();
     let selectionAssignment: Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0] | undefined;
     const baseStreamObserver = effectiveSpawnArgs.streamObserver ?? workerStateSensor.observer;
-    // W1-T4613: a fix worker is receipted by the fix rung itself (`fixWorkerReceipt`); a second pair here would count it twice.
-    const receiptLog: typeof log = callerOwnsBenchmarkReceipt(effectiveSpawnArgs) ? () => {} : log;
+    const receiptLog: typeof log = callerOwnsBenchmarkReceipt(effectiveSpawnArgs) ? () => {} : log; // W1-T4613: fixWorkerReceipt owns it
     return recordBenchmarkWorkerAttempt(() => rawSpawn({
       ...effectiveSpawnArgs,
       // Every dispatch-phase worker inherits the run identity at the ONE wrapper that already owns its state/error telemetry, so the
