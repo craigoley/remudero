@@ -5263,8 +5263,9 @@ export function creditSubjectIsImplementation(subject: string | undefined): bool
  *  ⚠ FAIL OPEN ON DARKNESS, WHICH IS THE WHOLE SAFETY PROPERTY. Only a candidate with
  *  `merged === true` and a concrete `prNumber` can stamp anything. An empty or absent candidate
  *  array (a failed projection is indistinguishable from "nothing merged"), a PR carrying no
- *  `taskId`, or a candidate for another task all leave the view BYTE-IDENTICAL — so a read failure
- *  can never be laundered into a close.
+ *  `taskId`, or a candidate for another task all leave `taskMergedBy` unset — so a read failure
+ *  can never be laundered into a close. (W1-T4633: an ABSENT array also withholds a pending
+ *  unmet-dependency close — see {@link recheckResequenceCloseAgainstFreshCredit}.)
  *
  *  ⚠ AND NEVER THE WINNER ITSELF. A candidate naming this very PR is skipped: the merged PR is not
  *  normally in the open array at all, but a stale listing must not be able to close the PR that
