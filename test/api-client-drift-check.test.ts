@@ -82,6 +82,54 @@ test("generate-api-client (no --check) writes a client that a subsequent --check
   }
 });
 
+// W1-T4609: the subset grew the three shapes the daemon's served payloads needed -- a value sent
+// in one of several shapes, a value that is always null, and a genuinely open JSON value or map.
+test("generate-api-client renders oneOf as a union, type null as null, and the empty schema and a typed map honestly", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "rmd-api-client-subset-"));
+  try {
+    const source = join(tmp, "daemon.yaml");
+    writeFileSync(
+      source,
+      MINIMAL_SPEC.replace(
+        "paths: {}",
+        [
+          "    Gauge:",
+          "      type: object",
+          "      required: [behindBy, never, value, result]",
+          "      properties:",
+          "        behindBy:",
+          "          oneOf:",
+          "            - type: integer",
+          "            - type: string",
+          "              enum: [unknown]",
+          "        never:",
+          '          type: "null"',
+          "        value: {}",
+          "        result:",
+          "          type: object",
+          "          additionalProperties: {}",
+          "        opaque:",
+          "          type: object",
+          "          additionalProperties: true",
+          "paths: {}",
+        ].join("\n"),
+      ),
+    );
+    const out = join(tmp, "schema.d.ts");
+    const genResult = runGenerate(source, out);
+    assert.equal(genResult.status, 0, genResult.stdout + genResult.stderr);
+    const written = readFileSync(out, "utf8");
+    assert.match(written, /behindBy: \(number\) \| \("unknown"\);/);
+    assert.match(written, /never: null;/);
+    assert.match(written, /value: unknown;/);
+    assert.match(written, /result: Record<string, unknown>;/);
+    // The bare `true` form keeps its pre-existing conservative rendering, so no committed field moves.
+    assert.match(written, /opaque\?: Record<string, never>;/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("generate-api-client --check: a STALE client (spec changed since generation) -> non-zero exit, NAMES the file to regenerate", () => {
   const tmp = mkdtempSync(join(tmpdir(), "rmd-api-client-stale-"));
   try {
