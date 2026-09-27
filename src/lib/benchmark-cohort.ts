@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, existsSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { closeSync, createReadStream, existsSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { systemClock } from "./clock.js";
 import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
 
@@ -53,6 +54,8 @@ export interface BenchmarkCohortSnapshot {
   asOf: string | null;
   lastGoodAt?: string;
   sourceLineage: { name: string; form: Form; sha256: string; bytes: number }[];
+  /** The live file can grow after this audited, newline-terminated byte prefix. */
+  liveWatermark?: { prefixBytes: number; tailPendingBytes: number };
   sourceRows: { assignments: number; attempts: number; terminals: number; unmatchedAttempts: number;
     unmatchedTerminals: number; invalidAssignmentRows: number; attemptRowsWithoutAssignmentId: number;
     terminalRowsWithoutAssignmentId: number; conflictingAssignments: number; duplicateRows: number };
@@ -73,6 +76,7 @@ export interface BenchmarkCohortPassResult {
   snapshot: BenchmarkCohortSnapshot;
   scannedSources: number;
   pendingSources: number;
+  tailPendingBytes?: number;
   checkpointBytes?: number;
 }
 
@@ -145,17 +149,38 @@ function writeCheckpoint(stateDir: string, checkpoint: Checkpoint): number {
   return Buffer.byteLength(encoded);
 }
 
-async function sourceHashes(path: string, prefixBytes?: number): Promise<{ full: string; prefix?: string }> {
+async function sourceHashes(path: string, prefixBytes?: number, throughBytes?: number): Promise<{ full: string; prefix?: string }> {
   const full = createHash("sha256");
   const prefix = prefixBytes === undefined ? undefined : createHash("sha256");
   let seen = 0;
-  for await (const chunk of createReadStream(path)) {
+  for await (const chunk of throughBytes === 0 ? [] : createReadStream(path,
+    throughBytes === undefined ? undefined : { end: throughBytes - 1 })) {
     const bytes = chunk as Buffer;
     full.update(bytes);
     if (prefix) prefix.update(bytes.subarray(0, Math.max(0, Math.min(bytes.length, prefixBytes! - seen))));
     seen += bytes.length;
   }
   return { full: full.digest("hex"), ...(prefix ? { prefix: prefix.digest("hex") } : {}) };
+}
+
+/** Find a durable newline boundary at or before the manifest's byte watermark. A writer may be
+ * appending while we scan; the unfinished line belongs to the next pass, never this denominator. */
+function completeLivePrefix(path: string, size: number): number {
+  if (size === 0) return 0;
+  const fd = openSync(path, "r");
+  const chunk = Buffer.allocUnsafe(64 * 1024);
+  try {
+    let end = size;
+    while (end > 0) {
+      const start = Math.max(0, end - chunk.length);
+      const bytes = readSync(fd, chunk, 0, end - start, start);
+      if (bytes !== end - start) throw new Error("ledger-live-truncated-before-watermark");
+      const newline = chunk.subarray(0, bytes).lastIndexOf(0x0a);
+      if (newline >= 0) return start + newline + 1;
+      end = start;
+    }
+    return 0;
+  } finally { closeSync(fd); }
 }
 
 function relevant(row: Record<string, unknown>): boolean {
@@ -182,16 +207,28 @@ function projectRow(row: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-async function scanSource(entry: ManifestEntry, precedingRotation: string | undefined, prior?: SourceRecord): Promise<SourceRecord> {
-  const hashes = await sourceHashes(entry.path, entry.form === "live" ? prior?.size : undefined);
-  const appendOnly = entry.form === "live" && prior !== undefined && entry.size > prior.size && hashes.prefix === prior.sha256;
+async function scanSource(entry: ManifestEntry, precedingRotation: string | undefined, prior?: SourceRecord,
+  onLiveWatermark?: () => void): Promise<SourceRecord> {
+  const prefixBytes = entry.form === "live" ? completeLivePrefix(entry.path, entry.size) : entry.size;
+  if (entry.form === "live") onLiveWatermark?.();
+  const hashes = await sourceHashes(entry.path, entry.form === "live" ? prior?.size : undefined,
+    entry.form === "live" ? prefixBytes : undefined);
+  const appendOnly = entry.form === "live" && prior !== undefined && prefixBytes >= prior.size
+    && hashes.prefix === prior.sha256;
   const rows: EvidenceRow[] = appendOnly ? [...prior.rows] : [];
   let malformedReason: string | undefined;
   let unread = 0;
   const sourceOptions = entry.form === "live"
     ? { afterRotation: precedingRotation, includeLive: true, ...(appendOnly ? { liveStartOffset: prior!.size } : {}) }
     : { afterRotation: precedingRotation, throughRotation: entry.name, includeLive: false };
-  for await (const _row of openLedgerUnion(dirname(entry.path), {
+  const sourceIO = entry.form === "live" ? {
+    readdirSync, existsSync,
+    createReadStream: (path: string, options?: { start?: number }) => createReadStream(path,
+      path === entry.path ? { ...options, end: prefixBytes - 1 } : options),
+  } : undefined;
+  const noNewLiveLine = entry.form === "live" && (prefixBytes === 0
+    || (appendOnly && prefixBytes === prior!.size));
+  for await (const _row of noNewLiveLine ? [] : openLedgerUnion(dirname(entry.path), {
     ...sourceOptions,
     dedupe: false,
     onAcceptedRecord: (row, raw) => {
@@ -200,16 +237,19 @@ async function scanSource(entry: ManifestEntry, precedingRotation: string | unde
     onMalformedRow: (finding) => { malformedReason = finding.kind === "live-torn-tail" ? "ledger-live-torn-tail" : "ledger-source-malformed"; },
     onUnreadArchive: () => { unread += 1; },
     onUnreadLive: () => { unread += 1; },
-  })) {
+  }, sourceIO)) {
     void _row;
   }
   const after = statSync(entry.path);
-  if (unread > 0 || malformedReason || after.size !== entry.size || after.mtimeMs !== entry.mtimeMs
-    || (await sourceHashes(entry.path)).full !== hashes.full) {
+  const stable = entry.form === "live"
+    ? after.size >= prefixBytes && (await sourceHashes(entry.path, undefined, prefixBytes)).full === hashes.full
+    : after.size === entry.size && after.mtimeMs === entry.mtimeMs
+      && (await sourceHashes(entry.path)).full === hashes.full;
+  if (unread > 0 || malformedReason || !stable) {
     throw new Error(unread > 0 ? entry.form === "live" ? "ledger-live-unreadable" : "ledger-source-unreadable"
       : malformedReason ?? "ledger-source-changed-during-scan");
   }
-  return { name: entry.name, form: entry.form, size: entry.size, mtimeMs: entry.mtimeMs, sha256: hashes.full, rows };
+  return { name: entry.name, form: entry.form, size: prefixBytes, mtimeMs: entry.mtimeMs, sha256: hashes.full, rows };
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -340,7 +380,8 @@ function affectedKeys(baseline: SourceRecord[], current: SourceRecord[]): Set<st
 }
 
 function deriveSnapshot(
-  sources: SourceRecord[], asOf: string, auditedSourceBytes: number, prior?: BenchmarkCohortSnapshot, dirtyKeys?: Set<string>,
+  sources: SourceRecord[], asOf: string, auditedSourceBytes: number, prior?: BenchmarkCohortSnapshot,
+  dirtyKeys?: Set<string>, liveWatermark?: { prefixBytes: number; tailPendingBytes: number },
 ): BenchmarkCohortSnapshot {
   const started = systemClock.now();
   const { assignments, attempts, terminals, invalidAssignmentRows, attemptRowsWithoutAssignmentId,
@@ -422,6 +463,7 @@ function deriveSnapshot(
   const snapshot: BenchmarkCohortSnapshot = {
     version: BENCHMARK_COHORT_VERSION, state: "observed", asOf,
     sourceLineage: sources.map(({ name, form, sha256, size }) => ({ name, form, sha256, bytes: size })),
+    ...(liveWatermark ? { liveWatermark } : {}),
     sourceRows: { assignments: assignments.size, attempts: attempts.size, terminals: terminals.size,
       unmatchedAttempts: [...attempts.keys()].filter((id) => !assignments.has(id)).length,
       unmatchedTerminals: [...terminals.keys()].filter((id) => !assignments.has(id)).length,
@@ -451,7 +493,8 @@ function deriveSnapshot(
 /** One source per ordinary pass by default; a failed projection never changes daemon work. */
 export async function runBenchmarkCohortPass(
   stateDir: string,
-  opts: { maxSources?: number; nowIso?: string } = {},
+  opts: { maxSources?: number; nowIso?: string; onLiveWatermark?: () => void;
+    onBeforeLivePrefixVerify?: () => void } = {},
 ): Promise<BenchmarkCohortPassResult> {
   const maxSources = opts.maxSources ?? 1;
   if (!Number.isInteger(maxSources) || maxSources < 1) throw new TypeError("maxSources must be a positive integer");
@@ -481,12 +524,14 @@ export async function runBenchmarkCohortPass(
   }
   let scannedSources = 0;
   let auditedSourceBytes = 0;
+  const scannedNames = new Set<string>();
   for (const entry of changed.slice(0, maxSources)) {
     const rotations = current.filter((candidate) => candidate.form !== "live");
     const index = rotations.findIndex((candidate) => candidate.name === entry.name);
     const precedingRotation = entry.form === "live" ? rotations.at(-1)?.name : rotations[index - 1]?.name;
     try {
-      known.set(entry.name, await scanSource(entry, precedingRotation, known.get(entry.name)));
+      known.set(entry.name, await scanSource(entry, precedingRotation, known.get(entry.name), opts.onLiveWatermark));
+      scannedNames.add(entry.name);
       faults.delete(entry.name);
       scannedSources += 1;
       auditedSourceBytes += entry.size;
@@ -500,7 +545,8 @@ export async function runBenchmarkCohortPass(
   checkpoint.sourceFaults = current.flatMap((entry) => { const fault = faults.get(entry.name); return fault ? [fault] : []; });
   const pendingSources = current.filter((entry) => {
     const source = known.get(entry.name);
-    if (source) return source.size !== entry.size || source.mtimeMs !== entry.mtimeMs || source.form !== entry.form;
+    if (source) return entry.form === "live" && scannedNames.has(entry.name) ? false
+      : source.size !== entry.size || source.mtimeMs !== entry.mtimeMs || source.form !== entry.form;
     const fault = faults.get(entry.name);
     return !fault || fault.size !== entry.size || fault.mtimeMs !== entry.mtimeMs || fault.form !== entry.form;
   }).length;
@@ -513,18 +559,35 @@ export async function runBenchmarkCohortPass(
     return { state: "unavailable", snapshot: emptySnapshot(checkpoint.sourceFaults[0].reason, checkpoint.lastGood),
       scannedSources, pendingSources: 0, checkpointBytes };
   }
-  const presentNames = new Set(current.map((entry) => entry.name));
-  const retired = checkpoint.baselineSources?.filter((source) => !presentNames.has(source.name)) ?? [];
-  if (retired.length > 0) {
+  const live = checkpoint.sources.find((source) => source.form === "live");
+  const liveManifest = current.find((entry) => entry.form === "live");
+  let tailPendingBytes = 0;
+  if (live && liveManifest) {
+    try {
+      opts.onBeforeLivePrefixVerify?.();
+      const size = statSync(liveManifest.path).size;
+      if (size < live.size || (await sourceHashes(liveManifest.path, undefined, live.size)).full !== live.sha256)
+        throw new Error("ledger-live-changed-after-scan");
+      tailPendingBytes = size - live.size;
+    } catch (error) {
+      const reason = error instanceof Error && error.message === "ledger-live-changed-after-scan"
+        ? "ledger-live-changed-after-scan" : "ledger-live-unreadable-after-scan";
+      const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
+      return { state: "partial", snapshot: emptySnapshot(reason, checkpoint.lastGood),
+        scannedSources, pendingSources: 1, checkpointBytes };
+    }
+  }
+  if (checkpoint.baselineSources) {
     const successorFingerprints = new Set(checkpoint.sources.flatMap((source) => source.rows.map((row) => row.fingerprint)));
-    if (retired.some((source) => source.rows.some((row) => !successorFingerprints.has(row.fingerprint)))) {
+    if (checkpoint.baselineSources.some((source) => source.rows.some((row) => !successorFingerprints.has(row.fingerprint)))) {
       const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
       return { state: "unavailable", snapshot: emptySnapshot("retired-source-evidence-not-reconciled", checkpoint.lastGood),
         scannedSources, pendingSources: 0, checkpointBytes };
     }
   }
   const dirtyKeys = checkpoint.baselineSources ? affectedKeys(checkpoint.baselineSources, checkpoint.sources) : undefined;
-  const snapshot = deriveSnapshot(checkpoint.sources, opts.nowIso ?? systemClock.iso(), auditedSourceBytes, checkpoint.lastGood, dirtyKeys);
+  const snapshot = deriveSnapshot(checkpoint.sources, opts.nowIso ?? systemClock.iso(), auditedSourceBytes,
+    checkpoint.lastGood, dirtyKeys, live ? { prefixBytes: live.size, tailPendingBytes } : undefined);
   if (snapshot.sourceRows.conflictingAssignments > 0) {
     const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
     return { state: "unavailable", snapshot: emptySnapshot("conflicting-assignment-ids", checkpoint.lastGood),
@@ -533,5 +596,35 @@ export async function runBenchmarkCohortPass(
   checkpoint.lastGood = snapshot;
   delete checkpoint.baselineSources;
   const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
-  return { state: "complete", snapshot, scannedSources, pendingSources: 0, checkpointBytes };
+  return { state: "complete", snapshot, scannedSources, pendingSources: 0, tailPendingBytes, checkpointBytes };
+}
+
+/** Direct, internal maintenance entrypoint: no new public `rmd` verb or model worker. */
+export async function runBenchmarkCohortIdlePass(
+  stateDir: string, run: typeof runBenchmarkCohortPass = runBenchmarkCohortPass,
+): Promise<number> {
+  try {
+    const result = await run(stateDir, { maxSources: 4 });
+    console.log(JSON.stringify({ event: "benchmark_cohort.idle_pass", state: result.state,
+      scanned_sources: result.scannedSources, pending_sources: result.pendingSources,
+      tail_pending_bytes: result.tailPendingBytes ?? 0, reason: result.snapshot.reason ?? null }));
+    return 0;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    const errorClass = code === "ENOENT" || code === "EACCES" || code === "EPERM" ? code
+      : error instanceof TypeError ? "type-error" : error instanceof SyntaxError ? "syntax-error" : "other-error";
+    console.error(JSON.stringify({ event: "benchmark_cohort.idle_pass_failed", reason: "projection-failed",
+      error_class: errorClass }));
+    return 1;
+  }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const stateDir = process.argv[2];
+  if (!stateDir || process.argv.length !== 3) {
+    console.error("usage: node --import tsx src/lib/benchmark-cohort.ts <state-dir>");
+    process.exitCode = 2;
+  } else {
+    void runBenchmarkCohortIdlePass(stateDir).then((code) => { process.exitCode = code; });
+  }
 }

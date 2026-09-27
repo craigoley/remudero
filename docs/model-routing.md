@@ -135,10 +135,17 @@ the overflowing measurement's original attributes ([OpenTelemetry cardinality gu
 Each daemon instance now runs a detached, best-effort cohort pass over its own ledger state. It
 audits gzip/plain rotations and the live tail in bounded, resumable source batches, checkpoints
 source hashes and a local `benchmark-cohort-v1` snapshot atomically, and re-audits edited sources
-or a changed live prefix. A retired source must reconcile its exact evidence lines in a successor
-before the snapshot can be observed. Exact replay lines are deduplicated; late attempts, terminal
+or a changed live prefix. Supervised idle instances also run one model-free, four-source pass
+within each existing five-minute pulse, with a two-minute process timeout and no added PR-probe
+delay; failure is a logged maintenance result, not a reason to block review. A live scan records
+only a newline-terminated byte prefix, rehashes that exact prefix after reading, and records
+pending tail bytes for the next pass. Concurrent append or an unfinished final line no longer
+suppresses a complete snapshot for the audited prefix. A retired, truncated, or rewritten source
+must reconcile its exact evidence lines in a successor before the snapshot can be observed; an
+unproven in-place model-label change is not silently accepted. Exact replay lines are deduplicated;
+late attempts, terminal
 fallback, corrections, and retractions rebuild affected dimension partitions. A missing or
-malformed source, unreadable archive, torn live tail, or incomplete scan yields `unavailable`
+malformed source, unreadable archive, or incomplete scan yields `unavailable`
 with last-good age rather than a fresh zero. A damaged checkpoint triggers full replay and stays
 unavailable until that replay completes. None of these conditions gates a worker or PR.
 An unchanged faulty source is recorded locally so later archives can still be audited; it is

@@ -3225,6 +3225,7 @@ export async function runDaemon(
                 state: result.state,
                 scanned_sources: result.scannedSources,
                 pending_sources: result.pendingSources,
+                tail_pending_bytes: result.tailPendingBytes ?? 0,
                 reason: result.snapshot.reason,
                 source_bytes: result.snapshot.pressure.sourceBytes,
                 checkpoint_bytes: result.checkpointBytes,

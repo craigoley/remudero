@@ -8,11 +8,14 @@ import { loadPlan } from "../src/lib/plan.js";
 import { detachSweepAction, drainDetachedSweepActions, detachedActionInFlight } from "../src/lib/sweep.js";
 import { runBenchmarkCohortPass } from "../src/lib/benchmark-cohort.js";
 
-test("daemon benchmark cohort pass is best effort and production wired", async () => {
+test("daemon benchmark cohort failure preserves worker and review flow", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-daemon-benchmark-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, "- id: A\n  title: a\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n");
   const lines: string[] = [];
+  const reviews: number[] = [];
+  let actions = [{ action: "review" as const, prNumber: 42, origin: "fixture",
+    requestedAt: "2026-09-26T12:00:00.000Z" }];
   let release: () => void = () => {};
   const blocked = new Promise<void>((resolve) => { release = resolve; });
   try {
@@ -21,6 +24,11 @@ test("daemon benchmark cohort pass is best effort and production wired", async (
       refreshMerged: () => () => false,
       runOne: async (id: string) => ({ taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }),
       sleep: async () => {}, sweep: async () => {},
+      pendingPrActions: () => actions,
+      runPrAction: async (request) => { reviews.push(request.prNumber); return { outcome: "completed" }; },
+      clearPrAction: (action, prNumber) => {
+        actions = actions.filter((request) => request.action !== action || request.prNumber !== prNumber);
+      },
       log: (step: string) => lines.push(step),
       checkBenchmarkCohort: () => true,
       runBenchmarkCohortPass: async () => {
@@ -30,6 +38,7 @@ test("daemon benchmark cohort pass is best effort and production wired", async (
     }, { max: 1 });
     assert.ok(lines.includes("benchmark_cohort.detached"), "the worker/PR loop completes before the projection");
     assert.ok(!lines.includes("benchmark_cohort.run_failed"), "the projection is still unsettled");
+    assert.deepEqual(reviews, [42], "PR review proceeds while projection is still blocked");
     release();
     await drainDetachedSweepActions();
     assert.ok(lines.includes("benchmark_cohort.run_failed"), "a failed projection is visible after normal work");

@@ -528,6 +528,7 @@ fi
 
 idle_starved_wait() {
   local repo_arg="" arg previous="" owner="" repo="" slug="" checkout="" base_sha="" origin_url="" probe_rc=0 i marker since
+  local pulse_started=0 remaining=0 cohort_rc=0
   for arg in "$@"; do
     if [ "$previous" = "--repo" ]; then repo_arg="$arg"; break; fi
     previous="$arg"
@@ -560,7 +561,21 @@ idle_starved_wait() {
       printf '{"ts":"%s","run_id":"IDLE-%s","task_id":"DAEMON","step":"daemon.idle_starved.pulse","lane":"daemon","repo":"%s"}\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${base_sha:0:12}" "$slug" >> "$CONFIG_ROOT/state/ledger.ndjson" || return 2
       [ ! -e "$CONFIG_ROOT/state/STOP" ] || { log "idle_starved: STOP requested"; return 0; }
-      sleep 300 &
+      # Keep the private cohort checkpoint moving without a model worker. The maintenance
+      # budget is part of this 300s pulse, not added to the PR wake/probe interval. A slow
+      # or failed projection is logged and abandoned; it never changes the supervisor's flow.
+      pulse_started="$(date +%s)"
+      cohort_rc=0
+      timeout -k 5s 120s node --import tsx "$TREE/src/lib/benchmark-cohort.ts" "$CONFIG_ROOT/state" &
+      child_pid=$!
+      wait "$child_pid" || cohort_rc=$?
+      child_pid=""
+      if [ -n "$signal_forwarded" ]; then return 0; fi
+      [ "$cohort_rc" -eq 0 ] || log "idle_starved: benchmark cohort pass unavailable (exit $cohort_rc)"
+      [ ! -e "$CONFIG_ROOT/state/STOP" ] || { log "idle_starved: STOP requested"; return 0; }
+      remaining=$((300 - ($(date +%s) - pulse_started)))
+      [ "$remaining" -gt 0 ] || remaining=1
+      sleep "$remaining" &
       child_pid=$!
       probe_rc=0
       wait "$child_pid" || probe_rc=$?
