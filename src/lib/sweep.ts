@@ -430,6 +430,27 @@ export function currentPlanIneligibilityReason(plan: Plan, task: Task, isMerged:
   return undefined;
 }
 
+/**
+ * W1-T4565 — a CLOSE must not rest on one lagging read. `currentPlanIneligibilityReason`'s resolver
+ * is the daemon's per-tick projection, which lagged a real merge by 13-28 minutes (MEASURED: the
+ * sweep credited W1-T4567 itself at 20:38:57, then closed #7333 at 20:42 for that "unmet"
+ * dependency). An unmet dependency the ledger already credits as merged is met: `creditedInLedger`
+ * is asked about exactly the unmet ids, and only when a close is proposed. It can only remove a
+ * reason, never add one; a `blocked`/retired task is unaffected.
+ */
+export function corroboratedIneligibilityReason(
+  plan: Plan,
+  task: Task,
+  isMerged: MergedResolver,
+  creditedInLedger: (taskIds: readonly string[]) => ReadonlySet<string>,
+): string | undefined {
+  const reason = currentPlanIneligibilityReason(plan, task, isMerged);
+  if (reason === undefined || task.status === "blocked") return reason;
+  const credited = creditedInLedger(unmetDependencies(plan, task, isMerged));
+  if (credited.size === 0) return reason;
+  return currentPlanIneligibilityReason(plan, task, (t) => isMerged(t) || credited.has(t.id));
+}
+
 /** The synthetic lane namespaces whose PR branches are created by the orchestrator itself. */
 function isSyntheticOrchestratorLaneId(taskId: string): boolean {
   return /^(?:RETRO(?:-.+)?|TRIAGE-.+|PLAN-.+|APPROVE-.+)$/.test(taskId);
