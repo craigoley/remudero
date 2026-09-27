@@ -1,0 +1,47 @@
+- id: W1-T4606
+  title: "A BM25 HIT IS NOT RELEVANCE — shadow the lexical second chance against plan records and reviewed facts before W1-T4354 changes any worker prompt"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "operator research 2026-09-27: hindsight evidence-backed recall and a local W1-T4354 replay"
+  plan_refs: ["§4E", W1-T4354]
+  files:
+    - src/lib/learning-lexical.ts
+    - src/lib/learnings.ts
+    - scripts/learning-lexical-shadow.mjs
+    - test/learnings.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T4354 proposes a seeded BM25 injection lane. A local replay over the first 500 plan records
+    with files at 4b40523 found 66 zero-baseline tasks. Two shared title terms still found a
+    candidate for 64 of them; a three-token phrase found none. Against the first 100 tasks, the
+    filed title-plus-rationale query with a 0.5 score floor would add facts to 94 tasks, averaging
+    6.28 added facts. Several top hits were plainly about another subject. Raw BM25 score is a
+    ranking, not a relevance probability, and the prompt change is too broad to ship from this
+    evidence. Hindsight's evidence-backed recall suggests a cited, reviewable retrieval report;
+    this task measures the corpus before claiming the second chance helps.
+  design: |
+    (i) A pure, deterministic BM25 ranker states its tokenizer, constants and tie break.
+    (ii) A read-only shadow evaluator replays the production baseline selector over plan-record
+         title, rationale and files, only proposes candidates for records with zero baseline
+         selections, and includes fact, source, id, score and matched terms for human judgment.
+         Label the result a plan-record proxy: live recon and acceptance text are absent.
+    (iii) The CLI prints a versioned JSON report with source commit and corpus digest, coverage,
+          abstentions, and a deterministic task sample. It reads no live ledger, changes no prompt,
+          and does not write a model decision.
+    (iv) Optional reviewed labels report judged precision, misleading hits and missing labels;
+         no score or automatic rollout recommendation substitutes for those labels.
+  acceptance:
+    - claim: "the shadow evaluator calls the deterministic ranker without changing selected learnings"
+      proof: "grep: bm25Rank( in src/lib/learnings.ts"
+  falsifier: |
+    Replace the reported candidate's fact/source with a score alone and the evidence test fails.
+    Feed a shadow candidate into selectLearnings and the unchanged-selection test fails. Shuffle
+    the input task order and the deterministic sample test must still pass.
+  note: "This is a prerequisite for the filed live trial W1-T4354; no production retrieval lane is enabled by this task."
