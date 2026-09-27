@@ -45,6 +45,9 @@ export function runCheckProof(proof, mergeBase, { root = REPO_ROOT, spawn = spaw
     cwd: root,
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
+    // check-proof is a read-only diagnostic against the caller's pinned head/base. Re-syncing a
+    // detached PR head against a moving origin/main would replace that question with a refusal.
+    env: { ...process.env, RMD_SELF_SYNC_DONE: "1" },
   });
   return {
     status: result.status,

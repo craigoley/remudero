@@ -88,10 +88,13 @@ interface Run {
 function runHostUpdate(args: string[], extraEnv: NodeJS.ProcessEnv = {}): Run {
   const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-sib-bin-`));
   writeStubs(bin);
+  const stateRoot = join(bin, "state-root");
+  mkdirSync(stateRoot);
   const r = spawnSync("bash", [SCRIPT, ...args], {
     encoding: "utf8",
     cwd: REPO_ROOT,
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, ...extraEnv },
+    // The reclaim proof must not snapshot the real host's state when run on an Azure worker.
+    env: { ...process.env, RMD_STATE_DIR: stateRoot, PATH: `${bin}:${process.env.PATH ?? ""}`, ...extraEnv },
   });
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
