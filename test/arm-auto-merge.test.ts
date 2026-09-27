@@ -106,6 +106,10 @@ test("W1-T4581 parses the complete declared parent chain and fails closed on a m
   const invalidNumber = inspect("Stacked on #0");
   assert.equal(invalidNumber.state, "unreadable");
   assert.match(invalidNumber.detail ?? "", /invalid PR number/);
+  const selfParent = inspect("Stacked on #1766");
+  assert.equal(selfParent.state, "unreadable");
+  assert.deepEqual(selfParent.parentNumbers, [1766]);
+  assert.match(selfParent.detail ?? "", /declares itself as a stack parent/);
   const overlong = `Stacked on ${Array.from({ length: 21 }, (_, index) => `#${index + 1}`).join(" → ")}`;
   const overlongResult = inspect(overlong);
   assert.equal(overlongResult.state, "unreadable");
