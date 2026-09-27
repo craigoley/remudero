@@ -829,6 +829,42 @@ test("idle_starved: supervised entrypoint stays asleep on an empty probe, then w
   assert.equal(ledger.split("daemon.idle_starved.pulse").length - 1, 12, "two 30-minute windows emit six pulses each");
 });
 
+test("idle_starved: an inbox reply between the Node decision and quiet sleep still wakes the daemon", () => {
+  const origin = makeOrigin();
+  mkdirSync(join(origin, "deploy"), { recursive: true });
+  writeFileSync(join(origin, "deploy", "idle-starved-probe.sh"), readFileSync(join(REPO_ROOT, "deploy", "idle-starved-probe.sh")));
+  writeFileSync(join(origin, "bin", "rmd"), [
+    "#!/usr/bin/env bash",
+    'state="$HOME/Remudero/state"',
+    'mkdir -p "$state" "$HOME/Remudero/repos"',
+    'if [ ! -e "$state/first-run" ]; then',
+    '  touch "$state/first-run"',
+    '  git clone -q "$RMD_REPO_URL" "$HOME/Remudero/repos/remudero-site"',
+    '  printf "reply\\n" > "$state/inbox-threads.jsonl"',
+    `  exit ${DAEMON_EXIT_IDLE_STARVED}`,
+    "fi",
+    'touch "$state/woke-for-inbox"',
+    "exit 0",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  git(origin, ["add", "-A"]);
+  commit(origin, "idle inbox boundary fixture");
+  const home = freshHome();
+  const run = boot(home, origin, {
+    cmd: ["./bin/rmd", "daemon", "--repo", "fake/remudero-site"],
+    env: { RMD_RESTART_THROTTLE_S: "1", GH_TOKEN: "fixture-token" },
+    stubs: {
+      sleep: "#!/usr/bin/env bash\nexit 0\n",
+      gh: '#!/usr/bin/env bash\ntouch "$HOME/Remudero/state/gh-consulted"\nprintf "[]"\n',
+    },
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.ok(existsSync(join(home, "Remudero", "state", "woke-for-inbox")));
+  assert.match(run.stderr, /idle_starved: wake .*probe exit 10/);
+  assert.equal(existsSync(join(home, "Remudero", "state", "gh-consulted")), false,
+    "the changed inbox must wake before an unchanged GitHub board is consulted");
+});
+
 test("idle_starved: an uncertain remote probe wakes Node without permanently disabling quiet mode", () => {
   const origin = makeOrigin();
   mkdirSync(join(origin, "deploy"), { recursive: true });
@@ -890,6 +926,8 @@ test("idle_starved: plan/main movement and unreadable PR data both wake the prob
   writeFileSync(gh, "#!/usr/bin/env bash\nprintf '[]'\n", { mode: 0o755 });
   writeFileSync(join(state, "ledger.ndjson"), JSON.stringify({ ts: new Date(Date.now() + 1000).toISOString(), step: "ratify.approved", task_id: "H" }) + "\n");
   assert.equal(probe().status, 10, "a newly released human task wakes even without a plan commit");
+  writeFileSync(join(state, "ledger.ndjson"), JSON.stringify({ ts: since, step: "ratify.approved", task_id: "H" }) + "\n");
+  assert.equal(probe().status, 10, "an approval in the marker's timestamp second cannot fall through the probe");
   writeFileSync(join(state, "ledger.ndjson"), "");
   writeFileSync(join(state, "KICK_REQUESTED-H"), "{}");
   assert.equal(probe().status, 10, "a console kick wakes the task daemon");
