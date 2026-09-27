@@ -81,6 +81,18 @@ test("two cash processes serialize the whole reservation against one pre-migrate
   }
 });
 
+test("shared cash allowance rewrites retain owner-only mode", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-fleet-cash-mode-"));
+  const shared = join(dir, "allowance.json");
+  try {
+    writeFileSync(shared, JSON.stringify({ utcDay: "2026-09-27", fleetCapUsd: 25, reservations: {} }), { mode: 0o600 });
+    reserveOpenWeightBudget(config(join(dir, "core"), shared), {
+      requestId: "mode-test", deployment: "gpt-oss-120b", requestBodyBytes: 10, atIso: ISO,
+    });
+    assert.equal(statSync(shared).mode & 0o777, 0o600);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("shared mode refuses missing and corrupt files, then applies one cap across distinct instance roots", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-fleet-cash-"));
   const shared = join(dir, "allowance.json");
