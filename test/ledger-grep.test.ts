@@ -150,7 +150,9 @@ test("ledgerGrepCommand refuses a missing pattern and an unknown flag, spawning 
 });
 
 test("FALSIFIER: zero archives exits non-zero and prints no result line — the mirror of the positive case below", () => {
-  const dir = tmpStateDir("rmd-ledger-grep-cli-noarchive-");
+  // A diagnostic prints the state directory. Its name may contain the task token without
+  // any ledger row escaping into the result (including when a worktree is named W1-T4...).
+  const dir = tmpStateDir("rmd-W1-T4-ledger-grep-cli-noarchive-");
   const logs: string[] = [];
   const errs: string[] = [];
   const realLog = console.log;
@@ -167,7 +169,7 @@ test("FALSIFIER: zero archives exits non-zero and prints no result line — the 
     const out = logs.join("\n");
     // Positively assert the ABSENCE of a result line — not merely that the exit code is non-zero.
     assert.doesNotMatch(out, /^matches:/m, "must print nothing that could be mistaken for a count");
-    assert.doesNotMatch(out, /W1-T4/, "must never leak a live-file-only match into output");
+    assert.doesNotMatch(out, /"task":"W1-T4"/, "must never leak the live-file-only row into output");
     assert.match(errs.join("\n"), /ZERO archive files matched/);
   } finally {
     console.log = realLog;
