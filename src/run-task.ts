@@ -891,6 +891,7 @@ const workerBoundaryStack: BenchmarkStackEvidence = {
 };
 import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
 import { benchmarkAaCommand, buildBenchmarkAaReport } from "./lib/benchmark-aa.js";
+import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/benchmark-paid-pilot.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
@@ -46251,6 +46252,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T4575: reads a public-fixture or explicitly opted-in trial manifest (benchmark-aa-trial-v1) naming one pinned stack (provider, model, effort, harness, prompt, tool, scorer and environment revisions), a strata revision and its tasks. Each task takes one of two labels by a sha256 draw over the trial and task ids, so a retry or a new run never moves it; non-starters and retries stay in the original arm. Reads the three-form ledger union and, unless --no-cohort, the benchmark-cohort-v1 projection, and reports the sample-ratio test against 50/50 (chi-square and exact binomial), assignment-to-terminal-to-verified-outcome joins, per-arm served-model and resource missingness, fallbacks and crossovers, outcome maturity and censoring, and the observed difference with a 95% interval. API cash estimates, subscription notional cost, invoices and unknown cost stay separate; unknown is never zero. It never declares a winner. It writes one dated private report with a privacy-safe benchmark-aa-receipt-v1 to --out (default <state-dir>/benchmark-aa-v1.<trial>.json); a refresh that cannot read its sources keeps that report and marks it stale. It changes no routing, blocks no dispatch, review or merge, and spends nothing.",
   },
   {
+    name: "benchmark-paid-pilot",
+    syntax: "rmd benchmark-paid-pilot activate --request <request.json> --aa-report <aa-report.json> --confirm-cash-ceiling-usd 100 [--state-dir <dir>] [--json] | report --pilot <id> [--case-files <snapshot.json>] [--out <report.json>] [--state-dir <dir>] [--json]",
+    summary: "Activate the approved $100/7-day paid pilot by hand, or report it; only its paid arm ever pauses.",
+    detail: "W1-T4603: `activate` is the only way the paid pilot starts; no daemon cadence, PR check or build starts it. It reads a benchmark-paid-pilot-request-v1 file (three consented repos, a task assignment seed and eligible population, a paid API-billed arm and a subscription control arm pinned to provider, model and effort, immutable harness, prompt, tool, scorer and environment revisions, verified completion as the primary outcome, a maturity window and the pre-registered protocol text) and the current benchmark-aa-v1 report, and refuses by name when that A/A receipt is missing, tampered, older than 24 hours, stale, inconclusive or reports integrity concerns, or when --confirm-cash-ceiling-usd 100 is absent. It then writes the immutable protocol and a privacy-safe benchmark-paid-pilot-receipt-v1 once to <state-dir>/benchmark-paid-pilot-v1.<pilot>.protocol.json: UTC start and expiry (the seven days start at activation), the $100 aggregate cash ceiling, the repos, the seed and population, the pinned arms, the outcome, maturity window, uncertainty method, stopping rule and the cited A/A receipt. A second activation refuses and never restarts the clock. Tasks keep the W1-T4575 stable draw, and retries, fallbacks, crossovers and non-starters stay in their original arm. Cash counts only API-billed worker-call estimates from the three-form ledger union, never subscription notional cost and never an invoice; a missing price is unknown, not zero. The paid arm alone pauses on missing or ambiguous cost evidence, expiry, an exhausted budget, allocation drift or an unreadable source the spend window needs; ordinary subscription dispatch, review, CI and merge continue. `report` writes a private report by task class and arm (verified completion, human effort, recovery, later defects, cash estimates and notional cost apart, denominators, missingness, censoring, the interval and the pinned revisions) to --out (default <state-dir>/benchmark-paid-pilot-v1.<pilot>.report.json); a report that cannot read its sources keeps the last dated one, marks it stale and names a repair follow-up. No winner is declared before the stopping rule, and nothing is exported.",
+  },
+  {
     name: "ledger-compact",
     syntax: "rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sources <n>] [--dry-run]",
     summary: "Compact one bounded window of old ledger rotations without losing a distinct row.",
@@ -47201,6 +47208,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
   ["benchmark-aa", async (rest) => await benchmarkAaCommand(rest, (input) => buildBenchmarkAaReport(input))],
+  ["benchmark-paid-pilot", async (rest) => await benchmarkPaidPilotCommand(rest, (input) => activateBenchmarkPaidPilot(input))],
   ["memory-lint", (rest) => memoryLintCommand(rest)],
   ["ledger-compact", (rest) => ledgerCompactCommand(rest)],
   ["hand-runs", (rest) => handRunsCommand(rest)],
