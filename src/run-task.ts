@@ -6627,7 +6627,17 @@ async function runReview(args: {
             : { assignment_unavailable_reason: "assignment-not-observed" }),
           ...(reviewerFields.routed_model || !reviewerAssignment ? {} : { routed_model: reviewerAssignment.selected.model }),
         });
-        await runShadowJudge({
+        // W1-T4620: the shadow round re-invokes THIS SAME `reviewerSpawnWorker`/`reviewerQueryFn`
+        // seam for a second, comparison decision. In real dispatch neither is ever supplied (see
+        // each field's own doc: "Default: the real SDK query()"/"Production defaults to the shared
+        // provider router") — but every test that drives `spawnReviewer!==false` end-to-end injects
+        // one of them as a single-shot double scoped to answer exactly one call, then asserts on
+        // state that double captured. A second, uninvited call silently overwrites that captured
+        // state with the SHADOW mount's own args (observed: test/codex-reviewer-production-wiring
+        // .test.ts's `observedSpawn` model/effort/maxTurns assertions), which is not a flake this
+        // feature is entitled to cause. Gate on the seam's ABSENCE, the same signal its own doc
+        // already uses to describe "real" vs "test".
+        if (!args.reviewerSpawnWorker && !args.reviewerQueryFn) await runShadowJudge({
           surface: "review", key: `${prUrl}:${headSha}:${decisionDigest}`,
           primaryMount: args.reviewerMount!, primaryDecision: candidateSemantic,
           primaryServedModel: reviewer.servedModel ?? reviewer.routedModel ?? null,
@@ -13474,6 +13484,16 @@ export interface RunTaskContext {
   /** Resolved once by the outer run so reviewer watchdogs reuse the same policy value. */
   workerAbandonMs?: number;
   workerStateSensor: WorkerStateSensor;
+  /**
+   * W1-T4620: true only when this context was built by the real `runTask` with NO injected
+   * `opts.spawn` — see that option's own doc ("Injectable worker-spawn ... Default: the real
+   * spawnWorker") for the same absence-is-real signal. The risk-judge shadow sample below reuses
+   * the run's ONE spawn seam for a second, comparison decision; a caller (or a test constructing
+   * this context directly) that supplied its own spawn provisioned it for the primary decision
+   * alone. Absent/false ⇒ the shadow sample is skipped, never defaulted to on, so no existing
+   * direct `runTaskBody` caller changes behavior by omitting a field it has never heard of.
+   */
+  shadowJudgeEnabled?: boolean;
 }
 
 /**
@@ -14673,6 +14693,10 @@ async function runTask(
       taskId,
       workerAbandonMs,
       workerStateSensor,
+      // W1-T4620: real dispatch never supplies `opts.spawn` (see that option's own doc) — every
+      // test that wants an offline risk-judge decision does. Absence is the "this is a real,
+      // unattended run" signal the risk-judge shadow sample below gates on.
+      shadowJudgeEnabled: opts.spawn === undefined,
     };
     return await runTaskBody(ctx);
   } finally {
@@ -14703,6 +14727,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     taskId,
     workerAbandonMs,
     workerStateSensor,
+    shadowJudgeEnabled,
   } = ctx;
   // Direct callers of the exported body retain ordinary routing.  Production runTask always
   // supplies the shared object so the preflight and its spawn wrapper observe the same decision.
@@ -17032,7 +17057,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // own DEFAULT_CONFIDENCE_THRESHOLD literal, unreachable from outside risk-judge.ts.
       confidenceThreshold: riskPolicy.confidenceThreshold,
     });
-    if (riskJudgeResult.verdict.availability !== "unavailable") {
+    // W1-T4620: gated on `shadowJudgeEnabled` (absent/false ⇒ this context was built with an
+    // injected `spawn`, i.e. a test's own double for the ONE primary decision — see that field's
+    // doc on RunTaskContext). Reusing it for a second, shadow decision would silently answer past
+    // what the double was provisioned for and corrupt whatever state it captured for the caller.
+    if (riskJudgeResult.verdict.availability !== "unavailable" && shadowJudgeEnabled) {
       await runShadowJudge({
         surface: "risk", key: `${task.id}:${review.headSha}`,
         primaryMount: riskJudgeMount, primaryDecision: riskJudgeResult.verdict.verdict,
