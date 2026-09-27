@@ -1,12 +1,56 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
 // @ts-expect-error The production coverage merger is an executable .mjs module outside tsconfig.
-import { renderCoverageSummary } from '../scripts/coverage-merge-ratchet.mjs';
+import { renderCoverageSummary, stageRawCoverageFile } from '../scripts/coverage-merge-ratchet.mjs';
+
+test('raw coverage staging uses a same-filesystem hard link, not a second multi-gigabyte copy', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rmd-coverage-link-'));
+  const raw = join(root, 'raw.json');
+  const staged = join(root, 'staged.json');
+  try {
+    writeFileSync(raw, '{"result":[]}\n');
+    stageRawCoverageFile(raw, staged);
+    assert.equal(statSync(raw).ino, statSync(staged).ino, 'staging must reuse the raw file inode');
+    assert.equal(readFileSync(staged, 'utf8'), readFileSync(raw, 'utf8'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('raw coverage staging copies only when a cross-device hard link is impossible', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rmd-coverage-cross-device-'));
+  const raw = join(root, 'raw.json');
+  const staged = join(root, 'staged.json');
+  try {
+    writeFileSync(raw, '{"result":[]}\n');
+    let copies = 0;
+    stageRawCoverageFile(raw, staged, {
+      link: () => { throw Object.assign(new Error('cross-device link'), { code: 'EXDEV' }); },
+      copy: (from: string, to: string) => { copies += 1; copyFileSync(from, to); },
+    });
+    assert.equal(copies, 1);
+    assert.equal(readFileSync(staged, 'utf8'), readFileSync(raw, 'utf8'));
+    assert.notEqual(statSync(raw).ino, statSync(staged).ino, 'fallback must be a copy, not a link');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('raw coverage staging propagates non-cross-device link failures', () => {
+  const failure = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+  assert.throws(
+    () => stageRawCoverageFile('raw.json', 'staged.json', {
+      link: () => { throw failure; },
+      copy: () => { assert.fail('a permission failure must not be hidden by a copy'); },
+    }),
+    (error: unknown) => error === failure,
+  );
+});
 
 function runMerger(output: string, ...rawDirectories: string[]): string {
   return execFileSync(

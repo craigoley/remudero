@@ -98,3 +98,15 @@ test("W1-T2961: the stalled verdict names the blocking reason", () => {
   assert.equal(quiet.dispatch_block_reason, "none");
   assert.equal(quiet.dispatch_verdict, "building", "and a building fleet never raises the arm");
 });
+
+test("idle_starved: a fresh shell pulse is live but not a stalled build; an old pulse is neither", () => {
+  const oldBuild = JSON.stringify({ ts: isoAgo(48 * 3600), step: "run.start", lane: "run-task", task_id: "W1-T1" });
+  const fresh = beat([oldBuild, JSON.stringify({ ts: isoAgo(60), step: "daemon.idle_starved.pulse", task_id: "DAEMON" })]);
+  assert.equal(fresh.daemon_verdict, "live");
+  assert.match(fresh.dispatch_verdict, /^idle_starved/);
+  assert.equal(fresh.daemon_last_step, "daemon.idle_starved.pulse");
+
+  const dead = beat([oldBuild, JSON.stringify({ ts: isoAgo(3600), step: "daemon.idle_starved.pulse", task_id: "DAEMON" })]);
+  assert.match(dead.daemon_verdict, /^STALE/);
+  assert.match(dead.dispatch_verdict, /^STALLED/, "an old pulse cannot mask a dead sleeper");
+});
