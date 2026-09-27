@@ -930,6 +930,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          POSTING_JOB_ID: ${{ job.check_run_id }}
           OUTCOME_RULE_CHECKS: ${{ steps.rule-checks.outcome }}
           OUTCOME_COMMITLINT: ${{ steps.commitlint.outcome }}
           OUTCOME_LEAK_GREP: ${{ steps.leak-grep.outcome }}
@@ -971,6 +972,7 @@ jobs:
             gh api "repos/${GITHUB_REPOSITORY}/check-runs" \
               -f "name=${check_name}" \
               -f "head_sha=${HEAD_SHA}" \
+              -f "external_id=job:${POSTING_JOB_ID}" \
               -f "status=completed" \
               -f "conclusion=${conclusion}" \
               -f "output[title]=${check_name}" \
