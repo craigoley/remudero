@@ -160,6 +160,7 @@ import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { startCiFrictionGardener, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
+import { daemonEvidenceCoverageDeps, runEvidenceCoverageGardener, startEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
@@ -32844,6 +32845,7 @@ export async function daemonCommand(
                   ciLearningTaskIdMinter(repoRoot),
                   intervalMs,
                 ),
+                (intervalMs: number) => startEvidenceCoverageGardener(() => runEvidenceCoverageGardener(daemonEvidenceCoverageDeps({ stateDir: join(config.root, "state"), root: repoRoot, log })), log, intervalMs),
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
                 // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
                 // registry instance" has no selector yet -- `RegistryInstance` carries no role or
