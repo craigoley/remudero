@@ -111,10 +111,15 @@ test("a second heartbeat run refuses while the first still holds the lock", (t) 
   const bed = makeBed();
 
   // A beat is IN PROGRESS: hold the very lock path the script takes, the way a slow scan would.
-  const holder = spawn(FLOCK as string, ["-x", bed.lock, "-c", "sleep 30"], { stdio: "ignore" });
+  // Invoke sh explicitly: `flock -c` uses the account's login shell, which is nologin for the
+  // unprivileged CI-parity user. A nonzero probe there meant "cannot log in", not "lock held".
+  const ready = join(bed.dir, "holder-ready");
+  const holder = spawn(FLOCK as string, ["-x", bed.lock, "sh", "-c", `printf held > ${JSON.stringify(ready)}; exec sleep 30`], { stdio: "ignore" });
   try {
-    // Give the holder a moment to actually acquire before the contender runs.
-    spawnSync("sh", ["-c", `for i in $(seq 1 50); do ${FLOCK} -n ${JSON.stringify(bed.lock)} -c true || exit 0; sleep 0.1; done; exit 1`]);
+    // The marker is written by the child AFTER flock acquired the lock. A failed holder never
+    // creates it and cannot turn this test into a false green or a confusing contender failure.
+    const acquired = spawnSync("sh", ["-c", `for i in $(seq 1 50); do test -f ${JSON.stringify(ready)} && exit 0; sleep 0.1; done; exit 1`]);
+    assert.equal(acquired.status, 0, "the holder must acquire the lock before the contender runs");
 
     const second = runBeat(bed);
 

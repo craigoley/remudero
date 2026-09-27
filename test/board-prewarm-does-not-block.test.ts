@@ -121,7 +121,10 @@ function callCount(counterFile: string): number {
   }
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 5000, stepMs = 15): Promise<void> {
+// A worker-thread warm may share an eight-core host with four instrumented coverage shards and
+// a live daemon. The assertion is eventual completion, not a five-second service SLO; retain a
+// finite bound without turning healthy scheduler contention into a false regression.
+async function waitUntil(predicate: () => boolean, timeoutMs = 20_000, stepMs = 15): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error(`waitUntil: condition never became true within ${timeoutMs}ms`);
