@@ -30,13 +30,15 @@ test("W1-T4457 criterion 1: a non-dispatch worker spawn ledgers its worker assig
       onSelectionAssignment: (observed) => { assert.equal(observed.id, assignment.id); callbackSeen += 1; },
     }), result);
     const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((rawLine) => JSON.parse(rawLine));
-    assert.equal(rows.length, 1);
+    assert.equal(rows.length, 2);
     assert.equal(rows[0].step, "worker.assignment");
     assert.equal(rows[0].lane, "triage");
     assert.equal(rows[0].worker_assignment.id, "selected-1");
     assert.equal(rows[0].worker_assignment.selected.provider, "cash");
     assert.equal(rows[0].task_id, "TRIAGE");
     assert.equal(rows[0].run_id, "triage-selected-1");
+    assert.equal(rows[1].step, "worker.attempt");
+    assert.equal(rows[1].selection_assignment_id, "selected-1");
     assert.equal(callbackSeen, 1);
     const inbox = buildInboxDraftSpawnArgs({
       cwd: root, settingsFile: "settings.json", prompt: "draft", config: { root } as Config,
@@ -45,9 +47,9 @@ test("W1-T4457 criterion 1: a non-dispatch worker spawn ledgers its worker assig
     });
     inbox.onSelectionAssignment?.({ ...assignment, id: "selected-2" });
     const afterInbox = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((rawLine) => JSON.parse(rawLine));
-    assert.equal(afterInbox.length, 2);
-    assert.equal(afterInbox[1].lane, "inbox-draft");
-    assert.equal(afterInbox[1].worker_assignment.id, "selected-2");
+    assert.equal(afterInbox.length, 3);
+    assert.equal(afterInbox[2].lane, "inbox-draft");
+    assert.equal(afterInbox[2].worker_assignment.id, "selected-2");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

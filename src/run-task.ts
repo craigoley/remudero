@@ -881,7 +881,7 @@ import {
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
-import { benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources } from "./lib/benchmark-run.js";
 import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
@@ -13902,13 +13902,7 @@ function ledgerNonDispatchAssignment(
 }
 
 export function ledgeredNonDispatchSpawn(lane: string, raw: typeof spawnWorker = spawnWorker): typeof spawnWorker {
-  return (args) => raw({
-    ...args,
-    onSelectionAssignment: (assignment) => {
-      ledgerNonDispatchAssignment(lane, assignment, args.config, args.runId, args.taskId);
-      args.onSelectionAssignment?.(assignment);
-    },
-  });
+  return benchmarkNonDispatchSpawn(lane, raw);
 }
 
 async function runTask(
@@ -14165,6 +14159,17 @@ async function runTask(
         selectionAssignment = assignment;
         log("worker.assignment", { worker_assignment: assignment });
         effectiveSpawnArgs.onSelectionAssignment?.(assignment);
+      },
+      onModelFallbackAttempt: (attempt) => {
+        let resources: Record<string, unknown> = {};
+        try { if (attempt.result) resources = benchmarkWorkerAttemptResources(attempt.result); }
+        catch { resources = { benchmark_run_unavailable_reason: "worker-result-fields-unavailable" }; }
+        try { log("worker.attempt", { ...(attempt.selectionAssignmentId
+          ? { selection_assignment_id: attempt.selectionAssignmentId } : {}),
+          attempted_model: attempt.model, success: false, worker_failure: attempt.reason, ...resources }); }
+        catch { /* telemetry cannot interrupt the cash ladder */ }
+        try { effectiveSpawnArgs.onModelFallbackAttempt?.(attempt); }
+        catch { /* caller telemetry cannot interrupt the cash ladder */ }
       },
       onSpawnError:
         effectiveSpawnArgs.onSpawnError ??
@@ -41859,7 +41864,7 @@ export async function draftProposalBatch(
       planText,
       {
         spawn: (_proposal, prompt) =>
-          spawnWorker(buildInboxDraftSpawnArgs({
+          benchmarkNonDispatchSpawn("inbox-draft")({ ...buildInboxDraftSpawnArgs({
             cwd: worktreePath,
             settingsFile,
             mount: inboxDraftMount,
@@ -41869,7 +41874,7 @@ export async function draftProposalBatch(
             // test reads this body so a later extraction cannot silently turn the guarantee into
             // a helper-level convention.
             disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
-          })),
+          }), onSelectionAssignment: undefined }),
         log,
       },
       runId,

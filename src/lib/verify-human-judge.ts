@@ -21,6 +21,7 @@ import type { Mount, Mounts } from "./mounts.js";
 import { canonicalWorkerProviderId, enabledWorkerProviders, type Config, type WorkerProviderId } from "./config.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 
 /** What the judge decides for ONE parked shard. None of the values edits or releases a task. */
 export type VerifyHumanDecision = "needs_operator" | "automate" | "backlog";
@@ -355,7 +356,7 @@ export async function spawnVerifyHumanJudgeWorker(opts: {
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): Promise<WorkerResult> {
-  const spawn = opts.spawn ?? spawnWorker;
+  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("verify-human-judge");
   return spawn(buildVerifyHumanJudgeSpawnArgs(opts));
 }
 

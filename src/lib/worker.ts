@@ -1048,6 +1048,14 @@ export interface SpawnWorkerArgs {
    * catches a sink failure and does not start attributing terminal rows to an event it could not
    * write; routing and billing behavior stay unchanged when telemetry is unavailable. */
   onSelectionAssignment?: (assignment: WorkerSelectionAssignment) => void;
+  /** One failed cash-ladder rung that was actually called, before trying its successor. The
+   * final rung remains the caller's ordinary worker result; a sink failure never changes flow. */
+  onModelFallbackAttempt?: (attempt: {
+    selectionAssignmentId?: string;
+    model: string;
+    reason: "deployment-absent" | "unsupported-response-format";
+    result?: WorkerResult;
+  }) => void;
   /** Injectable seam: override the process-group spawn and teardown. Omitted means the real
    * `spawnDetachedGroup`/`teardownProcessGroup`, so containment wiring stays provable without a real `claude` binary
    * (W1-T117). */
@@ -1900,6 +1908,8 @@ export const WORKER_SETTING_SOURCES: SettingSource[] = WORKER_SPAWN_ISOLATION.se
 export async function runOpenWeightWalkingLadder(
   run: (selection: OpenWeightModelSelection) => Promise<WorkerResult>,
   selection: OpenWeightModelSelection,
+  onFallbackAttempt?: (attempt: { selection: OpenWeightModelSelection;
+    reason: "deployment-absent" | "unsupported-response-format"; result?: WorkerResult }) => void,
 ): Promise<WorkerResult> {
   const rungs = [selection.model, ...selection.alternatives];
   let lastRefusal: unknown;
@@ -1913,6 +1923,8 @@ export async function runOpenWeightWalkingLadder(
       if (result.openWeightDeploymentAbsent && next) {
         markOpenWeightDeploymentAbsent(result.openWeightDeploymentAbsent);
         console.error(JSON.stringify({ event: "worker.openweight.rung_absent", deployment: model, next, rung: index + 1, of: rungs.length }));
+        try { onFallbackAttempt?.({ selection: { ...selection, model }, reason: "deployment-absent", result }); }
+        catch { console.error(JSON.stringify({ event: "worker.openweight.rung_telemetry_unavailable", reason: "sink-failed" })); }
         continue;
       }
       if (result.openWeightDeploymentAbsent) markOpenWeightDeploymentAbsent(result.openWeightDeploymentAbsent);
@@ -1932,6 +1944,10 @@ export async function runOpenWeightWalkingLadder(
         rung: index + 1,
         of: rungs.length,
       }));
+      if (next) {
+        try { onFallbackAttempt?.({ selection: { ...selection, model }, reason: "unsupported-response-format" }); }
+        catch { console.error(JSON.stringify({ event: "worker.openweight.rung_telemetry_unavailable", reason: "sink-failed" })); }
+      }
       if (!next) break;
     }
   }
@@ -2359,22 +2375,36 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       },
     );
     assertModelAllowed(openWeight.model, config);
-    const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
+    const cashAssignment = (model: string, alternatives: readonly string[]) => emitWorkerSelectionAssignment(args, {
       provider: "cash",
-      model: openWeight.model,
+      model,
       effort: openWeight.effort,
       mode: "mount-affinity",
       selectionPath: "mount-affinity",
       policy: routingPolicy,
-      alternatives: openWeight.alternatives,
+      alternatives,
       capability: openWeight.capability,
     });
+    let selectionAssignmentId = cashAssignment(openWeight.model, openWeight.alternatives);
     try {
       materializeWorkerHome({ workerHome, realHome });
       // WALK THE LADDER ON A CAPABILITY REFUSAL, NEVER ON ANYTHING ELSE (see `runOpenWeightWalkingLadder`).
+      let firstRung = true;
       const result = await runOpenWeightWalkingLadder(
-        (selection) => runOpenWeight({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection),
+        async (selection) => {
+          if (firstRung) firstRung = false;
+          else selectionAssignmentId = cashAssignment(selection.model,
+            openWeight.alternatives.slice(openWeight.alternatives.indexOf(selection.model) + 1));
+          const rung = await runOpenWeight({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
+          rung.selectionAssignmentId = selectionAssignmentId;
+          return rung;
+        },
         openWeight,
+        (attempt) => {
+          try { args.onModelFallbackAttempt?.({ selectionAssignmentId, model: attempt.selection.model,
+            reason: attempt.reason, ...(attempt.result ? { result: attempt.result } : {}) }); }
+          catch { console.error(JSON.stringify({ event: "worker.openweight.rung_telemetry_unavailable", reason: "sink-failed" })); }
+        },
       );
       result.selectionAssignmentId = selectionAssignmentId;
       return result;

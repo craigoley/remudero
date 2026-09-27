@@ -3,6 +3,7 @@ import { parse as parseYaml } from "yaml";
 import type { Mount, Mounts } from "./mounts.js";
 import { MountsError } from "./mounts.js";
 import { capStderrExcerpt, REPORT_EXCERPT_CAP, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 
 /**
  * Risk judge — P34 clause (b), MASTER-PLAN §4B/§9, W1-T248. A lightweight judge on the
@@ -1018,7 +1019,7 @@ export async function spawnRiskJudgeWorker(opts: {
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): Promise<WorkerResult> {
-  const spawn = opts.spawn ?? spawnWorker;
+  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge");
   return spawn(buildRiskJudgeSpawnArgs(opts));
 }
 
@@ -1044,7 +1045,7 @@ export function realRiskJudge(opts: {
   /** One entry per SPAWN, so a retried judgment (W1-T2212) reports what all attempts cost. */
   spend?: RiskJudgeSpendCollector;
 }): (input: RiskJudgeInput) => Promise<RiskJudgeVerdict> {
-  const spawn = opts.spawn ?? spawnWorker;
+  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge");
   const maxAttempts = opts.maxAttempts ?? RISK_JUDGE_MAX_ATTEMPTS;
   if (maxAttempts < 1) throw new Error("realRiskJudge: maxAttempts must be >= 1");
   return async (input: RiskJudgeInput) => {

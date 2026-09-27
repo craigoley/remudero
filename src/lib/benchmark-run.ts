@@ -1,6 +1,9 @@
 /** Private, metadata-only receipts. The enclosing ledger row owns run/assignment IDs; this
  * envelope deliberately contains neither IDs nor content, and grants no publication rights. */
-import { workerLedgerFields, type WorkerResult } from "./worker.js";
+import { loadConfig } from "./config.js";
+import { appendLedger } from "./ledger.js";
+import { ledgerPathFor } from "./ledger-path.js";
+import { spawnWorker, workerLedgerFields, type WorkerResult } from "./worker.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
 
@@ -86,18 +89,21 @@ function callEvidence(row: Record<string, unknown>) {
 }
 
 /** Keep the billing derivation at the canonical worker boundary, including cash-provider calls.
- * An empty result envelope carries default usage zeros, not observations. */
+ * An empty result envelope carries default usage zeros, not observations. Codex CLI currently
+ * supplies zero placeholders when dollars or token usage are not reported. */
 export function benchmarkWorkerAttemptResources(result: WorkerResult) {
   const fields = workerLedgerFields(result);
   const observedEnvelope = typeof result.subtype === "string" && result.subtype.length > 0;
+  const codexPlaceholder = result.provider === "codex";
+  const costObserved = observedEnvelope && !(codexPlaceholder && result.costUsd === 0);
+  const tokensObserved = observedEnvelope && !(codexPlaceholder && result.tokens.input === 0
+    && result.tokens.output === 0 && result.tokens.cacheRead === 0 && result.tokens.cacheCreation === 0);
   return {
     served_model: fields.served_model,
     worker_duration_ms: fields.worker_duration_ms,
-    ...(observedEnvelope ? {
-      tokens: fields.tokens,
-      billing_mode: fields.billing_mode,
-      total_cost_usd: fields.total_cost_usd,
-    } : {}),
+    ...(observedEnvelope ? { billing_mode: fields.billing_mode } : {}),
+    ...(tokensObserved ? { tokens: fields.tokens } : {}),
+    ...(costObserved ? { total_cost_usd: fields.total_cost_usd } : {}),
   };
 }
 
@@ -122,4 +128,68 @@ export function benchmarkRunTerminalReceipt(row: Record<string, unknown>, assign
   if (row.step !== "verdict" || !assignmentObserved || typeof row.selection_assignment_id !== "string"
     || row.selection_assignment_id.length === 0) return undefined;
   return { version: BENCHMARK_RUN_VERSION, phase: "terminal" as const, ...callEvidence(row) };
+}
+
+/** Capture an auxiliary worker call without turning telemetry into a worker or PR gate. The
+ * caller's existing assignment sink remains authoritative when one is supplied. */
+export function benchmarkNonDispatchSpawn(
+  lane: string, raw: typeof spawnWorker = spawnWorker,
+): typeof spawnWorker {
+  return async (args) => {
+    let observedAssignmentId: string | undefined;
+    const write = (step: string, fields: Record<string, unknown>): void => {
+      const config = args.config ?? loadConfig();
+      appendLedger(ledgerPathFor(config), {
+        run_id: args.runId ?? `${lane}-${observedAssignmentId ?? "unassigned"}`,
+        task_id: args.taskId ?? lane.toUpperCase(), step, lane, ...fields,
+      });
+    };
+    const recordAttempt = (fields: Record<string, unknown>): void => {
+      try {
+        const row = { step: "worker.attempt", ...fields,
+          assignment_observed: fields.selection_assignment_id === observedAssignmentId && observedAssignmentId !== undefined };
+        write("worker.attempt", { ...fields, benchmark_run: benchmarkRunAttemptReceipt(row) });
+      } catch {
+        // A missing sink is coverage debt, never a reason to retry or change the worker result.
+        console.error(JSON.stringify({ event: "benchmark.non_dispatch_attempt_unavailable", lane, reason: "ledger-write-failed" }));
+      }
+    };
+    let result: WorkerResult;
+    try {
+      result = await raw({ ...args, onSelectionAssignment: (assignment) => {
+        const priorId = observedAssignmentId;
+        observedAssignmentId = assignment.id;
+        try {
+          write("worker.assignment", { worker_assignment: assignment,
+            benchmark_run: benchmarkRunAssignmentReceipt(assignment, {}) });
+        } catch {
+          observedAssignmentId = priorId;
+          console.error(JSON.stringify({ event: "benchmark.non_dispatch_assignment_unavailable", lane, reason: "ledger-write-failed" }));
+        }
+        // A failed benchmark sink must not skip the caller's existing assignment callback.
+        args.onSelectionAssignment?.(assignment);
+      }, onModelFallbackAttempt: (attempt) => {
+        let resources: Record<string, unknown> = {};
+        try { if (attempt.result) resources = benchmarkWorkerAttemptResources(attempt.result); }
+        catch { resources = { benchmark_run_unavailable_reason: "worker-result-fields-unavailable" }; }
+        recordAttempt({ ...(attempt.selectionAssignmentId ? { selection_assignment_id: attempt.selectionAssignmentId } : {}),
+          attempted_model: attempt.model, success: false, worker_failure: attempt.reason, ...resources });
+        try { args.onModelFallbackAttempt?.(attempt); }
+        catch { console.error(JSON.stringify({ event: "benchmark.non_dispatch_fallback_hook_unavailable", lane })); }
+      } });
+    } catch (error) {
+      recordAttempt({ ...(observedAssignmentId ? { selection_assignment_id: observedAssignmentId } : {}),
+        success: false, worker_failure: "spawn-threw-before-result" });
+      throw error;
+    }
+    const assignmentId = result.selectionAssignmentId ?? observedAssignmentId;
+    const observedEnvelope = typeof result.subtype === "string" && result.subtype.length > 0;
+    let resources: Record<string, unknown>;
+    try { resources = benchmarkWorkerAttemptResources(result); }
+    catch { resources = { benchmark_run_unavailable_reason: "worker-result-fields-unavailable" }; }
+    recordAttempt({ ...(assignmentId ? { selection_assignment_id: assignmentId } : {}),
+      ...(result.isError || result.apiError || result.usageRefusal ? { success: false }
+        : observedEnvelope ? { success: true } : {}), ...resources });
+    return result;
+  };
 }
