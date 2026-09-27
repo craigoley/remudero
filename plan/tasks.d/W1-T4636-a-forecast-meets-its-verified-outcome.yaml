@@ -1,0 +1,49 @@
+- id: W1-T4636
+  title: "A WORKER'S SELF-FORECAST IS LEDGERED BUT NEVER SCORED — W1-T4629 records SELF_FORECAST on implement.done and ships scoreSelfForecasts, but no production path pairs a forecast with its assignment's verified outcome, so no model's calibration is ever measured"
+  repo: remudero
+  depends_on: ["W1-T4629", "W1-T4623"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: model-evidence program — W1-T4629 build report named the missing forecast x outcome projection"
+  plan_refs: ["W1-T4629", "W1-T4623", "W1-T4608", "W1-T4630"]
+  files:
+    - src/lib/self-forecast.ts
+    - src/lib/benchmark-cohort.ts
+    - test/a-forecast-meets-its-verified-outcome.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T4629 (PR 7474) appends a SELF_FORECAST contract to the implement prompt and records
+    `self_forecast: parseSelfForecast(...)` (present p / absent / invalid) on `implement.done` next
+    to `selection_assignment_id`. `scoreSelfForecasts(pairs, {bins})` computes Brier score, mean
+    forecast, observed rate, the perception gap and a reliability curve per model x task class — but
+    grep over origin/main finds no caller outside src/lib/self-forecast.ts: the pairs are never
+    built. The build report named the reason: W1-T4608's join exposed only group totals, not per-
+    assignment outcomes. W1-T4623 (PR 7478) has since joined verified outcomes one assignment at a
+    time inside benchmark-cohort.ts, so the per-assignment outcome now exists where the cohort
+    snapshot is built. METR's randomized study found developers believed they were ~20% faster while
+    measuring ~19% slower; whether each model's own forecast is calibrated is the same question
+    asked of the worker, and it is currently unmeasured.
+  design: |
+    In the cohort snapshot (benchmark-cohort.ts), build SelfForecastPair rows by joining each
+    implement.done `self_forecast` to its `selection_assignment_id`'s assignment (selected model,
+    task class) and that assignment's verified outcome through the same per-assignment
+    joinVerifiedTaskOutcomes path W1-T4623 uses. Completed counts 1; closed-unmerged-unadjudicated
+    counts 0; open (censored) and unavailable outcomes are excluded with a counted reason, never
+    scored as failure. Absent and invalid forecasts are counted, never imputed as 0.5. Attach
+    `selfForecastCalibration: scoreSelfForecasts(pairs, {bins})` to the snapshot alongside
+    modelDrift, recomputed when case files are supplied, with an explicit unavailable value when no
+    verified-outcome join exists. Descriptive only: no routing input, no gate, no public claim.
+  acceptance:
+    - claim: "each implement self-forecast is paired with its assignment's verified outcome and scored per model and task class, with absent forecasts and censored outcomes counted rather than imputed"
+      proof: "unit test: test/a-forecast-meets-its-verified-outcome.test.ts"
+    - claim: "the cohort snapshot calls the self-forecast scorer in production"
+      proof: "grep: scoreSelfForecasts( in src/lib/benchmark-cohort.ts"
+  falsifier: |
+    Revert the change: scoreSelfForecasts has no production caller, the cohort snapshot carries no
+    calibration, and the task's own test fails on a forecast whose verified outcome is known.
