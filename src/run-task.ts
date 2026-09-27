@@ -882,7 +882,7 @@ import {
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, benchmarkEvidenceLedgerPath } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
 // Prompt, tools, scorer and environment remain unavailable until immutable trial artifacts exist.
@@ -8853,6 +8853,7 @@ export function fixWorkerReceipt(
   spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>,
   log: (step: string, extra?: Record<string, unknown>) => void,
   workerRunId: string,
+  work: BenchmarkWorkInput = {},
 ): {
   spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
   ledgerFields: (result: WorkerResult) => Record<string, unknown>;
@@ -8866,7 +8867,7 @@ export function fixWorkerReceipt(
       receiptFailure ??= `${step}-ledger-write-failed`;
       throw error;
     }
-  }, workerBoundaryStack);
+  }, workerBoundaryStack, work);
   const receipted = (args: SpawnWorkerArgs): Promise<WorkerResult> =>
     recordBenchmarkWorkerAttempt(() => spawn(withCallerOwnedReceipt({
       ...args,
@@ -10467,7 +10468,7 @@ export async function runFixRung(opts: {
         // spawn already takes (spawnFixWorkerBounded) — this dispatch is never a strike (`strikes`
         // is read, never incremented, on this whole path) but it is still a real subprocess and
         // must never be allowed to hang the rung forever.
-        const prerequisiteReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, "prerequisite", systemClock.now()));
+        const prerequisiteReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, "prerequisite", systemClock.now()), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));
         const spawnOutcome = await spawnFixWorkerBounded({ ...deps, spawn: prerequisiteReceipt.spawn }, dispatchArgs, { runId: opts.runId, taskId: opts.taskId });
         const prerequisiteWorker = spawnOutcome.kind === "spawned" ? deps.account(spawnOutcome.result) : undefined;
         const prerequisiteUrl = prerequisiteWorker ? parseReport(workerTranscript(prerequisiteWorker))?.prUrl : undefined;
@@ -10773,7 +10774,7 @@ export async function runFixRung(opts: {
       // Unreadable HEAD: commitCount falls back to 0, as before this task — never a throw mid-dispatch.
     }
     const fixRoundStartedAtMs = systemClock.now();
-    const fixReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs));
+    const fixReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));
     let fixResult: WorkerResult;
     // W1-T1219: the spawn's elapsed ms on the SUCCESS path, the field `fix.spawn_abandoned` carries
     // on failure, folded into `fix.dispatch` so a completed spawn's duration is measurable at all.
@@ -10860,7 +10861,7 @@ export async function runFixRung(opts: {
     ) {
       deps.log("fix.commit_line_requested", { strike: attempt, round });
       deps.say("fix rung: no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
-      const askReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}-ask`, systemClock.now()));
+      const askReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}-ask`, systemClock.now()), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));
       const asked = await spawnFixWorkerBounded(
         { ...deps, spawn: askReceipt.spawn },
         {
@@ -13937,16 +13938,11 @@ export function predecessorTranscriptPromptLines(paths: readonly string[]): stri
 }
 
 export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<string, unknown>) => void,
-  stackEvidence: BenchmarkStackEvidence = {}) {
+  stackEvidence: BenchmarkStackEvidence = {}, initialWork: BenchmarkWorkInput = {}) {
   const assignments = new Set<string>();
-  let work: { taskClass?: string; risk?: string } = {};
+  let work = initialWork;
   return (step: string, extra: Record<string, unknown> = {}): void => {
-    if (step === "run.start") {
-      work = {
-        ...(typeof extra.task_class === "string" ? { taskClass: extra.task_class } : {}),
-        ...(typeof extra.risk === "string" ? { risk: extra.risk } : {}),
-      };
-    }
+    work = observeBenchmarkWork(work, step, extra);
     let fields: Record<string, unknown>;
     let durableAssignmentId: string | undefined;
     try {
@@ -14050,6 +14046,7 @@ function ledgerNonDispatchAssignment(
     step: "worker.assignment",
     lane,
     worker_assignment: assignment,
+    benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane), workerBoundaryStack),
   });
 }
 
@@ -14718,6 +14715,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // (lib/retro.ts's aggregateByClass) reads alongside this line's cost/verdict.
     task_class: taskClass,
     mount_class: mountClass,
+    task_shape: dispatchTaskShape({ task, tasks: plan.tasks, ledgerPath, lane: "run-task", reconUnavailableReason: "recon-not-yet-run" }),
     provider: mount.provider,
     worker_role: "implementer",
     budget_usd: budgetUsd,
