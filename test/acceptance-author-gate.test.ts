@@ -15,7 +15,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -36,6 +36,7 @@ type GateInput = {
   body: string;
   authorLogin?: string;
   trailerResolves?: (taskId: string) => boolean;
+  criteriaFromHeadPlan?: boolean;
   introducedTaskIds?: string[];
   trailerCommits?: Array<{ sha: string; subject: string; taskId: string }>;
   changedPaths?: readonly string[];
@@ -772,7 +773,7 @@ test("W1-T1060: a resolvable trailer is not refused for prose under an Acceptanc
     `Remudero-Task: ${IMPLEMENTATION_TASK}`,
   ].join("\n");
 
-  const verdict = evaluateGate({ body, trailerResolves: (taskId) => taskId === IMPLEMENTATION_TASK });
+  const verdict = evaluateGate({ body, trailerResolves: (taskId) => taskId === IMPLEMENTATION_TASK, criteriaFromHeadPlan: true });
 
   assert.equal(verdict.ok, true, `expected OK, got: ${"message" in verdict ? verdict.message : ""}`);
   assert.match(verdict.message, /criteria resolve from plan\/tasks\.yaml/);
@@ -804,4 +805,52 @@ test("W1-T1060: a trailer the plan does NOT declare buys no exemption from the b
   const verdict = evaluateGate({ body, trailerResolves: (taskId) => taskId === IMPLEMENTATION_TASK });
 
   assert.equal(verdict.ok, false);
+});
+
+// The matching first proof keeps the separate trailer/body divergence check out of this proof-shape test.
+const PROSE_BODY = (trailer?: string, invalidProof = true) => [
+  "## Acceptance criteria",
+  "",
+  "- claim: the plan proof is listed for readers",
+  "  proof: unit test: test/cross-repo-proof-suite-registry.test.ts",
+  "- claim: the second prose claim",
+  ...(invalidProof ? ["  proof: explained in the summary"] : []),
+  "",
+  ...(trailer === undefined ? [] : [`Remudero-Task: ${trailer}`]),
+].join("\n");
+
+test("acceptance gate ignores body proof shape when head plan criteria resolve", () => {
+  const headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+  const event = tmpEventFile({ pull_request: {
+    body: PROSE_BODY("W1-T3525", false), user: { login: "a-human" }, head: { sha: headSha },
+  } });
+  try {
+    const run = runGate(event.path);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(run.stdout, /acceptance-author-gate: OK/);
+  } finally {
+    event.cleanup();
+  }
+});
+
+test("acceptance gate still refuses prose body proofs without head plan criteria", () => {
+  const headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+  for (const { name, trailer, sha, invalidProof } of [
+    { name: "no trailer", trailer: undefined, sha: headSha, invalidProof: true },
+    { name: "unknown trailer", trailer: "W1-TNOTINPLAN", sha: headSha, invalidProof: true },
+    { name: "empty acceptance", trailer: "W1-T3337", sha: headSha, invalidProof: false },
+    { name: "missing head", trailer: "W1-T3525", sha: undefined, invalidProof: false },
+    { name: "unreadable head", trailer: "W1-T3525", sha: "0".repeat(40), invalidProof: false },
+  ]) {
+    const event = tmpEventFile({ pull_request: {
+      body: PROSE_BODY(trailer, invalidProof), user: { login: "a-human" }, head: { sha },
+    } });
+    try {
+      const run = runGate(event.path);
+      assert.equal(run.status, 1, `${name}: ${run.stdout + run.stderr}`);
+      assert.match(run.stderr, /REFUSED \(proof-shape\)/, name);
+    } finally {
+      event.cleanup();
+    }
+  }
 });

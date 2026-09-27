@@ -52,6 +52,7 @@ import {
   filingSelfCreditCheck,
   parseAcceptanceBlock,
   parseWhitelistedProof,
+  resolvePlanCriteriaAtHead,
   wrappedGrepPattern,
 } from "../src/lib/review.ts";
 import { rule15SplitViolation } from "../src/lib/ci-parity.ts";
@@ -291,6 +292,12 @@ export function planTrailerResolver(root = REPO_ROOT) {
   return ids === undefined ? undefined : (taskId) => ids.has(taskId);
 }
 
+/** Only non-empty criteria from the PR's own head can replace body-authored proofs. */
+export function criteriaResolveAtHead({ body, headSha, root = REPO_ROOT }) {
+  if (!headSha || extractTaskTrailerId(body ?? "") === undefined) return false;
+  return resolvePlanCriteriaAtHead(body, root, "plan/tasks.yaml", headSha).criteria.length > 0;
+}
+
 /**
  * Read declared task files from the checked-out plan. Unlike the trailer resolver's deliberately
  * permissive line scan, this needs the plan schema's authoritative `files:` array; a bad plan
@@ -493,9 +500,9 @@ export function evaluateCommitTrailerGate({ trailerCommits, changedPaths, taskFi
  * caller is what supplies it, so a `Remudero-Task:` trailer naming an id the plan does not declare
  * stops buying an exemption. `trailerResolves` OMITTED — which is what a caller with an unreadable
  * plan passes — leaves the verdict byte for byte what it was before this wiring.
- * @param {{ body: string, authorLogin?: string, headRefName?: string, trailerResolves?: (taskId: string) => boolean, introducedTaskIds?: string[], trailerCommits?: readonly { sha: string, subject: string, taskId: string }[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined, taskAcceptanceForId?: (taskId: string) => readonly { claim: string, proof: string }[] | undefined, rule15Verdict?: import("../src/lib/ci-parity.ts").Rule15SplitVerdict }} input
+ * @param {{ body: string, authorLogin?: string, headRefName?: string, trailerResolves?: (taskId: string) => boolean, criteriaFromHeadPlan?: boolean, introducedTaskIds?: string[], trailerCommits?: readonly { sha: string, subject: string, taskId: string }[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined, taskAcceptanceForId?: (taskId: string) => readonly { claim: string, proof: string }[] | undefined, rule15Verdict?: import("../src/lib/ci-parity.ts").Rule15SplitVerdict }} input
  */
-export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, introducedTaskIds = [], trailerCommits, changedPaths, taskFilesForId, taskAcceptanceForId, rule15Verdict }) {
+export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, criteriaFromHeadPlan = false, introducedTaskIds = [], trailerCommits, changedPaths, taskFilesForId, taskAcceptanceForId, rule15Verdict }) {
   if (authorLogin !== undefined && EXEMPT_BOT_LOGINS.has(authorLogin)) {
     return {
       ok: true,
@@ -543,19 +550,15 @@ export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, 
     }
   }
   const result = acceptanceAuthorTimeCheck(body, trailerResolves === undefined ? {} : { trailerResolves });
-  // JUDGE THE SOURCE THE CRITERIA ACTUALLY CAME FROM. The predicate above returns OK early on the
-  // trailer arm precisely because "criteria come from the plan record rather than the body" — and
-  // the proof-shape check below then re-parsed the BODY anyway, undoing the exemption the same
-  // call had just granted one line earlier. Recomputed here with the predicate's OWN condition, not
-  // by string-matching its message, so the two cannot disagree about which arm fired.
-  const criteriaCameFromPlan = trailerId !== undefined && (trailerResolves === undefined || trailerResolves(trailerId));
-  return result.ok ? authorTimeProofShapeRefusal(body, result, criteriaCameFromPlan) : result;
+  // The shared predicate still uses the lightweight ID resolver. Only the reviewer's non-empty
+  // criteria at this PR head can justify skipping the body's proof-shape check.
+  return result.ok ? authorTimeProofShapeRefusal(body, result, criteriaFromHeadPlan) : result;
 }
 
 /**
  * Refuse a body whose Acceptance bullets carry proofs review cannot execute.
  *
- * SKIPPED ENTIRELY when the criteria resolve from the plan (`criteriaCameFromPlan`). On that arm the
+ * SKIPPED ENTIRELY when non-empty criteria resolve at the PR head (`criteriaFromHeadPlan`). On that arm the
  * body's block is NOT the source of truth and review never reads it, so parsing it here judged prose
  * the author wrote as explanation. MEASURED on #5687: a body carrying a valid
  * `Remudero-Task: W1-T3612` trailer — whose shard declares two proofs that both parse — was refused
@@ -568,10 +571,10 @@ export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, 
  * would be a second implementation of it, which this script's own header rules out.
  * @param {string} body
  * @param {{ ok: true, message: string }} result
- * @param {boolean} [criteriaCameFromPlan]
+ * @param {boolean} [criteriaFromHeadPlan]
  */
-function authorTimeProofShapeRefusal(body, result, criteriaCameFromPlan = false) {
-  if (criteriaCameFromPlan) return result;
+function authorTimeProofShapeRefusal(body, result, criteriaFromHeadPlan = false) {
+  if (criteriaFromHeadPlan) return result;
   const criteria = parseAcceptanceBlock(body);
   const defects = [];
   criteria.forEach((criterion, index) => {
@@ -656,6 +659,7 @@ export function main(argv) {
       authorLogin: payload.authorLogin,
       headRefName: payload.headRefName,
       trailerResolves: planTrailerResolver(),
+      criteriaFromHeadPlan: criteriaResolveAtHead({ body: payload.body, headSha: payload.headSha }),
       introducedTaskIds: introducedShardTaskIds({ baseSha: payload.baseSha, headSha: payload.headSha }),
       trailerCommits,
       changedPaths,
