@@ -2410,6 +2410,7 @@ import {
   type DoctorDeps,
   statusCommand,
   type StatusDeps,
+  caseFileCommand,
   digestCommand,
   learningsCommand,
   learningsExportCommand,
@@ -2450,6 +2451,7 @@ export {
   type DoctorDeps,
   statusCommand,
   type StatusDeps,
+  caseFileCommand,
   digestCommand,
   learningsCommand,
   learningsExportCommand,
@@ -46204,6 +46206,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T279+W1-T280: ONE verb answering 'is it running' AND 'why is it stalled' from ONE read model. LOCAL (no network): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest daemon.summary). DERIVED: BLOCKERS BY CLASS (circuit-broken w/ reset note, dispatch.indeterminate w/ gh-window note, blocked PRs by sweep.ts's own named reason), QUEUE HEAD (next dispatchables, perpetual-attempt tasks flagged with observed per-cycle cost), INBOX (ready/not-ready counts, head not-ready reason), HEADROOM (newest telemetry + enforcement on/off from the same switch the daemon reads) — these read a batched GitHub gateway and degrade to a stated unknown on an outage, never a gate on the local sections. Each section ends with at most one next action. --json emits the exact same read model the text renders. Read-only: writes nothing, spawns nothing, always exits 0 (bad args aside).",
   },
   {
+    name: "case-file",
+    syntax: "rmd case-file <task-id> [--json]",
+    summary: "Read one task's sourced plan, run, PR, review, CI, and release evidence.",
+    detail: "W1-T4607: a read-only task case file. It streams a bounded three-form ledger window, joins only task-owned run IDs and exact assignment IDs, then reads the current PR head and its check rollup. Every section says observed, stale, pending, or unavailable with source and as-of; a merge is never reported as a deployment or healthy runtime.",
+  },
+  {
     name: "sweep",
     syntax: "rmd sweep [--repo <name>] [--dry-run]",
     summary: "Level-triggered PR-pipeline reconciler: re-derive disposition, take one action.",
@@ -47027,6 +47035,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["sync", (rest) => syncCommand(rest)],
   ["doctor", async (rest) => await doctorCommand(rest, { repoRoot })],
   ["status", async (rest) => await statusCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
+  ["case-file", async (rest) => await caseFileCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
   ["sweep", async (rest) => await sweepCommand(rest)],
   [
     "fix",
