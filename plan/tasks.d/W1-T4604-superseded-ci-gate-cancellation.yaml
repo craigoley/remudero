@@ -14,6 +14,8 @@
     - .github/workflows/ci.yml
     - .github/workflows/ci-gate.yml
     - scripts/ci-gate-from-contract.mjs
+    - test/fast-lane-classifier.test.ts
+    - test/push-ci-on-main.test.ts
     - test/the-ci-gate-does-not-hold-a-runner.test.ts
   status: queued
   rationale: |
