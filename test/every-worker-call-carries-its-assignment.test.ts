@@ -22,6 +22,8 @@ import { join, relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { ghShim } from "./helpers/gh-shim.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import {
   spawnWorker,
   type SpawnWorkerArgs,
@@ -220,32 +222,22 @@ interface ReviewerRun {
  *  the worker result itself carries the assignment and routed model. */
 async function reviewWith(opts: { assign: boolean; resultCarries: boolean }): Promise<ReviewerRun> {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4615-reviewer-`));
-  const sourceDir = join(root, "source");
-  const binDir = join(root, "bin");
+  const repo = gitRepo({ kind: "w1-t4615-reviewer-source", seedCommit: false });
+  const sourceDir = repo.dir;
   const oldPath = process.env.PATH;
   try {
     mkdirSync(join(sourceDir, "src"), { recursive: true });
-    mkdirSync(binDir);
-    execFileSync("git", ["init", "-q", sourceDir]);
-    git(sourceDir, "config", "user.name", "RMD Test");
-    git(sourceDir, "config", "user.email", "rmd-test@example.invalid");
     writeFileSync(join(sourceDir, "src", "example.ts"), "export const fixed = true;\n", "utf8");
-    git(sourceDir, "add", "src/example.ts");
-    git(sourceDir, "commit", "-q", "-m", "fixture");
-    const headSha = git(sourceDir, "rev-parse", "HEAD");
+    repo.git("add", "src/example.ts");
+    repo.git("commit", "-q", "-m", "fixture");
+    const headSha = repo.git("rev-parse", "HEAD");
     writeFileSync(join(root, "settings.json"), "{}\n", "utf8");
-    writeFileSync(join(binDir, "gh"), `#!/bin/sh
-case "$1 $2" in
-  "api "*)
-    case "$*" in
-      *pulls/*) echo '{"number":4615,"html_url":"https://github.com/acme/remudero/pull/4615","updated_at":"t","body":"fixed","state":"open","head":{"ref":"b","sha":"${headSha}"}}' ;;
-      *) echo '{}' ;;
-    esac ;;
-  "pr diff") printf '%s\\n' 'diff --git a/src/example.ts b/src/example.ts' '+export const fixed = true;' ;;
-  *) exit 0 ;;
-esac
-`, { mode: 0o755 });
-    process.env.PATH = `${binDir}:${oldPath}`;
+    const shim = ghShim([
+      { when: "pulls/", stdout: JSON.stringify({ number: 4615, html_url: "https://github.com/acme/remudero/pull/4615", updated_at: "t", body: "fixed", state: "open", head: { ref: "b", sha: headSha } }) },
+      { when: "pr diff", stdout: "diff --git a/src/example.ts b/src/example.ts\n+export const fixed = true;" },
+      { when: "api ", stdout: "{}" },
+    ], { kind: "w1-t4615-reviewer-gh" });
+    process.env.PATH = `${shim.dir}:${oldPath}`;
 
     const observed: WorkerStreamEvent[] = [];
     const workerTelemetry: WorkerStateSensor = {
@@ -293,6 +285,7 @@ esac
   } finally {
     process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });
+    repo.cleanup();
   }
 }
 
