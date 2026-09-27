@@ -187,9 +187,14 @@ async function sourceHashes(path: string, prefixBytes?: number, throughBytes?: n
   return { full: full.digest("hex"), ...(prefix ? { prefix: prefix.digest("hex") } : {}) };
 }
 
-class SourceAuditError extends Error {
-  constructor(message: string, readonly evidence: Pick<SourceFault,
-    "sha256" | "malformedRows" | "minTimestamp" | "maxTimestamp">) { super(message); }
+const sourceAuditFault = Symbol("source-audit-fault");
+type SourceAuditFault = Error & { [sourceAuditFault]: true; evidence: Pick<SourceFault,
+  "sha256" | "malformedRows" | "minTimestamp" | "maxTimestamp"> };
+function sourceAuditError(message: string, evidence: SourceAuditFault["evidence"]): SourceAuditFault {
+  return Object.assign(new Error(message), { [sourceAuditFault]: true as const, evidence });
+}
+function isSourceAuditFault(error: unknown): error is SourceAuditFault {
+  return error instanceof Error && sourceAuditFault in error;
 }
 
 /** Find a durable newline boundary at or before the manifest's byte watermark. A writer may be
@@ -295,7 +300,7 @@ async function scanSource(entry: ManifestEntry, precedingRotation: string | unde
   if (unread > 0 || malformedReason || !stable) {
     const boundedFault = entry.form !== "live" && unread === 0 && stable && boundedTime
       && malformedReason === "ledger-source-malformed";
-    throw new SourceAuditError(unread > 0 ? entry.form === "live" ? "ledger-live-unreadable" : "ledger-source-unreadable"
+    throw sourceAuditError(unread > 0 ? entry.form === "live" ? "ledger-live-unreadable" : "ledger-source-unreadable"
       : malformedReason ?? "ledger-source-changed-during-scan", {
       sha256: stable ? hashes.full : undefined, malformedRows,
       minTimestamp: boundedFault && minTimestamp ? minTimestamp : null,
@@ -652,7 +657,7 @@ export async function runBenchmarkCohortPass(
       auditedSourceBytes += entry.size;
     } catch (error) {
       known.delete(entry.name);
-      const evidence = error instanceof SourceAuditError ? error.evidence : undefined;
+      const evidence = isSourceAuditFault(error) ? error.evidence : undefined;
       faults.set(entry.name, { name: entry.name, form: entry.form, size: entry.size,
         mtimeMs: entry.mtimeMs, reason: String((error as Error)?.message ?? error), audited: true,
         ...(evidence ?? {}) });
