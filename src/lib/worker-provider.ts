@@ -4289,6 +4289,8 @@ export function priceRepairLadderRungs(
     try {
       dailyCeilingUsd = effectiveCashCapUsd(config.dailyCapUsd, { squeezed: terms.squeezed }) ?? null;
     } catch (error) {
+      // An inverted cap pair is refused, never guessed: the rung is priced with NO ceiling and the
+      // price line carries the refusal's own words.
       dailyCeilingUsd = null;
       ceilingNote = (error as Error).message;
     }

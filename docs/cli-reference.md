@@ -39,6 +39,7 @@ usage:
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
   rmd board [--repo <owner/repo> ...]   # Print what is open, and what is red, across every fleet repository.
+  rmd repair-ladder [--json]   # Report the repair ladder's live state and price each paid fallback rung; changes nothing.
   rmd census-membership [--base <ref>] [--files]   # Name the population-walking census suites this diff enters.
   rmd caller-sweep <symbol> [<symbol>...] [--files]   # Name the suites reachable from a changed symbol, including through its src/ callers.
   rmd ci-learning [--days N] [--force]   # Stage a marked, parked shard for each repaired CI failure in the window.
@@ -353,6 +354,16 @@ rmd board [--repo <owner/repo> ...]
 ```
 
 W1-T3685: the one question an operator asks first and no other verb answered — `rmd status` renders this daemon's OWN board from local state, `rmd ci-failures` answers a narrower one (failures, one repo, by day). Surveys every repository named by `--repo` (repeatable), or `config.fleetRepos` when none is given, or a three-repository fallback when that is unset too — never a list written into `pr-board.ts` itself. ONE `gh pr list --json ...` call per repository (surveyPullRequestBoard, src/lib/pr-board.ts): a per-PR follow-up read is refused by design, the secondary-rate-limit hazard. A repository that cannot be read prints UNAVAILABLE with the read error, never rendered as zero open — an empty queue and an unreachable one are opposite facts. Each open pull request prints its number, title, draft state, head branch, and the NAMES of its failing and pending checks. REPORT-ONLY: exit code is always 0, whatever the board contains — this verb reports, it does not gate.
+
+### `rmd repair-ladder`
+
+Report the repair ladder's live state and price each paid fallback rung; changes nothing.
+
+```
+rmd repair-ladder [--json]
+```
+
+W1-T3718: the fix rung can stall with every provider refusing and both paid rungs switched off, and the only trace was one fix.spawn_infra_blocked ledger row. This reports the durable stall record (since when, for how long, and per provider whether it is FULL or CANNOT BE ASKED -- only the first argues for paying) and prices each paid rung: the one config edit that arms it (workerProviders.cashFallbackWhenBlocked, overflow: "api_key"), what it bills, its dailyCapUsd ceiling, and what would still refuse it with the switch on. REPORT-ONLY: it never writes config -- enabling a paid fallback spends money and stays an operator act. --json prints the same as one object.
 
 ### `rmd census-membership`
 
