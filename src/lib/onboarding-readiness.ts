@@ -119,8 +119,25 @@ function parseApiError(err: unknown): OnboardingReadinessApiRead | undefined {
   return statusMatch ? { status: Number(statusMatch[1]), body: undefined } : undefined;
 }
 
+/** `gh api --paginate --slurp` supplies one array per completed page. A missing or malformed
+ * page is unknown, never evidence that no required checks exist on a later page. */
+function parseBranchRulePages(raw: string): OnboardingReadinessApiRead | undefined {
+  const parsed = parseJson(raw.trim());
+  if (!parsed.ok || !Array.isArray(parsed.value) || parsed.value.length === 0 || parsed.value.length > 20) return undefined;
+  const rules: unknown[] = [];
+  for (const page of parsed.value) {
+    if (!Array.isArray(page) || page.length > 100) return undefined;
+    rules.push(...page);
+  }
+  return { status: 200, body: rules };
+}
+
+function branchRuleArgs(owner: string, repo: string, branch: string): string[] {
+  return ["api", `repos/${owner}/${repo}/rules/branches/${encodeURIComponent(branch)}?per_page=100`, "--paginate", "--slurp"];
+}
+
 /** DETECTION ONLY, mirroring `github-posture.ts`'s own module header: metadata reads are bare
- *  `gh api <path> -i` GETs; the installation listing adds `--paginate --jq` to read every page.
+ *  `gh api <path> -i` GETs; installation and branch-rule lists paginate to completion.
  *  No call passes `-X`/`--method`/`-f`/`-F`/`--input` or writes to GitHub. */
 export function onboardingReadinessGateway(execFileFn: (args: string[]) => string = defaultExec): OnboardingReadinessGateway {
   function apiRead(path: string): OnboardingReadinessApiRead | undefined {
@@ -142,7 +159,13 @@ export function onboardingReadinessGateway(execFileFn: (args: string[]) => strin
     },
     getRepo: (owner, repo) => apiRead(`repos/${owner}/${repo}`),
     getBranchProtection: (owner, repo, branch) => apiRead(`repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}/protection`),
-    getBranchRules: (owner, repo, branch) => apiRead(`repos/${owner}/${repo}/rules/branches/${encodeURIComponent(branch)}`),
+    getBranchRules: (owner, repo, branch) => {
+      try {
+        return parseBranchRulePages(execFileFn(branchRuleArgs(owner, repo, branch)));
+      } catch (err) {
+        return parseApiError(err);
+      }
+    },
     getContents: (owner, repo, path) => apiRead(`repos/${owner}/${repo}/contents/${path}`),
   };
 }
@@ -168,7 +191,13 @@ export function onboardingReadinessGatewayAsync(read: (args: string[]) => Promis
     },
     getRepo: (owner, repo) => apiRead(`repos/${owner}/${repo}`),
     getBranchProtection: (owner, repo, branch) => apiRead(`repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}/protection`),
-    getBranchRules: (owner, repo, branch) => apiRead(`repos/${owner}/${repo}/rules/branches/${encodeURIComponent(branch)}`),
+    getBranchRules: async (owner, repo, branch) => {
+      try {
+        return parseBranchRulePages(await read(branchRuleArgs(owner, repo, branch)));
+      } catch (err) {
+        return parseApiError(err);
+      }
+    },
     getContents: (owner, repo, path) => apiRead(`repos/${owner}/${repo}/contents/${path}`),
   };
 }

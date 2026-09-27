@@ -194,13 +194,33 @@ test("the async readiness snapshot carries active rules into the served classifi
 
 test("the gateway URL-encodes a default branch with a slash for both protection APIs", () => {
   const calls: string[][] = [];
-  const g = onboardingReadinessGateway((args) => { calls.push(args); return "[]"; });
+  const g = onboardingReadinessGateway((args) => { calls.push(args); return "[[]]"; });
   g.getBranchProtection("acme", "widget", "release/next");
   g.getBranchRules("acme", "widget", "release/next");
   assert.deepEqual(calls.map((args) => args[1]), [
     "repos/acme/widget/branches/release%2Fnext/protection",
-    "repos/acme/widget/rules/branches/release%2Fnext",
+    "repos/acme/widget/rules/branches/release%2Fnext?per_page=100",
   ]);
+});
+
+test("branch rules are complete across pages, and a malformed page cannot prove no checks", async () => {
+  const firstPage = Array.from({ length: 100 }, () => ({ type: "pull_request" }));
+  const lastPage = [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "late-ci" }] } }];
+  const paginated = JSON.stringify([firstPage, lastPage]);
+  const argsSeen: string[][] = [];
+  const sync = onboardingReadinessGateway((args) => { argsSeen.push(args); return paginated; });
+  const fixture = gateway({ protection: status(404) });
+  const report = byId(onboardingReadiness("acme", "widget", { repos: [] }, { ...fixture, getBranchRules: sync.getBranchRules }).checks);
+  assert.equal(report["branch-protection"]!.status, "pass");
+  assert.equal(report["branch-protection"]!.evidence, "late-ci");
+  assert.deepEqual(argsSeen, [["api", "repos/acme/widget/rules/branches/main?per_page=100", "--paginate", "--slurp"]]);
+
+  const asyncRules = onboardingReadinessGatewayAsync(async () => paginated);
+  assert.deepEqual(await asyncRules.getBranchRules("acme", "widget", "main"), { status: 200, body: [...firstPage, ...lastPage] });
+  const partial = onboardingReadinessGateway(() => JSON.stringify([firstPage, { malformed: true }]));
+  assert.equal(partial.getBranchRules("acme", "widget", "main"), undefined);
+  assert.equal(statusOf({ ...fixture, getBranchRules: partial.getBranchRules }, "branch-protection")[0], "unknown");
+  assert.equal(onboardingReadinessGateway(() => "[]").getBranchRules("acme", "widget", "main"), undefined, "zero pages is not an empty active-rules result");
 });
 
 test("agent instructions and the test command name which file answered", () => {
@@ -229,7 +249,7 @@ test("the gateway classifies each gh api answer by its HTTP status, and only an 
     "repos/acme/widget/branches/trunk/protection": () => {
       throw Object.assign(new Error("exit 1"), { stderr: "gh: Branch not protected (HTTP 404)\n" });
     },
-    "repos/acme/widget/rules/branches/trunk": () => "[]",
+    "repos/acme/widget/rules/branches/trunk?per_page=100": () => "[[]]",
     "repos/acme/widget/contents/plan": () => "HTTP/2.0 204 No Content\r\n\r\n",
     "repos/acme/widget/contents/AGENTS.md": () => "HTTP/2.0 200 OK\r\n\r\n<html>not json</html>",
     "repos/acme/widget/contents/CLAUDE.md": () => {
@@ -254,6 +274,7 @@ test("the gateway classifies each gh api answer by its HTTP status, and only an 
   for (const args of calls) {
     assert.equal(args[0], "api");
     if (args[1]?.startsWith("installation/")) assert.deepEqual(args.slice(2), ["--paginate", "--jq", ".total_count, .repositories[].full_name"]);
+    else if (args[1]?.includes("/rules/branches/")) assert.deepEqual(args.slice(2), ["--paginate", "--slurp"]);
     else assert.deepEqual([args[2], args.length], ["-i", 3], "metadata remains a bare GET, never a write flag");
   }
 
@@ -298,7 +319,7 @@ test("the default gateway really shells out to gh", (t) => {
   const shim = ghShim([
     { when: "installation/repositories", stdout: "1\nacme/widget\n" },
     { when: "repos/acme/widget/branches", stderr: "gh: Not Found (HTTP 404)", exit: 1 },
-    { when: "repos/acme/widget/rules/branches", stdout: "[]" },
+    { when: "repos/acme/widget/rules/branches", stdout: "[[]]" },
     { when: "repos/acme/widget/contents", stderr: "gh: Not Found (HTTP 404)", exit: 1 },
     { when: "repos/acme/widget", stdout: '{"default_branch":"main"}' },
   ]);
