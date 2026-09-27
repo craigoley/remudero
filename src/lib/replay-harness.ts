@@ -24,7 +24,15 @@
  * reducer/renderer are shipped and correct. The renderer's non-run path especially must stay
  * reachable -- a producer that ran zero goldens must still render "no run recorded", never 0%.
  */
-import type { GoldenTask, HarnessRunner, ReplayOutcome } from "./replay.js";
+import { SEEDED_GOLDENS, type GoldenTask, type HarnessRunner, type ReplayOutcome } from "./replay.js";
+import {
+  deriveGoldenCorpus,
+  goldenTaskFromCorpusItem,
+  replayIdleGate,
+  type ReplayIdleSignal,
+  type ReplaySample,
+  type ReplaySampleSource,
+} from "./golden-corpus.js";
 
 /**
  * PRIMARY CONTROL (bound-kind, W1-T2791): this is the mechanism that actually limits what one
@@ -118,4 +126,23 @@ export function replayOptIn(argv: readonly string[]): ReplayOptIn {
       "There is deliberately no env var and no config default for this: a spend must not be inheritable " +
       "by a retro tick, a CI job or a test spawn.",
   };
+}
+
+export { replayIdleGate, type ReplayIdleSignal, type ReplaySample, type ReplaySampleSource } from "./golden-corpus.js";
+
+export function drawReplaySample(req: { argv: readonly string[]; idle: ReplayIdleSignal; source: ReplaySampleSource; limit?: number }): ReplaySample {
+  for (const gate of [replayOptIn(req.argv), replayIdleGate(req.idle)]) {
+    if (!gate.enabled) return { ...gate, goldens: [], items: [], excluded: [] };
+  }
+  const reason = "opted in and the fleet is idle";
+  if (req.source.kind === "seeded") {
+    return { enabled: true, reason, goldens: boundedCorpus(req.source.goldens ?? SEEDED_GOLDENS, req.limit), items: [], excluded: [] };
+  }
+  const { items, excluded } = deriveGoldenCorpus(req.source.corpus);
+  const paired = items.flatMap((item) => {
+    const golden = goldenTaskFromCorpusItem(item);
+    return golden ? [{ item, golden }] : [];
+  });
+  const goldens = boundedCorpus(paired.map((p) => p.golden), req.limit);
+  return { enabled: true, reason, goldens, items: paired.slice(0, goldens.length).map((p) => p.item), excluded };
 }
