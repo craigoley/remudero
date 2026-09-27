@@ -12,12 +12,17 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { clockFromMillisFn } from "../src/lib/clock.js";
 import type { Config } from "../src/lib/config.js";
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
+import { boundConsoleReadRoute, buildServeServer, withRepairLadder, type ServeDeps } from "../src/lib/serve.js";
+import { RouteResponseBuffer } from "../src/lib/console-snapshot-cache.js";
+import type { Route } from "../src/lib/service.js";
 import { repairLadderCommand, trackRepairLadder } from "../src/lib/sweep.js";
 import type { SpawnWorkerArgs } from "../src/lib/worker.js";
 import {
   ProviderCapacityBlockedError,
   claudeCapacityFromUsage,
+  priceRepairLadderRungs,
+  recordRepairLadderStall,
+  renderRepairLadderReport,
   providerRefusalCondition,
   readRepairLadderState,
   repairLadderStatePath,
@@ -223,4 +228,117 @@ test("the ladder verb prices the rungs and flips nothing", () => {
   assert.equal(config.workerProviders?.cashFallbackWhenBlocked, undefined);
   assert.equal(config.overflow, undefined);
   assert.equal(repairLadderCommand(["--enable"], config, undefined, {}, () => {}), 2, "there is no enabling flag");
+});
+
+async function call(route: Route): Promise<{ status: number; body: string }> {
+  const buffer = new RouteResponseBuffer();
+  await route.handler({ headers: {}, url: route.path, method: route.method } as never, buffer as never, {} as never);
+  const buffered = buffer.buffered(0);
+  return { status: buffered.status, body: buffered.body };
+}
+
+function fakeRoute(path: string, contentType: string, body: string): Route {
+  return {
+    method: "GET",
+    path,
+    scope: "read",
+    handler: (_req, res) => {
+      res.writeHead(200, { "content-type": contentType });
+      res.end(body);
+    },
+  } as Route;
+}
+
+test("the ladder's unhealthy arms stay loud: an unreadable record, a failed clear and a cold cache", async () => {
+  const root = fixtureRoot();
+  const path = repairLadderStatePath(root);
+
+  // A record with no first-seen instant, and one that is not JSON at all: both UNREADABLE, never
+  // read as a running ladder.
+  writeFileSync(path, JSON.stringify({ reason: "no since" }));
+  assert.deepEqual(readRepairLadderState(root), { state: "unreadable", reason: "repair-ladder record has no readable first-seen instant" });
+  writeFileSync(path, "{torn");
+  const torn = readRepairLadderState(root);
+  assert.equal(torn.state, "unreadable");
+  const unreadableReport = renderRepairLadderReport(torn, []).join("\n");
+  assert.match(unreadableReport, /UNREADABLE/);
+
+  // A torn prior record is not evidence of an earlier stall: this one starts now.
+  const started = recordRepairLadderStall(root, { reason: "r", providers: [], fallbacks: [] }, Date.parse("2026-09-17T01:00:00.000Z"));
+  assert.equal(started.began, true);
+  assert.equal(started.record.since, "2026-09-17T01:00:00.000Z");
+
+  // The stalled report names each provider's condition and the infrastructure fault.
+  const stalled = readRepairLadderState(root, Date.parse("2026-09-18T03:00:00.000Z"));
+  assert.equal(stalled.state === "stalled" ? stalled.downFor : "", "1d 2h");
+  const report = renderRepairLadderReport(
+    { ...(stalled as Extract<typeof stalled, { state: "stalled" }>), infrastructureFault: true, providers: [
+      { provider: "claude", condition: "cannot-be-asked", detail: "capacity unreadable" },
+      { provider: "codex", condition: "full", detail: "2% remaining" },
+    ] },
+    [],
+  ).join("\n");
+  assert.match(report, /STALLED for 1d 2h/);
+  assert.match(report, /claude: CANNOT BE ASKED — capacity unreadable/);
+  assert.match(report, /codex: FULL — 2% remaining/);
+  assert.match(report, /infrastructure fault/);
+
+  // An inverted cap pair is refused, never guessed: priced with NO ceiling, and says why.
+  const [inverted] = priceRepairLadderRungs({ dailyCapUsd: { normal: 25, squeezed: 10 } }, [{ rung: "cash", refusal: "off" }]);
+  assert.equal(inverted.dailyCeilingUsd, null);
+  assert.match(inverted.price, /NO daily ceiling \(dailyCapUsd\.squeezed/);
+
+  // A clear that cannot remove the record is ledgered, and the spawn's own outcome still stands.
+  const stuckRoot = fixtureRoot();
+  mkdirSync(repairLadderStatePath(stuckRoot));
+  const ledger = recorder();
+  const spawn = trackRepairLadder(async () => "worker ran", { config: configFor(stuckRoot), log: ledger.log });
+  assert.equal(await spawn(FIX_ARGS), "worker ran");
+  const failed = ledger.rows.find((row) => row.step === "repair_ladder.write_failed");
+  assert.equal(failed?.extra?.phase, "clear");
+
+  // The splice passes a body it cannot extend through byte-identical.
+  const read = () => ({ state: "running" }) as const;
+  for (const [contentType, body] of [["text/plain", "plain"], ["application/json", "{torn"], ["application/json", "[1,2]"]]) {
+    assert.deepEqual(await call(withRepairLadder(fakeRoute("/v1/daemon-health", contentType, body), read)), { status: 200, body });
+  }
+
+  // A COLD cache still carries the ladder: the fallback body of both surfaces reads it.
+  const coldRoot = fixtureRoot();
+  recordRepairLadderStall(coldRoot, { reason: "r", providers: [], fallbacks: [] });
+  const coldDeps = {
+    board: { plan: { tasks: [], byId: new Map() }, ledgerPath: join(coldRoot, "ledger.ndjson") },
+    fleetControlRoot: coldRoot,
+    log: () => {},
+  } as unknown as ServeDeps;
+  for (const coldPath of ["/v1/status", "/v1/daemon-health"]) {
+    const never: Route = { method: "GET", path: coldPath, scope: "read", handler: () => new Promise<void>(() => {}) } as Route;
+    const cold = await call(boundConsoleReadRoute(never, coldDeps, 5));
+    assert.equal((JSON.parse(cold.body) as { repairLadder?: { state: string } }).repairLadder?.state, "stalled", coldPath);
+  }
+});
+
+test("rmd repair-ladder is registered and reads the host config it is run against", async () => {
+  // The CONSUMING CLIENT is the CLI verb, so this goes through the real HANDLERS entry.
+  const { HANDLERS } = await import("../src/run-task.js");
+  const home = mkdtempSync(join(tmpdir(), "rmd-repair-ladder-home-"));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  const configBytes = JSON.stringify({ claudeBin: "/bin/true", root, dailyCapUsd: 20, workerProviders: { enabled: ["claude", "codex", "cash"] } });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), configBytes);
+  const priorHome = process.env.HOME;
+  const priorLog = console.log;
+  const printed: string[] = [];
+  process.env.HOME = home;
+  console.log = (line: unknown) => { printed.push(String(line)); };
+  try {
+    assert.equal(await HANDLERS.get("repair-ladder")!(["--json"]), 0);
+  } finally {
+    process.env.HOME = priorHome;
+    console.log = priorLog;
+  }
+  const report = JSON.parse(printed.join("")) as { ladder: { state: string }; rungs: Array<{ rung: string; armed: boolean; dailyCeilingUsd: number }> };
+  assert.equal(report.ladder.state, "running");
+  assert.deepEqual(report.rungs.map((rung) => [rung.rung, rung.armed, rung.dailyCeilingUsd]), [["cash", false, 20], ["overflow", false, 20]]);
+  assert.equal(readFileSync(join(home, ".config", "remudero", "config.json"), "utf8"), configBytes, "the verb wrote nothing");
 });
