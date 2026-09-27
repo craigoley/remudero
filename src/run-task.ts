@@ -1456,6 +1456,7 @@ import {
   planOnlyRunBranchReceipts,
   REGENERABLE_ARTIFACT_GENERATORS,
   repairLadderCommand,
+  trackRepairLadder,
 } from "./lib/sweep.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -16454,7 +16455,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         openTaskIds,
         reviewerCodeFreshness: () => checkReviewerCodeFreshness(repoRoot, process.env),
         deps: {
-          spawn,
+          // W1-T3718: the SAME repair-ladder tracking the sweep's fix spawn carries.
+          spawn: trackRepairLadder(spawn, { config, log }),
           waitForCiGreen,
           // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
           // non-green — see runFixRung's own doc for why this must happen on
