@@ -11,6 +11,7 @@ import {
   emissionsReport,
   EMISSIONS_ALLOWLIST,
 } from "../src/lib/emissions.js";
+import { configPath } from "../src/lib/config.js";
 import { emissionsCommand, ledgerCorpusFiles } from "../src/run-task.js";
 import { rotationStampIso } from "../src/lib/ledger-grep.js";
 
@@ -269,17 +270,36 @@ test("THE OTHER DIRECTION: with no skippable rotation the read is byte-for-byte 
 });
 
 test("W1-T2951: emissionsCommand's default-state smoke test asserts only stable report structure", () => {
-  // Drives the WHOLE body — derivation, attribution, the ledger scan, the render — against this
-  // checkout and this host's mutable ledger. Read-only: it writes nothing and spawns nothing.
-  const { code, out } = captureEmissions();
-  assert.equal(code, 0);
-  assert.match(out, /^rmd emissions — window 30d/m);
-  assert.match(out, /corpus\s+: \d+ ledger file\(s\)/);
-  // W1-T2479: "declared" (COMMANDS.length) and "scanned" (deriveCliVerbs's own count) are printed
-  // separately — assertVerbScanAgreesWithRegistry has already asserted they're equal by this
-  // point, but the report states its own corpus check rather than collapsing to one number.
-  assert.match(out, /verbs\s+: \d+ declared, \d+ scanned, \d+ measurable, \d+ unauditable/);
-  assert.match(out, /UNAUDITABLE \(no ledger step carries the verb's name\)/);
+  // Keep the default-state lookup (no injected stateDir), but point its HOME-relative config at
+  // a bounded fixture. A real daemon ledger can be gigabytes; reading it makes this structural
+  // smoke test OOM before any assertion, while its changing contents cannot prove fleet liveness.
+  const home = mkdtempSync(join(tmpdir(), "rmd-emissions-default-home-"));
+  const priorHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const stateDir = join(home, "state");
+    mkdirSync(stateDir, { recursive: true });
+    const config = configPath();
+    mkdirSync(dirname(config), { recursive: true });
+    writeFileSync(config, JSON.stringify({ claudeBin: "/usr/bin/true", root: home }));
+
+    for (const corpusFiles of [0, 1]) {
+      if (corpusFiles === 1) {
+        writeFileSync(join(stateDir, "ledger.ndjson"), `${JSON.stringify({ ts: new Date().toISOString(), step: "review.posted" })}\n`);
+      }
+      const { code, out } = captureEmissions();
+      assert.equal(code, 0);
+      assert.match(out, /^rmd emissions — window 30d/m);
+      assert.match(out, new RegExp(`corpus\\s+: ${corpusFiles} ledger file\\(s\\)`));
+      // W1-T2479: declared (COMMANDS.length) and scanned (deriveCliVerbs's count) stay distinct.
+      assert.match(out, /verbs\s+: \d+ declared, \d+ scanned, \d+ measurable, \d+ unauditable/);
+      assert.match(out, /UNAUDITABLE \(no ledger step carries the verb's name\)/);
+    }
+  } finally {
+    if (priorHome === undefined) delete process.env.HOME;
+    else process.env.HOME = priorHome;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("W1-T2951: unrelated review rows do not become evidence that daemon or sweep ran", () => {
