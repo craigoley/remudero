@@ -2039,7 +2039,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // already-green sibling job sharing this workflow run (`ci` and `coverage-ratchet` share one
     // here, the #2434/#2444 shape this task fixes). `ghRunImpl` is the SAME injection seam
     // `close` above already uses (W1-T921) — no `gh` call this closure makes is unobservable
-    // offline. `check.jobId` absent (the rollup's `detailsUrl` carried none) degrades to a NAMED
+    // offline. `check.jobId` absent (neither URL nor external id resolved) degrades to a NAMED
     // no-op — never a guessed target.
     // W1-T4586: ONE read, only when the sweep is about to act on red CI. The concurrency group
     // that cancels a sibling is ci.yml's, so only its runs count.
@@ -2165,13 +2165,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // `actions/runs/{run_id}/rerun-failed-jobs` — Q3(x) forbids substituting a whole-run re-run,
     // which would re-spend an already-green sibling job sharing this workflow run). `transition`
     // (from `staleCiGateTransition`, lib/sweep.ts) carries no job id of its own — that function's
-    // own doc names it "parsed by a future real-gateway producer from ci-gate's OWN check-run
-    // detailsUrl", which is exactly this closure. A SECOND fresh read is taken here (rather than
+    // own doc names it as ci-gate's OWN check-run job. A SECOND fresh read is taken here (rather than
     // reusing whatever `readCiGateRollup` returned moments earlier) because this call may run an
     // observable instant after the one that detected the stale transition, and design (i) already
     // requires every re-drive decision to compare against the CURRENT state, never a frame from a
-    // moment ago. No job id resolvable (rollup unreadable, or ci-gate's own entry carries no
-    // `detailsUrl`) degrades to a NAMED no-op — never a guessed target, exactly like
+    // moment ago. No job id resolvable (rollup unreadable, or neither URL nor external id carries one)
+    // degrades to a NAMED no-op — never a guessed target, exactly like
     // `requeueCheck`'s own contract above.
     reaggregateCiGate: async (pr, transition) => {
       let jobId: string | undefined;
@@ -2180,7 +2179,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const gate = dedupeRollupByLatestAttempt(rollup).find(
           (c) => (c.name ?? c.context ?? "") === CI_GATE_CHECK_NAME,
         );
-        jobId = gate?.detailsUrl?.match(/\/job\/(\d+)/)?.[1];
+        jobId = gate && checkJobId(gate);
       } catch (e) {
         log("sweep.ci_gate_reaggregate.rollup_error", {
           pr_number: pr.prNumber,
@@ -3202,7 +3201,7 @@ export interface CiFailure {
   /** The terminal time of the newest deduped failed attempt. It is deliberately not inferred
    * from `startedAt`: W1-T3422 can re-drive only after proving this verdict predates main's repair. */
   completedAt?: string;
-  /** Actions job id parsed from the check's details URL. The bounded retry refuses to guess when
+  /** Actions job id parsed from the check's details URL or external id. The bounded retry refuses to guess when
    * this is absent. */
   jobId?: string;
   /** The commit sha this failure is attributable to when the read identifies one (W1-T186);
@@ -4119,6 +4118,13 @@ export interface RollupCheckEntry {
   /** Actions job details URL when this entry is a check run. Preserved so the main-health reader
    * can feed the same job-id-bearing evidence producer as the PR sweep. */
   detailsUrl?: string;
+  /** Checks API posts keep this id even when GitHub rewrites detailsUrl to /runs/<check run id>. */
+  externalId?: string;
+}
+
+/** Resolve only a real Actions job id. A check-run URL's /runs/<id> is not a job id. */
+export function checkJobId(check: Pick<RollupCheckEntry, "detailsUrl" | "externalId">): string | undefined {
+  return check.detailsUrl?.match(/\/job\/(\d+)/)?.[1] ?? check.externalId?.match(/^job:(\d+)$/)?.[1];
 }
 
 /** Conclusions GitHub's OWN merge-eligibility treats as SATISFYING a required check (W1-T103):
@@ -4296,7 +4302,7 @@ export function checksPendingSinceFromRollup(
  *  verdict rather than a bad one, so the job can be re-queued instead of a worker dispatched. */
 export interface CancelledRequiredCheck {
   name: string;
-  /** GitHub Actions job id, parsed by the real gateway from the rollup's own `detailsUrl` — the
+  /** GitHub Actions job id, parsed by the real gateway from the rollup's URL or external id — the
    *  re-queue target is the JOB (design iv), never the workflow run. `undefined` when none could
    *  be read, and the real `requeueCheck` wiring then degrades to a named no-op. */
   jobId?: string;
