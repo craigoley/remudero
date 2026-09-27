@@ -174,7 +174,7 @@ test("agent instructions and the test command name which file answered", () => {
 test("the gateway classifies each gh api answer by its HTTP status, and only an unreadable call as undefined", () => {
   const calls: string[][] = [];
   const answers: Record<string, () => string> = {
-    "installation/repositories?per_page=100": () => 'HTTP/2.0 200 OK\r\nX-Header: 1\r\n\r\n{"repositories":[{"full_name":"acme/widget"},{"id":3},null]}',
+    "installation/repositories?per_page=100": () => "1\nacme/widget\n",
     "repos/acme/widget": () => '{"default_branch":"trunk"}',
     "repos/acme/widget/branches/trunk/protection": () => {
       throw Object.assign(new Error("exit 1"), { stderr: "gh: Branch not protected (HTTP 404)\n" });
@@ -199,7 +199,11 @@ test("the gateway classifies each gh api answer by its HTTP status, and only an 
   assert.equal(g.getContents("acme", "widget", "AGENTS.md"), undefined, "a 2xx with an unparsable body is a failed read");
   assert.equal(g.getContents("acme", "widget", "CLAUDE.md"), undefined, "a transport failure names no status");
   assert.deepEqual(g.getContents("acme", "widget", "Makefile"), { status: 503, body: undefined });
-  for (const args of calls) assert.deepEqual([args[0], args[2], args.length], ["api", "-i", 3], "a bare GET, never a write flag");
+  for (const args of calls) {
+    assert.equal(args[0], "api");
+    if (args[1]?.startsWith("installation/")) assert.deepEqual(args.slice(2), ["--paginate", "--jq", ".total_count, .repositories[].full_name"]);
+    else assert.deepEqual([args[2], args.length], ["-i", 3], "metadata remains a bare GET, never a write flag");
+  }
 
   const listing = (raw: () => string) => onboardingReadinessGateway(() => raw()).listInstallationRepos();
   assert.equal(listing(() => '{"repositories":"nope"}'), undefined);
@@ -212,9 +216,19 @@ test("the gateway classifies each gh api answer by its HTTP status, and only an 
   );
 });
 
+test("readiness checks Fleet App access beyond the first hundred repositories and refuses a partial list", () => {
+  const names = Array.from({ length: 101 }, (_, index) => `acme/repo-${index}`);
+  names[100] = "acme/widget";
+  const raw = `101\n${names.slice(0, 100).join("\n")}\n101\n${names[100]}\n`;
+  const complete = onboardingReadinessGateway(() => raw);
+  assert.deepEqual(statusOf(complete, "app-access"), ["pass", "acme/widget is listed in the Fleet GitHub App's installation"]);
+  const partial = onboardingReadinessGateway(() => `101\n${names.slice(0, 100).join("\n")}\n`);
+  assert.equal(statusOf(partial, "app-access")[0], "unknown", "an incomplete listing cannot prove the app lacks the repository");
+});
+
 test("the default gateway really shells out to gh", (t) => {
   const shim = ghShim([
-    { when: "installation/repositories", stdout: '{"repositories":[{"full_name":"acme/widget"}]}' },
+    { when: "installation/repositories", stdout: "1\nacme/widget\n" },
     { when: "repos/acme/widget/branches", stderr: "gh: Not Found (HTTP 404)", exit: 1 },
     { when: "repos/acme/widget/contents", stderr: "gh: Not Found (HTTP 404)", exit: 1 },
     { when: "repos/acme/widget", stdout: '{"default_branch":"main"}' },
