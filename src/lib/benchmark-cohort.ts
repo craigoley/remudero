@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { systemClock } from "./clock.js";
 import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
 
 export const BENCHMARK_COHORT_VERSION = "benchmark-cohort-v1" as const;
@@ -341,7 +342,7 @@ function affectedKeys(baseline: SourceRecord[], current: SourceRecord[]): Set<st
 function deriveSnapshot(
   sources: SourceRecord[], asOf: string, auditedSourceBytes: number, prior?: BenchmarkCohortSnapshot, dirtyKeys?: Set<string>,
 ): BenchmarkCohortSnapshot {
-  const started = Date.now();
+  const started = systemClock.now();
   const { assignments, attempts, terminals, invalidAssignmentRows, attemptRowsWithoutAssignmentId,
     terminalRowsWithoutAssignmentId, conflictingAssignments, duplicateRows } = indexEvidence(sources);
   const fingerprints = new Set<string>();
@@ -437,7 +438,7 @@ function deriveSnapshot(
       eventsPerRun: runs.size > 0 ? [...runs.values()].reduce((sum, count) => sum + count, 0) / runs.size : null,
       runsWithId: runs.size, dimensionCardinality: cohorts.length,
       rebuiltPartitions: prior && dirtyKeys ? dirtyKeys.size : cohorts.length,
-      rebuildMs: Date.now() - started },
+      rebuildMs: systemClock.now() - started },
   };
   snapshot.pressure.derivedBytes = Buffer.byteLength(JSON.stringify(snapshot));
   snapshot.pressure.snapshotGrowthBytes = prior ? snapshot.pressure.derivedBytes - prior.pressure.derivedBytes : null;
@@ -457,7 +458,10 @@ export async function runBenchmarkCohortPass(
   const checkpoint = readCheckpoint(stateDir);
   let current: ManifestEntry[];
   try { current = manifest(stateDir); }
-  catch { return { state: "unavailable", snapshot: emptySnapshot("ledger-source-unreadable", checkpoint.lastGood), scannedSources: 0, pendingSources: 0 }; }
+  catch {
+    // An unreadable ledger directory is not an observed empty cohort; preserve the last good snapshot.
+    return { state: "unavailable", snapshot: emptySnapshot("ledger-source-unreadable", checkpoint.lastGood), scannedSources: 0, pendingSources: 0 };
+  }
   if (current.length === 0) return { state: "unavailable", snapshot: emptySnapshot("ledger-source-missing", checkpoint.lastGood), scannedSources: 0, pendingSources: 0 };
   const known = new Map(checkpoint.sources.map((source) => [source.name, source]));
   const faults = new Map((checkpoint.sourceFaults ?? []).map((fault) => [fault.name, fault]));
@@ -520,7 +524,7 @@ export async function runBenchmarkCohortPass(
     }
   }
   const dirtyKeys = checkpoint.baselineSources ? affectedKeys(checkpoint.baselineSources, checkpoint.sources) : undefined;
-  const snapshot = deriveSnapshot(checkpoint.sources, opts.nowIso ?? new Date().toISOString(), auditedSourceBytes, checkpoint.lastGood, dirtyKeys);
+  const snapshot = deriveSnapshot(checkpoint.sources, opts.nowIso ?? systemClock.iso(), auditedSourceBytes, checkpoint.lastGood, dirtyKeys);
   if (snapshot.sourceRows.conflictingAssignments > 0) {
     const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
     return { state: "unavailable", snapshot: emptySnapshot("conflicting-assignment-ids", checkpoint.lastGood),

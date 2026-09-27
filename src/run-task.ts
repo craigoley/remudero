@@ -26045,21 +26045,23 @@ export function buildLedgerCompactionDaemonHooks(deps: {
   return { checkLedgerCompaction: check, runLedgerCompaction: run };
 }
 
-export function buildBenchmarkCohortDaemonHooks(deps: {
+interface BenchmarkCohortHookDeps {
   config?: Config;
-  now?: () => number;
+  clock?: Clock;
   intervalMs?: number;
   run?: (stateDir: string) => Promise<BenchmarkCohortPassResult>;
-} = {}): {
+}
+
+export function buildBenchmarkCohortDaemonHooks(deps: BenchmarkCohortHookDeps = {}): {
   checkBenchmarkCohort: () => boolean;
   runBenchmarkCohortPass: () => Promise<BenchmarkCohortPassResult>;
 } {
-  const now = deps.now ?? Date.now;
+  const clock = deps.clock ?? systemClock;
   const intervalMs = deps.intervalMs ?? 30_000;
   let lastStartedAt = Number.NEGATIVE_INFINITY;
   return {
     checkBenchmarkCohort: () => {
-      const current = now();
+      const current = clock.now();
       if (current - lastStartedAt < intervalMs) return false;
       lastStartedAt = current;
       return true;

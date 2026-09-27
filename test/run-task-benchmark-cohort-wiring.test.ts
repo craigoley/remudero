@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildBenchmarkCohortDaemonHooks, daemonCommand } from "../src/run-task.js";
+import { clockFromMillisFn } from "../src/lib/clock.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 
 test("run task wires benchmark cohort state root", async () => {
@@ -47,7 +48,7 @@ test("run task wires benchmark cohort state root", async () => {
 
 test("benchmark cohort cadence does not scan again until its interval", () => {
   let now = 1_000;
-  const hooks = buildBenchmarkCohortDaemonHooks({ now: () => now, intervalMs: 30_000 });
+  const hooks = buildBenchmarkCohortDaemonHooks({ clock: clockFromMillisFn(() => now), intervalMs: 30_000 });
   assert.equal(hooks.checkBenchmarkCohort(), true);
   assert.equal(hooks.checkBenchmarkCohort(), false);
   now += 29_999;
