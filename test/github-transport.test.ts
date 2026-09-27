@@ -528,7 +528,7 @@ test("the spike reaches both GitHub CLI calls through ghExec", () => {
         isError: false,
       });
       export function evaluateDenyFloor() {
-        return { heldUnderBypass: true, usedDontAskFallback: false, contained: true };
+        return { heldUnderBypass: false, usedDontAskFallback: true, contained: true };
       }
       export function ghPrMergeSquash(prUrl) {
         console.log("SPIKE_TEST_MERGE:" + prUrl);
@@ -623,6 +623,7 @@ test("the spike reaches both GitHub CLI calls through ghExec", () => {
   );
 
   assert.match(out, /SPIKE_TEST_GH_EXEC:repo clone craigoley\/remudero-sandbox /);
+  assert.match(out, /PROBE FALLBACK/, "the fake exercises the second, contained worker call");
   assert.match(out, /SPIKE_TEST_GH_EXEC:pr create --repo craigoley\/remudero-sandbox --base main --head spike-hello-\d+ --fill/);
   assert.match(out, /### SPIKE COMPLETE all steps executed/);
 });

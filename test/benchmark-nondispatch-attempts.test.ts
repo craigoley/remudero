@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { benchmarkNonDispatchSpawn } from "../src/lib/benchmark-run.js";
+import { spawnFlightJudgeWorker } from "../src/lib/flight-judge.js";
+import { spawnSpecialistWorker } from "../src/lib/specialist-panel.js";
 import { runOpenWeightWalkingLadder, spawnWorker } from "../src/lib/worker.js";
 import { clearOpenWeightAbsence } from "../src/lib/worker-provider.js";
 import type { Config } from "../src/lib/config.js";
@@ -65,6 +67,51 @@ test("non-dispatch benchmark attempts cover cash review triage and judge lanes",
       .subscriptionNotionalUsd as Record<string, unknown>).state, "unavailable");
     assert.doesNotMatch(JSON.stringify(ledger.map((row) => row.benchmark_run)), /sensitive-prompt-sentinel|assignment-0/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("fresh judge and specialist entrypoints record attempts through injected workers", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-judge-entrypoints-"));
+  const mount = { model: "opus", effort: "medium" as const, maxTurns: 2, contextBudget: 1_000 };
+  try {
+    const fake = (async (input: SpawnWorkerArgs) => {
+      const id = input.tools?.length ? "specialist-assignment" : "judge-assignment";
+      input.onSelectionAssignment?.(assignment(id, "codex", "opus"));
+      return result("codex", "opus", id);
+    }) as typeof spawnWorker;
+    const judge = await spawnFlightJudgeWorker({ input: { taskId: "T-JUDGE", goal: "assess",
+      acceptanceCriteria: [], recentTurns: [] }, mount, cwd: root, settingsFile: "settings.json",
+    config: { root } as Config }, fake);
+    const specialist = await spawnSpecialistWorker({ input: { specialist: "security", taskId: "T-SPECIALIST",
+      prUrl: "https://github.com/example/example/pull/1", triggers: [] }, mount, cwd: root,
+    settingsFile: "settings.json", config: { root } as Config }, fake);
+    assert.equal(judge.selectionAssignmentId, "judge-assignment");
+    assert.equal(specialist.selectionAssignmentId, "specialist-assignment");
+    const ledger = rows(root);
+    assert.deepEqual(ledger.filter((entry) => entry.step === "worker.attempt").map((entry) => entry.lane),
+      ["flight-judge", "specialist"]);
+    assert.equal(ledger.filter((entry) => entry.step === "verdict").length, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an auxiliary fallback caller hook failure leaves the worker and attempt intact", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-fallback-hook-"));
+  const originalError = console.error;
+  const warnings: string[] = [];
+  console.error = (line: string) => { warnings.push(line); };
+  try {
+    const selected = assignment("fallback-hook-assignment", "cash", "cash-a");
+    const final = result("cash", "cash-a", selected.id);
+    const fake = (async (input: SpawnWorkerArgs) => {
+      input.onSelectionAssignment?.(selected);
+      input.onModelFallbackAttempt?.({ selectionAssignmentId: selected.id, model: "cash-a",
+        reason: "deployment-absent", result: final });
+      return final;
+    }) as typeof spawnWorker;
+    assert.equal(await benchmarkNonDispatchSpawn("review", fake)({ ...args(root),
+      onModelFallbackAttempt: () => { throw new Error("observer failure"); } }), final);
+    assert.equal(rows(root).filter((entry) => entry.step === "worker.attempt").length, 2);
+    assert.ok(warnings.some((line) => line.includes("benchmark.non_dispatch_fallback_hook_unavailable")));
+  } finally { console.error = originalError; rmSync(root, { recursive: true, force: true }); }
 });
 
 test("codex subscription cost and token placeholders remain unknown while measured cash zero remains zero", async () => {
@@ -201,6 +248,38 @@ test("real cash worker boundary emits a distinct assignment for each walked mode
       (row.worker_assignment as WorkerSelectionAssignment).id));
     assert.equal(final.selectionAssignmentId, (assignments[1]!.worker_assignment as WorkerSelectionAssignment).id);
   } finally { clearOpenWeightAbsence(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("real cash ladder continues when a fallback telemetry callback throws", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-cash-hook-"));
+  const originalError = console.error;
+  const warnings: string[] = [];
+  console.error = (line: string) => { warnings.push(line); };
+  clearOpenWeightAbsence();
+  try {
+    const settingsFile = join(root, "settings.json");
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    const models: string[] = [];
+    const final = await spawnWorker({
+      cwd: REPO_ROOT, permissionMode: "bypassPermissions", settingsFile, prompt: "bounded cash request",
+      model: "sonnet", effort: "low", mountProvider: "cash",
+      config: { root, claudeBin: "/unused/claude", dailyCapUsd: { normal: 10, squeezed: 25 },
+        workerProviders: { enabled: ["cash"], cashEndpoint: "https://example.test/" } } as Config,
+      onModelFallbackAttempt: () => { throw new Error("observer failed"); },
+      providerRouting: { spawnOpenWeight: async (_args: SpawnWorkerArgs, _config: Config,
+        selection: { model: string; effort: string }) => {
+        models.push(selection.model);
+        return models.length === 1
+          ? { ...result("cash", selection.model, "pending", true), costUsd: 0,
+            openWeightDeploymentAbsent: selection.model }
+          : result("cash", selection.model, "pending");
+      } },
+    } as never);
+    assert.deepEqual(models, ["gpt-5-nano", "gpt-oss-120b"]);
+    assert.equal(final.isError, false, "the telemetry sink cannot cancel the fallback rung");
+    assert.ok(warnings.some((line) => line.includes("worker.openweight.rung_telemetry_unavailable")));
+  } finally { clearOpenWeightAbsence(); console.error = originalError;
+    rmSync(root, { recursive: true, force: true }); }
 });
 
 test("non-dispatch benchmark receipt failure preserves normal flow", async () => {

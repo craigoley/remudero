@@ -415,9 +415,20 @@ test("draftProposalBatch reaches the mount-derived inbox args through an offline
   const origin = gitRepo({ bare: true });
   const seed = gitRepo({ cloneFrom: origin.dir });
   let checkout: GitRepo | undefined;
+  let injectedCalls = 0;
   try {
     mkdirSync(join(seed.dir, "plan"), { recursive: true });
-    writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "tasks: []\n");
+    writeFileSync(join(seed.dir, "plan", "tasks.yaml"), `- id: W1-T1
+  title: offline grounding fixture
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  origin: fixture
+  files: [src/lib/daemon.ts]
+  status: queued
+`);
     seed.git("add", "plan/tasks.yaml");
     seed.git("commit", "-m", "seed");
     seed.git("push", "origin", "HEAD:main");
@@ -432,9 +443,15 @@ test("draftProposalBatch reaches the mount-derived inbox args through an offline
       "repo",
       "MOUNT-AFFINITY-DRAFT",
       () => {},
+      (async (args) => {
+        injectedCalls += 1;
+        assert.deepEqual(args.disallowedTools, INBOX_DRAFT_DISALLOWED_TOOLS);
+        return codexResult();
+      }) as typeof spawnWorker,
     );
     assert.equal(outcomes.length, 1);
-    assert.equal(outcomes[0]?.ok, false, "the test-runner guard or preflight stops the default adapter without a process");
+    assert.equal(injectedCalls, 1, "the real draft rung reaches its model-worker entrypoint through the evidence wrapper");
+    assert.equal(outcomes[0]?.ok, false, "the injected worker's marker-free draft is not accepted as a plan task");
   } finally {
     checkout?.cleanup();
     seed.cleanup();

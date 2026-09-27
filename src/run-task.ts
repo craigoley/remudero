@@ -13905,6 +13905,32 @@ export function ledgeredNonDispatchSpawn(lane: string, raw: typeof spawnWorker =
   return benchmarkNonDispatchSpawn(lane, raw);
 }
 
+/** A failed fallback call is a worker attempt, not a second task outcome. Telemetry and caller
+ * hooks are both best-effort so a faulty observer never changes the worker's retry path. */
+export function dispatchFallbackObserver(
+  log: (step: string, fields: Record<string, unknown>) => void,
+  caller?: SpawnWorkerArgs["onModelFallbackAttempt"],
+): NonNullable<SpawnWorkerArgs["onModelFallbackAttempt"]> {
+  return (attempt) => {
+    let resources: Record<string, unknown> = {};
+    try { if (attempt.result) resources = benchmarkWorkerAttemptResources(attempt.result); }
+    catch (error) {
+      resources = { benchmark_run_unavailable_reason: "worker-result-fields-unavailable" };
+      console.error(JSON.stringify({ event: "benchmark.dispatch_fallback_resource_unavailable",
+        reason: "worker-result-fields-unavailable",
+        error_class: error instanceof TypeError ? "TypeError" : error instanceof Error ? "Error" : "non-error" }));
+    }
+    try { log("worker.attempt", { ...(attempt.selectionAssignmentId
+      ? { selection_assignment_id: attempt.selectionAssignmentId } : {}),
+      attempted_model: attempt.model, success: false, worker_failure: attempt.reason, ...resources }); }
+    catch { console.error(JSON.stringify({ event: "benchmark.dispatch_fallback_attempt_unavailable",
+      reason: "ledger-write-failed" })); }
+    try { caller?.(attempt); }
+    catch { console.error(JSON.stringify({ event: "benchmark.dispatch_fallback_hook_unavailable",
+      reason: "caller-hook-failed" })); }
+  };
+}
+
 async function runTask(
   taskId: string,
   opts: {
@@ -14160,24 +14186,7 @@ async function runTask(
         log("worker.assignment", { worker_assignment: assignment });
         effectiveSpawnArgs.onSelectionAssignment?.(assignment);
       },
-      onModelFallbackAttempt: (attempt) => {
-        let resources: Record<string, unknown> = {};
-        try { if (attempt.result) resources = benchmarkWorkerAttemptResources(attempt.result); }
-        catch (error) {
-          resources = { benchmark_run_unavailable_reason: "worker-result-fields-unavailable" };
-          console.error(JSON.stringify({ event: "benchmark.dispatch_fallback_resource_unavailable",
-            reason: "worker-result-fields-unavailable",
-            error_class: error instanceof TypeError ? "TypeError" : error instanceof Error ? "Error" : "non-error" }));
-        }
-        try { log("worker.attempt", { ...(attempt.selectionAssignmentId
-          ? { selection_assignment_id: attempt.selectionAssignmentId } : {}),
-          attempted_model: attempt.model, success: false, worker_failure: attempt.reason, ...resources }); }
-        catch { console.error(JSON.stringify({ event: "benchmark.dispatch_fallback_attempt_unavailable",
-          reason: "ledger-write-failed" })); }
-        try { effectiveSpawnArgs.onModelFallbackAttempt?.(attempt); }
-        catch { console.error(JSON.stringify({ event: "benchmark.dispatch_fallback_hook_unavailable",
-          reason: "caller-hook-failed" })); }
-      },
+      onModelFallbackAttempt: dispatchFallbackObserver(log, effectiveSpawnArgs.onModelFallbackAttempt),
       onSpawnError:
         effectiveSpawnArgs.onSpawnError ??
         ((err) =>
@@ -41839,6 +41848,7 @@ export async function draftProposalBatch(
   repo: string,
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  rawSpawn: typeof spawnWorker = spawnWorker,
 ): Promise<DraftRungOutcome[]> {
   if (toDraft.length === 0) return [];
 
@@ -41871,7 +41881,7 @@ export async function draftProposalBatch(
       planText,
       {
         spawn: (_proposal, prompt) =>
-          benchmarkNonDispatchSpawn("inbox-draft")({ ...buildInboxDraftSpawnArgs({
+          benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({ ...buildInboxDraftSpawnArgs({
             cwd: worktreePath,
             settingsFile,
             mount: inboxDraftMount,
