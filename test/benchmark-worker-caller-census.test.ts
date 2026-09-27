@@ -38,6 +38,8 @@ function sites(file: string, text: string): Site[] {
 const classified: Record<string, Partial<Record<Kind, number>>> = {
   "src/lib/worker.ts": { call: 3 }, // provider fallback recursion inherits the caller's assignment sink
   "src/lib/benchmark-run.ts": { "parameter-default": 1 },
+  "src/lib/flight-judge.ts": { "parameter-default": 1 },
+  "src/lib/specialist-panel.ts": { "parameter-default": 1 },
   "src/run-task.ts": { "parameter-default": 1, "injected-default": 1 },
 };
 
@@ -60,8 +62,8 @@ test("benchmark worker caller census catches an unclassified spawn", () => {
     "positive control: the census sees the three known recursive provider fallbacks");
   const orchestration = readFileSync(join(root, "src/run-task.ts"), "utf8");
   for (const lane of ["inbox-draft", "review", "triage", "risk-judge"]) {
-    assert.ok(orchestration.includes(`ledgeredNonDispatchSpawn("${lane}")`)
-      || orchestration.includes(`benchmarkNonDispatchSpawn("${lane}")`), `${lane} is in the worker population`);
+    assert.ok(orchestration.includes(`ledgeredNonDispatchSpawn("${lane}"`)
+      || orchestration.includes(`benchmarkNonDispatchSpawn("${lane}"`), `${lane} is in the worker population`);
   }
   for (const site of unclassified(actual)) {
     console.warn(JSON.stringify({ event: "benchmark.caller_coverage_debt", ...site,
