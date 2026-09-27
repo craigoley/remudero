@@ -1,35 +1,21 @@
 /**
  * lib/field-trials-flow.ts — W1-T4574: FIELD TRIALS FROM OUR OWN FLOW.
  *
- * An operator-invoked, resumable snapshot that joins each opted-in repository's audited
- * three-form ledger union with its GitHub history (field-trials-github.ts) and derives five
- * OBSERVATIONAL families, stratified by source, time and task class:
- *   1. model adoption — requested, selected and served models counted separately per instance and
- *      day; per model, source merge (the booted head's commit time), runtime boot and first
- *      selected/served exposure are separate timestamps;
- *   2. automation conversion — eligible → assigned → worker → PR → review → merge → deployment →
- *      verified, with missing-join and human-touch counts at every stage;
- *   3. PR repair and correctness signals — first-pass CI, review rounds, repair commits, fix
- *      dispatches, reverts and same-task follow-up merges inside a follow-up window, and an honest
- *      unknown bucket; a green check never moves a PR into any correctness bucket;
- *   4. flow and recovery — claim → PR / merge / deploy (Kaplan-Meier quantiles, open work censored)
- *      and DORA commit-to-deploy lead time, retries, self-repair and escalation;
- *   5. learning-loop yield — gardener proposals to accepted / declined / open, credit and debit
- *      judgements, and follow-up defects; human effort is unavailable, never zero.
- * No family estimates a causal effect; the snapshot says so in `causalClaims`.
+ * An operator-invoked, resumable snapshot joining each opted-in repository's audited three-form
+ * ledger union with its GitHub history (field-trials-github.ts) into five OBSERVATIONAL families —
+ * model adoption, the automation funnel, PR repair/correctness signals, censored flow/recovery
+ * times and learning-loop yield — by source x week x task class. The families, their denominators
+ * and what is deferred are specified in docs/research/model-evidence-program.md ("Field trials
+ * from our own flow"). No family estimates a causal effect; `causalClaims` says so.
  *
- * A merge is never a deployment: deployment is a GitHub deployment whose newest status is
- * `success`, or a daemon boot whose head is at or after the merge commit on main. Without either
- * source the stage reads missing-join, never reached.
+ * INVARIANTS. A merge is never a deployment (only a successful GitHub deployment or a daemon boot
+ * at or after the merge commit is); a green check never moves a PR into a correctness bucket;
+ * unknown, censored and missing-join are counted, never zero. Partitions carry an input hash, so a
+ * late page or a ledger repair rebuilds only what it touches.
  *
- * Partitions are keyed by source x period x stratum; each carries the hash of its input units, so a
- * late GitHub page or a ledger repair rebuilds only the partitions whose inputs changed.
- *
- * PRIVACY. The snapshot is private and local: it keeps task ids, hosts and PR numbers for the
- * join. {@link buildFieldTrialsRelease} is the only export path: consent-checked per repository,
- * pseudonymised with a local rotatable salt, small cells suppressed (with complementary
- * suppression), unavailable values named, and scanned for every private join key before it is
- * written. A release is a dated, revocable candidate; nothing here publishes it.
+ * PRIVACY. The snapshot is private. {@link buildFieldTrialsRelease} is the only export: consent
+ * checked per repository, salted pseudonyms, small cells withheld, and REFUSED if any private join
+ * key appears. Falsifier: test/field-trials-flow.test.ts (merge-as-deployment reddens it).
  */
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
