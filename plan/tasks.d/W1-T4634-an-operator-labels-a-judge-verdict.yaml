@@ -1,0 +1,52 @@
+- id: W1-T4634
+  title: "A JUDGE-CALIBRATION SAMPLE NOBODY CAN LABEL CORRECTS NOTHING — W1-T4628 draws a stratified sample of judge verdicts and reads human labels from the state dir, but no route writes a label, so every PPI stratum reads unknown forever"
+  repo: remudero
+  depends_on: ["W1-T4628"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: model-evidence program — W1-T4628 build report named the missing label write path"
+  plan_refs: ["W1-T4628", "W1-T4608", "W1-T4614", "W1-T404"]
+  files:
+    - src/lib/judge-calibration.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/an-operator-labels-a-judge-verdict.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T4628 (PR 7480) adds `judge-calibration-v1`: a seeded stratified sample of review and risk-
+    judge verdicts (judge model x author model), Cohen's kappa against human labels, and prediction-
+    powered-inference corrected pass rates beside the raw ones. Labels are read from
+    `<stateDir>/judge-labels.json` through `fileJudgeLabelStore`, and `recordJudgeLabel(store,
+    {verdictRef, label, labeller}, clock)` validates and appends one, but nothing served calls it:
+    the analytics route is GET-only and serve.ts was outside that task's files. Until a write path
+    exists, every stratum stays `unlabelled` and the projection can only ever report raw judge
+    rates, which is exactly the uncorrected number it was built to replace.
+  design: |
+    Add a write-scoped console route, POST /v1/judge-labels, beside the operator-notes route in
+    serve.ts's route table. Body {verdictRef, label: pass|fail, labeller}. The handler validates
+    with the existing JUDGE_VERDICT_REF_RE, stamps the time server-side (never from the body), calls
+    recordJudgeLabel against the same state-dir store the analytics reader uses, and ledgers a panel
+    row carrying the bearer's hashed identity as origin (the operator-notes convention), so the
+    human-facing labeller and the credential that POSTed are both recorded. A verdictRef that is not
+    in the current sample is still accepted (the sample moves as verdicts arrive) but flagged in the
+    response. Tier LOW: a label is advisory evidence, trivially superseded by a later label, and
+    gates nothing. Declare the route in openapi/daemon.yaml and regenerate the api client so the
+    served-route census stays empty. The console's labelling queue (reading sample[] from judge-
+    calibration-v1 and posting here) is a separate console task filed once this route ships.
+  acceptance:
+    - claim: "an operator can POST a pass/fail label for a sampled judge verdict, stamped server-side with the labeller and the credential's hashed origin, and the next analytics refresh counts it"
+      proof: "unit test: test/an-operator-labels-a-judge-verdict.test.ts"
+    - claim: "the label route is served from the daemon's route table"
+      proof: "grep: buildRecordJudgeLabelRoute( in src/lib/serve.ts"
+    - claim: "the label route is declared in the daemon contract"
+      proof: "grep: /v1/judge-labels: in openapi/daemon.yaml"
+  falsifier: |
+    Revert the change: POST /v1/judge-labels is unserved, the served-route census has nothing to
+    declare, and the task's own test fails because no label reaches the store.
