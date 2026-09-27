@@ -29,6 +29,7 @@ import {
   ASSIGNMENT_LINE_RE,
   TRAILER_LINE_RE,
 } from "../src/lib/worker.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import { harnessCommitForShellLessWorker, headProvenanceFields } from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -66,12 +67,10 @@ function body(dir: string, rev = "HEAD"): string {
   return git(dir, "log", "-1", "--format=%B", rev);
 }
 
-/** A repo whose tracked `hooks/commit-msg` leaves a marker, wired the way `worktreeAdd` wires a run. */
-function repoWithTrackedHook(): string {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}assignment-trailer-`));
-  const repo = join(root, "main");
+/** Give a fresh `gitRepo()` a tracked `hooks/commit-msg` that leaves a marker, wired the way
+ *  `worktreeAdd` wires a run. The helper builds the repository; this only installs the hook. */
+function withTrackedCommitHook(repo: string): string {
   mkdirSync(join(repo, "hooks"), { recursive: true });
-  git(root, "init", "-q", "-b", "main", repo);
   const hook = join(repo, "hooks", "commit-msg");
   writeFileSync(hook, '#!/bin/sh\ntouch "$(git rev-parse --git-dir)/commit-msg-ran"\n');
   chmodSync(hook, 0o755);
@@ -84,7 +83,7 @@ function repoWithTrackedHook(): string {
 
 /** A linked worktree with the sibling `.base` record `worktreeAdd` writes for every run worktree. */
 function runWorktree(repo: string, name: string): string {
-  const wt = join(repo, "..", name);
+  const wt = `${repo}-${name}`;
   git(repo, "worktree", "add", "-q", "-b", `run-${name}-1`, "--no-track", wt, "main");
   git(wt, "config", "--worktree", "core.hooksPath", "hooks");
   recordWorktreeBase(wt, git(wt, "rev-parse", "HEAD").trim());
@@ -115,7 +114,7 @@ describe("W1-T4614: the trailer text", () => {
 
 describe("W1-T4614: the harness's own commit carries the trailer", () => {
   it("harnessCommitForShellLessWorker stamps the worker's assignment and the head resolves to it", () => {
-    const repo = repoWithTrackedHook();
+    const repo = withTrackedCommitHook(gitRepo({ kind: "assignment-trailer", seedCommit: false }).dir);
     writeFileSync(join(repo, "README.md"), "edited\n");
     const count = harnessCommitForShellLessWorker(
       {
@@ -140,7 +139,7 @@ describe("W1-T4614: the harness's own commit carries the trailer", () => {
 
 describe("W1-T4614: a shell-capable worker's commit is stamped by the run worktree's hook", () => {
   it("every commit in a run worktree carries the current assignment; repo hooks still run; other trailers kept", () => {
-    const repo = repoWithTrackedHook();
+    const repo = withTrackedCommitHook(gitRepo({ kind: "assignment-trailer", seedCommit: false }).dir);
     const wt = runWorktree(repo, "wt-a");
     assert.equal(stampAssignmentIfRunWorktree(wt, "asg-impl"), true);
 
@@ -173,7 +172,7 @@ describe("W1-T4614: a shell-capable worker's commit is stamped by the run worktr
   });
 
   it("a commit made outside a run is untouched and reads unattributed", () => {
-    const repo = repoWithTrackedHook();
+    const repo = withTrackedCommitHook(gitRepo({ kind: "assignment-trailer", seedCommit: false }).dir);
     const wt = runWorktree(repo, "wt-b");
     assert.equal(stampAssignmentIfRunWorktree(wt, "asg-run"), true);
     assert.equal(stampAssignmentIfRunWorktree(repo, "asg-run"), false, "the canonical checkout is not a run worktree");
@@ -187,7 +186,7 @@ describe("W1-T4614: a shell-capable worker's commit is stamped by the run worktr
   });
 
   it("refuses an id that is not a plain token, installing nothing", () => {
-    const repo = repoWithTrackedHook();
+    const repo = withTrackedCommitHook(gitRepo({ kind: "assignment-trailer", seedCommit: false }).dir);
     const wt = runWorktree(repo, "wt-c");
     assert.equal(stampRunWorktreeAssignment(wt, "bad id; rm -rf /"), false);
     mkdirSync(join(wt, "sub"));
