@@ -1,0 +1,40 @@
+- id: W1-T4628
+  title: "THE JUDGES THAT GRADE FIELD-TRIAL OUTCOMES ARE THEMSELVES UNGRADED — a small operator-labelled random sample yields judge agreement and prediction-powered bias-corrected rates with valid intervals"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: agent-evaluation state-of-the-art survey applied to Remudero's field trials"
+  plan_refs: ["W1-T100001", "W1-T4575", "W1-T4603", "W1-T4608", "W1-T4617", "W1-T4619", "W1-T4620", "W1-T4621", "W1-T4623"]
+  files:
+    - src/lib/judge-calibration.ts
+    - src/lib/analytics-route.ts
+    - test/judge-verdicts-are-corrected-by-a-human-sample.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    State of the art surveyed 2026-09-27 (sources in the filing PR). Remudero's plan tasks already
+    carry executable, base-vs-head discriminated proofs plus holdout criteria — an executable grader
+    most public agent evaluations lack. LLM judges carry position, verbosity and self-preference
+    bias (Zheng et al.), and human criteria drift while grading (Shankar et al.). Prediction-powered
+    inference (PPI) uses a small human-labelled sample to correct a judge's bias with valid
+    confidence intervals. Remudero's review and risk judges produce the verdicts a field trial would
+    publish.
+  design: |
+    Draw a stratified random sample of review and judge verdicts (by judge model and author model)
+    into an operator labelling queue surfaced in the console, record each human label with its
+    provenance, and compute judge-human agreement (Cohen's kappa), between-judge agreement, a judge
+    x author matrix, and PPI-corrected pass rates beside the raw ones. The sample size is a named,
+    adjustable parameter; unlabeled strata are reported as unknown. Nothing here gates a PR.
+  acceptance:
+    - claim: "a stratified sample of judge verdicts can be labelled by the operator, and agreement and prediction-powered corrected rates are reported beside raw rates with unlabeled strata as unknown"
+      proof: "unit test: test/judge-verdicts-are-corrected-by-a-human-sample.test.ts"
+    - claim: "the new module is wired into its production caller, not shipped unwired"
+      proof: "grep: deriveJudgeCalibration( in src/lib/analytics-route.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale describes.

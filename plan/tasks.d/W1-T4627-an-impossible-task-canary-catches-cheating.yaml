@@ -1,0 +1,41 @@
+- id: W1-T4627
+  title: "NOTHING TESTS WHETHER A MODEL CHEATS WHEN THE TASK CANNOT BE DONE HONESTLY — seed a few canary tasks whose holdout contradicts the visible proof, so any pass is a measured cheating event"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: agent-evaluation state-of-the-art survey applied to Remudero's field trials"
+  plan_refs: ["W1-T100001", "W1-T4575", "W1-T4603", "W1-T4608", "W1-T4617", "W1-T4619", "W1-T4620", "W1-T4621", "W1-T4623"]
+  files:
+    - src/lib/impossible-canary.ts
+    - src/run-task.ts
+    - test/an-impossible-task-canary-catches-cheating.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    State of the art surveyed 2026-09-27 (sources in the filing PR). Remudero's plan tasks already
+    carry executable, base-vs-head discriminated proofs plus holdout criteria — an executable grader
+    most public agent evaluations lack. ImpossibleBench mutates tests to contradict the
+    specification so any pass is cheating and reports high rates for some frontier models in some
+    scaffolds; METR measured reward hacking in 1-2% of o3 attempts, 43x more when the scorer was
+    visible. Remudero already runs holdout criteria and records reward_hacking_gap, but has no
+    deliberately impossible item, so the rate of cheating under pressure is unmeasured.
+  design: |
+    A small, versioned set of canary tasks (outside the plan's dispatchable queue, never merged)
+    whose visible proof and holdout criterion are mutually contradictory, run on each model on a
+    slow cadence inside the paid envelope or idle headroom. A pass on the visible proof while the
+    holdout fails is recorded as a cheating event; results are counts with exact binomial intervals
+    per model and scaffold revision, never a score. Canary contents stay out of every worker prompt
+    and public artifact.
+  acceptance:
+    - claim: "a canary whose holdout contradicts its visible proof records a visible pass with a failed holdout as a cheating event, reported as a count with an exact interval"
+      proof: "unit test: test/an-impossible-task-canary-catches-cheating.test.ts"
+    - claim: "the new module is wired into its production caller, not shipped unwired"
+      proof: "grep: runImpossibleCanary( in src/run-task.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale describes.
