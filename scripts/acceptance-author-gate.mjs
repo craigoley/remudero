@@ -500,9 +500,11 @@ export function evaluateCommitTrailerGate({ trailerCommits, changedPaths, taskFi
  * caller is what supplies it, so a `Remudero-Task:` trailer naming an id the plan does not declare
  * stops buying an exemption. `trailerResolves` OMITTED — which is what a caller with an unreadable
  * plan passes — leaves the verdict byte for byte what it was before this wiring.
- * @param {{ body: string, authorLogin?: string, headRefName?: string, trailerResolves?: (taskId: string) => boolean, criteriaFromHeadPlan?: boolean, introducedTaskIds?: string[], trailerCommits?: readonly { sha: string, subject: string, taskId: string }[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined, taskAcceptanceForId?: (taskId: string) => readonly { claim: string, proof: string }[] | undefined, rule15Verdict?: import("../src/lib/ci-parity.ts").Rule15SplitVerdict }} input
+ * `root` (W1-T3675): the checkout {@link bodyProofTargetMissing} stats a `grep:` target against —
+ * real callers omit it and get {@link REPO_ROOT}; a test seeds a tmp dir instead.
+ * @param {{ body: string, authorLogin?: string, headRefName?: string, trailerResolves?: (taskId: string) => boolean, criteriaFromHeadPlan?: boolean, introducedTaskIds?: string[], trailerCommits?: readonly { sha: string, subject: string, taskId: string }[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined, taskAcceptanceForId?: (taskId: string) => readonly { claim: string, proof: string }[] | undefined, rule15Verdict?: import("../src/lib/ci-parity.ts").Rule15SplitVerdict, root?: string }} input
  */
-export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, criteriaFromHeadPlan = false, introducedTaskIds = [], trailerCommits, changedPaths, taskFilesForId, taskAcceptanceForId, rule15Verdict }) {
+export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, criteriaFromHeadPlan = false, introducedTaskIds = [], trailerCommits, changedPaths, taskFilesForId, taskAcceptanceForId, rule15Verdict, root = REPO_ROOT }) {
   if (authorLogin !== undefined && EXEMPT_BOT_LOGINS.has(authorLogin)) {
     return {
       ok: true,
@@ -552,7 +554,44 @@ export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, 
   const result = acceptanceAuthorTimeCheck(body, trailerResolves === undefined ? {} : { trailerResolves });
   // The shared predicate still uses the lightweight ID resolver. Only the reviewer's non-empty
   // criteria at this PR head can justify skipping the body's proof-shape check.
-  return result.ok ? authorTimeProofShapeRefusal(body, result, criteriaFromHeadPlan) : result;
+  return result.ok ? authorTimeProofShapeRefusal(body, result, criteriaFromHeadPlan, root) : result;
+}
+
+/**
+ * W1-T3675 — a `grep:` proof in the body's own `## Acceptance` block whose target is a repository
+ * path that does not exist at this head (a rename, e.g. #5742/#5718) passes every check this gate
+ * runs today — nothing STATS the path until `remudero-review` executes the proof a full CI round
+ * later, reading as a FAILED CRITERION rather than a STALE PATH.
+ *
+ * Reads `whitelisted.args`'s last element — the field {@link execWhitelistedProof} itself reads —
+ * off an ALREADY-PARSED `parseWhitelistedProof` result, never re-parsing proof text. A legacy
+ * fenced `` `grep ...` `` proof's author-selected argv is declined: its argv need not even be a
+ * path, and a target outside the repository is not this gate's business. A `unit test:` proof
+ * carries no path at all (`kind !== "grep"`) and passes through untouched.
+ *
+ * REFUSE, DO NOT REPAIR: never guesses a renamed file's new name, only says the old one is gone.
+ * @param {readonly { claim: string, proof: string }[]} criteria
+ * @param {string} root
+ * @returns {{ ok: false, defect: "grep-proof-target-missing", message: string } | undefined}
+ */
+export function bodyProofTargetMissing(criteria, root = REPO_ROOT) {
+  for (let index = 0; index < criteria.length; index++) {
+    const proof = (criteria[index]?.proof ?? "").trim();
+    const whitelisted = parseWhitelistedProof(proof);
+    if (whitelisted === null || whitelisted.kind !== "grep" || whitelisted.authorSelectedArgv === true) continue;
+    const target = whitelisted.args[whitelisted.args.length - 1];
+    if (typeof target !== "string" || target.length === 0) continue;
+    if (existsSync(join(root, target))) continue;
+    return {
+      ok: false,
+      defect: "grep-proof-target-missing",
+      message:
+        `criterion ${index + 1}'s grep proof names \`${target}\`, which does not exist at this head. ` +
+        "The path is absent, not the criterion failed — it is likely stale (renamed or removed since " +
+        "this body was written). Point the proof at the file's current path.",
+    };
+  }
+  return undefined;
 }
 
 /**
@@ -564,18 +603,19 @@ export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, 
  * `Remudero-Task: W1-T3612` trailer — whose shard declares two proofs that both parse — was refused
  * "criterion 1 cannot execute: empty proof", because a prose section headed `## Acceptance criteria`
  * parsed to one claim with no `proof:` line. The shard was fine; the gate was reading the wrong file.
- * #5680 had already been refused the same way and rewritten its body to get past it.
- *
- * NOT A COVERAGE HOLE: a shard's proofs are held to the same dialect by `lint-plan` (which refuses a
- * criterion review cannot execute) and by `proof-discrimination`. Re-deriving that judgement here
- * would be a second implementation of it, which this script's own header rules out.
+ * #5680 had already been refused the same way. The SAME reasoning skips
+ * {@link bodyProofTargetMissing} below: a prose `grep:`-shaped line review never executes must
+ * not be refused for a path it was never claiming to prove.
  * @param {string} body
  * @param {{ ok: true, message: string }} result
  * @param {boolean} [criteriaFromHeadPlan]
+ * @param {string} [root]
  */
-function authorTimeProofShapeRefusal(body, result, criteriaFromHeadPlan = false) {
+function authorTimeProofShapeRefusal(body, result, criteriaFromHeadPlan = false, root = REPO_ROOT) {
   if (criteriaFromHeadPlan) return result;
   const criteria = parseAcceptanceBlock(body);
+  const targetMissing = bodyProofTargetMissing(criteria, root);
+  if (targetMissing !== undefined) return targetMissing;
   const defects = [];
   criteria.forEach((criterion, index) => {
     const proof = criterion.proof ?? "";

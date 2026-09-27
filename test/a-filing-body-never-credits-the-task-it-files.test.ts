@@ -11,6 +11,9 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
 import { buildPlanPrBody, diffContributesTaskShard, filingAcceptanceCriteria } from "../src/lib/plan-pr-emitter.js";
 import { extractTaskTrailerId, filingSelfCreditCheck } from "../src/lib/review.js";
@@ -23,10 +26,23 @@ const evaluateGate = authorGate.evaluateGate as (input: {
   body: string;
   trailerResolves?: (taskId: string) => boolean;
   introducedTaskIds?: readonly string[];
+  root?: string;
 }) => { ok: boolean; defect?: string; message: string };
 
 const FILED_ID = "W1-T9001";
 const SHARD = `plan/tasks.d/${FILED_ID}-a-thing-worth-filing.yaml`;
+
+/** W1-T3675: `evaluateGate` now stats a `grep:` proof's own target against a root. `SHARD` above is
+ *  exactly what a REAL filing PR's own checkout would contain (the diff adds it) — just not this
+ *  repo's real disk, since `FILED_ID` is a fixture, never actually filed. Seed a throwaway root
+ *  with that one file so the fixture matches a real filing checkout's shape. */
+function rootWithFiledShard(): { root: string; cleanup: () => void } {
+  const root = mkdtempSync(join(tmpdir(), "rmd-filing-body-"));
+  const shard = join(root, SHARD);
+  mkdirSync(dirname(shard), { recursive: true });
+  writeFileSync(shard, `- id: ${FILED_ID}\n  title: a thing worth filing\n`);
+  return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
 
 /** The shape a filing flow hands the emitter — including a `taskId`, the very mistake under test. */
 function filingBody(taskId: string | undefined): string {
@@ -52,15 +68,20 @@ test("W1-T3362: a filing body for a newly added shard carries no trailer crediti
 
 test("W1-T3362: the emitted filing body passes the acceptance author-time gate", () => {
   const body = filingBody(FILED_ID);
-  // The gate refuses the SAME body once the self-credit is put back — proving the check below has teeth.
-  const credited = `${body.trimEnd()}\n\nRemudero-Task: ${FILED_ID}\n`;
-  const refused = evaluateGate({ body: credited, introducedTaskIds: [FILED_ID] });
-  assert.equal(refused.ok, false);
-  assert.equal(refused.defect, "files-and-credits-the-same-task");
+  const { root, cleanup } = rootWithFiledShard();
+  try {
+    // The gate refuses the SAME body once the self-credit is put back — proving the check below has teeth.
+    const credited = `${body.trimEnd()}\n\nRemudero-Task: ${FILED_ID}\n`;
+    const refused = evaluateGate({ body: credited, introducedTaskIds: [FILED_ID], root });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.defect, "files-and-credits-the-same-task");
 
-  assert.equal(filingSelfCreditCheck(body, [FILED_ID]).ok, true);
-  const gate = evaluateGate({ body, introducedTaskIds: [FILED_ID] });
-  assert.equal(gate.ok, true, gate.message);
+    assert.equal(filingSelfCreditCheck(body, [FILED_ID]).ok, true);
+    const gate = evaluateGate({ body, introducedTaskIds: [FILED_ID], root });
+    assert.equal(gate.ok, true, gate.message);
+  } finally {
+    cleanup();
+  }
 });
 
 test("W1-T3362: an implementing body keeps its trailer when the diff adds no shard for that task", () => {
