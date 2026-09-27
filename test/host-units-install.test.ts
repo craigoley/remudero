@@ -516,7 +516,7 @@ test("W1-T3245: the tick recycles for image drift and never for mount drift", ()
   assert.match(tick.reason, /up-to-date/);
 
   // Image drift: the tick DOES act, even though the checkout is also behind.
-  const drifted = decideDeployTrigger({ ...base, imageBakedCommitsBehind: 1, imageDriftOnly: true });
+  const drifted = decideDeployTrigger({ ...base, imageBakedCommitsBehind: 1, imageDriftOnly: true, imagePublished: true });
   assert.equal(drifted.deploy, true, "a new image is the tick's own business");
   assert.match(drifted.reason, /running image predates 1 baked-path commit/);
 

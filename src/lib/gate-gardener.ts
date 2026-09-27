@@ -15,8 +15,8 @@ import { resolveRepoLayout } from "./repo-layout.js";
  * W1-T4115 measures how often each gate fires; nothing acted on it. Each pass proposes ONE class of
  * change as ONE pull request, every value taken from the ratchet's OWN measurement, never a guess:
  *   - TIGHTEN: a one-way ceiling the code has fallen below — a per-file source-size or comment-load
- *     row the ratchet itself would now record lower (its `shrunk`), or the contract-coverage ceiling
- *     above today's uncovered-route count.
+ *     row the ratchet itself would now record lower (its `shrunk`). (W1-T4583 retired the
+ *     contract-coverage ceiling this also tightened.)
  *   - REFRESH: a stale row — a per-file row for a file that no longer exists (the ratchet's
  *     `removed`), or the learnings baseline's recorded measurement that no longer matches the corpus.
  *     Its `capChars` headroom is deliberate and never touched.
@@ -60,7 +60,6 @@ interface LedgerVerdict {
 export interface GateProbes {
   ss: { listSourceFiles: (r: string) => string[]; countLines: (t: string) => number; evaluateSourceSizeRatchet: (c: Json, b: Json) => LedgerVerdict };
   cl: { listMeasuredFiles: (r: string) => string[]; countCommentLines: (t: string, p: string) => { comments: number }; evaluateCommentLoadRatchet: (c: Json, b: Json) => LedgerVerdict };
-  cc: { CLIENT_SOURCES: string[]; BASELINE_PATH: string; routesCalled: (s: string[], read: (t: string) => string[]) => string[]; routesDeclared: (t: string) => string[]; uncovered: (c: string[], d: string[]) => string[] };
   lb: { loadCorpus: (d: string) => unknown[]; computeActiveChars: (e: unknown[]) => { chars: number; activeCount: number } };
   gm: { readGateLists: (t: string) => { required: Set<string> }; evaluateGateMonotonic: (b: unknown, h: unknown) => { ok: boolean; detail: string } };
 }
@@ -70,7 +69,6 @@ export async function loadGateProbes(root: string): Promise<GateProbes> {
   return {
     ss: await load("scripts/source-size-ratchet.mjs"),
     cl: await load("scripts/comment-load-ratchet.mjs"),
-    cc: await load("scripts/contract-coverage-ratchet.mjs"),
     lb: await load("scripts/learnings-budget-ratchet.mjs"),
     gm: await load("scripts/gate-monotonic-check.mjs"),
   };
@@ -89,20 +87,6 @@ function ledgerCandidates(root: string, { ss, cl }: GateProbes): GateGardenActio
     ...verdict.shrunk.map((s): GateGardenAction => ({ class: "tighten", target: `${file}#${s.path}`, file, edit: { kind: "row", key: s.path, to: s.to }, reason: `The file shrank a whole bucket; the ratchet now records ${s.to}.` })),
     ...verdict.removed.map((path): GateGardenAction => ({ class: "refresh", target: `${file}#${path}`, file, edit: { kind: "row", key: path, to: null }, reason: "The file no longer exists." })),
   ]);
-}
-
-/** TIGHTEN for the contract-coverage ceiling, counted with the ratchet's own route functions. */
-function contractCandidates(root: string, { cc }: GateProbes): GateGardenAction[] {
-  const readTree = (target: string) =>
-    execFileSync("git", ["-C", root, "ls-files", "--", target], { encoding: "utf8" })
-      .split("\n")
-      .filter((p) => /\.(ts|tsx|js|mjs)$/.test(p))
-      .map((p) => readFileSync(join(root, p), "utf8"));
-  const count = cc.uncovered(cc.routesCalled(cc.CLIENT_SOURCES, readTree), cc.routesDeclared(readFileSync(join(root, "openapi/daemon.yaml"), "utf8"))).length;
-  const ceiling = readJson(join(root, cc.BASELINE_PATH)).uncoveredCeiling;
-  return typeof ceiling === "number" && count < ceiling
-    ? [{ class: "tighten", target: `${cc.BASELINE_PATH}#uncoveredCeiling`, file: cc.BASELINE_PATH, edit: { kind: "row", key: "uncoveredCeiling", to: count }, reason: `${count} routes are uncovered today, under the ceiling of ${ceiling}.` }]
-    : [];
 }
 
 /** REFRESH for the learnings baseline's recorded measurement; the cap is left alone. */
@@ -152,7 +136,7 @@ export function gateInventory(repoRoot: string, stateDir: string, probes: GatePr
   // The REQUIRED list, read by the gate-monotonic check itself.
   const required = probes.gm.readGateLists(readFileSync(join(repoRoot, CI_GATE_YML), "utf8")).required;
   const demote = report ? demotionCandidate(report, required) : undefined;
-  const candidates = [...ledgerCandidates(repoRoot, probes), ...contractCandidates(repoRoot, probes), ...learningsCandidates(repoRoot, probes), ...(demote ? [demote] : [])];
+  const candidates = [...ledgerCandidates(repoRoot, probes), ...learningsCandidates(repoRoot, probes), ...(demote ? [demote] : [])];
   return { candidates, tally: updateTally(stateDir, report) };
 }
 

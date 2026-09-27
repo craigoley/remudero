@@ -751,7 +751,7 @@ test("DEFAULT_BOARD_PREWARM_MS matches buildBatchedGithub's own default TTL (15s
 
 test("resolveServePort: no --port -> DEFAULT_SERVE_PORT", () => {
   assert.equal(resolveServePort([]), DEFAULT_SERVE_PORT);
-  assert.equal(DEFAULT_SERVE_PORT, 4317); // matches apps/dashboard/src/main.ts's own default
+  assert.equal(DEFAULT_SERVE_PORT, 4317);
 });
 
 test("resolveServePort: --port <n> is honored", () => {
@@ -855,7 +855,9 @@ test("GET /v1/feedback and GET /v1/trace (assembled server): the plan graph is r
   await withServeServer(depsFor(root, planOf([task({ id: "A" })])), async (base) => {
     const inbox = await get(base, "/v1/feedback", READ_TOKEN);
     assert.equal(inbox.status, 200);
-    assert.deepEqual(await inbox.json(), { entries: [] });
+    const inboxBody = (await inbox.json()) as { entries: unknown[]; staleness?: { status?: string } };
+    assert.deepEqual(inboxBody.entries, []);
+    assert.equal(inboxBody.staleness?.status, "fresh", "the feedback inbox is a cached console read that says how fresh it is");
 
     const trace = await get(base, "/v1/trace?id=A", READ_TOKEN);
     assert.equal(trace.status, 200);

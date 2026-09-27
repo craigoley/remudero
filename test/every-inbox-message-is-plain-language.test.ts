@@ -218,9 +218,11 @@ test("W1-T4087: the backfill runs on its own timer and logs a failure without st
     10,
     (step) => lines.push(step),
   );
+  assert.equal(pump.isBusy(), true, "the first in-flight pass blocks an idle transition");
   await new Promise((resolve) => setTimeout(resolve, 80));
   pump.stop();
   await pump.settled();
+  assert.equal(pump.isBusy(), false, "a settled plain-message writer no longer holds idle admission");
   assert.ok(lines.includes("inbox.plain_failed"), "the throwing read is logged");
   assert.ok(lines.includes("inbox.plain_written"), "a later tick still writes");
   assert.equal(Object.keys(JSON.parse(readFileSync(plainStorePath(stateDir), "utf8"))).length, 2);

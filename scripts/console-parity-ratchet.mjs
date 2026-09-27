@@ -8,7 +8,7 @@
 // discipline as scripts/comment-load-baseline.json) — a shrink is reported, never refused.
 //
 // A STEP, NOT A JOB: rides ci.yml's `comment-load-ratchet` job, beside
-// contract-coverage-ratchet.mjs — a new ci.yml JOB needs ci-gate.yml too, and Standing rule 25
+// the retired contract-coverage ratchet (W1-T3174, retired by W1-T4583) — a new ci.yml JOB needs ci-gate.yml too, and Standing rule 25
 // refuses a workflow change beside a src/ product path.
 //
 // Run via `node --import tsx` (like scripts/generate-macro-skills.mjs): COMMANDS and
@@ -163,9 +163,6 @@ export const CLI_ONLY = {
   serve:
     "bootstraps the console server itself — there is no console route to start the process " +
     "that serves the console's own routes",
-  "console-url":
-    "prints a locally-held secret bearer token; the console cannot hand out its own credential " +
-    "over an authenticated session of itself",
   escalate:
     "creates the escalation (opens a needs-human GitHub issue and, for MANUAL/HARD_STOP, fires " +
     "a real-time ping); the console can only act on one already raised (POST " +
@@ -219,7 +216,7 @@ export function classifyVerbs(verbNames, declaredRoutes, routeMatch = ROUTE_MATC
 /** The ratchet itself: `cliOnlyVerbs` (this run's CLI_ONLY membership) against the recorded
  *  `baselineVerbs`. `added` (grown past the recording) is the ONLY failure condition; `removed`
  *  (shrunk) is reported so the baseline can be lowered to lock the improvement in, same
- *  discipline as scripts/contract-coverage-ratchet.mjs's FELL branch. */
+ *  discipline as the retired contract-coverage ratchet's FELL branch (W1-T3174; retired by W1-T4583). */
 export function ratchetVerdict(cliOnlyVerbs, baselineVerbs) {
   const baseline = new Set(baselineVerbs);
   const current = new Set(cliOnlyVerbs);
@@ -263,7 +260,7 @@ function main() {
   const verbNames = COMMANDS.map((c) => c.name);
   const declaredRoutes = declaredConsoleRoutes();
   // A ZERO ON EITHER SIDE IS A BROKEN CENSUS, NOT A CLEAN SHEET — same discipline as
-  // contract-coverage-ratchet.mjs: if either extraction stops seeing its corpus, every verb
+  // the retired contract-coverage ratchet (W1-T3174, retired by W1-T4583): if either extraction stops seeing its corpus, every verb
   // reads as cli-only-or-unmapped and the gate cannot tell that apart from a real clean sheet.
   if (verbNames.length === 0 || declaredRoutes.length === 0) {
     console.log(

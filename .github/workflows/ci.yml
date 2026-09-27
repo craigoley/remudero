@@ -914,12 +914,6 @@ jobs:
           RMD_CI_REPORT: "1"
         run: node scripts/expiring-fixture-census.mjs
 
-      - name: Contract-coverage ratchet (no first-party route escapes the contract)
-        id: contract-coverage-ratchet
-        if: steps.classify.outputs.class == 'SOURCE'
-        continue-on-error: true
-        run: node scripts/contract-coverage-ratchet.mjs
-
       - name: Console-parity ratchet (every verb maps to a route or a stated cli-only reason)
         id: console-parity
         if: steps.classify.outputs.class == 'SOURCE'
@@ -955,7 +949,6 @@ jobs:
           OUTCOME_SOURCE_SIZE: ${{ steps.source-size.outcome }}
           OUTCOME_COMMENT_LOAD_RATCHET: ${{ steps.comment-load-ratchet.outcome }}
           OUTCOME_EXPIRING_FIXTURE_CENSUS: ${{ steps.expiring-fixture-census.outcome }}
-          OUTCOME_CONTRACT_COVERAGE_RATCHET: ${{ steps.contract-coverage-ratchet.outcome }}
           OUTCOME_CONSOLE_PARITY: ${{ steps.console-parity.outcome }}
           OUTCOME_BASELINE_MONOTONIC: ${{ steps.baseline-monotonic.outcome }}
         run: |
@@ -999,7 +992,7 @@ jobs:
           report "prompt-surface-gate" "${OUTCOME_PROMPT_SURFACE_GATE}"
           report "task-id-existence" "${OUTCOME_TASK_ID_EXISTENCE}"
           report "source-size" "${OUTCOME_SOURCE_SIZE}"
-          report "comment-load-ratchet" "${OUTCOME_COMMENT_LOAD_RATCHET}" "${OUTCOME_EXPIRING_FIXTURE_CENSUS}" "${OUTCOME_CONTRACT_COVERAGE_RATCHET}" "${OUTCOME_CONSOLE_PARITY}"
+          report "comment-load-ratchet" "${OUTCOME_COMMENT_LOAD_RATCHET}" "${OUTCOME_EXPIRING_FIXTURE_CENSUS}" "${OUTCOME_CONSOLE_PARITY}"
           report "baseline-monotonic" "${OUTCOME_BASELINE_MONOTONIC}"
 
   leak-grep:

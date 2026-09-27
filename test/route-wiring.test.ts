@@ -78,6 +78,15 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
   ["POST /v1/inbox/reframe", "needs an inbox-proposals fixture; ratify gateway already injected"],
   ["POST /v1/inbox/decline", "W1-T2604: ledger-only write, no gateway/root to mis-wire -- covered in test/the-console-inbox-can-decline-a-proposal.test.ts"],
   ["POST /v1/inbox/restore", "W1-T3407: ledger-only reversal of decline -- covered in test/a-decline-can-be-taken-back.test.ts"],
+  // W1-T4584: six write routes the line-start source scan could not see (built through a variable,
+  // or declared with method and path on one line), surfaced once the helper learned the assembled
+  // table. Each has its own suite; none has a deps-wiring test here yet.
+  ["POST /v1/confirm", "W1-T4584 surfaced -- confirm-nonce flow covered in test/console-merge-hold-control.test.ts"],
+  ["POST /v1/hooks/github", "W1-T4584 surfaced -- webhook ingest covered in test/ci-incidents.test.ts and test/route-scope-matrix.test.ts"],
+  ["POST /v1/incidents/events", "W1-T4584 surfaced -- covered in test/incident-events.test.ts"],
+  ["POST /v1/operator-agent/ask", "W1-T4584 surfaced -- covered in test/operator-agent-answer-route.test.ts"],
+  ["POST /v1/operator-agent/consequences", "W1-T4584 surfaced -- covered in test/operator-agent-consequences-list.test.ts"],
+  ["POST /v1/operator-agent/consequences/decision", "W1-T4584 surfaced -- covered in test/operator-agent-consequences-list.test.ts"],
   ["POST /v1/inbox/thread/reply", "W1-T4088: appends one thread message, no gateway -- covered in test/an-inbox-item-is-a-conversation.test.ts"],
   ["POST /v1/inbox/thread/read", "W1-T4088: moves a read mark, no gateway -- covered in test/an-inbox-item-is-a-conversation.test.ts"],
   ["POST /v1/feedback", "capture-only; no fleet effect"],
