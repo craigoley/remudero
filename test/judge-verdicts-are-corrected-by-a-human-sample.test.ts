@@ -19,6 +19,7 @@ import {
   writeAnalyticsCheckpoint,
 } from "../src/lib/analytics-route.js";
 import { fixedClock } from "../src/lib/clock.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   cohensKappa,
   deriveJudgeCalibration,
@@ -295,7 +296,7 @@ function memoryStore(initial: JudgeLabel[] = []): JudgeLabelStore & { labels: Ju
 }
 
 test("a label is recorded with its provenance, the latest per verdict wins, and an unreadable store is unavailable", () => {
-  const dir = mkdtempSync(join(tmpdir(), "judge-labels-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}judge-labels-`));
   const store = fileJudgeLabelStore(dir);
   assert.deepEqual(store.read(), [], "a missing file is no labels yet");
   const first = recordJudgeLabel(store, { verdictRef: "jv-0123456789abcdef", label: "pass", labeller: " operator " }, fixedClock(Date.parse("2026-09-27T10:00:00.000Z")));
@@ -378,7 +379,7 @@ test("the analytics route serves the judge calibration only when it is requested
 
 test("the ledger readers load labels beside the ledger and the checkpoint carries the judge rows", async () => {
   const { rows, labels } = fixture();
-  const dir = mkdtempSync(join(tmpdir(), "judge-calibration-ledger-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}judge-calibration-ledger-`));
   writeFileSync(join(dir, "ledger.ndjson"), rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
   fileJudgeLabelStore(dir).write(labels);
   const clock = fixedClock(Date.parse(NOW));

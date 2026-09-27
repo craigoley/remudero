@@ -278,9 +278,9 @@ export function fileJudgeLabelStore(stateDir: string): JudgeLabelStore {
   return {
     read: () => {
       if (!existsSync(path)) return [];
-      const parsed = record(JSON.parse(readFileSync(path, "utf8")));
-      if (!Array.isArray(parsed?.labels) || !parsed.labels.every(isJudgeLabel)) throw new Error(`${JUDGE_LABELS_FILENAME}: not a judge label file`);
-      return parsed.labels;
+      const labels: unknown = record(JSON.parse(readFileSync(path, "utf8")))?.labels;
+      if (Array.isArray(labels) && labels.every(isJudgeLabel)) return labels;
+      throw new Error(`${JUDGE_LABELS_FILENAME}: not a judge label file`);
     },
     write: (labels) => {
       writeAtomic(path, `${JSON.stringify({ version: 1, labels }, null, 2)}\n`);
