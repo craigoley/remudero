@@ -21,7 +21,20 @@ import { runDrain, type DrainDeps, type DrainSummary, type MergedSet } from "../
 import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
 import { checkDispatchGovernors } from "../src/lib/dispatch-governor.js";
 import type { Config } from "../src/lib/config.js";
-import { drainCommand, daemonCommand } from "../src/run-task.js";
+import { createOpenPrCountObservation, drainCommand, daemonCommand } from "../src/run-task.js";
+
+test("idle_starved: only a successful complete board read may prove zero open PRs", () => {
+  const board = createOpenPrCountObservation();
+  assert.equal(board.readConfirmed(), undefined, "no batch read is unknown, even with no projected PRs");
+  board.observe(undefined);
+  assert.equal(board.readConfirmed(), undefined, "a failed batch read is unknown");
+  board.observe([]);
+  assert.equal(board.readConfirmed(), 0, "a successful empty batch is affirmative evidence");
+  board.observe([{ number: 1, url: "https://github.com/o/r/pull/1", state: "OPEN" }]);
+  assert.equal(board.readConfirmed(), 1);
+  board.reset();
+  assert.equal(board.readConfirmed(), undefined, "the next tick cannot inherit an old zero");
+});
 
 // ── W1-T121 QUEUE GOVERNOR — a WIP limit on DISPATCH only; flow control
 // throttles intake, never drainage (the 23-open-PR incident). ────────────────

@@ -300,7 +300,7 @@ export function startPlainBackfill(
   deps: PlainBackfillDeps,
   intervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
-): { stop: () => void; settled: () => Promise<void> } {
+): { stop: () => void; settled: () => Promise<void>; isBusy: () => boolean } {
   let running: Promise<void> | undefined;
   const tick = () => {
     if (running) return;
@@ -318,6 +318,7 @@ export function startPlainBackfill(
   timer.unref?.();
   return {
     stop: () => clearInterval(timer),
+    isBusy: () => running !== undefined,
     settled: async () => {
       await running;
     },

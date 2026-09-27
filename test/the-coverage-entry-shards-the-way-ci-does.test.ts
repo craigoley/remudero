@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { CI_COVERAGE_SHARD_COUNT, coverageShardConcurrency, runCiParity } from "../src/lib/ci-parity.js";
+import { CI_COVERAGE_SHARD_COUNT, coverageScratchDir, coverageShardConcurrency, runCiParity } from "../src/lib/ci-parity.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -124,6 +124,33 @@ test("coverage entry runs CI's four shard selectors, then merges the shard raw c
     assert.ok(result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")?.ok);
   } finally {
     cleanup();
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("nested parity cannot erase an outer run's raw coverage shards", () => {
+  const fixtureRoot = coverageFixtureRoot();
+  const scratch = coverageScratchDir(fixtureRoot);
+  const outerRaw = join(fixtureRoot, "coverage", "raw-shards", "shard-1", "raw");
+  const sentinel = join(outerRaw, "coverage-outer-0000000000000-0.json");
+  const priorTmp = process.env.TMPDIR;
+  const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot);
+  mkdirSync(outerRaw, { recursive: true });
+  mkdirSync(scratch, { recursive: true });
+  writeFileSync(sentinel, "{}\n");
+  process.env.TMPDIR = scratch;
+  try {
+    const result = runCiParity(fixtureRoot, { spawn });
+    assert.equal(result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")?.ok, true);
+    assert.equal(existsSync(sentinel), true, "a nested run must not clear already-produced outer coverage");
+    for (const call of calls.filter((c) => shardNumber(c.args) !== undefined)) {
+      assert.ok(call.opts?.env?.NODE_V8_COVERAGE?.startsWith(realpathSync(scratch)), "nested shards use owned scratch, not outer raw-shards");
+    }
+  } finally {
+    if (priorTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = priorTmp;
+    cleanup();
+    rmSync(scratch, { recursive: true, force: true });
     rmSync(fixtureRoot, { recursive: true, force: true });
   }
 });

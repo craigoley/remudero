@@ -107,7 +107,8 @@ test("the default reader shells to git from serve's own checkout", async () => {
     resolveCommitsBehind: () => 1,
   });
   await gate.recheck();
-  for (let i = 0; i < 200 && exits.length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+  const readDeadline = Date.now() + 15_000;
+  while (exits.length === 0 && Date.now() < readDeadline) await new Promise((resolve) => setTimeout(resolve, 25));
   assert.deepEqual(exits, [0], "fabricated shas are unreadable, which restarts");
   assert.ok(logs.includes("serve.restart_diff_unreadable"));
 });

@@ -96,7 +96,7 @@ test("W1-T2545/W1-T3408 criterion 2: the bound is derived from the run's own mea
   const withSlowPopulation = runPreflightFast("/repo", {
     packageJsonText: PKG,
     spawn: okSpawn,
-    now: scriptedClock([3000, 3200, 4001]),
+    now: scriptedClock([3000, 3200, 4500]),
     steps: [census("a-census", "census:a"), census("b-census", "census:b"), census("c-census", "census:c")],
   });
   assert.equal(withSlowPopulation.steps.find((s) => s.name === "c-census")!.ok, true);
@@ -104,7 +104,7 @@ test("W1-T2545/W1-T3408 criterion 2: the bound is derived from the run's own mea
   const withFastPopulation = runPreflightFast("/repo", {
     packageJsonText: PKG,
     spawn: okSpawn,
-    now: scriptedClock([900, 1000, 4001, 4001]), // W1-T3408 + the re-measure: crossed twice
+    now: scriptedClock([900, 1000, 4500, 4500]), // W1-T3408 + the re-measure: beyond confirmation margin twice
     steps: [census("a-census", "census:a"), census("b-census", "census:b"), census("c-census", "census:c")],
   });
   assert.equal(
@@ -119,26 +119,26 @@ test("W1-T2545/W1-T3408 criterion 2: the bound is derived from the run's own mea
   const withOneCheapSibling = runPreflightFast("/repo", {
     packageJsonText: PKG,
     spawn: okSpawn,
-    now: scriptedClock([900, 3200, 4001]),
+    now: scriptedClock([900, 3200, 4500]),
     steps: [census("a-census", "census:a"), census("b-census", "census:b"), census("c-census", "census:c")],
   });
   assert.equal(
     withOneCheapSibling.steps.find((s) => s.name === "c-census")!.ok,
     true,
-    "one accidentally-fast sibling (900ms) beside one genuinely slow one (3200ms) must not tighten the bound enough to refuse a healthy 4001ms entry",
+    "one accidentally-fast sibling (900ms) beside one genuinely slow one (3200ms) must not tighten the bound enough to refuse a healthy 4500ms entry",
   );
 
   // And the derivation itself is a named, callable function rather than inline arithmetic.
   assert.equal(censusRunawayThresholdMs([]), undefined, "no census entries: no population, no invented bound");
   assert.equal(
-    censusRunawayThresholdMs([900, 1000, 4001]),
+    censusRunawayThresholdMs([900, 1000, 4500]),
     1000 * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE,
-    "the median of [900, 1000, 4001] is 1000",
+    "the median of [900, 1000, 4500] is 1000",
   );
   assert.equal(
-    censusRunawayThresholdMs([3000, 3200, 4001]),
+    censusRunawayThresholdMs([3000, 3200, 4500]),
     3200 * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE,
-    "the median of [3000, 3200, 4001] is 3200",
+    "the median of [3000, 3200, 4500] is 3200",
   );
   assert.equal(
     censusRunawayThresholdMs([200, 300]),
@@ -215,7 +215,8 @@ test("W1-T2545: a non-census entry is untouched — no timing, no cost report, n
   assert.doesNotMatch(r.steps[0].detail, /COST|RUNAWAY|soft bound/);
 });
 
-// ── The runaway bound is TIERED: a first crossing is re-measured once, alone; only a second refuses.
+// ── The runaway bound is TIERED: a first crossing is re-measured once, alone; only a second
+// crossing beyond the confirmation margin refuses.
 // MEASURED on PR #6821: negative-reachability-census took 4091ms against a 4000ms bound on a loaded
 // CI runner — over by 2% — while its own command PASSed. One crossing is a load spike, not a runaway.
 
@@ -238,16 +239,16 @@ test("a census that crosses the runaway bound once is re-measured before it refu
   assert.equal(r.ok, true);
 });
 
-test("a census that crosses the runaway bound twice still refuses", () => {
+test("a census that crosses the bound and confirmation margin still refuses", () => {
   const r = runPreflightFast("/repo", {
     packageJsonText: PKG,
     spawn: okSpawn,
-    now: scriptedClock([900, 1000, 4091, 4200]),
+    now: scriptedClock([900, 1000, 4500, 4600]),
     steps: [census("a-census", "census:a"), census("b-census", "census:b"), census("c-census", "census:c")],
   });
   const c = r.steps.find((s) => s.name === "c-census")!;
   assert.equal(c.ok, false);
-  assert.match(c.detail, /RUNAWAY — npm run --silent census:c took 4091ms then 4200ms on one re-measure, both over 4000ms/);
+  assert.match(c.detail, /RUNAWAY — npm run --silent census:c took 4500ms then 4600ms on one re-measure, the re-measure over 4400ms/);
   assert.equal(r.ok, false);
 });
 

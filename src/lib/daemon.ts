@@ -94,7 +94,7 @@ import {
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
 import { checkDispatchGovernors, type DispatchGovernorVerdict, type QuietHoursHoldResult } from "./dispatch-governor.js";
-import { assertRunnable, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleasedIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import type { DispatchValueContext } from "./dispatch-value.js";
@@ -126,7 +126,7 @@ type HarnessCommitRefusalResult = RunResult & {
  * deliberately absent: both are awaiting-states whose exit the supervisor would relaunch straight back into, so both
  * idle in process instead (W1-T197; 2026-07-22). `stale` has the opposite polarity — it is a request to exit, because
  * a supervisor restart is the only way a long-running daemon gets off the code it loaded at boot (W1-T126). */
-export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" | "stale" | "heap_pressure";
+export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" | "stale" | "heap_pressure" | "idle_starved";
 
 /** Default idle-poll pace: check back once a minute while nothing is runnable. The literal stays
  *  here because this module never touches the filesystem; `daemonCommand` threads the policy value
@@ -180,6 +180,9 @@ export const DAEMON_EXIT_BLOCKED = 76;
  * decision is delegated to `classifyFailure`, this repo's one failure classifier, so a reworded provider message is a
  * one-place fix and this can only ever narrow what counts as a crash. Forensics: docs/forensics/daemon.md. */
 export const DAEMON_EXIT_ENVIRONMENTAL = 77;
+
+/** A positively empty dedicated queue hands control to the zero-token shell supervisor. */
+export const DAEMON_EXIT_IDLE_STARVED = 78;
 
 /** W1-T3335 — the share of V8's OWN reported heap limit at which restarting beats continuing.
  *  Deliberately a fraction, not a byte count: the limit comes from NODE_OPTIONS and any literal
@@ -236,6 +239,7 @@ export function daemonExitCode(stopReason: DaemonStopReason): number {
   // `error` deliberately falls through to 1 below, so a genuine crash stays countable against
   // docker's on-failure budget exactly as it always was (W1-T2537).
   if (stopReason === "blocked") return DAEMON_EXIT_BLOCKED;
+  if (stopReason === "idle_starved") return DAEMON_EXIT_IDLE_STARVED;
   return 1;
 }
 
@@ -748,6 +752,10 @@ export type ReviewAdmissionGate = (() => boolean) & {
 };
 
 export interface DaemonDeps {
+  /** Only a supervised dedicated daemon may exit into the shell's 30-minute zero-token probe. */
+  idleStarvedSupervised?: boolean;
+  /** Complete, readable target-repo PR board count; undefined or throw means unknown, never empty. */
+  confirmedOpenPrCount?: () => number | undefined;
   buildDispatchValueContext?: (plan: Plan, isMerged: MergedSet) => DispatchValueContext | undefined;
   /** W1-T3216 — the ledger's RAW lines, for {@link resolveReleasedIds}: a console KICK for an
    *  operator-released `verify: human` task must be admitted here too, or the release works from
@@ -2161,10 +2169,10 @@ export function startPrActionPump(
   deps: Pick<DaemonDeps, "pendingPrActions" | "runPrAction" | "clearPrAction">,
   intervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
-): { stop: () => void; settled: () => Promise<void> } {
+): { stop: () => void; settled: () => Promise<void>; isBusy: () => boolean } {
   const pending = deps.pendingPrActions;
   const run = deps.runPrAction;
-  if (!pending || !run) return { stop: () => {}, settled: async () => {} };
+  if (!pending || !run) return { stop: () => {}, settled: async () => {}, isBusy: () => false };
   const running = new Set<string>();
   const inFlight = new Set<Promise<void>>();
   const tick = (): void => {
@@ -2210,6 +2218,7 @@ export function startPrActionPump(
   tick();
   return {
     stop: () => clearInterval(timer),
+    isBusy: () => inFlight.size > 0,
     settled: async () => {
       await Promise.all([...inFlight]);
     },
@@ -2465,7 +2474,7 @@ export async function runDaemon(
   const laneCount = Math.max(1, opts.laneCount ?? 1);
 
   // W1-T4077: stopped by `summary`, which every exit path of this function returns through.
-  const prActionPumpRef: { stop: () => void } = { stop: () => {} };
+  const prActionPumpRef: { stop: () => void; isBusy: () => boolean } = { stop: () => {}, isBusy: () => false };
   // W1-T4087: its own timer, so a main loop busy for many minutes never delays a plain message.
   const plainBackfill = deps.plainBackfill ? startPlainBackfill(deps.plainBackfill, pollIntervalMs, log) : undefined;
   // W1-T4089: the fleet's own findings, filed at the pace the fleet merges work.
@@ -2484,7 +2493,9 @@ export async function runDaemon(
     log("daemon.summary", { ...s });
     return s;
   };
-  prActionPumpRef.stop = startPrActionPump(deps, pollIntervalMs, log).stop;
+  const prActionPump = startPrActionPump(deps, pollIntervalMs, log);
+  prActionPumpRef.stop = prActionPump.stop;
+  prActionPumpRef.isBusy = prActionPump.isBusy;
   const gardens = [
     ...(deps.knowledgeGardener ? [startKnowledgeGardener(deps.knowledgeGardener, pollIntervalMs)] : []),
     ...(deps.gardens ?? []).map((start) => start(pollIntervalMs)),
@@ -4026,6 +4037,39 @@ export async function runDaemon(
       if (staleReviewerIdleFreshness) {
         await stopInterphaseReviewClock();
         return stopForFreshness(staleReviewerIdleFreshness);
+      }
+      // The ordinary zero-dispatch state also includes queue holds, failed credit reads, released
+      // human tasks, and in-flight PR work. None is proof of an exhausted queue. The strict gate
+      // below requires a complete PR observation and no structurally unblocked task.
+      // Only a supervised dedicated instance takes this exit: the self-hosting daemon's other
+      // cadences can generate work without a plan edit or a new PR.
+      if (deps.idleStarvedSupervised && !sweepLiveness.inFlight && deps.confirmedOpenPrCount && deps.isCreditIndeterminate && deps.readLedgerLines) {
+        try {
+          const openCount = deps.confirmedOpenPrCount();
+          if (openCount === 0 && !deps.pendingKicks?.().length && !deps.pendingPrActions?.().length) {
+            const released = releasedTaskIds(deps.readLedgerLines());
+            const hasUnblockedTask = planForBatch.tasks.some((task) => {
+              if (deps.isCreditIndeterminate!(task.id)) throw new Error(`credit unreadable: ${task.id}`);
+              if (isMerged(task.id)) return false;
+              try {
+                assertRunnable(planForBatch, task, (dep) => isMerged(dep.id), released);
+                return true;
+              } catch (e) {
+                if (e instanceof TaskAdmissionError) return false;
+                throw e;
+              }
+            });
+            if (!hasUnblockedTask && !(await stopInterphaseReviewClock()) &&
+              !prActionPumpRef.isBusy() && (!plainBackfill || !plainBackfill.isBusy()) &&
+              (!inboxResponder || !inboxResponder.isBusy()) &&
+              !deps.pendingKicks?.().length && !deps.pendingPrActions?.().length) {
+              log("daemon.idle_starved.enter", { repo: deps.targetRepo, open_prs: 0, plan_tasks: planForBatch.tasks.length });
+              return summary("idle_starved", "confirmed empty PR board and no unblocked task");
+            }
+          }
+        } catch (e) {
+          log("daemon.idle_starved.unassessed", { reason: String((e as Error)?.message ?? e) });
+        }
       }
       if (await stopInterphaseReviewClock()) continue;
       await sleepUntilSweepWake(pollIntervalMs);

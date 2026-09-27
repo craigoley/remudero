@@ -451,7 +451,9 @@ DISPATCH_AGE_S=""
 if [ -n "$DISPATCH_LAST_EPOCH" ]; then DISPATCH_AGE_S="$((NOW_EPOCH - DISPATCH_LAST_EPOCH))"; fi
 
 DISPATCH_STALLED_AFTER_S=21600
-if [ -z "$DISPATCH_AGE_S" ]; then
+if [ "$DAEMON_LAST_STEP" = "daemon.idle_starved.pulse" ] && [ -n "$DAEMON_AGE_S" ] && [ "$DAEMON_AGE_S" -le "$DAEMON_STALE_AFTER_S" ]; then
+  DISPATCH_VERDICT="idle_starved — no open PRs or auto-build tasks at last admission"
+elif [ -z "$DISPATCH_AGE_S" ]; then
   DISPATCH_VERDICT="unknown"
 elif [ "$DISPATCH_AGE_S" -le "$DISPATCH_STALLED_AFTER_S" ]; then
   DISPATCH_VERDICT="building"

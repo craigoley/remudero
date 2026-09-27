@@ -310,7 +310,7 @@ export function startInboxResponder(
   deps: InboxResponderDeps,
   intervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
-): { stop: () => void; settled: () => Promise<void> } {
+): { stop: () => void; settled: () => Promise<void>; isBusy: () => boolean } {
   let running: Promise<void> | undefined;
   const tick = () => {
     if (running) return;
@@ -333,6 +333,7 @@ export function startInboxResponder(
   timer.unref?.();
   return {
     stop: () => clearInterval(timer),
+    isBusy: () => running !== undefined,
     settled: async () => {
       await running;
     },

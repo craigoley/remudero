@@ -1423,6 +1423,7 @@ import {
   ABSENT_REPUSH_CAP,
   DEFAULT_FIX_CLASSES,
   buildSweepEffects as buildSweepEffectsFromLib,
+  corroboratedIneligibilityReason,
   currentPlanIneligibilityReason,
   defaultSweepGhRun,
   dispatchFixCatchOutcome,
@@ -29605,10 +29606,11 @@ function queueGovernorGateFor(
  * (design (i)) off this SAME single fetch. `read` is UNCHANGED in signature and behaviour — still a
  * bare total count — because it also backs `DrainDeps.openPrCount`/`DaemonDeps.openPrCount`, the
  * W1-T172 lane-dispatch-budget input, which has no ownership concept and must not gain one here. */
-function createOpenPrCountObservation(): {
+export function createOpenPrCountObservation(): {
   reset: () => void;
   observe: (openPrs: readonly PrRef[] | undefined) => void;
   read: (projectionCount: () => number) => number;
+  readConfirmed: () => number | undefined;
   readOwnership: (projectionCount: () => number) => { owned: number; foreign: number };
 } {
   let observed = false;
@@ -29627,6 +29629,7 @@ function createOpenPrCountObservation(): {
       if (openPrs === undefined) throw new Error("open PR board count is unreadable");
       return openPrs.length;
     },
+    readConfirmed: () => observed && openPrs !== undefined ? openPrs.length : undefined,
     // W1-T4465 design (i): a gateway without the batch method (the historical projection
     // fallback, `!observed`) carries no per-PR head refs at all — every one of those PRs is
     // counted OWNED, the SAME fail-closed direction {@link isFleetOwnedRunBranch} takes for a
@@ -32266,6 +32269,8 @@ export async function daemonCommand(
       plan,
       {
         refreshMerged,
+        idleStarvedSupervised: process.env.RMD_IDLE_STARVED_SUPERVISED === "1" && !target.isSelf && !flagValue(rest, "--plan"),
+        confirmedOpenPrCount: boardOpenPrCount.readConfirmed,
         onPlanReload: (fresh) => {
           activePlanRef.current = fresh;
         },
@@ -32739,7 +32744,7 @@ export async function daemonCommand(
           // (runDaemon's loop body, lib/daemon.ts) and this hook's own closure runs later in the
           // same tick, so by the time it calls `buildOpenPrViews`, `lastProj` is already this tick's
           // fresh dispatch projection.
-          (t: Task) => lastProj?.get(t.id)?.merged ?? false,
+          resequenceMergedResolver(() => lastProj),
           undefined,
           targetCheckoutRoot,
           () => activePlanRef.current,
@@ -32762,7 +32767,7 @@ export async function daemonCommand(
           // W1-T3585 — the SAME accessor `sweep:` above threads, off the SAME `lastProj` tick
           // snapshot: both daemon sweep paths must reconcile the identical current-plan
           // eligibility predicate, never two independently-derived ones.
-          (t: Task) => lastProj?.get(t.id)?.merged ?? false,
+          resequenceMergedResolver(() => lastProj),
           undefined,
           () => activePlanRef.current,
         ),
@@ -35727,7 +35732,9 @@ export function buildOpenPrViews(
     // `currentPlanIneligibilityReason`'s own doc (lib/sweep.ts) for the reason it can return.
     const planResequenceIneligible =
       mainPlan && taskRecord && deps.isMerged
-        ? currentPlanIneligibilityReason(mainPlan, taskRecord, deps.isMerged)
+        ? corroboratedIneligibilityReason(mainPlan, taskRecord, deps.isMerged, (ids) =>
+            ids.length === 0 ? new Set<string>() : readMergeCreditedTaskIds(ledgerPath, { candidates: ids }).credited,
+          )
         : undefined;
     const fileObservation = planFilingFiles.get(pr.number);
     const observedFiles = fileObservation?.state === "complete" ? fileObservation.paths : undefined;
@@ -42133,6 +42140,14 @@ export function buildInboxDraftHook(
 /** EXPORTED for its own coverage: the memoising seam W1-T510's readiness split rests on. Its
  *  body is reachable from no other test — both `inboxCommand` call sites need a live plan and
  *  a real GitHub gateway, which is why these lines arrived uncovered. */
+/** W1-T4565: the resequence CLOSE's resolver; `indeterminate` reads as met (DO NOT ACT), so doubt only withholds a close. */
+export function resequenceMergedResolver(projection: () => Map<string, StatusProjection> | undefined): MergedResolver {
+  return (t) => {
+    const p = projection()?.get(t.id);
+    return p?.merged === true || p?.indeterminate === true;
+  };
+}
+
 export function buildDepsReadinessAccessors(plan: Plan, deriveDeps: DeriveDeps): { isMerged: MergedResolver; depsUnobservable: (taskId: string) => GhFailureReason | undefined } {
   const projectionOf = new Map<string, StatusProjection>();
   const derive = (t: Task): StatusProjection => {
