@@ -4132,6 +4132,867 @@ components:
         sha:
           type: string
 
+    # ── W1-T4610 -- the inbox and escalation routes' payloads. Each schema below is derived from
+    # the TypeScript type its handler sends (src/lib/panel-graph.ts, src/lib/inbox-responder.ts,
+    # src/lib/inbox-plain.ts, src/lib/inbox.ts, src/lib/fleet-lane.ts, src/lib/panel-actions.ts,
+    # src/lib/reply-interpreter.ts, src/lib/escalate.ts, src/lib/serve.ts). This generator's
+    # subset has no oneOf/allOf, so a TypeScript union or `extends` is flattened into one object
+    # and the flattening is named in that schema's description.
+
+    PlainOption:
+      type: object
+      description: One option on an inbox item's plain message (src/lib/inbox-plain.ts's `PlainOption`).
+      required:
+        - label
+        - consequence
+      properties:
+        label:
+          type: string
+        consequence:
+          type: string
+
+    PlainInboxMessage:
+      type: object
+      description: >
+        W1-T4087: an inbox item's plain-language message (src/lib/inbox-plain.ts's
+        `PlainInboxMessage`) -- the model writer's text when it passed the plain-message check,
+        otherwise the item kind's template. The raw proposal summary is never promoted to it.
+      required:
+        - headline
+        - whatHappened
+        - whatWeNeed
+        - ifNothingHappens
+        - options
+        - source
+      properties:
+        headline:
+          type: string
+          description: 15 words or fewer.
+        whatHappened:
+          type: string
+        whatWeNeed:
+          type: string
+          description: What the daemon needs from the operator, as an instruction.
+        ifNothingHappens:
+          type: string
+          description: What happens if nobody acts.
+        options:
+          type: array
+          description: Two or three options.
+          items:
+            $ref: "#/components/schemas/PlainOption"
+        source:
+          type: string
+          description: Who wrote it -- the model writer or the per-kind template.
+          enum:
+            - writer
+            - template
+
+    InboxDraftedTask:
+      type: object
+      description: One task a READY proposal's drafted fragment would file (src/lib/panel-graph.ts's `InboxDraftedTask`).
+      required:
+        - id
+        - title
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+
+    InboxPredicateFailure:
+      type: object
+      description: >
+        One failing readiness predicate `classifyProposal` named for a not-ready proposal
+        (src/lib/inbox.ts's `PredicateFailure`) -- never a bare "not ready".
+      required:
+        - predicate
+        - detail
+      properties:
+        predicate:
+          type: string
+          enum:
+            - drafted
+            - deps_merged
+            - deps_observable
+            - evidence_anchors
+            - lint_clean
+            - no_conflict
+        detail:
+          type: string
+
+    InboxReadyItem:
+      type: object
+      description: >
+        One READY-to-ratify proposal (src/lib/panel-graph.ts's `InboxReadyItem`); the drafted
+        tasks ride along so the operator sees exactly what APPROVE would file.
+      required:
+        - proposalId
+        - summary
+        - plain
+        - draftedTasks
+      properties:
+        proposalId:
+          type: string
+        summary:
+          type: string
+          description: The raw proposal summary (the console's Details).
+        plain:
+          $ref: "#/components/schemas/PlainInboxMessage"
+        stampLine:
+          type: string
+          description: The drafted fragment's stamp line, when the draft carries one.
+        draftedTasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxDraftedTask"
+
+    InboxDraftingItem:
+      type: object
+      description: >
+        One proposal an Architect worker is drafting right now (src/lib/panel-graph.ts's
+        `InboxDraftingItem`).
+      required:
+        - proposalId
+        - summary
+        - plain
+        - spawnedAt
+      properties:
+        proposalId:
+          type: string
+        summary:
+          type: string
+        plain:
+          $ref: "#/components/schemas/PlainInboxMessage"
+        spawnedAt:
+          type: string
+          description: When the drafting worker was spawned; an empty string when unrecorded.
+
+    InboxNotReadyItem:
+      type: object
+      description: >
+        W1-T2604: one not-ready proposal with the exact predicate failures that hold it
+        (src/lib/panel-graph.ts's `InboxNotReadyItem`). Carries no affordance.
+      required:
+        - proposalId
+        - summary
+        - plain
+        - reasons
+      properties:
+        proposalId:
+          type: string
+        summary:
+          type: string
+        plain:
+          $ref: "#/components/schemas/PlainInboxMessage"
+        reasons:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxPredicateFailure"
+
+    InboxDeclinedItem:
+      type: object
+      description: >
+        W1-T3408: one DECLINED proposal (src/lib/panel-graph.ts's `InboxDeclinedItem`), so
+        POST /v1/inbox/restore's argument is discoverable. Nothing here is actionable except restore.
+      required:
+        - proposalId
+        - summary
+        - plain
+        - reason
+      properties:
+        proposalId:
+          type: string
+        summary:
+          type: string
+        plain:
+          $ref: "#/components/schemas/PlainInboxMessage"
+        reason:
+          type: string
+          description: The latest `panel.proposal_declined` row's reason, verbatim.
+
+    InboxNeedsYou:
+      type: object
+      description: >
+        W1-T4086: the operator-owned subset of each lane (`inboxOwner(...) === "operator"`),
+        built by GET /v1/inbox's handler from the same four arrays.
+      required:
+        - ready
+        - drafting
+        - notReady
+        - declined
+      properties:
+        ready:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxReadyItem"
+        drafting:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxDraftingItem"
+        notReady:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxNotReadyItem"
+        declined:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxDeclinedItem"
+
+    InboxFleetItem:
+      type: object
+      description: >
+        W1-T4086/W1-T4089: one fleet-owned proposal with the lane it sits in and the fleet lane's
+        latest decision, when it has made one (src/lib/panel-graph.ts's `InboxFleetItem`).
+      required:
+        - proposalId
+        - summary
+        - plain
+        - lane
+      properties:
+        proposalId:
+          type: string
+        summary:
+          type: string
+        plain:
+          $ref: "#/components/schemas/PlainInboxMessage"
+        lane:
+          type: string
+          enum:
+            - ready
+            - drafting
+            - notReady
+            - declined
+        decision:
+          type: string
+          description: The fleet lane's latest decision (src/lib/fleet-lane.ts's `FleetLaneDecision`).
+          enum:
+            - file
+            - merge
+        reason:
+          type: string
+          description: That decision's plain reason; present exactly when `decision` is.
+
+    InboxResult:
+      type: object
+      description: >
+        GET /v1/inbox's body (src/lib/panel-graph.ts's `buildInboxRoute`). Deferred, ratified and
+        retired proposals are never returned. The four top-level lanes hold every owner's items;
+        `needsYou` and `fleet` split them by who must act. `declined`, `needsYou` and `fleet` are
+        optional ONLY because the console cache's cold fallback body (serve.ts's
+        `fallbackBodyForCachedRead`) carries just `ready`, `drafting` and `notReady`; every
+        handler-computed body carries all six.
+      required:
+        - ready
+        - drafting
+        - notReady
+      properties:
+        ready:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxReadyItem"
+        drafting:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxDraftingItem"
+        notReady:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxNotReadyItem"
+        declined:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxDeclinedItem"
+        needsYou:
+          $ref: "#/components/schemas/InboxNeedsYou"
+        fleet:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxFleetItem"
+        staleness:
+          $ref: "#/components/schemas/ConsoleResponseStaleness"
+
+    InboxDigestEntry:
+      type: object
+      description: One stored daily digest (src/lib/serve.ts's `ConsoleInboxDigestEntry`).
+      required:
+        - ts
+        - text
+      properties:
+        ts:
+          type: string
+        text:
+          type: string
+
+    InboxDigestsResult:
+      type: object
+      description: >
+        GET /v1/inbox/digests's body (src/lib/serve.ts's `ConsoleInboxDigests`) -- the newest
+        digests, up to the render window (`CONSOLE_INBOX_DIGEST_LIMIT`, 10), oldest first.
+      required:
+        - entries
+        - omitted
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxDigestEntry"
+        omitted:
+          type: integer
+          description: Valid entries older than the render window that were left out.
+        reason:
+          type: string
+          description: >
+            Present only when the digest store could not be read or parsed; `entries` is then
+            empty. A missing store is not an error and carries no reason.
+
+    InboxThreadAction:
+      type: string
+      description: An action an inbox thread offers or records (src/lib/inbox-thread.ts's `InboxThreadAction`).
+      enum:
+        - approve
+        - decline
+        - edit
+        - restore
+
+    InboxThreadActionTaken:
+      type: object
+      description: What the daemon's responder did on a thread, and how to undo it.
+      required:
+        - action
+      properties:
+        action:
+          $ref: "#/components/schemas/InboxThreadAction"
+        undo:
+          type: string
+
+    InboxThreadMessageExtra:
+      type: object
+      description: A stored thread message's structured extras (src/lib/inbox-thread.ts's `ThreadMessageExtra`).
+      properties:
+        did:
+          $ref: "#/components/schemas/InboxThreadActionTaken"
+        suggestedAction:
+          $ref: "#/components/schemas/InboxThreadAction"
+        question:
+          type: boolean
+          description: The message is one of the responder's bounded clarifying questions.
+        operator:
+          type: string
+          description: The operator display name a reply was sent under (audit only).
+        replyId:
+          type: string
+          description: The idempotency id POST /v1/inbox/thread/reply stored the reply under.
+
+    InboxThreadMessage:
+      type: object
+      description: >
+        One message on an inbox thread (src/lib/inbox-responder.ts's `ThreadMessageView`). Message
+        `seq` 0 is the opening message, derived on read from the item's plain message and never
+        stored; it alone carries `plain` and `actions`.
+      required:
+        - seq
+        - from
+        - text
+        - ts
+      properties:
+        seq:
+          type: integer
+        from:
+          type: string
+          enum:
+            - daemon
+            - operator
+        text:
+          type: string
+        ts:
+          type:
+            - integer
+            - "null"
+          description: Epoch milliseconds; null on the derived opening message.
+        plain:
+          $ref: "#/components/schemas/PlainInboxMessage"
+        actions:
+          type: array
+          description: On the opening message -- the actions the item's current state allows.
+          items:
+            $ref: "#/components/schemas/InboxThreadAction"
+        extra:
+          $ref: "#/components/schemas/InboxThreadMessageExtra"
+
+    InboxThreadSummary:
+      type: object
+      description: >
+        One operator thread in GET /v1/inbox/threads (src/lib/inbox-responder.ts's
+        `ThreadSummaryView`). A declined item is listed only once someone has written on its thread.
+      required:
+        - threadId
+        - proposalId
+        - headline
+        - snippet
+        - waitingOn
+        - lastActivity
+        - messageCount
+        - unread
+      properties:
+        threadId:
+          type: string
+          description: "`thread:<proposalId>::inbox::-::-` (src/lib/inbox-thread.ts's `inboxThreadId`)."
+        proposalId:
+          type: string
+        headline:
+          type: string
+          description: The item's plain headline.
+        snippet:
+          type: string
+          description: The latest message's first sentence, at most 160 characters.
+        waitingOn:
+          type: string
+          description: "`daemon` when the operator wrote last, otherwise `operator`."
+          enum:
+            - operator
+            - daemon
+        lastActivity:
+          type:
+            - integer
+            - "null"
+          description: The latest message's epoch milliseconds; null when only the derived opening message exists.
+        messageCount:
+          type: integer
+          description: Messages including the derived opening message.
+        unread:
+          type: boolean
+          description: The daemon wrote last and the read mark is behind that message.
+
+    InboxThreadsResult:
+      type: object
+      description: GET /v1/inbox/threads's body -- waiting-on-you first, then most recent activity.
+      required:
+        - threads
+      properties:
+        threads:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxThreadSummary"
+
+    InboxThreadDetail:
+      type: object
+      description: >
+        GET /v1/inbox/thread's body (src/lib/inbox-responder.ts's `ThreadDetailView`, which
+        extends `ThreadSummaryView`; flattened here because this generator's subset has no allOf).
+      required:
+        - threadId
+        - proposalId
+        - headline
+        - snippet
+        - waitingOn
+        - lastActivity
+        - messageCount
+        - unread
+        - details
+        - messages
+      properties:
+        threadId:
+          type: string
+        proposalId:
+          type: string
+        headline:
+          type: string
+        snippet:
+          type: string
+        waitingOn:
+          type: string
+          enum:
+            - operator
+            - daemon
+        lastActivity:
+          type:
+            - integer
+            - "null"
+        messageCount:
+          type: integer
+        unread:
+          type: boolean
+        details:
+          type: string
+          description: The raw proposal summary, for the console's Details.
+        messages:
+          type: array
+          description: Oldest first; `seq` 0 is the derived opening message.
+          items:
+            $ref: "#/components/schemas/InboxThreadMessage"
+
+    InboxThreadReplyRequest:
+      type: object
+      description: POST /v1/inbox/thread/reply's body (src/lib/panel-graph.ts's `validateThreadReply`).
+      required:
+        - threadId
+        - text
+      properties:
+        threadId:
+          type: string
+          description: An inbox thread id, `thread:<proposalId>::inbox::-::-`.
+        text:
+          type: string
+          maxLength: 4000
+          description: Must be non-blank; stored trimmed.
+        intentId:
+          type: string
+          pattern: "^[A-Za-z0-9._:-]{8,128}$"
+          description: >
+            Client idempotency key. The same caller token, thread and intentId always derive the
+            same `replyId`, so a retry is answered `duplicate: true` rather than appended twice.
+
+    InboxThreadReplyResult:
+      type: object
+      description: >
+        POST /v1/inbox/thread/reply's 200 body. `delivery: delivered` means the reply is in the
+        thread store; `audit` says separately whether its `inbox.thread_replied` ledger row was
+        written (`recorded`), could not be written (`gap`), or could not be confirmed either way
+        for a duplicate (`unverified`).
+      required:
+        - ok
+        - delivery
+        - audit
+        - replyId
+        - threadId
+        - waitingOn
+        - duplicate
+      properties:
+        ok:
+          type: boolean
+        delivery:
+          type: string
+          enum:
+            - delivered
+        audit:
+          type: string
+          enum:
+            - recorded
+            - gap
+            - unverified
+        replyId:
+          type: string
+        threadId:
+          type: string
+        waitingOn:
+          type: string
+          enum:
+            - daemon
+        duplicate:
+          type: boolean
+          description: True when this replyId was already stored with the same text.
+
+    InboxThreadReplyRefusal:
+      type: object
+      description: >
+        A non-2xx body from POST /v1/inbox/thread/reply's handler. `delivery` says whether the
+        reply is known not to be stored (`not_delivered`) or cannot be confirmed (`unverified`).
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          enum:
+            - not_found
+            - reply_store_unavailable
+            - reply_intent_conflict
+            - reply_in_progress
+        detail:
+          type: string
+        delivery:
+          type: string
+          enum:
+            - not_delivered
+            - unverified
+        replyId:
+          type: string
+        priorReplyId:
+          type: string
+          description: On `reply_intent_conflict` -- the stored reply's id, whose text differs from this one.
+
+    InboxThreadReadRequest:
+      type: object
+      description: POST /v1/inbox/thread/read's body (src/lib/panel-graph.ts's `validateThreadRead`).
+      required:
+        - threadId
+        - seq
+      properties:
+        threadId:
+          type: string
+        seq:
+          type: integer
+          minimum: 0
+          description: Mark read up to and including this message; must not exceed the thread's last `seq`.
+
+    InboxOkResult:
+      type: object
+      description: "A bare acknowledgement: `{ ok: true }`."
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+
+    InboxProposalRequest:
+      type: object
+      description: POST /v1/inbox/approve's body (src/lib/panel-graph.ts's `validateApproveProposal`).
+      required:
+        - proposalId
+      properties:
+        proposalId:
+          type: string
+          description: A proposal id from the active registry; must be non-blank.
+
+    InboxReframeRequest:
+      type: object
+      description: POST /v1/inbox/reframe's body (src/lib/panel-graph.ts's `validateReframeProposal`).
+      required:
+        - proposalId
+        - feedback
+      properties:
+        proposalId:
+          type: string
+        feedback:
+          type: string
+          description: The operator's feedback, captured verbatim; must be non-blank.
+
+    InboxVerdictRequest:
+      type: object
+      description: >
+        POST /v1/inbox/decline's and POST /v1/inbox/restore's body (src/lib/panel-graph.ts's
+        `validateDeclineProposal`, shared by both). `reason` is required on restore too.
+      required:
+        - proposalId
+        - reason
+      properties:
+        proposalId:
+          type: string
+        reason:
+          type: string
+          description: Recorded verbatim on the `panel.proposal_declined` / `panel.proposal_restored` row; must be non-blank.
+
+    InboxProposalStartedResult:
+      type: object
+      description: >
+        POST /v1/inbox/approve's and POST /v1/inbox/reframe's 200 body. `started` confirms only
+        the hand-off to a detached `rmd approve` / `rmd reframe`; the resulting PR surfaces
+        through the console's own polling.
+      required:
+        - ok
+        - proposalId
+        - started
+      properties:
+        ok:
+          type: boolean
+        proposalId:
+          type: string
+        started:
+          type: boolean
+
+    InboxDeclineResult:
+      type: object
+      description: POST /v1/inbox/decline's 200 body.
+      required:
+        - ok
+        - proposalId
+        - declined
+      properties:
+        ok:
+          type: boolean
+        proposalId:
+          type: string
+        declined:
+          type: boolean
+
+    InboxRestoreResult:
+      type: object
+      description: POST /v1/inbox/restore's 200 body.
+      required:
+        - ok
+        - proposalId
+        - restored
+      properties:
+        ok:
+          type: boolean
+        proposalId:
+          type: string
+        restored:
+          type: boolean
+
+    InboxRefusal:
+      type: object
+      description: >
+        A handler-level refusal from an inbox route, always with a human-readable `detail`.
+        `not_found` (no active proposal / no current operator thread), `not_ready` (approve of a
+        proposal not currently READY -- detail is `refusalReason`), `already_ratified`,
+        `already_declined`, `not_declined` (src/lib/inbox.ts's `applyProposalVerdict`),
+        `seq_ahead` (a read mark past the last message), `thread_store_unreadable`.
+      required:
+        - error
+        - detail
+      properties:
+        error:
+          type: string
+          enum:
+            - not_found
+            - not_ready
+            - already_ratified
+            - already_declined
+            - not_declined
+            - seq_ahead
+            - thread_store_unreadable
+        detail:
+          type: string
+
+    EscalationReplyRequest:
+      type: object
+      description: >
+        POST /v1/escalation/reply's body (src/lib/panel-actions.ts's `validateEscalationReply`).
+        `taskId`, `class`, `cause` and `prRef` derive the escalation's thread id
+        (`thread:<taskId>::<class>::<cause|->::<prRef|->`, src/lib/inbox-thread.ts's `deriveThreadId`).
+      required:
+        - taskId
+        - class
+        - text
+      properties:
+        taskId:
+          type: string
+        class:
+          type: string
+        cause:
+          type: string
+        prRef:
+          type: string
+          description: A bare PR number string, as escalate.ts's `extractPrRef` keys it.
+        text:
+          type: string
+          description: The prose reply; must be non-blank.
+
+    ClarifyingQuestion:
+      type: object
+      description: One clarification the reply interpreter asks (src/lib/reply-interpreter.ts's `ClarifyingQuestion`).
+      required:
+        - id
+        - question
+        - established
+      properties:
+        id:
+          type: string
+        question:
+          type: string
+        established:
+          type: string
+          description: What research already established before asking.
+
+    ReplyInterpretation:
+      type: object
+      description: >
+        src/lib/reply-interpreter.ts's `InterpretReplyResult`, a union discriminated by `status`,
+        flattened because this generator's subset has no oneOf: `question` is present exactly
+        when `status` is `clarifying`, `unresolved` exactly when it is `exhausted`, and neither
+        when it is `understood`.
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - understood
+            - clarifying
+            - exhausted
+        question:
+          $ref: "#/components/schemas/ClarifyingQuestion"
+        unresolved:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClarifyingQuestion"
+
+    EscalationReplyResult:
+      type: object
+      description: >
+        POST /v1/escalation/reply's 200 body. `feedback` is the entry `captureFeedback` wrote
+        (origin `ui`, keyed to the thread); `interpretation` is what the reply interpreter
+        decided, and a clarifying question or exhaustion report has already been appended to the
+        thread when it is not `understood`.
+      required:
+        - ok
+        - taskId
+        - threadId
+        - feedback
+        - interpretation
+      properties:
+        ok:
+          type: boolean
+        taskId:
+          type: string
+        threadId:
+          type: string
+        feedback:
+          $ref: "#/components/schemas/FeedbackEntry"
+        interpretation:
+          $ref: "#/components/schemas/ReplyInterpretation"
+
+    EscalationOptionRoute:
+      type: string
+      description: >
+        The closed set of routes a signed escalation answer link may name, each at the write tier
+        serve.ts registers for it (src/lib/escalate.ts's `ESCALATION_OPTION_ROUTES`).
+      enum:
+        - /v1/manual/approve
+        - /v1/drain/kick
+        - /v1/drain/run
+        - /v1/inbox/approve
+        - /v1/skills/run
+        - /v1/control/pause
+        - /v1/control/resume
+        - /v1/control/stop
+        - /v1/escalation/mark-handled
+        - /v1/questions/answer
+        - /v1/drain/feedback
+        - /v1/auth/scope
+
+    EscalationLinkAnswerResult:
+      type: object
+      description: >
+        POST /v1/escalation/answer's 200 body. The answer is recorded as a reply on the
+        escalation's own thread (`answered by link: <route>`); the named route is NOT executed.
+      required:
+        - ok
+        - escalationId
+        - route
+      properties:
+        ok:
+          type: boolean
+        escalationId:
+          type: string
+        route:
+          $ref: "#/components/schemas/EscalationOptionRoute"
+
+    EscalationLinkRefusal:
+      type: object
+      description: >
+        A JSON refusal from the signed escalation-link routes (src/lib/escalate.ts's
+        `OptionLinkRefusal` plus the handler's own): `forged` (403, the signature does not
+        verify), `bad-request` / `expired` / `already-used` (410), `invalid_request` (400, no
+        thread store or no existing escalation thread -- the link is NOT consumed), `unavailable`
+        (503, the signing secret could not be resolved).
+      required:
+        - error
+        - detail
+      properties:
+        error:
+          type: string
+          enum:
+            - bad-request
+            - forged
+            - expired
+            - already-used
+            - invalid_request
+            - unavailable
+        detail:
+          type: string
+
   responses:
     Unauthorized:
       description: No or unrecognized bearer token.
@@ -6099,3 +6960,590 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/IncidentIngestBodyTooLarge"
+
+  # ── W1-T4610: the ratification inbox (W1-T110, W1-T193, W1-T2604, W1-T3407/W1-T3408) and its
+  # threads (W1-T4088) -- src/lib/panel-graph.ts's registrations -- plus the daily digests
+  # (src/lib/serve.ts's `buildInboxDigestsRoute`). Every write ledgers with the caller's bearer
+  # as `origin`; each names the write tier its route registers (W1-T404).
+
+  /v1/escalation/reply:
+    post:
+      summary: Answer an ESCALATION in prose -- recorded as an input on its thread, never a command.
+      description: >
+        W1-T2496, W1-T4471 (src/lib/panel-actions.ts's `buildEscalationReplyRoute`). Write tier:
+        LOW (W1-T404). Derives the escalation's thread id from the body, refuses (400) when no
+        thread store is configured, the thread cannot be read, or it holds no prior message --
+        never files an unattached reply. Otherwise appends the reply, runs the pure reply
+        interpreter (appending a clarifying question or exhaustion report when it is not
+        understood), captures a feedback entry (origin `ui`), records the answer into
+        `plan/questions.ndjson`, and ledgers `panel.escalation_replied`. It never closes an issue,
+        dispatches, ratifies or arms a merge.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EscalationReplyRequest"
+      responses:
+        "200":
+          description: The reply was appended, interpreted and recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationReplyResult"
+        "400":
+          description: >
+            `invalid_request` with a `detail` -- the body failed validation, or the thread it names
+            has no store, cannot be read, or holds no existing escalation. No side effect occurred.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  # W1-T2696: signed one-tap answer links on an escalation. Both routes are SELF-AUTHENTICATED
+  # (src/lib/service.ts's `Route.selfAuthenticated`): no bearer token is read -- the HMAC-signed
+  # query (`e` escalation id, `c` class, `r` option route, `x` expiry epoch ms, `s` 64-hex
+  # signature, minted by src/lib/escalate.ts's `mintOptionLink`) is the credential, verified by
+  # `verifyOptionLink` before anything acts. Hence `security: []` and no 401/403 bearer responses.
+
+  /v1/escalation/confirm:
+    get:
+      summary: Verify a signed escalation answer link and show a confirm form -- never acts.
+      description: >
+        src/lib/panel-actions.ts's `buildEscalationLinkConfirmRoute`. Registered read-scoped but
+        self-authenticated. On a verified link it renders an HTML form that POSTs the same query to
+        /v1/escalation/answer; a refusal renders its reason as HTML. Refusals other than a
+        malformed query are ledgered as `escalation.link_refused` (phase `confirm`).
+      security: []
+      parameters:
+        - name: e
+          in: query
+          required: true
+          description: The escalation id (signed).
+          schema:
+            type: string
+        - name: c
+          in: query
+          required: true
+          description: The escalation's class (signed, so an answer cannot be redirected onto another thread).
+          schema:
+            type: string
+        - name: r
+          in: query
+          required: true
+          description: The option route (signed); a route outside the closed set is refused.
+          schema:
+            $ref: "#/components/schemas/EscalationOptionRoute"
+        - name: x
+          in: query
+          required: true
+          description: Expiry, epoch milliseconds (signed); links live 24 hours.
+          schema:
+            type: string
+            pattern: "^[0-9]+$"
+        - name: s
+          in: query
+          required: true
+          description: HMAC-SHA256 over `e|c|r|x`, 64 lowercase hex characters.
+          schema:
+            type: string
+            pattern: "^[0-9a-f]{64}$"
+      responses:
+        "200":
+          description: The link verified; an HTML confirm form naming the escalation and option route.
+          content:
+            text/html:
+              schema:
+                type: string
+        "403":
+          description: The signature does not verify (`forged`); an HTML page naming why.
+          content:
+            text/html:
+              schema:
+                type: string
+        "410":
+          description: A malformed query, an expired link, or one already used; an HTML page naming why.
+          content:
+            text/html:
+              schema:
+                type: string
+        "503":
+          description: The signing secret could not be resolved (`unavailable`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationLinkRefusal"
+
+  /v1/escalation/answer:
+    post:
+      summary: Answer an escalation with a signed link's option -- single use.
+      description: >
+        src/lib/panel-actions.ts's `buildEscalationLinkAnswerRoute`. Registered write-scoped at
+        write tier LOW (W1-T404) but self-authenticated by the signed query; there is no request
+        body. Verifies the link, confirms the escalation's thread exists (a refusal there does
+        NOT burn the link), claims the single-use marker by exclusive create (the loser of two
+        racing taps gets 410 `already-used`), then appends `answered by link: <route>` as a
+        reply on the escalation's thread and ledgers `escalation.answered_by_link`. The option's
+        route itself is never called.
+      security: []
+      parameters:
+        - name: e
+          in: query
+          required: true
+          description: The escalation id (signed).
+          schema:
+            type: string
+        - name: c
+          in: query
+          required: true
+          description: The escalation's class (signed, so an answer cannot be redirected onto another thread).
+          schema:
+            type: string
+        - name: r
+          in: query
+          required: true
+          description: The option route (signed); a route outside the closed set is refused.
+          schema:
+            $ref: "#/components/schemas/EscalationOptionRoute"
+        - name: x
+          in: query
+          required: true
+          description: Expiry, epoch milliseconds (signed); links live 24 hours.
+          schema:
+            type: string
+            pattern: "^[0-9]+$"
+        - name: s
+          in: query
+          required: true
+          description: HMAC-SHA256 over `e|c|r|x`, 64 lowercase hex characters.
+          schema:
+            type: string
+            pattern: "^[0-9a-f]{64}$"
+      responses:
+        "200":
+          description: The answer was recorded on the escalation's thread and the link consumed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationLinkAnswerResult"
+        "400":
+          description: >
+            `invalid_request` -- no thread store is configured, or the escalation's thread cannot
+            be read or holds no message. The link is not consumed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationLinkRefusal"
+        "403":
+          description: "`forged` -- the signature does not verify."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationLinkRefusal"
+        "410":
+          description: "`bad-request`, `expired` or `already-used`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationLinkRefusal"
+        "503":
+          description: "`unavailable` -- the signing secret could not be resolved."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationLinkRefusal"
+
+  /v1/inbox:
+    get:
+      summary: The ratification inbox -- ready, drafting, not-ready and declined proposals.
+      description: >
+        src/lib/panel-graph.ts's `buildInboxRoute`, classified the way `rmd inbox` prints it.
+        Deferred-with-trigger, ratified and retired proposals are never returned. Served through
+        the console's cached-read wrapper (src/lib/serve.ts's `boundConsoleReadRoute`): the body
+        may be the previous snapshot while a recompute runs, says so in `staleness`, carries a
+        weak `etag`, and answers 304 to a matching `If-None-Match`.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The inbox, with the cache's staleness envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxResult"
+        "304":
+          description: The cached snapshot matches the request's `If-None-Match`; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/inbox/digests:
+    get:
+      summary: The mailbox's stored daily digests, newest ten.
+      description: >
+        src/lib/serve.ts's `buildInboxDigestsRoute` over `readConsoleInboxDigests`. A missing
+        store answers an empty list; an unreadable or unparsable one answers an empty list with a
+        `reason` -- never a non-2xx.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The digests inside the render window.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxDigestsResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/inbox/threads:
+    get:
+      summary: The operator's inbox threads, waiting-on-you first.
+      description: >
+        W1-T4088 (src/lib/panel-graph.ts's `buildInboxThreadsRoute`): one thread per
+        operator-owned inbox item, with its headline, the first sentence of the latest message,
+        who it is waiting on, last activity, message count and unread flag.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The thread list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxThreadsResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: "`thread_store_unreadable` -- the thread store could not be read."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+
+  /v1/inbox/thread:
+    get:
+      summary: One inbox thread's messages, oldest first.
+      description: >
+        W1-T4088 (src/lib/panel-graph.ts's `buildInboxThreadRoute`). The opening message
+        (`seq` 0) is derived from the item's current plain message on every read; the raw
+        proposal summary rides along as `details`.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: id
+          in: query
+          required: true
+          description: The thread id, `thread:<proposalId>::inbox::-::-`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The thread.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxThreadDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`not_found` -- the id names no current operator-owned inbox item (a missing or malformed id included)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+        "500":
+          description: "`thread_store_unreadable` -- the thread store could not be read."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+
+  /v1/inbox/thread/reply:
+    post:
+      summary: Write on an inbox thread -- an input for the daemon's responder, never a command.
+      description: >
+        W1-T4088 (src/lib/panel-graph.ts's `buildInboxThreadReplyRoute`). Write tier: LOW
+        (W1-T404) -- it only adds a message; the daemon's responder decides what it means and may
+        itself take only reversible actions. Idempotent per caller token, thread and `intentId`:
+        the stored reply is keyed by a derived `replyId`, one reply per thread is written at a
+        time under an in-flight lock, and the `inbox.thread_replied` ledger row is written once.
+      security:
+        - bearerWrite: []
+      parameters:
+        - name: X-Remudero-Operator
+          in: header
+          required: false
+          description: >
+            The operator's display name, stored on the message for audit only -- never an
+            authorisation input. Ignored unless 1-80 printable ASCII characters.
+          schema:
+            type: string
+            maxLength: 80
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InboxThreadReplyRequest"
+      responses:
+        "200":
+          description: The reply is in the thread store; `audit` says whether its ledger row is.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxThreadReplyResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`not_found` -- the thread names no current operator-owned inbox item."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxThreadReplyRefusal"
+        "409":
+          description: >
+            `reply_intent_conflict` (this `intentId` already stored a different text) or
+            `reply_in_progress` (another reply on this thread holds the lock; delivery unverified).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxThreadReplyRefusal"
+        "503":
+          description: "`reply_store_unavailable` -- the thread store write failed; `delivery` says whether the reply is known absent."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxThreadReplyRefusal"
+
+  /v1/inbox/thread/read:
+    post:
+      summary: Mark an inbox thread read up to a message.
+      description: >
+        W1-T4088 (src/lib/panel-graph.ts's `buildInboxThreadReadRoute`). Write tier: LOW
+        (W1-T404) -- bookkeeping; changes nothing but the unread flag. Read marks only move forward.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InboxThreadReadRequest"
+      responses:
+        "200":
+          description: The read mark was recorded (or was already at or past `seq`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxOkResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`not_found` -- the thread names no current operator-owned inbox item."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+        "409":
+          description: "`seq_ahead` -- the read mark exceeds the thread's last message."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+        "500":
+          description: "`thread_store_unreadable` -- the thread store could not be read."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+
+  /v1/inbox/approve:
+    post:
+      summary: Approve a READY proposal -- hands off to a detached `rmd approve`.
+      description: >
+        W1-T193 (src/lib/panel-graph.ts's `buildApproveProposalRoute`). Write tier: HIGH
+        (W1-T404) -- it moves code. Re-classifies the proposal live, reading the plan at its
+        committed ref, and refuses with 409 anything not currently READY, naming why. A ready
+        proposal is ledgered `panel.proposal_approve_requested` and handed to a detached
+        `rmd approve`; the 200 confirms only that hand-off.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InboxProposalRequest"
+      responses:
+        "200":
+          description: The approve run was handed off.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxProposalStartedResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: >
+            Missing write authority, a token below the HIGH write tier, or (when write tiers are
+            enforced) a missing or unmatched `X-Confirm-Nonce` (`confirm_nonce_required`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "`not_found` -- no active proposal with this id."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+        "409":
+          description: "`not_ready` -- the proposal is not currently READY; `detail` names why."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+
+  /v1/inbox/reframe:
+    post:
+      summary: Send feedback on a proposal -- hands off to a detached `rmd reframe`.
+      description: >
+        W1-T193 (src/lib/panel-graph.ts's `buildReframeProposalRoute`). Write tier: LOW (W1-T404)
+        -- feedback, never a ratification, so it has no readiness precondition: any proposal in
+        the active registry is accepted. Ledgers `panel.proposal_reframe_requested` with the
+        feedback text, then hands off to a detached `rmd reframe`.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InboxReframeRequest"
+      responses:
+        "200":
+          description: The reframe run was handed off.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxProposalStartedResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`not_found` -- no active proposal with this id."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+
+  /v1/inbox/decline:
+    post:
+      summary: Decline a proposal -- a recorded, reversible verdict that files nothing.
+      description: >
+        W1-T2604 (src/lib/panel-graph.ts's `buildDeclineProposalRoute`, deciding through
+        src/lib/inbox.ts's `applyProposalVerdict`). Write tier: LOW (W1-T404). The proposal stays
+        in the registry and is ledgered `panel.proposal_declined` with the reason; POST
+        /v1/inbox/restore takes it back. Refuses a proposal already ratified or already declined.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InboxVerdictRequest"
+      responses:
+        "200":
+          description: The decline was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxDeclineResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`not_found` -- no active proposal with this id."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+        "409":
+          description: "`already_ratified` or `already_declined`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+
+  /v1/inbox/restore:
+    post:
+      summary: Take back a decline.
+      description: >
+        W1-T3407 (src/lib/panel-graph.ts's `buildRestoreProposalRoute`, deciding through
+        src/lib/inbox.ts's `applyProposalVerdict`). Write tier: LOW (W1-T404). Symmetric with
+        decline, latest wins: ledgers `panel.proposal_restored` with the reason. Refuses a
+        RATIFIED proposal (its task is already filed) and one that is not declined.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InboxVerdictRequest"
+      responses:
+        "200":
+          description: The restore was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRestoreResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`not_found` -- no active proposal with this id."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+        "409":
+          description: "`already_ratified` or `not_declined`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
