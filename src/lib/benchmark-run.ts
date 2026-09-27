@@ -18,7 +18,8 @@ const unavailable = (reason: string): { state: "unavailable"; reason: string } =
 const REVISION_FIELDS = ["harnessRevision", "promptRevision", "toolRevision", "scorerRevision", "environmentRevision"] as const;
 const PIN_UNAVAILABLE_REASONS = new Set([
   "executing-module-outside-repository", "executing-source-not-clean", "executing-commit-invalid",
-  "executing-module-revision-unavailable", "manifest-not-pinned", "artifact-not-resolved",
+  "executing-module-revision-unavailable", "git-command-unavailable",
+  "manifest-not-pinned", "artifact-not-resolved",
 ]);
 export type BenchmarkRevisionField = typeof REVISION_FIELDS[number];
 export type BenchmarkRevisionPin = { source: "executing-module-git" | "image-build-stamp" | "resolved-artifact" | "trial-manifest"; revision: string };
@@ -27,6 +28,7 @@ export type BenchmarkStackEvidence = Partial<Record<BenchmarkRevisionField,
 
 function pinEvidence(field: BenchmarkRevisionField, input: BenchmarkStackEvidence[BenchmarkRevisionField]): Evidence<string> {
   if (input === undefined) return unavailable("not-pinned-by-harness");
+  if (input === null || typeof input !== "object") return unavailable("pin-evidence-invalid");
   if ("state" in input) return unavailable(PIN_UNAVAILABLE_REASONS.has(input.reason) ? input.reason : "pin-unavailable");
   const pins = Array.isArray(input) ? input : [input];
   if (pins.length === 0) return unavailable("pin-evidence-empty");
@@ -60,8 +62,10 @@ export function executingHarnessRevision(moduleFile: string,
     const revision = git(root, ["rev-parse", "HEAD"]).trim();
     return /^[0-9a-f]{40}$/i.test(revision)
       ? { source: "executing-module-git", revision } : unavailable("executing-commit-invalid");
-  } catch {
-    return unavailable("executing-module-revision-unavailable");
+  } catch (error) {
+    const reason = error instanceof Error && "code" in error && error.code === "ENOENT"
+      ? "git-command-unavailable" : "executing-module-revision-unavailable";
+    return { state: "unavailable", reason };
   }
 }
 

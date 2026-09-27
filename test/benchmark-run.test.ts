@@ -45,13 +45,17 @@ test("benchmark stack provenance is captured from the executing worker boundary"
   const receipt = benchmarkRunAssignmentReceipt(assignment, {}, { harnessRevision: pin });
   assert.deepEqual(receipt.stack.harnessRevision, { state: "observed", value: revision });
   assert.ok(calls.every((call) => call.startsWith("/srv/worker")), "never read cwd or another checkout");
-  assert.ok(calls.some((call) => call.includes("ls-files --error-unmatch -- src/run-task.ts")));
+  assert.equal(calls.length, 4, "root, tracked module, clean source, and commit are all checked");
 });
 
 test("benchmark stack provenance refuses guessed or conflicting revisions", () => {
   const dirty = executingHarnessRevision("/srv/worker/src/run-task.ts", (_cwd, args) =>
     args[0] === "status" ? " M src/lib/worker.ts\n" : args[1] === "--show-toplevel" ? "/srv/worker" : revision);
   assert.deepEqual(dirty, { state: "unavailable", reason: "executing-source-not-clean" });
+  const noGit = executingHarnessRevision("/srv/worker/src/run-task.ts", () => {
+    throw Object.assign(new Error("git is absent"), { code: "ENOENT" });
+  });
+  assert.deepEqual(noGit, { state: "unavailable", reason: "git-command-unavailable" });
   const missing = benchmarkRunAssignmentReceipt(assignment, {});
   assert.equal(missing.stack.harnessRevision.state, "unavailable");
   const conflict = benchmarkRunAssignmentReceipt(assignment, {}, { harnessRevision: [
@@ -67,6 +71,10 @@ test("benchmark stack provenance refuses guessed or conflicting revisions", () =
     environmentRevision: { state: "unavailable", reason: "secret-account" },
   });
   assert.deepEqual(unsafeReason.stack.environmentRevision, { state: "unavailable", reason: "pin-unavailable" });
+  const malformed = benchmarkRunAssignmentReceipt(assignment, {}, {
+    harnessRevision: "raw-secret" as unknown as BenchmarkStackEvidence["harnessRevision"],
+  });
+  assert.deepEqual(malformed.stack.harnessRevision, { state: "unavailable", reason: "pin-evidence-invalid" });
 });
 
 test("benchmark stack comparability requires matching observed revisions", () => {
