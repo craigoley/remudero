@@ -1,0 +1,43 @@
+- id: W1-T4600
+  title: "W1-T4597'S CODE-CHANGE SIGNAL IS LOST TO LEDGER ROTATION — the re-offer compares later daemon.boot rows with the boot that preceded the block, but the live ledger keeps only the newest boots, so once that boot rotates away an environmental block waits out the full cooldown even after its container was replaced"
+  repo: remudero
+  depends_on: [W1-T4597]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: verifying W1-T4597 on the live console fleet"
+  plan_refs: ["W1-T4597", "W1-T3978"]
+  files:
+    - src/lib/status.ts
+    - test/an-environmental-re-offer-sees-a-replaced-host.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27 05:10Z on the live console fleet, 30 minutes after W1-T4597 merged and the
+    daemon rebooted onto it: CONSOLE-T80 (blocked 2026-09-26) was re-offered at once and merged as
+    remudero-console#1787, but CONSOLE-T76 stayed blocked and a new starvation escalation (#1788)
+    named it. Its block (01:45:53Z, verdict `failed`, stage `worker.bounded_output`, host
+    6502f909f6e7) followed a boot at 01:33Z on cae2adb, yet the live ledger now holds only two
+    daemon.boot rows (03:33Z and 04:42Z, both host 1650153cf0d1, different code). With no boot
+    visible before the block, `environmentChangedSince` correctly refuses to guess and falls back to
+    the 6h cooldown. The block row itself carries `host`, and a daemon container that has been
+    replaced since the block is an environment change by definition — the containment and isolation
+    probes are host facts. Measured: an in-container daemon restart keeps its host (1650153cf0d1 at
+    both 03:33Z and 04:42Z; core 572c82544744 at 04:29Z and 05:03Z), so the signal is container
+    replacement, not every restart.
+  design: |
+    In status.ts's `environmentChangedSince`, also re-admit an environmental block when a later
+    `daemon.boot` carries a `host` different from the block row's own `host`. Keep the existing
+    signals unchanged: a later boot on different code than the visible boot before the block, and
+    the cooldown. A block row or boot without a host contributes no host evidence. The
+    MAX_ENVIRONMENTAL_REOFFERS bound applies unchanged.
+  acceptance:
+    - claim: "an environmental block whose preceding boot has rotated away is re-offered once a later daemon boots on a different host, and stays blocked when every later boot is on the same host"
+      proof: "unit test: test/an-environmental-re-offer-sees-a-replaced-host.test.ts"
+  falsifier: |
+    Drop the host arm: a block on host A followed only by boots on host B, with no boot visible
+    before it, stays blocked until the cooldown.
