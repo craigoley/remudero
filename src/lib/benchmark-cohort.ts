@@ -17,7 +17,9 @@ type SourceRecord = {
   sha256: string;
   rows: EvidenceRow[];
 };
-type SourceFault = { name: string; form: Form; size: number; mtimeMs: number; reason: string };
+type SourceFault = { name: string; form: Form; size: number; mtimeMs: number; reason: string;
+  audited?: boolean; sha256?: string; malformedRows?: number;
+  minTimestamp?: string | null; maxTimestamp?: string | null };
 type Checkpoint = {
   version: typeof BENCHMARK_COHORT_VERSION;
   sources: SourceRecord[];
@@ -49,11 +51,15 @@ type CoverageField = "taskClass" | "selectedModel" | "harnessRevision" | "worker
 
 export interface BenchmarkCohortSnapshot {
   version: typeof BENCHMARK_COHORT_VERSION;
-  state: "observed" | "unavailable";
+  state: "observed" | "observed-partial" | "unavailable";
   reason?: string;
   asOf: string | null;
   lastGoodAt?: string;
   sourceLineage: { name: string; form: Form; sha256: string; bytes: number }[];
+  /** Faulty source bytes remain immutable; these metadata are not publication approval. */
+  quarantine?: { sources: { name: string; form: Form; mtimeMs: number; sha256: string | null; malformedRows: number;
+    minTimestamp: string | null; maxTimestamp: string | null; reason: string }[];
+    excludedAssignments: number; unjoinableCleanRows: number };
   /** The live file can grow after this audited, newline-terminated byte prefix. */
   liveWatermark?: { prefixBytes: number; tailPendingBytes: number };
   sourceRows: { assignments: number; attempts: number; terminals: number; unmatchedAttempts: number;
@@ -72,7 +78,7 @@ export interface BenchmarkCohortSnapshot {
 }
 
 export interface BenchmarkCohortPassResult {
-  state: "partial" | "complete" | "unavailable";
+  state: "partial" | "complete" | "quarantined" | "unavailable";
   snapshot: BenchmarkCohortSnapshot;
   scannedSources: number;
   pendingSources: number;
@@ -96,16 +102,33 @@ function validFaults(value: unknown): value is SourceFault[] {
   return Array.isArray(value) && value.every((fault) => fault && typeof fault.name === "string"
     && ["gzip", "plain", "live"].includes(fault.form) && Number.isSafeInteger(fault.size) && fault.size >= 0
     && typeof fault.mtimeMs === "number" && Number.isFinite(fault.mtimeMs)
-    && typeof fault.reason === "string" && fault.reason.length > 0);
+    && typeof fault.reason === "string" && fault.reason.length > 0
+    && (fault.audited === undefined || fault.audited === true)
+    && (fault.sha256 === undefined || /^[a-f0-9]{64}$/.test(fault.sha256))
+    && (fault.malformedRows === undefined || Number.isSafeInteger(fault.malformedRows) && fault.malformedRows >= 0)
+    && [fault.minTimestamp, fault.maxTimestamp].every((ts) => ts === undefined || ts === null
+      || canonicalTimestamp(ts))
+    && (fault.minTimestamp == null) === (fault.maxTimestamp == null)
+    && (fault.maxTimestamp == null || typeof fault.sha256 === "string" && fault.minTimestamp <= fault.maxTimestamp));
 }
 
-function validLastGood(value: unknown, sources: SourceRecord[]): value is BenchmarkCohortSnapshot {
+function validLastGood(value: unknown, sources: SourceRecord[], faults: SourceFault[],
+  transitionPending: boolean): value is BenchmarkCohortSnapshot {
   const snapshot = object(value);
-  return snapshot?.version === BENCHMARK_COHORT_VERSION && snapshot.state === "observed"
+  return snapshot?.version === BENCHMARK_COHORT_VERSION
+    && (snapshot.state === "observed" || snapshot.state === "observed-partial")
+    && (transitionPending || (faults.length === 0 ? snapshot.state === "observed" : snapshot.state === "observed-partial"))
     && typeof snapshot.asOf === "string" && Array.isArray(snapshot.cohorts)
     && Array.isArray(snapshot.sourceLineage)
     && JSON.stringify(snapshot.sourceLineage.map((item: { name: string; sha256: string }) => [item.name, item.sha256]))
       === JSON.stringify(sources.map((source) => [source.name, source.sha256]))
+    && (snapshot.state === "observed" ? snapshot.quarantine === undefined
+      : Array.isArray(object(snapshot.quarantine)?.sources))
+    && (transitionPending || faults.length === 0 || JSON.stringify(object(snapshot.quarantine)?.sources)
+      === JSON.stringify(faults.map((fault) => ({ name: fault.name, form: fault.form, mtimeMs: fault.mtimeMs,
+        sha256: fault.sha256 ?? null, malformedRows: fault.malformedRows ?? 0,
+        minTimestamp: fault.minTimestamp ?? null, maxTimestamp: fault.maxTimestamp ?? null,
+        reason: fault.reason }))))
     && object(snapshot.sourceRows) !== undefined && object(snapshot.coverage) !== undefined
     && object(snapshot.pressure) !== undefined;
 }
@@ -134,7 +157,8 @@ function readCheckpoint(stateDir: string): Checkpoint {
       return { version: BENCHMARK_COHORT_VERSION, sources: parsed.sources,
         ...(parsed.sourceFaults ? { sourceFaults: parsed.sourceFaults } : {}),
         ...(parsed.baselineSources ? { baselineSources: parsed.baselineSources } : {}),
-        ...(validLastGood(parsed.lastGood, lastGoodSources) ? { lastGood: parsed.lastGood } : {}) };
+        ...(validLastGood(parsed.lastGood, lastGoodSources, parsed.sourceFaults ?? [], parsed.baselineSources !== undefined)
+          ? { lastGood: parsed.lastGood } : {}) };
     }
   } catch { /* A missing or damaged checkpoint is a full replay, never a healthy empty cohort. */ }
   return { version: BENCHMARK_COHORT_VERSION, sources: [] };
@@ -161,6 +185,16 @@ async function sourceHashes(path: string, prefixBytes?: number, throughBytes?: n
     seen += bytes.length;
   }
   return { full: full.digest("hex"), ...(prefix ? { prefix: prefix.digest("hex") } : {}) };
+}
+
+const sourceAuditFault = Symbol("source-audit-fault");
+type SourceAuditFault = Error & { [sourceAuditFault]: true; evidence: Pick<SourceFault,
+  "sha256" | "malformedRows" | "minTimestamp" | "maxTimestamp"> };
+function sourceAuditError(message: string, evidence: SourceAuditFault["evidence"]): SourceAuditFault {
+  return Object.assign(new Error(message), { [sourceAuditFault]: true as const, evidence });
+}
+function isSourceAuditFault(error: unknown): error is SourceAuditFault {
+  return error instanceof Error && sourceAuditFault in error;
 }
 
 /** Find a durable newline boundary at or before the manifest's byte watermark. A writer may be
@@ -217,6 +251,19 @@ async function scanSource(entry: ManifestEntry, precedingRotation: string | unde
     && hashes.prefix === prior.sha256;
   const rows: EvidenceRow[] = appendOnly ? [...prior.rows] : [];
   let malformedReason: string | undefined;
+  let malformedRows = 0;
+  let boundedTime = true;
+  let minTimestamp: string | undefined;
+  let maxTimestamp: string | undefined;
+  const observeTimestamp = (value: unknown): void => {
+    if (typeof value !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value)
+      || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value) {
+      boundedTime = false;
+      return;
+    }
+    if (minTimestamp === undefined || value < minTimestamp) minTimestamp = value;
+    if (maxTimestamp === undefined || value > maxTimestamp) maxTimestamp = value;
+  };
   let unread = 0;
   const sourceOptions = entry.form === "live"
     ? { afterRotation: precedingRotation, includeLive: true, ...(appendOnly ? { liveStartOffset: prior!.size } : {}) }
@@ -232,9 +279,14 @@ async function scanSource(entry: ManifestEntry, precedingRotation: string | unde
     ...sourceOptions,
     dedupe: false,
     onAcceptedRecord: (row, raw) => {
+      observeTimestamp(row.ts);
       if (relevant(row)) rows.push({ fingerprint: fingerprintLedgerLine(raw), bytes: Buffer.byteLength(raw), row: projectRow(row) });
     },
-    onMalformedRow: (finding) => { malformedReason = finding.kind === "live-torn-tail" ? "ledger-live-torn-tail" : "ledger-source-malformed"; },
+    onMalformedRow: (finding) => {
+      malformedRows += 1;
+      observeTimestamp(finding.timestamp);
+      malformedReason = finding.kind === "live-torn-tail" ? "ledger-live-torn-tail" : "ledger-source-malformed";
+    },
     onUnreadArchive: () => { unread += 1; },
     onUnreadLive: () => { unread += 1; },
   }, sourceIO)) {
@@ -246,8 +298,14 @@ async function scanSource(entry: ManifestEntry, precedingRotation: string | unde
     : after.size === entry.size && after.mtimeMs === entry.mtimeMs
       && (await sourceHashes(entry.path)).full === hashes.full;
   if (unread > 0 || malformedReason || !stable) {
-    throw new Error(unread > 0 ? entry.form === "live" ? "ledger-live-unreadable" : "ledger-source-unreadable"
-      : malformedReason ?? "ledger-source-changed-during-scan");
+    const boundedFault = entry.form !== "live" && unread === 0 && stable && boundedTime
+      && malformedReason === "ledger-source-malformed";
+    throw sourceAuditError(unread > 0 ? entry.form === "live" ? "ledger-live-unreadable" : "ledger-source-unreadable"
+      : malformedReason ?? "ledger-source-changed-during-scan", {
+      sha256: stable ? hashes.full : undefined, malformedRows,
+      minTimestamp: boundedFault && minTimestamp ? minTimestamp : null,
+      maxTimestamp: boundedFault && maxTimestamp ? maxTimestamp : null,
+    });
   }
   return { name: entry.name, form: entry.form, size: prefixBytes, mtimeMs: entry.mtimeMs, sha256: hashes.full, rows };
 }
@@ -379,13 +437,63 @@ function affectedKeys(baseline: SourceRecord[], current: SourceRecord[]): Set<st
   return keys;
 }
 
+function eligibleAssignmentIds(index: ReturnType<typeof indexEvidence>,
+  faults: ReadonlyArray<Pick<SourceFault, "maxTimestamp" | "mtimeMs">>): Set<string> {
+  const maxima = faults.map((fault) => fault.maxTimestamp);
+  const cutoff = faults.length > 0 && maxima.every((value) => typeof value === "string")
+    ? faults.reduce<string>((max, fault) => {
+      const bound = new Date(fault.mtimeMs).toISOString();
+      return [max, fault.maxTimestamp!, bound].sort().at(-1)!;
+    }, "") : null;
+  const eligible = new Set<string>();
+  for (const [id, assignment] of index.assignments) {
+    if (faults.length === 0) { eligible.add(id); continue; }
+    const ts = assignment.ts;
+    // UUIDv4 is minted at assignment time. A prior bounded source cannot hold a receipt for a
+    // future random ID; unknown/legacy IDs and the fault's own UTC day are conservatively excluded.
+    if (!cutoff || !/^[a-f\d]{8}-[a-f\d]{4}-4[a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/i.test(id)
+      || !canonicalTimestamp(ts) || ts.slice(0, 10) <= cutoff.slice(0, 10)) continue;
+    const joined = [index.attempts.get(id), index.terminals.get(id)].filter((row) => row !== undefined);
+    if (joined.some((row) => !canonicalTimestamp(row.ts) || row.ts <= cutoff)) continue;
+    eligible.add(id);
+  }
+  return eligible;
+}
+
+function canonicalTimestamp(value: unknown): value is string {
+  return typeof value === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value)
+    && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+}
+
+/** A source repair can release clean rows previously excluded by a fault, even if those clean
+ * source hashes did not change. Such partitions are dirty despite no changed assignment bytes. */
+function eligibilityChangeKeys(baseline: SourceRecord[], current: SourceRecord[],
+  beforeFaults: ReadonlyArray<Pick<SourceFault, "maxTimestamp" | "mtimeMs">>,
+  afterFaults: ReadonlyArray<Pick<SourceFault, "maxTimestamp" | "mtimeMs">>): Set<string> {
+  const before = indexEvidence(baseline);
+  const after = indexEvidence(current);
+  const beforeEligible = eligibleAssignmentIds(before, beforeFaults);
+  const afterEligible = eligibleAssignmentIds(after, afterFaults);
+  const keys = new Set<string>();
+  for (const id of new Set([...before.assignments.keys(), ...after.assignments.keys()])) {
+    if (beforeEligible.has(id) === afterEligible.has(id)) continue;
+    for (const row of [before.assignments.get(id), after.assignments.get(id)]) {
+      if (row) keys.add(JSON.stringify(dimensionsOf(row)));
+    }
+  }
+  return keys;
+}
+
 function deriveSnapshot(
   sources: SourceRecord[], asOf: string, auditedSourceBytes: number, prior?: BenchmarkCohortSnapshot,
   dirtyKeys?: Set<string>, liveWatermark?: { prefixBytes: number; tailPendingBytes: number },
+  faults: SourceFault[] = [],
 ): BenchmarkCohortSnapshot {
   const started = systemClock.now();
   const { assignments, attempts, terminals, invalidAssignmentRows, attemptRowsWithoutAssignmentId,
     terminalRowsWithoutAssignmentId, conflictingAssignments, duplicateRows } = indexEvidence(sources);
+  const eligible = eligibleAssignmentIds({ assignments, attempts, terminals, invalidAssignmentRows,
+    attemptRowsWithoutAssignmentId, terminalRowsWithoutAssignmentId, conflictingAssignments, duplicateRows }, faults);
   const fingerprints = new Set<string>();
   const evidenceBytesByDay = new Map<string, number>();
   const runs = new Map<string, number>();
@@ -403,8 +511,9 @@ function deriveSnapshot(
     const key = JSON.stringify(cohort.dimensions);
     if (!dirtyKeys.has(key)) groups.set(key, cohort);
   }
-  const coverage = blankCoverage(assignments.size);
+  const coverage = blankCoverage(eligible.size);
   for (const [id, row] of assignments) {
+    if (!eligible.has(id)) continue;
     const dimensions = dimensionsOf(row);
     for (const [field, observed] of [
       ["taskClass", dimensions.taskClass !== null],
@@ -461,8 +570,16 @@ function deriveSnapshot(
   }
   const cohorts = [...groups.values()].sort((a, b) => JSON.stringify(a.dimensions).localeCompare(JSON.stringify(b.dimensions)));
   const snapshot: BenchmarkCohortSnapshot = {
-    version: BENCHMARK_COHORT_VERSION, state: "observed", asOf,
+    version: BENCHMARK_COHORT_VERSION, state: faults.length > 0 ? "observed-partial" : "observed", asOf,
     sourceLineage: sources.map(({ name, form, sha256, size }) => ({ name, form, sha256, bytes: size })),
+    ...(faults.length > 0 ? { quarantine: {
+      sources: faults.map(({ name, form, mtimeMs, sha256, malformedRows, minTimestamp, maxTimestamp, reason }) => ({
+        name, form, mtimeMs, sha256: sha256 ?? null, malformedRows: malformedRows ?? 0,
+        minTimestamp: minTimestamp ?? null, maxTimestamp: maxTimestamp ?? null, reason,
+      })),
+      excludedAssignments: assignments.size - eligible.size,
+      unjoinableCleanRows: [...attempts.keys(), ...terminals.keys()].filter((id) => !eligible.has(id)).length,
+    } } : {}),
     ...(liveWatermark ? { liveWatermark } : {}),
     sourceRows: { assignments: assignments.size, attempts: attempts.size, terminals: terminals.size,
       unmatchedAttempts: [...attempts.keys()].filter((id) => !assignments.has(id)).length,
@@ -512,11 +629,14 @@ export async function runBenchmarkCohortPass(
     const prior = known.get(entry.name);
     if (prior) return prior.size !== entry.size || prior.mtimeMs !== entry.mtimeMs || prior.form !== entry.form;
     const fault = faults.get(entry.name);
-    return !fault || fault.size !== entry.size || fault.mtimeMs !== entry.mtimeMs || fault.form !== entry.form;
+    return !fault || !fault.audited || fault.size !== entry.size || fault.mtimeMs !== entry.mtimeMs || fault.form !== entry.form;
   });
-  if (changed.length === 0 && faults.size === 0 && checkpoint.lastGood && !checkpoint.baselineSources
-    && checkpoint.sources.length === current.length) {
-    return { state: "complete", snapshot: checkpoint.lastGood, scannedSources: 0, pendingSources: 0 };
+  if (changed.length === 0 && checkpoint.lastGood && !checkpoint.baselineSources
+    && checkpoint.sources.length + faults.size === current.length) {
+    const cached = faults.size > 0 && checkpoint.lastGood.cohorts.length === 0
+      ? { ...checkpoint.lastGood, state: "unavailable" as const } : checkpoint.lastGood;
+    return { state: faults.size === 0 ? "complete" : checkpoint.lastGood.cohorts.length > 0 ? "quarantined" : "unavailable",
+      snapshot: cached, scannedSources: 0, pendingSources: 0 };
   }
   if (!checkpoint.baselineSources && checkpoint.sources.length > 0
     && (checkpoint.lastGood || checkpoint.sources.some((source) => !current.some((entry) => entry.name === source.name)))) {
@@ -537,8 +657,10 @@ export async function runBenchmarkCohortPass(
       auditedSourceBytes += entry.size;
     } catch (error) {
       known.delete(entry.name);
+      const evidence = isSourceAuditFault(error) ? error.evidence : undefined;
       faults.set(entry.name, { name: entry.name, form: entry.form, size: entry.size,
-        mtimeMs: entry.mtimeMs, reason: String((error as Error)?.message ?? error) });
+        mtimeMs: entry.mtimeMs, reason: String((error as Error)?.message ?? error), audited: true,
+        ...(evidence ?? {}) });
     }
   }
   checkpoint.sources = current.flatMap((entry) => { const source = known.get(entry.name); return source ? [source] : []; });
@@ -548,16 +670,11 @@ export async function runBenchmarkCohortPass(
     if (source) return entry.form === "live" && scannedNames.has(entry.name) ? false
       : source.size !== entry.size || source.mtimeMs !== entry.mtimeMs || source.form !== entry.form;
     const fault = faults.get(entry.name);
-    return !fault || fault.size !== entry.size || fault.mtimeMs !== entry.mtimeMs || fault.form !== entry.form;
+    return !fault || !fault.audited || fault.size !== entry.size || fault.mtimeMs !== entry.mtimeMs || fault.form !== entry.form;
   }).length;
   if (pendingSources > 0) {
     const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
     return { state: "partial", snapshot: emptySnapshot("scan-incomplete", checkpoint.lastGood), scannedSources, pendingSources, checkpointBytes };
-  }
-  if (checkpoint.sourceFaults.length > 0) {
-    const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
-    return { state: "unavailable", snapshot: emptySnapshot(checkpoint.sourceFaults[0].reason, checkpoint.lastGood),
-      scannedSources, pendingSources: 0, checkpointBytes };
   }
   const live = checkpoint.sources.find((source) => source.form === "live");
   const liveManifest = current.find((entry) => entry.form === "live");
@@ -579,24 +696,41 @@ export async function runBenchmarkCohortPass(
   }
   if (checkpoint.baselineSources) {
     const successorFingerprints = new Set(checkpoint.sources.flatMap((source) => source.rows.map((row) => row.fingerprint)));
-    if (checkpoint.baselineSources.some((source) => source.rows.some((row) => !successorFingerprints.has(row.fingerprint)))) {
+    if (checkpoint.sourceFaults.length === 0
+      && checkpoint.baselineSources.some((source) => source.rows.some((row) => !successorFingerprints.has(row.fingerprint)))) {
       const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
       return { state: "unavailable", snapshot: emptySnapshot("retired-source-evidence-not-reconciled", checkpoint.lastGood),
         scannedSources, pendingSources: 0, checkpointBytes };
     }
   }
   const dirtyKeys = checkpoint.baselineSources ? affectedKeys(checkpoint.baselineSources, checkpoint.sources) : undefined;
+  if (dirtyKeys && checkpoint.lastGood?.quarantine) {
+    for (const key of eligibilityChangeKeys(checkpoint.baselineSources!, checkpoint.sources,
+      checkpoint.lastGood.quarantine.sources, checkpoint.sourceFaults)) dirtyKeys.add(key);
+  }
+  const prior = checkpoint.sourceFaults.length > 0 && checkpoint.lastGood !== undefined
+    && checkpoint.lastGood.quarantine === undefined
+    ? undefined : checkpoint.lastGood;
   const snapshot = deriveSnapshot(checkpoint.sources, opts.nowIso ?? systemClock.iso(), auditedSourceBytes,
-    checkpoint.lastGood, dirtyKeys, live ? { prefixBytes: live.size, tailPendingBytes } : undefined);
+    prior, prior ? dirtyKeys : undefined, live ? { prefixBytes: live.size, tailPendingBytes } : undefined,
+    checkpoint.sourceFaults);
+  if (checkpoint.sourceFaults.length > 0 && snapshot.cohorts.length === 0) {
+    snapshot.reason = checkpoint.sourceFaults[0].reason;
+    if (checkpoint.lastGood?.asOf) snapshot.lastGoodAt = checkpoint.lastGood.asOf;
+  }
   if (snapshot.sourceRows.conflictingAssignments > 0) {
     const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
     return { state: "unavailable", snapshot: emptySnapshot("conflicting-assignment-ids", checkpoint.lastGood),
       scannedSources, pendingSources: 0, checkpointBytes };
   }
-  checkpoint.lastGood = snapshot;
+  checkpoint.lastGood = snapshot.state === "observed-partial" && snapshot.cohorts.length === 0
+    ? { ...snapshot } : snapshot;
+  if (checkpoint.sourceFaults.length > 0 && snapshot.cohorts.length === 0) snapshot.state = "unavailable";
   delete checkpoint.baselineSources;
   const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
-  return { state: "complete", snapshot, scannedSources, pendingSources: 0, tailPendingBytes, checkpointBytes };
+  return { state: checkpoint.sourceFaults.length === 0 ? "complete"
+    : snapshot.cohorts.length > 0 ? "quarantined" : "unavailable",
+    snapshot, scannedSources, pendingSources: 0, tailPendingBytes, checkpointBytes };
 }
 
 /** Direct, internal maintenance entrypoint: no new public `rmd` verb or model worker. */

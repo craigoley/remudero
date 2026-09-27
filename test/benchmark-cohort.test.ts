@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -483,4 +483,117 @@ test("benchmark cohorts quarantine a malformed source while continuing to audit 
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }
+});
+
+test("benchmark cohort quarantines malformed source and keeps clean windows", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-bounded-fault-"));
+  try {
+    const bad = join(stateDir, "ledger.2026-09-25T12-00-00-000Z.ndjson.gz");
+    const good = join(stateDir, "ledger.2026-09-27T12-00-00-000Z.ndjson");
+    const beforeId = "73c51838-05b9-4d44-8987-f02610fb7268";
+    const afterId = "0aa02d38-05b9-4d44-8987-f02610fb7268";
+    const archived = row({ ts: "2026-09-25T11:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: beforeId, selected: { provider: "cash", model: "gpt-5-nano" } } })
+      + '{"ts":"2026-09-25T11:01:00.000Z","step":"worker.attempt",BAD}\n';
+    writeFileSync(bad, gzipSync(archived));
+    utimesSync(bad, new Date("2026-09-25T12:00:00.000Z"), new Date("2026-09-25T12:00:00.000Z"));
+    writeFileSync(good, row({ ts: "2026-09-27T11:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: afterId, selected: { provider: "cash", model: "gpt-6-luna" } } })
+      + row({ ts: "2026-09-27T11:01:00.000Z", step: "worker.attempt", selection_assignment_id: afterId,
+        success: true, billing_mode: "api", total_cost_usd: 0.02 }));
+    const result = await runBenchmarkCohortPass(stateDir, { maxSources: 2 });
+    assert.equal(result.state, "quarantined");
+    assert.equal(result.snapshot.state, "observed-partial");
+    assert.equal(result.snapshot.cohorts.length, 1);
+    assert.equal(result.snapshot.cohorts[0].dimensions.model, "gpt-6-luna");
+    assert.equal(result.snapshot.cohorts[0].workerCallSuccess, 1);
+    assert.equal(result.snapshot.coverage.workerCall.denominator, 1);
+    assert.equal(result.snapshot.quarantine?.excludedAssignments, 0);
+    assert.equal(result.snapshot.quarantine?.sources[0].malformedRows, 1);
+    assert.equal(result.snapshot.quarantine?.sources[0].maxTimestamp, "2026-09-25T11:01:00.000Z");
+    assert.equal(readFileSync(bad).equals(gzipSync(archived)), true, "the projection does not rewrite raw evidence");
+    const memoized = await runBenchmarkCohortPass(stateDir, { maxSources: 2 });
+    assert.equal(memoized.state, "quarantined");
+    assert.equal(memoized.scannedSources, 0, "unchanged bad evidence is not replayed on every daemon tick");
+    utimesSync(bad, new Date("2026-09-28T12:00:00.000Z"), new Date("2026-09-28T12:00:00.000Z"));
+    const laterWrite = await runBenchmarkCohortPass(stateDir, { maxSources: 1 });
+    assert.equal(laterWrite.state, "unavailable", "a later archive write invalidates the clean suffix");
+    assert.equal(laterWrite.snapshot.cohorts.length, 0);
+    assert.equal(laterWrite.snapshot.quarantine?.excludedAssignments, 1);
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
+
+test("benchmark cohort excludes joins crossing a quarantined source", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-unbounded-fault-"));
+  try {
+    const bad = join(stateDir, "ledger.2026-09-25T12-00-00-000Z.ndjson.gz");
+    const good = join(stateDir, "ledger.2026-09-27T12-00-00-000Z.ndjson");
+    const id = "0aa02d38-05b9-4d44-8987-f02610fb7268";
+    writeFileSync(bad, gzipSync('{"step":"worker.attempt",BAD}\n'));
+    writeFileSync(good, row({ ts: "2026-09-27T11:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id, selected: { provider: "cash", model: "gpt-6-luna" } } }));
+    const result = await runBenchmarkCohortPass(stateDir, { maxSources: 2 });
+    assert.equal(result.state, "unavailable");
+    assert.equal(result.snapshot.cohorts.length, 0, "an unbounded fault cannot contribute a model denominator");
+    assert.equal(result.snapshot.quarantine?.sources[0].maxTimestamp, null);
+    assert.equal(result.snapshot.quarantine?.excludedAssignments, 1);
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
+
+test("benchmark cohort retains dated last good during faulty partial replay", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-fault-transition-"));
+  try {
+    const archive = join(stateDir, "ledger.2026-09-25T12-00-00-000Z.ndjson.gz");
+    const later = join(stateDir, "ledger.2026-09-26T12-00-00-000Z.ndjson");
+    const old = row({ ts: "2026-09-25T11:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: "old", selected: { provider: "cash", model: "gpt-5-nano" } } });
+    const newer = row({ ts: "2026-09-26T11:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: "new", selected: { provider: "cash", model: "gpt-6-luna" } } });
+    writeFileSync(archive, gzipSync(old));
+    writeFileSync(later, newer);
+    const baseline = await runBenchmarkCohortPass(stateDir, { maxSources: 2, nowIso: "2026-09-26T12:00:00.000Z" });
+    assert.equal(baseline.state, "complete");
+    writeFileSync(archive, gzipSync(old + '{"ts":"2026-09-25T11:01:00.000Z",BAD}\n'));
+    writeFileSync(later, newer + row({ ts: "2026-09-26T11:02:00.000Z", step: "cycle.heartbeat" }));
+    const pending = await runBenchmarkCohortPass(stateDir, { maxSources: 1 });
+    assert.equal(pending.state, "partial");
+    assert.equal(pending.snapshot.lastGoodAt, baseline.snapshot.asOf);
+    const settled = await runBenchmarkCohortPass(stateDir, { maxSources: 1 });
+    assert.equal(settled.state, "unavailable");
+    assert.equal(settled.snapshot.lastGoodAt, baseline.snapshot.asOf,
+      "a fault arriving during replay must not erase the dated healthy baseline");
+    assert.equal(settled.snapshot.cohorts.length, 0);
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
+
+test("benchmark cohort repairs a quarantined source without raw deletion", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-fault-repair-"));
+  try {
+    const older = join(stateDir, "ledger.2026-09-25T10-30-00-000Z.ndjson");
+    const bad = join(stateDir, "ledger.2026-09-25T12-00-00-000Z.ndjson.gz");
+    const good = join(stateDir, "ledger.2026-09-27T12-00-00-000Z.ndjson");
+    const id = "0aa02d38-05b9-4d44-8987-f02610fb7268";
+    const assignment = row({ ts: "2026-09-27T11:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id, selected: { provider: "cash", model: "gpt-6-luna" } } });
+    writeFileSync(older, row({ ts: "2026-09-25T10:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: "older", selected: { provider: "cash", model: "gpt-5-nano" } } }));
+    writeFileSync(bad, gzipSync('{"ts":"2026-09-25T11:00:00.000Z",BAD}\n'));
+    utimesSync(bad, new Date("2026-09-25T12:00:00.000Z"), new Date("2026-09-25T12:00:00.000Z"));
+    writeFileSync(good, assignment);
+    const partial = await runBenchmarkCohortPass(stateDir, { maxSources: 3 });
+    assert.equal(partial.state, "quarantined");
+    assert.equal(partial.snapshot.pressure.rebuiltPartitions, 1);
+    assert.equal(partial.snapshot.quarantine?.excludedAssignments, 1);
+    const corrected = row({ ts: "2026-09-25T11:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: "a1", selected: { provider: "cash", model: "gpt-5-nano" } } });
+    writeFileSync(bad, gzipSync(corrected));
+    const repaired = await runBenchmarkCohortPass(stateDir, { maxSources: 1 });
+    assert.equal(repaired.state, "complete");
+    assert.equal(repaired.snapshot.cohorts.length, 2);
+    assert.equal(repaired.snapshot.pressure.rebuiltPartitions, 1, "unaffected clean cohort is reused");
+    assert.equal(repaired.snapshot.cohorts.find((cohort) => cohort.dimensions.model === "gpt-5-nano")?.assignments, 2,
+      "repair releases a formerly excluded clean assignment in the affected partition");
+    assert.equal(readFileSync(bad).equals(gzipSync(corrected)), true);
+    assert.equal(repaired.snapshot.quarantine, undefined);
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });

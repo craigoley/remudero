@@ -29,6 +29,11 @@
     "dateNow": 1,
     "newDate": 2
   },
+  "src/lib/benchmark-cohort.ts": {
+    "legacy": 0,
+    "dateNow": 0,
+    "newDate": 3
+  },
   "src/lib/board-review.ts": {
     "legacy": 0,
     "dateNow": 0,
@@ -208,6 +213,11 @@
     "legacy": 0,
     "dateNow": 1,
     "newDate": 0
+  },
+  "src/lib/ledger-union.ts": {
+    "legacy": 0,
+    "dateNow": 0,
+    "newDate": 1
   },
   "src/lib/ledger.ts": {
     "legacy": 2,

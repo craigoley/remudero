@@ -50,6 +50,8 @@ export interface LedgerMalformedRowFinding {
   rowOrdinal: number;
   kind: "invalid-json" | "non-object" | "live-torn-tail";
   resumeOffset?: number;
+  /** Canonical leading ledger timestamp, when even a damaged row preserves it. Never raw text. */
+  timestamp?: string;
 }
 
 export interface LedgerMalformedSource {
@@ -154,6 +156,14 @@ function parseObject(raw: string): Record<string, unknown> | undefined {
   return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
     ? (parsed as Record<string, unknown>)
     : undefined;
+}
+
+/** A damaged archive row can still carry a bounded timestamp if its canonical leading field
+ * survived. Keep only this scalar, never the offending line. */
+function leadingTimestamp(line: string): { timestamp?: string } {
+  const match = /^\{"ts":"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z)"/.exec(line);
+  if (!match || !Number.isFinite(Date.parse(match[1])) || new Date(match[1]).toISOString() !== match[1]) return {};
+  return { timestamp: match[1] };
 }
 
 /** Parses `buf`'s NDJSON lines from byte `start`, at most `maxLines` of them; `next` is where to resume. */
@@ -369,6 +379,7 @@ export async function* openLedgerUnion(
             form: entry.path === livePath ? "live" : entry.form,
             rowOrdinal,
             kind: badKind ?? "non-object",
+            ...(entry.path === livePath ? {} : leadingTimestamp(line)),
           };
           if (entry.path === livePath) pendingLiveBad = finding;
           else opts.onMalformedRow?.(finding);

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { gzipSync } from "node:zlib";
 import { runDaemon } from "../src/lib/daemon.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { detachSweepAction, drainDetachedSweepActions, detachedActionInFlight } from "../src/lib/sweep.js";
@@ -44,6 +45,40 @@ test("daemon benchmark cohort failure preserves worker and review flow", async (
     assert.ok(lines.includes("benchmark_cohort.run_failed"), "a failed projection is visible after normal work");
   } finally {
     release();
+    await drainDetachedSweepActions();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("benchmark cohort source fault is advisory to daemon work", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-daemon-cohort-source-fault-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, "- id: A\n  title: a\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n");
+  writeFileSync(join(root, "ledger.2026-09-25T12-00-00-000Z.ndjson.gz"),
+    gzipSync('{"ts":"2026-09-25T11:00:00.000Z",BAD}\n'));
+  let actions = [{ action: "review" as const, prNumber: 42, origin: "fixture",
+    requestedAt: "2026-09-26T12:00:00.000Z" }];
+  const reviews: number[] = [];
+  const entries: { step: string; fields?: Record<string, unknown> }[] = [];
+  try {
+    await runDaemon(loadPlan(planPath), {
+      refreshMerged: () => () => false,
+      runOne: async (id: string) => ({ taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }),
+      sleep: async () => {}, sweep: async () => {},
+      pendingPrActions: () => actions,
+      runPrAction: async (request) => { reviews.push(request.prNumber); return { outcome: "completed" }; },
+      clearPrAction: (action, prNumber) => {
+        actions = actions.filter((request) => request.action !== action || request.prNumber !== prNumber);
+      },
+      log: (step: string, fields?: Record<string, unknown>) => entries.push({ step, fields }),
+      checkBenchmarkCohort: () => true,
+      runBenchmarkCohortPass: () => runBenchmarkCohortPass(root),
+    }, { max: 1 });
+    await drainDetachedSweepActions();
+    assert.deepEqual(reviews, [42]);
+    const report = entries.find((entry) => entry.step === "benchmark_cohort.ran");
+    assert.equal(report?.fields?.state, "unavailable");
+  } finally {
     await drainDetachedSweepActions();
     rmSync(root, { recursive: true, force: true });
   }

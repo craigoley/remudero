@@ -162,12 +162,20 @@ must reconcile its exact evidence lines in a successor before the snapshot can b
 unproven in-place model-label change is not silently accepted. Exact replay lines are deduplicated;
 late attempts, terminal
 fallback, corrections, and retractions rebuild affected dimension partitions. A missing or
-malformed source, unreadable archive, or incomplete scan yields `unavailable`
-with last-good age rather than a fresh zero. A damaged checkpoint triggers full replay and stays
+malformed source with no bounded clean suffix, unreadable archive, or incomplete scan yields
+`unavailable` with last-good age rather than a fresh zero. A damaged checkpoint triggers full replay and stays
 unavailable until that replay completes. None of these conditions gates a worker or PR.
-An unchanged faulty source is recorded locally so later archives can still be audited; it is
-rechecked when its source identity changes. The complete cohort remains unavailable until every
-source is healthy or a retired source's evidence is reconciled.
+An unchanged faulty source is recorded locally by source hash, count of malformed rows, and
+bounded timestamp range only when **every** nonempty row has a canonical timestamp (including
+damaged rows). The raw archive is never rewritten by this projection. Later sources continue to be
+audited. The fault's file mtime is included in the cutoff so a later cohort cannot predate the
+archive's last write. A strictly later UTC-day assignment with a newly minted UUIDv4, and no joined receipt
+that crosses the fault's timestamp bound, can enter an explicitly `observed-partial` clean cohort;
+older, legacy-ID, or unbounded joins remain excluded with visible missingness. This uses the
+assignment producer's fresh-random-ID causal contract, not archive filenames as a time guarantee.
+If any malformed line lacks that timestamp, no clean model denominator is asserted. The complete
+cohort remains unavailable until every source is healthy or a retired source's evidence is
+reconciled. A partial clean cohort is not a public ranking or experiment effect.
 
 Dimensions are UTC day, task class, selected provider/model, and explicitly unavailable harness
 revision. Assignment-based denominators distinguish no worker call from a call with missing
