@@ -1,0 +1,41 @@
+- id: W1-T4617
+  title: "EVERY ROUTING DECISION COULD BE A MICRO-EXPERIMENT BUT NONE RECORDS ITS PROBABILITY — provider selection is a deterministic golden-ratio sequence, so observational fleet data can never be propensity-weighted, and the Sol/Sonnet A/B splits 46% of tasks across both arms"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: model-evidence research — every run should add usable model evidence or an explicit coverage gap"
+  plan_refs: ["W1-T100001", "W1-T4574", "W1-T4575", "W1-T4580", "W1-T4603", "W1-T4607", "W1-T4608"]
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/worker.ts
+    - src/lib/routing-experiments.ts
+    - test/a-routing-choice-logs-its-probability.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27 over the three fleets' full ledger unions (core 773,650 / console 356,871 /
+    site 269,728 rows, 2026-09-20..27) and origin/main 12baa03. `selectWorkerProvider` weights
+    candidates by (headroom - reserve)^2 but picks with a module-level golden-ratio counter, so the
+    choice is deterministic and time-of-day correlated and no selection probability exists. The
+    `sol-vs-sonnet` A/B unit is the spawn, not the task: 26 of 56 tagged tasks (46%) landed in both
+    arms (Fisher p~0.40 on the reported merge rates). `worker.assignment` already records the
+    candidate set and eligibility, so only the draw and its probability are missing to make ordinary
+    routing usable for inverse-propensity / doubly-robust estimates.
+  design: |
+    Keep the same weights, but draw with a seeded pseudo-random generator whose seed is derived from
+    (task id, attempt, decision point) and record on `worker.assignment` the per-candidate selection
+    probability, the drawn value and the seed. Experiments key their arm on the task (stable across
+    retries and fix rungs) and record intention-to-treat. The expected share each provider receives
+    is unchanged; a probability that cannot be computed is recorded as unavailable. No routing
+    policy change beyond replacing the deterministic counter.
+  acceptance:
+    - claim: "every routed assignment records per-candidate selection probability, draw and seed, and an experiment keeps one arm per task across retries and fix rungs"
+      proof: "unit test: test/a-routing-choice-logs-its-probability.test.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale measured.

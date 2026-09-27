@@ -1,0 +1,41 @@
+- id: W1-T4621
+  title: "THE MOST INTERESTING MODEL BEHAVIOUR IS RECORDED BUT NEVER ATTRIBUTED — contradicted claims, holdout reward-hacking gaps, scope overruns, empty commits and runaway turns exist per run but no one rolls them up by model"
+  repo: remudero
+  depends_on: [W1-T4614]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: model-evidence research — every run should add usable model evidence or an explicit coverage gap"
+  plan_refs: ["W1-T100001", "W1-T4574", "W1-T4575", "W1-T4580", "W1-T4603", "W1-T4607", "W1-T4608"]
+  files:
+    - src/lib/work-integrity.ts
+    - src/lib/analytics-route.ts
+    - test/work-integrity-is-measured-per-model.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27 over the three fleets' full ledger unions (core 773,650 / console 356,871 /
+    site 269,728 rows, 2026-09-20..27) and origin/main 12baa03. Unattributed per-run signals already
+    in the ledger: `implement.harness_commit_refused` 532 ('worker changed nothing'),
+    `fix.commit_refused` 440, `scope_guard.overrun` 51, `worker.runaway_turns` 42 core / 58 console,
+    review changesetContradictions/refusalContradictions, test_theater and reward_hacking_gap
+    (visible vs holdout pass rate), permission_denials, quality_suspect and compaction_events. They
+    answer 'how does this model behave', not only 'did it finish', which is what makes a model-
+    purpose atlas interesting and honest.
+  design: |
+    Add a work-integrity projection keyed by assignment (joined via selection_assignment_id and
+    W1-T4614's head lineage): per model x task class, the rates of contradicted claims, reward-
+    hacking gap, scope overruns, empty-commit refusals, runaway turns and test theater, each with
+    its denominator, coverage and unavailable counts. Private by default; exposed through the
+    analytics route like benchmark-quality-v1. No routing change.
+  acceptance:
+    - claim: "the work-integrity projection reports per model and task class each behaviour rate with its denominator, coverage and unavailable counts"
+      proof: "unit test: test/work-integrity-is-measured-per-model.test.ts"
+    - claim: "the new module is wired into its production caller, not shipped unwired"
+      proof: "grep: deriveWorkIntegrity( in src/lib/analytics-route.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale measured.
