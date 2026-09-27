@@ -4,7 +4,9 @@
  * Each field is filled only from a source the daemon already holds (W1-T4103):
  * - `errorrate`, `last_run`: the repository's `verdict` rows (see {@link ERROR_VERDICTS}).
  * - `queuedtasks`: the repository's plan tasks with no merge credit in the ledger.
- * - `tokens7d`, `cost_7d`: the repository's worker rows inside the trailing seven days.
+ * - `tokens7d`, `cost_7d`, `modelsused`: the repository's worker rows inside the trailing seven days.
+ *   Model names use the provider's `served_model` receipt, never the requested assignment. If a
+ *   worker row did not report its served model, the list is incomplete and stays `null`.
  * A row names its repository by its own `repo`, else through its run's `run.start` row.
  * `connected_at`, `active` and every setting stay `null`: the managed-repos file records only
  * identities and no config key holds a per-repo policy, pool size or alert threshold. An absent
@@ -32,7 +34,7 @@ export interface RepoDashboardHealth {
 
 export interface RepoDashboardTelemetry {
   tokens7d: number | null;
-  modelsused: [];
+  modelsused: string[] | null;
   cost_7d: number | null;
 }
 
@@ -85,10 +87,11 @@ export interface RepoTelemetry {
   errorrate: number | null;
   last_run: string | null;
   tokens7d: number | null;
+  modelsused: string[] | null;
   cost_7d: number | null;
 }
 
-const UNKNOWN: RepoTelemetry = { queuedtasks: null, errorrate: null, last_run: null, tokens7d: null, cost_7d: null };
+const UNKNOWN: RepoTelemetry = { queuedtasks: null, errorrate: null, last_run: null, tokens7d: null, modelsused: null, cost_7d: null };
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
@@ -138,6 +141,8 @@ export function projectRepoTelemetry(
   let decided = 0;
   let tokens = 0;
   let cost = 0;
+  let missingServedModel = false;
+  const servedModels = new Set<string>();
   for (const row of ledger) {
     const owner = str(row.repo) ?? runRepo.get(str(row.run_id) ?? "");
     if (!namesRepo(owner, repo)) continue;
@@ -153,6 +158,9 @@ export function projectRepoTelemetry(
       // `else`: a verdict row restates its run's worker total, so it never adds to the sum.
       tokens += tokenTotal(row);
       cost += num(row.total_cost_usd);
+      const servedModel = str(row.served_model)?.trim();
+      if (servedModel && servedModel.length <= 160) servedModels.add(servedModel);
+      else missingServedModel = true;
     }
   }
   const open = plan?.tasks.filter((t) =>
@@ -163,6 +171,7 @@ export function projectRepoTelemetry(
     errorrate: decided > 0 ? errors / decided : null,
     last_run: lastRun,
     tokens7d: tokens,
+    modelsused: missingServedModel ? null : [...servedModels].sort((a, b) => a.localeCompare(b)),
     cost_7d: cost,
   };
 }
@@ -186,7 +195,7 @@ function toDashboardEntry(repo: ManagedRepo, t: RepoTelemetry): RepoDashboardEnt
     },
     telemetry: {
       tokens7d: t.tokens7d,
-      modelsused: [],
+      modelsused: t.modelsused,
       cost_7d: t.cost_7d,
     },
     settings: {

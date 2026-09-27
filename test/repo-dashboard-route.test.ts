@@ -50,7 +50,7 @@ test("GET /v1/repos projects validated managed identities and leaves unsupported
           managed: true,
           source: "managed-repos",
           health: { status: "unknown", queuedtasks: null, errorrate: null, last_run: null, alerts: null },
-          telemetry: { tokens7d: null, modelsused: [], cost_7d: null },
+          telemetry: { tokens7d: null, modelsused: null, cost_7d: null },
           settings: { proofpolicy: null, workerpoolsize: null, alertthreshold: null },
         },
         {
@@ -62,7 +62,7 @@ test("GET /v1/repos projects validated managed identities and leaves unsupported
           managed: true,
           source: "managed-repos",
           health: { status: "unknown", queuedtasks: null, errorrate: null, last_run: null, alerts: null },
-          telemetry: { tokens7d: null, modelsused: [], cost_7d: null },
+          telemetry: { tokens7d: null, modelsused: null, cost_7d: null },
           settings: { proofpolicy: null, workerpoolsize: null, alertthreshold: null },
         },
       ],

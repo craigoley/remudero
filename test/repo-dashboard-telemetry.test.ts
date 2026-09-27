@@ -52,6 +52,7 @@ const worker = (run: string, ts: string, cost: number, tokens: Record<string, nu
   step: "implement.done",
   ts,
   model: "m",
+  served_model: "provider-m",
   billing_mode: "subscription",
   total_cost_usd: cost,
   tokens,
@@ -121,16 +122,32 @@ test("seven-day tokens and cost sum the repository's worker rows in the window",
   const t = projectRepoTelemetry(ALPHA, { ledger, nowMs: NOW_MS });
   assert.equal(t.tokens7d, 100 + 3 + 100);
   assert.equal(t.cost_7d, 1.5 + 0.25 + 9 + 0.25);
+  assert.deepEqual(t.modelsused, ["provider-m"]);
+});
+
+test("modelsused contains only complete provider-served model receipts for the repository and window", () => {
+  const ledger = [
+    start("r1", "alpha"), start("b1", "beta"),
+    { ...worker("r1", "2026-09-21T00:00:00.000Z", 1, {}), model: "requested-but-not-served", served_model: "gpt-6-luna" },
+    { ...worker("r1", "2026-09-22T00:00:00.000Z", 1, {}), served_model: "claude-sonnet" },
+    { ...worker("r1", "2026-09-22T01:00:00.000Z", 1, {}), served_model: "gpt-6-luna" },
+    { ...worker("b1", "2026-09-22T00:00:00.000Z", 1, {}), served_model: null },
+    { ...worker("r1", "2026-09-01T00:00:00.000Z", 1, {}), served_model: null },
+  ];
+  assert.deepEqual(projectRepoTelemetry(ALPHA, { ledger, nowMs: NOW_MS }).modelsused, ["claude-sonnet", "gpt-6-luna"]);
+  assert.equal(projectRepoTelemetry(ALPHA, { ledger: [...ledger, { ...worker("r1", "2026-09-22T02:00:00.000Z", 1, {}), served_model: null }], nowMs: NOW_MS }).modelsused, null,
+    "a silent provider makes the full set unknown; a requested model is not a substitute");
 });
 
 test("a telemetry field with no source stays null rather than zero", () => {
   const unknown = projectRepoTelemetry(ALPHA, { nowMs: NOW_MS });
-  assert.deepEqual(unknown, { queuedtasks: null, errorrate: null, last_run: null, tokens7d: null, cost_7d: null });
+  assert.deepEqual(unknown, { queuedtasks: null, errorrate: null, last_run: null, tokens7d: null, modelsused: null, cost_7d: null });
   const noPlan = projectRepoTelemetry(ALPHA, { ledger: [], nowMs: NOW_MS });
   assert.equal(noPlan.queuedtasks, null);
   assert.equal(noPlan.errorrate, null);
   assert.equal(noPlan.last_run, null);
   assert.equal(noPlan.tokens7d, 0, "a present ledger with no rows in the window is a measured zero");
+  assert.deepEqual(noPlan.modelsused, [], "a present ledger with no worker rows has a measured empty model set");
 });
 
 function fixtureRoot(): string {
@@ -170,7 +187,7 @@ test("GET /v1/repos fills telemetry from the real ledger and plan files and keep
   assert.deepEqual(concurrent, body, "a concurrent read shares the one off-thread pass");
   const [alpha] = body.repos;
   assert.deepEqual(alpha.health, { status: "unknown", queuedtasks: 1, errorrate: 0, last_run: "2026-09-21T01:00:00.000Z", alerts: null });
-  assert.deepEqual(alpha.telemetry, { tokens7d: 7, modelsused: [], cost_7d: 2 });
+  assert.deepEqual(alpha.telemetry, { tokens7d: 7, modelsused: ["provider-m"], cost_7d: 2 });
   assert.equal(alpha.connected_at, null);
   assert.equal(alpha.active, null);
   assert.deepEqual(alpha.settings, { proofpolicy: null, workerpoolsize: null, alertthreshold: null });
@@ -179,7 +196,7 @@ test("GET /v1/repos fills telemetry from the real ledger and plan files and keep
 test("GET /v1/repos leaves ledger fields null for an absent ledger", async () => {
   const root = fixtureRoot();
   const missing = await readDashboard(buildRepoDashboardRoute({ root, ledgerPath: join(root, "state", "ledger.ndjson"), clock: fixedClock(NOW_MS) }));
-  assert.deepEqual(missing.repos[0].telemetry, { tokens7d: null, modelsused: [], cost_7d: null });
+  assert.deepEqual(missing.repos[0].telemetry, { tokens7d: null, modelsused: null, cost_7d: null });
   assert.equal(missing.repos[0].health.queuedtasks, null);
 });
 

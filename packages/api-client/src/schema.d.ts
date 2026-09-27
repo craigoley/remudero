@@ -77,10 +77,10 @@ export interface components {
       last_run: string | null;
       alerts: (string)[] | null;
     };
-    /** Per-repository telemetry, unavailable until a durable per-repo aggregation source exists. */
+    /** Trailing seven-day per-repository worker telemetry from the ledger. Models are the distinct provider-reported served models, never requested or routed model assignments. A null modelsused means the ledger was unavailable or at least one worker row in the window did not report its served model; an empty array means no worker rows ran in the window. */
     RepoDashboardTelemetry: {
       tokens7d: number | null;
-      modelsused: (string)[];
+      modelsused: (string)[] | null;
       cost_7d: number | null;
     };
     /** Per-repository settings, unavailable until durable settings persistence exists. */

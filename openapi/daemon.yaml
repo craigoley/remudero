@@ -309,7 +309,11 @@ components:
 
     RepoDashboardTelemetry:
       type: object
-      description: Per-repository telemetry, unavailable until a durable per-repo aggregation source exists.
+      description: >
+        Trailing seven-day per-repository worker telemetry from the ledger. Models are the distinct
+        provider-reported served models, never requested or routed model assignments. A null
+        modelsused means the ledger was unavailable or at least one worker row in the window did
+        not report its served model; an empty array means no worker rows ran in the window.
       required:
         - tokens7d
         - modelsused
@@ -318,7 +322,7 @@ components:
         tokens7d:
           type: [number, "null"]
         modelsused:
-          type: array
+          type: [array, "null"]
           items:
             type: string
         cost_7d:
