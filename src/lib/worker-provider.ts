@@ -355,10 +355,14 @@ export function providerRefusalCondition(capacity: ProviderCapacity): ProviderRe
   return capacity.windows.some(validCapacityWindow) ? "full" : "cannot-be-asked";
 }
 
-function renderProviderRefusal(capacity: ProviderCapacity): string {
+function providerRefusalDetail(capacity: ProviderCapacity): string {
   const remaining = tightestRemaining(capacity);
-  const detail = capacity.readable && Number.isFinite(remaining) ? `${remaining}% remaining` : capacity.detail ?? "unreadable";
-  return `${capacity.provider}=${providerRefusalCondition(capacity) === "full" ? "full" : "cannot be asked"} (${detail})`;
+  return capacity.readable && Number.isFinite(remaining) ? `${remaining}% remaining` : capacity.detail ?? "unreadable";
+}
+
+function renderProviderRefusal(capacity: ProviderCapacity): string {
+  const condition = providerRefusalCondition(capacity) === "full" ? "full" : "cannot be asked";
+  return `${capacity.provider}=${condition} (${providerRefusalDetail(capacity)})`;
 }
 
 export class CodexToolchainBlockedError extends Error {
@@ -4154,7 +4158,7 @@ export function repairLadderStallFrom(error: unknown, fallbacks: readonly Repair
     providers: error.capacities.map((capacity) => ({
       provider: capacity.provider,
       condition: providerRefusalCondition(capacity),
-      detail: renderProviderRefusal(capacity).replace(/^[^=]*=/, ""),
+      detail: providerRefusalDetail(capacity),
     })),
     fallbacks: fallbacks.map((fallback) => ({ ...fallback })),
   };
