@@ -1,9 +1,9 @@
 - id: W1-T4354
   title: "30% OF TASKS MATCH ZERO LEARNINGS — add a deterministic BM25 lane that fills only the budget the glob/symbol/error match leaves empty, assigned per run by a seeded draw whose propensity is ledgered, so W1-T4241's outcome fold decides whether it helps"
   repo: remudero
-  depends_on: [W1-T4241, W1-T4243]
+  depends_on: [W1-T4241, W1-T4243, W1-T4606]
   type: implement
-  verify: auto
+  verify: human
   principles: {tdd: strict}
   budget_usd: 45.00
   risk: high
@@ -61,4 +61,4 @@
     off and replay every plan record against main's `selectLearnings`: any difference in selected, dropped or
     matchedBy fails. Draw the lane from wall-clock time instead of the run seed and the same-seed-same-selection
     case must fail. Drop the lane assignment from the ledger row and the fold-input case must fail.
-  note: "Measurement-first retrieval: the lane is a randomized arm the outcome fold judges, not a relevance claim. Filed after the turbopuffer/Cursor scan; the embedding alternative stays rejected by the three rulings named in (2)."
+  note: "Human verification parks this live prompt-injection trial until W1-T4606's source-pinned candidate report has representative relevance and misleading-hit labels and an operator explicitly releases the trial. The lane remains a randomized arm the outcome fold judges, not a relevance claim. Filed after the turbopuffer/Cursor scan; the embedding alternative stays rejected by the three rulings named in (2)."
