@@ -1424,6 +1424,7 @@ import {
   ABSENT_REPUSH_CAP,
   DEFAULT_FIX_CLASSES,
   buildSweepEffects as buildSweepEffectsFromLib,
+  checkJobId,
   corroboratedIneligibilityReason,
   currentPlanIneligibilityReason,
   defaultSweepGhRun,
@@ -5530,7 +5531,37 @@ async function restRollupFor(
   const combined = await read(combinedStatusRestArgs(owner, repo, sha));
   const resolved: unknown[] = [runs, combined];
   let next = 0;
-  return rollupFor(owner, repo, sha, () => resolved[next++]);
+  return attachPostedGateIds(rollupFor(owner, repo, sha, () => resolved[next++]), runs);
+}
+
+/** REST rollups preserve check-run order, so the raw response can supply external_id without
+ * changing the shared REST mapper used by unrelated callers. */
+function attachPostedGateIds<T extends object>(
+  rollup: T[],
+  response: unknown,
+): T[] {
+  const runs = (response as { check_runs?: Array<{ external_id?: unknown }> } | undefined)?.check_runs;
+  runs?.forEach((run, index) => {
+    if (typeof run.external_id === "string" && rollup[index]) {
+      (rollup[index] as T & { externalId?: string }).externalId = run.external_id;
+    }
+  });
+  return rollup;
+}
+
+export function fetchOpenPrsWithPostedIds(owner: string, repo: string, fetch: GhApiFetcher): OpenPrRest[] {
+  const checkRuns = new Map<string, unknown>();
+  const prs = fetchOpenPrsRest(owner, repo, (args, onRateLimit) => {
+    const response = fetch(args, onRateLimit);
+    if (args[1]?.includes("/check-runs?")) checkRuns.set(args[1], response);
+    return response;
+  });
+  for (const pr of prs) {
+    if (pr.statusCheckRollup) {
+      attachPostedGateIds(pr.statusCheckRollup, checkRuns.get(checkRunsRestArgs(owner, repo, pr.headRefOid)[1]));
+    }
+  }
+  return prs;
 }
 
 /**
@@ -34464,8 +34495,10 @@ interface RollupCheck {
   status?: string;
   conclusion?: string;
   state?: string;
-  /** The check's GitHub Actions job URL (…/actions/runs/<run>/job/<job>) — the ci-log mode's log source (W1-T100). */
+  /** The check's GitHub Actions job URL, when GitHub has not rewritten it to a check-run URL. */
   detailsUrl?: string;
+  /** Checks API posts retain `job:<id>` here when GitHub rewrites their details URL. */
+  externalId?: string;
   /** When this attempt started — see {@link RollupCheckEntry.startedAt} (lib/sweep.ts), which this
    *  type is structurally assignable to. Feeds {@link dedupeRollupByLatestAttempt} (W1-T457). */
   startedAt?: string;
@@ -34944,10 +34977,10 @@ export function fetchCiFailures(
     // SURVIVES the read, instead of being swallowed with the error that carried it.
     let logUnavailable: CiLogUnavailableCause | undefined = { kind: "no-job-id" };
     let tailSource: CiTailSource | undefined;
-    // W1-T2298: the id parsed here is ALSO the check-run id — measured equal on twelve checks across
-    // four PRs — so the annotation fallback below needs no new id plumbing and no new rollup field.
+    // W1-T2298: native Actions jobs have matching job and check-run ids. Posted gates preserve
+    // their posting job in externalId when their detailsUrl is rewritten to /runs/<check-run-id>.
     // Hoisted out of the `try` so the fallback can reach it after the read has already failed.
-    const jobId = c.detailsUrl?.match(/\/job\/(\d+)/)?.[1];
+    const jobId = checkJobId(c);
     let annotationFallback: CiAnnotationFallback | undefined;
     if (jobId && annotationReads < fetch.annotationReadLimit) {
       try {
@@ -35025,9 +35058,10 @@ export function fetchCiFailures(
  * mirroring how {@link fetchCiFailures} is the real gateway's producer for `ciFailures`: both name
  * off the SAME `cancelledRequiredCheckNames` predicate lib/sweep.ts owns, so this producer and
  * `checksStateFromRollup`'s red verdict can never drift into disagreeing about which check is
- * cancelled. `jobId` is parsed from the SAME `detailsUrl` shape `fetchCiFailures` already reads
- * (`…/actions/runs/<run>/job/<job>`) — best-effort, `undefined` when it cannot be read, so
+ * cancelled. `jobId` uses the SAME URL-or-external-id resolver `fetchCiFailures` reads —
+ * best-effort, `undefined` when neither carries a job id, so
  * `requeueCheck`'s real wiring degrades to a named no-op rather than guessing a re-queue target.
+ * Posted gates use `externalId` when GitHub rewrites their URL to /runs/<check-run-id>.
  *
  * W1-T2283 — `requiredContexts` is READ (still the one precondition — see
  * {@link cancelledRequiredCheckNames}'s own doc) but no longer narrows WHICH cancelled check gets
@@ -35047,7 +35081,7 @@ export function cancelledRequiredChecks(
   const deduped = dedupeRollupByLatestAttempt(rollup ?? []);
   return deduped
     .filter((c) => names.has(c.name ?? c.context ?? "unknown"))
-    .map((c) => ({ name: c.name ?? c.context ?? "unknown", jobId: c.detailsUrl?.match(/\/job\/(\d+)/)?.[1] }));
+    .map((c) => ({ name: c.name ?? c.context ?? "unknown", jobId: checkJobId(c) }));
 }
 
 /**
@@ -35620,7 +35654,7 @@ export function buildOpenPrViews(
     ((record: PendingReviewStatusRecord) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }));
   // W1-T468: waits its turn on the shared pacer (a no-op absent one) before the real list call,
   // and reports back whether it was rate-limited — see lib/open-prs-rest.ts's `GhCallPacer` doc.
-  const raw = paceGhEntry(deps.pacer, isGhRateLimitError, () => fetchOpenPrsRest(owner, repo, fetch)) as RawOpenPr[];
+  const raw = paceGhEntry(deps.pacer, isGhRateLimitError, () => fetchOpenPrsWithPostedIds(owner, repo, fetch)) as RawOpenPr[];
   const ledger = readLedgerLines(ledgerPath);
   // W1-T435: the SAME evidence pass that quotes an operator's steering note also produces
   // `pendingAnswer` from an answered clarification — a local file read, never GitHub.
