@@ -8,7 +8,7 @@
   budget_usd: 80.00
   risk: high
   band_meaning: span
-  origin: "follow-up audit of merged W1-T4580 implementation PR #7350, 2026-09-27"
+  origin: "follow-up audit of #7350, reconciled to W1-T4580 implementation PR #7405, 2026-09-27"
   plan_refs: ["W1-T4580", "W1-T4457", "W1-T4554", "docs/research/model-evidence-program.md"]
   files:
     - src/lib/benchmark-run.ts
@@ -31,14 +31,16 @@
     - test/benchmark-nondispatch-attempts.test.ts
     - test/every-worker-lane-ledgers-its-assignment.test.ts
     - docs/model-routing.md
-  status: queued
+  status: blocked
+  retirement: closed
   rationale: |
-    PR #7350 shipped assignment receipts for the non-dispatch path, but did not add
-    attempt/outcome receipts, a source caller census, or distinct cash-ladder rung
-    assignments. W1-T4580's broader design and four acceptance claims therefore remain
-    only partly implemented even though that task received merge credit. A cohort that
-    counts these assignments as observed model calls would still understate failed
-    auxiliary and cash attempts and bias model comparisons.
+    The original filing misattributed W1-T4580 to PR #7350; that PR implemented
+    W1-T4457. PR #7405 then merged the actual W1-T4580 implementation, including
+    this follow-up's four acceptance claims: the caller census, auxiliary attempt
+    receipts, distinct cash-ladder rung assignments, and fail-open receipt handling.
+    Each claim below names that merged PR as its satisfaction evidence. This retires
+    duplicate implementation work, not the separate runtime-coverage audit or
+    publication review; those remain independent before any public comparison.
   design: |
     Preserve #7350's authoritative worker.assignment producer and add metadata-only
     worker.attempt receipts at the same boundary. Keep assignment ID, run, lane,
@@ -56,12 +58,16 @@
   acceptance:
     - claim: "a source census detects an unclassified direct or injected model worker caller"
       proof: "unit test: benchmark worker caller census catches an unclassified spawn"
+      satisfied_by: "https://github.com/craigoley/remudero/pull/7405"
     - claim: "cash, review, triage and judge model calls get attempt receipts or named coverage debt"
       proof: "unit test: non-dispatch benchmark attempts cover cash review triage and judge lanes"
+      satisfied_by: "https://github.com/craigoley/remudero/pull/7405"
     - claim: "cash fallback rungs keep selected model and cost on distinct assignments, not task wins"
       proof: "unit test: cash ladder fallback attempts keep each selected model and cost on its own assignment"
+      satisfied_by: "https://github.com/craigoley/remudero/pull/7405"
     - claim: "receipt failure preserves the worker, cash retry and existing assignment callback"
       proof: "unit test: non-dispatch benchmark receipt failure preserves normal flow"
+      satisfied_by: "https://github.com/craigoley/remudero/pull/7405"
   falsifier: |
     A cash fallback inherits the first rung's model label; a reviewer attempt is
     counted as verified task completion; an unclassified caller silently disappears;
