@@ -1,0 +1,15 @@
+- id: W1-T4592
+  title: Add post-dispatch guard probes to ensure open PRs stay in sync with origin/main
+  repo: remudero/master-plan
+  depends_on:
+    - W1-T4591
+  type: implement
+  verify:
+    proof: "manual-check: verify origin/main not diverging before W1-T4081 dispatch"
+  risk: low
+  status: queued
+  attempts: 0
+  origin: followup:W1-T4081-1790143034676
+  files:
+    - plan/tasks.yaml
+    - MASTER-PLAN.md

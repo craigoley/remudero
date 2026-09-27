@@ -1,0 +1,15 @@
+- id: W1-T4593
+  title: Document ratification criteria for P25 alignment (MASTER-PLAN §7)
+  repo: remudero/master-plan
+  depends_on:
+    - W1-T4592
+  type: implement
+  verify:
+    proof: "manual-check: ensure criteria align with plan/tasks.yaml and existing decisions"
+  risk: low
+  status: queued
+  attempts: 0
+  origin: followup:W1-T4081-1790143034676
+  files:
+    - plan/tasks.yaml
+    - MASTER-PLAN.md
