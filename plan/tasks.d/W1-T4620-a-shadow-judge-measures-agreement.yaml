@@ -1,0 +1,39 @@
+- id: W1-T4620
+  title: "JUDGE MODELS ARE NEVER COMPARED — reviewer, risk-judge and verify-human-judge decisions are read-only and outcome-verifiable, the cheapest place to learn which model judges well, yet each decision is made by one model once"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: model-evidence research — every run should add usable model evidence or an explicit coverage gap"
+  plan_refs: ["W1-T100001", "W1-T4574", "W1-T4575", "W1-T4580", "W1-T4603", "W1-T4607", "W1-T4608"]
+  files:
+    - src/lib/shadow-judge.ts
+    - src/run-task.ts
+    - test/a-shadow-judge-measures-agreement.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27 over the three fleets' full ledger unions (core 773,650 / console 356,871 /
+    site 269,728 rows, 2026-09-20..27) and origin/main 12baa03. Review.posted carries per-criterion
+    decisions (claim, proof_exec, met, floorMet) and reward_hacking_gap; verify_human.judged and the
+    risk judge record decisions whose correctness later becomes observable (merged and surviving,
+    reverted, operator overrode). Read-only judgements can be repeated by a second model with no
+    effect on the repository, making them the lowest-risk surface for a genuine paired comparison.
+  design: |
+    Sample a bounded fraction of read-only judge decisions (review semantic verdicts, risk-judge
+    dispositions, verify-human decisions) and re-run each with a different model in shadow,
+    recording both decisions with their assignments. Measure agreement, and once W1-T4608's verified
+    outcomes exist, calibration of each judge model against them. The shadow decision never gates,
+    posts or changes anything; spend is bounded by measured headroom and paid arms by W1-T4603.
+  acceptance:
+    - claim: "a sampled read-only judge decision is re-run by a different model in shadow and both decisions are recorded without gating anything"
+      proof: "unit test: test/a-shadow-judge-measures-agreement.test.ts"
+    - claim: "the new module is wired into its production caller, not shipped unwired"
+      proof: "grep: runShadowJudge( in src/run-task.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale measured.

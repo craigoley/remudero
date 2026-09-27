@@ -1,0 +1,39 @@
+- id: W1-T4614
+  title: "A PR HEAD DOES NOT SAY WHICH MODEL WROTE IT — ~60 core PRs were reviewed at 2-7 heads, often a fix worker's, and no ledger row names the worker behind a head, so a review or CI verdict cannot be pinned on a model"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: model-evidence research — every run should add usable model evidence or an explicit coverage gap"
+  plan_refs: ["W1-T100001", "W1-T4574", "W1-T4575", "W1-T4580", "W1-T4603", "W1-T4607", "W1-T4608"]
+  files:
+    - src/run-task.ts
+    - src/lib/worker.ts
+    - test/a-commit-names-the-assignment-that-wrote-it.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27 over the three fleets' full ledger unions (core 773,650 / console 356,871 /
+    site 269,728 rows, 2026-09-20..27) and origin/main 12baa03. Neither `implement.done` nor
+    `pr.opened` carries a head sha (only `implement.harness_commit.sha`, on 164 runs);
+    `review.posted` is keyed on pr_url + head_sha with task_id PR-<n>. About 60 PRs were reviewed at
+    2-7 different heads, a later head often a fix worker's commit. Ledger rows rotate; git history
+    does not. Putting the authoring assignment into the commit itself makes head-to-model lineage
+    durable, GitHub-joinable (CI per head, reverts, blame) and independent of ledger retention.
+  design: |
+    Every commit a worker or the harness creates in a run worktree carries a `Remudero-Assignment:
+    <selection_assignment_id>` trailer (the harness commit path adds it directly; for shell-capable
+    workers the run worktree gets a prepare-commit-msg hook that appends it, so a worker cannot
+    forget it). `implement.done` and `pr.opened` carry the pushed head sha, and a helper resolves a
+    head sha to its authoring assignment from the trailer. A commit made outside a run keeps no
+    trailer and reads as `unattributed`, never guessed.
+  acceptance:
+    - claim: "every commit a run worker or the harness makes carries its Remudero-Assignment trailer, and a pushed head resolves to its authoring assignment or reads unattributed"
+      proof: "unit test: test/a-commit-names-the-assignment-that-wrote-it.test.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale measured.

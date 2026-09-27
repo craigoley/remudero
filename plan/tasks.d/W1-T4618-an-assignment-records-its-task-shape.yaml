@@ -1,0 +1,38 @@
+- id: W1-T4618
+  title: "MODEL COMPARISONS CANNOT ADJUST FOR DIFFICULTY — assignments record only task class and risk, while 57% of core work is high/src, so any per-model rate mixes easy and hard work"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: model-evidence research — every run should add usable model evidence or an explicit coverage gap"
+  plan_refs: ["W1-T100001", "W1-T4574", "W1-T4575", "W1-T4580", "W1-T4603", "W1-T4607", "W1-T4608"]
+  files:
+    - src/lib/benchmark-run.ts
+    - src/lib/worker.ts
+    - src/lib/benchmark-cohort.ts
+    - test/an-assignment-records-its-task-shape.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27 over the three fleets' full ledger unions (core 773,650 / console 356,871 /
+    site 269,728 rows, 2026-09-20..27) and origin/main 12baa03. `benchmark_run.work` on
+    worker.assignment carries taskClass and risk only. Core is 57% implement/high/src; the cash-
+    simple trial's eligible population (low-risk single-file docs/plan-lint) was empty for 274
+    run.starts, which nothing measured in advance. Difficulty is the dominant confounder of every
+    observational per-model comparison (W1-T4574, W1-T4608).
+  design: |
+    Record a bounded task-shape covariate block at assignment from data already in hand: declared
+    file count and top-level areas, acceptance criterion count and proof dialects, depends_on depth,
+    attempt number and prior strike count, lane, repo, and the recon size estimate when recon ran.
+    No free text, no paths beyond top-level area names. Expose the block to the cohort projection as
+    stratification dimensions with explicit unavailable values.
+  acceptance:
+    - claim: "an assignment records a bounded task-shape covariate block with explicit unavailable values, and the cohort can stratify by it"
+      proof: "unit test: test/an-assignment-records-its-task-shape.test.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale measured.

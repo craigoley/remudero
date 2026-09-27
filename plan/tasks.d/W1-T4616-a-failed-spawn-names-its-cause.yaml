@@ -1,0 +1,41 @@
+- id: W1-T4616
+  title: "~105 JUDGE AND SUMMARY SPAWNS AN HOUR THROW BEFORE A MODEL IS CHOSEN AND THE CAUSE IS NEVER RECORDED — worker.attempt says only spawn-threw-before-result, and those rows sit in benchmark denominators"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: model-evidence research — every run should add usable model evidence or an explicit coverage gap"
+  plan_refs: ["W1-T100001", "W1-T4574", "W1-T4575", "W1-T4580", "W1-T4603", "W1-T4607", "W1-T4608"]
+  files:
+    - src/lib/benchmark-run.ts
+    - src/lib/benchmark-evidence.ts
+    - src/lib/verify-human-judge.ts
+    - test/a-failed-spawn-names-its-cause.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27 over the three fleets' full ledger unions (core 773,650 / console 356,871 /
+    site 269,728 rows, 2026-09-20..27) and origin/main 12baa03. Since 2026-09-27T00Z core logs about
+    70/h `verify-human-judge` and 35/h `escalation-summary` `worker.attempt` rows with
+    `worker_failure: spawn-threw-before-result` and no assignment (467 of 638 attempts in the
+    window); one daemon process emits ~35 in 8 seconds per cycle while only ~13
+    `verify_human.judged` rows land per hour, some `judge_failed` 'failing open to needs_operator'.
+    `benchmarkNonDispatchSpawn` (src/lib/benchmark-run.ts) records the failure and rethrows, but the
+    thrown error's class and message are never ledgered, so the cause is invisible and these pre-
+    selection failures inflate every attempt denominator.
+  design: |
+    Record a bounded, redacted error class and message (no prompt text or paths) on every `spawn-
+    threw-before-result` attempt row, and mark pre-selection failures (no assignment observed) as a
+    separate outcome class that benchmark-quality-v1 and the cohort exclude from model denominators
+    while still counting them as a coverage gap. Diagnose the verify-human-judge / escalation-
+    summary loop from the newly recorded cause and fix it in the same task if it is a local defect.
+  acceptance:
+    - claim: "a spawn that throws before selection records a bounded error class and message and is excluded from model denominators while counted as a coverage gap"
+      proof: "unit test: test/a-failed-spawn-names-its-cause.test.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale measured.

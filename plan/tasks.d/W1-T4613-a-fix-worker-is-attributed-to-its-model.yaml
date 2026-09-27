@@ -1,0 +1,39 @@
+- id: W1-T4613
+  title: "THE FIX LANE SPENDS WITHOUT A MODEL — 577 fix.done rows carry cost but no provider, model, effort, tokens, duration or assignment, so the repair rung's spend and every head it authors are unattributable"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: model-evidence research — every run should add usable model evidence or an explicit coverage gap"
+  plan_refs: ["W1-T100001", "W1-T4574", "W1-T4575", "W1-T4580", "W1-T4603", "W1-T4607", "W1-T4608"]
+  files:
+    - src/run-task.ts
+    - src/lib/benchmark-run.ts
+    - test/a-fix-worker-is-attributed-to-its-model.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27 over the three fleets' full ledger unions (core 773,650 / console 356,871 /
+    site 269,728 rows, 2026-09-20..27) and origin/main 12baa03. `fix.done` (src/run-task.ts, the fix
+    rung) records cost, billing, account, turns and session, but 0% of 577 core rows carry
+    provider/model/effort/tokens/duration and 0% a selection_assignment_id; only 8
+    `worker.assignment` rows have lane=sweep-fix, and 1 of 577 fix runs can be matched to an
+    assignment within 2h. Fix runs log under the daemon's run id (`DAEMON-<pid>`), so there is no
+    per-worker run id either. 422 of 577 fix rows had non-zero cost. W1-T4608's exact head lineage
+    cannot attribute a review verdict on a fix worker's head to any model.
+  design: |
+    Route every fix-rung worker spawn through the same assignment/receipt path dispatch uses
+    (benchmarkRunLedgerLogger / the worker.assignment + worker.attempt pair), give each fix worker
+    its own run id, and put the workerLedgerFields (provider, requested/selected/served model,
+    effort, tokens, duration, cost, billing mode, selection_assignment_id) on `fix.done`. A receipt
+    failure never blocks the fix; it is recorded as an explicit unavailable field.
+  acceptance:
+    - claim: "a fix worker's run records its own run id, assignment and provider/model/effort/tokens/duration on fix.done, and a receipt failure never blocks the fix"
+      proof: "unit test: test/a-fix-worker-is-attributed-to-its-model.test.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale measured.

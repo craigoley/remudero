@@ -1,0 +1,44 @@
+- id: W1-T4619
+  title: "THE FLEET'S OWN MERGED WORK IS A CONTAMINATION-RESISTANT BENCHMARK NOBODY RUNS — tasks whose executable proofs failed at base and passed at head are ready-made graded items, and idle fleets have capacity to replay them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: model-evidence research — every run should add usable model evidence or an explicit coverage gap"
+  plan_refs: ["W1-T100001", "W1-T4574", "W1-T4575", "W1-T4580", "W1-T4603", "W1-T4607", "W1-T4608"]
+  files:
+    - src/lib/golden-corpus.ts
+    - src/lib/replay-harness.ts
+    - test/merged-work-becomes-a-held-out-golden.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27 over the three fleets' full ledger unions (core 773,650 / console 356,871 /
+    site 269,728 rows, 2026-09-20..27) and origin/main 12baa03. The golden-replay leg
+    (src/lib/replay-harness.ts, W1-T2689) is opt-in and bounded but its corpus is a small hand-
+    seeded set with almost no production runs. Meanwhile review.posted records per-criterion
+    proof_exec for every PR (core: 2,100 executed_pass, with W1-T362 discrimination against the
+    merge-base), so every merged task whose proofs failed at base and passed at head is a graded,
+    repository-specific, post-training-cutoff task with an executable scorer. Static public coding
+    benchmarks are contaminated (SWE-rebench); these items are fresh by construction and dated. The
+    console and site fleets spend hours in idle quiet mode (W1-T4601).
+  design: |
+    (i) Derive a golden corpus from merged tasks whose every executable proof discriminated (failed
+    at base, passed at head): record task id, base sha, shard acceptance and the merge date; hold
+    items out of any worker prompt. (ii) A bounded, opt-in replay runs a sample on a pinned stack
+    across a model x effort matrix only when the fleet is idle (quiet mode) and headroom is
+    measured, never competing with dispatch, and records replay results with the corpus item's
+    freshness. (iii) Scores are the task's own proofs; a proof that cannot execute is unmeasurable,
+    never a pass. Paid arms stay inside W1-T4603's envelope.
+  acceptance:
+    - claim: "a merged task whose every executable proof failed at base and passed at head enters the dated held-out corpus, and replay runs only when the fleet is idle"
+      proof: "unit test: test/merged-work-becomes-a-held-out-golden.test.ts"
+    - claim: "the new module is wired into its production caller, not shipped unwired"
+      proof: "grep: deriveGoldenCorpus( in src/lib/replay-harness.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale measured.
