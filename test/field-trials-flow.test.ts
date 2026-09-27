@@ -421,7 +421,7 @@ test("field trials replay late evidence without blocking work", async () => {
       "repos/acme/core/commits": [{ sha: "merge-sha-91", commit: { committer: { date: T(1, 10) } } }] });
     const printed: string[] = [];
     assert.equal(await fieldTrialsCommand([...args, "--ledger", `core=${ledger.dir}`], buildFieldTrialsFlowSnapshot,
-      { nowIso: T(20), fetch, print: (line) => printed.push(line) }), 0);
+      { nowIso: T(20), fetch, print: (line) => printed.push(line), resolveConfig: () => ({ root }) }), 0);
     const manifestPath = join(out, "field-trials-release-manifest.json");
     const good = parseReleaseManifest(JSON.parse(readFileSync(manifestPath, "utf8")));
     assert.equal(good.lastRefresh!.state, "released");
@@ -432,7 +432,8 @@ test("field trials replay late evidence without blocking work", async () => {
 
     const errors: string[] = [];
     const failed = await fieldTrialsCommand([...args, "--ledger", `core=${join(root, "no-such-state")}`], buildFieldTrialsFlowSnapshot,
-      { nowIso: T(21), fetch: pageFake({}, () => true), print: () => undefined, printError: (line) => errors.push(line) });
+      { nowIso: T(21), fetch: pageFake({}, () => true), print: () => undefined, printError: (line) => errors.push(line),
+        resolveConfig: () => ({ root }) });
     assert.equal(failed, 1, "the refresh reports its failure to the operator");
     const event = JSON.parse(errors[0]!);
     assert.deepEqual([event.event, event.reason, event.last_known_good.releaseId], ["field_trials.refresh_failed", "no-source-observed",
