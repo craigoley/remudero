@@ -100,6 +100,7 @@ import {
   type BenchmarkSourceQuality,
   type BenchmarkTerminalEvidence,
 } from "./benchmark-evidence.js";
+import { ABILITY_MAP_VERSION, abilityObservation, fitAbilityMap, unavailableAbilityMap, type AbilityMap, type AbilityObservation } from "./ability-map.js";
 
 /** One (lane, model) bucket of question 2 — worker counts and cost by lane/model. */
 export interface WorkerLaneModelBucket {
@@ -335,6 +336,7 @@ export interface AnalyticsSnapshot {
   /** W1-T4024 — money, in dollars, never mixed with subscription utilisation. */
   spend: { cash: CashSpendSnapshot };
   usage?: UsageProjection;
+  abilityMap?: AbilityMap;
   /** Outcome and work-category dimensions built from terminal run evidence. */
   dimensions: AnalyticsBreakdownDimension[];
   /** Flat rows for console drilldown views, derived from the same bounded dimensions. */
@@ -714,6 +716,8 @@ type RoutingAssignment = {
   taskClass?: string;
   risk?: string;
   taskType: string;
+  taskId?: string;
+  role?: string;
   routingRule: string;
   preferenceBypassed: boolean;
   preferredProvider?: string;
@@ -1142,6 +1146,29 @@ function boundedRoutingRule(assignment: Record<string, unknown>): string {
   return selectionPath ? `${mode}:${selectionPath}` : mode;
 }
 
+function abilityIdentity(line: Record<string, unknown>, runType: string | undefined): { taskId?: string; role?: string } {
+  const lane = str(line.lane);
+  const taskId = str(line.task_id);
+  const role = lane ?? runType;
+  return {
+    ...(taskId && taskId !== lane?.toUpperCase() ? { taskId } : {}),
+    ...(role ? { role } : {}),
+  };
+}
+
+function snapshotAbilityMap(acc: RoutingTelemetryAccumulator): AbilityMap {
+  const observations: AbilityObservation[] = [];
+  const excluded = { withoutTask: 0, withoutOutcome: 0 };
+  for (const [id, assignment] of acc.assignmentsById) {
+    const success = (acc.terminalsByAssignmentId.get(id) ?? acc.attemptsByAssignmentId.get(id))?.success;
+    if (!assignment.taskId) excluded.withoutTask += 1;
+    else if (typeof success !== "boolean") excluded.withoutOutcome += 1;
+    else observations.push(abilityObservation({ model: assignment.model, role: assignment.role ?? "unknown", task: assignment.taskId, recordedSuccess: success }));
+  }
+  const map = observations.length > 0 ? fitAbilityMap(observations) : unavailableAbilityMap("no-joined-observations");
+  return { ...map, excluded };
+}
+
 function routingAssignmentFromLine(acc: RoutingTelemetryAccumulator, line: Record<string, unknown>): RoutingAssignment | undefined {
   if (line.step !== "worker.assignment" || !line.worker_assignment || typeof line.worker_assignment !== "object") return undefined;
   const raw = line.worker_assignment as Record<string, unknown>;
@@ -1179,6 +1206,7 @@ function routingAssignmentFromLine(acc: RoutingTelemetryAccumulator, line: Recor
     ...(runId && acc.taskClassesByRun.has(runId) ? { taskClass: acc.taskClassesByRun.get(runId) } : {}),
     ...(runId && acc.risksByRun.has(runId) ? { risk: acc.risksByRun.get(runId) } : {}),
     taskType: (runId && acc.taskTypesByRun.get(runId)) ?? "unknown",
+    ...abilityIdentity(line, runId ? acc.taskTypesByRun.get(runId) : undefined),
     routingRule: boundedRoutingRule(raw),
     preferenceBypassed,
     ...(preferredProvider ? { preferredProvider } : {}),
@@ -1592,6 +1620,7 @@ function snapshotFromAccumulator(
     enumerable: false,
     writable: false,
   });
+  Object.defineProperty(out, "abilityMap", { value: snapshotAbilityMap(acc.routingTelemetry), enumerable: false, writable: false });
   if (!acc.invocationsMeasured) out.invocationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   if (!acc.workerDurationsMeasured) out.workerDurationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   return out;
@@ -2323,6 +2352,10 @@ export function buildAnalyticsRoute(deps: {
       }
       if (requestedVersion === BENCHMARK_QUALITY_VERSION) {
         sendJson(res, 200, base.benchmarkEvidence ?? unavailableBenchmarkEvidence("quality-projection-refresh-pending"));
+        return;
+      }
+      if (requestedVersion === ABILITY_MAP_VERSION) {
+        sendJson(res, 200, base.abilityMap ?? unavailableAbilityMap("ability-map-refresh-pending"));
         return;
       }
       if (requestedVersion === USAGE_PROJECTION_VERSION) {
