@@ -199,6 +199,15 @@ const DECLARED: readonly Declared[] = [
   },
   {
     kind: "chmod",
+    file: "a-host-reboot-keeps-cash-credentials.test.ts",
+    key: "0o644",
+    count: 1,
+    reason:
+      "the boot launcher explicitly rejects a secret whose stat mode is not 0o600 before reading it. " +
+      "The test checks that policy decision, not an OS read denial, so uid 0 has the same result.",
+  },
+  {
+    kind: "chmod",
     file: "state-backup.test.ts",
     key: "0o600",
     count: 1,
