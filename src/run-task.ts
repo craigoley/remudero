@@ -36120,6 +36120,7 @@ export function buildOpenPrViews(
       taskRetirement: taskRecord?.retirement,
       planResequenceIneligible,
       planResequenceUnmetDependencies,
+      planResequenceHeld: undefined,
       // W1-T923: a SIBLING read, off the SAME `review.posted` ledger line `unmetCriteria` above
       // already scans — see `actionableGateFailuresFromLedger`'s own doc for why it is keyed
       // differently (no `isPlanOnlyFilingPr` gate) and why it never parses `failure_reason`.
