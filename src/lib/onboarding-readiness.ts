@@ -80,6 +80,8 @@ export interface OnboardingReadinessGateway {
   getRepo(owner: string, repo: string): OnboardingReadinessApiRead | undefined;
   /** `GET /repos/{owner}/{repo}/branches/{branch}/protection`. */
   getBranchProtection(owner: string, repo: string, branch: string): OnboardingReadinessApiRead | undefined;
+  /** Active repository and organization rulesets applying to the default branch. */
+  getBranchRules(owner: string, repo: string, branch: string): OnboardingReadinessApiRead | undefined;
   /** `GET /repos/{owner}/{repo}/contents/{path}` — a file (object, base64 `content`) or a
    *  directory (array of entries); a 404 status means "confirmed absent", not a failed read. */
   getContents(owner: string, repo: string, path: string): OnboardingReadinessApiRead | undefined;
@@ -91,6 +93,7 @@ export interface OnboardingReadinessGatewayAsync {
   listInstallationRepos(): Promise<string[] | undefined>;
   getRepo(owner: string, repo: string): Promise<OnboardingReadinessApiRead | undefined>;
   getBranchProtection(owner: string, repo: string, branch: string): Promise<OnboardingReadinessApiRead | undefined>;
+  getBranchRules(owner: string, repo: string, branch: string): Promise<OnboardingReadinessApiRead | undefined>;
   getContents(owner: string, repo: string, path: string): Promise<OnboardingReadinessApiRead | undefined>;
 }
 
@@ -138,7 +141,8 @@ export function onboardingReadinessGateway(execFileFn: (args: string[]) => strin
       }
     },
     getRepo: (owner, repo) => apiRead(`repos/${owner}/${repo}`),
-    getBranchProtection: (owner, repo, branch) => apiRead(`repos/${owner}/${repo}/branches/${branch}/protection`),
+    getBranchProtection: (owner, repo, branch) => apiRead(`repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}/protection`),
+    getBranchRules: (owner, repo, branch) => apiRead(`repos/${owner}/${repo}/rules/branches/${encodeURIComponent(branch)}`),
     getContents: (owner, repo, path) => apiRead(`repos/${owner}/${repo}/contents/${path}`),
   };
 }
@@ -163,7 +167,8 @@ export function onboardingReadinessGatewayAsync(read: (args: string[]) => Promis
       }
     },
     getRepo: (owner, repo) => apiRead(`repos/${owner}/${repo}`),
-    getBranchProtection: (owner, repo, branch) => apiRead(`repos/${owner}/${repo}/branches/${branch}/protection`),
+    getBranchProtection: (owner, repo, branch) => apiRead(`repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}/protection`),
+    getBranchRules: (owner, repo, branch) => apiRead(`repos/${owner}/${repo}/rules/branches/${encodeURIComponent(branch)}`),
     getContents: (owner, repo, path) => apiRead(`repos/${owner}/${repo}/contents/${path}`),
   };
 }
@@ -192,16 +197,20 @@ export async function readOnboardingReadinessSnapshot(
     ...READINESS_CONTENT_PATHS.map((path) => unknownOnReadFailure(() => gateway.getContents(owner, repo, path))),
   ]);
   const branch = (repoRead?.body as { default_branch?: unknown } | null)?.default_branch;
-  const protection = repoRead?.status === 200 && typeof branch === "string" && branch
-    ? await unknownOnReadFailure(() => gateway.getBranchProtection(owner, repo, branch))
-    : undefined;
+  const [protection, rules] = repoRead?.status === 200 && typeof branch === "string" && branch
+    ? await Promise.all([
+      unknownOnReadFailure(() => gateway.getBranchProtection(owner, repo, branch)),
+      unknownOnReadFailure(() => gateway.getBranchRules(owner, repo, branch)),
+    ])
+    : [undefined, undefined];
   const byPath = new Map<string, OnboardingReadinessApiRead | undefined>(READINESS_CONTENT_PATHS.map((path, index) => [path, contents[index]]));
   return {
     complete: installed !== undefined && repoRead !== undefined && contents.every((read) => read !== undefined)
-      && (repoRead.status !== 200 || (typeof branch === "string" && branch.length > 0 && protection !== undefined)),
+      && (repoRead.status !== 200 || (typeof branch === "string" && branch.length > 0 && protection !== undefined && rules !== undefined)),
     listInstallationRepos: () => installed,
     getRepo: () => repoRead,
     getBranchProtection: (_owner, _repo, requestedBranch) => requestedBranch === branch ? protection : undefined,
+    getBranchRules: (_owner, _repo, requestedBranch) => requestedBranch === branch ? rules : undefined,
     getContents: (_owner, _repo, path) => byPath.get(path),
   };
 }
@@ -272,28 +281,64 @@ function checkBranchProtection(
   if (defaultBranch === undefined) {
     return check("branch-protection", "unknown", "default branch unknown — cannot check its protection");
   }
-  const read = gateway.getBranchProtection(owner, repo, defaultBranch);
-  if (read === undefined) {
-    return check("branch-protection", "unknown", "branch protection read failed");
+  const classic = gateway.getBranchProtection(owner, repo, defaultBranch);
+  const rules = gateway.getBranchRules(owner, repo, defaultBranch);
+  const classicChecks = classic?.status === 200 ? parseClassicRequiredChecks(classic.body) : undefined;
+  const activeRules = rules?.status === 200 ? parseActiveBranchRules(rules.body) : undefined;
+  const rulesetChecks = activeRules?.requiredChecks;
+  const requiredChecks = [...new Set([...(classicChecks ?? []), ...(rulesetChecks ?? [])])].sort();
+  if (requiredChecks.length > 0) {
+    const source = classicChecks?.length && rulesetChecks?.length ? "classic protection and active rulesets"
+      : classicChecks?.length ? "classic branch protection" : "active rulesets";
+    return check("branch-protection", "pass", `${defaultBranch} has ${requiredChecks.length} required status check(s) through ${source}`, requiredChecks.join(", "));
   }
-  if (read.status === 404) {
-    return check("branch-protection", "fail", `${defaultBranch} has no branch protection configured`);
+  if (classic === undefined || (classic.status !== 200 && classic.status !== 404) || (classic.status === 200 && classicChecks === undefined)
+    || rules === undefined || rules.status !== 200 || activeRules === undefined) {
+    return check("branch-protection", "unknown", "classic protection or active rulesets could not be read completely");
   }
-  if (read.status !== 200) {
-    return check("branch-protection", "unknown", `branch protection read returned HTTP ${read.status}`);
+  if (classic.status === 200 || activeRules.count > 0) {
+    return check("branch-protection", "warn", `${defaultBranch} has protection but no required status checks`);
   }
-  const body = read.body as { required_status_checks?: { contexts?: unknown } } | null;
-  const contexts = body?.required_status_checks?.contexts;
-  const requiredChecks = Array.isArray(contexts) ? contexts.filter((c): c is string => typeof c === "string") : [];
-  if (requiredChecks.length === 0) {
-    return check("branch-protection", "warn", `${defaultBranch} is protected but declares no required status checks`);
+  return check("branch-protection", "fail", `${defaultBranch} has no classic branch protection or active rulesets`);
+}
+
+function parseClassicRequiredChecks(body: unknown): string[] | undefined {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const required = (body as { required_status_checks?: unknown }).required_status_checks;
+  if (required == null) return [];
+  if (typeof required !== "object" || Array.isArray(required)) return undefined;
+  const value = required as { contexts?: unknown; checks?: unknown };
+  if (value.contexts !== undefined && !Array.isArray(value.contexts)) return undefined;
+  if (value.checks !== undefined && !Array.isArray(value.checks)) return undefined;
+  const contexts = Array.isArray(value.contexts) ? value.contexts.filter((c): c is string => typeof c === "string" && c.length > 0) : [];
+  const checks: string[] = [];
+  if (Array.isArray(value.checks)) {
+    for (const entry of value.checks) {
+      const context = (entry as { context?: unknown } | null)?.context;
+      if (typeof context !== "string" || !context) return undefined;
+      checks.push(context);
+    }
   }
-  return check(
-    "branch-protection",
-    "pass",
-    `${defaultBranch} is protected with ${requiredChecks.length} required status check(s)`,
-    requiredChecks.join(", "),
-  );
+  return [...new Set([...contexts, ...checks])];
+}
+
+/** GitHub's branch-rules endpoint returns only ACTIVE rules, including organization rulesets. */
+function parseActiveBranchRules(body: unknown): { count: number; requiredChecks: string[] } | undefined {
+  if (!Array.isArray(body)) return undefined;
+  const requiredChecks: string[] = [];
+  for (const item of body) {
+    if (!item || typeof item !== "object" || Array.isArray(item) || typeof (item as { type?: unknown }).type !== "string") return undefined;
+    const rule = item as { type: string; parameters?: { required_status_checks?: unknown } };
+    if (rule.type !== "required_status_checks") continue;
+    const checks = rule.parameters?.required_status_checks;
+    if (!Array.isArray(checks)) return undefined;
+    for (const entry of checks) {
+      const context = (entry as { context?: unknown } | null)?.context;
+      if (typeof context !== "string" || !context) return undefined;
+      requiredChecks.push(context);
+    }
+  }
+  return { count: body.length, requiredChecks };
 }
 
 function checkCiWorkflows(owner: string, repo: string, gateway: OnboardingReadinessGateway): OnboardingReadinessCheck {

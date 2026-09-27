@@ -37,6 +37,7 @@ function gateway(over: {
   installed?: string[] | undefined;
   repo?: OnboardingReadinessApiRead | undefined;
   protection?: OnboardingReadinessApiRead | undefined;
+  rules?: OnboardingReadinessApiRead | undefined;
   contents?: Contents;
 } = {}): OnboardingReadinessGateway & { protectionBranches: string[] } {
   const contents: Contents = {
@@ -58,6 +59,7 @@ function gateway(over: {
       protectionBranches.push(branch);
       return "protection" in over ? over.protection : ok({ required_status_checks: { contexts: ["ci", 7] } });
     },
+    getBranchRules: () => ("rules" in over ? over.rules : ok([])),
     getContents: (_o, _r, path) => contents[path],
   };
 }
@@ -108,6 +110,7 @@ test("a failed GitHub read reports unknown never pass", () => {
     listInstallationRepos: () => undefined,
     getRepo: () => undefined,
     getBranchProtection: () => undefined,
+    getBranchRules: () => undefined,
     getContents: () => undefined,
   };
   const checks = onboardingReadiness("acme", "widget", { repos: [] }, failed).checks;
@@ -117,7 +120,7 @@ test("a failed GitHub read reports unknown never pass", () => {
   assert.equal(byId(checks)["branch-protection"]!.reason, "default branch unknown — cannot check its protection");
 
   // A protection read that itself fails, on a known branch, is unknown too — never a confirmed "no protection".
-  assert.deepEqual(statusOf(gateway({ protection: undefined }), "branch-protection"), ["unknown", "branch protection read failed"]);
+  assert.deepEqual(statusOf(gateway({ protection: undefined }), "branch-protection"), ["unknown", "classic protection or active rulesets could not be read completely"]);
   // One failed AGENTS.md/CLAUDE.md read beside a confirmed absence is still unknown, not "none found".
   assert.equal(statusOf(gateway({ contents: { "AGENTS.md": status(404), "CLAUDE.md": undefined } }), "agent-instructions")[0], "unknown");
   // A failed test-command read with nothing else found is unknown, not "no test command".
@@ -156,6 +159,50 @@ test("a definitive 404 is a confirmed negative and any other status is unknown",
   assert.equal(plan(undefined), "unknown");
 });
 
+test("active rulesets protect a branch even when classic protection returns 404", () => {
+  const required = ok([{ type: "required_status_checks", ruleset_source_type: "Organization", parameters: { required_status_checks: [{ context: "org-ci" }] } }]);
+  const report = byId(onboardingReadiness("acme", "widget", { repos: [] }, gateway({ protection: status(404), rules: required })).checks);
+  assert.equal(report["branch-protection"]!.status, "pass");
+  assert.equal(report["branch-protection"]!.evidence, "org-ci");
+  assert.match(report["branch-protection"]!.reason, /active rulesets/);
+
+  assert.equal(statusOf(gateway({ protection: status(404), rules: ok([{ type: "pull_request" }]) }), "branch-protection")[0], "warn");
+  assert.equal(statusOf(gateway({ protection: status(404), rules: ok([]) }), "branch-protection")[0], "fail");
+  assert.equal(statusOf(gateway({ protection: status(404), rules: undefined }), "branch-protection")[0], "unknown");
+  assert.equal(statusOf(gateway({ protection: status(404), rules: ok({ not: "a rule list" }) }), "branch-protection")[0], "unknown");
+  assert.equal(statusOf(gateway({ protection: status(404), rules: ok([{ type: "required_status_checks", parameters: {} }]) }), "branch-protection")[0], "unknown");
+  assert.equal(statusOf(gateway({ protection: undefined, rules: required }), "branch-protection")[0], "pass", "the active ruleset proves required checks even if classic read fails");
+  assert.equal(statusOf(gateway({ protection: ok({}), rules: undefined }), "branch-protection")[0], "unknown", "missing ruleset evidence cannot prove there are no required checks");
+  assert.equal(statusOf(gateway({ protection: ok({ required_status_checks: { checks: [{ context: "classic-ci" }] } }) }), "branch-protection")[0], "pass", "the modern classic checks list is counted too");
+  assert.equal(statusOf(gateway({ protection: ok({ required_status_checks: { checks: [{}] } }) }), "branch-protection")[0], "unknown", "a malformed classic checks list is not an absence");
+});
+
+test("the async readiness snapshot carries active rules into the served classifier", async () => {
+  const source = gateway({ protection: status(404), rules: ok([{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "org-ci" }] } }]) });
+  const snapshot = await readOnboardingReadinessSnapshot("acme", "widget", {
+    listInstallationRepos: async () => source.listInstallationRepos(),
+    getRepo: async (...args) => source.getRepo(...args),
+    getBranchProtection: async (...args) => source.getBranchProtection(...args),
+    getBranchRules: async (...args) => source.getBranchRules(...args),
+    getContents: async (...args) => source.getContents(...args),
+  });
+  assert.equal(snapshot.complete, true);
+  const report = byId(onboardingReadiness("acme", "widget", { repos: [] }, snapshot).checks);
+  assert.equal(report["branch-protection"]!.status, "pass");
+  assert.equal(report["branch-protection"]!.evidence, "org-ci");
+});
+
+test("the gateway URL-encodes a default branch with a slash for both protection APIs", () => {
+  const calls: string[][] = [];
+  const g = onboardingReadinessGateway((args) => { calls.push(args); return "[]"; });
+  g.getBranchProtection("acme", "widget", "release/next");
+  g.getBranchRules("acme", "widget", "release/next");
+  assert.deepEqual(calls.map((args) => args[1]), [
+    "repos/acme/widget/branches/release%2Fnext/protection",
+    "repos/acme/widget/rules/branches/release%2Fnext",
+  ]);
+});
+
 test("agent instructions and the test command name which file answered", () => {
   const agents = (a: OnboardingReadinessApiRead | undefined, c: OnboardingReadinessApiRead | undefined) =>
     statusOf(gateway({ contents: { "AGENTS.md": a, "CLAUDE.md": c } }), "agent-instructions");
@@ -182,6 +229,7 @@ test("the gateway classifies each gh api answer by its HTTP status, and only an 
     "repos/acme/widget/branches/trunk/protection": () => {
       throw Object.assign(new Error("exit 1"), { stderr: "gh: Branch not protected (HTTP 404)\n" });
     },
+    "repos/acme/widget/rules/branches/trunk": () => "[]",
     "repos/acme/widget/contents/plan": () => "HTTP/2.0 204 No Content\r\n\r\n",
     "repos/acme/widget/contents/AGENTS.md": () => "HTTP/2.0 200 OK\r\n\r\n<html>not json</html>",
     "repos/acme/widget/contents/CLAUDE.md": () => {
@@ -198,6 +246,7 @@ test("the gateway classifies each gh api answer by its HTTP status, and only an 
   assert.deepEqual(g.listInstallationRepos(), ["acme/widget"]);
   assert.deepEqual(g.getRepo("acme", "widget"), { status: 200, body: { default_branch: "trunk" } });
   assert.deepEqual(g.getBranchProtection("acme", "widget", "trunk"), { status: 404, body: undefined });
+  assert.deepEqual(g.getBranchRules("acme", "widget", "trunk"), { status: 200, body: [] });
   assert.deepEqual(g.getContents("acme", "widget", "plan"), { status: 204, body: undefined });
   assert.equal(g.getContents("acme", "widget", "AGENTS.md"), undefined, "a 2xx with an unparsable body is a failed read");
   assert.equal(g.getContents("acme", "widget", "CLAUDE.md"), undefined, "a transport failure names no status");
@@ -249,6 +298,7 @@ test("the default gateway really shells out to gh", (t) => {
   const shim = ghShim([
     { when: "installation/repositories", stdout: "1\nacme/widget\n" },
     { when: "repos/acme/widget/branches", stderr: "gh: Not Found (HTTP 404)", exit: 1 },
+    { when: "repos/acme/widget/rules/branches", stdout: "[]" },
     { when: "repos/acme/widget/contents", stderr: "gh: Not Found (HTTP 404)", exit: 1 },
     { when: "repos/acme/widget", stdout: '{"default_branch":"main"}' },
   ]);
@@ -346,6 +396,7 @@ test("the served readiness route does not block on GitHub and re-reads the regis
       return sync.getRepo("acme", "widget");
     },
     getBranchProtection: async (...args) => { calls++; return sync.getBranchProtection(...args); },
+    getBranchRules: async (...args) => { calls++; return sync.getBranchRules(...args); },
     getContents: async (...args) => { calls++; return sync.getContents(...args); },
   };
   const route = buildOnboardingReadinessRoute({ repoRegistryPath, asyncGateway });
@@ -378,6 +429,7 @@ test("an incomplete GitHub readiness snapshot is retried, never cached as app ab
     },
     getRepo: async (...args) => sync.getRepo(...args),
     getBranchProtection: async (...args) => sync.getBranchProtection(...args),
+    getBranchRules: async (...args) => sync.getBranchRules(...args),
     getContents: async (...args) => sync.getContents(...args),
   };
   const route = buildOnboardingReadinessRoute({ repoRegistryPath, asyncGateway });
@@ -402,6 +454,7 @@ test("a complete readiness snapshot expires after its short TTL, including if th
       listInstallationRepos: async () => { installationReads++; return sync.listInstallationRepos(); },
       getRepo: async (...args) => sync.getRepo(...args),
       getBranchProtection: async (...args) => sync.getBranchProtection(...args),
+      getBranchRules: async (...args) => sync.getBranchRules(...args),
       getContents: async (...args) => sync.getContents(...args),
     },
   });
