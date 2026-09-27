@@ -456,7 +456,8 @@ function evaluateTask(ctx: SourceContext, taskId: string, rows: FlowRow[], pulls
     : rows.some((row) => row.step === "verdict") ? { state: "not-reached" } : { state: "censored" };
   stages.pr = pulls.length > 0 ? reached(earliest(pulls.map((pull) => pull.createdAt)))
     : !githubRead ? { state: "missing-join", reason: "github-unavailable" }
-      : ledgerPr ? { state: "missing-join", reason: "ledger-pr-not-in-github" } : { state: "not-reached" };
+      : ledgerPr ? { state: "missing-join", reason: "ledger-pr-not-in-github" }
+        : rows.some((row) => row.step === "verdict") ? { state: "not-reached" } : { state: "censored" };
   const reviewAt = at("review.posted");
   stages.review = reviewAt !== null || pulls.some((pull) => pull.detail.state === "observed" && pull.detail.reviews.total > 0)
     ? reached(reviewAt, humanReviewed)
