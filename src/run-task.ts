@@ -881,7 +881,13 @@ import {
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, executingHarnessRevision, type BenchmarkStackEvidence } from "./lib/benchmark-run.js";
+
+// Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
+// Prompt, tools, scorer and environment remain unavailable until immutable trial artifacts exist.
+const workerBoundaryStack: BenchmarkStackEvidence = {
+  harnessRevision: executingHarnessRevision(fileURLToPath(import.meta.url)),
+};
 import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
@@ -13819,7 +13825,8 @@ export function predecessorTranscriptPromptLines(paths: readonly string[]): stri
   ];
 }
 
-export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<string, unknown>) => void) {
+export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<string, unknown>) => void,
+  stackEvidence: BenchmarkStackEvidence = {}) {
   const assignments = new Set<string>();
   let work: { taskClass?: string; risk?: string } = {};
   return (step: string, extra: Record<string, unknown> = {}): void => {
@@ -13838,7 +13845,7 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
       if (assignment && typeof assignment === "object" && !Array.isArray(assignment)) {
         const selected = assignment as Parameters<typeof benchmarkRunAssignmentReceipt>[0];
         if (typeof selected.id === "string" && selected.id.length > 0 && selected.requested && selected.selected) {
-          benchmarkRun = benchmarkRunAssignmentReceipt(selected, work);
+          benchmarkRun = benchmarkRunAssignmentReceipt(selected, work, stackEvidence);
           durableAssignmentId = selected.id;
         }
       } else if (step === "worker.attempt") {
@@ -13967,6 +13974,8 @@ async function runTask(
   opts: {
     planPath?: string;
     config?: Config;
+    /** Frozen at the executing module boundary by default; trial runners may supply pinned artifacts. */
+    benchmarkStackEvidence?: BenchmarkStackEvidence;
     allowStale?: boolean;
     /** Explicit `--plan <path>` escape hatch (daemon only): read that file LITERALLY, no git
      *  sync — the operator named an exact file, so honor it verbatim, same as the sibling
@@ -14171,7 +14180,8 @@ async function runTask(
   // component, and same-taskId reruns are refused earlier by the dispatch claim/inflight check.
   const runId = `${taskId}-${Date.now()}`;
   const log = benchmarkRunLedgerLogger((step, fields) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...fields }));
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...fields }),
+    opts.benchmarkStackEvidence ?? workerBoundaryStack);
 
   // W1-T942: ONE worker-state sensor for THIS run's whole lifetime — recon, implement, and the
   // DECISION_REQUEST resume below all share it (see `buildWorkerStateSensor`'s own doc for why

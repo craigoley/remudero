@@ -1,6 +1,9 @@
 /** Private, metadata-only receipts. The enclosing ledger row owns run/assignment IDs; this
  * envelope deliberately contains neither IDs nor content, and grants no publication rights. */
 import { loadConfig } from "./config.js";
+import { execFileSync } from "node:child_process";
+import { dirname, isAbsolute, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { spawnWorker, workerLedgerFields, type WorkerResult } from "./worker.js";
@@ -11,6 +14,77 @@ type Evidence<T> = { state: "observed"; value: T } | { state: "unavailable"; rea
 type Outcome = { state: "observed"; value: true } | { state: "failed"; value: false } | { state: "unavailable"; reason: string };
 
 const unavailable = (reason: string): { state: "unavailable"; reason: string } => ({ state: "unavailable", reason });
+
+const REVISION_FIELDS = ["harnessRevision", "promptRevision", "toolRevision", "scorerRevision", "environmentRevision"] as const;
+const PIN_UNAVAILABLE_REASONS = new Set([
+  "executing-module-outside-repository", "executing-source-not-clean", "executing-commit-invalid",
+  "executing-module-revision-unavailable", "manifest-not-pinned", "artifact-not-resolved",
+]);
+export type BenchmarkRevisionField = typeof REVISION_FIELDS[number];
+export type BenchmarkRevisionPin = { source: "executing-module-git" | "image-build-stamp" | "resolved-artifact" | "trial-manifest"; revision: string };
+export type BenchmarkStackEvidence = Partial<Record<BenchmarkRevisionField,
+  BenchmarkRevisionPin | readonly BenchmarkRevisionPin[] | { state: "unavailable"; reason: string }>>;
+
+function pinEvidence(field: BenchmarkRevisionField, input: BenchmarkStackEvidence[BenchmarkRevisionField]): Evidence<string> {
+  if (input === undefined) return unavailable("not-pinned-by-harness");
+  if ("state" in input) return unavailable(PIN_UNAVAILABLE_REASONS.has(input.reason) ? input.reason : "pin-unavailable");
+  const pins = Array.isArray(input) ? input : [input];
+  if (pins.length === 0) return unavailable("pin-evidence-empty");
+  const revisions = new Set<string>();
+  for (const pin of pins) {
+    if (!pin || typeof pin !== "object" || !("source" in pin) || !("revision" in pin)) return unavailable("pin-evidence-invalid");
+    if ((pin.source === "executing-module-git" || pin.source === "image-build-stamp") !== (field === "harnessRevision")
+      && pin.source !== "trial-manifest") return unavailable("pin-source-invalid-for-field");
+    if (!["executing-module-git", "image-build-stamp", "resolved-artifact", "trial-manifest"].includes(pin.source))
+      return unavailable("pin-source-invalid");
+    if (typeof pin.revision !== "string" || !/^[0-9a-f]{40}$|^[0-9a-f]{64}$/i.test(pin.revision))
+      return unavailable("pin-revision-not-immutable-id");
+    revisions.add(pin.revision.toLowerCase());
+  }
+  return revisions.size === 1 ? { state: "observed", value: [...revisions][0]! } : unavailable("conflicting-pins");
+}
+
+/** Attest the module the current process loaded, independent of cwd or an operator checkout.
+ * Call once at module load: a later fast-forward cannot change the identity of code in memory.
+ * A dirty source tree or an untracked module has no defensible commit identity. */
+export function executingHarnessRevision(moduleFile: string,
+  git: (cwd: string, args: string[]) => string = (cwd, args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }),
+): BenchmarkStackEvidence["harnessRevision"] {
+  try {
+    const root = git(dirname(moduleFile), ["rev-parse", "--show-toplevel"]).trim();
+    const path = relative(root, moduleFile);
+    if (!path || path.startsWith("..") || isAbsolute(path)) return unavailable("executing-module-outside-repository");
+    git(root, ["ls-files", "--error-unmatch", "--", path]);
+    if (git(root, ["status", "--porcelain", "--", "src", "bin", "package.json", "package-lock.json"]).trim())
+      return unavailable("executing-source-not-clean");
+    const revision = git(root, ["rev-parse", "HEAD"]).trim();
+    return /^[0-9a-f]{40}$/i.test(revision)
+      ? { source: "executing-module-git", revision } : unavailable("executing-commit-invalid");
+  } catch {
+    return unavailable("executing-module-revision-unavailable");
+  }
+}
+
+const nonDispatchWorkerStack: BenchmarkStackEvidence = {
+  harnessRevision: executingHarnessRevision(fileURLToPath(import.meta.url)),
+};
+
+export function compareBenchmarkStacks(
+  left: ReturnType<typeof benchmarkRunAssignmentReceipt>, right: ReturnType<typeof benchmarkRunAssignmentReceipt>,
+) {
+  const fields = ["provider", "selectedModel", "selectedEffort", ...REVISION_FIELDS] as const;
+  const different: string[] = [];
+  const missing: string[] = [];
+  for (const field of fields) {
+    const a = left.stack[field];
+    const b = right.stack[field];
+    if (a.state !== "observed" || b.state !== "observed") missing.push(field);
+    else if (a.value !== b.value) different.push(field);
+  }
+  return different.length > 0 ? { state: "different-stack" as const, different, missing }
+    : missing.length > 0 ? { state: "unavailable" as const, different, missing }
+      : { state: "comparable" as const, different, missing };
+}
 
 function observedString(value: unknown, reason: string): Evidence<string> {
   return typeof value === "string" && value.trim().length > 0
@@ -31,10 +105,10 @@ export interface BenchmarkRunAssignmentInput {
 export function benchmarkRunAssignmentReceipt(
   assignment: BenchmarkRunAssignmentInput,
   work: { taskClass?: string; risk?: string },
+  stackEvidence: BenchmarkStackEvidence = {},
 ) {
   // No inference from checkout HEAD, route, or site-level consent: none of those pins the
   // actual prompt/tools/scorer used by this worker call or grants this instance publication.
-  const revision = unavailable("not-pinned-by-harness");
   return {
     version: BENCHMARK_RUN_VERSION,
     phase: "assignment" as const,
@@ -48,11 +122,11 @@ export function benchmarkRunAssignmentReceipt(
       selectedModel: observedString(assignment.selected.model, "selected-model-unavailable"),
       requestedEffort: observedString(assignment.requested.effort, "requested-effort-unavailable"),
       selectedEffort: observedString(assignment.selected.effort, "selected-effort-unavailable"),
-      harnessRevision: revision,
-      promptRevision: revision,
-      toolRevision: revision,
-      scorerRevision: revision,
-      environmentRevision: revision,
+      harnessRevision: pinEvidence("harnessRevision", stackEvidence.harnessRevision),
+      promptRevision: pinEvidence("promptRevision", stackEvidence.promptRevision),
+      toolRevision: pinEvidence("toolRevision", stackEvidence.toolRevision),
+      scorerRevision: pinEvidence("scorerRevision", stackEvidence.scorerRevision),
+      environmentRevision: pinEvidence("environmentRevision", stackEvidence.environmentRevision),
     },
     rights: { state: "private" as const, reason: "no-local-consent-receipt" },
     allocation: { method: "observational" as const, reason: "no-random-allocation-receipt" },
@@ -161,7 +235,7 @@ export function benchmarkNonDispatchSpawn(
         observedAssignmentId = assignment.id;
         try {
           write("worker.assignment", { worker_assignment: assignment,
-            benchmark_run: benchmarkRunAssignmentReceipt(assignment, {}) });
+            benchmark_run: benchmarkRunAssignmentReceipt(assignment, {}, nonDispatchWorkerStack) });
         } catch {
           observedAssignmentId = priorId;
           console.error(JSON.stringify({ event: "benchmark.non_dispatch_assignment_unavailable", lane, reason: "ledger-write-failed" }));

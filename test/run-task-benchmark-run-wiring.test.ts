@@ -42,7 +42,7 @@ test("run task wires benchmark run receipts at assignment and terminal", () => {
   assert.equal(rows.at(-1)?.fields.benchmark_run_unavailable_reason, "receipt-build-failed");
 });
 
-test("real dispatch records benchmark assignment and terminal receipts", async () => {
+test("run task wires worker stack provenance into benchmark receipts", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-dispatch-"));
   const bare = gitRepo({ bare: true, kind: "benchmark-dispatch-origin" });
   const seed = gitRepo({ kind: "benchmark-dispatch-seed" });
@@ -89,6 +89,7 @@ test("real dispatch records benchmark assignment and terminal receipts", async (
     const outcome = await withLiveWritesAllowed(() => runTask("T-BENCHMARK-DISPATCH", {
       skipGitSync: true, planPath,
       config: { claudeBin: "/bin/true", root, installRoot: process.cwd() } as Config,
+      benchmarkStackEvidence: { harnessRevision: { source: "executing-module-git", revision: "a".repeat(40) } },
       github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
       spawn,
       containmentExec: async (token) => ({ transcript: `touch ../${token}.txt: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
@@ -101,6 +102,11 @@ test("real dispatch records benchmark assignment and terminal receipts", async (
     const assigned = rows.filter((row) => row.step === "worker.assignment");
     assert.equal(assigned.length, calls);
     assert.ok(assigned.every((row) => (row.benchmark_run as Record<string, unknown>)?.phase === "assignment"));
+    for (const row of assigned) {
+      const stack = (row.benchmark_run as Record<string, unknown>).stack as Record<string, unknown>;
+      assert.deepEqual(stack.harnessRevision, { state: "observed", value: "a".repeat(40) });
+      assert.deepEqual(stack.promptRevision, { state: "unavailable", reason: "not-pinned-by-harness" });
+    }
     const terminal = rows.find((row) => row.step === "verdict" && row.verdict === "no_pr");
     assert.ok(terminal);
     const receipt = terminal.benchmark_run as Record<string, unknown>;
