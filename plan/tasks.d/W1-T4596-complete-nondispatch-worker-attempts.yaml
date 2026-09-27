@@ -22,6 +22,7 @@
     - src/lib/containment.ts
     - src/lib/escalate.ts
     - src/lib/feedback.ts
+    - src/lib/risk-judge.ts
     - src/lib/ruling-judge.ts
     - src/lib/inbox-responder.ts
     - src/lib/onboard/recon.ts
