@@ -1,0 +1,40 @@
+- id: W1-T4601
+  title: "A FLEET WITH NOTHING TO DO IS PAGED AS DOWN — the entrypoint's quiet mode (idle_starved) stops sweeping and pulses `daemon.idle_starved.pulse` every 1800s, but the gateway's liveness watch counts only sweep.summary and daemon.pause as heartbeats, so 30 min after any fleet drains its queue it escalates the fleet as down"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator session 2026-09-27: remudero-site#171 opened 30 min after the site fleet drained its queue"
+  plan_refs: ["W1-T4418"]
+  files:
+    - src/lib/fleet-liveness.ts
+    - test/a-quiet-fleet-is-not-a-down-fleet.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27: remudero-site entered quiet mode at 01:03Z (`daemon.idle_starved.enter`,
+    open_prs 0, all 35 plan tasks settled) and at 01:33Z — exactly the 30 x 1 min stale bound later
+    — the gateway opened remudero-site#171 'Fleet instance site is down: its daemon is not
+    sweeping', still open six hours later while the entrypoint kept writing its pulse. The console
+    fleet drained its queue at 06:22Z and 06:53Z and is on the same path. `judgeInstanceLiveness`
+    (fleet-liveness.ts, W1-T4418) treats only `sweep.summary` and `daemon.pause` as heartbeats, and
+    its row prefilter LIVENESS_ROW does not even read the quiet-mode rows, so an idle fleet is
+    indistinguishable from the 2026-09-23 crash loop W1-T4418 was built for: a bound firing on a
+    healthy condition, and an escalation that teaches the operator to ignore the one that matters.
+  design: |
+    In fleet-liveness.ts, read `daemon.idle_starved.enter` and `daemon.idle_starved.pulse` rows
+    (LIVENESS_ROW). When the newest of them is newer than the newest sweep heartbeat and younger
+    than a named bound of two of the entrypoint's 1800s probes, judge the instance up and mark it
+    quiet, so a quiet instance neither escalates nor stays in the gateway's down set. A quiet mode
+    whose pulse has stopped for longer than that bound is judged by the existing rules and names the
+    silent quiet mode in its reason. An operator STOP still reads as held first.
+  acceptance:
+    - claim: "an instance whose queue drained and whose quiet-mode pulse is fresh is judged up and quiet, while a quiet mode whose pulse stopped is still judged down"
+      proof: "unit test: test/a-quiet-fleet-is-not-a-down-fleet.test.ts"
+  falsifier: |
+    Drop the quiet arm: an instance whose newest rows are daemon.idle_starved.enter and a fresh
+    pulse, with its last sweep 45 min ago, is judged down.
