@@ -889,6 +889,7 @@ const workerBoundaryStack: BenchmarkStackEvidence = {
   harnessRevision: executingHarnessRevision(fileURLToPath(import.meta.url)),
 };
 import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
+import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -15628,7 +15629,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const ruleToolPointer = ruleLookup
       ? `\nTo read a doctrine rule by id or phrase, or a learning's evidence by learnings#id, call ${WORKER_RULE_TOOL_NAME}.`
       : "";
-    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
+    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -15660,7 +15661,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // drill will send. `ruleHeadlinesPart` is the SAME string the turn-0 prompt above just
     // carried (design (iii)) — never re-derived, so a compaction can never re-inject a
     // headline index that drifted from what turn 0 actually said.
-    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
+    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
     log("anchor.built", { anchor });
 
     // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
@@ -15729,6 +15730,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         // W1-T6: every worker call ledgers the standard telemetry shape.
         ...workerLedgerFields(impl),
         ...implHead,
+        self_forecast: parseSelfForecast(workerTranscript(impl)),
       });
       // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
       // above `runTask`. Best-effort and keyed on `runId` alone (not per-attempt), so a
