@@ -114,6 +114,7 @@ export function onboardingReadinessGateway(execFileFn: (args: string[]) => strin
         const raw = execFileFn(["api", "installation/repositories?per_page=100", "--paginate", "--jq", ".total_count, .repositories[].full_name"]);
         return parseInstallationRepositoryListing(raw) ?? undefined;
       } catch {
+        // A failed installation list cannot prove absence; report this check as unknown.
         return undefined;
       }
     },
