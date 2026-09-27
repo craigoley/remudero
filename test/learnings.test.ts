@@ -16,8 +16,11 @@ import {
   renderLearningsContext,
   renderMatchedLearnings,
   selectLearnings,
+  evaluateLexicalShadow,
+  assessLexicalShadowLabels,
   type LearningEntry,
 } from "../src/lib/learnings.js";
+import { bm25Rank } from "../src/lib/learning-lexical.js";
 import { assertProvenance, lintPrompt } from "../src/lib/provenance.js";
 import { renderImplementPrompt } from "../src/run-task.js";
 import { IMPLEMENT_ROLE_LINES } from "../src/lib/compaction.js";
@@ -55,6 +58,82 @@ const CORPUS: LearningEntry[] = [
     cited: "2026-07-12",
   },
 ];
+
+test("W1-T4606: shadow report carries evidence without changing selection", () => {
+  const entries: LearningEntry[] = [
+    { id: "relevant", subsystem: "test", lifecycle: "active", files: ["src/other.ts"],
+      fact: "Archive ledger rotation requires a complete checkpoint", src: "PR#123" },
+    { id: "direct", subsystem: "test", lifecycle: "active", files: ["src/direct.ts"],
+      fact: "Direct file match", src: "PR#124" },
+    { id: "retired", subsystem: "test", lifecycle: "superseded", files: ["src/other.ts"],
+      fact: "Archive ledger rotation requires a complete checkpoint", src: "PR#125" },
+  ];
+  const tasks = [
+    { id: "zero", title: "archive ledger rotation", files: ["src/zero.ts"] },
+    { id: "direct-task", title: "direct file work", files: ["src/direct.ts"] },
+    { id: "abstain", title: "zzqxv blorp", files: ["src/empty.ts"] },
+  ];
+  const baseline = selectLearnings(entries, tasks[0]!.files, 500, { text: tasks[0]!.title });
+  const source = { sha: "abc123", dirty: false };
+  const report = evaluateLexicalShadow(tasks, entries, source);
+  assert.equal(report.proxy, "plan-title-rationale-files-no-live-recon");
+  assert.equal(report.zeroBaseline, 2);
+  assert.equal(report.zeroWithCandidate, 1);
+  assert.equal(report.zeroWithoutCandidate, 1);
+  assert.ok(report.cases.every((item) => item.taskId !== "direct-task"));
+  const candidate = report.cases.find((item) => item.taskId === "zero")!.candidates[0]!;
+  assert.deepEqual([candidate.id, candidate.fact, candidate.src],
+    ["relevant", "Archive ledger rotation requires a complete checkpoint", "PR#123"]);
+  assert.ok(candidate.score > 0);
+  assert.deepEqual(selectLearnings(entries, tasks[0]!.files, 500, { text: tasks[0]!.title }), baseline);
+  assert.deepEqual(evaluateLexicalShadow([...tasks].reverse(), entries, source), report);
+
+  const review = { version: "lexical-shadow-labels-v1" as const, sourceSha: report.sourceSha,
+    corpusDigest: report.corpusDigest, labels: [{ taskId: "zero", learningId: "relevant",
+      verdict: "relevant" as const }] };
+  assert.deepEqual(assessLexicalShadowLabels(report, review), {
+    judged: 1, relevant: 1, misleading: 0, uncertain: 0, missing: 0,
+    candidateSlots: 1, topOneJudged: 1, topOneMissing: 0, precisionAtOne: 1, precisionAtK: 1,
+  });
+  assert.throws(() => assessLexicalShadowLabels(report, { ...review, corpusDigest: "stale" }), /do not match/);
+  assert.throws(() => evaluateLexicalShadow(tasks, [], source), /requires a nonempty plan and active learning corpus/);
+  assert.throws(() => evaluateLexicalShadow(tasks, entries, source, { sampleLimit: -1 }), /limits must be/);
+  assert.throws(() => assessLexicalShadowLabels(report, { ...review, labels: [...review.labels, ...review.labels] }),
+    /duplicate, invalid or outside/);
+});
+
+test("W1-T4606: label coverage includes lower-ranked candidates without contaminating precision at one", () => {
+  const entries: LearningEntry[] = [
+    { id: "a", subsystem: "test", lifecycle: "active", files: ["src/other.ts"],
+      fact: "Archive ledger retention needs a checkpoint", src: "PR#1" },
+    { id: "b", subsystem: "test", lifecycle: "active", files: ["src/else.ts"],
+      fact: "Archive ledger rotation needs a checkpoint", src: "PR#2" },
+  ];
+  const report = evaluateLexicalShadow([{ id: "one", title: "archive ledger checkpoint", files: ["src/none.ts"] }],
+    entries, { sha: "abc123", dirty: false }, { candidateLimit: 2 });
+  assert.equal(report.candidateLimit, 2);
+  const [first, second] = report.cases[0]!.candidates;
+  assert.ok(first && second);
+  const review = { version: "lexical-shadow-labels-v1" as const, sourceSha: report.sourceSha,
+    corpusDigest: report.corpusDigest, labels: [
+      { taskId: "one", learningId: first.id, verdict: "misleading" as const },
+      { taskId: "one", learningId: second.id, verdict: "relevant" as const },
+    ] };
+  assert.deepEqual(assessLexicalShadowLabels(report, review), {
+    judged: 2, relevant: 1, misleading: 1, uncertain: 0, missing: 0,
+    candidateSlots: 2, topOneJudged: 1, topOneMissing: 0, precisionAtOne: 0, precisionAtK: 0.5,
+  });
+  assert.deepEqual(assessLexicalShadowLabels(report, { ...review, labels: [review.labels[1]!] }), {
+    judged: 1, relevant: 1, misleading: 0, uncertain: 0, missing: 1,
+    candidateSlots: 2, topOneJudged: 0, topOneMissing: 1, precisionAtOne: null, precisionAtK: 1,
+  });
+});
+
+test("W1-T4606: ranker is deterministic and rejects stopword-only queries", () => {
+  const docs = [{ id: "z", text: "archive ledger rotation" }, { id: "a", text: "archive ledger rotation" }];
+  assert.deepEqual(bm25Rank("archive ledger", docs).map((hit) => hit.id), ["a", "z"]);
+  assert.deepEqual(bm25Rank("the and", docs), []);
+});
 
 /** Build a minimal implement Task for the fixture tests. */
 function task(over: Partial<Task> = {}): Task {

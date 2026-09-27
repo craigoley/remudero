@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deriveFactSymbols } from "./knowledge-symbols.js";
 import { learningValue, sampleBeta, seededRandom, type LearningUsage } from "./knowledge-value.js";
+import { bm25Rank } from "./learning-lexical.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { citation } from "./provenance.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -1860,6 +1861,146 @@ export function selectLearnings<T extends LearningEntry>(
   }
   const propensity = Object.fromEntries(Object.entries(hits).map(([id, n]) => [id, n / draws]));
   return { ...result, propensity };
+}
+
+export const LEXICAL_SHADOW_VERSION = "lexical-shadow-v1" as const;
+
+export interface LexicalShadowTask {
+  id: string;
+  title: string;
+  rationale?: string;
+  files?: string[];
+}
+
+export interface LexicalShadowCandidate {
+  id: string;
+  score: number;
+  matchedTerms: number;
+  fact: string;
+  src: string;
+  files: string[];
+}
+
+export interface LexicalShadowCase {
+  taskId: string;
+  title: string;
+  rationale: string;
+  files: string[];
+  candidates: LexicalShadowCandidate[];
+}
+
+export interface LexicalShadowReport {
+  version: typeof LEXICAL_SHADOW_VERSION;
+  sourceSha: string;
+  workingTreeDirty: boolean;
+  corpusDigest: string;
+  proxy: "plan-title-rationale-files-no-live-recon";
+  tasks: number;
+  zeroBaseline: number;
+  zeroWithCandidate: number;
+  zeroWithoutCandidate: number;
+  candidateLimit: number;
+  sampled: number;
+  cases: LexicalShadowCase[];
+}
+
+/** A plan-record proxy for reviewer judgment. It never passes candidates back to prompt assembly. */
+export function evaluateLexicalShadow(
+  tasks: readonly LexicalShadowTask[],
+  entries: readonly LearningEntry[],
+  source: { sha: string; dirty: boolean },
+  opts: { sampleLimit?: number; candidateLimit?: number; budgetChars?: number } = {},
+): LexicalShadowReport {
+  const sampleLimit = opts.sampleLimit ?? 50;
+  const candidateLimit = opts.candidateLimit ?? 3;
+  if (!Number.isSafeInteger(sampleLimit) || sampleLimit < 0 || !Number.isSafeInteger(candidateLimit) || candidateLimit < 1) {
+    throw new Error("lexical shadow limits must be non-negative sample and positive candidate integers");
+  }
+  if (tasks.length === 0 || entries.length === 0 || !entries.some((entry) => entry.lifecycle === "active")) {
+    throw new Error("lexical shadow requires a nonempty plan and active learning corpus");
+  }
+  const corpusDigest = createHash("sha256").update(JSON.stringify([...entries]
+    .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : a.src < b.src ? -1 : a.src > b.src ? 1 : 0)
+    .map((entry) => ({ id: entry.id, lifecycle: entry.lifecycle, files: entry.files,
+      fact: entry.fact, src: entry.src })))).digest("hex");
+  const active = entries.filter((entry) => entry.lifecycle === "active");
+  const byId = new Map(active.map((entry) => [entry.id, entry]));
+  const zeroCases: LexicalShadowCase[] = [];
+  let zeroWithCandidate = 0;
+  for (const task of tasks) {
+    const rationale = task.rationale ?? "";
+    const baseline = selectLearnings([...entries], task.files, opts.budgetChars ?? DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+      { text: [task.title, rationale] });
+    if (baseline.selected.length > 0) continue;
+    const ranked = bm25Rank([task.title, rationale].join("\n"),
+      active.map((entry) => ({ id: entry.id, text: entry.fact })));
+    if (ranked.length > 0) zeroWithCandidate++;
+    zeroCases.push({ taskId: task.id, title: task.title, rationale, files: [...(task.files ?? [])],
+      candidates: ranked.slice(0, candidateLimit).flatMap((hit) => {
+        const entry = byId.get(hit.id);
+        return entry ? [{ id: hit.id, score: hit.score, matchedTerms: hit.matchedTerms,
+          fact: entry.fact, src: entry.src, files: [...entry.files] }] : [];
+      }) });
+  }
+  const cases = zeroCases.sort((a, b) => {
+    const ah = createHash("sha256").update(a.taskId).digest("hex");
+    const bh = createHash("sha256").update(b.taskId).digest("hex");
+    return ah < bh ? -1 : ah > bh ? 1 : a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0;
+  }).slice(0, sampleLimit);
+  return { version: LEXICAL_SHADOW_VERSION, sourceSha: source.sha, workingTreeDirty: source.dirty,
+    corpusDigest, proxy: "plan-title-rationale-files-no-live-recon", tasks: tasks.length,
+    zeroBaseline: zeroCases.length, zeroWithCandidate,
+    zeroWithoutCandidate: zeroCases.length - zeroWithCandidate, candidateLimit,
+    sampled: cases.length, cases };
+}
+
+export interface LexicalShadowLabels {
+  version: "lexical-shadow-labels-v1";
+  sourceSha: string;
+  corpusDigest: string;
+  labels: { taskId: string; learningId: string; verdict: "relevant" | "misleading" | "uncertain" }[];
+}
+
+export function assessLexicalShadowLabels(report: LexicalShadowReport, review: LexicalShadowLabels): {
+  judged: number; relevant: number; misleading: number; uncertain: number; missing: number;
+  candidateSlots: number; topOneJudged: number; topOneMissing: number;
+  precisionAtOne: number | null; precisionAtK: number | null;
+} {
+  if (review.version !== "lexical-shadow-labels-v1" || review.sourceSha !== report.sourceSha
+    || review.corpusDigest !== report.corpusDigest || report.workingTreeDirty) {
+    throw new Error("lexical shadow labels do not match a clean report source and corpus");
+  }
+  const all = new Set(report.cases.flatMap((item) => item.candidates.map((candidate) =>
+    `${item.taskId}\u0000${candidate.id}`)));
+  const first = new Set(report.cases.flatMap((item) => item.candidates[0]
+    ? [`${item.taskId}\u0000${item.candidates[0].id}`] : []));
+  const seen = new Set<string>();
+  const counts = { judged: 0, relevant: 0, misleading: 0, uncertain: 0,
+    missing: all.size, candidateSlots: all.size, topOneJudged: 0, topOneMissing: first.size,
+    precisionAtOne: null as number | null, precisionAtK: null as number | null };
+  let firstRelevant = 0;
+  let firstMisleading = 0;
+  for (const label of review.labels) {
+    const key = `${label.taskId}\u0000${label.learningId}`;
+    if (!all.has(key) || seen.has(key) || !["relevant", "misleading", "uncertain"].includes(label.verdict)) {
+      throw new Error(`lexical shadow label is duplicate, invalid or outside the sampled candidates: ${label.taskId}`);
+    }
+    seen.add(key);
+    counts[label.verdict]++;
+    counts.judged++;
+    if (first.has(key)) {
+      counts.topOneJudged++;
+      if (label.verdict === "relevant") firstRelevant++;
+      if (label.verdict === "misleading") firstMisleading++;
+    }
+  }
+  counts.missing = all.size - counts.judged;
+  counts.topOneMissing = first.size - counts.topOneJudged;
+  const decided = counts.relevant + counts.misleading;
+  const firstDecided = firstRelevant + firstMisleading;
+  counts.precisionAtOne = firstDecided > 0 ? firstRelevant / firstDecided : null;
+  counts.precisionAtK = decided > 0 ? counts.relevant / decided : null;
+  return counts;
 }
 
 /** One entry as a provenance-tagged CONTEXT bullet. */
