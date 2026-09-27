@@ -98,6 +98,7 @@ import { checkDispatchGovernors, type DispatchGovernorVerdict, type QuietHoursHo
 import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleasedIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
+import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, isEnvironmentalBlock } from "./status.js";
 import type { DispatchValueContext } from "./dispatch-value.js";
 import { GhJsonUnreadableResponseError } from "./github-transport.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
@@ -2364,6 +2365,10 @@ export async function runDaemon(
   // projection reader has a chance to observe that row. Not a Task mutation, so plan reloads cannot
   // erase it.
   const independentFailureBlocksThisRun = new Set<string>();
+  // W1-T4597: an ENVIRONMENTAL block (containment probe, isolation preflight, transient, git fetch) is
+  // held in process only until its cooldown, then the projection decides, so one long-lived daemon can
+  // still re-offer it; a restart on new code clears this map anyway.
+  const environmentalBlocksThisRun = new Map<string, number>();
   // A zero-cost `blocked_illformed` verdict is a pre-dispatch admission refusal, not a durable
   // independent failure. Exclude its unchanged task contract only for this process, so it cannot
   // spin on the same immutable plan; a changed contract deliberately clears the entry below and is
@@ -2692,13 +2697,16 @@ export async function runDaemon(
         // restart derives the same skip instead of trusting this tick's Task object.
         const refusal = result as HarnessCommitRefusalResult;
         const harnessCommitRefused = refusal.harnessCommitRefused === true && result.verdict === "no_pr";
-        if (!harnessCommitRefused) independentFailureBlocksThisRun.add(task.id);
+        const environmental = !harnessCommitRefused && isEnvironmentalBlock(result.verdict, undefined);
+        if (environmental) environmentalBlocksThisRun.set(task.id, daemonClock.now());
+        else if (!harnessCommitRefused) independentFailureBlocksThisRun.add(task.id);
         log("dispatch.blocked_independent", {
           task_id: task.id,
           task: task.id,
           verdict: result.verdict,
           pr_url: result.prUrl,
           run_id: result.runId,
+          ...(environmental ? { environmental: true } : {}),
           ...(harnessCommitRefused
             ? {
                 harness_commit_refused: true,
@@ -3862,8 +3870,13 @@ export async function runDaemon(
         }
       },
       onLifetimePressure: (t) => lifetimePressureTasks.set(t.id, t),
-      isIndependentFailureBlocked: (taskId) =>
-        independentFailureBlocksThisRun.has(taskId) || deps.isIndependentFailureBlocked?.(taskId) === true,
+      isIndependentFailureBlocked: (taskId) => {
+        const environmentalAt = environmentalBlocksThisRun.get(taskId);
+        const heldInProcess =
+          independentFailureBlocksThisRun.has(taskId) ||
+          (environmentalAt !== undefined && daemonClock.now() - environmentalAt < ENVIRONMENTAL_BLOCK_COOLDOWN_MS);
+        return heldInProcess || deps.isIndependentFailureBlocked?.(taskId) === true;
+      },
       isTerminalPreDispatchRefusalHeld: (task) =>
         terminalPreDispatchRefusalRevisions.get(task.id) === preDispatchContractRevision(task),
     };

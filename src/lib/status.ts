@@ -2985,6 +2985,50 @@ export interface EscalationState {
   openedAt?: string;
 }
 
+/** W1-T4597: verdicts that say the fleet's ENVIRONMENT refused to run a task, never the task itself. */
+export const ENVIRONMENTAL_BLOCK_VERDICTS: ReadonlySet<string> = new Set([
+  "blocked_containment",
+  "blocked_isolation",
+  "blocked_transient",
+  "blocked_git_fetch",
+]);
+/** W1-T4597: `failed` verdict stages that are environmental (the Codex output cap, W1-T4595). */
+export const ENVIRONMENTAL_BLOCK_STAGES: ReadonlySet<string> = new Set(["worker.bounded_output"]);
+/** W1-T4597: an environmental block with no deploy since is re-offered after this long. */
+export const ENVIRONMENTAL_BLOCK_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+/** PRIMARY CONTROL (W1-T4597): consecutive environmental re-offers before the block stays durable. */
+export const MAX_ENVIRONMENTAL_REOFFERS = 2;
+
+export function isEnvironmentalBlock(verdict: unknown, stage: unknown): boolean {
+  if (typeof verdict === "string" && ENVIRONMENTAL_BLOCK_VERDICTS.has(verdict)) return true;
+  return verdict === "failed" && typeof stage === "string" && ENVIRONMENTAL_BLOCK_STAGES.has(stage);
+}
+
+/** W1-T4597: has the environment plausibly changed since an environmental block at `blockMs` — a
+ *  later `daemon.boot` on different code than the one running at the block, or the cooldown elapsed? */
+function environmentChangedSince(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  blockMs: number,
+  nowMs: number,
+  index: LedgerIndex | undefined,
+): boolean {
+  if (nowMs - blockMs >= ENVIRONMENTAL_BLOCK_COOLDOWN_MS) return true;
+  let before: { ms: number; sha: string } | undefined;
+  const after: string[] = [];
+  for (const line of indexedStepRows(lines, "daemon.boot", index)) {
+    if (line.step !== "daemon.boot" || typeof line.head_sha !== "string" || typeof line.ts !== "string") continue;
+    const ms = Date.parse(line.ts);
+    if (!Number.isFinite(ms)) continue;
+    if (ms <= blockMs) {
+      if (!before || ms > before.ms) before = { ms, sha: line.head_sha };
+    } else {
+      after.push(line.head_sha);
+    }
+  }
+  // No known code at block time: only the cooldown can release it, never a guess.
+  return before !== undefined && after.some((sha) => sha !== before.sha);
+}
+
 /** The latest durable independent-failure block if no later dispatch superseded it.
  *
  * `blocked_illformed` is a zero-cost admission refusal: run-task returns it before an inflight
@@ -3009,14 +3053,24 @@ export function latestIndependentFailureBlock(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
   index?: LedgerIndex,
+  nowMs?: number,
 ): boolean {
   let last: "run" | "blocked" | "admission_refused" | "inflight_deferral" | "credit_refused" | undefined;
+  // W1-T4597: the stage each run's verdict named, the current streak of consecutive environmental
+  // blocks, and when the latest one landed.
+  const stageByRun = new Map<string, unknown>();
+  let environmentalStreak = 0;
+  let environmentalBlockMs: number | undefined;
   let harnessRefusal = false;
   let retryPending = false;
   let retrySpent = false;
   const harnessRefusalRuns = new Set<string>();
   for (const line of indexedTaskRows(lines, taskId, index)) {
     if (line.task_id !== taskId && line.task !== taskId) continue;
+    if (line.step === "verdict" && typeof line.run_id === "string") {
+      stageByRun.set(line.run_id, line.stage);
+      if (!isEnvironmentalBlock(line.verdict, line.stage)) environmentalStreak = 0;
+    }
     if (line.step === "run.start") {
       if (retryPending) retrySpent = true;
       retryPending = false;
@@ -3044,6 +3098,14 @@ export function latestIndependentFailureBlock(
             : line.verdict === "task_already_merged"
               ? "credit_refused" // W1-T4413: a refusal about credit, not a task failure
               : "blocked";
+      if (last === "blocked" && isEnvironmentalBlock(line.verdict, line.stage ?? stageByRun.get(runId))) {
+        environmentalStreak += 1;
+        const ms = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
+        environmentalBlockMs = Number.isFinite(ms) ? ms : undefined;
+      } else if (last === "blocked") {
+        environmentalStreak = 0;
+        environmentalBlockMs = undefined;
+      }
     } else if (
       line.step === "dispatch.harness_commit_retry" &&
       line.original_refusal === "harness_commit_refused" &&
@@ -3059,6 +3121,10 @@ export function latestIndependentFailureBlock(
   if (retryPending) return false;
   if (harnessRefusal && retrySpent) return true;
   if (harnessRefusal) return true;
+  if (last === "blocked" && environmentalBlockMs !== undefined && environmentalStreak <= MAX_ENVIRONMENTAL_REOFFERS) {
+    const now = nowMs ?? (index?.rows === lines ? index.latestTsMs : latestLedgerTsMs(lines)) ?? environmentalBlockMs;
+    if (environmentChangedSince(lines, environmentalBlockMs, now, index)) return false;
+  }
   return last === "blocked";
 }
 
@@ -3119,7 +3185,7 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   const now = deps.now ?? (() => Date.now());
   const projection: StatusProjection = { ...base };
 
-  if (latestIndependentFailureBlock(ledgerLines, task.id, deps.ledgerIndex)) {
+  if (latestIndependentFailureBlock(ledgerLines, task.id, deps.ledgerIndex, now())) {
     projection.status = "blocked";
     projection.independentFailureBlocked = true;
   }
