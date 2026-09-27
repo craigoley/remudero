@@ -133,7 +133,7 @@ test("commandHelp(spec) contains that command's full detail verbatim, for every 
 // commands themselves, except W1-T3685's newly registered `board` verb, which must be added to
 // this reviewed inventory as part of the command addition.
 const BASELINE_COMMAND_NAMES = [
-  "alert-fix", "approve", "authority", "autonomy-rate", "away", "board", "bundle", "caller-sweep", "case-file", "check-acceptance", "check-proof",
+  "alert-fix", "approve", "authority", "autonomy-rate", "away", "benchmark-aa", "board", "bundle", "caller-sweep", "case-file", "check-acceptance", "check-proof",
   "census-membership", "ci-failures", "ci-learning", "correct", "coverage-improve", "daemon", "daemon-plist", "decline", "dep-review",
   "deploy", "deploy-plist", "deploy-run", "digest", "digest-plist", "doctor", "down", "drain",
   "emissions", "escalate", "feedback", "feedback-reconcile", "fix", "hand-runs", "inbox", "init", "install-checkout", "issues",
@@ -161,6 +161,7 @@ const BASELINE_COMMAND_NAMES = [
 // verb — joins the registry.
 // W1-T4096: `knowledge` — `rmd knowledge fold`, the narrative-store fold operations by hand —
 // joins the registry.
+// W1-T4575: `benchmark-aa` — the A/A integrity report over a pinned-stack trial — joins the registry.
 // `decline` and `restore` — the terminal's route to the console's inbox decline and its reversal,
 // through the same applyProposalVerdict the serve routes use — join the registry.
 test("COMMANDS carries the reviewed command-name inventory", () => {

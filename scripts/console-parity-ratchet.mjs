@@ -114,6 +114,7 @@ export const CLI_ONLY = {
       // 2026-09-24 ruling: an operator report over the ledger union on the daemon host; the console
       // reads the same experiment through routing.decision on each worker.assignment row.
       "routing-ab",
+      "benchmark-aa",
       // W1-T4098: lints the operator's OWN Claude Code memory directory on the operator's machine —
       // not fleet state, and not reachable from the console's remote HTTP client.
       "memory-lint",
