@@ -77,7 +77,6 @@ function seededGates(opts: { ciGate?: string } = {}): string {
   put("src/lib/a.ts", "export const a = 1;\n");
   put("scripts/source-size-baseline.json", JSON.stringify({ "src/lib/a.ts": 1000, "src/lib/gone.ts": 500 }, null, 2) + "\n");
   put("scripts/comment-load-baseline.json", JSON.stringify({ _comment: "ceilings", "src/lib/a.ts": 250 }, null, 2) + "\n");
-  put("scripts/contract-coverage-baseline.json", '{\n  "_comment": "ceiling \\u2014 may fall",\n  "uncoveredCeiling": 5\n}\n');
   put("openapi/daemon.yaml", "paths:\n  /v1/status:\n    get: {}\n");
   put("learnings/core.yaml", "- id: one\n  fact: A fact.\n");
   put("scripts/learnings-budget-baseline.json", '{\n  "_comment": "cap \\u00a78A",\n  "measuredChars": 1,\n  "measuredActiveEntries": 9,\n  "capChars": 42000\n}\n');
@@ -111,11 +110,10 @@ test("W1-T4116: a slack baseline is tightened to its measured value", async () =
   const pass = runGarden(gateGardenSpec(deps(root, landed), probes), deps(root, landed));
   assert.deepEqual(pass.plan?.acting, ["tighten"]);
   const targets = pass.plan!.actions.map((a) => a.target).sort();
-  assert.deepEqual(targets, ["scripts/contract-coverage-baseline.json#uncoveredCeiling", "scripts/source-size-baseline.json#src/lib/a.ts"]);
-  // Each value is the one the ratchet itself records: a one-line file's source-size bucket, and
-  // today's count of uncovered routes (the fixture's client sources call none).
+  assert.deepEqual(targets, ["scripts/source-size-baseline.json#src/lib/a.ts"]);
+  // The value is the one the ratchet itself records: a one-line file's source-size bucket. (W1-T4583
+  // retired the contract-coverage ceiling this pass also used to tighten.)
   assert.equal(JSON.parse(readFileSync(join(root, "scripts/source-size-baseline.json"), "utf8"))["src/lib/a.ts"], 500);
-  assert.match(readFileSync(join(root, "scripts/contract-coverage-baseline.json"), "utf8"), /"_comment": "ceiling \\u2014 may fall",\n {2}"uncoveredCeiling": 0\n/);
   assert.equal("review" in landed[0]!, false, "a tightening lands for the fleet like any other change");
   assert.doesNotMatch(landed[0]!.body, /^\*\*Judged by its outcome/, "an unreviewed class carries no note");
   assert.match(landed[0]!.body, /proof: grep: "src\/lib\/a\.ts": 500 in scripts\/source-size-baseline\.json/);

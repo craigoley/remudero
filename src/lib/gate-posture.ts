@@ -504,7 +504,6 @@ export const GATE_POSTURE_DECLARATIONS: Readonly<Record<string, GatePostureDecla
   "script:scripts/claude-md-budget-ratchet.mjs": repair(false, "budget pressure is computable, but refusing can still strand rule knowledge"),
   "script:scripts/comment-load-ratchet.mjs": repair(true, "the ratchet prints the baseline or comment edit needed"),
   "script:scripts/console-parity-ratchet.mjs": repair(true, "console parity drift names the missing route or fixture"),
-  "script:scripts/contract-coverage-ratchet.mjs": repair(true, "contract coverage drift is repaired with a test or baseline decrease"),
   "script:scripts/coverage-merge-ratchet.mjs": repair(true, "coverage merge failures name missing shard artifacts or bad inputs"),
   "script:scripts/coverage-ratchet.mjs": repair(true, "coverage failures are repaired by tests or measured baseline movement"),
   "script:scripts/clock-signature-ratchet.mjs": repair(true, "clock-signature drift is repaired by measured baseline movement"),
