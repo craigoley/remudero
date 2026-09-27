@@ -147,7 +147,7 @@ test("rmd routing-ab prints each arm and refuses an unknown flag", async () => {
   const readRows = async () => ROWS;
   assert.equal(await routingAbCommand([], { stateDir: "/state", readRows, today: "2026-10-09", print: (line) => lines.push(line) }), 0);
   assert.match(lines[0]!, /\/state \(16 ledger rows read\)/);
-  assert.match(lines[1]!, /^sol-vs-sonnet: insufficient sample; 5 assignments, 1 tasks in both arms; revisit 2026-10-08 \(DUE\)$/);
+  assert.match(lines[1]!, /^sol-vs-sonnet: insufficient sample; 5 assignments, 1 tasks in both arms, 0 crossover tasks; revisit 2026-10-08 \(DUE\)$/);
   assert.match(lines[2]!, /sonnet \(claude\): 2 tasks, 1 merged \(50\.0%\), 1\.0 fix dispatches\/task, 15\.0 min median, 2400 tokens, \$5\.00 notional/);
   const json: string[] = [];
   assert.equal(await routingAbCommand(["--json"], { stateDir: "/state", readRows, today: "2026-09-25", print: (line) => json.push(line) }), 0);

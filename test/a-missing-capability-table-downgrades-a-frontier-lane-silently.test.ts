@@ -147,7 +147,7 @@ test("a Codex worker whose capability table is unreadable still spawns (fail-sof
         // in production once both `resolveWorkerCapabilities` and its own `config.root` read fail.
         readCodex: async (_config, request) =>
           selectCodexModel(VISIBLE_CODEX_MODELS, CODEX_HEADROOM, codexConfig, request.requestedModel, request.requestedEffort, undefined),
-        tieBreaker: 0,
+        draw: 0,
         writeStatus: () => {},
       },
       containment: {
@@ -232,7 +232,7 @@ test("a Codex worker served BY a real capability table carries no missing-table 
         readClaude: async () => ({ provider: "claude", readable: true, windows: [{ name: "session (5h)", usedPercent: 97 }] }),
         readCodex: async (_config, request) =>
           selectCodexModel(visibleFrontierModels, frontierHeadroom, codexConfig, request.requestedModel, request.requestedEffort, LADDER),
-        tieBreaker: 0,
+        draw: 0,
         writeStatus: () => {},
       },
       containment: {

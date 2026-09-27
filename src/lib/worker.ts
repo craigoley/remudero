@@ -63,7 +63,13 @@ import {
   type ClaudeModelHealthState,
 } from "./claude-model-health.js";
 import { loadMounts, mountsPath, resolveClaudeModelAlias, subscriptionOnlyModel, type CapabilityLadder } from "./mounts.js";
-import { routingExperimentFor } from "./routing-experiments.js";
+import {
+  experimentDrawSeed,
+  experimentIntentionToTreat,
+  ROUTING_EXPERIMENTS,
+  routingExperimentFor,
+  type ExperimentIntentionToTreat,
+} from "./routing-experiments.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { assertLiveSpawnAllowed } from "./spawn-guard.js";
 import { validateWorkerSettingsFile } from "./settings.js";
@@ -119,6 +125,10 @@ import {
   finishProviderWindowMeasurement,
   providerEligibility,
   readCodexCapacity,
+  selectionPropensity,
+  spawnDecisionPoint,
+  type RoutingDrawSeed,
+  type RoutingPropensity,
   selectOpenWeightModel,
   spawnCodexWorker,
   spawnOpenWeightWorker,
@@ -347,6 +357,10 @@ export interface WorkerSelectionAssignment {
     capabilityPreference?: { capability: string; provider: WorkerProviderId };
     /** WHY: the rule that fired, what it weighed, and each subscription's headroom at that moment. */
     decision?: RoutingDecision;
+    /** W1-T4617: each candidate's selection probability, the draw and its seed. */
+    propensity?: RoutingPropensity;
+    /** W1-T4617: an experiment's intention to treat -- assigned arm, served arm, crossover. */
+    experiment?: ExperimentIntentionToTreat;
   };
   candidates: Array<{
     provider: WorkerProviderId;
@@ -991,7 +1005,8 @@ export interface SpawnWorkerArgs {
       config: Config,
       selection: { model: string; effort: string },
     ) => Promise<WorkerResult>;
-    tieBreaker?: number;
+    /** Test seam: the auction's drawn value in [0, 1), in place of the seeded draw (W1-T4617). */
+    draw?: number;
     /** Best-effort durable projection for the console; never allowed to change spawn outcome. */
     writeStatus?: typeof writeProviderRoutingStatus;
     now?: () => number;
@@ -1483,6 +1498,8 @@ export function workerSelectionAssignment(
   const selected = input.capacity;
   const model = input.model ?? selected?.model ?? args.model ?? DEFAULT_MODEL_LABEL;
   const recordedModel = input.provider === "claude" ? resolveClaudeModelAlias(model, input.capabilities) : model;
+  const decision = routingDecision(args, recordedModel !== model ? { ...input, model: recordedModel } : input);
+  const experiment = decision.ab && args.taskId ? experimentIntentionToTreat(decision.ab, args.taskId, input.provider) : undefined;
   return {
     version: 1,
     id: randomUUID(),
@@ -1512,7 +1529,15 @@ export function workerSelectionAssignment(
         : {}),
       ...(input.preferenceBypass ? { preferenceBypass: input.preferenceBypass } : {}),
       ...(input.capabilityPreference ? { capabilityPreference: input.capabilityPreference } : {}),
-      decision: routingDecision(args, recordedModel !== model ? { ...input, model: recordedModel } : input),
+      decision,
+      propensity: selectionPropensity({
+        selected: input.provider,
+        considered: (args.routingFallback?.capacities ?? input.capacities ?? []).map((capacity) => capacity.provider),
+        selection: input.selection,
+        unavailableReason: decision.rule.endsWith("-fallback") ? "no-eligible-candidates"
+          : decision.rule === "cash-trial" ? "assigned-by-cash-trial" : undefined,
+      }),
+      ...(experiment ? { experiment } : {}),
     },
     candidates: (input.capacities ?? (selected ? [selected] : [])).slice(0, 8).map(selectionCandidateSnapshot),
   };
@@ -1585,7 +1610,24 @@ function emitWorkerSelectionAssignment(
   }
 }
 
-let providerTieBreaker = 0;
+/** W1-T4617: key the auction's draw on the TASK when it joins an experiment, else on this attempt's decision point. */
+export function auctionDrawSeed(
+  args: Pick<SpawnWorkerArgs, "taskId" | "runId" | "model" | "effort" | "sandboxIntent" | "prompt">,
+  policy: { preference: ProviderRoutingPreference; reservePercent: number },
+  capacities: readonly ProviderCapacity[],
+  capability: CodexModelTier | undefined,
+): RoutingDrawSeed {
+  const considered = capacities.map((capacity) => ({
+    provider: capacity.provider,
+    ...(capacity.model ? { model: capacity.model } : {}),
+    eligible: providerEligibility(capacity, policy.reservePercent).eligible,
+  }));
+  const id = policy.preference === "automatic" ? routingExperimentFor({ capability, effort: args.effort, considered }) : undefined;
+  const experiment = ROUTING_EXPERIMENTS.find((candidate) => candidate.id === id);
+  if (experiment && args.taskId) return experimentDrawSeed(experiment, args.taskId);
+  return { unit: "spawn", taskId: args.taskId ?? "no-task", attempt: args.runId ?? "no-run", point: spawnDecisionPoint(args) };
+}
+
 let claudeCapacityCache: { at: number; value: ProviderCapacity } | undefined;
 
 export interface ClaudeCapacityDeps {
@@ -2105,7 +2147,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       const routed = selectWorkerProviderForPolicy(
         capacities,
         auction.policy,
-        args.providerRouting?.tieBreaker ?? providerTieBreaker++,
+        args.providerRouting?.draw ?? auctionDrawSeed(args, auction.policy, capacities, requestedCapability),
       );
       selection = routed.selection;
       preferenceBypass = routed.preferenceBypass;

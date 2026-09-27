@@ -156,8 +156,9 @@ test("frontier work takes Claude with headroom even when Codex has far more, and
     assert.equal(selectWorkerProviderForPolicy(capacities, frontier, tieBreaker).selection.provider, "claude");
   }
   // The same capacities under the old automatic auction hand Codex most of the frontier work.
-  const automaticPicks = Array.from({ length: 20 }, (_, tieBreaker) =>
-    selectWorkerProviderForPolicy(capacities, policy(), tieBreaker).selection.provider);
+  const automaticPicks = Array.from({ length: 20 }, (_, index) =>
+    selectWorkerProviderForPolicy(capacities, policy(), { unit: "spawn", taskId: `W1-T${index}`, attempt: "run-1", point: "p" })
+      .selection.provider);
   assert.ok(automaticPicks.filter((provider) => provider === "codex").length > 10);
 
   const blocked = selectWorkerProviderForPolicy([capacity("claude", 97), capacity("codex", 5, "gpt-6-sol")], frontier);

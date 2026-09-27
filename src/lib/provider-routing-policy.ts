@@ -14,6 +14,7 @@ import {
   type ProviderCapacity,
   type CodexModelPreference,
   type ProviderSelection,
+  type RoutingDrawSeed,
 } from "./worker-provider.js";
 
 export const PROVIDER_ROUTING_POLICY_VERSION = 2;
@@ -470,15 +471,15 @@ export function policyForCapability(
 export function selectWorkerProviderForPolicy(
   capacities: ProviderCapacity[],
   policy: EffectiveProviderRoutingPolicy,
-  tieBreaker = 0,
+  draw: number | RoutingDrawSeed = 0,
 ): ProviderRoutingPolicySelection {
   const effective = capacities.filter((capacity) => policy.routableProviders.includes(capacity.provider));
-  const automatic = () => selectWorkerProvider(effective, policy.reservePercent, tieBreaker);
+  const automatic = () => selectWorkerProvider(effective, policy.reservePercent, draw);
   if (policy.preference === "automatic") return { selection: automatic() };
   const preferred = effective.find((capacity) => capacity.provider === policy.preference);
   if (preferred) {
     try {
-      return { selection: selectWorkerProvider([preferred], policy.reservePercent, 0) };
+      return { selection: selectWorkerProvider([preferred], policy.reservePercent, draw) };
     } catch (error) {
       if (!(error instanceof ProviderCapacityBlockedError)) throw error;
     }

@@ -15,6 +15,7 @@ import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
+import { seededRandom, seedOf } from "./knowledge-value.js";
 import { withFleetCashAllowanceLock } from "./cash-allowance-lock.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
@@ -200,6 +201,8 @@ export interface ProviderSelection {
   allocationWeight?: number;
   /** Intended share among the eligible providers at this decision point. */
   allocationSharePercent?: number;
+  /** W1-T4617: the draw that picked this provider, and every drawn candidate's probability. */
+  draw?: RoutingDraw;
 }
 
 export interface ProviderWindowConsumption {
@@ -410,21 +413,78 @@ export function providerEligibility(capacity: ProviderCapacity, reservePercent: 
   return admitted ? { eligible: true, headroomPercent } : { eligible: false, reason: "below-reserve", headroomPercent };
 }
 
-const GOLDEN_RATIO_CONJUGATE = (Math.sqrt(5) - 1) / 2;
+/**
+ * W1-T4617: EVERY ROUTING DECISION IS A MICRO-EXPERIMENT, SO IT RECORDS ITS PROBABILITY.
+ *
+ * The auction used to pick with a module-level golden-ratio counter: deterministic, correlated with
+ * the order (and so the time of day) spawns arrived, and with no selection probability anyone could
+ * weight an outcome by. It now draws ONE uniform value from a PRNG seeded by hashing
+ * `(task id, attempt, decision point)` -- the repo's own FNV-1a {@link seedOf} into its mulberry32
+ * {@link seededRandom} -- over the SAME `(headroom - reserve)^2` weights. The draw is independent of
+ * the weights and of the clock, so each provider's expected share is exactly its normalised weight,
+ * and the same inputs always reproduce the same draw.
+ */
+export const ROUTING_DRAW_METHOD = "fnv1a-mulberry32/v1";
 
-function deterministicAllocationPoint(tieBreaker: number): number {
-  const index = Number.isFinite(tieBreaker) ? Math.abs(Math.trunc(tieBreaker)) : 0;
-  return (index * GOLDEN_RATIO_CONJUGATE) % 1;
+/** What a draw is keyed on. `unit: "task"` means every attempt of the task shares it (an experiment arm). */
+export interface RoutingDrawKey {
+  unit: "spawn" | "task";
+  taskId: string;
+  attempt: string;
+  point: string;
+}
+
+/** Hash a draw key into its 32-bit seed. The fields are NUL-joined so no two keys share a seed string. */
+export function routingDrawSeed(key: RoutingDrawKey): number {
+  return seedOf(["routing-draw/v1", key.unit, key.taskId, key.attempt, key.point].join("\u0000"));
+}
+
+/** A key's uniform draw in [0, 1) and the seed it came from, rendered as eight hex digits. */
+export function routingDrawValue(key: RoutingDrawKey): { value: number; seed: string } {
+  const seed = routingDrawSeed(key);
+  return { value: seededRandom(seed)(), seed: seed.toString(16).padStart(8, "0") };
+}
+
+/** The decision point of one spawn: a digest of what it asks for, so a fix rung and a reviewer draw apart. */
+export function spawnDecisionPoint(request: { model?: string; effort?: string; sandboxIntent?: string; prompt: string }): string {
+  const text = [request.model ?? "", request.effort ?? "", request.sandboxIntent ?? "", request.prompt].join("\u0000");
+  return `spawn:${seedOf(text).toString(16).padStart(8, "0")}`;
+}
+
+/** A keyed draw, plus the order the cumulative walk takes (absent: most headroom first). */
+export interface RoutingDrawSeed extends RoutingDrawKey {
+  order?: readonly WorkerProviderId[];
+}
+
+/** One recorded draw: its method, value, seed and each drawn candidate's selection probability. */
+export interface RoutingDraw {
+  method: typeof ROUTING_DRAW_METHOD;
+  value: number;
+  /** Eight hex digits of the hashed seed, or `supplied` when a caller passed the value itself. */
+  seed: string;
+  key?: RoutingDrawKey;
+  probabilities: Array<{ provider: WorkerProviderId; probability: number }>;
+}
+
+function resolveRoutingDraw(source: number | RoutingDrawSeed): { value: number; seed: string; key?: RoutingDrawKey; order?: readonly WorkerProviderId[] } {
+  if (typeof source !== "object") {
+    const value = Number.isFinite(source) ? Math.min(Math.max(source, 0), 1 - Number.EPSILON) : 0;
+    return { value, seed: "supplied" };
+  }
+  const { order, ...key } = source;
+  return { ...routingDrawValue(key), key, ...(order ? { order } : {}) };
 }
 
 /**
  * Select across eligible subscriptions in proportion to squared usable tight-window headroom.
- * Unreadable providers and providers at the reserve boundary are excluded before weighting.
+ * Unreadable providers and providers at the reserve boundary are excluded before weighting. The
+ * pick is ONE draw over those weights (see {@link ROUTING_DRAW_METHOD}); a number is taken as the
+ * drawn value itself, which is the test seam and the single-candidate path.
  */
 export function selectWorkerProvider(
   capacities: ProviderCapacity[],
   reservePercent = 5,
-  tieBreaker = 0,
+  draw: number | RoutingDrawSeed = 0,
 ): ProviderSelection {
   const eligible = capacities
     .filter((capacity) => providerEligibility(capacity, reservePercent).eligible)
@@ -440,24 +500,79 @@ export function selectWorkerProvider(
     .sort((a, b) => b.tightestRemainingPercent - a.tightestRemainingPercent);
   if (eligible.length === 0) throw new ProviderCapacityBlockedError(capacities);
   const totalWeight = eligible.reduce((sum, item) => sum + item.allocationWeight, 0);
+  const resolved = resolveRoutingDraw(draw);
+  const recorded: RoutingDraw = {
+    method: ROUTING_DRAW_METHOD,
+    value: resolved.value,
+    seed: resolved.seed,
+    ...(resolved.key ? { key: resolved.key } : {}),
+    probabilities: eligible.map((item) => ({ provider: item.provider, probability: item.allocationWeight / totalWeight })),
+  };
   const weighted = eligible.map((item) => ({
     ...item,
     allocationSharePercent: item.allocationWeight / totalWeight * 100,
+    draw: recorded,
   }));
-  const best = eligible[0].tightestRemainingPercent;
-  const tied = weighted.filter((item) => item.tightestRemainingPercent === best);
-  if (tied.length === weighted.length) {
-    const index = Number.isFinite(tieBreaker) ? Math.abs(Math.trunc(tieBreaker)) : 0;
-    return tied[index % tied.length];
-  }
-
-  const targetWeight = deterministicAllocationPoint(tieBreaker) * totalWeight;
+  // The walk's order moves no probability; an experiment fixes it so one task-keyed value reads as one arm.
+  const rank = (provider: WorkerProviderId) => {
+    const index = resolved.order?.indexOf(provider) ?? -1;
+    return index < 0 ? Number.MAX_SAFE_INTEGER : index;
+  };
+  const walk = resolved.order ? [...weighted].sort((a, b) => rank(a.provider) - rank(b.provider)) : weighted;
+  const targetWeight = resolved.value * totalWeight;
   let cumulativeWeight = 0;
-  for (const item of weighted) {
+  for (const item of walk) {
     cumulativeWeight += item.allocationWeight;
     if (targetWeight < cumulativeWeight) return item;
   }
-  return weighted[weighted.length - 1];
+  return walk[walk.length - 1];
+}
+
+/**
+ * W1-T4617: the selection probability a `worker.assignment` row carries. `unavailable` is a named
+ * state with a reason -- never 0, never omitted -- because a propensity-weighted estimate that read
+ * a missing probability as zero would divide by it.
+ */
+export interface RoutingPropensity {
+  method: typeof ROUTING_DRAW_METHOD | "single-candidate" | "unavailable";
+  selectedProbability: number | "unavailable";
+  candidates: Array<{ provider: WorkerProviderId; probability: number | "unavailable" }>;
+  unavailableReason?: string;
+  draw?: { value: number; seed: string; key?: RoutingDrawKey };
+}
+
+/**
+ * Derive the propensity of one assignment. An auction selection reads its own draw (an ineligible
+ * or policy-excluded candidate is a KNOWN 0); no auction means one candidate at probability 1; a
+ * rule that settled the provider outside any weighing, or a selection with no draw, is unavailable.
+ */
+export function selectionPropensity(input: {
+  selected: WorkerProviderId;
+  considered: readonly WorkerProviderId[];
+  selection?: Pick<ProviderSelection, "draw">;
+  unavailableReason?: string;
+}): RoutingPropensity {
+  const providers = [...new Set([...input.considered, input.selected])];
+  const reason = input.unavailableReason ?? (input.selection && !input.selection.draw ? "missing-weight" : undefined);
+  if (reason !== undefined) {
+    return {
+      method: "unavailable",
+      selectedProbability: "unavailable",
+      candidates: providers.map((provider) => ({ provider, probability: "unavailable" as const })),
+      unavailableReason: reason,
+    };
+  }
+  const draw = input.selection?.draw;
+  if (!draw) {
+    return { method: "single-candidate", selectedProbability: 1, candidates: [{ provider: input.selected, probability: 1 }] };
+  }
+  const probability = new Map(draw.probabilities.map((entry) => [entry.provider, entry.probability]));
+  return {
+    method: draw.method,
+    selectedProbability: probability.get(input.selected) ?? "unavailable",
+    candidates: providers.map((provider) => ({ provider, probability: probability.get(provider) ?? 0 })),
+    draw: { value: draw.value, seed: draw.seed, ...(draw.key ? { key: draw.key } : {}) },
+  };
 }
 
 export function claudeCapacityFromUsage(
