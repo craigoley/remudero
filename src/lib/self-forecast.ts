@@ -38,6 +38,23 @@ export function parseSelfForecast(reportText: string): SelfForecast {
   return { state: "present", p };
 }
 
+const INVALID_REASONS: ReadonlySet<unknown> = new Set(["malformed", "out-of-range", "duplicate"]);
+
+/** W1-T4636: read a LEDGERED forecast back. Only the exact shape {@link parseSelfForecast} writes is
+ *  a forecast; anything else is null — a damaged record, never re-read as a worker's absent answer. */
+export function readSelfForecastRecord(value: unknown): SelfForecast | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (record.state === "present") {
+    return typeof record.p === "number" && record.p >= 0 && record.p <= 1 ? { state: "present", p: record.p } : null;
+  }
+  if (record.state === "absent") return record.reason === "missing" ? { state: "absent", reason: "missing" } : null;
+  if (record.state === "invalid" && INVALID_REASONS.has(record.reason)) {
+    return { state: "invalid", reason: record.reason as "malformed" | "out-of-range" | "duplicate" };
+  }
+  return null;
+}
+
 /** One forecast joined to its verified outcome: 1 = completed per the W1-T4608 join, 0 = verified
  *  not completed, null = no verified outcome (censored, unavailable, or not yet joined). */
 export interface SelfForecastPair {
@@ -111,4 +128,34 @@ export function scoreSelfForecasts(pairs: readonly SelfForecastPair[], opts: { b
       perceptionGap: meanForecast === null || observedRate === null ? null : meanForecast - observedRate, reliability };
   });
   return { state: groups.some((g) => g.scored > 0) ? "observed" : "unavailable", groups };
+}
+
+export const SELF_FORECAST_CALIBRATION_VERSION = "self-forecast-calibration-v1" as const;
+
+/** W1-T4636: the cohort snapshot's calibration record. Descriptive only — never a routing input, a
+ *  gate or a public claim — and it names no task, run or assignment: groups key on model x class. */
+export interface SelfForecastCalibration {
+  version: typeof SELF_FORECAST_CALIBRATION_VERSION;
+  state: "observed" | "unavailable";
+  reason: string | null;
+  asOf: string | null;
+  claim: "descriptive-not-causal";
+  routingInput: "never";
+  /** null only when no verified-outcome join was supplied: then nothing below was measured. */
+  coverage: {
+    /** `implement.done` rows paired to a cohort assignment and carrying a readable forecast record. */
+    paired: number;
+    forecasts: { present: number; absent: number; invalid: number };
+    /** Completed = 1, closed-unmerged-unadjudicated = 0; `excluded` is left unscored, by reason. */
+    outcomes: { completed: number; notCompleted: number; excluded: Record<string, number> };
+    /** `implement.done` rows that never became a pair, by reason. */
+    unpaired: Record<string, number>;
+  } | null;
+  score: SelfForecastScore | null;
+}
+
+/** The explicit unavailable value: no join, so no pair was built and nothing is imputed. */
+export function unavailableSelfForecastCalibration(reason: string, asOf: string | null): SelfForecastCalibration {
+  return { version: SELF_FORECAST_CALIBRATION_VERSION, state: "unavailable", reason, asOf,
+    claim: "descriptive-not-causal", routingInput: "never", coverage: null, score: null };
 }

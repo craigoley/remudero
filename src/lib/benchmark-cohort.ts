@@ -8,11 +8,16 @@ import { joinVerifiedTaskOutcomes, type BenchmarkVerifiedOutcome, type VerifiedA
 import { deriveModelDrift, MODEL_DRIFT_VERSION, unavailableModelDrift, type ModelDriftReport,
   type ModelExposure } from "./model-drift.js";
 import type { TaskCaseFile } from "./task-case-file.js";
+import { readSelfForecastRecord, scoreSelfForecasts, SELF_FORECAST_CALIBRATION_VERSION,
+  unavailableSelfForecastCalibration, type SelfForecastCalibration, type SelfForecastPair } from "./self-forecast.js";
 
 export const BENCHMARK_COHORT_VERSION = "benchmark-cohort-v1" as const;
 
 type Form = "gzip" | "plain" | "live";
 type EvidenceRow = { fingerprint: string; bytes: number; row: Record<string, unknown> };
+/** W1-T4636: the row projection a source was scanned under. A live source scanned before
+ * `implement.done` was retained lacks those rows, so it is rescanned whole, never appended to. */
+const SOURCE_PROJECTION = "implement-forecast-v1" as const;
 type SourceRecord = {
   name: string;
   form: Form;
@@ -20,6 +25,7 @@ type SourceRecord = {
   mtimeMs: number;
   sha256: string;
   rows: EvidenceRow[];
+  projection?: typeof SOURCE_PROJECTION;
 };
 type SourceFault = { name: string; form: Form; size: number; mtimeMs: number; reason: string;
   audited?: boolean; sha256?: string; malformedRows?: number;
@@ -97,6 +103,8 @@ export interface BenchmarkCohortSnapshot {
   coverage: Record<CoverageField, CohortFieldCoverage>;
   verifiedTaskOutcome: "unavailable-no-github-verification-join" | BenchmarkVerifiedOutcome;
   modelDrift: ModelDriftReport;
+  /** W1-T4636: each implement self-forecast scored against its assignment's verified outcome. */
+  selfForecastCalibration: SelfForecastCalibration;
   taskShape: TaskShapeStrata;
   experimentEffect: "unavailable-no-randomized-allocation";
   pressure: {
@@ -161,7 +169,8 @@ function validLastGood(value: unknown, sources: SourceRecord[], faults: SourceFa
         reason: fault.reason }))))
     && object(snapshot.sourceRows) !== undefined && object(snapshot.coverage) !== undefined
     && object(snapshot.pressure) !== undefined && object(snapshot.modelDrift)?.version === MODEL_DRIFT_VERSION
-    && object(snapshot.taskShape)?.version === TASK_SHAPE_STRATA_VERSION;
+    && object(snapshot.taskShape)?.version === TASK_SHAPE_STRATA_VERSION
+    && object(snapshot.selfForecastCalibration)?.version === SELF_FORECAST_CALIBRATION_VERSION;
 }
 
 function manifest(stateDir: string): ManifestEntry[] {
@@ -249,7 +258,8 @@ function completeLivePrefix(path: string, size: number): number {
 }
 
 function relevant(row: Record<string, unknown>): boolean {
-  return row.step === "worker.assignment" || row.step === "worker.attempt" || row.step === "verdict";
+  return row.step === "worker.assignment" || row.step === "worker.attempt" || row.step === "verdict"
+    || row.step === "implement.done";
 }
 
 function projectRow(row: Record<string, unknown>): Record<string, unknown> {
@@ -268,6 +278,13 @@ function projectRow(row: Record<string, unknown>): Record<string, unknown> {
         stack: { harnessRevision: stack?.harnessRevision } },
     };
   }
+  if (row.step === "implement.done") {
+    // The checkpoint keeps only the canonical forecast shape; a damaged record is marked, not copied.
+    const forecast = row.self_forecast === undefined ? undefined
+      : readSelfForecastRecord(row.self_forecast) ?? { state: "record-invalid" };
+    return { ts: row.ts, run_id: row.run_id, step: row.step, selection_assignment_id: row.selection_assignment_id,
+      self_forecast: forecast };
+  }
   return {
     ts: row.ts, run_id: row.run_id, step: row.step, selection_assignment_id: row.selection_assignment_id,
     success: row.success, served_model: row.served_model, billing_mode: row.billing_mode,
@@ -282,7 +299,7 @@ async function scanSource(entry: ManifestEntry, precedingRotation: string | unde
   const hashes = await sourceHashes(entry.path, entry.form === "live" ? prior?.size : undefined,
     entry.form === "live" ? prefixBytes : undefined);
   const appendOnly = entry.form === "live" && prior !== undefined && prefixBytes >= prior.size
-    && hashes.prefix === prior.sha256;
+    && hashes.prefix === prior.sha256 && prior.projection === SOURCE_PROJECTION;
   const rows: EvidenceRow[] = appendOnly ? [...prior.rows] : [];
   let malformedReason: string | undefined;
   let malformedRows = 0;
@@ -341,7 +358,8 @@ async function scanSource(entry: ManifestEntry, precedingRotation: string | unde
       maxTimestamp: boundedFault && maxTimestamp ? maxTimestamp : null,
     });
   }
-  return { name: entry.name, form: entry.form, size: prefixBytes, mtimeMs: entry.mtimeMs, sha256: hashes.full, rows };
+  return { name: entry.name, form: entry.form, size: prefixBytes, mtimeMs: entry.mtimeMs, sha256: hashes.full, rows,
+    projection: SOURCE_PROJECTION };
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -402,6 +420,7 @@ function emptySnapshot(reason: string, lastGood?: BenchmarkCohortSnapshot): Benc
       conflictingAssignments: 0, duplicateRows: 0 },
     cohorts: [], coverage: blankCoverage(0),
     verifiedTaskOutcome: "unavailable-no-github-verification-join", modelDrift: unavailableModelDrift(reason),
+    selfForecastCalibration: unavailableSelfForecastCalibration(reason, null),
     taskShape: blankTaskShape(0), experimentEffect: "unavailable-no-randomized-allocation",
     pressure: { sourceBytes: 0, auditedSourceBytes: 0, derivedBytes: 0, snapshotGrowthBytes: null,
       sourceToDerivedRatio: null, evidenceBytesByDay: [], eventsPerAssignment: null, eventsPerRun: null,
@@ -562,20 +581,31 @@ function cohortAssignments(sources: SourceRecord[], faults: SourceFault[]): Coho
   return assignments;
 }
 
+function caseFilesByTask(caseFiles: readonly TaskCaseFile[]): Map<unknown, TaskCaseFile[]> {
+  const byTask = new Map<unknown, TaskCaseFile[]>();
+  for (const file of caseFiles) byTask.set(file?.taskId, [...(byTask.get(file?.taskId) ?? []), file]);
+  return byTask;
+}
+
+/** One assignment's own W1-T4608 disposition, joined alone against its task's case files: completed,
+ * closed-unmerged-unadjudicated (a resolved non-completion), or unavailable with its reason — an open
+ * PR is censored, never a failure. Drift and forecast calibration both read exactly this. */
+function verifiedDisposition(assignment: CohortAssignment, byTask: Map<unknown, TaskCaseFile[]>,
+  cutoff: string): ModelExposure["verified"] {
+  const { coverage } = joinVerifiedTaskOutcomes([assignment], byTask.get(assignment.taskId) ?? [], cutoff);
+  return coverage.completed > 0 ? { state: "resolved", completed: true }
+    : coverage.reasons["closed-unmerged-unadjudicated"] ? { state: "resolved", completed: false }
+      : { state: "unavailable", reason: coverage.censored > 0 ? "censored-open-at-cutoff" : Object.keys(coverage.reasons)[0]! };
+}
+
 /** Each assignment's own W1-T4608 disposition, joined one at a time against its task's case files so
  * the drift detector reads exactly the verification the cohort overlay reads, never a worker call. */
 function driftExposures(assignments: CohortAssignment[], caseFiles: readonly TaskCaseFile[] | undefined,
   cutoff: string): ModelExposure[] {
-  const byTask = new Map<unknown, TaskCaseFile[]>();
-  for (const file of caseFiles ?? []) byTask.set(file?.taskId, [...(byTask.get(file?.taskId) ?? []), file]);
+  const byTask = caseFilesByTask(caseFiles ?? []);
   return assignments.map((assignment) => {
-    let verified: ModelExposure["verified"] = { state: "unavailable", reason: "no-verified-outcome-join" };
-    if (caseFiles) {
-      const { coverage } = joinVerifiedTaskOutcomes([assignment], byTask.get(assignment.taskId) ?? [], cutoff);
-      verified = coverage.completed > 0 ? { state: "resolved", completed: true }
-        : coverage.reasons["closed-unmerged-unadjudicated"] ? { state: "resolved", completed: false }
-          : { state: "unavailable", reason: coverage.censored > 0 ? "censored-open-at-cutoff" : Object.keys(coverage.reasons)[0]! };
-    }
+    const verified: ModelExposure["verified"] = caseFiles ? verifiedDisposition(assignment, byTask, cutoff)
+      : { state: "unavailable", reason: "no-verified-outcome-join" };
     const cost: ModelExposure["cost"] = !assignment.attempted ? { state: "unavailable", reason: "no-attempt" }
       : assignment.costUsd === null || assignment.billingMode === null ? { state: "unavailable", reason: "cost-not-recorded" }
         : { state: "observed", billingMode: assignment.billingMode, usd: assignment.costUsd };
@@ -583,12 +613,59 @@ function driftExposures(assignments: CohortAssignment[], caseFiles: readonly Tas
   });
 }
 
+/** Reliability bins for the calibration curve: tenths of probability. */
+const SELF_FORECAST_CALIBRATION_BINS = 10;
+
+/** W1-T4636: pair each `implement.done` self-forecast with its `selection_assignment_id`'s cohort
+ * assignment (selected model, task class) and that assignment's verified outcome, then score them.
+ * A present, absent or invalid forecast is fed to the scorer as-is — counted, never imputed as 0.5 —
+ * and an outcome that is censored or unavailable is fed as null, so it is counted but never scored. */
+function selfForecastCalibration(sources: SourceRecord[], assignments: CohortAssignment[],
+  caseFiles: readonly TaskCaseFile[] | undefined, cutoff: string): SelfForecastCalibration {
+  if (!caseFiles) return unavailableSelfForecastCalibration("no-verified-outcome-join", cutoff);
+  const byId = new Map(assignments.map((assignment) => [assignment.assignmentId, assignment]));
+  const byTask = caseFilesByTask(caseFiles);
+  const tally = (bucket: Record<string, number>, reason: string): void => { bucket[reason] = (bucket[reason] ?? 0) + 1; };
+  const unpaired: Record<string, number> = {};
+  const fingerprints = new Set<string>();
+  const implementRows = new Map<string, Record<string, unknown>>();
+  for (const source of sources) for (const evidence of source.rows) {
+    if (evidence.row.step !== "implement.done" || fingerprints.has(evidence.fingerprint)) continue;
+    fingerprints.add(evidence.fingerprint);
+    const id = evidence.row.selection_assignment_id;
+    if (typeof id === "string" && id.length > 0) implementRows.set(id, evidence.row);
+    else tally(unpaired, "implement-row-without-assignment-id");
+  }
+  const forecasts = { present: 0, absent: 0, invalid: 0 };
+  const outcomes = { completed: 0, notCompleted: 0, excluded: {} as Record<string, number> };
+  const pairs: SelfForecastPair[] = [];
+  for (const [id, row] of implementRows) {
+    const assignment = byId.get(id);
+    const forecast = readSelfForecastRecord(row.self_forecast);
+    if (assignment === undefined) { tally(unpaired, "assignment-not-in-cohort"); continue; }
+    if (forecast === null) { tally(unpaired, row.self_forecast === undefined ? "forecast-not-recorded" : "forecast-record-invalid"); continue; }
+    forecasts[forecast.state] += 1;
+    const verified = verifiedDisposition(assignment, byTask, cutoff);
+    if (verified.state === "unavailable") tally(outcomes.excluded, verified.reason);
+    else if (verified.completed) outcomes.completed += 1;
+    else outcomes.notCompleted += 1;
+    pairs.push({ model: assignment.selectedModel, taskClass: assignment.taskClass, forecast,
+      verifiedOutcome: verified.state === "unavailable" ? null : verified.completed ? 1 : 0 });
+  }
+  const score = scoreSelfForecasts(pairs, { bins: SELF_FORECAST_CALIBRATION_BINS });
+  return { version: SELF_FORECAST_CALIBRATION_VERSION, state: score.state,
+    reason: score.state === "observed" ? null : "no-scored-pair", asOf: cutoff,
+    claim: "descriptive-not-causal", routingInput: "never",
+    coverage: { paired: pairs.length, forecasts, outcomes, unpaired }, score };
+}
+
 function withVerifiedOutcome(snapshot: BenchmarkCohortSnapshot, sources: SourceRecord[], faults: SourceFault[],
   caseFiles: readonly TaskCaseFile[] | undefined, cutoff: string): BenchmarkCohortSnapshot {
   if (!caseFiles) return snapshot;
   const assignments = cohortAssignments(sources, faults);
   return { ...snapshot, verifiedTaskOutcome: joinVerifiedTaskOutcomes(assignments, caseFiles, cutoff),
-    modelDrift: deriveModelDrift(driftExposures(assignments, caseFiles, cutoff), cutoff) };
+    modelDrift: deriveModelDrift(driftExposures(assignments, caseFiles, cutoff), cutoff),
+    selfForecastCalibration: selfForecastCalibration(sources, assignments, caseFiles, cutoff) };
 }
 
 function canonicalTimestamp(value: unknown): value is string {
@@ -736,6 +813,7 @@ function deriveSnapshot(
     coverage,
     verifiedTaskOutcome: caseFiles ? joinVerifiedTaskOutcomes(joined, caseFiles, asOf) : "unavailable-no-github-verification-join",
     modelDrift: deriveModelDrift(driftExposures(joined, caseFiles, asOf), asOf),
+    selfForecastCalibration: selfForecastCalibration(sources, joined, caseFiles, asOf),
     taskShape: { ...taskShape, strata: [...strata.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, stratum]) => stratum) },
     experimentEffect: "unavailable-no-randomized-allocation",
     pressure: { sourceBytes: sources.reduce((sum, source) => sum + source.size, 0), auditedSourceBytes,
