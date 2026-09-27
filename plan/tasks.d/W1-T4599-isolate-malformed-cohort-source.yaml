@@ -1,0 +1,54 @@
+- id: W1-T4599
+  title: "Quarantine malformed ledger windows without erasing trustworthy model evidence"
+  repo: remudero
+  depends_on: [W1-T4554, W1-T4598]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "live three-daemon cohort audit, issue #7387, 2026-09-27"
+  plan_refs: ["W1-T4554", "W1-T4553", "W1-T4574", "#7387", "docs/model-routing.md"]
+  files:
+    - src/lib/benchmark-cohort.ts
+    - src/lib/ledger-union.ts
+    - test/benchmark-cohort.test.ts
+    - test/ledger-union.test.ts
+    - docs/model-routing.md
+  status: queued
+  rationale: |
+    Core's cohort checkpoint has no lastGood snapshot because one historical gzip archive is
+    valid gzip but contains malformed JSON at line 799768 of 1016356. The current all-or-nothing
+    projection marks the whole fleet unavailable even for disjoint, clean windows. The
+    archive is evidence and must not be edited in place. W1-T4554 already records the fault
+    and continues auditing later sources; this task does not redo that reader. It makes the
+    resulting clean evidence usable only where eligibility can be proved, exposing the lost
+    observation window and join uncertainty instead of pretending it has zero events.
+  design: |
+    Record a source-scoped fault with stable source identity and malformed-line count,
+    without retaining or publishing raw content. Bound the affected time/run join range
+    only when source evidence proves it; otherwise mark that range unknown and conservatively
+    quarantine every possibly connected partition. Reuse the existing bounded scan of
+    unaffected sources and materialize explicitly eligible clean partitions alongside
+    quarantined partitions with per-field missingness and known-lost-source markers. A task,
+    model, or run that could join across a faulty source is ineligible for a performance
+    denominator until repaired; do not infer that a missing attempt was a success, failure,
+    or zero cost. Maintain immutable original archives and source hashes, re-audit only the
+    affected partitions after a source is corrected or a valid late receipt appears, and make
+    the loss visible to operators and public-release review. Publication remains a separate
+    consent and evidence decision. The projection and fault handling stay detached from
+    routing, worker retries, review and PR gates.
+  acceptance:
+    - claim: "one malformed archive cannot suppress unrelated clean daily cohorts"
+      proof: "unit test: benchmark cohort quarantines malformed source and keeps clean windows"
+    - claim: "cross-source joins and model denominators expose uncertainty rather than invented zeros"
+      proof: "unit test: benchmark cohort excludes joins crossing a quarantined source"
+    - claim: "repair of one source rebuilds only affected partitions and preserves original evidence"
+      proof: "unit test: benchmark cohort repairs a quarantined source without raw deletion"
+    - claim: "a source fault remains visible without blocking worker or PR flow"
+      proof: "unit test: benchmark cohort source fault is advisory to daemon work"
+  falsifier: |
+    Delete or rewrite the archive; count an unknown failed call as zero; publish a model
+    ranking from a denominator crossing the quarantined window; or stall a healthy PR
+    because one archive is malformed.
