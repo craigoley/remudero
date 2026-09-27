@@ -115,6 +115,7 @@ export const CLI_ONLY = {
       // reads the same experiment through routing.decision on each worker.assignment row.
       "routing-ab",
       "benchmark-aa",
+      "benchmark-paid-pilot",
       // W1-T4098: lints the operator's OWN Claude Code memory directory on the operator's machine —
       // not fleet state, and not reachable from the console's remote HTTP client.
       "memory-lint",
