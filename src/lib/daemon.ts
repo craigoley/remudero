@@ -35,6 +35,7 @@ import { buildMeasurementCadenceRow } from "./measurement-cadence.js";
 import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-review.js";
 import type { DigestCadenceRunResult } from "./digest.js";
 import type { LedgerCompactionDecision, LedgerCompactionOutcome } from "./ledger-compaction-rung.js";
+import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
@@ -1049,6 +1050,9 @@ export interface DaemonDeps {
   /** Run ONE bounded compaction pass. Never touches the live ledger, never a rotation dependency, and
    *  best-effort like every cadence above it — a compaction fault must never break a daemon cycle. */
   runLedgerCompaction?: () => Promise<LedgerCompactionOutcome | undefined>;
+  /** Local, best-effort projection. A source fault is evidence debt, never a work gate. */
+  checkBenchmarkCohort?: () => boolean;
+  runBenchmarkCohortPass?: () => Promise<BenchmarkCohortPassResult>;
   /** W1-T2923: one scheduler over repository-intake rungs. The check is pure from this module's
    *  perspective; run-task.ts owns markers, policy, GitHub, filesystem and worker effects. */
   checkIntakeRungs?: () => readonly IntakeRungDecision[];
@@ -3195,6 +3199,38 @@ export async function runDaemon(
         }
       } else if (ledgerCompactionDecision) {
         log("ledger_compaction.skipped", { reason: ledgerCompactionDecision.reason });
+      }
+    }
+
+    if (deps.checkBenchmarkCohort) {
+      let due = false;
+      try { due = deps.checkBenchmarkCohort(); }
+      catch (e) { log("benchmark_cohort.check_failed", { error: String((e as Error)?.message ?? e) }); }
+      if (due && deps.runBenchmarkCohortPass) {
+        if (detachedActionInFlight("benchmark-cohort")) {
+          log("benchmark_cohort.already_detached");
+        } else {
+          try {
+            const work = deps.runBenchmarkCohortPass();
+            detachSweepAction(work.then((result) => {
+              log("benchmark_cohort.ran", {
+                state: result.state,
+                scanned_sources: result.scannedSources,
+                pending_sources: result.pendingSources,
+                reason: result.snapshot.reason,
+                source_bytes: result.snapshot.pressure.sourceBytes,
+                checkpoint_bytes: result.checkpointBytes,
+                dimension_cardinality: result.snapshot.pressure.dimensionCardinality,
+                rebuilt_partitions: result.snapshot.pressure.rebuiltPartitions,
+              });
+            }).catch((e) => {
+              log("benchmark_cohort.run_failed", { error: String((e as Error)?.message ?? e) });
+            }), { actionKind: "benchmark-cohort", taskId: "DAEMON" });
+            log("benchmark_cohort.detached");
+          } catch (e) {
+            log("benchmark_cohort.run_failed", { error: String((e as Error)?.message ?? e) });
+          }
+        }
       }
     }
 

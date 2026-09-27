@@ -882,6 +882,7 @@ import {
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources } from "./lib/benchmark-run.js";
+import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -26049,6 +26050,32 @@ export function buildLedgerCompactionDaemonHooks(deps: {
   return { checkLedgerCompaction: check, runLedgerCompaction: run };
 }
 
+interface BenchmarkCohortHookDeps {
+  config?: Config;
+  clock?: Clock;
+  intervalMs?: number;
+  run?: (stateDir: string) => Promise<BenchmarkCohortPassResult>;
+}
+
+export function buildBenchmarkCohortDaemonHooks(deps: BenchmarkCohortHookDeps = {}): {
+  checkBenchmarkCohort: () => boolean;
+  runBenchmarkCohortPass: () => Promise<BenchmarkCohortPassResult>;
+} {
+  const clock = deps.clock ?? systemClock;
+  const intervalMs = deps.intervalMs ?? 30_000;
+  let lastStartedAt = Number.NEGATIVE_INFINITY;
+  return {
+    checkBenchmarkCohort: () => {
+      const current = clock.now();
+      if (current - lastStartedAt < intervalMs) return false;
+      lastStartedAt = current;
+      return true;
+    },
+    runBenchmarkCohortPass: () => (deps.run ?? ((stateDir) => runBenchmarkCohortPass(stateDir, { maxSources: 4 })))
+      (dirname(ledgerPathFor(deps.config ?? loadConfig()))),
+  };
+}
+
 /** The live ledger is bounded independently of its rotations, so this reads the recent fire
  * marker without reopening the archive union that the compaction rung exists to protect. */
 export function lastLedgerCompactionFiredAtMs(lines: readonly string[]): number | undefined {
@@ -32232,6 +32259,8 @@ export async function daemonCommand(
   // cadence beside it. Its state directory is this daemon's own `config.root/state`; wiring it
   // for a drained repository would compact the fleet ledger while evaluating somebody else's plan.
   const ledgerCompactionHooks = target.isSelf ? buildLedgerCompactionDaemonHooks({ config }) : undefined;
+  // Each enrolled daemon owns its local ledger, including site/console target instances.
+  const benchmarkCohortHooks = buildBenchmarkCohortDaemonHooks({ config });
   // W1-T2923: one policy-gated cadence over the repository-intake rungs that used to require
   // hand-run verbs. SELF-TARGET ONLY: every runner writes this harness checkout/state.
   const intakeRungHooks = target.isSelf ? buildIntakeRungsDaemonHooks({ config }) : undefined;
@@ -32810,6 +32839,8 @@ export async function daemonCommand(
         // over-bound corpus into a silent no-op until a union read OOMs the fleet.
         checkLedgerCompaction: ledgerCompactionHooks?.checkLedgerCompaction,
         runLedgerCompaction: ledgerCompactionHooks?.runLedgerCompaction,
+        checkBenchmarkCohort: benchmarkCohortHooks.checkBenchmarkCohort,
+        runBenchmarkCohortPass: benchmarkCohortHooks.runBenchmarkCohortPass,
         checkIntakeRungs: intakeRungHooks?.checkIntakeRungs,
         runIntakeRung: intakeRungHooks?.runIntakeRung,
         // BOARD-REVIEW RUNG (W1-T2304's design, wired here). Same shape as the two cadences
