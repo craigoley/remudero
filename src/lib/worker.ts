@@ -1573,6 +1573,8 @@ function emitWorkerSelectionAssignment(
 ): string | undefined {
   const assignment = workerSelectionAssignment(args, input);
   console.error(JSON.stringify({ event: "worker.selection.assigned", assignment }));
+  // W1-T4614: before the provider call, so every commit this worker makes in its run worktree names this assignment.
+  stampAssignmentIfRunWorktree(args.cwd, assignment.id);
   if (!args.onSelectionAssignment) return undefined;
   try {
     args.onSelectionAssignment(assignment);
@@ -4429,6 +4431,97 @@ export function removeWorktreeBase(worktreePath: string): void {
     fs.unlinkSync(worktreeBasePath(worktreePath));
   } catch {
     /* absent or unreadable — removal owes nothing here */
+  }
+}
+
+/** W1-T4614: the trailer naming the selection assignment whose worker (or harness step) wrote a commit. */
+export const ASSIGNMENT_TRAILER_KEY = "Remudero-Assignment";
+const ASSIGNMENT_CONFIG_KEY = "remudero.assignment";
+const ASSIGNMENT_HOOKS_DIRNAME = "remudero-assignment-hooks";
+const ASSIGNMENT_PRIOR_HOOKS_FILE = ".prior-hooks-path";
+const ASSIGNMENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const ASSIGNMENT_LINE_RE = new RegExp(`^${ASSIGNMENT_TRAILER_KEY}:[ \\t]*(\\S+)[ \\t]*$`, "gm");
+const TRAILER_LINE_RE = /^[A-Za-z0-9][A-Za-z0-9-]*:[ \t]*\S/;
+
+/** W1-T4614: `message` with a `Remudero-Assignment:` trailer, joined to an existing trailer block or as a new paragraph.
+ * An existing assignment line is kept: an amend or re-commit never re-attributes the commit it rewrites. */
+export function withAssignmentTrailer(message: string, assignmentId: string | undefined): string {
+  if (assignmentId === undefined || commitMessageAssignment(message) !== "unattributed") return message;
+  const trimmed = message.replace(/\s+$/, "");
+  const lastParagraph = trimmed.split(/\n[ \t]*\n/).pop() ?? "";
+  const joinsTrailers = trimmed.includes("\n") && lastParagraph.split("\n").every((line) => TRAILER_LINE_RE.test(line));
+  return `${trimmed}${joinsTrailers ? "\n" : "\n\n"}${ASSIGNMENT_TRAILER_KEY}: ${assignmentId}`;
+}
+
+/** W1-T4614: the assignment a commit message names (its last trailer line), or `unattributed` — never guessed. */
+export function commitMessageAssignment(message: string): string {
+  const ids = [...message.matchAll(ASSIGNMENT_LINE_RE)].map((m) => m[1]!);
+  return ids.at(-1) ?? "unattributed";
+}
+
+/** W1-T4614: resolve a commit (a pushed head sha) to its authoring assignment. A commit that cannot be read is
+ * `unreadable`, kept apart from `unattributed` (a real commit with no trailer): missing evidence is not evidence of absence. */
+export function resolveCommitAssignment(repoDir: string, sha: string): string {
+  try {
+    const message = execFileSync("git", ["-C", repoDir, "log", "-1", "--format=%B", sha, "--"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return commitMessageAssignment(message);
+  } catch {
+    // Nothing was read, so nothing can be said about who wrote it — a third value, never folded into `unattributed`.
+    return "unreadable";
+  }
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** W1-T4614: make every commit in `worktreePath` name `assignmentId`: its own `core.hooksPath` points at a private dir
+ * whose prepare-commit-msg (the hook `--no-verify` never skips) appends the trailer and whose other hooks delegate to the
+ * worktree's previous hooks. Re-stamping changes only the id; an id that is not a plain token installs nothing (false). */
+export function stampRunWorktreeAssignment(worktreePath: string, assignmentId: string): boolean {
+  if (!ASSIGNMENT_ID_RE.test(assignmentId)) return false;
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  if (realpathSync(git("rev-parse", "--show-toplevel")) !== realpathSync(worktreePath)) return false;
+  const hooksDir = join(git("rev-parse", "--path-format=absolute", "--git-dir"), ASSIGNMENT_HOOKS_DIRNAME);
+  const current = git("rev-parse", "--path-format=absolute", "--git-path", "hooks");
+  const priorFile = join(hooksDir, ASSIGNMENT_PRIOR_HOOKS_FILE);
+  const prior = current === hooksDir ? readFileSync(priorFile, "utf8").trim() : current;
+  mkdirSync(hooksDir, { recursive: true });
+  writeFileSync(priorFile, `${prior}\n`);
+  const delegate = (name: string) => `if [ -x ${shellQuote(join(prior, name))} ]; then ${shellQuote(join(prior, name))} "$@" || exit $?; fi\n`;
+  const existing = existsSync(prior) ? readdirSync(prior) : [];
+  for (const name of existing) {
+    if (name === "prepare-commit-msg" || name.includes(".")) continue;
+    writeFileSync(join(hooksDir, name), `#!/bin/sh\n${delegate(name)}exit 0\n`, { mode: 0o755 });
+  }
+  writeFileSync(
+    join(hooksDir, "prepare-commit-msg"),
+    "#!/bin/sh\n# W1-T4614: written by the harness — names the assignment that wrote this commit.\n" +
+      delegate("prepare-commit-msg") +
+      `id=$(git config --get ${ASSIGNMENT_CONFIG_KEY}) || exit 0\n` +
+      `grep -q '^${ASSIGNMENT_TRAILER_KEY}:' "$1" && exit 0\n` +
+      `grep -Eq '^[[:space:]]*[^#[:space:]]' "$1" || exit 0\n` +
+      `exec git interpret-trailers --in-place --trailer "${ASSIGNMENT_TRAILER_KEY}: $id" "$1"\n`,
+    { mode: 0o755 },
+  );
+  git("config", "--worktree", ASSIGNMENT_CONFIG_KEY, assignmentId);
+  git("config", "--worktree", "core.hooksPath", hooksDir);
+  return true;
+}
+
+/** W1-T4614: stamp `cwd` only when `worktreeAdd` created it (its sibling base record), so commits anywhere else stay
+ * untouched. Never throws: an unstampable worktree must not refuse the spawn. */
+export function stampAssignmentIfRunWorktree(cwd: string, assignmentId: string): boolean {
+  if (readWorktreeBase(cwd) === null) return false;
+  try {
+    return stampRunWorktreeAssignment(cwd, assignmentId);
+  } catch (error) {
+    console.error(JSON.stringify({ event: "worker.assignment_stamp_failed", reason: String((error as Error)?.message ?? error) }));
+    return false;
   }
 }
 
