@@ -1569,8 +1569,6 @@ function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string,
 export interface AnalyticsDeriveOptions {
   /** Optional host-side git calibration; the ledger reader cannot infer post-merge outcomes. */
   operatorAgentOutcomes?: OperatorAgentTaskOutcomeSignal;
-  /** W1-T4628: operator labels for the judge calibration. The ledger readers load them from
-   *  `judgeLabelStore` (default: the state dir's label file) when this is absent. */
   judgeLabels?: JudgeLabelsInput;
   judgeLabelStore?: JudgeLabelStore;
 }
@@ -1733,7 +1731,6 @@ export async function deriveAnalyticsSnapshotFromLedger(
   return snapshotFromAccumulator(acc, clock.iso(), withJudgeLabels(stateDir, options));
 }
 
-/** W1-T4628: a ledger reader knows its state dir, so it reads the operator's labels beside it. */
 function withJudgeLabels(stateDir: string, options: AnalyticsDeriveOptions): AnalyticsDeriveOptions {
   return { ...options, judgeLabels: options.judgeLabels ?? loadJudgeLabels(options.judgeLabelStore ?? fileJudgeLabelStore(stateDir)) };
 }
