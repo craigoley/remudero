@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
-import { systemClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import { loadConfig } from "./config.js";
 import { DEFAULT_MAX_PAGES, ghApiFetch, ingestFieldTrialsGithub, parseGithubStore, RUN_BRANCH_RE,
   type FieldTrialsGithubPass, type FieldTrialsGithubStore, type GithubCursor, type GithubPageFetch,
@@ -63,7 +63,7 @@ function text(value: unknown): string | null {
 }
 
 function iso(value: unknown): string | null {
-  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
+  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? fixedClock(Date.parse(value)).iso() : null;
 }
 
 function sha256(value: string): string {
@@ -73,9 +73,9 @@ function sha256(value: string): string {
 /** The Monday (UTC) that starts the ISO week holding `at`; the time stratum of every family. */
 export function periodOf(at: string | null): string {
   if (at === null) return "unknown";
-  const day = new Date(at);
-  const back = (day.getUTCDay() + 6) % 7;
-  return new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate() - back)).toISOString().slice(0, 10);
+  const days = Math.floor(Date.parse(at) / DAY_MS);
+  // 1970-01-01 was a Thursday: three days after the Monday that starts its ISO week.
+  return fixedClock((days - (days + 3) % 7) * DAY_MS).iso().slice(0, 10);
 }
 
 export interface FlowRow {
