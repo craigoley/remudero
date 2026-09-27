@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { configPath, loadConfig, type Config } from "./config.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { capStderrExcerpt, spawnWorker } from "./worker.js";
+import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import { reapWorkerScratch } from "./worker-scratch.js";
 import { WORKER_HOME_SYMLINKS } from "./worker-home.js";
 
@@ -887,7 +888,7 @@ export function defaultExecutor(
   settingsFile: string,
   config: Config,
   budgetUsd?: number,
-  spawn: typeof spawnWorker = spawnWorker,
+  spawn: typeof spawnWorker = benchmarkNonDispatchSpawn("containment"),
   initializeRepository: (cwd: string) => void = (cwd) => {
     execFileSync("git", ["init", "-q"], { cwd, stdio: "ignore" });
   },

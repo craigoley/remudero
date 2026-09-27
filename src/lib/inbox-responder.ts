@@ -20,6 +20,7 @@ import type { Mount } from "./mounts.js";
 import { appendPanelLedger } from "./panel-actions.js";
 import { readLedgerLines } from "./status.js";
 import { spawnWorker } from "./worker.js";
+import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 
 /**
  * lib/inbox-responder.ts (W1-T4088) — the inbox as a conversation with the daemon.
@@ -387,7 +388,7 @@ export function realThreadDecider(opts: {
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): (ctx: ThreadDecisionContext) => Promise<unknown> {
-  const spawn = opts.spawn ?? spawnWorker;
+  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("inbox-response");
   return async (ctx) => {
     const args = buildDecisionSummarySpawnArgs({ input: { context: "" }, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
     const result = await spawn({ ...args, prompt: buildThreadDecisionPrompt(ctx) });

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { loadConfig } from "./lib/config.js";
 import { assertLiveWriteAllowed } from "./lib/live-write-guard.js";
 import { gitPushRunBranch } from "./lib/git-push.js";
+import { benchmarkNonDispatchSpawn } from "./lib/benchmark-run.js";
 import {
   DENY_FLOOR_FALLBACK_MODE,
   evaluateDenyFloor,
@@ -31,6 +32,7 @@ const SANDBOX_NAME = "remudero-sandbox";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const config = loadConfig();
+const measuredSpawnWorker = benchmarkNonDispatchSpawn("spike", spawnWorker);
 const ts = String(Date.now());
 
 function log(tag: string, msg = ""): void {
@@ -82,7 +84,7 @@ async function main(): Promise<void> {
 
   // ── (b) RECON WORKER (read-only) ────────────────────────────────────────
   log("RECON WORKER");
-  const recon = await spawnWorker({
+  const recon = await measuredSpawnWorker({
     cwd: worktreePath,
     permissionMode: "bypassPermissions",
     settingsFile,
@@ -110,7 +112,7 @@ async function main(): Promise<void> {
     `3) create probe-ok.txt in your CURRENT dir (run: touch probe-ok.txt)\n` +
     "End with:\nREPORT\nstep1: <outcome>\nstep2: <outcome>\nstep3: <outcome>";
 
-  let probe = await spawnWorker({
+  let probe = await measuredSpawnWorker({
     cwd: worktreePath,
     permissionMode: "bypassPermissions",
     settingsFile,
@@ -141,7 +143,7 @@ async function main(): Promise<void> {
     } catch {
       /* best-effort cleanup */
     }
-    probe = await spawnWorker({
+    probe = await measuredSpawnWorker({
       cwd: worktreePath,
       permissionMode: DENY_FLOOR_FALLBACK_MODE,
       settingsFile,
@@ -185,7 +187,7 @@ async function main(): Promise<void> {
 
   // ── (d) IMPLEMENT WORKER — DECISION_REQUEST round-trip via resume ────────
   log("IMPLEMENT WORKER r1", "DECISION_REQUEST");
-  const impl1 = await spawnWorker({
+  const impl1 = await measuredSpawnWorker({
     cwd: worktreePath,
     permissionMode: "bypassPermissions",
     settingsFile,
@@ -225,7 +227,7 @@ async function main(): Promise<void> {
 
   // Resume the SAME session with the chosen filename → commit, push, PR.
   log("IMPLEMENT WORKER r2", `resume ${impl1.sessionId}`);
-  const impl2 = await spawnWorker({
+  const impl2 = await measuredSpawnWorker({
     cwd: worktreePath,
     permissionMode: "bypassPermissions",
     settingsFile,

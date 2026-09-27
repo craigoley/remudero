@@ -8,6 +8,7 @@ import { landFeedback, landFeedbackStatusContent, type LandFeedbackOpts } from "
 import type { Mount, Mounts } from "./mounts.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 
 /** `plan/feedback/` — the durable, diffable feedback inbox (MASTER-PLAN §7B, W1-T40). One entry
  * per item: id, timestamp, raw text, attachments, origin, status. Capture is pure filesystem
@@ -254,7 +255,7 @@ export function realDecisionSummarizer(opts: {
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): (input: SummarizeInput) => Promise<unknown> {
-  const spawn = opts.spawn ?? spawnWorker;
+  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("feedback-summary");
   return async (input: SummarizeInput) => {
     const result: WorkerResult = await spawn(
       buildDecisionSummarySpawnArgs({ input, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile }),
@@ -433,7 +434,7 @@ export function realFeedbackExpander(opts: {
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): (input: FeedbackExpanderInput) => Promise<unknown> {
-  const spawn = opts.spawn ?? spawnWorker;
+  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("feedback-judge");
   return async (input: FeedbackExpanderInput) => {
     const result: WorkerResult = await spawn(
       buildFeedbackExpansionSpawnArgs({ input, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile }),

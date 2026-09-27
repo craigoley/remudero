@@ -83,13 +83,13 @@ import type {
 } from "./review.js";
 import { parseLedger } from "./retro.js";
 import { selectRuntimeReviewWidth } from "./review-capacity.js";
+import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import {
   activeWorkerCount,
   appendQuestion,
   capStderrExcerpt,
   listRegisteredWorktrees,
   renderWorkerSettings,
-  spawnWorker,
   STDERR_EXCERPT_CAP,
   worktreeAdd,
   worktreeRemove,
@@ -2768,7 +2768,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           deps: {
             // Fresh-spawn adapter: an empty resumeSessionId (cold PR) becomes a
             // fresh spawn rather than an attempt to resume a session that doesn't exist.
-            spawn: (args: SpawnWorkerArgs) => (spawnImpl ?? spawnWorker)({ ...args, resumeSessionId: args.resumeSessionId || undefined }),
+            spawn: (args: SpawnWorkerArgs) => (spawnImpl ?? benchmarkNonDispatchSpawn("sweep-fix"))({ ...args, resumeSessionId: args.resumeSessionId || undefined }),
             waitForCiGreen,
             // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
             // non-green — see runFixRung's own doc for why this must happen on

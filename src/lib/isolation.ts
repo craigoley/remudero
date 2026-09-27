@@ -2,6 +2,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type Config } from "./config.js";
 import { capStderrExcerpt, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import { reapWorkerScratch } from "./worker-scratch.js";
 
 /**
@@ -359,7 +360,7 @@ export function defaultExecutor(
   settingsFile: string,
   config: Config,
   budgetUsd?: number,
-  spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult> = spawnWorker,
+  spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult> = benchmarkNonDispatchSpawn("isolation"),
 ): ProbeExecutor {
   return async () => {
     const cwd = join(config.root, "tmp", `isolation-probe-${Date.now()}`);

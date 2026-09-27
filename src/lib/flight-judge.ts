@@ -2,6 +2,8 @@ import type { AcceptanceCriterion } from "./plan.js";
 import type { Mount } from "./mounts.js";
 import type { TurnToolCall } from "./flight-signals.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import type { Config } from "./config.js";
+import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 
 /**
  * Flight judge (Layer 2) — MASTER-PLAN §4B, W1-T21.
@@ -551,6 +553,8 @@ export async function spawnFlightJudgeWorker(opts: {
   mount: Mount;
   cwd: string;
   settingsFile: string;
-}): Promise<WorkerResult> {
-  return spawnWorker(buildFlightJudgeSpawnArgs(opts));
+  config?: Config;
+}, raw: typeof spawnWorker = spawnWorker): Promise<WorkerResult> {
+  return benchmarkNonDispatchSpawn("flight-judge", raw)({ ...buildFlightJudgeSpawnArgs(opts),
+    ...(opts.config ? { config: opts.config } : {}) });
 }
