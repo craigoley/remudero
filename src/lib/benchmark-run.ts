@@ -6,6 +6,8 @@ import { dirname, isAbsolute, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
+import { isTestRunner } from "./live-write-guard.js";
+import type { Config } from "./config.js";
 import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
@@ -222,6 +224,37 @@ export function callerOwnsBenchmarkReceipt(args: SpawnWorkerArgs): boolean {
   return (args as { [CALLER_OWNS_BENCHMARK_RECEIPT]?: boolean })[CALLER_OWNS_BENCHMARK_RECEIPT] === true;
 }
 
+/** W1-T4616: where a worker-call receipt may be written. MEASURED 2026-09-27: most of the ~105/h
+ *  `spawn-threw-before-result` rows came from TEST processes — a suite under `node --test` that
+ *  reached a real judge spawn with no explicit config resolved the default config's root, which is
+ *  the operator's or daemon's LIVE ledger, and wrote fake failed attempts into production evidence.
+ *  Under the test runner, only an explicitly supplied config names an evidence ledger. */
+export function benchmarkEvidenceLedgerPath(
+  config: Config | undefined, load: () => Config = loadConfig,
+): string | undefined {
+  if (config) return ledgerPathFor(config);
+  return isTestRunner() ? undefined : ledgerPathFor(load());
+}
+
+/** PRIMARY CONTROL (W1-T4616): the longest redacted error message a failed-spawn receipt keeps. */
+export const SPAWN_FAILURE_MESSAGE_MAX_CHARS = 240;
+
+/** W1-T4616: the cause of a spawn that threw before returning — its class, code and a bounded message
+ *  with paths, credentials and long tokens redacted — and whether it failed before any model was
+ *  selected, so the attempt is a counted coverage gap rather than a model's failure. */
+export function spawnFailureDetail(error: unknown, assignmentObserved: boolean): Record<string, unknown> {
+  const errorClass = error instanceof Error ? error.constructor.name || "Error" : typeof error;
+  const code = error !== null && typeof error === "object" && typeof (error as { code?: unknown }).code === "string"
+    ? (error as { code: string }).code : undefined;
+  const raw = error instanceof Error ? error.message : String(error);
+  const message = raw
+    .replace(/\b(?:sk|ghp|gho|ghs|ghu|xox[abp])[-_][A-Za-z0-9_-]{6,}/g, "<secret>")
+    .replace(/(?:~|\.{1,2})?(?:\/[^\s/:'"`]+){2,}\/?/g, "<path>")
+    .replace(/[A-Za-z0-9+_=-]{32,}/g, "<token>")
+    .replace(/\s+/g, " ").trim().slice(0, SPAWN_FAILURE_MESSAGE_MAX_CHARS);
+  return { pre_selection: !assignmentObserved, error_class: errorClass, ...(code ? { error_code: code } : {}), error_message: message };
+}
+
 /** Capture an auxiliary worker call without turning telemetry into a worker or PR gate. The
  * caller's existing assignment sink remains authoritative when one is supplied. */
 export function benchmarkNonDispatchSpawn(
@@ -232,8 +265,9 @@ export function benchmarkNonDispatchSpawn(
     if (callerOwnsBenchmarkReceipt(args)) return raw(args);
     let observedAssignmentId: string | undefined;
     const write = (step: string, fields: Record<string, unknown>): void => {
-      const config = args.config ?? loadConfig();
-      appendLedger(ledgerPathFor(config), {
+      const path = benchmarkEvidenceLedgerPath(args.config);
+      if (path === undefined) return;
+      appendLedger(path, {
         run_id: args.runId ?? `${lane}-${observedAssignmentId ?? "unassigned"}`,
         task_id: args.taskId ?? lane.toUpperCase(), step, lane, ...fields,
       });
@@ -278,7 +312,8 @@ export function benchmarkNonDispatchSpawn(
       } });
     } catch (error) {
       recordAttempt({ ...(observedAssignmentId ? { selection_assignment_id: observedAssignmentId } : {}),
-        success: false, worker_failure: "spawn-threw-before-result" });
+        success: false, worker_failure: "spawn-threw-before-result",
+        ...spawnFailureDetail(error, observedAssignmentId !== undefined) });
       throw error;
     }
     const assignmentId = result.selectionAssignmentId ?? observedAssignmentId;

@@ -881,7 +881,7 @@ import {
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, benchmarkEvidenceLedgerPath } from "./lib/benchmark-run.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
 // Prompt, tools, scorer and environment remain unavailable until immutable trial artifacts exist.
@@ -13989,13 +13989,14 @@ export function recordBenchmarkWorkerAttempt(
   selected: () => { id: string } | undefined,
   stopPolling: () => void,
 ): Promise<WorkerResult> {
-  const failed = (): void => {
+  const failed = (error: unknown): void => {
     try {
       const assignment = selected();
       log("worker.attempt", {
         ...(assignment ? { selection_assignment_id: assignment.id } : {}),
         success: false,
         worker_failure: "spawn-threw-before-result",
+        ...spawnFailureDetail(error, assignment !== undefined),
       });
     } catch { /* preserve the original worker error */ }
   };
@@ -14003,7 +14004,7 @@ export function recordBenchmarkWorkerAttempt(
   try {
     workerCall = call();
   } catch (error) {
-    failed();
+    failed(error);
     stopPolling();
     throw error;
   }
@@ -14024,7 +14025,7 @@ export function recordBenchmarkWorkerAttempt(
     } catch { /* telemetry cannot alter the returned worker result */ }
     return result;
   }, (error: unknown) => {
-    failed();
+    failed(error);
     throw error;
   }).finally(stopPolling);
 }
@@ -14037,7 +14038,9 @@ function ledgerNonDispatchAssignment(
   runId?: string,
   taskId?: string,
 ): void {
-  appendLedger(ledgerPathFor(config ?? loadConfig()), {
+  const path = benchmarkEvidenceLedgerPath(config);
+  if (path === undefined) return;
+  appendLedger(path, {
     run_id: runId ?? `${lane}-${assignment.id}`,
     task_id: taskId ?? lane.toUpperCase(),
     step: "worker.assignment",
