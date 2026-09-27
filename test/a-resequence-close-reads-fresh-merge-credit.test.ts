@@ -125,7 +125,7 @@ test("W1-T4633: a dependency this pass already holds as merged is met, so the de
   // Credit observable by trailer: implementation-subject known, and ALSO the unknown-subject case —
   // "did the merge implement it" is a supersession question, not "did the dependency merge".
   for (const candidate of [depMergedCandidate(), depMergedCandidate({ creditIsImplementation: undefined })]) {
-    const [projected] = projectMergedTaskCandidates([producedView()], [candidate], PLAN.byId);
+    const [projected] = projectMergedTaskCandidates([producedView()], [candidate]);
     assert.equal(projected?.planResequenceIneligible, undefined, "the fresh merge credit meets the dependency");
     const sweep = sweepDeps();
     try {
@@ -145,29 +145,24 @@ test("W1-T4633: fresh credit removes only the merged dependencies, and never a b
     planResequenceIneligible: `unmet dependencies in the current plan: ${DEP_ID}, ${other}`,
     planResequenceUnmetDependencies: [DEP_ID, other],
   };
-  const covered = new Set([TASK_ID, DEP_ID, other]);
-  const [partial] = projectMergedTaskCandidates([view], [depMergedCandidate()], covered);
+  const [partial] = projectMergedTaskCandidates([view], [depMergedCandidate()]);
   assert.equal(partial?.planResequenceIneligible, `unmet dependency in the current plan: ${other}`);
   assert.deepEqual(partial?.planResequenceUnmetDependencies, [other]);
 
   // A not-merged candidate is not merge evidence.
-  const [unmerged] = projectMergedTaskCandidates([view], [depMergedCandidate({ merged: false })], covered);
+  const [unmerged] = projectMergedTaskCandidates([view], [depMergedCandidate({ merged: false })]);
   assert.equal(unmerged?.planResequenceIneligible, view.planResequenceIneligible);
 
   // The blocked/retirement branches of the same row carry no unmet ids and are left untouched.
   const blocked: OpenPrView = { ...view, planResequenceIneligible: "blocked in the current plan", planResequenceUnmetDependencies: undefined };
   assert.equal(projectMergedTaskCandidates([blocked], undefined)[0]?.planResequenceIneligible, "blocked in the current plan");
-  assert.equal(projectMergedTaskCandidates([blocked], [depMergedCandidate()], covered)[0]?.planResequenceIneligible, "blocked in the current plan");
+  assert.equal(projectMergedTaskCandidates([blocked], [depMergedCandidate()])[0]?.planResequenceIneligible, "blocked in the current plan");
 });
 
 test("W1-T4633: an unreadable dependency credit leaves the PR open and records why", async () => {
-  // Two shapes of "the credit read cannot speak for this dependency": no candidate read at all, and
-  // a read over a plan that does not carry the dependency.
-  for (const [candidates, covered] of [
-    [undefined, undefined],
-    [[], new Set<string>([TASK_ID])],
-  ] as const) {
-    const [projected] = projectMergedTaskCandidates([producedView()], candidates, covered);
+  // No merge-credit read this pass: the dependency's merge state is indeterminate, not "unmerged".
+  {
+    const [projected] = projectMergedTaskCandidates([producedView()], undefined);
     assert.equal(projected?.planResequenceIneligible, undefined, "indeterminate grants no authority to close");
     assert.match(projected?.planResequenceHeld ?? "", new RegExp(DEP_ID), "the held reason names the dependency");
     const sweep = sweepDeps();
@@ -212,7 +207,7 @@ function reapExec(calls: string[][]) {
 
 test("W1-T4633: a PR the resequence row does close keeps its head branch through the reaper", async () => {
   // The control: no merge credit anywhere, so the dependency really is unmet and the close stands.
-  const [projected] = projectMergedTaskCandidates([producedView()], [], PLAN.byId);
+  const [projected] = projectMergedTaskCandidates([producedView()], []);
   assert.match(projected?.planResequenceIneligible ?? "", new RegExp(DEP_ID));
   const sweep = sweepDeps();
   const realLog = console.log;
