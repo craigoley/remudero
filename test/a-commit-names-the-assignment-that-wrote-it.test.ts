@@ -25,6 +25,9 @@ import {
   stampAssignmentIfRunWorktree,
   stampRunWorktreeAssignment,
   withAssignmentTrailer,
+  ASSIGNMENT_ID_RE,
+  ASSIGNMENT_LINE_RE,
+  TRAILER_LINE_RE,
 } from "../src/lib/worker.js";
 import { harnessCommitForShellLessWorker, headProvenanceFields } from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -206,4 +209,16 @@ describe("W1-T4614: a shell-capable worker's commit is stamped by the run worktr
     assert.equal(resolveCommitAssignment(empty, "HEAD"), "unreadable");
     assert.deepEqual(headProvenanceFields(empty), {});
   });
+});
+
+it("W1-T4614: the trailer validators refuse what they must, distinctly from what they accept", () => {
+  // Each validator's unhealthy arm, asserted apart from its healthy arm (the negative-reachability ratchet).
+  assert.equal(ASSIGNMENT_ID_RE.test("asg-1.x_2"), true);
+  assert.equal(ASSIGNMENT_ID_RE.test("bad id; rm -rf /"), false);
+  ASSIGNMENT_LINE_RE.lastIndex = 0;
+  assert.equal(ASSIGNMENT_LINE_RE.exec("Remudero-Assignment: asg-7")?.[1], "asg-7");
+  ASSIGNMENT_LINE_RE.lastIndex = 0;
+  assert.equal(ASSIGNMENT_LINE_RE.exec("Remudero-Task: W1-T4614"), null);
+  assert.equal(TRAILER_LINE_RE.test("Co-Authored-By: someone"), true);
+  assert.equal(TRAILER_LINE_RE.test("an ordinary sentence, not a trailer"), false);
 });

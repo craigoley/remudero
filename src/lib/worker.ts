@@ -4439,9 +4439,9 @@ export const ASSIGNMENT_TRAILER_KEY = "Remudero-Assignment";
 const ASSIGNMENT_CONFIG_KEY = "remudero.assignment";
 const ASSIGNMENT_HOOKS_DIRNAME = "remudero-assignment-hooks";
 const ASSIGNMENT_PRIOR_HOOKS_FILE = ".prior-hooks-path";
-const ASSIGNMENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const ASSIGNMENT_LINE_RE = new RegExp(`^${ASSIGNMENT_TRAILER_KEY}:[ \\t]*(\\S+)[ \\t]*$`, "gm");
-const TRAILER_LINE_RE = /^[A-Za-z0-9][A-Za-z0-9-]*:[ \t]*\S/;
+export const ASSIGNMENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+export const ASSIGNMENT_LINE_RE = new RegExp(`^${ASSIGNMENT_TRAILER_KEY}:[ \\t]*(\\S+)[ \\t]*$`, "gm");
+export const TRAILER_LINE_RE = /^[A-Za-z0-9][A-Za-z0-9-]*:[ \t]*\S/;
 
 /** W1-T4614: `message` with a `Remudero-Assignment:` trailer, joined to an existing trailer block or as a new paragraph.
  * An existing assignment line is kept: an amend or re-commit never re-attributes the commit it rewrites. */
