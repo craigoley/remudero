@@ -53,6 +53,7 @@ import { realRiskJudge, riskJudgeSpendCollector, runRiskJudge, type RiskJudgeInp
 import { laneRunStartFields, runFixRung, runTask } from "../src/run-task.js";
 import { buildDigest } from "../src/lib/digest.js";
 import { groupSpendByAccount } from "../src/lib/ledger.js";
+import { liveRunSpend } from "../src/lib/status-stream-publisher.js";
 import { collectWorkerResult, workerLedgerFields } from "../src/lib/worker.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
@@ -311,14 +312,16 @@ test("W1-T2383 (Q3): the digest's cost total is step-gated on `verdict`, so a pr
   assert.match(costLine(before), /notional cost: \$2\.00/, "CONTROL: the line really is the cost line and really carries the verdict row s 2 dollars");
 });
 
-test("W1-T2383 (Q3): the board's spend fold still reads only cost_usd and num_turns on implement.done/fix.done, so max_turns is inert there", () => {
-  const src = readFileSync(new URL("../src/lib/board.ts", import.meta.url), "utf8");
-  const from = src.indexOf('if (line.step !== "implement.done" && line.step !== "fix.done") continue;');
-  assert.ok(from >= 0, "the fold must still exist under that exact predicate");
-  const region = src.slice(from, from + 260);
-  assert.match(region, /line\.cost_usd/);
-  assert.match(region, /line\.num_turns/);
-  assert.equal(/line\.max_turns/.test(region), false, "the added key is read by nothing in this fold");
+test("W1-T2383 (Q3): the board's shared spend fold counts cost_usd and num_turns, not max_turns", () => {
+  const board = readFileSync(new URL("../src/lib/board.ts", import.meta.url), "utf8");
+  assert.match(board, /import \{[^}]*liveRunSpend[^}]*\} from "\.\/status-stream-publisher\.js"/);
+  assert.match(board, /liveRunSpend\(lines, p\.taskId\)/);
+  assert.deepEqual(liveRunSpend([
+    { task_id: "W1-A", step: "run.start" },
+    { task_id: "W1-A", step: "implement.done", cost_usd: 1.25, num_turns: 2, max_turns: 99 },
+    { task_id: "W1-A", step: "fix.done", cost_usd: 0.75, num_turns: 3, max_turns: 100 },
+    { task_id: "W1-A", step: "risk_judge.decision", cost_usd: 50, num_turns: 50, max_turns: 50 },
+  ], "W1-A"), { spendUsd: 2, turns: 5, hasData: true });
 });
 
 test("W1-T2383 (Q3): the one step-agnostic spend reader credits the new row instead of refusing it as unlabelled", () => {
