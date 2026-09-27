@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadPlan } from "./plan.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
@@ -10,6 +11,7 @@ import {
   extractTaskTrailerId,
   parseAcceptanceBlock,
   parseWhitelistedProof,
+  type SuiteRegistryTarget,
 } from "./review.js";
 
 export interface OpenPullRequestProofResult {
@@ -24,7 +26,15 @@ export type OpenPullRequestProofRunner = (
   proof: string,
   mergeBase: string,
   repoRoot: string,
+  target?: SuiteRegistryTarget,
 ) => OpenPullRequestProofResult;
+
+/** W1-T4590: rmd's OWN launcher, resolved from this module rather than from the tree being
+ *  published — a consumer repository carries neither tsx nor src/run-task.ts, which failed every
+ *  console and site PR open (19 builds, 2026-09-25..26) with "Cannot find package 'tsx'". bin/rmd
+ *  runs its own node_modules/.bin/tsx on its own src/run-task.ts. (`import.meta.resolve` is not
+ *  available when tsx loads this module through its CommonJS path, so it is not used here.) */
+const RMD_BIN = fileURLToPath(new URL("../../bin/rmd", import.meta.url));
 
 const TASK_ID_SHAPE = /^(?:W\d+|[A-Z][A-Z0-9_]*)-T\d+$/;
 
@@ -34,10 +44,16 @@ export function filedTaskIdFromRunBranch(branch: string): string | undefined {
   return taskId && TASK_ID_SHAPE.test(taskId) ? taskId : undefined;
 }
 
-export function defaultProofRunner(proof: string, mergeBase: string, repoRoot: string): OpenPullRequestProofResult {
+export function defaultProofRunner(
+  proof: string,
+  mergeBase: string,
+  repoRoot: string,
+  target?: SuiteRegistryTarget,
+): OpenPullRequestProofResult {
+  const repo = target ? ["--repo", `${target.owner}/${target.repo}`] : [];
   const result = spawnSync(
-    process.execPath,
-    ["--import", "tsx", "src/run-task.ts", "check-proof", proof, "--base", mergeBase],
+    RMD_BIN,
+    ["check-proof", proof, "--base", mergeBase, ...repo],
     // A PR proof runs on the branch being published. The child already receives its exact base
     // and must inspect that branch, not ask self-sync to fast-forward it to origin/main.
     { cwd: repoRoot, encoding: "utf8", maxBuffer: 16 * 1024 * 1024, env: { ...process.env, [SELF_SYNC_GUARD_ENV]: "1" } },
@@ -107,6 +123,8 @@ export function openPullRequestChecked(
   repoRoot: string,
   baseRef = "origin/main",
   runProof: OpenPullRequestProofRunner = defaultProofRunner,
+  /** W1-T4590: the repository this PR targets; proofs parse and run against ITS suite roots. */
+  target?: SuiteRegistryTarget,
 ): string {
   const taskId = filedTaskIdFromRunBranch(branch);
   if (!taskId) {
@@ -144,10 +162,10 @@ export function openPullRequestChecked(
   const mergeBase = mergeBaseFor(repoRoot, baseRef);
   for (const criterion of criteria) {
     const proof = criterion.proof.trim();
-    if (!proof || parseWhitelistedProof(proof) === null) {
+    if (!proof || parseWhitelistedProof(proof, target) === null) {
       return reject(`${taskId} has a proof the local check-proof command cannot execute: ${proof || "(empty)"}`);
     }
-    const result = runProof(proof, mergeBase, repoRoot);
+    const result = runProof(proof, mergeBase, repoRoot, target);
     if (result.status !== 0 || result.error) {
       const detail = [result.error, result.stderr, result.stdout].filter(Boolean).join("\n").trim();
       return reject(

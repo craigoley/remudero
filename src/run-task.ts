@@ -3735,7 +3735,7 @@ export function ghPrCreateFillCommand(
   const body = filedTaskIdFromRunBranch(branch)
     ? draftedBody
     : ensureJudgeableBody(draftedBody, PR_OPEN_TIME_ACCEPTANCE_FALLBACK);
-  const checkedBody = openPullRequestChecked(body, branch, worktreePath, "origin/main", proofRunner);
+  const checkedBody = openPullRequestChecked(body, branch, worktreePath, "origin/main", proofRunner, { owner, repo });
   const args = [
     "api",
     "--method",
@@ -21899,14 +21899,24 @@ export function checkProofCommand(
     console.error("rmd check-proof: --base needs a <ref> argument, e.g. `--base origin/main`\n" + USAGE);
     return CHECK_PROOF_EXIT.refused;
   }
+  // W1-T4590: `--repo <owner/name>` resolves the proof against THAT repository's registered suite
+  // roots, as the reviewer does (W1-T3525). Omitted, the default target is unchanged.
+  const repoFlagIdx = rest.indexOf("--repo");
+  const repoSlug = repoFlagIdx >= 0 ? rest[repoFlagIdx + 1] : undefined;
+  const [repoOwner, repoName] = repoSlug?.split("/") ?? [];
+  if (repoFlagIdx >= 0 && (!repoOwner || !repoName)) {
+    console.error("rmd check-proof: --repo needs <owner/name>, e.g. `--repo craigoley/remudero-console`\n" + USAGE);
+    return CHECK_PROOF_EXIT.refused;
+  }
+  const target = repoOwner && repoName ? { owner: repoOwner, repo: repoName } : undefined;
+  const flagTokens = new Set<number>();
+  for (const idx of [baseFlagIdx, repoFlagIdx]) if (idx >= 0) flagTokens.add(idx).add(idx + 1);
   const proof = rest
     .filter((t, i) => {
       if (t === CHECK_PROOF_FULL_SUITE_FLAG) return false;
-      // Only ever excludes the flag token AND its value token — guarded by baseFlagIdx >= 0 so
-      // an ABSENT --base (index -1, +1 = 0) can never accidentally eat argv[0]. This is the
-      // exact shape that keeps every caller who omits --base byte-identical to before this task.
-      if (baseFlagIdx >= 0 && (i === baseFlagIdx || i === baseFlagIdx + 1)) return false;
-      return true;
+      // Only ever excludes a PRESENT flag's own token and its value token, so a caller who omits
+      // both --base and --repo keeps a byte-identical proof string.
+      return !flagTokens.has(i);
     })
     .join(" ")
     .trim();
@@ -21914,13 +21924,13 @@ export function checkProofCommand(
     console.error("rmd check-proof: give me a proof, e.g. `rmd check-proof 'grep: foo in src/lib/bar.ts'`\n" + USAGE);
     return CHECK_PROOF_EXIT.refused;
   }
-  const w = parseWhitelistedProof(proof);
+  const w = parseWhitelistedProof(proof, target);
   if (!w) {
     console.log(`proof:      ${proof}`);
     console.log("parse:      REFUSED — parseWhitelistedProof returned null.");
     // R-12: name the cause when the parser can — a directory-shaped target, a missing `in <path>`
     // clause, a traversal — instead of only the generic hint below.
-    const why = explainGrepProofRefusal(proof) ?? explainUnitTestProofRefusal(proof);
+    const why = explainGrepProofRefusal(proof) ?? explainUnitTestProofRefusal(proof, target);
     if (why !== undefined) console.log(`            reason: ${why}`);
     console.log(
       "            A `grep:` proof needs an explicit `in <path>` clause; a `unit test:` proof needs a\n" +
@@ -45927,7 +45937,7 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "check-proof",
-    syntax: "rmd check-proof <proof> [--allow-full-suite] [--base <ref>]",
+    syntax: "rmd check-proof <proof> [--allow-full-suite] [--base <ref>] [--repo <owner/name>]",
     summary: "Run one acceptance proof through the reviewer's own executor and print its verdict.",
     detail: "run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, the verdict, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). A `unit test:` proof naming a TITLE rather than a test/<file>.test.ts PATH is resolved to its file first; when it resolves to none, the run is REFUSED rather than falling back to the whole-suite glob (--allow-full-suite overrides, time-boxed). --base <ref> (W1-T912, OPTIONAL — omitting it leaves every line and exit code above byte-identical) re-runs the SAME proof against <ref> and prints a `base:`/`discrimination:` line: a proof that ALSO matches at <ref> discriminates nothing and reports `executed_stale`, the reviewer's OWN name for the exact downgrade it applies at review time (W1-T273/W1-T362) — so a local `verdict: pass` that would count for nothing in review is visible before a PR ever opens. The base is a real detached worktree at <ref> (R-11, the reviewer's own builder), so `unit test:` proofs are compared too; when that worktree cannot be created, a `grep:` proof falls back to a materialized base blob and a `unit test:` proof reports UNKNOWN (the reviewer's base_unknown). The worktree is removed before the verb returns. EXIT CODE IS THE VERDICT: 0 pass, 1 fail (genuinely unmet — overrides the keyword floor), 2 refused (nothing executed — bad usage, an unparseable proof, or an unresolved name run declined), 3 no-match (ran and named nothing — degrades to the keyword floor, NEVER read as fail), 4 exec_error (a timeout/spawn failure/grep-exit-2 — inconclusive, also degrades), 5 executed_stale (--base only — passed on both trees, never read as fail). READ-ONLY: writes no cache, no ledger line, no state file",
   },
