@@ -18,7 +18,6 @@ import type { Plan, Task, TaskRisk } from "./plan.js";
 import { DEFAULT_RISK, TASK_STATUSES } from "./plan.js";
 import {
   createLedgerTailCache,
-  deriveStatus,
   projectPlan,
   readLedgerLines,
   readLedgerTail,
@@ -38,6 +37,7 @@ import type { LastSeenStore } from "./last-seen.js";
 import { buildRecapEvents, type RecapEvent } from "./recap.js";
 import { computeGlanceSpend, type GlanceSpend } from "./glance.js";
 import { buildStatusBoard, type BlockedPrBlocker, type MergeHeldRow } from "./status-board.js";
+import { liveRunSpend, subscribeStatusStream } from "./status-stream-publisher.js";
 
 /** Ledger poll pace for the SSE stream — comfortably under the 2s acceptance budget. */
 export const DEFAULT_POLL_MS = 250;
@@ -480,42 +480,8 @@ export function summarizeCounts(
   };
 }
 
-/**
- * Live accumulated spend/turns (W1-T184): sums `cost_usd`/`num_turns` over `implement.done`/
- * `fix.done` lines for `taskId` since its latest `run.start` — the same reset rule
- * {@link deriveRunState} uses (task_id + `run.start`/`verdict`, never `run_id`; a cold fix-rung
- * dispatch stamps its own pseudo `run_id`, so keying on that instead silently freezes live
- * spend). Narrow to these two step names: `budget.warning`/`verdict` log a running total, not an
- * increment, so summing those too would double-count.
- */
-// Why: the frozen-live-spend incident this reset rule fixes — docs/forensics/board.md#liverunspend
-function liveRunSpend(lines: Array<Record<string, unknown>>, taskId: string): { spendUsd: number; turns: number; hasData: boolean } | undefined {
-  let inFlight = false;
-  let spendUsd = 0;
-  let turns = 0;
-  // Distinguishes "no data yet" from a real zero (fb-1784902052582-c124f9).
-  let hasData = false;
-  for (const line of lines) {
-    if (line.task_id !== taskId) continue;
-    if (line.step === "run.start") {
-      inFlight = true;
-      spendUsd = 0;
-      turns = 0;
-      hasData = false;
-      continue;
-    }
-    if (line.step === "verdict") {
-      inFlight = false;
-      continue;
-    }
-    if (!inFlight) continue;
-    if (line.step !== "implement.done" && line.step !== "fix.done") continue;
-    if (typeof line.cost_usd === "number") spendUsd += line.cost_usd;
-    if (typeof line.num_turns === "number") turns += line.num_turns;
-    hasData = true;
-  }
-  return inFlight ? { spendUsd, turns, hasData } : undefined;
-}
+// `liveRunSpend` moved to `status-stream-publisher.ts` (W1-T4455): imported above, so this
+// module and that one stay a one-way edge rather than a cycle. See that file's docstring on it.
 
 /**
  * Memoized {@link computeBoardSnapshot} (W1-T184): a recompute only happens when something the
@@ -1189,73 +1155,15 @@ export function buildRecentRoute(deps: BoardDeps): Route {
   };
 }
 
-/** Every distinct `task_id` named on a ledger line, in first-seen order. */
-function taskIdsOf(lines: Array<Record<string, unknown>>): string[] {
-  const seen = new Set<string>();
-  for (const line of lines) {
-    if (typeof line.task_id === "string") seen.add(line.task_id);
-  }
-  return [...seen];
-}
-
-/** GET /v1/status/stream — one `status` SSE event per task whose projection changes. Subscribing
- *  primes the line count to the current ledger length, so a client is never replayed history. */
+/** GET /v1/status/stream — one `status` SSE event per task whose projection changes, fanned out
+ *  by the ONE shared publisher (W1-T4455, `subscribeStatusStream` in `status-stream-publisher.ts`)
+ *  rather than a per-connection tail/derive/poll: N viewers now cost ONE ledger tail and ONE
+ *  derive pass, not N. Subscribing is never replayed history, exactly as before this task. */
 export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): SseRoute {
   return {
     path: "/v1/status/stream",
     scope: "read",
-    subscribe: (send: SseSend) => {
-      // One persistent tail cursor for this connection's lifetime: an unchanged ledger between
-      // ticks costs one statSync, not a full re-read of the file.
-      const tail = createLedgerTailCache();
-      const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, tail));
-      const effectiveDeps: BoardDeps = { ...deps, readLedger };
-
-      // Enrich with live spend/turns (W1-T184), the same way computeBoardSnapshot does, off the
-      // same already-read lines: the client's ingestProjection overwrites the previously-known
-      // row on every SSE flip, so a payload with no spend fields would silently wipe whatever
-      // the last REST poll had shown.
-      // Why: the "tonight's burn was invisible" fixture this enrichment fixes —
-      // docs/forensics/board.md#buildstatusstream--live-spend-over-sse
-      const deriveForStream = (
-        task: Task,
-        lines: Array<Record<string, unknown>>,
-      ): StatusProjection & { liveSpendUsd?: number; liveTurns?: number } => {
-        const projection = deriveStatus(task, effectiveDeps);
-        if (!projection.phase) return projection;
-        const spend = liveRunSpend(lines, task.id);
-        return spend ? { ...projection, liveSpendUsd: spend.spendUsd, liveTurns: spend.turns } : projection;
-      };
-
-      // Prime lastSent with every task's current projection, not an empty map — otherwise the
-      // first ledger line touching a task would always look like a flip, even when it lands on
-      // the state the client already has.
-      const primingLines = readLedger(deps.ledgerPath);
-      let lastLineCount = primingLines.length;
-      const lastSent = new Map<string, string>(deps.plan.tasks.map((t) => [t.id, JSON.stringify(deriveForStream(t, primingLines))]));
-
-      const tick = () => {
-        const lines = readLedger(deps.ledgerPath);
-        if (lines.length <= lastLineCount) return;
-        const newLines = lines.slice(lastLineCount);
-        lastLineCount = lines.length;
-
-        for (const taskId of taskIdsOf(newLines)) {
-          const task = deps.plan.byId.get(taskId);
-          if (!task) continue; // a ledger line for a task not (or no longer) in the plan.
-          // Re-derive off the FULL `lines` (not just `newLines`) — liveRunSpend needs the
-          // task's whole current run, and deriveStatus itself always re-reads the ledger too.
-          const projection = deriveForStream(task, lines);
-          const serialized = JSON.stringify(projection);
-          if (lastSent.get(taskId) === serialized) continue; // no actual flip (incl. spend) — don't spam.
-          lastSent.set(taskId, serialized);
-          send("status", projection);
-        }
-      };
-
-      const timer = setInterval(tick, pollMs);
-      return () => clearInterval(timer);
-    },
+    subscribe: (send: SseSend) => subscribeStatusStream(deps, send, { pollMs }),
   };
 }
 
