@@ -36,7 +36,7 @@ const OUT_OF_SAMPLE_REF = "jv-0123456789abcdef";
 type Row = Record<string, unknown>;
 
 /** Two authored heads, each reviewed once by judge-1: two sampled verdicts. */
-function ledgerRows(): Row[] {
+function judgedHeadRows(): Row[] {
   const rows: Row[] = [];
   for (let i = 0; i < 2; i += 1) {
     const head = `h${i}${"0".repeat(39)}`;
@@ -59,7 +59,7 @@ function stateDir(): string {
   return dir;
 }
 
-function ledger(path: string): Row[] {
+function appendedRows(path: string): Row[] {
   return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Row);
 }
 
@@ -89,7 +89,7 @@ function post(base: string, body: unknown, token = WRITE_TOKEN): Promise<Respons
 test("POST /v1/judge-labels stores a server-stamped label with its labeller and ledgers the credential's hashed origin; the next derivation counts it", async () => {
   const dir = stateDir();
   const ledgerPath = join(dir, "ledger.ndjson");
-  const rows = ledgerRows();
+  const rows = judgedHeadRows();
   const before = deriveJudgeCalibration(rows, { asOf: null, labels: loadJudgeLabels(fileJudgeLabelStore(dir)) });
   assert.equal(before.sample.length, 2, "positive control: the fixture draws a two-verdict queue");
   assert.equal(before.labels.matched, 0);
@@ -111,7 +111,7 @@ test("POST /v1/judge-labels stores a server-stamped label with its labeller and 
 
   const stored = fileJudgeLabelStore(dir).read();
   assert.deepEqual(stored, [{ verdictRef: target, label: "fail", labeller: "craig", labelledAt: "2026-09-27T12:34:56.000Z" }], "the body's labelledAt is never trusted");
-  const recorded = ledger(ledgerPath).filter((row) => row.step === JUDGE_LABEL_RECORDED_STEP);
+  const recorded = appendedRows(ledgerPath).filter((row) => row.step === JUDGE_LABEL_RECORDED_STEP);
   assert.equal(recorded.length, 1);
   assert.equal(recorded[0]!.origin, hashToken(WRITE_TOKEN), "origin is the bearer's hashed identity, never the raw token");
   assert.equal(recorded[0]!.task_id, target);
@@ -149,13 +149,13 @@ test("invalid input is a 400 and writes nothing", async () => {
     assert.equal(forbidden.status, 403, "the read token cannot label");
   });
   assert.equal(existsSync(join(dir, JUDGE_LABELS_FILENAME)), false);
-  assert.deepEqual(ledger(ledgerPath), []);
+  assert.deepEqual(appendedRows(ledgerPath), []);
 });
 
 test("a verdict outside the current sample is stored but flagged, and an undrawn sample reads unavailable", async () => {
   const dir = stateDir();
   const ledgerPath = join(dir, "ledger.ndjson");
-  const sample = deriveJudgeCalibration(ledgerRows(), { asOf: null, labels: { labels: [] } }).sample;
+  const sample = deriveJudgeCalibration(judgedHeadRows(), { asOf: null, labels: { labels: [] } }).sample;
   assert.ok(sample.length > 0 && !sample.some((item) => item.verdictRef === OUT_OF_SAMPLE_REF));
   let current: typeof sample | undefined = sample;
   const route = buildRecordJudgeLabelRoute(fileJudgeLabelStore(dir), ledgerPath, () => current, fixedClock(CLOCK_MS));
@@ -168,7 +168,7 @@ test("a verdict outside the current sample is stored but flagged, and an undrawn
     assert.equal(((await cold.json()) as { sampleMembership: string }).sampleMembership, "sample-unavailable");
   });
   assert.deepEqual(fileJudgeLabelStore(dir).read().map((label) => label.label), ["pass", "fail"]);
-  assert.deepEqual(ledger(ledgerPath).map((row) => row.sample_membership), ["out-of-sample", "sample-unavailable"]);
+  assert.deepEqual(appendedRows(ledgerPath).map((row) => row.sample_membership), ["out-of-sample", "sample-unavailable"]);
 });
 
 test("a store that cannot be written is a 500 write_failed and ledgers nothing", async () => {
@@ -185,7 +185,7 @@ test("a store that cannot be written is a 500 write_failed and ledgers nothing",
     assert.equal(res.status, 500);
     assert.deepEqual(await res.json(), { error: "write_failed" });
   });
-  assert.deepEqual(ledger(ledgerPath), []);
+  assert.deepEqual(appendedRows(ledgerPath), []);
 });
 
 function serveDeps(dir: string): ServeDeps {
@@ -237,5 +237,5 @@ test("the served route table carries POST /v1/judge-labels, write-scoped at LOW,
     server.close();
   }
   assert.deepEqual(fileJudgeLabelStore(dir).read().map((label) => label.verdictRef), [OUT_OF_SAMPLE_REF], "the label lands in dirname(ledgerPath), the store analytics reads");
-  assert.equal(ledger(deps.ledgerPath).filter((row) => row.step === JUDGE_LABEL_RECORDED_STEP).length, 1);
+  assert.equal(appendedRows(deps.ledgerPath).filter((row) => row.step === JUDGE_LABEL_RECORDED_STEP).length, 1);
 });
