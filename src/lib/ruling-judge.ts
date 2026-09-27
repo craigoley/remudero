@@ -25,6 +25,7 @@ import type { Proposal } from "./inbox.js";
 import type { Mount, Mounts } from "./mounts.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 
 /** What {@link judgeRulingRisk} decides for one authored ruling. There is no third value: a
  *  ruling is either safe for the agent to land or it is the operator's — "drop" is not
@@ -364,7 +365,7 @@ export async function spawnRulingJudgeWorker(opts: {
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): Promise<WorkerResult> {
-  const spawn = opts.spawn ?? spawnWorker;
+  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("ruling-judge");
   return spawn(buildRulingJudgeSpawnArgs(opts));
 }
 

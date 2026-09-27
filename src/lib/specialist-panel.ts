@@ -2,7 +2,8 @@ import { ghExec } from "./github-transport.js";
 import type { DiffSummary, RiskBand } from "./risk-score.js";
 import type { Mount } from "./mounts.js";
 import { isTddStrict } from "./review.js";
-import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import type { SpawnWorkerArgs, WorkerResult } from "./worker.js";
+import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 
 /**
  * Specialist panel (Layer 4) — MASTER-PLAN §4B, W2-T1.
@@ -431,7 +432,7 @@ export async function spawnSpecialistWorker(opts: {
   cwd: string;
   settingsFile: string;
 }): Promise<WorkerResult> {
-  return spawnWorker(buildSpecialistSpawnArgs(opts));
+  return benchmarkNonDispatchSpawn("specialist")(buildSpecialistSpawnArgs(opts));
 }
 
 // ── Parsing the specialist's machine-readable verdict ───────────────────────
