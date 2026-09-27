@@ -5,7 +5,7 @@
  * Raw pass rates mix a model's ability with the difficulty of the tasks the router handed it. This
  * module fits a Rasch/1PL model, P(success) = sigmoid(theta_model + theta_role - beta_task), over
  * attempt-level observations. It is a regularised maximum-a-posteriori fit: a weak Gaussian prior
- * on every parameter, Newton steps with step halving, and a fixed iteration bound. Task difficulty
+ * on every parameter, damped Newton steps, and a fixed iteration bound. Task difficulty
  * is centred to mean 0 and role ability to mean 0, so model ability carries the intercept.
  *
  * Intervals are Laplace intervals from the posterior curvature, taken on the centred contrasts.
@@ -26,6 +26,8 @@ const DEFAULT_INTERVAL_Z = 1.959964;
 /** BACKSTOP: Newton on this log-concave objective converges in well under 30 steps. */
 const NEWTON_ITERATION_LIMIT = 100;
 const NEWTON_TOLERANCE = 1e-9;
+/** BACKSTOP: a full Newton step from the prior mode moves a few logits at most. */
+const MAX_STEP = 4;
 
 /** Where a binary outcome came from; a verified outcome always wins over the recorded one. */
 export type AbilityOutcomeSource = "verified" | "attempt-recorded";
@@ -62,6 +64,8 @@ export interface AbilityMapOptions {
   minCellAttempts?: number;
   /** Minimum attempts before a task difficulty is reported as a number. */
   minTaskAttempts?: number;
+  /** Newton iteration bound; a fit that does not converge within it is reported unavailable. */
+  maxIterations?: number;
 }
 
 /** A reported cell. `insufficient` deliberately has no estimate: thin evidence is blank, not zero. */
@@ -285,28 +289,22 @@ export function fitAbilityMap(observations: readonly AbilityObservation[], optio
   const precision = 1 / (priorSd * priorSd);
 
   let x = new Array<number>(k + t).fill(0);
-  let objective = negativeLogPosterior(x, triples, k, precision);
   let iterations = 0;
   let converged = false;
-  while (iterations < NEWTON_ITERATION_LIMIT && !converged) {
+  const iterationLimit = options.maxIterations ?? NEWTON_ITERATION_LIMIT;
+  while (iterations < iterationLimit && !converged) {
     iterations += 1;
     const g = gradient(x, triples, k, precision);
     const step = solve(curvatureAt(x, triples, k, t, precision), g.slice(0, k), g.slice(k));
     const direction = [...step.xK, ...step.xT];
-    let scale = 1;
-    let candidate = x.map((value, i) => value - direction[i]!);
-    let candidateObjective = negativeLogPosterior(candidate, triples, k, precision);
-    for (let halving = 0; halving < 40 && !(candidateObjective <= objective + 1e-12); halving += 1) {
-      scale /= 2;
-      candidate = x.map((value, i) => value - scale * direction[i]!);
-      candidateObjective = negativeLogPosterior(candidate, triples, k, precision);
-    }
-    const moved = Math.max(...direction.map((d) => Math.abs(scale * d)));
-    x = candidate;
-    objective = candidateObjective;
-    converged = moved < NEWTON_TOLERANCE;
+    const largest = direction.reduce((max, d) => Math.max(max, Math.abs(d)), 0);
+    // A damped step: no single Newton move exceeds MAX_STEP logits on any parameter.
+    const scale = Math.min(1, MAX_STEP / largest);
+    x = x.map((value, i) => value - scale * direction[i]!);
+    converged = scale * largest < NEWTON_TOLERANCE;
   }
   if (!converged || !x.every(Number.isFinite)) return unavailableAbilityMap("fit-did-not-converge", observations.length);
+  const objective = negativeLogPosterior(x, triples, k, precision);
 
   const curvature = curvatureAt(x, triples, k, t, precision);
   const S = curvature.sInverse;

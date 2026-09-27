@@ -150,6 +150,24 @@ test("confounding: raw pass rates rank the weaker model first, the fit separates
   assert.ok(hard - easy > 2, `assigned difficulty is attributed to the tasks (hard ${hard.toFixed(2)} vs easy ${easy.toFixed(2)})`);
 });
 
+test("the evidence floor and iteration bound are options, and a fit that does not converge is unavailable, not a number", () => {
+  const { observations } = simulate(13);
+  const strict = fitAbilityMap(observations, { minCellAttempts: 10_000, minTaskAttempts: 10_000 });
+  assert.equal(strict.state, "fitted");
+  assert.ok([...strict.models, ...strict.roles, ...strict.tasks].every((c) => c.state === "insufficient"));
+  const guttman: AbilityObservation[] = [];
+  for (let i = 0; i < 5; i += 1) for (let j = 0; j < 5; j += 1) for (let k = 0; k < 8; k += 1) {
+    guttman.push(abilityObservation({ model: `m${i}`, role: "implement", task: `t${j}`, recordedSuccess: i > j }));
+  }
+  const weakPrior = fitAbilityMap(guttman, { priorSd: 100 });
+  assert.equal(weakPrior.state, "fitted", "a separable pattern under a very weak prior still converges through damped steps");
+  assert.ok(estimated(weakPrior.models, "m4").estimate > estimated(weakPrior.models, "m0").estimate);
+  const cut = fitAbilityMap(guttman, { priorSd: 100, maxIterations: 1 });
+  assert.equal(cut.state, "unavailable");
+  assert.equal(cut.reason, "fit-did-not-converge");
+  assert.deepEqual(cut.models, []);
+});
+
 test("outcome source is labelled: verified when supplied, else attempt-recorded", () => {
   const verified = abilityObservation({ model: "m", role: "implement", task: "T", recordedSuccess: true, verifiedSuccess: false });
   assert.deepEqual(verified, { model: "m", role: "implement", task: "T", success: false, source: "verified" });
