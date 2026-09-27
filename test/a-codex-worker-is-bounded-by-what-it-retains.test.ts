@@ -88,3 +88,29 @@ test("W1-T4595: a single unbounded line is still refused, and the stream keeps a
     rmSync(codex.home, { recursive: true, force: true });
   }
 });
+
+test("W1-T4595: the stream backstop refuses runaway ordinary events after they are discarded", async () => {
+  const codex = fakeCodex();
+  try {
+    const event = `${JSON.stringify({
+      type: "item.completed",
+      item: { type: "command_execution", command: "npm test", aggregated_output: "x".repeat(256 * 1024) },
+    })}\n`;
+    const eventBytes = Buffer.byteLength(event, "utf8");
+    const eventsToExceed = Math.floor(CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES / eventBytes) + 1;
+    for (let i = 0; i < eventsToExceed; i++) codex.stdout.write(event);
+
+    await assert.rejects(codex.run, (error: unknown) => {
+      assert.ok(isCodexWorkerOutputLimitError(error));
+      assert.equal(error.stream, "stdout");
+      assert.equal(error.limitBytes, CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES);
+      assert.equal(error.observedBytes, eventsToExceed * eventBytes);
+      assert.equal(error.pendingLineBytes, 0, "every accepted event was a complete line");
+      assert.equal(error.eventBytesByKind["item.completed:command_execution"], (eventsToExceed - 1) * eventBytes);
+      return true;
+    });
+    assert.equal(codex.teardowns(), 1);
+  } finally {
+    rmSync(codex.home, { recursive: true, force: true });
+  }
+});
