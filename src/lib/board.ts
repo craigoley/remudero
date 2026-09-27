@@ -1163,7 +1163,10 @@ export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): Ss
   return {
     path: "/v1/status/stream",
     scope: "read",
-    subscribe: (send: SseSend) => subscribeStatusStream(deps, send, { pollMs }),
+    subscribe: (send: SseSend, req) => subscribeStatusStream(deps, send, {
+      pollMs,
+      lastEventId: typeof req?.headers["last-event-id"] === "string" ? req.headers["last-event-id"] : undefined,
+    }),
   };
 }
 

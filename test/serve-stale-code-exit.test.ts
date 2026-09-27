@@ -82,6 +82,17 @@ function recorder(bootSha: string, extra: Partial<StaleCodeExitDeps> = {}) {
   return { gate, exits, logs, shaCalls, setCurrentSha: (s: string) => (currentSha = s) };
 }
 
+test("stale-code SSE wrapper preserves Last-Event-ID request context", () => {
+  const { gate } = recorder(BOOT);
+  const req = { headers: { "last-event-id": "boot:7" } } as unknown as IncomingMessage;
+  let received: IncomingMessage | undefined;
+  const route: SseRoute = { path: "/v1/status/stream", scope: "read",
+    subscribe: (_send, request) => { received = request; return () => {}; } };
+  const release = gate.wrapSse(route).subscribe(() => {}, req);
+  try { assert.strictEqual(received, req); }
+  finally { release(); gate.stop(); }
+});
+
 // ── isConsoleCodeStale — the pure comparison design (i)/(vi) is built on ──
 
 test("isConsoleCodeStale: identical shas are never stale", () => {

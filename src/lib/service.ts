@@ -99,8 +99,10 @@ export interface Route {
   selfAuthenticated?: boolean;
 }
 
-/** Push one SSE event to a subscribed client (`event:`/`data:` framing, owned by this module). */
-export type SseSend = (event: string, data: unknown) => void;
+/** Push one SSE event or comment. The optional id is a transport field, never JSON data. */
+export type SseSend = ((event: string, data: unknown, id?: string) => void) & {
+  comment?: (text: string) => void;
+};
 
 /** One SSE stream: an exact GET `path` match gated by `scope`. */
 export interface SseRoute {
@@ -108,7 +110,7 @@ export interface SseRoute {
   scope: Scope;
   /** Called once per client connection, after the scope check passes. Must return an
    *  unsubscribe/cleanup function, invoked on disconnect — no subscription outlives the client. */
-  subscribe: (send: SseSend) => () => void;
+  subscribe: (send: SseSend, req?: IncomingMessage) => () => void;
 }
 
 /** The bearer tokens this surface accepts. `write` also satisfies `read`-scoped routes. */
@@ -982,10 +984,12 @@ function openSse(req: IncomingMessage, res: ServerResponse, route: SseRoute, pat
   });
   // Prime the stream immediately so the client sees an open 200 before subscribe()'s first event.
   res.write(":ok\n\n");
-  const send: SseSend = (event, data) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  const send: SseSend = (event, data, id) => {
+    const safeId = id !== undefined && !/[\r\n]/.test(id) ? `id: ${id}\n` : "";
+    res.write(`${safeId}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
-  const unsubscribe = route.subscribe(send);
+  send.comment = (text) => res.write(`: ${text.replace(/[\r\n]/g, " ")}\n\n`);
+  const unsubscribe = route.subscribe(send, req);
   log("service.sse.open", { path });
   req.on("close", () => {
     unsubscribe();

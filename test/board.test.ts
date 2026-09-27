@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
+import { createService, type SseSend } from "../src/lib/service.js";
+import { subscribeStatusStream, isStatusStreamResumeGap,
+  DEFAULT_STATUS_STREAM_HEARTBEAT_MS, STATUS_STREAM_RETAINED_WINDOW } from "../src/lib/status-stream-publisher.js";
 import {
   buildRecentRoute,
   buildStatusRoute,
@@ -45,6 +47,77 @@ import { createLastSeenStore, hashToken, type LastSeenStore } from "../src/lib/l
 
 const READ_TOKEN = "board-read-token";
 const WRITE_TOKEN = "board-write-token";
+
+function emptyStreamDeps(onRead: () => void): BoardDeps {
+  return { plan: planOf([]), ledgerPath: "/unused", github: fakeGitHub(),
+    readLedger: () => { onRead(); return []; } };
+}
+
+function streamObserver(events: Array<{ event: string; data: unknown; id?: string }>, comments: string[] = []): SseSend {
+  const send: SseSend = (event, data, id) => { events.push({ event, data, id }); };
+  send.comment = (comment) => { comments.push(comment); };
+  return send;
+}
+
+test("two status stream subscribers share one ledger tail", () => {
+  let reads = 0;
+  const deps = emptyStreamDeps(() => { reads++; });
+  const first = subscribeStatusStream(deps, streamObserver([]), { pollMs: 1000, heartbeatMs: 1000 });
+  const second = subscribeStatusStream(deps, streamObserver([]), { pollMs: 1000, heartbeatMs: 1000 });
+  try { assert.equal(reads, 1, "second subscriber did not create a second priming tail"); }
+  finally { first(); second(); }
+  const third = subscribeStatusStream(deps, streamObserver([]), { pollMs: 1000, heartbeatMs: 1000 });
+  assert.equal(reads, 2, "a new publisher starts only after the last subscriber leaves");
+  third();
+});
+
+test("a quiet status stream sends a heartbeat within 30 seconds", async () => {
+  assert.ok(DEFAULT_STATUS_STREAM_HEARTBEAT_MS <= 30_000);
+  const comments: string[] = [];
+  const events: Array<{ event: string; data: unknown; id?: string }> = [];
+  let wake: (() => void) | undefined;
+  const arrived = new Promise<void>((resolve) => { wake = resolve; });
+  const send = streamObserver(events, comments);
+  send.comment = (comment) => { comments.push(comment); wake?.(); };
+  const stop = subscribeStatusStream(emptyStreamDeps(() => {}), send, { pollMs: 1000, heartbeatMs: 5 });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([arrived, new Promise<never>((_resolve, reject) =>
+      { timeout = setTimeout(() => reject(new Error("no heartbeat")), 2_000); })]);
+    assert.deepEqual(comments, ["hb"]);
+    assert.deepEqual(events, [], "heartbeats are comments, not client-visible events");
+  } finally { if (timeout) clearTimeout(timeout); stop(); }
+});
+
+test("a status stream resume past the retained window receives a resync event", () => {
+  assert.equal(isStatusStreamResumeGap("boot", STATUS_STREAM_RETAINED_WINDOW + 1, "boot:0"), true);
+  assert.equal(isStatusStreamResumeGap("boot", STATUS_STREAM_RETAINED_WINDOW + 1, "boot:2"), false);
+  const events: Array<{ event: string; data: unknown; id?: string }> = [];
+  const stop = subscribeStatusStream(emptyStreamDeps(() => {}), streamObserver(events), {
+    lastEventId: "previous-boot:1", pollMs: 1000, heartbeatMs: 1000,
+  });
+  try { assert.deepEqual(events, [{ event: "resync", data: { reason: "gap" }, id: undefined }]); }
+  finally { stop(); }
+});
+
+test("shared status publisher attaches a monotonic resume id to each status event", async () => {
+  let rows: Array<Record<string, unknown>> = [];
+  const deps: BoardDeps = { plan: planOf([task({ id: "W1-TX" })]), ledgerPath: "/unused",
+    github: fakeGitHub(), readLedger: () => rows };
+  const events: Array<{ event: string; data: unknown; id?: string }> = [];
+  let wake: (() => void) | undefined;
+  const arrived = new Promise<void>((resolve) => { wake = resolve; });
+  const send: SseSend = (event, data, id) => { events.push({ event, data, id }); wake?.(); };
+  const stop = subscribeStatusStream(deps, send, { pollMs: 5, heartbeatMs: 1000 });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    rows = [{ task_id: "W1-TX", run_id: "run-1", step: "run.start", ts: new Date().toISOString() }];
+    await Promise.race([arrived, new Promise<never>((_resolve, reject) =>
+      { timeout = setTimeout(() => reject(new Error("no status event")), 2_000); })]);
+    assert.equal(events[0]?.event, "status");
+    assert.match(events[0]?.id ?? "", /^[0-9a-f-]{36}:1$/);
+  } finally { if (timeout) clearTimeout(timeout); stop(); }
+});
 
 function task(over: Partial<Task> = {}): Task {
   return {

@@ -15,9 +15,8 @@
  * - `event: status` with the same {@link StatusProjection} JSON payload as before (unchanged).
  * - a monotonic per-publisher `generation` counter and a random `bootId`, minted fresh every time
  *   the publisher (re)starts, together forming the resume token `<bootId>:<generation>`.
- * - a `heartbeat` event on every open stream every {@link DEFAULT_STATUS_STREAM_HEARTBEAT_MS}
- *   (25s) — real byte-for-byte `: hb` COMMENT framing needs a raw-write primitive `SseSend` does
- *   not have today; see the follow-up note on {@link sendHeartbeat}.
+ * - a `: hb` comment on every open stream every {@link DEFAULT_STATUS_STREAM_HEARTBEAT_MS}
+ *   (25s), through the transport's comment writer.
  * - a subscriber that arrives with a `lastEventId` naming a DIFFERENT `bootId`, or a generation
  *   older than the retained window ({@link STATUS_STREAM_RETAINED_WINDOW} events), is sent
  *   `event: resync` / `data: {"reason":"gap"}` FIRST, before anything else. No history is ever
@@ -172,23 +171,14 @@ function tick(state: PublisherState): void {
     if (state.lastSent.get(taskId) === serialized) continue; // no actual flip (incl. spend) — don't spam.
     state.lastSent.set(taskId, serialized);
     state.generation += 1;
-    for (const send of state.subscribers) send("status", projection);
+    const id = `${state.bootId}:${state.generation}`;
+    for (const send of state.subscribers) send("status", projection, id);
   }
 }
 
-/**
- * A `heartbeat` SSE event on every open stream, every {@link DEFAULT_STATUS_STREAM_HEARTBEAT_MS}.
- *
- * FOLLOW-UP (out of THIS task's declared scope — `board.ts`/`status-stream-publisher.ts` only):
- * the design's wire contract pins a raw `: hb` COMMENT line, not a named event, so an
- * `EventSource` client's own event listeners never see it fire. `SseSend` (`lib/service.ts`) has
- * no comment-writing primitive today — only `event:`/`data:` framing — so a byte-for-byte `: hb`
- * frame needs `service.ts` to grow one; that file is outside this task's declared `files:`. This
- * publisher still resets Cloudflare's idle timer every {@link DEFAULT_STATUS_STREAM_HEARTBEAT_MS}
- * either way, which is the acceptance bar this task closes; the exact framing is tracked below.
- */
+/** Keep the connection alive without a client-visible event or a synthetic status delta. */
 function sendHeartbeat(state: PublisherState): void {
-  for (const send of state.subscribers) send("heartbeat", {});
+  for (const send of state.subscribers) send.comment?.("hb");
 }
 
 function startPublisher(deps: BoardDeps, pollMs: number, heartbeatMs: number): PublisherState {
