@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile as execFileChild, execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { constants as fsConstants, accessSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { constants as fsConstants, accessSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -134,6 +134,9 @@ export interface ProviderCapacity {
   modelDecision?: CodexModelDecision;
   /** Manual reset readiness — count and earliest expiry only, NEVER a credit id. */
   resetCredits?: { availableCount: number; earliestExpiresAt?: number };
+  /** W1-T3718: `readable: false` because the provider ANSWERED and every candidate sat below the
+   *  reserve, not because the probe failed. See {@link providerRefusalCondition}. */
+  exhausted?: boolean;
 }
 
 export type CodexModelTier = "economy" | "balanced" | "frontier";
@@ -332,13 +335,30 @@ export function providerWindowConsumption(
 export class ProviderCapacityBlockedError extends Error {
   readonly reasonClass = "blocked_toolchain";
   constructor(readonly capacities: ProviderCapacity[]) {
-    super(
-      `no configured worker subscription has readable headroom: ${capacities
-        .map((c) => `${c.provider}=${c.readable ? `${tightestRemaining(c)}% remaining` : c.detail ?? "unreadable"}`)
-        .join(", ")}`,
-    );
+    super(`no configured worker subscription has readable headroom: ${capacities.map(renderProviderRefusal).join(", ")}`);
     this.name = "ProviderCapacityBlockedError";
   }
+}
+
+/**
+ * W1-T3718: WHY A SUBSCRIPTION REFUSED. `full` answered the probe and has no headroom above the
+ * reserve; `cannot-be-asked` never gave a readable answer. MEASURED 2026-09-17: "claude=capacity
+ * unreadable" and a 10s probe budget that fired after 174s both reached the operator as absence of
+ * headroom -- an infrastructure fault dressed as a budget decision. Only `full` argues for paying
+ * for a fallback, so the two are never folded together.
+ */
+export type ProviderRefusalCondition = "full" | "cannot-be-asked";
+
+export function providerRefusalCondition(capacity: ProviderCapacity): ProviderRefusalCondition {
+  if (capacity.exhausted === true) return "full";
+  if (!capacity.readable) return "cannot-be-asked";
+  return capacity.windows.some(validCapacityWindow) ? "full" : "cannot-be-asked";
+}
+
+function renderProviderRefusal(capacity: ProviderCapacity): string {
+  const remaining = tightestRemaining(capacity);
+  const detail = capacity.readable && Number.isFinite(remaining) ? `${remaining}% remaining` : capacity.detail ?? "unreadable";
+  return `${capacity.provider}=${providerRefusalCondition(capacity) === "full" ? "full" : "cannot be asked"} (${detail})`;
 }
 
 export class CodexToolchainBlockedError extends Error {
@@ -1044,10 +1064,18 @@ export function selectCodexModel(
     if (fallback) {
       const fallbackEfforts = fallback.option?.supportedEfforts ?? [];
       const fallbackEffort = requestedEffort ?? fallback.model.defaultReasoningEffort ?? fallbackEfforts[0] ?? "default";
+      // W1-T3718: the detail names WHY. It said "no reserved headroom" for every cause, a quota
+      // that was never readable included -- so an unanswerable probe read as a full subscription.
+      const reason = fallback.option?.reason;
       return {
         ...fallback.capacity,
         readable: false,
-        detail: `${tier} Codex models have no reserved headroom`,
+        ...(reason === "below-reserve" ? { exhausted: true } : {}),
+        detail: reason === "below-reserve"
+          ? `${tier} Codex models have no reserved headroom`
+          : reason === "quota-unreadable"
+            ? `${tier} Codex quota is unreadable (${fallback.capacity.detail ?? "no detail"})`
+            : `no ${tier} Codex model is eligible (${reason ?? "no decision"})`,
         model: canonicalCodexModelId(fallback.model),
         effort: fallbackEffort,
         modelDecision: decisionBase,
@@ -4062,4 +4090,240 @@ async function spawnCodexWorkerInPrivateTemp(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+// ── W1-T3718: THE REPAIR LADDER IS A FLEET STATE, NOT A PER-ATTEMPT LINE ────────────────────
+// MEASURED 2026-09-17: the fix rung could not spawn for ~90 minutes, every provider refusing and
+// both paid rungs switched off. The only trace was one `fix.spawn_infra_blocked` row among 731, so
+// the operator's sole symptom was red PRs that stopped moving. A stalled ladder is the repair
+// mechanism being OFF: one durable record with its first-seen instant, cleared by the first spawn
+// that succeeds, and read by the surfaces an operator already watches.
+
+/** The two paid rungs below the subscriptions, in the order `spawnWorker` tries them. */
+export type RepairLadderRungId = "cash" | "overflow";
+
+/** One paid rung as a blocked spawn saw it. `refusal` is why it did not carry the spawn;
+ *  `refusalIfSwitched` is what would STILL refuse it with its operator switch turned on. */
+export interface RepairLadderFallback {
+  rung: RepairLadderRungId;
+  refusal?: string;
+  refusalIfSwitched?: string;
+}
+
+export interface RepairLadderProvider {
+  provider: WorkerProviderId;
+  condition: ProviderRefusalCondition;
+  detail: string;
+}
+
+/** The durable record. It carries NO refusal count, by design: a count is the shape nobody read. */
+export interface RepairLadderStallRecord {
+  version: 1;
+  /** First-seen instant of THIS stall; kept across every later refusal until a spawn succeeds. */
+  since: string;
+  lastSeen: string;
+  reason: string;
+  providers: RepairLadderProvider[];
+  fallbacks: RepairLadderFallback[];
+}
+
+export type RepairLadderStall = Omit<RepairLadderStallRecord, "version" | "since" | "lastSeen">;
+
+export type RepairLadderState =
+  | { state: "running" }
+  | ({
+      state: "stalled";
+      ageMs: number;
+      downFor: string;
+      /** True when some provider could not be ASKED: an infrastructure fault a paid rung routes
+       *  around but does not repair. */
+      infrastructureFault: boolean;
+    } & Omit<RepairLadderStallRecord, "version">)
+  | { state: "unreadable"; reason: string };
+
+export function repairLadderStatePath(root: string): string {
+  return join(root, "state", "repair-ladder.json");
+}
+
+/** The stall a spawn refusal represents, or `undefined` when it is not the ladder being off -- a
+ *  refusal other than "no provider would take the work" is a per-spawn fault, not this state. */
+export function repairLadderStallFrom(error: unknown, fallbacks: readonly RepairLadderFallback[]): RepairLadderStall | undefined {
+  if (!(error instanceof ProviderCapacityBlockedError)) return undefined;
+  return {
+    reason: error.message,
+    providers: error.capacities.map((capacity) => ({
+      provider: capacity.provider,
+      condition: providerRefusalCondition(capacity),
+      detail: renderProviderRefusal(capacity).replace(/^[^=]*=/, ""),
+    })),
+    fallbacks: fallbacks.map((fallback) => ({ ...fallback })),
+  };
+}
+
+function parseRepairLadderRecord(raw: string): RepairLadderStallRecord | undefined {
+  const parsed = JSON.parse(raw) as Partial<RepairLadderStallRecord> | null;
+  if (!parsed || typeof parsed !== "object" || typeof parsed.since !== "string" || !Number.isFinite(Date.parse(parsed.since))) {
+    return undefined;
+  }
+  return {
+    version: 1,
+    since: parsed.since,
+    lastSeen: typeof parsed.lastSeen === "string" ? parsed.lastSeen : parsed.since,
+    reason: typeof parsed.reason === "string" ? parsed.reason : "no reason recorded",
+    providers: Array.isArray(parsed.providers) ? parsed.providers : [],
+    fallbacks: Array.isArray(parsed.fallbacks) ? parsed.fallbacks : [],
+  };
+}
+
+/** Record (or extend) the stall. A stall already on record keeps its `since`: the surface reports
+ *  how long the ladder has been down, never when it was last refused. */
+export function recordRepairLadderStall(
+  root: string,
+  stall: RepairLadderStall,
+  nowMs: number = systemClock.now(),
+): { record: RepairLadderStallRecord; began: boolean } {
+  const path = repairLadderStatePath(root);
+  const raw = readFileIfExists(path);
+  let prior: RepairLadderStallRecord | undefined;
+  try {
+    prior = raw === undefined ? undefined : parseRepairLadderRecord(raw);
+  } catch (error) {
+    // A torn or foreign file is not evidence of an earlier stall; this one starts now.
+    console.error(JSON.stringify({ event: "repair_ladder.prior_unreadable", reason: (error as Error).message }));
+  }
+  const at = new Date(nowMs).toISOString();
+  const record: RepairLadderStallRecord = { version: 1, since: prior?.since ?? at, lastSeen: at, ...stall };
+  writeAtomic(path, `${JSON.stringify(record)}\n`);
+  return { record, began: prior === undefined };
+}
+
+/** Clear the stall on a successful spawn. Returns the record it cleared, if one was on file. */
+export function clearRepairLadderStall(root: string): RepairLadderStallRecord | undefined {
+  const path = repairLadderStatePath(root);
+  if (!existsSync(path)) return undefined;
+  let cleared: RepairLadderStallRecord | undefined;
+  try {
+    cleared = parseRepairLadderRecord(readFileSync(path, "utf8"));
+  } catch (error) {
+    console.error(JSON.stringify({ event: "repair_ladder.clear_unparsed", reason: (error as Error).message }));
+  }
+  rmSync(path, { force: true });
+  return cleared;
+}
+
+export function formatDownFor(ms: number): string {
+  const minutes = Math.floor(Math.max(0, ms) / 60_000);
+  if (minutes < 1) return "under a minute";
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  if (days > 0) return `${days}d ${hours % 24}h`;
+  return hours > 0 ? `${hours}h ${minutes % 60}m` : `${minutes}m`;
+}
+
+/** The live state, as the status surfaces and the operator verb read it. An unreadable file is
+ *  reported as UNREADABLE, never as a running ladder. */
+export function readRepairLadderState(root: string, nowMs: number = systemClock.now()): RepairLadderState {
+  let record: RepairLadderStallRecord | undefined;
+  try {
+    const raw = readFileIfExists(repairLadderStatePath(root));
+    if (raw === undefined) return { state: "running" };
+    record = parseRepairLadderRecord(raw);
+  } catch (error) {
+    return { state: "unreadable", reason: (error as Error).message };
+  }
+  if (record === undefined) return { state: "unreadable", reason: "repair-ladder record has no readable first-seen instant" };
+  const { version: _version, ...rest } = record;
+  const ageMs = Math.max(0, nowMs - Date.parse(record.since));
+  return {
+    state: "stalled",
+    ageMs,
+    downFor: formatDownFor(ageMs),
+    infrastructureFault: record.providers.some((provider) => provider.condition === "cannot-be-asked"),
+    ...rest,
+  };
+}
+
+/** One paid rung, priced: what switching it on would bill, the ceiling, and what would still refuse. */
+export interface RepairLadderRungPrice {
+  rung: RepairLadderRungId;
+  /** The ONE config edit that arms this rung. Printed, never applied. */
+  switchSetting: string;
+  /** True when this rung would carry a blocked spawn right now. */
+  armed: boolean;
+  refusal?: string;
+  /** What would still refuse this rung with its switch on; absent when the switch alone suffices. */
+  stillBlockedBy?: string;
+  billing: string;
+  dailyCeilingUsd: number | null;
+  price: string;
+}
+
+const RUNG_TERMS: Record<RepairLadderRungId, { switchSetting: string; billing: string; squeezed: boolean }> = {
+  cash: {
+    switchSetting: "workerProviders.cashFallbackWhenBlocked: true",
+    billing: "per request to the cash provider, outside every subscription",
+    // The blocked-auction cash spawn is the ONE place the squeeze ceiling is claimed.
+    squeezed: true,
+  },
+  overflow: {
+    switchSetting: 'overflow: "api_key"',
+    billing: "per token to Anthropic API credits, outside the subscription",
+    squeezed: false,
+  },
+};
+
+/** Price every paid rung from config alone. PURE: it reads the config it is handed and writes
+ *  nothing -- enabling a paid fallback spends money and stays an operator act. */
+export function priceRepairLadderRungs(
+  config: Pick<Config, "dailyCapUsd">,
+  fallbacks: readonly RepairLadderFallback[],
+): RepairLadderRungPrice[] {
+  return fallbacks.map((fallback) => {
+    const terms = RUNG_TERMS[fallback.rung];
+    let dailyCeilingUsd: number | null;
+    let ceilingNote: string | undefined;
+    try {
+      dailyCeilingUsd = effectiveCashCapUsd(config.dailyCapUsd, { squeezed: terms.squeezed }) ?? null;
+    } catch (error) {
+      dailyCeilingUsd = null;
+      ceilingNote = (error as Error).message;
+    }
+    const price = dailyCeilingUsd === null
+      ? `billed ${terms.billing}; NO daily ceiling (${ceilingNote ?? "dailyCapUsd is unset"}), so this rung refuses even when switched on`
+      : `billed ${terms.billing}; at most $${dailyCeilingUsd}/UTC day (dailyCapUsd${typeof config.dailyCapUsd === "object" ? (terms.squeezed ? ".squeezed" : ".normal") : ""})`;
+    return {
+      rung: fallback.rung,
+      switchSetting: terms.switchSetting,
+      armed: fallback.refusal === undefined,
+      ...(fallback.refusal === undefined ? {} : { refusal: fallback.refusal }),
+      ...(fallback.refusalIfSwitched === undefined ? {} : { stillBlockedBy: fallback.refusalIfSwitched }),
+      billing: terms.billing,
+      dailyCeilingUsd,
+      price,
+    };
+  });
+}
+
+/** The operator verb's text: the ladder's live state, then each rung priced. Changes nothing. */
+export function renderRepairLadderReport(state: RepairLadderState, rungs: readonly RepairLadderRungPrice[]): string[] {
+  const lines: string[] = [];
+  if (state.state === "running") lines.push("repair ladder: RUNNING — no stall on record since the last successful spawn");
+  else if (state.state === "unreadable") lines.push(`repair ladder: UNREADABLE — ${state.reason}`);
+  else {
+    lines.push(`repair ladder: STALLED for ${state.downFor} (since ${state.since}, last refused ${state.lastSeen})`);
+    for (const provider of state.providers) {
+      lines.push(`  ${provider.provider}: ${provider.condition === "full" ? "FULL" : "CANNOT BE ASKED"} — ${provider.detail}`);
+    }
+    if (state.infrastructureFault) {
+      lines.push("  a provider that cannot be asked is an infrastructure fault: a paid rung routes around it, it does not repair it");
+    }
+  }
+  lines.push("paid rungs (this verb changes nothing — switching one on spends money and stays an operator act):");
+  for (const rung of rungs) {
+    lines.push(`  ${rung.rung}: ${rung.armed ? "ARMED" : "OFF"} — switch: ${rung.switchSetting}`);
+    lines.push(`    price: ${rung.price}`);
+    if (rung.refusal !== undefined) lines.push(`    refused now: ${rung.refusal}`);
+    lines.push(`    ${rung.stillBlockedBy === undefined ? "the switch alone would arm it" : `still blocked with the switch on: ${rung.stillBlockedBy}`}`);
+  }
+  return lines;
 }
