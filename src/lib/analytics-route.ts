@@ -102,6 +102,18 @@ import {
 } from "./benchmark-evidence.js";
 import { ABILITY_MAP_VERSION, abilityObservation, fitAbilityMap, unavailableAbilityMap, type AbilityMap, type AbilityObservation } from "./ability-map.js";
 import { buildEvalCard, EVAL_CARD_VERSION, emptyEvalCardEvidence, type EvalCardEvidence, type EvalCardTrial } from "./eval-card.js";
+import { deriveWorkIntegrity, unavailableWorkIntegrity, WORK_INTEGRITY_VERSION, workIntegrityRow, type WorkIntegrity } from "./work-integrity.js";
+import {
+  deriveJudgeCalibration,
+  fileJudgeLabelStore,
+  JUDGE_CALIBRATION_VERSION,
+  judgeCalibrationRow,
+  loadJudgeLabels,
+  unavailableJudgeCalibration,
+  type JudgeCalibration,
+  type JudgeLabelsInput,
+  type JudgeLabelStore,
+} from "./judge-calibration.js";
 
 /** One (lane, model) bucket of question 2 — worker counts and cost by lane/model. */
 export interface WorkerLaneModelBucket {
@@ -338,6 +350,8 @@ export interface AnalyticsSnapshot {
   spend: { cash: CashSpendSnapshot };
   usage?: UsageProjection;
   abilityMap?: AbilityMap;
+  workIntegrity?: WorkIntegrity;
+  judgeCalibration?: JudgeCalibration;
   /** Outcome and work-category dimensions built from terminal run evidence. */
   dimensions: AnalyticsBreakdownDimension[];
   /** Flat rows for console drilldown views, derived from the same bounded dimensions. */
@@ -593,6 +607,8 @@ interface AnalyticsAccumulator {
   checkpointHistory: CheckpointHistoryState;
   checkpointBreakdowns: CheckpointBreakdownState;
   checkpointHydrated: boolean;
+  workIntegrityRows: Array<Record<string, unknown>>;
+  judgeCalibrationRows: Array<Record<string, unknown>>;
 }
 
 type CheckpointHistoryBucket = {
@@ -697,6 +713,8 @@ type AnalyticsCheckpointState = {
     terminalsWithoutRunId: number;
     workCategories: Array<[string, number]>;
   };
+  workIntegrityRows?: Array<Record<string, unknown>>;
+  judgeCalibrationRows?: Array<Record<string, unknown>>;
 };
 
 export interface AnalyticsCheckpoint {
@@ -824,6 +842,8 @@ function analyticsAccumulator(): AnalyticsAccumulator {
     checkpointHistory: { days: new Map(), starts: new Map() },
     checkpointBreakdowns: { starts: new Set(), terminals: new Map(), startsWithoutRunId: 0, terminalsWithoutRunId: 0, workCategories: new Map() },
     checkpointHydrated: false,
+    workIntegrityRows: [],
+    judgeCalibrationRows: [],
   };
 }
 
@@ -1488,6 +1508,10 @@ function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string,
   // row is an outcome fact; neither may be inferred from the other.
   accumulateRoutingTelemetryLine(acc.routingTelemetry, line);
   accumulateUsageLine(acc.usage, line);
+  const workIntegrityLine = workIntegrityRow(line);
+  if (workIntegrityLine) acc.workIntegrityRows.push(workIntegrityLine);
+  const judgeLine = judgeCalibrationRow(line);
+  if (judgeLine) acc.judgeCalibrationRows.push(judgeLine);
 
   if (line.step === "cli.invoked") {
     acc.invocationsMeasured = true;
@@ -1545,6 +1569,8 @@ function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string,
 export interface AnalyticsDeriveOptions {
   /** Optional host-side git calibration; the ledger reader cannot infer post-merge outcomes. */
   operatorAgentOutcomes?: OperatorAgentTaskOutcomeSignal;
+  judgeLabels?: JudgeLabelsInput;
+  judgeLabelStore?: JudgeLabelStore;
 }
 
 function snapshotFromAccumulator(
@@ -1622,6 +1648,12 @@ function snapshotFromAccumulator(
     writable: false,
   });
   Object.defineProperty(out, "abilityMap", { value: snapshotAbilityMap(acc.routingTelemetry), enumerable: false, writable: false });
+  Object.defineProperty(out, "workIntegrity", { value: deriveWorkIntegrity(acc.workIntegrityRows, { asOf: nowIso }), enumerable: false, writable: false });
+  const judgeCalibration = deriveJudgeCalibration(acc.judgeCalibrationRows, {
+    asOf: nowIso,
+    labels: options.judgeLabels ?? { unavailable: "no-label-store-supplied" },
+  });
+  Object.defineProperty(out, "judgeCalibration", { value: judgeCalibration, enumerable: false, writable: false });
   if (!acc.invocationsMeasured) out.invocationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   if (!acc.workerDurationsMeasured) out.workerDurationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   return out;
@@ -1696,7 +1728,11 @@ export async function deriveAnalyticsSnapshotFromLedger(
   }
   signal?.throwIfAborted();
   finishBenchmarkSourceQuality(acc.routingTelemetry, unreadArchives, unreadLive);
-  return snapshotFromAccumulator(acc, clock.iso(), options);
+  return snapshotFromAccumulator(acc, clock.iso(), withJudgeLabels(stateDir, options));
+}
+
+function withJudgeLabels(stateDir: string, options: AnalyticsDeriveOptions): AnalyticsDeriveOptions {
+  return { ...options, judgeLabels: options.judgeLabels ?? loadJudgeLabels(options.judgeLabelStore ?? fileJudgeLabelStore(stateDir)) };
 }
 
 function checkpointPath(stateDir: string): string {
@@ -1781,6 +1817,8 @@ function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpoin
       terminalsWithoutRunId: acc.checkpointBreakdowns.terminalsWithoutRunId,
       workCategories: [...acc.checkpointBreakdowns.workCategories.entries()],
     },
+    workIntegrityRows: acc.workIntegrityRows.map((row) => ({ ...row })),
+    judgeCalibrationRows: acc.judgeCalibrationRows.map((row) => ({ ...row })),
   };
 }
 
@@ -1831,6 +1869,8 @@ function hydrateCheckpointState(state: AnalyticsCheckpointState): AnalyticsAccum
   acc.checkpointBreakdowns.startsWithoutRunId = state.breakdowns.startsWithoutRunId;
   acc.checkpointBreakdowns.terminalsWithoutRunId = state.breakdowns.terminalsWithoutRunId;
   acc.checkpointBreakdowns.workCategories = new Map(state.breakdowns.workCategories);
+  acc.workIntegrityRows = (state.workIntegrityRows ?? []).map((row) => ({ ...row }));
+  acc.judgeCalibrationRows = (state.judgeCalibrationRows ?? []).map((row) => ({ ...row }));
   acc.checkpointHydrated = true;
   return acc;
 }
@@ -1896,6 +1936,8 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
     priorCheckpoint.state.routingTelemetry?.benchmarkVersion === BENCHMARK_QUALITY_VERSION &&
     priorCheckpoint.state.routingTelemetry?.benchmarkCounters !== undefined &&
     Array.isArray(priorCheckpoint.state.routingTelemetry?.malformedSources) &&
+    Array.isArray(priorCheckpoint.state.workIntegrityRows) &&
+    Array.isArray(priorCheckpoint.state.judgeCalibrationRows) &&
     !(priorLiveMalformed && currentSource?.archives.length !== priorCheckpoint.source.archives.length) &&
     currentSource !== undefined && checkpointSourceCanResume(priorCheckpoint.source, currentSource);
   let acc: AnalyticsAccumulator;
@@ -1951,7 +1993,7 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
   }
   signal?.throwIfAborted();
   finishBenchmarkSourceQuality(acc.routingTelemetry, unreadArchives, unreadLive);
-  const snapshot = snapshotFromAccumulator(acc, clock.iso(), options);
+  const snapshot = snapshotFromAccumulator(acc, clock.iso(), withJudgeLabels(stateDir, options));
   const source = checkpointSource(stateDir) ?? currentSource ?? { archives: [], live: null, lastArchive: null, liveOffset: 0 };
   if (tornLiveStartOffset !== undefined) source.liveOffset = Math.min(source.liveOffset, tornLiveStartOffset);
   const checkpoint: AnalyticsCheckpoint = {
@@ -2358,6 +2400,14 @@ export function buildAnalyticsRoute(deps: {
       }
       if (requestedVersion === ABILITY_MAP_VERSION) {
         sendJson(res, 200, base.abilityMap ?? unavailableAbilityMap("ability-map-refresh-pending"));
+        return;
+      }
+      if (requestedVersion === WORK_INTEGRITY_VERSION) {
+        sendJson(res, 200, base.workIntegrity ?? unavailableWorkIntegrity("work-integrity-refresh-pending"));
+        return;
+      }
+      if (requestedVersion === JUDGE_CALIBRATION_VERSION) {
+        sendJson(res, 200, base.judgeCalibration ?? unavailableJudgeCalibration("judge-calibration-refresh-pending"));
         return;
       }
       if (requestedVersion === EVAL_CARD_VERSION) {

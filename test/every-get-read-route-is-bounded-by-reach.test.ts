@@ -89,6 +89,9 @@ function depsFor(root: string, ledgerPath: string): Parameters<typeof buildServe
     tokens: { read: READ_TOKEN, write: "write-token" },
     pollMs: 60_000,
     githubAppRefresh: { start: () => ({ armed: false }) },
+    // The onboarding inventory is a GitHub read, not a ledger scan. Keep this census offline
+    // while still driving the route and checking its warm-request archive reach.
+    onboardingRepositoryInventory: { read: async () => "0" },
     daemonHealth: { exec: () => JSON.stringify({ resources: { core: { remaining: 4999, reset: 1_790_000_000 } } }) },
   } as never;
 }

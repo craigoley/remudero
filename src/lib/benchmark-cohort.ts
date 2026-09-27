@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { systemClock } from "./clock.js";
 import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
 import { joinVerifiedTaskOutcomes, type BenchmarkVerifiedOutcome, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
+import { deriveModelDrift, MODEL_DRIFT_VERSION, unavailableModelDrift, type ModelDriftReport,
+  type ModelExposure } from "./model-drift.js";
 import type { TaskCaseFile } from "./task-case-file.js";
 
 export const BENCHMARK_COHORT_VERSION = "benchmark-cohort-v1" as const;
@@ -70,6 +72,7 @@ export interface BenchmarkCohortSnapshot {
   cohorts: BenchmarkCohort[];
   coverage: Record<CoverageField, CohortFieldCoverage>;
   verifiedTaskOutcome: "unavailable-no-github-verification-join" | BenchmarkVerifiedOutcome;
+  modelDrift: ModelDriftReport;
   experimentEffect: "unavailable-no-randomized-allocation";
   pressure: {
     sourceBytes: number; auditedSourceBytes: number; derivedBytes: number; snapshotGrowthBytes: number | null;
@@ -132,7 +135,7 @@ function validLastGood(value: unknown, sources: SourceRecord[], faults: SourceFa
         minTimestamp: fault.minTimestamp ?? null, maxTimestamp: fault.maxTimestamp ?? null,
         reason: fault.reason }))))
     && object(snapshot.sourceRows) !== undefined && object(snapshot.coverage) !== undefined
-    && object(snapshot.pressure) !== undefined;
+    && object(snapshot.pressure) !== undefined && object(snapshot.modelDrift)?.version === MODEL_DRIFT_VERSION;
 }
 
 function manifest(stateDir: string): ManifestEntry[] {
@@ -227,12 +230,14 @@ function projectRow(row: Record<string, unknown>): Record<string, unknown> {
   if (row.step === "worker.assignment") {
     const assignment = object(row.worker_assignment);
     const selected = object(assignment?.selected);
+    const requested = object(assignment?.requested);
     const receipt = object(row.benchmark_run);
     const work = object(receipt?.work);
     const stack = object(receipt?.stack);
     return {
-      ts: row.ts, task_id: row.task_id, run_id: row.run_id, step: row.step,
-      worker_assignment: { id: assignment?.id, selected: { provider: selected?.provider, model: selected?.model } },
+      ts: row.ts, host: row.host, task_id: row.task_id, run_id: row.run_id, step: row.step,
+      worker_assignment: { id: assignment?.id, requested: { model: requested?.model },
+        selected: { provider: selected?.provider, model: selected?.model } },
       benchmark_run: { work: { taskClass: work?.taskClass }, stack: { harnessRevision: stack?.harnessRevision } },
     };
   }
@@ -334,7 +339,7 @@ function emptySnapshot(reason: string, lastGood?: BenchmarkCohortSnapshot): Benc
       attemptRowsWithoutAssignmentId: 0, terminalRowsWithoutAssignmentId: 0,
       conflictingAssignments: 0, duplicateRows: 0 },
     cohorts: [], coverage: blankCoverage(0),
-    verifiedTaskOutcome: "unavailable-no-github-verification-join",
+    verifiedTaskOutcome: "unavailable-no-github-verification-join", modelDrift: unavailableModelDrift(reason),
     experimentEffect: "unavailable-no-randomized-allocation",
     pressure: { sourceBytes: 0, auditedSourceBytes: 0, derivedBytes: 0, snapshotGrowthBytes: null,
       sourceToDerivedRatio: null, evidenceBytesByDay: [], eventsPerAssignment: null, eventsPerRun: null,
@@ -462,12 +467,12 @@ function eligibleAssignmentIds(index: ReturnType<typeof indexEvidence>,
   return eligible;
 }
 
-function withVerifiedOutcome(snapshot: BenchmarkCohortSnapshot, sources: SourceRecord[], faults: SourceFault[],
-  caseFiles: readonly TaskCaseFile[] | undefined, cutoff: string): BenchmarkCohortSnapshot {
-  if (!caseFiles) return snapshot;
+type CohortAssignment = VerifiedAssignment & { exposure: Omit<ModelExposure, "verified" | "cost"> };
+
+function cohortAssignments(sources: SourceRecord[], faults: SourceFault[]): CohortAssignment[] {
   const index = indexEvidence(sources);
   const eligible = eligibleAssignmentIds(index, faults);
-  const assignments: VerifiedAssignment[] = [];
+  const assignments: CohortAssignment[] = [];
   for (const [id, row] of index.assignments) {
     if (!eligible.has(id)) continue;
     const terminal = index.terminals.get(id);
@@ -476,16 +481,52 @@ function withVerifiedOutcome(snapshot: BenchmarkCohortSnapshot, sources: SourceR
     const sameRunCall = call?.run_id === row.run_id ? call : undefined;
     const dimensions = dimensionsOf(row);
     const billingMode = sameRunCall?.billing_mode;
+    const servedModel = typeof sameRunCall?.served_model === "string" && sameRunCall.served_model ? sameRunCall.served_model : null;
+    const requested = object(object(row.worker_assignment)?.requested)?.model;
     assignments.push({ assignmentId: id,
       taskId: typeof row.task_id === "string" ? row.task_id : null,
       runId: typeof row.run_id === "string" ? row.run_id : null,
       assignedAt: typeof row.ts === "string" ? row.ts : null,
-      taskClass: dimensions.taskClass, selectedModel: dimensions.model,
-      servedModel: typeof sameRunCall?.served_model === "string" ? sameRunCall.served_model : null,
+      taskClass: dimensions.taskClass, selectedModel: dimensions.model, servedModel,
       billingMode: billingMode === "api" || billingMode === "subscription" ? billingMode : null,
-      costUsd: finiteCost(sameRunCall?.total_cost_usd), attempted: !!sameRunCall });
+      costUsd: finiteCost(sameRunCall?.total_cost_usd), attempted: !!sameRunCall,
+      exposure: { at: canonicalTimestamp(row.ts) ? row.ts : null,
+        fleet: typeof row.host === "string" && row.host ? row.host : null,
+        harnessRevision: dimensions.harnessRevision, taskClass: dimensions.taskClass,
+        requestedModel: typeof requested === "string" && requested ? requested : null,
+        selectedModel: dimensions.model, servedModel,
+        servedAt: canonicalTimestamp(sameRunCall?.ts) ? sameRunCall.ts : null } });
   }
-  return { ...snapshot, verifiedTaskOutcome: joinVerifiedTaskOutcomes(assignments, caseFiles, cutoff) };
+  return assignments;
+}
+
+/** Each assignment's own W1-T4608 disposition, joined one at a time against its task's case files so
+ * the drift detector reads exactly the verification the cohort overlay reads, never a worker call. */
+function driftExposures(assignments: CohortAssignment[], caseFiles: readonly TaskCaseFile[] | undefined,
+  cutoff: string): ModelExposure[] {
+  const byTask = new Map<unknown, TaskCaseFile[]>();
+  for (const file of caseFiles ?? []) byTask.set(file?.taskId, [...(byTask.get(file?.taskId) ?? []), file]);
+  return assignments.map((assignment) => {
+    let verified: ModelExposure["verified"] = { state: "unavailable", reason: "no-verified-outcome-join" };
+    if (caseFiles) {
+      const { coverage } = joinVerifiedTaskOutcomes([assignment], byTask.get(assignment.taskId) ?? [], cutoff);
+      verified = coverage.completed > 0 ? { state: "resolved", completed: true }
+        : coverage.reasons["closed-unmerged-unadjudicated"] ? { state: "resolved", completed: false }
+          : { state: "unavailable", reason: coverage.censored > 0 ? "censored-open-at-cutoff" : Object.keys(coverage.reasons)[0]! };
+    }
+    const cost: ModelExposure["cost"] = !assignment.attempted ? { state: "unavailable", reason: "no-attempt" }
+      : assignment.costUsd === null || assignment.billingMode === null ? { state: "unavailable", reason: "cost-not-recorded" }
+        : { state: "observed", billingMode: assignment.billingMode, usd: assignment.costUsd };
+    return { ...assignment.exposure, verified, cost };
+  });
+}
+
+function withVerifiedOutcome(snapshot: BenchmarkCohortSnapshot, sources: SourceRecord[], faults: SourceFault[],
+  caseFiles: readonly TaskCaseFile[] | undefined, cutoff: string): BenchmarkCohortSnapshot {
+  if (!caseFiles) return snapshot;
+  const assignments = cohortAssignments(sources, faults);
+  return { ...snapshot, verifiedTaskOutcome: joinVerifiedTaskOutcomes(assignments, caseFiles, cutoff),
+    modelDrift: deriveModelDrift(driftExposures(assignments, caseFiles, cutoff), cutoff) };
 }
 
 function canonicalTimestamp(value: unknown): value is string {
@@ -597,6 +638,7 @@ function deriveSnapshot(
     groups.set(key, group);
   }
   const cohorts = [...groups.values()].sort((a, b) => JSON.stringify(a.dimensions).localeCompare(JSON.stringify(b.dimensions)));
+  const joined = cohortAssignments(sources, faults);
   const snapshot: BenchmarkCohortSnapshot = {
     version: BENCHMARK_COHORT_VERSION, state: faults.length > 0 ? "observed-partial" : "observed", asOf,
     sourceLineage: sources.map(({ name, form, sha256, size }) => ({ name, form, sha256, bytes: size })),
@@ -616,7 +658,8 @@ function deriveSnapshot(
       conflictingAssignments, duplicateRows },
     cohorts,
     coverage,
-    verifiedTaskOutcome: "unavailable-no-github-verification-join",
+    verifiedTaskOutcome: caseFiles ? joinVerifiedTaskOutcomes(joined, caseFiles, asOf) : "unavailable-no-github-verification-join",
+    modelDrift: deriveModelDrift(driftExposures(joined, caseFiles, asOf), asOf),
     experimentEffect: "unavailable-no-randomized-allocation",
     pressure: { sourceBytes: sources.reduce((sum, source) => sum + source.size, 0), auditedSourceBytes,
       derivedBytes: 0, snapshotGrowthBytes: prior ? 0 : null, sourceToDerivedRatio: null,
@@ -627,7 +670,6 @@ function deriveSnapshot(
       rebuiltPartitions: prior && dirtyKeys ? dirtyKeys.size : cohorts.length,
       rebuildMs: systemClock.now() - started },
   };
-  snapshot.verifiedTaskOutcome = withVerifiedOutcome(snapshot, sources, faults, caseFiles, asOf).verifiedTaskOutcome;
   snapshot.pressure.derivedBytes = Buffer.byteLength(JSON.stringify(snapshot));
   snapshot.pressure.snapshotGrowthBytes = prior ? snapshot.pressure.derivedBytes - prior.pressure.derivedBytes : null;
   snapshot.pressure.sourceToDerivedRatio = snapshot.pressure.derivedBytes > 0

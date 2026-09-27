@@ -873,6 +873,240 @@ export interface components {
     OperatorAgentConsequencePreflightRequest: {
       action: OperatorAgentConsequenceAction;
     };
+    /** A 403 on a HIGH-tier write route (W1-T404). `forbidden` is src/lib/service.ts's scope/tier gate: `required_scope` names the missing scope, and `required_tier` is present when the credential's write tier is too low -- the bearer write token is pinned at LOW, so it never reaches a HIGH route. `confirm_nonce_required` is the same dispatcher refusing a request whose X-Confirm-Nonce is absent or was not issued by POST /v1/confirm for this exact method, path and payload (POST /v1/operator-agent/consequences/decision's handler also refuses a missing nonce itself, naming the `consequenceId`). */
+    HighTierForbidden: {
+      error: "forbidden" | "confirm_nonce_required";
+      required_scope?: "read" | "write";
+      required_tier?: "low" | "middle" | "high";
+      /** Present only on the consequence decision handler's own missing-nonce refusal. */
+      consequenceId?: string;
+    };
+    /** One recorded decision on a pending consequence (src/lib/operator-agent.ts's `ConsequenceDecisionReceipt`). */
+    OperatorAgentConsequenceReceipt: {
+      kind: "approve" | "refuse";
+      at: string;
+      /** The deciding credential's actor id, when the ledger row recorded one. */
+      issuer?: string;
+      /** The decision's reason. A refusal with no operator reason carries "operator refused this consequence". */
+      note?: string;
+    };
+    /** consequence-v1 as the console's `normalizedConsequenceRecord` validates it (src/lib/operator-agent.ts's `PendingConsequenceRecord`), projected from the approval the consequence preflight persisted on its ledger row. */
+    OperatorAgentPendingConsequence: {
+      /** The preflighted action's id. */
+      consequenceId: string;
+      classes: ("financial" | "irreversible")[];
+      /** The action's target identity, never truncated -- a longer one is not listed at all. */
+      target: string;
+      amountUsd?: number;
+      currency?: string;
+      /** The per-action financial ceiling. */
+      ceilingUsd?: number;
+      coolingOffMs?: number;
+      coolingOffUntil?: string;
+      /** The earlier of the quote expiry and the irreversible confirmation expiry. */
+      expiresAt: string;
+      approverRequired: boolean;
+      recoveryStatement: string;
+      /** `stale` once the earliest evidence item's freshness window has passed. */
+      freshness: "verified" | "stale";
+      /** When the preflight row that made this consequence pending was written. */
+      observedAt: string;
+      /** Empty, or the one refusal recorded since that preflight row. */
+      receipts: (OperatorAgentConsequenceReceipt)[];
+      source: "rmd:core:/v1/operator-agent/consequences";
+    };
+    /** GET /v1/operator-agent/consequences's body (src/lib/operator-agent.ts's `PendingConsequenceRead`). */
+    OperatorAgentPendingConsequenceRead: {
+      state: "verified";
+      /** Newest `observedAt` first, at most `max` records. */
+      consequences: (OperatorAgentPendingConsequence)[];
+      source: "ledger";
+      generatedAt: string;
+      /** The per-read cap (MAX_PENDING_CONSEQUENCES, 100). */
+      max: number;
+      /** Every pending consequence, before the cap. */
+      total: number;
+      truncated: boolean;
+      /** Pending preflight rows written before W1-T4104 carried no approval projection -- counted, never listed. */
+      unprojected: number;
+    };
+    /** A write verb on GET /v1/operator-agent/consequences, refused by name. */
+    OperatorAgentConsequencesReadOnlyRefusal: {
+      error: "read_only";
+      method: "POST" | "PUT" | "PATCH" | "DELETE";
+      path: "/v1/operator-agent/consequences";
+      detail: string;
+      allow: ("GET")[];
+    };
+    /** src/lib/operator-agent.ts's `validateConsequenceDecisionInput`. `note` is the console's earlier name for `reason` and is accepted as an alias; sending both is a 400. */
+    OperatorAgentConsequenceDecisionRequest: {
+      consequenceId: string;
+      decision: "approve" | "refuse";
+      reason?: string;
+      note?: string;
+    };
+    OperatorAgentConsequenceDecisionResult: {
+      ok: true;
+      consequenceId: string;
+      decision: "approve" | "refuse";
+      at: string;
+      receipt: OperatorAgentConsequenceReceipt;
+    };
+    /** A consequence decision refused because the consequence is not (or no longer) pending; nothing is recorded. */
+    OperatorAgentConsequenceDecisionRefusal: {
+      error: "not_found" | "expired_consequence" | "consequence_not_pending";
+      consequenceId: string;
+      detail: string;
+    };
+    /** A bound `emergency-stop-v1` stop (src/lib/emergency-control.ts's `EmergencyStop`). */
+    EmergencyStop: {
+      schema: "emergency-stop-v1";
+      id: string;
+      scope: "fleet" | "repository" | "instance" | "principal";
+      /** Present for every scope but `fleet`, which is total by definition. */
+      scopeTarget?: string;
+      reason: string;
+      issuedBy: string;
+      issuedAt: string;
+      clearPolicy: "expires" | "explicit-clear-required";
+      /** Present only when `clearPolicy` is `expires`. */
+      expiresAt?: string;
+      /** The capabilities this stop blocks. The code's type is `string[] | "*"`: the literal string "*" (the default) blocks every capability. This document's OpenAPI subset (scripts/generate-api-client.mjs) has no union, so only the array arm is typed here -- a consumer must accept the string "*" as well. */
+      affectedCapabilities: (string)[];
+      /** The delegation classes this stop blocks. The code's type is `string[] | "*"`: the literal string "*" (the default) blocks every class; as for `affectedCapabilities`, only the array arm is typed here and a consumer must accept "*" as well. */
+      affectedDelegationClasses: (string)[];
+      /** The incident record this stop is accountable to; every receipt of its lifecycle links back to it. */
+      incidentReceiptId: string;
+    };
+    /** One bounded, attributable receipt of an emergency stop's lifecycle (src/lib/emergency-control.ts's `EmergencyReceipt`). */
+    EmergencyReceipt: {
+      receiptId: string;
+      stopId: string;
+      /** Always the stop's own `incidentReceiptId`. */
+      parentReceiptId: string;
+      kind: "stop" | "refusal" | "cancellation" | "clear";
+      /** `issued` for a stop, the refused action kind for a refusal, `cleared` or the clear refusal code for a clear. */
+      outcome: string;
+      decidedAt: string;
+      /** Capped at 240 characters plus a trailing ellipsis. */
+      reason: string;
+    };
+    /** src/lib/operator-agent.ts's `validateEmergencyStopIssue`, then `createEmergencyStop`'s issuance rules. `affectedCapabilities`/`affectedDelegationClasses` default to "*" when omitted and may be sent as the literal string "*" -- the OpenAPI subset types only their array arm. `issuedAt` is stamped by the daemon. */
+    EmergencyStopIssueRequest: {
+      /** Defaults to `estop-<uuid>`. */
+      id?: string;
+      scope: "fleet" | "repository" | "instance" | "principal";
+      /** Required for every scope but `fleet`; refused on `fleet`. */
+      scopeTarget?: string;
+      reason: string;
+      issuedBy: string;
+      clearPolicy: "expires" | "explicit-clear-required";
+      /** Required for `expires`; refused for `explicit-clear-required`. */
+      expiresAt?: string;
+      affectedCapabilities?: (string)[];
+      affectedDelegationClasses?: (string)[];
+      incidentReceiptId: string;
+    };
+    EmergencyStopIssueResult: {
+      ok: true;
+      stop: EmergencyStop;
+      receipt: EmergencyReceipt;
+    };
+    /** src/lib/operator-agent.ts's `validateEmergencyStopClear`. Clearing succeeds only with a `healthy` health read whose `checkedAt` is no more than five minutes old and `complete` revocation coverage; anything else is a 409 refusal, not a 400. */
+    EmergencyStopClearRequest: {
+      stopId: string;
+      /** An explicit human sign-off -- never inferred from a prior approval. */
+      confirmation: {
+        confirmedBy: string;
+        confirmedAt: string;
+      };
+      /** A fresh, authoritative health/preflight read. */
+      health: {
+        source: string;
+        status: "healthy" | "degraded" | "unavailable";
+        checkedAt: string;
+      };
+      revocation: {
+        coverage: "complete" | "partial" | "unavailable";
+      };
+    };
+    EmergencyStopClearResult: {
+      ok: true;
+      receipt: EmergencyReceipt;
+    };
+    EmergencyStopClearRefusal: {
+      ok: false;
+      code: "already-cleared" | "confirmation-required" | "health-stale" | "health-not-healthy" | "revocation-source-partial" | "revocation-source-unavailable";
+      receipt: EmergencyReceipt;
+    };
+    EmergencyStopStatusResult: {
+      active: (EmergencyStop)[];
+      source: "ledger";
+    };
+    /** An action refused because an active emergency stop covers it; the receipt's `stopId` names the stop. */
+    EmergencyStopAdmissionRefusal: {
+      ok: false;
+      error: "emergency_stop_active";
+      code: "emergency-stop-active";
+      receipt: EmergencyReceipt;
+    };
+    /** src/lib/operator-agent.ts's `validateDelegationHandoff`, then src/lib/automation-action.ts's `createDelegationEnvelope` (which also refuses a `sender` equal to the `recipient`). The recipient's acceptance may only narrow the envelope's capabilities; `humanApproval` is required for high, production, financial, credential and destructive risk. */
+    OperatorAgentDelegationHandoffRequest: {
+      envelope: {
+        /** Defaults to `dlg-<uuid>`. */
+        id?: string;
+        sender: string;
+        recipient: string;
+        principal: string;
+        purpose: string;
+        capabilities: (string)[];
+        scope?: {
+          repo?: string;
+          instance?: string;
+        };
+        audience: string;
+        expiresAt: string;
+        /** Defaults to `n-<uuid>`. */
+        nonce?: string;
+      };
+      acceptedCapabilities: (string)[];
+      action: {
+        capability: string;
+        nonce: string;
+        risk: "low" | "medium" | "high" | "production" | "financial" | "credential" | "destructive";
+        humanApproval?: {
+          approvedBy: string;
+          approvedAt: string;
+        };
+      };
+    };
+    /** One bounded, attributable receipt for an executed or refused delegated use (src/lib/automation-action.ts's `DelegationReceipt`). Identity fields are capped at 200 characters and `reason` at 240, each plus a trailing ellipsis when cut. */
+    DelegationReceipt: {
+      receiptId: string;
+      envelopeId: string;
+      parentReceiptId?: string;
+      capability: string;
+      audience: string;
+      actorIdentity: string;
+      decidedAt: string;
+      outcome: "executed" | "refused";
+      code?: DelegationRefusalCode;
+      reason: string;
+    };
+    /** Every reason a delegation step can be refused for (src/lib/automation-action.ts's `DelegationRefusalCode`). */
+    DelegationRefusalCode: "unknown-envelope" | "expired" | "revoked" | "parent-revoked" | "identity-mismatch" | "already-accepted" | "empty-acceptance" | "capability-widened" | "expiry-widened" | "not-accepted" | "wrong-audience" | "capability-not-accepted" | "replayed-nonce" | "human-gate-required" | "audit-unavailable";
+    OperatorAgentDelegationHandoffResult: {
+      ok: true;
+      receipt: DelegationReceipt;
+    };
+    /** A refused handoff, in one of two shapes: refused at the recipient's acceptance step (`stage: accept`, `code`, `detail`; no receipt), or refused at execution (`receipt`, whose `outcome` is `refused` and whose `code` names why). */
+    OperatorAgentDelegationHandoffRefusal: {
+      ok: false;
+      stage?: "accept";
+      code?: DelegationRefusalCode;
+      detail?: string;
+      receipt?: DelegationReceipt;
+    };
     FollowUpQuietHours: {
       timezone: string;
       start: string;
@@ -1818,6 +2052,245 @@ export interface components {
       error: "bad-request" | "forged" | "expired" | "already-used" | "invalid_request" | "unavailable";
       detail: string;
     };
+    /** The 403 body a HIGH-tier write returns from src/lib/service.ts's dispatch gate, before its handler runs. `forbidden` -- the credential lacks write scope (`required_scope`) or its granted write tier is below HIGH (`required_tier: high`; the bearer write token is pinned at LOW, so only a stepped-up operator session reaches HIGH). `confirm_nonce_required` -- the tier was granted but no `X-Confirm-Nonce` was presented, or the nonce was unknown, expired (5 minutes), already spent, or bound to a different method, path or raw body. */
+    HighTierRefusal: {
+      error: "forbidden" | "confirm_nonce_required";
+      required_scope?: "read" | "write";
+      required_tier?: "low" | "middle" | "high";
+    };
+    /** POST /v1/confirm's body (src/lib/service.ts's `validateConfirmNonceRequest`) -- names the exact HIGH-tier call the returned nonce will authorize. The nonce is consumed only by a request whose method, path and RAW body bytes equal these fields exactly. */
+    ConfirmNonceRequest: {
+      method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+      /** The target route's path; must start with `/`. */
+      path: string;
+      /** The exact raw request body the HIGH-tier call will send, byte for byte (an empty string for a call with no body). It is compared verbatim, never JSON-normalised. */
+      payload: string;
+    };
+    /** POST /v1/confirm's 200 body. `nonce` is single-use (a wrong guess spends it too) and expires 5 minutes after issue (src/lib/service.ts's `CONFIRM_NONCE_TTL_MS`). */
+    ConfirmNonceResult: {
+      /** 48 hex characters; present it as the `X-Confirm-Nonce` header. */
+      nonce: string;
+    };
+    /** POST /v1/drain/feedback's body (src/lib/panel-actions.ts's `validateDrainFeedback`) -- the post-drain rundown's one-tap verdict on one task (W1-T141). */
+    DrainFeedbackRequest: {
+      taskId: string;
+      verdict: "good" | "wrong" | "needs-follow-up";
+      drainRunId: string;
+      /** W1-T435 steering note, at most 2000 characters (a longer one is a 400, never truncated). Quoted into the next fix-rung dispatch only for `wrong` or `needs-follow-up`. */
+      note?: string;
+    };
+    DrainFeedbackResult: {
+      ok: true;
+      taskId: string;
+      verdict: "good" | "wrong" | "needs-follow-up";
+    };
+    /** POST /v1/drain/kick's body (src/lib/panel-actions.ts's `validateTaskId`). `taskId` must be a non-empty id safe to embed in a marker filename: `^[A-Za-z0-9][A-Za-z0-9._-]{0,126}$` with no `..` (src/lib/fleet-control.ts's `isSafeTaskId`). */
+    KickRequest: {
+      taskId: string;
+    };
+    /** The kick marker was written. `armed` records intent only -- the daemon's own `assertRunnable`-gated dispatch (or refusal) happens at its next poll. */
+    KickResult: {
+      armed: true;
+      taskId: string;
+    };
+    /** The `DRAIN_REQUESTED` marker was written; the daemon runs one dispatch cycle at its next poll. Records intent only. */
+    DrainNowResult: {
+      armed: true;
+    };
+    /** One dependency edge on a drain-preview card (src/lib/drain.ts's `DependencyEdge`). */
+    DrainPreviewEdge: {
+      id: string;
+      /** The linked task's title, or its id when the plan does not carry it. */
+      title: string;
+    };
+    /** One would-drain task card (src/lib/drain.ts's `DrainPreviewCard`, W1-T140). */
+    DrainPreviewCard: {
+      id: string;
+      title: string;
+      /** The task's plan `note`, or an empty string when it has none. */
+      description: string;
+      /** Incoming edges -- this task's own `depends_on`. */
+      dependsOn: (DrainPreviewEdge)[];
+      /** Outgoing edges -- tasks that DIRECTLY declare this task as a dependency (one hop). */
+      dependents: (DrainPreviewEdge)[];
+    };
+    /** GET /v1/drain/preview's body -- the would-drain queue in dispatch order. */
+    DrainPreviewResult: {
+      cards: (DrainPreviewCard)[];
+    };
+    /** POST /v1/feedback/preview's body (src/lib/panel-graph.ts's `validatePreviewFeedback`). `replyTo`, when present, must name a feedback entry parked at `grilling`, the same rule POST /v1/feedback applies. */
+    FeedbackPreviewRequest: {
+      /** The draft; must be non-blank. */
+      text: string;
+      /** A feedback entry id; non-blank when present. */
+      replyTo?: string;
+    };
+    /** POST /v1/feedback/preview's 200 body. `expansion` is null when no expander is wired, the expander threw, or its output failed src/lib/feedback.ts's `validateFeedbackExpansion` bounds -- fail-open, since the console files the draft plain. Nothing is filed either way. */
+    FeedbackPreviewResult: {
+      /** src/lib/feedback.ts's `FeedbackExpansion`. */
+      expansion: {
+        /** A falsifiable, plain-language headline; at most 300 characters. */
+        claim: string;
+        /** Only measured/verbatim specifics the operator stated; may be empty; at most 800 characters. */
+        evidence: string;
+        /** At most 10 directives, each at most 300 characters. */
+        recon: (string)[];
+        /** What observation would retire this claim; at most 300 characters. */
+        falsifying_check: string;
+      } | null;
+    };
+    /** A GitHub webhook delivery body. Its shape is GitHub's and genuinely open-ended per event; the handler reads only the two fields declared here. Anything else is carried through unread except for `check_run` classification (name, conclusion, head sha). */
+    GithubWebhookPayload: {
+      /** The event's action, when the event has one (`status` does not). */
+      action?: string;
+      repository?: {
+        /** Must equal this daemon's own `owner/repo`, or the delivery is a 403. */
+        full_name?: string;
+      };
+    };
+    /** POST /v1/hooks/github's 202 body -- one of four shapes, all a 2xx so GitHub never retries: `{accepted: true}` (the sweep-wake marker was written or coalesced), `{accepted: false, reason: successful_leaf}` (semantic enforce mode: a successful leaf check run, recorded for dedup but no wake), `{duplicate: true}` (this delivery id was already seen; nothing re-written), or `{error: ignored}` (an event/action outside the allowlist; nothing written). */
+    GithubWebhookReceipt: {
+      accepted?: boolean;
+      reason?: "successful_leaf";
+      duplicate?: true;
+      error?: "ignored";
+    };
+    /** POST /v1/hooks/github's refusal body (src/lib/github-event-wake.ts's `createGitHubEventWakeHandler`), checked in this order: `webhook_not_configured` (503, no secret configured -- the route ships dark), `body_too_large` (413, over 1 MiB), `invalid_signature` (401), `invalid_json` (400), `repository_mismatch` (403), `missing_delivery_id` (400). */
+    GithubWebhookRefusal: {
+      error: "webhook_not_configured" | "body_too_large" | "invalid_signature" | "invalid_json" | "repository_mismatch" | "missing_delivery_id";
+    };
+    /** POST /v1/merge-hold's body (src/lib/panel-actions.ts's `validateConsoleMergeHold`). Unknown fields are refused. There is deliberately no identity field: the recorded `by` is the authenticated caller, never the payload. */
+    MergeHoldRequest: {
+      action: "engage" | "release";
+      /** Non-blank; stored trimmed. */
+      reason: string;
+      /** A positive integer. Omitted means the whole fleet. */
+      prNumber?: number;
+      /** A `W1-T<n>` id -- board enrichment only, valid only with `prNumber`. */
+      taskId?: string;
+    };
+    /** The current durable merge hold for a scope (src/lib/review.ts's `AutomergeHold`). */
+    AutomergeHold: {
+      by: string;
+      reason: string;
+    };
+    /** src/lib/operator-merge-hold.ts's `OperatorMergeHoldResult`. A release of an already-clear scope is an idempotent no-op: `written: false` and neither `prior` nor `current`. */
+    MergeHoldResult: {
+      action: "engage" | "release";
+      /** `the whole fleet` or `PR #<n>`. */
+      scope: string;
+      written: boolean;
+      prior?: AutomergeHold;
+      current?: AutomergeHold;
+    };
+    /** POST /v1/merge-hold's 403 body: the dispatch gate's HIGH-tier refusals (see HighTierRefusal), plus `bearer_provenance_required` from the handler itself when the caller's identity resolves to `unknown`, so no hold is ever written anonymously. */
+    MergeHoldRefusal: {
+      error: "forbidden" | "confirm_nonce_required" | "bearer_provenance_required";
+      required_scope?: "read" | "write";
+      required_tier?: "low" | "middle" | "high";
+    };
+    /** One provenance-stamped operator guidance note (src/lib/operator-notes.ts's `OperatorNoteEntry`). */
+    OperatorNote: {
+      /** Stamped server-side at write time, never client-supplied. */
+      ts: string;
+      taskId: string;
+      author: string;
+      note: string;
+    };
+    /** GET /v1/operator-notes's body -- only the notes scoped to exactly `taskId`, oldest first; an empty list when none exist. */
+    OperatorNotesResult: {
+      taskId: string;
+      notes: (OperatorNote)[];
+    };
+    /** POST /v1/operator-notes/add's body (src/lib/operator-notes.ts's `validateAddOperatorNote`). `taskId` must be a safe task id (src/lib/fleet-control.ts's `isSafeTaskId`); `author` and `note` must be non-blank and are stored trimmed. */
+    AddOperatorNoteRequest: {
+      taskId: string;
+      author: string;
+      note: string;
+    };
+    AddOperatorNoteResult: {
+      ok: true;
+      taskId: string;
+      author: string;
+      ts: string;
+    };
+    /** The note store could not be appended to; nothing was ledgered. */
+    OperatorNoteWriteFailure: {
+      error: "write_failed";
+    };
+    /** POST /v1/policy/daily-cost-ceiling's body. The route adds no bounds check of its own: the store refuses a non-finite value or one outside plan/policy.yaml's `sweep.dailyCostCeilingUsd` bound with a 400, never clamping it. */
+    SetDailyCostCeilingRequest: {
+      usd: number;
+    };
+    /** The RESOLVED effective ceiling after the write (src/lib/policy.ts's `resolveDailyCostCeiling`), never the input echoed back. `provenance: default` after a set means the store could not honour it. */
+    DailyCostCeilingResult: {
+      ok: true;
+      usd: number;
+      provenance: "overridden" | "default";
+      /** plan/policy.yaml's committed default, carried so an override shows what it replaced. */
+      committedDefaultUsd: number;
+    };
+    /** POST /v1/policy/provider-routing's body (src/lib/provider-routing-policy.ts's `ProviderRoutingPolicyOverrideInput`; the store is the one schema authority, so every rule below is a 400 from it). Exactly these keys -- `codexModelPreference` may be omitted (legacy payload, automatic selection). `enabledProviders` is non-empty, duplicate-free and a subset of the committed host config; `preference` is `automatic` or an enabled, unparked provider; `reservePercent` is 0-50; `expiresAt` is a canonical ISO timestamp in the future and at most 24 hours away; each park names an enabled provider once with an `until` in the future and no later than `expiresAt`, and at least one provider stays unparked; a Codex model preference needs Codex enabled and unparked, and must match a fresh, mapped, eligible option in the daemon's Codex model inventory. */
+    ProviderRoutingPolicyOverrideRequest: {
+      enabledProviders: ("claude" | "codex" | "cash" | "openweight")[];
+      preference: "automatic" | "claude" | "codex" | "cash" | "openweight";
+      reservePercent: number;
+      parks: (ProviderPark)[];
+      codexModelPreference?: {
+        capability: "economy" | "balanced" | "frontier";
+        effort: string;
+        model: string;
+      } | null;
+      expiresAt: string;
+    };
+    /** The committed host policy an override narrows (src/lib/provider-routing-policy.ts's `CommittedProviderRoutingPolicy`). */
+    CommittedProviderRoutingPolicy: {
+      enabledProviders: ("claude" | "codex" | "cash" | "openweight")[];
+      preference: "automatic";
+      reservePercent: number;
+      /** Always empty -- the committed policy parks nothing. */
+      parks: (ProviderPark)[];
+      /** Always null -- the committed policy selects Codex models automatically. */
+      codexModelPreference: Record<string, never> | null;
+    };
+    /** The policy the next dispatch will use (src/lib/provider-routing-policy.ts's `resolveProviderRoutingPolicy`). Every invalid stored state fails closed to the committed config with `provenance: default` and a `fallback.reason`. */
+    EffectiveProviderRoutingPolicy: {
+      provenance: "default" | "overridden";
+      committed: CommittedProviderRoutingPolicy;
+      enabledProviders: ("claude" | "codex" | "cash" | "openweight")[];
+      /** Enabled providers after active parks are applied. */
+      routableProviders: ("claude" | "codex" | "cash" | "openweight")[];
+      preference: "automatic" | "claude" | "codex" | "cash" | "openweight";
+      reservePercent: number;
+      /** Only parks still active at resolution time. */
+      parks: (ProviderPark)[];
+      codexModelPreference?: CodexModelPreference;
+      overrideExpiresAt?: string;
+      writtenAt?: string;
+      writerFingerprint?: string;
+      fallback?: {
+        reason: "unreadable" | "malformed" | "unsupported-version" | "expired" | "incompatible-with-config";
+      };
+    };
+    /** The resolved policy after a set or clear; it takes effect on the next dispatch, not in flight. */
+    ProviderRoutingPolicyWriteResult: {
+      ok: true;
+      effective: "next dispatch";
+      policy: EffectiveProviderRoutingPolicy;
+    };
+    /** A provider-routing policy write refused before anything was written or cleared. `invalid_request` (400, the body failed the store's validation), `codex_model_not_eligible` (400, the requested Codex model is not a fresh, mapped, eligible option), `provider_policy_unavailable` (409, the daemon has not published a committed provider-policy projection yet), `codex_model_inventory_stale` (409, a Codex model preference needs a fresh daemon-written model inventory). */
+    ProviderRoutingPolicyRefusal: {
+      error: "invalid_request" | "codex_model_not_eligible" | "provider_policy_unavailable" | "codex_model_inventory_stale";
+      detail?: string;
+    };
+    /** POST /v1/quiet-hours's body (src/lib/panel-actions.ts's `validateQuietHours`). */
+    QuietHoursRequest: {
+      enabled: boolean;
+    };
+    /** The quiet-hours flag as written. */
+    QuietHoursResult: {
+      quietHours: boolean;
+    };
   };
   securitySchemes: {
     /** Read-scoped bearer token. Grants GET access to read-scoped routes and SSE streams. A write-scoped token also satisfies this scope (write is a superset of read). */
@@ -1864,6 +2337,25 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+        };
+    };
+  };
+  "/v1/onboarding/repositories": {
+    get: {
+      responses: {
+          "200": {
+            state: "verified";
+            source: "fleet-app-installation" | "daemon-user-token";
+            observed_at: string;
+            repositories: (string)[];
+            total_count: number;
+          };
+          "401": Error;
+          "403": Error;
+          "503": {
+            state: "unavailable";
+            reason: "github_read_failed" | "incomplete_or_invalid_listing";
+          };
         };
     };
   };
@@ -2342,6 +2834,98 @@ export interface paths {
         };
     };
   };
+  "/v1/operator-agent/consequences": {
+    get: {
+      responses: {
+          "200": OperatorAgentPendingConsequenceRead;
+          "401": Error;
+          "403": Error;
+        };
+    };
+    put: {
+      responses: {
+          "401": Error;
+          "403": Error;
+          "405": OperatorAgentConsequencesReadOnlyRefusal;
+        };
+    };
+    post: {
+      responses: {
+          "401": Error;
+          "403": Error;
+          "405": OperatorAgentConsequencesReadOnlyRefusal;
+        };
+    };
+    delete: {
+      responses: {
+          "401": Error;
+          "403": Error;
+          "405": OperatorAgentConsequencesReadOnlyRefusal;
+        };
+    };
+    patch: {
+      responses: {
+          "401": Error;
+          "403": Error;
+          "405": OperatorAgentConsequencesReadOnlyRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/consequences/decision": {
+    post: {
+      responses: {
+          "200": OperatorAgentConsequenceDecisionResult;
+          "400": Error;
+          "401": Error;
+          "403": HighTierForbidden;
+          "404": OperatorAgentConsequenceDecisionRefusal;
+          "409": OperatorAgentConsequenceDecisionRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/delegation/handoff": {
+    post: {
+      responses: {
+          "200": OperatorAgentDelegationHandoffResult;
+          "400": Error;
+          "401": Error;
+          "403": HighTierForbidden;
+          "409": OperatorAgentDelegationHandoffRefusal;
+          "423": EmergencyStopAdmissionRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/emergency/clear": {
+    post: {
+      responses: {
+          "200": EmergencyStopClearResult;
+          "400": Error;
+          "401": Error;
+          "403": HighTierForbidden;
+          "404": Error;
+          "409": EmergencyStopClearRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/emergency/status": {
+    get: {
+      responses: {
+          "200": EmergencyStopStatusResult;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/emergency/stop": {
+    post: {
+      responses: {
+          "201": EmergencyStopIssueResult;
+          "400": Error;
+          "401": Error;
+          "403": HighTierForbidden;
+        };
+    };
+  };
   "/v1/operator-agent/follow-ups": {
     get: {
       responses: {
@@ -2662,6 +3246,171 @@ export interface paths {
           "403": Error;
           "404": InboxRefusal;
           "409": InboxRefusal;
+        };
+    };
+  };
+  "/v1/confirm": {
+    post: {
+      responses: {
+          "200": ConfirmNonceResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/drain/feedback": {
+    post: {
+      responses: {
+          "200": DrainFeedbackResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/drain/kick": {
+    post: {
+      responses: {
+          "200": KickResult;
+          "400": Error;
+          "401": Error;
+          "403": HighTierRefusal;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/drain/preview": {
+    get: {
+      responses: {
+          "200": DrainPreviewResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/drain/run": {
+    post: {
+      responses: {
+          "200": DrainNowResult;
+          "401": Error;
+          "403": HighTierRefusal;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/feedback/preview": {
+    post: {
+      responses: {
+          "200": FeedbackPreviewResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/hooks/github": {
+    post: {
+      responses: {
+          "202": GithubWebhookReceipt;
+          "400": GithubWebhookRefusal;
+          "401": GithubWebhookRefusal;
+          "403": GithubWebhookRefusal;
+          "413": GithubWebhookRefusal;
+          "503": GithubWebhookRefusal;
+        };
+    };
+  };
+  "/v1/merge-hold": {
+    post: {
+      responses: {
+          "200": MergeHoldResult;
+          "400": Error;
+          "401": Error;
+          "403": MergeHoldRefusal;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/operator-notes": {
+    get: {
+      responses: {
+          "200": OperatorNotesResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/operator-notes/add": {
+    post: {
+      responses: {
+          "200": AddOperatorNoteResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "500": OperatorNoteWriteFailure;
+        };
+    };
+  };
+  "/v1/policy/daily-cost-ceiling": {
+    post: {
+      responses: {
+          "200": DailyCostCeilingResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/policy/daily-cost-ceiling/clear": {
+    post: {
+      responses: {
+          "200": DailyCostCeilingResult;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/policy/provider-routing": {
+    post: {
+      responses: {
+          "200": ProviderRoutingPolicyWriteResult;
+          "400": ProviderRoutingPolicyRefusal;
+          "401": Error;
+          "403": HighTierRefusal;
+          "404": Error;
+          "409": ProviderRoutingPolicyRefusal;
+        };
+    };
+  };
+  "/v1/policy/provider-routing/clear": {
+    post: {
+      responses: {
+          "200": ProviderRoutingPolicyWriteResult;
+          "400": ProviderRoutingPolicyRefusal;
+          "401": Error;
+          "403": HighTierRefusal;
+          "404": Error;
+          "409": ProviderRoutingPolicyRefusal;
+        };
+    };
+  };
+  "/v1/quiet-hours": {
+    post: {
+      responses: {
+          "200": QuietHoursResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
         };
     };
   };

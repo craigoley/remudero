@@ -17,7 +17,8 @@ import {
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
-import { type Config, fixStrikeCap } from "./config.js";
+import { systemClock, type Clock } from "./clock.js";
+import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { gitPushEmptyCommit, gitPushRunBranch, LanePushForeignHeadError } from "./git-push.js";
 import { ghJson, ghJsonAsync } from "./github-transport.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
@@ -87,6 +88,7 @@ import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import {
   activeWorkerCount,
   appendQuestion,
+  cashFallbackRefusal,
   capStderrExcerpt,
   listRegisteredWorktrees,
   renderWorkerSettings,
@@ -98,6 +100,15 @@ import {
   type SpawnWorkerArgs,
   type WorkerResult,
 } from "./worker.js";
+import {
+  clearRepairLadderStall,
+  priceRepairLadderRungs,
+  readRepairLadderState,
+  recordRepairLadderStall,
+  renderRepairLadderReport,
+  repairLadderStallFrom,
+  type RepairLadderFallback,
+} from "./worker-provider.js";
 import {
   FLEET_NOTICE_LABEL,
   NEEDS_HUMAN_LABEL,
@@ -2792,7 +2803,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           deps: {
             // Fresh-spawn adapter: an empty resumeSessionId (cold PR) becomes a
             // fresh spawn rather than an attempt to resume a session that doesn't exist.
-            spawn: (args: SpawnWorkerArgs) => (spawnImpl ?? benchmarkNonDispatchSpawn("sweep-fix"))({ ...args, resumeSessionId: args.resumeSessionId || undefined }),
+            // W1-T3718: the repair ladder's fleet state follows THIS spawn — a capacity refusal
+            // records (or extends) the stall, the first spawn that returns clears it.
+            spawn: trackRepairLadder(
+              (args: SpawnWorkerArgs) => (spawnImpl ?? benchmarkNonDispatchSpawn("sweep-fix"))({ ...args, resumeSessionId: args.resumeSessionId || undefined }),
+              { config, log: (s: string, extra?: Record<string, unknown>) => log(s, { task_id: task.id, ...extra }) },
+            ),
             waitForCiGreen,
             // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
             // non-green — see runFixRung's own doc for why this must happen on
@@ -12979,4 +12995,106 @@ export async function runPostFixReverification(
   const summary: PostFixReverificationSummary = { total: openPrs.length, redriven, results };
   log("sweep.post_fix_reverification.summary", { total: summary.total, redriven: summary.redriven });
   return summary;
+}
+
+// ── W1-T3718: THE REPAIR LADDER'S FLEET STATE, AND THE ONE VERB THAT PRICES IT ────────────────
+
+/**
+ * Each paid rung as the fix rung would meet it: the live refusal, and what would STILL refuse it
+ * with its operator switch on. The second is what makes the verb a price rather than a guess --
+ * measured 2026-09-17, an operator hitting the stall had to discover two separate config keys from
+ * two separate log lines, and enabling one of them alone would not necessarily have armed it.
+ * Reads the SAME predicates `spawnWorker` consults, never a restatement of them.
+ */
+export function repairLadderFallbacks(
+  config: Config,
+  tools: readonly string[] | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): RepairLadderFallback[] {
+  const cashSwitched: Config = { ...config, workerProviders: { ...config.workerProviders, cashFallbackWhenBlocked: true } };
+  const overflowSwitched: Config = { ...config, overflow: "api_key" };
+  const rung = (id: RepairLadderFallback["rung"], refusal: string | undefined, refusalIfSwitched: string | undefined): RepairLadderFallback => ({
+    rung: id,
+    ...(refusal === undefined ? {} : { refusal }),
+    ...(refusalIfSwitched === undefined ? {} : { refusalIfSwitched }),
+  });
+  return [
+    rung("cash", cashFallbackRefusal(config, tools), cashFallbackRefusal(cashSwitched, tools)),
+    rung("overflow", overflowFallbackRefusal(config, env), overflowFallbackRefusal(overflowSwitched, env)),
+  ];
+}
+
+/**
+ * Wrap a fix-rung spawn so the ladder's DURABLE state follows it: a refusal meaning "no provider
+ * would take the work" records (or extends) the one stall record; a spawn that returns clears it.
+ * The refusal itself propagates unchanged -- strike accounting is not this wrapper's business -- and
+ * a failure to write the state is ledgered, never allowed to turn a spawn outcome into a throw.
+ */
+export function trackRepairLadder<A extends SpawnWorkerArgs, R>(
+  spawn: (args: A) => Promise<R>,
+  opts: { config: Config; log: (step: string, extra?: Record<string, unknown>) => void; clock?: Clock },
+): (args: A) => Promise<R> {
+  const root = opts.config.root;
+  const clock = opts.clock ?? systemClock;
+  return async (args: A) => {
+    let result: R;
+    try {
+      result = await spawn(args);
+    } catch (error) {
+      const config = args.config ?? opts.config;
+      const stall = repairLadderStallFrom(error, repairLadderFallbacks(config, args.cashTools ?? args.tools, args.env));
+      if (stall !== undefined) {
+        try {
+          const { record, began } = recordRepairLadderStall(root, stall, clock.now());
+          if (began) {
+            opts.log("repair_ladder.stalled", {
+              since: record.since,
+              reason: record.reason,
+              providers: record.providers,
+              fallbacks: record.fallbacks,
+            });
+          }
+        } catch (writeError) {
+          opts.log("repair_ladder.write_failed", { phase: "record", reason: (writeError as Error).message });
+        }
+      }
+      throw error;
+    }
+    try {
+      const cleared = clearRepairLadderStall(root);
+      if (cleared !== undefined) {
+        opts.log("repair_ladder.recovered", { since: cleared.since, down_ms: Math.max(0, clock.now() - Date.parse(cleared.since)) });
+      }
+    } catch (clearError) {
+      opts.log("repair_ladder.write_failed", { phase: "clear", reason: (clearError as Error).message });
+    }
+    return result;
+  };
+}
+
+/**
+ * `rmd repair-ladder [--json]` -- the ladder's live state and every paid rung, priced.
+ *
+ * REPORT ONLY. It prints the one config edit that would arm each rung and what that rung would
+ * bill; it never writes config, because enabling a paid fallback spends money and stays an
+ * operator act (W1-T3718 design iii).
+ */
+export function repairLadderCommand(
+  rest: readonly string[],
+  config: Config,
+  /** The tool surface a fix round would divert to cash; decides whether cash can serve it at all. */
+  fixTools: readonly string[] | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+  print: (line: string) => void = (line) => console.log(line),
+): number {
+  const unknown = rest.filter((arg) => arg !== "--json");
+  if (unknown.length > 0) {
+    print(`rmd repair-ladder: unknown argument(s) ${unknown.join(" ")} — usage: rmd repair-ladder [--json]`);
+    return 2;
+  }
+  const state = readRepairLadderState(config.root, systemClock.now());
+  const rungs = priceRepairLadderRungs(config, repairLadderFallbacks(config, fixTools, env));
+  if (rest.includes("--json")) print(JSON.stringify({ ladder: state, rungs }));
+  else for (const line of renderRepairLadderReport(state, rungs)) print(line);
+  return 0;
 }

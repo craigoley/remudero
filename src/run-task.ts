@@ -160,6 +160,7 @@ import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { startCiFrictionGardener, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
+import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener, startEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
@@ -881,7 +882,7 @@ import {
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, benchmarkEvidenceLedgerPath } from "./lib/benchmark-run.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
 // Prompt, tools, scorer and environment remain unavailable until immutable trial artifacts exist.
@@ -889,6 +890,7 @@ const workerBoundaryStack: BenchmarkStackEvidence = {
   harnessRevision: executingHarnessRevision(fileURLToPath(import.meta.url)),
 };
 import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
+import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -1456,6 +1458,8 @@ import {
   creditSubjectIsImplementation,
   planOnlyRunBranchReceipts,
   REGENERABLE_ARTIFACT_GENERATORS,
+  repairLadderCommand,
+  trackRepairLadder,
 } from "./lib/sweep.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -13990,13 +13994,14 @@ export function recordBenchmarkWorkerAttempt(
   selected: () => { id: string } | undefined,
   stopPolling: () => void,
 ): Promise<WorkerResult> {
-  const failed = (): void => {
+  const failed = (error: unknown): void => {
     try {
       const assignment = selected();
       log("worker.attempt", {
         ...(assignment ? { selection_assignment_id: assignment.id } : {}),
         success: false,
         worker_failure: "spawn-threw-before-result",
+        ...spawnFailureDetail(error, assignment !== undefined),
       });
     } catch { /* preserve the original worker error */ }
   };
@@ -14004,7 +14009,7 @@ export function recordBenchmarkWorkerAttempt(
   try {
     workerCall = call();
   } catch (error) {
-    failed();
+    failed(error);
     stopPolling();
     throw error;
   }
@@ -14025,7 +14030,7 @@ export function recordBenchmarkWorkerAttempt(
     } catch { /* telemetry cannot alter the returned worker result */ }
     return result;
   }, (error: unknown) => {
-    failed();
+    failed(error);
     throw error;
   }).finally(stopPolling);
 }
@@ -14038,7 +14043,9 @@ function ledgerNonDispatchAssignment(
   runId?: string,
   taskId?: string,
 ): void {
-  appendLedger(ledgerPathFor(config ?? loadConfig()), {
+  const path = benchmarkEvidenceLedgerPath(config);
+  if (path === undefined) return;
+  appendLedger(path, {
     run_id: runId ?? `${lane}-${assignment.id}`,
     task_id: taskId ?? lane.toUpperCase(),
     step: "worker.assignment",
@@ -15626,7 +15633,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const ruleToolPointer = ruleLookup
       ? `\nTo read a doctrine rule by id or phrase, or a learning's evidence by learnings#id, call ${WORKER_RULE_TOOL_NAME}.`
       : "";
-    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
+    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -15658,7 +15665,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // drill will send. `ruleHeadlinesPart` is the SAME string the turn-0 prompt above just
     // carried (design (iii)) — never re-derived, so a compaction can never re-inject a
     // headline index that drifted from what turn 0 actually said.
-    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
+    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
     log("anchor.built", { anchor });
 
     // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
@@ -15727,6 +15734,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         // W1-T6: every worker call ledgers the standard telemetry shape.
         ...workerLedgerFields(impl),
         ...implHead,
+        self_forecast: parseSelfForecast(workerTranscript(impl)),
       });
       // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
       // above `runTask`. Best-effort and keyed on `runId` alone (not per-attempt), so a
@@ -16561,7 +16569,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         openTaskIds,
         reviewerCodeFreshness: () => checkReviewerCodeFreshness(repoRoot, process.env),
         deps: {
-          spawn,
+          // W1-T3718: the SAME repair-ladder tracking the sweep's fix spawn carries.
+          spawn: trackRepairLadder(spawn, { config, log }),
           waitForCiGreen,
           // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
           // non-green — see runFixRung's own doc for why this must happen on
@@ -32901,6 +32910,7 @@ export async function daemonCommand(
                   ciLearningTaskIdMinter(repoRoot),
                   intervalMs,
                 ),
+                (intervalMs: number) => startEvidenceCoverageGardener(() => runEvidenceCoverageGardener(daemonEvidenceCoverageInput({ stateDir: join(config.root, "state"), root: repoRoot, log })), log, intervalMs),
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
                 // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
                 // registry instance" has no selector yet -- `RegistryInstance` carries no role or
@@ -46260,6 +46270,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T3685: the one question an operator asks first and no other verb answered — `rmd status` renders this daemon's OWN board from local state, `rmd ci-failures` answers a narrower one (failures, one repo, by day). Surveys every repository named by `--repo` (repeatable), or `config.fleetRepos` when none is given, or a three-repository fallback when that is unset too — never a list written into `pr-board.ts` itself. ONE `gh pr list --json ...` call per repository (surveyPullRequestBoard, src/lib/pr-board.ts): a per-PR follow-up read is refused by design, the secondary-rate-limit hazard. A repository that cannot be read prints UNAVAILABLE with the read error, never rendered as zero open — an empty queue and an unreachable one are opposite facts. Each open pull request prints its number, title, draft state, head branch, and the NAMES of its failing and pending checks. REPORT-ONLY: exit code is always 0, whatever the board contains — this verb reports, it does not gate.",
   },
   {
+    name: "repair-ladder",
+    syntax: "rmd repair-ladder [--json]",
+    summary: "Report the repair ladder's live state and price each paid fallback rung; changes nothing.",
+    detail: "W1-T3718: the fix rung can stall with every provider refusing and both paid rungs switched off, and the only trace was one fix.spawn_infra_blocked ledger row. This reports the durable stall record (since when, for how long, and per provider whether it is FULL or CANNOT BE ASKED -- only the first argues for paying) and prices each paid rung: the one config edit that arms it (workerProviders.cashFallbackWhenBlocked, overflow: \"api_key\"), what it bills, its dailyCapUsd ceiling, and what would still refuse it with the switch on. REPORT-ONLY: it never writes config -- enabling a paid fallback spends money and stays an operator act. --json prints the same as one object.",
+  },
+  {
     name: "census-membership",
     syntax: "rmd census-membership [--base <ref>] [--files]",
     summary: "Name the population-walking census suites this diff enters.",
@@ -47185,6 +47201,13 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["ci-failures", (rest) => ciFailuresCommand(rest)],
   ["board", (rest) => boardCommand(rest)],
   ["census-membership", (rest) => censusMembershipCommand(rest)],
+  [
+    "repair-ladder",
+    (rest) => {
+      const config = loadConfig();
+      return repairLadderCommand(rest, config, fixRoundGitOwnership(config).cashTools ?? FIX_WORKER_TOOLS);
+    },
+  ],
   ["caller-sweep", (rest) => callerSweepCommand(rest)],
   ["ci-learning", (rest) => ciLearningCommand(rest)],
   ["rule-efficacy", (rest) => ruleEfficacyCommand(rest)],

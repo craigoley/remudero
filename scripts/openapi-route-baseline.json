@@ -1,26 +1,4 @@
 {
   "_comment": "W1-T4579 — served /v1 paths absent from openapi/daemon.yaml, measured over the ASSEMBLED route table (buildServeRoutes plus the status SSE route) by test/every-served-route-is-in-the-contract.test.ts. A set that may only SHRINK: declare a route in the spec and remove it here in the same PR; a newly served route must be declared, never added here. Parameters are normalised to {}.",
-  "undeclared": [
-    "/v1/confirm",
-    "/v1/drain/feedback",
-    "/v1/drain/kick",
-    "/v1/drain/preview",
-    "/v1/drain/run",
-    "/v1/feedback/preview",
-    "/v1/hooks/github",
-    "/v1/merge-hold",
-    "/v1/operator-agent/consequences",
-    "/v1/operator-agent/consequences/decision",
-    "/v1/operator-agent/delegation/handoff",
-    "/v1/operator-agent/emergency/clear",
-    "/v1/operator-agent/emergency/status",
-    "/v1/operator-agent/emergency/stop",
-    "/v1/operator-notes",
-    "/v1/operator-notes/add",
-    "/v1/policy/daily-cost-ceiling",
-    "/v1/policy/daily-cost-ceiling/clear",
-    "/v1/policy/provider-routing",
-    "/v1/policy/provider-routing/clear",
-    "/v1/quiet-hours"
-  ]
+  "undeclared": []
 }
