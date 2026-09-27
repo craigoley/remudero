@@ -2211,6 +2211,7 @@ import {
   foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock,
   workerLedgerFields,
   workerTranscript,
+  withAssignmentTrailer, resolveCommitAssignment,
   uniqueRunBranch,
   excludeNodeModulesFromGit,
   linkWorktreeNodeModules, resolveNodeModulesSource,
@@ -10838,6 +10839,7 @@ export async function runFixRung(opts: {
         worktreePath: opts.worktreePath,
         declaredPaths: opts.task.files ?? [],
         ...options,
+        assignmentId: fixResult.selectionAssignmentId,
         log: deps.log,
         say: deps.say,
         onRefusal: (reason, undeclared = []) => {
@@ -15714,6 +15716,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
             : prompt,
         }),
       );
+      const implHead = headProvenanceFields(worktreePath);
       log("implement.done", {
         session_id: impl.sessionId,
         cost_usd: impl.costUsd,
@@ -15724,21 +15727,14 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         permission_denials: impl.permissionDenials.length,
         // W1-T6: every worker call ledgers the standard telemetry shape.
         ...workerLedgerFields(impl),
+        ...implHead,
       });
       // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
       // above `runTask`. Best-effort and keyed on `runId` alone (not per-attempt), so a
       // transient/diagnose-informed retry's own re-dispatch OVERWRITES the same file rather than
       // multiplying it: `implement.done` is one archive point per run, unlike the fix rung's
       // per-strike archive below.
-      let implHeadShaForArchive: string | undefined;
-      try {
-        implHeadShaForArchive = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-        }).trim();
-      } catch {
-        // best-effort — see comment above.
-      }
+      const implHeadShaForArchive = implHead.head_sha;
       archiveWorkerTranscript(
         {
           root: config.root,
@@ -16056,6 +16052,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       report: fullText(impl),
       worktreePath,
       declaredPaths: task.files ?? [],
+      assignmentId: impl.selectionAssignmentId,
       log,
       say,
       onRefusal: createHarnessCommitRefusalRecorder(harnessCommitRefusalState),
@@ -16073,6 +16070,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       task: writerCannotResume(impl.provider ?? implementMount.provider, implementTools) ? task : undefined,
       worktreePath,
       declaredPaths: task.files ?? [],
+      assignmentId: impl.selectionAssignmentId,
       log,
       say,
       resume: commitLineResume(spawn, account, {
@@ -16391,7 +16389,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         log,
       },
     );
-    log("pr.opened", { pr_url: prUrl });
+    // W1-T4614: the head the PR opened at, joinable to its review and CI verdicts and to the assignment that wrote it.
+    log("pr.opened", { pr_url: prUrl, ...headProvenanceFields(worktreePath) });
     say(`PR: ${prUrl}`);
 
     // ── IRREVERSIBILITY SIGNAL (W1-T947, W1-T919 ruling): computed ONCE, right
@@ -28450,6 +28449,7 @@ async function retroCommand(
       report: workerTranscript(worker),
       worktreePath,
       declaredPaths: ["MASTER-PLAN.md"],
+      assignmentId: worker.selectionAssignmentId,
       log,
       say,
     });
@@ -37668,6 +37668,8 @@ export function harnessCommitForShellLessWorker(
     declaredPaths: readonly string[];
     subjectSource?: "worker-authored" | "re-asked" | "harness-derived";
     derivedCommit?: { subject: string; reason: string };
+    /** W1-T4614: the selection assignment of the worker whose edits this commits; its trailer names it. */
+    assignmentId?: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
     /** Receives the helper's exact refusal reason so a fix lane can record its own outcome row,
@@ -37688,7 +37690,10 @@ export function harnessCommitForShellLessWorker(
     input.onRefusal?.(reason, []);
     return input.commitCount;
   }
-  const message = asked ?? `${input.derivedCommit!.subject}\n\nHarness-derived subject: ${input.derivedCommit!.reason}`;
+  const message = withAssignmentTrailer(
+    asked ?? `${input.derivedCommit!.subject}\n\nHarness-derived subject: ${input.derivedCommit!.reason}`,
+    input.assignmentId,
+  );
   const subjectSource = asked === undefined ? "harness-derived" : input.subjectSource ?? "worker-authored";
   const committed = commit(input.worktreePath, input.declaredPaths, message);
   const refusalReason = committed.reason ?? "harness commit refused";
@@ -37705,6 +37710,22 @@ export function harnessCommitForShellLessWorker(
   }
   input.say(`harness committed the worker's edits (${committed.sha?.slice(0, 8)}) — it had no shell of its own`);
   return ahead(input.worktreePath, "origin/main");
+}
+
+/** W1-T4614: the head sha a worktree holds and the assignment its commit names — the fields `implement.done` and
+ * `pr.opened` carry so a review or CI verdict on that head joins to the worker that wrote it. Empty when no head reads. */
+export function headProvenanceFields(worktreePath: string): { head_sha?: string; head_assignment?: string } {
+  let headSha: string;
+  try {
+    headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "--verify", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    // No head to name: the row omits both fields rather than inventing a sha.
+    return {};
+  }
+  return { head_sha: headSha, head_assignment: resolveCommitAssignment(worktreePath, headSha) };
 }
 
 /** Keep the run-body refusal state callback independently executable for the harness path. */
@@ -37753,6 +37774,8 @@ export async function resumeForMissingCommitLine(
     task?: Pick<Task, "id" | "title" | "type">;
     worktreePath: string;
     declaredPaths: readonly string[];
+    /** W1-T4614: the ORIGINAL worker's assignment — it did the edits; the resume only supplies the line. */
+    assignmentId?: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
     /** Resume the worker's OWN session once with the ask-for-the-line prompt. A required
@@ -37812,6 +37835,7 @@ export async function resumeForMissingCommitLine(
       declaredPaths: input.declaredPaths,
       subjectSource: derivedCommit ? "harness-derived" : "re-asked",
       derivedCommit,
+      assignmentId: input.assignmentId,
       log: input.log,
       say: input.say,
       onRefusal: createHarnessCommitRefusalRecorder(refusalState),
