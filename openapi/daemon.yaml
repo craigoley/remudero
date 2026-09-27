@@ -2591,6 +2591,649 @@ components:
         action:
           $ref: "#/components/schemas/OperatorAgentConsequenceAction"
 
+    HighTierForbidden:
+      type: object
+      description: >
+        A 403 on a HIGH-tier write route (W1-T404). `forbidden` is src/lib/service.ts's scope/tier
+        gate: `required_scope` names the missing scope, and `required_tier` is present when the
+        credential's write tier is too low -- the bearer write token is pinned at LOW, so it never
+        reaches a HIGH route. `confirm_nonce_required` is the same dispatcher refusing a request
+        whose X-Confirm-Nonce is absent or was not issued by POST /v1/confirm for this exact
+        method, path and payload (POST /v1/operator-agent/consequences/decision's handler also
+        refuses a missing nonce itself, naming the `consequenceId`).
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          enum: [forbidden, confirm_nonce_required]
+        required_scope:
+          type: string
+          enum: [read, write]
+        required_tier:
+          type: string
+          enum: [low, middle, high]
+        consequenceId:
+          type: string
+          description: Present only on the consequence decision handler's own missing-nonce refusal.
+
+    OperatorAgentConsequenceReceipt:
+      type: object
+      description: >
+        One recorded decision on a pending consequence (src/lib/operator-agent.ts's
+        `ConsequenceDecisionReceipt`).
+      required: [kind, at]
+      properties:
+        kind:
+          type: string
+          enum: [approve, refuse]
+        at:
+          type: string
+          format: date-time
+        issuer:
+          type: string
+          description: The deciding credential's actor id, when the ledger row recorded one.
+        note:
+          type: string
+          description: >
+            The decision's reason. A refusal with no operator reason carries "operator refused this
+            consequence".
+
+    OperatorAgentPendingConsequence:
+      type: object
+      description: >
+        consequence-v1 as the console's `normalizedConsequenceRecord` validates it
+        (src/lib/operator-agent.ts's `PendingConsequenceRecord`), projected from the approval the
+        consequence preflight persisted on its ledger row.
+      required: [consequenceId, classes, target, expiresAt, approverRequired, recoveryStatement, freshness, observedAt, receipts, source]
+      properties:
+        consequenceId:
+          type: string
+          description: The preflighted action's id.
+        classes:
+          type: array
+          items:
+            type: string
+            enum: [financial, irreversible]
+        target:
+          type: string
+          maxLength: 320
+          description: The action's target identity, never truncated -- a longer one is not listed at all.
+        amountUsd:
+          type: number
+        currency:
+          type: string
+        ceilingUsd:
+          type: number
+          description: The per-action financial ceiling.
+        coolingOffMs:
+          type: integer
+        coolingOffUntil:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+          description: The earlier of the quote expiry and the irreversible confirmation expiry.
+        approverRequired:
+          type: boolean
+        recoveryStatement:
+          type: string
+          maxLength: 1000
+        freshness:
+          type: string
+          enum: [verified, stale]
+          description: "`stale` once the earliest evidence item's freshness window has passed."
+        observedAt:
+          type: string
+          format: date-time
+          description: When the preflight row that made this consequence pending was written.
+        receipts:
+          type: array
+          description: Empty, or the one refusal recorded since that preflight row.
+          items:
+            $ref: "#/components/schemas/OperatorAgentConsequenceReceipt"
+        source:
+          type: string
+          enum: ["rmd:core:/v1/operator-agent/consequences"]
+
+    OperatorAgentPendingConsequenceRead:
+      type: object
+      description: GET /v1/operator-agent/consequences's body (src/lib/operator-agent.ts's `PendingConsequenceRead`).
+      required: [state, consequences, source, generatedAt, max, total, truncated, unprojected]
+      properties:
+        state:
+          type: string
+          enum: [verified]
+        consequences:
+          type: array
+          description: Newest `observedAt` first, at most `max` records.
+          items:
+            $ref: "#/components/schemas/OperatorAgentPendingConsequence"
+        source:
+          type: string
+          enum: [ledger]
+        generatedAt:
+          type: string
+          format: date-time
+        max:
+          type: integer
+          description: The per-read cap (MAX_PENDING_CONSEQUENCES, 100).
+        total:
+          type: integer
+          description: Every pending consequence, before the cap.
+        truncated:
+          type: boolean
+        unprojected:
+          type: integer
+          description: Pending preflight rows written before W1-T4104 carried no approval projection -- counted, never listed.
+
+    OperatorAgentConsequencesReadOnlyRefusal:
+      type: object
+      description: A write verb on GET /v1/operator-agent/consequences, refused by name.
+      required: [error, method, path, detail, allow]
+      properties:
+        error:
+          type: string
+          enum: [read_only]
+        method:
+          type: string
+          enum: [POST, PUT, PATCH, DELETE]
+        path:
+          type: string
+          enum: ["/v1/operator-agent/consequences"]
+        detail:
+          type: string
+        allow:
+          type: array
+          items:
+            type: string
+            enum: [GET]
+
+    OperatorAgentConsequenceDecisionRequest:
+      type: object
+      description: >
+        src/lib/operator-agent.ts's `validateConsequenceDecisionInput`. `note` is the console's
+        earlier name for `reason` and is accepted as an alias; sending both is a 400.
+      required: [consequenceId, decision]
+      properties:
+        consequenceId:
+          type: string
+          minLength: 1
+          maxLength: 160
+        decision:
+          type: string
+          enum: [approve, refuse]
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        note:
+          type: string
+          minLength: 1
+          maxLength: 1000
+
+    OperatorAgentConsequenceDecisionResult:
+      type: object
+      required: [ok, consequenceId, decision, at, receipt]
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+        consequenceId:
+          type: string
+        decision:
+          type: string
+          enum: [approve, refuse]
+        at:
+          type: string
+          format: date-time
+        receipt:
+          $ref: "#/components/schemas/OperatorAgentConsequenceReceipt"
+
+    OperatorAgentConsequenceDecisionRefusal:
+      type: object
+      description: A consequence decision refused because the consequence is not (or no longer) pending; nothing is recorded.
+      required: [error, consequenceId, detail]
+      properties:
+        error:
+          type: string
+          enum: [not_found, expired_consequence, consequence_not_pending]
+        consequenceId:
+          type: string
+        detail:
+          type: string
+
+    EmergencyStop:
+      type: object
+      description: >
+        A bound `emergency-stop-v1` stop (src/lib/emergency-control.ts's `EmergencyStop`).
+      required: [schema, id, scope, reason, issuedBy, issuedAt, clearPolicy, affectedCapabilities, affectedDelegationClasses, incidentReceiptId]
+      properties:
+        schema:
+          type: string
+          enum: [emergency-stop-v1]
+        id:
+          type: string
+        scope:
+          type: string
+          enum: [fleet, repository, instance, principal]
+        scopeTarget:
+          type: string
+          description: Present for every scope but `fleet`, which is total by definition.
+        reason:
+          type: string
+        issuedBy:
+          type: string
+        issuedAt:
+          type: string
+          format: date-time
+        clearPolicy:
+          type: string
+          enum: [expires, explicit-clear-required]
+        expiresAt:
+          type: string
+          format: date-time
+          description: Present only when `clearPolicy` is `expires`.
+        affectedCapabilities:
+          type: array
+          description: >
+            The capabilities this stop blocks. The code's type is `string[] | "*"`: the literal
+            string "*" (the default) blocks every capability. This document's OpenAPI subset
+            (scripts/generate-api-client.mjs) has no union, so only the array arm is typed here --
+            a consumer must accept the string "*" as well.
+          items:
+            type: string
+        affectedDelegationClasses:
+          type: array
+          description: >
+            The delegation classes this stop blocks. The code's type is `string[] | "*"`: the
+            literal string "*" (the default) blocks every class; as for `affectedCapabilities`,
+            only the array arm is typed here and a consumer must accept "*" as well.
+          items:
+            type: string
+        incidentReceiptId:
+          type: string
+          description: The incident record this stop is accountable to; every receipt of its lifecycle links back to it.
+
+    EmergencyReceipt:
+      type: object
+      description: >
+        One bounded, attributable receipt of an emergency stop's lifecycle
+        (src/lib/emergency-control.ts's `EmergencyReceipt`).
+      required: [receiptId, stopId, parentReceiptId, kind, outcome, decidedAt, reason]
+      properties:
+        receiptId:
+          type: string
+        stopId:
+          type: string
+        parentReceiptId:
+          type: string
+          description: Always the stop's own `incidentReceiptId`.
+        kind:
+          type: string
+          enum: [stop, refusal, cancellation, clear]
+        outcome:
+          type: string
+          description: >
+            `issued` for a stop, the refused action kind for a refusal, `cleared` or the clear
+            refusal code for a clear.
+        decidedAt:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          maxLength: 241
+          description: Capped at 240 characters plus a trailing ellipsis.
+
+    EmergencyStopIssueRequest:
+      type: object
+      description: >
+        src/lib/operator-agent.ts's `validateEmergencyStopIssue`, then `createEmergencyStop`'s
+        issuance rules. `affectedCapabilities`/`affectedDelegationClasses` default to "*" when
+        omitted and may be sent as the literal string "*" -- the OpenAPI subset types only their
+        array arm. `issuedAt` is stamped by the daemon.
+      required: [scope, reason, issuedBy, clearPolicy, incidentReceiptId]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 160
+          description: Defaults to `estop-<uuid>`.
+        scope:
+          type: string
+          enum: [fleet, repository, instance, principal]
+        scopeTarget:
+          type: string
+          minLength: 1
+          maxLength: 160
+          description: Required for every scope but `fleet`; refused on `fleet`.
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+        issuedBy:
+          type: string
+          minLength: 1
+          maxLength: 160
+        clearPolicy:
+          type: string
+          enum: [expires, explicit-clear-required]
+        expiresAt:
+          type: string
+          format: date-time
+          description: Required for `expires`; refused for `explicit-clear-required`.
+        affectedCapabilities:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: string
+            minLength: 1
+            maxLength: 160
+        affectedDelegationClasses:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: string
+            minLength: 1
+            maxLength: 160
+        incidentReceiptId:
+          type: string
+          minLength: 1
+          maxLength: 160
+
+    EmergencyStopIssueResult:
+      type: object
+      required: [ok, stop, receipt]
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+        stop:
+          $ref: "#/components/schemas/EmergencyStop"
+        receipt:
+          $ref: "#/components/schemas/EmergencyReceipt"
+
+    EmergencyStopClearRequest:
+      type: object
+      description: >
+        src/lib/operator-agent.ts's `validateEmergencyStopClear`. Clearing succeeds only with a
+        `healthy` health read whose `checkedAt` is no more than five minutes old and `complete`
+        revocation coverage; anything else is a 409 refusal, not a 400.
+      required: [stopId, confirmation, health, revocation]
+      properties:
+        stopId:
+          type: string
+          minLength: 1
+          maxLength: 160
+        confirmation:
+          type: object
+          description: An explicit human sign-off -- never inferred from a prior approval.
+          required: [confirmedBy, confirmedAt]
+          properties:
+            confirmedBy:
+              type: string
+              minLength: 1
+              maxLength: 160
+            confirmedAt:
+              type: string
+              format: date-time
+        health:
+          type: object
+          description: A fresh, authoritative health/preflight read.
+          required: [source, status, checkedAt]
+          properties:
+            source:
+              type: string
+              minLength: 1
+              maxLength: 160
+            status:
+              type: string
+              enum: [healthy, degraded, unavailable]
+            checkedAt:
+              type: string
+              format: date-time
+        revocation:
+          type: object
+          required: [coverage]
+          properties:
+            coverage:
+              type: string
+              enum: [complete, partial, unavailable]
+
+    EmergencyStopClearResult:
+      type: object
+      required: [ok, receipt]
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+        receipt:
+          $ref: "#/components/schemas/EmergencyReceipt"
+
+    EmergencyStopClearRefusal:
+      type: object
+      required: [ok, code, receipt]
+      properties:
+        ok:
+          type: boolean
+          enum: [false]
+        code:
+          type: string
+          enum: [already-cleared, confirmation-required, health-stale, health-not-healthy, revocation-source-partial, revocation-source-unavailable]
+        receipt:
+          $ref: "#/components/schemas/EmergencyReceipt"
+
+    EmergencyStopStatusResult:
+      type: object
+      required: [active, source]
+      properties:
+        active:
+          type: array
+          items:
+            $ref: "#/components/schemas/EmergencyStop"
+        source:
+          type: string
+          enum: [ledger]
+
+    EmergencyStopAdmissionRefusal:
+      type: object
+      description: An action refused because an active emergency stop covers it; the receipt's `stopId` names the stop.
+      required: [ok, error, code, receipt]
+      properties:
+        ok:
+          type: boolean
+          enum: [false]
+        error:
+          type: string
+          enum: [emergency_stop_active]
+        code:
+          type: string
+          enum: [emergency-stop-active]
+        receipt:
+          $ref: "#/components/schemas/EmergencyReceipt"
+
+    OperatorAgentDelegationHandoffRequest:
+      type: object
+      description: >
+        src/lib/operator-agent.ts's `validateDelegationHandoff`, then
+        src/lib/automation-action.ts's `createDelegationEnvelope` (which also refuses a `sender`
+        equal to the `recipient`). The recipient's acceptance may only narrow the envelope's
+        capabilities; `humanApproval` is required for high, production, financial, credential and
+        destructive risk.
+      required: [envelope, acceptedCapabilities, action]
+      properties:
+        envelope:
+          type: object
+          required: [sender, recipient, principal, purpose, capabilities, audience, expiresAt]
+          properties:
+            id:
+              type: string
+              minLength: 1
+              maxLength: 160
+              description: Defaults to `dlg-<uuid>`.
+            sender:
+              type: string
+              minLength: 1
+              maxLength: 160
+            recipient:
+              type: string
+              minLength: 1
+              maxLength: 160
+            principal:
+              type: string
+              minLength: 1
+              maxLength: 160
+            purpose:
+              type: string
+              minLength: 1
+              maxLength: 500
+            capabilities:
+              type: array
+              minItems: 1
+              maxItems: 20
+              items:
+                type: string
+                minLength: 1
+                maxLength: 160
+            scope:
+              type: object
+              properties:
+                repo:
+                  type: string
+                instance:
+                  type: string
+            audience:
+              type: string
+              minLength: 1
+              maxLength: 160
+            expiresAt:
+              type: string
+              format: date-time
+            nonce:
+              type: string
+              minLength: 1
+              maxLength: 160
+              description: Defaults to `n-<uuid>`.
+        acceptedCapabilities:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 160
+        action:
+          type: object
+          required: [capability, nonce, risk]
+          properties:
+            capability:
+              type: string
+              minLength: 1
+              maxLength: 160
+            nonce:
+              type: string
+              minLength: 1
+              maxLength: 160
+            risk:
+              type: string
+              enum: [low, medium, high, production, financial, credential, destructive]
+            humanApproval:
+              type: object
+              required: [approvedBy, approvedAt]
+              properties:
+                approvedBy:
+                  type: string
+                  minLength: 1
+                  maxLength: 160
+                approvedAt:
+                  type: string
+                  format: date-time
+
+    DelegationReceipt:
+      type: object
+      description: >
+        One bounded, attributable receipt for an executed or refused delegated use
+        (src/lib/automation-action.ts's `DelegationReceipt`). Identity fields are capped at 200
+        characters and `reason` at 240, each plus a trailing ellipsis when cut.
+      required: [receiptId, envelopeId, capability, audience, actorIdentity, decidedAt, outcome, reason]
+      properties:
+        receiptId:
+          type: string
+        envelopeId:
+          type: string
+        parentReceiptId:
+          type: string
+        capability:
+          type: string
+        audience:
+          type: string
+        actorIdentity:
+          type: string
+        decidedAt:
+          type: string
+          format: date-time
+        outcome:
+          type: string
+          enum: [executed, refused]
+        code:
+          $ref: "#/components/schemas/DelegationRefusalCode"
+        reason:
+          type: string
+
+    DelegationRefusalCode:
+      type: string
+      description: Every reason a delegation step can be refused for (src/lib/automation-action.ts's `DelegationRefusalCode`).
+      enum:
+        - unknown-envelope
+        - expired
+        - revoked
+        - parent-revoked
+        - identity-mismatch
+        - already-accepted
+        - empty-acceptance
+        - capability-widened
+        - expiry-widened
+        - not-accepted
+        - wrong-audience
+        - capability-not-accepted
+        - replayed-nonce
+        - human-gate-required
+        - audit-unavailable
+
+    OperatorAgentDelegationHandoffResult:
+      type: object
+      required: [ok, receipt]
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+        receipt:
+          $ref: "#/components/schemas/DelegationReceipt"
+
+    OperatorAgentDelegationHandoffRefusal:
+      type: object
+      description: >
+        A refused handoff, in one of two shapes: refused at the recipient's acceptance step
+        (`stage: accept`, `code`, `detail`; no receipt), or refused at execution (`receipt`, whose
+        `outcome` is `refused` and whose `code` names why).
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          enum: [false]
+        stage:
+          type: string
+          enum: [accept]
+        code:
+          $ref: "#/components/schemas/DelegationRefusalCode"
+        detail:
+          type: string
+        receipt:
+          $ref: "#/components/schemas/DelegationReceipt"
+
     FollowUpQuietHours:
       type: object
       required: [timezone, start, end]
@@ -5806,6 +6449,20 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    OperatorAgentConsequencesReadOnly:
+      description: >
+        The pending consequence approval list is read-only: every write verb on it is refused by
+        name (`read_only`) and records nothing.
+      headers:
+        Allow:
+          description: Always `GET`.
+          schema:
+            type: string
+            enum: [GET]
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/OperatorAgentConsequencesReadOnlyRefusal"
 
 # W3-T2 (MASTER-PLAN §7, WS-5a): the read-only live board's first real business routes --
 # a task/ledger-state snapshot (REST) and its live-update companion (SSE). Both are built on
@@ -7231,6 +7888,333 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "409":
           description: The action was refused by consequence policy; the response names the machine-readable code and reason.
+
+  /v1/operator-agent/consequences:
+    get:
+      summary: W1-T4104 — the bounded list of consequence approvals waiting on an operator.
+      description: >
+        src/lib/operator-agent.ts's `readPendingConsequences`, read-only. Lists every action whose
+        LATEST consequence preflight row was refused for `missing-approvers` or
+        `cooling-off-active`, is `financial` or `irreversible`, carries the approval projection the
+        preflight persisted, and has not expired. An approved consequence leaves the list; a
+        refused one stays visible with its refusal receipt. Newest first, capped at `max` (100)
+        with `truncated` saying when more exist; pending rows written before W1-T4104 carried no
+        projection and are counted in `unprojected`, never guessed into a record. An empty queue
+        is an empty list with its read time, never a 404.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The pending consequence approvals.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentPendingConsequenceRead"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      summary: Refused by name — the pending consequence list is read-only.
+      description: >
+        `buildOperatorAgentConsequencesWriteRefusalRoutes` registers POST, PUT, PATCH and DELETE on
+        this path at READ scope, so a write is answered `405 read_only` with `Allow: GET` rather
+        than the router's anonymous 404. Nothing is recorded; a decision is POST
+        /v1/operator-agent/consequences/decision.
+      security:
+        - bearerRead: []
+      responses:
+        "405":
+          $ref: "#/components/responses/OperatorAgentConsequencesReadOnly"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    put:
+      summary: Refused by name — the pending consequence list is read-only.
+      description: "The same refusal as POST on this path -- `405 read_only`, `Allow: GET`, nothing recorded."
+      security:
+        - bearerRead: []
+      responses:
+        "405":
+          $ref: "#/components/responses/OperatorAgentConsequencesReadOnly"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    patch:
+      summary: Refused by name — the pending consequence list is read-only.
+      description: "The same refusal as POST on this path -- `405 read_only`, `Allow: GET`, nothing recorded."
+      security:
+        - bearerRead: []
+      responses:
+        "405":
+          $ref: "#/components/responses/OperatorAgentConsequencesReadOnly"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    delete:
+      summary: Refused by name — the pending consequence list is read-only.
+      description: "The same refusal as POST on this path -- `405 read_only`, `Allow: GET`, nothing recorded."
+      security:
+        - bearerRead: []
+      responses:
+        "405":
+          $ref: "#/components/responses/OperatorAgentConsequencesReadOnly"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/operator-agent/consequences/decision:
+    post:
+      summary: Approve or refuse one pending consequence (HIGH write tier, nonce-confirmed).
+      description: >
+        `buildOperatorAgentConsequencesDecisionRoute`. HIGH write tier: the bearer write token is
+        pinned at LOW and is refused `403 forbidden` with `required_tier: high`; a HIGH-tier
+        credential must present an X-Confirm-Nonce minted by POST /v1/confirm for this exact
+        method, path and payload. The handler also refuses a request with no nonce header itself,
+        so the route never becomes an unguarded write. Only a consequence GET
+        /v1/operator-agent/consequences still lists as pending can be decided: an unknown one is
+        `404`, an expired or already-decided one `409`, and a refusal records nothing. A decision
+        appends one ledger row carrying the first 32 hex characters of the nonce's SHA-256, never
+        the nonce itself.
+      security:
+        - bearerWrite: []
+      parameters:
+        - name: X-Confirm-Nonce
+          in: header
+          required: true
+          description: The single-use confirmation nonce POST /v1/confirm issued for this exact request.
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentConsequenceDecisionRequest"
+      responses:
+        "200":
+          description: The decision was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentConsequenceDecisionResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Missing write scope or HIGH write tier (`forbidden`), or no valid confirmation nonce (`confirm_nonce_required`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HighTierForbidden"
+        "404":
+          description: No pending consequence with this id exists (`not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentConsequenceDecisionRefusal"
+        "409":
+          description: The consequence expired (`expired_consequence`) or is no longer pending (`consequence_not_pending`); nothing is recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentConsequenceDecisionRefusal"
+
+  /v1/operator-agent/delegation/handoff:
+    post:
+      summary: W1-T3883 — issue, accept and execute one bounded agent-delegation envelope (HIGH write tier).
+      description: >
+        `buildOperatorAgentDelegationHandoffRoute`. Builds an `agent-delegation-envelope-v1`
+        (src/lib/automation-action.ts's `createDelegationEnvelope`), refuses it by name (`423`)
+        when an active emergency stop's scope covers it (the fleet, or its repo, instance or
+        principal) and its delegation classes are "*" or include the
+        requested capability (ledgering the refusal receipt), then
+        records the recipient's explicit, narrow-only acceptance (a refused acceptance is a `409`
+        with no receipt) and runs the requested capability through `executeBoundedDelegation` --
+        the one seam that checks acceptance, replay, expiry, revocation, identity, audience, audit
+        availability and the human gate for high, production, financial, credential and
+        destructive risk. Every use that reaches execution, executed or refused, returns one
+        bounded receipt and ledgers only that receipt. The
+        envelope store is in-memory and per-process. HIGH write tier: the bearer write token
+        (pinned at LOW) is refused `403`; a HIGH-tier credential must present an X-Confirm-Nonce
+        minted by POST /v1/confirm for this exact request.
+      security:
+        - bearerWrite: []
+      parameters:
+        - name: X-Confirm-Nonce
+          in: header
+          required: true
+          description: The single-use confirmation nonce POST /v1/confirm issued for this exact request.
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentDelegationHandoffRequest"
+      responses:
+        "200":
+          description: The envelope was accepted and the requested capability verified and executed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentDelegationHandoffResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Missing write scope or HIGH write tier (`forbidden`), or no valid confirmation nonce (`confirm_nonce_required`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HighTierForbidden"
+        "409":
+          description: "Refused at acceptance (`stage: accept`, with `code` and `detail`) or at execution (a refused `receipt` naming its `code`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentDelegationHandoffRefusal"
+        "423":
+          description: An active emergency stop covers this handoff; nothing is issued, and the refusal receipt names the stop.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmergencyStopAdmissionRefusal"
+
+  /v1/operator-agent/emergency/clear:
+    post:
+      summary: W1-T3900 — lift one emergency stop (HIGH write tier; the only path that clears a stop).
+      description: >
+        `buildEmergencyStopClearRoute` over src/lib/emergency-control.ts's `clearEmergencyStop`.
+        Requires an explicit human confirmation, a `healthy` authoritative health read taken
+        within the last five minutes, and `complete` revocation-source coverage; any shortfall,
+        or a stop already cleared, is a `409` carrying a refusal receipt and records nothing. An
+        unknown stop id is `404`. HIGH write tier: the bearer write token (pinned at LOW) is
+        refused `403`; a HIGH-tier credential must present an X-Confirm-Nonce minted by POST
+        /v1/confirm for this exact request.
+      security:
+        - bearerWrite: []
+      parameters:
+        - name: X-Confirm-Nonce
+          in: header
+          required: true
+          description: The single-use confirmation nonce POST /v1/confirm issued for this exact request.
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmergencyStopClearRequest"
+      responses:
+        "200":
+          description: The stop is cleared; its clear receipt is ledgered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmergencyStopClearResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Missing write scope or HIGH write tier (`forbidden`), or no valid confirmation nonce (`confirm_nonce_required`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HighTierForbidden"
+        "404":
+          description: No emergency stop with this id was ever issued (`not_found`, with a `detail`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The clear was refused; the receipt's `outcome` repeats the refusal `code`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmergencyStopClearRefusal"
+
+  /v1/operator-agent/emergency/status:
+    get:
+      summary: W1-T3900 — the emergency stops currently in effect.
+      description: >
+        `buildEmergencyStopStatusRoute`. Every `emergency-stop-v1` stop reconstructed from the
+        ledger union (rotated archives and the live file) that has not been cleared and, for an
+        `expires` stop, has not reached its `expiresAt`. An empty list means no stop is active.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The active stops.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmergencyStopStatusResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/operator-agent/emergency/stop:
+    post:
+      summary: W1-T3900 — issue a bounded, incident-linked emergency stop (HIGH write tier).
+      description: >
+        `buildEmergencyStopIssueRoute` over src/lib/emergency-control.ts's `createEmergencyStop`.
+        The stop and its issuance receipt are ledgered, so the stop survives a daemon restart;
+        from then on it refuses action admission, follow-up promotion, capability use and agent
+        handoff within its scope until it expires (`clearPolicy: expires`) or is cleared through
+        POST /v1/operator-agent/emergency/clear (`explicit-clear-required`). A stop that fails
+        issuance (a `fleet` stop with a `scopeTarget`, any other scope without one, an `expires`
+        stop without `expiresAt`, an `explicit-clear-required` stop with one) is a `400` and
+        records nothing. HIGH write tier: the bearer write token (pinned at LOW) is refused
+        `403`; a HIGH-tier credential must present an X-Confirm-Nonce minted by POST /v1/confirm
+        for this exact request.
+      security:
+        - bearerWrite: []
+      parameters:
+        - name: X-Confirm-Nonce
+          in: header
+          required: true
+          description: The single-use confirmation nonce POST /v1/confirm issued for this exact request.
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmergencyStopIssueRequest"
+      responses:
+        "201":
+          description: The stop is in effect; the stop and its issuance receipt are ledgered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmergencyStopIssueResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Missing write scope or HIGH write tier (`forbidden`), or no valid confirmation nonce (`confirm_nonce_required`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HighTierForbidden"
 
   /v1/operator-agent/follow-ups:
     get:
