@@ -1,0 +1,43 @@
+- id: W1-T4638
+  title: "THE PAIRED PILOT CAN SAMPLE, ADMIT, GRADE AND ACCOUNT BUT CANNOT RUN AN ATTEMPT — W1-T4625 refuses every live pair as attempt-dispatch-not-wired until a sealed side-attempt dispatcher exists"
+  repo: remudero
+  depends_on: ["W1-T4625"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: operator-approved A/A run (rmd benchmark-aa, 27 run-task tasks) and its case-file rerun"
+  plan_refs: ["W1-T4625", "W1-T4603", "W1-T4575", "W1-T4571"]
+  files:
+    - src/lib/paired-trial.ts
+    - src/run-task.ts
+    - test/a-paired-side-attempt-runs-in-a-sealed-worktree.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    W1-T4625 (the operator-chosen paired design for the approved $100/7-day pilot, W1-T4603) wires
+    sampling, admission, shadow mode, pause/resume, grading through the reviewer's own executor,
+    cash accounting and McNemar analysis, and passes trial-manifest stack pins so side attempts
+    carry observed revisions. Its `dispatchAttempt` seam has no production implementation, so a
+    sampled live pair is refused as `attempt-dispatch-not-wired`; the pilot can shadow but never
+    measure.
+  design: |
+    Implement the production dispatcher behind W1-T4625's seam: create a fresh DETACHED worktree at
+    the task's base commit outside every fleet-owned branch namespace, spawn the protocol's pinned
+    arm (provider, model, effort) with the request's stack evidence through the ordinary worker
+    spawn path, return the resulting head for grading, and remove the worktree afterwards. It never
+    pushes, never opens a PR, never writes a run-<task>-<ms> branch, and writes no worker.assignment
+    row that dispatch or credit could read as the task's own work. Prime dependencies the way
+    execWhitelistedProof already does. Any push, PR or fleet-branch write is reported as an
+    isolation breach (the pair becomes unmeasurable). A pair is run by the daemon, not a CLI process
+    that can exit first. No activation, and no spend in tests.
+  acceptance:
+    - claim: "a paired side attempt runs the pinned arm in a fresh detached worktree at the task base, returns its head for grading, never pushes or opens a PR, and a push is an isolation breach"
+      proof: "unit test: test/a-paired-side-attempt-runs-in-a-sealed-worktree.test.ts"
+    - claim: "the daemon wires the sealed dispatcher into the paired trial"
+      proof: "grep: sealedPairedAttemptDispatcher( in src/run-task.ts"
+  falsifier: |
+    Revert the change: every sampled live pair is refused as attempt-dispatch-not-wired.

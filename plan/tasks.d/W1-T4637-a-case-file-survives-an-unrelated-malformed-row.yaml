@@ -1,0 +1,53 @@
+- id: W1-T4637
+  title: "ONE CORRUPT ARCHIVED ROW DISABLES EVERY TASK'S VERIFIED OUTCOME — rmd case-file refuses the whole ledger union on any malformed row, so the W1-T4608 join reads unavailable fleet-wide, and building a cohort's case files takes longer than the join's own freshness window"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: operator-approved A/A run (rmd benchmark-aa, 27 run-task tasks) and its case-file rerun"
+  plan_refs: ["W1-T4607", "W1-T4608", "W1-T4575", "W1-T4623", "W1-T4636"]
+  files:
+    - src/lib/task-case-file.ts
+    - src/run-task.ts
+    - test/a-case-file-survives-an-unrelated-malformed-row.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27 on the core fleet's live state (the fleet state dir, 357 gz archives
+    + live). The operator-approved A/A (`rmd benchmark-aa`, 27 run-task tasks) was re-run with a
+    `--case-files` snapshot of all 27 tasks and still read 0 verified, 0 censored. All 27 case files
+    report `ledger: unavailable, ledger-source-malformed`. The union holds exactly one unparseable
+    row: ledger.2026-09-22T16-27-20-296Z.ndjson.gz line 799768, a truncated DAEMON `sweep.fix` row
+    stamped 2026-09-20T13:32:26Z. `buildTaskCaseFile` counts `onMalformedRow` and refuses the whole
+    ledger section when the count is non-zero, so that single archived row, belonging to no plan
+    task, makes every task's case file unjoinable. The verified-outcome join
+    (`joinVerifiedTaskOutcomes`) therefore reads `case-file-ledger-unavailable` for every task,
+    which starves model drift (W1-T4623), self-forecast calibration (W1-T4636), the A/A (W1-T4575),
+    the paid-pilot report (W1-T4603/W1-T4625) and the field-trials verified stage (W1-T4574). The
+    benchmark cohort already treats a malformed archived row as a bounded, time-windowed fault
+    instead of refusing everything. Separately, `rmd case-file` streams the full union per task
+    (~105 s each on this host), while the join rejects a case file more than 15 minutes older than
+    its cutoff (`case-file-stale`): building 27 case files sequentially took ~45 minutes, so 13 of
+    them were stale by construction.
+  design: |
+    (1) A malformed row makes a task's ledger section unavailable only when it could belong to that
+    task: its readable prefix names the task id or one of the task's run ids, or its timestamp
+    cannot be read and falls inside the task's ledger window. Otherwise the section stays observed
+    and carries the malformed count and the affected source, exactly as the cohort reports a bounded
+    fault. Never rewrite the archive. (2) Add a batch form, `rmd case-file --tasks <id,id,...>
+    --json` (or a file of ids), that streams the union ONCE and emits a `task-case-file-v1` array
+    with one shared asOf, so a cohort's snapshot fits the verified join's freshness window. Both are
+    read-only; nothing gates a PR.
+  acceptance:
+    - claim: "a malformed row that cannot belong to a task leaves that task's case-file ledger observed with the malformed count, while a malformed row naming the task still makes it unavailable"
+      proof: "unit test: test/a-case-file-survives-an-unrelated-malformed-row.test.ts"
+    - claim: "a batch case-file read streams the ledger once and emits every requested task's case file under one asOf"
+      proof: "grep: --tasks in src/run-task.ts"
+  falsifier: |
+    Replay the 2026-09-27 shape: one truncated DAEMON row in an old archive makes every task's case
+    file ledger-unavailable.

@@ -1,0 +1,42 @@
+- id: W1-T4639
+  title: "THE MAIN LANE'S WORKER CALLS MOSTLY NEVER JOIN THEIR ASSIGNMENT — 64 of 522 run-task assignments have a worker.attempt receipt, so their cost, billing mode and served model are unknown, and the paid pilot would pause on exactly that"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: operator-approved A/A run (rmd benchmark-aa, 27 run-task tasks) and its case-file rerun"
+  plan_refs: ["W1-T4613", "W1-T4614", "W1-T4616", "W1-T4556", "W1-T4603"]
+  files:
+    - src/run-task.ts
+    - src/lib/benchmark-run.ts
+    - test/a-run-task-worker-call-joins-its-assignment.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27 over the core fleet's full ledger union,
+    2026-09-20T22:45Z..2026-09-27T22:45Z: 1073 `worker.assignment` rows, 458 of which join a
+    `worker.attempt` receipt through `selection_assignment_id`. By lane: run-task 64/522 (12%),
+    inbox-draft 149/242, retro 63/94, review 28/48, risk-judge 2/10, while verify-human-judge,
+    isolation, containment and feedback-summary join fully. A further 1381 `worker.attempt` rows
+    carry no `selection_assignment_id` at all (verify-human-judge 851 and escalation-summary 530,
+    all failures). The operator-approved A/A read 115 of its assignments as unknown cost, 103 of
+    them `no-attempt`. W1-T4603's paid pilot pauses its paid arm on missing cost evidence, and every
+    verified-outcome and cost projection counts these as missing.
+  design: |
+    Diagnose which run-task worker calls write a `worker.assignment` but no `worker.attempt` receipt
+    (recon, implement, diagnose, resume, fix rungs, reviewer, retries, spawn failures before a
+    result), and make every one of them write exactly one receipt carrying `selection_assignment_id`
+    with served model, billing mode and cost, or an explicit unavailable reason (including a spawn
+    that failed before any result). Make the verify-human-judge and escalation-summary failure
+    receipts carry their assignment id too. Do not change routing or spend; receipts only.
+  acceptance:
+    - claim: "every run-task worker call that writes an assignment writes one worker.attempt receipt carrying its selection_assignment_id with served model, billing mode and cost or a named unavailable reason, including a spawn that fails before a result"
+      proof: "unit test: test/a-run-task-worker-call-joins-its-assignment.test.ts"
+  falsifier: |
+    Revert the change: a run-task implement call leaves its assignment without a worker.attempt
+    receipt, as in the measured 64 of 522.
