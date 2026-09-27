@@ -567,9 +567,11 @@ export async function runBenchmarkCohortPass(
       if (size < live.size || (await sourceHashes(liveManifest.path, undefined, live.size)).full !== live.sha256)
         throw new Error("ledger-live-changed-after-scan");
       tailPendingBytes = size - live.size;
-    } catch {
+    } catch (error) {
+      const reason = error instanceof Error && error.message === "ledger-live-changed-after-scan"
+        ? "ledger-live-changed-after-scan" : "ledger-live-unreadable-after-scan";
       const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
-      return { state: "partial", snapshot: emptySnapshot("ledger-live-changed-after-scan", checkpoint.lastGood),
+      return { state: "partial", snapshot: emptySnapshot(reason, checkpoint.lastGood),
         scannedSources, pendingSources: 1, checkpointBytes };
     }
   }
@@ -605,8 +607,12 @@ export async function runBenchmarkCohortIdlePass(
       scanned_sources: result.scannedSources, pending_sources: result.pendingSources,
       tail_pending_bytes: result.tailPendingBytes ?? 0, reason: result.snapshot.reason ?? null }));
     return 0;
-  } catch {
-    console.error(JSON.stringify({ event: "benchmark_cohort.idle_pass_failed", reason: "projection-failed" }));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    const errorClass = code === "ENOENT" || code === "EACCES" || code === "EPERM" ? code
+      : error instanceof TypeError ? "type-error" : error instanceof SyntaxError ? "syntax-error" : "other-error";
+    console.error(JSON.stringify({ event: "benchmark_cohort.idle_pass_failed", reason: "projection-failed",
+      error_class: errorClass }));
     return 1;
   }
 }

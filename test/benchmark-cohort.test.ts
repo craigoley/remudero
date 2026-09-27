@@ -4,9 +4,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { runBenchmarkCohortPass } from "../src/lib/benchmark-cohort.js";
+import { runBenchmarkCohortIdlePass, runBenchmarkCohortPass } from "../src/lib/benchmark-cohort.js";
 
 const row = (value: Record<string, unknown>) => JSON.stringify(value) + "\n";
+
+test("benchmark cohort idle failure reports a bounded class without leaking error text", async () => {
+  const original = console.error;
+  const lines: string[] = [];
+  console.error = (line: string) => { lines.push(line); };
+  try {
+    const code = await runBenchmarkCohortIdlePass("unused", async () => {
+      throw Object.assign(new Error("sensitive path and source text"), { code: "EACCES" });
+    });
+    assert.equal(code, 1);
+    assert.deepEqual(JSON.parse(lines[0]!), { event: "benchmark_cohort.idle_pass_failed",
+      reason: "projection-failed", error_class: "EACCES" });
+  } finally { console.error = original; }
+});
 
 test("benchmark cohort live append retains a stable prefix watermark", async () => {
   const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-live-prefix-"));
