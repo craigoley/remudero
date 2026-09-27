@@ -15,6 +15,7 @@ import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import { systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
+import { withFleetCashAllowanceLock } from "./cash-allowance-lock.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
@@ -2492,11 +2493,17 @@ export function openWeightUsageUsd(deployment: string, promptTokens: number, com
   return (promptTokens * rate.inputUsdPerMillion + completionTokens * rate.outputUsdPerMillion) / 1_000_000;
 }
 
-/** The allowance file, a pure function of `config.root` the way {@link
- *  import("./ledger-path.js").ledgerPathFor} is — one canonical path, never inlined at a call site. */
+/** The allowance file. A fleet override must point at the same pre-migrated host mount in every cash instance. */
 export const OPENWEIGHT_ALLOWANCE_FILENAME = "openweight-allowance.json";
+export function sharedCashAllowancePath(config: Config): string | undefined {
+  const path = config.workerProviders?.fleetCashAllowancePath;
+  if (path !== undefined && (!isAbsolute(path) || !path.endsWith(".json"))) {
+    throw new Error("shared cash allowance path must be an absolute JSON file path");
+  }
+  return path;
+}
 export function openWeightAllowancePath(config: Config): string {
-  return join(config.root, "state", OPENWEIGHT_ALLOWANCE_FILENAME);
+  return sharedCashAllowancePath(config) ?? join(config.root, "state", OPENWEIGHT_ALLOWANCE_FILENAME);
 }
 
 /**
@@ -2531,6 +2538,7 @@ export function openWeightUtcDay(atIso: string): string {
  */
 export interface OpenWeightAllowanceState {
   utcDay: string;
+  fleetCapUsd?: number;
   reservations: Record<string, { reservedUsd: number; settledUsd: number | null; settledReason?: string; deployment?: string }>;
 }
 
@@ -2595,14 +2603,13 @@ export class OpenWeightAllowanceExhaustedError extends RmdError {
 export const OPENWEIGHT_ALLOWANCE_CAS_ATTEMPTS = 12;
 
 /**
- * Read-modify-write the allowance file atomically ACROSS PROCESSES.
+ * Fleet mode holds a SQLite write lock; local mode retains its historical optimistic retry.
  *
- * `writeAtomic`'s `beforeRename` is the compare-and-swap: the new state is staged in the same
+ * `writeAtomic`'s `beforeRename` checks for a changed snapshot: the new state is staged in the same
  * directory, then, immediately before the rename commits it, the live file is re-read and compared
  * to the exact bytes this attempt planned from. A peer that committed in that window changes those
  * bytes, the stage is withdrawn, and the whole read-modify-write retries against the peer's
- * committed state. That is what makes two concurrent daemon workers unable to spend the same
- * allowance twice — a plain read-then-write would lose one of the two updates.
+ * committed state. This check alone is not an interprocess CAS; the fleet lock supplies that.
  *
  * Durability across a restart is the file itself: every committed reservation is on disk before the
  * request it pays for is sent, so a process that dies mid-request comes back to a state that still
@@ -2613,9 +2620,17 @@ function mutateOpenWeightAllowance<T>(
   utcDay: string,
   mutate: (state: OpenWeightAllowanceState) => { next: OpenWeightAllowanceState; result: T },
   beforeCommit?: () => void,
+  shared = false,
+  requireFleetCap = false,
 ): T {
+  if (shared) {
+    return withFleetCashAllowanceLock(path, () => mutateOpenWeightAllowance(path, utcDay, mutate, beforeCommit, false, true));
+  }
   for (let attempt = 1; ; attempt++) {
     const snapshot = readFileIfExists(path);
+    if (requireFleetCap && snapshot === undefined) {
+      throw new Error(`shared cash allowance is missing at ${path}; refusing to reset unknown fleet spend`);
+    }
     let state: OpenWeightAllowanceState | undefined;
     if (snapshot !== undefined) {
       // FAIL CLOSED ON AN UNREADABLE ALLOWANCE. A corrupt or truncated file is the one case where
@@ -2632,14 +2647,28 @@ function mutateOpenWeightAllowance<T>(
             `(${error instanceof Error ? error.message : String(error)})`,
         );
       }
-      if (typeof parsed.utcDay !== "string" || parsed.reservations === null || typeof parsed.reservations !== "object") {
+      if (typeof parsed.utcDay !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(parsed.utcDay) ||
+          parsed.reservations === null || typeof parsed.reservations !== "object" || Array.isArray(parsed.reservations)) {
         throw new Error(`openweight allowance file at ${path} has no readable utcDay/reservations; refusing to spend against an unknown committed total`);
       }
-      state = { utcDay: parsed.utcDay, reservations: parsed.reservations as OpenWeightAllowanceState["reservations"] };
+      if (requireFleetCap && (!Number.isFinite(parsed.fleetCapUsd) || (parsed.fleetCapUsd ?? 0) <= 0)) {
+        throw new Error(`shared cash allowance at ${path} has no valid fleet cap; refusing paid spend`);
+      }
+      for (const [id, row] of Object.entries(parsed.reservations)) {
+        if (!id || row === null || typeof row !== "object" || !Number.isFinite(row.reservedUsd) || row.reservedUsd < 0 ||
+            (row.settledUsd !== null && (!Number.isFinite(row.settledUsd) || row.settledUsd < 0 || row.settledUsd > row.reservedUsd)) ||
+            (row.deployment !== undefined && typeof row.deployment !== "string")) {
+          throw new Error(`openweight allowance file at ${path} has an unreadable reservation ${id}; refusing to spend against an unknown committed total`);
+        }
+      }
+      state = { utcDay: parsed.utcDay, fleetCapUsd: parsed.fleetCapUsd, reservations: parsed.reservations as OpenWeightAllowanceState["reservations"] };
+    }
+    if (requireFleetCap && state && state.utcDay > utcDay) {
+      throw new Error(`shared cash allowance is already on ${state.utcDay}; refusing an older ${utcDay} request`);
     }
     // A different UTC day starts a fresh allowance: yesterday's committed spend must not consume
     // today's cap, and must not be carried forward as credit either. This is the ONLY reset.
-    if (state === undefined || state.utcDay !== utcDay) state = { utcDay, reservations: {} };
+    if (state === undefined || state.utcDay !== utcDay) state = { utcDay, fleetCapUsd: state?.fleetCapUsd, reservations: {} };
 
     const { next, result } = mutate(state);
     // TEST-ONLY seam, in the shape {@link import("./fs-race-safe.js").reclaimStaleLock}'s own
@@ -2716,16 +2745,20 @@ export function reserveOpenWeightBudget(
     extraInputTokens?: number;
   },
 ): { reservedUsd: number; committedUsd: number; capUsd: number } {
-  const capUsd = effectiveCashCapUsd(config.dailyCapUsd, { squeezed: input.squeezed });
+  const configuredCapUsd = effectiveCashCapUsd(config.dailyCapUsd, { squeezed: input.squeezed });
   // validateConfig already refuses an enabled cash provider (W1-T3607: canonical id, "openweight"
   // accepted as a deprecated alias) with no dailyCapUsd. This is the runtime half of that same rule:
   // an absent cap here means the transport must not run at all, rather than defaulting to unlimited.
-  if (capUsd === undefined || capUsd === null) {
+  if (configuredCapUsd === undefined || configuredCapUsd === null || !Number.isFinite(configuredCapUsd) || configuredCapUsd <= 0) {
     throw new Error("cash provider requires a dailyCapUsd before any paid request");
   }
   const utcDay = openWeightUtcDay(input.atIso);
   const wantUsd = openWeightReservationUsd(input.deployment, input.requestBodyBytes, input.extraInputTokens ?? 0);
   return mutateOpenWeightAllowance(openWeightAllowancePath(config), utcDay, (state) => {
+    const capUsd = Math.min(configuredCapUsd, state.fleetCapUsd ?? Infinity);
+    if (Object.hasOwn(state.reservations, input.requestId)) {
+      throw new Error(`cash allowance request identity already reserved: ${input.requestId}`);
+    }
     const committedUsd = openWeightCommittedUsd(state);
     if (committedUsd + wantUsd > capUsd) {
       throw new OpenWeightAllowanceExhaustedError({ committedUsd, capUsd, wantUsd, utcDay });
@@ -2743,7 +2776,7 @@ export function reserveOpenWeightBudget(
       next: { ...state, reservations: { ...state.reservations, [input.requestId]: { reservedUsd: wantUsd, settledUsd: null, deployment: input.deployment } } },
       result: { reservedUsd: wantUsd, committedUsd: committedUsd + wantUsd, capUsd },
     };
-  }, input.beforeCommit);
+  }, input.beforeCommit, sharedCashAllowancePath(config) !== undefined);
 }
 
 /**
@@ -2781,7 +2814,7 @@ export function settleOpenWeightBudget(
       },
       result: undefined,
     };
-  });
+  }, undefined, sharedCashAllowancePath(config) !== undefined);
 }
 
 export interface OpenWeightSpawnArgs {

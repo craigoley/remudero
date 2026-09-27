@@ -113,6 +113,8 @@ export interface Config {
      * intentionally environment-only and is never a config field.
      * W1-T3607: canonical field — read before the deprecated {@link openweightEndpoint} alias. */
     cashEndpoint?: string;
+    /** Host-shared, pre-migrated cash allowance JSON. All cash instances must use the same path. */
+    fleetCashAllowancePath?: string;
     /** DEPRECATED (W1-T3607): the pre-rename spelling of {@link cashEndpoint}, read as a fallback so an
      *  already-deployed host's config.json need not be hand-edited the moment this ships. Remove once no
      *  live host config carries it. */
@@ -218,6 +220,7 @@ const workerProvidersShape: ValueSchema = {
     configField("codexModel", "string", true, undefined, "config.json", "Hard Codex model override.", stringShape),
     configField("codexModels", "object", true, undefined, "config.json", "Codex model preferences per mount tier.", codexModelsShape),
     configField("cashEndpoint", "string", true, undefined, "config.json", "Azure OpenAI-compatible endpoint for the cash (non-subscription) worker adapter.", stringShape),
+    configField("fleetCashAllowancePath", "string", true, undefined, "config.json", "Absolute path to the pre-migrated, host-shared cash allowance JSON used by every cash daemon.", stringShape),
     configField(
       "harnessCommitsImplement",
       "boolean",
