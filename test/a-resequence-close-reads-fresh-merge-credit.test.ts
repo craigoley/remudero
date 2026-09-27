@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Plan, Task } from "../src/lib/plan.js";
-import { readLedgerLines } from "../src/lib/status.js";
+import { readLedgerLines, type BranchReapPlan } from "../src/lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
   projectMergedTaskCandidates,
@@ -20,7 +20,7 @@ import {
   type OpenPrView,
   type SweepDeps,
 } from "../src/lib/sweep.js";
-import { buildOpenPrViews, DECLARED_BRANCH_GUARDS, reapBranchesCommand } from "../src/run-task.js";
+import { buildOpenPrViews, DECLARED_BRANCH_GUARDS, keepReversiblyClosedHeads, reapBranchesCommand } from "../src/run-task.js";
 
 const NOW = Date.parse("2026-09-27T15:12:50.591Z");
 const PR_NUMBER = 7465;
@@ -233,5 +233,38 @@ test("W1-T4633: a PR the resequence row does close keeps its head branch through
   } finally {
     console.log = realLog;
     rmSync(sweep.dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4633: an unreadable reaper ledger conservatively keeps every closed-unmerged head", () => {
+  const control = "run-W1-T4000-1790000000000";
+  const merged = "run-W1-T3999-1789990000000";
+  const plan: BranchReapPlan = {
+    deletable: [HEAD_REF, control, merged],
+    guarded: [],
+    hold: [],
+    undetermined: [],
+    undeclaredGuards: [],
+    missingBranches: [],
+    reasons: {
+      [HEAD_REF]: "closed_unmerged",
+      [control]: "closed_unmerged",
+      [merged]: "merged",
+    },
+  };
+  const errors: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+  try {
+    const kept = keepReversiblyClosedHeads(plan, () => {
+      throw new Error("permission denied");
+    });
+    assert.deepEqual(kept, [HEAD_REF, control], "every closed-unmerged head is retained when ledger state is unreadable");
+    assert.deepEqual(plan.deletable, [merged], "only non-closed candidates remain deletable");
+    assert.equal(errors.length, 1);
+    assert.match(errors[0] ?? "", /keeping every closed-unmerged head/);
+    assert.match(errors[0] ?? "", /permission denied/);
+  } finally {
+    console.error = originalError;
   }
 });
