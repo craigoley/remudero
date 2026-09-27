@@ -101,6 +101,7 @@ import {
   type BenchmarkTerminalEvidence,
 } from "./benchmark-evidence.js";
 import { ABILITY_MAP_VERSION, abilityObservation, fitAbilityMap, unavailableAbilityMap, type AbilityMap, type AbilityObservation } from "./ability-map.js";
+import { buildEvalCard, EVAL_CARD_VERSION, emptyEvalCardEvidence, type EvalCardEvidence, type EvalCardTrial } from "./eval-card.js";
 
 /** One (lane, model) bucket of question 2 — worker counts and cost by lane/model. */
 export interface WorkerLaneModelBucket {
@@ -2326,6 +2327,7 @@ export function buildAnalyticsRoute(deps: {
   currentSnapshot: () => AnalyticsSnapshot;
   currentLiveMetrics?: () => LiveAnalyticsMetrics;
   mountsRoot?: string;
+  currentEvalCardInput?: (trialId: string | undefined) => { trial: EvalCardTrial; evidence: EvalCardEvidence } | undefined;
 }): Route {
   return {
     method: "GET",
@@ -2356,6 +2358,11 @@ export function buildAnalyticsRoute(deps: {
       }
       if (requestedVersion === ABILITY_MAP_VERSION) {
         sendJson(res, 200, base.abilityMap ?? unavailableAbilityMap("ability-map-refresh-pending"));
+        return;
+      }
+      if (requestedVersion === EVAL_CARD_VERSION) {
+        const input = deps.currentEvalCardInput?.(params.get("trial") ?? undefined);
+        sendJson(res, 200, buildEvalCard(input?.trial ?? null, input?.evidence ?? emptyEvalCardEvidence()));
         return;
       }
       if (requestedVersion === USAGE_PROJECTION_VERSION) {
