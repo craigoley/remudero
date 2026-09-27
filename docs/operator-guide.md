@@ -1503,8 +1503,14 @@ the JSON allowance during every reservation and settlement. If the shared file i
 unreadable, behind a later UTC day, or the lock cannot be acquired, it refuses a paid request. A local success does
 not prove that the three containers see one host file.
 
-1. Hold cash dispatch and stop all three cash-capable daemons for the migration window. Record
-   each local allowance path and its inode, UTC day, and mtime. Keep these source files intact.
+1. Hold cash dispatch and stop all three cash-capable daemons for the migration window. Suspend
+   their host watchdog timers first: on the current three-daemon host these are
+   `rmd-fleet-watchdog.timer`, `rmd-site-fleet-watchdog.timer`, and
+   `rmd-console-fleet-watchdog.timer`. Otherwise a timer can revive an old local-allowance writer
+   between the snapshot and the config switch. Confirm that no cash writer remains before
+   `--apply`. Record each local allowance path and its inode, UTC day, and mtime. Keep these
+   source files intact, and restore the watchdog timers after all three daemons have restarted
+   successfully on the shared path.
 2. Run `bash deploy/migrate-fleet-cash-allowance.sh --dry-run DEST YYYY-MM-DD 25 CORE SITE CONSOLE`
    with all three local allowance paths. Inspect the combined request IDs, committed dollars,
    reserved dollars, settled dollars, and per-deployment figures. Conflicting duplicate IDs,
@@ -1524,4 +1530,8 @@ not prove that the three containers see one host file.
    before and after. This reports allowance commitments, not an Azure invoice.
 
 The W1-T4632 `verify: human` release hold applies to the live cutover. Keep the old local
-files and the pre-cutover receipt for recovery; do not reset today's allowance to zero.
+files and the pre-cutover receipt for recovery; do not reset today's allowance to zero. If a
+restart or path check fails before any request reaches the shared file, restore the prior config
+and local files together. Once any shared request has been made, do not point cash back at the
+old local files: they omit that spend. Hold cash dispatch until an operator reconciles the shared
+and local reservations; restart the daemons with cash disabled so subscription work can continue.
