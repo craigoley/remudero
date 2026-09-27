@@ -44,6 +44,20 @@ test("ledger union audits malformed rows without losing later records", async ()
   }
 });
 
+test("ledger union reports only a canonical leading timestamp for damaged archive rows", async () => {
+  const dir = tmpStateDir();
+  try {
+    const archive = join(dir, "ledger.2026-01-02T00-00-00-000Z.ndjson.gz");
+    writeFileSync(archive, gzipSync('{"ts":"2026-01-01T12:00:00.000Z","secret":"never-report",BAD}\n'
+      + '{"ts":"2026-01-99T12:00:00.000Z",BAD}\n'
+      + '{"step":"worker.attempt",BAD}\n'));
+    const findings: { timestamp?: string }[] = [];
+    for await (const _row of openLedgerUnion(dir, { onMalformedRow: (finding) => findings.push(finding) })) void _row;
+    assert.deepEqual(findings.map((finding) => finding.timestamp), ["2026-01-01T12:00:00.000Z", undefined, undefined]);
+    assert.ok(!JSON.stringify(findings).includes("never-report"));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("ledger union distinguishes live torn tail from unread archive", async () => {
   const dir = tmpStateDir();
   try {
