@@ -679,6 +679,7 @@ test("feedback landing review failure is retryable and never arms merge", () => 
 
   const first = withLiveWritesAllowed(() => landFeedback(root, { gh, requestReview }));
   assert.equal(first.landed, true);
+  assert.equal(first.prUrl, "https://github.com/o/r/pull/15", "the open PR remains visible after a failed review handoff");
   assert.match(first.error ?? "", /review handoff failed/);
   const second = withLiveWritesAllowed(() => landFeedback(root, { gh, requestReview }));
   assert.equal(second.landed, true);

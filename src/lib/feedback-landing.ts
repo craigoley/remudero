@@ -857,9 +857,9 @@ function finishLanding(
 
   const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded, requestReview);
   if (error) {
-    // Pushed fine; only the PR failed to open — pushed: true because the branch content did move.
+    // The push succeeded; preserve a known PR URL even if its review handoff failed.
     return withRefused(
-      { landed: true, files: build.unlanded, error: `pushed to ${kind.branch} but ${error}`, pushed: true },
+      { landed: true, files: build.unlanded, prUrl, error: `pushed to ${kind.branch} but ${error}`, pushed: true },
       build.refused,
     );
   }
