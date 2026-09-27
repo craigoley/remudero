@@ -1,0 +1,52 @@
+- id: W1-T4635
+  title: "REMOVE THE TEST-ONLY CLAUDE CAPACITY CACHE RESET — `clearClaudeCapacityCache` has no production caller because `forceRefresh` already owns every real attribution boundary; tests must exercise that shipped contract instead of exporting a second invalidation API"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: medium
+  status: queued
+  attempts: 0
+  origin: architect
+  plan_refs: ["§7", "P25", "W1-T2473", "W1-T2828"]
+  files: [src/lib/worker.ts, test/worker-provider.test.ts]
+  rationale: |
+    The adoption finding is real, not contradicted by the three references in
+    test/worker-provider.test.ts: the symbol-no-caller scan deliberately excludes tests because a
+    test invoking an export does not adopt it into the running product. No source file outside
+    src/lib/worker.ts calls `clearClaudeCapacityCache`.
+
+    A new production caller would manufacture behavior solely to silence the report. The live
+    invalidation contract already exists as `ClaudeCapacityDeps.forceRefresh`: ordinary routing
+    reads use the configured cache, while the before/after provider-window attribution reads pass
+    forceRefresh so each boundary receives a fresh observation. The existing cache test also
+    proves that forceRefresh replaces a cached value. `clearClaudeCapacityCache` therefore adds
+    only a public, process-global mutation seam for tests and owns no distinct product behavior.
+
+    Resolve the adoption debt by deleting the redundant export and making the tests use the same
+    forceRefresh contract production uses. This follows the adoption report's advisory boundary:
+    the finding exposes an unowned mechanism; it does not presume that the mechanism deserves a
+    caller.
+  design: |
+    Delete `clearClaudeCapacityCache` from src/lib/worker.ts rather than adding a production call
+    site or retaining a renamed test-only export.
+
+    Rewrite the Claude capacity tests so each seeded scenario begins with a force-refreshed
+    reading. Prove that a following ordinary read reuses that value without opening another SDK
+    session, and that another force-refreshed read replaces it. Failure-path fixtures likewise
+    establish their own state through forceRefresh instead of mutating module state directly.
+
+    Preserve the configured cache lifetime, control-only SDK-session teardown, account labeling,
+    provider selection, and before/after window-consumption attribution unchanged. This task adds
+    no new invalidation path and changes no production routing decision.
+  acceptance:
+    - claim: "`clearClaudeCapacityCache` is absent from the worker module's exported product surface and no replacement test-only cache-reset export is introduced"
+      proof: "unit test: Claude capacity exposes no cache-clear product API"
+    - claim: "tests establish cache state through forceRefresh: a forced reading replaces any prior value, while the following ordinary reading reuses it without opening another SDK session"
+      proof: "unit test: forceRefresh replaces cached Claude capacity and ordinary reads reuse it"
+    - claim: "the production attribution boundary remains wired to forceRefresh, so removing the reset export does not weaken fresh before-and-after provider-window measurement"
+      proof: "unit test: Claude attribution boundaries request fresh capacity without a cache-reset export"
+    - claim: "cache lifetime, unreadable-result handling and best-effort SDK-session teardown retain their existing behavior after the redundant reset is removed"
+      proof: "unit test: Claude capacity cache behavior survives removal of the test-only reset"
