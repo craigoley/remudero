@@ -789,8 +789,11 @@ test("real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that
   // test that had been reading the PR body through the refused `gh`) and they moved by exactly
   // thirty-five, to :6151/:6212. The NINTH re-derivation; still the same two call sites.
   // The DECISION_REQUEST falsifier assertions added FIVE ahead of both: :6156/:6217, the TENTH.
-    "armIfVerdictPermits:test/run-task.test.ts:6156:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:6217:ledgerLines",
+  // PR-7492's sampled-risk integration coverage adds a selected-head assertion and shadow-spawn
+  // assertions ahead of both, moving the same witnesses by nine to :6165/:6226. The candidates
+  // still omit ledgerLines while supplying arm; only their coordinates moved.
+    "armIfVerdictPermits:test/run-task.test.ts:6165:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:6226:ledgerLines",
   ];
   for (const key of expectedKeys) {
     assert.ok(

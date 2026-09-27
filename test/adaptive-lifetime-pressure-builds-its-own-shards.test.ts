@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
+import { shadowJudgeSampled } from "../src/lib/shadow-judge.js";
 import { productionLifetimePressureHook, routeAdaptiveLifetimePressure } from "../src/run-task.js";
 import { VERIFY_HUMAN_JUDGED_STEP } from "../src/lib/verify-human-judge.js";
 import type { Config } from "../src/lib/config-schema.js";
+import type { WorkerResult, spawnWorker } from "../src/lib/worker.js";
 
 // W1-T4025 exported `routeAdaptiveLifetimePressure` with no caller in test/, so the whole shard
 // projection — the evidence string and the observation key the judge is asked about — shipped
@@ -133,6 +135,38 @@ test("routeAdaptiveLifetimePressure asks the judge about a shard whose evidence 
     assert.equal(result.judged, 0, "an empty task list judges nothing");
     assert.deepEqual(result.skipped, [], "and projects no shard at all");
     assert.equal(readFileSync(ledgerPath, "utf8").includes(SETTLED_KEY), true, "the prior row is left untouched");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("routeAdaptiveLifetimePressure records sampled agreement through its production ledger adapter", async () => {
+  const { dir, plan, ledgerPath, config } = fixture();
+  try {
+    writeLedger(ledgerPath, []);
+    const id = Array.from({ length: 1000 }, (_, i) => `T-ADAPTIVE-SHADOW-${i}`)
+      .find((candidate) => shadowJudgeSampled(
+        `verify-human:${candidate}:adaptive-lifetime=0:capacity=0:open=0:merged=0:last=unavailable:unavailable`,
+      ));
+    assert.ok(id, "the fixture selects a stable sampled adaptive observation");
+    const task = { ...plan.byId.get("T4025-C")!, id };
+    const spawn: typeof spawnWorker = async () => ({
+      text: "VERIFY_HUMAN_DECISION: backlog\nVERIFY_HUMAN_REASON: stable fixture",
+    } as WorkerResult);
+
+    const result = await routeAdaptiveLifetimePressure([task], {
+      plan,
+      root: dir,
+      config,
+      ledgerPath,
+      runId: "RUN-ADAPTIVE-SHADOW",
+      shadowJudgeSpawns: { primary: spawn, shadow: spawn },
+    });
+
+    assert.equal(result.judged, 1);
+    const rows = readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    assert.ok(rows.some((row) => row.step === "shadow_judge.paired" && row.surface === "verify-human"));
+    assert.ok(rows.some((row) => row.step === VERIFY_HUMAN_JUDGED_STEP && row.task_id === id));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

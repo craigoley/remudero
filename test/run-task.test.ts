@@ -130,6 +130,7 @@ import {
 } from "../src/lib/sweep.js";
 
 import { loadMounts, mountsPath, type Mount } from "../src/lib/mounts.js";
+import { shadowJudgeSampled } from "../src/lib/shadow-judge.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import { feedbackEntryPath, readFeedbackEntry } from "../src/lib/feedback.js";
 import { cashDivertToolsForLane, worktreesDir } from "../src/lib/worker.js";
@@ -1770,6 +1771,9 @@ test("BEHAVIORAL (W1-T268): a real runTask run all the way to a real MERGED verd
   writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
   const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
   followupGitFixture(root);
+  const shadowHeadSha = Array.from({ length: 1000 }, (_, i) => i.toString(16).padStart(40, "0"))
+    .find((sha) => shadowJudgeSampled(`risk:T-FOLLOWUP:${sha}`));
+  assert.ok(shadowHeadSha, "the fixture selects a stable sampled risk decision");
 
   const FIXED_TS = 1785000000014;
   const branch = `run-T-FOLLOWUP-${FIXED_TS}`;
@@ -1817,7 +1821,7 @@ test("BEHAVIORAL (W1-T268): a real runTask run all the way to a real MERGED verd
         spawn,
         containmentExec: followupHoldingContainmentExec,
         isolationExec: followupCleanIsolationExec,
-        runReview: async () => fakeReview("success", []),
+        runReview: async () => fakeReview("success", [], shadowHeadSha),
       }),
     );
 
@@ -1825,14 +1829,19 @@ test("BEHAVIORAL (W1-T268): a real runTask run all the way to a real MERGED verd
     assert.equal(res.merged, true);
     assert.equal(
       spawnCalls.length,
-      3,
-      "recon, implement, and the risk judge — no fix rung, no reviewer LLM spawn (review was injected)",
+      4,
+      "recon, implement, primary risk judge, and one shadow risk judge — no reviewer LLM spawn (review was injected)",
     );
+    assert.equal(spawnCalls[3]?.maxBudgetUsd, 0.1);
+    assert.equal(spawnCalls[3]?.maxTurns, 4);
+    assert.deepEqual(spawnCalls[3]?.clockBound, { boundMs: 60_000 });
+    assert.notEqual(spawnCalls[2]?.model, spawnCalls[3]?.model, "the shadow risk judge uses a different configured model");
 
     const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
       .split("\n")
       .filter(Boolean)
       .map((l) => JSON.parse(l));
+    assert.ok(ledger.some((l) => l.step === "shadow_judge.paired" && l.surface === "risk"));
     const verdict = ledger.find((l) => l.step === "verdict" && l.verdict === "merged");
     assert.ok(verdict, "the merged verdict is ledgered");
     assert.equal(verdict.billing_mode, "subscription");

@@ -861,6 +861,9 @@ import {
   automationProposalFromJudgedShard,
   proposalFromJudgedShard,
   realVerifyHumanJudge,
+  resolveVerifyHumanJudgeMount,
+  parseVerifyHumanVerdict,
+  spawnVerifyHumanJudgeWorker,
   shardsNeedingJudgement,
   verifyHumanVerdictRow,
   applyAutomateVerdict,
@@ -1050,7 +1053,7 @@ import {
 import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn } from "./lib/replay-harness.js";
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
-import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
+import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount, type Mounts } from "./lib/mounts.js";
 import { resolveMountExplorationDispatch as exploreMount } from "./lib/mount-exploration.js";
 import {
   RULING_JUDGED_STEP,
@@ -1126,6 +1129,7 @@ import {
   type RiskJudgeVerdict,
   type RiskPolicy,
 } from "./lib/risk-judge.js";
+import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "./lib/shadow-judge.js";
 import { evaluateRiskJudgeDisposition } from "./lib/risk-judge-eval.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
 import {
@@ -6624,6 +6628,31 @@ async function runReview(args: {
             : reviewerAssignment ? { selection_assignment_id: reviewerAssignment.id }
             : { assignment_unavailable_reason: "assignment-not-observed" }),
           ...(reviewerFields.routed_model || !reviewerAssignment ? {} : { routed_model: reviewerAssignment.selected.model }),
+        });
+        await runShadowJudge({
+          surface: "review", key: `${prUrl}:${headSha}:${decisionDigest}`,
+          primaryMount: args.reviewerMount!, primaryDecision: candidateSemantic,
+          primaryServedModel: reviewer.servedModel ?? reviewer.routedModel ?? null,
+          mounts: () => [args.reviewerMount!, resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)))],
+          log,
+          judge: async (mount) => {
+            const shadow = args.account(await reviewerSpawnWorker({
+              cwd: snapshot.cwd, permissionMode: "bypassPermissions", settingsFile: args.settingsFile,
+              model: mount.model, mountProvider: mount.provider, effort: mount.effort,
+              maxTurns: Math.min(mount.maxTurns, 12), maxBudgetUsd: SHADOW_JUDGE_MAX_BUDGET_USD,
+              config: args.config, queryFn: args.reviewerQueryFn,
+              tools: ["Read", "Grep", "Glob"], sandboxIntent: "disposable-review",
+              sandboxReadRoots: snapshot.dependencyReadRoots,
+              runId: args.runId, taskId: task.id,
+              clockBound: { boundMs: Math.min(reviewerClockBoundMs, 60_000) },
+              prompt,
+            }));
+            assertReviewerSnapshotIntegrity(snapshot.cwd, headSha);
+            return {
+              decision: reviewerSemanticVerdicts(shadow, criteria.length),
+              servedModel: shadow.servedModel ?? shadow.routedModel ?? null,
+            };
+          },
         });
         // The reviewer is fresh (no resume) — reap its SDK scratchpad now, before
         // withTempDir removes reviewCwd. Best-effort, guarded (lib/worker-scratch).
@@ -16934,12 +16963,22 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // and `runRiskJudge` reads the total onto the `risk_judge.decision` row it already writes.
     // Declared HERE, at the single call site, so it cannot outlive one judgment.
     const riskJudgeSpend = riskJudgeSpendCollector();
+    let primaryRiskServedModel: string | null = null;
+    let judgedRiskInput = riskJudgeInput;
     const judgeWithChangeView = async (input: RiskJudgeInput): Promise<RiskJudgeVerdict> => {
       const view = changeView(prUrl);
-      return realRiskJudge({ mount: riskJudgeMount, cwd: worktreePath, settingsFile, spawn, spend: riskJudgeSpend })({
+      judgedRiskInput = {
         ...input,
         change: { ...input.change, changeView: view },
-      });
+      };
+      return realRiskJudge({
+        mount: riskJudgeMount, cwd: worktreePath, settingsFile, spend: riskJudgeSpend,
+        spawn: async (options) => {
+          const result = await spawn(options);
+          primaryRiskServedModel = result.servedModel ?? result.routedModel ?? null;
+          return result;
+        },
+      })(judgedRiskInput);
     };
     const riskJudgeResult = await runRiskJudge(riskJudgeInput, {
       judge: judgeWithChangeView,
@@ -16993,6 +17032,32 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // own DEFAULT_CONFIDENCE_THRESHOLD literal, unreachable from outside risk-judge.ts.
       confidenceThreshold: riskPolicy.confidenceThreshold,
     });
+    if (riskJudgeResult.verdict.availability !== "unavailable") {
+      await runShadowJudge({
+        surface: "risk", key: `${task.id}:${review.headSha}`,
+        primaryMount: riskJudgeMount, primaryDecision: riskJudgeResult.verdict.verdict,
+        primaryServedModel: primaryRiskServedModel,
+        mounts: () => [riskJudgeMount, resolveMount(loadMounts(mountsPath(repoRoot)), "reviewer", task.risk)],
+        log,
+        judge: async (mount) => {
+          let shadowServedModel: string | null = null;
+          const shadow = await realRiskJudge({
+            mount, cwd: worktreePath, settingsFile, maxAttempts: 1,
+            spawn: async (options) => {
+              const result = await spawn({
+                ...options, maxTurns: Math.min(options.maxTurns ?? 4, 4),
+                maxBudgetUsd: SHADOW_JUDGE_MAX_BUDGET_USD,
+                clockBound: { boundMs: 60_000 },
+              });
+              shadowServedModel = result.servedModel ?? result.routedModel ?? null;
+              return result;
+            },
+          })(judgedRiskInput);
+          if (shadow.availability === "unavailable") throw new Error("shadow risk verdict unavailable");
+          return { decision: shadow.verdict, servedModel: shadowServedModel };
+        },
+      });
+    }
     if (riskJudgeResult.action.kind === "escalate") {
       log("verdict", {
         verdict: "blocked",
@@ -26587,11 +26652,12 @@ export async function defaultVerifyHumanCadenceResult(
       shards: parkedVerifyHumanShards(plan, repoRoot, clock),
       priorVerdicts: priorVerifyHumanVerdicts(rows),
       priorAgeBandKeys: priorVerifyHumanAgeBandKeys(rows),
-      judge: realVerifyHumanJudge({
+      judge: shadowedVerifyHumanJudge({
         mounts: loadMounts(mountsPath(repoRoot)),
         config,
         cwd: repoRoot,
         settingsFile: join(repoRoot, "settings", "worker.json"),
+        log: (step, fields) => appendLedger(ledgerPath, { run_id: runId, step, ...fields } as LedgerLine),
       }),
       stageProposal: (proposal) => void stageInboxProposalOnce(registryPath, proposal),
       appendRow: (row) => appendLedger(ledgerPath, row as LedgerLine),
@@ -42793,6 +42859,54 @@ export function skillLifecyclePrBody(action: SkillLifecycleAction, proposalId: s
 // refused THIS shard for the same omission until it carried a call-site criterion. So the call
 // site ships in the same change as the judge, and the shard's acceptance greps for it here.
 
+export function shadowedVerifyHumanJudge(opts: {
+  mounts: Mounts;
+  config: Config;
+  cwd: string;
+  settingsFile: string;
+  log: (step: string, fields: Record<string, unknown>) => void;
+  spawns?: { primary: typeof spawnWorker; shadow: typeof spawnWorker };
+}): (shard: ShardUnderJudgement) => Promise<VerifyHumanVerdict> {
+  let primaryServedModel: string | null = null;
+  const primarySpawn = opts.spawns?.primary ?? ledgeredNonDispatchSpawn("verify-human-judge");
+  const shadowSpawn = opts.spawns?.shadow ?? ledgeredNonDispatchSpawn("verify-human-shadow");
+  const primary = realVerifyHumanJudge({
+    ...opts,
+    spawn: async (args) => {
+      const result = await primarySpawn(args);
+      primaryServedModel = result.servedModel ?? result.routedModel ?? null;
+      return result;
+    },
+  });
+  const primaryMount = resolveVerifyHumanJudgeMount(opts.mounts, opts.config);
+  return async (shard) => {
+    primaryServedModel = null;
+    const verdict = await primary(shard);
+    if (verdict.judgeFailed) return verdict;
+    await runShadowJudge({
+      surface: "verify-human", key: observedStateKey(shard),
+      primaryMount, primaryDecision: verdict.decision,
+      primaryServedModel,
+      mounts: () => [primaryMount, resolveMount(opts.mounts, "reviewer", "low")],
+      log: opts.log,
+      judge: async (mount) => {
+        const shadow = await spawnVerifyHumanJudgeWorker({
+          shard, mount, cwd: opts.cwd, settingsFile: opts.settingsFile,
+          spawn: (args) => shadowSpawn({
+            ...args, maxTurns: Math.min(args.maxTurns ?? 4, 4),
+            maxBudgetUsd: SHADOW_JUDGE_MAX_BUDGET_USD,
+            clockBound: { boundMs: 60_000 },
+          }),
+        });
+        const parsed = parseVerifyHumanVerdict(shadow.text);
+        if (parsed.judgeFailed) throw new Error("shadow verify-human verdict unavailable");
+        return { decision: parsed.decision, servedModel: shadow.servedModel ?? shadow.routedModel ?? null };
+      },
+    });
+    return verdict;
+  };
+}
+
 /** {@link routeVerifyHumanBacklog}'s effects, every one injectable — so the fail-open path and
  *  the never-writes-the-plan invariant are provable without a repo, a spawn or a network. */
 export interface VerifyHumanRouteDeps {
@@ -42834,6 +42948,7 @@ type AdaptiveLifetimePressureRoute = Pick<VerifyHumanRouteDeps, "runId"> & {
   config: Config;
   ledgerPath: string;
   runId: string;
+  shadowJudgeSpawns?: { primary: typeof spawnWorker; shadow: typeof spawnWorker };
 };
 
 /** Route repeated attributable dispatch pressure through the existing three-way LLM judge. */
@@ -42871,11 +42986,13 @@ export async function routeAdaptiveLifetimePressure(
     };
   });
   return routeVerifyHumanBacklog(shards, {
-    judge: realVerifyHumanJudge({
+    judge: shadowedVerifyHumanJudge({
       mounts: loadMounts(mountsPath(deps.root)),
       config: deps.config,
       cwd: deps.root,
       settingsFile: join(deps.root, "settings", "worker.json"),
+      log: (step, fields) => appendLedger(deps.ledgerPath, { run_id: deps.runId, step, ...fields } as LedgerLine),
+      spawns: deps.shadowJudgeSpawns,
     }),
     priorVerdicts: priorVerifyHumanVerdicts(rows),
     maxJudged: tasks.length,
@@ -43133,11 +43250,12 @@ export async function verifyHumanSweepCommand(
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const sweepRunId = `VHSWEEP-${(deps.clock ?? systemClock).iso()}`;
   const result = await (deps.route ?? routeVerifyHumanBacklog)(shards, {
-    judge: realVerifyHumanJudge({
+    judge: shadowedVerifyHumanJudge({
       mounts: loadMounts(mountsPath(root)),
       config,
       cwd: root,
       settingsFile: join(root, "settings", "worker.json"),
+      log: (step, fields) => appendLedger(ledgerPath, { run_id: sweepRunId, step, ...fields } as LedgerLine),
     }),
     priorVerdicts,
     maxJudged: limit,
