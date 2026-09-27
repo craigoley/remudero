@@ -1486,6 +1486,15 @@ block before an eligible frontier task can divert there. The cash fallback switc
 the cash provider enabled, and the task must declare only tools the cash adapter serves. A
 frontier mount pinned directly to cash is still refused.
 
+For reboot recovery, the generated host launcher reads one mode-0600 line from each of
+`~/.local/share/remudero/secrets/openweight-api-key`, `foundry-claude-api-key`, and
+`foundry-claude-endpoint` before starting the container. The last file contains the Foundry
+`https://<resource>.services.ai.azure.com/anthropic` base URL. `RMD_CASH_SECRET_DIR` selects a
+different absolute directory when rendering host units. The launcher passes only environment
+variable names to Docker, so key values do not enter its command arguments or unit files. A
+missing or unsafe file leaves that cash route unavailable while subscription work can boot; check
+the named launcher warning and repair the file before relying on squeeze fallback.
+
 Every Foundry Messages turn reserves against the same UTC-day `dailyCapUsd` as the inexpensive
 cash requests **within one daemon** unless `workerProviders.fleetCashAllowancePath` names one
 host-shared file for every cash instance. Opus has an additional $5 ordinary and $10 squeeze-day limit; automatic routing
