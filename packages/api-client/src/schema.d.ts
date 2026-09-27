@@ -873,6 +873,240 @@ export interface components {
     OperatorAgentConsequencePreflightRequest: {
       action: OperatorAgentConsequenceAction;
     };
+    /** A 403 on a HIGH-tier write route (W1-T404). `forbidden` is src/lib/service.ts's scope/tier gate: `required_scope` names the missing scope, and `required_tier` is present when the credential's write tier is too low -- the bearer write token is pinned at LOW, so it never reaches a HIGH route. `confirm_nonce_required` is the same dispatcher refusing a request whose X-Confirm-Nonce is absent or was not issued by POST /v1/confirm for this exact method, path and payload (POST /v1/operator-agent/consequences/decision's handler also refuses a missing nonce itself, naming the `consequenceId`). */
+    HighTierForbidden: {
+      error: "forbidden" | "confirm_nonce_required";
+      required_scope?: "read" | "write";
+      required_tier?: "low" | "middle" | "high";
+      /** Present only on the consequence decision handler's own missing-nonce refusal. */
+      consequenceId?: string;
+    };
+    /** One recorded decision on a pending consequence (src/lib/operator-agent.ts's `ConsequenceDecisionReceipt`). */
+    OperatorAgentConsequenceReceipt: {
+      kind: "approve" | "refuse";
+      at: string;
+      /** The deciding credential's actor id, when the ledger row recorded one. */
+      issuer?: string;
+      /** The decision's reason. A refusal with no operator reason carries "operator refused this consequence". */
+      note?: string;
+    };
+    /** consequence-v1 as the console's `normalizedConsequenceRecord` validates it (src/lib/operator-agent.ts's `PendingConsequenceRecord`), projected from the approval the consequence preflight persisted on its ledger row. */
+    OperatorAgentPendingConsequence: {
+      /** The preflighted action's id. */
+      consequenceId: string;
+      classes: ("financial" | "irreversible")[];
+      /** The action's target identity, never truncated -- a longer one is not listed at all. */
+      target: string;
+      amountUsd?: number;
+      currency?: string;
+      /** The per-action financial ceiling. */
+      ceilingUsd?: number;
+      coolingOffMs?: number;
+      coolingOffUntil?: string;
+      /** The earlier of the quote expiry and the irreversible confirmation expiry. */
+      expiresAt: string;
+      approverRequired: boolean;
+      recoveryStatement: string;
+      /** `stale` once the earliest evidence item's freshness window has passed. */
+      freshness: "verified" | "stale";
+      /** When the preflight row that made this consequence pending was written. */
+      observedAt: string;
+      /** Empty, or the one refusal recorded since that preflight row. */
+      receipts: (OperatorAgentConsequenceReceipt)[];
+      source: "rmd:core:/v1/operator-agent/consequences";
+    };
+    /** GET /v1/operator-agent/consequences's body (src/lib/operator-agent.ts's `PendingConsequenceRead`). */
+    OperatorAgentPendingConsequenceRead: {
+      state: "verified";
+      /** Newest `observedAt` first, at most `max` records. */
+      consequences: (OperatorAgentPendingConsequence)[];
+      source: "ledger";
+      generatedAt: string;
+      /** The per-read cap (MAX_PENDING_CONSEQUENCES, 100). */
+      max: number;
+      /** Every pending consequence, before the cap. */
+      total: number;
+      truncated: boolean;
+      /** Pending preflight rows written before W1-T4104 carried no approval projection -- counted, never listed. */
+      unprojected: number;
+    };
+    /** A write verb on GET /v1/operator-agent/consequences, refused by name. */
+    OperatorAgentConsequencesReadOnlyRefusal: {
+      error: "read_only";
+      method: "POST" | "PUT" | "PATCH" | "DELETE";
+      path: "/v1/operator-agent/consequences";
+      detail: string;
+      allow: ("GET")[];
+    };
+    /** src/lib/operator-agent.ts's `validateConsequenceDecisionInput`. `note` is the console's earlier name for `reason` and is accepted as an alias; sending both is a 400. */
+    OperatorAgentConsequenceDecisionRequest: {
+      consequenceId: string;
+      decision: "approve" | "refuse";
+      reason?: string;
+      note?: string;
+    };
+    OperatorAgentConsequenceDecisionResult: {
+      ok: true;
+      consequenceId: string;
+      decision: "approve" | "refuse";
+      at: string;
+      receipt: OperatorAgentConsequenceReceipt;
+    };
+    /** A consequence decision refused because the consequence is not (or no longer) pending; nothing is recorded. */
+    OperatorAgentConsequenceDecisionRefusal: {
+      error: "not_found" | "expired_consequence" | "consequence_not_pending";
+      consequenceId: string;
+      detail: string;
+    };
+    /** A bound `emergency-stop-v1` stop (src/lib/emergency-control.ts's `EmergencyStop`). */
+    EmergencyStop: {
+      schema: "emergency-stop-v1";
+      id: string;
+      scope: "fleet" | "repository" | "instance" | "principal";
+      /** Present for every scope but `fleet`, which is total by definition. */
+      scopeTarget?: string;
+      reason: string;
+      issuedBy: string;
+      issuedAt: string;
+      clearPolicy: "expires" | "explicit-clear-required";
+      /** Present only when `clearPolicy` is `expires`. */
+      expiresAt?: string;
+      /** The capabilities this stop blocks. The code's type is `string[] | "*"`: the literal string "*" (the default) blocks every capability. This document's OpenAPI subset (scripts/generate-api-client.mjs) has no union, so only the array arm is typed here -- a consumer must accept the string "*" as well. */
+      affectedCapabilities: (string)[];
+      /** The delegation classes this stop blocks. The code's type is `string[] | "*"`: the literal string "*" (the default) blocks every class; as for `affectedCapabilities`, only the array arm is typed here and a consumer must accept "*" as well. */
+      affectedDelegationClasses: (string)[];
+      /** The incident record this stop is accountable to; every receipt of its lifecycle links back to it. */
+      incidentReceiptId: string;
+    };
+    /** One bounded, attributable receipt of an emergency stop's lifecycle (src/lib/emergency-control.ts's `EmergencyReceipt`). */
+    EmergencyReceipt: {
+      receiptId: string;
+      stopId: string;
+      /** Always the stop's own `incidentReceiptId`. */
+      parentReceiptId: string;
+      kind: "stop" | "refusal" | "cancellation" | "clear";
+      /** `issued` for a stop, the refused action kind for a refusal, `cleared` or the clear refusal code for a clear. */
+      outcome: string;
+      decidedAt: string;
+      /** Capped at 240 characters plus a trailing ellipsis. */
+      reason: string;
+    };
+    /** src/lib/operator-agent.ts's `validateEmergencyStopIssue`, then `createEmergencyStop`'s issuance rules. `affectedCapabilities`/`affectedDelegationClasses` default to "*" when omitted and may be sent as the literal string "*" -- the OpenAPI subset types only their array arm. `issuedAt` is stamped by the daemon. */
+    EmergencyStopIssueRequest: {
+      /** Defaults to `estop-<uuid>`. */
+      id?: string;
+      scope: "fleet" | "repository" | "instance" | "principal";
+      /** Required for every scope but `fleet`; refused on `fleet`. */
+      scopeTarget?: string;
+      reason: string;
+      issuedBy: string;
+      clearPolicy: "expires" | "explicit-clear-required";
+      /** Required for `expires`; refused for `explicit-clear-required`. */
+      expiresAt?: string;
+      affectedCapabilities?: (string)[];
+      affectedDelegationClasses?: (string)[];
+      incidentReceiptId: string;
+    };
+    EmergencyStopIssueResult: {
+      ok: true;
+      stop: EmergencyStop;
+      receipt: EmergencyReceipt;
+    };
+    /** src/lib/operator-agent.ts's `validateEmergencyStopClear`. Clearing succeeds only with a `healthy` health read whose `checkedAt` is no more than five minutes old and `complete` revocation coverage; anything else is a 409 refusal, not a 400. */
+    EmergencyStopClearRequest: {
+      stopId: string;
+      /** An explicit human sign-off -- never inferred from a prior approval. */
+      confirmation: {
+        confirmedBy: string;
+        confirmedAt: string;
+      };
+      /** A fresh, authoritative health/preflight read. */
+      health: {
+        source: string;
+        status: "healthy" | "degraded" | "unavailable";
+        checkedAt: string;
+      };
+      revocation: {
+        coverage: "complete" | "partial" | "unavailable";
+      };
+    };
+    EmergencyStopClearResult: {
+      ok: true;
+      receipt: EmergencyReceipt;
+    };
+    EmergencyStopClearRefusal: {
+      ok: false;
+      code: "already-cleared" | "confirmation-required" | "health-stale" | "health-not-healthy" | "revocation-source-partial" | "revocation-source-unavailable";
+      receipt: EmergencyReceipt;
+    };
+    EmergencyStopStatusResult: {
+      active: (EmergencyStop)[];
+      source: "ledger";
+    };
+    /** An action refused because an active emergency stop covers it; the receipt's `stopId` names the stop. */
+    EmergencyStopAdmissionRefusal: {
+      ok: false;
+      error: "emergency_stop_active";
+      code: "emergency-stop-active";
+      receipt: EmergencyReceipt;
+    };
+    /** src/lib/operator-agent.ts's `validateDelegationHandoff`, then src/lib/automation-action.ts's `createDelegationEnvelope` (which also refuses a `sender` equal to the `recipient`). The recipient's acceptance may only narrow the envelope's capabilities; `humanApproval` is required for high, production, financial, credential and destructive risk. */
+    OperatorAgentDelegationHandoffRequest: {
+      envelope: {
+        /** Defaults to `dlg-<uuid>`. */
+        id?: string;
+        sender: string;
+        recipient: string;
+        principal: string;
+        purpose: string;
+        capabilities: (string)[];
+        scope?: {
+          repo?: string;
+          instance?: string;
+        };
+        audience: string;
+        expiresAt: string;
+        /** Defaults to `n-<uuid>`. */
+        nonce?: string;
+      };
+      acceptedCapabilities: (string)[];
+      action: {
+        capability: string;
+        nonce: string;
+        risk: "low" | "medium" | "high" | "production" | "financial" | "credential" | "destructive";
+        humanApproval?: {
+          approvedBy: string;
+          approvedAt: string;
+        };
+      };
+    };
+    /** One bounded, attributable receipt for an executed or refused delegated use (src/lib/automation-action.ts's `DelegationReceipt`). Identity fields are capped at 200 characters and `reason` at 240, each plus a trailing ellipsis when cut. */
+    DelegationReceipt: {
+      receiptId: string;
+      envelopeId: string;
+      parentReceiptId?: string;
+      capability: string;
+      audience: string;
+      actorIdentity: string;
+      decidedAt: string;
+      outcome: "executed" | "refused";
+      code?: DelegationRefusalCode;
+      reason: string;
+    };
+    /** Every reason a delegation step can be refused for (src/lib/automation-action.ts's `DelegationRefusalCode`). */
+    DelegationRefusalCode: "unknown-envelope" | "expired" | "revoked" | "parent-revoked" | "identity-mismatch" | "already-accepted" | "empty-acceptance" | "capability-widened" | "expiry-widened" | "not-accepted" | "wrong-audience" | "capability-not-accepted" | "replayed-nonce" | "human-gate-required" | "audit-unavailable";
+    OperatorAgentDelegationHandoffResult: {
+      ok: true;
+      receipt: DelegationReceipt;
+    };
+    /** A refused handoff, in one of two shapes: refused at the recipient's acceptance step (`stage: accept`, `code`, `detail`; no receipt), or refused at execution (`receipt`, whose `outcome` is `refused` and whose `code` names why). */
+    OperatorAgentDelegationHandoffRefusal: {
+      ok: false;
+      stage?: "accept";
+      code?: DelegationRefusalCode;
+      detail?: string;
+      receipt?: DelegationReceipt;
+    };
     FollowUpQuietHours: {
       timezone: string;
       start: string;
@@ -2578,6 +2812,98 @@ export interface paths {
           "401": Error;
           "403": Error;
           "409": undefined;
+        };
+    };
+  };
+  "/v1/operator-agent/consequences": {
+    get: {
+      responses: {
+          "200": OperatorAgentPendingConsequenceRead;
+          "401": Error;
+          "403": Error;
+        };
+    };
+    put: {
+      responses: {
+          "401": Error;
+          "403": Error;
+          "405": OperatorAgentConsequencesReadOnlyRefusal;
+        };
+    };
+    post: {
+      responses: {
+          "401": Error;
+          "403": Error;
+          "405": OperatorAgentConsequencesReadOnlyRefusal;
+        };
+    };
+    delete: {
+      responses: {
+          "401": Error;
+          "403": Error;
+          "405": OperatorAgentConsequencesReadOnlyRefusal;
+        };
+    };
+    patch: {
+      responses: {
+          "401": Error;
+          "403": Error;
+          "405": OperatorAgentConsequencesReadOnlyRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/consequences/decision": {
+    post: {
+      responses: {
+          "200": OperatorAgentConsequenceDecisionResult;
+          "400": Error;
+          "401": Error;
+          "403": HighTierForbidden;
+          "404": OperatorAgentConsequenceDecisionRefusal;
+          "409": OperatorAgentConsequenceDecisionRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/delegation/handoff": {
+    post: {
+      responses: {
+          "200": OperatorAgentDelegationHandoffResult;
+          "400": Error;
+          "401": Error;
+          "403": HighTierForbidden;
+          "409": OperatorAgentDelegationHandoffRefusal;
+          "423": EmergencyStopAdmissionRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/emergency/clear": {
+    post: {
+      responses: {
+          "200": EmergencyStopClearResult;
+          "400": Error;
+          "401": Error;
+          "403": HighTierForbidden;
+          "404": Error;
+          "409": EmergencyStopClearRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/emergency/status": {
+    get: {
+      responses: {
+          "200": EmergencyStopStatusResult;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/emergency/stop": {
+    post: {
+      responses: {
+          "201": EmergencyStopIssueResult;
+          "400": Error;
+          "401": Error;
+          "403": HighTierForbidden;
         };
     };
   };
