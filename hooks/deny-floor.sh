@@ -50,12 +50,15 @@ invokes_gh() {
     | grep -Eq '(^|[^A-Za-z0-9_/.-])gh[[:space:]]'
 }
 
-# 1) force-push to the default branch (main/master).
-if printf '%s' "$cmd" | grep -Eq 'git[[:space:]]+push[[:space:]].*(--force|-f)([[:space:]]|=|$)'; then
-  if printf '%s' "$cmd" | grep -Eq '(origin[[:space:]]+)?(main|master|HEAD:main|HEAD:master)'; then
+# 1) force-push to the default branch (main/master), judged per command SEGMENT (W1-T4588): the
+#    force flag and the default-branch refspec must sit in the SAME `git push` segment. Read across
+#    the whole line, gh's `-f base=main` field beside a plain push satisfied both greps.
+while IFS= read -r seg; do
+  if printf '%s' "$seg" | grep -Eq 'git[[:space:]]+push[[:space:]].*(--force|-f)([[:space:]]|=|$)' &&
+    printf '%s' "$seg" | grep -Eq '(origin[[:space:]]+)?(main|master|HEAD:main|HEAD:master)'; then
     deny "git push --force to a default branch"
   fi
-fi
+done < <(printf '%s\n' "$cmd" | sed -E 's/(&&|[|][|]|;|[|])/\n/g')
 
 # 2) gh auth mutation (login/logout/refresh/token/setup-git).
 if printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+auth[[:space:]]+(login|logout|refresh|token|setup-git)'; then
