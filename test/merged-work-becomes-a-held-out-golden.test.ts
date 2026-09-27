@@ -211,3 +211,9 @@ test("the bounded, opt-in replay draws its sample from the derived corpus, and s
   assert.equal(seeded.enabled, true);
   assert.deepEqual(seeded.goldens, SEEDED_GOLDENS.slice(0, REPLAY_CORPUS_BOUND));
 });
+
+test("W1-T4619: a merge credit with no parseable merge date is excluded by name, never dated as now", () => {
+  const { items, excluded } = deriveGoldenCorpus({ reviewLines: [], merged: new Map([["T-UNDATED", credit("not-a-date")]]), nowMs: NOW });
+  assert.equal(items.length, 0);
+  assert.deepEqual(excluded, [{ taskId: "T-UNDATED", reason: "merge credit carries no parseable merge date" }]);
+});
