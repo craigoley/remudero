@@ -1,0 +1,48 @@
+- id: W1-T4612
+  title: "THE DAEMON SERVES 6 OPERATOR-AGENT SAFETY ROUTES ITS OWN CONTRACT NEVER DECLARES — declare them in openapi/daemon.yaml, regenerate packages/api-client, and shrink scripts/openapi-route-baseline.json"
+  repo: remudero
+  depends_on: [W1-T4611]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: completing the console contract after CONSOLE-T84 (remudero-console#1784)"
+  plan_refs: ["W1-T4579", "W1-T4583", "CONSOLE-T84"]
+  files:
+    - openapi/daemon.yaml
+    - scripts/openapi-route-baseline.json
+    - packages/api-client/src/schema.d.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27: scripts/openapi-route-baseline.json names 48 /v1 paths the daemon serves
+    (declaredConsoleRoutes, W1-T4579's census) that openapi/daemon.yaml does not declare. W1-T4579
+    made that baseline SHRINK-ONLY but filed nothing that shrinks it, so the spec has stayed at 43
+    declared paths. remudero-console's CONSOLE-T84 audit pins this spec and baselines 36 console
+    calls that are served but undeclared, so every one of them can be removed or reshaped by core
+    with nothing on either side noticing, and packages/api-client — generated from this document,
+    and by its own description the ONLY way a client talks to the daemon — cannot call them at all.
+    This task declares the operator-agent safety routes: /v1/operator-agent/consequences,
+    /v1/operator-agent/consequences/decision, /v1/operator-agent/delegation/handoff, /v1/operator-
+    agent/emergency/clear, /v1/operator-agent/emergency/status, /v1/operator-agent/emergency/stop.
+  design: |
+    For each path, declare every method the route table serves
+    (declaredConsoleRoutes/assembledRoutes), with the scope (read or write) and tier the route
+    registers, its request body and query parameters, and a response schema derived from the
+    handler's actual payload builder — never a bare `type: object` standing in for a shape the code
+    defines. Regenerate packages/api-client with scripts/generate-api-client.mjs so the drift check
+    stays green, and remove exactly these paths from scripts/openapi-route-baseline.json. A path
+    whose payload is genuinely open-ended says so in its description. No route's behaviour changes.
+    Sequenced after W1-T4611 so the chain never edits the spec, the generated client and the
+    baseline concurrently.
+  acceptance:
+    - claim: "the operator-agent safety routes are declared in the daemon contract and have left the undeclared-route baseline"
+      proof: "grep: /v1/operator-agent/emergency/stop: in openapi/daemon.yaml"
+    - claim: "/v1/operator-agent/delegation/handoff is declared too, so the census has removed it from the baseline"
+      proof: "grep: /v1/operator-agent/delegation/handoff: in openapi/daemon.yaml"
+  falsifier: |
+    Leave /v1/operator-agent/emergency/stop undeclared: the served-route census still lists it in
+    the baseline and the grep for its path entry in openapi/daemon.yaml finds nothing.
