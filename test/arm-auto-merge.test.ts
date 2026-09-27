@@ -100,6 +100,12 @@ test("W1-T4581 parses the complete declared parent chain and fails closed on a m
   const malformed = inspect("**Stacked on → #1764**");
   assert.equal(malformed.state, "unreadable");
   assert.match(malformed.detail ?? "", /no valid parent chain/);
+  const danglingArrow = inspect("Stacked on #1765 →");
+  assert.equal(danglingArrow.state, "unreadable");
+  assert.match(danglingArrow.detail ?? "", /parent chain is malformed/);
+  const invalidNumber = inspect("Stacked on #0");
+  assert.equal(invalidNumber.state, "unreadable");
+  assert.match(invalidNumber.detail ?? "", /invalid PR number/);
   const overlong = `Stacked on ${Array.from({ length: 21 }, (_, index) => `#${index + 1}`).join(" → ")}`;
   const overlongResult = inspect(overlong);
   assert.equal(overlongResult.state, "unreadable");
@@ -141,12 +147,25 @@ test("W1-T4581 REST reader requires every parent merged and fails closed on unre
 
   const unreadableBody = stackPrerequisiteFromRest(PR, () => ({ state: "open" }));
   assert.equal(unreadableBody.state, "unreadable", "a missing body cannot be interpreted as an unstacked PR");
+  const nonTextBody = stackPrerequisiteFromRest(PR, () => ({ body: 42 }));
+  assert.equal(nonTextBody.state, "unreadable");
+  assert.match(nonTextBody.detail ?? "", /body was not readable text/);
+  const failedBodyRead = stackPrerequisiteFromRest(PR, () => {
+    throw new Error("body request refused");
+  });
+  assert.equal(failedBodyRead.state, "unreadable");
+  assert.match(failedBodyRead.detail ?? "", /could not read this PR's body: body request refused/);
   const unreadableParent = stackPrerequisiteFromRest(PR.replace("/2887", "/1766"), (args) => {
     if (args[1].endsWith("/1766")) return { body };
     throw new Error("REST unavailable");
   });
   assert.equal(unreadableParent.state, "unreadable");
   assert.match(unreadableParent.detail ?? "", /could not read declared parent #1765/);
+  const unknownParent = stackPrerequisiteFromRest(PR.replace("/2887", "/1766"), (args) =>
+    args[1].endsWith("/1766") ? { body } : { state: "mystery", merged_at: null },
+  );
+  assert.equal(unknownParent.state, "unreadable");
+  assert.match(unknownParent.detail ?? "", /parent #1765 returned an unknown state \(MYSTERY\)/);
 });
 
 test("W1-T4581 open-time and ledger-gated arms refuse with an unmerged parent", () => {
