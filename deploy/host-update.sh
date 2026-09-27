@@ -50,6 +50,8 @@
 #   ./deploy/host-update.sh --tag <sha>        # a specific tag instead of :latest
 #   REGISTRY=... IMAGE=... ./deploy/host-update.sh          # retarget without editing this file
 #   RMD_STATE_DIR=/path ./deploy/host-update.sh            # if the bind mount is not ~/rmd-state
+#   ./deploy/host-update.sh --check-state-roots            # is EVERY instance's state on /mnt/rmd?
+#   ./deploy/host-update.sh --relocate-state-root <instance> <dest>  # copy one there, verified
 
 set -euo pipefail
 
@@ -114,6 +116,9 @@ TAG="${TAG:-latest}"
 DRY_RUN=0
 RECLAIM_ONLY=0
 PRINT_DAEMON_RUN=0
+CHECK_STATE_ROOTS=0
+RELOCATE_INSTANCE=""
+RELOCATE_DEST=""
 
 # The HOST side of the state bind mount. The CONTAINER side is /home/node/Remudero (config.root
 # derives from HOME — see REQ 10 in deploy/Dockerfile), and the measured invocation binds
@@ -175,6 +180,12 @@ while [ $# -gt 0 ]; do
     # why `docker container prune` is deliberately NOT part of it.
     --reclaim-only) RECLAIM_ONLY=1; shift ;;
     --print-daemon-run) PRINT_DAEMON_RUN=1; shift ;;
+    # W1-T3673: see the STATE ROOTS block below. Both modes exit before docker is contacted.
+    --check-state-roots) CHECK_STATE_ROOTS=1; shift ;;
+    --relocate-state-root)
+      RELOCATE_INSTANCE="${2:?--relocate-state-root needs <instance> <dest>}"
+      RELOCATE_DEST="${3:?--relocate-state-root needs <instance> <dest>}"
+      shift 3 ;;
     -h|--help)  sed -n '1,60p' "$0"; exit 0 ;;
     *) echo "host-update: unknown argument '$1' (try --help)" >&2; exit 2 ;;
   esac
@@ -490,6 +501,187 @@ ${CODEX_MOUNT_LINE}${CONTAINER_CONFIG_MOUNT_LINE}    -v ${STATE_DIR}:${STATE_MOU
   # code onto the machine and restarting the daemon onto it; here the entrypoint clones or
   # fast-forwards on every boot, and this script's own pull replaces the image wholesale.
 PRINTED
+  exit 0
+fi
+
+# ── STATE ROOTS (W1-T3673) — every instance's ledger on the PERSISTENT data disk ─────────────
+# MEASURED 2026-09-16: core (bind from /mnt/rmd/state2) and console (/mnt/rmd/...) lived on the
+# managed data disk; site's ~/rmd-site-state lived on /dev/root, the 29 GiB OS disk that filled that
+# day and panicked the host. Full measurement: plan/tasks.d/W1-T3673-*.yaml.
+#
+# RESOLVED BY FILESYSTEM, NOT BY PATH. `df -P` names the device a path actually lives on, and a bind
+# mount reports its SOURCE device — so core's ~/rmd-state2 passes and a bare ~/rmd-site-state fails,
+# which a string prefix check against /mnt/rmd would get wrong in both directions.
+#
+# /mnt/scratch IS REFUSED, NOT MERELY REPORTED. It is the Azure EPHEMERAL resource disk (440 GiB, 1%
+# used, mounted by waagent, absent from dataDisks): a ledger there reads as durable and is gone on
+# the first deallocation. And a /mnt/rmd that is not its own mounted disk (its `nofail` fstab line
+# failed) is refused too — otherwise every root beneath it would "match" while sitting on /dev/root.
+#
+# NOT A BACKUP: one managed disk is three replicas in one datacentre. This puts every instance under
+# ONE root that W1-T3670's snapshot can copy whole; it does not replace that snapshot.
+if [ "${CHECK_STATE_ROOTS}" -eq 1 ] || [ -n "${RELOCATE_INSTANCE}" ]; then
+  PERSISTENT_ROOT="${RMD_PERSISTENT_ROOT:-/mnt/rmd}"
+  EPHEMERAL_ROOT="${RMD_EPHEMERAL_ROOT:-/mnt/scratch}"
+  SR_REGISTRY="${RMD_INSTANCE_REGISTRY:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd)/.remudero/daemon-instances.yaml}"
+  fs_device() { df -P "$1" 2>/dev/null | awk 'NR==2 {print $1}'; }
+  resolve_dir() { (cd "$1" 2>/dev/null && pwd -P); }
+  # name<TAB>state_dir<TAB>container_name<TAB>retired, one line per declared instance — the same
+  # 2-space-key grammar deploy/recycle-container.sh's registry reader uses.
+  list_state_roots() {
+    awk '
+      function flush() { if (name != "") print name "\t" sd "\t" cn "\t" ret; name = "" }
+      { sub(/[[:space:]]+#.*/, "") }
+      /^[[:space:]]*$/ { next }
+      /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { flush(); name = $1; sub(/:$/, "", name); sd = ""; cn = ""; ret = ""; next }
+      name != "" && /^    (state_dir|container_name|retired):/ {
+        key = $1; sub(/:$/, "", key); v = $0; sub(/^    [a-z_]+:[[:space:]]*/, "", v); gsub(/^"|"$/, "", v)
+        if (key == "state_dir") sd = v; else if (key == "container_name") cn = v; else ret = v
+      }
+      END { flush() }
+    ' "$1"
+  }
+  if [ ! -r "${SR_REGISTRY}" ]; then
+    echo "host-update: REFUSING — instance registry '${SR_REGISTRY}' is not readable (set RMD_INSTANCE_REGISTRY)." >&2
+    exit 2
+  fi
+  PERSIST_REAL="$(resolve_dir "${PERSISTENT_ROOT}")" || PERSIST_REAL=""
+  PERSIST_DEV="$( [ -n "${PERSIST_REAL}" ] && fs_device "${PERSIST_REAL}")" || PERSIST_DEV=""
+  EPH_REAL="$(resolve_dir "${EPHEMERAL_ROOT}")" || EPH_REAL=""
+  EPH_DEV="$( [ -n "${EPH_REAL}" ] && fs_device "${EPH_REAL}")" || EPH_DEV=""
+  ROOT_DEV="$(fs_device /)"
+  if [ -z "${PERSIST_DEV}" ] || [ "${PERSIST_DEV}" = "${ROOT_DEV}" ] || [ "${PERSIST_DEV}" = "${EPH_DEV}" ]; then
+    echo "host-update: REFUSING — persistent root ${PERSISTENT_ROOT} is not its own mounted disk" >&2
+    echo "  (device '${PERSIST_DEV:-none}'; / is '${ROOT_DEV:-unknown}', ephemeral is '${EPH_DEV:-absent}')." >&2
+    echo "  Mount the managed data disk there first (sudo mount -a), or set RMD_PERSISTENT_ROOT." >&2
+    exit 2
+  fi
+  # persistent | ephemeral | missing | other:<device> — the ephemeral test is by path AND device,
+  # so a directory BIND-MOUNTED from /mnt/scratch into $HOME is caught too.
+  state_root_class() {
+    local real dev
+    real="$(resolve_dir "$1")" || real=""
+    [ -n "${real}" ] || { echo missing; return 0; }
+    dev="$(fs_device "${real}")"
+    if [ -n "${EPH_REAL}" ]; then case "${real}/" in "${EPH_REAL}/"*) echo ephemeral; return 0 ;; esac; fi
+    if [ -n "${EPH_DEV}" ] && [ "${dev}" = "${EPH_DEV}" ]; then echo ephemeral; return 0; fi
+    if [ "${dev}" = "${PERSIST_DEV}" ]; then echo persistent; return 0; fi
+    echo "other:${dev:-unknown}"
+  }
+fi
+
+if [ "${CHECK_STATE_ROOTS}" -eq 1 ]; then
+  echo "host-update: state roots — persistent disk ${PERSISTENT_ROOT} (${PERSIST_DEV}), registry ${SR_REGISTRY}"
+  sr_seen=0; sr_bad=""; sr_refused=""
+  while IFS=$'\t' read -r sr_name sr_dir _sr_container sr_retired; do
+    [ -n "${sr_name}" ] || continue
+    sr_seen=$((sr_seen + 1))
+    if [ "${sr_retired}" = "true" ]; then echo "  ${sr_name}  retired — not checked"; continue; fi
+    if [ -z "${sr_dir}" ]; then
+      echo "  ${sr_name}  declares NO state_dir — NOT on the persistent data disk" >&2
+      sr_bad="${sr_bad} ${sr_name}"; continue
+    fi
+    sr_class="$(state_root_class "${sr_dir}")"
+    case "${sr_class}" in
+      persistent) echo "  ${sr_name}  ${sr_dir}  ok — on the persistent data disk (${PERSIST_DEV})" ;;
+      ephemeral)
+        echo "  ${sr_name}  ${sr_dir}  REFUSED — on the EPHEMERAL resource disk ${EPHEMERAL_ROOT}; lost on deallocation" >&2
+        sr_refused="${sr_refused} ${sr_name}" ;;
+      missing)
+        echo "  ${sr_name}  ${sr_dir}  does not exist on this host — NOT on the persistent data disk" >&2
+        sr_bad="${sr_bad} ${sr_name}" ;;
+      *)
+        echo "  ${sr_name}  ${sr_dir}  NOT on the persistent data disk — it is on ${sr_class#other:}" >&2
+        sr_bad="${sr_bad} ${sr_name}" ;;
+    esac
+  done < <(list_state_roots "${SR_REGISTRY}")
+  if [ "${sr_seen}" -eq 0 ]; then
+    echo "host-update: ${SR_REGISTRY} declares no instances — nothing was proven." >&2
+    exit 1
+  fi
+  if [ -n "${sr_refused}" ]; then
+    echo "host-update: REFUSING — state root(s) on the EPHEMERAL resource disk:${sr_refused}" >&2
+    exit 2
+  fi
+  if [ -n "${sr_bad}" ]; then
+    echo "host-update: state root(s) NOT on the persistent data disk:${sr_bad}" >&2
+    echo "  Relocate each with: $0 --relocate-state-root <instance> ${PERSISTENT_ROOT}/<instance>-state" >&2
+    exit 1
+  fi
+  echo "host-update: every declared instance's state root is on the persistent data disk."
+  exit 0
+fi
+
+# ── --relocate-state-root <instance> <dest>: COPY, VERIFY EVERY BYTE, THEN STOP ─────────────────
+# The ledger is irreplaceable, so this never deletes, merges or overwrites: it refuses a live
+# container (a copy taken mid-append is not the ledger), refuses an existing <dest>, copies into a
+# staging sibling ON THE SAME DISK, `cmp`s every regular file against its source and installs <dest>
+# only if all match. The swap itself (stop, move the original aside, bind <dest> over it via
+# /etc/fstab exactly as core's /mnt/rmd/state2 is) needs root and is PRINTED, never performed.
+if [ -n "${RELOCATE_INSTANCE}" ]; then
+  rl_line="$(list_state_roots "${SR_REGISTRY}" | awk -F'\t' -v w="${RELOCATE_INSTANCE}" '$1 == w && !seen++')"
+  if [ -z "${rl_line}" ]; then
+    echo "host-update: REFUSING — instance '${RELOCATE_INSTANCE}' is not declared in ${SR_REGISTRY}." >&2
+    exit 2
+  fi
+  IFS=$'\t' read -r _rl_name rl_src rl_container _rl_retired <<<"${rl_line}"
+  rl_src_real="$(resolve_dir "${rl_src:-/nonexistent}")" || rl_src_real=""
+  if [ -z "${rl_src_real}" ]; then
+    echo "host-update: REFUSING — ${RELOCATE_INSTANCE}'s state root '${rl_src}' does not exist." >&2
+    exit 2
+  fi
+  case "${RELOCATE_DEST}" in /*) : ;; *) echo "host-update: REFUSING — <dest> must be absolute." >&2; exit 2 ;; esac
+  RELOCATE_DEST="${RELOCATE_DEST%/}"
+  if [ -e "${RELOCATE_DEST}" ] || [ -L "${RELOCATE_DEST}" ]; then
+    echo "host-update: REFUSING — ${RELOCATE_DEST} already exists; this never merges into or overwrites a directory." >&2
+    exit 2
+  fi
+  rl_class="$(state_root_class "$(dirname "${RELOCATE_DEST}")")"
+  case "${rl_class}" in
+    persistent) : ;;
+    ephemeral)
+      echo "host-update: REFUSING — ${RELOCATE_DEST} is on the EPHEMERAL resource disk ${EPHEMERAL_ROOT}; nothing copied." >&2
+      exit 2 ;;
+    *)
+      echo "host-update: REFUSING — ${RELOCATE_DEST} is not on the persistent data disk (${rl_class}); nothing copied." >&2
+      exit 2 ;;
+  esac
+  if command -v docker >/dev/null 2>&1; then
+    if ! rl_running="$(docker ps --format '{{.Names}}' 2>/dev/null)"; then
+      echo "host-update: REFUSING — docker is not answering, so '${rl_container}' cannot be proven stopped." >&2
+      exit 2
+    fi
+    if [ -n "${rl_container}" ] && grep -qx -- "${rl_container}" <<<"${rl_running}"; then
+      echo "host-update: REFUSING — container ${rl_container} is RUNNING and may be appending to the ledger." >&2
+      echo "  Stop it first (docker stop ${rl_container}); a copy taken mid-append is not the ledger." >&2
+      exit 2
+    fi
+  fi
+  rl_stage="${RELOCATE_DEST}.relocating.$$"
+  mkdir -p -- "${rl_stage}"
+  if ! cp -a -- "${rl_src_real}/." "${rl_stage}/"; then
+    rm -rf -- "${rl_stage}"
+    echo "host-update: relocation FAILED — the copy did not complete; nothing installed, source untouched." >&2
+    exit 1
+  fi
+  rl_files=0; rl_mismatch=""
+  while IFS= read -r -d '' rl_f; do
+    rl_rel="${rl_f#"${rl_src_real}"/}"
+    rl_files=$((rl_files + 1))
+    cmp -s -- "${rl_f}" "${rl_stage}/${rl_rel}" || rl_mismatch="${rl_mismatch} ${rl_rel}"
+  done < <(find "${rl_src_real}" -type f -print0)
+  if [ -n "${rl_mismatch}" ]; then
+    rm -rf -- "${rl_stage}"
+    echo "host-update: relocation FAILED — copied bytes differ from the source:${rl_mismatch}" >&2
+    echo "  The copy was discarded; nothing installed at ${RELOCATE_DEST}; the source is untouched." >&2
+    exit 1
+  fi
+  mv -- "${rl_stage}" "${RELOCATE_DEST}"
+  echo "host-update: relocated ${RELOCATE_INSTANCE}: ${rl_files} file(s) byte-identical at ${RELOCATE_DEST}"
+  echo "  The source ${rl_src} is UNTOUCHED. To switch ${RELOCATE_INSTANCE} over (root, instance stopped):"
+  echo "    sudo mv ${rl_src} ${rl_src}.pre-relocate && sudo mkdir ${rl_src}"
+  echo "    echo '${RELOCATE_DEST} ${rl_src} none bind,nofail 0 0' | sudo tee -a /etc/fstab && sudo mount ${rl_src}"
+  echo "  Then re-run: $0 --check-state-roots"
   exit 0
 fi
 
