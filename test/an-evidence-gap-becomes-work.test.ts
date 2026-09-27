@@ -18,7 +18,7 @@ import { parse as parseYaml } from "yaml";
 import type { Clock } from "../src/lib/clock.js";
 import {
   benchmarkEvidenceByLane,
-  daemonEvidenceCoverageDeps,
+  daemonEvidenceCoverageInput,
   EVIDENCE_COVERAGE_DROP_TOLERANCE,
   EVIDENCE_COVERAGE_MAX_FILINGS_PER_PASS,
   EVIDENCE_COVERAGE_MIN_DENOMINATOR,
@@ -30,7 +30,7 @@ import {
   laneFieldCoverage,
   runEvidenceCoverageGardener,
   startEvidenceCoverageGardener,
-  type EvidenceCoverageDeps,
+  type EvidenceCoverageInput,
   type EvidenceCoverageFollowup,
 } from "../src/lib/evidence-coverage-gardener.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
@@ -87,13 +87,13 @@ function calls(lane: string, n: number, unserved = 0, prefix = lane): Row[] {
   return rows;
 }
 
-function harness(overrides: Partial<EvidenceCoverageDeps> = {}) {
+function harness(overrides: Partial<EvidenceCoverageInput> = {}) {
   const ref = { t: T0 };
   const stateDir = tmpState();
   const rows: { current: Row[] } = { current: [] };
   const filed: EvidenceCoverageFollowup[] = [];
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
-  const deps: EvidenceCoverageDeps = {
+  const deps: EvidenceCoverageInput = {
     stateDir,
     readRows: () => ({ ok: true, rows: rows.current }),
     file: (followup) => {
@@ -386,7 +386,7 @@ test("the daemon deps read the windowed ledger union and refuse an incomplete on
       JSON.stringify({ ts: "2026-09-01T12:00:00.000Z", step: "worker.attempt", lane: "fix" }),
     ].join("\n") + "\n",
   );
-  const deps = daemonEvidenceCoverageDeps({ stateDir, root: stateDir, log: () => {} });
+  const deps = daemonEvidenceCoverageInput({ stateDir, root: stateDir, log: () => {} });
   const read = deps.readRows("2026-09-20T00:00:00.000Z");
   assert.equal(read.ok, true);
   assert.deepEqual(read.ok ? read.rows.map((r) => r.step) : [], ["worker.assignment"]);

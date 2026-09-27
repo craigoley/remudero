@@ -283,7 +283,7 @@ interface EvidenceCoverageState {
   source?: OpenGap & { reason: string };
 }
 
-function readState(path: string, log: EvidenceCoverageDeps["log"]): EvidenceCoverageState {
+function readState(path: string, log: EvidenceCoverageInput["log"]): EvidenceCoverageState {
   if (!existsSync(path)) return { version: 1, cells: {} };
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as EvidenceCoverageState;
@@ -309,7 +309,7 @@ export type EvidenceCoverageFiler = (followup: EvidenceCoverageFollowup) => void
 
 export type EvidenceRowsRead = { ok: true; rows: readonly Row[] } | { ok: false; reason: string };
 
-export interface EvidenceCoverageDeps {
+export interface EvidenceCoverageInput {
   stateDir: string;
   /** The evidence rows at or after `sinceTs`; `ok: false` when the source could not be read whole. */
   readRows: (sinceTs: string) => EvidenceRowsRead;
@@ -374,7 +374,7 @@ function sourceFollowupRaw(reason: string, firstSeenAt: string): string {
  * {@link EVIDENCE_COVERAGE_MAX_FILINGS_PER_PASS} follow-ups; writes the state atomically. Never
  * throws for a filer failure, and returns nothing a gate could read as a verdict.
  */
-export function runEvidenceCoverageGardener(deps: EvidenceCoverageDeps): EvidenceCoveragePass {
+export function runEvidenceCoverageGardener(deps: EvidenceCoverageInput): EvidenceCoveragePass {
   const clock = deps.clock ?? systemClock;
   const now = clock.now();
   const nowIso = clock.iso();
@@ -482,7 +482,7 @@ export function feedbackEvidenceCoverageFiler(root: string, land: LandFeedbackOp
 
 /** The daemon's deps (src/run-task.ts): the windowed ledger union, refused whole when any file in the
  *  window is unreadable, and feedback filed into the daemon's own checkout. */
-export function daemonEvidenceCoverageDeps(input: { stateDir: string; root: string; log: EvidenceCoverageDeps["log"] }): EvidenceCoverageDeps {
+export function daemonEvidenceCoverageInput(input: { stateDir: string; root: string; log: EvidenceCoverageInput["log"] }): EvidenceCoverageInput {
   return {
     stateDir: input.stateDir,
     readRows: (sinceTs) => {
@@ -498,7 +498,7 @@ export function daemonEvidenceCoverageDeps(input: { stateDir: string; root: stri
  *  `gardens` list takes. The pass is synchronous, so two never overlap; a thrown pass is logged. */
 export function startEvidenceCoverageGardener(
   run: () => EvidenceCoveragePass,
-  log: EvidenceCoverageDeps["log"],
+  log: EvidenceCoverageInput["log"],
   intervalMs: number,
 ): { stop: () => void } {
   const tick = () => {
