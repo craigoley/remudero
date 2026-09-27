@@ -11,9 +11,8 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 import type { Clock } from "../src/lib/clock.js";
@@ -40,7 +39,6 @@ import { ledgerLivePath } from "../src/lib/ledger-union.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { daemonCommand } from "../src/run-task.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const T0 = Date.parse("2026-09-27T00:00:00.000Z");
 
 function tmpState(): string {
@@ -413,15 +411,6 @@ test("the starter runs a pass at once, logs a failed pass, and stops", () => {
   garden.stop();
   assert.equal(runs, 1);
   assert.deepEqual(logs, ["evidence_coverage.gardener_failed"]);
-});
-
-test("the daemon starts the evidence-coverage gardener among its gardens", () => {
-  const source = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
-  const gardens = source.indexOf("gardens: [");
-  const call = source.indexOf("runEvidenceCoverageGardener(daemonEvidenceCoverageDeps(");
-  const sre = source.indexOf("startSreLane(", gardens);
-  assert.ok(gardens > 0 && call > gardens && call < sre, "the call sits inside the daemon's gardens list");
-  assert.match(source, /startEvidenceCoverageGardener\(\s*\(\) => runEvidenceCoverageGardener\(/);
 });
 
 test("a self-hosting daemon's eighth garden runs an evidence-coverage pass against its own state dir", async () => {
