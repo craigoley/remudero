@@ -1,0 +1,68 @@
+- id: W1-T4596
+  title: "Complete non-dispatch worker attempts and cash-ladder evidence"
+  repo: remudero
+  depends_on: [W1-T4580, W1-T4578]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  risk: high
+  band_meaning: span
+  origin: "follow-up audit of merged W1-T4580 implementation PR #7350, 2026-09-27"
+  plan_refs: ["W1-T4580", "W1-T4457", "W1-T4554", "docs/research/model-evidence-program.md"]
+  files:
+    - src/lib/benchmark-run.ts
+    - src/lib/worker.ts
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - src/lib/verify-human-judge.ts
+    - src/lib/specialist-panel.ts
+    - src/lib/flight-judge.ts
+    - src/lib/isolation.ts
+    - src/lib/containment.ts
+    - src/lib/escalate.ts
+    - src/lib/feedback.ts
+    - src/lib/risk-judge.ts
+    - src/lib/ruling-judge.ts
+    - src/lib/inbox-responder.ts
+    - src/lib/onboard/recon.ts
+    - src/spike.ts
+    - test/benchmark-worker-caller-census.test.ts
+    - test/benchmark-nondispatch-attempts.test.ts
+    - test/every-worker-lane-ledgers-its-assignment.test.ts
+    - docs/model-routing.md
+  status: queued
+  rationale: |
+    PR #7350 shipped assignment receipts for the non-dispatch path, but did not add
+    attempt/outcome receipts, a source caller census, or distinct cash-ladder rung
+    assignments. W1-T4580's broader design and four acceptance claims therefore remain
+    only partly implemented even though that task received merge credit. A cohort that
+    counts these assignments as observed model calls would still understate failed
+    auxiliary and cash attempts and bias model comparisons.
+  design: |
+    Preserve #7350's authoritative worker.assignment producer and add metadata-only
+    worker.attempt receipts at the same boundary. Keep assignment ID, run, lane,
+    requested/selected/served model, error class, duration, tokens, API cash and
+    subscription notional as separate fields with explicit unknown reasons. Each
+    actually-called cash fallback rung must have its own assignment and attempt;
+    a retry is never an independent verified task success. Cover direct and injected
+    review/fix, triage, inbox, judge, specialist and sweep callers with a source
+    census and named coverage-debt output for any unclassified caller. The census
+    is advisory and creates follow-up work; it must not fail an unrelated PR.
+    Failed writes and malformed optional result telemetry never change routing,
+    retries, worker outcomes, review results, or PR flow. Keep IDs and raw content
+    out of public metric labels. Reconcile actual runtime coverage separately in
+    the cohort gardener before publishing comparisons.
+  acceptance:
+    - claim: "a source census detects an unclassified direct or injected model worker caller"
+      proof: "unit test: benchmark worker caller census catches an unclassified spawn"
+    - claim: "cash, review, triage and judge model calls get attempt receipts or named coverage debt"
+      proof: "unit test: non-dispatch benchmark attempts cover cash review triage and judge lanes"
+    - claim: "cash fallback rungs keep selected model and cost on distinct assignments, not task wins"
+      proof: "unit test: cash ladder fallback attempts keep each selected model and cost on its own assignment"
+    - claim: "receipt failure preserves the worker, cash retry and existing assignment callback"
+      proof: "unit test: non-dispatch benchmark receipt failure preserves normal flow"
+  falsifier: |
+    A cash fallback inherits the first rung's model label; a reviewer attempt is
+    counted as verified task completion; an unclassified caller silently disappears;
+    or a telemetry sink failure changes a worker or PR outcome.
