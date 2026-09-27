@@ -170,7 +170,7 @@ test("a full supervisor tick asks the registry only on drift, then recycles thro
   assert.ok(!calls.includes("alert"), "a healthy recycle raises no alert");
 });
 
-test("the real deps read the newest image commit, ask the instance's own image repository, and read the failure time", async () => {
+test("real deploy dependency probes recover expired ACR auth without conflating missing or unknown publication", async (t) => {
   const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { realDeployDeps } = await import("../src/lib/deployer.js");
@@ -184,8 +184,10 @@ test("the real deps read the newest image commit, ask the instance's own image r
       .replace("state_dir: /home/craigoleyagent/rmd-state2", `state_dir: ${state}`);
     writeFileSync(join(install, ".remudero", "daemon-instances.yaml"), registry);
     const inspected: string[] = [];
+    const refreshedRegistries: string[] = [];
     const execFile = (cmd: string, args: string[]): string => {
       if (cmd === "git" && args.includes("log")) return `${NEWEST}\n`;
+      if (cmd === "az") { refreshedRegistries.push(args[3]!); return ""; }
       if (cmd === "docker" && args[0] === "manifest") {
         const ref = args[2]!;
         inspected.push(ref);
@@ -217,7 +219,68 @@ test("the real deps read the newest image commit, ask the instance's own image r
     assert.equal(deps.imagePublished?.(NEWEST), true);
     assert.equal(inspected[0], `synthwatcholey0620.azurecr.io/remudero:${NEWEST}`, "the tag replaces :latest on the instance's own image");
     assert.equal(deps.imagePublished?.("f".repeat(40)), false, "the registry said no such tag");
+    assert.deepEqual(refreshedRegistries, [], "a missing tag does not refresh auth");
     assert.equal(deps.imagePublished?.("unauthorized"), undefined, "auth trouble is unknown, never a no");
+    assert.deepEqual(refreshedRegistries, ["synthwatcholey0620"], "one refresh for an auth refusal");
+
+    const publicationDeps = (execFile: (cmd: string, args: string[]) => string,
+      log: (step: string, data?: Record<string, unknown>) => void = () => {}) => realDeployDeps({
+      installPath: install, stateRoot: state, daemonLabel: "com.remudero.daemon", serveLabel: "com.remudero.serve",
+      servePort: 4317, uid: 502, ledgerPath: join(root, "ledger.ndjson"), log, execFile, sleep: () => {},
+    });
+
+    await t.test("image publication refreshes expired ACR auth once and reads the same published tag", () => {
+      const calls: string[] = [];
+      const events: { step: string; outcome: unknown }[] = [];
+      let authorized = false;
+      const refreshed = publicationDeps((cmd, args) => {
+        calls.push(`${cmd} ${args.join(" ")}`);
+        if (cmd === "az") {
+          assert.deepEqual(args, ["acr", "login", "-n", "synthwatcholey0620"]);
+          authorized = true;
+          return "Login Succeeded";
+        }
+        if (cmd === "docker" && args[0] === "manifest") {
+          if (!authorized) throw Object.assign(new Error("manifest inspect failed"),
+            { stderr: "unauthorized: authentication required" });
+          return "{}";
+        }
+        return "";
+      }, (step, data) => events.push({ step, outcome: data?.outcome }));
+      assert.equal(refreshed.imagePublished?.(NEWEST), true);
+      assert.deepEqual(calls, [
+        `docker manifest inspect synthwatcholey0620.azurecr.io/remudero:${NEWEST}`,
+        "az acr login -n synthwatcholey0620",
+        `docker manifest inspect synthwatcholey0620.azurecr.io/remudero:${NEWEST}`,
+      ]);
+      assert.deepEqual(events, [{ step: "deploy.image_auth_refresh", outcome: "recovered" }]);
+    });
+
+    await t.test("image publication keeps failed auth refresh unknown without another manifest probe", () => {
+      const calls: string[] = [];
+      const failed = publicationDeps((cmd, args) => {
+        calls.push(cmd);
+        if (cmd === "docker" && args[0] === "manifest") throw new Error("unauthorized: authentication required");
+        if (cmd === "az") throw new Error("Azure login expired");
+        return "";
+      });
+      assert.equal(failed.imagePublished?.(NEWEST), undefined);
+      assert.deepEqual(calls, ["docker", "az"]);
+    });
+
+    await t.test("image publication distinguishes a missing tag after auth recovery", () => {
+      let probes = 0;
+      const missing = publicationDeps((cmd, args) => {
+        if (cmd === "docker" && args[0] === "manifest") {
+          probes += 1;
+          if (probes === 1) throw new Error("unauthorized: authentication required");
+          throw new Error("manifest unknown: no such manifest");
+        }
+        return "";
+      });
+      assert.equal(missing.imagePublished?.(NEWEST), false);
+      assert.equal(probes, 2);
+    });
 
     assert.equal(deps.imageRecycleManual?.(), false);
     writeFileSync(join(state, "state", "DEPLOY_IMAGE_MANUAL"), "");

@@ -1813,12 +1813,44 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     imagePublished: (sha) => {
       const image = registryText === undefined ? undefined : imageRefFor(registryText, o.stateRoot);
       if (!image) return undefined;
+      const ref = `${image.replace(/:[^:/]+$/, "")}:${sha}`;
+      const errorText = (error: unknown): string => {
+        const e = error as { message?: unknown; stderr?: unknown } | null;
+        return `${String(e?.message ?? error)}\n${String(e?.stderr ?? "")}`;
+      };
+      const authFailure = (error: unknown): boolean =>
+        /unauthorized|authentication required|authentication failed|requested access.*denied|\b401\b/i
+          .test(errorText(error));
+      const classify = (error: unknown): boolean | undefined =>
+        !authFailure(error) && /no such manifest|manifest unknown|not found/i.test(errorText(error))
+          ? false : undefined;
       try {
-        exec("docker", ["manifest", "inspect", `${image.replace(/:[^:/]+$/, "")}:${sha}`]);
+        exec("docker", ["manifest", "inspect", ref]);
         return true;
       } catch (err) {
-        // Only a registry that answered "no such tag" is a no; auth or network trouble is unknown.
-        return /no such manifest|manifest unknown|not found/i.test(String((err as Error)?.message ?? err)) ? false : undefined;
+        if (!authFailure(err)) {
+          // Only a registry that answered "no such tag" is a no; network trouble stays unknown.
+          return classify(err);
+        }
+      }
+      // ACR's Docker token can expire while the Azure CLI session is still valid. Refresh once,
+      // then re-read the SAME tag; neither a failed refresh nor a second auth failure is absence.
+      const registry = /^([a-z0-9-]+)\.azurecr\.io\//i.exec(image)?.[1];
+      if (!registry) return undefined;
+      try {
+        exec("az", ["acr", "login", "-n", registry]);
+      } catch {
+        log("deploy.image_auth_refresh", { outcome: "failed", registry });
+        return undefined;
+      }
+      try {
+        exec("docker", ["manifest", "inspect", ref]);
+        log("deploy.image_auth_refresh", { outcome: "recovered", registry });
+        return true;
+      } catch (err) {
+        const published = classify(err);
+        log("deploy.image_auth_refresh", { outcome: published === false ? "absent" : "unknown", registry });
+        return published;
       }
     },
     imageRecycleManual: () => existsSync(deployImageManualPath(o.stateRoot)),
