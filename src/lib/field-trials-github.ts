@@ -14,7 +14,8 @@
  * derived trailer ids, revert target and a bot/human class survive. Nothing here decides whether a
  * change deployed or was correct; field-trials-flow.ts reads these facts and keeps those separate.
  */
-import { execFile } from "node:child_process";
+import { fixedClock } from "./clock.js";
+import { ghTextAsync } from "./github-transport.js";
 
 export const FIELD_TRIALS_GITHUB_VERSION = "field-trials-github-v1" as const;
 
@@ -40,7 +41,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
 }
 
 function iso(value: unknown): string | null {
-  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
+  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? fixedClock(Date.parse(value)).iso() : null;
 }
 
 function text(value: unknown): string | null {
@@ -61,13 +62,18 @@ export function pageOf(body: string): GithubPage {
   return Array.isArray(items) ? { ok: true, items } : { ok: false, reason: "github-page-not-a-list" };
 }
 
-/** The default seam: `gh api <path>` with the caller's environment. A failed read is a reason, never a throw. */
-export function ghApiFetch(env: NodeJS.ProcessEnv = process.env): GithubPageFetch {
-  return (path) => new Promise((resolvePage) => {
-    execFile("gh", ["api", path], { env, maxBuffer: GH_MAX_BUFFER_BYTES }, (error, stdout) => {
-      resolvePage(error ? { ok: false, reason: "github-read-failed" } : pageOf(String(stdout)));
-    });
-  });
+/** The default seam: `gh api <path>` through the paced, bounded GitHub transport. A failed or refused
+ *  read is a reason, never a throw, so the pass records where to resume. */
+export function ghApiFetch(read: (args: string[]) => Promise<string> = (args) => ghTextAsync(args, { maxBuffer: GH_MAX_BUFFER_BYTES })): GithubPageFetch {
+  return async (path) => {
+    let body: string;
+    try { body = await read(["api", path]); }
+    catch {
+      const reason = "github-read-failed";
+      return { ok: false, reason };
+    }
+    return pageOf(body);
+  };
 }
 
 export type AuthorClass = "bot" | "human" | "unknown";
@@ -311,10 +317,10 @@ async function ingestRepo(fetch: GithubPageFetch, repo: string, store: GithubRep
   await sweepList(fetch, `repos/${repo}/deployments`, store.cursors.deployments, budget, asOf,
     (item) => iso(record(item)?.created_at), (item) => {
       const deployment = record(item);
-      if (!Number.isSafeInteger(deployment?.id)) return;
-      const id = deployment!.id as number;
+      if (deployment === undefined || !Number.isSafeInteger(deployment.id)) return;
+      const id = deployment.id as number;
       store.deployments[String(id)] = store.deployments[String(id)]
-        ?? { id, sha: text(deployment!.sha), createdAt: iso(deployment!.created_at), status: { state: "pending-read" } };
+        ?? { id, sha: text(deployment.sha), createdAt: iso(deployment.created_at), status: { state: "pending-read" } };
     });
   for (const deployment of Object.values(store.deployments)) {
     if (TERMINAL_DEPLOYMENT_STATES.has(deployment.status.state) || budget.left <= 0) continue;
