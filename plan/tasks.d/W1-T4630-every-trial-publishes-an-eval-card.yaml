@@ -1,0 +1,43 @@
+- id: W1-T4630
+  title: "A FIELD-TRIAL RESULT CANNOT SHOW ITS OWN VALIDITY — every trial gets an eval card with a pre-registration hash, randomization unit, A/A and sample-ratio checks, power, coverage, grader validity and deviations"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: agent-evaluation state-of-the-art survey applied to Remudero's field trials"
+  plan_refs: ["W1-T100001", "W1-T4575", "W1-T4603", "W1-T4608", "W1-T4617", "W1-T4619", "W1-T4620", "W1-T4621", "W1-T4623"]
+  files:
+    - src/lib/eval-card.ts
+    - src/lib/analytics-route.ts
+    - docs/research/model-evidence-program.md
+    - test/every-trial-publishes-an-eval-card.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    State of the art surveyed 2026-09-27 (sources in the filing PR). Remudero's plan tasks already
+    carry executable, base-vs-head discriminated proofs plus holdout criteria — an executable grader
+    most public agent evaluations lack. Honest published comparisons carry error bars with clustered
+    and paired standard errors and a power analysis (Anthropic, 'Adding Error Bars to Evals'), A/A
+    tests and sample-ratio-mismatch checks (online-experiment practice), and documentation cards
+    (model cards). 'The Leaderboard Illusion' found two identical checkpoints 17 points apart.
+    Remudero also has a validity signal others lack: the rate of proofs graded stale (passing at
+    base) or not executable is a direct measure of grader validity.
+  design: |
+    A versioned eval-card record produced for each trial (W1-T4575 A/A, W1-T4603 pilot, W1-T4625
+    paired trials): the pre-registration content hash committed before the first assignment,
+    estimand, randomization unit and propensity excerpt, A/A result and sample-ratio check, power
+    calculation, per-cell coverage with unknowns, grader-validity rates (stale, not executable,
+    holdout coverage), and a deviations log. A trial with no committed pre-registration has no
+    publishable card. The site's release gate consumes the card; nothing here publishes on its own.
+  acceptance:
+    - claim: "an eval card carries the pre-registration hash, randomization unit, A/A and sample-ratio results, power, coverage, grader validity and deviations, and a trial without a committed pre-registration has no publishable card"
+      proof: "unit test: test/every-trial-publishes-an-eval-card.test.ts"
+    - claim: "the new module is wired into its production caller, not shipped unwired"
+      proof: "grep: buildEvalCard( in src/lib/analytics-route.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale describes.

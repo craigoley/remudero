@@ -1,0 +1,43 @@
+- id: W1-T4625
+  title: "MODEL COMPARISONS PAY FOR TASK-DIFFICULTY VARIANCE THEY COULD CANCEL — a paired design runs one eligible task on two randomized models and grades both with the same executable proofs and holdouts"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: agent-evaluation state-of-the-art survey applied to Remudero's field trials"
+  plan_refs: ["W1-T100001", "W1-T4575", "W1-T4603", "W1-T4608", "W1-T4617", "W1-T4619", "W1-T4620", "W1-T4621", "W1-T4623"]
+  files:
+    - src/lib/paired-trial.ts
+    - src/run-task.ts
+    - test/a-paired-dispatch-trial-shares-one-grader.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    State of the art surveyed 2026-09-27 (sources in the filing PR). Remudero's plan tasks already
+    carry executable, base-vs-head discriminated proofs plus holdout criteria — an executable grader
+    most public agent evaluations lack. Unpaired arms need about 167 tasks each to separate a 50%
+    from a 65% success rate; pairing each task with itself removes the between-task variance, which
+    dominates in Remudero (57% of core work is high/src). Arena-style human votes are noisy for
+    agents (BigCodeArena: ~41% near-ties). Remudero can grade both trajectories with the task's own
+    proofs and holdouts instead of votes. Selection bias from router-chosen tasks (METR 2025/2026)
+    is avoided only when the randomization happens after eligibility, not by the router.
+  design: |
+    Within W1-T4603's approved paid envelope and after W1-T4575's A/A passes, a paired-dispatch
+    protocol: for an eligible task sampled after admission, dispatch two isolated attempts on two
+    randomized models (order randomized, same pinned stack), grade both heads with the task's
+    executable proofs and holdout criteria without opening either as a mergeable PR, and let only
+    the normal dispatch path produce the merged change. Record the pair, its randomization receipt
+    and both graded outcomes; analysis uses paired (McNemar/discordant-pair) statistics with
+    intervals. A pair whose grading cannot execute is unmeasurable, never a win for either arm.
+  acceptance:
+    - claim: "an eligible task sampled after admission is dispatched to two randomized models on one pinned stack, both heads are graded by the task's proofs and holdouts, neither is merged by the trial, and an ungradeable pair is unmeasurable"
+      proof: "unit test: test/a-paired-dispatch-trial-shares-one-grader.test.ts"
+    - claim: "the new module is wired into its production caller, not shipped unwired"
+      proof: "grep: runPairedTrial( in src/run-task.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale describes.
