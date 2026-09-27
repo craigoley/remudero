@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { OPERATOR_ACTIVITY_CONTRACT_VERSION } from "../src/lib/panel-graph.js";
+import { fixedClock } from "../src/lib/clock.js";
 import { captureFeedback } from "../src/lib/feedback.js";
 import { buildFeedbackInboxRoute, type PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { createConsoleSnapshotCache, ifNoneMatchHits, snapshotEtag, type ConsoleResponseStaleness } from "../src/lib/console-snapshot-cache.js";
@@ -102,7 +103,7 @@ test("an unchanged cached body answers 304 to its own etag", async () => {
   let version = 1;
   const inbox = countingRoute("/v1/inbox", () => ({ ready: [version] }));
   const deferred: Array<() => void> = [];
-  const cache = createConsoleSnapshotCache(inbox, { budgetMs: 50, fallbackBody: (staleness) => ({ staleness }), minRefreshMs: 0, defer: (run) => void deferred.push(run), setTimer: () => {} });
+  const cache = createConsoleSnapshotCache(inbox, { budgetMs: 50, fallbackBody: (staleness) => ({ staleness }), minRefreshMs: 0, clock: fixedClock(0), defer: (run) => void deferred.push(run), setTimer: () => {} });
   const first = await read(cache.handler, reqOf("/v1/inbox"));
   const etag = first.headers.etag;
   assert.equal(etag, snapshotEtag(JSON.stringify({ ready: [1] })));
