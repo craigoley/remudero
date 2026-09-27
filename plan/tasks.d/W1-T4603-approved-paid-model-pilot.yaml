@@ -1,0 +1,64 @@
+- id: W1-T4603
+  title: "Implement the approved $100/7-day paid model pilot controller without gating normal work"
+  repo: remudero
+  depends_on: [W1-T4556, W1-T4575, W1-T4599]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator approval: $100 total cash spend over 7 days for a dedicated three-repo benchmark pilot; issue #7418"
+  plan_refs: ["W1-T4574", "W1-T4575", "W1-T4556", "W1-T4599", "#7418", "docs/research/model-evidence-program.md"]
+  files:
+    - src/lib/benchmark-paid-pilot.ts
+    - src/run-task.ts
+    - test/benchmark-paid-pilot.test.ts
+    - docs/research/model-evidence-program.md
+  status: queued
+  rationale: |
+    The operator approved a distinct $100-total, seven-day paid benchmark pilot across all
+    three opted-in repos. The cash-simple operational trial and its corrected per-call accounting
+    are not this randomized model-purpose experiment. The current A/A and malformed-source work
+    must establish the integrity of the allocation and cost evidence before the pilot spends.
+    The approval is already given within this scope; do not introduce another go/no-go gate.
+  design: |
+    Build an explicit operator-invoked activation command, not a daemon-cadence launch or PR
+    check. At activation, persist an immutable protocol and receipt with UTC start/expiry,
+    $100 aggregate cash ceiling, the three consented repo identities, task-level assignment
+    seed and eligible population, pinned model/effort/harness/scorer versions, primary verified
+    outcome, maturity window, uncertainty method, and stopping rule. The seven-day clock starts
+    at activation. Reuse the A/A integrity receipt, stable task assignments, three-form ledger
+    union, and per-call cash estimate accounting; never treat subscription notional cost as
+    cash or a provider estimate as an invoice. Include non-starters, retries, fallbacks, and
+    crossovers in intention-to-treat analysis rather than silently dropping them.
+
+    Pause only the paid arm on missing/ambiguous cost evidence, expired time, exhausted cash
+    budget, allocation drift, or unreadable source required for the spend window. Ordinary
+    subscription dispatch, PR review, CI, and merge must keep flowing. A failed experiment
+    projection retains a dated last-known-good receipt with an explicit unavailable reason
+    and emits a repair follow-up. Do not change production smart-router policy as part of the
+    trial. Require a deliberate activation after the implementation and A/A proofs are current;
+    code completion alone does not spend cash.
+
+    Produce a local, privacy-safe report separating verified completion, human effort,
+    recovery, later defects, cash estimates, and subscription notional cost by task class and
+    model arm, with assignment denominators, missingness, censoring, uncertainty, and the
+    exact stack revisions. No automatic public ranking or raw-row export: a reviewed release
+    manifest through W1-T4574 and the feature-flagged site is separate work.
+  acceptance:
+    - claim: "activation records a pinned protocol and enforces $100 total over seven days from activation"
+      proof: "unit test: paid benchmark pilot persists approved protocol and bounded cash window"
+    - claim: "retries and crossovers stay with their original task assignment, including non-starters"
+      proof: "unit test: paid benchmark pilot preserves intention to treat across attempts"
+    - claim: "missing or ambiguous spend pauses only paid work while normal PR flow continues"
+      proof: "unit test: paid benchmark pilot isolates cost uncertainty from ordinary flow"
+    - claim: "analysis separates cash, notional, verified outcomes, and censored follow-up"
+      proof: "unit test: paid benchmark pilot reports evidence without fabricated wins"
+    - claim: "the trial is reached by an operator command rather than a daemon or PR gate"
+      proof: "grep: activateBenchmarkPaidPilot( in src/run-task.ts"
+  falsifier: |
+    A build starts spending automatically; a missing price becomes zero; a retry is reallocated;
+    a subscription cost depletes the cash budget; seven days run from issue filing rather than
+    activation; a telemetry outage blocks a healthy PR; or a pre/post model adoption overlay is
+    published as a causal winner.
