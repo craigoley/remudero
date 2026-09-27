@@ -44,4 +44,4 @@
     Replace the reported candidate's fact/source with a score alone and the evidence test fails.
     Feed a shadow candidate into selectLearnings and the unchanged-selection test fails. Shuffle
     the input task order and the deterministic sample test must still pass.
-  note: "This is a prerequisite for the filed live trial W1-T4354; no production retrieval lane is enabled by this task."
+  note: "This is a prerequisite for the filed live trial W1-T4354; no production retrieval lane is enabled by this task. reservation hand-off: research-lexical-shadow-1790512000000 -> plan-W1-T4606-lexical-shadow-1790512200000"
