@@ -85,5 +85,11 @@ test("benchmark cohort backlog progresses during supervised idle starvation", as
     assert.equal(direct.status, 0, direct.stderr);
     assert.match(direct.stdout, /"event":"benchmark_cohort.idle_pass"/);
     assert.ok(!direct.stdout.includes("a1"), "the idle process emits metadata, never assignment IDs");
+    const usage = spawnSync(process.execPath, ["--import", "tsx",
+      fileURLToPath(new URL("../src/lib/benchmark-cohort.ts", import.meta.url))], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8", timeout: 10_000,
+    });
+    assert.equal(usage.status, 2);
+    assert.match(usage.stderr, /usage: node --import tsx src\/lib\/benchmark-cohort\.ts <state-dir>/);
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });

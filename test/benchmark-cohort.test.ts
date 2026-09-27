@@ -47,6 +47,31 @@ test("benchmark cohort live append retains a stable prefix watermark", async () 
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });
 
+test("benchmark cohort refuses a live prefix rewritten or lost after scanning", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-prefix-race-"));
+  const live = join(stateDir, "ledger.ndjson");
+  const assignment = (id: string) => row({ ts: "2026-09-26T11:00:00.000Z", step: "worker.assignment",
+    worker_assignment: { id, selected: { provider: "cash", model: "gpt-5-nano" } } });
+  const first = assignment("a1");
+  try {
+    writeFileSync(live, first);
+    const rewritten = await runBenchmarkCohortPass(stateDir, { onBeforeLivePrefixVerify: () => {
+      writeFileSync(live, assignment("a2"));
+    } });
+    assert.equal(rewritten.state, "partial");
+    assert.equal(rewritten.snapshot.state, "unavailable", "a rewritten prefix is not a healthy cohort");
+    assert.equal(rewritten.snapshot.reason, "ledger-live-changed-after-scan");
+    writeFileSync(live, first);
+    const vanished = await runBenchmarkCohortPass(stateDir, { onBeforeLivePrefixVerify: () => {
+      unlinkSync(live);
+    } });
+    assert.equal(vanished.state, "partial");
+    assert.equal(vanished.snapshot.reason, "ledger-live-unreadable-after-scan");
+    writeFileSync(live, first);
+    assert.equal((await runBenchmarkCohortPass(stateDir)).state, "complete", "restored evidence can be retried");
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
+
 test("benchmark cohort live prefix repairs rotation and truncation", async () => {
   const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-live-rotate-"));
   const live = join(stateDir, "ledger.ndjson");

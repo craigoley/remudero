@@ -493,7 +493,8 @@ function deriveSnapshot(
 /** One source per ordinary pass by default; a failed projection never changes daemon work. */
 export async function runBenchmarkCohortPass(
   stateDir: string,
-  opts: { maxSources?: number; nowIso?: string; onLiveWatermark?: () => void } = {},
+  opts: { maxSources?: number; nowIso?: string; onLiveWatermark?: () => void;
+    onBeforeLivePrefixVerify?: () => void } = {},
 ): Promise<BenchmarkCohortPassResult> {
   const maxSources = opts.maxSources ?? 1;
   if (!Number.isInteger(maxSources) || maxSources < 1) throw new TypeError("maxSources must be a positive integer");
@@ -563,6 +564,7 @@ export async function runBenchmarkCohortPass(
   let tailPendingBytes = 0;
   if (live && liveManifest) {
     try {
+      opts.onBeforeLivePrefixVerify?.();
       const size = statSync(liveManifest.path).size;
       if (size < live.size || (await sourceHashes(liveManifest.path, undefined, live.size)).full !== live.sha256)
         throw new Error("ledger-live-changed-after-scan");
