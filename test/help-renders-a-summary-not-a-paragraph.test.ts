@@ -133,7 +133,7 @@ test("commandHelp(spec) contains that command's full detail verbatim, for every 
 // commands themselves, except W1-T3685's newly registered `board` verb, which must be added to
 // this reviewed inventory as part of the command addition.
 const BASELINE_COMMAND_NAMES = [
-  "alert-fix", "approve", "authority", "autonomy-rate", "away", "board", "bundle", "caller-sweep", "check-acceptance", "check-proof",
+  "alert-fix", "approve", "authority", "autonomy-rate", "away", "board", "bundle", "caller-sweep", "case-file", "check-acceptance", "check-proof",
   "census-membership", "ci-failures", "ci-learning", "correct", "coverage-improve", "daemon", "daemon-plist", "decline", "dep-review",
   "deploy", "deploy-plist", "deploy-run", "digest", "digest-plist", "doctor", "down", "drain",
   "emissions", "escalate", "feedback", "feedback-reconcile", "fix", "hand-runs", "inbox", "init", "install-checkout", "issues",

@@ -16,7 +16,7 @@
     - test/benchmark-run.test.ts
     - test/run-task-benchmark-run-wiring.test.ts
     - docs/model-routing.md
-  status: queued
+  status: merged
   rationale: |
     Existing worker.assignment/verdict joins identify selected and served models, but an
     assignment has no pinned benchmark-run schema for the work and working stack. W1-T4554

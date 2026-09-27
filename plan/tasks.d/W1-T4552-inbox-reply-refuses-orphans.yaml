@@ -12,7 +12,7 @@
   origin: "2026-09-25 operator request: trace Inbox from list through message and reply response"
   plan_refs: [W1-T4088, W1-T4471]
   files: [src/lib/panel-graph.ts, test/inbox-reply-refuses-orphans.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Source audit on 2026-09-25: GET /v1/inbox/thread requires an operator-owned item in

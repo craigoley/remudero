@@ -17,7 +17,7 @@
     - test/benchmark-evidence.test.ts
     - test/analytics-route.test.ts
     - docs/model-routing.md
-  status: queued
+  status: merged
   rationale: |
     `routing-v1` already joins pre-execution `worker.assignment` to terminal verdicts, but its
     display totals coalesce some absent tokens, duration, and cost with zero. Its live routing

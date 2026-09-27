@@ -15,7 +15,7 @@
     - src/lib/worker.ts
     - src/lib/mounts.ts
     - src/lib/usage-telemetry.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE CODE PATH, CHECKED FIRST ON MAIN (9aa0dd61e). workerSelectionAssignment (src/lib/worker.ts) builds

@@ -3359,8 +3359,3 @@ export function resolveServiceTokens(configRoot: string): ServiceTokens {
   }
   return JSON.parse(result.raw) as ServiceTokens;
 }
-
-/** `existsSync` re-export point kept trivial — used only by test fixtures wanting to assert the tokens file's persistence without importing node:fs directly for that one check. */
-export function serviceTokensFileExists(configRoot: string): boolean {
-  return existsSync(serviceTokensPath(configRoot));
-}

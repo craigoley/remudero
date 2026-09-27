@@ -1,0 +1,51 @@
+- id: W1-T4608
+  title: "WORKER SUCCESS IS NOT TASK SUCCESS — join benchmark assignments to exact verified PR outcomes before routing from live fleet evidence"
+  repo: remudero
+  depends_on: [W1-T4554, W1-T4607]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 85.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "research:paperclip-completion-semantics-and-local-benchmark-cohort-gap-2026-09-27"
+  plan_refs: ["§Headroom", "§Self-improvement", W1-T3958, W1-T4554, W1-T4607]
+  files:
+    - src/lib/benchmark-cohort.ts
+    - src/lib/benchmark-verified-outcome.ts
+    - src/lib/task-case-file.ts
+    - test/benchmark-verified-outcome.test.ts
+    - docs/model-routing.md
+  status: queued
+  attempts: 0
+  rationale: |
+    benchmark-cohort-v1 joins worker assignments, attempts and ledger terminals, but its
+    `verifiedTaskOutcome` is still `unavailable-no-github-verification-join`. A successful
+    worker call, coherent draft or ledger verdict cannot credit a model with completing a
+    task. W1-T3958 proposes benchmark-ready routing pools; using live fleet outcomes there
+    requires an exact, coverage-counted GitHub verification join first.
+    Paperclip's execution semantics separate ownership, execution and settled completion:
+    https://github.com/paperclipai/paperclip/blob/master/doc/execution-semantics.md.
+  design: |
+    Preserve private task/run/assignment join keys in the local cohort checkpoint only, with
+    no high-cardinality public model label. Accept a case-file/GitHub snapshot whose task
+    credit, PR number, exact head SHA, review/acceptance result and merge state are sourced
+    and current. Join only exact assignment-to-run-to-task-to-head lineage. An observed clean
+    completion requires the repository's accepted head-specific review and merged task credit;
+    a closed but unmerged PR is not automatically a model failure. Treat still-open work at
+    cutoff as censored and pre-instrumentation, stale, conflicting or unreadable evidence as
+    unavailable with counted reasons. A missing GitHub read cannot become a success or zero.
+
+    Produce per-class/model completion, repair, latency and separately labeled cash/notional
+    cost with field and join coverage. Keep the observational cohort separate from randomized
+    experiments. The join is a read-only overlay; it changes no worker route, PR gate or
+    outcome ledger. W1-T3958 may consume a reviewed ready cohort later, with its fixed
+    baseline when this overlay is unavailable.
+  acceptance:
+    - claim: "benchmark consolidation invokes the exact verified outcome join"
+      proof: "grep: joinVerifiedTaskOutcomes( in src/lib/benchmark-cohort.ts"
+  falsifier: |
+    Credit a worker-call success without an exact task and head-specific accepted merge;
+    count an open PR as failed; collapse missing cost into zero; or accept an unreadable GitHub
+    snapshot as an empty successful cohort. Each must fail its focused test.
+  note: "This is the measurement prerequisite for live-fleet outcome claims in W1-T3958, not automatic model promotion."

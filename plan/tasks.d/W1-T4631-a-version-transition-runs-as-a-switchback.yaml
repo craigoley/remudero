@@ -1,0 +1,41 @@
+- id: W1-T4631
+  title: "VERSION TRANSITIONS ARE READ AS BEFORE-AND-AFTER — Luna/Sol 5.6->6 and Opus 5->5.5 comparisons are confounded by task mix and provider incidents unless both versions stay live and are randomized per task during the overlap"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: agent-evaluation state-of-the-art survey applied to Remudero's field trials"
+  plan_refs: ["W1-T100001", "W1-T4575", "W1-T4603", "W1-T4608", "W1-T4617", "W1-T4619", "W1-T4620", "W1-T4621", "W1-T4623"]
+  files:
+    - src/lib/version-switchback.ts
+    - src/lib/worker-provider.ts
+    - test/a-version-transition-runs-as-a-switchback.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    State of the art surveyed 2026-09-27 (sources in the filing PR). Remudero's plan tasks already
+    carry executable, base-vs-head discriminated proofs plus holdout criteria — an executable grader
+    most public agent evaluations lack. Hosted models drift and providers ship infrastructure
+    changes that alter behaviour (Chen et al.; Model Equality Testing found 11 of 31 endpoints
+    serving different distributions; a provider postmortem traced a degradation to routing bugs, 16%
+    of requests misrouted at worst). A pre/post comparison attributes all of that, plus task-mix
+    shifts, to the new version.
+  design: |
+    When a provider exposes a new version alongside the old, a switchback protocol keeps both
+    eligible for a bounded overlap window and assigns each eligible task to one version by a task-
+    stable random draw (W1-T4617's logged propensity), recording the transition window, both
+    versions' served-model evidence and the per-task arm. Analysis compares arms within the window
+    with intervals and reports 'no detected change (power X)' rather than 'no change'. It changes no
+    default model and ends automatically when the window closes.
+  acceptance:
+    - claim: "during a version overlap window each eligible task is assigned one version by a task-stable random draw with the window and arms recorded, and the protocol ends when the window closes"
+      proof: "unit test: test/a-version-transition-runs-as-a-switchback.test.ts"
+    - claim: "the new module is wired into its production caller, not shipped unwired"
+      proof: "grep: switchbackArmFor( in src/lib/worker-provider.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale describes.

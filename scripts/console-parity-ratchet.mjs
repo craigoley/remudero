@@ -95,6 +95,9 @@ export const CLI_ONLY = {
       // this verb's job. NOTE FOR THE AUTHOR: if the intent is for an operator to read this in the
       // console rather than a terminal, a route is the better answer and this entry should go.
       "board",
+      // W1-T4607: streams a host-local ledger window and an operator-scoped GitHub head read.
+      // The console's task card remains its separate, cached read surface.
+      "case-file",
       "proof-queue-audit",
       "preflight",
       "next-task-id",

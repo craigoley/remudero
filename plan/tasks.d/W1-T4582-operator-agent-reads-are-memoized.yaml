@@ -13,7 +13,7 @@
     - src/lib/operator-agent.ts
     - src/lib/serve.ts
     - test/operator-agent-reads-are-memoized.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T4576's reach census (test/every-get-read-route-is-bounded-by-reach.test.ts) measured seven

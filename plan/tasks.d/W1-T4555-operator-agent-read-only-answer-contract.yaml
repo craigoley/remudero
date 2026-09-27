@@ -17,7 +17,7 @@
     - openapi/daemon.yaml
     - test/operator-agent-answer-contract.test.ts
     - test/operator-agent-answer-route.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The daemon has durable proposal, decision, and outcome routes, but no answer endpoint.

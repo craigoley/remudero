@@ -11,7 +11,7 @@
   plan_refs: ["W1-T4420"]
   files:
     - test/a-pr-opens-with-a-judgeable-body.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The test calls `ghPrCreateFillCommand(REPO_ROOT, ...)` with branch `run-W1-T4420-<ms>`.

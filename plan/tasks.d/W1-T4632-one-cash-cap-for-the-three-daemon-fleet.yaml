@@ -1,0 +1,63 @@
+- id: W1-T4632
+  title: "THREE $25 ALLOWANCES ARE NOT ONE $25 FLEET CAP — make cash reservations atomic across core, site and console before the next squeeze"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator:2026-09-27-cash-cap-live-audit"
+  plan_refs: ["§Headroom", "§9", W1-T3575, W1-T3692]
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/config-schema.ts
+    - src/lib/config.ts
+    - src/lib/cash-allowance-lock.ts
+    - deploy/migrate-fleet-cash-allowance.sh
+    - test/fleet-cash-allowance.test.ts
+    - test/foundry-opus-cash-emergency.test.ts
+    - docs/model-routing.md
+    - docs/operator-guide.md
+  status: queued
+  attempts: 0
+  rationale: |
+    Read-only live audit on 2026-09-27: the shared host config sets dailyCapUsd: 25 and
+    enables the deprecated openweight alias for cash. All three daemons mount that config,
+    but openWeightAllowancePath(config) resolves under each instance's config.root/state.
+    Core and console had separate current-day allowance files; site had an older file.
+    At the audit instant they committed about $0.39 total, but three independent $25
+    guards could authorize up to $75 in one UTC day. The cash adapter already prices Opus
+    within a $5 ordinary/$10 squeeze sublimit; neither that sublimit nor low observed spend
+    establishes a fleet-wide $25 ceiling. Its existing read/check/rename sequence also needs
+    a real cross-process serialization boundary before a shared file can be authoritative.
+  design: |
+    Provide one explicitly configured, host-shared allowance path for all enrolled cash
+    instances and verify from a NEW session inside each container that it names the same
+    writable inode/mount. One atomic cross-process reservation/settlement protocol must
+    serialize all three instances, retain failed and crashed requests conservatively, and
+    refuse cash if the shared file or lock cannot be trusted. A failed read may never
+    initialize an empty budget. Keep the existing per-deployment price table, cheap-first
+    lanes, $25 global UTC-day cap, and squeeze-only Opus $10 sublimit.
+
+    Migrate the current UTC day's three local reservation sets before switching the path:
+    preserve request IDs, refuse conflicting duplicates or unreadable files, and record
+    a before/after receipt showing global committed spend by deployment. Switch all three
+    instances together; prove a fresh cash request from any instance charges the one file.
+    Publish a read-only aggregate budget view with committed, reserved, and settled dollars,
+    day, cap, and source freshness so an operator can distinguish accounting from an invoice.
+    Do not enable paid overflow or widen automatic Opus eligibility.
+  acceptance:
+    - claim: "all three configured cash instances reserve against one shared allowance path"
+      proof: "grep: sharedCashAllowancePath( in src/lib/worker-provider.ts"
+    - claim: "a real cross-process lock protects the shared reservation mutation"
+      proof: "grep: withFleetCashAllowanceLock( in src/lib/worker-provider.ts"
+    - claim: "the host migration has an explicit refusal on conflicting request identities"
+      proof: "grep: conflicting request in deploy/migrate-fleet-cash-allowance.sh"
+  falsifier: |
+    Two instances can each reserve $20 against a $25 fleet cap, a stale or unreadable
+    shared file starts at zero, a crash loses an unsettled reservation, or a host migration
+    overwrites one instance's request ID. Cross-process tests and a read-only deployed-path
+    receipt must fail on each case. A successful local test alone is not live migration proof.
+  note: "Plan-first because this changes financial authority and deployment state. Human verification is the release hold."

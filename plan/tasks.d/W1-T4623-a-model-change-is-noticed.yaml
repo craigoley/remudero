@@ -1,0 +1,40 @@
+- id: W1-T4623
+  title: "PROVIDERS CHANGE MODELS UNDER US AND NOTHING NOTICES — served-model strings, quality and cost shift across Luna/Sol 5.6->6 and Opus 5->5.5, but the fleet has no drift record, only a later pre/post guess"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: model-evidence research — every run should add usable model evidence or an explicit coverage gap"
+  plan_refs: ["W1-T100001", "W1-T4574", "W1-T4575", "W1-T4580", "W1-T4603", "W1-T4607", "W1-T4608"]
+  files:
+    - src/lib/model-drift.ts
+    - src/lib/benchmark-cohort.ts
+    - test/a-model-change-is-noticed.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27 over the three fleets' full ledger unions (core 773,650 / console 356,871 /
+    site 269,728 rows, 2026-09-20..27) and origin/main 12baa03. Assignments already carry requested
+    vs selected vs served model; 1,303 core assignments span gpt-5.5, gpt-5.6-luna/terra,
+    gpt-6-luna/sol and claude-sonnet-5/opus-5-5. The model-transition timelines the Field Trials
+    program wants (merge date, daemon boot, requested selection, first served exposure, outcome
+    windows) need a durable record of when each served model first and last appeared and whether
+    outcomes shifted.
+  design: |
+    Record a model-exposure timeline (first/last seen per requested and served model, per fleet and
+    harness revision) and run a bounded sequential change detector per model x task class on
+    verified outcomes (W1-T4608) and cost, emitting a drift observation with its window, sample
+    sizes and uncertainty. Observations are descriptive, never causal claims and never routing
+    inputs.
+  acceptance:
+    - claim: "a served model's first and last exposure is recorded per fleet and harness revision, and a sequential detector reports drift with window, sample sizes and uncertainty"
+      proof: "unit test: test/a-model-change-is-noticed.test.ts"
+    - claim: "the new module is wired into its production caller, not shipped unwired"
+      proof: "grep: deriveModelDrift( in src/lib/benchmark-cohort.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale measured.

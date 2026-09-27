@@ -1,0 +1,40 @@
+- id: W1-T4615
+  title: "THE REVIEWER, ACTIVITY STREAM AND TRANSCRIPTS NAME THE WRONG MODEL OR NONE — 21 review assignments for 174 reviewer runs, worker.activity carries only the mount alias, and archived transcripts say 'sonnet' for routed Codex runs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: model-evidence research — every run should add usable model evidence or an explicit coverage gap"
+  plan_refs: ["W1-T100001", "W1-T4574", "W1-T4575", "W1-T4580", "W1-T4603", "W1-T4607", "W1-T4608"]
+  files:
+    - src/run-task.ts
+    - src/lib/worker.ts
+    - src/lib/review.ts
+    - test/every-worker-call-carries-its-assignment.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27 over the three fleets' full ledger unions (core 773,650 / console 356,871 /
+    site 269,728 rows, 2026-09-20..27) and origin/main 12baa03. `review.reviewer` has
+    selection_assignment_id on 11% of core rows (3% console, 0% site) and num_turns on 0%;
+    `worker.activity` (64,828 core rows) carries only `requested_model` = the mount alias, so 3,622
+    Codex events read 'sonnet' and fix/review/retro workers emit no activity at all; 1,317 of 1,337
+    archived transcripts carry `model: sonnet` in front matter, including runs routed to gpt-6-sol.
+    W1-T4580 (#7405) added a caller census for non-dispatch lanes; the reviewer lane and the
+    activity/transcript attribution remain outside it.
+  design: |
+    Extend the spawn caller census (W1-T4580) so a new spawnWorker call site without an assignment
+    receipt fails a test by name, and bring the reviewer spawn into it. `worker.activity` rows carry
+    selection_assignment_id and the routed provider/model (not the alias). The transcript archive's
+    front matter records routed and served model (served may be `unavailable`, never the alias). No
+    change to routing.
+  acceptance:
+    - claim: "a spawnWorker call site with no assignment receipt fails the census by name, and reviewer runs, activity rows and transcripts carry the routed model rather than the alias"
+      proof: "unit test: test/every-worker-call-carries-its-assignment.test.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale measured.

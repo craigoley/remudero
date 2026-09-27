@@ -11,6 +11,8 @@ export interface components {
       error: "unauthorized" | "forbidden" | "not_found" | "invalid_request" | "internal_error";
       /** Present only on a 403 -- the scope the caller's token was missing. */
       required_scope?: "read" | "write";
+      /** W1-T4609 -- a human-readable reason accompanying `invalid_request` (400) and a route-level `not_found` (404); the service-level 401/403/404/500 envelopes omit it. */
+      detail?: string;
       /** W1-T404 -- present only on a 403 refused for an insufficient WRITE TIER (once src/lib/service.ts's `enforceWriteTiers` is turned on; not yet set by `rmd serve`'s own production wiring). `low` (bookkeeping), `middle` (reversible but disruptive, or a spend force multiplier) or `high` (spends money or moves code) -- the tier the caller's token was missing, alongside `required_scope: write`. */
       required_tier?: "low" | "middle" | "high";
     };
@@ -1083,12 +1085,747 @@ export interface components {
         unclassifiedCostRows: number;
       };
     };
+    /** The data-status envelope the console read cache splices into every JSON object body a CACHED read route serves (src/lib/console-snapshot-cache.ts's `ConsoleResponseStaleness`, applied by src/lib/serve.ts's `boundConsoleReadRoute` to GET /v1/recent and GET /v1/daemon-health among others). The same facts ride the `x-rmd-cache-state`, `x-rmd-cache-age-ms` and `x-rmd-generated-at` response headers. */
+    ConsoleResponseStaleness: {
+      /** The body's own data-status. `unavailable` means no live computation has produced a snapshot yet and the body is the route's documented fallback. */
+      status: "fresh" | "stale" | "unavailable";
+      stale: boolean;
+      /** Milliseconds since the served snapshot was computed; null when none exists. */
+      ageMs: number | null;
+      /** When the served snapshot was computed; null when none exists. */
+      generatedAt: string | null;
+      /** A background recomputation is in flight. */
+      refreshing: boolean;
+      /** The request-path budget the cache waited before answering from a fallback. */
+      budgetMs: number;
+      /** Why the snapshot is stale or unavailable, when a cause was observed. */
+      reason?: string;
+    };
+    /** One Claude usage window (src/lib/account-usage.ts's `UsageWindowReading`). An absent `percentUsed` means UNKNOWN, never 0. */
+    UsageWindowReading: {
+      percentUsed?: number;
+      resetsAt?: string;
+    };
+    /** GET /v1/account-usage's body (src/lib/account-usage.ts's `AccountUsageSnapshot`, built by `deriveAccountUsage`). Every value field is ABSENT, never zero, when its source could not be read. Identity fields come from `~/.claude.json`'s `oauthAccount` and never carry a credential. */
+    AccountUsageSnapshot: {
+      accountEmail?: string;
+      accountUuid?: string;
+      accountOrg?: string;
+      fiveHour?: UsageWindowReading;
+      sevenDay?: UsageWindowReading;
+      /** The usage reading's own as-of. Absent iff `usageUnknownReason` is present. */
+      usageAsOf?: string;
+      usageAgeMs?: number;
+      /** Why the usage windows are UNKNOWN; absent when the reading is good. */
+      usageUnknownReason?: "unreadable" | "no-cache" | "account-mismatch" | "too-old";
+      /** Exactly one of `creditState` / `creditUnknownReason` is present. */
+      creditState?: "subscription" | "credits";
+      creditUnknownReason?: "not-exposed" | "unrecognised-value";
+      /** Which `~/.claude.json` field the credit state was read from, when one was found. */
+      creditStateField?: string;
+      /** The headroom governor's posture per the newest `daemon.headroom` ledger line. */
+      governor: "armed" | "telemetry-only" | "unknown";
+      governorAsOf?: string;
+      governorAgeMs?: number;
+      /** `deferred` only while a `daemon.cost_governor` line says dispatch is being held; absent evidence reads `unknown`, never healthy. */
+      costGovernor: "deferred" | "unknown";
+      costGovernorAsOf?: string;
+      costGovernorAgeMs?: number;
+      costGovernorObservedUsd?: number;
+      costGovernorCeilingUsd?: number;
+      queueGovernor: "deferred" | "unknown";
+      queueGovernorAsOf?: string;
+      queueGovernorAgeMs?: number;
+      queueGovernorObservedOpenCount?: number;
+      queueGovernorWipLimit?: number;
+      dailyCostCeilingUsd?: number;
+      dailyCostCeilingProvenance?: "overridden" | "default" | "instance-share";
+      dailyCostCeilingDefaultUsd?: number;
+      dailyCostCeilingFallbackReason?: string;
+      dailyCostCeilingAuditAsOf?: string;
+      dailyCostCeilingAuditWho?: string;
+      dailyCostCeilingAuditFromUsd?: number;
+      dailyCostCeilingAuditToUsd?: number;
+      dailyCostCeilingAuditEffectiveUsd?: number;
+      /** The scope note carried in the payload so a render can never drop it. */
+      measures: string;
+    };
+    /** GET /v1/control/status's body (src/lib/panel-actions.ts's `FleetControlStatus`): the Pause/Resume/STOP/quiet-hours button states derived from the fleet-control flag files, plus heartbeat evidence of whether the daemon is actually running. */
+    FleetControlStatus: {
+      paused: boolean;
+      /** Human-readable detail, present only while paused. */
+      pauseDetail?: string;
+      stopped: boolean;
+      /** Human-readable detail, present only while stopped. */
+      stopDetail?: string;
+      quietHours: boolean;
+      /** Whether a `daemon.*` heartbeat falls inside the liveness bound. OMITTED, never a fabricated false, when the ledger gives no evidence either way. */
+      daemonLive?: boolean;
+      /** The evidence behind `daemonLive`, always present. `fresh-poll` -> live; `last-poll-stale` and `no-daemon-activity` -> not live; `ledger-empty`, `ledger-absent` and `ledger-unreadable` -> `daemonLive` omitted. */
+      daemonLiveReason: "fresh-poll" | "last-poll-stale" | "no-daemon-activity" | "ledger-empty" | "ledger-absent" | "ledger-unreadable";
+    };
+    /** The serve process's own event-loop delay over a rolling one-minute window (src/lib/daemon-health.ts's `EventLoopLag`). */
+    EventLoopLag: {
+      p50Ms: number;
+      p99Ms: number;
+      maxMs: number;
+      windowMs: number;
+    };
+    /** One `/proc/pressure/<resource>` reading, percent of wall time (src/lib/daemon-health.ts's `PressureReading`). */
+    PressureReading: {
+      someAvg10: number;
+      someAvg60: number;
+      fullAvg10?: number;
+    };
+    /** The host's PSI pressure per resource (src/lib/daemon-health.ts's `HostPressure`). A resource whose pressure file is absent or unparsable reads the literal `"unknown"`, never 0. */
+    HostPressure: {
+      cpu: (PressureReading) | ("unknown");
+      io: (PressureReading) | ("unknown");
+      memory: (PressureReading) | ("unknown");
+    };
+    /** The serve checkout's own freshness, the SAME reading the stale-code restart decision acts on (src/lib/daemon-health.ts's `GatewayCheckoutState`). Each field reads the literal `"unknown"` until it has been checked. */
+    GatewayCheckoutState: {
+      /** The checkout's HEAD sha, or `unknown`. */
+      head: string;
+      behindBy: (number) | ("unknown");
+      dirty: (boolean) | ("unknown");
+      dirtyPaths?: (string)[];
+      /** ISO-8601 time of the check, or `unknown`. */
+      checkedAt: string;
+      detail?: string;
+    };
+    /** GET /v1/daemon-health's body (src/lib/daemon-health.ts's `DaemonHealthSnapshot`). Every field whose own source could not be read is ABSENT, never a placeholder. `hostPressure` and `gatewayCheckout` are always sent by the live handler; they are optional here because the console read cache's fallback body (src/lib/serve.ts's `fallbackBodyForCachedRead`, served before any live snapshot exists) carries only `pollIntervalMs` and `staleness`. */
+    DaemonHealthSnapshot: {
+      lastPollTs?: string;
+      lastPollAgeMs?: number;
+      pollIntervalMs: number;
+      /** `lastPollTs + pollIntervalMs`; absent with no `lastPollTs`. */
+      nextPollAt?: string;
+      diskFreeBytes?: number;
+      rateLimitRemaining?: number;
+      eventLoopLag?: EventLoopLag;
+      hostPressure?: HostPressure;
+      gatewayCheckout?: GatewayCheckoutState;
+      staleness?: ConsoleResponseStaleness;
+    };
+    /** One fix-verification lifecycle record as GET /v1/incidents projects it (src/lib/incident-lifecycle.ts's `IncidentWire`). */
+    IncidentRecord: {
+      fingerprint: string;
+      title: string;
+      source: "console" | "gateway" | "daemon";
+      kind: "exception" | "http_5xx" | "latency" | "invariant";
+      status: "new" | "filed" | "building" | "deployed" | "verified" | "regressed";
+      firstSeen: string;
+      lastSeen: string;
+      count24h: number;
+      feedbackId: string | null;
+      pr: number | null;
+    };
+    /** GET /v1/incidents's body -- the lifecycle store, newest `lastSeen` first. */
+    IncidentsResult: {
+      incidents: (IncidentRecord)[];
+      generatedAt: string;
+    };
+    /** GET /v1/incidents's 503 -- the lifecycle store exists but could not be read, reported as an error rather than the `200 {incidents: []}` a quiet fleet returns. */
+    IncidentsUnavailable: {
+      error: "incidents_unavailable";
+      /** `malformed` or `unreadable` from the production store reader. */
+      reason: string;
+    };
+    /** One reported stack frame -- file and function only; a line number is never part of the wire shape. */
+    IncidentEventFrame: {
+      file: string;
+      fn: string;
+    };
+    /** POST /v1/incidents/events's body (src/lib/incident-events.ts's `IncidentEventInput`, validated by `validateIncidentEventBody`). At most 16 KiB. The daemon scrubs `message` and `route` (query/fragment stripped; token, email and uuid shapes redacted) and caps `message` at 500 characters and `frames` at 20 before anything is fingerprinted or stored. */
+    IncidentEventRequest: {
+      source: "console" | "gateway" | "daemon";
+      kind: "exception" | "http_5xx" | "latency" | "invariant";
+      name: string;
+      message: string;
+      frames?: (IncidentEventFrame)[];
+      route?: string;
+      sha?: string;
+      /** An ISO date string (any value `Date.parse` accepts). */
+      at: string;
+    };
+    /** POST /v1/incidents/events's answer. `sampled` is true once the fingerprint has passed the per-minute cap; a sampled event writes at most one `incident.sampled` row per window. */
+    IncidentEventResult: {
+      fingerprint: string;
+      accepted: true;
+      sampled: boolean;
+    };
+    /** POST /v1/incidents/events's 413 -- the raw body exceeded 16 KiB and was not read further. */
+    IncidentIngestBodyTooLarge: {
+      error: "body_too_large";
+    };
+    /** One of the eight onboarding checks (src/lib/onboarding-readiness.ts's `OnboardingReadinessCheck`). */
+    OnboardingReadinessCheck: {
+      id: "app-access" | "default-branch" | "branch-protection" | "ci-workflows" | "agent-instructions" | "test-command" | "plan-layout" | "already-onboarded";
+      /** `unknown` only when the read could not be completed, never for a definitive GitHub answer. */
+      status: "pass" | "warn" | "fail" | "unknown";
+      reason: string;
+      evidence?: string;
+    };
+    /** GET /v1/onboarding/readiness's body (src/lib/onboarding-readiness.ts's `OnboardingReadinessReport`): each check independently pass/warn/fail/unknown, never one verdict hiding which check said what. */
+    OnboardingReadinessReport: {
+      /** `owner/name`. */
+      repo: string;
+      checks: (OnboardingReadinessCheck)[];
+    };
+    /** GET /v1/peek's body (src/lib/serve.ts's `buildPeekRoute`): the tail of one run's `state/runs/<runId>.tail`, at most 500 lines and 64 KiB. A missing or unreadable tail is `found: false` with a named `reason`, never a silent empty body. */
+    PeekResult: {
+      runId: string;
+      /** Whether the run is in flight, per the daemon's own live-run reader. */
+      live: boolean;
+      found: boolean;
+      lines: (string)[];
+      /** Present only when `found` is false. */
+      reason?: string;
+    };
+    /** Whole-plan task counts derived from GitHub, never the plan's decorative `status:` field (src/lib/panel-graph.ts's `PlanProgress`). Under `unknown` the last observed reading is carried forward with its `asOf`; the counts are absent only on a first reading taken during an outage. */
+    PlanProgress: {
+      done?: number;
+      inFlight?: number;
+      queued?: number;
+      total?: number;
+      unknown: boolean;
+      asOf?: string;
+      unavailableReason?: string;
+    };
+    /** One MASTER-PLAN section's filed/merged pair (src/lib/panel-graph.ts's `PlanSectionCount`). */
+    PlanSectionCount: {
+      heading: string;
+      filed: number;
+      merged: number;
+    };
+    /** One frontier row in the dispatcher's own order (src/lib/panel-graph.ts's `FrontierRow`). */
+    FrontierRow: {
+      id: string;
+      title: string;
+      runnable: boolean;
+      /** The TypeScript union also names `verify-human`, but `buildPlanFrontier` excludes those tasks from the frontier, so no served row carries it. */
+      reasonKind: "file-order" | "unmet-dependency" | "circuit-breaker" | "blocked";
+      reason: string;
+    };
+    /** GET /v1/plan/view's body -- progress, per-section counts and the frontier off one plan projection. */
+    PlanViewResult: {
+      progress: PlanProgress;
+      sections: (PlanSectionCount)[];
+      frontier: (FrontierRow)[];
+    };
+    ProviderRoutingWindowStatus: {
+      name: string;
+      usedPercent: number;
+      resetsAt?: string;
+    };
+    /** Manual reset readiness -- a count and the earliest expiry only, never a credit id. `earliestExpiresAt` is the provider's own numeric timestamp, passed through unconverted. */
+    ProviderRoutingResetCreditsStatus: {
+      availableCount: number;
+      earliestExpiresAt?: number;
+    };
+    CodexModelDecisionOptionStatus: {
+      id: string;
+      displayName?: string;
+      supportedEfforts: (string)[];
+      accountDefault: boolean;
+      mapped: boolean;
+      eligible: boolean;
+      selected: boolean;
+      windows: (ProviderRoutingWindowStatus)[];
+      reason?: "unmapped" | "unsupported-effort" | "quota-unreadable" | "below-reserve";
+    };
+    CodexModelDecisionStatus: {
+      requestedCapability: "economy" | "balanced" | "frontier";
+      requestedEffort: string;
+      mappedCandidates: (string)[];
+      options: (CodexModelDecisionOptionStatus)[];
+      selectedModel?: string;
+      selectedEffort?: string;
+      preferredModel?: string;
+      preferenceBypass?: "unmapped" | "unsupported-effort" | "quota-unreadable" | "below-reserve" | "not-visible";
+    };
+    ProviderRoutingProviderStatus: {
+      provider: "claude" | "codex" | "cash" | "openweight";
+      readable: boolean;
+      windows: (ProviderRoutingWindowStatus)[];
+      allocationWindows?: (ProviderRoutingWindowStatus)[];
+      reason?: "capacity-unreadable" | "authentication-unavailable" | "capacity-unavailable";
+      accountLabel?: string;
+      model?: string;
+      effort?: string;
+      modelDecision?: CodexModelDecisionStatus;
+      resetCredits?: ProviderRoutingResetCreditsStatus;
+    };
+    ProviderRoutingSelectedStatus: {
+      provider: "claude" | "codex" | "cash" | "openweight";
+      tightestRemainingPercent: number;
+      allocationWeight?: number;
+      allocationSharePercent?: number;
+      accountLabel?: string;
+      model?: string;
+      effort?: string;
+    };
+    ProviderRoutingModelHealthStatus: {
+      requestedModel?: string;
+      routedModel?: string;
+      state: "healthy" | "degraded" | "unknown";
+      source: "fresh" | "stale" | "unknown";
+      eligible: boolean;
+    };
+    ProviderPark: {
+      provider: "claude" | "codex" | "cash" | "openweight";
+      until: string;
+    };
+    CodexModelPreference: {
+      capability: "economy" | "balanced" | "frontier";
+      effort: string;
+      model: string;
+    };
+    /** The committed host policy an override is measured against (src/lib/provider-routing-policy.ts's `CommittedProviderRoutingPolicy`). */
+    ProviderRoutingCommittedPolicy: {
+      enabledProviders: ("claude" | "codex" | "cash" | "openweight")[];
+      preference: "automatic";
+      reservePercent: number;
+      /** Always empty -- the committed policy parks nothing. */
+      parks: (ProviderPark)[];
+      /** Always null -- the committed policy states no model preference. */
+      codexModelPreference: null;
+    };
+    /** The effective provider-routing policy (src/lib/provider-routing-policy.ts's `EffectiveProviderRoutingPolicy`). GET /v1/provider-routing re-resolves it live on every request, so a console write, expiry or clear is visible before the next dispatch. */
+    ProviderRoutingPolicyStatus: {
+      provenance: "default" | "overridden";
+      committed: ProviderRoutingCommittedPolicy;
+      enabledProviders: ("claude" | "codex" | "cash" | "openweight")[];
+      /** Enabled providers after active parks are applied. */
+      routableProviders: ("claude" | "codex" | "cash" | "openweight")[];
+      preference: "automatic" | "claude" | "codex" | "cash" | "openweight";
+      reservePercent: number;
+      parks: (ProviderPark)[];
+      codexModelPreference?: CodexModelPreference;
+      overrideExpiresAt?: string;
+      writtenAt?: string;
+      writerFingerprint?: string;
+      /** Present only when a stored override was refused and the committed policy was used instead. */
+      fallback?: {
+        reason: "unreadable" | "malformed" | "unsupported-version" | "expired" | "incompatible-with-config";
+      };
+    };
+    ProviderRoutingPreferenceBypass: {
+      provider: "claude" | "codex" | "cash" | "openweight";
+      reason: "unreadable" | "below-reserve";
+    };
+    /** GET /v1/provider-routing's body: the daemon's last provider-routing decision as the daemon wrote it to `state/provider-routing-status.json` (src/lib/provider-routing-status.ts's `ProviderRoutingStatus`, projected field by field by `readProviderRoutingStatus`), with `policy` overlaid by a live resolution. The console process never probes a provider. */
+    ProviderRoutingStatus: {
+      version: number;
+      state: "unknown" | "not-probed" | "selected" | "blocked";
+      freshness: "fresh" | "stale" | "not-probed" | "unknown";
+      /** Why the status is `unknown`. */
+      reason?: "absent" | "unreadable" | "malformed" | "unsupported-version";
+      enabledProviders?: ("claude" | "codex" | "cash" | "openweight")[];
+      reservePercent?: number;
+      observedAt?: string;
+      freshUntil?: string;
+      providers?: (ProviderRoutingProviderStatus)[];
+      selected?: ProviderRoutingSelectedStatus;
+      blockedReason?: "no-provider-headroom";
+      modelHealth?: ProviderRoutingModelHealthStatus;
+      policy?: ProviderRoutingPolicyStatus;
+      preferenceBypass?: ProviderRoutingPreferenceBypass;
+    };
+    /** One RECENT feed row minted from a ledger line (src/lib/board.ts's `RecentActivityEntry`). */
+    RecentActivityEntry: {
+      taskId: string;
+      runId?: string;
+      title: string;
+      verb: "merged" | "verdict" | "fix" | "escalated" | "spend" | "run-refused" | "run-started" | "worker";
+      /** The originating ledger line's own `ts`. */
+      ts: string;
+      detail?: string;
+      costUsd?: number;
+      numTurns?: number;
+      prNumber?: number;
+      prUrl?: string;
+      eventKind?: "working" | "tool-executing" | "message";
+      eventAt?: string;
+      workerRole?: "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
+      provider?: string;
+      requestedModel?: string;
+      servedModel?: string;
+      turnsSoFar?: number;
+      toolName?: string;
+      toolReason?: string;
+      toolStartedAt?: string;
+      toolCompletedAt?: string;
+      toolDurationMs?: number;
+      toolOutcome?: "success" | "error";
+      /** GitHub decoration, present only when a read resolved it. */
+      prTitle?: string;
+      /** Present only when GitHub decoration was attempted and failed for this row. */
+      githubUnavailable?: true;
+    };
+    /** GET /v1/recent's body -- at most 20 entries, newest first. */
+    RecentActivityResult: {
+      entries: (RecentActivityEntry)[];
+      staleness?: ConsoleResponseStaleness;
+    };
+    /** One `measurement_cadence.ran` ledger row (src/lib/measurement-cadence.ts's `MeasurementCadenceRowEntry`). `result` is keyed by cadence verb (camelCased) and each value is that verb's SUMMARY (`summarizeMeasurementValue`): scalars, short strings and array counts. The verb set grows with the cadence, so the map is genuinely open. */
+    SelfMeasurementRow: {
+      ts: string;
+      result: Record<string, unknown>;
+    };
+    /** The newest measurement rows, newest first. */
+    SelfMeasurementRows: {
+      status: "ok";
+      rows: (SelfMeasurementRow)[];
+    };
+    /** The ledger union could not be read in full (no archive at all, or an unopenable rotation) -- never answered as an empty "never measured". */
+    SelfMeasurementUnreadable: {
+      status: "unreadable";
+      reason: string;
+    };
+    /** `?detail=<verb>`: that verb's FULL report from the newest row carrying it. `value` is whatever that verb recorded, un-summarized, so its shape is the verb's own. */
+    SelfMeasurementDetail: {
+      verb: string;
+      ts: string;
+      value: unknown;
+    };
+    /** One plan acceptance criterion (src/lib/plan.ts's `AcceptanceCriterion`). */
+    AcceptanceCriterion: {
+      claim: string;
+      proof: string;
+      satisfied_by?: string;
+      holdout?: boolean;
+    };
+    /** One owned run in a task card's history -- read from the ledger, no GitHub call. */
+    TaskCardRun: {
+      runId: string;
+      verdict?: string;
+      costUsd?: number;
+      prUrl?: string;
+    };
+    /** The row-click task card (src/lib/task-card.ts's `TaskCard`). */
+    TaskCard: {
+      id: string;
+      title: string;
+      rationale?: string;
+      acceptance: (AcceptanceCriterion)[];
+      dependsOn: (string)[];
+      /** The GitHub-derived projection's status, falling back to the plan's own only when no projection resolved. */
+      status: "queued" | "recon" | "prompted" | "running" | "review" | "fixing" | "diagnosing" | "blocked" | "merged" | "done";
+      merged: boolean;
+      prNumber?: number;
+      prUrl?: string;
+      runs: (TaskCardRun)[];
+    };
+    TaskCardResult: {
+      card: TaskCard;
+    };
+    /** GET /v1/version's body -- the console sha captured at server start, and nothing else. */
+    VersionResult: {
+      sha: string;
+    };
+    /** One option on an inbox item's plain message (src/lib/inbox-plain.ts's `PlainOption`). */
+    PlainOption: {
+      label: string;
+      consequence: string;
+    };
+    /** W1-T4087: an inbox item's plain-language message (src/lib/inbox-plain.ts's `PlainInboxMessage`) -- the model writer's text when it passed the plain-message check, otherwise the item kind's template. The raw proposal summary is never promoted to it. */
+    PlainInboxMessage: {
+      /** 15 words or fewer. */
+      headline: string;
+      whatHappened: string;
+      /** What the daemon needs from the operator, as an instruction. */
+      whatWeNeed: string;
+      /** What happens if nobody acts. */
+      ifNothingHappens: string;
+      /** Two or three options. */
+      options: (PlainOption)[];
+      /** Who wrote it -- the model writer or the per-kind template. */
+      source: "writer" | "template";
+    };
+    /** One task a READY proposal's drafted fragment would file (src/lib/panel-graph.ts's `InboxDraftedTask`). */
+    InboxDraftedTask: {
+      id: string;
+      title: string;
+    };
+    /** One failing readiness predicate `classifyProposal` named for a not-ready proposal (src/lib/inbox.ts's `PredicateFailure`) -- never a bare "not ready". */
+    InboxPredicateFailure: {
+      predicate: "drafted" | "deps_merged" | "deps_observable" | "evidence_anchors" | "lint_clean" | "no_conflict";
+      detail: string;
+    };
+    /** One READY-to-ratify proposal (src/lib/panel-graph.ts's `InboxReadyItem`); the drafted tasks ride along so the operator sees exactly what APPROVE would file. */
+    InboxReadyItem: {
+      proposalId: string;
+      /** The raw proposal summary (the console's Details). */
+      summary: string;
+      plain: PlainInboxMessage;
+      /** The drafted fragment's stamp line, when the draft carries one. */
+      stampLine?: string;
+      draftedTasks: (InboxDraftedTask)[];
+    };
+    /** One proposal an Architect worker is drafting right now (src/lib/panel-graph.ts's `InboxDraftingItem`). */
+    InboxDraftingItem: {
+      proposalId: string;
+      summary: string;
+      plain: PlainInboxMessage;
+      /** When the drafting worker was spawned; an empty string when unrecorded. */
+      spawnedAt: string;
+    };
+    /** W1-T2604: one not-ready proposal with the exact predicate failures that hold it (src/lib/panel-graph.ts's `InboxNotReadyItem`). Carries no affordance. */
+    InboxNotReadyItem: {
+      proposalId: string;
+      summary: string;
+      plain: PlainInboxMessage;
+      reasons: (InboxPredicateFailure)[];
+    };
+    /** W1-T3408: one DECLINED proposal (src/lib/panel-graph.ts's `InboxDeclinedItem`), so POST /v1/inbox/restore's argument is discoverable. Nothing here is actionable except restore. */
+    InboxDeclinedItem: {
+      proposalId: string;
+      summary: string;
+      plain: PlainInboxMessage;
+      /** The latest `panel.proposal_declined` row's reason, verbatim. */
+      reason: string;
+    };
+    /** W1-T4086: the operator-owned subset of each lane (`inboxOwner(...) === "operator"`), built by GET /v1/inbox's handler from the same four arrays. */
+    InboxNeedsYou: {
+      ready: (InboxReadyItem)[];
+      drafting: (InboxDraftingItem)[];
+      notReady: (InboxNotReadyItem)[];
+      declined: (InboxDeclinedItem)[];
+    };
+    /** W1-T4086/W1-T4089: one fleet-owned proposal with the lane it sits in and the fleet lane's latest decision, when it has made one (src/lib/panel-graph.ts's `InboxFleetItem`). */
+    InboxFleetItem: {
+      proposalId: string;
+      summary: string;
+      plain: PlainInboxMessage;
+      lane: "ready" | "drafting" | "notReady" | "declined";
+      /** The fleet lane's latest decision (src/lib/fleet-lane.ts's `FleetLaneDecision`). */
+      decision?: "file" | "merge";
+      /** That decision's plain reason; present exactly when `decision` is. */
+      reason?: string;
+    };
+    /** GET /v1/inbox's body (src/lib/panel-graph.ts's `buildInboxRoute`). Deferred, ratified and retired proposals are never returned. The four top-level lanes hold every owner's items; `needsYou` and `fleet` split them by who must act. `declined`, `needsYou` and `fleet` are optional ONLY because the console cache's cold fallback body (serve.ts's `fallbackBodyForCachedRead`) carries just `ready`, `drafting` and `notReady`; every handler-computed body carries all six. */
+    InboxResult: {
+      ready: (InboxReadyItem)[];
+      drafting: (InboxDraftingItem)[];
+      notReady: (InboxNotReadyItem)[];
+      declined?: (InboxDeclinedItem)[];
+      needsYou?: InboxNeedsYou;
+      fleet?: (InboxFleetItem)[];
+      staleness?: ConsoleResponseStaleness;
+    };
+    /** One stored daily digest (src/lib/serve.ts's `ConsoleInboxDigestEntry`). */
+    InboxDigestEntry: {
+      ts: string;
+      text: string;
+    };
+    /** GET /v1/inbox/digests's body (src/lib/serve.ts's `ConsoleInboxDigests`) -- the newest digests, up to the render window (`CONSOLE_INBOX_DIGEST_LIMIT`, 10), oldest first. */
+    InboxDigestsResult: {
+      entries: (InboxDigestEntry)[];
+      /** Valid entries older than the render window that were left out. */
+      omitted: number;
+      /** Present only when the digest store could not be read or parsed; `entries` is then empty. A missing store is not an error and carries no reason. */
+      reason?: string;
+    };
+    /** An action an inbox thread offers or records (src/lib/inbox-thread.ts's `InboxThreadAction`). */
+    InboxThreadAction: "approve" | "decline" | "edit" | "restore";
+    /** What the daemon's responder did on a thread, and how to undo it. */
+    InboxThreadActionTaken: {
+      action: InboxThreadAction;
+      undo?: string;
+    };
+    /** A stored thread message's structured extras (src/lib/inbox-thread.ts's `ThreadMessageExtra`). */
+    InboxThreadMessageExtra: {
+      did?: InboxThreadActionTaken;
+      suggestedAction?: InboxThreadAction;
+      /** The message is one of the responder's bounded clarifying questions. */
+      question?: boolean;
+      /** The operator display name a reply was sent under (audit only). */
+      operator?: string;
+      /** The idempotency id POST /v1/inbox/thread/reply stored the reply under. */
+      replyId?: string;
+    };
+    /** One message on an inbox thread (src/lib/inbox-responder.ts's `ThreadMessageView`). Message `seq` 0 is the opening message, derived on read from the item's plain message and never stored; it alone carries `plain` and `actions`. */
+    InboxThreadMessage: {
+      seq: number;
+      from: "daemon" | "operator";
+      text: string;
+      /** Epoch milliseconds; null on the derived opening message. */
+      ts: number | null;
+      plain?: PlainInboxMessage;
+      /** On the opening message -- the actions the item's current state allows. */
+      actions?: (InboxThreadAction)[];
+      extra?: InboxThreadMessageExtra;
+    };
+    /** One operator thread in GET /v1/inbox/threads (src/lib/inbox-responder.ts's `ThreadSummaryView`). A declined item is listed only once someone has written on its thread. */
+    InboxThreadSummary: {
+      /** `thread:<proposalId>::inbox::-::-` (src/lib/inbox-thread.ts's `inboxThreadId`). */
+      threadId: string;
+      proposalId: string;
+      /** The item's plain headline. */
+      headline: string;
+      /** The latest message's first sentence, at most 160 characters. */
+      snippet: string;
+      /** `daemon` when the operator wrote last, otherwise `operator`. */
+      waitingOn: "operator" | "daemon";
+      /** The latest message's epoch milliseconds; null when only the derived opening message exists. */
+      lastActivity: number | null;
+      /** Messages including the derived opening message. */
+      messageCount: number;
+      /** The daemon wrote last and the read mark is behind that message. */
+      unread: boolean;
+    };
+    /** GET /v1/inbox/threads's body -- waiting-on-you first, then most recent activity. */
+    InboxThreadsResult: {
+      threads: (InboxThreadSummary)[];
+    };
+    /** GET /v1/inbox/thread's body (src/lib/inbox-responder.ts's `ThreadDetailView`, which extends `ThreadSummaryView`; flattened here because this generator's subset has no allOf). */
+    InboxThreadDetail: {
+      threadId: string;
+      proposalId: string;
+      headline: string;
+      snippet: string;
+      waitingOn: "operator" | "daemon";
+      lastActivity: number | null;
+      messageCount: number;
+      unread: boolean;
+      /** The raw proposal summary, for the console's Details. */
+      details: string;
+      /** Oldest first; `seq` 0 is the derived opening message. */
+      messages: (InboxThreadMessage)[];
+    };
+    /** POST /v1/inbox/thread/reply's body (src/lib/panel-graph.ts's `validateThreadReply`). */
+    InboxThreadReplyRequest: {
+      /** An inbox thread id, `thread:<proposalId>::inbox::-::-`. */
+      threadId: string;
+      /** Must be non-blank; stored trimmed. */
+      text: string;
+      /** Client idempotency key. The same caller token, thread and intentId always derive the same `replyId`, so a retry is answered `duplicate: true` rather than appended twice. */
+      intentId?: string;
+    };
+    /** POST /v1/inbox/thread/reply's 200 body. `delivery: delivered` means the reply is in the thread store; `audit` says separately whether its `inbox.thread_replied` ledger row was written (`recorded`), could not be written (`gap`), or could not be confirmed either way for a duplicate (`unverified`). */
+    InboxThreadReplyResult: {
+      ok: boolean;
+      delivery: "delivered";
+      audit: "recorded" | "gap" | "unverified";
+      replyId: string;
+      threadId: string;
+      waitingOn: "daemon";
+      /** True when this replyId was already stored with the same text. */
+      duplicate: boolean;
+    };
+    /** A non-2xx body from POST /v1/inbox/thread/reply's handler. `delivery` says whether the reply is known not to be stored (`not_delivered`) or cannot be confirmed (`unverified`). */
+    InboxThreadReplyRefusal: {
+      error: "not_found" | "reply_store_unavailable" | "reply_intent_conflict" | "reply_in_progress";
+      detail?: string;
+      delivery?: "not_delivered" | "unverified";
+      replyId?: string;
+      /** On `reply_intent_conflict` -- the stored reply's id, whose text differs from this one. */
+      priorReplyId?: string;
+    };
+    /** POST /v1/inbox/thread/read's body (src/lib/panel-graph.ts's `validateThreadRead`). */
+    InboxThreadReadRequest: {
+      threadId: string;
+      /** Mark read up to and including this message; must not exceed the thread's last `seq`. */
+      seq: number;
+    };
+    /** A bare acknowledgement: `{ ok: true }`. */
+    InboxOkResult: {
+      ok: boolean;
+    };
+    /** POST /v1/inbox/approve's body (src/lib/panel-graph.ts's `validateApproveProposal`). */
+    InboxProposalRequest: {
+      /** A proposal id from the active registry; must be non-blank. */
+      proposalId: string;
+    };
+    /** POST /v1/inbox/reframe's body (src/lib/panel-graph.ts's `validateReframeProposal`). */
+    InboxReframeRequest: {
+      proposalId: string;
+      /** The operator's feedback, captured verbatim; must be non-blank. */
+      feedback: string;
+    };
+    /** POST /v1/inbox/decline's and POST /v1/inbox/restore's body (src/lib/panel-graph.ts's `validateDeclineProposal`, shared by both). `reason` is required on restore too. */
+    InboxVerdictRequest: {
+      proposalId: string;
+      /** Recorded verbatim on the `panel.proposal_declined` / `panel.proposal_restored` row; must be non-blank. */
+      reason: string;
+    };
+    /** POST /v1/inbox/approve's and POST /v1/inbox/reframe's 200 body. `started` confirms only the hand-off to a detached `rmd approve` / `rmd reframe`; the resulting PR surfaces through the console's own polling. */
+    InboxProposalStartedResult: {
+      ok: boolean;
+      proposalId: string;
+      started: boolean;
+    };
+    /** POST /v1/inbox/decline's 200 body. */
+    InboxDeclineResult: {
+      ok: boolean;
+      proposalId: string;
+      declined: boolean;
+    };
+    /** POST /v1/inbox/restore's 200 body. */
+    InboxRestoreResult: {
+      ok: boolean;
+      proposalId: string;
+      restored: boolean;
+    };
+    /** A handler-level refusal from an inbox route, always with a human-readable `detail`. `not_found` (no active proposal / no current operator thread), `not_ready` (approve of a proposal not currently READY -- detail is `refusalReason`), `already_ratified`, `already_declined`, `not_declined` (src/lib/inbox.ts's `applyProposalVerdict`), `seq_ahead` (a read mark past the last message), `thread_store_unreadable`. */
+    InboxRefusal: {
+      error: "not_found" | "not_ready" | "already_ratified" | "already_declined" | "not_declined" | "seq_ahead" | "thread_store_unreadable";
+      detail: string;
+    };
+    /** POST /v1/escalation/reply's body (src/lib/panel-actions.ts's `validateEscalationReply`). `taskId`, `class`, `cause` and `prRef` derive the escalation's thread id (`thread:<taskId>::<class>::<cause|->::<prRef|->`, src/lib/inbox-thread.ts's `deriveThreadId`). */
+    EscalationReplyRequest: {
+      taskId: string;
+      class: string;
+      cause?: string;
+      /** A bare PR number string, as escalate.ts's `extractPrRef` keys it. */
+      prRef?: string;
+      /** The prose reply; must be non-blank. */
+      text: string;
+    };
+    /** One clarification the reply interpreter asks (src/lib/reply-interpreter.ts's `ClarifyingQuestion`). */
+    ClarifyingQuestion: {
+      id: string;
+      question: string;
+      /** What research already established before asking. */
+      established: string;
+    };
+    /** src/lib/reply-interpreter.ts's `InterpretReplyResult`, a union discriminated by `status`, flattened because this generator's subset has no oneOf: `question` is present exactly when `status` is `clarifying`, `unresolved` exactly when it is `exhausted`, and neither when it is `understood`. */
+    ReplyInterpretation: {
+      status: "understood" | "clarifying" | "exhausted";
+      question?: ClarifyingQuestion;
+      unresolved?: (ClarifyingQuestion)[];
+    };
+    /** POST /v1/escalation/reply's 200 body. `feedback` is the entry `captureFeedback` wrote (origin `ui`, keyed to the thread); `interpretation` is what the reply interpreter decided, and a clarifying question or exhaustion report has already been appended to the thread when it is not `understood`. */
+    EscalationReplyResult: {
+      ok: boolean;
+      taskId: string;
+      threadId: string;
+      feedback: FeedbackEntry;
+      interpretation: ReplyInterpretation;
+    };
+    /** The closed set of routes a signed escalation answer link may name, each at the write tier serve.ts registers for it (src/lib/escalate.ts's `ESCALATION_OPTION_ROUTES`). */
+    EscalationOptionRoute: "/v1/manual/approve" | "/v1/drain/kick" | "/v1/drain/run" | "/v1/inbox/approve" | "/v1/skills/run" | "/v1/control/pause" | "/v1/control/resume" | "/v1/control/stop" | "/v1/escalation/mark-handled" | "/v1/questions/answer" | "/v1/drain/feedback" | "/v1/auth/scope";
+    /** POST /v1/escalation/answer's 200 body. The answer is recorded as a reply on the escalation's own thread (`answered by link: <route>`); the named route is NOT executed. */
+    EscalationLinkAnswerResult: {
+      ok: boolean;
+      escalationId: string;
+      route: EscalationOptionRoute;
+    };
+    /** A JSON refusal from the signed escalation-link routes (src/lib/escalate.ts's `OptionLinkRefusal` plus the handler's own): `forged` (403, the signature does not verify), `bad-request` / `expired` / `already-used` (410), `invalid_request` (400, no thread store or no existing escalation thread -- the link is NOT consumed), `unavailable` (503, the signing secret could not be resolved). */
+    EscalationLinkRefusal: {
+      error: "bad-request" | "forged" | "expired" | "already-used" | "invalid_request" | "unavailable";
+      detail: string;
+    };
   };
   securitySchemes: {
     /** Read-scoped bearer token. Grants GET access to read-scoped routes and SSE streams. A write-scoped token also satisfies this scope (write is a superset of read). */
     bearerRead: { type: "http"; scheme: "bearer" };
     /** Write-scoped bearer token. Required for any route whose `scope` is `write` (src/lib/service.ts's `Scope`). */
     bearerWrite: { type: "http"; scheme: "bearer" };
+    /** W1-T4383 ingest-only bearer token (src/lib/service.ts's `ingestTokenProvider`). Grants exactly POST /v1/incidents/events and falls through to 401 on every other route. */
+    bearerIngest: { type: "http"; scheme: "bearer" };
   };
 }
 
@@ -1642,6 +2379,289 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+        };
+    };
+  };
+  "/v1/version": {
+    get: {
+      responses: {
+          "200": VersionResult;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/recent": {
+    get: {
+      responses: {
+          "200": RecentActivityResult;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/daemon-health": {
+    get: {
+      responses: {
+          "200": DaemonHealthSnapshot;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/account-usage": {
+    get: {
+      responses: {
+          "200": AccountUsageSnapshot;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/provider-routing": {
+    get: {
+      responses: {
+          "200": ProviderRoutingStatus;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/control/status": {
+    get: {
+      responses: {
+          "200": FleetControlStatus;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/task": {
+    get: {
+      responses: {
+          "200": TaskCardResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/plan/view": {
+    get: {
+      responses: {
+          "200": PlanViewResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/onboarding/readiness": {
+    get: {
+      responses: {
+          "200": OnboardingReadinessReport;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/peek": {
+    get: {
+      responses: {
+          "200": PeekResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/replay": {
+    get: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/self-measurement": {
+    get: {
+      responses: {
+          "200": (SelfMeasurementRows) | (SelfMeasurementUnreadable) | (SelfMeasurementDetail);
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/incidents": {
+    get: {
+      responses: {
+          "200": IncidentsResult;
+          "401": Error;
+          "403": Error;
+          "503": IncidentsUnavailable;
+        };
+    };
+  };
+  "/v1/incidents/events": {
+    post: {
+      responses: {
+          "200": IncidentEventResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "413": IncidentIngestBodyTooLarge;
+        };
+    };
+  };
+  "/v1/escalation/reply": {
+    post: {
+      responses: {
+          "200": EscalationReplyResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/escalation/confirm": {
+    get: {
+      responses: {
+          "200": undefined;
+          "403": undefined;
+          "410": undefined;
+          "503": EscalationLinkRefusal;
+        };
+    };
+  };
+  "/v1/escalation/answer": {
+    post: {
+      responses: {
+          "200": EscalationLinkAnswerResult;
+          "400": EscalationLinkRefusal;
+          "403": EscalationLinkRefusal;
+          "410": EscalationLinkRefusal;
+          "503": EscalationLinkRefusal;
+        };
+    };
+  };
+  "/v1/inbox": {
+    get: {
+      responses: {
+          "200": InboxResult;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/inbox/digests": {
+    get: {
+      responses: {
+          "200": InboxDigestsResult;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/inbox/threads": {
+    get: {
+      responses: {
+          "200": InboxThreadsResult;
+          "401": Error;
+          "403": Error;
+          "500": InboxRefusal;
+        };
+    };
+  };
+  "/v1/inbox/thread": {
+    get: {
+      responses: {
+          "200": InboxThreadDetail;
+          "401": Error;
+          "403": Error;
+          "404": InboxRefusal;
+          "500": InboxRefusal;
+        };
+    };
+  };
+  "/v1/inbox/thread/reply": {
+    post: {
+      responses: {
+          "200": InboxThreadReplyResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": InboxThreadReplyRefusal;
+          "409": InboxThreadReplyRefusal;
+          "503": InboxThreadReplyRefusal;
+        };
+    };
+  };
+  "/v1/inbox/thread/read": {
+    post: {
+      responses: {
+          "200": InboxOkResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": InboxRefusal;
+          "409": InboxRefusal;
+          "500": InboxRefusal;
+        };
+    };
+  };
+  "/v1/inbox/approve": {
+    post: {
+      responses: {
+          "200": InboxProposalStartedResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": InboxRefusal;
+          "409": InboxRefusal;
+        };
+    };
+  };
+  "/v1/inbox/reframe": {
+    post: {
+      responses: {
+          "200": InboxProposalStartedResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": InboxRefusal;
+        };
+    };
+  };
+  "/v1/inbox/decline": {
+    post: {
+      responses: {
+          "200": InboxDeclineResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": InboxRefusal;
+          "409": InboxRefusal;
+        };
+    };
+  };
+  "/v1/inbox/restore": {
+    post: {
+      responses: {
+          "200": InboxRestoreResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": InboxRefusal;
+          "409": InboxRefusal;
         };
     };
   };

@@ -61,6 +61,7 @@ import {
 } from "./status-board.js";
 import {
   buildBatchedGithub,
+  deriveStatus,
   readLedgerLines,
   taskIdFromRunBranch,
   type GitHub,
@@ -107,6 +108,10 @@ import { extractTaskTrailerId } from "./review.js";
 import { mapRestPr, singlePrRestArgs, type RestPullRow } from "./open-prs-rest.js";
 import { ghJson, GH_RATE_LIMIT_BUCKET_UNKNOWN } from "./github-transport.js";
 import { worktreesDir, readWorktreeBase } from "./worker.js";
+import { resolveRepoLayout } from "./repo-layout.js";
+import { systemClock } from "./clock.js";
+import { buildTaskCaseFile, readTaskCaseLedger, type CaseLedgerRead, type CasePrRead, type CasePrSnapshot } from "./task-case-file.js";
+import type { Task } from "./plan.js";
 
 /** Repository facts are resolved once by the CLI entrypoint and passed across this module
  * boundary. Keeping this seam optional preserves direct library use; its fallback is deliberately
@@ -807,6 +812,91 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
   } else {
     out(`${render(model)}\n\n${renderGhBucketsSection(ghBucketRefusals)}`);
   }
+  return 0;
+}
+
+/** One explicit PR read for an operator-requested case file. A rollup absence is unknown, not green. */
+export function parseCasePrSnapshot(value: unknown, readAt: string): CasePrRead {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { state: "unavailable", reason: "pr-response-invalid" };
+  const row = value as Record<string, unknown>;
+  if (!Number.isSafeInteger(row.number) || (row.number as number) <= 0 || typeof row.url !== "string"
+    || !["OPEN", "CLOSED", "MERGED"].includes(String(row.state))
+    || typeof row.headRefOid !== "string" || !/^[a-f0-9]{40}$/i.test(row.headRefOid)) {
+    return { state: "unavailable", reason: "pr-identity-invalid" };
+  }
+  const checks: CasePrSnapshot["checks"] = Array.isArray(row.statusCheckRollup)
+    ? row.statusCheckRollup.flatMap((entry: unknown) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+      const check = entry as Record<string, unknown>;
+      const name = typeof check.name === "string" ? check.name : typeof check.context === "string" ? check.context : null;
+      const raw = check.__typename === "StatusContext" ? check.state : check.conclusion ?? check.status;
+      if (!name || typeof raw !== "string") return [];
+      const state = raw.toLowerCase();
+      return [{ name, state: state === "success" ? "success" as const
+        : ["failure", "error", "cancelled", "timed_out", "action_required"].includes(state) ? "failure" as const
+          : "pending" as const }];
+    }) : null;
+  return { state: "observed", value: {
+    number: row.number as number, url: row.url, state: row.state as CasePrSnapshot["state"],
+    headSha: row.headRefOid, body: typeof row.body === "string" ? row.body : "",
+    mergedAt: typeof row.mergedAt === "string" ? row.mergedAt : null,
+    checks, readAt,
+  } };
+}
+
+export interface CaseFileCommandInput extends ReportRepoContext {
+  loadConfig?: () => Config;
+  buildGithub?: typeof buildBatchedGithub;
+  readGhPr?: typeof ghJson;
+  readTask?: (taskId: string) => Task | undefined;
+  readLedger?: (stateDir: string, taskId: string, asOf: string) => Promise<CaseLedgerRead>;
+  readProjection?: (task: Task, ledger: CaseLedgerRead) => StatusProjection | undefined;
+  readPr?: (number: number, owner: string, repo: string, readAt: string) => CasePrRead;
+  nowIso?: () => string;
+  stateDir?: string;
+  out?: (line: string) => void;
+  err?: (line: string) => void;
+  usage?: string;
+}
+
+/** `rmd case-file`: one task, bounded local ledger union, batched board read, one exact PR read. */
+export async function caseFileCommand(rest: string[], deps: CaseFileCommandInput = {}): Promise<number> {
+  const out = deps.out ?? ((line: string) => console.log(line));
+  const err = deps.err ?? ((line: string) => console.error(line));
+  const taskId = rest[0];
+  if (!taskId || !/^W\d+-T\d+$/.test(taskId) || rest.some((arg, index) => index > 0 && arg !== "--json")) {
+    err(`rmd case-file: expected <task-id> [--json]\n${deps.usage ?? ""}`);
+    return 2;
+  }
+  const root = reportRepoRoot(deps);
+  const asOf = (deps.nowIso ?? (() => systemClock.iso()))();
+  const task = deps.readTask ? deps.readTask(taskId) : loadPlan(resolveRepoLayout(root).planMonolith).byId.get(taskId);
+  if (!task) { err(`rmd case-file: ${taskId} is not in the plan`); return 2; }
+  const stateDir = deps.stateDir ?? join((deps.loadConfig ?? loadConfig)().root, "state");
+  const ledger = await (deps.readLedger ?? readTaskCaseLedger)(stateDir, taskId, asOf);
+  let projection: StatusProjection | undefined;
+  let prRead: CasePrRead = { state: "unavailable", reason: "github-not-read" };
+  let ownerRepo: { owner: string; repo: string } | undefined;
+  try {
+    ownerRepo = reportOwnerRepo(deps, root);
+    projection = deps.readProjection ? deps.readProjection(task, ledger) : deriveStatus(task, {
+      ledgerPath: ledgerPathFor((deps.loadConfig ?? loadConfig)()),
+      readLedger: () => ledger.state === "observed" ? ledger.rows : [],
+      github: (deps.buildGithub ?? buildBatchedGithub)(ownerRepo.owner, ownerRepo.repo),
+    });
+    if (projection?.prNumber !== undefined) {
+      prRead = deps.readPr ? deps.readPr(projection.prNumber, ownerRepo.owner, ownerRepo.repo, asOf)
+        : parseCasePrSnapshot((deps.readGhPr ?? ghJson)(["pr", "view", String(projection.prNumber), "--repo", `${ownerRepo.owner}/${ownerRepo.repo}`,
+          "--json", "number,url,state,headRefOid,body,mergedAt,statusCheckRollup"]), asOf);
+    } else {
+      prRead = { state: "unavailable", reason: "no-pr-in-current-projection" };
+    }
+  } catch (error) {
+    prRead = { state: "unavailable", reason: `github-read-failed:${error instanceof Error ? error.name : "unknown"}` };
+  }
+  const file = buildTaskCaseFile({ task, projection, ledger, prRead, asOf });
+  // JSON is also the default so every evidence state, source, and as-of remains machine-readable.
+  out(JSON.stringify(file, null, 2));
   return 0;
 }
 

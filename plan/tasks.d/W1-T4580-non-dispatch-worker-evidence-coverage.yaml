@@ -22,7 +22,7 @@
     - test/benchmark-worker-caller-census.test.ts
     - test/benchmark-nondispatch-attempts.test.ts
     - docs/model-routing.md
-  status: queued
+  status: merged
   rationale: |
     W1-T4578 covers every worker call through run-task's dispatch wrapper, not all worker
     entrypoints. W1-T4457 separately owns missing selection assignments in non-dispatch
