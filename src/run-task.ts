@@ -8838,7 +8838,10 @@ export function fixWorkerReceipt(
         assignment = selected;
         try {
           receipt("worker.assignment", { worker_assignment: selected });
-        } catch { /* named on the fix row as benchmark_receipt_unavailable_reason */ }
+        } catch {
+          const reason = "worker.assignment-ledger-write-failed";
+          receiptFailure ??= reason; // named on the fix row as benchmark_receipt_unavailable_reason
+        }
         args.onSelectionAssignment?.(selected);
       },
       onModelFallbackAttempt: dispatchFallbackObserver(receipt, args.onModelFallbackAttempt),
@@ -8848,7 +8851,8 @@ export function fixWorkerReceipt(
     try {
       fields = Object.fromEntries(Object.entries(workerLedgerFields(result)).filter(([, value]) => value !== undefined)); // absent, never undefined (W1-T2383)
     } catch {
-      fields = { worker_fields_unavailable_reason: "worker-result-fields-unavailable" };
+      const reason = "worker-result-fields-unavailable";
+      fields = { worker_fields_unavailable_reason: reason };
     }
     const assignmentId = result.selectionAssignmentId ?? assignment?.id;
     return {
