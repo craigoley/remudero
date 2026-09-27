@@ -881,7 +881,7 @@ import {
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, executingHarnessRevision, type BenchmarkStackEvidence } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence } from "./lib/benchmark-run.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
 // Prompt, tools, scorer and environment remain unavailable until immutable trial artifacts exist.
@@ -2226,6 +2226,7 @@ import {
   WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND,
   type RunLockInfo,
   type SpawnWorkerArgs,
+  type WorkerSelectionAssignment,
   type ForeignTreeStandDown, type RegisteredWorktree,
   type WorkerResult,
   type WorktreeReapSummary,
@@ -8836,6 +8837,68 @@ export function reclaimAbandonedWorker(
   }
 }
 
+/** W1-T4613: a fix worker's own run id, logged as `worker_run_id`. The caller's run id (liveness) and the
+ *  process marker (reclaim; the orphan sweep matches it to a held inflight lock) deliberately stay put. */
+export function fixWorkerRunId(callerRunId: string, label: string, startedAtMs: number): string {
+  return `${callerRunId}-${label}-${startedAtMs}`;
+}
+
+/** W1-T4613: one fix-rung spawn, receipted with dispatch's worker.assignment + worker.attempt pair under its own run id; wrappers
+ *  beneath stand aside (`withCallerOwnedReceipt`). `ledgerFields` = `workerLedgerFields` + the join ids. A receipt failure is
+ *  swallowed and named as an `*_unavailable_reason` field — it never changes the worker's result, its retry, or the fix. */
+export function fixWorkerReceipt(
+  spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  workerRunId: string,
+): {
+  spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+  ledgerFields: (result: WorkerResult) => Record<string, unknown>;
+} {
+  let assignment: WorkerSelectionAssignment | undefined;
+  let receiptFailure: string | undefined;
+  const receipt = benchmarkRunLedgerLogger((step, fields) => {
+    try {
+      log(step, { ...fields, worker_run_id: workerRunId, worker_rung: "fix" });
+    } catch (error) {
+      receiptFailure ??= `${step}-ledger-write-failed`;
+      throw error;
+    }
+  }, workerBoundaryStack);
+  const receipted = (args: SpawnWorkerArgs): Promise<WorkerResult> =>
+    recordBenchmarkWorkerAttempt(() => spawn(withCallerOwnedReceipt({
+      ...args,
+      onSelectionAssignment: (selected) => {
+        assignment = selected;
+        try {
+          receipt("worker.assignment", { worker_assignment: selected });
+        } catch {
+          const reason = "worker.assignment-ledger-write-failed";
+          receiptFailure ??= reason; // named on the fix row as benchmark_receipt_unavailable_reason
+        }
+        args.onSelectionAssignment?.(selected);
+      },
+      onModelFallbackAttempt: dispatchFallbackObserver(receipt, args.onModelFallbackAttempt),
+    })), receipt, () => assignment, () => {});
+  const ledgerFields = (result: WorkerResult): Record<string, unknown> => {
+    let fields: Record<string, unknown>;
+    try {
+      fields = Object.fromEntries(Object.entries(workerLedgerFields(result)).filter(([, value]) => value !== undefined)); // absent, never undefined (W1-T2383)
+    } catch {
+      const reason = "worker-result-fields-unavailable";
+      fields = { worker_fields_unavailable_reason: reason };
+    }
+    const assignmentId = result.selectionAssignmentId ?? assignment?.id;
+    return {
+      ...fields,
+      worker_run_id: workerRunId,
+      ...(assignmentId ? { selection_assignment_id: assignmentId } : { selection_assignment_unavailable_reason: "assignment-not-observed" }),
+      ...(assignment ? { requested_model: assignment.requested.model, selected_model: assignment.selected.model } : {}),
+      ...(receiptFailure ? { benchmark_receipt_unavailable_reason: receiptFailure } : {}),
+    };
+  };
+  return { spawn: receipted, ledgerFields };
+}
+
 /**
  * W1-T1044 — bounds ONE `deps.spawn` call by WALL-CLOCK elapsed time, so a worker that never
  * returns (this task's own measured incident: an `until` shell loop with no exit condition,
@@ -10401,11 +10464,10 @@ export async function runFixRung(opts: {
         // spawn already takes (spawnFixWorkerBounded) — this dispatch is never a strike (`strikes`
         // is read, never incremented, on this whole path) but it is still a real subprocess and
         // must never be allowed to hang the rung forever.
-        const spawnOutcome = await spawnFixWorkerBounded(deps, dispatchArgs, { runId: opts.runId, taskId: opts.taskId });
-        const prerequisiteUrl =
-          spawnOutcome.kind === "spawned"
-            ? parseReport(workerTranscript(deps.account(spawnOutcome.result)))?.prUrl
-            : undefined;
+        const prerequisiteReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, "prerequisite", systemClock.now()));
+        const spawnOutcome = await spawnFixWorkerBounded({ ...deps, spawn: prerequisiteReceipt.spawn }, dispatchArgs, { runId: opts.runId, taskId: opts.taskId });
+        const prerequisiteWorker = spawnOutcome.kind === "spawned" ? deps.account(spawnOutcome.result) : undefined;
+        const prerequisiteUrl = prerequisiteWorker ? parseReport(workerTranscript(prerequisiteWorker))?.prUrl : undefined;
         const target = prerequisiteUrl ? mergeTargetFromPrUrl(prerequisiteUrl) : undefined;
         if (!target) {
           // THE REFUSAL CONDITION (rationale (5)/(9)): the dispatched worker never produced a
@@ -10432,6 +10494,7 @@ export async function runFixRung(opts: {
           prerequisite_pr_url: prerequisiteUrl,
           instrument_paths: instrumentPaths,
           src_paths: srcPaths,
+          ...(prerequisiteWorker ? prerequisiteReceipt.ledgerFields(prerequisiteWorker) : {}),
         });
         prerequisitePr = target.prNumber;
       }
@@ -10707,13 +10770,14 @@ export async function runFixRung(opts: {
       // Unreadable HEAD: commitCount falls back to 0, as before this task — never a throw mid-dispatch.
     }
     const fixRoundStartedAtMs = systemClock.now();
+    const fixReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs));
     let fixResult: WorkerResult;
     // W1-T1219: the spawn's elapsed ms on the SUCCESS path, the field `fix.spawn_abandoned` carries
     // on failure, folded into `fix.dispatch` so a completed spawn's duration is measurable at all.
     let spawnElapsedMs: number | undefined;
     try {
       // W1-T1044: bounds this ONE spawn by wall-clock time (spawnFixWorkerBounded's doc: why).
-      const spawnOutcome = await spawnFixWorkerBounded(deps, fixArgs, {
+      const spawnOutcome = await spawnFixWorkerBounded({ ...deps, spawn: fixReceipt.spawn }, fixArgs, {
         runId: opts.runId,
         taskId: opts.taskId,
         snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) },
@@ -10792,8 +10856,9 @@ export async function runFixRung(opts: {
     ) {
       deps.log("fix.commit_line_requested", { strike: attempt, round });
       deps.say("fix rung: no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
+      const askReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}-ask`, systemClock.now()));
       const asked = await spawnFixWorkerBounded(
-        deps,
+        { ...deps, spawn: askReceipt.spawn },
         {
           ...fixArgs,
           prompt: missingCommitLinePrompt({
@@ -10812,7 +10877,7 @@ export async function runFixRung(opts: {
       deps.log("fix.commit_line_answered", {
         strike: attempt,
         outcome: asked.kind,
-        ...(answer ? { session_id: answer.sessionId, cost_usd: answer.costUsd, num_turns: answer.numTurns } : {}),
+        ...(answer ? { ...askReceipt.ledgerFields(answer), session_id: answer.sessionId, cost_usd: answer.costUsd, num_turns: answer.numTurns } : {}),
       });
       if (answer) {
         harnessCommitRefusalReason = undefined;
@@ -10932,6 +10997,7 @@ export async function runFixRung(opts: {
       });
     }
     deps.log("fix.done", {
+      ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
       strike: strikes,
       round,
       session_id: fixResult.sessionId,
@@ -14257,6 +14323,7 @@ async function runTask(
     const stopPolling = workerStateSensor.startPolling();
     let selectionAssignment: Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0] | undefined;
     const baseStreamObserver = effectiveSpawnArgs.streamObserver ?? workerStateSensor.observer;
+    const receiptLog: typeof log = callerOwnsBenchmarkReceipt(effectiveSpawnArgs) ? () => {} : log; // W1-T4613: fixWorkerReceipt owns it
     return recordBenchmarkWorkerAttempt(() => rawSpawn({
       ...effectiveSpawnArgs,
       // Every dispatch-phase worker inherits the run identity at the ONE wrapper that already owns its state/error telemetry, so the
@@ -14265,10 +14332,10 @@ async function runTask(
       taskId: effectiveSpawnArgs.taskId ?? taskId,
       onSelectionAssignment: (assignment) => {
         selectionAssignment = assignment;
-        log("worker.assignment", { worker_assignment: assignment });
+        receiptLog("worker.assignment", { worker_assignment: assignment });
         effectiveSpawnArgs.onSelectionAssignment?.(assignment);
       },
-      onModelFallbackAttempt: dispatchFallbackObserver(log, effectiveSpawnArgs.onModelFallbackAttempt),
+      onModelFallbackAttempt: dispatchFallbackObserver(receiptLog, effectiveSpawnArgs.onModelFallbackAttempt),
       onSpawnError:
         effectiveSpawnArgs.onSpawnError ??
         ((err) =>
@@ -14290,7 +14357,7 @@ async function runTask(
       // its own `clockBound` (none exist today) is respected; every future dispatch call site
       // through this wrapper is covered without remembering to add it individually.
       clockBound: effectiveSpawnArgs.clockBound ?? { boundMs: workerAbandonMs },
-      }), log, () => selectionAssignment, stopPolling);
+      }), receiptLog, () => selectionAssignment, stopPolling);
   };
   // W1-T143: a raw synchronous write, not console.log — this narration is exactly what the
   // daemon's `runOne` exercises on every dispatch, and console.log's async, non-TTY-buffered
