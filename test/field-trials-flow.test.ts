@@ -177,8 +177,8 @@ test("field trials join three repo ledger and GitHub histories with explicit mis
     assert.deepEqual(unmatchedPrs, [{ source: "core", number: 15 }]);
     assert.deepEqual(ambiguousPrs, [{ source: "core", number: 14, tasks: ["T4-core-task", "T5-core-task"] }]);
     const pr = sumStage(snapshot, "core", "pr");
-    assert.deepEqual([pr.denominator, pr.reached, pr.missingJoin, pr.missingReasons], [4, 2, 1, { "ledger-pr-not-in-github": 1 }],
-      "a ledger PR GitHub never returned is a missing join, never a task without a PR");
+    assert.deepEqual([pr.denominator, pr.reached, pr.missingJoin, pr.censored, pr.missingReasons], [4, 2, 1, 1, { "ledger-pr-not-in-github": 1 }],
+      "a ledger PR GitHub never returned is a missing join, and a task still in flight is censored, never a task without a PR");
     assert.equal(sumStage(snapshot, "site", "merge").reached, 1);
     assert.equal(Object.keys(snapshot.families.funnel).some((key) => key.startsWith("console|")), false, "no ledger, no invented tasks");
     assert.equal(sumOf(snapshot.families.repair, "core", (cells) => cells.mergedPrs), 2, "every merged PR is a repair unit, linked or not");
