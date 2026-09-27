@@ -1867,6 +1867,25 @@ export interface paths {
         };
     };
   };
+  "/v1/onboarding/repositories": {
+    get: {
+      responses: {
+          "200": {
+            state: "verified";
+            source: "fleet-app-installation" | "daemon-user-token";
+            observed_at: string;
+            repositories: (string)[];
+            total_count: number;
+          };
+          "401": Error;
+          "403": Error;
+          "503": {
+            state: "unavailable";
+            reason: "github_read_failed" | "incomplete_or_invalid_listing";
+          };
+        };
+    };
+  };
   "/v1/repos": {
     get: {
       responses: {
