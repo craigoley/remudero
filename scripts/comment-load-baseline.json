@@ -23,6 +23,7 @@
   "deploy/verify-image.sh": 322,
   "hooks/commit-msg": 37,
   "hooks/mkdtemp-allowlist.txt": 0,
+  "scripts/acceptance-author-gate.mjs": 500,
   "scripts/assertion-discrimination-baseline.json": 0,
   "scripts/assertion-discrimination-check.mjs": 58,
   "scripts/bound-kind-baseline.json": 0,

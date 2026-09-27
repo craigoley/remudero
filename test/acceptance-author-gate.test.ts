@@ -405,7 +405,11 @@ test("W1-T3414: source-changing and plan-only task controls pass, and unreadable
   assert.equal(planOnly.ok, true, planOnly.message);
 
   const unreadableTaskDeclaration = evaluateGate({
-    body: "## Acceptance\n\n- claim: plan filing\n  proof: grep: W1-T3414 in plan/tasks.d/W1-T3414.yaml\n",
+    // W1-T3675: this body's own proof must now name a path that actually EXISTS in this checkout
+    // (the shard's real, current filename), never the bare `W1-T3414.yaml` placeholder the other
+    // fixtures above still use — those are short-circuited by an earlier structural refusal before
+    // the new path-existence check ever runs, so they are unaffected; this one is not.
+    body: "## Acceptance\n\n- claim: plan filing\n  proof: grep: id in plan/tasks.d/W1-T3414-a-follow-up-commits-trailer-credits-the-whole-squash.yaml\n",
     authorLogin: "a-human",
     changedPaths: ["plan/tasks.d/W1-T3414.yaml"],
     taskFilesForId: () => {

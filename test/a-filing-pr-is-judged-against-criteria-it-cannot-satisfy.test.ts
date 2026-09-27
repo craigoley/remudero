@@ -16,6 +16,9 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
 import { filingSelfCreditCheck } from "../src/lib/review.js";
 // @ts-expect-error — `scripts/**` sits outside tsconfig's `include`, so this executable .mjs has
@@ -29,7 +32,22 @@ const evaluateGate = authorGate.evaluateGate as (input: {
   authorLogin?: string;
   trailerResolves?: (taskId: string) => boolean;
   introducedTaskIds?: readonly string[];
+  root?: string;
 }) => { ok: boolean; defect?: string; message: string };
+
+/** W1-T3675: `evaluateGate` now stats a `grep:` proof's own target against `root`. `FILING_BODY`
+ *  below greps a shard this PR is (in the scenario) FILING — genuinely present in a real filing
+ *  PR's own checkout, but not on THIS repo's real disk (the id is a fixture, never actually
+ *  filed). Seed a throwaway root with that one file so the fixture matches a real checkout's
+ *  shape, exactly the root-injection convention every other structural predicate here already
+ *  uses — never a claim that the check itself should look away from a filing PR's own shard. */
+function rootWithFilingShard(): { root: string; cleanup: () => void } {
+  const root = mkdtempSync(join(tmpdir(), "rmd-filing-pr-criteria-"));
+  const shard = join(root, "plan", "tasks.d", "W1-T3231-x.yaml");
+  mkdirSync(dirname(shard), { recursive: true });
+  writeFileSync(shard, "- id: W1-T3231\n  title: x\n");
+  return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
 
 const introducedShardTaskIds = authorGate.introducedShardTaskIds as (opts: {
   baseSha?: string;
@@ -105,7 +123,12 @@ test("W1-T3231: a diff the gate cannot read introduces nothing — it never refu
   assert.deepEqual(introducedShardTaskIds({ git: threw }), []);
   assert.deepEqual(introducedShardTaskIds({ baseSha: "aaa", git: threw }), []);
   // ...and that empty set is what makes the gate pass, not merely not-crash.
-  assert.equal(evaluateGate({ body: FILING_BODY, introducedTaskIds: [] }).ok, true);
+  const { root, cleanup } = rootWithFilingShard();
+  try {
+    assert.equal(evaluateGate({ body: FILING_BODY, introducedTaskIds: [], root }).ok, true);
+  } finally {
+    cleanup();
+  }
 });
 
 test("W1-T3231: an added shard's declared id is read from the head blob, and one unreadable shard costs only itself", () => {
