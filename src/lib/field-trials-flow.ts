@@ -18,7 +18,7 @@
  * key appears. Falsifier: test/field-trials-flow.test.ts (merge-as-deployment reddens it).
  */
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
@@ -993,8 +993,14 @@ function readJson(path: string): unknown {
 /** The local, rotatable pseudonym salt. Deleting the file rotates every pseudonym on the next release. */
 function pseudonymSalt(outDir: string): string {
   const path = join(outDir, "field-trials-pseudonym-salt");
-  if (!existsSync(path)) writeFileSync(path, randomBytes(32).toString("hex"), { mode: 0o600 });
-  return readFileSync(path, "utf8").trim();
+  const salt = randomBytes(32).toString("hex");
+  try {
+    writeFileSync(path, salt, { mode: 0o600, flag: "wx" });
+    return salt;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    return readFileSync(path, "utf8").trim();
+  }
 }
 
 export interface FieldTrialsCommandInput {
