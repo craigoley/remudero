@@ -318,13 +318,9 @@ export interface WorkerResult {
 export const DEFAULT_MODEL_LABEL = "default";
 export const DEFAULT_EFFORT_LABEL = "default";
 
-/**
- * The routing decision recorded immediately before a worker call. This is an assignment record,
- * not a provider receipt: {@link WorkerResult.servedModel} remains the only field that may say
- * what a provider actually reported serving. The bounded capacity snapshot makes a later policy
- * proposal reproducible without retaining a prompt, credential, reset-credit id, or raw account
- * response.
- */
+/** The routing decision recorded just before a worker call: an assignment, not a provider receipt
+ * ({@link WorkerResult.servedModel} alone says what was served). Its bounded capacity snapshot makes a
+ * later policy proposal reproducible without keeping a prompt, credential, reset-credit id or raw response. */
 export interface WorkerSelectionAssignment {
   version: 1;
   id: string;
@@ -357,9 +353,7 @@ export interface WorkerSelectionAssignment {
     capabilityPreference?: { capability: string; provider: WorkerProviderId };
     /** WHY: the rule that fired, what it weighed, and each subscription's headroom at that moment. */
     decision?: RoutingDecision;
-    /** W1-T4617: each candidate's selection probability, the draw and its seed. */
     propensity?: RoutingPropensity;
-    /** W1-T4617: an experiment's intention to treat -- assigned arm, served arm, crossover. */
     experiment?: ExperimentIntentionToTreat;
   };
   candidates: Array<{
