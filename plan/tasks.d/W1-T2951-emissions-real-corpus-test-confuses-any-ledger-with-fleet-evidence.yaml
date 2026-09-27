@@ -52,10 +52,13 @@
     - claim: "the default-state smoke test still executes the complete emissions command and validates its exit code, heading, corpus line, verb census and unauditable section without deriving semantic liveness from mutable host contents"
       proof: "unit test: test/emissions.test.ts"
     - claim: "the focused suite passes with an empty default state root and with unrelated ledger rows written there before the real-corpus smoke test"
+      kind: guard
       proof: "isolated test run: test/emissions.test.ts"
     - claim: "production emissions logic, corpus enumeration, state-root selection, ledger contents and allowlist are unchanged"
+      kind: guard
       proof: "diff assertion and unit test: test/emissions.test.ts is the only changed implementation file"
     - claim: "restoring the old any-corpus-implies-fleet inference makes the unrelated-event regression fail while the repaired suite passes"
+      kind: guard
       proof: "recorded strict-TDD falsifier: test/emissions.test.ts"
   falsifier: |
     Close without implementation if current main's host-dependent smoke test already limits itself
