@@ -1049,8 +1049,8 @@ export function gatePrewarmOnClients(
     noteRead,
     route: {
       ...route,
-      subscribe: (send) => {
-        const unsubscribe = route.subscribe(send);
+      subscribe: (send, req) => {
+        const unsubscribe = route.subscribe(send, req);
         clients += 1;
         // 0 -> 1 ONLY. A second viewer must not start a second timer (which would double the
         // very call rate this exists to bound) and must not re-warm off-cadence. `start` is
@@ -1601,8 +1601,8 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     wrapSse(route) {
       return {
         ...route,
-        subscribe: (send) => {
-          const unsubscribe = route.subscribe(send);
+        subscribe: (send, req) => {
+          const unsubscribe = route.subscribe(send, req);
           clients += 1;
           let released = false;
           return () => {

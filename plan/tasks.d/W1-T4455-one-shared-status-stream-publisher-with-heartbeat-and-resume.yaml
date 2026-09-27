@@ -14,12 +14,23 @@
   files:
     - src/lib/status-stream-publisher.ts
     - src/lib/board.ts
+    - src/lib/service.ts
+    - src/lib/serve.ts
+    - test/board.test.ts
+    - test/status-stream-wire.test.ts
+    - test/serve-prewarm-clientgate.test.ts
+    - test/serve-stale-code-exit.test.ts
+    - test/spend-observability-fields.test.ts
   note: |
     RELEASED 2026-09-25: the reserved build is abandoned. Its only implementation PR (#7002) was closed
     without merge after the plan still showed unmet dependency W1-T4451; that dependency has since shipped
     as #6993. The original `run-W1-T4455-*` branch is absent, there is no open implementation PR, and no
     active builder remains. The task is eligible again through the ordinary selector; its declared
     dependency, high-risk declaration, and acceptance requirements are unchanged; only the dispatch hold is released.
+    2026-09-27 scope correction: the original two-file list could not deliver the already-declared
+    SSE wire contract. The transport owns id/comment framing, and both serve wrappers must carry
+    Last-Event-ID to the board route. The added files and executable tests are that same contract,
+    not a new feature or a PR-flow gate.
   status: queued
   attempts: 0
   rationale: |

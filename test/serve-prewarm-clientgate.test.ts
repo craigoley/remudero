@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import type { IncomingMessage } from "node:http";
 
 import { gatePrewarmOnClients, DEFAULT_BOARD_PREWARM_MS } from "../src/lib/serve.js";
 import type { SseRoute, SseSend } from "../src/lib/service.js";
@@ -7,6 +8,17 @@ import type { GitHub } from "../src/lib/status.js";
 
 const INTERVAL = 20;
 const SEND: SseSend = () => {};
+
+test("prewarm SSE wrapper preserves Last-Event-ID request context", () => {
+  const req = { headers: { "last-event-id": "boot:7" } } as unknown as IncomingMessage;
+  let received: IncomingMessage | undefined;
+  const route: SseRoute = { path: "/v1/status/stream", scope: "read",
+    subscribe: (_send, request) => { received = request; return () => {}; } };
+  const gated = gatePrewarmOnClients(route, countingGithub(), 1000);
+  const release = gated.route.subscribe(SEND, req);
+  try { assert.strictEqual(received, req); }
+  finally { release(); gated.stop(); }
+});
 
 /**
  * Yield one macrotask turn. Since W1-T3192 the first warm is SCHEDULED rather than run on the
