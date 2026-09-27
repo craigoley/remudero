@@ -160,7 +160,7 @@ test("a refusal's ledgered reason describes the refusal, never the semantic gate
 test("armOutcomeReason maps every outcome to a reason about that outcome", () => {
   const all: Array<ArmOutcome | "skipped"> = [
     "armed", "direct-merged", "ledger-refused", "no-task-id",
-    "head-unavailable", "direct-merge-failed", "arm-error-ignored", "skipped",
+    "head-unavailable", "direct-merge-failed", "arm-error-ignored", "stack-parent-refused", "skipped",
   ];
 
   const reasons = all.map((o) => armOutcomeReason(o, "verdict is a full PASS"));
@@ -171,6 +171,13 @@ test("armOutcomeReason maps every outcome to a reason about that outcome", () =>
     assert.notEqual(reasons[i], "verdict is a full PASS", `${o}: a non-arming outcome must not read as an approval`);
     assert.ok(reasons[i].length > 20, `${o}: says something specific`);
   }
+});
+
+test("W1-T4581 stack-parent refusal is non-armed and has a specific reason", () => {
+  const reason = armOutcomeReason("stack-parent-refused", "verdict is a full PASS");
+
+  assert.notEqual(reason, "verdict is a full PASS", "a refused outcome must not carry the semantic approval reason");
+  assert.match(reason, /stacked parents that are not all merged.*W1-T4581.*arm and direct merge both refused/);
 });
 
 // ── 8: TRAP 2 — the withdrawal still beats the post; the arm still follows it ───────

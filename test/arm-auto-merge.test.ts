@@ -24,12 +24,14 @@ import { readLedgerLines } from "../src/lib/status.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import {
   armAutoMerge,
+  armAutoMergeAtOpen,
   armIfVerdictPermits,
   attemptArm,
   disarmAutoMerge,
   fixRebaseMergeFactsFromRest,
   ghUpdateBranch,
   readHeadShaRest,
+  stackPrerequisiteFromRest,
   type ArmDeps,
 } from "../src/lib/arm-auto-merge.js";
 
@@ -57,6 +59,7 @@ function harness() {
     armAuto: (prUrl) => void ghCalls.push({ verb: "armAuto", prUrl }),
     mergeDirect: (prUrl) => void ghCalls.push({ verb: "mergeDirect", prUrl }),
     disableAuto: (prUrl) => void ghCalls.push({ verb: "disableAuto", prUrl }),
+    stackPrerequisite: () => ({ state: "unstacked", parentNumbers: [] }),
     say: (m) => void said.push(m),
   };
 
@@ -81,6 +84,131 @@ test("armAutoMerge, driven through the lib module directly: a PASSING ledgered v
 
   assert.equal(outcome, "armed", "the W1-T230 ledger gate reads the review.posted row and permits arming");
   assert.deepEqual(h.ghCalls, [{ verb: "armAuto", prUrl: PR }], "exactly one gh armAuto call, for this PR, and no other gh verb");
+  h.cleanup();
+});
+
+test("W1-T4581 parses the complete declared parent chain and fails closed on a malformed stack marker", () => {
+  const inspect = (body: string) =>
+    stackPrerequisiteFromRest(PR.replace("/2887", "/1766"), (args) =>
+      args[1] === "repos/craigoley/remudero/pulls/1766"
+        ? { body }
+        : { state: "closed", merged_at: "2026-09-26T19:00:00Z" },
+    );
+  assert.deepEqual(inspect("**Stacked on #1765 → #1764**: child"), { state: "ready", parentNumbers: [1765, 1764] });
+  assert.deepEqual(inspect("Stacked on #1765 -> #1764"), { state: "ready", parentNumbers: [1765, 1764] });
+  assert.deepEqual(inspect("ordinary PR body"), { state: "unstacked", parentNumbers: [] });
+  const malformed = inspect("**Stacked on → #1764**");
+  assert.equal(malformed.state, "unreadable");
+  assert.match(malformed.detail ?? "", /no valid parent chain/);
+  const danglingArrow = inspect("Stacked on #1765 →");
+  assert.equal(danglingArrow.state, "unreadable");
+  assert.match(danglingArrow.detail ?? "", /parent chain is malformed/);
+  const invalidNumber = inspect("Stacked on #0");
+  assert.equal(invalidNumber.state, "unreadable");
+  assert.match(invalidNumber.detail ?? "", /invalid PR number/);
+  const selfParent = inspect("Stacked on #1766");
+  assert.equal(selfParent.state, "unreadable");
+  assert.deepEqual(selfParent.parentNumbers, [1766]);
+  assert.match(selfParent.detail ?? "", /declares itself as a stack parent/);
+  const overlong = `Stacked on ${Array.from({ length: 21 }, (_, index) => `#${index + 1}`).join(" → ")}`;
+  const overlongResult = inspect(overlong);
+  assert.equal(overlongResult.state, "unreadable");
+  assert.match(overlongResult.detail ?? "", /20-parent safety bound/);
+});
+
+test("W1-T4581 REST reader requires every parent merged and fails closed on unreadable data", () => {
+  const body = "**Stacked on #1765 → #1764**: child";
+  const rows = new Map<string, unknown>([
+    ["repos/craigoley/remudero/pulls/1766", { body }],
+    ["repos/craigoley/remudero/pulls/1765", { state: "closed", merged_at: "2026-09-26T19:00:00Z" }],
+    ["repos/craigoley/remudero/pulls/1764", { state: "open", merged_at: null }],
+  ]);
+  const calls: string[] = [];
+  const fetch = (args: string[]) => {
+    const path = args[1];
+    calls.push(path);
+    if (path === "repos/craigoley/remudero/pulls/1764") return rows.get(path);
+    return rows.get(path);
+  };
+  const blocked = stackPrerequisiteFromRest(PR.replace("/2887", "/1766"), fetch);
+  assert.deepEqual(blocked, {
+    state: "blocked",
+    parentNumbers: [1765, 1764],
+    pendingParentNumbers: [1764],
+    detail: "declared parent(s) #1764 are not merged",
+  });
+  assert.deepEqual(calls, [
+    "repos/craigoley/remudero/pulls/1766",
+    "repos/craigoley/remudero/pulls/1765",
+    "repos/craigoley/remudero/pulls/1764",
+  ]);
+
+  rows.set("repos/craigoley/remudero/pulls/1764", { state: "closed", merged_at: "2026-09-25T19:00:00Z" });
+  assert.deepEqual(stackPrerequisiteFromRest(PR.replace("/2887", "/1766"), fetch), {
+    state: "ready",
+    parentNumbers: [1765, 1764],
+  });
+
+  const unreadableBody = stackPrerequisiteFromRest(PR, () => ({ state: "open" }));
+  assert.equal(unreadableBody.state, "unreadable", "a missing body cannot be interpreted as an unstacked PR");
+  const nonTextBody = stackPrerequisiteFromRest(PR, () => ({ body: 42 }));
+  assert.equal(nonTextBody.state, "unreadable");
+  assert.match(nonTextBody.detail ?? "", /body was not readable text/);
+  const failedBodyRead = stackPrerequisiteFromRest(PR, () => {
+    throw new Error("body request refused");
+  });
+  assert.equal(failedBodyRead.state, "unreadable");
+  assert.match(failedBodyRead.detail ?? "", /could not read this PR's body: body request refused/);
+  const unreadableParent = stackPrerequisiteFromRest(PR.replace("/2887", "/1766"), (args) => {
+    if (args[1].endsWith("/1766")) return { body };
+    throw new Error("REST unavailable");
+  });
+  assert.equal(unreadableParent.state, "unreadable");
+  assert.match(unreadableParent.detail ?? "", /could not read declared parent #1765/);
+  const unknownParent = stackPrerequisiteFromRest(PR.replace("/2887", "/1766"), (args) =>
+    args[1].endsWith("/1766") ? { body } : { state: "mystery", merged_at: null },
+  );
+  assert.equal(unknownParent.state, "unreadable");
+  assert.match(unknownParent.detail ?? "", /parent #1765 returned an unknown state \(MYSTERY\)/);
+});
+
+test("W1-T4581 open-time and ledger-gated arms refuse with an unmerged parent", () => {
+  const h = harness();
+  h.writeReviewPosted();
+  h.armDeps.stackPrerequisite = () => ({
+    state: "blocked",
+    parentNumbers: [1765],
+    pendingParentNumbers: [1765],
+    detail: "declared parent #1765 is not merged",
+  });
+
+  assert.equal(armAutoMerge(PR, TASK_ID, h.armDeps), "stack-parent-refused");
+  assert.deepEqual(h.ghCalls, [], "ledger-gated auto-merge must not arm or direct-merge the child");
+  assert.ok(h.said.some((line) => line.includes("automerge.stack_parent_refused")));
+
+  const openTimeCalls: string[] = [];
+  const openTime = armAutoMergeAtOpen(
+    PR,
+    {
+      armAuto: () => openTimeCalls.push("arm"),
+      mergeDirect: () => openTimeCalls.push("merge"),
+      isMerged: () => false,
+      stackPrerequisite: h.armDeps.stackPrerequisite,
+      say: () => undefined,
+    },
+  );
+  assert.equal(openTime, "stack-parent-refused");
+  assert.deepEqual(openTimeCalls, [], "at-open auto-merge must use the same parent-order gate");
+  h.cleanup();
+});
+
+test("W1-T4581 a stacked PR may arm only after the complete declared parent chain reads merged", () => {
+  const h = harness();
+  h.writeReviewPosted();
+  h.armDeps.stackPrerequisite = () => ({ state: "ready", parentNumbers: [1765, 1764] });
+
+  assert.equal(armAutoMerge(PR, TASK_ID, h.armDeps), "armed");
+  assert.deepEqual(h.ghCalls, [{ verb: "armAuto", prUrl: PR }]);
   h.cleanup();
 });
 

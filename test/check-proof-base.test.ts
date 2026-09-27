@@ -433,3 +433,18 @@ test("a base run that itself cannot execute (e.g. an unreadable base file on dis
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test("check-proof refuses --repo when its owner/name value is missing or malformed", () => {
+  const errors: string[] = [];
+  const realError = console.error;
+  console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
+  try {
+    for (const argv of [["--repo"], ["--repo", "craigoley"]]) {
+      errors.length = 0;
+      assert.equal(checkProofCommand(argv), CHECK_PROOF_EXIT.refused, `argv ${JSON.stringify(argv)} must refuse`);
+      assert.match(errors.join("\n"), /--repo needs <owner\/name>/, "the CLI explains the required value");
+    }
+  } finally {
+    console.error = realError;
+  }
+});

@@ -71,6 +71,107 @@ function parsePrUrl(prUrl: string): { owner: string; repo: string; number: numbe
   return m ? { owner: m[1], repo: m[2], number: Number(m[3]) } : undefined;
 }
 
+/** The result of reading one PR's explicit stack declaration and every parent it names. */
+export interface StackPrerequisiteCheck {
+  state: "unstacked" | "ready" | "blocked" | "unreadable";
+  parentNumbers: number[];
+  pendingParentNumbers?: number[];
+  detail?: string;
+}
+
+/** Parse only the explicit first-line `Stacked on #N → #M` convention used by PR descriptions.
+ *  `declared: false` means no stack marker; a malformed marker is distinct and must fail closed. */
+function stackedParentNumbersFromBody(
+  body: string,
+): { declared: false; parentNumbers: [] } | { declared: true; parentNumbers: number[]; error?: string } {
+  const line = body.split(/\r?\n/).find((candidate) => /^\s*(?:[-*]\s+)?(?:\*\*)?Stacked on\b/i.test(candidate));
+  if (!line) return { declared: false, parentNumbers: [] };
+  const match = /^\s*(?:[-*]\s+)?(?:\*\*)?Stacked on\s+(#\d+(?:(?:\s*→\s*|\s*->\s*)#\d+)*)/i.exec(line);
+  if (!match) return { declared: true, parentNumbers: [], error: "the Stacked on declaration has no valid parent chain" };
+  const remainder = line.slice(match[0].length).trimStart();
+  if (/^(?:→|->)/.test(remainder)) {
+    return { declared: true, parentNumbers: [], error: "the Stacked on parent chain is malformed" };
+  }
+  const parentNumbers = [...match[1].matchAll(/#(\d+)/g)].map((entry) => Number(entry[1]));
+  if (parentNumbers.length === 0 || parentNumbers.some((number) => !Number.isSafeInteger(number) || number < 1)) {
+    return { declared: true, parentNumbers: [], error: "the Stacked on parent chain contains an invalid PR number" };
+  }
+  if (parentNumbers.length > 20) {
+    return { declared: true, parentNumbers: [], error: "the Stacked on parent chain exceeds the 20-parent safety bound" };
+  }
+  return { declared: true, parentNumbers: [...new Set(parentNumbers)] };
+}
+
+/**
+ * W1-T4581 — read a PR's declared stack over REST and require every ancestor in its explicit
+ * `Stacked on` chain to be merged. A missing body, malformed declaration, unreadable parent, or
+ * open/closed-unmerged parent never becomes permission to arm. Injected `fetch` keeps this seam
+ * deterministic in tests; the production caller uses ghJson.
+ */
+export function stackPrerequisiteFromRest(prUrl: string, fetch: GhApiFetcher = ghJson): StackPrerequisiteCheck {
+  const target = parsePrUrl(prUrl);
+  if (!target) return { state: "unreadable", parentNumbers: [], detail: `cannot resolve pull-request URL: ${prUrl}` };
+  let raw: unknown;
+  try {
+    raw = fetch(singlePrRestArgs(target.owner, target.repo, target.number));
+  } catch (e) {
+    // An unreadable PR body is not evidence that the PR is unstacked; preserve the failure reason.
+    return {
+      state: "unreadable",
+      parentNumbers: [],
+      detail: `could not read this PR's body: ${String((e as Error)?.message ?? e)}`,
+    };
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) || !("body" in raw)) {
+    return { state: "unreadable", parentNumbers: [], detail: "the PR REST response did not include a body" };
+  }
+  const body = (raw as Partial<RestPullRow>).body;
+  if (body === null) return { state: "unstacked", parentNumbers: [] };
+  if (typeof body !== "string") {
+    return { state: "unreadable", parentNumbers: [], detail: "the PR REST body was not readable text" };
+  }
+  const declaration = stackedParentNumbersFromBody(body);
+  if (!declaration.declared) return { state: "unstacked", parentNumbers: [] };
+  const parentNumbers = declaration.parentNumbers;
+  if (declaration.error) return { state: "unreadable", parentNumbers, detail: declaration.error };
+  if (parentNumbers.includes(target.number)) {
+    return { state: "unreadable", parentNumbers, detail: "the PR declares itself as a stack parent" };
+  }
+
+  const pendingParentNumbers: number[] = [];
+  for (const parentNumber of parentNumbers) {
+    let parentState: string;
+    try {
+      parentState = liveStateFromRest(target.owner, target.repo, parentNumber, fetch);
+    } catch (e) {
+      // A failed parent lookup must remain distinct from MERGED or CLOSED, so callers fail closed.
+      return {
+        state: "unreadable",
+        parentNumbers,
+        detail: `could not read declared parent #${parentNumber}: ${String((e as Error)?.message ?? e)}`,
+      };
+    }
+    if (parentState === "MERGED") continue;
+    if (parentState === "OPEN" || parentState === "CLOSED") {
+      pendingParentNumbers.push(parentNumber);
+      continue;
+    }
+    return {
+      state: "unreadable",
+      parentNumbers,
+      detail: `declared parent #${parentNumber} returned an unknown state (${parentState})`,
+    };
+  }
+  return pendingParentNumbers.length > 0
+    ? {
+        state: "blocked",
+        parentNumbers,
+        pendingParentNumbers,
+        detail: `declared parent(s) ${pendingParentNumbers.map((number) => `#${number}`).join(", ")} are not merged`,
+      }
+    : { state: "ready", parentNumbers };
+}
+
 /** Private mirror of run-task.ts's `prNumberFromRef` — used only by {@link logArmAttribution} and
  *  {@link attemptArm}'s hold check, both of which are always handed a full PR URL in production. */
 function prNumberFromRef(ref: string): number | undefined {
@@ -329,6 +430,8 @@ export interface ArmDeps {
   /** W1-T4405 — OPTIONAL. `gh pr merge <url>`: on a queue branch this ENQUEUES the PR (the queue
    *  owns the merge method), where the REST merge endpoint would be refused as a queue bypass. */
   enqueue?: (prUrl: string) => void;
+  /** W1-T4581 — explicit stack parents must all be merged before either arm or direct-merge path. */
+  stackPrerequisite?: (prUrl: string) => StackPrerequisiteCheck;
   say: (msg: string) => void;
 }
 
@@ -395,6 +498,7 @@ export function realArmDeps(
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
       ghExec(["pr", "merge", prUrl], { encoding: "utf8", stdio: "pipe" });
     },
+    stackPrerequisite: (prUrl) => stackPrerequisiteFromRest(prUrl),
     say: (msg) => console.log(msg),
   };
 }
@@ -448,7 +552,9 @@ export type ArmOutcome =
   | "hold-refused"
   // W1-T3551: {@link attemptArm} refused because the PR was a draft — GitHub refuses auto-merge
   // on a draft, so this is named distinctly rather than surfacing as a generic arm failure.
-  | "draft-refused";
+  | "draft-refused"
+  // W1-T4581: a declared stack parent is unmerged or its state could not be read.
+  | "stack-parent-refused";
 
 /**
  * W1-T1079: {@link attemptArm}'s outcome PLUS the raw failure text it captured, when there was
@@ -689,7 +795,7 @@ export const REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS = 2_000;
 export function attemptArm(
   prUrl: string,
   deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "sleepSync" | "mergeQueue" | "enqueue">>,
+    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
   priorHeadSha?: string,
   // W1-T3551: read off `OpenPrView.isDraft` (POSITIVE match only — `undefined`/`false` both fall
   // through unchanged). This is the ONE shared call site {@link armAutoMergeDetailed} (ledger-gated
@@ -719,6 +825,24 @@ export function attemptArm(
           `arm withheld: ${prUrl}`,
       );
       return { outcome: "hold-refused" };
+    }
+  }
+  if (deps.stackPrerequisite) {
+    let stack: StackPrerequisiteCheck;
+    try {
+      stack = deps.stackPrerequisite(prUrl);
+    } catch (e) {
+      // Do not erase a failed prerequisite read into permission to arm or directly merge.
+      stack = {
+        state: "unreadable",
+        parentNumbers: [],
+        detail: `stack prerequisite read threw: ${String((e as Error)?.message ?? e)}`,
+      };
+    }
+    if (stack.state !== "unstacked" && stack.state !== "ready") {
+      const detail = stack.detail ?? `stack prerequisite state was ${stack.state}`;
+      deps.say(`automerge.stack_parent_refused (W1-T4581): ${detail} — arm withheld: ${prUrl}`);
+      return { outcome: "stack-parent-refused", error: detail };
     }
   }
   if (deps.mergeQueue?.(prUrl)) return attemptQueueArm(prUrl, deps);
@@ -883,7 +1007,7 @@ function attemptQueueArm(
 export function armAutoMergeAtOpen(
   prUrl: string,
   deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "sleepSync">>) = realArmDeps(),
+    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "sleepSync" | "stackPrerequisite">>) = realArmDeps(),
   irreversible = false,
   // W1-T3551: threaded straight through to {@link attemptArm}'s shared gate — see that function's
   // own doc. Defaults false, so every existing call site (which predates this parameter and never
@@ -1140,6 +1264,8 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
       return "an operator merge hold (W1-T1000002) stands over this PR — auto-merge refuses regardless of verdict; only an explicit release lifts it";
     case "draft-refused":
       return "the pull request is a draft (W1-T3551) — GitHub refuses auto-merge on a draft regardless of verdict; held until marked ready for review";
+    case "stack-parent-refused":
+      return "the PR declares stacked parents that are not all merged, or their state could not be read (W1-T4581) — arm and direct merge both refused";
     case "skipped":
       return "the semantic gate refused before any arm was attempted";
   }

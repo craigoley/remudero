@@ -45,3 +45,10 @@
   falsifier: |
     CLOSE IF the operator rules the maintained projection unnecessary given W1-T4454's worker-thread
     projections, and record that ruling instead.
+  note: |
+    DEFERRED BY OPERATOR RULING, 2026-09-27 (DECISIONS.md "W1-T4568: the materialized read model is
+    DEFERRED"). Its prerequisites shipped, and together with W1-T4452, W1-T4567 and W1-T4582 every GET read
+    route now answers a warm request without re-opening a ledger archive: W1-T4576's reach census baseline
+    (CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE) is empty. `verify: human` keeps it parked from fleet dispatch;
+    an operator releases it when any of these holds: (a) that baseline is non-empty again; (b) a console read route's first request after a serve
+    restart exceeds 5 s on the live corpus; (c) the ledger corpus grows past 5 GB compressed or 10M rows.

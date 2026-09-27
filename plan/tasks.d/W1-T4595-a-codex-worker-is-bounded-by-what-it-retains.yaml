@@ -1,0 +1,43 @@
+- id: W1-T4595
+  title: "A CODEX WORKER IS KILLED FOR HOW MUCH IT SAYS, NOT HOW MUCH IS KEPT — CODEX_WORKER_STDOUT_MAX_BYTES (1 MiB) caps the TOTAL stdout stream although CodexJsonlAccumulator already parses it incrementally, so 98 builds died just past 1 MiB (1.07-1.11 MB observed)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-27: found while verifying W1-T4590 restored consumer builds"
+  plan_refs: ["W1-T3490", "W1-T3502", "W1-T3787", "W1-T4590"]
+  files:
+    - src/lib/worker-provider.ts
+    - test/a-codex-worker-is-bounded-by-what-it-retains.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27 across the fleet ledgers (every rotation form): 98 verdicts 'Codex worker
+    stdout output exceeded its 1048576-byte retention budget' since 2026-09-13 — 88 core (W1-T3390,
+    W1-T3394, W1-T3395, W1-T3397, W1-T3525, ... and RETRO/TRIAGE lanes), 9 console (API-T34,
+    API-T56, CONSOLE-T2, CONSOLE-T15, CONSOLE-T16, CONSOLE-T76, CONSOLE-T84), 1 site (PORTAL-T7);
+    observed sizes cluster at 1.07-1.11 MB, just past the bound. CONSOLE-T76 died this way 3 minutes
+    after the console daemon restarted onto W1-T4590's fix, and CONSOLE-T84 tripped its circuit
+    breaker on it. W1-T3490 (heap exhaustion at 8.2 GiB) made the collector incremental —
+    CodexJsonlAccumulator keeps only the session id, token totals, agent-message blocks, errors and
+    one pending line — AND capped the total stream. With incremental parsing the total is not what
+    the heap holds, so the cap fires on healthy, ordinary output: a bound firing on a healthy
+    condition.
+  design: |
+    Bound what is RETAINED, not what is streamed. (i) The accumulator caps its pending
+    (unterminated) line and the bytes of agent-message blocks and errors it keeps (keeping the
+    newest blocks), and each bound is a named constant. (ii) CODEX_WORKER_STDOUT_MAX_BYTES becomes a
+    large BACKSTOP against a runaway stream (the clock bound still applies), sized well above the
+    observed 1.11 MB. (iii) A stdout stream of several MiB of ordinary events completes with the
+    normal result shape, and the heap-retention bound still refuses a single unbounded line. Record
+    event_bytes_by_kind on the task verdict row too (today only retro.error carries it).
+  acceptance:
+    - claim: "a Codex worker streaming several MiB of ordinary events completes, while an unbounded single line is still refused"
+      proof: "unit test: test/a-codex-worker-is-bounded-by-what-it-retains.test.ts"
+  falsifier: |
+    Restore the 1 MiB total-stream cap: a fake Codex process emitting 2 MiB of ordinary item events
+    fails with the retention-budget error.

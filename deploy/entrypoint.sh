@@ -550,8 +550,9 @@ idle_starved_wait() {
   base_sha="$(git -C "$checkout" rev-parse --verify HEAD)" || return 2
   [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]] || return 2
   marker="$CONFIG_ROOT/state/idle-starved.marker"
-  touch "$marker" || return 2
-  since="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  [ -f "$marker" ] || return 2
+  IFS= read -r since < "$marker" || return 2
+  [[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.000Z$ ]] || return 2
   log "idle_starved: $slug at $base_sha; probing every 1800s with no Node worker"
   while :; do
     i=0
@@ -595,6 +596,12 @@ while :; do
   rc=0
   child_rc=""
   signal_forwarded=""
+  # Establish the observation boundary BEFORE Node can decide to sleep. A control or human
+  # approval arriving after that decision but before exit 78 must be newer than this marker.
+  if [ "${RMD_IDLE_STARVED_SUPERVISED:-}" = "1" ]; then
+    mkdir -p "$CONFIG_ROOT/state" || die "cannot prepare idle_starved state directory"
+    date -u +%Y-%m-%dT%H:%M:%S.000Z > "$CONFIG_ROOT/state/idle-starved.marker" || die "cannot prepare idle_starved marker"
+  fi
   "$@" &
   child_pid=$!
   wait "$child_pid" || rc=$?
