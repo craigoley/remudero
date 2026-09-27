@@ -104,7 +104,9 @@ function writeStubs(host: Host, opts: { runningContainers?: string[]; cpStripsCa
       "#!/usr/bin/env bash",
       `"${realCp}" "$@" || exit $?`,
       'find "${@: -1}" -name ledger.ndjson -type f | while IFS= read -r f; do',
-      '  tr -d "\\r" <"$f" >"$f.tmp" && mv "$f.tmp" "$f"',
+      // The fixture includes non-UTF-8 bytes. macOS tr refuses those under a UTF-8 locale,
+      // before the checksum mismatch this test intends to exercise can be reached.
+      '  LC_ALL=C tr -d "\\r" <"$f" >"$f.tmp" && mv "$f.tmp" "$f"',
       "done",
       "",
     ].join("\n");

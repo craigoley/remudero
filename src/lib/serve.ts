@@ -205,6 +205,7 @@ import {
 } from "./instance-registry.js";
 import { daemonInstanceRegistryPath } from "./deployer.js";
 import { onboardingReadiness, type OnboardingReadinessGateway, type OnboardingRegistryRead } from "./onboarding-readiness.js";
+import { buildOnboardingRepositoryInventoryRoute, type OnboardingInventoryRouteOptions } from "./onboarding-repository-inventory.js";
 import {
   buildProviderAuthRoutes,
   ProviderAuthSessionStore,
@@ -474,6 +475,8 @@ export interface ServeDeps {
     repoRegistryPath?: string;
     readText?: (path: string) => Promise<string>;
   };
+  /** Read-only, paginated GitHub-token inventory for the console onboarding candidate list. */
+  onboardingRepositoryInventory?: OnboardingInventoryRouteOptions;
   instances?: InstanceGatewayOptions;
   /**
    * W1-T2269: the console's OWN installation-token refresh loop — the SAME mechanism
@@ -2633,6 +2636,7 @@ function assembleServeRoutes(
       ...deps.onboardingReadiness,
       repoRegistryPath: deps.onboardingReadiness?.repoRegistryPath ?? deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
     }),
+    buildOnboardingRepositoryInventoryRoute(deps.onboardingRepositoryInventory),
     // W1-T945: read-only run-tail reader — root defaults to fleetControlRoot (= config.root, the
     // same root the tail writer resolves state/runs/<runId>.tail against); isLive defaults to
     // "never live" so a caller that omits it (a bare test) never fabricates liveness.

@@ -6607,6 +6607,47 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/onboarding/repositories:
+    get:
+      summary: Read the complete paginated GitHub-token repository candidate inventory.
+      description: >
+        Read-only repository names visible to the daemon's current Fleet GitHub App installation
+        token, or its user-token fallback. This is not onboarding readiness or activation evidence.
+        The result is cached for at most 60 seconds and carries its actual observation time. An
+        incomplete or failed listing returns 503 instead of a partial success.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Complete repository names visible to the current token.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [state, source, observed_at, repositories, total_count]
+                properties:
+                  state: { type: string, enum: [verified] }
+                  source: { type: string, enum: [fleet-app-installation, daemon-user-token] }
+                  observed_at: { type: string, format: date-time }
+                  repositories:
+                    type: array
+                    items: { type: string }
+                  total_count: { type: integer, minimum: 0 }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: GitHub access could not be read or the pagination result was incomplete.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [state, reason]
+                properties:
+                  state: { type: string, enum: [unavailable] }
+                  reason: { type: string, enum: [github_read_failed, incomplete_or_invalid_listing] }
+
   /v1/repos:
     get:
       summary: The read-only managed-repo portfolio for the console dashboard.
