@@ -1133,7 +1133,7 @@ function armOpenMergedFakeGh(branch: string, callLogPath: string, headSha: strin
       "if [[ \"$1\" == 'api' ]]; then",
       "  case \"$2\" in",
       `    */pulls/*/files*) echo '[]'; exit 0 ;;`,
-      `    */pulls/*) echo '{"number":702,"state":"closed","merged":${!closedUnmerged},"merged_at":${closedUnmerged ? "null" : '"2026-01-01T00:00:00Z"'},"head":{"sha":"${headSha}"}}'; exit 0 ;;`,
+      `    */pulls/*) echo '{"number":702,"state":"closed","merged":${!closedUnmerged},"merged_at":${closedUnmerged ? "null" : '"2026-01-01T00:00:00Z"'},"body":"","head":{"sha":"${headSha}"}}'; exit 0 ;;`,
       "    */check-runs*)",
       "      echo 'ci-poll' >> \"$CALLLOG\"",
       "      echo '{\"check_runs\":[{\"name\":\"ci\",\"status\":\"completed\",\"conclusion\":\"success\"}]}'",
