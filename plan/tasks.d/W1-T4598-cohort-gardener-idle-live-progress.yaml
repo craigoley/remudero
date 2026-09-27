@@ -1,0 +1,54 @@
+- id: W1-T4598
+  title: "Keep benchmark cohort consolidation progressing in idle and append-active instances"
+  repo: remudero
+  depends_on: [W1-T4554]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "live three-daemon cohort audit, issue #7387, 2026-09-27"
+  plan_refs: ["W1-T4554", "W1-T4557", "#7387", "docs/model-routing.md"]
+  files:
+    - src/lib/benchmark-cohort.ts
+    - src/lib/daemon.ts
+    - src/run-task.ts
+    - deploy/entrypoint.sh
+    - test/benchmark-cohort.test.ts
+    - test/daemon-benchmark-cohort.test.ts
+    - test/run-task-benchmark-cohort-wiring.test.ts
+    - docs/model-routing.md
+  status: queued
+  rationale: |
+    The site daemon was healthy but entered supervised idle-starved after one bounded cohort
+    pass, leaving four of 43 ledger sources scanned and no lastGood snapshot until an operator
+    manually ran nine more passes. Console scanned 105 of 106 sources, but an append to its live
+    ledger during scanning produced ledger-source-changed-during-scan and no lastGood until a
+    manual retry. Healthy idle or write-active daemons must not silently stop improving the
+    private evidence projection; neither condition justifies blocking PR flow.
+  design: |
+    Give the benchmark gardener a bounded, no-model-token maintenance cadence even while the
+    supervised daemon is idle-starved. Keep the quiet mode's low memory/CPU behavior and stop
+    signaling; process only pending sources, report progress, and avoid re-reading unchanged
+    rotations. For a live append-only source, define and hash a stable byte prefix at a
+    declared watermark, scan exactly that prefix, and leave any concurrent append/torn tail
+    pending for the next pass. Rotation, truncation, or prefix mismatch must trigger a
+    source-specific repair, never silently trust the old hash. A continuously appending live
+    file must be able to yield a complete snapshot for the observed prefix with an explicit
+    freshness watermark and tail-pending status. The checkpoint remains local, atomic,
+    resumable and pressure-accounted. Gardener failure never changes task, worker, review,
+    cash retry, or PR flow; no raw rows are sent to the site.
+  acceptance:
+    - claim: "an idle-starved instance completes a finite source backlog without model work or busy polling"
+      proof: "unit test: benchmark cohort backlog progresses during supervised idle starvation"
+    - claim: "a live append during scan yields an audited prefix and leaves the tail pending"
+      proof: "unit test: benchmark cohort live append retains a stable prefix watermark"
+    - claim: "rotation or truncation repairs the affected source without double counting"
+      proof: "unit test: benchmark cohort live prefix repairs rotation and truncation"
+    - claim: "projection failure is visible and never delays dispatch or PR review"
+      proof: "unit test: daemon benchmark cohort failure preserves worker and review flow"
+  falsifier: |
+    A daemon with no runnable task never completes its initial cohort; an active live append
+    makes all history unavailable forever; a changed prefix is accepted as if identical; or
+    cohort work consumes a model call or holds a healthy PR.
