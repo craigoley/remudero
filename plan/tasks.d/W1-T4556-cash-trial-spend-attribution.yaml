@@ -14,7 +14,7 @@
     - src/lib/cash-trial.ts
     - test/a-capped-cash-trial-takes-only-the-simplest-work.test.ts
     - docs/model-routing.md
-  status: queued
+  status: merged
   rationale: |
     `summarizeCashTrial` currently charges a cash trial assignment from the final verdict's
     `cost_usd`, which is the whole run's cost and can include subscription calls. The worker's

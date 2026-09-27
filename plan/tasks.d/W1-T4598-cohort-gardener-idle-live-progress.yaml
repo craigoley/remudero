@@ -19,7 +19,7 @@
     - test/daemon-benchmark-cohort.test.ts
     - test/run-task-benchmark-cohort-wiring.test.ts
     - docs/model-routing.md
-  status: queued
+  status: merged
   rationale: |
     The site daemon was healthy but entered supervised idle-starved after one bounded cohort
     pass, leaving four of 43 ledger sources scanned and no lastGood snapshot until an operator

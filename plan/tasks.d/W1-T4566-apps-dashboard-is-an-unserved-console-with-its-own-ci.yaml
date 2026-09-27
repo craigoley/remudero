@@ -20,7 +20,7 @@
     - deploy/entrypoint.sh
     - deploy/serve-container.sh
     - scripts/contract-coverage-ratchet.mjs
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-26 at core main 9cc0ec8c. apps/dashboard is the React SPA from the W1-T3173 ruling,

@@ -15,7 +15,7 @@
     - src/lib/sre-governor.ts
     - src/lib/sre-runbooks.ts
     - src/lib/daemon.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The operator widened W1-T4386's allowlist to recycles and lock clearing, on one condition: "a watcher of

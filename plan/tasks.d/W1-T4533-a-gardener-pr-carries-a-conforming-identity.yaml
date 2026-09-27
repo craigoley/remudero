@@ -12,7 +12,7 @@
   files:
     - scripts/lib/argv.mjs
     - test/a-gardener-pr-carries-a-conforming-identity.test.ts
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> plan-file-W1-T4533-1790305266000

@@ -12,7 +12,7 @@
   plan_refs: ["W1-T4561", "W1-T2472"]
   files:
     - test/review-skips-spawn-on-plan-only.test.ts
-  status: queued
+  status: merged
   rationale: |
     W1-T4561 correctly treats a new task ID with unavailable reservation evidence as unknown,
     withholding the verdict. The older plan-only spawn fixture, however, adds a synthetic ID

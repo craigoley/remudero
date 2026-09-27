@@ -13,7 +13,7 @@
     - test/acceptance-author-gate.test.ts
   origin: "operator-session#open-weight-resequence-2026-09-14"
   plan_refs: ["W1-T3149", "W1-T3414", "W1-T3554", "W1-T1060", "W1-T2297", "W1-T2432"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: chore/file-openweight-output-contract-1789389121907 -> chore/file-acceptance-trailer-shadow-recon-1789389121907

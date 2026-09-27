@@ -12,7 +12,7 @@
   plan_refs: ["W1-T3762", "W1-T4453"]
   files:
     - src/run-task.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at main 6a04d2f18: spawnWorker (src/lib/worker.ts) always prints `worker.selection.assigned` to stderr and

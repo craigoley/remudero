@@ -16,7 +16,7 @@
     - test/benchmark-cohort.test.ts
     - test/ledger-union.test.ts
     - docs/model-routing.md
-  status: queued
+  status: merged
   rationale: |
     Core's cohort checkpoint has no lastGood snapshot because one historical gzip archive is
     valid gzip but contains malformed JSON at line 799768 of 1016356. The current all-or-nothing

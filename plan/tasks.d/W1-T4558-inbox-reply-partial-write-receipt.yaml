@@ -15,7 +15,7 @@
     - src/lib/panel-graph.ts
     - src/lib/inbox-thread.ts
     - test/inbox-reply-partial-write.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     POST /v1/inbox/thread/reply appends a durable message before appendPanelLedger records

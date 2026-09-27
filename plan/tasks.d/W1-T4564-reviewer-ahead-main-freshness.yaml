@@ -16,7 +16,7 @@
     - test/a-stale-gate-cannot-publish-a-verdict.test.ts
     - test/a-reviewer-verdict-survives-unrelated-main-churn.test.ts
     - test/a-run-task-advance-is-classified-by-review-path.test.ts
-  status: queued
+  status: merged
   rationale: |
     checkReviewerCodeFreshness compares HEAD..origin/main whenever SHAs differ. On #7290,
     origin/main was already an ancestor of the PR checkout; the reverse diff therefore

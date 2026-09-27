@@ -19,7 +19,7 @@
     - test/daemon-benchmark-cohort.test.ts
     - test/run-task-benchmark-cohort-wiring.test.ts
     - docs/model-routing.md
-  status: queued
+  status: merged
   rationale: |
     W1-T4553 makes the quality of assignment/terminal evidence explicit, but a growing fleet
     cannot rescan and interpret every raw ledger rotation for every chart or insight pass.

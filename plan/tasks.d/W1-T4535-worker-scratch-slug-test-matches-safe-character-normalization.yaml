@@ -12,7 +12,7 @@
     - test/worker-scratch.test.ts
   origin: "operator-session#local-preflight-worker-scratch-slug-2026-09-25"
   plan_refs: []
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED in the final full local preflight for W1-T3574 (head ebed4d05, measured base 6bc5f0615b65):

@@ -13,7 +13,7 @@
     - src/lib/pr-open.ts
     - src/run-task.ts
     - test/a-consumer-repo-pr-opens-after-its-proofs-run.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-26 in the consumer daemons' ledgers (every rotation form): 15 run.error rows in
