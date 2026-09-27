@@ -151,6 +151,10 @@ export interface ReviewEvaluatorProvenance {
   servedModel: string | null;
   effort: string | null;
   sessionId: string | null;
+  /** W1-T4615: what the router selected and the assignment that recorded it. Optional because
+   * rows ledgered before it carry neither; `requestedModel` is the mount's ask, often an alias. */
+  routedModel?: string | null;
+  selectionAssignmentId?: string | null;
 }
 
 export interface ReviewDecisionTerminal {

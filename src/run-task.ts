@@ -2235,6 +2235,8 @@ import {
   DEFAULT_WORKER_QUIET_FLOOR_MS,
   type WorkerState,
   type WorkerStreamObserver,
+  type WorkerStreamEvent,
+  type WorkerSelectionAssignment,
   WorkerAbandonedError,
 } from "./lib/worker.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
@@ -2642,6 +2644,20 @@ export interface WorkerStateSensor {
   setRunawayBound: (bound: number | undefined) => void;
 }
 
+/** W1-T4615: stamp an activity event with its spawn's assignment; never promoted to `servedModel`. */
+export function attributeWorkerStreamEvent(
+  event: WorkerStreamEvent,
+  assignment: Pick<WorkerSelectionAssignment, "id" | "selected"> | undefined,
+): WorkerStreamEvent {
+  if (!assignment) return event;
+  return {
+    ...event,
+    selectionAssignmentId: event.selectionAssignmentId ?? assignment.id,
+    routedProvider: event.routedProvider ?? assignment.selected.provider,
+    routedModel: event.routedModel ?? assignment.selected.model,
+  };
+}
+
 const WORKER_TELEMETRY_TEXT_MAX_CHARS = 240;
 
 /** Keep a worker-authored sentence useful as a tool rationale without turning status telemetry
@@ -2746,6 +2762,12 @@ export function buildWorkerStateSensor(args: {
         ...(event.provider ? { provider: event.provider } : {}),
         ...(event.requestedModel ? { requested_model: event.requestedModel } : {}),
         ...(event.servedModel ? { served_model: event.servedModel } : {}),
+        // W1-T4615: the routed half beside the requested alias, or a named gap.
+        ...(event.selectionAssignmentId
+          ? { selection_assignment_id: event.selectionAssignmentId }
+          : { assignment_unavailable_reason: "assignment-not-observed" }),
+        ...(event.routedProvider ? { routed_provider: event.routedProvider } : {}),
+        ...(event.routedModel ? { routed_model: event.routedModel } : {}),
         ...(event.turnsSoFar === undefined ? {} : { turns_so_far: event.turnsSoFar }),
         ...(event.kind === "tool-executing"
           ? {
@@ -6526,6 +6548,8 @@ async function runReview(args: {
           args.reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon;
         const reviewerClockBound = { clockBound: { boundMs: reviewerClockBoundMs } };
         const reviewerSpawnWorker = args.reviewerSpawnWorker ?? ledgeredNonDispatchSpawn("review");
+        // W1-T4615: assigned before the provider call, so every later stream event names the routed model.
+        let reviewerAssignment: WorkerSelectionAssignment | undefined;
         try {
           reviewer = args.account(
             await reviewerSpawnWorker({
@@ -6559,7 +6583,8 @@ async function runReview(args: {
             // (and leave `remudero-review=pending`) forever.  The deterministic floor still posts
             // a terminal verdict when this bound trips.
             ...reviewerClockBound,
-            streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer({ ...event, workerRole: "reviewer", provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }) : undefined,
+            onSelectionAssignment: (assignment) => { reviewerAssignment = assignment; },
+            streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
             }),
           );
@@ -6577,6 +6602,8 @@ async function runReview(args: {
           servedModel: reviewerFields.served_model,
           effort: reviewerFields.effort,
           sessionId: reviewer.sessionId ?? null,
+          routedModel: reviewerFields.routed_model ?? reviewerAssignment?.selected.model ?? null,
+          selectionAssignmentId: reviewerFields.selection_assignment_id ?? reviewerAssignment?.id ?? null,
         };
         log("review.reviewer", {
           session_id: reviewer.sessionId,
@@ -6585,6 +6612,10 @@ async function runReview(args: {
           // W1-T6: the advisory reviewer is a BRAIN-PLANE call — same telemetry
           // shape as a worker call, so ledger lines are queryable uniformly.
           ...reviewerFields,
+          ...(reviewerFields.selection_assignment_id ? {}
+            : reviewerAssignment ? { selection_assignment_id: reviewerAssignment.id }
+            : { assignment_unavailable_reason: "assignment-not-observed" }),
+          ...(reviewerFields.routed_model || !reviewerAssignment ? {} : { routed_model: reviewerAssignment.selected.model }),
         });
         // The reviewer is fresh (no resume) — reap its SDK scratchpad now, before
         // withTempDir removes reviewCwd. Best-effort, guarded (lib/worker-scratch).
@@ -10935,6 +10966,7 @@ export async function runFixRung(opts: {
         model: opts.mount.model,
         verdict: fixResult.subtype,
         headSha: expectedHeadShaForPush,
+        worker: fixResult,
       },
       deps.log,
     );
@@ -13756,16 +13788,23 @@ export function archiveWorkerTranscript(
     verdict?: string;
     headSha?: string;
     retention?: number;
+    worker?: Pick<WorkerResult, "provider" | "routedModel" | "servedModel" | "selectionAssignmentId">;
   },
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): { path: string; bytes: number } | undefined {
   try {
     const capped = capStderrExcerpt(opts.text ?? "", TRANSCRIPT_EXCERPT_CAP);
+    // W1-T4615: `model` is the mount's REQUEST (often an alias); routed/served come only from the result.
+    const worker = opts.worker;
     const frontMatter = [
       "---",
       `run_id: ${opts.runId}`,
       `rung: ${opts.rung}`,
-      `model: ${opts.model ?? "unknown"}`,
+      `requested_model: ${opts.model ?? "unknown"}`,
+      `routed_provider: ${worker?.provider ?? "unavailable"}`,
+      `routed_model: ${worker?.routedModel ?? "unavailable"}`,
+      `served_model: ${worker?.servedModel ?? "unavailable"}`,
+      `selection_assignment_id: ${worker?.selectionAssignmentId ?? "unavailable"}`,
       `verdict: ${opts.verdict ?? "unknown"}`,
       `head_sha: ${opts.headSha ?? "unknown"}`,
       "---",
@@ -14242,7 +14281,8 @@ async function runTask(
       // Keep provider/model attribution specific to THIS spawn, not the run's initial mount.
       // The selected assignment is authoritative for provider + requested model; the selected
       // model is deliberately not promoted to a served-model receipt.
-      streamObserver: (event) => baseStreamObserver(enrichWorkerStreamEvent(event, effectiveSpawnArgs, selectionAssignment)),
+      streamObserver: (event) => baseStreamObserver(attributeWorkerStreamEvent(
+        enrichWorkerStreamEvent(event, effectiveSpawnArgs, selectionAssignment), selectionAssignment)),
       // W1-T1045: every real dispatch spawn gets the clock bound BY CONSTRUCTION — the SAME
       // wrap-once rationale as `onSpawnError`/`streamObserver` above. A caller that already set
       // its own `clockBound` (none exist today) is respected; every future dispatch call site
@@ -15640,6 +15680,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           model: attemptMount.model,
           verdict: impl.subtype,
           headSha: implHeadShaForArchive,
+          worker: impl,
         },
         log,
       );
@@ -15691,7 +15732,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // above `runTask`. `runDiagnoseThenRetry` calls `diagnose` at most once per run, so this
       // never overwrites a sibling round's file the way the implement archive above can.
       archiveWorkerTranscript(
-        { root: config.root, taskId, runId, rung: "diagnose", text: workerTranscript(d), model: diagnoseMount.model, verdict: d.subtype },
+        { root: config.root, taskId, runId, rung: "diagnose", text: workerTranscript(d), model: diagnoseMount.model, verdict: d.subtype, worker: d },
         log,
       );
       return { text: workerTranscript(d) };
