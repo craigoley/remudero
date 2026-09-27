@@ -342,3 +342,10 @@ test("GET /v1/analytics?projectionVersion=eval-card-v1 serves a private card bui
   await unwired.handler({ url: "/v1/analytics?projectionVersion=eval-card-v1" } as never, bare.res, { params: {} });
   assert.equal((bare.sent().body as { publishable: boolean }).publishable, false);
 });
+
+test("normalQuantile's tail branch matches reference quantiles on both sides", () => {
+  // Below 0.02425 and above 0.97575 the approximation takes its tail branch.
+  assert.ok(Math.abs(normalQuantile(0.001) - -3.090232306) < 1e-6);
+  assert.ok(Math.abs(normalQuantile(0.999) - 3.090232306) < 1e-6);
+  assert.ok(Math.abs(normalQuantile(0.01) - -2.326347874) < 1e-6);
+});
