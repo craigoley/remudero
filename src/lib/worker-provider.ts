@@ -2709,6 +2709,9 @@ function mutateOpenWeightAllowance<T>(
     // rather than by hoping two real processes happen to interleave.
     beforeCommit?.();
     const committed = writeAtomic(path, `${JSON.stringify(next)}\n`, {
+      // The stage replaces the inode on every reservation and settlement. Preserve the private
+      // allowance mode across those renames instead of letting the process umask create 0644.
+      mode: 0o600,
       tmpTag: "openweight-allowance",
       // THE COMPARE-AND-SWAP. Re-read the live file and refuse to commit unless it is still the
       // exact bytes this attempt planned from.
