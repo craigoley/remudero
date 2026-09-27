@@ -12,10 +12,10 @@
  * is visible rather than silent; (2) the scorer (the proofs) is HELD OUT — the golden a dispatch
  * sees carries no proof text; (3) a proof that cannot execute on replay is UNMEASURABLE, never a pass.
  */
+import { fixedClock } from "./clock.js";
 import { isMergeCreditLine } from "./status.js";
 import type { ProofExecOutcome } from "./review.js";
 import type { GoldenClass, GoldenTask } from "./replay.js";
-import type { ReplayOptIn } from "./replay-harness.js";
 import type { InstanceLiveness } from "./fleet-liveness.js";
 import { HEADROOM_LIMIT_PCT, headroomExhausted, type UsageSnapshot } from "./headroom.js";
 
@@ -28,7 +28,7 @@ const DAY_MS = 24 * 60 * 60_000;
 function isoOf(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const ms = Date.parse(value);
-  return Number.isNaN(ms) ? undefined : new Date(ms).toISOString();
+  return Number.isNaN(ms) ? undefined : fixedClock(ms).iso();
 }
 
 /** One criterion as `review.posted`'s `decision_verdict.criteria[]` records it. */
@@ -236,13 +236,20 @@ export interface ReplayIdleSignal {
   headroom?: UsageSnapshot;
 }
 
+/** A gate's answer — the same shape as replay-harness.ts's `ReplayOptIn`, declared here so this module never
+ *  imports the harness that imports it (the no-circular rule). The reason is always populated. */
+export interface ReplayGate {
+  enabled: boolean;
+  reason: string;
+}
+
 /**
  * THE IDLE GATE replay-harness.ts's `drawReplaySample` applies after the spend opt-in. A replay may spend only
  * while the fleet is up in quiet mode (its queue drained, so a replay never competes with dispatch) and
  * headroom was MEASURED below the limit. PRODUCTION WIRING: the caller feeds `judgeInstanceLiveness` over this
  * instance's own ledger rows (the `daemon.idle_starved.*` quiet rows) and the newest usage snapshot.
  */
-export function replayIdleGate(signal: ReplayIdleSignal, limitPct: number = HEADROOM_LIMIT_PCT): ReplayOptIn {
+export function replayIdleGate(signal: ReplayIdleSignal, limitPct: number = HEADROOM_LIMIT_PCT): ReplayGate {
   if (signal.liveness === undefined) return { enabled: false, reason: "refusing to replay: fleet idleness was not measured" };
   if (signal.liveness.state !== "up" || signal.liveness.quiet !== true) {
     return {
@@ -262,7 +269,7 @@ export type ReplaySampleSource = { kind: "seeded"; goldens?: readonly GoldenTask
 /** A sample `drawReplaySample` drew — empty unless opted in AND idle. For a derived source `items` is
  *  index-aligned to `goldens` and holds each golden's held-out scorer; `excluded` names every credited
  *  task that could not enter, so a coverage gap is explicit. */
-export interface ReplaySample extends ReplayOptIn {
+export interface ReplaySample extends ReplayGate {
   goldens: GoldenTask[];
   items: GoldenCorpusItem[];
   excluded: GoldenCorpusExclusion[];
