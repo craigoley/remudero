@@ -4,6 +4,8 @@ import { join, relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+// @source-text-subject: this test inventories model-worker call sites in source text;
+// its planted-site control proves the census can detect a newly unclassified caller.
 const root = fileURLToPath(new URL("..", import.meta.url));
 type Kind = "call" | "parameter-default" | "injected-default";
 type Site = { file: string; line: number; kind: Kind };
