@@ -10,6 +10,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { clockFromMillisFn } from "../src/lib/clock.js";
 import type { Config } from "../src/lib/config.js";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { repairLadderCommand, trackRepairLadder } from "../src/lib/sweep.js";
@@ -63,7 +64,7 @@ test("a stalled repair ladder is one fleet state, not a per-attempt line", async
   const ledger = recorder();
   let clock = Date.parse("2026-09-17T01:18:55.000Z");
   const refused = blocked();
-  const spawn = trackRepairLadder(async () => { throw refused; }, { config: configFor(root), log: ledger.log, now: () => clock });
+  const spawn = trackRepairLadder(async () => { throw refused; }, { config: configFor(root), log: ledger.log, clock: clockFromMillisFn(() => clock) });
 
   // Three refused strikes across ninety minutes: the per-attempt shape this task replaces.
   for (const stepMs of [0, 45 * 60_000, 45 * 60_000]) {
@@ -166,7 +167,7 @@ test("a successful spawn clears the stalled ladder state", async () => {
   const spawn = trackRepairLadder(async () => {
     if (refuse) throw blocked();
     return "worker ran";
-  }, { config: configFor(root), log: ledger.log, now: () => clock });
+  }, { config: configFor(root), log: ledger.log, clock: clockFromMillisFn(() => clock) });
 
   await assert.rejects(spawn(FIX_ARGS));
   assert.equal(readRepairLadderState(root, clock).state, "stalled");
@@ -196,7 +197,7 @@ test("the ladder verb prices the rungs and flips nothing", () => {
   const snapshot = JSON.stringify(config);
 
   const printed: string[] = [];
-  const exit = repairLadderCommand(["--json"], { config, fixTools: ["Read", "Edit", "Bash"], env: {}, print: (line) => printed.push(line) });
+  const exit = repairLadderCommand(["--json"], config, ["Read", "Edit", "Bash"], {}, (line) => printed.push(line));
   assert.equal(exit, 0);
   const report = JSON.parse(printed[0]) as { ladder: { state: string }; rungs: Array<Record<string, unknown>> };
   assert.equal(report.ladder.state, "running");
@@ -213,7 +214,7 @@ test("the ladder verb prices the rungs and flips nothing", () => {
   assert.match(String(overflow.stillBlockedBy), /ANTHROPIC_API_KEY/);
 
   const text: string[] = [];
-  assert.equal(repairLadderCommand([], { config, fixTools: ["Read"], env: {}, print: (line) => text.push(line) }), 0);
+  assert.equal(repairLadderCommand([], config, ["Read"], {}, (line) => text.push(line)), 0);
   assert.match(text.join("\n"), /changes nothing/);
 
   // FLIPS NOTHING: the config it read is byte-identical, in memory and on disk, and no rung armed.
@@ -221,5 +222,5 @@ test("the ladder verb prices the rungs and flips nothing", () => {
   assert.equal(readFileSync(configPath, "utf8"), bytes);
   assert.equal(config.workerProviders?.cashFallbackWhenBlocked, undefined);
   assert.equal(config.overflow, undefined);
-  assert.equal(repairLadderCommand(["--enable"], { config, fixTools: undefined, print: () => {} }), 2, "there is no enabling flag");
+  assert.equal(repairLadderCommand(["--enable"], config, undefined, {}, () => {}), 2, "there is no enabling flag");
 });

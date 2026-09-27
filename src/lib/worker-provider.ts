@@ -12,7 +12,7 @@ import {
 } from "./capability-grant.js";
 import { reconcileExternalEffect, type ExternalEffectRequest, type ExternalEffectResult } from "./action-reconciliation.js";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { UsageSnapshot } from "./headroom.js";
@@ -4195,7 +4195,7 @@ export function recordRepairLadderStall(
     // A torn or foreign file is not evidence of an earlier stall; this one starts now.
     console.error(JSON.stringify({ event: "repair_ladder.prior_unreadable", reason: (error as Error).message }));
   }
-  const at = new Date(nowMs).toISOString();
+  const at = fixedClock(nowMs).iso();
   const record: RepairLadderStallRecord = { version: 1, since: prior?.since ?? at, lastSeen: at, ...stall };
   writeAtomic(path, `${JSON.stringify(record)}\n`);
   return { record, began: prior === undefined };

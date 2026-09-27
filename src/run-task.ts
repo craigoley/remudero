@@ -46989,7 +46989,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     "repair-ladder",
     (rest) => {
       const config = loadConfig();
-      return repairLadderCommand(rest, { config, fixTools: fixRoundGitOwnership(config).cashTools ?? FIX_WORKER_TOOLS });
+      return repairLadderCommand(rest, config, fixRoundGitOwnership(config).cashTools ?? FIX_WORKER_TOOLS);
     },
   ],
   ["caller-sweep", (rest) => callerSweepCommand(rest)],

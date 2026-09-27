@@ -17,6 +17,7 @@ import {
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
+import { systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { gitPushEmptyCommit, gitPushRunBranch, LanePushForeignHeadError } from "./git-push.js";
 import { ghJson, ghJsonAsync } from "./github-transport.js";
@@ -12935,10 +12936,10 @@ export function repairLadderFallbacks(
  */
 export function trackRepairLadder<A extends SpawnWorkerArgs, R>(
   spawn: (args: A) => Promise<R>,
-  opts: { config: Config; log: (step: string, extra?: Record<string, unknown>) => void; now?: () => number },
+  opts: { config: Config; log: (step: string, extra?: Record<string, unknown>) => void; clock?: Clock },
 ): (args: A) => Promise<R> {
   const root = opts.config.root;
-  const now = opts.now ?? (() => Date.now());
+  const clock = opts.clock ?? systemClock;
   return async (args: A) => {
     let result: R;
     try {
@@ -12948,7 +12949,7 @@ export function trackRepairLadder<A extends SpawnWorkerArgs, R>(
       const stall = repairLadderStallFrom(error, repairLadderFallbacks(config, args.cashTools ?? args.tools, args.env));
       if (stall !== undefined) {
         try {
-          const { record, began } = recordRepairLadderStall(root, stall, now());
+          const { record, began } = recordRepairLadderStall(root, stall, clock.now());
           if (began) {
             opts.log("repair_ladder.stalled", {
               since: record.since,
@@ -12966,7 +12967,7 @@ export function trackRepairLadder<A extends SpawnWorkerArgs, R>(
     try {
       const cleared = clearRepairLadderStall(root);
       if (cleared !== undefined) {
-        opts.log("repair_ladder.recovered", { since: cleared.since, down_ms: Math.max(0, now() - Date.parse(cleared.since)) });
+        opts.log("repair_ladder.recovered", { since: cleared.since, down_ms: Math.max(0, clock.now() - Date.parse(cleared.since)) });
       }
     } catch (clearError) {
       opts.log("repair_ladder.write_failed", { phase: "clear", reason: (clearError as Error).message });
@@ -12980,27 +12981,23 @@ export function trackRepairLadder<A extends SpawnWorkerArgs, R>(
  *
  * REPORT ONLY. It prints the one config edit that would arm each rung and what that rung would
  * bill; it never writes config, because enabling a paid fallback spends money and stays an
- * operator act (W1-T3718 design iii). `fixTools` is the tool surface a fix round would divert to
- * cash, which decides whether the cash rung can serve it at all.
+ * operator act (W1-T3718 design iii).
  */
 export function repairLadderCommand(
   rest: readonly string[],
-  deps: {
-    config: Config;
-    fixTools: readonly string[] | undefined;
-    env?: NodeJS.ProcessEnv;
-    now?: () => number;
-    print?: (line: string) => void;
-  },
+  config: Config,
+  /** The tool surface a fix round would divert to cash; decides whether cash can serve it at all. */
+  fixTools: readonly string[] | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+  print: (line: string) => void = (line) => console.log(line),
 ): number {
-  const print = deps.print ?? ((line: string) => console.log(line));
   const unknown = rest.filter((arg) => arg !== "--json");
   if (unknown.length > 0) {
     print(`rmd repair-ladder: unknown argument(s) ${unknown.join(" ")} — usage: rmd repair-ladder [--json]`);
     return 2;
   }
-  const state = readRepairLadderState(deps.config.root, (deps.now ?? (() => Date.now()))());
-  const rungs = priceRepairLadderRungs(deps.config, repairLadderFallbacks(deps.config, deps.fixTools, deps.env));
+  const state = readRepairLadderState(config.root, systemClock.now());
+  const rungs = priceRepairLadderRungs(config, repairLadderFallbacks(config, fixTools, env));
   if (rest.includes("--json")) print(JSON.stringify({ ladder: state, rungs }));
   else for (const line of renderRepairLadderReport(state, rungs)) print(line);
   return 0;
