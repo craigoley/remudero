@@ -6,7 +6,7 @@ import { dirname, isAbsolute, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
-import { spawnWorker, workerLedgerFields, type WorkerResult } from "./worker.js";
+import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
 
@@ -208,12 +208,28 @@ export function benchmarkRunTerminalReceipt(row: Record<string, unknown>, assign
   return { version: BENCHMARK_RUN_VERSION, phase: "terminal" as const, ...callEvidence(row) };
 }
 
+/** W1-T4613: set on a spawn's args by a caller that writes that worker's assignment + attempt
+ * receipts itself (the fix rung), so a receipt-writing wrapper beneath it stands aside instead of
+ * receipting one worker call twice. A symbol survives every wrapper's args spread and never
+ * reaches a serialized ledger row. */
+export const CALLER_OWNS_BENCHMARK_RECEIPT: unique symbol = Symbol("rmd.callerOwnsBenchmarkReceipt");
+
+export function withCallerOwnedReceipt(args: SpawnWorkerArgs): SpawnWorkerArgs {
+  return { ...args, [CALLER_OWNS_BENCHMARK_RECEIPT]: true } as SpawnWorkerArgs;
+}
+
+export function callerOwnsBenchmarkReceipt(args: SpawnWorkerArgs): boolean {
+  return (args as { [CALLER_OWNS_BENCHMARK_RECEIPT]?: boolean })[CALLER_OWNS_BENCHMARK_RECEIPT] === true;
+}
+
 /** Capture an auxiliary worker call without turning telemetry into a worker or PR gate. The
  * caller's existing assignment sink remains authoritative when one is supplied. */
 export function benchmarkNonDispatchSpawn(
   lane: string, raw: typeof spawnWorker = spawnWorker,
 ): typeof spawnWorker {
   return async (args) => {
+    // W1-T4613: the caller already receipts this worker; a second pair would count it twice.
+    if (callerOwnsBenchmarkReceipt(args)) return raw(args);
     let observedAssignmentId: string | undefined;
     const write = (step: string, fields: Record<string, unknown>): void => {
       const config = args.config ?? loadConfig();
