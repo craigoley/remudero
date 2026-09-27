@@ -1,0 +1,53 @@
+- id: W1-T4607
+  title: "ONE TASK, ONE EVIDENCE CASE FILE — join plan, run, PR head, review, CI and release observations with source, freshness and next owner"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  risk: high
+  band_meaning: span
+  origin: "research:paperclip-execution-semantics-and-buzz-shared-event-stream-2026-09-27"
+  plan_refs: ["§Headroom", "§Self-improvement", W1-T4554]
+  files:
+    - src/lib/task-case-file.ts
+    - src/lib/report-commands.ts
+    - src/run-task.ts
+    - test/task-case-file.test.ts
+    - test/report-commands-case-file.test.ts
+    - docs/cli-reference.md
+  status: queued
+  attempts: 0
+  rationale: |
+    Paperclip separates dependency, ownership, status and live execution; Buzz keeps branch,
+    CI, review and merge events in one readable thread. RMD already owns the facts in plan,
+    ledger, StatusProjection and its batched GitHub gateway, but an operator asking why one
+    task stopped must assemble them by hand. A merged source change, a passed review, a built
+    image and healthy runtime are distinct observations. A read-only case file can show the
+    joins and their gaps without importing either external product or inventing a new authority.
+    Sources: https://github.com/paperclipai/paperclip/blob/master/doc/execution-semantics.md
+    and https://github.com/block/buzz/blob/main/README.md.
+  design: |
+    Add `rmd case-file <task-id> --json` as one bounded local read. It takes the task's plan
+    record, the existing status/GitHub board snapshot, and the three-form ledger union. Join
+    runs by exact run_id, PRs by number/anchored task credit, and head-specific checks/reviews
+    by exact head SHA. Never infer ownership from title text or a stale branch alone.
+
+    Each section carries state observed, stale, pending, or unavailable, with source and as-of
+    time. Show assignment, selected/served model and cash/notional spend separately; PR head,
+    CI and review receipts; merged source, deployment and runtime observations separately; and
+    a concrete next owner/action only when an existing receipt names one. If this snapshot has
+    no CI, deployment or runtime source, say why it is unavailable. A failed GitHub read is not
+    an empty PR list; a missing ledger window is not zero work. Use existing batched reads and
+    bounded union rules, not a new per-PR poll. No writes, routing changes or auto decisions.
+  acceptance:
+    - claim: "the operator command calls the case-file projection rather than leaving a test-only module"
+      proof: "grep: buildTaskCaseFile( in src/lib/report-commands.ts"
+    - claim: "the CLI registers a task-scoped case-file verb"
+      proof: "grep: case-file in src/run-task.ts"
+  falsifier: |
+    Make an unreadable GitHub source display zero PRs, use a current CI result for another
+    head SHA, call a merge a deployment, or report a next owner from prose alone. The focused
+    tests must fail. Remove one ledger rotation form and the positive-control test must fail.
+  note: "Stage one is an operator read surface. It does not add a relay, replace status precedence, or mutate a task."
