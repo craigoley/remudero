@@ -1,0 +1,66 @@
+- id: W1-T4605
+  title: "CORE COHORT BACKFILL STALLS THROUGH LONG ACTIVE WORKER CYCLES"
+  repo: remudero
+  depends_on: [W1-T4598, W1-T4599]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator live three-daemon cohort audit, 2026-09-27"
+  plan_refs: ["W1-T4554", "W1-T4598", "W1-T4599", "W1-T4574", "#7387", "docs/model-routing.md"]
+  files:
+    - src/lib/benchmark-cohort.ts
+    - src/lib/daemon.ts
+    - src/run-task.ts
+    - deploy/entrypoint.sh
+    - docs/model-routing.md
+  status: queued
+  rationale: |
+    After the W1-T4599 repair reached Azure, the core daemon's detached cohort
+    pass ran from 11:07 to 11:12 UTC and audited one malformed archive without
+    editing it. The checkpoint advanced from 66 to 69 sources but reported 309
+    pending. It had not run another pass by 11:42 while W1-T3675's worker cycle
+    remained active and heartbeat receipts continued. Site and console reached
+    complete observed cohort snapshots (43 and 108 sources respectively). The
+    W1-T4598 idle-starvation pulse does not cover an active long worker cycle.
+    At one pass per cycle the core historical graph feed cannot catch up even
+    though PRs and workers are healthy. This is an evidence-lag problem, not a
+    reason to block work, publish partial data as complete, or buy model calls.
+  design: |
+    Give the core cohort gardener an independent, resumable maintenance cadence
+    during long active cycles, reusing the existing single-flight detached action
+    registry and source checkpoint. Let measured CPU, memory pressure, source
+    bytes, worker/review activity, and last pass duration determine the next
+    batch and pause; yield automatically to interactive work. Avoid an arbitrary
+    throughput floor or a dispatch/PR gate. A process restart must resume from
+    audited source watermarks without rereading every unchanged archive. Preserve
+    the W1-T4599 malformed-source quarantine and three-form ledger positive
+    controls; unknown rows and cross-source joins remain ineligible for public
+    performance denominators.
+
+    Report audited/pending/quarantined sources, observed bytes and pass duration,
+    last-progress time, resource pressure, and a clearly labeled uncertain
+    catch-up projection. Detect no-progress or repeated faults and issue a
+    follow-up task recommendation rather than raising a worker, review, or merge
+    block. A refresh failure retains the dated last-known-good snapshot; do not
+    turn unavailable into zero. Keep raw paths, task IDs, and private rows local.
+    Add focused tests with this task's exact proof titles and extend `files:` in
+    the implementation PR; the filing itself ships no test suite.
+  acceptance:
+    - claim: "a long active worker cycle still advances a pending cohort backlog without model work"
+      proof: "unit test: active worker cohort catchup advances audited sources between cycles"
+    - claim: "resource pressure defers projection while worker and review flow continue"
+      proof: "unit test: cohort catchup yields to worker pressure without a PR gate"
+    - claim: "restart and late source repair preserve progress and malformed-source quarantine"
+      proof: "unit test: cohort catchup resumes checkpoints and quarantined sources"
+    - claim: "operators can distinguish progress, backlog, and a stalled or failed projection"
+      proof: "unit test: cohort catchup reports measured progress and uncertain completion"
+    - claim: "the independent maintenance cadence is actually wired into the daemon lifetime"
+      proof: "grep: startBenchmarkCohortCatchup( in src/lib/daemon.ts"
+  falsifier: |
+    An active worker prevents all cohort progress for its full lifetime; a
+    background batch competes until a worker or reviewer stalls; a historical
+    malformed row is silently skipped; a missing source becomes zero; or a
+    cohort refresh failure blocks a healthy PR.
