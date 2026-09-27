@@ -215,14 +215,15 @@ export function taskShapeCovariates(input: TaskShapeInput, missing = "task-not-i
   const task = input.task;
   const files = task?.files;
   const acceptance = task?.acceptance;
+  const taskId = typeof task?.id === "string" && task.id.length > 0 ? task.id : undefined;
   let starts = 0;
   let strikes = 0;
   for (const row of input.ledgerRows ?? []) {
-    if (row.task_id !== task?.id) continue;
+    if (taskId === undefined || row.task_id !== taskId) continue;
     if (row.step === "run.start") starts += 1;
     else if (row.step === "fix.dispatch") strikes += 1;
   }
-  const ledgerMissing = !task?.id ? missing : input.ledgerUnavailableReason ?? "ledger-not-in-hand";
+  const ledgerMissing = taskId === undefined ? missing : input.ledgerUnavailableReason ?? "ledger-not-in-hand";
   const attempt = input.runStartWritten ? starts : starts + 1;
   const areas = [...new Set((files ?? []).map(topLevelArea))].sort();
   const boundedAreas = areas.length > TASK_SHAPE_AREAS_MAX
@@ -240,10 +241,10 @@ export function taskShapeCovariates(input: TaskShapeInput, missing = "task-not-i
     proofDialects: !task ? unavailable(missing) : !Array.isArray(acceptance) ? unavailable("acceptance-not-declared")
       : { state: "observed" as const, value: [...new Set(acceptance.map((c) => proofDialect(c?.proof)))].sort() },
     dependsOnDepth: !task ? unavailable(missing) : dependsOnDepth(task, input.tasks),
-    attemptNumber: !input.ledgerRows || !task?.id ? unavailable(ledgerMissing)
+    attemptNumber: !input.ledgerRows || taskId === undefined ? unavailable(ledgerMissing)
       : attempt < 1 ? unavailable("run-start-not-in-live-ledger")
         : { state: "observed" as const, value: { count: attempt, bucket: cappedBucket(attempt, 3), basis: "live-ledger" as const } },
-    priorStrikes: !input.ledgerRows || !task?.id ? unavailable(ledgerMissing)
+    priorStrikes: !input.ledgerRows || taskId === undefined ? unavailable(ledgerMissing)
       : { state: "observed" as const, value: { count: strikes, bucket: cappedBucket(strikes, 2), basis: "live-ledger" as const } },
     lane: tokenEvidence(input.lane, missing, "lane-not-a-token"),
     repo: !task ? unavailable(missing) : tokenEvidence(task.repo, "repo-not-declared", "repo-not-a-token"),
