@@ -2237,7 +2237,6 @@ import {
   type WorkerState,
   type WorkerStreamObserver,
   type WorkerStreamEvent,
-  type WorkerSelectionAssignment,
   WorkerAbandonedError,
 } from "./lib/worker.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
