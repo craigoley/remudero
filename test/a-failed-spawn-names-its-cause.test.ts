@@ -79,7 +79,9 @@ test("W1-T4616: a test process with no explicit config never writes worker-call 
   const saved = process.env.NODE_TEST_CONTEXT;
   try {
     delete process.env.NODE_TEST_CONTEXT;
-    assert.equal(typeof benchmarkEvidenceLedgerPath(undefined), "string", "outside the runner the daemon's default ledger still applies");
+    // An injected loader: the real one would create a config and resolve `claude` on a bare CI runner.
+    assert.equal(benchmarkEvidenceLedgerPath(undefined, () => ({ root: "/srv/daemon" }) as Config),
+      join("/srv/daemon", "state", "ledger.ndjson"), "outside the runner the daemon's default ledger still applies");
   } finally {
     process.env.NODE_TEST_CONTEXT = saved;
   }

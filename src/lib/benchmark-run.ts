@@ -229,9 +229,11 @@ export function callerOwnsBenchmarkReceipt(args: SpawnWorkerArgs): boolean {
  *  reached a real judge spawn with no explicit config resolved the default config's root, which is
  *  the operator's or daemon's LIVE ledger, and wrote fake failed attempts into production evidence.
  *  Under the test runner, only an explicitly supplied config names an evidence ledger. */
-export function benchmarkEvidenceLedgerPath(config: Config | undefined): string | undefined {
+export function benchmarkEvidenceLedgerPath(
+  config: Config | undefined, load: () => Config = loadConfig,
+): string | undefined {
   if (config) return ledgerPathFor(config);
-  return isTestRunner() ? undefined : ledgerPathFor(loadConfig());
+  return isTestRunner() ? undefined : ledgerPathFor(load());
 }
 
 /** PRIMARY CONTROL (W1-T4616): the longest redacted error message a failed-spawn receipt keeps. */
