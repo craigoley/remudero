@@ -1,8 +1,8 @@
 {
   "_comment": "PROOF-DISCRIMINATION GRANDFATHER. A whole-file `unit test: <path>` proof is stale BY CONSTRUCTION - `check-proof --base` returns exit 5 (executedStale) for it every time, verified by sampling test/plan.test.ts, test/daemon.test.ts and test/mounts.test.ts against a real base (hits 100/820/256, verdict pass, exit 5 in all three). That shape is also the repo's DOMINANT idiom: 5368 such proofs across 1214 tasks, roughly 69% of all 7,767 proofs in the plan. Without this table the REQUIRED proof-discrimination gate refuses the majority of the plan on arrival - it stops being a signal and becomes a wall. The gate is not wrong (a proof passing at the base really cannot establish a PR's work); the corpus simply predates it. A RATCHET, NOT AN EXEMPTION: each row is the number of stale proofs that task may carry, seeded from its measured whole-file count. Exceeding a row is REFUSED, which is what stops a new non-discriminating proof being added. Lower a row in the same change that repoints its proofs at what the diff changes; NEVER raise one. The allowance counts ANY stale proof, not only the shape it was seeded from, so a task that also carries a stale grep: can still exceed its row - deliberately, since a grep is the cheap one to repoint. A PR with no resolvable Remudero-Task trailer gets ZERO allowance: it authors its own body criteria and has no backlog to inherit. An unreadable table also grandfathers nothing, so a fault cannot admit a stale proof. Falsifier: test/a-grandfathered-stale-proof-is-reported-not-refused.test.ts",
   "_capturedAt": "2026-09-13",
-  "_measuredTotal": 5368,
-  "_measuredTasks": 1214,
+  "_measuredTotal": 5365,
+  "_measuredTasks": 1213,
   "W1-T1000002": 6,
   "W1-T1000003": 3,
   "W1-T1027": 1,
@@ -768,7 +768,6 @@
   "W1-T2947": 8,
   "W1-T2948": 6,
   "W1-T295": 4,
-  "W1-T2951": 3,
   "W1-T2952": 6,
   "W1-T2953": 5,
   "W1-T2957": 4,

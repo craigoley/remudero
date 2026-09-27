@@ -109,6 +109,17 @@ test("staleAllowanceFor refuses every non-count: absent, zero, negative, fractio
   assert.equal(staleAllowanceFor("x", { x: "9" } as unknown as Record<string, number>), 0, "a string row is not a count");
 });
 
+test("W1-T2951's narrowed behavior proofs retire its stale-proof allowance", () => {
+  const baseline = readStaleBaseline(REPO_ROOT);
+  assert.equal(staleAllowanceFor("W1-T2951", baseline), 0, "the old whole-file allowance must not survive narrowed proofs");
+  const { code, errors } = runGate({
+    readPayload: () => ({ readable: true, baseSha: "b", headSha: "h", body: "Remudero-Task: W1-T2951" }),
+    baseline: () => baseline,
+  });
+  assert.equal(code, 1, "a new stale proof for W1-T2951 must be refused");
+  assert.match(errors.join("\n"), /Allowance for W1-T2951: 0/);
+});
+
 test("judgeStaleAgainstAllowance is a ratchet at the boundary, not a range", () => {
   assert.deepEqual(judgeStaleAgainstAllowance(2, 2), { ok: true, staleCount: 2, allowed: 2, excess: 0 });
   assert.deepEqual(judgeStaleAgainstAllowance(3, 2), { ok: false, staleCount: 3, allowed: 2, excess: 1 });
