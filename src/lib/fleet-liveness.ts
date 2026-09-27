@@ -44,6 +44,8 @@ export interface InstanceLiveness {
   bootError?: string;
   /** Why the instance is DOWN (or HELD); empty when up. */
   reasons: string[];
+  /** W1-T4601: up in the entrypoint's quiet mode — the queue drained, so it probes instead of sweeping. */
+  quiet?: true;
 }
 
 /** The window every row is read over: the trailing hour the boot count is reported against. */
@@ -69,9 +71,15 @@ export const MAX_BOOTS_WITHOUT_HEARTBEAT = 5;
 
 /** Only a ledger row a daemon writes by finishing a tick. A paused daemon ticks without sweeping. */
 const HEARTBEAT_STEPS = new Set(["sweep.summary", "daemon.pause"]);
+/** W1-T4601: the rows of the entrypoint's quiet mode (deploy/entrypoint.sh `idle_starved_wait`), which a
+ *  fleet with an empty queue writes INSTEAD of sweeping. */
+const QUIET_STEPS = new Set(["daemon.idle_starved.enter", "daemon.idle_starved.pulse"]);
+/** PRIMARY CONTROL (W1-T4601): a quiet instance is alive while its newest quiet row is younger than two of
+ *  the entrypoint's 1800s probes; a quiet mode silent for longer is judged by the ordinary rules. */
+export const QUIET_PULSE_BOUND_MS = 2 * 30 * 60_000;
 /** The ledgered form of a boot failure. The 2026-09-23 PlanError reached stderr only. */
 const BOOT_ERROR_STEPS = new Set(["cli.unhandled_rejection"]);
-const LIVENESS_ROW = /"step":"(sweep\.summary|daemon\.(start|pause|stop|quota)|cli\.(invoked|unhandled_rejection))"/;
+const LIVENESS_ROW = /"step":"(sweep\.summary|daemon\.(start|pause|stop|quota|idle_starved\.(enter|pulse))|cli\.(invoked|unhandled_rejection))"/;
 
 function tsOf(row: LivenessRow): number {
   return typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
@@ -138,12 +146,19 @@ export function judgeInstanceLiveness(instance: LivenessInstance, rows: readonly
     // An operator STOP is a deliberate hold, not an outage: say so rather than page about it.
     return { ...result, state: "held", reasons: [`stopped by the operator: ${String(stop.detail ?? "STOP flag")}`] };
   }
+  const quiet = newest(rows, (r) => QUIET_STEPS.has(String(r.step)));
+  const quietMs = quiet ? tsOf(quiet) : Number.NEGATIVE_INFINITY;
+  if (quietMs > heartbeatMs && nowMs - quietMs <= QUIET_PULSE_BOUND_MS) {
+    // W1-T4601: the queue drained and the entrypoint is probing on schedule — idle, not down.
+    return { ...result, bootsSinceHeartbeat: boots.filter((ms) => ms > quietMs).length, quiet: true };
+  }
   if (heartbeat ? nowMs - heartbeatMs > staleBoundMs : staleBoundMs <= LIVENESS_WINDOW_MS) {
     result.reasons.push(
       heartbeat
         ? `no sweep for ${minutes(nowMs - heartbeatMs)}, past its bound of ${minutes(staleBoundMs)} (${STALE_HEARTBEAT_POLL_MULTIPLE} × its ${minutes(pollIntervalMs)} poll)`
         : `no sweep at all in the trailing ${minutes(LIVENESS_WINDOW_MS)} (bound ${minutes(staleBoundMs)})`,
     );
+    if (quietMs > heartbeatMs) result.reasons.push(`its quiet-mode probe has been silent for ${minutes(nowMs - quietMs)} (bound ${minutes(QUIET_PULSE_BOUND_MS)})`);
   }
   if (result.bootsSinceHeartbeat > MAX_BOOTS_WITHOUT_HEARTBEAT) {
     result.reasons.push(`booted ${result.bootsSinceHeartbeat} times with no sweep between (bound ${MAX_BOOTS_WITHOUT_HEARTBEAT})`);
