@@ -114,6 +114,7 @@ import { buildPanelSkillRunRoutes } from "./panel-skill-run.js";
 import { buildRepoDashboardRoute } from "./repo-dashboard-route.js";
 import { buildTaskCardRoute } from "./task-card.js";
 import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operator-notes.js";
+import { buildRecordJudgeLabelRoute, fileJudgeLabelStore } from "./judge-calibration.js";
 import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, type OperatorAgentMemorySource } from "./operator-agent.js";
 import { buildContextControlsRoutes } from "./context-controls.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
@@ -2563,6 +2564,8 @@ function assembleServeRoutes(
     // worker.ts's question channel already reads/writes (see operator-notes.ts's module doc).
     buildAddOperatorNoteRoute({ root: deps.questionsRoot, ledgerPath: deps.ledgerPath }),
     buildListOperatorNotesRoute({ root: deps.questionsRoot }),
+    // W1-T4634: the store analytics reads (state dir = dirname(ledgerPath)); the queue is its last draw.
+    buildRecordJudgeLabelRoute(fileJudgeLabelStore(dirname(deps.ledgerPath)), deps.ledgerPath, () => currentAnalyticsSnapshot().judgeCalibration?.sample),
     // Console UP NEXT write-actions (fb-1784988460437-9daa9b): Run a queued task, Drain now.
     buildKickRoute(fleetControlDeps),
     buildDrainNowRoute(fleetControlDeps),

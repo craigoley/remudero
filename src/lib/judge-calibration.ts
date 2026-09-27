@@ -26,8 +26,10 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Clock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
+import type { Route } from "./service.js";
 
 export const JUDGE_CALIBRATION_VERSION = "judge-calibration-v1" as const;
 
@@ -298,6 +300,60 @@ export function recordJudgeLabel(
   if (!isJudgeLabel(label)) throw new Error("judge label refused: needs a jv- verdict reference, a pass/fail label and a labeller");
   store.write([...store.read(), label]);
   return label;
+}
+
+/** Whether a posted label's verdict is in the labelling queue the last analytics refresh drew.
+ *  `sample-unavailable` when no refresh has drawn one yet: unknown, never "out". */
+export type JudgeLabelSampleMembership = "in-sample" | "out-of-sample" | "sample-unavailable";
+
+export const JUDGE_LABEL_RECORDED_STEP = "panel.judge_label_recorded";
+
+function validateJudgeLabelBody(body: unknown): { error: string } | { verdictRef: string; label: "pass" | "fail"; labeller: string } {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.verdictRef !== "string" || !JUDGE_VERDICT_REF_RE.test(body.verdictRef)) return { error: "verdictRef must be a jv- verdict reference" };
+  if (body.label !== "pass" && body.label !== "fail") return { error: "label must be pass or fail" };
+  if (typeof body.labeller !== "string" || !body.labeller.trim()) return { error: "labeller is required" };
+  return { verdictRef: body.verdictRef, label: body.label, labeller: body.labeller.trim() };
+}
+
+/**
+ * POST /v1/judge-labels (W1-T4634) — the write half of the labelling queue, mirroring
+ * operator-notes.ts's `buildAddOperatorNoteRoute`. `labelledAt` comes from `clock`, never the body.
+ * The bearer's hashed identity is ledgered as `origin` beside the human `labeller`. A verdict
+ * outside `currentSample()` is still stored (the draw moves as verdicts arrive) but flagged.
+ * Tier LOW: a label is advisory evidence, superseded by a later label, and gates nothing.
+ */
+export function buildRecordJudgeLabelRoute(
+  store: JudgeLabelStore,
+  ledgerPath: string,
+  currentSample: () => ReadonlyArray<{ verdictRef: string }> | undefined,
+  clock: Clock = systemClock,
+): Route {
+  return {
+    method: "POST",
+    path: "/v1/judge-labels",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validateJudgeLabelBody, (input, req, res) => {
+      let stored: JudgeLabel;
+      try {
+        stored = recordJudgeLabel(store, input, clock);
+      } catch {
+        const reason = "write_failed";
+        sendJson(res, 500, { error: reason });
+        return;
+      }
+      const sample = currentSample();
+      const sampleMembership: JudgeLabelSampleMembership = sample === undefined ? "sample-unavailable"
+        : sample.some((item) => item.verdictRef === stored.verdictRef) ? "in-sample" : "out-of-sample";
+      appendPanelLedger(ledgerPath, JUDGE_LABEL_RECORDED_STEP, stored.verdictRef, bearerTokenId(req), {
+        label: stored.label,
+        labeller: stored.labeller,
+        sample_membership: sampleMembership,
+      });
+      sendJson(res, 200, { ok: true, ...stored, sampleMembership });
+    }),
+  };
 }
 
 /** Labels as the projection consumes them: read, or unavailable with a reason. */
