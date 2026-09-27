@@ -6,6 +6,8 @@ import { dirname, isAbsolute, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
+import { isTestRunner } from "./live-write-guard.js";
+import type { Config } from "./config.js";
 import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
@@ -222,6 +224,16 @@ export function callerOwnsBenchmarkReceipt(args: SpawnWorkerArgs): boolean {
   return (args as { [CALLER_OWNS_BENCHMARK_RECEIPT]?: boolean })[CALLER_OWNS_BENCHMARK_RECEIPT] === true;
 }
 
+/** W1-T4616: where a worker-call receipt may be written. MEASURED 2026-09-27: most of the ~105/h
+ *  `spawn-threw-before-result` rows came from TEST processes — a suite under `node --test` that
+ *  reached a real judge spawn with no explicit config resolved the default config's root, which is
+ *  the operator's or daemon's LIVE ledger, and wrote fake failed attempts into production evidence.
+ *  Under the test runner, only an explicitly supplied config names an evidence ledger. */
+export function benchmarkEvidenceLedgerPath(config: Config | undefined): string | undefined {
+  if (config) return ledgerPathFor(config);
+  return isTestRunner() ? undefined : ledgerPathFor(loadConfig());
+}
+
 /** PRIMARY CONTROL (W1-T4616): the longest redacted error message a failed-spawn receipt keeps. */
 export const SPAWN_FAILURE_MESSAGE_MAX_CHARS = 240;
 
@@ -251,8 +263,9 @@ export function benchmarkNonDispatchSpawn(
     if (callerOwnsBenchmarkReceipt(args)) return raw(args);
     let observedAssignmentId: string | undefined;
     const write = (step: string, fields: Record<string, unknown>): void => {
-      const config = args.config ?? loadConfig();
-      appendLedger(ledgerPathFor(config), {
+      const path = benchmarkEvidenceLedgerPath(args.config);
+      if (path === undefined) return;
+      appendLedger(path, {
         run_id: args.runId ?? `${lane}-${observedAssignmentId ?? "unassigned"}`,
         task_id: args.taskId ?? lane.toUpperCase(), step, lane, ...fields,
       });

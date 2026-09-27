@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { benchmarkNonDispatchSpawn, SPAWN_FAILURE_MESSAGE_MAX_CHARS, spawnFailureDetail } from "../src/lib/benchmark-run.js";
+import { benchmarkEvidenceLedgerPath, benchmarkNonDispatchSpawn, SPAWN_FAILURE_MESSAGE_MAX_CHARS, spawnFailureDetail } from "../src/lib/benchmark-run.js";
 import type { Config } from "../src/lib/config.js";
 import type { SpawnWorkerArgs, WorkerSelectionAssignment } from "../src/lib/worker.js";
 import { recordBenchmarkWorkerAttempt } from "../src/run-task.js";
@@ -68,4 +68,22 @@ test("W1-T4616: a spawn that throws before selection records a bounded, redacted
   const long = spawnFailureDetail(new Error("x ".repeat(2000)), false);
   assert.ok(String(long.error_message).length <= SPAWN_FAILURE_MESSAGE_MAX_CHARS);
   assert.equal(spawnFailureDetail("plain string", true).error_class, "string");
+});
+
+test("W1-T4616: a test process with no explicit config never writes worker-call evidence to the default (live) ledger", async () => {
+  // MEASURED 2026-09-27: the spawn-threw flood's writers were node --test processes whose default
+  // config resolved the live ledger. Under the runner only an explicit config names a ledger.
+  assert.ok(process.env.NODE_TEST_CONTEXT, "this suite runs under the node test runner");
+  assert.equal(benchmarkEvidenceLedgerPath(undefined), undefined);
+  assert.equal(benchmarkEvidenceLedgerPath({ root: "/tmp/fixture-root" } as Config), join("/tmp/fixture-root", "state", "ledger.ndjson"));
+  const saved = process.env.NODE_TEST_CONTEXT;
+  try {
+    delete process.env.NODE_TEST_CONTEXT;
+    assert.equal(typeof benchmarkEvidenceLedgerPath(undefined), "string", "outside the runner the daemon's default ledger still applies");
+  } finally {
+    process.env.NODE_TEST_CONTEXT = saved;
+  }
+  // The wrapper itself: a failed spawn with no config writes nothing and still rethrows.
+  const spawn = benchmarkNonDispatchSpawn("escalation-summary", async () => { throw thrown(); });
+  await assert.rejects(spawn({ cwd: tmpdir(), permissionMode: "bypassPermissions", settingsFile: "s.json", prompt: "p" }), /configuration file not found/);
 });
