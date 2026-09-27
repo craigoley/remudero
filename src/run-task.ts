@@ -2227,7 +2227,6 @@ import {
   WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND,
   type RunLockInfo,
   type SpawnWorkerArgs,
-  type WorkerSelectionAssignment,
   type ForeignTreeStandDown, type RegisteredWorktree,
   type WorkerResult,
   type WorktreeReapSummary,
@@ -2237,8 +2236,7 @@ import {
   DEFAULT_WORKER_QUIET_FLOOR_MS,
   type WorkerState,
   type WorkerStreamObserver,
-  type WorkerStreamEvent,
-  type WorkerSelectionAssignment,
+  type WorkerStreamEvent, type WorkerSelectionAssignment,
   WorkerAbandonedError,
 } from "./lib/worker.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
