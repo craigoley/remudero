@@ -22051,7 +22051,12 @@ export function checkProofCommand(
   console.log(`parse:      OK — kind=${w.kind}${w.nameFiltered ? " (name-filtered)" : ""}`);
 
   let args = w.args as readonly string[];
-  if (w.nameFiltered) {
+  if (w.nameFiltered && w.runner === "vitest") {
+    // The registered Vitest target already scopes the run to its own tests/ root. The
+    // Node-only grep resolver searches this repo's test/ root and would refuse a valid
+    // site/console proof before the shared reviewer executor could run it.
+    console.log("candidates: delegated to the registered Vitest suite root");
+  } else if (w.nameFiltered) {
     const r = resolveNameFilteredCandidates(process.cwd(), w.label);
     if (r.status === "resolved") {
       console.log(`candidates: ${r.files.length} file(s) — ${r.files.join(", ")}`);
