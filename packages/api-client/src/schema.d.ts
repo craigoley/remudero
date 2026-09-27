@@ -2218,6 +2218,25 @@ export interface components {
     OperatorNoteWriteFailure: {
       error: "write_failed";
     };
+    /** POST /v1/judge-labels's body (src/lib/judge-calibration.ts's `validateJudgeLabelBody`). `verdictRef` must match `JUDGE_VERDICT_REF_RE` (`jv-` and 16 lowercase hex digits, as judge-calibration-v1's `sample[].verdictRef` carries it); `labeller` must be non-blank and is stored trimmed. Any timestamp in the body is ignored. */
+    RecordJudgeLabelRequest: {
+      verdictRef: string;
+      label: "pass" | "fail";
+      labeller: string;
+    };
+    RecordJudgeLabelResult: {
+      ok: true;
+      verdictRef: string;
+      label: "pass" | "fail";
+      labeller: string;
+      labelledAt: string;
+      /** Whether `verdictRef` is in the labelling queue the last analytics refresh drew. `sample-unavailable` when no refresh has drawn one yet. */
+      sampleMembership: "in-sample" | "out-of-sample" | "sample-unavailable";
+    };
+    /** The judge label store could not be read or written; nothing was ledgered. */
+    JudgeLabelWriteFailure: {
+      error: "write_failed";
+    };
     /** POST /v1/policy/daily-cost-ceiling's body. The route adds no bounds check of its own: the store refuses a non-finite value or one outside plan/policy.yaml's `sweep.dailyCostCeilingUsd` bound with a 400, never clamping it. */
     SetDailyCostCeilingRequest: {
       usd: number;
@@ -3355,6 +3374,17 @@ export interface paths {
           "403": Error;
           "404": Error;
           "500": OperatorNoteWriteFailure;
+        };
+    };
+  };
+  "/v1/judge-labels": {
+    post: {
+      responses: {
+          "200": RecordJudgeLabelResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "500": JudgeLabelWriteFailure;
         };
     };
   };

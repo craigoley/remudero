@@ -6138,6 +6138,76 @@ components:
           enum:
             - write_failed
 
+    RecordJudgeLabelRequest:
+      type: object
+      description: >
+        POST /v1/judge-labels's body (src/lib/judge-calibration.ts's `validateJudgeLabelBody`).
+        `verdictRef` must match `JUDGE_VERDICT_REF_RE` (`jv-` and 16 lowercase hex digits, as
+        judge-calibration-v1's `sample[].verdictRef` carries it); `labeller` must be non-blank and
+        is stored trimmed. Any timestamp in the body is ignored.
+      required:
+        - verdictRef
+        - label
+        - labeller
+      properties:
+        verdictRef:
+          type: string
+          pattern: "^jv-[0-9a-f]{16}$"
+        label:
+          type: string
+          enum:
+            - pass
+            - fail
+        labeller:
+          type: string
+
+    RecordJudgeLabelResult:
+      type: object
+      required:
+        - ok
+        - verdictRef
+        - label
+        - labeller
+        - labelledAt
+        - sampleMembership
+      properties:
+        ok:
+          type: boolean
+          enum:
+            - true
+        verdictRef:
+          type: string
+        label:
+          type: string
+          enum:
+            - pass
+            - fail
+        labeller:
+          type: string
+        labelledAt:
+          type: string
+          format: date-time
+        sampleMembership:
+          type: string
+          description: >
+            Whether `verdictRef` is in the labelling queue the last analytics refresh drew.
+            `sample-unavailable` when no refresh has drawn one yet.
+          enum:
+            - in-sample
+            - out-of-sample
+            - sample-unavailable
+
+    JudgeLabelWriteFailure:
+      type: object
+      description: The judge label store could not be read or written; nothing was ledgered.
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          enum:
+            - write_failed
+
     SetDailyCostCeilingRequest:
       type: object
       description: >
@@ -9775,6 +9845,45 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OperatorNoteWriteFailure"
+
+  /v1/judge-labels:
+    post:
+      summary: Record one operator pass/fail label for a sampled judge verdict.
+      description: >
+        W1-T4634 (src/lib/judge-calibration.ts's `buildRecordJudgeLabelRoute`). Write tier LOW -- a
+        label is advisory evidence, superseded by a later label for the same verdict, and gates
+        nothing. `labelledAt` is stamped server-side; the label is appended to
+        `<stateDir>/judge-labels.json` (the store the judge-calibration-v1 projection reads, counted
+        at the next analytics refresh) and `panel.judge_label_recorded` is ledgered with the
+        caller's hashed identity as origin. A `verdictRef` outside the current labelling queue is
+        still stored and flagged by `sampleMembership`.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecordJudgeLabelRequest"
+      responses:
+        "200":
+          description: The label was stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecordJudgeLabelResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: The label store could not be read or written; nothing was ledgered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JudgeLabelWriteFailure"
 
   /v1/policy/daily-cost-ceiling:
     post:

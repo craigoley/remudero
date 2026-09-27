@@ -93,6 +93,7 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
   ["POST /v1/feedback/preview", "W1-T350: files nothing (no root-scoped side effect to mis-root) — behavior covered in test/panel-graph.test.ts and the console idiom in test/serve.test.ts"],
   ["POST /v1/feedback/decision", "needs a feedback-landing fixture (real git bridge)"],
   ["POST /v1/operator-notes/add", "advisory note; no fleet effect"],
+  ["POST /v1/judge-labels", "W1-T4634: advisory judge label, no fleet effect -- served wiring to dirname(ledgerPath) covered in test/an-operator-labels-a-judge-verdict.test.ts"],
   ["POST /v1/drain/feedback", "covered by test/route-registration.test.ts (mount + write scope)"],
   [
     "POST /v1/escalation/reply",
