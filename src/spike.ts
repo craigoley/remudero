@@ -16,6 +16,7 @@ import {
   parseDecisionRequest,
   parseReport,
   renderWorkerSettings,
+  spawnWorker,
   worktreeAdd,
   worktreeRemove,
   worktreesDir,
@@ -31,7 +32,7 @@ const SANDBOX_NAME = "remudero-sandbox";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const config = loadConfig();
-const measuredSpawnWorker = benchmarkNonDispatchSpawn("spike");
+const measuredSpawnWorker = benchmarkNonDispatchSpawn("spike", spawnWorker);
 const ts = String(Date.now());
 
 function log(tag: string, msg = ""): void {
