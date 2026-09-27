@@ -191,7 +191,20 @@ amounts remain separate. The pressure report measures source and checkpoint byte
 evidence bytes by UTC day, observed events per run, dimension count, and rebuilt partitions;
 it does not delete raw rows or impose a fixed storage cutoff. Run and assignment IDs stay in the
 private local checkpoint as join keys, never graph labels. There is no uploader, public cohort
-endpoint, randomized-effect estimate, or verified GitHub-outcome join in this pass. The public
+endpoint or randomized-effect estimate. A read-only, optional verified-outcome overlay can now
+join a fresh `task-case-file-v1` snapshot to the cohort's private task/run/assignment keys. It
+credits completion only when that run names the same PR and the current head has successful
+review, acceptance and CI evidence plus merged task credit. Open PRs are censored at the cutoff;
+closed unmerged PRs, old or unreadable case files, and assignments predating the join keys are
+counted as unavailable. The overlay reports per-class/selected-model completion, observed repair
+runs, merge latency, and API versus subscription-notional cost coverage. No case-file snapshot
+means the original explicit `unavailable-no-github-verification-join` state; an empty or missing
+snapshot never becomes a zero-failure claim. Cached ledger projections refresh this overlay
+without replaying the ledger, while the daemon's ordinary pass continues without GitHub polling.
+An analyst can pass a fresh JSON array of `rmd case-file <task-id> --json` results to the internal
+`node --import tsx src/lib/benchmark-cohort.ts <state-dir> --case-files <snapshot.json>` entrypoint;
+it prints only aggregate outcome groups and refuses unreadable or malformed input.
+Neither this observational join nor worker-call success promotes a model. The public
 Field Trials route remains feature-flagged to 404 until consent, quality, and review are ready.
 
 ## Baseline and savings

@@ -16,7 +16,8 @@ const projection = { taskId: task.id, status: "merged", merged: true, source: "t
 const sha = "a".repeat(40);
 const prRead: CasePrRead = { state: "observed", value: { number: 7449, url: projection.prUrl!, state: "MERGED", headSha: sha,
   body: `Remudero-Task: ${task.id}`, mergedAt: "2026-09-27T13:52:28Z", readAt: now,
-  checks: [{ name: "remudero-review", state: "success" }, { name: "ci-gate", state: "success" }] } };
+  checks: [{ name: "remudero-review", state: "success" }, { name: "acceptance-author-gate", state: "success" },
+    { name: "ci-gate", state: "success" }] } };
 const row = (step: string, rest: Record<string, unknown>) => ({ ts: "2026-09-27T13:00:00.000Z", task_id: task.id,
   run_id: `${task.id}-1790514000000`, step, ...rest });
 const ledger = (rows: Record<string, unknown>[]): CaseLedgerRead => ({ state: "observed", rows,
@@ -38,6 +39,7 @@ test("case file joins one owned assignment and separates selected, served, cash,
   assert.equal(result.runs[0].servedModel, "gpt-6-luna");
   assert.equal(result.runs[0].costUsd, 0.02);
   assert.equal(result.review.state, "observed");
+  assert.equal(result.acceptance.state, "observed");
   assert.equal(result.ci.state, "observed");
   assert.equal(result.mergedSource.state, "observed");
   assert.equal(result.deployment.state, "unavailable");
