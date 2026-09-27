@@ -22,7 +22,7 @@
  * repo, not remudero's own posture" sibling.
  */
 
-import { ghExec, splitGhHeaderBlock } from "./github-transport.js";
+import { ghExec, ghTextAsync, splitGhHeaderBlock } from "./github-transport.js";
 import { parseInstallationRepositoryListing } from "./onboarding-repository-listing.js";
 
 // ── The report shape ────────────────────────────────────────────────────────────────────────
@@ -85,27 +85,46 @@ export interface OnboardingReadinessGateway {
   getContents(owner: string, repo: string, path: string): OnboardingReadinessApiRead | undefined;
 }
 
+/** The served route uses bounded async GitHub reads; the synchronous gateway remains for CLI
+ * callers and the pure report's deterministic tests. */
+export interface OnboardingReadinessGatewayAsync {
+  listInstallationRepos(): Promise<string[] | undefined>;
+  getRepo(owner: string, repo: string): Promise<OnboardingReadinessApiRead | undefined>;
+  getBranchProtection(owner: string, repo: string, branch: string): Promise<OnboardingReadinessApiRead | undefined>;
+  getContents(owner: string, repo: string, path: string): Promise<OnboardingReadinessApiRead | undefined>;
+}
+
+export interface OnboardingReadinessSnapshot extends OnboardingReadinessGateway {
+  /** Only a complete set of GitHub answers may be reused on another request. */
+  complete: boolean;
+}
+
+function parseApiRead(raw: string): OnboardingReadinessApiRead | undefined {
+  const { headers, body } = splitGhHeaderBlock(raw);
+  const statusMatch = /^HTTP\/\d(?:\.\d)?\s+(\d+)/.exec(headers);
+  const status = statusMatch ? Number(statusMatch[1]) : 200;
+  const trimmed = body.trim();
+  if (trimmed === "") return { status, body: undefined };
+  const parsed = parseJson(trimmed);
+  return parsed.ok ? { status, body: parsed.value } : undefined;
+}
+
+function parseApiError(err: unknown): OnboardingReadinessApiRead | undefined {
+  // gh exits non-zero for both HTTP errors and transport failures. Only the former proves status.
+  const text = `${(err as { stderr?: string | Buffer })?.stderr ?? ""} ${(err as { message?: string })?.message ?? ""}`;
+  const statusMatch = /\bHTTP\s+(\d+)\b/.exec(text);
+  return statusMatch ? { status: Number(statusMatch[1]), body: undefined } : undefined;
+}
+
 /** DETECTION ONLY, mirroring `github-posture.ts`'s own module header: metadata reads are bare
  *  `gh api <path> -i` GETs; the installation listing adds `--paginate --jq` to read every page.
  *  No call passes `-X`/`--method`/`-f`/`-F`/`--input` or writes to GitHub. */
 export function onboardingReadinessGateway(execFileFn: (args: string[]) => string = defaultExec): OnboardingReadinessGateway {
   function apiRead(path: string): OnboardingReadinessApiRead | undefined {
     try {
-      const raw = execFileFn(["api", path, "-i"]);
-      const { headers, body } = splitGhHeaderBlock(raw);
-      const statusMatch = /^HTTP\/\d(?:\.\d)?\s+(\d+)/.exec(headers);
-      const status = statusMatch ? Number(statusMatch[1]) : 200;
-      const trimmed = body.trim();
-      if (trimmed === "") return { status, body: undefined };
-      const parsed = parseJson(trimmed);
-      return parsed.ok ? { status, body: parsed.value } : undefined; // An unparsable body is a failed read.
+      return parseApiRead(execFileFn(["api", path, "-i"]));
     } catch (err) {
-      // `gh` exits non-zero for every non-2xx response AND for a genuine transport failure; only
-      // the former names its status in the error text (`gh: Not Found (HTTP 404)`) — a definitive
-      // answer this module can still classify. Anything else is truly unreadable.
-      const text = `${(err as { stderr?: string | Buffer })?.stderr ?? ""} ${(err as { message?: string })?.message ?? ""}`;
-      const statusMatch = /\bHTTP\s+(\d+)\b/.exec(text);
-      return statusMatch ? { status: Number(statusMatch[1]), body: undefined } : undefined;
+      return parseApiError(err);
     }
   }
   return {
@@ -121,6 +140,69 @@ export function onboardingReadinessGateway(execFileFn: (args: string[]) => strin
     getRepo: (owner, repo) => apiRead(`repos/${owner}/${repo}`),
     getBranchProtection: (owner, repo, branch) => apiRead(`repos/${owner}/${repo}/branches/${branch}/protection`),
     getContents: (owner, repo, path) => apiRead(`repos/${owner}/${repo}/contents/${path}`),
+  };
+}
+
+const defaultReadAsync = (args: string[]): Promise<string> => ghTextAsync(args, { maxBuffer: 2 * 1024 * 1024, timeout: 15_000 });
+
+/** The request path must not block Node's event loop while `gh` waits on GitHub. */
+export function onboardingReadinessGatewayAsync(read: (args: string[]) => Promise<string> = defaultReadAsync): OnboardingReadinessGatewayAsync {
+  async function apiRead(path: string): Promise<OnboardingReadinessApiRead | undefined> {
+    try {
+      return parseApiRead(await read(["api", path, "-i"]));
+    } catch (err) {
+      return parseApiError(err);
+    }
+  }
+  return {
+    listInstallationRepos: async () => {
+      try {
+        return parseInstallationRepositoryListing(await read(["api", "installation/repositories?per_page=100", "--paginate", "--jq", ".total_count, .repositories[].full_name"])) ?? undefined;
+      } catch {
+        return undefined;
+      }
+    },
+    getRepo: (owner, repo) => apiRead(`repos/${owner}/${repo}`),
+    getBranchProtection: (owner, repo, branch) => apiRead(`repos/${owner}/${repo}/branches/${branch}/protection`),
+    getContents: (owner, repo, path) => apiRead(`repos/${owner}/${repo}/contents/${path}`),
+  };
+}
+
+const READINESS_CONTENT_PATHS = [".github/workflows", "AGENTS.md", "CLAUDE.md", "package.json", "Makefile", "pyproject.toml", "plan"] as const;
+
+async function unknownOnReadFailure<T>(read: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await read();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Collect GitHub evidence concurrently, then let the existing pure classifier interpret it.
+ * Missing/failed reads stay undefined, never a guessed absence. The returned snapshot is safe to
+ * cache; the caller still supplies a freshly read fleet registry to `onboardingReadiness`. */
+export async function readOnboardingReadinessSnapshot(
+  owner: string,
+  repo: string,
+  gateway: OnboardingReadinessGatewayAsync = onboardingReadinessGatewayAsync(),
+): Promise<OnboardingReadinessSnapshot> {
+  const [installed, repoRead, ...contents] = await Promise.all([
+    unknownOnReadFailure(() => gateway.listInstallationRepos()),
+    unknownOnReadFailure(() => gateway.getRepo(owner, repo)),
+    ...READINESS_CONTENT_PATHS.map((path) => unknownOnReadFailure(() => gateway.getContents(owner, repo, path))),
+  ]);
+  const branch = (repoRead?.body as { default_branch?: unknown } | null)?.default_branch;
+  const protection = repoRead?.status === 200 && typeof branch === "string" && branch
+    ? await unknownOnReadFailure(() => gateway.getBranchProtection(owner, repo, branch))
+    : undefined;
+  const byPath = new Map<string, OnboardingReadinessApiRead | undefined>(READINESS_CONTENT_PATHS.map((path, index) => [path, contents[index]]));
+  return {
+    complete: installed !== undefined && repoRead !== undefined && contents.every((read) => read !== undefined)
+      && (repoRead.status !== 200 || (typeof branch === "string" && branch.length > 0 && protection !== undefined)),
+    listInstallationRepos: () => installed,
+    getRepo: () => repoRead,
+    getBranchProtection: (_owner, _repo, requestedBranch) => requestedBranch === branch ? protection : undefined,
+    getContents: (_owner, _repo, path) => byPath.get(path),
   };
 }
 

@@ -13,9 +13,12 @@ import { test } from "node:test";
 import {
   onboardingReadiness,
   onboardingReadinessGateway,
+  onboardingReadinessGatewayAsync,
+  readOnboardingReadinessSnapshot,
   type OnboardingReadinessApiRead,
   type OnboardingReadinessCheck,
   type OnboardingReadinessGateway,
+  type OnboardingReadinessGatewayAsync,
   type OnboardingReadinessStatus,
 } from "../src/lib/onboarding-readiness.js";
 import { buildOnboardingReadinessRoute, buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
@@ -216,6 +219,22 @@ test("the gateway classifies each gh api answer by its HTTP status, and only an 
   );
 });
 
+test("the async gateway preserves definitive HTTP absence and incomplete installation evidence", async () => {
+  const calls: string[][] = [];
+  const asyncGateway = onboardingReadinessGatewayAsync(async (args) => {
+    calls.push(args);
+    if (args[1]?.startsWith("installation/")) return "2\nacme/widget\n";
+    if (args[1]?.endsWith("/protection")) throw Object.assign(new Error("exit 1"), { stderr: "gh: Not Found (HTTP 404)" });
+    if (args[1] === "repos/acme/widget") return '{"default_branch":"main"}';
+    throw new Error("network unavailable");
+  });
+  const snapshot = await readOnboardingReadinessSnapshot("acme", "widget", asyncGateway);
+  assert.equal(snapshot.listInstallationRepos(), undefined, "a truncated page cannot prove app absence");
+  assert.deepEqual(snapshot.getBranchProtection("acme", "widget", "main"), { status: 404, body: undefined });
+  assert.equal(snapshot.complete, false, "incomplete reads must not enter the warm cache");
+  assert.ok(calls.every((args) => args[0] === "api"));
+});
+
 test("readiness checks Fleet App access beyond the first hundred repositories and refuses a partial list", () => {
   const names = Array.from({ length: 101 }, (_, index) => `acme/repo-${index}`);
   names[100] = "acme/widget";
@@ -307,6 +326,95 @@ test("the readiness route refuses a missing or malformed repo and answers a vali
 
   const retired = await invoke(route, "/v1/onboarding/readiness?repo=acme/retired");
   assert.equal(checkStatus(retired.body, "already-onboarded").status, "pass", "a retired row is not an onboarded repo");
+});
+
+test("the served readiness route does not block on GitHub and re-reads the registry on a warm GitHub snapshot", async (t) => {
+  const dir = fixtureDir(t);
+  const repoRegistryPath = join(dir, "registry.yaml");
+  writeFileSync(repoRegistryPath, REGISTRY);
+  const sync = gateway();
+  let calls = 0;
+  let releaseRepo: (() => void) | undefined;
+  let markRepoStarted: (() => void) | undefined;
+  const repoStarted = new Promise<void>((resolve) => { markRepoStarted = resolve; });
+  const asyncGateway: OnboardingReadinessGatewayAsync = {
+    listInstallationRepos: async () => { calls++; return sync.listInstallationRepos(); },
+    getRepo: async () => {
+      calls++;
+      markRepoStarted!();
+      await new Promise<void>((resolve) => { releaseRepo = resolve; });
+      return sync.getRepo("acme", "widget");
+    },
+    getBranchProtection: async (...args) => { calls++; return sync.getBranchProtection(...args); },
+    getContents: async (...args) => { calls++; return sync.getContents(...args); },
+  };
+  const route = buildOnboardingReadinessRoute({ repoRegistryPath, asyncGateway });
+  const pending = invoke(route, "/v1/onboarding/readiness?repo=acme/widget");
+  const concurrent = invoke(route, "/v1/onboarding/readiness?repo=acme/widget");
+  await repoStarted;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(typeof releaseRepo, "function", "the GitHub read yielded to the event loop");
+  releaseRepo!();
+  const [first, joined] = await Promise.all([pending, concurrent]);
+  assert.equal(checkStatus(first.body, "already-onboarded").status, "warn");
+  assert.equal(checkStatus(joined.body, "app-access").status, "pass");
+  const firstCalls = calls;
+  writeFileSync(repoRegistryPath, "instances:\n  gone:\n    github_repo: acme/widget\n    retired: true\n");
+  const second = await invoke(route, "/v1/onboarding/readiness?repo=acme/widget");
+  assert.equal(checkStatus(second.body, "already-onboarded").status, "pass", "registry truth is not cached with GitHub evidence");
+  assert.equal(calls, firstCalls, "the complete GitHub snapshot was reused");
+});
+
+test("an incomplete GitHub readiness snapshot is retried, never cached as app absence", async (t) => {
+  const dir = fixtureDir(t);
+  const repoRegistryPath = join(dir, "registry.yaml");
+  writeFileSync(repoRegistryPath, REGISTRY);
+  const sync = gateway();
+  let installationReads = 0;
+  const asyncGateway: OnboardingReadinessGatewayAsync = {
+    listInstallationRepos: async () => {
+      if (++installationReads === 1) throw new Error("GitHub read refused");
+      return sync.listInstallationRepos();
+    },
+    getRepo: async (...args) => sync.getRepo(...args),
+    getBranchProtection: async (...args) => sync.getBranchProtection(...args),
+    getContents: async (...args) => sync.getContents(...args),
+  };
+  const route = buildOnboardingReadinessRoute({ repoRegistryPath, asyncGateway });
+  const first = await invoke(route, "/?repo=acme/widget");
+  assert.equal(checkStatus(first.body, "app-access").status, "unknown");
+  const second = await invoke(route, "/?repo=acme/widget");
+  assert.equal(checkStatus(second.body, "app-access").status, "pass");
+  assert.equal(installationReads, 2);
+});
+
+test("a complete readiness snapshot expires after its short TTL, including if the clock moves backward", async (t) => {
+  const dir = fixtureDir(t);
+  const repoRegistryPath = join(dir, "registry.yaml");
+  writeFileSync(repoRegistryPath, REGISTRY);
+  const sync = gateway();
+  let nowMs = 100_000;
+  let installationReads = 0;
+  const route = buildOnboardingReadinessRoute({
+    repoRegistryPath,
+    clock: { now: () => nowMs, date: () => new Date(nowMs), iso: () => new Date(nowMs).toISOString() },
+    asyncGateway: {
+      listInstallationRepos: async () => { installationReads++; return sync.listInstallationRepos(); },
+      getRepo: async (...args) => sync.getRepo(...args),
+      getBranchProtection: async (...args) => sync.getBranchProtection(...args),
+      getContents: async (...args) => sync.getContents(...args),
+    },
+  });
+  await invoke(route, "/?repo=acme/widget");
+  nowMs += 29_999;
+  await invoke(route, "/?repo=acme/widget");
+  assert.equal(installationReads, 1);
+  nowMs += 1;
+  await invoke(route, "/?repo=acme/widget");
+  assert.equal(installationReads, 2);
+  nowMs -= 30_001;
+  await invoke(route, "/?repo=acme/widget");
+  assert.equal(installationReads, 3, "a backward clock must not keep evidence warm forever");
 });
 
 test("an unreadable or invalid registry makes only already-onboarded unknown, with no path in the answer", async (t) => {
