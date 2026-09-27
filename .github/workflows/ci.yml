@@ -1775,7 +1775,10 @@ jobs:
     name: ci-gate
     runs-on: ubuntu-latest
     needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow, commitlint, leak-grep, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
-    if: ${{ always() && github.event_name == 'pull_request' }}
+    # `always()` must still aggregate a FAILED dependency, but alone it also survives normal
+    # cancellation and keeps a superseded PR run's concurrency slot occupied (W1-T4604).
+    # GitHub re-evaluates this job condition when cancelling: the second arm releases that run.
+    if: ${{ always() && !cancelled() && github.event_name == 'pull_request' }}
     # Light band. Its wait starts only after every ci.yml job has finished, so it covers stragglers
     # from OTHER workflows alone (all done by minute 4 on every PR measured): a 900 s WAIT_CAP_SECONDS
     # here, plus ci-gate.yml's 600 s grace window, still ends inside this bound — so the gate's own

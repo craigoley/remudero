@@ -14,7 +14,7 @@
   files:
     - src/lib/worker.ts
     - src/run-task.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-24 in the same live CPU profile of the core daemon that led to #7011, #7016 and #7017: the

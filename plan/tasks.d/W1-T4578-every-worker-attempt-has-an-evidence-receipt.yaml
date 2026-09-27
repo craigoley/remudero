@@ -18,7 +18,7 @@
     - test/benchmark-worker-attempt-projection.test.ts
     - test/benchmark-worker-attempt-wiring.test.ts
     - docs/model-routing.md
-  status: queued
+  status: merged
   rationale: |
     W1-T4560 established the assignment and run-verdict envelope; this extends that same
     surface to each worker call rather than redoing the earlier receipt.

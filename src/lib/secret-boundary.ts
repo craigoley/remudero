@@ -39,8 +39,6 @@ export function mintSentinel(label: string): string {
  *  `ALLOWED_NETWORK_DOMAINS` comment) — named here ONCE so this module and that one can never
  *  silently disagree about which host this boundary exists to protect. */
 export const MODEL_HOST_DEFAULT = "api.anthropic.com";
-/** The real upstream this proxy forwards a substituted request to, by default. */
-export const MODEL_UPSTREAM_BASE_URL_DEFAULT = `https://${MODEL_HOST_DEFAULT}`;
 
 /**
  * One row of the boundary proxy's destination table: a host declared reachable with a credential

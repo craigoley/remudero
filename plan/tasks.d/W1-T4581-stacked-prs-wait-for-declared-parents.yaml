@@ -18,7 +18,7 @@
     - test/automerge-hold.test.ts
     - test/ledger-rotation.test.ts
   plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Observed on craigoley/remudero-console: #1766's body declared "Stacked on #1765 → #1764";

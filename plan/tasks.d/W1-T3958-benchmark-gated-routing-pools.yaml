@@ -64,4 +64,4 @@
     Select a failed candidate, use an incomparable benchmark to promote a model, impute missing cost
     or quality as zero, change a session's route without a declared refusal, or hide the baseline
     fallback. The corresponding proof must fail.
-  note: "This layers a selection contract over W1-T167/W1-T250/W1-T3576/W1-T3762; it does not replace class policy, probe evidence, or assignment telemetry. reservation hand-off: run-W1-T3956-17899977143N -> run-W1-T3956-1789997714300"
+  note: "This layers a selection contract over W1-T167/W1-T250/W1-T3576/W1-T3762; it does not replace class policy, probe evidence, or assignment telemetry. W1-T4607 supplies a sourced case file; live-fleet completion evidence waits for W1-T4608's exact verification join; comparable offline benchmark pools can proceed. reservation hand-off: run-W1-T3956-17899977143N -> run-W1-T3956-1789997714300"

@@ -2327,7 +2327,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // choosing Codex; capacity remains an auction-only concept.
     const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
       provider: "codex",
-      model: args.model,
+      // W1-T4615: with no capacity selection, codexExecArgs runs the configured Codex model; the
+      // mount's own label (often a Claude alias) is the REQUEST, and stays in `requested.model`.
+      model: config.workerProviders?.codexModel ?? args.model,
       effort: args.effort,
       mode: "mount-affinity",
       selectionPath: "mount-affinity",
@@ -2338,6 +2340,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       materializeWorkerHome({ workerHome, realHome });
       const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config);
       result.selectionAssignmentId = selectionAssignmentId;
+      result.routedModel ??= result.model;
       if (args.model) result.model = args.model;
       return result;
     } finally {
@@ -2397,6 +2400,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             openWeight.alternatives.slice(openWeight.alternatives.indexOf(selection.model) + 1));
           const rung = await runOpenWeight({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
           rung.selectionAssignmentId = selectionAssignmentId;
+          rung.routedModel ??= selection.model;
           return rung;
         },
         openWeight,
@@ -2757,6 +2761,11 @@ export interface WorkerStreamEvent {
   provider?: string;
   requestedModel?: string;
   servedModel?: string;
+  /** W1-T4615: the pre-execution assignment this spawn joined and what it SELECTED. A routing
+   * choice, never a served-model receipt: `servedModel` stays the only provider claim. */
+  selectionAssignmentId?: string;
+  routedProvider?: string;
+  routedModel?: string;
   /** The cumulative count of raw `assistant`-type SDK messages seen so far this spawn: one increment per message however many
    * blocks it carries, so a message with both fires two events reporting the SAME count, and every event kind carries it so a
    * reader never holds a stale value. DELIBERATELY NOT NAMED `numTurns` — the terminal `num_turns` does not reliably count

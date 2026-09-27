@@ -151,6 +151,10 @@ export interface ReviewEvaluatorProvenance {
   servedModel: string | null;
   effort: string | null;
   sessionId: string | null;
+  /** W1-T4615: what the router selected and the assignment that recorded it. Optional because
+   * rows ledgered before it carry neither; `requestedModel` is the mount's ask, often an alias. */
+  routedModel?: string | null;
+  selectionAssignmentId?: string | null;
 }
 
 export interface ReviewDecisionTerminal {
@@ -4883,8 +4887,8 @@ const FAIL_PREFIX = "remudero-review: FAIL — ";
  * specifics, because an unexplained red is the shape that gets overridden: `criteriaTampered` (Standing rule 15) comes
  * first, ahead of the empty-unmet test-theater fallback, since a diff can trip the rule-15 guard alone with every
  * named criterion still met; `changesetContradictions` names which claim was contradicted and which files refute it;
- * `instrumentEntanglement` (Standing rule 25) names the instrument and src paths AND STATES THE RESOLUTION;
- * `unprovenancedDecisionsEntries` names the unmarked header and the two accepted genres. `unmetClaims` is
+ * `unprovenancedDecisionsEntries` names the unmarked header and the two accepted genres; `instrumentEntanglement`
+ * (Standing rule 25, advisory) names its paths and resolution only when no blocking reason is present (W1-T4602). `unmetClaims` is
  * caller-filtered to VISIBLE criteria only (W1-T166), and `hiddenUnmetCount` surfaces unmet HOLDOUT criteria as a bare
  * count, this text being readable by the very worker a holdout criterion must stay hidden from. */
 export function failSummary(
@@ -4953,13 +4957,6 @@ export function failSummary(
     // discoverable only by reading this file. `files:` is the half that gives, since it is recoverable from the PR.
     return `${FAIL_PREFIX}body contradicts its own diff: claimed "${first.claim}" (backtick a mention to quote it), files: ${filesText}${more}`;
   }
-  if (instrumentEntanglement) {
-    return (
-      `${FAIL_PREFIX}entangled: instrument path(s) ${instrumentEntanglement.instrumentPaths.join(", ")} changed ` +
-      `alongside src/ path(s) ${instrumentEntanglement.srcPaths.join(", ")} in the same PR — split it: land the ` +
-      `instrument change in its own PR, then rebase this one onto it (or revert the instrument hunk here)`
-    );
-  }
   if (unprovenancedDecisionsEntries.length > 0) {
     const first = unprovenancedDecisionsEntries[0];
     const more =
@@ -4973,6 +4970,15 @@ export function failSummary(
     return (
       `${FAIL_PREFIX}${hiddenUnmetCount} holdout criteri${hiddenUnmetCount === 1 ? "on" : "a"} unmet ` +
       `(reviewer-only — not disclosed to the worker)${testTheater ? "; test theater" : ""}`
+    );
+  }
+  // W1-T4602: Standing rule 25 is ADVISORY since #5031, so the entanglement names the summary only when nothing
+  // blocking does — ahead of a real blocker it sent #7365 to a split worker for a one-line DECISIONS fix.
+  if (unmetClaims.length === 0 && !testTheater && instrumentEntanglement) {
+    return (
+      `${FAIL_PREFIX}entangled: instrument path(s) ${instrumentEntanglement.instrumentPaths.join(", ")} changed ` +
+      `alongside src/ path(s) ${instrumentEntanglement.srcPaths.join(", ")} in the same PR — split it: land the ` +
+      `instrument change in its own PR, then rebase this one onto it (or revert the instrument hunk here)`
     );
   }
   if (unmetClaims.length === 0) return `${FAIL_PREFIX}test theater: added tests assert nothing`;

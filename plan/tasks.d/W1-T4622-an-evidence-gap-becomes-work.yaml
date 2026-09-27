@@ -1,0 +1,39 @@
+- id: W1-T4622
+  title: "EVIDENCE GAPS ARE FOUND BY HAND — the fix lane's missing model, the reviewer's missing assignment and the transcript's wrong label each took a manual census to see; nothing turns a coverage drop into a bounded follow-up"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: model-evidence research — every run should add usable model evidence or an explicit coverage gap"
+  plan_refs: ["W1-T100001", "W1-T4574", "W1-T4575", "W1-T4580", "W1-T4603", "W1-T4607", "W1-T4608"]
+  files:
+    - src/lib/evidence-coverage-gardener.ts
+    - src/run-task.ts
+    - test/an-evidence-gap-becomes-work.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27 over the three fleets' full ledger unions (core 773,650 / console 356,871 /
+    site 269,728 rows, 2026-09-20..27) and origin/main 12baa03. benchmark-quality-v1 already
+    measures per-field missingness and join coverage, but no process watches it: the gaps behind
+    W1-T4613, W1-T4615 and W1-T4616 were each found by a one-off research census. The standard is
+    that every daemon, task, cycle, worker and run adds usable evidence or an explicit coverage gap,
+    and a gardener turns gaps into bounded work.
+  design: |
+    An evidence-coverage gardener reads the benchmark-quality projection per lane and field on a
+    cadence, and when a lane's coverage for a required field (assignment, served model, tokens,
+    cost, outcome join) is below its own trailing baseline or absent, files or updates one dedup-
+    keyed follow-up naming the lane, field, denominator and first-seen time. It never gates a PR or
+    blocks work; its own failure is visible and becomes repair work.
+  acceptance:
+    - claim: "a lane whose coverage of a required evidence field falls below its trailing baseline gets one dedup-keyed follow-up, and the gardener never gates a PR"
+      proof: "unit test: test/an-evidence-gap-becomes-work.test.ts"
+    - claim: "the new module is wired into its production caller, not shipped unwired"
+      proof: "grep: runEvidenceCoverageGardener( in src/run-task.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale measured.

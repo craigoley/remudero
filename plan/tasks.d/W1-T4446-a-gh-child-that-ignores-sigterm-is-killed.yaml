@@ -12,7 +12,7 @@
   plan_refs: []
   files:
     - src/lib/github-transport.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-24: a gh child outlived DEFAULT_GH_CALL_TIMEOUT_MS (60 s). The primary cause was the

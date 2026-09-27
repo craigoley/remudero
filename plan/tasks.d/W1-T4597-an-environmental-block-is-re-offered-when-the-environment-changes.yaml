@@ -15,7 +15,7 @@
     - src/lib/daemon.ts
     - src/lib/ledger.ts
     - test/an-environmental-block-is-re-offered-when-the-environment-changes.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

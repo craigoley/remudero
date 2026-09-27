@@ -13,7 +13,7 @@
   files:
     - deploy/docker-fixture-fence.sh
     - test/docker-fixture-fence.test.ts
-  status: queued
+  status: merged
   rationale: |
     The current recycle script refuses to run inside a container, but a stale host checkout
     can have a test fixture that overrides its in-container marker and accidentally reaches

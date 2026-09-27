@@ -11,7 +11,7 @@
   files:
     - scripts/contract-coverage-ratchet.mjs
     - test/the-contract-census-lives-with-its-consumer.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     scripts/contract-coverage-ratchet.mjs (W1-T3174) counted /v1 routes an IN-REPO client calls that

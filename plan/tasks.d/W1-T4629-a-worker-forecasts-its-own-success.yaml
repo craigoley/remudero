@@ -1,0 +1,40 @@
+- id: W1-T4629
+  title: "A MODEL'S CONFIDENCE IS NEVER COMPARED WITH ITS RESULT — each worker states a probability that its change will pass review and merge, so calibration and the perception gap become per-model measurements"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: agent-evaluation state-of-the-art survey applied to Remudero's field trials"
+  plan_refs: ["W1-T100001", "W1-T4575", "W1-T4603", "W1-T4608", "W1-T4617", "W1-T4619", "W1-T4620", "W1-T4621", "W1-T4623"]
+  files:
+    - src/lib/self-forecast.ts
+    - src/run-task.ts
+    - test/a-worker-forecasts-its-own-success.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    State of the art surveyed 2026-09-27 (sources in the filing PR). Remudero's plan tasks already
+    carry executable, base-vs-head discriminated proofs plus holdout criteria — an executable grader
+    most public agent evaluations lack. METR's randomized study found developers believed AI made
+    them ~20% faster while it made them 19% slower; the gap between perceived and actual effect was
+    itself the headline finding. OpenAI's 'confessions' work scores honest self-reports separately
+    from the task. Remudero's workers already write a structured REPORT but never a calibrated
+    forecast, so over- and under-confidence per model is invisible.
+  design: |
+    Workers end their REPORT with an anchored `SELF_FORECAST: p=<0..1>` line for 'this head passes
+    review and merges without rework'. The harness parses and ledgers it on the terminal row with
+    the assignment, never uses it for gating or routing, and a projection scores it against the
+    verified outcome (W1-T4608) with Brier score and a reliability curve per model and task class. A
+    missing or malformed forecast is recorded as absent, not as 0.5.
+  acceptance:
+    - claim: "a worker's anchored SELF_FORECAST is parsed and ledgered on its terminal row, scored against verified outcome with a Brier score, and a missing forecast is absent rather than 0.5"
+      proof: "unit test: test/a-worker-forecasts-its-own-success.test.ts"
+    - claim: "the new module is wired into its production caller, not shipped unwired"
+      proof: "grep: parseSelfForecast( in src/run-task.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale describes.

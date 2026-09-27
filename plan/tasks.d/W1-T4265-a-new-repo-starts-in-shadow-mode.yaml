@@ -17,7 +17,7 @@
     - src/run-task.ts
     - test/shadow-instance-safety.test.ts
     - test/owner-dispatch-threading.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The design doc's onboarding gate: a new repo is proven in a shadow instance before it goes live

@@ -13,7 +13,7 @@
     - test/host-caused-suite-reds.test.ts
   origin: "followup#DAEMON-1788783316728-w1-t3020-sandbox-suite-reds-2026-09-07"
   plan_refs: ["W1-T2234", "W1-T2770", "W1-T2790", "W1-T130"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE LINE, VERBATIM FROM SOURCE. When no registered cluster applies, the step returns:

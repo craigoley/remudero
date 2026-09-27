@@ -2237,6 +2237,8 @@ import {
   DEFAULT_WORKER_QUIET_FLOOR_MS,
   type WorkerState,
   type WorkerStreamObserver,
+  type WorkerStreamEvent,
+  type WorkerSelectionAssignment,
   WorkerAbandonedError,
 } from "./lib/worker.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
@@ -2412,6 +2414,7 @@ import {
   type DoctorDeps,
   statusCommand,
   type StatusDeps,
+  caseFileCommand,
   digestCommand,
   learningsCommand,
   learningsExportCommand,
@@ -2452,6 +2455,7 @@ export {
   type DoctorDeps,
   statusCommand,
   type StatusDeps,
+  caseFileCommand,
   digestCommand,
   learningsCommand,
   learningsExportCommand,
@@ -2644,6 +2648,20 @@ export interface WorkerStateSensor {
   setRunawayBound: (bound: number | undefined) => void;
 }
 
+/** W1-T4615: stamp an activity event with its spawn's assignment; never promoted to `servedModel`. */
+export function attributeWorkerStreamEvent(
+  event: WorkerStreamEvent,
+  assignment: Pick<WorkerSelectionAssignment, "id" | "selected"> | undefined,
+): WorkerStreamEvent {
+  if (!assignment) return event;
+  return {
+    ...event,
+    selectionAssignmentId: event.selectionAssignmentId ?? assignment.id,
+    routedProvider: event.routedProvider ?? assignment.selected.provider,
+    routedModel: event.routedModel ?? assignment.selected.model,
+  };
+}
+
 const WORKER_TELEMETRY_TEXT_MAX_CHARS = 240;
 
 /** Keep a worker-authored sentence useful as a tool rationale without turning status telemetry
@@ -2748,6 +2766,12 @@ export function buildWorkerStateSensor(args: {
         ...(event.provider ? { provider: event.provider } : {}),
         ...(event.requestedModel ? { requested_model: event.requestedModel } : {}),
         ...(event.servedModel ? { served_model: event.servedModel } : {}),
+        // W1-T4615: the routed half beside the requested alias, or a named gap.
+        ...(event.selectionAssignmentId
+          ? { selection_assignment_id: event.selectionAssignmentId }
+          : { assignment_unavailable_reason: "assignment-not-observed" }),
+        ...(event.routedProvider ? { routed_provider: event.routedProvider } : {}),
+        ...(event.routedModel ? { routed_model: event.routedModel } : {}),
         ...(event.turnsSoFar === undefined ? {} : { turns_so_far: event.turnsSoFar }),
         ...(event.kind === "tool-executing"
           ? {
@@ -6528,6 +6552,8 @@ async function runReview(args: {
           args.reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon;
         const reviewerClockBound = { clockBound: { boundMs: reviewerClockBoundMs } };
         const reviewerSpawnWorker = args.reviewerSpawnWorker ?? ledgeredNonDispatchSpawn("review");
+        // W1-T4615: assigned before the provider call, so every later stream event names the routed model.
+        let reviewerAssignment: WorkerSelectionAssignment | undefined;
         try {
           reviewer = args.account(
             await reviewerSpawnWorker({
@@ -6561,7 +6587,8 @@ async function runReview(args: {
             // (and leave `remudero-review=pending`) forever.  The deterministic floor still posts
             // a terminal verdict when this bound trips.
             ...reviewerClockBound,
-            streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer({ ...event, workerRole: "reviewer", provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }) : undefined,
+            onSelectionAssignment: (assignment) => { reviewerAssignment = assignment; },
+            streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
             }),
           );
@@ -6579,6 +6606,8 @@ async function runReview(args: {
           servedModel: reviewerFields.served_model,
           effort: reviewerFields.effort,
           sessionId: reviewer.sessionId ?? null,
+          routedModel: reviewerFields.routed_model ?? reviewerAssignment?.selected.model ?? null,
+          selectionAssignmentId: reviewerFields.selection_assignment_id ?? reviewerAssignment?.id ?? null,
         };
         log("review.reviewer", {
           session_id: reviewer.sessionId,
@@ -6587,6 +6616,10 @@ async function runReview(args: {
           // W1-T6: the advisory reviewer is a BRAIN-PLANE call — same telemetry
           // shape as a worker call, so ledger lines are queryable uniformly.
           ...reviewerFields,
+          ...(reviewerFields.selection_assignment_id ? {}
+            : reviewerAssignment ? { selection_assignment_id: reviewerAssignment.id }
+            : { assignment_unavailable_reason: "assignment-not-observed" }),
+          ...(reviewerFields.routed_model || !reviewerAssignment ? {} : { routed_model: reviewerAssignment.selected.model }),
         });
         // The reviewer is fresh (no resume) — reap its SDK scratchpad now, before
         // withTempDir removes reviewCwd. Best-effort, guarded (lib/worker-scratch).
@@ -10937,6 +10970,7 @@ export async function runFixRung(opts: {
         model: opts.mount.model,
         verdict: fixResult.subtype,
         headSha: expectedHeadShaForPush,
+        worker: fixResult,
       },
       deps.log,
     );
@@ -13758,16 +13792,23 @@ export function archiveWorkerTranscript(
     verdict?: string;
     headSha?: string;
     retention?: number;
+    worker?: Pick<WorkerResult, "provider" | "routedModel" | "servedModel" | "selectionAssignmentId">;
   },
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): { path: string; bytes: number } | undefined {
   try {
     const capped = capStderrExcerpt(opts.text ?? "", TRANSCRIPT_EXCERPT_CAP);
+    // W1-T4615: `model` is the mount's REQUEST (often an alias); routed/served come only from the result.
+    const worker = opts.worker;
     const frontMatter = [
       "---",
       `run_id: ${opts.runId}`,
       `rung: ${opts.rung}`,
-      `model: ${opts.model ?? "unknown"}`,
+      `requested_model: ${opts.model ?? "unknown"}`,
+      `routed_provider: ${worker?.provider ?? "unavailable"}`,
+      `routed_model: ${worker?.routedModel ?? "unavailable"}`,
+      `served_model: ${worker?.servedModel ?? "unavailable"}`,
+      `selection_assignment_id: ${worker?.selectionAssignmentId ?? "unavailable"}`,
       `verdict: ${opts.verdict ?? "unknown"}`,
       `head_sha: ${opts.headSha ?? "unknown"}`,
       "---",
@@ -14244,7 +14285,8 @@ async function runTask(
       // Keep provider/model attribution specific to THIS spawn, not the run's initial mount.
       // The selected assignment is authoritative for provider + requested model; the selected
       // model is deliberately not promoted to a served-model receipt.
-      streamObserver: (event) => baseStreamObserver(enrichWorkerStreamEvent(event, effectiveSpawnArgs, selectionAssignment)),
+      streamObserver: (event) => baseStreamObserver(attributeWorkerStreamEvent(
+        enrichWorkerStreamEvent(event, effectiveSpawnArgs, selectionAssignment), selectionAssignment)),
       // W1-T1045: every real dispatch spawn gets the clock bound BY CONSTRUCTION — the SAME
       // wrap-once rationale as `onSpawnError`/`streamObserver` above. A caller that already set
       // its own `clockBound` (none exist today) is respected; every future dispatch call site
@@ -15642,6 +15684,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           model: attemptMount.model,
           verdict: impl.subtype,
           headSha: implHeadShaForArchive,
+          worker: impl,
         },
         log,
       );
@@ -15693,7 +15736,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // above `runTask`. `runDiagnoseThenRetry` calls `diagnose` at most once per run, so this
       // never overwrites a sibling round's file the way the implement archive above can.
       archiveWorkerTranscript(
-        { root: config.root, taskId, runId, rung: "diagnose", text: workerTranscript(d), model: diagnoseMount.model, verdict: d.subtype },
+        { root: config.root, taskId, runId, rung: "diagnose", text: workerTranscript(d), model: diagnoseMount.model, verdict: d.subtype, worker: d },
         log,
       );
       return { text: workerTranscript(d) };
@@ -22011,7 +22054,12 @@ export function checkProofCommand(
   console.log(`parse:      OK — kind=${w.kind}${w.nameFiltered ? " (name-filtered)" : ""}`);
 
   let args = w.args as readonly string[];
-  if (w.nameFiltered) {
+  if (w.nameFiltered && w.runner === "vitest") {
+    // The registered Vitest target already scopes the run to its own tests/ root. The
+    // Node-only grep resolver searches this repo's test/ root and would refuse a valid
+    // site/console proof before the shared reviewer executor could run it.
+    console.log("candidates: delegated to the registered Vitest suite root");
+  } else if (w.nameFiltered) {
     const r = resolveNameFilteredCandidates(process.cwd(), w.label);
     if (r.status === "resolved") {
       console.log(`candidates: ${r.files.length} file(s) — ${r.files.join(", ")}`);
@@ -46213,6 +46261,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T279+W1-T280: ONE verb answering 'is it running' AND 'why is it stalled' from ONE read model. LOCAL (no network): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest daemon.summary). DERIVED: BLOCKERS BY CLASS (circuit-broken w/ reset note, dispatch.indeterminate w/ gh-window note, blocked PRs by sweep.ts's own named reason), QUEUE HEAD (next dispatchables, perpetual-attempt tasks flagged with observed per-cycle cost), INBOX (ready/not-ready counts, head not-ready reason), HEADROOM (newest telemetry + enforcement on/off from the same switch the daemon reads) — these read a batched GitHub gateway and degrade to a stated unknown on an outage, never a gate on the local sections. Each section ends with at most one next action. --json emits the exact same read model the text renders. Read-only: writes nothing, spawns nothing, always exits 0 (bad args aside).",
   },
   {
+    name: "case-file",
+    syntax: "rmd case-file <task-id> [--json]",
+    summary: "Read one task's sourced plan, run, PR, review, CI, and release evidence.",
+    detail: "W1-T4607: a read-only task case file. It streams a bounded three-form ledger window, joins only task-owned run IDs and exact assignment IDs, then reads the current PR head and its check rollup. Every section says observed, stale, pending, or unavailable with source and as-of; a merge is never reported as a deployment or healthy runtime.",
+  },
+  {
     name: "sweep",
     syntax: "rmd sweep [--repo <name>] [--dry-run]",
     summary: "Level-triggered PR-pipeline reconciler: re-derive disposition, take one action.",
@@ -47043,6 +47097,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["sync", (rest) => syncCommand(rest)],
   ["doctor", async (rest) => await doctorCommand(rest, { repoRoot })],
   ["status", async (rest) => await statusCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
+  ["case-file", async (rest) => await caseFileCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
   ["sweep", async (rest) => await sweepCommand(rest)],
   [
     "fix",

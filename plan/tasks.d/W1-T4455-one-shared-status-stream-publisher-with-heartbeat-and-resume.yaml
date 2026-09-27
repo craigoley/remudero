@@ -31,7 +31,7 @@
     SSE wire contract. The transport owns id/comment framing, and both serve wrappers must carry
     Last-Event-ID to the board route. The added files and executable tests are that same contract,
     not a new feature or a PR-flow gate.
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at main 6a04d2f18: buildStatusStream (src/lib/board.ts) creates a ledger tail cache and runs deriveStatus for

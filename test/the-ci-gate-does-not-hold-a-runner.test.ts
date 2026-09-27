@@ -22,7 +22,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 import { staleCiGateTransition } from "../src/lib/sweep.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -32,7 +32,11 @@ const { contractRun } = (await import(pathToFileURL(RUNNER).href)) as {
 };
 
 type Job = { name?: string; needs?: string[]; if?: string; env?: Record<string, string>; steps?: Array<{ run?: string }> };
-type Wf = { on: { pull_request?: { types?: string[] } | null }; jobs: Record<string, Job> };
+type Wf = {
+  on: { pull_request?: { types?: string[] } | null; merge_group?: unknown };
+  concurrency?: { group?: string; "cancel-in-progress"?: string };
+  jobs: Record<string, Job>;
+};
 const CI_TEXT = readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8");
 const GATE_TEXT = readFileSync(join(REPO_ROOT, ".github/workflows/ci-gate.yml"), "utf8");
 const ci = parseYaml(CI_TEXT) as Wf;
@@ -42,14 +46,14 @@ const REQUIRED = JSON.parse(contractRun(GATE_TEXT).env.REQUIRED!) as string[];
 /** Runs the real runner against the real contract with the shared gh shim answering every
  *  check-runs read with `runs`, and a no-op sleep so any wait would be instant. Returns the exit
  *  and how many times the check-runs API was read. */
-function runGate(runs: Array<{ name: string; status: string; conclusion: string | null }>) {
+function runGate(runs: Array<{ name: string; status: string; conclusion: string | null }>, route?: GhShimRoute) {
   const page = JSON.stringify([{ check_runs: runs.map((r) => ({ ...r, started_at: "2026-09-24T00:00:00Z" })) }]);
-  const shim = ghShim([{ when: "check-runs", stdout: page }], { kind: "w1t4400" });
+  const shim = ghShim([route ?? { when: "check-runs", stdout: page }], { kind: "w1t4400" });
   const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4400-bin-`));
   writeFileSync(join(bin, "sleep"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   const r = spawnSync(process.execPath, [RUNNER], {
     encoding: "utf8",
-    env: { ...process.env, PATH: `${shim.dir}:${bin}:${process.env.PATH}`, GH_TOKEN: "t", REPO: "o/r", SHA: "abc", GRACE_WINDOW_SECONDS: "0", WAIT_CAP_SECONDS: "0" },
+    env: { ...process.env, PATH: `${shim.dir}:${bin}:${process.env.PATH}`, GH_TOKEN: "t", REPO: "o/r", SHA: "abc", GRACE_WINDOW_SECONDS: "0", WAIT_CAP_SECONDS: "0", RETRY_BACKOFF_SECONDS: "0" },
   });
   return { status: r.status, out: r.stdout + r.stderr, calls: shim.calls().length };
 }
@@ -62,9 +66,9 @@ test("W1-T4400: ci-gate evaluates on completion events without a wait loop", () 
   assert.equal(job.name, "ci-gate", "the check keeps the exact name branch protection requires");
   const others = Object.keys(ci.jobs).filter((id) => id !== "ci-gate").sort();
   assert.deepEqual([...job.needs!].sort(), others);
-  // always() is load-bearing: without it a failed needed job SKIPS the gate, and GitHub counts a
-  // skipped required check as passing.
-  assert.equal(job.if, "${{ always() && github.event_name == 'pull_request' }}");
+  // always() is load-bearing for failed needs; !cancelled() is load-bearing for releasing a
+  // superseded run's concurrency slot after ordinary cancellation.
+  assert.equal(job.if, "${{ always() && !cancelled() && github.event_name == 'pull_request' }}");
   assert.match(job.steps!.map((s) => s.run ?? "").join("\n"), /node scripts\/ci-gate-from-contract\.mjs/);
 
   // The real runner evaluates the real contract ONCE when everything has finished: one read, pass.
@@ -107,4 +111,38 @@ test("W1-T4400: a lost completion event is recovered by the scheduled re-evaluat
   // And the gate IS a real Actions job in ci.yml (uses no API-posted check), so that re-drive and a
   // "re-run failed jobs" — which re-runs dependents too — both reach it.
   assert.equal(ci.jobs["ci-gate"]!.steps!.some((s) => /check-runs.*--method POST|POST.*check-runs/.test(s.run ?? "")), false);
+});
+
+test("superseded ci gate stops on cancellation without holding a new head", () => {
+  // GitHub re-evaluates a running job's `if` on cancellation. `always()` alone stays true;
+  // `!cancelled()` makes a superseded run releasable by ordinary cancellation.
+  assert.equal(ci.concurrency?.group, "ci-${{ github.event.pull_request.number || github.ref }}");
+  assert.equal(ci.concurrency?.["cancel-in-progress"], "${{ github.event_name == 'pull_request' }}");
+  assert.equal(ci.jobs["ci-gate"]!.if,
+    "${{ always() && !cancelled() && github.event_name == 'pull_request' }}");
+});
+
+test("current head ci gate remains fail closed after cancellation repair", () => {
+  const green = REQUIRED.map((name) => ({ name, status: "completed", conclusion: "success" }));
+  assert.equal(runGate(green).status, 0);
+  const red = runGate(green.map((row) => row.name === "claims" ? { ...row, conclusion: "failure" } : row));
+  assert.notEqual(red.status, 0);
+  assert.match(red.out, /claims/);
+  const missing = runGate(green.filter((row) => row.name !== "claims"));
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.out, /TIMED OUT|claims/);
+  const unreadable = runGate(green, { when: "check-runs", stderr: "unreadable", exit: 1 });
+  assert.notEqual(unreadable.status, 0);
+  assert.match(unreadable.out, /unreadable|FAILED/);
+  assert.ok(unreadable.calls > 0);
+});
+
+test("ci gate cancellation preserves edited and merge group routes", () => {
+  assert.deepEqual(gate.on.pull_request?.types, ["edited"]);
+  assert.ok(ci.on.pull_request !== undefined);
+  assert.ok("merge_group" in ci.on);
+  assert.equal(gate.jobs["ci-gate"]!.if, undefined);
+  assert.ok(ci.jobs["ci-gate"]!.needs?.includes("coverage-ratchet"));
+  assert.ok(ci.jobs["ci-gate"]!.needs?.includes("ci"));
+  assert.match(ci.jobs["ci-gate"]!.if!, /github\.event_name == 'pull_request'/);
 });

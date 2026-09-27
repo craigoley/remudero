@@ -12,7 +12,7 @@
   plan_refs: ["W1-T3852"]
   files:
     - src/lib/panel-graph.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Read at main: buildOperatorActivityProjection (src/lib/panel-graph.ts) builds `activities` (itself already

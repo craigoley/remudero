@@ -13,7 +13,7 @@
   files:
     - src/lib/ledger-union.ts
     - test/ledger-union.test.ts
-  status: queued
+  status: merged
   rationale: |
     W1-T4554 needs a source-at-a-time, resumable scan. Today `afterRotation` still opens every
     later archive, so a supposed bounded cohort pass can unexpectedly rescan the whole corpus.

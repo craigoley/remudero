@@ -1,0 +1,46 @@
+- id: W1-T4633
+  title: "THE SWEEP CLOSES A VALID PR AS 'UNMET DEPENDENCY' SECONDS BEFORE IT CREDITS THAT DEPENDENCY'S MERGE — the plan-resequence stale close trusts a merged-task set the same pass only refreshes later, and it deletes the head branch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-27: #7465 closed 16s before the same sweep credited its dependency #7458"
+  plan_refs: ["W1-T3585", "W1-T3558", "W1-T2779"]
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/a-resequence-close-reads-fresh-merge-credit.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27: W1-T4610 merged as #7458 at 15:09:29Z. At 15:12:50.591Z the sweep closed
+    #7465 (W1-T4611, depends_on W1-T4610) with 'task W1-T4611 is unmet dependency in the current
+    plan: W1-T4610 — the plan resequenced after this PR was admitted' and deleted its head branch;
+    at 15:13:06.670Z the SAME pass's `sweep.credit_backfill` wrote `verdict.merged` for W1-T4610
+    from #7458. The row (W1-T3585, src/lib/sweep.ts's `planResequenceIneligible` disposition, set by
+    buildOpenPrViews in src/run-task.ts from `currentPlanIneligibilityReason` over `deps.isMerged`)
+    trusts a merged-task set that has not yet absorbed a merge the pass itself is about to credit,
+    so any dependent PR opened right after its dependency merges is closed as stale. The close is
+    described as reversible, but deleting the head branch makes reopening depend on someone holding
+    a local copy (it was restored by hand). The same row closed W1-T4455, W1-T4452 and W1-T4454 on
+    2026-09-24 and W1-T4596 on 2026-09-27; whether any of those were the same race is unverified.
+  design: |
+    Before this row closes a PR for an unmet dependency, re-check each unmet dependency against the
+    same batched merge-credit sources `sweep.credit_backfill` uses (anchored trailer, head branch,
+    durable credit store) — or order the credit backfill ahead of the disposition pass — and treat a
+    dependency with an observable merged PR as met. A dependency whose credit read fails is
+    indeterminate: the PR is left open and the reason recorded, never closed. A PR this row does
+    close keeps its head branch (the close stays genuinely reversible). The blocked/retirement
+    branches of the same row are unchanged.
+  acceptance:
+    - claim: "a dependent PR whose dependency merged before this pass is not closed as an unmet dependency, an unreadable dependency credit leaves it open, and a closed PR keeps its head branch"
+      proof: "unit test: test/a-resequence-close-reads-fresh-merge-credit.test.ts"
+  falsifier: |
+    Replay the 2026-09-27 shape: a dependency merged (credit observable by trailer) but not yet in
+    the pass's merged set; without the fix the dependent PR is closed as stale and its branch
+    deleted.

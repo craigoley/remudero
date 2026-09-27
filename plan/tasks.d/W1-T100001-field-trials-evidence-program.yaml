@@ -14,7 +14,7 @@
     - docs/research/model-evidence-program.md
     - docs/docs-index.json
     - test/model-evidence-program.test.ts
-  status: queued
+  status: merged
   rationale: |
     The core already records model assignment, worker receipts, routing-v1 joins, an observational
     headroom-selected routing comparison, exact ledger archive compaction, and a proposal gardener.

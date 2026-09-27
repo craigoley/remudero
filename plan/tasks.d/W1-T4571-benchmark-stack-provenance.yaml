@@ -18,7 +18,7 @@
     - test/benchmark-evidence.test.ts
     - test/run-task-benchmark-run-wiring.test.ts
     - docs/model-routing.md
-  status: queued
+  status: merged
   rationale: |
     The merged benchmark-run-v1 envelope correctly refuses to guess harness, prompt, tool,
     scorer, and environment revisions: all are currently `not-pinned-by-harness`. That protects

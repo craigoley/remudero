@@ -1,0 +1,41 @@
+- id: W1-T4626
+  title: "RAW PASS RATES MIX A MODEL'S ABILITY WITH THE DIFFICULTY OF THE TASKS IT HAPPENED TO GET — fit an item-response model over attempts so ability per model and role is reported apart from task difficulty, with intervals"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-27: agent-evaluation state-of-the-art survey applied to Remudero's field trials"
+  plan_refs: ["W1-T100001", "W1-T4575", "W1-T4603", "W1-T4608", "W1-T4617", "W1-T4619", "W1-T4620", "W1-T4621", "W1-T4623"]
+  files:
+    - src/lib/ability-map.ts
+    - src/lib/analytics-route.ts
+    - test/model-ability-is-separated-from-task-difficulty.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    State of the art surveyed 2026-09-27 (sources in the filing PR). Remudero's plan tasks already
+    carry executable, base-vs-head discriminated proofs plus holdout criteria — an executable grader
+    most public agent evaluations lack. Item-response models separate agent ability from item
+    difficulty (tinyBenchmarks; 'Agent Psychometrics' fits P(success)=sigma(theta_model +
+    theta_scaffold - beta_task) with AUC 0.84 on unseen tasks; METR's time-horizon metric is a
+    2-parameter logistic). In Remudero the router, driven by subscription headroom, decides which
+    model gets which task, so per-model pass rates are confounded by task mix.
+  design: |
+    An offline Rasch/1PL fit over the attempt-level outcome matrix (assignment x task, outcome from
+    W1-T4608's verified join where present, else the attempt's own recorded outcome, labelled as
+    such) estimating theta per model and per role (implement, review, repair, triage) and beta per
+    task, with posterior or bootstrap intervals and a minimum-evidence rule that leaves thin cells
+    blank rather than zero. Internal diagnostic only: observational data is never a public ranking,
+    and the fit exposes beta to choose calibrated canary items (W1-T4623, W1-T4627).
+  acceptance:
+    - claim: "the ability map reports per-model and per-role ability separately from per-task difficulty with intervals, leaving thin cells blank rather than zero"
+      proof: "unit test: test/model-ability-is-separated-from-task-difficulty.test.ts"
+    - claim: "the new module is wired into its production caller, not shipped unwired"
+      proof: "grep: fitAbilityMap( in src/lib/analytics-route.ts"
+  falsifier: |
+    Revert the change: the task's own test fails on the gap its rationale describes.

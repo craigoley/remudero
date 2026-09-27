@@ -13,7 +13,7 @@
   files:
     - src/lib/status.ts
     - test/an-environmental-re-offer-sees-a-replaced-host.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

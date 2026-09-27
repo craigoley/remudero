@@ -11,7 +11,7 @@
   files:
     - hooks/deny-floor.sh
     - test/deny-floor-reads-only-the-push-segment.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-26, four times in one session: a non-forced push of a feature branch chained

@@ -15,7 +15,7 @@
     - src/run-task.ts
     - src/lib/review.ts
     - test/review-closed-pending-short-circuit.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-24 on the core daemon's ledger union for the 24 h ending 16:48Z: 36 `review.post_refused` rows

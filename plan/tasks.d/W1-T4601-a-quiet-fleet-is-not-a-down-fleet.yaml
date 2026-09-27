@@ -12,7 +12,7 @@
   files:
     - src/lib/fleet-liveness.ts
     - test/a-quiet-fleet-is-not-a-down-fleet.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
