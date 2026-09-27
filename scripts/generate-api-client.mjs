@@ -17,7 +17,8 @@
 // around by using the swc parser instead of dependency-cruiser's own tsc-based extractor). Rather
 // than loosen peer-dep enforcement repo-wide for one generator, this is a small self-contained
 // renderer over a deliberately small OpenAPI subset (object/string/number/integer/boolean/array
-// schemas, $ref, enum, nullable via a `["T","null"]` type array, http-bearer security schemes,
+// schemas, $ref, enum, nullable via a `["T","null"]` type array, `oneOf` unions, the empty schema
+// as `unknown`, `additionalProperties: <schema>` maps, http-bearer security schemes,
 // and per-path/per-method response types) -- the same "plain Node script" convention every other
 // scripts/generate-*.mjs in this repo already uses.
 //
@@ -60,11 +61,22 @@ function refSchemaName(ref, knownSchemaNames) {
 /** Render one JSON-Schema-subset node (as used by openapi/daemon.yaml) as a TS type expression. */
 function renderType(schema, indent, knownSchemaNames) {
   if (schema.$ref) return refSchemaName(schema.$ref, knownSchemaNames);
+  // W1-T4609: a value the daemon really sends in one of several shapes (`number | "unknown"`, a
+  // discriminated result) is a `oneOf`, rendered as the union of its members.
+  if (Array.isArray(schema.oneOf)) {
+    return schema.oneOf.map((member) => `(${renderType(member, indent, knownSchemaNames)})`).join(" | ");
+  }
+  // JSON Schema's empty schema admits any JSON value, so a node that constrains nothing renders
+  // `unknown`, never a guessed shape. A node naming properties/items without a type still fails.
+  if (schema.type === undefined && schema.enum === undefined && schema.properties === undefined && schema.items === undefined) {
+    return "unknown";
+  }
 
   const rawType = schema.type;
   const types = Array.isArray(rawType) ? rawType : [rawType];
   const nullable = types.includes("null");
   const coreTypes = types.filter((t) => t !== "null");
+  if (coreTypes.length === 0 && nullable) return "null";
   if (coreTypes.length !== 1) {
     throw new Error(`generate-api-client: expected exactly one non-null type, got ${JSON.stringify(rawType)}`);
   }
@@ -95,6 +107,12 @@ function renderObject(schema, indent, knownSchemaNames) {
   const required = new Set(schema.required ?? []);
   const propIndent = indent + "  ";
   const names = Object.keys(properties);
+  // An open map whose VALUE schema is declared (`additionalProperties: {...}`) renders as a record
+  // of that value; the bare `additionalProperties: true` form keeps its conservative rendering.
+  const valueSchema = schema.additionalProperties;
+  if (names.length === 0 && valueSchema !== null && typeof valueSchema === "object") {
+    return `Record<string, ${renderType(valueSchema, indent, knownSchemaNames)}>`;
+  }
   if (names.length === 0) return "Record<string, never>";
   const lines = names.map((name) => {
     const prop = properties[name];

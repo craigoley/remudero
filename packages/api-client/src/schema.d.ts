@@ -11,6 +11,8 @@ export interface components {
       error: "unauthorized" | "forbidden" | "not_found" | "invalid_request" | "internal_error";
       /** Present only on a 403 -- the scope the caller's token was missing. */
       required_scope?: "read" | "write";
+      /** W1-T4609 -- a human-readable reason accompanying `invalid_request` (400) and a route-level `not_found` (404); the service-level 401/403/404/500 envelopes omit it. */
+      detail?: string;
       /** W1-T404 -- present only on a 403 refused for an insufficient WRITE TIER (once src/lib/service.ts's `enforceWriteTiers` is turned on; not yet set by `rmd serve`'s own production wiring). `low` (bookkeeping), `middle` (reversible but disruptive, or a spend force multiplier) or `high` (spends money or moves code) -- the tier the caller's token was missing, alongside `required_scope: write`. */
       required_tier?: "low" | "middle" | "high";
     };
@@ -1083,12 +1085,454 @@ export interface components {
         unclassifiedCostRows: number;
       };
     };
+    /** The data-status envelope the console read cache splices into every JSON object body a CACHED read route serves (src/lib/console-snapshot-cache.ts's `ConsoleResponseStaleness`, applied by src/lib/serve.ts's `boundConsoleReadRoute` to GET /v1/recent and GET /v1/daemon-health among others). The same facts ride the `x-rmd-cache-state`, `x-rmd-cache-age-ms` and `x-rmd-generated-at` response headers. */
+    ConsoleResponseStaleness: {
+      /** The body's own data-status. `unavailable` means no live computation has produced a snapshot yet and the body is the route's documented fallback. */
+      status: "fresh" | "stale" | "unavailable";
+      stale: boolean;
+      /** Milliseconds since the served snapshot was computed; null when none exists. */
+      ageMs: number | null;
+      /** When the served snapshot was computed; null when none exists. */
+      generatedAt: string | null;
+      /** A background recomputation is in flight. */
+      refreshing: boolean;
+      /** The request-path budget the cache waited before answering from a fallback. */
+      budgetMs: number;
+      /** Why the snapshot is stale or unavailable, when a cause was observed. */
+      reason?: string;
+    };
+    /** One Claude usage window (src/lib/account-usage.ts's `UsageWindowReading`). An absent `percentUsed` means UNKNOWN, never 0. */
+    UsageWindowReading: {
+      percentUsed?: number;
+      resetsAt?: string;
+    };
+    /** GET /v1/account-usage's body (src/lib/account-usage.ts's `AccountUsageSnapshot`, built by `deriveAccountUsage`). Every value field is ABSENT, never zero, when its source could not be read. Identity fields come from `~/.claude.json`'s `oauthAccount` and never carry a credential. */
+    AccountUsageSnapshot: {
+      accountEmail?: string;
+      accountUuid?: string;
+      accountOrg?: string;
+      fiveHour?: UsageWindowReading;
+      sevenDay?: UsageWindowReading;
+      /** The usage reading's own as-of. Absent iff `usageUnknownReason` is present. */
+      usageAsOf?: string;
+      usageAgeMs?: number;
+      /** Why the usage windows are UNKNOWN; absent when the reading is good. */
+      usageUnknownReason?: "unreadable" | "no-cache" | "account-mismatch" | "too-old";
+      /** Exactly one of `creditState` / `creditUnknownReason` is present. */
+      creditState?: "subscription" | "credits";
+      creditUnknownReason?: "not-exposed" | "unrecognised-value";
+      /** Which `~/.claude.json` field the credit state was read from, when one was found. */
+      creditStateField?: string;
+      /** The headroom governor's posture per the newest `daemon.headroom` ledger line. */
+      governor: "armed" | "telemetry-only" | "unknown";
+      governorAsOf?: string;
+      governorAgeMs?: number;
+      /** `deferred` only while a `daemon.cost_governor` line says dispatch is being held; absent evidence reads `unknown`, never healthy. */
+      costGovernor: "deferred" | "unknown";
+      costGovernorAsOf?: string;
+      costGovernorAgeMs?: number;
+      costGovernorObservedUsd?: number;
+      costGovernorCeilingUsd?: number;
+      queueGovernor: "deferred" | "unknown";
+      queueGovernorAsOf?: string;
+      queueGovernorAgeMs?: number;
+      queueGovernorObservedOpenCount?: number;
+      queueGovernorWipLimit?: number;
+      dailyCostCeilingUsd?: number;
+      dailyCostCeilingProvenance?: "overridden" | "default" | "instance-share";
+      dailyCostCeilingDefaultUsd?: number;
+      dailyCostCeilingFallbackReason?: string;
+      dailyCostCeilingAuditAsOf?: string;
+      dailyCostCeilingAuditWho?: string;
+      dailyCostCeilingAuditFromUsd?: number;
+      dailyCostCeilingAuditToUsd?: number;
+      dailyCostCeilingAuditEffectiveUsd?: number;
+      /** The scope note carried in the payload so a render can never drop it. */
+      measures: string;
+    };
+    /** GET /v1/control/status's body (src/lib/panel-actions.ts's `FleetControlStatus`): the Pause/Resume/STOP/quiet-hours button states derived from the fleet-control flag files, plus heartbeat evidence of whether the daemon is actually running. */
+    FleetControlStatus: {
+      paused: boolean;
+      /** Human-readable detail, present only while paused. */
+      pauseDetail?: string;
+      stopped: boolean;
+      /** Human-readable detail, present only while stopped. */
+      stopDetail?: string;
+      quietHours: boolean;
+      /** Whether a `daemon.*` heartbeat falls inside the liveness bound. OMITTED, never a fabricated false, when the ledger gives no evidence either way. */
+      daemonLive?: boolean;
+      /** The evidence behind `daemonLive`, always present. `fresh-poll` -> live; `last-poll-stale` and `no-daemon-activity` -> not live; `ledger-empty`, `ledger-absent` and `ledger-unreadable` -> `daemonLive` omitted. */
+      daemonLiveReason: "fresh-poll" | "last-poll-stale" | "no-daemon-activity" | "ledger-empty" | "ledger-absent" | "ledger-unreadable";
+    };
+    /** The serve process's own event-loop delay over a rolling one-minute window (src/lib/daemon-health.ts's `EventLoopLag`). */
+    EventLoopLag: {
+      p50Ms: number;
+      p99Ms: number;
+      maxMs: number;
+      windowMs: number;
+    };
+    /** One `/proc/pressure/<resource>` reading, percent of wall time (src/lib/daemon-health.ts's `PressureReading`). */
+    PressureReading: {
+      someAvg10: number;
+      someAvg60: number;
+      fullAvg10?: number;
+    };
+    /** The host's PSI pressure per resource (src/lib/daemon-health.ts's `HostPressure`). A resource whose pressure file is absent or unparsable reads the literal `"unknown"`, never 0. */
+    HostPressure: {
+      cpu: (PressureReading) | ("unknown");
+      io: (PressureReading) | ("unknown");
+      memory: (PressureReading) | ("unknown");
+    };
+    /** The serve checkout's own freshness, the SAME reading the stale-code restart decision acts on (src/lib/daemon-health.ts's `GatewayCheckoutState`). Each field reads the literal `"unknown"` until it has been checked. */
+    GatewayCheckoutState: {
+      /** The checkout's HEAD sha, or `unknown`. */
+      head: string;
+      behindBy: (number) | ("unknown");
+      dirty: (boolean) | ("unknown");
+      dirtyPaths?: (string)[];
+      /** ISO-8601 time of the check, or `unknown`. */
+      checkedAt: string;
+      detail?: string;
+    };
+    /** GET /v1/daemon-health's body (src/lib/daemon-health.ts's `DaemonHealthSnapshot`). Every field whose own source could not be read is ABSENT, never a placeholder. `hostPressure` and `gatewayCheckout` are always sent by the live handler; they are optional here because the console read cache's fallback body (src/lib/serve.ts's `fallbackBodyForCachedRead`, served before any live snapshot exists) carries only `pollIntervalMs` and `staleness`. */
+    DaemonHealthSnapshot: {
+      lastPollTs?: string;
+      lastPollAgeMs?: number;
+      pollIntervalMs: number;
+      /** `lastPollTs + pollIntervalMs`; absent with no `lastPollTs`. */
+      nextPollAt?: string;
+      diskFreeBytes?: number;
+      rateLimitRemaining?: number;
+      eventLoopLag?: EventLoopLag;
+      hostPressure?: HostPressure;
+      gatewayCheckout?: GatewayCheckoutState;
+      staleness?: ConsoleResponseStaleness;
+    };
+    /** One fix-verification lifecycle record as GET /v1/incidents projects it (src/lib/incident-lifecycle.ts's `IncidentWire`). */
+    IncidentRecord: {
+      fingerprint: string;
+      title: string;
+      source: "console" | "gateway" | "daemon";
+      kind: "exception" | "http_5xx" | "latency" | "invariant";
+      status: "new" | "filed" | "building" | "deployed" | "verified" | "regressed";
+      firstSeen: string;
+      lastSeen: string;
+      count24h: number;
+      feedbackId: string | null;
+      pr: number | null;
+    };
+    /** GET /v1/incidents's body -- the lifecycle store, newest `lastSeen` first. */
+    IncidentsResult: {
+      incidents: (IncidentRecord)[];
+      generatedAt: string;
+    };
+    /** GET /v1/incidents's 503 -- the lifecycle store exists but could not be read, reported as an error rather than the `200 {incidents: []}` a quiet fleet returns. */
+    IncidentsUnavailable: {
+      error: "incidents_unavailable";
+      /** `malformed` or `unreadable` from the production store reader. */
+      reason: string;
+    };
+    /** One reported stack frame -- file and function only; a line number is never part of the wire shape. */
+    IncidentEventFrame: {
+      file: string;
+      fn: string;
+    };
+    /** POST /v1/incidents/events's body (src/lib/incident-events.ts's `IncidentEventInput`, validated by `validateIncidentEventBody`). At most 16 KiB. The daemon scrubs `message` and `route` (query/fragment stripped; token, email and uuid shapes redacted) and caps `message` at 500 characters and `frames` at 20 before anything is fingerprinted or stored. */
+    IncidentEventRequest: {
+      source: "console" | "gateway" | "daemon";
+      kind: "exception" | "http_5xx" | "latency" | "invariant";
+      name: string;
+      message: string;
+      frames?: (IncidentEventFrame)[];
+      route?: string;
+      sha?: string;
+      /** An ISO date string (any value `Date.parse` accepts). */
+      at: string;
+    };
+    /** POST /v1/incidents/events's answer. `sampled` is true once the fingerprint has passed the per-minute cap; a sampled event writes at most one `incident.sampled` row per window. */
+    IncidentEventResult: {
+      fingerprint: string;
+      accepted: true;
+      sampled: boolean;
+    };
+    /** POST /v1/incidents/events's 413 -- the raw body exceeded 16 KiB and was not read further. */
+    IncidentIngestBodyTooLarge: {
+      error: "body_too_large";
+    };
+    /** One of the eight onboarding checks (src/lib/onboarding-readiness.ts's `OnboardingReadinessCheck`). */
+    OnboardingReadinessCheck: {
+      id: "app-access" | "default-branch" | "branch-protection" | "ci-workflows" | "agent-instructions" | "test-command" | "plan-layout" | "already-onboarded";
+      /** `unknown` only when the read could not be completed, never for a definitive GitHub answer. */
+      status: "pass" | "warn" | "fail" | "unknown";
+      reason: string;
+      evidence?: string;
+    };
+    /** GET /v1/onboarding/readiness's body (src/lib/onboarding-readiness.ts's `OnboardingReadinessReport`): each check independently pass/warn/fail/unknown, never one verdict hiding which check said what. */
+    OnboardingReadinessReport: {
+      /** `owner/name`. */
+      repo: string;
+      checks: (OnboardingReadinessCheck)[];
+    };
+    /** GET /v1/peek's body (src/lib/serve.ts's `buildPeekRoute`): the tail of one run's `state/runs/<runId>.tail`, at most 500 lines and 64 KiB. A missing or unreadable tail is `found: false` with a named `reason`, never a silent empty body. */
+    PeekResult: {
+      runId: string;
+      /** Whether the run is in flight, per the daemon's own live-run reader. */
+      live: boolean;
+      found: boolean;
+      lines: (string)[];
+      /** Present only when `found` is false. */
+      reason?: string;
+    };
+    /** Whole-plan task counts derived from GitHub, never the plan's decorative `status:` field (src/lib/panel-graph.ts's `PlanProgress`). Under `unknown` the last observed reading is carried forward with its `asOf`; the counts are absent only on a first reading taken during an outage. */
+    PlanProgress: {
+      done?: number;
+      inFlight?: number;
+      queued?: number;
+      total?: number;
+      unknown: boolean;
+      asOf?: string;
+      unavailableReason?: string;
+    };
+    /** One MASTER-PLAN section's filed/merged pair (src/lib/panel-graph.ts's `PlanSectionCount`). */
+    PlanSectionCount: {
+      heading: string;
+      filed: number;
+      merged: number;
+    };
+    /** One frontier row in the dispatcher's own order (src/lib/panel-graph.ts's `FrontierRow`). */
+    FrontierRow: {
+      id: string;
+      title: string;
+      runnable: boolean;
+      /** The TypeScript union also names `verify-human`, but `buildPlanFrontier` excludes those tasks from the frontier, so no served row carries it. */
+      reasonKind: "file-order" | "unmet-dependency" | "circuit-breaker" | "blocked";
+      reason: string;
+    };
+    /** GET /v1/plan/view's body -- progress, per-section counts and the frontier off one plan projection. */
+    PlanViewResult: {
+      progress: PlanProgress;
+      sections: (PlanSectionCount)[];
+      frontier: (FrontierRow)[];
+    };
+    ProviderRoutingWindowStatus: {
+      name: string;
+      usedPercent: number;
+      resetsAt?: string;
+    };
+    /** Manual reset readiness -- a count and the earliest expiry only, never a credit id. `earliestExpiresAt` is the provider's own numeric timestamp, passed through unconverted. */
+    ProviderRoutingResetCreditsStatus: {
+      availableCount: number;
+      earliestExpiresAt?: number;
+    };
+    CodexModelDecisionOptionStatus: {
+      id: string;
+      displayName?: string;
+      supportedEfforts: (string)[];
+      accountDefault: boolean;
+      mapped: boolean;
+      eligible: boolean;
+      selected: boolean;
+      windows: (ProviderRoutingWindowStatus)[];
+      reason?: "unmapped" | "unsupported-effort" | "quota-unreadable" | "below-reserve";
+    };
+    CodexModelDecisionStatus: {
+      requestedCapability: "economy" | "balanced" | "frontier";
+      requestedEffort: string;
+      mappedCandidates: (string)[];
+      options: (CodexModelDecisionOptionStatus)[];
+      selectedModel?: string;
+      selectedEffort?: string;
+      preferredModel?: string;
+      preferenceBypass?: "unmapped" | "unsupported-effort" | "quota-unreadable" | "below-reserve" | "not-visible";
+    };
+    ProviderRoutingProviderStatus: {
+      provider: "claude" | "codex" | "cash" | "openweight";
+      readable: boolean;
+      windows: (ProviderRoutingWindowStatus)[];
+      allocationWindows?: (ProviderRoutingWindowStatus)[];
+      reason?: "capacity-unreadable" | "authentication-unavailable" | "capacity-unavailable";
+      accountLabel?: string;
+      model?: string;
+      effort?: string;
+      modelDecision?: CodexModelDecisionStatus;
+      resetCredits?: ProviderRoutingResetCreditsStatus;
+    };
+    ProviderRoutingSelectedStatus: {
+      provider: "claude" | "codex" | "cash" | "openweight";
+      tightestRemainingPercent: number;
+      allocationWeight?: number;
+      allocationSharePercent?: number;
+      accountLabel?: string;
+      model?: string;
+      effort?: string;
+    };
+    ProviderRoutingModelHealthStatus: {
+      requestedModel?: string;
+      routedModel?: string;
+      state: "healthy" | "degraded" | "unknown";
+      source: "fresh" | "stale" | "unknown";
+      eligible: boolean;
+    };
+    ProviderPark: {
+      provider: "claude" | "codex" | "cash" | "openweight";
+      until: string;
+    };
+    CodexModelPreference: {
+      capability: "economy" | "balanced" | "frontier";
+      effort: string;
+      model: string;
+    };
+    /** The committed host policy an override is measured against (src/lib/provider-routing-policy.ts's `CommittedProviderRoutingPolicy`). */
+    ProviderRoutingCommittedPolicy: {
+      enabledProviders: ("claude" | "codex" | "cash" | "openweight")[];
+      preference: "automatic";
+      reservePercent: number;
+      /** Always empty -- the committed policy parks nothing. */
+      parks: (ProviderPark)[];
+      /** Always null -- the committed policy states no model preference. */
+      codexModelPreference: null;
+    };
+    /** The effective provider-routing policy (src/lib/provider-routing-policy.ts's `EffectiveProviderRoutingPolicy`). GET /v1/provider-routing re-resolves it live on every request, so a console write, expiry or clear is visible before the next dispatch. */
+    ProviderRoutingPolicyStatus: {
+      provenance: "default" | "overridden";
+      committed: ProviderRoutingCommittedPolicy;
+      enabledProviders: ("claude" | "codex" | "cash" | "openweight")[];
+      /** Enabled providers after active parks are applied. */
+      routableProviders: ("claude" | "codex" | "cash" | "openweight")[];
+      preference: "automatic" | "claude" | "codex" | "cash" | "openweight";
+      reservePercent: number;
+      parks: (ProviderPark)[];
+      codexModelPreference?: CodexModelPreference;
+      overrideExpiresAt?: string;
+      writtenAt?: string;
+      writerFingerprint?: string;
+      /** Present only when a stored override was refused and the committed policy was used instead. */
+      fallback?: {
+        reason: "unreadable" | "malformed" | "unsupported-version" | "expired" | "incompatible-with-config";
+      };
+    };
+    ProviderRoutingPreferenceBypass: {
+      provider: "claude" | "codex" | "cash" | "openweight";
+      reason: "unreadable" | "below-reserve";
+    };
+    /** GET /v1/provider-routing's body: the daemon's last provider-routing decision as the daemon wrote it to `state/provider-routing-status.json` (src/lib/provider-routing-status.ts's `ProviderRoutingStatus`, projected field by field by `readProviderRoutingStatus`), with `policy` overlaid by a live resolution. The console process never probes a provider. */
+    ProviderRoutingStatus: {
+      version: number;
+      state: "unknown" | "not-probed" | "selected" | "blocked";
+      freshness: "fresh" | "stale" | "not-probed" | "unknown";
+      /** Why the status is `unknown`. */
+      reason?: "absent" | "unreadable" | "malformed" | "unsupported-version";
+      enabledProviders?: ("claude" | "codex" | "cash" | "openweight")[];
+      reservePercent?: number;
+      observedAt?: string;
+      freshUntil?: string;
+      providers?: (ProviderRoutingProviderStatus)[];
+      selected?: ProviderRoutingSelectedStatus;
+      blockedReason?: "no-provider-headroom";
+      modelHealth?: ProviderRoutingModelHealthStatus;
+      policy?: ProviderRoutingPolicyStatus;
+      preferenceBypass?: ProviderRoutingPreferenceBypass;
+    };
+    /** One RECENT feed row minted from a ledger line (src/lib/board.ts's `RecentActivityEntry`). */
+    RecentActivityEntry: {
+      taskId: string;
+      runId?: string;
+      title: string;
+      verb: "merged" | "verdict" | "fix" | "escalated" | "spend" | "run-refused" | "run-started" | "worker";
+      /** The originating ledger line's own `ts`. */
+      ts: string;
+      detail?: string;
+      costUsd?: number;
+      numTurns?: number;
+      prNumber?: number;
+      prUrl?: string;
+      eventKind?: "working" | "tool-executing" | "message";
+      eventAt?: string;
+      workerRole?: "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
+      provider?: string;
+      requestedModel?: string;
+      servedModel?: string;
+      turnsSoFar?: number;
+      toolName?: string;
+      toolReason?: string;
+      toolStartedAt?: string;
+      toolCompletedAt?: string;
+      toolDurationMs?: number;
+      toolOutcome?: "success" | "error";
+      /** GitHub decoration, present only when a read resolved it. */
+      prTitle?: string;
+      /** Present only when GitHub decoration was attempted and failed for this row. */
+      githubUnavailable?: true;
+    };
+    /** GET /v1/recent's body -- at most 20 entries, newest first. */
+    RecentActivityResult: {
+      entries: (RecentActivityEntry)[];
+      staleness?: ConsoleResponseStaleness;
+    };
+    /** One `measurement_cadence.ran` ledger row (src/lib/measurement-cadence.ts's `MeasurementCadenceRowEntry`). `result` is keyed by cadence verb (camelCased) and each value is that verb's SUMMARY (`summarizeMeasurementValue`): scalars, short strings and array counts. The verb set grows with the cadence, so the map is genuinely open. */
+    SelfMeasurementRow: {
+      ts: string;
+      result: Record<string, unknown>;
+    };
+    /** The newest measurement rows, newest first. */
+    SelfMeasurementRows: {
+      status: "ok";
+      rows: (SelfMeasurementRow)[];
+    };
+    /** The ledger union could not be read in full (no archive at all, or an unopenable rotation) -- never answered as an empty "never measured". */
+    SelfMeasurementUnreadable: {
+      status: "unreadable";
+      reason: string;
+    };
+    /** `?detail=<verb>`: that verb's FULL report from the newest row carrying it. `value` is whatever that verb recorded, un-summarized, so its shape is the verb's own. */
+    SelfMeasurementDetail: {
+      verb: string;
+      ts: string;
+      value: unknown;
+    };
+    /** One plan acceptance criterion (src/lib/plan.ts's `AcceptanceCriterion`). */
+    AcceptanceCriterion: {
+      claim: string;
+      proof: string;
+      satisfied_by?: string;
+      holdout?: boolean;
+    };
+    /** One owned run in a task card's history -- read from the ledger, no GitHub call. */
+    TaskCardRun: {
+      runId: string;
+      verdict?: string;
+      costUsd?: number;
+      prUrl?: string;
+    };
+    /** The row-click task card (src/lib/task-card.ts's `TaskCard`). */
+    TaskCard: {
+      id: string;
+      title: string;
+      rationale?: string;
+      acceptance: (AcceptanceCriterion)[];
+      dependsOn: (string)[];
+      /** The GitHub-derived projection's status, falling back to the plan's own only when no projection resolved. */
+      status: "queued" | "recon" | "prompted" | "running" | "review" | "fixing" | "diagnosing" | "blocked" | "merged" | "done";
+      merged: boolean;
+      prNumber?: number;
+      prUrl?: string;
+      runs: (TaskCardRun)[];
+    };
+    TaskCardResult: {
+      card: TaskCard;
+    };
+    /** GET /v1/version's body -- the console sha captured at server start, and nothing else. */
+    VersionResult: {
+      sha: string;
+    };
   };
   securitySchemes: {
     /** Read-scoped bearer token. Grants GET access to read-scoped routes and SSE streams. A write-scoped token also satisfies this scope (write is a superset of read). */
     bearerRead: { type: "http"; scheme: "bearer" };
     /** Write-scoped bearer token. Required for any route whose `scope` is `write` (src/lib/service.ts's `Scope`). */
     bearerWrite: { type: "http"; scheme: "bearer" };
+    /** W1-T4383 ingest-only bearer token (src/lib/service.ts's `ingestTokenProvider`). Grants exactly POST /v1/incidents/events and falls through to 401 on every other route. */
+    bearerIngest: { type: "http"; scheme: "bearer" };
   };
 }
 
@@ -1642,6 +2086,145 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+        };
+    };
+  };
+  "/v1/version": {
+    get: {
+      responses: {
+          "200": VersionResult;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/recent": {
+    get: {
+      responses: {
+          "200": RecentActivityResult;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/daemon-health": {
+    get: {
+      responses: {
+          "200": DaemonHealthSnapshot;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/account-usage": {
+    get: {
+      responses: {
+          "200": AccountUsageSnapshot;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/provider-routing": {
+    get: {
+      responses: {
+          "200": ProviderRoutingStatus;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/control/status": {
+    get: {
+      responses: {
+          "200": FleetControlStatus;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/task": {
+    get: {
+      responses: {
+          "200": TaskCardResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/plan/view": {
+    get: {
+      responses: {
+          "200": PlanViewResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/onboarding/readiness": {
+    get: {
+      responses: {
+          "200": OnboardingReadinessReport;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/peek": {
+    get: {
+      responses: {
+          "200": PeekResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/replay": {
+    get: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/self-measurement": {
+    get: {
+      responses: {
+          "200": (SelfMeasurementRows) | (SelfMeasurementUnreadable) | (SelfMeasurementDetail);
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/incidents": {
+    get: {
+      responses: {
+          "200": IncidentsResult;
+          "401": Error;
+          "403": Error;
+          "503": IncidentsUnavailable;
+        };
+    };
+  };
+  "/v1/incidents/events": {
+    post: {
+      responses: {
+          "200": IncidentEventResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "413": IncidentIngestBodyTooLarge;
         };
     };
   };

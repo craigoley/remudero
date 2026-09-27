@@ -65,6 +65,12 @@ components:
       description: >
         Write-scoped bearer token. Required for any route whose `scope` is
         `write` (src/lib/service.ts's `Scope`).
+    bearerIngest:
+      type: http
+      scheme: bearer
+      description: >
+        W1-T4383 ingest-only bearer token (src/lib/service.ts's `ingestTokenProvider`). Grants
+        exactly POST /v1/incidents/events and falls through to 401 on every other route.
 
   schemas:
     Error:
@@ -97,6 +103,11 @@ components:
           enum:
             - read
             - write
+        detail:
+          type: string
+          description: >
+            W1-T4609 -- a human-readable reason accompanying `invalid_request` (400) and a
+            route-level `not_found` (404); the service-level 401/403/404/500 envelopes omit it.
         required_tier:
           type: string
           description: >
@@ -3067,6 +3078,1060 @@ components:
             subscriptionNotionalCostUsd: { type: number }
             unclassifiedCostRows: { type: integer }
 
+    # ── W1-T4609: the payloads of fourteen routes the daemon served before this document declared
+    # them. Each schema below is transcribed from the TypeScript type or builder the handler
+    # actually serializes (named in its description); nothing here is a placeholder shape.
+
+    ConsoleResponseStaleness:
+      type: object
+      description: >
+        The data-status envelope the console read cache splices into every JSON object body a
+        CACHED read route serves (src/lib/console-snapshot-cache.ts's `ConsoleResponseStaleness`,
+        applied by src/lib/serve.ts's `boundConsoleReadRoute` to GET /v1/recent and GET
+        /v1/daemon-health among others). The same facts ride the `x-rmd-cache-state`,
+        `x-rmd-cache-age-ms` and `x-rmd-generated-at` response headers.
+      required: [status, stale, ageMs, generatedAt, refreshing, budgetMs]
+      properties:
+        status:
+          type: string
+          enum: [fresh, stale, unavailable]
+          description: >
+            The body's own data-status. `unavailable` means no live computation has produced a
+            snapshot yet and the body is the route's documented fallback.
+        stale:
+          type: boolean
+        ageMs:
+          type: [number, "null"]
+          description: Milliseconds since the served snapshot was computed; null when none exists.
+        generatedAt:
+          type: [string, "null"]
+          format: date-time
+          description: When the served snapshot was computed; null when none exists.
+        refreshing:
+          type: boolean
+          description: A background recomputation is in flight.
+        budgetMs:
+          type: number
+          description: The request-path budget the cache waited before answering from a fallback.
+        reason:
+          type: string
+          description: Why the snapshot is stale or unavailable, when a cause was observed.
+
+    UsageWindowReading:
+      type: object
+      description: >
+        One Claude usage window (src/lib/account-usage.ts's `UsageWindowReading`). An absent
+        `percentUsed` means UNKNOWN, never 0.
+      properties:
+        percentUsed:
+          type: number
+        resetsAt:
+          type: string
+
+    AccountUsageSnapshot:
+      type: object
+      description: >
+        GET /v1/account-usage's body (src/lib/account-usage.ts's `AccountUsageSnapshot`, built by
+        `deriveAccountUsage`). Every value field is ABSENT, never zero, when its source could not
+        be read. Identity fields come from `~/.claude.json`'s `oauthAccount` and never carry a
+        credential.
+      required: [governor, costGovernor, queueGovernor, measures]
+      properties:
+        accountEmail:
+          type: string
+        accountUuid:
+          type: string
+        accountOrg:
+          type: string
+        fiveHour:
+          $ref: "#/components/schemas/UsageWindowReading"
+        sevenDay:
+          $ref: "#/components/schemas/UsageWindowReading"
+        usageAsOf:
+          type: string
+          format: date-time
+          description: The usage reading's own as-of. Absent iff `usageUnknownReason` is present.
+        usageAgeMs:
+          type: number
+        usageUnknownReason:
+          type: string
+          enum: [unreadable, no-cache, account-mismatch, too-old]
+          description: Why the usage windows are UNKNOWN; absent when the reading is good.
+        creditState:
+          type: string
+          enum: [subscription, credits]
+          description: Exactly one of `creditState` / `creditUnknownReason` is present.
+        creditUnknownReason:
+          type: string
+          enum: [not-exposed, unrecognised-value]
+        creditStateField:
+          type: string
+          description: Which `~/.claude.json` field the credit state was read from, when one was found.
+        governor:
+          type: string
+          enum: [armed, telemetry-only, unknown]
+          description: The headroom governor's posture per the newest `daemon.headroom` ledger line.
+        governorAsOf:
+          type: string
+        governorAgeMs:
+          type: number
+        costGovernor:
+          type: string
+          enum: [deferred, unknown]
+          description: >
+            `deferred` only while a `daemon.cost_governor` line says dispatch is being held;
+            absent evidence reads `unknown`, never healthy.
+        costGovernorAsOf:
+          type: string
+        costGovernorAgeMs:
+          type: number
+        costGovernorObservedUsd:
+          type: number
+        costGovernorCeilingUsd:
+          type: number
+        queueGovernor:
+          type: string
+          enum: [deferred, unknown]
+        queueGovernorAsOf:
+          type: string
+        queueGovernorAgeMs:
+          type: number
+        queueGovernorObservedOpenCount:
+          type: number
+        queueGovernorWipLimit:
+          type: number
+        dailyCostCeilingUsd:
+          type: number
+        dailyCostCeilingProvenance:
+          type: string
+          enum: [overridden, default, instance-share]
+        dailyCostCeilingDefaultUsd:
+          type: number
+        dailyCostCeilingFallbackReason:
+          type: string
+        dailyCostCeilingAuditAsOf:
+          type: string
+        dailyCostCeilingAuditWho:
+          type: string
+        dailyCostCeilingAuditFromUsd:
+          type: number
+        dailyCostCeilingAuditToUsd:
+          type: number
+        dailyCostCeilingAuditEffectiveUsd:
+          type: number
+        measures:
+          type: string
+          description: The scope note carried in the payload so a render can never drop it.
+
+    FleetControlStatus:
+      type: object
+      description: >
+        GET /v1/control/status's body (src/lib/panel-actions.ts's `FleetControlStatus`): the
+        Pause/Resume/STOP/quiet-hours button states derived from the fleet-control flag files,
+        plus heartbeat evidence of whether the daemon is actually running.
+      required: [paused, stopped, quietHours, daemonLiveReason]
+      properties:
+        paused:
+          type: boolean
+        pauseDetail:
+          type: string
+          description: Human-readable detail, present only while paused.
+        stopped:
+          type: boolean
+        stopDetail:
+          type: string
+          description: Human-readable detail, present only while stopped.
+        quietHours:
+          type: boolean
+        daemonLive:
+          type: boolean
+          description: >
+            Whether a `daemon.*` heartbeat falls inside the liveness bound. OMITTED, never a
+            fabricated false, when the ledger gives no evidence either way.
+        daemonLiveReason:
+          type: string
+          enum: [fresh-poll, last-poll-stale, no-daemon-activity, ledger-empty, ledger-absent, ledger-unreadable]
+          description: >
+            The evidence behind `daemonLive`, always present. `fresh-poll` -> live; `last-poll-stale`
+            and `no-daemon-activity` -> not live; `ledger-empty`, `ledger-absent` and
+            `ledger-unreadable` -> `daemonLive` omitted.
+
+    EventLoopLag:
+      type: object
+      description: The serve process's own event-loop delay over a rolling one-minute window (src/lib/daemon-health.ts's `EventLoopLag`).
+      required: [p50Ms, p99Ms, maxMs, windowMs]
+      properties:
+        p50Ms:
+          type: number
+        p99Ms:
+          type: number
+        maxMs:
+          type: number
+        windowMs:
+          type: number
+
+    PressureReading:
+      type: object
+      description: One `/proc/pressure/<resource>` reading, percent of wall time (src/lib/daemon-health.ts's `PressureReading`).
+      required: [someAvg10, someAvg60]
+      properties:
+        someAvg10:
+          type: number
+        someAvg60:
+          type: number
+        fullAvg10:
+          type: number
+
+    HostPressure:
+      type: object
+      description: >
+        The host's PSI pressure per resource (src/lib/daemon-health.ts's `HostPressure`). A
+        resource whose pressure file is absent or unparsable reads the literal `"unknown"`, never 0.
+      required: [cpu, io, memory]
+      properties:
+        cpu:
+          oneOf:
+            - $ref: "#/components/schemas/PressureReading"
+            - type: string
+              enum: [unknown]
+        io:
+          oneOf:
+            - $ref: "#/components/schemas/PressureReading"
+            - type: string
+              enum: [unknown]
+        memory:
+          oneOf:
+            - $ref: "#/components/schemas/PressureReading"
+            - type: string
+              enum: [unknown]
+
+    GatewayCheckoutState:
+      type: object
+      description: >
+        The serve checkout's own freshness, the SAME reading the stale-code restart decision acts
+        on (src/lib/daemon-health.ts's `GatewayCheckoutState`). Each field reads the literal
+        `"unknown"` until it has been checked.
+      required: [head, behindBy, dirty, checkedAt]
+      properties:
+        head:
+          type: string
+          description: The checkout's HEAD sha, or `unknown`.
+        behindBy:
+          oneOf:
+            - type: integer
+            - type: string
+              enum: [unknown]
+        dirty:
+          oneOf:
+            - type: boolean
+            - type: string
+              enum: [unknown]
+        dirtyPaths:
+          type: array
+          items:
+            type: string
+        checkedAt:
+          type: string
+          description: ISO-8601 time of the check, or `unknown`.
+        detail:
+          type: string
+
+    DaemonHealthSnapshot:
+      type: object
+      description: >
+        GET /v1/daemon-health's body (src/lib/daemon-health.ts's `DaemonHealthSnapshot`). Every
+        field whose own source could not be read is ABSENT, never a placeholder. `hostPressure`
+        and `gatewayCheckout` are always sent by the live handler; they are optional here because
+        the console read cache's fallback body (src/lib/serve.ts's `fallbackBodyForCachedRead`,
+        served before any live snapshot exists) carries only `pollIntervalMs` and `staleness`.
+      required: [pollIntervalMs]
+      properties:
+        lastPollTs:
+          type: string
+          format: date-time
+        lastPollAgeMs:
+          type: number
+        pollIntervalMs:
+          type: number
+        nextPollAt:
+          type: string
+          format: date-time
+          description: "`lastPollTs + pollIntervalMs`; absent with no `lastPollTs`."
+        diskFreeBytes:
+          type: number
+        rateLimitRemaining:
+          type: number
+        eventLoopLag:
+          $ref: "#/components/schemas/EventLoopLag"
+        hostPressure:
+          $ref: "#/components/schemas/HostPressure"
+        gatewayCheckout:
+          $ref: "#/components/schemas/GatewayCheckoutState"
+        staleness:
+          $ref: "#/components/schemas/ConsoleResponseStaleness"
+
+    IncidentRecord:
+      type: object
+      description: One fix-verification lifecycle record as GET /v1/incidents projects it (src/lib/incident-lifecycle.ts's `IncidentWire`).
+      required: [fingerprint, title, source, kind, status, firstSeen, lastSeen, count24h, feedbackId, pr]
+      properties:
+        fingerprint:
+          type: string
+        title:
+          type: string
+        source:
+          type: string
+          enum: [console, gateway, daemon]
+        kind:
+          type: string
+          enum: [exception, http_5xx, latency, invariant]
+        status:
+          type: string
+          enum: [new, filed, building, deployed, verified, regressed]
+        firstSeen:
+          type: string
+          format: date-time
+        lastSeen:
+          type: string
+          format: date-time
+        count24h:
+          type: number
+        feedbackId:
+          type: [string, "null"]
+        pr:
+          type: [number, "null"]
+
+    IncidentsResult:
+      type: object
+      description: GET /v1/incidents's body -- the lifecycle store, newest `lastSeen` first.
+      required: [incidents, generatedAt]
+      properties:
+        incidents:
+          type: array
+          items:
+            $ref: "#/components/schemas/IncidentRecord"
+        generatedAt:
+          type: string
+          format: date-time
+
+    IncidentsUnavailable:
+      type: object
+      description: >
+        GET /v1/incidents's 503 -- the lifecycle store exists but could not be read, reported as
+        an error rather than the `200 {incidents: []}` a quiet fleet returns.
+      required: [error, reason]
+      properties:
+        error:
+          type: string
+          enum: [incidents_unavailable]
+        reason:
+          type: string
+          description: "`malformed` or `unreadable` from the production store reader."
+
+    IncidentEventFrame:
+      type: object
+      description: One reported stack frame -- file and function only; a line number is never part of the wire shape.
+      required: [file, fn]
+      properties:
+        file:
+          type: string
+        fn:
+          type: string
+
+    IncidentEventRequest:
+      type: object
+      description: >
+        POST /v1/incidents/events's body (src/lib/incident-events.ts's `IncidentEventInput`,
+        validated by `validateIncidentEventBody`). At most 16 KiB. The daemon scrubs `message`
+        and `route` (query/fragment stripped; token, email and uuid shapes redacted) and caps
+        `message` at 500 characters and `frames` at 20 before anything is fingerprinted or stored.
+      required: [source, kind, name, message, at]
+      properties:
+        source:
+          type: string
+          enum: [console, gateway, daemon]
+        kind:
+          type: string
+          enum: [exception, http_5xx, latency, invariant]
+        name:
+          type: string
+          minLength: 1
+        message:
+          type: string
+        frames:
+          type: array
+          items:
+            $ref: "#/components/schemas/IncidentEventFrame"
+        route:
+          type: string
+        sha:
+          type: string
+        at:
+          type: string
+          description: An ISO date string (any value `Date.parse` accepts).
+
+    IncidentEventResult:
+      type: object
+      description: >
+        POST /v1/incidents/events's answer. `sampled` is true once the fingerprint has passed the
+        per-minute cap; a sampled event writes at most one `incident.sampled` row per window.
+      required: [fingerprint, accepted, sampled]
+      properties:
+        fingerprint:
+          type: string
+        accepted:
+          type: boolean
+          enum: [true]
+        sampled:
+          type: boolean
+
+    IncidentIngestBodyTooLarge:
+      type: object
+      description: POST /v1/incidents/events's 413 -- the raw body exceeded 16 KiB and was not read further.
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum: [body_too_large]
+
+    OnboardingReadinessCheck:
+      type: object
+      description: One of the eight onboarding checks (src/lib/onboarding-readiness.ts's `OnboardingReadinessCheck`).
+      required: [id, status, reason]
+      properties:
+        id:
+          type: string
+          enum: [app-access, default-branch, branch-protection, ci-workflows, agent-instructions, test-command, plan-layout, already-onboarded]
+        status:
+          type: string
+          enum: [pass, warn, fail, unknown]
+          description: "`unknown` only when the read could not be completed, never for a definitive GitHub answer."
+        reason:
+          type: string
+        evidence:
+          type: string
+
+    OnboardingReadinessReport:
+      type: object
+      description: >
+        GET /v1/onboarding/readiness's body (src/lib/onboarding-readiness.ts's
+        `OnboardingReadinessReport`): each check independently pass/warn/fail/unknown, never
+        one verdict hiding which check said what.
+      required: [repo, checks]
+      properties:
+        repo:
+          type: string
+          description: "`owner/name`."
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/OnboardingReadinessCheck"
+
+    PeekResult:
+      type: object
+      description: >
+        GET /v1/peek's body (src/lib/serve.ts's `buildPeekRoute`): the tail of one run's
+        `state/runs/<runId>.tail`, at most 500 lines and 64 KiB. A missing or unreadable tail is
+        `found: false` with a named `reason`, never a silent empty body.
+      required: [runId, live, found, lines]
+      properties:
+        runId:
+          type: string
+        live:
+          type: boolean
+          description: Whether the run is in flight, per the daemon's own live-run reader.
+        found:
+          type: boolean
+        lines:
+          type: array
+          items:
+            type: string
+        reason:
+          type: string
+          description: Present only when `found` is false.
+
+    PlanProgress:
+      type: object
+      description: >
+        Whole-plan task counts derived from GitHub, never the plan's decorative `status:` field
+        (src/lib/panel-graph.ts's `PlanProgress`). Under `unknown` the last observed reading is
+        carried forward with its `asOf`; the counts are absent only on a first reading taken
+        during an outage.
+      required: [unknown]
+      properties:
+        done:
+          type: number
+        inFlight:
+          type: number
+        queued:
+          type: number
+        total:
+          type: number
+        unknown:
+          type: boolean
+        asOf:
+          type: string
+          format: date-time
+        unavailableReason:
+          type: string
+
+    PlanSectionCount:
+      type: object
+      description: One MASTER-PLAN section's filed/merged pair (src/lib/panel-graph.ts's `PlanSectionCount`).
+      required: [heading, filed, merged]
+      properties:
+        heading:
+          type: string
+        filed:
+          type: number
+        merged:
+          type: number
+
+    FrontierRow:
+      type: object
+      description: One frontier row in the dispatcher's own order (src/lib/panel-graph.ts's `FrontierRow`).
+      required: [id, title, runnable, reasonKind, reason]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        runnable:
+          type: boolean
+        reasonKind:
+          type: string
+          enum: [file-order, unmet-dependency, circuit-breaker, blocked]
+          description: >
+            The TypeScript union also names `verify-human`, but `buildPlanFrontier` excludes those
+            tasks from the frontier, so no served row carries it.
+        reason:
+          type: string
+
+    PlanViewResult:
+      type: object
+      description: GET /v1/plan/view's body -- progress, per-section counts and the frontier off one plan projection.
+      required: [progress, sections, frontier]
+      properties:
+        progress:
+          $ref: "#/components/schemas/PlanProgress"
+        sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlanSectionCount"
+        frontier:
+          type: array
+          items:
+            $ref: "#/components/schemas/FrontierRow"
+
+    ProviderRoutingWindowStatus:
+      type: object
+      required: [name, usedPercent]
+      properties:
+        name:
+          type: string
+        usedPercent:
+          type: number
+        resetsAt:
+          type: string
+
+    ProviderRoutingResetCreditsStatus:
+      type: object
+      description: >
+        Manual reset readiness -- a count and the earliest expiry only, never a credit id.
+        `earliestExpiresAt` is the provider's own numeric timestamp, passed through unconverted.
+      required: [availableCount]
+      properties:
+        availableCount:
+          type: number
+        earliestExpiresAt:
+          type: number
+
+    CodexModelDecisionOptionStatus:
+      type: object
+      required: [id, supportedEfforts, accountDefault, mapped, eligible, selected, windows]
+      properties:
+        id:
+          type: string
+        displayName:
+          type: string
+        supportedEfforts:
+          type: array
+          items:
+            type: string
+        accountDefault:
+          type: boolean
+        mapped:
+          type: boolean
+        eligible:
+          type: boolean
+        selected:
+          type: boolean
+        windows:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProviderRoutingWindowStatus"
+        reason:
+          type: string
+          enum: [unmapped, unsupported-effort, quota-unreadable, below-reserve]
+
+    CodexModelDecisionStatus:
+      type: object
+      required: [requestedCapability, requestedEffort, mappedCandidates, options]
+      properties:
+        requestedCapability:
+          type: string
+          enum: [economy, balanced, frontier]
+        requestedEffort:
+          type: string
+        mappedCandidates:
+          type: array
+          items:
+            type: string
+        options:
+          type: array
+          items:
+            $ref: "#/components/schemas/CodexModelDecisionOptionStatus"
+        selectedModel:
+          type: string
+        selectedEffort:
+          type: string
+        preferredModel:
+          type: string
+        preferenceBypass:
+          type: string
+          enum: [unmapped, unsupported-effort, quota-unreadable, below-reserve, not-visible]
+
+    ProviderRoutingProviderStatus:
+      type: object
+      required: [provider, readable, windows]
+      properties:
+        provider:
+          type: string
+          enum: [claude, codex, cash, openweight]
+        readable:
+          type: boolean
+        windows:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProviderRoutingWindowStatus"
+        allocationWindows:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProviderRoutingWindowStatus"
+        reason:
+          type: string
+          enum: [capacity-unreadable, authentication-unavailable, capacity-unavailable]
+        accountLabel:
+          type: string
+        model:
+          type: string
+        effort:
+          type: string
+        modelDecision:
+          $ref: "#/components/schemas/CodexModelDecisionStatus"
+        resetCredits:
+          $ref: "#/components/schemas/ProviderRoutingResetCreditsStatus"
+
+    ProviderRoutingSelectedStatus:
+      type: object
+      required: [provider, tightestRemainingPercent]
+      properties:
+        provider:
+          type: string
+          enum: [claude, codex, cash, openweight]
+        tightestRemainingPercent:
+          type: number
+        allocationWeight:
+          type: number
+        allocationSharePercent:
+          type: number
+        accountLabel:
+          type: string
+        model:
+          type: string
+        effort:
+          type: string
+
+    ProviderRoutingModelHealthStatus:
+      type: object
+      required: [state, source, eligible]
+      properties:
+        requestedModel:
+          type: string
+        routedModel:
+          type: string
+        state:
+          type: string
+          enum: [healthy, degraded, unknown]
+        source:
+          type: string
+          enum: [fresh, stale, unknown]
+        eligible:
+          type: boolean
+
+    ProviderPark:
+      type: object
+      required: [provider, until]
+      properties:
+        provider:
+          type: string
+          enum: [claude, codex, cash, openweight]
+        until:
+          type: string
+
+    CodexModelPreference:
+      type: object
+      required: [capability, effort, model]
+      properties:
+        capability:
+          type: string
+          enum: [economy, balanced, frontier]
+        effort:
+          type: string
+        model:
+          type: string
+
+    ProviderRoutingCommittedPolicy:
+      type: object
+      description: The committed host policy an override is measured against (src/lib/provider-routing-policy.ts's `CommittedProviderRoutingPolicy`).
+      required: [enabledProviders, preference, reservePercent, parks, codexModelPreference]
+      properties:
+        enabledProviders:
+          type: array
+          items:
+            type: string
+            enum: [claude, codex, cash, openweight]
+        preference:
+          type: string
+          enum: [automatic]
+        reservePercent:
+          type: number
+        parks:
+          type: array
+          maxItems: 0
+          description: Always empty -- the committed policy parks nothing.
+          items:
+            $ref: "#/components/schemas/ProviderPark"
+        codexModelPreference:
+          type: "null"
+          description: Always null -- the committed policy states no model preference.
+
+    ProviderRoutingPolicyStatus:
+      type: object
+      description: >
+        The effective provider-routing policy (src/lib/provider-routing-policy.ts's
+        `EffectiveProviderRoutingPolicy`). GET /v1/provider-routing re-resolves it live on every
+        request, so a console write, expiry or clear is visible before the next dispatch.
+      required: [provenance, committed, enabledProviders, routableProviders, preference, reservePercent, parks]
+      properties:
+        provenance:
+          type: string
+          enum: [default, overridden]
+        committed:
+          $ref: "#/components/schemas/ProviderRoutingCommittedPolicy"
+        enabledProviders:
+          type: array
+          items:
+            type: string
+            enum: [claude, codex, cash, openweight]
+        routableProviders:
+          type: array
+          description: Enabled providers after active parks are applied.
+          items:
+            type: string
+            enum: [claude, codex, cash, openweight]
+        preference:
+          type: string
+          enum: [automatic, claude, codex, cash, openweight]
+        reservePercent:
+          type: number
+        parks:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProviderPark"
+        codexModelPreference:
+          $ref: "#/components/schemas/CodexModelPreference"
+        overrideExpiresAt:
+          type: string
+        writtenAt:
+          type: string
+        writerFingerprint:
+          type: string
+        fallback:
+          type: object
+          description: Present only when a stored override was refused and the committed policy was used instead.
+          required: [reason]
+          properties:
+            reason:
+              type: string
+              enum: [unreadable, malformed, unsupported-version, expired, incompatible-with-config]
+
+    ProviderRoutingPreferenceBypass:
+      type: object
+      required: [provider, reason]
+      properties:
+        provider:
+          type: string
+          enum: [claude, codex, cash, openweight]
+        reason:
+          type: string
+          enum: [unreadable, below-reserve]
+
+    ProviderRoutingStatus:
+      type: object
+      description: >
+        GET /v1/provider-routing's body: the daemon's last provider-routing decision as the
+        daemon wrote it to `state/provider-routing-status.json` (src/lib/provider-routing-status.ts's
+        `ProviderRoutingStatus`, projected field by field by `readProviderRoutingStatus`), with
+        `policy` overlaid by a live resolution. The console process never probes a provider.
+      required: [version, state, freshness]
+      properties:
+        version:
+          type: number
+        state:
+          type: string
+          enum: [unknown, not-probed, selected, blocked]
+        freshness:
+          type: string
+          enum: [fresh, stale, not-probed, unknown]
+        reason:
+          type: string
+          enum: [absent, unreadable, malformed, unsupported-version]
+          description: Why the status is `unknown`.
+        enabledProviders:
+          type: array
+          items:
+            type: string
+            enum: [claude, codex, cash, openweight]
+        reservePercent:
+          type: number
+        observedAt:
+          type: string
+        freshUntil:
+          type: string
+        providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProviderRoutingProviderStatus"
+        selected:
+          $ref: "#/components/schemas/ProviderRoutingSelectedStatus"
+        blockedReason:
+          type: string
+          enum: [no-provider-headroom]
+        modelHealth:
+          $ref: "#/components/schemas/ProviderRoutingModelHealthStatus"
+        policy:
+          $ref: "#/components/schemas/ProviderRoutingPolicyStatus"
+        preferenceBypass:
+          $ref: "#/components/schemas/ProviderRoutingPreferenceBypass"
+
+    RecentActivityEntry:
+      type: object
+      description: One RECENT feed row minted from a ledger line (src/lib/board.ts's `RecentActivityEntry`).
+      required: [taskId, title, verb, ts]
+      properties:
+        taskId:
+          type: string
+        runId:
+          type: string
+        title:
+          type: string
+        verb:
+          type: string
+          enum: [merged, verdict, fix, escalated, spend, run-refused, run-started, worker]
+        ts:
+          type: string
+          description: The originating ledger line's own `ts`.
+        detail:
+          type: string
+        costUsd:
+          type: number
+        numTurns:
+          type: number
+        prNumber:
+          type: number
+        prUrl:
+          type: string
+        eventKind:
+          type: string
+          enum: [working, tool-executing, message]
+        eventAt:
+          type: string
+        workerRole:
+          type: string
+          enum: [recon, implementer, reviewer, fixer, triage, retro, unknown]
+        provider:
+          type: string
+        requestedModel:
+          type: string
+        servedModel:
+          type: string
+        turnsSoFar:
+          type: number
+        toolName:
+          type: string
+        toolReason:
+          type: string
+        toolStartedAt:
+          type: string
+        toolCompletedAt:
+          type: string
+        toolDurationMs:
+          type: number
+        toolOutcome:
+          type: string
+          enum: [success, error]
+        prTitle:
+          type: string
+          description: GitHub decoration, present only when a read resolved it.
+        githubUnavailable:
+          type: boolean
+          enum: [true]
+          description: Present only when GitHub decoration was attempted and failed for this row.
+
+    RecentActivityResult:
+      type: object
+      description: GET /v1/recent's body -- at most 20 entries, newest first.
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecentActivityEntry"
+        staleness:
+          $ref: "#/components/schemas/ConsoleResponseStaleness"
+
+    SelfMeasurementRow:
+      type: object
+      description: >
+        One `measurement_cadence.ran` ledger row (src/lib/measurement-cadence.ts's
+        `MeasurementCadenceRowEntry`). `result` is keyed by cadence verb (camelCased) and each
+        value is that verb's SUMMARY (`summarizeMeasurementValue`): scalars, short strings and
+        array counts. The verb set grows with the cadence, so the map is genuinely open.
+      required: [ts, result]
+      properties:
+        ts:
+          type: string
+        result:
+          type: object
+          additionalProperties: {}
+
+    SelfMeasurementRows:
+      type: object
+      description: The newest measurement rows, newest first.
+      required: [status, rows]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/SelfMeasurementRow"
+
+    SelfMeasurementUnreadable:
+      type: object
+      description: >
+        The ledger union could not be read in full (no archive at all, or an unopenable
+        rotation) -- never answered as an empty "never measured".
+      required: [status, reason]
+      properties:
+        status:
+          type: string
+          enum: [unreadable]
+        reason:
+          type: string
+
+    SelfMeasurementDetail:
+      type: object
+      description: >
+        `?detail=<verb>`: that verb's FULL report from the newest row carrying it. `value` is
+        whatever that verb recorded, un-summarized, so its shape is the verb's own.
+      required: [verb, ts, value]
+      properties:
+        verb:
+          type: string
+        ts:
+          type: string
+        value: {}
+
+    AcceptanceCriterion:
+      type: object
+      description: One plan acceptance criterion (src/lib/plan.ts's `AcceptanceCriterion`).
+      required: [claim, proof]
+      properties:
+        claim:
+          type: string
+        proof:
+          type: string
+        satisfied_by:
+          type: string
+        holdout:
+          type: boolean
+
+    TaskCardRun:
+      type: object
+      description: One owned run in a task card's history -- read from the ledger, no GitHub call.
+      required: [runId]
+      properties:
+        runId:
+          type: string
+        verdict:
+          type: string
+        costUsd:
+          type: number
+        prUrl:
+          type: string
+
+    TaskCard:
+      type: object
+      description: The row-click task card (src/lib/task-card.ts's `TaskCard`).
+      required: [id, title, acceptance, dependsOn, status, merged, runs]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        rationale:
+          type: string
+        acceptance:
+          type: array
+          items:
+            $ref: "#/components/schemas/AcceptanceCriterion"
+        dependsOn:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+          enum: [queued, recon, prompted, running, review, fixing, diagnosing, blocked, merged, done]
+          description: The GitHub-derived projection's status, falling back to the plan's own only when no projection resolved.
+        merged:
+          type: boolean
+        prNumber:
+          type: number
+        prUrl:
+          type: string
+        runs:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskCardRun"
+
+    TaskCardResult:
+      type: object
+      required: [card]
+      properties:
+        card:
+          $ref: "#/components/schemas/TaskCard"
+
+    VersionResult:
+      type: object
+      description: GET /v1/version's body -- the console sha captured at server start, and nothing else.
+      required: [sha]
+      properties:
+        sha:
+          type: string
+
   responses:
     Unauthorized:
       description: No or unrecognized bearer token.
@@ -4596,3 +5661,441 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  # ── W1-T4609: fourteen routes the daemon served before this document declared them (measured by
+  # test/every-served-route-is-in-the-contract.test.ts against scripts/openapi-route-baseline.json).
+  # Declared as served -- no route's behaviour changed with this.
+  /v1/version:
+    get:
+      summary: The console sha this serve process booted with.
+      description: >
+        src/lib/serve.ts's `buildVersionRoute`: the sha captured once at server start (the SAME one
+        the stale-code exit compares against), never re-resolved per request. Read scope on
+        purpose -- a commit sha is not a secret -- and the payload carries nothing credential-shaped.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The boot sha.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/recent:
+    get:
+      summary: The RECENT activity feed -- the newest 20 ledger-derived entries.
+      description: >
+        src/lib/board.ts's `buildRecentRoute` / `computeRecentActivity`: classifies only ledger
+        lines new since the last read, decorates each fresh entry with its PR title once, and
+        returns the newest 20, newest first. Served through the console read cache
+        (src/lib/serve.ts's `boundConsoleReadRoute`), so the body carries `staleness`, a weak
+        `ETag` is set, and before any live snapshot exists the fallback body is
+        `{entries: [], staleness}`.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The feed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecentActivityResult"
+        "304":
+          description: The request's `If-None-Match` matched the cached snapshot's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/daemon-health:
+    get:
+      summary: The daemon's heartbeat, host pressure and gateway-checkout health.
+      description: >
+        src/lib/daemon-health.ts's `buildDaemonHealthRoute`: last poll from the ledger's newest
+        `daemon.*` line, disk free, GitHub rate-limit remaining, event-loop lag, host PSI pressure
+        and the serve checkout's freshness. A field whose source cannot be read is absent, never a
+        placeholder. Served through the console read cache, so the body carries `staleness`, a
+        weak `ETag` is set, and before any live snapshot exists the fallback body is
+        `{pollIntervalMs, staleness}`.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The health snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DaemonHealthSnapshot"
+        "304":
+          description: The request's `If-None-Match` matched the cached snapshot's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/account-usage:
+    get:
+      summary: The Claude account's identity, usage windows, credit state and governor posture.
+      description: >
+        src/lib/account-usage.ts's `buildAccountUsageRoute`, computed fresh per request from
+        `~/.claude.json` (identity and cached usage only -- never OAuth material), the ledger's
+        governor heartbeats and the effective daily cost ceiling. NOT side-effect free: when the
+        observed credit state differs from the last one the ledger recorded, the request appends
+        one `account.credit_state` ledger row recording that edge.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The account-usage snapshot; unreadable values are absent, never zero.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountUsageSnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/provider-routing:
+    get:
+      summary: The daemon's last provider-routing decision, with the live effective policy.
+      description: >
+        src/lib/serve.ts's `buildProviderRoutingRoute`: reads the daemon-written
+        `state/provider-routing-status.json` (an absent, unreadable or malformed file reads
+        `state: unknown` with a `reason`, never an error) and overlays `policy` with a fresh
+        resolution so a console write, expiry or clear shows before the next dispatch. Serve
+        performs no provider probe.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The routing status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderRoutingStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/control/status:
+    get:
+      summary: Pause/Resume/STOP/quiet-hours button states, plus daemon liveness evidence.
+      description: >
+        src/lib/panel-actions.ts's `buildControlStatusRoute`: button states derived from the
+        actual fleet-control flag files, never stateless buttons, and `daemonLive` read from the
+        SAME heartbeat GET /v1/daemon-health computes. A ledger read that throws degrades to
+        `daemonLiveReason: ledger-unreadable`, never a 500.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The fleet-control status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FleetControlStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/task:
+    get:
+      summary: The row-click task card for one plan task.
+      description: >
+        src/lib/task-card.ts's `buildTaskCardRoute`: title, rationale, acceptance criteria
+        (holdout criteria included -- this is an operator read, not a worker prompt), dependency
+        ids, GitHub-derived status and the task's own runs from the ledger, addressed by `?id=`.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The task card.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskCardResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No task with that id is in the plan (`error: not_found` with a `detail`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/plan/view:
+    get:
+      summary: The Plan tab -- progress, per-section counts and the dispatch frontier.
+      description: >
+        src/lib/panel-graph.ts's `buildPlanViewRoute`: `progress`, `sections` and `frontier` off
+        one plan snapshot and one GitHub-derived projection. The frontier binds the dispatcher's
+        own selector, so its order is the order dispatch would take; a held task renders with the
+        reason that held it.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: frontier
+          in: query
+          required: false
+          description: How many frontier rows to return; defaults to 8.
+          schema:
+            type: number
+            exclusiveMinimum: 0
+      responses:
+        "200":
+          description: The plan view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlanViewResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/onboarding/readiness:
+    get:
+      summary: Eight onboarding checks for a candidate repository.
+      description: >
+        src/lib/serve.ts's `buildOnboardingReadinessRoute` over src/lib/onboarding-readiness.ts:
+        app access, default branch, branch protection, CI workflows, agent instructions, test
+        command, plan layout, and whether the repo is already in the fleet registry. An
+        unreadable registry makes that one check `unknown`, never a 503 and never a pass.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: repo
+          in: query
+          required: true
+          description: "`owner/name`."
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+      responses:
+        "200":
+          description: The readiness report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnboardingReadinessReport"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/peek:
+    get:
+      summary: Read-only tail of one run's recorded worker output.
+      description: >
+        src/lib/serve.ts's `buildPeekRoute`: the last `lines` lines (default 50, at most 500 and
+        64 KiB) of `state/runs/<runId>.tail`. The run id's shape is validated before any path is
+        built. Nothing this route reads writes, signals, resumes or kills a run.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: runId
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$"
+        - name: lines
+          in: query
+          required: false
+          description: A positive integer; anything else falls back to 50, and values above 500 are capped.
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: "The tail, or `found: false` with the reason no tail was read."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PeekResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/replay:
+    get:
+      summary: The incident timeline -- `rmd replay`'s narration of a ledger window, as HTML.
+      description: >
+        src/lib/serve.ts's `buildReplayRoute`: narrates the ledger archive-and-live union between
+        `since` and `until` via src/lib/ledger-replay.ts's `buildReplay`, rendered as an escaped
+        server-side HTML fragment (`div.replay-panel[data-replay=ok]`). A partial corpus is
+        refused, never narrated short: the same 200 then carries `rmd replay`'s own refusal text
+        in `div.replay-panel.replay-refused[data-replay=refused]`.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: since
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: until
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: task
+          in: query
+          required: false
+          description: Narrow to one task id, as `rmd replay --task`.
+          schema:
+            type: string
+        - name: step
+          in: query
+          required: false
+          description: Narrow to steps with this prefix, as `rmd replay --step`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: An HTML fragment -- the narration, or the refusal for a partial corpus.
+          content:
+            text/html:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/self-measurement:
+    get:
+      summary: The newest self-measurement cadence rows, summarized, or one verb's full report.
+      description: >
+        src/lib/serve.ts's `buildSelfMeasurementRoute` over src/lib/measurement-cadence.ts:
+        without `detail`, the newest ten `measurement_cadence.ran` rows with each verb reduced to
+        its headline summary -- or `status: unreadable` when the ledger union cannot be read in
+        full, never an empty "never measured". With `?detail=<verb>`, that verb's full report
+        from the newest row carrying it.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: detail
+          in: query
+          required: false
+          description: One cadence verb name, e.g. `autonomyRate`.
+          schema:
+            type: string
+            pattern: "^[A-Za-z][A-Za-z0-9]{0,63}$"
+      responses:
+        "200":
+          description: >
+            `SelfMeasurementRows` or `SelfMeasurementUnreadable` without `detail`;
+            `SelfMeasurementDetail` with it.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/SelfMeasurementRows"
+                  - $ref: "#/components/schemas/SelfMeasurementUnreadable"
+                  - $ref: "#/components/schemas/SelfMeasurementDetail"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`detail` named a verb no measurement row carries (`error: not_found` with a `detail`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/incidents:
+    get:
+      summary: The incident fix-verification lifecycle store, newest first.
+      description: >
+        src/lib/incident-lifecycle.ts's `buildIncidentsRoute`: every incident fingerprint's
+        lifecycle (`new -> filed -> building -> deployed -> verified | regressed`), newest
+        `lastSeen` first. An absent store is an empty list; a store that exists but cannot be
+        read is a 503, never the `200 {incidents: []}` a quiet fleet returns.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The lifecycle records.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentsResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: The lifecycle store exists but could not be read.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentsUnavailable"
+
+  /v1/incidents/events:
+    post:
+      summary: Report one error event for grouping into an incident.
+      description: >
+        src/lib/incident-events.ts's `buildIncidentEventsRoute` (write scope, tier low): validate,
+        scrub, fingerprint (error type plus the first three in-app frames), then ledger one
+        `incident.event` row. Past 20 events per fingerprint per minute a burst collapses to ONE
+        `incident.sampled` row and later events in that window answer `sampled: true` and write
+        nothing. `message` and `frames` never reach the ledger. Reachable with the write token or
+        with the ingest-only token, which grants this one method and path and nothing else.
+      security:
+        - bearerWrite: []
+        - bearerIngest: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IncidentEventRequest"
+      responses:
+        "200":
+          description: The event was accepted (and ledgered, unless sampled out).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentEventResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          description: The body exceeded 16 KiB.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentIngestBodyTooLarge"
