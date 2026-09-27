@@ -121,6 +121,9 @@ export const CLI_ONLY = {
       "memory-lint",
       "pr-owner",
       "hand-runs",
+      // W1-T4574: an operator snapshot joining a host-local ledger with GitHub history; its only
+      // export is a reviewed candidate release file, never a live console read.
+      "field-trials",
       "ci-failures",
       "census-membership",
       "caller-sweep",

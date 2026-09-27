@@ -136,7 +136,7 @@ const BASELINE_COMMAND_NAMES = [
   "alert-fix", "approve", "authority", "autonomy-rate", "away", "benchmark-aa", "benchmark-paid-pilot", "board", "bundle", "caller-sweep", "case-file", "check-acceptance", "check-proof",
   "census-membership", "ci-failures", "ci-learning", "correct", "coverage-improve", "daemon", "daemon-plist", "decline", "dep-review",
   "deploy", "deploy-plist", "deploy-run", "digest", "digest-plist", "doctor", "down", "drain",
-  "emissions", "escalate", "feedback", "feedback-reconcile", "fix", "hand-runs", "inbox", "init", "install-checkout", "issues",
+  "emissions", "escalate", "feedback", "feedback-reconcile", "field-trials", "fix", "hand-runs", "inbox", "init", "install-checkout", "issues",
   "knowledge",
   "learnings", "ledger-compact", "ledger-grep", "lint-plan", "memory-lint", "merge-hold", "next-task-id", "note", "notify", "onboard", "ops", "pause",
   "peek", "plan", "plan-reconcile", "preflight", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
@@ -163,6 +163,7 @@ const BASELINE_COMMAND_NAMES = [
 // joins the registry.
 // W1-T4575: `benchmark-aa` — the A/A integrity report over a pinned-stack trial — joins the registry.
 // W1-T4603: `benchmark-paid-pilot` — the operator activation and report of the approved paid pilot — joins the registry.
+// W1-T4574: `field-trials` — the observational ledger x GitHub aggregate snapshot — joins the registry.
 // `decline` and `restore` — the terminal's route to the console's inbox decline and its reversal,
 // through the same applyProposalVerdict the serve routes use — join the registry.
 test("COMMANDS carries the reviewed command-name inventory", () => {

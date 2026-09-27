@@ -884,6 +884,7 @@ import {
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
+import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
 
@@ -46388,6 +46389,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T2697: the ledger records every rmd verb but never who ran it — a worker subprocess, the daemon's own in-process loop, and an operator's bare `./bin/rmd` are now distinguished by the `actor` field every appendLedger call stamps at write time (a pre-stamp row reads `unknown`, never guessed). This prints the hand-run census: over the archive+live ledger UNION (never the live file alone — W1-T1013), operator rows are grouped into sessions by their writing process and a thirty-minute gap, each session reduced to its ordered step sequence, and any sequence of length >= 2 recurring across at least the policy floor of DISTINCT CALENDAR DAYS (never session count) is printed with its days and session count. The same census, when the daemon's own cadence supplies a run id, additionally proposes each unproposed recurrence as ONE `plan/feedback/` entry (deduped by sequence signature against the ledger union, `hand_run.census_proposed`) — this command never does that itself. READ-ONLY: writes no ledger line, no feedback entry, no state file.",
   },
   {
+    name: "field-trials",
+    syntax: "rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--json]",
+    summary: "Join the ledger union and GitHub history into observational field-trials aggregates.",
+    detail: "W1-T4574: one operator-invoked, resumable snapshot pass. For each source repository (default config.fleetRepos as core, site and console; only core's ledger is on this host unless --ledger names another) it reads the audited three-form ledger union and up to --max-pages GitHub pages of pull requests, main commits, deployments and per-PR reviews, commits and first-commit check runs; an interrupted sweep resumes from its stored page and only a completed sweep advances its watermark. PRs link to plan tasks by the trailer, branch and ledger credit paths separately; unmatched and ambiguous links are counted. It derives five observational families by source, week and task class: model adoption (requested, selected and served models apart; source merge, runtime boot and first exposure apart), the automation funnel with missing-join and human-touch counts per stage, PR repair and correctness signals with an unknown bucket, flow and recovery times with open work censored (Kaplan-Meier) and DORA commit-to-deploy lead time, and learning-loop yield. A merge is never a deployment and a green check is never correctness. The snapshot is private under --out-dir (default <root>/state/field-trials). With --consent it writes a dated, pseudonymised candidate release that withholds small cells and is refused if any private join key appears; --revoke withdraws one. A failed refresh keeps the last known good release. It writes no ledger line, gates no PR, changes no routing, spends nothing and publishes nothing.",
+  },
+  {
     name: "ci-failures",
     syntax: "rmd ci-failures [--days N]",
     summary: "Report the window's red CI gates, each paired with the commit that repaired it.",
@@ -47330,6 +47337,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["memory-lint", (rest) => memoryLintCommand(rest)],
   ["ledger-compact", (rest) => ledgerCompactCommand(rest)],
   ["hand-runs", (rest) => handRunsCommand(rest)],
+  ["field-trials", async (rest) => await fieldTrialsCommand(rest, (input) => buildFieldTrialsFlowSnapshot(input))],
   ["ci-failures", (rest) => ciFailuresCommand(rest)],
   ["board", (rest) => boardCommand(rest)],
   ["census-membership", (rest) => censusMembershipCommand(rest)],
