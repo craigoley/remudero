@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { benchmarkRunAssignmentReceipt, benchmarkRunTerminalReceipt } from "../src/lib/benchmark-run.js";
+import { benchmarkRunAssignmentReceipt, benchmarkRunTerminalReceipt, compareBenchmarkStacks,
+  executingHarnessRevision, type BenchmarkStackEvidence } from "../src/lib/benchmark-run.js";
 
 const assignment = {
   id: "private-assignment-id",
@@ -21,6 +22,74 @@ test("benchmark run assignment records private stack provenance and explicit una
   assert.doesNotMatch(JSON.stringify(receipt), /secret-account|private-assignment-id|repository_name|prompt_content/);
   const withoutWork = benchmarkRunAssignmentReceipt(assignment, {});
   assert.deepEqual(withoutWork.work.taskClass, { state: "unavailable", reason: "not-recorded-at-assignment" });
+});
+
+const revision = "a".repeat(40);
+const completeStack: BenchmarkStackEvidence = {
+  harnessRevision: { source: "executing-module-git", revision },
+  promptRevision: { source: "trial-manifest", revision: "b".repeat(40) },
+  toolRevision: { source: "resolved-artifact", revision: "c".repeat(64) },
+  scorerRevision: { source: "trial-manifest", revision: "d".repeat(40) },
+  environmentRevision: { source: "resolved-artifact", revision: "e".repeat(64) },
+};
+
+test("benchmark stack provenance is captured from the executing worker boundary", () => {
+  const calls: string[] = [];
+  const pin = executingHarnessRevision("/srv/worker/src/run-task.ts", (cwd, args) => {
+    calls.push(`${cwd}:${args.join(" ")}`);
+    if (args[0] === "rev-parse" && args[1] === "--show-toplevel") return "/srv/worker\n";
+    if (args[0] === "status") return "";
+    if (args[0] === "rev-parse") return `${revision}\n`;
+    return "src/run-task.ts\n";
+  });
+  const receipt = benchmarkRunAssignmentReceipt(assignment, {}, { harnessRevision: pin });
+  assert.deepEqual(receipt.stack.harnessRevision, { state: "observed", value: revision });
+  assert.ok(calls.every((call) => call.startsWith("/srv/worker")), "never read cwd or another checkout");
+  assert.equal(calls.length, 4, "root, tracked module, clean source, and commit are all checked");
+});
+
+test("benchmark stack provenance refuses guessed or conflicting revisions", () => {
+  const dirty = executingHarnessRevision("/srv/worker/src/run-task.ts", (_cwd, args) =>
+    args[0] === "status" ? " M src/lib/worker.ts\n" : args[1] === "--show-toplevel" ? "/srv/worker" : revision);
+  assert.deepEqual(dirty, { state: "unavailable", reason: "executing-source-not-clean" });
+  const noGit = executingHarnessRevision("/srv/worker/src/run-task.ts", () => {
+    throw Object.assign(new Error("git is absent"), { code: "ENOENT" });
+  });
+  assert.deepEqual(noGit, { state: "unavailable", reason: "git-command-unavailable" });
+  const missing = benchmarkRunAssignmentReceipt(assignment, {});
+  assert.equal(missing.stack.harnessRevision.state, "unavailable");
+  const conflict = benchmarkRunAssignmentReceipt(assignment, {}, { harnessRevision: [
+    { source: "executing-module-git", revision },
+    { source: "trial-manifest", revision: "f".repeat(40) },
+  ] });
+  assert.deepEqual(conflict.stack.harnessRevision, { state: "unavailable", reason: "conflicting-pins" });
+  const raw = benchmarkRunAssignmentReceipt(assignment, {}, { promptRevision: {
+    source: "trial-manifest", revision: "secret-account-or-raw-prompt-content",
+  } });
+  assert.deepEqual(raw.stack.promptRevision, { state: "unavailable", reason: "pin-revision-not-immutable-id" });
+  const unsafeReason = benchmarkRunAssignmentReceipt(assignment, {}, {
+    environmentRevision: { state: "unavailable", reason: "secret-account" },
+  });
+  assert.deepEqual(unsafeReason.stack.environmentRevision, { state: "unavailable", reason: "pin-unavailable" });
+  const malformed = benchmarkRunAssignmentReceipt(assignment, {}, {
+    harnessRevision: "raw-secret" as unknown as BenchmarkStackEvidence["harnessRevision"],
+  });
+  assert.deepEqual(malformed.stack.harnessRevision, { state: "unavailable", reason: "pin-evidence-invalid" });
+});
+
+test("benchmark stack comparability requires matching observed revisions", () => {
+  const left = benchmarkRunAssignmentReceipt(assignment, {}, completeStack);
+  const same = benchmarkRunAssignmentReceipt(assignment, {}, completeStack);
+  assert.deepEqual(compareBenchmarkStacks(left, same), { state: "comparable", different: [], missing: [] });
+  const different = benchmarkRunAssignmentReceipt(assignment, {}, { ...completeStack,
+    promptRevision: { source: "trial-manifest", revision: "f".repeat(40) } });
+  assert.deepEqual(compareBenchmarkStacks(left, different), {
+    state: "different-stack", different: ["promptRevision"], missing: [],
+  });
+  const unpinned = benchmarkRunAssignmentReceipt(assignment, {}, { ...completeStack, scorerRevision: undefined });
+  assert.deepEqual(compareBenchmarkStacks(left, unpinned), {
+    state: "unavailable", different: [], missing: ["scorerRevision"],
+  });
 });
 
 test("benchmark run terminal preserves missingness and separate accounting modes", () => {

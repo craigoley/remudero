@@ -114,8 +114,14 @@ projection cannot support a public causal model ranking on its own.
 
 The private `benchmark-run-v1` envelope rides the existing `worker.assignment`, per-call
 `worker.attempt`, and run `verdict` rows; it is not an extra worker call or a public endpoint. It freezes the
-assignment-time task class, risk, requested and selected stack, with explicit unavailable
-prompt/tool/harness/scorer/environment revisions until the harness can pin those independently.
+assignment-time task class, risk, requested and selected stack. The executing harness commit is
+attested from the module actually loaded by the worker process, only when that module is tracked
+and the tracked source, launcher, and package inputs are clean at load time; an operator checkout, origin/main HEAD, or
+image build stamp from a different mounted source is not substituted. Prompt, tool, scorer, and
+environment revisions remain unavailable until an immutable resolved artifact or explicit trial
+manifest pins them. Invalid or conflicting pins stay unavailable with a bounded reason.
+Comparability names mismatched and missing stack fields separately; only two completely observed,
+matching working stacks classify comparable. This is an identity check, not a model-effect estimate.
 Rights are private without a local consent receipt, and allocation is observational without a
 randomization receipt. An attempt envelope names worker-call outcome and per-field missingness;
 observed zero tokens, duration, or cost differ from absent measurements. API request estimates
@@ -177,8 +183,8 @@ If any malformed line lacks that timestamp, no clean model denominator is assert
 cohort remains unavailable until every source is healthy or a retired source's evidence is
 reconciled. A partial clean cohort is not a public ranking or experiment effect.
 
-Dimensions are UTC day, task class, selected provider/model, and explicitly unavailable harness
-revision. Assignment-based denominators distinguish no worker call from a call with missing
+Dimensions are UTC day, task class, selected provider/model, and observed or explicitly unavailable
+harness revision. Assignment-based denominators distinguish no worker call from a call with missing
 served-model, billing, or cost evidence. A per-call attempt wins over a final verdict as worker
 call evidence; neither proves task correctness. Estimated API dollars and subscription notional
 amounts remain separate. The pressure report measures source and checkpoint bytes, relevant
