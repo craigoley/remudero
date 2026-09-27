@@ -42796,16 +42796,17 @@ export function skillLifecyclePrBody(action: SkillLifecycleAction, proposalId: s
 // refused THIS shard for the same omission until it carried a call-site criterion. So the call
 // site ships in the same change as the judge, and the shard's acceptance greps for it here.
 
-function shadowedVerifyHumanJudge(opts: {
+export function shadowedVerifyHumanJudge(opts: {
   mounts: Mounts;
   config: Config;
   cwd: string;
   settingsFile: string;
   log: (step: string, fields: Record<string, unknown>) => void;
+  spawns?: { primary: typeof spawnWorker; shadow: typeof spawnWorker };
 }): (shard: ShardUnderJudgement) => Promise<VerifyHumanVerdict> {
   let primaryServedModel: string | null = null;
-  const primarySpawn = ledgeredNonDispatchSpawn("verify-human-judge");
-  const shadowSpawn = ledgeredNonDispatchSpawn("verify-human-shadow");
+  const primarySpawn = opts.spawns?.primary ?? ledgeredNonDispatchSpawn("verify-human-judge");
+  const shadowSpawn = opts.spawns?.shadow ?? ledgeredNonDispatchSpawn("verify-human-shadow");
   const primary = realVerifyHumanJudge({
     ...opts,
     spawn: async (args) => {
@@ -42884,6 +42885,7 @@ type AdaptiveLifetimePressureRoute = Pick<VerifyHumanRouteDeps, "runId"> & {
   config: Config;
   ledgerPath: string;
   runId: string;
+  shadowJudgeSpawns?: { primary: typeof spawnWorker; shadow: typeof spawnWorker };
 };
 
 /** Route repeated attributable dispatch pressure through the existing three-way LLM judge. */
@@ -42927,6 +42929,7 @@ export async function routeAdaptiveLifetimePressure(
       cwd: deps.root,
       settingsFile: join(deps.root, "settings", "worker.json"),
       log: (step, fields) => appendLedger(deps.ledgerPath, { run_id: deps.runId, step, ...fields } as LedgerLine),
+      spawns: deps.shadowJudgeSpawns,
     }),
     priorVerdicts: priorVerifyHumanVerdicts(rows),
     maxJudged: tasks.length,

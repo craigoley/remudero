@@ -75,3 +75,20 @@ test("a sampled shadow configuration failure records a coverage gap without aski
   assert.equal(rows[0]?.step, "shadow_judge.unavailable");
   assert.match(String(rows[0]?.fields.reason), /mount-resolution-failed: routing unavailable/);
 });
+
+test("no alternate mount is recorded as unavailable even when ledgering also fails", async (t) => {
+  const key = Array.from({ length: 100 }, (_, i) => String(i)).find((value) => shadowJudgeSampled(`review:${value}`))!;
+  let stderr = "";
+  t.mock.method(process.stderr, "write", ((chunk: string | Uint8Array) => {
+    stderr += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString();
+    return true;
+  }) as typeof process.stderr.write);
+
+  await runShadowJudge({
+    surface: "review", key, primaryMount: primary, primaryDecision: [true], mounts: [primary],
+    judge: async () => { throw new Error("must not run without another model"); },
+    log: () => { throw new Error("ledger unavailable"); },
+  });
+
+  assert.match(stderr, /shadow judge ledger unavailable: ledger unavailable/);
+});

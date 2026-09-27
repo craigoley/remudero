@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { runReview } from "../src/run-task.js";
+import { shadowJudgeSampled } from "../src/lib/shadow-judge.js";
+import { reviewDecisionDigest } from "../src/lib/review.js";
 
 type LogRow = { step: string; extra: Record<string, unknown> };
 
@@ -35,6 +37,8 @@ async function withFixture<T>(
   const settingsFile = join(root, "settings.json");
   mkdirSync(join(sourceDir, "src"), { recursive: true });
   mkdirSync(binDir);
+  mkdirSync(join(root, ".remudero"), { recursive: true });
+  copyFileSync(join(import.meta.dirname, "..", ".remudero", "mounts.yaml"), join(root, ".remudero", "mounts.yaml"));
   execFileSync("git", ["init", "-q", sourceDir]);
   git(sourceDir, "config", "user.name", "RMD Test");
   git(sourceDir, "config", "user.email", "rmd-test@example.invalid");
@@ -99,6 +103,7 @@ async function review(
     headCheckoutDir?: string;
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     logs: LogRow[];
+    report?: string;
   },
 ) {
   return runReview({
@@ -110,7 +115,7 @@ async function review(
       files: ["src/example.ts"],
       acceptance: [{ claim: "the fixed source is present", proof: "grep: fixed in src/example.ts" }],
     },
-    report: "the fixed source is present",
+    report: options.report ?? "the fixed source is present",
     settingsFile: fixture.settingsFile,
     config: { claudeBin: "/unused", root: fixture.root } as never,
     log: (step: string, extra: Record<string, unknown> = {}) => options.logs.push({ step, extra }),
@@ -125,6 +130,18 @@ async function review(
     disarm: () => "not-armed" as const,
     arm: () => ({ armed: false, reason: "test" }),
   } as never);
+}
+
+function sampledReviewReport(headSha: string): string {
+  const prUrl = "https://github.com/acme/remudero/pull/2868";
+  const diff = "diff --git a/src/example.ts b/src/example.ts\n+export const fixed = true;\n";
+  const acceptance = [{ claim: "the fixed source is present", proof: "grep: fixed in src/example.ts" }];
+  for (let i = 0; i < 1000; i += 1) {
+    const report = `the fixed source is present (${i})`;
+    const digest = reviewDecisionDigest({ headSha, diff, report, body: report, acceptance, declaredFiles: ["src/example.ts"] });
+    if (shadowJudgeSampled(`review:${prUrl}:${headSha}:${digest}`)) return report;
+  }
+  throw new Error("could not seed a sampled review decision");
 }
 
 test("W1-T2868: the Claude semantic reviewer receives a disposable exact-head checkout without changing its source", async () => {
@@ -155,6 +172,30 @@ test("W1-T2868: the Claude semantic reviewer receives a disposable exact-head ch
     assert.equal(git(fixture.sourceDir, "rev-parse", "HEAD"), fixture.headSha);
     assert.equal(git(fixture.sourceDir, "status", "--porcelain", "--untracked-files=all"), "");
     assert.doesNotMatch(readFileSync(fixture.ghLog, "utf8"), /pr checkout/, "materialization adds no GitHub checkout call");
+  });
+});
+
+test("a sampled semantic review invokes one bounded second reviewer and records the paired result", async () => {
+  await withFixture(async (fixture) => {
+    const logs: LogRow[] = [];
+    const calls: SpawnWorkerArgs[] = [];
+    const verdict = await review(fixture, {
+      headCheckoutDir: fixture.sourceDir,
+      report: sampledReviewReport(fixture.headSha),
+      logs,
+      spawn: async (args) => {
+        calls.push(args);
+        return reviewerResult("claude", "REVIEW_VERDICT 1: PASS");
+      },
+    });
+
+    assert.equal(verdict.state, "success");
+    assert.equal(calls.length, 2, "the sampled path runs primary once and one shadow reviewer");
+    assert.notEqual(calls[0]?.model, calls[1]?.model, "the shadow must use a different configured model");
+    assert.equal(calls[1]?.maxBudgetUsd, 0.1);
+    assert.equal(calls[1]?.maxTurns, 12);
+    assert.deepEqual(calls[1]?.tools, ["Read", "Grep", "Glob"]);
+    assert.ok(logs.some((row) => row.step === "shadow_judge.paired"));
   });
 });
 
