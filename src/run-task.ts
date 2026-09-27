@@ -1336,6 +1336,7 @@ import {
   type StatusProjection,
   planBranchReap,
   type BranchFacts,
+  type BranchReapPlan,
   BRANCH_REAP_REASON_LABEL,
   readLedgerUnionBounded,
   taskIdFromRunBranch,
@@ -1433,7 +1434,7 @@ import {
   DEFAULT_FIX_CLASSES,
   buildSweepEffects as buildSweepEffectsFromLib,
   checkJobId,
-  corroboratedIneligibilityReason,
+  corroboratedIneligibility,
   currentPlanIneligibilityReason,
   defaultSweepGhRun,
   dispatchFixCatchOutcome,
@@ -20498,6 +20499,53 @@ function perHeadPrState(
 }
 
 /**
+ * W1-T4633 — A REVERSIBLE CLOSE KEEPS ITS HEAD. The sweep's plan-resequence close omits
+ * `--delete-branch` (W1-T921), yet a closed-unmerged head is deletable here with no age gate, so
+ * the same pass's reaper deleted #7465's branch on 2026-09-27 and it was restored by hand. Every
+ * head a `sweep.disposed` row names in `keep_head_branch` (written only by that close — see
+ * lib/sweep.ts's `PLAN_RESEQUENCE_CLOSE_MARKER`) moves out of `plan.deletable`, IN PLACE, and is
+ * returned so the report names it. A later merge still reaps it: only `closed_unmerged` is kept.
+ *
+ * `readLedger` returning `undefined` means no ledger is configured: nothing is kept, the prior
+ * behaviour. A ledger that exists but cannot be READ keeps every closed-unmerged head — it cannot
+ * rule out that any of them is a reversible close, and a kept branch costs only a later pass.
+ */
+export function keepReversiblyClosedHeads(
+  plan: BranchReapPlan,
+  readLedger: () => ReadonlyArray<Record<string, unknown>> | undefined,
+): string[] {
+  const closed = plan.deletable.filter((name) => plan.reasons[name] === "closed_unmerged");
+  if (closed.length === 0) return [];
+  let keep: ReadonlySet<string>;
+  try {
+    const rows = readLedger();
+    if (rows === undefined) return [];
+    keep = new Set(
+      rows
+        .filter((row) => row.step === "sweep.disposed" && row.acted === true && typeof row.keep_head_branch === "string")
+        .map((row) => row.keep_head_branch as string),
+    );
+  } catch (err) {
+    console.error(`rmd reap-branches: keeping every closed-unmerged head — the ledger could not be read (${String(err)})`);
+    keep = new Set(closed);
+  }
+  const kept = closed.filter((name) => keep.has(name));
+  if (kept.length > 0) plan.deletable = plan.deletable.filter((name) => !keep.has(name));
+  return kept;
+}
+
+/** The configured ledger path, or `undefined` when no fleet config resolves one (a bare checkout). */
+function configuredLedgerPathOrUndefined(): string | undefined {
+  try {
+    return ledgerPathFor(loadConfig());
+  } catch {
+    // Deliberate: no fleet config means no sweep ledger exists to hold a keep mark, so "no path"
+    // and "unreadable config" coincide for this one consumer — nothing to keep either way.
+    return undefined;
+  }
+}
+
+/**
  * `rmd ledger-grep <pattern>` — the deduplicated union of every `state/ledger.*.ndjson.gz`
  * archive and the live `state/ledger.ndjson`, for `pattern`. Replaces the manual
  * `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches
@@ -20683,6 +20731,10 @@ export function reapBranchesCommand(
   }
 
   const plan = planBranchReap(facts, DECLARED_BRANCH_GUARDS);
+  const keptReversibleClose = keepReversiblyClosedHeads(plan, () => {
+    const sourcePath = opts.creditLedgerPath ?? opts.ledgerPath ?? configuredLedgerPathOrUndefined();
+    return sourcePath === undefined ? undefined : readLedgerLines(sourcePath);
+  });
 
   // THE REVERSE COMPARISONS (W1-T2226): ONE additional pattern grep, not one per branch — the
   // 274-subprocess cost above is the per-branch forward direction; this is the single extra call
@@ -20745,6 +20797,10 @@ export function reapBranchesCommand(
     manifest.push({ name: b, sha, reason });
     print(`  ${sha}\t${b}\t${reason}`);
   }
+  if (keptReversibleClose.length > 0) {
+    print(`kept:      ${keptReversibleClose.length}  (closed by the sweep's reversible plan-resequence close — reopenable)`);
+    for (const name of keptReversibleClose) print(`  ${name}`);
+  }
   // W1-T2246: "no PR" and "could not tell" are different reasons for the same disposition — a
   // single "(no PR, commits not in main)" string asserted BOTH about the whole bucket, which is
   // exactly the mislabel this task ends. `plan.undetermined` is a SUBSET of `plan.hold`, so the
@@ -20794,6 +20850,7 @@ export function reapBranchesCommand(
       orphan_declarations: orphanDeclarations,
       missing_branches: deadDeclaredGuards,
       held_branches: plan.hold,
+      kept_reversible_close_branches: keptReversibleClose,
       reasons: plan.reasons,
     });
   }
@@ -35952,12 +36009,17 @@ export function buildOpenPrViews(
     // merged-task set (`deps.isMerged`). Any one absent leaves `planResequenceIneligible`
     // `undefined` — never inferred from `taskId`/`headRefName` alone. See
     // `currentPlanIneligibilityReason`'s own doc (lib/sweep.ts) for the reason it can return.
-    const planResequenceIneligible =
+    // W1-T4633: the unmet ids ride along as data so the pass's fresh-credit re-check
+    // (`projectMergedTaskCandidates`, lib/sweep.ts) can clear a dependency the ledger lags on.
+    const resequence =
       mainPlan && taskRecord && deps.isMerged
-        ? corroboratedIneligibilityReason(mainPlan, taskRecord, deps.isMerged, (ids) =>
+        ? corroboratedIneligibility(mainPlan, taskRecord, deps.isMerged, (ids) =>
             ids.length === 0 ? new Set<string>() : readMergeCreditedTaskIds(ledgerPath, { candidates: ids }).credited,
           )
         : undefined;
+    const planResequenceIneligible = resequence?.reason;
+    const planResequenceUnmetDependencies =
+      resequence && resequence.unmetDependencies.length > 0 ? resequence.unmetDependencies : undefined;
     const fileObservation = planFilingFiles.get(pr.number);
     const observedFiles = fileObservation?.state === "complete" ? fileObservation.paths : undefined;
     const reviewLedgerKey = taskId ?? `PR-${pr.number}`;
@@ -36065,6 +36127,8 @@ export function buildOpenPrViews(
       planFilingSource: planFiling.source,
       taskRetirement: taskRecord?.retirement,
       planResequenceIneligible,
+      planResequenceUnmetDependencies,
+      planResequenceHeld: undefined,
       // W1-T923: a SIBLING read, off the SAME `review.posted` ledger line `unmetCriteria` above
       // already scans — see `actionableGateFailuresFromLedger`'s own doc for why it is keyed
       // differently (no `isPlanOnlyFilingPr` gate) and why it never parses `failure_reason`.

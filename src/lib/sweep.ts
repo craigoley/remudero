@@ -457,12 +457,36 @@ export function corroboratedIneligibilityReason(
   isMerged: MergedResolver,
   creditedInLedger: (taskIds: readonly string[]) => ReadonlySet<string>,
 ): string | undefined {
-  const reason = currentPlanIneligibilityReason(plan, task, isMerged);
-  if (reason === undefined || task.status === "blocked") return reason;
-  const credited = creditedInLedger(unmetDependencies(plan, task, isMerged));
-  if (credited.size === 0) return reason;
-  return currentPlanIneligibilityReason(plan, task, (t) => isMerged(t) || credited.has(t.id));
+  return corroboratedIneligibility(plan, task, isMerged, creditedInLedger).reason;
 }
+
+/** W1-T4633 — {@link corroboratedIneligibilityReason} plus the still-unmet dependency ids AS DATA,
+ *  so {@link projectMergedTaskCandidates} can re-check exactly those ids against the pass's fresh
+ *  merge credit without parsing them back out of the prose. `unmetDependencies` is empty for a
+ *  runnable task and for a blocked/retired one — only the unmet-dependency reason carries ids. */
+export function corroboratedIneligibility(
+  plan: Plan,
+  task: Task,
+  isMerged: MergedResolver,
+  creditedInLedger: (taskIds: readonly string[]) => ReadonlySet<string>,
+): { reason: string | undefined; unmetDependencies: string[] } {
+  const reason = currentPlanIneligibilityReason(plan, task, isMerged);
+  if (reason === undefined || task.status === "blocked") return { reason, unmetDependencies: [] };
+  const unmet = unmetDependencies(plan, task, isMerged);
+  const credited = creditedInLedger(unmet);
+  if (credited.size === 0) return { reason, unmetDependencies: unmet };
+  const corroborated = (t: Task): boolean => isMerged(t) || credited.has(t.id);
+  return {
+    reason: currentPlanIneligibilityReason(plan, task, corroborated),
+    unmetDependencies: unmetDependencies(plan, task, corroborated),
+  };
+}
+
+/** W1-T4633 — the phrase ONLY the plan-resequence close row's reason carries. runSweep keys the
+ *  `keep_head_branch` field of that close's `sweep.disposed` row on it, and the branch reaper
+ *  (run-task.ts's `reapBranchesCommand`) keeps every head that field names: the close is described
+ *  as reversible, and deleting the head makes reopening depend on someone's local copy. */
+export const PLAN_RESEQUENCE_CLOSE_MARKER = "the plan resequenced after this PR was admitted";
 
 /** The synthetic lane namespaces whose PR branches are created by the orchestrator itself. */
 function isSyntheticOrchestratorLaneId(taskId: string): boolean {
@@ -3892,6 +3916,14 @@ export interface OpenPrView {
    *  plan, an unreadable merged-task set, an absent/synthetic task id, a missing task record, or a
    *  genuinely still-runnable task all leave this `undefined` and change nothing. */
   planResequenceIneligible?: string;
+  /** W1-T4633 — the dependency ids behind an unmet-dependency `planResequenceIneligible`, as data.
+   *  Absent for a blocked/retired reason. {@link projectMergedTaskCandidates} re-checks exactly
+   *  these against the pass's fresh merge credit before the close is allowed to stand. */
+  planResequenceUnmetDependencies?: readonly string[];
+  /** W1-T4633 — set when an unmet-dependency close was WITHHELD because the pass's merge-credit read
+   *  could not speak for a dependency (no read, or a dependency outside the read's plan). The PR is
+   *  left open; runSweep logs this reason as `sweep.plan_resequence_close.held`. */
+  planResequenceHeld?: string;
   /** Rolled-up remudero-review state on the head. */
   reviewState: "success" | "failure" | "pending" | "none";
   /** Rolled-up required-checks state on the head. */
@@ -5247,8 +5279,9 @@ export function creditSubjectIsImplementation(subject: string | undefined): bool
  *  ⚠ FAIL OPEN ON DARKNESS, WHICH IS THE WHOLE SAFETY PROPERTY. Only a candidate with
  *  `merged === true` and a concrete `prNumber` can stamp anything. An empty or absent candidate
  *  array (a failed projection is indistinguishable from "nothing merged"), a PR carrying no
- *  `taskId`, or a candidate for another task all leave the view BYTE-IDENTICAL — so a read failure
- *  can never be laundered into a close.
+ *  `taskId`, or a candidate for another task all leave `taskMergedBy` unset — so a read failure
+ *  can never be laundered into a close. (W1-T4633: an ABSENT array also withholds a pending
+ *  unmet-dependency close — see {@link recheckResequenceCloseAgainstFreshCredit}.)
  *
  *  ⚠ AND NEVER THE WINNER ITSELF. A candidate naming this very PR is skipped: the merged PR is not
  *  normally in the open array at all, but a stale listing must not be able to close the PR that
@@ -5257,6 +5290,60 @@ export function projectMergedTaskCandidates(
   prs: readonly OpenPrView[],
   candidates: readonly CreditCandidate[] | undefined,
 ): OpenPrView[] {
+  return stampTaskMergedBy(recheckResequenceCloseAgainstFreshCredit(prs, candidates), candidates);
+}
+
+/**
+ * W1-T4633 — THE RESEQUENCE CLOSE MUST READ THE MERGE CREDIT THIS PASS ALREADY HOLDS. MEASURED
+ * 2026-09-27: #7465 was closed for "unmet dependency W1-T4610" 16s BEFORE the same pass's credit
+ * backfill wrote `verdict.merged` for W1-T4610 from #7458 — `buildOpenPrViews`' ledger corroboration
+ * (W1-T4565) runs before that rung appends, so it cannot see a merge the pass is about to credit.
+ * These candidates are the SAME batched merge-credit read (anchored trailer, head branch) the
+ * backfill rung is handed, so a dependency with an observable merged PR here is met.
+ *
+ * Only an unmet-dependency reason with its ids as data is touched; a blocked/retired reason is left
+ * exactly as it was. It can only REMOVE closure authority, never add it:
+ *   - every unmet id merged here            ⇒ the reason is cleared;
+ *   - some merged                           ⇒ the reason is rewritten to the rest;
+ *   - no credit read at all (`candidates` undefined) ⇒ INDETERMINATE: the reason is cleared and
+ *     `planResequenceHeld` records why — the PR is left open, never closed.
+ * `merged === true` alone is the evidence: whether the crediting PR IMPLEMENTED the task
+ * (`creditIsImplementation`) is a supersession question, not whether the dependency merged.
+ * PURE.
+ */
+export function recheckResequenceCloseAgainstFreshCredit(
+  prs: readonly OpenPrView[],
+  candidates: readonly CreditCandidate[] | undefined,
+): OpenPrView[] {
+  const mergedTaskIds = new Set((candidates ?? []).filter((c) => c.merged === true && c.taskId).map((c) => c.taskId));
+  return prs.map((pr) => {
+    const unmet = pr.planResequenceUnmetDependencies;
+    if (pr.planResequenceIneligible === undefined || unmet === undefined || unmet.length === 0) return pr;
+    if (candidates === undefined) {
+      return {
+        ...pr,
+        planResequenceIneligible: undefined,
+        planResequenceUnmetDependencies: undefined,
+        planResequenceHeld:
+          `unmet-dependency close withheld: no merge-credit read this pass could speak for ${unmet.join(", ")} ` +
+          `— indeterminate, left open`,
+      };
+    }
+    const stillUnmet = unmet.filter((id) => !mergedTaskIds.has(id));
+    if (stillUnmet.length === unmet.length) return pr;
+    if (stillUnmet.length === 0) {
+      return { ...pr, planResequenceIneligible: undefined, planResequenceUnmetDependencies: undefined };
+    }
+    return {
+      ...pr,
+      planResequenceIneligible:
+        `unmet dependenc${stillUnmet.length === 1 ? "y" : "ies"} in the current plan: ${stillUnmet.join(", ")}`,
+      planResequenceUnmetDependencies: stillUnmet,
+    };
+  });
+}
+
+function stampTaskMergedBy(prs: readonly OpenPrView[], candidates: readonly CreditCandidate[] | undefined): OpenPrView[] {
   const mergedByTask = new Map<string, number>();
   for (const c of candidates ?? []) {
     // W1-T3063 — `=== true` IS THE FIX, and the strictness is the point: `undefined` (the subject
@@ -6186,8 +6273,8 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       pr.planFilingSource === "not-plan-only" &&
       pr.planResequenceIneligible !== undefined,
     reason: (pr) =>
-      `task ${pr.taskId ?? "(unknown)"} is ${pr.planResequenceIneligible} — the plan resequenced after this PR was ` +
-      `admitted, current dispatch will not rebuild it, and it cannot be left owning the task — closing the leftover implementation PR`,
+      `task ${pr.taskId ?? "(unknown)"} is ${pr.planResequenceIneligible} — ${PLAN_RESEQUENCE_CLOSE_MARKER}, current ` +
+      `dispatch will not rebuild it, and it cannot be left owning the task — closing the leftover implementation PR`,
   },
   {
     disposition: "stale",
@@ -9505,6 +9592,10 @@ export async function runSweep(
         acted,
         reason,
         head_sha: pr.headSha,
+        // W1-T4633 — the branch a reversible plan-resequence close must keep; the reaper reads it.
+        ...(disposition === "stale" && acted && pr.headRefName && reason.includes(PLAN_RESEQUENCE_CLOSE_MARKER)
+          ? { keep_head_branch: pr.headRefName }
+          : {}),
         // W1-T4470 — the EFFECTIVE mergeability this exact head disposed under, observed this
         // pass or inherited from a prior one (see `withInheritedMergeState`). Read back by
         // `lastKnownMergeStateFromLedger`, keyed pr_number+head_sha, so hysteresis persists
@@ -9608,6 +9699,11 @@ export async function runSweep(
           ...(error ? { withdrawal_error: error } : {}),
         });
       }
+    }
+    // W1-T4633 — an unmet-dependency close withheld on an indeterminate credit read is recorded,
+    // never silent: the PR stays open under whatever other row now matches it.
+    if (pr.planResequenceHeld !== undefined) {
+      log("sweep.plan_resequence_close.held", { pr_number: pr.prNumber, task_id: pr.taskId, reason: pr.planResequenceHeld });
     }
     let { disposition, reason } = postReviewFailureHistoryDisposition(pr, prior, policy, now) ?? deriveDisposition(pr, policy, now);
     if (inheritedMergeState) {
