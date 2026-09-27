@@ -1,0 +1,69 @@
+- id: W1-T4597
+  title: "AN ENVIRONMENTAL FAILURE BLOCKS A TASK FOREVER — a containment probe that never ran, an isolation preflight whose spawn failed, a transient API storm or a Codex output cap each write the same durable `dispatch.blocked_independent` a task-caused failure writes, and only a new run.start clears it, so one infrastructure fault starves a fleet: re-offer an environmental block ONCE after the daemon's code changes or a cooldown passes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-27: console fleet starved (#1782) behind three environmental blocks"
+  plan_refs: ["W1-T3978", "W1-T3979", "W1-T3565", "W1-T2910", "W1-T4595", "W1-T271", "W1-T298"]
+  files:
+    - src/lib/status.ts
+    - src/lib/daemon.ts
+    - src/lib/ledger.ts
+    - test/an-environmental-block-is-re-offered-when-the-environment-changes.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-27 on the live console fleet: `dispatch.starvation.escalated` (#1782 on
+    remudero-console) with zero dispatchable tasks and three blocked — CONSOLE-T80
+    (`blocked_containment`, observed `probe-never-ran`, 2026-09-26 12:46 on host cc695dac1202, since
+    replaced), CONSOLE-T60 (`blocked_isolation`: the probe spawn itself failed on a missing worker-
+    home .claude.json), and CONSOLE-T76 (`failed` at stage `worker.bounded_output`, the Codex stdout
+    cap W1-T4595 repairs). None of the three says anything about the task: each is the fleet's
+    environment refusing to run it. Yet `latestIndependentFailureBlock` (status.ts) treats every
+    such row as `blocked` until a later `run.start`, which no automatic path writes, so the fleet
+    sat idle with headroom and the escalation's own advice ('a blocked: task needs the plan mark
+    lifted') names a mark that does not exist.
+    Fleet-wide the same classes recur: `blocked_containment` verdicts (probe-never-ran / write-
+    never-attempted) land a few times a week across core, console and site hosts (core W1-T4480 at
+    2026-09-27 01:05, PORTAL-T35 2026-09-26), `blocked_transient` ('repeated transient API error
+    across 3 retries — not a task failure') latched W1-T4438 and W1-T4455, and `blocked_git_fetch`
+    latched W1-T4004 and PORTAL-T22. The containment gate failing CLOSED is correct; staying closed
+    after the environment changes is the defect.
+    W1-T3978 (harness-commit refusal) and W1-T3979 (inflight contention) already carve narrow re-
+    admission arms out of this same state machine; W1-T3565 did it for ill-formed admission. None
+    covers an environmental class.
+    DUPLICATE-SURFACE RULING: W1-T298 shares daemon.ts and ledger.ts as generic daemon and ledger
+    mechanics; it names no environmental re-admission predicate, so the overlap is retained in
+    plan_refs rather than hidden by dropping the scheduler write or the rotation retention this task
+    needs.
+  design: |
+    (i) Name the environmental classes as one exported, reviewed constant (verdicts
+    `blocked_containment`, `blocked_isolation`, `blocked_transient`, `blocked_git_fetch`, and a
+    `failed` verdict whose stage is `worker.bounded_output`), and have the daemon record on the
+    `dispatch.blocked_independent` row the class it matched and the `head_sha` of its own latest
+    `daemon.boot`. Every other verdict stays durably blocked exactly as today.
+    (ii) `latestIndependentFailureBlock` re-admits an environmental block ONCE when EITHER a later
+    `daemon.boot` carries a different `head_sha` than the block recorded (a deploy may have fixed
+    it) OR a named cooldown (default 6h) has passed since the block. The daemon logs
+    `dispatch.environment_retry` naming the block's run_id and which signal released it; the next
+    `run.start` spends it, as W1-T3978's marker is spent.
+    (iii) Bound it: after two consecutive environmental re-offers for one task with no intervening
+    non-environmental outcome, the block stays durable and the starvation escalation names the class
+    and the count, so a host that can never run a task escalates rather than loops. The lifetime cap
+    and circuit breaker remain the backstop.
+    (iv) Retain the new row through rotation (ledger.ts's decision-relevant list) so the bound
+    survives a rotation; a legacy block row without the class field is classified from its verdict
+    and stage.
+  acceptance:
+    - claim: "an environmental block is re-offered once after a code change or cooldown, while a task-caused block and a third consecutive environmental block stay durable"
+      proof: "unit test: test/an-environmental-block-is-re-offered-when-the-environment-changes.test.ts"
+  falsifier: |
+    Drop the environmental arm: a task whose latest row is `blocked_containment` with a later
+    daemon.boot at a different head_sha stays blocked. Drop the bound: a task with three consecutive
+    environmental blocks is re-offered a third time.

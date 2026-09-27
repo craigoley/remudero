@@ -1634,10 +1634,10 @@ export interface ParsedCodexEvents {
   usageRefusal?: UsageLimitRefusal;
 }
 
-/** PRIMARY CONTROL: the maximum JSONL transcript one Codex worker may retain before it is
- * terminated. This is the ordinary containment boundary for worker output, not a recovery
- * fallback after another guard has failed. */
+/** PRIMARY CONTROL (W1-T4595): the most stdout one Codex worker may RETAIN (W1-T3490's heap), not stream. */
 export const CODEX_WORKER_STDOUT_MAX_BYTES = 1 * 1024 * 1024;
+/** BACKSTOP (W1-T4595): the total stdout one Codex worker may STREAM, against a runaway process. */
+export const CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES = 64 * 1024 * 1024;
 /** PRIMARY CONTROL: stderr is diagnostic evidence, not protocol input, so it receives its own
  * smaller containment ceiling. */
 export const CODEX_WORKER_STDERR_MAX_BYTES = 256 * 1024;
@@ -1726,6 +1726,7 @@ class CodexJsonlAccumulator {
   private numTurns = 0;
   private usageRefusal: UsageLimitRefusal | undefined;
   private pending = "";
+  private keptBytes = 0;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
     CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
   ) as Record<CodexEventByteKind, number>;
@@ -1767,6 +1768,11 @@ class CodexJsonlAccumulator {
     return Buffer.byteLength(this.pending, "utf8");
   }
 
+  /** W1-T4595: the unterminated line plus the kept blocks and errors. */
+  retainedBytes(): number {
+    return this.pendingLineBytes() + this.keptBytes;
+  }
+
   private consumeLine(line: string): void {
     if (!line.trim()) return;
     let event: CodexJsonEvent;
@@ -1789,6 +1795,7 @@ class CodexJsonlAccumulator {
     if (event.type === "turn.started") this.numTurns += 1;
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
       this.blocks.push(event.item.text);
+      this.keptBytes += Buffer.byteLength(event.item.text, "utf8");
     }
     if (event.type === "turn.completed" && event.usage) {
       this.input += event.usage.input_tokens ?? 0;
@@ -1798,6 +1805,7 @@ class CodexJsonlAccumulator {
     if (event.type === "turn.failed" || event.type === "error") {
       const message = event.error?.message ?? event.type;
       this.errors.push(message);
+      this.keptBytes += Buffer.byteLength(message, "utf8");
       // Codex 0.152.0 preserves its structured UsageLimitExceeded classification inside app-server,
       // but `codex exec --json` intentionally projects only the terminal message. Normalize at this
       // adapter boundary while the text is known to be provider error evidence; never scan agent
@@ -3998,12 +4006,17 @@ async function spawnCodexWorkerInPrivateTemp(
     if (outputLimit || timedOut) return;
     const text = chunk.toString("utf8");
     stdoutBytes += Buffer.byteLength(text, "utf8");
-    if (stdoutBytes > CODEX_WORKER_STDOUT_MAX_BYTES) {
-      exceedOutputBudget("stdout", CODEX_WORKER_STDOUT_MAX_BYTES, stdoutBytes);
+    if (stdoutBytes > CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES) {
+      exceedOutputBudget("stdout", CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES, stdoutBytes);
       return;
     }
     const observedAt = Date.now();
     stdout.push(text, observedAt);
+    const retained = stdout.retainedBytes();
+    if (retained > CODEX_WORKER_STDOUT_MAX_BYTES) {
+      exceedOutputBudget("stdout", CODEX_WORKER_STDOUT_MAX_BYTES, retained);
+      return;
+    }
     if (/\"type\":\"agent_message\"/.test(text)) args.streamObserver?.({ kind: "working", tsMs: observedAt });
     else args.streamObserver?.({ kind: "message", tsMs: observedAt });
     armClockBound();

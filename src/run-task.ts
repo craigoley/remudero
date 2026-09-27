@@ -16970,6 +16970,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         stream: err.stream,
         limit_bytes: err.limitBytes,
         observed_bytes: err.observedBytes,
+        // W1-T4595: which event kinds filled it, on the task row too (not only on retro.error).
+        event_bytes_by_kind: err.event_bytes_by_kind ?? err.eventBytesByKind ?? {},
+        pending_line_bytes: err.pendingLineBytes ?? 0,
         cost_usd: costUsd,
         ...terminalVerdictFields(null),
       });

@@ -3140,3 +3140,19 @@ probe and a gate-posture row. Its question now has two owners: **W1-T4579** (the
 SERVED route to be declared or in a shrink-only baseline and every declared route to be served, and
 **CONSOLE-T84** (the consumer, remudero-console) checks the live console's calls against a reviewed pin
 of the spec. Rollback: restore the script, its baseline and its ci.yml step from the parent of this PR.
+
+## 2026-09-27 — OPERATOR RULING: W1-T4568's materialized read model is DEFERRED; re-measure before building
+
+*Operator-ruled 2026-09-27, answering "do we still build a materialized DB between the daemon and the console?"
+with "defer and re-measure".*
+
+The question W1-T4568 carried ("do we need a lightweight db between the console and the daemon?") was asked
+while three read routes took 3-15 s by re-parsing every rotated archive per request. Since then W1-T4567,
+W1-T4452, W1-T4454 and W1-T4582 bounded them (rotation memos, the snapshot cache, a worker-thread projection),
+and W1-T4576's reach census measures EVERY GET read route answering a warm request without re-opening an
+archive — its baseline is empty. A store would now buy durability across restarts and query flexibility, not
+latency, at the cost of a second source of truth to keep consistent with the append-only ledger. DEFERRED, not
+closed: W1-T4568 stays parked (`verify: human` holds it from dispatch) with three measurable release triggers (the census baseline non-empty, a
+cold first read over 5 s, or the corpus past 5 GB / 10M rows). If it is built, node:sqlite remains the
+recommended store (in-process, no new dependency). Rollback: release W1-T4568 for build.
+

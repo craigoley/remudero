@@ -25,9 +25,23 @@ for pattern in "$state"/KICK_REQUESTED-* "$state"/PR_ACTION_REQUESTED-*; do
   if [ -e "$pattern" ]; then exit 10; fi
 done
 [ ! -e "$state/DRAIN_REQUESTED" ] || exit 10
-for watched in "$state/inbox-threads.jsonl" "$state/inbox-proposals.json"; do
-  if [ -e "$watched" ] && [ "$watched" -nt "$marker" ]; then exit 10; fi
-done
+watch_rc=0
+run_bounded node -e '
+  const fs = require("node:fs");
+  const [marker, ...watched] = process.argv.slice(1);
+  let baseline;
+  try { baseline = fs.statSync(marker, { bigint: true }).mtimeNs; }
+  catch { process.exit(2); }
+  for (const path of watched) {
+    try {
+      if (fs.statSync(path, { bigint: true }).mtimeNs >= baseline) process.exit(10);
+    } catch (error) {
+      if (error.code !== "ENOENT") process.exit(2);
+    }
+  }
+' "$marker" "$state/inbox-threads.jsonl" "$state/inbox-proposals.json" >/dev/null || watch_rc=$?
+if [ "$watch_rc" -eq 10 ]; then exit 10; fi
+[ "$watch_rc" -eq 0 ] || exit 2
 
 # A human-task release is a ledger event, not a plan commit. Scan all three rotation forms;
 # only approvals after this sleep began can create newly eligible work.
@@ -40,7 +54,7 @@ for file in "$state"/ledger.ndjson "$state"/ledger.*.ndjson "$state"/ledger.*.nd
   approvals+="$part"$'\n'
 done
 new_approvals="$(printf '%s' "$approvals" | jq -ser --arg since "$since" \
-  'map(select(.step == "ratify.approved" and .ts > $since)) | length')" || exit 2
+  'map(select(.step == "ratify.approved" and .ts >= $since)) | length')" || exit 2
 [ "$new_approvals" = 0 ] || exit 10
 
 # App auth is minted inside the ordinary Node daemon, so its process-local GH_TOKEN dies
