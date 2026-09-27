@@ -13,7 +13,7 @@
     - src/run-task.ts
     - src/lib/sweep.ts
     - test/a-resequence-close-needs-a-corroborated-unmet-dependency.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED in the core daemon's ledger (rmd-state2, every rotation form): W1-T4567 merged as #7320

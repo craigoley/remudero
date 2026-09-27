@@ -12,7 +12,7 @@
   files:
     - src/lib/sweep.ts
     - test/a-requeue-never-cancels-a-sibling-run.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-26 on #7333 (head bd5ae661): a reopen created CI run 36270528934 beside the

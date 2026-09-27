@@ -13,7 +13,7 @@
   files:
     - src/lib/worker-provider.ts
     - test/a-codex-worker-is-bounded-by-what-it-retains.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-27 across the fleet ledgers (every rotation form): 98 verdicts 'Codex worker

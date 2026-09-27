@@ -15,7 +15,7 @@
     - src/lib/measurement-cadence.ts
     - src/lib/operator-agent.ts
     - test/a-read-route-never-scans-the-whole-ledger.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-26 against the live gateway (read token, direct to the serve container):

@@ -12,7 +12,7 @@
   files:
     - test/helpers/declared-routes.ts
     - test/declared-routes-sees-every-route-shape.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-26: declaredConsoleRoutes() found 86 distinct /v1 paths while the assembled

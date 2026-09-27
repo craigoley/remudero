@@ -16,7 +16,7 @@
     - scripts/source-size-baseline.json
     - tsconfig.json
     - test/no-retired-dashboard-surface-remains.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     On main after W1-T4563/W1-T4566: src/lib/review.ts carries DASHBOARD_VITEST_CONFIG =

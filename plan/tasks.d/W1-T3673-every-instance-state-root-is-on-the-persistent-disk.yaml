@@ -11,7 +11,7 @@
   files: [deploy/host-update.sh, test/every-instance-state-root-is-on-the-persistent-disk.test.ts]
   origin: oper#ledger-durability-2026-09-16
   plan_refs: ["W1-T3670", "W1-T3626"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-16 on the live host, per instance:

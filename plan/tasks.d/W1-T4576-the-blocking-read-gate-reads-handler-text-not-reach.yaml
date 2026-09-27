@@ -14,7 +14,7 @@
     - src/lib/serve.ts
     - src/lib/ledger-union.ts
     - test/every-get-read-route-is-bounded-by-reach.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     `consoleBlockingRequestPathViolations` (src/lib/serve.ts) tests each GET read route's

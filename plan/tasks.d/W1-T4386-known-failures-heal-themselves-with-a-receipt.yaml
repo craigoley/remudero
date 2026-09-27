@@ -16,7 +16,7 @@
     - src/lib/sre-runbooks.ts
     - src/lib/sre-lane.ts
     - src/lib/authority.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Operator rulings 2026-09-23: reversible fixes on an allowlist auto-run; interrupt the operator only on a

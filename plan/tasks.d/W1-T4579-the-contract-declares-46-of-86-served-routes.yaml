@@ -14,7 +14,7 @@
     - test/every-served-route-is-in-the-contract.test.ts
     - scripts/openapi-route-baseline.json
     - openapi/daemon.yaml
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-26 at core main 7cee238 through test/helpers/declared-routes.ts's

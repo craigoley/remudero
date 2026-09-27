@@ -17,7 +17,7 @@
     - test/ledger-union.test.ts
     - test/analytics-route.test.ts
     - docs/model-routing.md
-  status: queued
+  status: merged
   rationale: |
     The streaming ledger union deliberately drops invalid JSON and continues. Its audit reports
     unread archives but currently calls a gzip-valid archive healthy even when an interior NDJSON

@@ -11,7 +11,7 @@
   files:
     - src/lib/deployer.ts
     - test/auto-mode-waits-for-a-published-image.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     src/lib/deployer.ts decideDeployTrigger: the automatic image recycle (operator ruling

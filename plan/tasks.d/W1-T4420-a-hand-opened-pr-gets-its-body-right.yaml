@@ -15,7 +15,7 @@
     - src/lib/pr-open.ts
     - src/run-task.ts
     - test/a-pr-opens-with-a-judgeable-body.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-24: three operator-session PRs (#6915, #6916, #6917) failed acceptance-author-gate `no-header`
