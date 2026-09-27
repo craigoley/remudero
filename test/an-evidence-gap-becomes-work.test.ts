@@ -34,8 +34,11 @@ import {
   type EvidenceCoverageDeps,
   type EvidenceCoverageFollowup,
 } from "../src/lib/evidence-coverage-gardener.js";
+import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import { feedbackEntryPath } from "../src/lib/feedback.js";
 import { ledgerLivePath } from "../src/lib/ledger-union.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { daemonCommand } from "../src/run-task.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const T0 = Date.parse("2026-09-27T00:00:00.000Z");
@@ -419,4 +422,34 @@ test("the daemon starts the evidence-coverage gardener among its gardens", () =>
   const sre = source.indexOf("startSreLane(", gardens);
   assert.ok(gardens > 0 && call > gardens && call < sre, "the call sits inside the daemon's gardens list");
   assert.match(source, /startEvidenceCoverageGardener\(\s*\(\) => runEvidenceCoverageGardener\(/);
+});
+
+test("a self-hosting daemon's eighth garden runs an evidence-coverage pass against its own state dir", async () => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4622-home-`));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  let captured: DaemonDeps | undefined;
+  try {
+    await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan, d): Promise<DaemonSummary> => {
+        captured = d;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    // plan, gate, test, config, export, ci-friction, selector-shadow, then this gardener.
+    const start = captured?.gardens?.[7];
+    assert.ok(start, "an eighth garden is wired after the selector-shadow gardener");
+    start!(60 * 60 * 1000).stop();
+    const state = JSON.parse(readFileSync(evidenceCoverageStatePath(join(root, "state")), "utf8"));
+    assert.equal(typeof state.lastPassAt, "string", "the pass ran at once and recorded itself in the daemon's state dir");
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+  }
 });
