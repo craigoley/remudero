@@ -17,6 +17,7 @@ import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { validateDecisionSummary, type DecisionSummary, type SummarizeDeps } from "./feedback.js";
 import type { Mount, Mounts } from "./mounts.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import type { WriteTier } from "./service.js";
 
@@ -633,7 +634,7 @@ export async function spawnEscalationJudgeWorker(opts: {
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): Promise<WorkerResult> {
-  const spawn = opts.spawn ?? spawnWorker;
+  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("escalation-summary");
   return spawn(buildEscalationJudgeSpawnArgs(opts));
 }
 

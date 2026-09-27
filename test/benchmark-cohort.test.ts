@@ -4,9 +4,120 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { runBenchmarkCohortPass } from "../src/lib/benchmark-cohort.js";
+import { runBenchmarkCohortIdlePass, runBenchmarkCohortPass } from "../src/lib/benchmark-cohort.js";
 
 const row = (value: Record<string, unknown>) => JSON.stringify(value) + "\n";
+
+test("benchmark cohort idle failure reports a bounded class without leaking error text", async () => {
+  const original = console.error;
+  const lines: string[] = [];
+  console.error = (line: string) => { lines.push(line); };
+  try {
+    const code = await runBenchmarkCohortIdlePass("unused", async () => {
+      throw Object.assign(new Error("sensitive path and source text"), { code: "EACCES" });
+    });
+    assert.equal(code, 1);
+    assert.deepEqual(JSON.parse(lines[0]!), { event: "benchmark_cohort.idle_pass_failed",
+      reason: "projection-failed", error_class: "EACCES" });
+  } finally { console.error = original; }
+});
+
+test("benchmark cohort live append retains a stable prefix watermark", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-live-prefix-"));
+  const live = join(stateDir, "ledger.ndjson");
+  const first = row({ ts: "2026-09-26T11:00:00.000Z", step: "worker.assignment",
+    worker_assignment: { id: "a1", selected: { provider: "cash", model: "gpt-5-nano" } } });
+  const second = row({ ts: "2026-09-26T11:01:00.000Z", step: "worker.assignment",
+    worker_assignment: { id: "a2", selected: { provider: "codex", model: "gpt-6-sol" } } });
+  try {
+    writeFileSync(live, first);
+    const prefix = await runBenchmarkCohortPass(stateDir, { onLiveWatermark: () => {
+      writeFileSync(live, first + second);
+    } });
+    assert.equal(prefix.state, "complete");
+    assert.equal(prefix.snapshot.state, "observed");
+    assert.equal(prefix.snapshot.sourceRows.assignments, 1, "the newly appended row is not in the declared prefix");
+    assert.equal(prefix.snapshot.liveWatermark?.prefixBytes, Buffer.byteLength(first));
+    assert.equal(prefix.snapshot.liveWatermark?.tailPendingBytes, Buffer.byteLength(second));
+    const catchup = await runBenchmarkCohortPass(stateDir);
+    assert.equal(catchup.state, "complete");
+    assert.equal(catchup.snapshot.sourceRows.assignments, 2);
+    assert.equal(catchup.snapshot.liveWatermark?.tailPendingBytes, 0);
+    assert.equal(readFileSync(live, "utf8"), first + second, "source remains immutable to the gardener");
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
+
+test("benchmark cohort refuses a live prefix rewritten or lost after scanning", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-prefix-race-"));
+  const live = join(stateDir, "ledger.ndjson");
+  const assignment = (id: string) => row({ ts: "2026-09-26T11:00:00.000Z", step: "worker.assignment",
+    worker_assignment: { id, selected: { provider: "cash", model: "gpt-5-nano" } } });
+  const first = assignment("a1");
+  try {
+    writeFileSync(live, first);
+    const rewritten = await runBenchmarkCohortPass(stateDir, { onBeforeLivePrefixVerify: () => {
+      writeFileSync(live, assignment("a2"));
+    } });
+    assert.equal(rewritten.state, "partial");
+    assert.equal(rewritten.snapshot.state, "unavailable", "a rewritten prefix is not a healthy cohort");
+    assert.equal(rewritten.snapshot.reason, "ledger-live-changed-after-scan");
+    writeFileSync(live, first);
+    const vanished = await runBenchmarkCohortPass(stateDir, { onBeforeLivePrefixVerify: () => {
+      unlinkSync(live);
+    } });
+    assert.equal(vanished.state, "partial");
+    assert.equal(vanished.snapshot.reason, "ledger-live-unreadable-after-scan");
+    writeFileSync(live, first);
+    assert.equal((await runBenchmarkCohortPass(stateDir)).state, "complete", "restored evidence can be retried");
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
+
+test("benchmark cohort live prefix repairs rotation and truncation", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-live-rotate-"));
+  const live = join(stateDir, "ledger.ndjson");
+  const assignment = (id: string) => row({ ts: "2026-09-26T11:00:00.000Z", step: "worker.assignment",
+    worker_assignment: { id, selected: { provider: "cash", model: "gpt-5-nano" } } });
+  const first = assignment("a1");
+  const second = assignment("a2");
+  const third = assignment("a3");
+  try {
+    writeFileSync(live, first);
+    assert.equal((await runBenchmarkCohortPass(stateDir)).snapshot.sourceRows.assignments, 1);
+    writeFileSync(join(stateDir, "ledger.2026-09-26T11-01-00-000Z.ndjson"), first);
+    writeFileSync(live, second);
+    const rotated = await runBenchmarkCohortPass(stateDir, { maxSources: 2 });
+    assert.equal(rotated.state, "complete");
+    assert.equal(rotated.snapshot.sourceRows.assignments, 2, "the archived replay is not counted twice");
+    writeFileSync(live, "");
+    const lost = await runBenchmarkCohortPass(stateDir);
+    assert.equal(lost.state, "unavailable", "unarchived truncated evidence is not a healthy zero");
+    assert.equal(lost.snapshot.reason, "retired-source-evidence-not-reconciled");
+    writeFileSync(join(stateDir, "ledger.2026-09-26T11-02-00-000Z.ndjson"), second);
+    writeFileSync(live, third);
+    const repaired = await runBenchmarkCohortPass(stateDir, { maxSources: 2 });
+    assert.equal(repaired.state, "complete");
+    assert.equal(repaired.snapshot.sourceRows.assignments, 3);
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
+
+test("benchmark cohort leaves an unscanned changed live source pending behind archive work", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-pending-live-"));
+  const live = join(stateDir, "ledger.ndjson");
+  const assignment = (id: string) => row({ ts: "2026-09-26T11:00:00.000Z", step: "worker.assignment",
+    worker_assignment: { id, selected: { provider: "cash", model: "gpt-5-nano" } } });
+  try {
+    writeFileSync(live, assignment("a1"));
+    assert.equal((await runBenchmarkCohortPass(stateDir)).state, "complete");
+    writeFileSync(join(stateDir, "ledger.2026-09-26T11-02-00-000Z.ndjson"), assignment("a2"));
+    writeFileSync(live, assignment("a1") + assignment("a3"));
+    const archiveOnly = await runBenchmarkCohortPass(stateDir, { maxSources: 1 });
+    assert.equal(archiveOnly.state, "partial", "an old live prefix is not a complete new cohort");
+    assert.equal(archiveOnly.pendingSources, 1);
+    const finished = await runBenchmarkCohortPass(stateDir, { maxSources: 1 });
+    assert.equal(finished.state, "complete");
+    assert.equal(finished.snapshot.sourceRows.assignments, 3);
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
 
 test("benchmark cohorts reconcile the three-form ledger union exactly", async () => {
   const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-cohort-"));
@@ -284,7 +395,7 @@ test("benchmark cohorts reconcile a retired rotation with its successor before p
   }
 });
 
-test("benchmark cohorts re-audit a changed live prefix and recover a completed torn tail", async () => {
+test("benchmark cohorts refuse unproven live rewrites and recover a completed torn tail", async () => {
   const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-live-cursor-"));
   try {
     const live = join(stateDir, "ledger.ndjson");
@@ -297,19 +408,24 @@ test("benchmark cohorts re-audit a changed live prefix and recover a completed t
     const attempt = row({ ts: "2026-09-26T11:01:00.000Z", step: "worker.attempt",
       selection_assignment_id: "a1", success: true });
     writeFileSync(live, corrected + attempt);
-    const rebuilt = await runBenchmarkCohortPass(stateDir);
-    assert.equal(rebuilt.state, "complete");
-    assert.equal(rebuilt.snapshot.cohorts[0].dimensions.model, "gpt-6-luna",
-      "same-length prefix edits cannot be mistaken for an append cursor");
-    assert.equal(rebuilt.snapshot.sourceRows.assignments, 1);
+    const rewritten = await runBenchmarkCohortPass(stateDir);
+    assert.equal(rewritten.state, "unavailable", "a raw rewrite loses the prior assignment without a successor receipt");
+    assert.equal(rewritten.snapshot.reason, "retired-source-evidence-not-reconciled");
+    assert.equal(rewritten.snapshot.cohorts[0].dimensions.model, "gpt-5-nano",
+      "an unproven edit cannot silently relabel prior model evidence");
+
+    writeFileSync(live, assignment + attempt);
+    const restored = await runBenchmarkCohortPass(stateDir);
+    assert.equal(restored.state, "complete");
+    assert.equal(restored.snapshot.sourceRows.assignments, 1);
 
     const later = row({ ts: "2026-09-26T11:02:00.000Z", step: "worker.attempt",
       selection_assignment_id: "a1", success: false });
-    writeFileSync(live, corrected + attempt + later.slice(0, 12));
+    writeFileSync(live, assignment + attempt + later.slice(0, 12));
     const torn = await runBenchmarkCohortPass(stateDir);
-    assert.equal(torn.state, "unavailable");
-    assert.equal(torn.snapshot.reason, "ledger-live-torn-tail");
-    writeFileSync(live, corrected + attempt + later);
+    assert.equal(torn.state, "complete", "complete lines remain eligible while the torn tail waits");
+    assert.equal(torn.snapshot.liveWatermark?.tailPendingBytes, 12);
+    writeFileSync(live, assignment + attempt + later);
     const completed = await runBenchmarkCohortPass(stateDir);
     assert.equal(completed.state, "complete");
     assert.equal(completed.snapshot.cohorts[0].workerCallFailure, 1);

@@ -3005,28 +3005,33 @@ export function isEnvironmentalBlock(verdict: unknown, stage: unknown): boolean 
 }
 
 /** W1-T4597: has the environment plausibly changed since an environmental block at `blockMs` — a
- *  later `daemon.boot` on different code than the one running at the block, or the cooldown elapsed? */
+ *  later `daemon.boot` on different code than the one running at the block, a later boot on a different
+ *  host than the block's own (W1-T4600: a replaced container), or the cooldown elapsed? */
 function environmentChangedSince(
   lines: ReadonlyArray<Record<string, unknown>>,
   blockMs: number,
+  blockHost: string | undefined,
   nowMs: number,
   index: LedgerIndex | undefined,
 ): boolean {
   if (nowMs - blockMs >= ENVIRONMENTAL_BLOCK_COOLDOWN_MS) return true;
   let before: { ms: number; sha: string } | undefined;
-  const after: string[] = [];
+  const afterShas: string[] = [];
   for (const line of indexedStepRows(lines, "daemon.boot", index)) {
-    if (line.step !== "daemon.boot" || typeof line.head_sha !== "string" || typeof line.ts !== "string") continue;
+    if (line.step !== "daemon.boot" || typeof line.ts !== "string") continue;
     const ms = Date.parse(line.ts);
     if (!Number.isFinite(ms)) continue;
+    if (ms > blockMs && blockHost !== undefined && typeof line.host === "string" && line.host !== blockHost) return true;
+    if (typeof line.head_sha !== "string") continue;
     if (ms <= blockMs) {
       if (!before || ms > before.ms) before = { ms, sha: line.head_sha };
     } else {
-      after.push(line.head_sha);
+      afterShas.push(line.head_sha);
     }
   }
-  // No known code at block time: only the cooldown can release it, never a guess.
-  return before !== undefined && after.some((sha) => sha !== before.sha);
+  // No known code at block time (its boot may have rotated away): only the host or the cooldown can
+  // release it, never a guess.
+  return before !== undefined && afterShas.some((sha) => sha !== before.sha);
 }
 
 /** The latest durable independent-failure block if no later dispatch superseded it.
@@ -3061,6 +3066,7 @@ export function latestIndependentFailureBlock(
   const stageByRun = new Map<string, unknown>();
   let environmentalStreak = 0;
   let environmentalBlockMs: number | undefined;
+  let environmentalBlockHost: string | undefined;
   let harnessRefusal = false;
   let retryPending = false;
   let retrySpent = false;
@@ -3102,9 +3108,11 @@ export function latestIndependentFailureBlock(
         environmentalStreak += 1;
         const ms = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
         environmentalBlockMs = Number.isFinite(ms) ? ms : undefined;
+        environmentalBlockHost = typeof line.host === "string" ? line.host : undefined;
       } else if (last === "blocked") {
         environmentalStreak = 0;
         environmentalBlockMs = undefined;
+        environmentalBlockHost = undefined;
       }
     } else if (
       line.step === "dispatch.harness_commit_retry" &&
@@ -3123,7 +3131,7 @@ export function latestIndependentFailureBlock(
   if (harnessRefusal) return true;
   if (last === "blocked" && environmentalBlockMs !== undefined && environmentalStreak <= MAX_ENVIRONMENTAL_REOFFERS) {
     const now = nowMs ?? (index?.rows === lines ? index.latestTsMs : latestLedgerTsMs(lines)) ?? environmentalBlockMs;
-    if (environmentChangedSince(lines, environmentalBlockMs, now, index)) return false;
+    if (environmentChangedSince(lines, environmentalBlockMs, environmentalBlockHost, now, index)) return false;
   }
   return last === "blocked";
 }

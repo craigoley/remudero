@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { benchmarkRunLedgerLogger, recordBenchmarkWorkerAttempt, runTask } from "../src/run-task.js";
+import { benchmarkRunLedgerLogger, dispatchFallbackObserver, recordBenchmarkWorkerAttempt, runTask } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { spawnWorker, WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -101,6 +101,37 @@ test("benchmark attempt telemetry writer failure does not change the worker resu
   } });
   assert.doesNotThrow(() => log("worker.attempt", { selection_assignment_id: "a", success: true }));
   assert.equal(calls, 2);
+});
+
+test("dispatch fallback observer keeps per-call resources and isolates resource, ledger and caller faults", () => {
+  const rows: Record<string, unknown>[] = [];
+  const warnings: string[] = [];
+  const originalError = console.error;
+  console.error = (line: string) => { warnings.push(line); };
+  try {
+    const good = { provider: "cash", subtype: "success", costUsd: 0.2, servedModel: "cash-a", workerDurationMs: 17,
+      tokens: { input: 2, output: 1, cacheRead: 0, cacheCreation: 0 } } as WorkerResult;
+    const observe = dispatchFallbackObserver((step, fields) => {
+      assert.equal(step, "worker.attempt");
+      rows.push(fields);
+    });
+    observe({ selectionAssignmentId: "a1", model: "cash-a", reason: "deployment-absent", result: good });
+    assert.equal(rows[0]?.selection_assignment_id, "a1");
+    assert.equal(rows[0]?.total_cost_usd, 0.2);
+    assert.equal(rows[0]?.success, false);
+    const broken = Object.defineProperty({ ...good }, "tokens", { get: () => { throw new TypeError("raw usage unavailable"); } });
+    observe({ selectionAssignmentId: "a2", model: "cash-b", reason: "deployment-absent",
+      result: broken as WorkerResult });
+    assert.equal(rows[1]?.benchmark_run_unavailable_reason, "worker-result-fields-unavailable");
+    assert.equal(rows[1]?.total_cost_usd, undefined, "partial resource reads never claim a cash value");
+    dispatchFallbackObserver(() => { throw new Error("ledger unavailable"); },
+      () => { throw new Error("caller observer unavailable"); })({ model: "cash-c", reason: "deployment-absent" });
+    assert.ok(warnings.some((line) => line.includes("benchmark.dispatch_fallback_resource_unavailable")
+      && line.includes('"error_class":"TypeError"')));
+    assert.ok(warnings.some((line) => line.includes("benchmark.dispatch_fallback_attempt_unavailable")));
+    assert.ok(warnings.some((line) => line.includes("benchmark.dispatch_fallback_hook_unavailable")));
+    assert.ok(warnings.every((line) => !line.includes("raw usage unavailable")));
+  } finally { console.error = originalError; }
 });
 
 test("benchmark attempt does not claim a join when its assignment write failed", () => {

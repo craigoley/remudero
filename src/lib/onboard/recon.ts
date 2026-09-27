@@ -11,6 +11,7 @@ import type { GhExec, Known } from "./inventory.js";
 import { isReadOnlyToolset, SPECIALIST_TOOLS, type SpecialistName } from "../specialist-panel.js";
 import type { Mount } from "../mounts.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "../worker.js";
+import { benchmarkNonDispatchSpawn } from "../benchmark-run.js";
 
 /**
  * `rmd onboard <target-dir> --phase recon` — phase 2 of the four-phase `rmd onboard`
@@ -422,7 +423,7 @@ export async function spawnReconSpecialist(opts: {
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): Promise<WorkerResult> {
-  const spawn = opts.spawn ?? spawnWorker;
+  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("onboard-recon");
   return spawn(buildReconSpecialistSpawnArgs(opts));
 }
 

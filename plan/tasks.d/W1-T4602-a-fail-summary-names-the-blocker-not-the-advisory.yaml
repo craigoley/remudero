@@ -1,0 +1,42 @@
+- id: W1-T4602
+  title: "A REVIEW FAIL SUMMARY NAMES THE ADVISORY RULE 25 ENTANGLEMENT INSTEAD OF THE BLOCKER — #5031 made instrument entanglement advisory, but failSummary still checks it before unprovenanced DECISIONS entries, holdouts, test theater and unmet criteria, so a red review tells the operator and the sweep to split a PR whose real fault is something else"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator session 2026-09-27: #7365 review FAIL named the advisory entanglement, not the DECISIONS provenance blocker"
+  plan_refs: ["W1-T297", "W1-T352", "W1-T527"]
+  files:
+    - src/lib/review.ts
+    - test/a-fail-summary-names-the-blocker-not-the-advisory.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-26 on #7365 (W1-T4583): remudero-review posted FAIL with the summary
+    'entangled: instrument path(s) .github/workflows/ci.yml, scripts/console-parity-ratchet.mjs, ...
+    changed alongside src/ path(s) ... — split it'. The verdict's own fields show
+    `instrumentEntangled: true` AND `unprovenancedDecisionsEntries: ['## 2026-09-26 — W1-T4583:
+    ...']`. `judgeReview` does not count entanglement toward `state` (#5031, 2026-09-10, 'make
+    Standing rule 25 advisory instead of blocking'), so the only blocker was the DECISIONS
+    provenance mark — adding one line turned the same unsplit diff green 36 minutes later.
+    `failSummary` still orders the entanglement branch ahead of every blocking reason, so the
+    summary named a non-blocking cause and omitted the blocking one. The cost is not only wording:
+    sweep.ts matches that text as UNSATISFIABLE_GATE_MARKER and routes the PR as a `gate-conflict`
+    needing a split worker, the wrong remedy for a one-line fix.
+  design: |
+    In review.ts's `failSummary`, move the instrument-entanglement branch below every blocking
+    reason: it names the summary only when no blocking reason is present (no unprovenanced DECISIONS
+    entry, no unmet visible or holdout criterion, no test theater), preserving W1-T297's direct
+    summary of an entanglement alone. Every earlier branch (rule 15, id collision and ownership,
+    refusal and changeset contradictions) is unchanged. `judgeReview`'s `state` and floor are
+    untouched.
+  acceptance:
+    - claim: "a failing review with an advisory entanglement and an unprovenanced DECISIONS entry or an unmet criterion names the blocking cause, while an entanglement alone is still named"
+      proof: "unit test: test/a-fail-summary-names-the-blocker-not-the-advisory.test.ts"
+  falsifier: |
+    Restore the entanglement branch above the DECISIONS branch: judging #7365's shape (entangled
+    diff plus an unmarked DECISIONS entry) yields the 'entangled:' summary again.

@@ -3,6 +3,8 @@ import type { DiffSummary, RiskBand } from "./risk-score.js";
 import type { Mount } from "./mounts.js";
 import { isTddStrict } from "./review.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import type { Config } from "./config.js";
+import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 
 /**
  * Specialist panel (Layer 4) — MASTER-PLAN §4B, W2-T1.
@@ -430,8 +432,10 @@ export async function spawnSpecialistWorker(opts: {
   mount: Mount;
   cwd: string;
   settingsFile: string;
-}): Promise<WorkerResult> {
-  return spawnWorker(buildSpecialistSpawnArgs(opts));
+  config?: Config;
+}, raw: typeof spawnWorker = spawnWorker): Promise<WorkerResult> {
+  return benchmarkNonDispatchSpawn("specialist", raw)({ ...buildSpecialistSpawnArgs(opts),
+    ...(opts.config ? { config: opts.config } : {}) });
 }
 
 // ── Parsing the specialist's machine-readable verdict ───────────────────────

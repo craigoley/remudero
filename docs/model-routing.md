@@ -125,6 +125,23 @@ producer contract for the later cohort gardener, not a model score or publicatio
 The run verdict stays a separate end-to-end phase; a thrown spawn emits a failed call with unknown
 usage, and a failed telemetry write cannot affect the worker or PR path. A daemon cycle without a
 model call contributes source freshness and coverage, never a synthetic model trial.
+
+### Non-dispatch worker coverage
+
+Dispatch is not the whole model population. Inbox drafting, cash fallback rungs, reviews and fixes,
+triage, standalone judges, specialists, and auxiliary sweeps may call a worker outside the main
+task dispatcher. The non-dispatch boundary now writes a private assignment and `worker.attempt`
+for each such call, preserving the enclosing run/lane where available. A cash ladder model that
+fails because its deployment is absent or rejects the required response format gets its own
+failed attempt before the successor gets a new assignment. The final rung is recorded once, from
+the returned worker result. These are model-call observations, not independent verified task wins.
+
+An assignment write failure leaves the attempt's join unavailable and logs coverage debt; it does
+not suppress the caller's existing assignment callback or change the worker route. A missing
+result has unknown tokens, duration, and cost rather than fabricated zeros. The source caller
+census warns locally about an unclassified entrypoint and proposes follow-up work, without
+becoming a PR gate. The cohort gardener must still reconcile the actual three-instance runtime
+population, GitHub outcomes, and consent before any aggregate is eligible for publication.
 The enclosing run/assignment IDs remain local ledger join keys, never metric labels. If a later
 OpenTelemetry export uses bounded dimensions, its overflow bucket must be reported as lost
 dimension coverage, not a trustworthy provider/model slice: the SDK retains the total but strips
@@ -135,10 +152,17 @@ the overflowing measurement's original attributes ([OpenTelemetry cardinality gu
 Each daemon instance now runs a detached, best-effort cohort pass over its own ledger state. It
 audits gzip/plain rotations and the live tail in bounded, resumable source batches, checkpoints
 source hashes and a local `benchmark-cohort-v1` snapshot atomically, and re-audits edited sources
-or a changed live prefix. A retired source must reconcile its exact evidence lines in a successor
-before the snapshot can be observed. Exact replay lines are deduplicated; late attempts, terminal
+or a changed live prefix. Supervised idle instances also run one model-free, four-source pass
+within each existing five-minute pulse, with a two-minute process timeout and no added PR-probe
+delay; failure is a logged maintenance result, not a reason to block review. A live scan records
+only a newline-terminated byte prefix, rehashes that exact prefix after reading, and records
+pending tail bytes for the next pass. Concurrent append or an unfinished final line no longer
+suppresses a complete snapshot for the audited prefix. A retired, truncated, or rewritten source
+must reconcile its exact evidence lines in a successor before the snapshot can be observed; an
+unproven in-place model-label change is not silently accepted. Exact replay lines are deduplicated;
+late attempts, terminal
 fallback, corrections, and retractions rebuild affected dimension partitions. A missing or
-malformed source, unreadable archive, torn live tail, or incomplete scan yields `unavailable`
+malformed source, unreadable archive, or incomplete scan yields `unavailable`
 with last-good age rather than a fresh zero. A damaged checkpoint triggers full replay and stays
 unavailable until that replay completes. None of these conditions gates a worker or PR.
 An unchanged faulty source is recorded locally so later archives can still be audited; it is
