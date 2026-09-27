@@ -59,6 +59,7 @@ export interface TaskCaseFile {
   runs: TaskCaseRun[];
   pr: CaseEvidence<{ number: number; url: string; headSha: string; state: CasePrSnapshot["state"]; taskCredit: boolean }>;
   review: CaseEvidence<{ headSha: string; status: "success" }>;
+  acceptance: CaseEvidence<{ headSha: string; status: "success" }>;
   ci: CaseEvidence<{ headSha: string; status: "success" }>;
   mergedSource: CaseEvidence<{ prNumber: number; mergedAt: string }>;
   deployment: CaseEvidence<{ revision: string }>;
@@ -198,6 +199,7 @@ export function buildTaskCaseFile(input: {
       : unknown(matches[0].state === "pending" ? "pending" : "unavailable", `check-${matches[0].state}`, "github-status-rollup", prSnapshot.readAt);
   };
   const review = check("remudero-review");
+  const acceptance = check("acceptance-author-gate");
   const ci = check("ci-gate");
   const mergedSource = taskCredit && prSnapshot?.state === "MERGED" && prSnapshot.mergedAt
     ? observed({ prNumber: prSnapshot.number, mergedAt: prSnapshot.mergedAt }, "github-merge", prSnapshot.readAt)
@@ -207,7 +209,7 @@ export function buildTaskCaseFile(input: {
     ? { owner: "operator", action: projection.escalationIssueUrl, source: "status-escalation-receipt" }
     : projection?.verifyHumanPending ? { owner: "operator", action: `review verify: human task ${task.id}`, source: "plan-verify-gate" }
       : null;
-  return { version: "task-case-file-v1", taskId: task.id, asOf, plan, ledger: ledgerEvidence, runs, pr, review, ci,
+  return { version: "task-case-file-v1", taskId: task.id, asOf, plan, ledger: ledgerEvidence, runs, pr, review, acceptance, ci,
     mergedSource, deployment: unknown("unavailable", "deployment-source-not-collected", "deployment", null),
     runtime: unknown("unavailable", "runtime-source-not-collected", "runtime", null), next };
 }

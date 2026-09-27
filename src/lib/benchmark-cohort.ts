@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, createReadStream, existsSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { systemClock } from "./clock.js";
 import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
+import { joinVerifiedTaskOutcomes, type BenchmarkVerifiedOutcome, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
+import type { TaskCaseFile } from "./task-case-file.js";
 
 export const BENCHMARK_COHORT_VERSION = "benchmark-cohort-v1" as const;
 
@@ -67,7 +69,7 @@ export interface BenchmarkCohortSnapshot {
     terminalRowsWithoutAssignmentId: number; conflictingAssignments: number; duplicateRows: number };
   cohorts: BenchmarkCohort[];
   coverage: Record<CoverageField, CohortFieldCoverage>;
-  verifiedTaskOutcome: "unavailable-no-github-verification-join";
+  verifiedTaskOutcome: "unavailable-no-github-verification-join" | BenchmarkVerifiedOutcome;
   experimentEffect: "unavailable-no-randomized-allocation";
   pressure: {
     sourceBytes: number; auditedSourceBytes: number; derivedBytes: number; snapshotGrowthBytes: number | null;
@@ -229,7 +231,7 @@ function projectRow(row: Record<string, unknown>): Record<string, unknown> {
     const work = object(receipt?.work);
     const stack = object(receipt?.stack);
     return {
-      ts: row.ts, run_id: row.run_id, step: row.step,
+      ts: row.ts, task_id: row.task_id, run_id: row.run_id, step: row.step,
       worker_assignment: { id: assignment?.id, selected: { provider: selected?.provider, model: selected?.model } },
       benchmark_run: { work: { taskClass: work?.taskClass }, stack: { harnessRevision: stack?.harnessRevision } },
     };
@@ -460,6 +462,32 @@ function eligibleAssignmentIds(index: ReturnType<typeof indexEvidence>,
   return eligible;
 }
 
+function withVerifiedOutcome(snapshot: BenchmarkCohortSnapshot, sources: SourceRecord[], faults: SourceFault[],
+  caseFiles: readonly TaskCaseFile[] | undefined, cutoff: string): BenchmarkCohortSnapshot {
+  if (!caseFiles) return snapshot;
+  const index = indexEvidence(sources);
+  const eligible = eligibleAssignmentIds(index, faults);
+  const assignments: VerifiedAssignment[] = [];
+  for (const [id, row] of index.assignments) {
+    if (!eligible.has(id)) continue;
+    const terminal = index.terminals.get(id);
+    const attempt = index.attempts.get(id);
+    const call = attempt ?? terminal;
+    const sameRunCall = call?.run_id === row.run_id ? call : undefined;
+    const dimensions = dimensionsOf(row);
+    const billingMode = sameRunCall?.billing_mode;
+    assignments.push({ assignmentId: id,
+      taskId: typeof row.task_id === "string" ? row.task_id : null,
+      runId: typeof row.run_id === "string" ? row.run_id : null,
+      assignedAt: typeof row.ts === "string" ? row.ts : null,
+      taskClass: dimensions.taskClass, selectedModel: dimensions.model,
+      servedModel: typeof sameRunCall?.served_model === "string" ? sameRunCall.served_model : null,
+      billingMode: billingMode === "api" || billingMode === "subscription" ? billingMode : null,
+      costUsd: finiteCost(sameRunCall?.total_cost_usd), attempted: !!sameRunCall });
+  }
+  return { ...snapshot, verifiedTaskOutcome: joinVerifiedTaskOutcomes(assignments, caseFiles, cutoff) };
+}
+
 function canonicalTimestamp(value: unknown): value is string {
   return typeof value === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value)
     && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
@@ -487,7 +515,7 @@ function eligibilityChangeKeys(baseline: SourceRecord[], current: SourceRecord[]
 function deriveSnapshot(
   sources: SourceRecord[], asOf: string, auditedSourceBytes: number, prior?: BenchmarkCohortSnapshot,
   dirtyKeys?: Set<string>, liveWatermark?: { prefixBytes: number; tailPendingBytes: number },
-  faults: SourceFault[] = [],
+  faults: SourceFault[] = [], caseFiles?: readonly TaskCaseFile[],
 ): BenchmarkCohortSnapshot {
   const started = systemClock.now();
   const { assignments, attempts, terminals, invalidAssignmentRows, attemptRowsWithoutAssignmentId,
@@ -599,6 +627,7 @@ function deriveSnapshot(
       rebuiltPartitions: prior && dirtyKeys ? dirtyKeys.size : cohorts.length,
       rebuildMs: systemClock.now() - started },
   };
+  snapshot.verifiedTaskOutcome = withVerifiedOutcome(snapshot, sources, faults, caseFiles, asOf).verifiedTaskOutcome;
   snapshot.pressure.derivedBytes = Buffer.byteLength(JSON.stringify(snapshot));
   snapshot.pressure.snapshotGrowthBytes = prior ? snapshot.pressure.derivedBytes - prior.pressure.derivedBytes : null;
   snapshot.pressure.sourceToDerivedRatio = snapshot.pressure.derivedBytes > 0
@@ -611,7 +640,7 @@ function deriveSnapshot(
 export async function runBenchmarkCohortPass(
   stateDir: string,
   opts: { maxSources?: number; nowIso?: string; onLiveWatermark?: () => void;
-    onBeforeLivePrefixVerify?: () => void } = {},
+    onBeforeLivePrefixVerify?: () => void; caseFiles?: TaskCaseFile[] } = {},
 ): Promise<BenchmarkCohortPassResult> {
   const maxSources = opts.maxSources ?? 1;
   if (!Number.isInteger(maxSources) || maxSources < 1) throw new TypeError("maxSources must be a positive integer");
@@ -636,7 +665,8 @@ export async function runBenchmarkCohortPass(
     const cached = faults.size > 0 && checkpoint.lastGood.cohorts.length === 0
       ? { ...checkpoint.lastGood, state: "unavailable" as const } : checkpoint.lastGood;
     return { state: faults.size === 0 ? "complete" : checkpoint.lastGood.cohorts.length > 0 ? "quarantined" : "unavailable",
-      snapshot: cached, scannedSources: 0, pendingSources: 0 };
+      snapshot: withVerifiedOutcome(cached, checkpoint.sources, [...faults.values()], opts.caseFiles,
+        opts.nowIso ?? systemClock.iso()), scannedSources: 0, pendingSources: 0 };
   }
   if (!checkpoint.baselineSources && checkpoint.sources.length > 0
     && (checkpoint.lastGood || checkpoint.sources.some((source) => !current.some((entry) => entry.name === source.name)))) {
@@ -713,7 +743,7 @@ export async function runBenchmarkCohortPass(
     ? undefined : checkpoint.lastGood;
   const snapshot = deriveSnapshot(checkpoint.sources, opts.nowIso ?? systemClock.iso(), auditedSourceBytes,
     prior, prior ? dirtyKeys : undefined, live ? { prefixBytes: live.size, tailPendingBytes } : undefined,
-    checkpoint.sourceFaults);
+    checkpoint.sourceFaults, opts.caseFiles);
   if (checkpoint.sourceFaults.length > 0 && snapshot.cohorts.length === 0) {
     snapshot.reason = checkpoint.sourceFaults[0].reason;
     if (checkpoint.lastGood?.asOf) snapshot.lastGoodAt = checkpoint.lastGood.asOf;
@@ -753,12 +783,61 @@ export async function runBenchmarkCohortIdlePass(
   }
 }
 
+/** Analyst-only input: a bounded, explicit snapshot; the daemon never polls GitHub for this. */
+export async function runBenchmarkVerifiedOverlayPass(
+  stateDir: string, caseFilePath: string, beforeRead?: () => void,
+): Promise<number> {
+  try {
+    const maxBytes = 4 * 1024 * 1024;
+    const fd = openSync(caseFilePath, "r");
+    let text: string;
+    try {
+      const before = fstatSync(fd);
+      if (!before.isFile() || before.size > maxBytes) throw new TypeError("case-file-snapshot-too-large");
+      beforeRead?.();
+      const bytes = Buffer.allocUnsafe(before.size + 1);
+      let used = 0;
+      while (used < bytes.length) {
+        const read = readSync(fd, bytes, used, bytes.length - used, null);
+        if (read === 0) break;
+        used += read;
+      }
+      const after = fstatSync(fd);
+      if (used !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) {
+        throw new TypeError("case-file-snapshot-changed-during-read");
+      }
+      text = bytes.subarray(0, used).toString("utf8");
+    } finally { closeSync(fd); }
+    const parsed: unknown = JSON.parse(text);
+    if (!Array.isArray(parsed) || parsed.some((file) => {
+      const value = object(file);
+      return value === undefined || value.version !== "task-case-file-v1"
+        || typeof value.taskId !== "string" || typeof value.asOf !== "string";
+    })) {
+      throw new TypeError("case-file-snapshot-invalid");
+    }
+    const result = await runBenchmarkCohortPass(stateDir, { maxSources: 4, caseFiles: parsed as TaskCaseFile[] });
+    console.log(JSON.stringify({ event: "benchmark_cohort.verified_overlay", state: result.state,
+      verified_task_outcome: result.snapshot.verifiedTaskOutcome }));
+    return 0;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    const errorClass = code === "ENOENT" || code === "EACCES" || code === "EPERM" ? code
+      : error instanceof TypeError ? "type-error" : error instanceof SyntaxError ? "syntax-error" : "other-error";
+    console.error(JSON.stringify({ event: "benchmark_cohort.verified_overlay_failed",
+      reason: "snapshot-unavailable", error_class: errorClass }));
+    return 1;
+  }
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const stateDir = process.argv[2];
-  if (!stateDir || process.argv.length !== 3) {
-    console.error("usage: node --import tsx src/lib/benchmark-cohort.ts <state-dir>");
+  if (!stateDir || process.argv.length !== 3 && (process.argv.length !== 5 || process.argv[3] !== "--case-files")) {
+    console.error("usage: node --import tsx src/lib/benchmark-cohort.ts <state-dir> [--case-files <snapshot.json>]");
     process.exitCode = 2;
   } else {
-    void runBenchmarkCohortIdlePass(stateDir).then((code) => { process.exitCode = code; });
+    const pass = process.argv[3] === "--case-files"
+      ? runBenchmarkVerifiedOverlayPass(stateDir, process.argv[4]) : runBenchmarkCohortIdlePass(stateDir);
+    void pass.then((code) => { process.exitCode = code; });
   }
 }
