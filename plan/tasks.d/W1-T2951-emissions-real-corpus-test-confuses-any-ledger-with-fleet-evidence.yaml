@@ -46,11 +46,11 @@
     control fail.
   acceptance:
     - claim: "a non-empty explicit corpus containing only unrelated review events does not become test evidence that daemon or sweep ran"
-      proof: "unit test: test/emissions.test.ts"
+      proof: "unit test: W1-T2951: unrelated review rows do not become evidence that daemon or sweep ran"
     - claim: "a deterministic explicit corpus with recent daemon and sweep events renders positive counts for both and never classifies either verb as unreachable"
-      proof: "unit test: test/emissions.test.ts"
+      proof: "unit test: W1-T2951: explicit daemon and sweep events make only their own verbs live"
     - claim: "the default-state smoke test still executes the complete emissions command and validates its exit code, heading, corpus line, verb census and unauditable section without deriving semantic liveness from mutable host contents"
-      proof: "unit test: test/emissions.test.ts"
+      proof: "unit test: W1-T2951: emissionsCommand's default-state smoke test asserts only stable report structure"
     - claim: "the focused suite passes with an empty default state root and with unrelated ledger rows written there before the real-corpus smoke test"
       kind: guard
       proof: "isolated test run: test/emissions.test.ts"
