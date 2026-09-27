@@ -130,7 +130,7 @@ function latestAtOrBefore<T extends { at: number }>(entries: readonly T[] | unde
   return best;
 }
 
-interface Review { at: number; order: number; row: Row }
+interface Review { at: number; row: Row }
 
 export function deriveWorkIntegrity(rows: ReadonlyArray<Row>, options: { asOf: string | null }): WorkIntegrity {
   const taskClassByRun = new Map<string, string>();
@@ -145,7 +145,7 @@ export function deriveWorkIntegrity(rows: ReadonlyArray<Row>, options: { asOf: s
   const headlessReviews: Row[] = [];
   const pending: Row[] = [];
 
-  rows.forEach((row, order) => {
+  rows.forEach((row) => {
     const runId = str(row.run_id);
     const at = timeOf(row);
     const selected = str(row.selection_assignment_id);
@@ -175,11 +175,11 @@ export function deriveWorkIntegrity(rows: ReadonlyArray<Row>, options: { asOf: s
       if (!head) headlessReviews.push(row);
       else {
         const prior = reviewsByHead.get(head);
-        const review = { at: at ?? -Infinity, order, row };
+        const review = { at: at ?? -Infinity, row };
         if (!prior || review.at >= prior.at) reviewsByHead.set(head, review);
       }
     }
-    if (row.step === "scope_guard.overrun" || String(row.step) in IN_FLIGHT_EVENTS) pending.push(row);
+    if (row.step === "scope_guard.overrun" || Object.hasOwn(IN_FLIGHT_EVENTS, String(row.step))) pending.push(row);
   });
 
   const unattributed = emptyUnattributed();
@@ -212,7 +212,7 @@ export function deriveWorkIntegrity(rows: ReadonlyArray<Row>, options: { asOf: s
 
   const reviewsByAssignment = new Map<string, Row[]>();
   const missReview = (reason: string): void => { for (const signal of REVIEW_SIGNALS) miss(signal, reason); };
-  for (const _ of headlessReviews) missReview("review-without-head");
+  headlessReviews.forEach(() => missReview("review-without-head"));
   for (const [head, review] of reviewsByHead) {
     const value = headAuthors.get(head);
     const author = assignmentIdOf(value);

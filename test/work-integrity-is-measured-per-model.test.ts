@@ -52,7 +52,7 @@ function review(second: number, head: string | undefined, verdict: Row, extra: R
   };
 }
 
-function ledgerRows(): Row[] {
+function signalRows(): Row[] {
   return [
     { ts: at(0), step: "run.start", run_id: "R1", task_id: "W1-T1", type: "implement", task_class: "feature" },
     { ts: at(0), step: "run.start", run_id: "R2", task_id: "W1-T2", type: "implement", task_class: "feature" },
@@ -131,7 +131,7 @@ const rate = (numerator: number, denominator: number, unavailable: number) => ({
 });
 
 test("each behaviour signal is joined to its authoring assignment and rolled up per model and task class", () => {
-  const integrity = deriveWorkIntegrity(ledgerRows(), { asOf: NOW });
+  const integrity = deriveWorkIntegrity(signalRows(), { asOf: NOW });
   assert.equal(integrity.version, WORK_INTEGRITY_VERSION);
   assert.equal(integrity.version, "work-integrity-v1");
   assert.equal(integrity.state, "observed");
@@ -174,7 +174,7 @@ test("each behaviour signal is joined to its authoring assignment and rolled up 
 });
 
 test("a signal that cannot be joined to an assignment is reported as unavailable with its reason", () => {
-  const { unattributed } = deriveWorkIntegrity(ledgerRows(), { asOf: NOW });
+  const { unattributed } = deriveWorkIntegrity(signalRows(), { asOf: NOW });
   assert.deepEqual(unattributed.runawayTurns, { count: 2, reasons: { "no-run-id": 1, "no-assignment-in-run": 1 } });
   assert.deepEqual(unattributed.emptyCommitRefusals, { count: 2, reasons: { "no-assignment-in-run": 1, untimed: 1 } });
   assert.deepEqual(unattributed.scopeOverruns, {
@@ -220,7 +220,7 @@ function fakeResponse() {
 }
 
 test("the analytics route serves work integrity as a private, versioned projection", async () => {
-  const rows = ledgerRows();
+  const rows = signalRows();
   const base = deriveAnalyticsSnapshot(rows, NOW);
   const route = buildAnalyticsRoute({ currentSnapshot: () => base });
 
@@ -244,7 +244,7 @@ test("the analytics route serves work integrity as a private, versioned projecti
 test("a checkpoint resume carries the retained work-integrity rows forward", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-work-integrity-"));
   const live = join(dir, "ledger.ndjson");
-  const rows = ledgerRows();
+  const rows = signalRows();
   const cut = rows.findIndex((row) => row.step === "worker.assignment" && row.run_id === "R2");
   try {
     writeFileSync(live, `${rows.slice(0, cut).map((row) => JSON.stringify(row)).join("\n")}\n`);
