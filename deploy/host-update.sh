@@ -33,8 +33,10 @@
 # DO NOT ADD STATE CLEANING HERE. Not a ledger rotation, not an archive expiry, not a worktree
 # reaper (see the recommendation at the foot of this file), not "just the old ones". A disk-space
 # script that can delete evidence is one bad predicate away from destroying the only copy, and the
-# blast radius is the whole fleet's history. The one thing this script does with the state
-# directory is MEASURE it, read-only, so the operator can see where the space actually went.
+# blast radius is the whole fleet's history. This script MEASURES the state directory, read-only,
+# and on the nightly `--reclaim-only` rung COPIES `state/` (mounted read-only) into its sibling
+# `state-backups/` (section 3a, W1-T3677). The only thing that copy ever removes is one of its OWN
+# dated snapshots beyond the keep count — never anything under `state/`.
 #
 # ── PLAIN BASH AND DOCKER, deliberately — the same discipline as deploy/verify-image.sh, which is
 # this script's sibling. It runs on a host that may have no node, no rmd and no checkout, and it
@@ -52,6 +54,7 @@
 #   RMD_STATE_DIR=/path ./deploy/host-update.sh            # if the bind mount is not ~/rmd-state
 #   ./deploy/host-update.sh --check-state-roots            # is EVERY instance's state on /mnt/rmd?
 #   ./deploy/host-update.sh --relocate-state-root <instance> <dest>  # copy one there, verified
+#   ./deploy/host-update.sh --reclaim-only     # the NIGHTLY rung: snapshot state/, then reclaim
 
 set -euo pipefail
 
@@ -124,6 +127,10 @@ RELOCATE_DEST=""
 # derives from HOME — see REQ 10 in deploy/Dockerfile), and the measured invocation binds
 # ~/rmd-state to it. Only ever read.
 STATE_DIR="${RMD_STATE_DIR:-${HOME:-/root}/rmd-state}"
+# W1-T3677: where section 3a's nightly snapshots land — beside `state/`, never inside it (the
+# snapshot would recurse into its own prior copies), and on the same persistent disk as the ledger
+# rather than on the root disk that fills.
+STATE_BACKUP_DIR="${RMD_STATE_BACKUP_DIR:-${STATE_DIR}/state-backups}"
 # The HOST side of the CREDENTIAL bind mount, derived the same way STATE_DIR is rather than
 # hardcoded to one operator's home. MEASURED 2026-08-13, on the first containerised daemon: the
 # printed invocation mounted NO credential at all, and the worker preflight refused every spawn —
@@ -905,6 +912,132 @@ else
   echo "  state volume:   ${STATE_DIR} does not exist on this host"
 fi
 
+# ── 3a. NIGHTLY STATE SNAPSHOT (W1-T3677) — before the reclaim, which can remove the image ─────
+# `snapshotState` (src/lib/ledger.ts, W1-T234) was built and tested and had never run: nothing
+# scheduled it and no snapshot existed on the host. This rung already runs nightly, so the snapshot
+# rides it — one maintenance story, not two.
+#
+# IT RUNS INSIDE THE FLEET IMAGE, because the host is assumed to have no node and no checkout (see
+# the header) and the image has both. `state/` is mounted READ-ONLY, the network is off, and
+# `--pull never` makes a missing image a loud failure rather than a download. It runs BEFORE section
+# 4 because, with no fleet container up, `docker image prune -a` removes that very image.
+#
+# INVARIANT: refuse while any fleet container is LIVE (section 1's `LIVE`) — a live daemon may be
+# mid-append, and a copy of a half-written ledger is not a backup. A refusal that leaves no snapshot
+# newer than RMD_STATE_BACKUP_MAX_AGE_HOURS fails the rung: a backup that is always skipped is the
+# exact silence this section exists to end.
+#
+# VERIFY, DON'T TRUST: success is an archive the HOST can see holding files, never a zero exit. Any
+# failure sets `state_snapshot_failed`, which section 4c turns into a non-zero exit; the reclaim
+# still runs, because disk pressure does not wait on a backup.
+#
+# FALSIFIER: test/the-state-snapshot-actually-runs-on-this-host.test.ts — drop the invocation and no
+# archive appears; swallow a failure and the rung exits 0; drop the LIVE refusal and a snapshot is
+# taken beside a live container.
+state_snapshot_failed=0
+if [ "${RECLAIM_ONLY}" -eq 1 ]; then
+  echo
+  STATE_SNAPSHOT_SRC="${STATE_DIR}/state"
+  STATE_SNAPSHOT_IMAGE="${RMD_STATE_SNAPSHOT_IMAGE:-${REF}}"
+  STATE_BACKUP_KEEP="${RMD_STATE_BACKUP_KEEP:-7}"
+  STATE_BACKUP_MAX_AGE_HOURS="${RMD_STATE_BACKUP_MAX_AGE_HOURS:-48}"
+  for knob in "RMD_STATE_BACKUP_KEEP=${STATE_BACKUP_KEEP}" "RMD_STATE_BACKUP_MAX_AGE_HOURS=${STATE_BACKUP_MAX_AGE_HOURS}"; do
+    case "${knob#*=}" in
+      ''|*[!0-9]*|0) echo "host-update: REFUSING — ${knob%%=*} must be a positive integer, got '${knob#*=}'." >&2; exit 2 ;;
+    esac
+  done
+  # The container-side paths. The image's source tree is /app (deploy/Dockerfile's WORKDIR).
+  SNAP_IN_STATE="/rmd-snapshot/state"
+  SNAP_IN_BACKUPS="/rmd-snapshot/backups"
+  SNAP_JS="import { snapshotState } from '/app/src/lib/ledger.ts';
+const s = snapshotState('${SNAP_IN_STATE}', '${SNAP_IN_BACKUPS}');
+console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.length);"
+  # Only names snapshotState itself writes (`state-backup.<ISO stamp, : and . as ->`) are ever
+  # listed, counted as fresh, or expired — nothing else under the backup dir is this rung's to judge.
+  is_snapshot_name() {
+    case "$1" in
+      state-backup.[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9]Z) return 0 ;;
+    esac
+    return 1
+  }
+  # Every snapshot, oldest first (the ISO stamp sorts chronologically), optionally only those whose
+  # directory mtime is newer than <minutes>.
+  list_snapshots() {
+    [ -d "${STATE_BACKUP_DIR}" ] || return 0
+    local n
+    if [ -n "${1:-}" ]; then
+      find "${STATE_BACKUP_DIR}" -mindepth 1 -maxdepth 1 -type d -name 'state-backup.*' -mmin "-$1" 2>/dev/null || true
+    else
+      find "${STATE_BACKUP_DIR}" -mindepth 1 -maxdepth 1 -type d -name 'state-backup.*' 2>/dev/null || true
+    fi | while IFS= read -r n; do
+      n="${n##*/}"
+      if is_snapshot_name "${n}"; then printf '%s\n' "${n}"; fi
+    done | sort
+  }
+  if [ ! -d "${STATE_SNAPSHOT_SRC}" ]; then
+    # The rmd-state -> rmd-state2 drift the sibling scan exists for: a derived path with no state/
+    # beside one that has a ledger is a missed backup, not a fresh host.
+    sib_ledger="$(find_sibling_with_marker "${STATE_DIR}" "state/ledger.ndjson")"
+    if [ -n "${sib_ledger}" ]; then
+      echo "host-update: STATE SNAPSHOT FAILED — ${STATE_SNAPSHOT_SRC} does not exist, but" >&2
+      echo "  ${sib_ledger} does. Set RMD_STATE_DIR if that is the volume you mean." >&2
+      state_snapshot_failed=1
+    else
+      echo "host-update: state snapshot — ${STATE_SNAPSHOT_SRC} does not exist on this host; nothing to snapshot"
+    fi
+  elif [ -n "${LIVE}" ]; then
+    echo "host-update: REFUSING state snapshot — a fleet container is RUNNING." >&2
+    printf '%s\n' "${LIVE}" | sed 's/^/  /' >&2
+    echo "  A live daemon may be mid-append; a copy of a half-written ledger is not a backup." >&2
+    fresh_snap="$(list_snapshots "$((STATE_BACKUP_MAX_AGE_HOURS * 60))" | tail -1)"
+    if [ -n "${fresh_snap}" ]; then
+      echo "  The newest snapshot is under ${STATE_BACKUP_MAX_AGE_HOURS}h old and still stands: ${STATE_BACKUP_DIR}/${fresh_snap}" >&2
+    else
+      echo "host-update: STATE SNAPSHOT MISSED — nothing under ${STATE_BACKUP_DIR} is newer than ${STATE_BACKUP_MAX_AGE_HOURS}h." >&2
+      echo "  The ledger stays unprotected until this rung runs with the fleet stopped." >&2
+      state_snapshot_failed=1
+    fi
+  elif [ "${DRY_RUN}" -eq 1 ]; then
+    echo "host-update: state snapshot (DRY RUN) — would copy ${STATE_SNAPSHOT_SRC} (read-only) into ${STATE_BACKUP_DIR}"
+    echo "  via ${STATE_SNAPSHOT_IMAGE}, keeping the newest ${STATE_BACKUP_KEEP}; nothing written"
+  elif ! mkdir -p "${STATE_BACKUP_DIR}"; then
+    echo "host-update: STATE SNAPSHOT FAILED — cannot create ${STATE_BACKUP_DIR}." >&2
+    state_snapshot_failed=1
+  else
+    echo "host-update: state snapshot — ${STATE_SNAPSHOT_SRC} -> ${STATE_BACKUP_DIR} via ${STATE_SNAPSHOT_IMAGE}"
+    snap_out="$(docker run --rm --pull never --network none --entrypoint node -w /app \
+      -v "${STATE_SNAPSHOT_SRC}:${SNAP_IN_STATE}:ro" -v "${STATE_BACKUP_DIR}:${SNAP_IN_BACKUPS}" \
+      "${STATE_SNAPSHOT_IMAGE}" --import tsx --input-type=module -e "${SNAP_JS}" 2>&1)" && snap_rc=0 || snap_rc=$?
+    snap_name="$(printf '%s\n' "${snap_out}" | awk '$1 == "RMD_STATE_SNAPSHOT" { n = $2 } END { print n }')"
+    is_snapshot_name "${snap_name}" || snap_name=""
+    if [ "${snap_rc}" -ne 0 ]; then
+      echo "host-update: STATE SNAPSHOT FAILED — the snapshot exited ${snap_rc}:" >&2
+      printf '%s\n' "${snap_out}" | sed 's/^/  /' >&2
+      state_snapshot_failed=1
+    elif [ -z "${snap_name}" ] || [ ! -d "${STATE_BACKUP_DIR}/${snap_name}" ] \
+         || [ -z "$(find "${STATE_BACKUP_DIR}/${snap_name}" -type f 2>/dev/null | head -1)" ]; then
+      echo "host-update: STATE SNAPSHOT FAILED — it exited 0 but published no archive this host can see" >&2
+      echo "  under ${STATE_BACKUP_DIR} (reported: '${snap_name:-nothing}'). Output was:" >&2
+      printf '%s\n' "${snap_out}" | sed 's/^/  /' >&2
+      state_snapshot_failed=1
+    else
+      echo "host-update: state snapshot — ${STATE_BACKUP_DIR}/${snap_name} verified"
+      # Retention, only after a verified NEW snapshot: keep the newest STATE_BACKUP_KEEP, never the
+      # one just written. A failed or refused night expires nothing.
+      snap_all="$(list_snapshots)"
+      snap_count="$(printf '%s\n' "${snap_all}" | grep -c . || true)"
+      snap_excess=$((snap_count - STATE_BACKUP_KEEP))
+      if [ "${snap_excess}" -gt 0 ]; then
+        printf '%s\n' "${snap_all}" | head -n "${snap_excess}" | while IFS= read -r old_snap; do
+          [ -n "${old_snap}" ] && [ "${old_snap}" != "${snap_name}" ] || continue
+          rm -rf -- "${STATE_BACKUP_DIR:?}/${old_snap}"
+          echo "  expired ${old_snap} (keeping the newest ${STATE_BACKUP_KEEP})"
+        done
+      fi
+    fi
+  fi
+fi
+
 # ── 4. RECLAIM ───────────────────────────────────────────────────────────────────────────────
 # TARGETED PRUNES, NOT `docker system prune -af`, and the difference is worth stating because the
 # brief is right that `-a` is easy to run without understanding its scope.
@@ -1129,6 +1262,12 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   AFTER_AVAIL="$(df -Pk / | awk 'NR==2 {print $4}')"
   echo
   echo "host-update: reclaim-only — no pull, no restart. Free on / : ${AFTER_AVAIL} KiB"
+  # W1-T3677: section 3a's snapshot failed, was refused past its age bound, or missed a drifted
+  # state volume. The reclaim above still ran; the rung must not report success regardless.
+  if [ "${state_snapshot_failed}" -eq 1 ]; then
+    echo "host-update: the nightly STATE SNAPSHOT did not leave a verified, recent archive — see above." >&2
+    exit 1
+  fi
   # W1-T3682: a git object reclaim that reached none of its named targets must not report the same
   # exit code as a clean run. `git_reclaim_reached` is set inside section 4a's loop and left unset
   # whenever that loop never ran (RECLAIM_ONLY=0, unreachable here) or never entered it (the LIVE

@@ -54,6 +54,13 @@ function writeDockerStub(dir: string): void {
     '    if [ "$2" = "inspect" ]; then exit 0; fi',
     '    echo "Total reclaimed space: 0B"; exit 0 ;;',
     '  container|builder) echo "Total reclaimed space: 0B"; exit 0 ;;',
+    // W1-T3677: section 3a snapshots a real `state/` through `docker run` before the reclaim and
+    // verifies the archive from the host. Publish one the way the image would; the snapshot itself
+    // is proved against the real snapshotState in test/the-state-snapshot-actually-runs-on-this-host.test.ts.
+    "  run)",
+    '    for a in "$@"; do case "$a" in *:/rmd-snapshot/backups) b="${a%%:*}" ;; esac; done',
+    '    n=state-backup.2026-01-01T00-00-00-000Z; mkdir -p "$b/$n" && echo stub > "$b/$n/ledger.ndjson"',
+    '    echo "RMD_STATE_SNAPSHOT $n 1"; exit 0 ;;',
     "esac",
     "exit 0",
     "",
