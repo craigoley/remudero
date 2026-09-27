@@ -242,7 +242,11 @@ test("a PASSING verdict never carries failure_class/failure_reason — absent, n
 
 // ── acceptance criterion 3: the FULL reason, not the 140-char status description ──
 
-test("ACCEPTANCE 3: the ledgered failure_reason is the FULL text — the instrument-entanglement message alone exceeds GitHub's 140-char status-description limit and is NOT truncated", () => {
+test("ACCEPTANCE 3: the ledgered failure_reason is the FULL text — a DECISIONS provenance refusal naming its header exceeds GitHub's 140-char status-description limit and is NOT truncated", () => {
+  // W1-T4602: the long reason this test measures used to be W1-T297's instrument-entanglement prose, riding on an
+  // unmet-criterion failure. Rule 25 is advisory since #5031, so that prose no longer names a failure another
+  // reason caused; the DECISIONS provenance refusal, which names the unmarked header and both accepted genres, is
+  // the long, un-sliced reason a real failure still carries.
   // W1-T297's own instrument-entanglement message names the offending paths AND
   // states the resolution in full prose — comfortably over 140 characters on its
   // own, with no budget-slicing applied anywhere in failSummary's branch for it
@@ -259,9 +263,14 @@ diff --git a/src/lib/widget.ts b/src/lib/widget.ts
 +++ b/src/lib/widget.ts
 @@
 +export function frobnicate() {}
+diff --git a/DECISIONS.md b/DECISIONS.md
++++ b/DECISIONS.md
+@@
++## 2026-09-26 — W1-T4583: the in-repo contract-coverage ratchet is RETIRED
++
++A binding change with no provenance mark anywhere in it.
 `.trim();
-  // The criterion is deliberately UNRESPONSIVE so the verdict fails on its own merits; the
-  // entanglement prose still rides on that failure's reason, which is what this test measures.
+  // The criterion is deliberately UNRESPONSIVE as well; the DECISIONS refusal still leads the reason.
   const v = judgeReview(ONE_CRITERION, { diff: entangledDiff, report: "SUMMARY\n- nothing substantiating here.\nPR_URL: https://github.com/o/r/pull/1" });
   assert.equal(v.state, "failure");
   assert.equal(v.instrumentEntangled, true);
@@ -276,5 +285,5 @@ diff --git a/src/lib/widget.ts b/src/lib/widget.ts
     fields.failure_reason!.slice(0, GITHUB_STATUS_DESC_MAX),
     "the ledgered reason is not what a 140-char-truncated description would have kept",
   );
-  assert.match(fields.failure_reason!, /revert the instrument hunk here/, "the tail that a 140-char slice would have dropped survives in the ledgered field");
+  assert.match(fields.failure_reason!, /Operator-authored/, "the tail that a 140-char slice would have dropped survives in the ledgered field");
 });
