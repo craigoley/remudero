@@ -41,7 +41,6 @@ import { EXECUTOR_EVIDENCE_CODE, SELF_REPORTED_CODE, resolveCatalogueCapability 
 import { fixedClock, type Clock } from "./clock.js";
 import { DELEGATION_PROFILE_MAX_COST_USD, delegationEligibility, findNonAuthoritativeSignal, type DelegationProfileState } from "./delegation-profile.js";
 import { DEFAULT_MAX_ROUNDS } from "./reply-interpreter.js";
-import { resolveCatalogueCapability } from "./action-executor.js";
 
 /** Named once so a record's own `version` and every consumer's pin can never drift. */
 export const INTENT_PLAN_VERSION = "intent-plan-v1" as const;
