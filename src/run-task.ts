@@ -14726,6 +14726,143 @@ export function runErrorCause(err: unknown): RunErrorCause {
   return "run-error";
 }
 
+/** W1-T4656: a pre-push census refusal read off a push error — the hook's block, the censuses its rows name,
+ *  and the baseline files a row itself offers ("or record … in <file>"). Undefined for any other failure. */
+export interface CensusPushRefusal {
+  text: string;
+  censuses: string[];
+  offeredBaselines: string[];
+}
+
+export function censusPushRefusal(err: unknown): CensusPushRefusal | undefined {
+  const lines = String((err as Error)?.message ?? err).split("\n");
+  const at = lines.findIndex((l) => /^census-precheck: this branch grows \d+ census count/.test(l));
+  const rows: string[] = [];
+  for (const line of at < 0 ? [] : lines.slice(at + 1)) {
+    if (!/^\s+[a-z][\w-]*: /.test(line)) break;
+    rows.push(line);
+  }
+  if (rows.length === 0) return undefined;
+  const uniq = (xs: string[]) => [...new Set(xs)].sort();
+  return {
+    text: [lines[at]!, ...rows].join("\n"),
+    censuses: uniq(rows.map((r) => r.trim().split(":")[0]!)),
+    offeredBaselines: uniq(rows.flatMap((r) => r.match(/\bor record .* in (\S+)$/)?.[1] ?? [])),
+  };
+}
+
+const CENSUS_BASELINE_FILES = ["scripts/clock-signature-baseline.json", "scripts/comment-load-baseline.json", "scripts/fixture-copy-baseline.json"];
+
+export type CensusPushRungOutcome =
+  | { outcome: "cleared"; strikes: number; remedy: "code-change" | "baseline-row"; baselineFiles: string[] }
+  | { outcome: "refused"; strikes: number; refusal: CensusPushRefusal; reason: string };
+
+/**
+ * W1-T4656: the fix rung's own strike — ci-log prompt, fix mount, wall-clock bound, harness commit, strike
+ * cap — run on a refused push BEFORE any PR exists, which `runFixRung` itself cannot serve (it re-judges
+ * through the PR's CI and review). Each strike retries the push THROUGH the hook; a baseline the refusal
+ * does not offer is never pushed, and the remedy taken is ledgered.
+ */
+export async function repairCensusRefusedPush(input: {
+  refusal: CensusPushRefusal;
+  task: Task;
+  runId: string;
+  worktreePath: string;
+  branch: string;
+  resumeSessionId: string;
+  mount: Mount;
+  stepUpMount?: Mount;
+  settingsFile: string;
+  config: Config;
+  budgetUsd: number;
+  ledgerPath: string;
+  spawnWallClockBoundMs?: number;
+  spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+  account: (r: WorkerResult) => WorkerResult;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  say: (msg: string) => void;
+}): Promise<CensusPushRungOutcome> {
+  const { task, worktreePath: cwd, log } = input;
+  const head = () => execFileSync("git", ["-C", cwd, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const startHead = head();
+  const offered = new Set(input.refusal.offeredBaselines);
+  const { harnessCommits, cashTools } = fixRoundGitOwnership(input.config);
+  const strikeCap = fixStrikeCap(input.config);
+  let refusal = input.refusal;
+  for (let strike = 1; strike <= strikeCap; strike++) {
+    log("census_push.refused", { strike, censuses: refusal.censuses, refusal: refusal.text, worktree: cwd });
+    const mount = input.stepUpMount && strike > 1 && strike === strikeCap ? input.stepUpMount : input.mount;
+    const prompt = [
+      renderFixPrompt({
+        task,
+        round: strike,
+        branch: input.branch,
+        harnessCommits,
+        evidence: { ciFailures: [{ name: "pre-push census-precheck", logTail: refusal.text }] },
+        reachableRemedyFiles: refusal.offeredBaselines.map((path) => ({ path, job: "census-precheck" })),
+      }),
+      "",
+      "PRE-PUSH CENSUS (W1-T4656): no PR exists yet — hooks/pre-push refused this branch with the census rows above.",
+      "Apply the remedy each row names, preferring the code change; record a baseline row only where that row offers",
+      "one. Never push with --no-verify or RMD_PREPUSH_GATES=0: the harness retries the push through the hook.",
+    ].join("\n");
+    const roundStart = head();
+    const receipt = fixWorkerReceipt(input.spawn, log, fixWorkerRunId(input.runId, `census${strike}`, systemClock.now()), fixLaneBenchmarkWork(task, input.ledgerPath));
+    const spawned = await spawnFixWorkerBounded(
+      { spawn: receipt.spawn, log, spawnWallClockBoundMs: input.spawnWallClockBoundMs, reclaimWorker: (info) => reclaimAbandonedWorker(info, { log }) },
+      {
+        cwd,
+        permissionMode: "bypassPermissions",
+        settingsFile: input.settingsFile,
+        model: mount.model,
+        mountProvider: mount.provider,
+        effort: mount.effort,
+        maxTurns: mount.maxTurns,
+        maxBudgetUsd: input.budgetUsd,
+        config: input.config,
+        prompt,
+        resumeSessionId: strike === 1 ? input.resumeSessionId : undefined,
+        tools: harnessCommits ? FIX_WORKER_TOOLS_HARNESS_COMMITS : FIX_WORKER_TOOLS,
+        ...(cashTools === undefined ? {} : { cashTools }),
+        runId: input.runId,
+        taskId: task.id,
+      },
+      { runId: input.runId, taskId: task.id },
+    );
+    if (spawned.kind !== "spawned") return { outcome: "refused", strikes: strike, refusal, reason: `fix worker ${spawned.kind} after ${spawned.elapsedMs}ms` };
+    const result = input.account(spawned.result);
+    harnessCommitForShellLessWorker({
+      harnessOwnsGit: harnessCommits,
+      commitCount: commitsAhead(cwd, roundStart),
+      report: workerTranscript(result),
+      worktreePath: cwd,
+      declaredPaths: [...(task.files ?? []), ...refusal.offeredBaselines],
+      assignmentId: result.selectionAssignmentId,
+      log,
+      say: input.say,
+    });
+    const baselineFiles = execFileSync("git", ["-C", cwd, "diff", "--name-only", startHead, "HEAD", "--", ...CENSUS_BASELINE_FILES], { encoding: "utf8" })
+      .split("\n")
+      .filter(Boolean);
+    log("census_push.strike", { strike, ...receipt.ledgerFields(result), cost_usd: result.costUsd, baseline_files: baselineFiles });
+    const unoffered = baselineFiles.filter((f) => !offered.has(f));
+    if (unoffered.length > 0) return { outcome: "refused", strikes: strike, refusal, reason: `raised a baseline no refusal row offers: ${unoffered.join(", ")}` };
+    try {
+      gitPushRunBranch(cwd);
+    } catch (err) {
+      const next = censusPushRefusal(err);
+      if (!next) throw err;
+      refusal = next;
+      for (const f of next.offeredBaselines) offered.add(f);
+      continue;
+    }
+    const remedy = baselineFiles.length > 0 ? "baseline-row" : "code-change";
+    log("census_push.cleared", { strikes: strike, remedy, baseline_files: baselineFiles, censuses: input.refusal.censuses });
+    return { outcome: "cleared", strikes: strike, remedy, baselineFiles };
+  }
+  return { outcome: "refused", strikes: strikeCap, refusal, reason: `not cleared in ${strikeCap} strike(s)` };
+}
+
 export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   const {
     config,
@@ -16288,6 +16425,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       } as RunResult;
     }
 
+    // W1-T4656: ONE policy read shared by the census rung and the fix rung (config-reader-seams counts reads).
+    const fixSpawnWallClockBoundMs = () => opts.spawnWallClockBoundMs ?? loadDefaultPolicy().values.fixSpawnWallClockBoundMs;
     // Ensure the branch is on origin (worker pushes without -u).
     let branchOnOrigin = false;
     let probeFailure: RemotePresenceProbeFailure | undefined;
@@ -16421,7 +16560,38 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         );
       }
       say("fallback: pushing branch from orchestrator (outside sandbox)");
-      gitPushRunBranch(worktreePath);
+      try {
+        gitPushRunBranch(worktreePath);
+      } catch (err) {
+        // W1-T4656: a census refusal is a repairable gate failure; anything else still takes run.error.
+        const refusal = censusPushRefusal(err);
+        if (!refusal) throw err;
+        const rung = await repairCensusRefusedPush({
+          refusal, task, runId, worktreePath, branch, resumeSessionId: impl.sessionId, mount: fixMount,
+          ...(stepUpMount ? { stepUpMount } : {}), settingsFile, config, budgetUsd, ledgerPath,
+          spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
+          spawn: trackRepairLadder(spawn, { config, log }), account, log, say,
+        });
+        if (rung.outcome === "refused") {
+          // The hook refuses every push of this head, so the worktree is the evidence W1-T434 would have pushed.
+          log("verdict", {
+            verdict: "failed",
+            reason: `census-refused push not cleared by the fix rung (${rung.reason})`,
+            stage: "fallback_push.census",
+            cause: "census-refused-push" satisfies RunErrorCause,
+            censuses: rung.refusal.censuses,
+            refusal: rung.refusal.text,
+            strikes: rung.strikes,
+            ...headProvenanceFields(worktreePath),
+            cost_usd: costUsd,
+            billing_mode: billingMode(impl.childEnvKeys),
+            account_label: impl.accountLabel,
+            ...terminalVerdictFields(impl),
+          });
+          say(`verdict: failed — census-refused push (${rung.refusal.censuses.join(", ")}); worktree kept: ${worktreePath}`);
+          return { taskId, runId, merged: false, costUsd, verdict: "failed" };
+        }
+      }
     }
     // W1-T4425: when the worker already reported its OWN PR, normalize its body from THIS run's
     // plan record before the trailer-amend push below, so `trailer-body-proof-divergence` never
@@ -16743,7 +16913,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // W1-T1044: the wall-clock bound on this rung's own worker spawn, and the best-effort
           // reclaim of whatever it abandoned — see runFixRung's own deps doc. W1-T1219: reads
           // `fixSpawnWallClockBoundMs`, its OWN policy row, not the sweep tick's.
-          spawnWallClockBoundMs: opts.spawnWallClockBoundMs ?? loadDefaultPolicy().values.fixSpawnWallClockBoundMs,
+          spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
           // W1-T2261: binds this rung's OWN `log` through so a match/no-match reclaim outcome
           // (`fix.spawn_reclaimed`/`fix.spawn_reclaim_no_match`) lands in the same ledger stream
           // as `fix.spawn_abandoned` — the bare function reference below this before this task

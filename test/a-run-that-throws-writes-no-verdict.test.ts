@@ -44,6 +44,9 @@ const CENSUS_REFUSAL = [
   "  clock-signature: src/lib/serve.ts dateNow 3 > baseline 2 — move it onto the Clock port",
 ].join("\n");
 
+/** A NON-census hook refusal: since W1-T4656 a census refusal goes to the fix rung, not run.error. */
+const HOOK_REFUSAL = "pre-push: test-tier-manifest: ghost row test/gone.test.ts — remove the row, or restore the file";
+
 const OFFLINE_GITHUB: GitHub = {
   prByRef: () => null,
   findMergedByTrailer: () => null,
@@ -81,7 +84,7 @@ function workerResult(over: Partial<WorkerResult>): WorkerResult {
 }
 
 /** A bare origin, a seed that carries the plan, and the clone runTask works from. */
-function buildFixture(opts: { censusHook?: boolean } = {}): { root: string; planPath: string; config: Config; cleanup: () => void } {
+function buildFixture(opts: { refusingHook?: boolean } = {}): { root: string; planPath: string; config: Config; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}thrown-verdict-root-`));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FIXTURE_PLAN);
@@ -90,11 +93,11 @@ function buildFixture(opts: { censusHook?: boolean } = {}): { root: string; plan
   writeFileSync(join(seed.dir, "README.md"), "seed\n");
   mkdirSync(join(seed.dir, "plan"), { recursive: true });
   writeFileSync(join(seed.dir, "plan", "tasks.yaml"), FIXTURE_PLAN);
-  if (opts.censusHook) {
-    // A TRACKED hooks/pre-push, which worktreeAdd's `core.hooksPath hooks` runs — the fleet's census
+  if (opts.refusingHook) {
+    // A TRACKED hooks/pre-push, which worktreeAdd's `core.hooksPath hooks` runs — the fleet's gate
     // path. Only the run BRANCH is refused; the dispatch-claim ref push must still land.
     mkdirSync(join(seed.dir, "hooks"), { recursive: true });
-    const lines = CENSUS_REFUSAL.split("\n").map((l) => `  echo '${l}' >&2`);
+    const lines = [`  echo '${HOOK_REFUSAL}' >&2`];
     const hook = join(seed.dir, "hooks", "pre-push");
     writeFileSync(hook, ["#!/bin/sh", "if grep -q ' refs/heads/run-'; then", ...lines, "  exit 1", "fi", "exit 0", ""].join("\n"));
     chmodSync(hook, 0o755);
@@ -136,8 +139,8 @@ function twoStepSpawn(implement: () => Promise<WorkerResult>): typeof spawnWorke
   };
 }
 
-test("W1-T4655: a census-refused push after implement writes one run.error verdict and the error still propagates", async () => {
-  const fx = buildFixture({ censusHook: true });
+test("W1-T4655: a hook-refused push after implement writes one run.error verdict and the error still propagates", async () => {
+  const fx = buildFixture({ refusingHook: true });
   try {
     let thrown: unknown;
     await withLiveWritesAllowed(() =>
@@ -156,7 +159,7 @@ test("W1-T4655: a census-refused push after implement writes one run.error verdi
         thrown = err;
       },
     );
-    assert.match(String((thrown as Error).message), /census-precheck: this branch grows 1 census count/);
+    assert.match(String((thrown as Error).message), /ghost row test\/gone\.test\.ts/);
 
     const ledger = readLedger(fx.root);
     assert.ok(ledger.some((row) => row.step === "implement.done"), "the implement worker returned before the throw");
@@ -168,9 +171,9 @@ test("W1-T4655: a census-refused push after implement writes one run.error verdi
     const verdict = verdicts[0] ?? {};
     assert.equal(verdict.verdict, "failed");
     assert.equal(verdict.stage, "run.error");
-    assert.equal(verdict.cause, "census-refused-push");
+    assert.equal(verdict.cause, "git-push-failed");
     assert.equal(verdict.run_id, runError[0]?.run_id);
-    assert.match(String(verdict.reason), /census-precheck:/);
+    assert.match(String(verdict.reason), /ghost row/);
     assert.equal(typeof verdict.cost_usd, "number");
     assert.equal(verdict.model, null, "no worker outcome is read off a thrown run");
     assert.ok(ledger.indexOf(verdict) > ledger.indexOf(runError[0] ?? {}), "the verdict follows the run.error row");
