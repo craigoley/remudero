@@ -2,27 +2,21 @@
  * lib/escalation-precision.ts — per-class "did a human actually act on this?" precision (W1-T4677).
  *
  * OBSERVED 2026-09-26..28: 64 false "main is red" escalations fired on #7296, and #7561 alone
- * produced five needs-human issues — every one dismissed by closing the GitHub issue, which
- * `panel.escalation_marked_handled` recorded as nothing but an `issue_url` (src/lib/panel-actions.ts).
- * With no disposition, no reader can ever learn a class is mostly noise, so the same false alarm
- * keeps paging at the same rate forever. Paperclip's execution-semantics doc (§12) keeps this exact
- * distinction — snooze / continue / dismissed_false_positive — against its own alerts, cited in this
- * task's rationale as prior art, not copied wholesale (this module's four dispositions are its own).
+ * produced five needs-human issues, every one dismissed by closing the GitHub issue, which
+ * `panel.escalation_marked_handled` recorded as nothing but an `issue_url` (panel-actions.ts). With
+ * no disposition, no reader can ever learn a class is mostly noise, so the same false alarm keeps
+ * paging at the same rate forever.
  *
- * This module owns TWO things:
- *   (1) the closed set of dispositions a human's mark-handled action now MUST choose between
- *       (panel-actions.ts's `buildEscalationMarkHandledRoute` validates against it), and
- *   (2) the pure arithmetic that turns a class's disposed history into an acted-on PRECISION and,
- *       from that, the SIGNAL TIER (issue -> digest -> board) its escalations currently deserve.
+ * This module owns TWO things: (1) the closed set of dispositions a mark-handled action now MUST
+ * choose between (panel-actions.ts's `buildEscalationMarkHandledRoute` validates against it), and
+ * (2) the pure arithmetic turning a class's disposed history into an acted-on PRECISION and, from
+ * that, the SIGNAL TIER (issue -> digest -> board) its escalations currently deserve. Both are
+ * computed fresh off the ledger every call — no persisted "current tier" row, so there is no
+ * separate memory for either to drift from.
  *
- * Both are computed fresh off the ledger every time they are called — no persisted "current tier"
- * row exists, so calling this again each retro (design point iii) is simply calling it again: there
- * is no drift to reconcile because there is no separate memory to drift from.
- *
- * MANUAL and HARD_STOP (src/lib/escalate.ts's EscalationClass) never demote: a human is required
- * there BY DEFINITION — deploys, secrets, the deterministic hard-stop list — so a low acted-on rate
- * is not evidence the *signal* is noisy, only that the *situation* is rare. Demoting either would
- * quiet the one class this loop is built to never resolve alone.
+ * MANUAL and HARD_STOP (escalate.ts's EscalationClass) never demote: a human is required there BY
+ * DEFINITION, so a low acted-on rate is evidence the *situation* is rare, not that the *signal* is
+ * noisy. Demoting either would quiet the one class this loop is built to never resolve alone.
  *
  * Why: docs/forensics/escalation-precision.md; this task's own rationale/design.
  */
