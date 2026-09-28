@@ -111,6 +111,19 @@ test("a heartbeat replayed by a later rotation after it was dropped is counted o
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("a dropped heartbeat replayed at the same ts as the kept one is skipped, not swapped in", async () => {
+  const first = line(20, "worker.activity", { event_kind: "assistant-text", seq: "first" });
+  const second = line(20, "worker.activity", { event_kind: "assistant-text", seq: "second" });
+  const dir = stateWith([...opening, first, second], [first, ...closing(30)]);
+  try {
+    const read = await readTaskCaseLedger(dir, taskId, asOf, { maxTelemetryRowsPerStep: 1 });
+    assert.equal(read.telemetryRowsDropped, 1);
+    assert.deepEqual(read.rows.filter((row) => row.step === "worker.activity").map((row) => row.seq), ["second"]);
+    const file = buildTaskCaseFile({ task, ledger: read, asOf, prRead: { state: "unavailable", reason: "github-not-read" } });
+    assert.equal(file.ledger.state === "observed" && file.ledger.value.matchingRows, 7);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("a heartbeat with no readable ts is the first dropped, and the batch read counts each task apart", async () => {
   const undated = JSON.stringify({ ts: "not-a-time", task_id: taskId, run_id: runId, step: "worker.activity", event_kind: "assistant-text" });
   const other = "W1-T4652";
