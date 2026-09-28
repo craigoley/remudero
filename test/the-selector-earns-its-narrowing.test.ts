@@ -419,13 +419,17 @@ test("a self-hosting daemon keeps timers alive while selector-shadow reads a run
     const start = captured?.gardens?.[6];
     assert.ok(start, "a seventh garden is wired after the ci-friction gardener");
     const done = join(home, "log-done");
+    const allDone = join(home, "all-logs-done");
     const jobs = Array.from({ length: SELECTOR_SHADOW_SHARDS }, (_, i) =>
       ({ id: i + 101, name: `coverage-shard (${i + 1}/8)`, status: "completed" }));
     const shim = ghShim([
       { when: "actions/workflows/ci.yml/runs", stdout: JSON.stringify({ workflow_runs: [{ id: 42, head_sha: "abc123", status: "completed" }] }) },
       { when: "actions/runs/42/jobs", stdout: JSON.stringify({ total_count: jobs.length, jobs }) },
       { when: "actions/jobs/101/logs", stdout: "unparseable log", delaySeconds: 0.5, doneFile: done },
-      ...jobs.slice(1).map((job) => ({ when: `actions/jobs/${job.id}/logs`, stdout: "unparseable log" })),
+      ...jobs.slice(1).map((job, index) => ({
+        when: `actions/jobs/${job.id}/logs`, stdout: "unparseable log",
+        ...(index === jobs.length - 2 ? { doneFile: allDone } : {}),
+      })),
     ], { kind: "selector-shadow-log" });
     process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
     process.env.RMD_GH_TRANSPORT_FLOOR = "advisory";
@@ -437,6 +441,12 @@ test("a self-hosting daemon keeps timers alive while selector-shadow reads a run
       assert.ok(shim.calls().some((call) => call.includes("actions/jobs/101/logs")), "the installed reader reached the coverage job log child");
       await new Promise((r) => setTimeout(r, 20));
       assert.equal(existsSync(done), false, "the daemon event loop ran before the log child finished");
+      // stop() clears future ticks, but the current eight-job read continues. Keep the
+      // shim installed until that read finishes so no later child hits the shared gh stub.
+      for (let waited = 0; !existsSync(allDone) && waited < 5_000; waited += 10) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert.ok(existsSync(allDone), "the current read completed all eight coverage jobs");
     } finally {
       garden.stop();
     }
