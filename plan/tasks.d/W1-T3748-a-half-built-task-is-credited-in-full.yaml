@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: medium
   budget_usd: 20.00
-  files: [src/lib/task-linter.ts, test/a-task-declaring-two-surfaces-is-credited-in-full.test.ts]
+  files: [src/lib/task-linter.ts]
   origin: oper#squeeze-session-2026-09-17
   plan_refs: ["W1-T3746", "W1-T3747"]
   status: queued
