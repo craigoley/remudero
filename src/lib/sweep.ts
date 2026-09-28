@@ -7960,6 +7960,8 @@ export interface SweepDeps {
   reviewerCodeRecovery?: {
     loadedCodeSha?: string;
     isLoadedCodeAtOrAfter: (requiredOriginMainSha: string) => boolean;
+    /** The daemon has a guarded fresh-tree review runner for stale loaded code. */
+    freshTreeReviewAvailable?: boolean;
     /** Returns and clears the last local ancestry-read failure, if the recovery implementation
      * can distinguish one. The sweep keeps the bounded backoff either way. */
     takeAncestryFailure?: () => string | undefined;
@@ -8465,10 +8467,17 @@ function reviewerCodeFreshnessBackoffReason(
     }
   }
   const ageMinutes = Math.max(0, (now - attemptedAt) / 60_000);
-  if (ageMinutes >= policy.pendingCeilingMinutes) return undefined;
+  // The daemon can retry with a fresh reviewer tree after a short bounded pause.
+  // Direct callers and unreadable refusals retain the original pending ceiling.
+  const ceiling = refusal.freshness === "stale" &&
+    typeof refusal.requiredOriginMainSha === "string" && refusal.requiredOriginMainSha.length > 0 &&
+    recovery?.freshTreeReviewAvailable === true
+    ? Math.min(5, policy.pendingCeilingMinutes)
+    : policy.pendingCeilingMinutes;
+  if (ageMinutes >= ceiling) return undefined;
   return (
     `the last reviewer-code freshness refusal for ${reviewKey} was ${Math.floor(ageMinutes)}m ago — ` +
-    `freshness recovery backoff remains inside the ${policy.pendingCeilingMinutes}m pending ceiling; ` +
+    `freshness recovery backoff remains inside the ${ceiling}m pending ceiling; ` +
     `${ancestryCheckFailure ? `ancestry check failed (${ancestryCheckFailure}); ` : ""}` +
     `this is a bounded reviewer-source freshness refusal, not a durable review verdict`
   );
@@ -9820,7 +9829,15 @@ export async function runSweep(
     if (pr.planResequenceHeld !== undefined) {
       log("sweep.plan_resequence_close.held", { pr_number: pr.prNumber, task_id: pr.taskId, reason: pr.planResequenceHeld });
     }
-    let { disposition, reason } = postReviewFailureHistoryDisposition(pr, prior, policy, now) ?? deriveDisposition(pr, policy, now);
+    const freshnessRefusal = prior.reviewFreshnessRefusals.get(reviewOutcomeKeyForPr(pr));
+    const pendingSince = pr.reviewPendingSince ? Date.parse(pr.reviewPendingSince) : Number.NaN;
+    // A refusal on this exact input after the current pending post proves its owner
+    // finished. An older refusal cannot preempt a newer review in flight.
+    const refusedCurrentPending = pr.reviewState === "pending" &&
+      freshnessRefusal?.attemptedAt !== undefined && Number.isFinite(pendingSince) &&
+      freshnessRefusal.attemptedAt >= pendingSince;
+    const dispositionView = refusedCurrentPending ? { ...pr, reviewPendingOwnerDead: true } : pr;
+    let { disposition, reason } = postReviewFailureHistoryDisposition(dispositionView, prior, policy, now) ?? deriveDisposition(dispositionView, policy, now);
     if (inheritedMergeState) {
       reason =
         `${reason} — mergeability unread this pass; inherited last known "${inheritedMergeState.state}" ` +

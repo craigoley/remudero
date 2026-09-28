@@ -32437,7 +32437,10 @@ export async function daemonCommand(
       return undefined;
     }
   })();
-  const reviewerCodeRecovery = reviewerCodeRecoveryFromLoadedModule(daemonModuleRepoDir, daemonLoadedCodeSha);
+  const reviewerCodeRecovery = {
+    ...reviewerCodeRecoveryFromLoadedModule(daemonModuleRepoDir, daemonLoadedCodeSha),
+    freshTreeReviewAvailable: true,
+  };
   const buildSweepHook: DaemonSweepHookBuilder = deps.buildSweepHook ?? daemonDefaultBuildSweepHook;
   const buildSweepLightHook: DaemonSweepLightHookBuilder = deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook;
 
