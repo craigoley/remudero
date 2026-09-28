@@ -114,6 +114,16 @@ test("selector-shadow reads all eight coverage job logs instead of a partial run
   await assert.rejects(readCoverageShardLogsAsync("acme", "remudero", 42, {
     ...io, readJson: async () => ({ total_count: 7, jobs: jobs.slice(0, 7) }),
   }), /missing coverage jobs/);
+  for (const invalid of [
+    [{ ...jobs[0], status: "in_progress" }, ...jobs.slice(1)],
+    [{ ...jobs[0], id: undefined }, ...jobs.slice(1)],
+    [...jobs, { ...jobs[0], id: 109 }],
+  ]) {
+    await assert.rejects(readCoverageShardLogsAsync("acme", "remudero", 42, {
+      readJson: async () => ({ total_count: invalid.length, jobs: invalid }),
+      readText: async () => { throw new Error("unexpected job-log read"); },
+    }), /invalid coverage job 1/);
+  }
   await assert.rejects(readCoverageShardLogsAsync("acme", "remudero", 42, {
     ...io, readText: async () => { throw new Error("job log unavailable"); },
   }), /job log unavailable/);
