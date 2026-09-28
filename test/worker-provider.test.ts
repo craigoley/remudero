@@ -25,9 +25,11 @@ import {
   providerWindowConsumption,
   finishProviderWindowMeasurement,
   selectCodexModel,
+  routingDrawValue,
   selectWorkerProvider,
   spawnCodexWorker,
   type ProviderCapacity,
+  type RoutingDrawSeed,
 } from "../src/lib/worker-provider.js";
 import {
   selectWorkerProviderForPolicy,
@@ -59,10 +61,15 @@ test("provider selector uses the subscription with the most tight-window headroo
   assert.equal(selectWorkerProvider([capacity("claude", 30, 70), capacity("codex", 25, 40)]).provider, "codex");
 });
 
+// W1-T4617: a fixed list of seeded draws stands in for the dispatches the golden-ratio counter used to index.
+function dispatchSeed(index: number): RoutingDrawSeed {
+  return { unit: "spawn", taskId: `W1-T${index}`, attempt: "run-1", point: "spawn:00000000" };
+}
+
 function providerSequence(claudeUsed: number, codexUsed: number, dispatches = 200): Record<"claude" | "codex", number> {
   const counts = { claude: 0, codex: 0 };
   for (let index = 0; index < dispatches; index += 1) {
-    const selected = selectWorkerProvider([capacity("claude", claudeUsed), capacity("codex", codexUsed)], 5, index).provider;
+    const selected = selectWorkerProvider([capacity("claude", claudeUsed), capacity("codex", codexUsed)], 5, dispatchSeed(index)).provider;
     if (selected === "claude" || selected === "codex") counts[selected] += 1;
   }
   return counts;
@@ -89,7 +96,7 @@ test("automatic provider routing weights provider pressure separately from model
   };
   const counts = { claude: 0, codex: 0 };
   for (let index = 0; index < 200; index += 1) {
-    const selected = selectWorkerProvider([claude, codex], 5, index).provider;
+    const selected = selectWorkerProvider([claude, codex], 5, dispatchSeed(index)).provider;
     if (selected === "claude" || selected === "codex") counts[selected] += 1;
   }
   assert.ok(counts.claude >= 150, `provider pressure should favor Claude, got ${JSON.stringify(counts)}`);
@@ -121,7 +128,7 @@ test("weighted routing stays balanced for a small lead and reverses with the hea
 
   const codexLead = providerSequence(45, 40);
   assert.ok(codexLead.codex >= 105 && codexLead.codex <= 115, JSON.stringify(codexLead));
-  assert.equal(claudeLead.claude, codexLead.codex, "reversing capacities reverses the deterministic share");
+  assert.equal(claudeLead.claude, codexLead.codex, "reversing capacities over the same seeds reverses the share");
 });
 
 test("provider selector excludes an exhausted provider even when another window is empty", () => {
@@ -148,11 +155,17 @@ test("provider selector rejects an out-of-range percentage instead of treating i
   assert.throws(() => selectWorkerProvider([capacity("codex", -1)]), ProviderCapacityBlockedError);
 });
 
-test("provider selector alternates exact ties using its supplied tie breaker", () => {
+test("provider selector splits exact ties by its seeded draw at equal probability", () => {
   const values = [capacity("claude", 10), capacity("codex", 10)];
-  const sequence = Array.from({ length: 20 }, (_, index) => selectWorkerProvider(values, 5, index));
-  assert.deepEqual(sequence.map((selection) => selection.provider), Array.from({ length: 20 }, (_, index) => index % 2 === 0 ? "claude" : "codex"));
+  const sequence = Array.from({ length: 20 }, (_, index) => selectWorkerProvider(values, 5, dispatchSeed(index)));
+  // Equal weights: a draw below one half takes the first-listed tie, the rest the second.
+  assert.deepEqual(
+    sequence.map((selection) => selection.provider),
+    Array.from({ length: 20 }, (_, index) => routingDrawValue(dispatchSeed(index)).value < 0.5 ? "claude" : "codex"),
+  );
+  assert.ok(new Set(sequence.map((selection) => selection.provider)).size === 2, "both tied subscriptions are drawn");
   assert.ok(sequence.every((selection) => selection.allocationSharePercent === 50));
+  assert.ok(sequence.every((selection) => selection.draw?.probabilities.every((entry) => entry.probability === 0.5)));
 });
 
 function routingPolicy(preference: "automatic" | "claude" | "codex"): EffectiveProviderRoutingPolicy {
@@ -1224,7 +1237,7 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and p
             effort: "high",
           };
         },
-        tieBreaker: 0,
+        draw: 0,
         writeStatus: (_root, input) => writeProviderRoutingStatus(root, input),
       },
       onSelectionAssignment: (assignment) => assignments.push(assignment),

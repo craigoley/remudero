@@ -2,12 +2,13 @@ import { join } from "node:path";
 import { loadConfig, type WorkerProviderId } from "./config.js";
 import { systemClock } from "./clock.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
+import { routingDrawValue, type RoutingDrawSeed } from "./worker-provider.js";
 
 /**
  * Live routing experiments (operator ruling 2026-09-24, DECISIONS.md). An assignment joins an
  * experiment only when the auction could genuinely have picked EITHER arm: both providers were
- * eligible and the codex arm was serving the experiment's model. Headroom, not the task, then
- * decided the arm, so the arms compare like-for-like.
+ * eligible and the codex arm was serving the experiment's model. Headroom still weighs the served
+ * provider; the task alone fixes the assigned arm (W1-T4617), so a retry never re-randomises it.
  */
 export interface RoutingExperiment {
   id: string;
@@ -56,6 +57,62 @@ export function routingExperimentFor(
   })?.id;
 }
 
+/**
+ * W1-T4617: THE EXPERIMENT'S UNIT IS THE TASK. Keying the arm on the spawn let every retry and fix
+ * rung re-randomise it, and 26 of 56 tagged tasks (46%) landed in both arms. The auction draw an
+ * experiment joins is keyed on `(task, experiment)` alone and walks the arms in declared order, so
+ * every attempt of a task reads the same value: the SAME weights still decide the served provider
+ * (no share moves), while the assigned arm below is a pure function of the task.
+ */
+export function experimentDrawSeed(experiment: RoutingExperiment, taskId: string): RoutingDrawSeed {
+  return {
+    unit: "task",
+    taskId,
+    attempt: "every-attempt",
+    point: `experiment:${experiment.id}`,
+    order: Object.keys(experiment.arms) as WorkerProviderId[],
+  };
+}
+
+/** Intention to treat: the arm the task was assigned, the arm this decision served, and whether they differ. */
+export interface ExperimentIntentionToTreat {
+  id: string;
+  unit: "task";
+  assignedArm: string;
+  /** Each arm's assignment probability: the arms split the task-keyed value equally. */
+  assignedProbability: number;
+  servedArm: string;
+  crossover: boolean;
+}
+
+/** The arm a task is assigned: its task-keyed draw split equally across the declared arms. */
+export function experimentArmForTask(experiment: RoutingExperiment, taskId: string): { arm: string; probability: number } {
+  const arms = Object.values(experiment.arms) as string[];
+  const { value } = routingDrawValue(experimentDrawSeed(experiment, taskId));
+  return { arm: arms[Math.min(arms.length - 1, Math.floor(value * arms.length))]!, probability: 1 / arms.length };
+}
+
+/** The ITT record for one tagged decision, or undefined when the id names no live experiment. */
+export function experimentIntentionToTreat(
+  experimentId: string,
+  taskId: string,
+  served: WorkerProviderId,
+  experiments: readonly RoutingExperiment[] = ROUTING_EXPERIMENTS,
+): ExperimentIntentionToTreat | undefined {
+  const experiment = experiments.find((candidate) => candidate.id === experimentId);
+  if (!experiment) return undefined;
+  const assigned = experimentArmForTask(experiment, taskId);
+  const servedArm = experiment.arms[served] ?? served;
+  return {
+    id: experiment.id,
+    unit: "task",
+    assignedArm: assigned.arm,
+    assignedProbability: assigned.probability,
+    servedArm,
+    crossover: servedArm !== assigned.arm,
+  };
+}
+
 export interface ExperimentArmReport {
   arm: string;
   provider: WorkerProviderId;
@@ -76,6 +133,8 @@ export interface ExperimentReport {
   assignments: number;
   /** Tasks whose tagged assignments landed in BOTH arms; counted under their first arm. */
   mixedTasks: number;
+  /** W1-T4617: tasks served an arm other than the one they were assigned at least once. */
+  crossoverTasks: number;
   sufficient: boolean;
   arms: ExperimentArmReport[];
 }
@@ -103,6 +162,7 @@ function tokenTotal(value: unknown): number | undefined {
 export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: RoutingExperiment, today: string): ExperimentReport {
   const firstArm = new Map<string, { arm: string; provider: WorkerProviderId; ts: string }>();
   const armsSeen = new Map<string, Set<string>>();
+  const crossed = new Set<string>();
   const assignmentTask = new Map<string, string>();
   const receipts = new Map<string, { minutes?: number; tokens?: number; cost?: number }>();
   const merges: Array<{ task: string; ts: string }> = [];
@@ -117,8 +177,11 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       const decision = routing?.decision as Row | undefined;
       if (decision?.ab !== experiment.id) continue;
       const provider = str((assignment?.selected as Row | undefined)?.provider) as WorkerProviderId | undefined;
-      const arm = provider ? experiment.arms[provider] : undefined;
+      const itt = routing?.experiment as Row | undefined;
+      // A row carrying its intention-to-treat record counts under its ASSIGNED arm; an older row, its served one.
+      const arm = str(itt?.assignedArm) ?? (provider ? experiment.arms[provider] : undefined);
       if (!provider || !arm) continue;
+      if (itt?.crossover === true) crossed.add(task);
       const id = str(assignment?.id);
       if (id) assignmentTask.set(id, task);
       const seen = armsSeen.get(task) ?? new Set<string>();
@@ -169,6 +232,7 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
     revisitDue: today >= experiment.revisitOn,
     assignments: assignmentTask.size,
     mixedTasks: [...armsSeen.values()].filter((seen) => seen.size > 1).length,
+    crossoverTasks: crossed.size,
     sufficient: arms.every((arm) => arm.tasks >= experiment.minTasksPerArm),
     arms,
   };
@@ -200,7 +264,7 @@ export async function routingAbCommand(rest: string[], opts: RoutingAbCommandOpt
   print(`state dir: ${stateDir} (${rows.length} ledger rows read)`);
   for (const report of reports) {
     const status = report.sufficient ? "measured" : "insufficient sample";
-    print(`${report.id}: ${status}; ${report.assignments} assignments, ${report.mixedTasks} tasks in both arms; revisit ${report.revisitOn}${report.revisitDue ? " (DUE)" : ""}`);
+    print(`${report.id}: ${status}; ${report.assignments} assignments, ${report.mixedTasks} tasks in both arms, ${report.crossoverTasks} crossover tasks; revisit ${report.revisitOn}${report.revisitDue ? " (DUE)" : ""}`);
     for (const arm of report.arms) {
       print(
         `  ${arm.arm} (${arm.provider}): ${arm.tasks} tasks, ${arm.merged} merged (${fmt(arm.mergeRate, 100, "%")}), ` +
