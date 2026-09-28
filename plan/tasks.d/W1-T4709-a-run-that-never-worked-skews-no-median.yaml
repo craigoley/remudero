@@ -1,0 +1,40 @@
+- id: W1-T4709
+  title: "A RUN THAT NEVER WORKED SKEWS THE SETTLED MEDIANS — W1-T4655/W1-T4701 give thrown and deferred runs a `failed` verdict, which puts their near-zero spans into the per-class duration medians the running-long sentinel, retro and mount-headroom read"
+  repo: remudero
+  depends_on: ["W1-T4701", "W1-T4702"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-28: unresolved item named by W1-T4701's build (PR #7636)"
+  plan_refs: ["W1-T4417", "W1-T4655", "W1-T4701", "W1-T4702"]
+  files:
+    - src/lib/cost-anomaly.ts
+    - test/a-run-that-never-worked-skews-no-median.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    cost-anomaly.ts folds SETTLED runs (`run.start` -> `verdict`) into a per-class median span that
+    sets the running-long threshold (`detectRunningLong`), and the same settled spans feed the retro
+    overrun mining and mount-headroom distributions. Since W1-T4655 (merged) and W1-T4701 (PR #7636),
+    a run that threw or deferred before doing any work ends with `verdict: "failed"` and a `stage`
+    in status.ts's `THROWN_RUN_VERDICT_STAGES` (`run.error`, `managed_checkout.refresh`,
+    `worktree.node_modules`, `worktree.add`, `preflight.containment`, `preflight.isolation`). Its span
+    is setup time only, so every such row drags its class's median down and makes the running-long
+    sentinel fire earlier on healthy runs. The operator-approved backfill of 41 historical phantom
+    runs (2026-09-28) adds 41 more such rows, stamped at each refusal's own ts.
+  design: |
+    The settled-span fold excludes a verdict whose `stage` is in `THROWN_RUN_VERDICT_STAGES` (import
+    it; never a second list) and any row marked `backfilled: true`, and reports how many it excluded
+    beside the median it computed, so the sample size stays honest. Audit the retro and mount-headroom
+    readers of the same spans and apply the same exclusion there if they share the fold, or name them
+    for a follow-up if they do not.
+  acceptance:
+    - claim: "a thrown-run or backfilled verdict does not enter the per-class settled median, and the excluded count is reported beside it"
+      proof: "unit test: test/a-run-that-never-worked-skews-no-median.test.ts"
+  falsifier: |
+    A class with ten real 30-minute runs and ten thrown-run rows at 10 seconds: the median stays 30
+    minutes, never 15.

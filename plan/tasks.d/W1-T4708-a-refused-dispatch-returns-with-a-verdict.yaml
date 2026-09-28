@@ -1,0 +1,42 @@
+- id: W1-T4708
+  title: "A REFUSED DISPATCH RETURNS WITHOUT A VERDICT — runTask's claim-contention and stale-base exits return a RunResult verdict but never ledger it, so each refused run stays in flight to every reader; 27 such runs 2026-09-25..28"
+  repo: remudero
+  depends_on: ["W1-T4701"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-28: unresolved items named by W1-T4701's build (PR #7636)"
+  plan_refs: ["W1-T4655", "W1-T4701", "W1-T4702", "W1-T405", "W1-T4597"]
+  files:
+    - src/run-task.ts
+    - test/a-refused-dispatch-returns-with-a-verdict.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-28 over the ledger union, run-task runs 2026-09-25..28 that logged run.start
+    and never a verdict or run.error, after excluding the pre-worktree throws W1-T4701 closes:
+    20 end on `dispatch.claim_released` and 7 on `worktree.stale_base`. Both are RETURNS, not
+    throws: the dispatch-claim refusal in runTaskBody returns `{ verdict: claimOutcome ===
+    "unreachable" ? "blocked_git_fetch" : "blocked_inflight" }` and the stale-base branch returns
+    `{ verdict: "failed" }`, each without `log("verdict", …)`, so the run's outcome exists only in the
+    caller's memory. cost-anomaly, the case file, verified outcomes and status all read a run as in
+    flight until a verdict row exists (the same defect W1-T4701 closes for the throw sites).
+  design: |
+    Each such return writes exactly one terminal verdict row carrying the verdict it already
+    returns, a `stage` naming the site (e.g. `dispatch.claim`, `worktree.stale_base`) and the
+    refusal reason, through W1-T4701's once-per-run writer so no run gets two. AUDIT FIRST, as
+    W1-T4655/W1-T4701 did: `blocked_inflight` / `blocked_git_fetch` rows must not change dispatch
+    (status.ts's environmental streak and INFRASTRUCTURE_REFUSAL_VERDICTS, dispatchesWithoutNewOwnedPr,
+    strike and escalation readers); add the minimal stage guard where a reader would otherwise change
+    behaviour and record the audit table in the PR body. The returned RunResult is unchanged. A
+    backfill of the existing 27 runs is out of scope; name it for the operator.
+  acceptance:
+    - claim: "a claim-contention refusal and a stale-base refusal each write exactly one terminal verdict naming their stage, return the same RunResult as before, and leave re-dispatch behaviour unchanged"
+      proof: "unit test: test/a-refused-dispatch-returns-with-a-verdict.test.ts"
+  falsifier: |
+    Drive runTask into a held dispatch claim: before this change the ledger has run.start and
+    dispatch.claim_released but no verdict; after it, one blocked_inflight verdict with its stage.
