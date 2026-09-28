@@ -1,0 +1,45 @@
+- id: W1-T4652
+  title: "A PR-LESS RUN BESIDE A LATER RUN'S PR IS AN ENDING, NOT A MISMATCH — when the task's current PR exists but a run opened none and ended no_pr/failed/blocked_*, the verified-outcome join reads run-pr-mismatch instead of W1-T4648's ended-without-completion"
+  repo: remudero
+  depends_on: ["W1-T4648"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-28: A/A run 8 (after W1-T4651) — every remaining run-pr-mismatch is a PR-less earlier run of a task whose PR a later run opened"
+  plan_refs: ["W1-T4608", "W1-T4648", "W1-T4651", "W1-T4575"]
+  files:
+    - src/lib/benchmark-verified-outcome.ts
+    - test/a-prless-run-beside-a-later-pr-is-an-ending.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-28, eighth operator-approved A/A run (trial aa-retro-2026-09-27, main 196cea9f):
+    the remaining `run-pr-mismatch` units (4 in A2) and, across the 27 cohort case files, every run
+    whose own prNumber differs from the task's observed current PR, are the same shape — the run
+    opened NO PR (prNumber null) and ended with a terminal verdict, and a later run (or a session)
+    opened the PR the projection now reads. 14 tasks carry PR-less runs beside a current PR; those
+    with a terminal ending verdict read no_pr, failed, blocked_budget or blocked_transient (others
+    carry no verdict or already_satisfied and keep their reasons). E.g. W1-T4438 and W1-T4455: four
+    blocked_transient runs each before PRs 7407/7404 merged; W1-T3576: three blocked_budget runs
+    before 7522.
+    `joinVerifiedTaskOutcomes` compares `run.prNumber !== pr.number` before asking whether the run
+    opened a PR at all, so an observed run-level ending reads as a join defect. W1-T4648 already
+    names this ending when the projection holds no PR; the same run beside someone else's PR is the
+    same observation.
+  design: |
+    In the join, a run whose own prNumber is null and whose verdict W1-T4648's
+    ENDS_WITHOUT_COMPLETION classes as an ending reads `ended-without-completion`
+    (`ended-without-pr:<verdict>`) whether or not the task has a current PR. `run-pr-mismatch`
+    stays for a run that opened a DIFFERENT PR than the current one, and a PR-less run with no
+    verdict or a non-ending verdict keeps its existing reason. As in W1-T4648 this is an outcome,
+    never a model-failure claim, and the completed run's credit is unchanged.
+  acceptance:
+    - claim: "a run that opened no PR and ended no_pr, failed or blocked beside a later run's merged PR reads ended-without-completion, and a run that opened a different PR still reads run-pr-mismatch"
+      proof: "unit test: test/a-prless-run-beside-a-later-pr-is-an-ending.test.ts"
+  falsifier: |
+    A run with prNumber 7001 beside a current merged PR 7002 must still read run-pr-mismatch, never
+    an ending.
