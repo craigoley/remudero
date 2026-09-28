@@ -314,3 +314,44 @@ test("W1-T3997: the daemon's own production wiring reaches the real async reader
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("CI-learning daemon wiring uses one GraphQL commit read instead of per-commit REST rollups", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}ci-graphql-wiring-`));
+  try {
+    const rest: string[] = [];
+    const graphql: string[] = [];
+    const hooks = buildCiLearningDaemonHooks({
+      config: { root } as Config,
+      checkoutRoot: root,
+      planOrigins: [],
+      readJson: async (args) => {
+        rest.push(args[1] ?? "");
+        if (args[1]?.includes("pulls?state=all")) return [{ number: 42, updated_at: "2999-01-01T00:00:00Z" }];
+        throw new Error("per-commit REST read was not expected");
+      },
+      readGraphql: async (args) => {
+        graphql.push(args.join(" "));
+        return { data: { repository: { pullRequest: { commits: {
+          nodes: [{ commit: { oid: "head", statusCheckRollup: null } }],
+          pageInfo: { hasNextPage: false, endCursor: null },
+        } } } } };
+      },
+    });
+    const result = await hooks.runCiLearningCadence();
+    assert.equal(result.status, "clear");
+    assert.equal(graphql.length, 1);
+    assert.equal(rest.filter((request) => request.includes("pulls/42/commits") || request.includes("check-runs")).length, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("CI learning retries after a PR-level authentication failure instead of recording a partial success", async () => {
+  await assert.rejects(loadCiFailureWindowAsync(1, {
+    read: async (args) => args[1]?.includes("pulls?state=all")
+      ? [{ number: 42, updated_at: "2999-01-01T00:00:00Z" }]
+      : [],
+    readPr: async () => { throw Object.assign(new Error("HTTP 401 Bad credentials"), { code: 1 }); },
+    yieldBetweenObservation: async () => {},
+  }), /HTTP 401/);
+});
