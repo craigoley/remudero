@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -209,4 +209,30 @@ test("buildRetroDaemonHooks: checkRetroTrigger delegates to the check; runRetroT
 
   await hooks.runRetroTrigger(fired);
   assert.deepEqual(ranWith?.automated, fired, "runRetroTrigger forwards the firing decision as the automated gate");
+});
+
+test("the default retro daemon hook persists its attempt before spawning the subprocess", async () => {
+  const { config, markerPath } = fixtureRoot();
+  const markerTs = "2026-09-20T00:00:00.000Z";
+  saveMarker(markerPath, { ts: markerTs, learnings_count: 0, runs_seen: 0 });
+  const decision: Extract<RetroTriggerDecision, { fire: true }> = {
+    fire: true, reason: "days", mergesSinceMarker: 0, daysSinceMarker: 8,
+  };
+  let spawned = false;
+  try {
+    const hooks = buildRetroDaemonHooks({
+      config,
+      runSubprocess: async (actual) => {
+        spawned = true;
+        assert.deepEqual(actual, decision);
+        const attempt = JSON.parse(readFileSync(join(config.root, "state", "last-retro-attempt.json"), "utf8")) as { at: string; markerTs: string };
+        assert.equal(attempt.markerTs, markerTs);
+        assert.equal(recentRetroAttempt(config.root, markerTs, new Date()), true, "the attempt was persisted before subprocess entry");
+      },
+    });
+    await hooks.runRetroTrigger(decision);
+    assert.equal(spawned, true, "the default arm reached the injected subprocess runner");
+  } finally {
+    rmSync(config.root, { recursive: true, force: true });
+  }
 });

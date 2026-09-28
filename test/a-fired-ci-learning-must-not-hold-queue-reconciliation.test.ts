@@ -267,6 +267,24 @@ test("the first PR listing retries once after reauthentication and names a repea
   assert.equal(refreshes, 1);
 });
 
+test("a repeated PR-list failure names rate limit, timeout, and response-buffer causes", async () => {
+  for (const [detail, reason] of [
+    ["API rate limit exceeded (HTTP 403)", "rate-limit"],
+    ["request timed out (ETIMEDOUT)", "timeout"],
+    ["stdout maxBuffer exceeded (ENOBUFS)", "response-buffer"],
+  ] as const) {
+    let reads = 0;
+    await assert.rejects(
+      loadCiFailureWindowAsync(1, {
+        read: async () => { reads++; throw Object.assign(new Error("gh api failed"), { stderr: detail }); },
+        yieldBetweenObservation: async () => {},
+      }),
+      new RegExp(`first ${reason} .* second ${reason}`),
+    );
+    assert.equal(reads, 2, `${reason}: one retry and a named refusal`);
+  }
+});
+
 test("W1-T3997: the daemon's own production wiring reaches the real async reader, not just a test double", async () => {
   // Every OTHER test above drives buildCiLearningCadenceRunner directly, or supplies its own
   // loadWindow to buildCiLearningDaemonHooks — neither exercises the wiring's own fallback

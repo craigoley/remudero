@@ -26543,6 +26543,8 @@ export function lastLedgerCompactionFiredAtMs(lines: readonly string[]): number 
 export function buildRetroDaemonHooks(deps: {
   check?: () => RetroTriggerDecision | undefined;
   runRetro?: (rest: string[], opts: { automated: Extract<RetroTriggerDecision, { fire: true }> }) => Promise<number>;
+  config?: Config;
+  runSubprocess?: typeof runAutomatedRetroSubprocess;
 } = {}): {
   checkRetroTrigger: () => RetroTriggerDecision | undefined;
   // The optional `log` is supplied by the CALLER at invocation time (daemonCommand's own
@@ -26561,8 +26563,8 @@ export function buildRetroDaemonHooks(deps: {
     runRetroTrigger: async (decision, log) => {
       if (deps.runRetro) await deps.runRetro([], { automated: decision });
       else {
-        recordRetroAttempt(loadConfig().root, systemClock.date());
-        await runAutomatedRetroSubprocess(decision, { log });
+        recordRetroAttempt((deps.config ?? loadConfig()).root, systemClock.date());
+        await (deps.runSubprocess ?? runAutomatedRetroSubprocess)(decision, { log });
       }
     },
   };
