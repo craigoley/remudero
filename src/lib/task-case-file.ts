@@ -1,7 +1,9 @@
-import { readdirSync } from "node:fs";
+import { createReadStream, readdirSync } from "node:fs";
 import { basename } from "node:path";
+import { createInterface } from "node:readline";
+import { createGunzip } from "node:zlib";
 import { fixedClock } from "./clock.js";
-import { ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
+import { ledgerLivePath, ledgerRotationEntries, openLedgerUnion, type LedgerMalformedRowFinding } from "./ledger-union.js";
 import type { Task } from "./plan.js";
 import type { StatusProjection } from "./status.js";
 
@@ -34,6 +36,7 @@ export interface CaseLedgerRead {
   forms: { gzip: number; plain: number; live: number };
   unread: string[];
   malformed: number;
+  malformedSources?: string[];
   truncated: boolean;
 }
 
@@ -55,7 +58,8 @@ export interface TaskCaseFile {
   taskId: string;
   asOf: string;
   plan: CaseEvidence<{ title: string; dependsOn: string[]; verify: Task["verify"]; risk: Task["risk"] }>;
-  ledger: CaseEvidence<{ windowStart: string; forms: CaseLedgerRead["forms"]; matchingRows: number }>;
+  ledger: CaseEvidence<{ windowStart: string; forms: CaseLedgerRead["forms"]; matchingRows: number;
+    malformed?: number; malformedSources?: string[] }>;
   runs: TaskCaseRun[];
   pr: CaseEvidence<{ number: number; url: string; headSha: string; state: CasePrSnapshot["state"]; taskCredit: boolean }>;
   review: CaseEvidence<{ headSha: string; status: "success" }>;
@@ -70,52 +74,127 @@ export interface TaskCaseFile {
 const ownedRun = (taskId: string, runId: unknown): runId is string =>
   typeof runId === "string" && (runId === taskId || runId.startsWith(`${taskId}-`));
 
-/** Stream the three-form union. Only exact task-owned rows are retained, with a hard memory bound. */
-export async function readTaskCaseLedger(
-  stateDir: string, taskId: string, asOf: string, opts: { windowDays?: number; maxRows?: number } = {},
-): Promise<CaseLedgerRead> {
+/** Read only the damaged lines by ordinal; the union deliberately exposes metadata, not raw text. */
+async function malformedPrefixes(findings: LedgerMalformedRowFinding[]): Promise<Map<string, Map<number, string>>> {
+  const bySource = new Map<string, Set<number>>();
+  for (const finding of findings) {
+    const ordinals = bySource.get(finding.path) ?? new Set<number>();
+    ordinals.add(finding.rowOrdinal);
+    bySource.set(finding.path, ordinals);
+  }
+  const prefixes = new Map<string, Map<number, string>>();
+  for (const [path, ordinals] of bySource) {
+    const source = createReadStream(path);
+    const gunzip = path.endsWith(".gz") ? createGunzip() : undefined;
+    const input = gunzip ? source.pipe(gunzip) : source;
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    const selected = new Map<number, string>();
+    let ordinal = 0;
+    let failed = false;
+    source.once("error", () => { failed = true; });
+    gunzip?.once("error", () => { failed = true; });
+    try {
+      for await (const line of lines) {
+        ordinal += 1;
+        if (ordinals.has(ordinal)) selected.set(ordinal, line);
+        if (selected.size === ordinals.size) break;
+      }
+      if (failed || selected.size !== ordinals.size) throw new Error(`cannot reread malformed ledger row in ${path}`);
+      prefixes.set(path, selected);
+    } finally {
+      lines.close();
+      gunzip?.destroy();
+      source.destroy();
+    }
+  }
+  return prefixes;
+}
+
+function namesTask(prefix: string, taskId: string): boolean {
+  const fields = /"(task_id|run_id)"\s*:\s*"([^"]*)/g;
+  for (const match of prefix.matchAll(fields)) {
+    if (match[1] === "task_id" && match[2] === taskId) return true;
+    if (match[1] === "run_id" && ownedRun(taskId, match[2])) return true;
+  }
+  return false;
+}
+
+/** Stream the three-form union once and keep only exact task-owned rows, bounded per task. */
+export async function readTaskCaseLedgers(
+  stateDir: string, taskIds: readonly string[], asOf: string,
+  opts: { windowDays?: number; maxRows?: number; openUnion?: typeof openLedgerUnion } = {},
+): Promise<Map<string, CaseLedgerRead>> {
   const windowDays = opts.windowDays ?? 30;
   const maxRows = opts.maxRows ?? 2_000;
   if (!Number.isInteger(windowDays) || windowDays < 1 || !Number.isInteger(maxRows) || maxRows < 1)
     throw new TypeError("case-file windowDays and maxRows must be positive integers");
   const windowStart = fixedClock(Date.parse(asOf) - windowDays * 86_400_000).iso();
   const forms = { gzip: 0, plain: 0, live: 0 };
-  const rows: Record<string, unknown>[] = [];
-  const seenTaskRows = new Set<string>();
+  const ids = [...new Set(taskIds)];
+  const rows = new Map(ids.map((id) => [id, [] as Record<string, unknown>[]]));
+  const seenTaskRows = new Map(ids.map((id) => [id, new Set<string>()]));
+  const truncated = new Set<string>();
   const unread: string[] = [];
+  const findings: LedgerMalformedRowFinding[] = [];
   let malformed = 0;
-  let truncated = false;
+  let malformedOverflow = false;
+  let missing = false;
+  let readFailure: string | undefined;
+  let prefixes = new Map<string, Map<number, string>>();
   try {
     const rotations = ledgerRotationEntries(readdirSync(stateDir), stateDir);
     for (const entry of rotations) forms[entry.form] += 1;
     // A live file is counted by the reader itself, not guessed from a directory listing.
     if (readdirSync(stateDir).includes(basename(ledgerLivePath(stateDir)))) forms.live = 1;
-    if (rotations.length + forms.live === 0) return {
-      rows, state: "unavailable", reason: "ledger-corpus-missing", asOf, windowStart, forms, unread, malformed, truncated,
-    };
-    for await (const row of openLedgerUnion(stateDir, {
+    missing = rotations.length + forms.live === 0;
+    if (!missing) for await (const row of (opts.openUnion ?? openLedgerUnion)(stateDir, {
       sinceTs: windowStart, dedupe: false,
       onUnreadArchive: (path) => unread.push(path),
       onUnreadLive: (path) => unread.push(path),
-      onMalformedRow: () => { malformed += 1; },
+      onMalformedRow: (finding) => {
+        malformed += 1;
+        if (findings.length < maxRows) findings.push(finding);
+        else malformedOverflow = true;
+      },
     })) {
-      if (row.task_id !== taskId || !ownedRun(taskId, row.run_id)) continue;
+      const taskId = row.task_id;
+      if (typeof taskId !== "string" || !rows.has(taskId) || !ownedRun(taskId, row.run_id)) continue;
+      const taskRows = rows.get(taskId)!;
+      const seen = seenTaskRows.get(taskId)!;
       // Rotations retain replayed lines; a task-scoped set stays bounded by maxRows.
       const identity = JSON.stringify(row);
-      if (seenTaskRows.has(identity)) continue;
-      if (rows.length >= maxRows) { truncated = true; continue; }
-      seenTaskRows.add(identity);
-      rows.push(row);
+      if (seen.has(identity)) continue;
+      if (taskRows.length >= maxRows) { truncated.add(taskId); continue; }
+      seen.add(identity);
+      taskRows.push(row);
     }
+    const attributable = findings.filter((finding) => finding.timestamp && finding.timestamp >= windowStart);
+    if (!malformedOverflow && attributable.length) prefixes = await malformedPrefixes(attributable);
   } catch (error) {
-    return { rows: [], state: "unavailable", reason: `ledger-read-failed:${error instanceof Error ? error.name : "unknown"}`,
-      asOf, windowStart, forms, unread, malformed, truncated };
+    readFailure = `ledger-read-failed:${error instanceof Error ? error.name : "unknown"}`;
   }
-  return { rows: unread.length || malformed || truncated ? [] : rows,
-    state: unread.length || malformed || truncated ? "unavailable" : "observed",
-    ...(unread.length || malformed || truncated ? { reason: unread.length ? "ledger-source-unreadable"
-      : malformed ? "ledger-source-malformed" : "task-row-bound-exceeded" } : {}),
-    asOf, windowStart, forms, unread, malformed, truncated };
+  const malformedSources = [...new Set(findings.map((finding) => finding.path))];
+  return new Map(ids.map((taskId) => {
+    const relevant = findings.some((finding) => {
+      if (finding.timestamp && finding.timestamp < windowStart) return false;
+      if (!finding.timestamp) return true;
+      const prefix = prefixes.get(finding.path)?.get(finding.rowOrdinal);
+      return prefix === undefined || namesTask(prefix, taskId);
+    });
+    const reason = readFailure ?? (missing ? "ledger-corpus-missing" : unread.length ? "ledger-source-unreadable"
+      : malformedOverflow ? "ledger-malformed-bound-exceeded" : relevant ? "ledger-source-malformed"
+        : truncated.has(taskId) ? "task-row-bound-exceeded" : undefined);
+    const result: CaseLedgerRead = { rows: reason ? [] : rows.get(taskId)!, state: reason ? "unavailable" : "observed",
+      ...(reason ? { reason } : {}), asOf, windowStart, forms, unread, malformed,
+      malformedSources, truncated: truncated.has(taskId) };
+    return [taskId, result];
+  }));
+}
+
+export async function readTaskCaseLedger(
+  stateDir: string, taskId: string, asOf: string, opts: { windowDays?: number; maxRows?: number } = {},
+): Promise<CaseLedgerRead> {
+  return (await readTaskCaseLedgers(stateDir, [taskId], asOf, opts)).get(taskId)!;
 }
 
 function observed<T>(value: T, source: string, asOf: string): CaseEvidence<T> {
@@ -146,8 +225,10 @@ export function buildTaskCaseFile(input: {
   const { task, projection, ledger, prRead, asOf } = input;
   const plan = observed({ title: task.title, dependsOn: task.depends_on, verify: task.verify, risk: task.risk }, "plan", asOf);
   const ledgerEvidence = ledger.state === "observed"
-    ? observed({ windowStart: ledger.windowStart, forms: ledger.forms, matchingRows: ledger.rows.length }, "ledger-three-form-union", ledger.asOf)
-    : unknown<{ windowStart: string; forms: CaseLedgerRead["forms"]; matchingRows: number }>("unavailable", ledger.reason ?? "ledger-unavailable", "ledger-three-form-union", ledger.asOf);
+    ? observed({ windowStart: ledger.windowStart, forms: ledger.forms, matchingRows: ledger.rows.length,
+      malformed: ledger.malformed, malformedSources: ledger.malformedSources ?? [] }, "ledger-three-form-union", ledger.asOf)
+    : unknown<{ windowStart: string; forms: CaseLedgerRead["forms"]; matchingRows: number;
+      malformed: number; malformedSources: string[] }>("unavailable", ledger.reason ?? "ledger-unavailable", "ledger-three-form-union", ledger.asOf);
   const byRun = new Map<string, TaskCaseRun>();
   const assignmentRun = new Map<string, string>();
   if (ledger.state === "observed") for (const row of ledger.rows) {

@@ -898,6 +898,7 @@ import { benchmarkAaCommand, buildBenchmarkAaReport } from "./lib/benchmark-aa.j
 import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/benchmark-paid-pilot.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
+import { readTaskCaseLedgers, type TaskCaseFile } from "./lib/task-case-file.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
@@ -2425,6 +2426,7 @@ import {
   statusCommand,
   type StatusDeps,
   caseFileCommand,
+  type CaseFileCommandInput,
   digestCommand,
   learningsCommand,
   learningsExportCommand,
@@ -2492,6 +2494,40 @@ export {
   realUid,
   defaultLifecycleExec,
 };
+
+/** A cohort snapshot shares one ledger scan and one observation time across all requested tasks. */
+export async function caseFileBatchCommand(rest: string[], deps: CaseFileCommandInput = {}): Promise<number> {
+  const err = deps.err ?? ((line: string) => console.error(line));
+  const out = deps.out ?? ((line: string) => console.log(line));
+  const taskIds = rest[0] === "--tasks" ? rest[1]?.split(",") : undefined;
+  if (taskIds === undefined || taskIds.length === 0 || taskIds.some((id) => !/^W\d+-T\d+$/.test(id))
+    || new Set(taskIds).size !== taskIds.length || rest.length !== 3 || rest[2] !== "--json") {
+    err(`rmd case-file: expected --tasks <id,id,...> --json\n${deps.usage ?? ""}`);
+    return 2;
+  }
+  const root = deps.repoRoot ?? repoRoot;
+  const plan = deps.readTask ? undefined : loadPlan(resolveRepoLayout(root).planMonolith);
+  const tasks = new Map(taskIds.map((id) => [id, deps.readTask ? deps.readTask(id) : plan?.byId.get(id)]));
+  const absent = taskIds.find((id) => !tasks.get(id));
+  if (absent) { err(`rmd case-file: ${absent} is not in the plan`); return 2; }
+  const asOf = (deps.nowIso ?? (() => systemClock.iso()))();
+  const stateDir = deps.stateDir ?? join((deps.loadConfig ?? loadConfig)().root, "state");
+  const ledgers = await readTaskCaseLedgers(stateDir, taskIds, asOf);
+  const ownerRepo = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
+  const github = (deps.buildGithub ?? buildBatchedGithub)(ownerRepo.owner, ownerRepo.repo);
+  const files: TaskCaseFile[] = [];
+  for (const id of taskIds) {
+    const code = await caseFileCommand([id, "--json"], {
+      ...deps, repoRoot: root, stateDir, nowIso: () => asOf,
+      readTask: (taskId) => tasks.get(taskId), readLedger: async (_, taskId) => ledgers.get(taskId)!,
+      resolveOwnerRepo: () => ownerRepo, buildGithub: () => github,
+      out: (line) => { files.push(JSON.parse(line) as TaskCaseFile); },
+    });
+    if (code !== 0) return code;
+  }
+  out(JSON.stringify(files, null, 2));
+  return 0;
+}
 
 /**
  * The REAL reads behind the binary-pin rung, as one object so the wiring is a single argument and
@@ -47397,7 +47433,9 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["sync", (rest) => syncCommand(rest)],
   ["doctor", async (rest) => await doctorCommand(rest, { repoRoot })],
   ["status", async (rest) => await statusCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
-  ["case-file", async (rest) => await caseFileCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
+  ["case-file", async (rest) => rest[0] === "--tasks"
+    ? await caseFileBatchCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })
+    : await caseFileCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
   ["sweep", async (rest) => await sweepCommand(rest)],
   [
     "fix",
