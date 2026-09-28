@@ -910,7 +910,10 @@ function assembleCaseFile(task: Task, ledger: CaseLedgerRead, asOf: string, root
       readLedger: () => ledger.state === "observed" ? ledger.rows : [],
       github: github(ownerRepo.owner, ownerRepo.repo),
     });
-    if (projection?.prNumber !== undefined) {
+    if (projection?.indeterminate === true && projection.prNumber === undefined) {
+      // A failed status read is not an observed absence: "no PR" here would read as a run that ended without one.
+      prRead = { state: "unavailable", reason: `projection-indeterminate:${projection.unavailableReason ?? "unclassified"}` };
+    } else if (projection?.prNumber !== undefined) {
       prRead = deps.readPr ? deps.readPr(projection.prNumber, ownerRepo.owner, ownerRepo.repo, asOf)
         : parseCasePrSnapshot((deps.readGhPr ?? ghJson)(["pr", "view", String(projection.prNumber), "--repo", `${ownerRepo.owner}/${ownerRepo.repo}`,
           "--json", "number,url,state,headRefOid,body,mergedAt,statusCheckRollup"]), asOf);
