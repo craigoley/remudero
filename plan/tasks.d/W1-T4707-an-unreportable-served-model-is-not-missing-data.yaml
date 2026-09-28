@@ -1,0 +1,41 @@
+- id: W1-T4707
+  title: "AN UNREPORTABLE SERVED MODEL IS NOT MISSING DATA — the A/A counts a codex attempt's served model as notRecorded, so every trial whose arms saw different provider mixes flags differential-missingness:servedModel even though W1-T4650 now names the reason"
+  repo: remudero
+  depends_on: ["W1-T4650"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-28: A/A run 9 still flags servedModel at p=0.024 after W1-T4650"
+  plan_refs: ["W1-T4575", "W1-T4647", "W1-T4650"]
+  files:
+    - src/lib/benchmark-aa.ts
+    - test/an-unreportable-served-model-is-not-missing-data.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-28: the ninth operator-approved A/A run (trial aa-retro-2026-09-27, main
+    07d4354b) still reports `differential-missingness:servedModel` (p=0.0240), as runs 3-8 did.
+    W1-T4650 (merged) traced the cause: served_model is recorded for claude only; codex's
+    `exec --json` stream carries no model id, so every codex attempt now records a NAMED
+    `served_model_reason` (CODEX_SERVED_MODEL_REASON) instead of silence. benchmark-aa.ts's
+    missingness tally (`summary.missingness[field][… observed ? "observed" : "notRecorded"]`) still
+    counts that as notRecorded, so the finding measures which providers each arm was routed to, not
+    a pipeline that drops evidence — exactly the confound an A/A exists to rule out.
+  design: |
+    Split the served-model tally three ways: observed, notRecorded (no model and no reason, or a
+    generic reason — genuine missing evidence), and unreportable (a provider-declared reason that
+    says the stream cannot carry a model id, e.g. W1-T4650's codex reason). The differential-
+    missingness test runs on notRecorded only; unreportable is reported per arm beside it and, when
+    its share differs between arms, as its own non-integrity finding naming the provider mix. The
+    classification reads the attempt row's own `served_model_reason` against the exported reason
+    constants, never a hand-copied string. Older rows with no reason stay notRecorded.
+  acceptance:
+    - claim: "an attempt whose provider declares its served model unreportable is tallied unreportable, not missing, and differential-missingness:servedModel is computed from genuinely missing evidence only"
+      proof: "unit test: test/an-unreportable-served-model-is-not-missing-data.test.ts"
+  falsifier: |
+    Two arms identical except that one is all codex attempts carrying W1-T4650's reason: no
+    differential-missingness:servedModel finding, and an unreportable share reported per arm.
