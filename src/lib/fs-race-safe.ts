@@ -17,13 +17,10 @@ import { hostname } from "node:os";
  */
 export type CreateOrReadResult = { created: true; fd: number } | { created: false; raw: string };
 
-/** Attempts before giving up on the create/read flip-flop below. Two already covers any realistic
- *  interleaving — a retry needs a peer to have both created and unlinked the file since our last
- *  syscall — so this only stops a pathological peer from spinning this process forever. */
+/** BACKSTOP: two covers any real create/unlink flip-flop; this stops a pathological peer spinning us. */
 const CREATE_OR_READ_ATTEMPTS = 3;
 
-/** The three syscalls this helper makes, injectable so a test can drive the check-then-act
- *  WINDOW deterministically. Appended LAST so no positional caller shifts. */
+/** The syscalls this helper makes, injectable so a test drives the check-then-act WINDOW itself. */
 export interface FsRaceSyscalls {
   openSync: typeof openSync;
   readFileSync: typeof readFileSync;
@@ -63,16 +60,10 @@ export function createOrReadExclusive(
   }
 }
 
-/** BACKSTOP: how many times a reader looks at an EMPTY file before giving up on its creator. The
- *  creator's claim-to-publish span is one `which claude` plus a validation — milliseconds — so
- *  this only stops a creator that died mid-claim from hanging every later reader forever. */
+/** BACKSTOP: ~1s of looks at an EMPTY file, so a creator that died mid-claim cannot hang readers. */
 const IN_PROGRESS_READ_ATTEMPTS = 40;
-
-/** The pause between two looks at an empty file; with the attempts above, about a second. */
 const IN_PROGRESS_WAIT_MS = 25;
 
-/** The named reason a reader gives up with: the file it found stayed empty — a creator claimed
- *  the path and never published. Deleting the empty file lets the next caller create it. */
 export class StillBeingWrittenError extends Error {
   readonly reason = "still-being-written";
   constructor(
@@ -87,20 +78,12 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-/** A won claim on an empty path: `publish` renames the whole content over it in one step, and
- *  `release` closes the claim — withdrawing it first if nothing was published, so the next caller
- *  becomes the creator instead of waiting on a writer that is gone. Call `release` in a `finally`. */
+/** `release` (in a `finally`) withdraws a claim nothing was published over, so a retry can create. */
 export type PublishedClaimResult =
   | { created: true; publish: (raw: string) => void; release: () => void }
   | { created: false; raw: string };
 
-/**
- * {@link createOrReadExclusive} for a file whose readers must never see it half-written. The
- * winner of the `wx` claim gets a {@link PublishedClaimResult} whose `publish` renames the content
- * OVER its own empty claim, so the path only ever holds zero bytes or the whole file. A reader
- * that finds zero bytes treats it as in progress and looks again, a bounded number of times,
- * then throws {@link StillBeingWrittenError}. A non-empty file is handed back unjudged.
- */
+/** {@link createOrReadExclusive} whose `publish` renames OVER the empty claim; readers wait out zero bytes. */
 export function createOrReadPublished(
   path: string,
   mode: number,
@@ -126,7 +109,7 @@ function publishableClaim(path: string, claimFd: number, mode: number): Publishe
     },
     release: () => {
       closeSync(claimFd);
-      if (!published) rmSync(path, { force: true }); // `force`: already gone is fine
+      if (!published) rmSync(path, { force: true });
     },
   };
 }
