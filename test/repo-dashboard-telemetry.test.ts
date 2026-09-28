@@ -193,6 +193,29 @@ test("GET /v1/repos fills telemetry from the real ledger and plan files and keep
   assert.deepEqual(alpha.settings, { proofpolicy: null, workerpoolsize: null, alertthreshold: null });
 });
 
+test("a registry-only core repository receives its own ledger telemetry", async () => {
+  const root = fixtureRoot();
+  const repoRegistryPath = join(root, ".remudero", "daemon-instances.yaml");
+  writeFileSync(repoRegistryPath, ["instances:", "  core:", "    repo: remudero", "    github_repo: craigoley/remudero", ""].join("\n"));
+  mkdirSync(join(root, "plan"));
+  writeFileSync(join(root, "plan", "tasks.yaml"), task("C-1", "craigoley/remudero"));
+  const state = join(root, "state");
+  mkdirSync(state);
+  const ledgerPath = join(state, "ledger.ndjson");
+  writeFileSync(ledgerPath, [
+    start("core-run", "craigoley/remudero"),
+    worker("core-run", "2026-09-21T00:00:00.000Z", 3, { input: 11 }),
+    verdict("core-run", "merged", "2026-09-21T01:00:00.000Z"),
+  ].map((row) => JSON.stringify(row)).join("\n") + "\n");
+  const body = await readDashboard(buildRepoDashboardRoute({ root, repoRegistryPath, ledgerPath, clock: fixedClock(NOW_MS) }));
+  const core = body.repos.find((repo) => repo.id === "craigoley/remudero");
+  assert.ok(core);
+  assert.equal(core.source, "instance-registry");
+  assert.deepEqual(core.telemetry, { tokens7d: 11, modelsused: ["provider-m"], cost_7d: 3 });
+  assert.equal(core.health.queuedtasks, 1);
+  assert.equal(body.repos.find((repo) => repo.id === "acme/alpha")?.source, "managed-repos");
+});
+
 test("GET /v1/repos leaves ledger fields null for an absent ledger", async () => {
   const root = fixtureRoot();
   const missing = await readDashboard(buildRepoDashboardRoute({ root, ledgerPath: join(root, "state", "ledger.ndjson"), clock: fixedClock(NOW_MS) }));

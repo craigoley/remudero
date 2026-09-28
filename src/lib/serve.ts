@@ -2560,7 +2560,12 @@ function assembleServeRoutes(
   const readLadder = (nowMs: number): RepairLadderState => (deps.repairLadder?.read ?? readRepairLadderState)(deps.fleetControlRoot, nowMs);
   const rawRoutes = [
     withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen), modelApprovals), readLadder),
-    buildRepoDashboardRoute({ root: deps.questionsRoot, ledgerPath: deps.ledgerPath, planPath: deps.panelGraph.planPath }),
+    buildRepoDashboardRoute({
+      root: deps.questionsRoot,
+      repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
+      ledgerPath: deps.ledgerPath,
+      planPath: deps.panelGraph.planPath,
+    }),
     buildRecentRoute(deps.board),
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),

@@ -1,5 +1,8 @@
 /**
- * The read-only managed-repository portfolio surface for the console dashboard.
+ * The read-only repository portfolio surface for the console dashboard.
+ * The instance registry supplies connected daemon repositories, including core; the separate
+ * managed-repos file supplies issue-intake repositories. Never add core to managed-repos merely
+ * to make a dashboard card appear: that would also opt its public issues into intake.
  *
  * Each field is filled only from a source the daemon already holds (W1-T4103):
  * - `errorrate`, `last_run`: the repository's `verdict` rows (see {@link ERROR_VERDICTS}).
@@ -8,12 +11,13 @@
  *   Model names use the provider's `served_model` receipt, never the requested assignment. If a
  *   worker row did not report its served model, the list is incomplete and stays `null`.
  * A row names its repository by its own `repo`, else through its run's `run.start` row.
- * `connected_at`, `active` and every setting stay `null`: the managed-repos file records only
- * identities and no config key holds a per-repo policy, pool size or alert threshold. An absent
+ * `connected_at`, `active` and every setting stay `null`: neither identity registry records a
+ * connection timestamp or measured activity state, and no config key holds a per-repo policy,
+ * pool size or alert threshold. An absent
  * ledger leaves its fields `null`, never `0`; a FAILED plan or ledger read is unavailable with its reason.
  */
 
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 import type { Route } from "./service.js";
@@ -21,6 +25,7 @@ import { sendJson } from "./panel-actions.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
 import { loadManagedRepos, type ManagedRepo } from "./managed-repos.js";
+import { InstanceRegistryError, parseInstanceRegistry } from "./instance-registry.js";
 import { loadPlan, type Plan } from "./plan.js";
 import { isMergeCreditLine, readLedgerUnionBounded } from "./status.js";
 
@@ -51,7 +56,7 @@ export interface RepoDashboardEntry {
   connected_at: null;
   active: null;
   managed: true;
-  source: "managed-repos";
+  source: "managed-repos" | "instance-registry";
   health: RepoDashboardHealth;
   telemetry: RepoDashboardTelemetry;
   settings: RepoDashboardSettings;
@@ -59,7 +64,9 @@ export interface RepoDashboardEntry {
 
 export interface RepoDashboardResult {
   generated_at: string;
-  source: "managed-repos";
+  source: "managed-repos" | "instance-registry+managed-repos";
+  /** Absent only for standalone route callers that did not configure a registry read. */
+  registry?: { state: "verified" } | { state: "unavailable"; reason: string };
   repos: RepoDashboardEntry[];
 }
 
@@ -176,7 +183,7 @@ export function projectRepoTelemetry(
   };
 }
 
-function toDashboardEntry(repo: ManagedRepo, t: RepoTelemetry): RepoDashboardEntry {
+function toDashboardEntry(repo: ManagedRepo, t: RepoTelemetry, source: RepoDashboardEntry["source"] = "managed-repos"): RepoDashboardEntry {
   const id = `${repo.owner}/${repo.repo}`;
   return {
     id,
@@ -185,7 +192,7 @@ function toDashboardEntry(repo: ManagedRepo, t: RepoTelemetry): RepoDashboardEnt
     connected_at: null,
     active: null,
     managed: true,
-    source: "managed-repos",
+    source,
     health: {
       status: "unknown",
       queuedtasks: t.queuedtasks,
@@ -309,10 +316,12 @@ async function statStamp(path: string): Promise<string> {
   }
 }
 
-/** GET /v1/repos — the validated, read-only managed-repo portfolio. */
+/** GET /v1/repos — connected instances plus the independent issue-intake managed set. */
 export function buildRepoDashboardRoute(deps: {
   /** Repository root containing the managed-repos state file. */
   root: string;
+  /** The same repo-tracked registry path served by GET /v1/registry; optional for standalone callers. */
+  repoRegistryPath?: string;
   /** Injectable clock for a stable generated_at and telemetry window in route tests. */
   clock?: Clock;
   /** The daemon ledger; omitted means every ledger-derived field stays null. */
@@ -357,13 +366,41 @@ export function buildRepoDashboardRoute(deps: {
     scope: "read",
     handler: async (_req, res) => {
       const managed = loadManagedRepos(deps.root);
-      const measured = managed.length > 0 && deps.ledgerPath !== undefined ? await measure(managed, deps.ledgerPath) : undefined;
+      let registry: { state: "verified"; repos: ManagedRepo[] } | { state: "unavailable"; reason: string } | undefined;
+      if (deps.repoRegistryPath) {
+        try {
+          const parsed = parseInstanceRegistry(await readFile(deps.repoRegistryPath, "utf8"));
+          registry = {
+            state: "verified",
+            repos: parsed.instances.filter((instance) => instance.live).map((instance) => {
+              const [owner, repo] = instance.repo.split("/");
+              return { owner, repo };
+            }),
+          };
+        } catch (error) {
+          // Keep the known managed rows, but name the missing registry evidence. Never expose its
+          // host path in a browser response or pretend core is absent from the fleet.
+          registry = { state: "unavailable", reason: error instanceof InstanceRegistryError ? error.code : "unreadable" };
+        }
+      }
+      const byIdentity = new Map<string, { repo: ManagedRepo; source: RepoDashboardEntry["source"] }>();
+      if (registry?.state === "verified") {
+        for (const repo of registry.repos) byIdentity.set(`${repo.owner}/${repo.repo}`.toLowerCase(), { repo, source: "instance-registry" });
+      }
+      for (const repo of managed) {
+        const key = `${repo.owner}/${repo.repo}`.toLowerCase();
+        if (!byIdentity.has(key)) byIdentity.set(key, { repo, source: "managed-repos" });
+      }
+      const identities = [...byIdentity.values()];
+      const repos = identities.map((identity) => identity.repo);
+      const measured = repos.length > 0 && deps.ledgerPath !== undefined ? await measure(repos, deps.ledgerPath) : undefined;
       if (measured && !measured.outcome.ok) throw new RepoTelemetryUnavailableError(measured.outcome.reason);
-      const telemetry = measured?.outcome.ok ? measured.outcome.telemetry : managed.map(() => UNKNOWN);
+      const telemetry = measured?.outcome.ok ? measured.outcome.telemetry : repos.map(() => UNKNOWN);
       const body: RepoDashboardResult = {
         generated_at: measured ? fixedClock(measured.atMs).iso() : clock.iso(),
-        source: "managed-repos",
-        repos: managed.map((repo, i) => toDashboardEntry(repo, telemetry[i])),
+        source: registry?.state === "verified" ? "instance-registry+managed-repos" : "managed-repos",
+        ...(registry ? { registry: registry.state === "verified" ? { state: "verified" as const } : registry } : {}),
+        repos: identities.map((identity, i) => toDashboardEntry(identity.repo, telemetry[i], identity.source)),
       };
       sendJson(res, 200, body);
     },
