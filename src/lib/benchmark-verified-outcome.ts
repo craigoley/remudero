@@ -1,4 +1,4 @@
-import type { TaskCaseFile } from "./task-case-file.js";
+import type { TaskCaseFile, TaskCaseRun } from "./task-case-file.js";
 
 /** Private checkpoint keys are used only for the join; public groups contain no task or run ID. */
 export interface VerifiedAssignment {
@@ -40,6 +40,13 @@ export interface BenchmarkVerifiedOutcome {
 const timestamp = (value: unknown): value is string => typeof value === "string"
   && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(value)
   && Number.isFinite(Date.parse(value));
+
+/** A run's outcome is shared by EVERY assignment it wrote (W1-T4646); a case file from before
+ * `assignmentIds` existed falls back to the single last `assignmentId` it recorded. */
+function runWroteAssignment(run: TaskCaseRun, assignmentId: string): boolean {
+  const written = Array.isArray(run.assignmentIds) ? run.assignmentIds : [run.assignmentId];
+  return written.includes(assignmentId);
+}
 
 /** No worker-call result, ledger verdict, or closed PR can independently award completion. */
 export function joinVerifiedTaskOutcomes(
@@ -86,7 +93,7 @@ export function joinVerifiedTaskOutcomes(
         const pr = file.pr?.state === "observed" ? file.pr.value : null;
         const merged = file.mergedSource?.state === "observed" ? file.mergedSource.value : null;
         if (!run) reason = "run-not-in-case-file";
-        else if (run.assignmentId !== assignment.assignmentId) reason = "assignment-run-mismatch";
+        else if (!runWroteAssignment(run, assignment.assignmentId)) reason = "assignment-run-mismatch";
         else if (!pr) reason = "current-pr-unavailable";
         else if (run.prNumber !== pr.number) reason = "run-pr-mismatch";
         else if (pr.state === "OPEN") { disposition = "censored"; reason = "open-at-cutoff"; }

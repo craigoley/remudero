@@ -110,7 +110,7 @@ import { ghJson, GH_RATE_LIMIT_BUCKET_UNKNOWN } from "./github-transport.js";
 import { worktreesDir, readWorktreeBase } from "./worker.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { systemClock } from "./clock.js";
-import { buildTaskCaseFile, readTaskCaseLedger, type CaseLedgerRead, type CasePrRead, type CasePrSnapshot } from "./task-case-file.js";
+import { buildTaskCaseFile, readTaskCaseLedger, readTaskCaseLedgers, type CaseLedgerRead, type CasePrRead, type CasePrSnapshot, type TaskCaseFile } from "./task-case-file.js";
 import type { Task } from "./plan.js";
 
 /** Repository facts are resolved once by the CLI entrypoint and passed across this module
@@ -850,6 +850,8 @@ export interface CaseFileCommandInput extends ReportRepoContext {
   readGhPr?: typeof ghJson;
   readTask?: (taskId: string) => Task | undefined;
   readLedger?: (stateDir: string, taskId: string, asOf: string) => Promise<CaseLedgerRead>;
+  /** The batch form's ONE union pass for every requested task. */
+  readLedgers?: (stateDir: string, taskIds: readonly string[], asOf: string) => Promise<Map<string, CaseLedgerRead>>;
   readProjection?: (task: Task, ledger: CaseLedgerRead) => StatusProjection | undefined;
   readPr?: (number: number, owner: string, repo: string, readAt: string) => CasePrRead;
   nowIso?: () => string;
@@ -859,21 +861,45 @@ export interface CaseFileCommandInput extends ReportRepoContext {
   usage?: string;
 }
 
-/** `rmd case-file`: one task, bounded local ledger union, batched board read, one exact PR read. */
-export async function caseFileCommand(rest: string[], deps: CaseFileCommandInput = {}): Promise<number> {
-  const out = deps.out ?? ((line: string) => console.log(line));
-  const err = deps.err ?? ((line: string) => console.error(line));
-  const taskId = rest[0];
-  if (!taskId || !/^W\d+-T\d+$/.test(taskId) || rest.some((arg, index) => index > 0 && arg !== "--json")) {
-    err(`rmd case-file: expected <task-id> [--json]\n${deps.usage ?? ""}`);
-    return 2;
+/**
+ * BACKSTOP: the batch form's per-task GitHub reads are sequential, one PR view each. A cohort
+ * snapshot (27 tasks in the 2026-09-27 A/A) sits far below this; a list beyond it is refused
+ * whole rather than issuing an unbounded run of reads.
+ */
+export const MAX_CASE_FILE_BATCH_TASKS = 200;
+
+const CASE_FILE_TASK_ID = /^W\d+-T\d+$/;
+
+/** `--tasks <id,id,...>` and `--tasks-file <path>` (ids split on commas or whitespace), deduped in order. */
+function caseFileBatchIds(rest: string[]): string[] | string {
+  const ids: string[] = [];
+  for (let index = 0; index < rest.length; index += 1) {
+    const flag = rest[index];
+    if (flag === "--json") continue;
+    const value = rest[index + 1];
+    if ((flag !== "--tasks" && flag !== "--tasks-file") || value === undefined) return `unexpected argument ${flag}`;
+    index += 1;
+    let text = value;
+    if (flag === "--tasks-file") {
+      try { text = readFileSync(value, "utf8"); }
+      catch {
+        const reason = `--tasks-file ${value} is unreadable`;
+        return reason;
+      }
+    }
+    ids.push(...text.split(/[\s,]+/).filter(Boolean));
   }
-  const root = reportRepoRoot(deps);
-  const asOf = (deps.nowIso ?? (() => systemClock.iso()))();
-  const task = deps.readTask ? deps.readTask(taskId) : loadPlan(resolveRepoLayout(root).planMonolith).byId.get(taskId);
-  if (!task) { err(`rmd case-file: ${taskId} is not in the plan`); return 2; }
-  const stateDir = deps.stateDir ?? join((deps.loadConfig ?? loadConfig)().root, "state");
-  const ledger = await (deps.readLedger ?? readTaskCaseLedger)(stateDir, taskId, asOf);
+  const unique = [...new Set(ids)];
+  const invalid = unique.find((id) => !CASE_FILE_TASK_ID.test(id));
+  if (invalid !== undefined) return `${invalid} is not a task id`;
+  if (unique.length === 0) return "no task ids given";
+  if (unique.length > MAX_CASE_FILE_BATCH_TASKS) return `${unique.length} task ids exceed the batch bound of ${MAX_CASE_FILE_BATCH_TASKS}`;
+  return unique;
+}
+
+/** One task's GitHub side: the batched board read (shared across a batch) and one exact PR read. */
+function assembleCaseFile(task: Task, ledger: CaseLedgerRead, asOf: string, root: string, deps: CaseFileCommandInput,
+  github: (owner: string, repo: string) => ReturnType<typeof buildBatchedGithub>): TaskCaseFile {
   let projection: StatusProjection | undefined;
   let prRead: CasePrRead = { state: "unavailable", reason: "github-not-read" };
   let ownerRepo: { owner: string; repo: string } | undefined;
@@ -882,7 +908,7 @@ export async function caseFileCommand(rest: string[], deps: CaseFileCommandInput
     projection = deps.readProjection ? deps.readProjection(task, ledger) : deriveStatus(task, {
       ledgerPath: ledgerPathFor((deps.loadConfig ?? loadConfig)()),
       readLedger: () => ledger.state === "observed" ? ledger.rows : [],
-      github: (deps.buildGithub ?? buildBatchedGithub)(ownerRepo.owner, ownerRepo.repo),
+      github: github(ownerRepo.owner, ownerRepo.repo),
     });
     if (projection?.prNumber !== undefined) {
       prRead = deps.readPr ? deps.readPr(projection.prNumber, ownerRepo.owner, ownerRepo.repo, asOf)
@@ -894,9 +920,39 @@ export async function caseFileCommand(rest: string[], deps: CaseFileCommandInput
   } catch (error) {
     prRead = { state: "unavailable", reason: `github-read-failed:${error instanceof Error ? error.name : "unknown"}` };
   }
-  const file = buildTaskCaseFile({ task, projection, ledger, prRead, asOf });
+  return buildTaskCaseFile({ task, projection, ledger, prRead, asOf });
+}
+
+/** `rmd case-file`: one task (or a `--tasks` batch under one asOf and ONE ledger union pass),
+ * bounded local ledger union, batched board read, one exact PR read per task. */
+export async function caseFileCommand(rest: string[], deps: CaseFileCommandInput = {}): Promise<number> {
+  const out = deps.out ?? ((line: string) => console.log(line));
+  const err = deps.err ?? ((line: string) => console.error(line));
+  const batch = rest.includes("--tasks") || rest.includes("--tasks-file");
+  const taskIds = batch ? caseFileBatchIds(rest) : [rest[0]];
+  if (typeof taskIds === "string" || (!batch && (!rest[0] || !CASE_FILE_TASK_ID.test(rest[0])
+    || rest.some((arg, index) => index > 0 && arg !== "--json")))) {
+    err(typeof taskIds === "string" ? `rmd case-file: expected --tasks <id,id,...> [--tasks-file <path>] [--json] (${taskIds})\n${deps.usage ?? ""}`
+      : `rmd case-file: expected <task-id> [--json]\n${deps.usage ?? ""}`);
+    return 2;
+  }
+  const root = reportRepoRoot(deps);
+  const asOf = (deps.nowIso ?? (() => systemClock.iso()))();
+  let plan: Plan | undefined;
+  const tasks: Task[] = [];
+  for (const taskId of taskIds) {
+    const task = deps.readTask ? deps.readTask(taskId) : (plan ??= loadPlan(resolveRepoLayout(root).planMonolith)).byId.get(taskId);
+    if (!task) { err(`rmd case-file: ${taskId} is not in the plan`); return 2; }
+    tasks.push(task);
+  }
+  const stateDir = deps.stateDir ?? join((deps.loadConfig ?? loadConfig)().root, "state");
+  const ledgers = batch ? await (deps.readLedgers ?? readTaskCaseLedgers)(stateDir, taskIds, asOf)
+    : new Map([[taskIds[0], await (deps.readLedger ?? readTaskCaseLedger)(stateDir, taskIds[0], asOf)]]);
+  let gateway: ReturnType<typeof buildBatchedGithub> | undefined;
+  const github = (owner: string, repo: string) => gateway ??= (deps.buildGithub ?? buildBatchedGithub)(owner, repo);
+  const files = tasks.map((task) => assembleCaseFile(task, ledgers.get(task.id)!, asOf, root, deps, github));
   // JSON is also the default so every evidence state, source, and as-of remains machine-readable.
-  out(JSON.stringify(file, null, 2));
+  out(JSON.stringify(batch ? files : files[0], null, 2));
   return 0;
 }
 

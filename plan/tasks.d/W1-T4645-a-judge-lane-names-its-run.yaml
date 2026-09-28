@@ -1,0 +1,41 @@
+- id: W1-T4645
+  title: "THE VERIFY-HUMAN AND ESCALATION JUDGES SPAWN WITHOUT A RUN — neither lane passes a run id or config to its spawn, so their receipts read *-unassigned and cannot join a task or an assignment"
+  repo: remudero
+  depends_on: ["W1-T4639"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-28: follow-ups from the W1-T4639 build (PR 7518), operator asked to file both"
+  plan_refs: ["W1-T4639", "W1-T4616", "W1-T4620"]
+  files:
+    - src/lib/verify-human-judge.ts
+    - src/lib/escalate.ts
+    - src/run-task.ts
+    - test/a-judge-lane-names-its-run.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-28 by the W1-T4639 build (PR 7518): `verify-human-judge` (src/lib/verify-human-
+    judge.ts, `benchmarkNonDispatchSpawn("verify-human-judge")`; run-task.ts
+    `ledgeredNonDispatchSpawn("verify-human-judge")`) and `escalation-summary` (src/lib/escalate.ts)
+    pass no run id or config into their spawn arguments, so their receipts carry `*-unassigned`
+    identifiers and no task join. These two lanes produced the 1381 id-less failure receipts in the
+    week to 2026-09-27 (test pollution, fixed by W1-T4616), and they are two of the three surfaces
+    W1-T4620's shadow judges sample, whose agreement rows need the same join. W1-T4639 deliberately
+    did not thread config through, because that could change which config the worker routes under.
+  design: |
+    Thread the judged task's id and a per-decision run id into both lanes' spawn arguments and
+    receipts so each assignment and receipt joins its task. Pass config only if the spawn already
+    resolves the same one; otherwise pass identity fields alone. Prove routing is unchanged: the
+    same provider, model and effort are selected with and without the new fields (a test asserts
+    identical selection). Receipts and attribution only; no spend or routing change.
+  acceptance:
+    - claim: "the verify-human and escalation judges record their task and run on each assignment and receipt, and the selected provider, model and effort are identical to before"
+      proof: "unit test: test/a-judge-lane-names-its-run.test.ts"
+  falsifier: |
+    Revert the change: a verify-human judge receipt reads verify-human-judge-unassigned and joins no
+    task.

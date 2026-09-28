@@ -52,6 +52,12 @@ export interface LedgerMalformedRowFinding {
   resumeOffset?: number;
   /** Canonical leading ledger timestamp, when even a damaged row preserves it. Never raw text. */
   timestamp?: string;
+  /** The damaged row's first readable `task_id`/`run_id` values: bounded id tokens, never raw text. */
+  taskId?: string;
+  runId?: string;
+  /** Every distinct plan-task id (`W<n>-T<n>`) the damaged text names, so a per-task reader can
+   * tell a row that could be its own from an unrelated one without seeing the text. */
+  namedTaskIds?: string[];
 }
 
 export interface LedgerMalformedSource {
@@ -160,6 +166,13 @@ function parseObject(raw: string): Record<string, unknown> | undefined {
 
 /** A damaged archive row can still carry a bounded timestamp if its canonical leading field
  * survived. Keep only this scalar, never the offending line. */
+function damagedRowIdentity(line: string): Pick<LedgerMalformedRowFinding, "taskId" | "runId" | "namedTaskIds"> {
+  const taskId = /"task_id":"([A-Za-z0-9._:-]{1,160})"/.exec(line)?.[1];
+  const runId = /"run_id":"([A-Za-z0-9._:-]{1,160})"/.exec(line)?.[1];
+  const named = [...new Set(line.match(/(?<![A-Za-z0-9])W\d+-T\d+/g) ?? [])].sort();
+  return { ...(taskId ? { taskId } : {}), ...(runId ? { runId } : {}), ...(named.length ? { namedTaskIds: named } : {}) };
+}
+
 function leadingTimestamp(line: string): { timestamp?: string } {
   const match = /^\{"ts":"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z)"/.exec(line);
   if (!match || !Number.isFinite(Date.parse(match[1])) || new Date(match[1]).toISOString() !== match[1]) return {};
@@ -380,6 +393,7 @@ export async function* openLedgerUnion(
             rowOrdinal,
             kind: badKind ?? "non-object",
             ...(entry.path === livePath ? {} : leadingTimestamp(line)),
+            ...damagedRowIdentity(line),
           };
           if (entry.path === livePath) pendingLiveBad = finding;
           else opts.onMalformedRow?.(finding);

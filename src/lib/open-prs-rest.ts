@@ -644,6 +644,8 @@ export interface MergeStateObservation {
   state?: MergeState;
   mergeable?: boolean;
   mergeableState?: string;
+  mergeCommitSha?: string;
+  headSha?: string;
 }
 
 /** Bounded best-effort hydration; unknown or failed reads are omitted, never guessed. */
@@ -657,15 +659,24 @@ export function hydrateMergeStateObservations(
   const out = new Map<number, MergeStateObservation>();
   for (const n of prNumbers.slice(0, cap)) {
     try {
-      const row = fetch(singlePrRestArgs(owner, repo, n)) as { mergeable_state?: string | null; mergeable?: boolean | null };
+      const row = fetch(singlePrRestArgs(owner, repo, n)) as {
+        mergeable_state?: string | null;
+        mergeable?: boolean | null;
+        merge_commit_sha?: string | null;
+        head?: { sha?: string | null } | null;
+      };
       const state = mergeStateFromRest(row);
       const mergeableState = typeof row.mergeable_state === "string" ? row.mergeable_state.toLowerCase() : undefined;
       const mergeable = typeof row.mergeable === "boolean" ? row.mergeable : undefined;
+      const mergeCommitSha = typeof row.merge_commit_sha === "string" && row.merge_commit_sha !== "" ? row.merge_commit_sha : undefined;
+      const headSha = row.head && typeof row.head.sha === "string" && row.head.sha !== "" ? row.head.sha : undefined;
       if (state !== undefined || mergeableState !== undefined || mergeable !== undefined) {
         out.set(n, {
           ...(state === undefined ? {} : { state }),
           ...(mergeableState === undefined ? {} : { mergeableState }),
           ...(mergeable === undefined ? {} : { mergeable }),
+          ...(mergeCommitSha === undefined ? {} : { mergeCommitSha }),
+          ...(headSha === undefined ? {} : { headSha }),
         });
       }
     } catch {
@@ -686,6 +697,217 @@ export function hydrateMergeStates(
   const out = new Map<number, MergeState>();
   for (const [n, observation] of hydrateMergeStateObservations(owner, repo, prNumbers, fetch, cap)) {
     if (observation.state !== undefined) out.set(n, observation.state);
+  }
+  return out;
+}
+
+/** W1-T3980 — REST-only scanner-blocker read for an armed, green, `blocked` PR; its safety case is documented on
+ *  `repairableCodeqlBlocker` (sweep.ts). Every failed or truncated read is a named `unreadable`, never absence. */
+export const SCANNER_BLOCKER_HYDRATION_CAP = 3; // BACKSTOP: above the one-at-a-time population (#1579, #7495); 3 REST reads each
+export const SCANNER_DIAGNOSTIC_MAX_CHARS = 400; // PRIMARY CONTROL: sizes the untrusted scanner text a repair prompt carries
+const SCANNER_PAGE_SIZE = 100; // one full REST page; a response this long may be truncated, so reads as unreadable
+const CODE_SCANNING_BOT_LOGIN = "github-advanced-security[bot]"; // the author of every code-scanning review thread
+
+export interface ScannerBlockerCandidateInput {
+  autoMergeArmed: boolean;
+  isDraft?: boolean;
+  checksState: string;
+  reviewState: string;
+  mergeable?: boolean;
+  mergeableState?: string;
+}
+
+export function isScannerBlockerCandidate(pr: ScannerBlockerCandidateInput): boolean {
+  return (
+    pr.autoMergeArmed === true &&
+    pr.isDraft !== true &&
+    pr.checksState === "green" &&
+    pr.reviewState === "success" &&
+    pr.mergeable === true &&
+    pr.mergeableState === "blocked"
+  );
+}
+
+export interface ScannerAlertIdentity {
+  alertNumber: number;
+  ruleId: string;
+  path: string;
+  line: number;
+  message: string; // bounded to SCANNER_DIAGNOSTIC_MAX_CHARS; untrusted scanner text
+}
+
+export type ScannerBlockerAmbiguity = "unreadable" | "stale" | "multiple" | "non-codeql" | "human-thread" | "unthreaded";
+
+export type ScannerBlockerObservation =
+  | { kind: "codeql-singleton"; headSha: string; mergeCommitSha: string; alert: ScannerAlertIdentity }
+  | { kind: "ambiguous"; cause: ScannerBlockerAmbiguity; detail: string }
+  | { kind: "base-behind"; behindBy: number }
+  | { kind: "no-scanner-alert" };
+
+export function scannerAlertsRestArgs(owner: string, repo: string, prNumber: number): string[] {
+  return ["api", `repos/${owner}/${repo}/code-scanning/alerts?ref=refs/pull/${prNumber}/merge&state=open&per_page=${SCANNER_PAGE_SIZE}`];
+}
+
+export function reviewCommentsRestArgs(owner: string, repo: string, prNumber: number): string[] {
+  return ["api", `repos/${owner}/${repo}/pulls/${prNumber}/comments?per_page=${SCANNER_PAGE_SIZE}`];
+}
+
+export interface ScannerBlockerCandidate {
+  number: number;
+  headSha: string;
+  merge?: MergeStateObservation;
+}
+
+function ambiguousScanner(cause: ScannerBlockerAmbiguity, detail: string): ScannerBlockerObservation {
+  return { kind: "ambiguous", cause, detail: detail.slice(0, SCANNER_DIAGNOSTIC_MAX_CHARS) };
+}
+
+interface RestScannerAlert {
+  number?: unknown;
+  rule?: { id?: unknown } | null;
+  tool?: { name?: unknown } | null;
+  most_recent_instance?: {
+    ref?: unknown;
+    commit_sha?: unknown;
+    message?: { text?: unknown } | null;
+    location?: { path?: unknown; start_line?: unknown } | null;
+  } | null;
+}
+
+interface RestReviewComment {
+  body?: unknown;
+  user?: { login?: unknown; type?: unknown } | null;
+}
+
+function threadCitesAlert(comment: RestReviewComment, alertNumber: number): boolean {
+  const body = typeof comment.body === "string" ? comment.body : "";
+  const needle = `/security/code-scanning/${alertNumber}`;
+  for (let at = body.indexOf(needle); at !== -1; at = body.indexOf(needle, at + 1)) {
+    const next = body.charAt(at + needle.length);
+    if (next < "0" || next > "9") return true;
+  }
+  return false;
+}
+
+export function classifyScannerBlocker(
+  candidate: ScannerBlockerCandidate,
+  alerts: unknown,
+  comments: unknown,
+): ScannerBlockerObservation {
+  if (!Array.isArray(alerts) || alerts.length >= SCANNER_PAGE_SIZE) {
+    return ambiguousScanner("unreadable", "code-scanning alert listing was not a complete page");
+  }
+  if (!Array.isArray(comments) || comments.length >= SCANNER_PAGE_SIZE) {
+    return ambiguousScanner("unreadable", "review comment listing was not a complete page");
+  }
+  const threads = comments as RestReviewComment[];
+  const foreign = threads.filter((c) => (c.user ? c.user.login : undefined) !== CODE_SCANNING_BOT_LOGIN);
+  const humans = foreign.filter((c) => (c.user ? c.user.type : undefined) !== "Bot");
+  if (humans.length > 0) {
+    return ambiguousScanner("human-thread", `${humans.length} review comment(s) not authored by a bot`);
+  }
+  if (foreign.length > 0) {
+    return ambiguousScanner("non-codeql", `${foreign.length} review comment(s) authored by a bot other than code scanning`);
+  }
+  const rows = alerts as RestScannerAlert[];
+  const nonCodeql = rows.filter((a) => (a.tool ? a.tool.name : undefined) !== "CodeQL");
+  if (nonCodeql.length > 0) {
+    return ambiguousScanner("non-codeql", `${nonCodeql.length} open alert(s) from a tool other than CodeQL`);
+  }
+  if (rows.length === 0) return { kind: "no-scanner-alert" };
+  if (rows.length > 1) {
+    return ambiguousScanner("multiple", `${rows.length} open CodeQL alerts on this merge ref`);
+  }
+  const alert = rows[0];
+  const instance = alert.most_recent_instance ?? undefined;
+  const location = instance ? instance.location ?? undefined : undefined;
+  const ruleId = alert.rule ? alert.rule.id : undefined;
+  const text = instance && instance.message ? instance.message.text : undefined;
+  if (
+    typeof alert.number !== "number" ||
+    typeof ruleId !== "string" ||
+    instance === undefined ||
+    location === undefined ||
+    typeof location.path !== "string" ||
+    typeof location.start_line !== "number"
+  ) {
+    return ambiguousScanner("unreadable", "the CodeQL alert lacked a number, rule id or location");
+  }
+  const mergeRef = `refs/pull/${candidate.number}/merge`;
+  if (instance.ref !== mergeRef) {
+    return ambiguousScanner("stale", `alert #${alert.number} was observed on ${String(instance.ref)}, not ${mergeRef}`);
+  }
+  const merge = candidate.merge ?? {};
+  const mergeCommitSha = merge.mergeCommitSha;
+  if (mergeCommitSha === undefined || instance.commit_sha !== mergeCommitSha) {
+    return ambiguousScanner("stale", `alert #${alert.number} was analysed at a merge commit other than the current one`);
+  }
+  if (merge.headSha !== candidate.headSha) {
+    return ambiguousScanner("stale", `the PR head moved between the listing and the merge-fact read`);
+  }
+  const alertNumber = alert.number;
+  if (!threads.some((c) => threadCitesAlert(c, alertNumber))) {
+    return ambiguousScanner("unthreaded", `no code-scanning review thread cites alert #${alertNumber}`);
+  }
+  return {
+    kind: "codeql-singleton",
+    headSha: candidate.headSha,
+    mergeCommitSha,
+    alert: {
+      alertNumber,
+      ruleId,
+      path: location.path,
+      line: location.start_line,
+      message: (typeof text === "string" ? text : "").slice(0, SCANNER_DIAGNOSTIC_MAX_CHARS),
+    },
+  };
+}
+
+export function observeScannerBlocker(
+  owner: string,
+  repo: string,
+  candidate: ScannerBlockerCandidate,
+  fetch: GhApiFetcher,
+): ScannerBlockerObservation {
+  let behindBy: unknown;
+  try {
+    const compare = fetch(["api", `repos/${owner}/${repo}/compare/${candidate.headSha}...main`]) as { ahead_by?: unknown } | null;
+    behindBy = compare ? compare.ahead_by : undefined;
+  } catch {
+    const reason = "the head-to-main compare read failed";
+    return ambiguousScanner("unreadable", reason);
+  }
+  if (typeof behindBy !== "number" || !Number.isFinite(behindBy)) {
+    return ambiguousScanner("unreadable", "the head-to-main compare carried no distance");
+  }
+  if (behindBy > 0) return { kind: "base-behind", behindBy };
+  let alerts: unknown;
+  let comments: unknown;
+  try {
+    alerts = fetch(scannerAlertsRestArgs(owner, repo, candidate.number));
+  } catch {
+    const reason = "the code-scanning alert read failed";
+    return ambiguousScanner("unreadable", reason);
+  }
+  try {
+    comments = fetch(reviewCommentsRestArgs(owner, repo, candidate.number));
+  } catch {
+    const reason = "the review comment read failed";
+    return ambiguousScanner("unreadable", reason);
+  }
+  return classifyScannerBlocker(candidate, alerts, comments);
+}
+
+export function hydrateScannerBlockerObservations(
+  owner: string,
+  repo: string,
+  candidates: readonly ScannerBlockerCandidate[],
+  fetch: GhApiFetcher,
+  cap: number = SCANNER_BLOCKER_HYDRATION_CAP,
+): Map<number, ScannerBlockerObservation> {
+  const out = new Map<number, ScannerBlockerObservation>();
+  for (const candidate of candidates.slice(0, cap)) {
+    out.set(candidate.number, observeScannerBlocker(owner, repo, candidate, fetch));
   }
   return out;
 }

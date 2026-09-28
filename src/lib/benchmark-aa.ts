@@ -489,6 +489,8 @@ export interface BenchmarkAaReport {
   maturity: { cutoff: string; mature: boolean; censored: number; unavailable: number };
   invoice: { state: "observed"; usd: number; attribution: "trial-level-not-per-arm" } | { state: "unavailable"; reason: string };
   evalCard: EvalCard | null;
+  /** The exact trial and evidence `evalCard` was built from, so a reader can serve the same card. */
+  evalCardInput: { trial: EvalCardTrial; evidence: EvalCardEvidence } | null;
   findings: AaFinding[];
   recommendations: string[];
   receipt: AaIntegrityReceipt;
@@ -570,7 +572,7 @@ function staleOrUnavailable(input: BenchmarkAaReportInput, allocation: AaAllocat
     lateEvidence: { state: "no-prior", rows: 0, affectedArms: [] },
     sampleRatio: { allocated: unknown, exposed: unknown }, arms: null, strata: [],
     maturity: { cutoff: input.nowIso, mature: false, censored: 0, unavailable: 0 },
-    invoice: { state: "unavailable", reason }, evalCard: null, findings: [sourceFinding], recommendations: [],
+    invoice: { state: "unavailable", reason }, evalCard: null, evalCardInput: null, findings: [sourceFinding], recommendations: [],
   });
 }
 
@@ -726,7 +728,7 @@ export function buildBenchmarkAaReport(input: BenchmarkAaReportInput): Benchmark
       censored: count((arm) => arm.outcomes.censored), unavailable: count((arm) => arm.outcomes.unavailable) },
     invoice: manifest.invoice ? { state: "observed", usd: manifest.invoice.usd, attribution: "trial-level-not-per-arm" }
       : { state: "unavailable", reason: "no-invoice-receipt" },
-    evalCard, findings,
+    evalCard, evalCardInput: { trial, evidence: cardEvidence }, findings,
     recommendations: [...new Set(concerns.map((item) => RECOMMENDATIONS[item.kind.split(":")[0]!])
       .filter((line): line is string => line !== undefined))],
   });

@@ -22,8 +22,10 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
  * nothing watched it: the fix lane's missing served model, the reviewer's missing assignment and the
  * transcript's wrong label were each found by a one-off census. This gardener reads that projection
  * PER LANE on a cadence and, when a lane's coverage of a required field falls below its own trailing
- * baseline — or the field is absent outright — files or updates ONE dedup-keyed feedback follow-up
- * naming the lane, the field, the denominator and the first-seen time.
+ * baseline, sits under the field's absolute floor, or is absent outright, files or updates ONE
+ * dedup-keyed feedback follow-up naming the lane, the field, the denominator and the first-seen time.
+ * A reading under the floor never becomes a baseline (W1-T4640): a lane that was broken from its
+ * first pass would otherwise be adopted as healthy and never filed.
  *
  * IT NEVER GATES. It returns no verdict any merge, review or dispatch path reads; a gap is feedback
  * for triage to turn into a task. Its OWN failures are visible: a filer that throws is logged and the
@@ -34,6 +36,24 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
  *  served model, measured tokens and cost. */
 export const EVIDENCE_COVERAGE_FIELDS = ["assignment", "outcome", "servedModel", "tokens", "cost"] as const;
 export type EvidenceCoverageField = (typeof EVIDENCE_COVERAGE_FIELDS)[number];
+
+/** PRIMARY CONTROL (W1-T4640): the floor for the assignment and outcome joins. In-flight rows cost a healthy join
+ *  up to a drop tolerance (best measured 0.91-1.0); the audit's broken joins read 0.002-0.68. */
+export const EVIDENCE_COVERAGE_JOIN_FLOOR = 0.8;
+
+/** PRIMARY CONTROL (W1-T4640): the floor for served model, tokens and cost, judged over joined calls that no
+ *  in-flight row depresses: healthy lanes read 0.93-1.0 on them, run-task's served model 0.48. */
+export const EVIDENCE_COVERAGE_MEASURED_FLOOR = 0.9;
+
+/** PRIMARY CONTROL: each required field's absolute floor — under it a lane-field is a gap whatever its
+ *  baseline, and the reading never becomes one. */
+export const EVIDENCE_COVERAGE_FLOORS: Readonly<Record<EvidenceCoverageField, number>> = {
+  assignment: EVIDENCE_COVERAGE_JOIN_FLOOR,
+  outcome: EVIDENCE_COVERAGE_JOIN_FLOOR,
+  servedModel: EVIDENCE_COVERAGE_MEASURED_FLOOR,
+  tokens: EVIDENCE_COVERAGE_MEASURED_FLOOR,
+  cost: EVIDENCE_COVERAGE_MEASURED_FLOOR,
+};
 
 /** PRIMARY CONTROL: a lane-field whose denominator is below this is reported insufficient, never a
  *  gap — a thin lane's ratio swings on one row and would file noise. */
@@ -236,20 +256,24 @@ export function laneFieldCoverage(snapshot: BenchmarkEvidenceSnapshot): Record<E
   };
 }
 
-export type CoverageGapKind = "absent" | "below-baseline";
+export type CoverageGapKind = "absent" | "below-baseline" | "below-floor";
 export type CoverageCellVerdict =
   | { kind: "insufficient" }
   | { kind: "healthy"; ratio: number }
   | { kind: "gap"; gap: CoverageGapKind };
 
 /** The pure decision for one lane-field: thin is insufficient; zero coverage is absent whatever the
- *  baseline; a fall of more than the tolerance under the baseline is a gap; anything else is healthy
- *  and becomes the new baseline. */
-export function judgeCoverageCell(count: CoverageCount, baseline: number | undefined): CoverageCellVerdict {
+ *  baseline; a fall of more than the tolerance under the baseline is a gap; a reading under `floor`
+ *  is a `below-floor` gap with or without a baseline; anything else is healthy and becomes the new
+ *  baseline. A drop from a healthy baseline keeps the more specific `below-baseline` name even when
+ *  it also lands under the floor. `floor` defaults to 0 (no floor); the gardener always passes the
+ *  field's {@link EVIDENCE_COVERAGE_FLOORS} entry. */
+export function judgeCoverageCell(count: CoverageCount, baseline: number | undefined, floor = 0): CoverageCellVerdict {
   if (count.denominator < EVIDENCE_COVERAGE_MIN_DENOMINATOR) return { kind: "insufficient" };
   const ratio = count.observed / count.denominator;
   if (count.observed === 0) return { kind: "gap", gap: "absent" };
   if (baseline !== undefined && ratio < baseline - EVIDENCE_COVERAGE_DROP_TOLERANCE) return { kind: "gap", gap: "below-baseline" };
+  if (ratio < floor) return { kind: "gap", gap: "below-floor" };
   return { kind: "healthy", ratio };
 }
 
@@ -295,6 +319,20 @@ function readState(path: string, log: EvidenceCoverageInput["log"]): EvidenceCov
   }
 }
 
+/** A baseline adopted under its field's floor — by a pass that predates the floor — is dropped, so the
+ *  lane is judged against the floor alone until a reading clears it. Returns the cells it changed. */
+function discardSubFloorBaselines(state: EvidenceCoverageState): string[] {
+  const discarded: string[] = [];
+  for (const [key, cell] of Object.entries(state.cells)) {
+    const floor = EVIDENCE_COVERAGE_FLOORS[key.slice(key.lastIndexOf("/") + 1) as EvidenceCoverageField] ?? 0;
+    if (cell.baseline === undefined || cell.baseline >= floor) continue;
+    delete cell.baseline;
+    delete cell.baselineAt;
+    discarded.push(key);
+  }
+  return discarded;
+}
+
 export interface EvidenceCoverageFollowup {
   /** The dedup key and feedback id. */
   id: string;
@@ -323,6 +361,8 @@ export interface EvidenceCoverageGap extends CoverageCount {
   field: EvidenceCoverageField;
   kind: CoverageGapKind;
   baseline?: number;
+  /** The field's absolute floor, carried on every gap so a `below-floor` follow-up can name it. */
+  floor: number;
   firstSeenAt: string;
 }
 
@@ -346,7 +386,9 @@ function gapFollowupRaw(gap: EvidenceCoverageGap): string {
   const ratio = gap.denominator > 0 ? gap.observed / gap.denominator : 0;
   const judged = gap.kind === "absent"
     ? "the field is absent: no row in the window records it"
-    : `trailing baseline ${pct(gap.baseline ?? 0)} — below it by more than ${pct(EVIDENCE_COVERAGE_DROP_TOLERANCE)}`;
+    : gap.kind === "below-floor"
+      ? `below the field's ${pct(gap.floor)} floor — a chronic gap no baseline excuses`
+      : `trailing baseline ${pct(gap.baseline ?? 0)} — below it by more than ${pct(EVIDENCE_COVERAGE_DROP_TOLERANCE)}`;
   return [
     `Evidence coverage gap (${EVIDENCE_COVERAGE_POLICY_VERSION}, over ${BENCHMARK_QUALITY_VERSION}): lane \`${gap.lane}\`, field \`${gap.field}\`.`,
     `Coverage: ${gap.observed}/${gap.denominator} ${FIELD_DENOMINATOR[gap.field]} (${pct(ratio)}) in the trailing ${EVIDENCE_COVERAGE_WINDOW_MS / 86_400_000}-day window; ${judged}.`,
@@ -384,6 +426,8 @@ export function runEvidenceCoverageGardener(deps: EvidenceCoverageInput): Eviden
   if (state.lastPassAt && now - Date.parse(state.lastPassAt) < EVIDENCE_COVERAGE_PASS_INTERVAL_MS) {
     return { ...result, ran: false, skipped: "not-due" };
   }
+  const discarded = discardSubFloorBaselines(state);
+  if (discarded.length > 0) deps.log("evidence_coverage.baseline_discarded", { cells: discarded, reason: "a baseline under its field's floor is a chronic gap, not a healthy reading" });
 
   let budget = EVIDENCE_COVERAGE_MAX_FILINGS_PER_PASS;
   const fileOnce = (open: OpenGap, digest: string, followup: Omit<EvidenceCoverageFollowup, "action">): void => {
@@ -430,7 +474,8 @@ export function runEvidenceCoverageGardener(deps: EvidenceCoverageInput): Eviden
         const key = `${lane}/${field}`;
         const cell = state.cells[key] ?? {};
         const count = coverage[field];
-        const verdict = judgeCoverageCell(count, cell.baseline);
+        const floor = EVIDENCE_COVERAGE_FLOORS[field];
+        const verdict = judgeCoverageCell(count, cell.baseline, floor);
         if (verdict.kind === "insufficient") {
           result.insufficient.push({ lane, field, denominator: count.denominator });
           continue;
@@ -442,7 +487,7 @@ export function runEvidenceCoverageGardener(deps: EvidenceCoverageInput): Eviden
         }
         const open: OpenGap = cell.gap?.kind === verdict.gap ? cell.gap : { kind: verdict.gap, firstSeenAt: cell.gap?.firstSeenAt ?? nowIso, ...(cell.gap?.filedDigest ? { filedDigest: cell.gap.filedDigest } : {}) };
         state.cells[key] = { ...cell, gap: open };
-        const gap: EvidenceCoverageGap = { lane, field, kind: open.kind, ...count, firstSeenAt: open.firstSeenAt, ...(cell.baseline !== undefined ? { baseline: cell.baseline } : {}) };
+        const gap: EvidenceCoverageGap = { lane, field, kind: open.kind, ...count, floor, firstSeenAt: open.firstSeenAt, ...(cell.baseline !== undefined ? { baseline: cell.baseline } : {}) };
         result.gaps.push(gap);
         // The digest moves on a whole-percent change, not on every new row, so a persisting gap
         // re-lands a handful of times rather than once per pass.

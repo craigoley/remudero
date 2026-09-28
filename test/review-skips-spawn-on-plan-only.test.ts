@@ -260,7 +260,10 @@ test("the outcome reports the skip only when a spawn REALLY did not happen — i
 test("DRIVEN CONTROL: the same harness on a plan+src diff STILL spawns — the skip is scoped to plan-only", async () => {
   const r = await driveReview(PLAN_PLUS_SRC_DIFF);
   console.log(`    PLAN+SRC   spawns=${r.spawns}  outcome=${r.outcome}`);
-  assert.equal(r.spawns, 1, `a diff carrying src/ must still spawn (spawns=${r.spawns}, outcome=${r.outcome}, summary=${r.summary}, steps=${r.steps.join(",")})`);
+  // W1-T4620 samples 5% of review decisions for a shadow judge on the same reviewer seam; the key
+  // hashes this checkout's content, so whether it fires moves with main. Count the primary only.
+  const shadowSpawns = r.steps.filter((step) => step === "shadow_judge.paired" || step === "shadow_judge.unavailable").length;
+  assert.equal(r.spawns - shadowSpawns, 1, `a diff carrying src/ must still spawn (spawns=${r.spawns}, shadow=${shadowSpawns}, outcome=${r.outcome}, summary=${r.summary}, steps=${r.steps.join(",")})`);
   assert.notEqual(r.outcome, "not_attempted_plan_only", "and must not report the plan-only skip");
   assert.ok(!r.steps.includes("review.reviewer.skipped"), "nor emit the skip row");
 });

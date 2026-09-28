@@ -63,14 +63,16 @@
     evidence, multiple alerts, and a positive-distance stale-blocked PR all refuse this new route.
     Deleting the exact singleton guard must make the mismatched-ref or human-thread assertion fail.
   acceptance:
-    - claim: "the open-PR gateway has the bounded merge-fact seam that will carry a named scanner blocker without inventing a successful read"
-      proof: "grep: hydrateMergeStateObservations in src/lib/open-prs-rest.ts"
-    - claim: "the sweep owns explicit raw merge-state handling rather than treating a blocked merge ref as a clean merge"
-      proof: "grep: mergeableState in src/lib/sweep.ts"
-    - claim: "the existing sweep carries a single gated update/repair effect rather than a per-PR unbounded loop"
-      proof: "grep: selectUpdateBranchTarget in src/lib/sweep.ts"
-    - claim: "the production gateway materializes OpenPrView fields in one audited object literal"
-      proof: "grep: buildOpenPrViews in src/run-task.ts"
+    - claim: "the open-PR gateway hydrates a bounded, typed scanner-blocker observation for the narrow armed-green-blocked population, never inventing a successful read"
+      proof: "grep: hydrateScannerBlockerObservations in src/lib/open-prs-rest.ts"
+    - claim: "exactly one fresh current-head CodeQL blocker on the task's own run branch is routed to the existing constrained fix worker on that PR branch"
+      proof: "grep: repairableCodeqlBlocker in src/lib/sweep.ts"
+    - claim: "the repair is ledgered with a PR, head and alert dedupe key before any worker starts, so an unchanged pass dispatches nothing"
+      proof: "grep: CODEQL_BLOCKER_DISPATCH_STEP in src/lib/sweep.ts"
+    - claim: "a human-authored, non-CodeQL, multiple, stale or unreadable thread is named blocked-ambiguous and never repaired, resolved or dismissed"
+      proof: "unit test: test/auto-merge-blocked-codeql-review-thread.test.ts"
+    - claim: "the production gateway carries the observation into the open-PR view"
+      proof: "grep: scannerBlocker: scannerBlockers in src/run-task.ts"
   status: queued
   attempts: 0
   origin: oper#observed-console-pr-1579-codeql-thread-2026-09-21

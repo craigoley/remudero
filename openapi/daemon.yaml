@@ -111,11 +111,11 @@ components:
         required_tier:
           type: string
           description: >
-            W1-T404 -- present only on a 403 refused for an insufficient WRITE TIER (once
-            src/lib/service.ts's `enforceWriteTiers` is turned on; not yet set by `rmd serve`'s
-            own production wiring). `low` (bookkeeping), `middle` (reversible but disruptive,
-            or a spend force multiplier) or `high` (spends money or moves code) -- the tier the
-            caller's token was missing, alongside `required_scope: write`.
+            W1-T404 -- present only on a 403 refused for an insufficient WRITE TIER by
+            src/lib/service.ts's dispatch gate, which `enforceWriteTiers` turns on and `rmd
+            serve`'s production wiring sets (W1-T500). `low` (bookkeeping), `middle` (reversible
+            but disruptive, or a spend force multiplier) or `high` (spends money or moves code)
+            -- the tier the caller's credential was missing, alongside `required_scope: write`.
           enum:
             - low
             - middle
@@ -309,7 +309,11 @@ components:
 
     RepoDashboardTelemetry:
       type: object
-      description: Per-repository telemetry, unavailable until a durable per-repo aggregation source exists.
+      description: >
+        Trailing seven-day per-repository worker telemetry from the ledger. Models are the distinct
+        provider-reported served models, never requested or routed model assignments. A null
+        modelsused means the ledger was unavailable or at least one worker row in the window did
+        not report its served model; an empty array means no worker rows ran in the window.
       required:
         - tokens7d
         - modelsused
@@ -318,7 +322,7 @@ components:
         tokens7d:
           type: [number, "null"]
         modelsused:
-          type: array
+          type: [array, "null"]
           items:
             type: string
         cost_7d:
@@ -402,6 +406,29 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/RepoDashboardEntry"
+
+    RegistryUnavailable:
+      type: object
+      description: >
+        GET /v1/registry's 503 body (src/lib/serve.ts's `buildRegistryRoute`): the repo registry
+        could not be read, or src/lib/instance-registry.ts's `parseInstanceRegistry` refused it.
+        Path-free on purpose -- an fs error embeds the absolute path, so only a code is echoed.
+        A dedicated refusal rather than a member of the shared Error enum, which a consumer
+        switches over exhaustively (packages/daemon-client-smoke).
+      required:
+        - error
+        - reason
+      properties:
+        error:
+          type: string
+          enum:
+            - registry_unavailable
+        reason:
+          type: string
+          description: >
+            `unreadable` when the file could not be read, else the parser's
+            `InstanceRegistryErrorCode` (`no_instances_block`, `malformed_line`,
+            `duplicate_instance`, ...).
 
     RegistryResult:
       type: object
@@ -642,8 +669,8 @@ components:
       description: >
         A bounded operator request to run the established repair or review command against one
         pull request in this daemon instance. The request is recorded for the daemon's next poll;
-        this HTTP route never starts a worker itself. HIGH-tier confirmation is required by the
-        service before this schema is accepted.
+        this HTTP route never starts a worker itself. The route is LOW tier (W1-T4077), so no
+        confirmation nonce precedes this body.
       additionalProperties: false
       required:
         - action
@@ -744,24 +771,141 @@ components:
           items:
             type: string
         origin:
-          type: string
-          enum:
-            - cli
-            - ui
-            - issue
+          description: >
+            src/lib/feedback.ts's `FeedbackOrigin`: a human capture method, or one of the
+            machine-origin shapes `isValidFeedbackOrigin` admits (`issue#<n>`, W1-T57;
+            `alert#<source>-<id>`, W1-T56; `repair#<surface>`, W1-T905; `incident#<sha256>`,
+            W1-T4385) naming the source that produced the entry.
+          oneOf:
+            - type: string
+              enum:
+                - cli
+                - ui
+                - issue
+            - type: string
+              pattern: "^(issue#[0-9]+|alert#(code-scanning|dependabot|secret-scanning)-.+|repair#[a-z][a-z-]*|incident#[0-9a-f]{64})$"
         status:
           type: string
+          description: >
+            The lifecycle (new -> grilling -> proposed -> accepted/rejected), plus `answered`
+            (W1-T2278): the terminal arm a `grilling` entry reaches once a reply names it, the
+            same write that sets `answered_by`.
           enum:
             - new
             - grilling
             - proposed
             - accepted
             - rejected
+            - answered
+        reply_to:
+          type:
+            - string
+            - "null"
+          description: >
+            W1-T2278 -- the `grilling` entry this entry answers, when captured through POST
+            /v1/feedback's `replyTo`; null otherwise.
+        answered_by:
+          type:
+            - string
+            - "null"
+          description: >
+            W1-T2278 -- the reverse edge of `reply_to`: the id of the entry that answered this one,
+            set in the same write that moves it to `answered`; null or absent otherwise.
+        thread_id:
+          type:
+            - string
+            - "null"
+          description: >
+            W1-T2496 -- the escalation thread this entry replies to, via POST
+            /v1/escalation/reply; a different edge than `reply_to`. Null when none.
+        submission_key:
+          type:
+            - string
+            - "null"
+          description: >
+            W1-T2302 -- the console-minted per-submission key a repeat of the same submit is
+            recognised by. Null when none was supplied.
         proposal_pr:
           type:
             - string
             - "null"
           description: Set once `rmd triage` opens a proposal PR for this entry; null until then.
+        summary:
+          type:
+            - object
+            - "null"
+          description: >
+            W1-T313 -- src/lib/feedback.ts's `DecisionSummary`, the plain-language decision card
+            generated once when the entry moves to `proposed`; null until then or on a summarizer
+            failure.
+          required:
+            - headline
+            - what_happened
+            - decision
+            - options
+          properties:
+            headline:
+              type: string
+            what_happened:
+              type: string
+            decision:
+              type: string
+            options:
+              type: array
+              items:
+                type: object
+                required:
+                  - label
+                  - consequence
+                properties:
+                  label:
+                    type: string
+                  consequence:
+                    type: string
+        expansion:
+          type:
+            - object
+            - "null"
+          description: >
+            W1-T350 -- src/lib/feedback.ts's `FeedbackExpansion`, attached at capture from the
+            console's preview; null when no preview ran.
+          required:
+            - claim
+            - evidence
+            - recon
+            - falsifying_check
+          properties:
+            claim:
+              type: string
+            evidence:
+              type: string
+            recon:
+              type: array
+              items:
+                type: string
+            falsifying_check:
+              type: string
+        upstream:
+          type: object
+          description: >
+            W1-T397 -- present only when a home-repo pointer is configured and this checkout is not
+            the home repo: whether the entry's upstream PR landed.
+          required:
+            - home
+            - status
+          properties:
+            home:
+              type: string
+              description: "`owner/repo` of the configured home repo."
+            status:
+              type: string
+              enum:
+                - landed
+                - unreachable
+            pr_url:
+              type: string
+            error:
+              type: string
         unverified:
           type: boolean
           description: >
@@ -1347,6 +1491,8 @@ components:
         source:
           type: string
           enum: [ledger]
+        presentation:
+          $ref: "#/components/schemas/OperatorAgentProposalPresentation"
 
     ContextRetention:
       type: object
@@ -1738,6 +1884,287 @@ components:
           type: string
           format: date-time
 
+    OperatorPreferenceScope:
+      type: object
+      description: W1-T3895 -- a learned preference belongs to one principal in one repository, optionally one surface.
+      required: [principalId, repository]
+      properties:
+        principalId:
+          type: string
+          minLength: 1
+        repository:
+          type: string
+          minLength: 1
+        surface:
+          type: string
+
+    OperatorPreferenceEffect:
+      type: object
+      description: The whole effect vocabulary. None of these can grant a capability, raise a budget, lower an approval level, or suppress a refusal.
+      required: [kind, value]
+      properties:
+        kind:
+          type: string
+          enum: [ordering, notification-style, clarification-wording]
+        value:
+          type: string
+          minLength: 1
+
+    OperatorPreferenceLifecycle:
+      type: string
+      enum: [proposed, accepted, rejected, corrected, opted_out, deleted, expired, unmeasurable]
+
+    OperatorPreferenceReceiptSummary:
+      type: object
+      required: [receiptId, action, lifecycle, at]
+      properties:
+        receiptId:
+          type: string
+        action:
+          type: string
+          enum: [accept, reject, correct, opt-out, delete]
+        lifecycle:
+          $ref: "#/components/schemas/OperatorPreferenceLifecycle"
+        at:
+          type: string
+          format: date-time
+
+    OperatorPreferenceProjection:
+      type: object
+      description: >
+        The `preference-hypothesis-v1` projection of one ledgered `operator-preference-v1` record
+        (src/lib/preference-policy.ts's `projectOperatorPreference`). Evidence is bounded decision
+        references only; a deleted preference withholds its anchors and explanation.
+      required: [version, preferenceId, scope, effect, evidence, confidence, freshness, expiresAt, explanation, application, lifecycle, source, observedAt, receipts]
+      properties:
+        version:
+          type: string
+          enum: [preference-hypothesis-v1]
+        preferenceId:
+          type: string
+        scope:
+          $ref: "#/components/schemas/OperatorPreferenceScope"
+        effect:
+          $ref: "#/components/schemas/OperatorPreferenceEffect"
+        evidence:
+          type: object
+          required: [summary, sampleFloor, sampleSize, source, observedAt, freshness]
+          properties:
+            summary:
+              type: string
+            sampleFloor:
+              type: integer
+            sampleSize:
+              type: integer
+            source:
+              type: string
+            observedAt:
+              type: string
+              format: date-time
+            freshness:
+              type: string
+              enum: [verified, stale]
+            anchors:
+              type: array
+              items:
+                type: string
+        confidence:
+          type: object
+          description: "`value` is 0 with `source` `insufficient` or `unmeasurable` when the evidence cannot measure the preference."
+          required: [value, source, sampleFloor]
+          properties:
+            value:
+              type: number
+            source:
+              type: string
+            sampleFloor:
+              type: integer
+        freshness:
+          type: string
+          enum: [verified, stale]
+        expiresAt:
+          type: string
+          format: date-time
+        explanation:
+          type: string
+        application:
+          type: object
+          required: [state, effect, nonAuthorityGuarantee, reason]
+          properties:
+            state:
+              type: string
+              enum: [applied, shadow, not_applied]
+            effect:
+              type: string
+            nonAuthorityGuarantee:
+              type: string
+              enum: [presentation_only]
+            reason:
+              type: string
+        lifecycle:
+          $ref: "#/components/schemas/OperatorPreferenceLifecycle"
+        source:
+          type: string
+        observedAt:
+          type: string
+          format: date-time
+        supersedes:
+          type: string
+          description: The earlier hypothesis for the same scope and effect this one replaced.
+        receipts:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperatorPreferenceReceiptSummary"
+
+    OperatorPreferenceList:
+      type: object
+      required: [source, stale, scope, preferences]
+      properties:
+        source:
+          type: string
+          enum: [ledger]
+        stale:
+          type: boolean
+        scope:
+          $ref: "#/components/schemas/OperatorPreferenceScope"
+        preferences:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperatorPreferenceProjection"
+
+    OperatorPreferenceProposalRequest:
+      type: object
+      description: Scope and effect only. Evidence, confidence, and authority are never accepted from the caller.
+      required: [scope, effect]
+      additionalProperties: false
+      properties:
+        scope:
+          $ref: "#/components/schemas/OperatorPreferenceScope"
+        effect:
+          $ref: "#/components/schemas/OperatorPreferenceEffect"
+
+    OperatorPreferenceProposalResult:
+      type: object
+      required: [ok, existing, preference]
+      properties:
+        ok:
+          type: boolean
+        existing:
+          type: boolean
+        preference:
+          $ref: "#/components/schemas/OperatorPreferenceProjection"
+
+    OperatorPreferenceActionRequest:
+      type: object
+      description: >
+        One operator action on one preference. `correction` is required to correct. A note is
+        ledgered only as present and a correction only as a digest; neither raw text is stored.
+      required: [preferenceId, scope]
+      additionalProperties: false
+      properties:
+        action:
+          type: string
+          enum: [accept, reject, correct, opt-out, delete]
+        preferenceId:
+          type: string
+          minLength: 1
+        scope:
+          $ref: "#/components/schemas/OperatorPreferenceScope"
+        note:
+          type: string
+        correction:
+          type: string
+        requestId:
+          type: string
+          description: Idempotency key -- a repeated requestId for the same action returns the original receipt.
+
+    OperatorPreferenceReceipt:
+      type: object
+      description: The durable, linked receipt of one preference action.
+      required: [ok, receiptId, preferenceId, linkedTo, action, lifecycle, previousLifecycle, at, scope]
+      properties:
+        ok:
+          type: boolean
+        receiptId:
+          type: string
+        preferenceId:
+          type: string
+        linkedTo:
+          type: string
+        action:
+          type: string
+          enum: [accept, reject, correct, opt-out, delete]
+        lifecycle:
+          $ref: "#/components/schemas/OperatorPreferenceLifecycle"
+        previousLifecycle:
+          $ref: "#/components/schemas/OperatorPreferenceLifecycle"
+        at:
+          type: string
+          format: date-time
+        scope:
+          $ref: "#/components/schemas/OperatorPreferenceScope"
+        requestId:
+          type: string
+        previousReceiptId:
+          type: string
+        hasNote:
+          type: boolean
+        correctionDigest:
+          type: string
+
+    OperatorPreferenceRefusal:
+      type: object
+      description: A refused preference action or proposal; nothing was recorded.
+      required: [error, code, detail]
+      properties:
+        error:
+          type: string
+          enum: [conflict, not_found]
+        code:
+          type: string
+          description: "`not_found`, `scope_mismatch`, `already_deleted`, `opted_out`, `stale_evidence`, or `invalid_transition`."
+        detail:
+          type: string
+
+    OperatorAgentProposalPresentation:
+      type: object
+      description: >
+        W1-T3895 -- present only when GET /v1/operator-agent/proposals names a principal scope. The
+        proposals were checked for authority and refusal first; accepted preferences only reordered
+        the actionable ones.
+      required: [scope, applied, skipped, refusals]
+      properties:
+        scope:
+          $ref: "#/components/schemas/OperatorPreferenceScope"
+        applied:
+          type: array
+          items:
+            type: string
+        skipped:
+          type: array
+          items:
+            type: object
+            required: [preferenceId, reason]
+            properties:
+              preferenceId:
+                type: string
+              reason:
+                type: string
+        refusals:
+          type: array
+          items:
+            type: object
+            required: [proposalId, code]
+            properties:
+              proposalId:
+                type: string
+              code:
+                type: string
+        notificationStyle:
+          type: string
+        clarificationWording:
+          type: string
+
     OperatorAgentExperimentScope:
       type: object
       required: [repo]
@@ -1970,6 +2397,699 @@ components:
           type: string
         rollback:
           $ref: "#/components/schemas/OperatorAgentExperimentRollback"
+
+    # ── W1-T3855 -- automation-action-v1: the explicit preflight, idempotency, approval, rollback,
+    # and receipt contract between a recommendation and an execution (src/lib/automation-action.ts).
+    AutomationActionScope:
+      type: object
+      description: >
+        Names a flowId or experimentId AND a repo or instance; a record missing either half is
+        refused `missing-scope`.
+      properties:
+        flowId:
+          type: string
+          maxLength: 160
+        experimentId:
+          type: string
+          maxLength: 160
+        repo:
+          type: string
+          maxLength: 160
+        instance:
+          type: string
+          maxLength: 160
+
+    AutomationActionPrecondition:
+      type: object
+      required: [id, source, description]
+      properties:
+        id:
+          type: string
+          maxLength: 160
+        source:
+          type: string
+          maxLength: 160
+          description: The authoritative source an observation must come from.
+        description:
+          type: string
+          maxLength: 320
+
+    AutomationActionRollback:
+      type: object
+      required: [mode]
+      description: A reversible action names its plan; an irreversible one names the refusal path a rollback request takes instead.
+      properties:
+        mode:
+          type: string
+          enum: [reversible, irreversible]
+        plan:
+          type: string
+          maxLength: 320
+        refusal:
+          type: string
+          maxLength: 320
+
+    AutomationAction:
+      type: object
+      description: >
+        An immutable automation-action-v1 record (src/lib/automation-action.ts's
+        `validateAutomationAction`). Fields the contract does not name are dropped; a raw prompt,
+        transcript, credential, model prose, or browser-owned measurement field -- or a
+        credential-shaped value -- refuses the whole record.
+      required: [version, actionId, capability, summary, scope, risk, preconditions, freshness, idempotencyKey, createdAt, expiresAt, dryRun, approval, rollback, receiptRef]
+      properties:
+        version:
+          type: string
+          enum: [automation-action-v1]
+        actionId:
+          type: string
+          maxLength: 160
+        capability:
+          type: string
+          maxLength: 160
+        summary:
+          type: string
+          maxLength: 320
+        scope:
+          $ref: "#/components/schemas/AutomationActionScope"
+        risk:
+          type: string
+          enum: [low, medium, high, production, financial, credential, destructive]
+        preconditions:
+          type: array
+          minItems: 1
+          maxItems: 12
+          items:
+            $ref: "#/components/schemas/AutomationActionPrecondition"
+        freshness:
+          type: object
+          required: [maxAgeSeconds]
+          properties:
+            maxAgeSeconds:
+              type: integer
+              minimum: 1
+              maximum: 2592000
+        idempotencyKey:
+          type: string
+          maxLength: 160
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        dryRun:
+          type: boolean
+        approval:
+          type: object
+          required: [policy]
+          properties:
+            policy:
+              type: string
+              enum: [none, human]
+              description: high, production, financial, credential and destructive risk must declare human.
+        rollback:
+          $ref: "#/components/schemas/AutomationActionRollback"
+        receiptRef:
+          type: string
+          maxLength: 160
+          description: The authoritative system of record whose receipt proves what happened.
+
+    AutomationPreconditionObservation:
+      type: object
+      required: [preconditionId, state, source, observedAt]
+      properties:
+        preconditionId:
+          type: string
+          maxLength: 160
+        state:
+          type: string
+          enum: [satisfied, unsatisfied, unavailable]
+        source:
+          type: string
+          maxLength: 160
+        observedAt:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          maxLength: 320
+
+    AutomationPreflightFinding:
+      type: object
+      required: [outcome, code, detail]
+      properties:
+        outcome:
+          type: string
+          enum: [refused, stale, unknown, expired, in-progress]
+        code:
+          type: string
+        detail:
+          type: string
+        preconditionId:
+          type: string
+        receiptId:
+          type: string
+
+    AutomationPreflightResult:
+      type: object
+      required: [version, actionId, outcome, evaluatedAt, approval, findings]
+      properties:
+        version:
+          type: string
+          enum: [automation-action-v1]
+        actionId:
+          type: string
+        outcome:
+          type: string
+          enum: [ready, refused, stale, unknown, expired, in-progress]
+        evaluatedAt:
+          type: string
+          format: date-time
+        approval:
+          type: string
+          enum: [not-required, pending, approved, rejected]
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutomationPreflightFinding"
+
+    AutomationActionReceipt:
+      type: object
+      description: One bounded, append-only receipt; completion and rollback link to what they follow via linkedReceiptId.
+      required: [version, receiptId, actionId, idempotencyKey, kind, outcome, at, receiptRef, reason]
+      properties:
+        version:
+          type: string
+          enum: [automation-action-v1]
+        receiptId:
+          type: string
+        actionId:
+          type: string
+        idempotencyKey:
+          type: string
+        kind:
+          type: string
+          enum: [execution, completion, rollback]
+        outcome:
+          type: string
+          enum: [in-progress, dry-run, refused, succeeded, failed, rolled_back]
+        at:
+          type: string
+          format: date-time
+        receiptRef:
+          type: string
+        linkedReceiptId:
+          type: string
+        preflight:
+          type: string
+          enum: [ready, refused, stale, unknown, expired, in-progress]
+        code:
+          type: string
+        reason:
+          type: string
+          maxLength: 321
+        evidenceRef:
+          type: string
+
+    OperatorAgentActionHistory:
+      type: object
+      required: [action, state, approval, receipts]
+      properties:
+        action:
+          $ref: "#/components/schemas/AutomationAction"
+        state:
+          type: string
+          enum: [registered, approved, rejected, in-progress, succeeded, failed, rolled_back, expired]
+        approval:
+          type: string
+          enum: [not-required, pending, approved, rejected]
+        decision:
+          type: object
+          required: [decision, decidedBy, decidedAt]
+          properties:
+            decision:
+              type: string
+              enum: [approved, rejected]
+            decidedBy:
+              type: string
+            decidedAt:
+              type: string
+              format: date-time
+        receipts:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/AutomationActionReceipt"
+
+    OperatorAgentActionList:
+      type: object
+      required: [version, actions, source]
+      properties:
+        version:
+          type: string
+          enum: [automation-action-v1]
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperatorAgentActionHistory"
+        source:
+          type: string
+          enum: [ledger]
+
+    OperatorAgentActionRegistration:
+      type: object
+      required: [action]
+      properties:
+        action:
+          $ref: "#/components/schemas/AutomationAction"
+
+    OperatorAgentActionDecisionRequest:
+      type: object
+      required: [actionId, decision]
+      properties:
+        actionId:
+          type: string
+        decision:
+          type: string
+          enum: [approved, rejected]
+
+    OperatorAgentActionObservationRequest:
+      type: object
+      required: [actionId]
+      properties:
+        actionId:
+          type: string
+        observations:
+          type: array
+          maxItems: 24
+          items:
+            $ref: "#/components/schemas/AutomationPreconditionObservation"
+        dryRun:
+          type: boolean
+          description: Execute only; a dry run evaluates preflight and records a dry-run receipt without admitting anything.
+        delegationId:
+          type: string
+          maxLength: 160
+          description: >
+            W1-T3878 -- the delegation-profile-v1 this request acts under. Its eligibility (missing,
+            revoked, stale, expired, unapproved, over budget, out of scope, unlinked, capability,
+            risk ceiling, human gate) enters preflight as refused findings named `delegation-*`.
+        estimatedCostUsd:
+          type: number
+          minimum: 0
+          maximum: 10000
+          description: W1-T3878 -- the cost an admission under `delegationId` charges against that profile's cost budget.
+
+    OperatorAgentActionCompletionRequest:
+      type: object
+      required: [actionId, admissionReceiptId, outcome]
+      properties:
+        actionId:
+          type: string
+        admissionReceiptId:
+          type: string
+        outcome:
+          type: string
+          enum: [succeeded, failed]
+        evidenceRef:
+          type: string
+          maxLength: 160
+          description: Required for succeeded -- success is claimed only with the evidence that proves it.
+        reason:
+          type: string
+          maxLength: 320
+
+    OperatorAgentActionRollbackRequest:
+      type: object
+      required: [actionId, reason, evidenceRef]
+      properties:
+        actionId:
+          type: string
+        reason:
+          type: string
+          maxLength: 320
+        evidenceRef:
+          type: string
+          maxLength: 160
+
+    OperatorAgentActionPreflightResponse:
+      type: object
+      required: [preflight]
+      properties:
+        preflight:
+          $ref: "#/components/schemas/AutomationPreflightResult"
+
+    OperatorAgentActionStepResult:
+      type: object
+      description: >
+        An engine step's disposition and the receipt it decided. `reused` returns the EXISTING
+        receipt for a duplicate idempotency key, completion, or rollback, and appends nothing.
+      required: [ok, disposition, receipt]
+      properties:
+        ok:
+          type: boolean
+        disposition:
+          type: string
+          enum: [admitted, dry-run, refused, reused, completed, rolled_back]
+        receipt:
+          $ref: "#/components/schemas/AutomationActionReceipt"
+        preflight:
+          $ref: "#/components/schemas/AutomationPreflightResult"
+
+    # ── W1-T3878 -- delegation-profile-v1: the trust budget every delegation carries ──────────
+    DelegationProfileScope:
+      oneOf:
+        - type: object
+          required: [kind, repository]
+          properties:
+            kind:
+              type: string
+              enum: [repository]
+            repository:
+              type: string
+              maxLength: 160
+        - type: object
+          required: [kind, instanceId]
+          properties:
+            kind:
+              type: string
+              enum: [instance]
+            instanceId:
+              type: string
+              maxLength: 160
+
+    DelegationProfileLink:
+      type: object
+      description: The action or flow this delegation governs; at least one is required.
+      properties:
+        flowId:
+          type: string
+          maxLength: 160
+        actionId:
+          type: string
+          maxLength: 160
+
+    DelegationProfileBudget:
+      type: object
+      required: [costUsd, durationMinutes]
+      properties:
+        costUsd:
+          type: number
+          minimum: 0
+          maximum: 10000
+        durationMinutes:
+          type: integer
+          minimum: 1
+          maximum: 129600
+          description: Counted from the operator's acceptance.
+
+    DelegationProfileInput:
+      type: object
+      description: >
+        What an issuer supplies (src/lib/delegation-profile.ts's `buildDelegationProfile`). version,
+        revision, createdAt (the server clock) and revocationRef are set by core. A raw prompt,
+        transcript, credential, browser-owned measurement, or a model-confidence / prior-approval /
+        UI-state field anywhere refuses the whole record by name.
+      required: [delegationId, principal, purpose, link, scope, dataClasses, capabilities, capabilitySummary, riskTier, budget, notification, approvalLevel, humanDecision, fallbackOwner, expiresAt]
+      properties:
+        delegationId:
+          type: string
+          maxLength: 160
+        principal:
+          type: string
+          maxLength: 160
+        purpose:
+          type: string
+          maxLength: 320
+        link:
+          $ref: "#/components/schemas/DelegationProfileLink"
+        scope:
+          $ref: "#/components/schemas/DelegationProfileScope"
+        dataClasses:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            type: string
+            maxLength: 120
+        capabilities:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            type: string
+            maxLength: 160
+        capabilitySummary:
+          type: string
+          maxLength: 320
+        riskTier:
+          type: string
+          description: The highest risk an action under this profile may declare.
+          enum: [low, medium, high, production, financial, credential, destructive]
+        budget:
+          $ref: "#/components/schemas/DelegationProfileBudget"
+        notification:
+          type: string
+          enum: [silent, on-refusal, on-every-action]
+        approvalLevel:
+          type: string
+          enum: [profile, each-action]
+        humanDecision:
+          type: string
+          maxLength: 320
+        fallbackOwner:
+          type: string
+          maxLength: 160
+        expiresAt:
+          type: string
+          format: date-time
+          description: After createdAt and within 90 days of it.
+
+    DelegationProfileReceipt:
+      type: object
+      required: [kind, at]
+      properties:
+        kind:
+          type: string
+          enum: [accept, revoke, replace]
+        at:
+          type: string
+          format: date-time
+        note:
+          type: string
+          maxLength: 320
+
+    DelegationProfileView:
+      type: object
+      description: >
+        One profile with its derived state. `riskTier` is the console's four-tier vocabulary (every
+        critical tier reads `critical`); `actionRiskCeiling` is core's own tier. `lifecycleState`
+        answers "may it act at all" and is never folded with `freshness`; `revocation` is present
+        whenever the ledger carries it, including a superseded profile naming its replacement.
+      required: [version, delegationId, revision, principal, purpose, link, scope, dataClasses, capabilities, capabilitySummary, riskTier, actionRiskCeiling, budget, notification, approvalLevel, humanDecision, fallbackOwner, createdAt, expiresAt, revocationRef, approval, lifecycleState, status, spentCostUsd, receipts, observedAt, freshness]
+      properties:
+        version:
+          type: string
+          enum: [delegation-profile-v1]
+        delegationId:
+          type: string
+        revision:
+          type: integer
+          minimum: 1
+        replaces:
+          type: string
+        principal:
+          type: string
+        purpose:
+          type: string
+        link:
+          $ref: "#/components/schemas/DelegationProfileLink"
+        scope:
+          $ref: "#/components/schemas/DelegationProfileScope"
+        dataClasses:
+          type: array
+          items:
+            type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        capabilitySummary:
+          type: string
+        riskTier:
+          type: string
+          enum: [low, medium, high, critical]
+        actionRiskCeiling:
+          type: string
+          enum: [low, medium, high, production, financial, credential, destructive]
+        budget:
+          $ref: "#/components/schemas/DelegationProfileBudget"
+        notification:
+          type: string
+          enum: [silent, on-refusal, on-every-action]
+        approvalLevel:
+          type: string
+          enum: [profile, each-action]
+        humanDecision:
+          type: string
+        fallbackOwner:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        revocationRef:
+          type: string
+        approval:
+          type: object
+          required: [state]
+          properties:
+            state:
+              type: string
+              enum: [pending, approved, denied]
+            decidedAt:
+              type: string
+              format: date-time
+        lifecycleState:
+          type: string
+          enum: [active, expired, revoked]
+        status:
+          type: string
+          enum: [pending, active, denied, revoked, superseded, expired]
+        revocation:
+          type: object
+          properties:
+            reason:
+              type: string
+            revokedAt:
+              type: string
+              format: date-time
+        supersededBy:
+          type: string
+        pendingReplacement:
+          type: string
+        spentCostUsd:
+          type: number
+        receipts:
+          type: array
+          items:
+            $ref: "#/components/schemas/DelegationProfileReceipt"
+        observedAt:
+          type: string
+          format: date-time
+        freshness:
+          type: string
+          enum: [verified]
+
+    DelegationProfileList:
+      type: object
+      required: [version, profiles, source]
+      properties:
+        version:
+          type: string
+          enum: [delegation-profile-v1]
+        profiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/DelegationProfileView"
+        source:
+          type: string
+          enum: [ledger]
+
+    DelegationProfileIssueRequest:
+      type: object
+      required: [profile]
+      properties:
+        profile:
+          $ref: "#/components/schemas/DelegationProfileInput"
+
+    DelegationProfileIssueResult:
+      type: object
+      required: [ok, profile]
+      properties:
+        ok:
+          type: boolean
+        profile:
+          $ref: "#/components/schemas/DelegationProfileView"
+
+    DelegationDecisionRequest:
+      type: object
+      required: [delegationId, decision]
+      properties:
+        delegationId:
+          type: string
+          maxLength: 160
+        decision:
+          type: string
+          enum: [accepted, revoked]
+        note:
+          type: string
+          maxLength: 320
+
+    DelegationDecisionResult:
+      type: object
+      required: [ok, delegationId, decision, decidedBy, at, lifecycleState, approval]
+      properties:
+        ok:
+          type: boolean
+        delegationId:
+          type: string
+        decision:
+          type: string
+          enum: [accepted, revoked]
+        decidedBy:
+          type: string
+        at:
+          type: string
+          format: date-time
+        lifecycleState:
+          type: string
+          enum: [active, expired, revoked]
+        approval:
+          type: string
+          enum: [pending, approved, denied]
+
+    DelegationReplaceRequest:
+      type: object
+      required: [delegationId]
+      properties:
+        delegationId:
+          type: string
+          maxLength: 160
+        note:
+          type: string
+          maxLength: 320
+        changes:
+          type: object
+          description: >
+            Any DelegationProfileInput field except the identity fields (delegationId, principal,
+            link, scope), which refuse `immutable-field`. Unnamed fields carry over; expiresAt
+            defaults to the predecessor's lifetime from now.
+          additionalProperties: true
+
+    DelegationReplaceResult:
+      type: object
+      required: [ok, delegationId, replacementId, at, lifecycleState, profile]
+      properties:
+        ok:
+          type: boolean
+        delegationId:
+          type: string
+          description: The profile being replaced; unchanged, and authoritative until the replacement is accepted.
+        replacementId:
+          type: string
+        at:
+          type: string
+          format: date-time
+        lifecycleState:
+          type: string
+          description: The REPLACED profile's lifecycle, which the replacement does not change.
+          enum: [active, expired, revoked]
+        profile:
+          $ref: "#/components/schemas/DelegationProfileView"
 
     # ── W1-T3856 -- experiment-promotion-v1: the guarded flow from a candidate policy to measured
     # production exposure (deterministic replay, shadow observation, canary promotion, stop
@@ -2590,32 +3710,6 @@ components:
       properties:
         action:
           $ref: "#/components/schemas/OperatorAgentConsequenceAction"
-
-    HighTierForbidden:
-      type: object
-      description: >
-        A 403 on a HIGH-tier write route (W1-T404). `forbidden` is src/lib/service.ts's scope/tier
-        gate: `required_scope` names the missing scope, and `required_tier` is present when the
-        credential's write tier is too low -- the bearer write token is pinned at LOW, so it never
-        reaches a HIGH route. `confirm_nonce_required` is the same dispatcher refusing a request
-        whose X-Confirm-Nonce is absent or was not issued by POST /v1/confirm for this exact
-        method, path and payload (POST /v1/operator-agent/consequences/decision's handler also
-        refuses a missing nonce itself, naming the `consequenceId`).
-      required:
-        - error
-      properties:
-        error:
-          type: string
-          enum: [forbidden, confirm_nonce_required]
-        required_scope:
-          type: string
-          enum: [read, write]
-        required_tier:
-          type: string
-          enum: [low, middle, high]
-        consequenceId:
-          type: string
-          description: Present only on the consequence decision handler's own missing-nonce refusal.
 
     OperatorAgentConsequenceReceipt:
       type: object
@@ -5650,6 +6744,8 @@ components:
         at LOW, so only a stepped-up operator session reaches HIGH). `confirm_nonce_required` --
         the tier was granted but no `X-Confirm-Nonce` was presented, or the nonce was unknown,
         expired (5 minutes), already spent, or bound to a different method, path or raw body.
+        W1-T4642 folded W1-T4612's `HighTierForbidden` schema into this one: the two differed
+        only by `consequenceId`.
       required:
         - error
       properties:
@@ -5669,6 +6765,11 @@ components:
             - low
             - middle
             - high
+        consequenceId:
+          type: string
+          description: >
+            Present only on POST /v1/operator-agent/consequences/decision's own missing-nonce
+            refusal, naming the pending consequence it refused.
 
     ConfirmNonceRequest:
       type: object
@@ -6767,7 +7868,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/RegistryUnavailable"
 
   /v1/status:
     get:
@@ -6939,7 +8040,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/HighTierForbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -6948,10 +8049,12 @@ paths:
       summary: Queue one confirmed pull-request repair or review in this daemon instance.
       description: >
         W1-T3989: the console can request `fix` for an actionable red PR or `review` for a
-        green PR waiting only for Remudero review. This is a HIGH-tier, exact-payload-confirmed
-        action. The handler writes durable intent and returns immediately; the daemon consumes at
-        most one request per poll through its existing `rmd fix` or `rmd review` command path.
-        A successful receipt is intentionally not a worker-start or PR-success claim.
+        green PR waiting only for Remudero review. LOW tier, by W1-T4077's operator ruling
+        (2026-09-22): the route executes nothing and takes no `X-Confirm-Nonce`, so the console's
+        bearer write token (pinned at LOW) reaches it. The handler writes durable intent and
+        returns immediately; the daemon consumes at most one request per poll through its
+        existing `rmd fix` or `rmd review` command path, which keeps its own rails. A successful
+        receipt is intentionally not a worker-start or PR-success claim.
       security:
         - bearerWrite: []
       requestBody:
@@ -6972,11 +8075,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          description: Missing write authority or the required high-tier confirmation nonce.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -7541,9 +8640,30 @@ paths:
       description: >
         Returns only proposal, decision, and observed-outcome records reconstructed from the
         append-only ledger, including supported rotated ledger files. No raw analytics payload or
-        bearer token is returned.
+        bearer token is returned. W1-T3895: naming a `principalId` and `repository` narrows the list
+        to that repository and applies the principal's accepted preferences AFTER each proposal's
+        authority and emergency-stop refusal are settled (see `presentation`).
       security:
         - bearerRead: []
+      parameters:
+        - name: principalId
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+        - name: repository
+          in: query
+          required: false
+          description: Required when principalId is present.
+          schema:
+            type: string
+            minLength: 1
+        - name: surface
+          in: query
+          required: false
+          schema:
+            type: string
       responses:
         "200":
           description: Durable operator-agent history.
@@ -7680,6 +8800,281 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /v1/operator-agent/preferences:
+    get:
+      summary: Read a principal's learned operator preferences in one repository.
+      description: >
+        W1-T3895 -- folds `operator-preference-v1` records and their lifecycle events from the
+        ledger into `preference-hypothesis-v1` projections. Opted-out and deleted preferences stay
+        listed with their lifecycle; only an accepted, measured, fresh, unexpired one applies.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: principalId
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - name: repository
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - name: surface
+          in: query
+          required: false
+          description: When present, only preferences for this surface (or for every surface) are listed.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The principal's preferences in the repository.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceList"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/operator-agent/preferences/propose:
+    post:
+      summary: Replay ledgered operator decisions into a shadow-mode preference hypothesis.
+      description: >
+        Confidence is computed from bounded operator decisions in the repository, never accepted
+        from the caller; below the sample floor, or with no decision that measures the effect, the
+        hypothesis is recorded as unmeasurable. It stays `proposed` until the operator accepts it.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorPreferenceProposalRequest"
+      responses:
+        "201":
+          description: A new hypothesis was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceProposalResult"
+        "200":
+          description: The same live hypothesis already exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceProposalResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: The operator opted out of this kind of preference in this scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+        "503":
+          description: The operator-agent memory has not completed its first refresh.
+
+  /v1/operator-agent/preferences/accept:
+    post:
+      summary: Accept a proposed preference so it may apply to presentation.
+      description: Appends one linked `panel.operator_preference_event` receipt. A refusal records nothing.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorPreferenceActionRequest"
+      responses:
+        "200":
+          description: The durable receipt (or the original one, for a repeated requestId).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceReceipt"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such preference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+        "409":
+          description: The action conflicts with the preference's scope or lifecycle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+
+  /v1/operator-agent/preferences/reject:
+    post:
+      summary: Reject a preference; it stops applying.
+      description: Appends one linked `panel.operator_preference_event` receipt. A refusal records nothing.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorPreferenceActionRequest"
+      responses:
+        "200":
+          description: The durable receipt (or the original one, for a repeated requestId).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceReceipt"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such preference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+        "409":
+          description: The action conflicts with the preference's scope or lifecycle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+
+  /v1/operator-agent/preferences/correct:
+    post:
+      summary: Correct a preference; it stops applying until re-proposed.
+      description: Appends one linked `panel.operator_preference_event` receipt. A refusal records nothing.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorPreferenceActionRequest"
+      responses:
+        "200":
+          description: The durable receipt (or the original one, for a repeated requestId).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceReceipt"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such preference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+        "409":
+          description: The action conflicts with the preference's scope or lifecycle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+
+  /v1/operator-agent/preferences/opt-out:
+    post:
+      summary: Opt out of a preference; only deletion remains possible.
+      description: Appends one linked `panel.operator_preference_event` receipt. A refusal records nothing.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorPreferenceActionRequest"
+      responses:
+        "200":
+          description: The durable receipt (or the original one, for a repeated requestId).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceReceipt"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such preference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+        "409":
+          description: The action conflicts with the preference's scope or lifecycle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+
+  /v1/operator-agent/preferences/delete:
+    post:
+      summary: Delete a preference; its evidence is no longer served.
+      description: Appends one linked `panel.operator_preference_event` receipt. A refusal records nothing.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorPreferenceActionRequest"
+      responses:
+        "200":
+          description: The durable receipt (or the original one, for a repeated requestId).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceReceipt"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such preference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+        "409":
+          description: The action conflicts with the preference's scope or lifecycle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
 
   /v1/operator-agent/experiments:
     get:
@@ -8123,7 +9518,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/HighTierForbidden"
+                $ref: "#/components/schemas/HighTierRefusal"
         "404":
           description: No pending consequence with this id exists (`not_found`).
           content:
@@ -8187,7 +9582,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/HighTierForbidden"
+                $ref: "#/components/schemas/HighTierRefusal"
         "409":
           description: "Refused at acceptance (`stage: accept`, with `code` and `detail`) or at execution (a refused `receipt` naming its `code`)."
           content:
@@ -8200,6 +9595,369 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EmergencyStopAdmissionRefusal"
+
+  /v1/operator-agent/actions:
+    get:
+      summary: W1-T3855 -- read every automation-action-v1 record with its derived state and receipts.
+      description: >
+        `readOperatorAgentActions` over the ledger union. The first record per actionId wins, the
+        first operator decision stands, and receipts append in ledger order; state is derived
+        from them, never stored.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Durable automation-action history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      summary: W1-T3855 -- register an automation action before anything may execute it.
+      description: >
+        Validates scope, risk, preconditions, freshness, idempotency key, expiry, dry-run
+        capability, approval policy, rollback/refusal path and receipt reference, refusing an
+        incomplete record by name (`400`, detail `<code>: <reason>`). An identical
+        re-registration is `200`; a different record under the same actionId, or a second action
+        bound to the same idempotencyKey, is `409`.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentActionRegistration"
+      responses:
+        "201":
+          description: Action registered.
+        "200":
+          description: Identical action already registered.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/actions/decision:
+    post:
+      summary: W1-T3855 -- approve or reject a human-policy action (HIGH write tier, nonce-confirmed).
+      description: >
+        Only an action whose approval policy is `human` and that is still pending and unexpired
+        can be decided; the first decision stands (`409` afterwards). The decider is the
+        verified request identity, never a body field. HIGH write tier (operator ruling
+        2026-09-28): the bearer write token (pinned at LOW) is refused `403`, and a HIGH-tier
+        credential must present an X-Confirm-Nonce minted by POST /v1/confirm for this exact request.
+      security:
+        - bearerWrite: []
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentActionDecisionRequest"
+      responses:
+        "200":
+          description: Decision recorded.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HighTierForbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/actions/preflight:
+    post:
+      summary: W1-T3855 -- evaluate an action's preflight without executing or recording anything.
+      description: >
+        Answers ready, refused, stale, unknown, expired or in-progress with every finding. A
+        missing observation, an unavailable or browser-owned source, or an observation from the
+        wrong source is `unknown`, never ready.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentActionObservationRequest"
+      responses:
+        "200":
+          description: The preflight result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionPreflightResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator-agent/actions/execute:
+    post:
+      summary: W1-T3855 -- admit one execution per idempotency key (MIDDLE write tier).
+      description: >
+        Re-runs preflight at execution time. A duplicate idempotency key returns the existing
+        receipt (`200`, `reused`) and appends nothing; anything but a ready preflight appends a
+        refusal (`409`); a dry run appends a dry-run receipt (`200`); a ready action is admitted
+        `in-progress` (`202`) -- never succeeded -- until POST /v1/operator-agent/actions/complete
+        records its evidence. An active emergency stop covering the action's repo or instance
+        refuses it first (`423`).
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentActionObservationRequest"
+      responses:
+        "202":
+          description: Admitted in-progress.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "200":
+          description: A dry run, or the existing receipt for a duplicate idempotency key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Refused; the receipt names the preflight outcome and code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "423":
+          description: An active emergency stop covers this action; the refusal receipt names the stop.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmergencyStopAdmissionRefusal"
+
+  /v1/operator-agent/actions/complete:
+    post:
+      summary: W1-T3855 -- record how an admitted execution ended (MIDDLE write tier).
+      description: >
+        Appends a completion receipt linked to the admission. `succeeded` requires an
+        evidenceRef; a second completion returns the first; completing anything but an
+        in-progress admission is `409` and appends nothing.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentActionCompletionRequest"
+      responses:
+        "200":
+          description: Completion recorded, or the existing completion returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Refused (`not-admitted`, `evidence-required`, `receipt-history-full`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+
+  /v1/operator-agent/actions/rollback:
+    post:
+      summary: W1-T3855 -- append a rollback linked to the completion it undoes (MIDDLE write tier).
+      description: >
+        Never rewrites the admission or completion. An irreversible action's rollback is refused
+        and that refusal recorded, naming its declared refusal path; with nothing completed it is
+        refused without a record; a second rollback returns the first.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentActionRollbackRequest"
+      responses:
+        "200":
+          description: Rollback recorded, or the existing rollback returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Refused (`nothing-to-roll-back`, `irreversible`, `receipt-history-full`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+
+  /v1/operator-agent/delegations:
+    get:
+      summary: W1-T3878 -- read every delegation-profile-v1 with its derived approval, lifecycle and spend.
+      description: >
+        `readDelegationProfiles` folds the ledger union: the first record per delegationId wins, a
+        revocation is terminal, the first acceptance stands, an accepted replacement supersedes its
+        predecessor, and admitted executions under a profile sum into `spentCostUsd`.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Durable delegation profiles.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegationProfileList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      summary: W1-T3878 -- issue a delegation profile (LOW write tier; pending until accepted).
+      description: >
+        `buildDelegationProfile` refuses an incomplete record by name (`400`, `code` and `field`).
+        The issued profile is `pending` and authorizes nothing until a HIGH-tier acceptance. A
+        second issue under the same delegationId is `409` -- change a profile by replacing it.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DelegationProfileIssueRequest"
+      responses:
+        "201":
+          description: Profile issued, pending approval.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegationProfileIssueResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/delegations/decision:
+    post:
+      summary: W1-T3878 -- accept or revoke a delegation profile (HIGH write tier, nonce-confirmed).
+      description: >
+        Accepting GRANTS a trust budget, so this is HIGH like /v1/operator-agent/actions/decision:
+        the bearer write token (pinned at LOW) is refused `403`, and a HIGH-tier credential must
+        present an X-Confirm-Nonce minted by POST /v1/confirm for this exact request. Only a pending
+        profile is accepted, never one whose predecessor was revoked; revocation is terminal, and
+        revoking a pending profile denies it. The decider is the verified identity, never a body
+        field. A model-confidence, prior-approval or UI-state field is refused `400`.
+      security:
+        - bearerWrite: []
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DelegationDecisionRequest"
+      responses:
+        "200":
+          description: Decision recorded; `lifecycleState` is the profile's state after it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegationDecisionResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HighTierForbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/delegations/replace:
+    post:
+      summary: W1-T3878 -- issue a linked replacement for a profile (LOW write tier; pending until accepted).
+      description: >
+        `buildDelegationReplacement` never mutates the original: the replacement is the next
+        revision with a derived id, `replaces` set, and a `replace` receipt on the original, which
+        stays authoritative until the replacement is accepted and is superseded from then on. A
+        revoked, denied or superseded profile, or one already being replaced, is `409`; naming an
+        identity field in `changes` is `400` `immutable-field`.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DelegationReplaceRequest"
+      responses:
+        "201":
+          description: Replacement issued, pending approval.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegationReplaceResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
 
   /v1/operator-agent/emergency/clear:
     post:
@@ -8244,7 +10002,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/HighTierForbidden"
+                $ref: "#/components/schemas/HighTierRefusal"
         "404":
           description: No emergency stop with this id was ever issued (`not_found`, with a `detail`).
           content:
@@ -8325,7 +10083,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/HighTierForbidden"
+                $ref: "#/components/schemas/HighTierRefusal"
 
   /v1/operator-agent/follow-ups:
     get:
@@ -8401,7 +10159,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/HighTierForbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -9314,13 +11072,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          description: >
-            Missing write authority, a token below the HIGH write tier, or (when write tiers are
-            enforced) a missing or unmatched `X-Confirm-Nonce` (`confirm_nonce_required`).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
+          $ref: "#/components/responses/HighTierForbidden"
         "404":
           description: "`not_found` -- no active proposal with this id."
           content:
