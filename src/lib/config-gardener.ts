@@ -206,31 +206,39 @@ export function settledClassCosts(runs: RunSummary[]): { byClass: Map<string, nu
   return { byClass, excluded };
 }
 
-/** Distinct settled tasks among `runs`, how many merged, and their summed cost. */
-export function cohortOutcome(runs: RunSummary[]): CohortOutcome {
+/** Distinct settled tasks among `runs`, how many merged, and their summed cost; a `neverWorked` run
+ *  is no canary outcome, only `excludedCount` (W1-T4726). */
+export function cohortOutcome(runs: RunSummary[]): CohortOutcome & { excludedCount?: number } {
   const tasks = new Map<string, boolean>();
   let costUsd = 0;
+  let excludedCount = 0;
   for (const r of runs) {
     if (r.verdict === "incomplete") continue;
+    if (r.neverWorked) { excludedCount++; continue; }
     tasks.set(r.taskId, (tasks.get(r.taskId) ?? false) || r.verdict === "merged");
     costUsd += r.costUsd;
   }
-  return { tasks: tasks.size, merged: [...tasks.values()].filter(Boolean).length, costUsd };
+  return { tasks: tasks.size, merged: [...tasks.values()].filter(Boolean).length, costUsd, ...(excludedCount > 0 ? { excludedCount } : {}) };
 }
 
-/** The canary cohort's runs and the rest's, per {@link ConfigCohort}, since `exposedAt`. */
-export function splitCohort(cohort: ConfigCohort, runs: RunSummary[], exposedAt: string, nowIso: string): { canary: RunSummary[]; rest: RunSummary[] } {
+/** The canary cohort's runs and the rest's, per {@link ConfigCohort}, since `exposedAt`; `neverWorked`
+ *  runs join neither side and are counted as `excludedCount` (W1-T4726). */
+export function splitCohort(cohort: ConfigCohort, runs: RunSummary[], exposedAt: string, nowIso: string): { canary: RunSummary[]; rest: RunSummary[]; excludedCount?: number } {
   const since = Date.parse(exposedAt);
   const at = (r: RunSummary) => Date.parse(r.startTs);
+  const inWindow = (canary: RunSummary[], rest: RunSummary[]) => {
+    const excludedCount = [...canary, ...rest].filter((r) => r.neverWorked).length;
+    return { canary: canary.filter((r) => !r.neverWorked), rest: rest.filter((r) => !r.neverWorked), ...(excludedCount > 0 ? { excludedCount } : {}) };
+  };
   if (cohort.kind === "tasks") {
     const ids = new Set(cohort.taskIds);
     const after = runs.filter((r) => settledImplement(r) && r.taskClass === cohort.taskClass && at(r) >= since);
-    return { canary: after.filter((r) => ids.has(r.taskId)), rest: after.filter((r) => !ids.has(r.taskId)) };
+    return inWindow(after.filter((r) => ids.has(r.taskId)), after.filter((r) => !ids.has(r.taskId)));
   }
   const inScope = (r: RunSummary) => cohort.kind === "all" ? r.type === "implement" : r.type === cohort.type && r.risk === cohort.risk && r.taskClass === cohort.taskClass;
   const before = since - Math.max(0, Date.parse(nowIso) - since);
   const scoped = runs.filter((r) => inScope(r) && r.verdict !== "incomplete");
-  return { canary: scoped.filter((r) => at(r) >= since), rest: scoped.filter((r) => at(r) >= before && at(r) < since) };
+  return inWindow(scoped.filter((r) => at(r) >= since), scoped.filter((r) => at(r) >= before && at(r) < since));
 }
 
 function population(cohort: ConfigCohort): string {
@@ -599,6 +607,7 @@ export function tendConfigCanaries(deps: GardenerDeps, runs: () => RunSummary[])
     if (!isPromotionActive(c.promotion.state)) continue;
     let exposed = c.promotion.state !== "shadow";
     let step: CanaryStep;
+    let excludedCount: number | undefined;
     if (!exposed) {
       const pr: PrState = deps.prState?.(c.prUrl) ?? "unknown";
       if (pr === "closed") step = { state: "rolled_back", verdict: "rolled_back", reason: "its PR was closed unmerged; nothing was exposed" };
@@ -612,6 +621,7 @@ export function tendConfigCanaries(deps: GardenerDeps, runs: () => RunSummary[])
     } else {
       measured ??= runs();
       const split = splitCohort(c.cohort, measured, c.exposedAt ?? c.promotion.observationWindow.start, nowIso);
+      excludedCount = split.excludedCount;
       step = stepCanary(c.promotion, cohortGuardObservations(cohortOutcome(split.canary), cohortOutcome(split.rest), c.promotion.comparisonPopulation, nowIso), nowIso);
     }
     c.promotion = { ...c.promotion, state: step.state };
@@ -620,7 +630,7 @@ export function tendConfigCanaries(deps: GardenerDeps, runs: () => RunSummary[])
     if (step.verdict === "rolled_back") settlePending(deps.stateDir, c.prUrl, "debit");
     if (step.verdict === "promoted") settlePending(deps.stateDir, c.prUrl, "credit");
     if (step.verdict === "expired") settlePending(deps.stateDir, c.prUrl, "release");
-    if (step.verdict !== "waiting") deps.log(`${CONFIG_GARDEN_NAME}.canary_${step.verdict}`, { scope: c.promotion.scope.policyScope, pr_url: c.prUrl, state: step.state, reason: step.reason ?? null, rollback_pr_url: c.rollbackPrUrl ?? null });
+    if (step.verdict !== "waiting") deps.log(`${CONFIG_GARDEN_NAME}.canary_${step.verdict}`, { scope: c.promotion.scope.policyScope, pr_url: c.prUrl, state: step.state, reason: step.reason ?? null, rollback_pr_url: c.rollbackPrUrl ?? null, ...(excludedCount ? { excluded_count: excludedCount } : {}) });
     canaries[i] = c;
     results.push({ canary: c, step });
   }

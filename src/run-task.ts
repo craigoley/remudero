@@ -816,6 +816,14 @@ import {
   type PlanStateTruthResolver,
   type RetroTriggerDecision,
   type ShippedGithub,
+  defaultRetroBackoffPolicy,
+  evaluateRetroBackoff,
+  loadRetroAttemptRecord,
+  nextRetroAttemptRecord,
+  saveRetroAttemptRecord,
+  type RetroAttemptRecord,
+  type RetroBackoffDecision,
+  type RetroBackoffPolicy,
 } from "./lib/retro.js";
 import {
   runRetroPrepublishPreflight,
@@ -26312,31 +26320,54 @@ let lastRetroTriggerDecline:
   | { ledgerPath: string; fingerprint: string }
   | undefined;
 
-/** A persistent attempt fence survives daemon restarts while the publication marker is frozen. */
+/** A persistent attempt fence survives daemon restarts while the publication marker is frozen.
+ *  W1-T4664: this is now also {@link RetroBackoffPolicy.baseDelayMs} — a SINGLE failure still
+ *  waits exactly this long (unchanged), and each further consecutive failure in the same marker
+ *  cycle doubles it (see {@link retroBackoffPolicyFor}). */
 export const RETRO_ATTEMPT_RETRY_MS = 6 * 60 * 60 * 1000;
 
 export function retroAttemptPath(root: string): string {
   return join(root, "state", "last-retro-attempt.json");
 }
 
-export function recordRetroAttempt(root: string, at: Date): void {
-  const marker = resolveMarkerForGather(join(root, "state", "last-retro.json"));
-  const markerTs = marker.kind === "ok" ? marker.marker.ts : null;
-  const path = retroAttemptPath(root);
-  mkdirSync(dirname(path), { recursive: true });
-  writeAtomic(path, JSON.stringify({ at: at.toISOString(), markerTs }) + "\n");
+/** {@link RetroBackoffPolicy} for `root`'s attempt fence: the flat-fence delay as the DOUBLING
+ *  base, plus the loaded (or default) merges cadence threshold as the merges-floor step —
+ *  "a further threshold's worth of merges" (design (ii)) reuses the SAME threshold the trigger
+ *  itself fires on, never a second, bespoke literal. */
+function retroBackoffPolicyFor(policy?: Policy): RetroBackoffPolicy {
+  return {
+    baseDelayMs: RETRO_ATTEMPT_RETRY_MS,
+    mergesThreshold: policy?.values.retro.mergesThreshold ?? defaultRetroBackoffPolicy().mergesThreshold,
+  };
 }
 
+/**
+ * W1-T4664: record ONE automated-retro attempt — called right before every spawn, success or
+ * failure alike (unchanged from the pre-existing flat fence). `mergesSinceMarker` is the trigger's
+ * OWN count for this attempt (0 when the caller has none, e.g. a direct unit-test call), persisted
+ * so a LATER declined tick can compute the merges-based exit floor without re-reading GitHub.
+ * The streak this saves is computed by {@link nextRetroAttemptRecord}: +1 inside the same marker
+ * cycle as the prior record, reset to 1 the moment the marker moves (a publish) or there is none.
+ */
+export function recordRetroAttempt(root: string, at: Date, mergesSinceMarker = 0): void {
+  const marker = resolveMarkerForGather(join(root, "state", "last-retro.json"));
+  const markerTs = marker.kind === "ok" ? marker.marker.ts : undefined;
+  const path = retroAttemptPath(root);
+  const prior = loadRetroAttemptRecord(path);
+  saveRetroAttemptRecord(path, nextRetroAttemptRecord(prior, at, markerTs, mergesSinceMarker));
+}
+
+/** W1-T4664: TIME-ONLY view of {@link evaluateRetroBackoff} — passes the record's OWN
+ *  `mergesSinceMarker` back in as "current", so the merges-based leg can never independently
+ *  open early here (comparing a value to itself plus a positive threshold is always false); this
+ *  keeps `recentRetroAttempt`'s existing zero-GitHub-cost contract exactly as it always was
+ *  (test/retro-trigger-check.test.ts's "survives daemon restart" case). `retroTriggerCheck`
+ *  below additionally widens the merges reading with a cheap (non-GitHub) read before declining. */
 export function recentRetroAttempt(root: string, markerTs: string | undefined, now: Date): boolean {
-  try {
-    const attempt = JSON.parse(readFileSync(retroAttemptPath(root), "utf8")) as { at?: unknown; markerTs?: unknown };
-    if (attempt.markerTs !== (markerTs ?? null) || typeof attempt.at !== "string") return false;
-    const elapsed = now.getTime() - Date.parse(attempt.at);
-    return Number.isFinite(elapsed) && elapsed >= 0 && elapsed < RETRO_ATTEMPT_RETRY_MS;
-  } catch {
-    // A missing or damaged attempt fence permits a retry; the publication marker still guards success.
-    return false;
-  }
+  const record = loadRetroAttemptRecord(retroAttemptPath(root));
+  if (record === undefined) return false;
+  const decision = evaluateRetroBackoff(record, record.mergesSinceMarker, markerTs, now, retroBackoffPolicyFor());
+  return !decision.eligible;
 }
 
 function reportRetroTriggerDecline(
@@ -26374,6 +26405,43 @@ function reportRetroTriggerDecline(
   } catch {
     // Best-effort evidence. A failed append must not turn an unreadable GitHub corpus into a
     // retro decision; leaving the fingerprint unset lets the next tick retry the report.
+  }
+}
+
+/** W1-T4664 design (iii): ledger the back-off decision distinctly from a generic decline — the
+ *  streak and the next eligible time, so a retro stuck in backoff is VISIBLE (grep the ledger)
+ *  rather than silent. Same best-effort append + per-ledger dedup shape as
+ *  {@link reportRetroTriggerDecline}, sharing its `lastRetroTriggerDecline` latch so the two never
+ *  double-report the same tick. */
+function reportRetroTriggerBackoff(
+  ledgerPath: string,
+  marker: { ts: string } | undefined,
+  backoff: Extract<RetroBackoffDecision, { eligible: false }>,
+): void {
+  const fingerprint = `${marker?.ts ?? "absent"}\u0000backoff\u0000${backoff.streak}\u0000${backoff.nextEligibleAt}`;
+  if (
+    lastRetroTriggerDecline?.ledgerPath === ledgerPath &&
+    lastRetroTriggerDecline.fingerprint === fingerprint
+  ) {
+    return;
+  }
+  try {
+    appendProducerLedger(ledgerPath, "daemon", {
+      run_id: "RETRO-TRIGGER",
+      step: "daemon.retro_trigger.backoff",
+      outcome: "declined",
+      reason:
+        `automated retro backed off: ${backoff.streak} consecutive failed attempt(s) in this marker cycle; ` +
+        `eligible again at ${backoff.nextEligibleAt} or once ${backoff.mergesFloor} merges have landed since the marker`,
+      marker_ts: marker?.ts ?? null,
+      streak: backoff.streak,
+      next_eligible_at: backoff.nextEligibleAt,
+      merges_floor: backoff.mergesFloor,
+    });
+    lastRetroTriggerDecline = { ledgerPath, fingerprint };
+  } catch {
+    // Best-effort evidence, same as reportRetroTriggerDecline: never let a ledger append failure
+    // turn into a retro decision of its own.
   }
 }
 
@@ -26425,9 +26493,57 @@ export function retroTriggerCheck(
   const markerResolution = resolveMarkerForGather(markerPath);
   if (markerResolution.kind === "corrupt") return undefined;
   const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
-  if (recentRetroAttempt(config.root, marker?.ts, now)) {
-    reportRetroTriggerDecline(ledgerPath, marker, now, "automated retro already attempted in this marker cycle; retry after six hours");
-    return undefined;
+  const policy = deps.policy ?? loadPolicy(policyPath(repoRoot));
+  // MERGE RESOLUTION (W1-T2289 x the ledger-union and runless-merge fixes on main). Both sides
+  // rewrote this block and each carries behaviour the other lacks, so neither could be taken whole:
+  // main supplies the SOURCE (`resolveLedgerUnion`, which sees rotated archives a bare
+  // `readFileSync` of the live file cannot) and the COUNT (`shipped` plus `runlessMerges`, so a
+  // merge with no worker run still counts); this branch supplies the SINGLE PARSE and
+  // `followupsPending`, which the caller below reads and which exists nowhere on main.
+  //
+  // Composing is strictly better than either: `records` is now parsed ONCE from the UNION, so
+  // `mineFollowups` sees rotated history too — which this branch's own version did not.
+  //
+  // W1-T4664: this LOCAL read (and `gatherRuns`/`taskIdsWithRuns`/`runlessMergesSince` below it)
+  // is hoisted ahead of the GitHub-backed pass so the back-off check can reuse it — it costs
+  // nothing extra to compute up front (it never touches `github.unavailable()` or the per-run
+  // `headRefName` credit pass), and computing it exactly ONCE here, rather than a second time
+  // inside the back-off branch, keeps this file's one ledger-file read call site exactly one
+  // (acceptance 7, test/intake-triggers-read-their-own-depth.test.ts).
+  const stateDir = join(config.root, "state");
+  const ledgerUnion = resolveLedgerUnion(stateDir, RUN_LEDGER_STEP_PATTERN);
+  const ledgerNdjson = ledgerUnion.ok
+    ? ledgerUnion.matches.join("\n")
+    : existsSync(ledgerPath)
+      ? readFileSync(ledgerPath, "utf8")
+      : "";
+  // ONE parse feeds every read below (W1-T2289 acceptance 7): `gatherRuns` for the fleet-activity
+  // signal this trigger already had, `mineFollowups` for the retro's OWN queue depth, and (W1-T4664)
+  // the back-off's own merges-floor pre-check — never a second `readFileSync`/`parseLedger`.
+  const records = parseLedger(ledgerNdjson);
+  const runs = gatherRuns(records);
+  const taskIdsWithRuns = new Set(runs.map((r) => r.taskId));
+
+  const backoffPolicy = retroBackoffPolicyFor(policy);
+  const lastAttempt = loadRetroAttemptRecord(retroAttemptPath(config.root));
+  if (lastAttempt !== undefined && lastAttempt.markerTs === (marker?.ts ?? null)) {
+    // W1-T4664 design (ii): still on the SAME marker cycle as the last recorded attempt — widen
+    // the merges reading BEFORE the expensive per-run GitHub credit pass below, so a busy window
+    // can still open an early exit ahead of the doubling delay. `mergedCommits()` is this repo's
+    // own `git log` (retro.ts's `runlessMergesSince`), never a GitHub round-trip, so this costs
+    // nothing extra on the common "still not yet" answer — exactly what
+    // test/retro-trigger-check.test.ts's "survives daemon restart" case measures via `githubReads`.
+    // `Math.max` with the attempt's own recorded count keeps this a conservative LOWER BOUND on the
+    // real (GitHub-credited) total: it omits `shippedSince`'s per-run crediting, so it can only
+    // ever DELAY an early exit, never grant one the real count below would refuse.
+    const githubEarly = deps.github ?? retroShippedGithubGateway();
+    const runlessMergesEarly = runlessMergesSince(githubEarly.mergedCommits?.() ?? [], marker?.ts, taskIdsWithRuns);
+    const mergesProxy = Math.max(lastAttempt.mergesSinceMarker, runlessMergesEarly.length);
+    const backoff = evaluateRetroBackoff(lastAttempt, mergesProxy, marker?.ts, now, backoffPolicy);
+    if (!backoff.eligible) {
+      reportRetroTriggerBackoff(ledgerPath, marker, backoff);
+      return undefined;
+    }
   }
   const github = deps.github ?? retroShippedGithubGateway();
   const githubUnavailable = github.unavailable?.();
@@ -26438,29 +26554,7 @@ export function retroTriggerCheck(
   if (lastRetroTriggerDecline?.ledgerPath === ledgerPath) {
     lastRetroTriggerDecline = undefined;
   }
-  // MERGE RESOLUTION (W1-T2289 x the ledger-union and runless-merge fixes on main). Both sides
-  // rewrote this block and each carries behaviour the other lacks, so neither could be taken whole:
-  // main supplies the SOURCE (`resolveLedgerUnion`, which sees rotated archives a bare
-  // `readFileSync` of the live file cannot) and the COUNT (`shipped` plus `runlessMerges`, so a
-  // merge with no worker run still counts); this branch supplies the SINGLE PARSE and
-  // `followupsPending`, which the caller below reads and which exists nowhere on main.
-  //
-  // Composing is strictly better than either: `records` is now parsed ONCE from the UNION, so
-  // `mineFollowups` sees rotated history too — which this branch's own version did not.
-  const stateDir = join(config.root, "state");
-  const ledgerUnion = resolveLedgerUnion(stateDir, RUN_LEDGER_STEP_PATTERN);
-  const ledgerNdjson = ledgerUnion.ok
-    ? ledgerUnion.matches.join("\n")
-    : existsSync(ledgerPath)
-      ? readFileSync(ledgerPath, "utf8")
-      : "";
-  // ONE parse feeds both reads below (W1-T2289 acceptance 7): `gatherRuns` for the fleet-activity
-  // signal this trigger already had, and `mineFollowups` for the retro's OWN queue depth — never
-  // a second `readFileSync`/`parseLedger` of the same path.
-  const records = parseLedger(ledgerNdjson);
-  const runs = gatherRuns(records);
   const { shipped } = shippedSince(runs, marker?.ts, github);
-  const taskIdsWithRuns = new Set(runs.map((r) => r.taskId));
   const runlessMerges = runlessMergesSince(github.mergedCommits?.() ?? [], marker?.ts, taskIdsWithRuns);
   const mergesSinceMarker = shipped.length + runlessMerges.length;
   // THE RETRO'S OWN INPUT, NOT THE FLEET'S ACTIVITY (W1-T2289). `openTitles` is intentionally
@@ -26469,7 +26563,6 @@ export function retroTriggerCheck(
   // later — duplicating it here would be a second read of state this function has no other use
   // for.
   const followupsPending = mineFollowups(records).candidates.length;
-  const policy = deps.policy ?? loadPolicy(policyPath(repoRoot));
   return evaluateRetroTrigger(
     mergesSinceMarker,
     marker?.ts,
@@ -26899,7 +26992,7 @@ export function buildRetroDaemonHooks(deps: {
     runRetroTrigger: async (decision, log) => {
       if (deps.runRetro) await deps.runRetro([], { automated: decision });
       else {
-        recordRetroAttempt((deps.config ?? loadConfig()).root, systemClock.date());
+        recordRetroAttempt((deps.config ?? loadConfig()).root, systemClock.date(), decision.mergesSinceMarker);
         await (deps.runSubprocess ?? runAutomatedRetroSubprocess)(decision, { log });
       }
     },

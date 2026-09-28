@@ -4175,6 +4175,8 @@ export interface RollupCheckEntry {
   /** Actions job details URL when this entry is a check run. Preserved so the main-health reader
    * can feed the same job-id-bearing evidence producer as the PR sweep. */
   detailsUrl?: string;
+  /** GitHub check-run id for equal-second start ties; absent on commit statuses. */
+  checkRunId?: number;
   /** Checks API posts keep this id even when GitHub rewrites detailsUrl to /runs/<check run id>. */
   externalId?: string;
 }
@@ -4204,16 +4206,23 @@ export const REQUIRED_CHECK_FAIL = new Set([
   "STALE",
 ]);
 
-/** Group rollup entries by check name or status context and keep ONLY the latest
- *  {@link RollupCheckEntry.startedAt} — ci-gate's own dedupe rule, copied rather than reinvented.
- *  An entry with no `startedAt` sorts OLDER and a tie keeps the LAST encountered. // Why: a sha
- *  accumulates one entry PER ATTEMPT, so a superseded CANCELLED entry read "red" forever. */
+/** Group rollup entries by check name or status context and keep the latest start. GitHub records
+ *  starts to the second, so check runs tied on that field use their numeric id. Commit statuses
+ *  have no check-run id and retain the historical last-encountered tie behavior. */
 export function dedupeRollupByLatestAttempt<T extends RollupCheckEntry>(rollup: readonly T[]): T[] {
   const latest = new Map<string, T>();
   for (const c of rollup) {
     const key = c.name ?? c.context ?? "";
     const prior = latest.get(key);
-    if (!prior || (c.startedAt ?? "") >= (prior.startedAt ?? "")) latest.set(key, c);
+    if (!prior || (c.startedAt ?? "") > (prior.startedAt ?? "")) {
+      latest.set(key, c);
+    } else if ((c.startedAt ?? "") === (prior.startedAt ?? "")) {
+      if (typeof c.checkRunId === "number" && typeof prior.checkRunId === "number") {
+        if (c.checkRunId >= prior.checkRunId) latest.set(key, c);
+      } else {
+        latest.set(key, c);
+      }
+    }
   }
   return [...latest.values()];
 }

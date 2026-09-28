@@ -86,6 +86,12 @@ export const AGED_FIELDS = [
     source: "src/lib/preference-policy.ts",
     evidence: ["Date.parse(preference.freshUntil)", "now >"],
   },
+  {
+    field: "retroAttemptAt",
+    threshold: "automated retro attempt backoff",
+    source: "src/lib/retro.ts",
+    evidence: ["Date.parse(lastAttempt.retroAttemptAt)", "now.getTime() >= nextEligibleAtMs"],
+  },
 ];
 
 /** The population ratchet: each file's measured fixture count as captured on W1-T3334.
@@ -105,6 +111,7 @@ export const RECORDED_POPULATION_BY_FILE = Object.freeze({
   // population it was counted in drops with it.
   "test/a-refusal-is-a-verdict-not-a-strike.test.ts": 0,
   "test/a-remedy-that-changed-nothing-is-dispatched-again.test.ts": 1,
+  "test/a-retro-that-cannot-publish-backs-off.test.ts": 1,
   "test/a-stale-fleet-branch-is-rebased-before-it-is-escalated.test.ts": 0,
   "test/an-open-pr-does-not-rot-while-it-waits.test.ts": 2,
   "test/arm-failure-classification.test.ts": 1,

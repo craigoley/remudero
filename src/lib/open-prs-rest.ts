@@ -79,8 +79,8 @@ function budgetFromRateLimitLikeReading(reading: {
   return { remaining, limit, resource };
 }
 
-/** Check-runs for a head SHA. REST defaults to `filter=latest` (one run per check name), which is what
- *  GraphQL's rollup reports too — so reruns collapse identically on both transports. */
+/** Check-runs for a head SHA. GitHub can return multiple same-name runs on this endpoint,
+ *  including runs whose start timestamps are identical. Consumers must select the latest id. */
 export function checkRunsRestArgs(owner: string, repo: string, sha: string): string[] {
   return ["api", `repos/${owner}/${repo}/commits/${sha}/check-runs?per_page=100`];
 }
@@ -93,6 +93,7 @@ export function combinedStatusRestArgs(owner: string, repo: string, sha: string)
 
 /** One check run as REST reports it (lowercase enums, snake_case keys). */
 interface RestCheckRun {
+  id?: number;
   name?: string;
   /** "queued" | "in_progress" | "completed" — lowercase, where GraphQL reports "QUEUED" etc. */
   status?: string;
@@ -132,6 +133,7 @@ export interface RestRollupEntry {
   conclusion?: string;
   state?: string;
   detailsUrl?: string;
+  checkRunId?: number;
   targetUrl?: string;
   /** W1-T2300 — when this attempt started, mapped by {@link rollupFromRest} from a check run's
    *  `started_at` or a status context's `created_at`; absent only on a malformed row.
@@ -168,6 +170,7 @@ export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[]
     if (status !== undefined) e.status = status;
     if (conclusion !== undefined) e.conclusion = conclusion;
     if (c.details_url) e.detailsUrl = c.details_url;
+    if (typeof c.id === "number" && Number.isSafeInteger(c.id) && c.id > 0) e.checkRunId = c.id;
     if (c.started_at) e.startedAt = c.started_at;
     if (c.completed_at) e.completedAt = c.completed_at;
     return e;

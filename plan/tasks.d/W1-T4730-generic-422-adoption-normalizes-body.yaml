@@ -1,0 +1,37 @@
+- id: W1-T4730
+  title: "A GENERIC 422 HIDES AN EXISTING WORKER PR AND SKIPS BODY NORMALIZATION"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: human
+  origin: "operator repair 2026-09-28: W1-T4669 run failed after worker opened PR #7677"
+  plan_refs: [W1-T4425, W1-T4466]
+  files: [src/run-task.ts, test/one-lane-s-github-failure-does-not-end-the-pass.test.ts, test/run-pr-acceptance-normalize.test.ts]
+  note: "Treat a generic HTTP 422 from PR creation as a reason to read, never as proof of an existing PR. Adopt only a confirmed open PR for this exact head; unrelated validation errors still rethrow. Normalize an adopted worker PR's body from the task's own acceptance after fallback creation."
+  rationale: |
+    On W1-T4669, the worker opened PR #7677 but did not report its URL to the
+    harness. The harness's fallback REST create received `gh: Validation Failed
+    (HTTP 422)` with no `pull request already exists` text. W1-T4466's classifier
+    required both 422 and that text, so it never ran the exact-head adoption
+    lookup and the run ended `failed` despite the open PR. W1-T4425's body
+    normalizer runs before fallback creation; it therefore never saw this PR.
+    Its worker-authored Acceptance header carried prose bullets rather than the
+    plan's executable proofs, and acceptance-author-gate refused it. The sweep
+    opened two needs-human issues for a mechanical body repair.
+  design: |
+    On any REST-create HTTP 422, perform the read-only lookup for an open PR on
+    the exact owner and branch. Adopt only when that lookup confirms a URL;
+    otherwise rethrow the original validation error. After the fallback returns
+    a PR URL, normalize its Acceptance block against the task record, using the
+    existing body writer; a genuinely new, already-canonical PR remains a no-op.
+    Keep the pre-fallback normalization for workers that directly reported a PR.
+  acceptance:
+    - claim: "a generic 422 adopts only a confirmed exact-head open PR"
+      proof: 'grep: test("W1-T4730: a generic 422 adopts only a confirmed exact-head open PR" in test/one-lane-s-github-failure-does-not-end-the-pass.test.ts'
+    - claim: "an adopted PR's prose Acceptance block is rewritten from the plan"
+      proof: 'grep: test("W1-T4730: an adopted PR prose Acceptance block is rewritten from the plan" in test/run-pr-acceptance-normalize.test.ts'
