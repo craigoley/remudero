@@ -345,10 +345,12 @@ export interface PlanPrBodyOpts {
   baseRef?: string;
   /** `rmd check-proof --base`'s exit status. Injected only to test the author-time decision. */
   proofCheck?: (proof: string, baseRef: string) => number | null;
+  /** Checkout whose HEAD and `origin/main` describe the body being emitted (usually its author worktree). */
+  proofCwd?: string;
 }
 
-function authorBaseRef(): string {
-  const result = spawnSync("git", ["merge-base", "origin/main", "HEAD"], { encoding: "utf8" });
+function authorBaseRef(cwd: string): string {
+  const result = spawnSync("git", ["merge-base", "origin/main", "HEAD"], { cwd, encoding: "utf8" });
   const base = result.stdout?.trim();
   if (result.status !== 0 || !base) {
     throw new Error("body emission refused: cannot resolve the merge base for acceptance proofs; ask for a human ruling");
@@ -356,12 +358,13 @@ function authorBaseRef(): string {
   return base;
 }
 
-function checkProofAtAuthorTime(proof: string, baseRef: string): number | null {
+function checkProofAtAuthorTime(proof: string, baseRef: string, cwd: string): number | null {
   const runTask = fileURLToPath(new URL("../run-task.ts", import.meta.url));
   const result = spawnSync(
     process.execPath,
     ["--import", "tsx", runTask, "check-proof", proof, "--base", baseRef],
     {
+      cwd,
       encoding: "utf8",
       maxBuffer: 16 * 1024 * 1024,
       env: { ...process.env, RMD_SELF_SYNC_DONE: "1" },
@@ -380,8 +383,11 @@ export function buildPlanPrBody(opts: PlanPrBodyOpts): string {
   // was already true before the diff. Keep synthetic/non-executable legacy inputs for the other
   // author gate, but never write a runnable stale or zero-match proof into a new body.
   if (opts.proofCheck || criteria.some((c) => parseWhitelistedProof(c.proof.trim()) !== null)) {
-    const baseRef = opts.baseRef ?? authorBaseRef();
-    refuseNonDiscriminatingCriteria(criteria, (proof) => (opts.proofCheck ?? checkProofAtAuthorTime)(proof, baseRef));
+    const proofCwd = opts.proofCwd ?? process.cwd();
+    const baseRef = opts.baseRef ?? authorBaseRef(proofCwd);
+    refuseNonDiscriminatingCriteria(criteria, (proof) =>
+      opts.proofCheck ? opts.proofCheck(proof, baseRef) : checkProofAtAuthorTime(proof, baseRef, proofCwd),
+    );
   }
   // W1-T3362: never credit a task whose record this same diff adds — `filingSelfCreditCheck` refuses it.
   const selfCredit = taskId !== undefined && diffContributesTaskShard(taskId, opts.addedFiles ?? changedFiles ?? []);
