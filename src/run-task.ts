@@ -586,6 +586,7 @@ import {
   shellOut,
   type CiParityStepResult,
   type PreflightFastDeps,
+  type PreflightFastResult,
   type RemedyFileForGate,
 } from "./lib/ci-parity.js";
 // W1-T4434 — `rmd census fix`'s own orchestrator: applies each census red's registered
@@ -25150,7 +25151,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  *  and exported for the falsifying test (W1-T2646,
  *  test/preflight-help-is-derived-not-retyped.test.ts) to gate directly: a flag added to one
  *  list and not the printed signature is now a test failure, not a reader's omission. */
-export const PREFLIGHT_VALUE_FLAGS = ["--from", "--to", "--summary-file"] as const;
+export const PREFLIGHT_VALUE_FLAGS = ["--from", "--to", "--summary-file", "--base"] as const;
 export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage", "--no-fast", "--proofs"] as const;
 
 /** W1-T3738 — what {@link runPreflightProofs} needs, all injected so a test drives it without a
@@ -25161,6 +25162,10 @@ export interface PreflightProofsDeps {
   git?: (args: string[]) => string;
   /** The reviewer's OWN resolver, injected so a test can vary the criteria without a plan. */
   resolveCriteria?: (body: string, headSha: string) => readonly { proof?: string; satisfied_by?: string }[];
+  /** W1-T3741 — `rmd preflight --base <ref>`'s forwarded base. Undefined (the default) leaves this
+   *  tier's own `git merge-base origin/main HEAD` resolution byte-for-byte unchanged; a stacked
+   *  branch's caller supplies the ref its work actually stacks on instead. */
+  base?: string;
 }
 
 /**
@@ -25197,7 +25202,10 @@ export function runPreflightProofs(
   let body: string;
   try {
     headSha = git(["rev-parse", "HEAD"]).trim();
-    mergeBase = git(["merge-base", "origin/main", "HEAD"]).trim();
+    // W1-T3741: an explicit `base` (forwarded from `preflight --base <ref>`) stands in for the
+    // origin/main-relative merge-base a stacked branch would otherwise resolve wrongly; absent,
+    // this is the exact `merge-base origin/main HEAD` read that shipped before this task.
+    mergeBase = deps.base ?? git(["merge-base", "origin/main", "HEAD"]).trim();
     body = git(["log", "-1", "--format=%B"]);
   } catch (err) {
     // UNREADABLE IS NOT A REFUSAL. A shallow clone or an unfetched origin/main is an environment
@@ -25313,6 +25321,16 @@ export function preflightSummarySentence(
       ? `\n### not checked here: ${skipped.map((t) => `${t.name} (${t.enableWith})`).join(", ")} — CI runs more than this run did`
       : "")
   );
+}
+
+/**
+ * W1-T3741 design (ii) — the ONE line that says which base this run measured against, because a
+ * reader cannot infer it: an ordinary branch and a stacked one (`--base <ref>` pointed at another
+ * open PR's branch) print the SAME step names either way, and the base is the one input that
+ * distinguishes a genuine red from a false one caused by comparing against the wrong tree.
+ */
+export function preflightBaseLine(base: string | undefined): string {
+  return base !== undefined ? `preflight base: ${base} (--base)` : "preflight base: origin/main (default)";
 }
 
 /** W1-T2646: renders `FAST_GATE_STEPS`' own script names — SCRIPT NAMES ONLY, never each
@@ -25629,6 +25647,85 @@ export type PreflightCommandDeps = PreflightDeps & {
   cpuCount?: number;
 };
 
+/** W1-T3741 — the `job` names of the two {@link FAST_GATE_STEPS} entries
+ *  {@link runPreflightBaseAwareGates} runs DIRECTLY instead, so {@link preflightCommand} can drop
+ *  exactly these two from the table it hands `runPreflightFast` and run nothing twice. */
+const PREFLIGHT_BASE_AWARE_JOBS: ReadonlySet<string> = new Set(["worker-branch-shape", "lint-plan"]);
+
+/**
+ * W1-T3741 — the two {@link FAST_GATE_STEPS} jobs that resolve `origin/main` on their OWN, so a
+ * forwarded `rmd preflight --base <ref>` must run each directly rather than through its ordinary
+ * npm-script invocation: `worker-branch-shape:check` (package.json) passes no `--base` at all and
+ * its script falls through to its own `origin/main` default, and `lint-plan:fast` BAKES `--base
+ * origin/main` into the npm script string itself — appending a second `--base` after it would
+ * lose, because {@link flagValue} (lib/cli-args.ts) reads the FIRST occurrence, not the last.
+ *
+ * Bypassing `npm run` for exactly these two and spawning each underlying command with the
+ * forwarded ref directly keeps this whole change inside `src/run-task.ts`: neither `package.json`
+ * nor lib/ci-parity.ts's own `FAST_GATE_STEPS` registry is touched. Each step is reported under
+ * the SAME `job` name `runPreflightFast` already prints, so the step list's shape is unchanged —
+ * `preflightCommand` drops these two jobs from the table it hands `runPreflightFast` (see
+ * {@link PREFLIGHT_BASE_AWARE_JOBS}) so neither ever runs twice.
+ */
+function runPreflightBaseAwareGates(repoRoot: string, base: string, spawn: PreflightSpawn): CiParityStepResult[] {
+  const steps: CiParityStepResult[] = [];
+
+  const workerBranchShape = shellOut(
+    spawn,
+    `node scripts/worker-branch-shape.mjs --base ${base}`,
+    process.execPath,
+    ["scripts/worker-branch-shape.mjs", "--base", base],
+    { cwd: repoRoot },
+  );
+  steps.push({
+    name: "worker-branch-shape",
+    ok: workerBranchShape.ok,
+    detail: `worker-branch-shape: ${workerBranchShape.detail}`,
+  });
+
+  // Mirrors FAST_GATE_STEPS' own `lint-plan` entry: `skipWhenAbsent: "plan"` — a checkout with no
+  // plan/ directory has nothing for lint-plan to check, and that is a SKIP, never a FAIL.
+  if (!existsSync(join(repoRoot, "plan"))) {
+    steps.push({
+      name: "lint-plan",
+      ok: true,
+      detail: "lint-plan: SKIPPED — no plan/ directory in this checkout; nothing for lint-plan to check here",
+    });
+  } else {
+    const lintPlan = shellOut(
+      spawn,
+      `node --import tsx scripts/lint-plan-offline.mjs --base ${base} --merge-base`,
+      process.execPath,
+      ["--import", "tsx", "scripts/lint-plan-offline.mjs", "--base", base, "--merge-base"],
+      { cwd: repoRoot },
+    );
+    steps.push({ name: "lint-plan", ok: lintPlan.ok, detail: `lint-plan: ${lintPlan.detail}` });
+  }
+
+  return steps;
+}
+
+/**
+ * W1-T3741 — re-assembles `runPreflightFast`'s own step list with `worker-branch-shape` and
+ * `lint-plan` replaced by {@link runPreflightBaseAwareGates}'s base-forwarded results, in
+ * `FAST_GATE_STEPS`' own declared order so the printed shape never depends on whether `--base`
+ * was passed. `base === undefined` returns `result` untouched — the byte-for-byte default path.
+ */
+function withPreflightBaseAwareFastSteps(
+  result: PreflightFastResult,
+  repoRoot: string,
+  base: string | undefined,
+  spawn: PreflightSpawn,
+): PreflightFastResult {
+  if (base === undefined) return result;
+  const baseAwareByJob = new Map(runPreflightBaseAwareGates(repoRoot, base, spawn).map((s) => [s.name, s]));
+  const byJob = new Map(result.steps.map((s) => [s.name, s]));
+  const merged = FAST_GATE_STEPS.map((g) => baseAwareByJob.get(g.job) ?? byJob.get(g.job)).filter(
+    (s): s is CiParityStepResult => s !== undefined,
+  );
+  return { steps: merged, ok: merged.every((s) => s.ok) };
+}
+
 export async function preflightCommand(rest: string[], deps: PreflightCommandDeps = {}): Promise<number> {
   const badArg = unknownArgError("preflight", rest, [...PREFLIGHT_VALUE_FLAGS], [...PREFLIGHT_BOOL_FLAGS]);
   if (badArg) {
@@ -25645,6 +25742,11 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const from = flagValue(rest, "--from");
   const to = flagValue(rest, "--to");
   const range = deps.range ?? (from !== undefined || to !== undefined ? { from: from ?? "origin/main", to: to ?? "HEAD" } : undefined);
+  // W1-T3741 — the base every mirrored gate that resolves one against `origin/main` by default is
+  // FORWARDED to instead, for a stacked branch whose true base is another open PR's branch. Absent
+  // (the default), every gate below resolves `origin/main` exactly as it always has.
+  const base = flagValue(rest, "--base");
+  const preflightSpawnForBase = deps.spawn ?? defaultPreflightSpawn;
 
   const result = runPreflight(repoRoot, { ...deps, range });
   // W1-T3737 — THE FAST TIER IS THE DEFAULT. MEASURED on origin/main: it runs twenty checks in
@@ -25652,7 +25754,20 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // comment-load shape, 12s green). `--fast` stays accepted and is now a no-op, so every existing
   // call site and worker prompt is byte-identical; `--no-fast` is the escape, because a bound with
   // no escape is a wall and an operator on a slow host must still be able to push.
-  const fast = rest.includes("--no-fast") ? undefined : runPreflightFast(repoRoot, { spawn: deps.spawn });
+  const fast = rest.includes("--no-fast")
+    ? undefined
+    : withPreflightBaseAwareFastSteps(
+        runPreflightFast(repoRoot, {
+          spawn: deps.spawn,
+          // W1-T3741: when a base is forwarded, these two run DIRECTLY (see
+          // withPreflightBaseAwareFastSteps) instead of through their origin/main-resolving npm
+          // scripts — omitted here so neither runs twice.
+          ...(base !== undefined ? { steps: FAST_GATE_STEPS.filter((s) => !PREFLIGHT_BASE_AWARE_JOBS.has(s.job)) } : {}),
+        }),
+        repoRoot,
+        base,
+        preflightSpawnForBase,
+      );
   // W1-T4108 — RIDE THE SAME `--no-fast` ESCAPE AS `fast` ABOVE. Both are further, GitHub-free
   // additions to the same default tier that #6677/#6687/#6690/#6693 (2026-09-23) show CI, not
   // preflight, was catching: console-parity/the two census suites cost seconds like every other
@@ -25668,7 +25783,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const coverage = rest.includes("--coverage") ? runPreflightCoverage(repoRoot, { spawn: deps.spawn }) : undefined;
   // W1-T3738: opt-in, because each proof spawns a real base worktree and a real test — the
   // 29-second default tier cannot absorb that. Named in the coverage line below either way.
-  const proofs = rest.includes("--proofs") ? runPreflightProofs(repoRoot, { spawn: deps.spawn }) : undefined;
+  const proofs = rest.includes("--proofs") ? runPreflightProofs(repoRoot, { spawn: deps.spawn, base }) : undefined;
 
   for (const step of result.steps) {
     console.log(step.detail);
@@ -25759,6 +25874,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   console.log(
     "\n" +
       preflightSummarySentence(ok, steps, tiers) +
+      `\n### ${preflightBaseLine(base)}` +
       `\n### ${runContextLine(runContext)}` +
       (treeAdvisory ? `\n### ${treeAdvisory}` : ""),
   );
@@ -46333,10 +46449,11 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "preflight",
-    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>]",
+    syntax:
+      "rmd preflight [--from <ref>] [--to <ref>] [--base <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>]",
     summary: "The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.",
     detail:
-      "W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS every FAST_GATE_STEPS entry (lib/ci-parity.ts) — RENDERED here from that table, never retyped, so a later row changes this line with no edit to this string: " +
+      "W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --base <ref> (W1-T3741) is FORWARDED to every mirrored gate that resolves its own base against origin/main by default — the fast gate's worker-branch-shape and lint-plan jobs (run directly, bypassing their origin/main-baked npm scripts, under the SAME job name so the step list is unchanged in shape) and --proofs's own merge-base — for a STACKED branch (whose true base is another open PR's branch, not main) so it is judged against the base it actually stacks on rather than a false red an author would 'fix' by rebasing work that was never wrong; absent, every gate resolves origin/main exactly as it does today, and the summary line always names which base the run measured against; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS every FAST_GATE_STEPS entry (lib/ci-parity.ts) — RENDERED here from that table, never retyped, so a later row changes this line with no edit to this string: " +
       renderFastGateScriptList(FAST_GATE_STEPS) +
       " — none of them shells the full test:ci suite, though the four census:* entries above each spawn `node --test` on their own one named file; that spawn is timed, and an outlier is refused as RUNAWAY — not by a fixed millisecond ceiling, but by a bound derived from THIS SAME run's own cheapest census entry (W1-T2478 admitted the class under a measured bound, W1-T2545 made that bound relative so a growing corpus cannot outgrow it) — the one failure mode unique to --fast; W1-T2734's source-size signal is the one networked member, refreshing origin/main before a PR-relative measurement, and every other member stays network-free; --coverage (W1-T1074) ADDS runPreflightCoverage's diff-coverage gate alone, at author-time on its own freshly self-derived origin/main...HEAD base — never a caller-supplied diff — opt-in and slow by construction (minutes, not seconds: it shells the same full instrumented suite --ci-parity's coverage-ratchet job runs, because a coverage lcov needs the full suite and --fast can never carry one, by design), and REFUSES rather than reports on an empty diff, a tree left dirty in a diffed file, or a changed file with no lcov SF: instrumentation record (reported as UNPROVEN, naming the file); any subset of --ci-parity/--fast/--coverage may be passed; exits non-zero if any step fails, after every step has run and reported. EVERY run also writes a machine-readable verdict to `<repoRoot>/coverage/preflight-summary.json` (override with --summary-file <path>) — ok, the head sha, duration, pass/fail counts and every step — so an eight-minute result survives the container that produced it; written on FAIL as well as PASS, and a write failure never changes the exit code",
   },
