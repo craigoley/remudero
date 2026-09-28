@@ -21,6 +21,7 @@ import {
   CADENCE_STALE_INTERVALS,
   cadenceMarkerRows,
   type CadenceMarkerDef,
+  type LivenessState,
 } from "../src/lib/status-board.js";
 
 const HOUR = 3_600_000;
@@ -98,4 +99,28 @@ test("W1-T3236: every marker a periodic rung writes is in the table, and the ret
   const rows = cadenceMarkerRows(CADENCE_MARKERS, () => 1_000 * HOUR, () => undefined);
   assert.equal(rows.length, CADENCE_MARKERS.length);
   assert.ok(rows.every((r) => r.state === "stale"), "a 1000h-old marker is stale on every rung");
+});
+
+// W1-T3760: a marker whose NAMED writer is positively observed stopped is not a failing cadence.
+const SERVED: CadenceMarkerDef = { name: "last-seen", file: "last-seen.json", writer: "serve" };
+const judged = (def: CadenceMarkerDef, ageMs: number | undefined, writer: LivenessState) =>
+  cadenceMarkerRows([def], () => ageMs, () => 60, () => writer)[0]!;
+
+test("W1-T3760: a marker past its budget whose named writer is stopped reads writer-stopped, not stale", () => {
+  const r = judged(SERVED, 10 * 60 * 60_000, "stopped");
+  assert.equal(r.state, "writer-stopped");
+  assert.match(r.consequence, /writer is not running \(serve\)/);
+});
+
+test("W1-T3760: an unsensed, running or overdue writer keeps the stale verdict — only a positive stop suppresses it", () => {
+  for (const writer of ["unknown", "running", "idle", "overdue"] as const) assert.equal(judged(SERVED, 10 * 60 * 60_000, writer).state, "stale", writer);
+});
+
+test("W1-T3760: a never-written marker stays never, and a fresh one fresh, even when its writer is stopped", () => {
+  assert.equal(judged(SERVED, undefined, "stopped").state, "never");
+  assert.equal(judged(SERVED, 60_000, "stopped").state, "fresh");
+});
+
+test("W1-T3760: a row naming no writer keeps the three states whatever the writer sensor says", () => {
+  assert.equal(judged(RETRO, 10 * 60 * 60_000, "stopped").state, "stale");
 });
