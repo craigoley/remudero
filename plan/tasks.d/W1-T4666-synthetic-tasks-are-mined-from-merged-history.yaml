@@ -1,0 +1,34 @@
+- id: W1-T4666
+  title: "THE FLEET HAS DOZENS OF GRADED TASKS AND COULD HAVE THOUSANDS — reverse-apply the non-test change of merged run PRs (SWE-smith style) and keep a candidate only when the task's own proof goes red on it, producing fresh, repo-specific graded tasks for difficulty estimation, canaries and prompt evolution"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  plan_refs: [W1-T4619, W1-T4626, W1-T4627]
+  files: [src/lib/synthetic-tasks.ts, test/synthetic-tasks-are-mined-from-merged-history.test.ts, src/lib/golden-corpus.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-28: golden-corpus.ts admits only real merged tasks whose proofs discriminate base from head; nothing
+    generates tasks. SWE-smith (https://arxiv.org/abs/2504.21798) produced 50k test-breaking tasks from 128 repos and lifted a
+    32B model to 40.2% on SWE-bench Verified (+33 points). rmd's own proofs are the validity check SWE-smith had to build.
+  design: |
+    (i) For a merged run PR with unit-test proofs, build the candidate by reverse-applying its non-test hunks onto main.
+    (ii) Keep it only when the task's own proof goes red on the candidate and green on main (the discrimination rule).
+    (iii) Emit a sealed synthetic task record (never a plan shard, never dispatched to production) for W1-T4626/W1-T4627/W1-T4665.
+    (iv) Pilot first: 30 merged tasks, report the keep rate.
+  acceptance:
+    - claim: "a reverse-applied merged change is kept only when its own proof goes red"
+      proof: 'grep: test("W1-T4666: a reverse-applied merged change is kept only when its own proof goes red" in test/synthetic-tasks-are-mined-from-merged-history.test.ts'
+    - claim: "a candidate whose proof stays green is discarded"
+      proof: 'grep: test("W1-T4666: a candidate whose proof stays green is discarded" in test/synthetic-tasks-are-mined-from-merged-history.test.ts'
+    - claim: "the new module is called from src/lib/golden-corpus.ts"
+      proof: 'grep: mineSyntheticTasks( in src/lib/golden-corpus.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

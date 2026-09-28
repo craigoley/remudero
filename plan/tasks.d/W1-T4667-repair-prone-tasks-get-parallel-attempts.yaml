@@ -1,0 +1,35 @@
+- id: W1-T4667
+  title: "REPAIR ROUNDS ARE 77% OF PR TIME AND THEY RUN ONE AFTER ANOTHER — after a first failed strike on a repair-prone task, spawn k sealed attempts in parallel and keep the one the proofs (then the reviewer) prefer; measure first from paired-trial data whether any-of-k beats the single attempt enough to pay"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  plan_refs: [W1-T4625, W1-T4638]
+  files: [src/lib/parallel-attempts.ts, test/repair-prone-tasks-get-parallel-attempts.test.ts, src/lib/sweep.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: PR-flow baseline 2026-09-24 — median 37 min, 77% in repair rounds; fix rounds run sequentially in sweep.ts.
+    paired-trial.ts (W1-T4625) and W1-T4638 already build sealed side-attempt worktrees but forbid production effect.
+    SWE-Gym (https://arxiv.org/abs/2412.21139) and R2E-Gym (https://arxiv.org/pdf/2504.07164): verifier-selected best-of-16
+    reached 32.0% vs 42.8% oracle; R2E's hybrid verifier combines execution with a judge — rmd's proofs + reviewer.
+  design: |
+    (i) FIRST, offline: from paired-trial rows, compute P(either attempt passes) - P(normal attempt passes) per task shape.
+    (ii) Only for shapes where that gap pays for the extra attempts (a ratio of measured gain to window share, never a fixed k),
+    spawn parallel sealed attempts after the first failed strike; select by proofs, then reviewer.
+    (iii) The chosen attempt is pushed as the fix round; the rest are discarded and ledgered.
+  acceptance:
+    - claim: "parallel attempts are spawned only for shapes whose measured any-of-k gain pays"
+      proof: 'grep: test("W1-T4667: parallel attempts are spawned only for shapes whose measured any-of-k gain pays" in test/repair-prone-tasks-get-parallel-attempts.test.ts'
+    - claim: "the attempt chosen is the one the proofs prefer"
+      proof: 'grep: test("W1-T4667: the attempt chosen is the one the proofs prefer" in test/repair-prone-tasks-get-parallel-attempts.test.ts'
+    - claim: "the new module is called from src/lib/sweep.ts"
+      proof: 'grep: planParallelAttempts( in src/lib/sweep.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

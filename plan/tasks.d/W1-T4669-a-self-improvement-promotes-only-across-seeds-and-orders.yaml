@@ -1,0 +1,32 @@
+- id: W1-T4669
+  title: "A SELF-IMPROVEMENT CAN LOOK REAL ON ONE RUN AND VANISH ON THE NEXT — promoting a learned prompt, workflow or skill requires the gain to hold across several seeds and a shuffled task order, because single runs vary by up to 10 points and shuffled order turned a +1.5% into -4.5%"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  plan_refs: [W1-T4625]
+  files: [src/lib/experiment-promotion.ts, test/a-self-improvement-promotes-only-across-seeds-and-orders.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: arXiv 2608.18066 (Aug 2026) — across self-improving agents, run-to-run variance rose in 71% of cases and a
+    shuffled task order turned an expected +1.5% into -4.5%. rmd's paired-trial McNemar test covers model comparisons, but
+    promoting a learned artifact (prompt, workflow, skill, learning) has no repeat or reorder requirement.
+  design: |
+    (i) experiment-promotion gains a promotion check for learned artifacts: the effect is estimated over several independent
+    seeds with the task order shuffled per seed, and promotion needs the interval to exclude zero.
+    (ii) The number of seeds grows until the interval is decided or the budget share is spent (no fixed count).
+    (iii) The ledger row names seeds, orders and the interval.
+  acceptance:
+    - claim: "a gain seen on one seed alone is not promoted"
+      proof: 'grep: test("W1-T4669: a gain seen on one seed alone is not promoted" in test/a-self-improvement-promotes-only-across-seeds-and-orders.test.ts'
+    - claim: "a gain that holds across shuffled seeds is promoted"
+      proof: 'grep: test("W1-T4669: a gain that holds across shuffled seeds is promoted" in test/a-self-improvement-promotes-only-across-seeds-and-orders.test.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

@@ -1,0 +1,35 @@
+- id: W1-T4672
+  title: "THE RISK AND VERIFY-HUMAN JUDGES RUN FULL AGENT SESSIONS AND REPORT THEIR OWN CONFIDENCE — make each a single tool-less typed-choice call that returns a probability over the fixed options (Jev's model), run it in shadow beside today's judge, and let the probability pick the tier"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  plan_refs: [W1-T4628, W1-T424]
+  files: [src/lib/typed-judgment.ts, src/lib/risk-judge.ts, test/small-judgments-are-one-typed-choice-call.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: the risk judge spawns a worker session with tools and a turn cap (src/lib/risk-judge.ts ~1022-1038) and its
+    answer carries a self-stated confidence (~:54); a 0.85 confidence produced a wrong escalation (~:95). Jev (TypeSafe AI;
+    reference agent https://github.com/browser-use/jev-ultrafast, docs https://docs.typesafe.ai/introduction) answers typed
+    Choice/Score questions with a distribution in about 100-180 ms; its fan-out pattern asks dependent questions in one call.
+  design: |
+    (i) typed-judgment.ts: one stateless call on the cheap lane over the prepared RiskJudgeInput, returning a distribution
+    over the judge's fixed options; out-of-set output is rejected.
+    (ii) Shadow: ledger both verdicts; grade agreement and calibration with the existing judge-calibration grading (W1-T4628).
+    (iii) Only after shadow evidence: the probability picks proceed / proceed-and-watch / escalate, with no fixed cutoff.
+  acceptance:
+    - claim: "the typed judgment returns a distribution over the fixed options and rejects anything else"
+      proof: 'grep: test("W1-T4672: the typed judgment returns a distribution over the fixed options and rejects anything else" in test/small-judgments-are-one-typed-choice-call.test.ts'
+    - claim: "the typed judgment runs in shadow beside the session judge"
+      proof: 'grep: test("W1-T4672: the typed judgment runs in shadow beside the session judge" in test/small-judgments-are-one-typed-choice-call.test.ts'
+    - claim: "the new module is called from src/lib/risk-judge.ts"
+      proof: 'grep: typedRiskJudgment( in src/lib/risk-judge.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.
