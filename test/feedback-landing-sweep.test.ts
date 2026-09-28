@@ -165,6 +165,48 @@ test("W1-T530 CROSS-FILE INVARIANT: a plan/feedback/*.yaml no capture ever saw l
   assert.equal(detailLine?.extra?.pr_url, "https://github.com/o/r/pull/9001");
 });
 
+test("a feedback file already committed on a feature branch is not re-landed by the daemon sweep", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  git(root, "checkout", "--quiet", "-b", "feedback-pr");
+  writeFeedbackEntry(root, "fb-already-in-pr", "already committed for review");
+  git(root, "add", "--", "plan/feedback/fb-already-in-pr.yaml");
+  git(root, "commit", "--quiet", "-m", "chore(feedback): include record in feature PR");
+  assert.equal(git(root, "status", "--porcelain").trim(), "", "the PR's committed file is not a local inbox write");
+
+  const { gh, calls } = fakeGh("https://github.com/o/r/pull/9002");
+  const result = withLiveWritesAllowed(() => sweepFeedbackLanding(root, { gh }));
+
+  assert.equal(result.landed, false);
+  assert.deepEqual(calls, [], "clean committed PR content must not start a nested landing PR");
+  assert.throws(() => git(root, "--git-dir", bareOrigin, "show", `${LANDING_BRANCH}:plan/feedback/fb-already-in-pr.yaml`));
+});
+
+test("a tracked feedback file changed after capture is still included by the daemon sweep", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(
+    join(root, "plan", "feedback", "fb-edited-after-capture.yaml"),
+    "id: fb-edited-after-capture\nstatus: new\nraw: captured before the edit\n",
+  );
+  git(root, "add", "--", "plan/feedback/fb-edited-after-capture.yaml");
+  git(root, "commit", "--quiet", "-m", "chore(feedback): capture record");
+  git(root, "push", "--quiet", "origin", "main");
+  writeFileSync(
+    join(root, "plan", "feedback", "fb-edited-after-capture.yaml"),
+    "id: fb-edited-after-capture\nstatus: grilling\nraw: captured and then edited locally\n",
+  );
+  assert.equal(git(root, "diff", "--name-only").trim(), "plan/feedback/fb-edited-after-capture.yaml");
+
+  const { gh, calls } = fakeGh("https://github.com/o/r/pull/9003");
+  const result = withLiveWritesAllowed(() => sweepFeedbackLanding(root, { gh }));
+
+  assert.equal(result.landed, true, JSON.stringify(result));
+  assert.deepEqual(result.files, ["plan/feedback/fb-edited-after-capture.yaml"]);
+  assert.equal(calls.filter((args) => args[0] === "pr" && args[1] === "create").length, 1);
+});
+
 // ── Criterion 2: a captured entry whose AT-CAPTURE landing FAILED is picked up LATER ─────────
 
 test("W1-T530: an entry whose at-capture landing failed (gh pr create refused) is picked up by a LATER periodic sweepFeedbackLanding pass, with no further capture", () => {

@@ -259,6 +259,18 @@ function listRelFiles(root: string, relDir: string): string[] {
   return out;
 }
 
+/** Local inbox copies are worktree changes made by captureFeedback, not arbitrary clean files
+ *  already committed on a feature branch. In particular, a PR that commits feedback records
+ *  must not cause a daemon boot in that PR checkout to create a second landing PR for them. */
+function listDirtyRelFiles(root: string, relDir: string, git: GitExec): string[] {
+  const present = new Set(listRelFiles(root, relDir));
+  const candidates = [
+    ...git(["ls-files", "--others", "--exclude-standard", "-z", "--", relDir]).split("\0"),
+    ...git(["diff", "HEAD", "--name-only", "-z", "--", relDir]).split("\0"),
+  ];
+  return [...new Set(candidates.filter((path) => path !== "" && present.has(path)))].sort();
+}
+
 /** One landing target's shape — every kind shares the same commit/push/PR tail (see
  *  {@link finishLanding}); only the branch, the commit/PR text, and which directory it walks differ. */
 interface LandingKind {
@@ -867,9 +879,11 @@ function finishLanding(
 }
 
 /** Acknowledge any byte-identical, untracked queue copy already on fetched origin/main, then land
- *  every remaining `plan/feedback/**` file present on disk but absent or changed upstream. Never
- *  throws. Scans disk because `captureFeedback`'s local copy is the durable buffer even offline —
- *  unlike {@link landContent}, this path legitimately needs a real file to read. */
+ *  every remaining untracked or worktree-modified `plan/feedback/**` inbox file absent or changed
+ *  upstream. Clean files already committed on a feature branch are not local inbox writes and
+ *  must not be re-landed as a nested PR. Never throws. Scans disk because `captureFeedback`'s
+ *  local copy is the durable buffer even offline — unlike {@link landContent}, this path
+ *  legitimately needs a real file to read. */
 interface LandPendingOpts extends LandFeedbackOpts {
   /** Internal compatibility seam: only the named sweep publishes acknowledgement evidence. */
   reportAcknowledgement?: boolean;
@@ -897,7 +911,7 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
     const scanLocalUnlanded = (): { files: string[]; refused: FeedbackRefusal[] } => {
       const files: string[] = [];
       const refused: FeedbackRefusal[] = [];
-      for (const rel of listRelFiles(root, kind.ownedDir)) {
+      for (const rel of listDirtyRelFiles(root, kind.ownedDir, git)) {
         const localSha = git(["hash-object", join(root, rel)]).trim();
         let remoteSha: string | null;
         try {
