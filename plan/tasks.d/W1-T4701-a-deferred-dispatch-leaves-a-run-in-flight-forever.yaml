@@ -1,0 +1,48 @@
+- id: W1-T4701
+  title: "A DEFERRED DISPATCH LEAVES A RUN IN FLIGHT FOREVER — a managed-checkout refresh refusal (and the other pre-worktree deferrals) throws before runTask's outer catch, so the run writes run.start and no verdict and every in-flight reader counts it running; 20 such runs since 2026-09-26, the oldest reported running for 35 hours"
+  repo: remudero
+  depends_on: ["W1-T4655"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-28: a stale W1-T3760 run held its dispatch claim and read running_long for 4 hours after its PR's fix was needed"
+  plan_refs: ["W1-T4356", "W1-T4193", "W1-T4655", "W1-T4417"]
+  files:
+    - src/run-task.ts
+    - test/a-deferred-dispatch-leaves-no-run-in-flight.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-28 over the ledger union 2026-09-26..28: 20 runs logged
+    `managed_checkout.refresh_refused` and not one of them ever wrote a `verdict` or `run.error`
+    row; the running-long sentinel still reports all 20 as in flight (W1-T3574-1790483891548 since
+    2026-09-27 04:51, 315 `run.running_long` rows). In runTaskBody (src/run-task.ts) the refresh is
+    `try { checkoutRefresh = refreshManagedCheckout(...) } catch (e) { log("managed_checkout.
+    refresh_refused", ...); releaseDispatchClaim(...); throw e; }` — ABOVE the outer try whose catch
+    writes `run.error` and (since W1-T4655) a terminal verdict, so the run's only rows are run.start
+    and the refusal. The two sibling pre-worktree deferrals just below it end the same way:
+    `worktree.node_modules_refused` (W1-T4193, a deliberate DEFERRAL rethrown for daemon.ts's
+    `isSpawnInfraBlocked` backoff) and `worktree.add_failed`. cost-anomaly.ts reads a run as in
+    flight until a `verdict` row exists, as do the case file, verified outcomes and every status
+    reader, so each deferral becomes a permanent phantom run and a recurring incident.
+  design: |
+    Every pre-worktree exit of runTaskBody writes exactly one terminal verdict row before it
+    throws, in the same shape W1-T4655 uses (a RunResult verdict, a `stage` naming the site —
+    `managed_checkout.refresh`, `worktree.node_modules`, `worktree.add` — and a bounded cause), and
+    keeps its existing throw so daemon.ts's deferral/backoff classification is unchanged. Choose
+    the verdict by AUDIT, not taste: a deferral must not start counting as a strike, a failure or an
+    environmental block that changes re-dispatch (check status.ts's environmental streak,
+    dispatchesWithoutNewOwnedPr, verify-human-release and every other verdict reader W1-T4655's
+    audit listed); record the audit in the PR body. Best-effort: a ledger failure never replaces
+    the original error. A one-shot backfill for the 20 existing phantom runs is OUT of scope —
+    name it in the PR body so the operator can decide.
+  acceptance:
+    - claim: "a managed-checkout refresh refusal and each other pre-worktree deferral write exactly one terminal verdict naming their stage before the error propagates, and the daemon's deferral classification of the thrown error is unchanged"
+      proof: "unit test: test/a-deferred-dispatch-leaves-no-run-in-flight.test.ts"
+  falsifier: |
+    Make refreshManagedCheckout throw: the run's ledger must hold run.start, the refusal row and one
+    terminal verdict, and cost-anomaly's in-flight fold must no longer list the run.
