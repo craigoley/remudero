@@ -21,7 +21,7 @@ import { exactBinomialHalfPValue } from "./benchmark-aa.js";
 import { activePaidPilotProtocols, PAIRED_TRIAL_STEPS, pairedSampleDraw, paidPilotArmAdmission, paidPilotArmFor,
   readPaidPilotControls, readPaidPilotEvidence, summarizePaidPilotSpend, type PaidPilotArm, type PaidPilotControlState,
   type PaidPilotEvidence, type PaidPilotProtocol, type PaidPilotRow, type PaidPilotSpend, type PairedPilotReportView } from "./benchmark-paid-pilot.js";
-import { benchmarkRunAssignmentReceipt, type BenchmarkStackEvidence } from "./benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, type BenchmarkStackEvidence } from "./benchmark-run.js";
 import { systemClock, type Clock } from "./clock.js";
 import type { Config } from "./config.js";
 import type { WorkerProviderId } from "./config-schema.js";
@@ -467,7 +467,7 @@ export function sealedPairedAttemptDispatcher(options: SealedPairedAttemptOption
       const settingsFile = renderWorkerSettings({ templatePath: join(installRoot, "settings", "worker.json"),
         hooksDir: join(installRoot, "hooks"), outPath: settingsOut });
       validateWorkerSettingsFile(settingsFile);
-      const result = await (options.spawn ?? spawnWorker)({
+      const result = await (options.spawn ?? benchmarkNonDispatchSpawn("paired-trial", spawnWorker))({
         cwd: dir, permissionMode: "bypassPermissions", settingsFile, config: options.config,
         prompt: `${renderImplementPrompt(options.task, "", attemptId)}\n${SEALED_ATTEMPT_CONTRACT_LINES.join("\n")}`,
         model: request.pin.model, effort: request.pin.effort, mountProvider: request.pin.provider as WorkerProviderId,
