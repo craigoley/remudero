@@ -283,6 +283,9 @@ test("W1-T4658: the propose route calls the planner for a goal-only proposal and
     const producer = { goal: "Promote the canary in repo owner/repo.", steps: [stepInput()], idempotencyKey: "producer" };
     assert.equal((await post(base, producer)).status, 201);
 
+    const claimed = await post(base, { goal: "unstick PR #42", approved: true });
+    assert.equal(claimed.status, 400, "the raw request is refused as sent, before any planning");
+    assert.equal(claimed.body.code, "authority-claim");
     const unmatched = await post(base, { goal: "delete the repo" });
     assert.equal(unmatched.status, 201);
     assert.equal(((unmatched.body.plan as IntentPlan).steps).length, 0);
