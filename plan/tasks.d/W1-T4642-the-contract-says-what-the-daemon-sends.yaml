@@ -1,0 +1,44 @@
+- id: W1-T4642
+  title: "THE DAEMON CONTRACT MIS-STATES FIVE THINGS THE DAEMON ACTUALLY SENDS — a stale tier, a stale enforcement note, two response bodies the spec never declared, and missing feedback fields"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-28: thread audit of dropped follow-ups, verified against origin/main and the live ledger"
+  plan_refs: ["W1-T4609", "W1-T4610", "W1-T4611", "W1-T4612", "W1-T4077", "W1-T404"]
+  files:
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/the-contract-says-what-the-daemon-sends.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    VERIFIED 2026-09-28 against origin/main, left over from the W1-T4609..W1-T4612 route chain: (1)
+    /v1/pr-actions is documented as HIGH-tier and exact-payload-confirmed, but panel-actions.ts
+    serves it at `tier: "low"` since W1-T4077's operator ruling (2026-09-22); (2)
+    Error.required_tier says tiers are enforced only once `enforceWriteTiers` is on and not by `rmd
+    serve`'s production wiring, but serve.ts sets `enforceWriteTiers: true`; (3) service.ts refuses
+    with `{ error: "confirm_nonce_required" }` (403), which the shared Error enum does not list; (4)
+    the /v1/registry 503 is declared as Error, but serve.ts sends `{ error: "registry_unavailable",
+    reason }`; (5) FeedbackEntry omits `reply_to` and `answered_by`, which feedback.ts's
+    FeedbackEntry carries. Also W1-T4612 added `schemas/HighTierForbidden` beside W1-T4611's
+    `responses/HighTierForbidden` -> `schemas/HighTierRefusal`; the two differ only by
+    `consequenceId`.
+  design: |
+    Correct each declaration to the served behaviour, preferring dedicated refusal schemas over
+    widening the shared Error enum where the consumer-breaking-change census would otherwise break
+    an exhaustive switch. Fold the two HighTier schemas into one (adding the optional
+    `consequenceId`). Regenerate the api client; the five contract tests stay green and the
+    undeclared-route baseline stays empty. The new test asserts each served shape validates against
+    its declared schema.
+  acceptance:
+    - claim: "each corrected response body the daemon sends validates against its declared schema, pr-actions is declared low tier, and one HighTier refusal schema remains"
+      proof: "unit test: test/the-contract-says-what-the-daemon-sends.test.ts"
+  falsifier: |
+    Revert the change: the served registry 503 body and the confirm_nonce_required 403 do not
+    validate against the declared schemas.
