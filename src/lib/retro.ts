@@ -15,6 +15,7 @@ import { appendLedger, type LedgerLine, type LedgerWriterDeps } from "./ledger.j
 import { DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD, promotionTaint } from "./learnings.js";
 import type { Lifecycle, LearningEntry, PromotionResult, PromotionTaintResult } from "./learnings.js";
 import { resolveMountForClass, type Mounts } from "./mounts.js";
+import { isNeverWorkedVerdict } from "./never-worked.js";
 import {
   scanPlanCoherence,
   type PlanCoherenceFinding,
@@ -300,6 +301,8 @@ export interface RunSummary {
   observedVerdict?: string;
   creditTs?: string;
   creditMatch?: "pr_url" | "task_id";
+  /** W1-T4711: its verdict row {@link isNeverWorkedVerdict} — a run, but no sample of its class. */
+  neverWorked?: true;
 }
 
 const DONE_STEPS = new Set(["recon.done", "implement.done", "implement.resumed"]);
@@ -415,6 +418,7 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
       ...(typeof verdictLine?.guard === "string" ? { guard: verdictLine.guard } : {}),
       ...(typeof verdictLine?.check === "string" ? { check: verdictLine.check } : {}),
       ...(typeof verdictLine?.observed === "string" ? { observed: verdictLine.observed } : {}),
+      ...(isNeverWorkedVerdict(verdictLine) ? { neverWorked: true as const } : {}),
     });
   }
   // Deterministic order: by start timestamp then run id.
@@ -487,14 +491,21 @@ export interface ClassCalibration {
   turnsPerMerge: number | null;
   /** Output tokens per MERGED PR, same discipline as `turnsPerMerge`; `null` at a zero denominator. */
   outputTokensPerMerge: number | null;
+  /** W1-T4711: `neverWorked` runs of this class kept out of every figure above; absent when none. */
+  excludedCount?: number;
 }
 
 /** Aggregate runs BY TASK CLASS (W1-T167) — {@link aggregateByType} grouped on `taskClass`. A run
  *  with no class groups under `"unknown"`; `shipped` is joined back by `runId`, never re-read. */
 export function aggregateByClass(runs: RunSummary[], shipped?: ShippedRecord[]): ClassCalibration[] {
   const byClass = new Map<string, RunSummary[]>();
+  const excluded = new Map<string, number>();
   for (const r of runs) {
     const key = r.taskClass ?? "unknown";
+    if (r.neverWorked) {
+      excluded.set(key, (excluded.get(key) ?? 0) + 1);
+      continue;
+    }
     const arr = byClass.get(key) ?? [];
     arr.push(r);
     byClass.set(key, arr);
@@ -534,6 +545,7 @@ export function aggregateByClass(runs: RunSummary[], shipped?: ShippedRecord[]):
       mergedForDenominator,
       turnsPerMerge: mergedForDenominator === 0 ? null : round(totalTurns / mergedForDenominator),
       outputTokensPerMerge: mergedForDenominator === 0 ? null : round(totalOutputTokens / mergedForDenominator),
+      ...(excluded.has(taskClass) ? { excludedCount: excluded.get(taskClass) } : {}),
     });
   }
   out.sort((a, b) => (a.taskClass < b.taskClass ? -1 : a.taskClass > b.taskClass ? 1 : 0));
@@ -2133,10 +2145,24 @@ export function mineOverrunClasses(
   runs: RunSummary[],
   opts: { threshold?: number } = {},
 ): ClassOverrunProposal[] {
+  return mineOverrunClassesCounted(runs, opts).proposals;
+}
+
+/** {@link mineOverrunClasses} plus how many overrun-verdict runs it skipped as `neverWorked`
+ *  (W1-T4711): a refused dispatch is a host condition, never a class pattern. */
+export function mineOverrunClassesCounted(
+  runs: RunSummary[],
+  opts: { threshold?: number } = {},
+): { proposals: ClassOverrunProposal[]; excludedCount: number } {
   const threshold = opts.threshold ?? 2;
   const byClass = new Map<string, RunSummary[]>();
+  let excludedCount = 0;
   for (const r of runs) {
     if (!isOverrunRun(r)) continue;
+    if (r.neverWorked) {
+      excludedCount++;
+      continue;
+    }
     const key = overrunClassKey(r);
     const arr = byClass.get(key) ?? [];
     arr.push(r);
@@ -2159,7 +2185,7 @@ export function mineOverrunClasses(
     });
   }
   out.sort((a, b) => (a.taskType + a.risk < b.taskType + b.risk ? -1 : a.taskType + a.risk > b.taskType + b.risk ? 1 : 0));
-  return out;
+  return { proposals: out, excludedCount };
 }
 
 /** Render the mined overrun proposals (markdown) — printed by `--dry-run` and fed to the Architect. */
