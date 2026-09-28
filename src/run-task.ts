@@ -866,6 +866,7 @@ import {
   resolveVerifyHumanJudgeMount,
   parseVerifyHumanVerdict,
   spawnVerifyHumanJudgeWorker,
+  receiptIdentityOnly,
   shardsNeedingJudgement,
   verifyHumanVerdictRow,
   applyAutomateVerdict,
@@ -42893,8 +42894,8 @@ export function shadowedVerifyHumanJudge(opts: {
   spawns?: { primary: typeof spawnWorker; shadow: typeof spawnWorker };
 }): (shard: ShardUnderJudgement) => Promise<VerifyHumanVerdict> {
   let primaryServedModel: string | null = null;
-  const primarySpawn = opts.spawns?.primary ?? ledgeredNonDispatchSpawn("verify-human-judge");
-  const shadowSpawn = opts.spawns?.shadow ?? ledgeredNonDispatchSpawn("verify-human-shadow");
+  const primarySpawn = opts.spawns?.primary ?? ledgeredNonDispatchSpawn("verify-human-judge", receiptIdentityOnly(spawnWorker));
+  const shadowSpawn = opts.spawns?.shadow ?? ledgeredNonDispatchSpawn("verify-human-shadow", receiptIdentityOnly(spawnWorker));
   const primary = realVerifyHumanJudge({
     ...opts,
     spawn: async (args) => {

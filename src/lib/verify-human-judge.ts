@@ -20,6 +20,7 @@ import type { Proposal } from "./inbox.js";
 import type { Mount, Mounts } from "./mounts.js";
 import { canonicalWorkerProviderId, enabledWorkerProviders, type Config, type WorkerProviderId } from "./config.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
+import { createHash } from "node:crypto";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 
@@ -325,6 +326,22 @@ export function automationProposalFromJudgedShard(shard: ShardUnderJudgement, ve
  *  in the prompt, so it can neither explore the worktree nor take any action. */
 export const VERIFY_HUMAN_JUDGE_TOOLS: string[] = [];
 
+/** W1-T4645: one judge decision's run id. The decision is keyed by {@link observedStateKey}, as
+ *  its prior verdict is, so a re-ask after a failed verdict and the shadow judge's paired call join
+ *  the same run. Deterministic, which keeps the spawn-args builder pure. */
+export function verifyHumanJudgeRunId(shard: ShardUnderJudgement): string {
+  const digest = createHash("sha256").update(observedStateKey(shard)).digest("hex").slice(0, 12);
+  return `verify-human-judge-${shard.id}-${digest}`;
+}
+
+/** W1-T4645: the raw spawn beneath a judge lane's receipt wrapper. The task and run ids reach the
+ *  receipts and stop here: the router seeds its auction draw on them (`auctionDrawSeed`), so a
+ *  judge naming its run must not change which provider, model or effort serves it. These lanes
+ *  never passed either field before, so dropping both hands the router exactly what it had. */
+export function receiptIdentityOnly(raw: typeof spawnWorker): typeof spawnWorker {
+  return ({ taskId: _taskId, runId: _runId, ...routed }) => raw(routed);
+}
+
 /** Pure, so the "no tools, cheapest mount" contract is unit-testable without a spawn. */
 export function buildVerifyHumanJudgeSpawnArgs(opts: {
   shard: ShardUnderJudgement;
@@ -333,6 +350,8 @@ export function buildVerifyHumanJudgeSpawnArgs(opts: {
   settingsFile: string;
 }): SpawnWorkerArgs {
   return {
+    taskId: opts.shard.id,
+    runId: verifyHumanJudgeRunId(opts.shard),
     cwd: opts.cwd,
     permissionMode: "bypassPermissions",
     settingsFile: opts.settingsFile,
@@ -356,7 +375,7 @@ export async function spawnVerifyHumanJudgeWorker(opts: {
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): Promise<WorkerResult> {
-  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("verify-human-judge");
+  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("verify-human-judge", receiptIdentityOnly(spawnWorker));
   return spawn(buildVerifyHumanJudgeSpawnArgs(opts));
 }
 

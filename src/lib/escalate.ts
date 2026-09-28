@@ -1,5 +1,5 @@
 import { ghExec } from "./github-transport.js";
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -19,6 +19,7 @@ import type { Mount, Mounts } from "./mounts.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
+import { receiptIdentityOnly } from "./verify-human-judge.js";
 import type { WriteTier } from "./service.js";
 
 /**
@@ -602,6 +603,13 @@ export async function judgeEscalation(e: Escalation, deps: EscalationJudgeDeps):
  *  is baked into the prompt, so it has no ability to explore the worktree or take any action. */
 export const ESCALATION_JUDGE_TOOLS: string[] = [];
 
+/** W1-T4645: one escalation-judge decision's run id — a digest of exactly what was judged, so the
+ *  same escalation re-judged joins one run and a different one never shares it. */
+export function escalationJudgeRunId(e: Escalation): string {
+  const digest = createHash("sha256").update(buildEscalationJudgePrompt(e)).digest("hex").slice(0, 12);
+  return `escalation-summary-${e.taskId}-${digest}`;
+}
+
 /** Build the {@link SpawnWorkerArgs} for a real escalation-judge spawn — a pure function so the
  *  "no tools, cheapest mount" contract is unit-testable without a spawn. */
 export function buildEscalationJudgeSpawnArgs(opts: {
@@ -611,6 +619,8 @@ export function buildEscalationJudgeSpawnArgs(opts: {
   settingsFile: string;
 }): SpawnWorkerArgs {
   return {
+    taskId: opts.escalation.taskId,
+    runId: escalationJudgeRunId(opts.escalation),
     cwd: opts.cwd,
     permissionMode: "bypassPermissions",
     settingsFile: opts.settingsFile,
@@ -634,7 +644,7 @@ export async function spawnEscalationJudgeWorker(opts: {
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): Promise<WorkerResult> {
-  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("escalation-summary");
+  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("escalation-summary", receiptIdentityOnly(spawnWorker));
   return spawn(buildEscalationJudgeSpawnArgs(opts));
 }
 
