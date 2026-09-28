@@ -1,0 +1,32 @@
+- id: W1-T4674
+  title: "AWAY IS A MANUAL FLAG THE OPERATOR FORGETS — infer attended versus away from recent operator activity (console writes, owner comments, answer clicks, operator commits) as a lease whose length is learned from the operator's own reply latency, keeping the flag as an override"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  plan_refs: [W1-T2696]
+  files: [src/lib/presence.ts, src/lib/escalate.ts, test/presence-is-inferred-from-activity.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: only `rmd away on|off` (src/lib/escalate.ts ~419-462). Buzz's presence is a lease expiring after 3x the
+    heartbeat, 'a bounded wrong dot, never an indefinite one' (https://github.com/block/buzz ARCHITECTURE.md).
+  design: |
+    (i) presence.ts derives attended from the latest operator activity across the four sources.
+    (ii) The lease length is learned from the distribution of the operator's reply latency (no fixed number).
+    (iii) Away batches escalations into the digest exactly as the manual flag does; the flag overrides.
+  acceptance:
+    - claim: "recent operator activity reads as attended without the manual flag"
+      proof: 'grep: test("W1-T4674: recent operator activity reads as attended without the manual flag" in test/presence-is-inferred-from-activity.test.ts'
+    - claim: "the manual flag overrides the inferred state"
+      proof: 'grep: test("W1-T4674: the manual flag overrides the inferred state" in test/presence-is-inferred-from-activity.test.ts'
+    - claim: "the new module is called from src/lib/escalate.ts"
+      proof: 'grep: inferOperatorPresence( in src/lib/escalate.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.
