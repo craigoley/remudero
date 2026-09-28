@@ -8343,7 +8343,7 @@ function isReopenedClosedLifecycleRefusal(reason: unknown): boolean {
 
 const RETRYABLE_REVIEW_THROW_PREFIX = "post-review attempt threw — standing down rather than retrying this head unbounded:";
 
-function isRetryableReviewThrow(reason: unknown): boolean {
+export function isRetryableReviewThrow(reason: unknown): boolean {
   return typeof reason === "string" && reason.startsWith(RETRYABLE_REVIEW_THROW_PREFIX);
 }
 
