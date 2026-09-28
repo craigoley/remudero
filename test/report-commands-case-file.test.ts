@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { caseFileCommand, parseCasePrSnapshot } from "../src/lib/report-commands.js";
 import type { Task } from "../src/lib/plan.js";
+import type { Config } from "../src/lib/config.js";
 import type { StatusProjection } from "../src/lib/status.js";
 import { buildBatchedGithub } from "../src/lib/status.js";
+import { createBoardSnapshotCache } from "../src/lib/board-snapshot-cache.js";
 
 const task = { id: "W1-T4607", title: "Case file", repo: "remudero", depends_on: [], type: "implement",
   verify: "auto", risk: "high", status: "queued", attempts: 0 } as Task;
@@ -127,4 +129,27 @@ test("a throttled status read with no PR number is not an observed absence of a 
   });
   assert.equal(throttledCode, 0);
   assert.equal(JSON.parse(throttled[0]).pr.reason, "projection-indeterminate:rate_limit");
+});
+
+test("the case-file board read starts from the persisted board snapshot, not a cold walk", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-case-snapshot-"));
+  const stateDir = join(root, "state");
+  const seeded = createBoardSnapshotCache(root, "craigoley", "remudero");
+  assert.equal(seeded.commitClosed([{ number: 7001, url: "https://github.com/craigoley/remudero/pull/7001", state: "MERGED",
+    headRefName: "run-W1-T4607-1700000000000", headRefOid: "sha-7001", body: `Remudero-Task: ${task.id}`,
+    autoMergeRequest: null, title: "merged 7001", updatedAt: "2026-09-05T00:01:00Z" }]), true);
+  writeFileSync(join(stateDir, "ledger.ndjson"), "");
+  const seen: Array<number[] | undefined> = [];
+  const printed: string[] = [];
+  const code = await caseFileCommand([task.id], {
+    stateDir, nowIso: () => "2026-09-27T14:00:00.000Z", resolveOwnerRepo: () => ({ owner: "craigoley", repo: "remudero" }),
+    readTask: () => task, loadConfig: () => ({ root }) as unknown as Config,
+    buildGithub: ((_owner: string, _repo: string, options?: Parameters<typeof buildBatchedGithub>[2]) => {
+      seen.push(options?.snapshotCache ? [...(options.snapshotCache.closedSeed()?.keys() ?? [])] : undefined);
+      throw new Error("no network in this test");
+    }) as typeof buildBatchedGithub,
+    out: (line) => printed.push(line),
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(seen, [[7001]], "the gateway is built once, seeded from the snapshot under the state dir's root");
 });
