@@ -1,0 +1,39 @@
+- id: W1-T4710
+  title: "A UNION READ IGNORES ITS STEP FILTER — resolveLedgerUnion accepts a `step` option its raw-line reader never consults, so a caller passing pattern `.*` with step review.posted decompresses and returns the whole ledger corpus"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-28: found by W1-T4702's build (PR #7637)"
+  plan_refs: ["W1-T3471", "W1-T4702"]
+  files:
+    - src/lib/ledger-union.ts
+    - test/a-union-read-honours-its-step-filter.test.ts
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-09-28 at origin/main: `resolveLedgerUnion(stateDir, pattern, fsDeps, opts)`
+    (src/lib/ledger-union.ts) passes `{ ...opts, pattern, … }` to `readLedgerUnionRawLinesSync`, whose
+    only filter is `!opts.pattern || opts.pattern.test(line)`; `LedgerUnionOptions.step` is declared but
+    never read on this path. The sweep's arm-recovery read (W1-T3471) calls
+    `resolveLedgerUnion(dirname(ledgerPath), ".*", undefined, { step: "review.posted" })`, so on that
+    rare path it decompresses every archive and returns every line of the corpus (355 `.gz` rotations
+    on the fleet host) while reading as a review.posted query. W1-T4702's build measured the corpus
+    read at 7.6 s and ~830 MB RSS peak. A silently ignored option also means any future caller
+    trusting `step` gets unfiltered rows.
+  design: |
+    Make the raw-line reader honour `step` (match the row's `"step":"<name>"` field exactly, one or
+    many), or make passing an unsupported option a thrown error — whichever the other callers of
+    `LedgerUnionOptions` already expect (audit them). Either way `step` is never silently ignored, and
+    the sweep's arm read returns only review.posted rows.
+  acceptance:
+    - claim: "a union read with a step filter returns only rows of that step, and no LedgerUnionOptions field is silently ignored"
+      proof: "unit test: test/a-union-read-honours-its-step-filter.test.ts"
+  falsifier: |
+    Read a two-archive fixture with pattern `.*` and step review.posted: every returned row is a
+    review.posted row.
