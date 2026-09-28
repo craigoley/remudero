@@ -16423,6 +16423,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       } as RunResult;
     }
 
+    // W1-T4656: ONE policy read shared by the census rung and the fix rung (config-reader-seams counts reads).
+    const fixSpawnWallClockBoundMs = () => opts.spawnWallClockBoundMs ?? loadDefaultPolicy().values.fixSpawnWallClockBoundMs;
     // Ensure the branch is on origin (worker pushes without -u).
     let branchOnOrigin = false;
     let probeFailure: RemotePresenceProbeFailure | undefined;
@@ -16565,7 +16567,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         const rung = await repairCensusRefusedPush({
           refusal, task, runId, worktreePath, branch, resumeSessionId: impl.sessionId, mount: fixMount,
           ...(stepUpMount ? { stepUpMount } : {}), settingsFile, config, budgetUsd, ledgerPath,
-          spawnWallClockBoundMs: opts.spawnWallClockBoundMs ?? loadDefaultPolicy().values.fixSpawnWallClockBoundMs,
+          spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
           spawn: trackRepairLadder(spawn, { config, log }), account, log, say,
         });
         if (rung.outcome === "refused") {
@@ -16909,7 +16911,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // W1-T1044: the wall-clock bound on this rung's own worker spawn, and the best-effort
           // reclaim of whatever it abandoned — see runFixRung's own deps doc. W1-T1219: reads
           // `fixSpawnWallClockBoundMs`, its OWN policy row, not the sweep tick's.
-          spawnWallClockBoundMs: opts.spawnWallClockBoundMs ?? loadDefaultPolicy().values.fixSpawnWallClockBoundMs,
+          spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
           // W1-T2261: binds this rung's OWN `log` through so a match/no-match reclaim outcome
           // (`fix.spawn_reclaimed`/`fix.spawn_reclaim_no_match`) lands in the same ledger stream
           // as `fix.spawn_abandoned` — the bare function reference below this before this task
