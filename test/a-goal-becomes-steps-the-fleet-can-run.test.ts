@@ -9,10 +9,11 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ACTION_CATALOGUE, resolveCatalogueCapability } from "../src/lib/action-executor.js";
+import { ACTION_CATALOGUE, executeCatalogueAction, resolveCatalogueCapability } from "../src/lib/action-executor.js";
+import type { AutomationAction, AutomationActionReceipt } from "../src/lib/automation-action.js";
 import { fixedClock } from "../src/lib/clock.js";
-import { pauseFilePath, stopFilePath } from "../src/lib/fleet-control.js";
-import { buildIntentPlan, INTENT_PLAN_LEDGER_STEP, previewIntentPlan, type IntentPlan } from "../src/lib/intent-plan.js";
+import { isPaused, pauseFilePath, stopFilePath } from "../src/lib/fleet-control.js";
+import { buildIntentPlan, INTENT_PLAN_LEDGER_STEP, intentPlanActions, previewIntentPlan, type IntentPlan } from "../src/lib/intent-plan.js";
 import {
   boardPrReading,
   boardTaskReading,
@@ -299,4 +300,37 @@ test("W1-T4658: every catalogue entry the planner can draft keeps the catalogue'
     assert.ok(built.ok, JSON.stringify(built));
     assertCatalogueOnly(built.plan);
   }
+});
+
+test("W1-T4658: a planner-produced rmd.fleet.pause action carries approval human and the executor runs it, never refusing approval-too-weak", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}intent-planner-exec-`));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const { plan, state } = propose({ goal: "pause the fleet", scope: { instance: "fleet-1" } }, goalEvidenceReader({ root, clock: CLOCK }));
+  assert.equal(state, "ready");
+  const [action] = intentPlanActions(plan, plan.scope);
+  assert.equal(action!.capability, "rmd.fleet.pause");
+  assert.deepEqual(action!.approval, { policy: "human" }, "the stricter of the tier-derived policy and the catalogue's");
+  const run = (candidate: AutomationAction) => {
+    const receipts: AutomationActionReceipt[] = [];
+    const result = executeCatalogueAction({
+      action: candidate,
+      receipts: [],
+      approval: { decision: "approved", decidedBy: PROPOSER, decidedAt: CLOCK.iso() },
+      observations: candidate.preconditions.map((item) => ({ preconditionId: item.id, state: "satisfied" as const, source: item.source, observedAt: CLOCK.iso() })),
+      clock: CLOCK,
+      callerTier: "middle",
+      origin: PROPOSER,
+      executor: { root, ledgerPath: tempStatePath() },
+      appendReceipt: (receipt) => receipts.push(receipt),
+    });
+    return { result, codes: (result.preflight?.findings ?? []).map((finding) => finding.code) };
+  };
+  const weakened = run({ ...action!, approval: { policy: "none" } });
+  assert.equal(weakened.result.disposition, "refused", "the control: a none-approval pause is what the executor refuses");
+  assert.ok(weakened.codes.includes("approval-too-weak"));
+  assert.equal(isPaused(root), false);
+  const planned = run(action!);
+  assert.ok(!planned.codes.includes("approval-too-weak"), JSON.stringify(planned.codes));
+  assert.equal(planned.result.disposition, "completed", JSON.stringify(planned.result.receipt));
+  assert.equal(isPaused(root), true, "the executor's own handler paused the fleet");
 });
