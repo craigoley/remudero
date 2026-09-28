@@ -18,7 +18,7 @@ import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, write
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { aaArmFor, aaStackHash, buildAaAllocationReceipt, buildBenchmarkAaReport, parseAaTrialManifest, readAaLedgerEvidence,
-  BENCHMARK_AA_VERSION, type AaTrialManifest, type BenchmarkAaReport } from "./benchmark-aa.js";
+  BENCHMARK_AA_VERSION, type AaTrialManifest, type BenchmarkAaCommandInput, type BenchmarkAaReport } from "./benchmark-aa.js";
 import { benchmarkRunAssignmentReceipt, type BenchmarkStackEvidence } from "./benchmark-run.js";
 import { systemClock, type Clock } from "./clock.js";
 import { loadConfig, type Config } from "./config.js";
@@ -406,7 +406,7 @@ const USAGE = "usage: rmd benchmark-aa prospective register --trial <manifest.js
 
 /** `rmd benchmark-aa prospective ...`: parses the operator's words and hands one request to `run`. */
 export async function prospectiveAaCommand(rest: string[], run: (request: ProspectiveAaRequest) => Promise<ProspectiveAaOutcome>,
-  deps: { print?: (line: string) => void; resolveStateDir?: () => string; clock?: Clock } = {}): Promise<number> {
+  deps: BenchmarkAaCommandInput = {}): Promise<number> {
   const print = deps.print ?? ((line: string) => console.log(line));
   const [action, ...args] = rest;
   let values: Record<string, string | boolean | undefined>;

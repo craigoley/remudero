@@ -14,7 +14,7 @@ import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 import { runBenchmarkCohortPass, type BenchmarkCohortSnapshot } from "./benchmark-cohort.js";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
-import { systemClock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 import { loadConfig } from "./config.js";
 import { buildEvalCard, chiSquareGoodnessOfFit, normalCdf, SRM_ALPHA, type EvalCard, type EvalCardEvidence,
   type EvalCardTrial } from "./eval-card.js";
@@ -800,6 +800,8 @@ export interface BenchmarkAaCommandInput {
   nowIso?: string;
   print?: (line: string) => void;
   resolveStateDir?: () => string;
+  /** W1-T4647: the prospective subcommand's time source; the retrospective verb reads nowIso. */
+  clock?: Clock;
   readEvidence?: (stateDir: string, taskIds: ReadonlySet<string>) => Promise<AaLedgerEvidence>;
   readCohort?: (stateDir: string) => Promise<BenchmarkCohortSnapshot>;
 }
