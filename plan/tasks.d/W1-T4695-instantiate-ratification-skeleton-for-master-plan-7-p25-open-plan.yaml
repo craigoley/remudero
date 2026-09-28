@@ -1,6 +1,6 @@
 - id: W1-T4695
   title: Instantiate ratification skeleton for MASTER-PLAN §7/P25 open plan
-  repo: master-plan
+  repo: remudero
   depends_on: []
   type: implement
   verify:
@@ -9,6 +9,10 @@
   status: queued
   attempts: 0
   origin: plan/tasks.yaml
+  rationale: >-
+    The approved verify-human-automate:W1-T4471 follow-up needs a concrete
+    ratification skeleton before its MASTER-PLAN mapping can be written.
+    This task creates that skeleton; W1-T4696 records the mapping after it exists.
   files:
     - plan/tasks.yaml
     - MASTER-PLAN.md

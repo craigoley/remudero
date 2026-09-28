@@ -1,6 +1,6 @@
 - id: W1-T4697
   title: "MASTER-PLAN §7/P25 ratification groundwork: confirm alignment with existing plan"
-  repo: "MASTER-PLAN"
+  repo: remudero
   depends_on: ["W1-T110"]
   type: "implement"
   verify:
@@ -10,4 +10,8 @@
   status: "queued"
   attempts: 0
   origin: "ratification draft"
+  rationale: >-
+    The approved proof-debt:W1-T4065 follow-up starts with an alignment check
+    against the existing plan. This task records that check before W1-T4698
+    compiles acceptance lines, so the candidate does not assume alignment.
   files: ["MASTER-PLAN.md", "plan/tasks.yaml"]

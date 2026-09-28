@@ -1,6 +1,6 @@
 - id: W1-T4696
   title: Add placeholder mapping and stamp to MASTER-PLAN.md (ratification line)
-  repo: master-plan
+  repo: remudero
   depends_on:
     - W1-T4695
   type: implement
@@ -10,6 +10,10 @@
   status: queued
   attempts: 0
   origin: MASTER-PLAN.md
+  rationale: >-
+    The approved verify-human-automate:W1-T4471 follow-up needs the new
+    skeleton's identifier mapped into the ratification line. This task follows
+    W1-T4695 and records that mapping in MASTER-PLAN.md.
   files:
     - MASTER-PLAN.md
     - plan/tasks.yaml

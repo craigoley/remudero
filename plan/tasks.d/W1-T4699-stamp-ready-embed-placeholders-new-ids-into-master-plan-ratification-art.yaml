@@ -1,6 +1,6 @@
 - id: W1-T4699
   title: "Stamp ready: embed placeholders New-IDs into MASTER-PLAN ratification artifact"
-  repo: "MASTER-PLAN"
+  repo: remudero
   depends_on: ["W1-T4698", "W1-T112"]
   type: "implement"
   verify:
@@ -10,4 +10,8 @@
   status: "queued"
   attempts: 0
   origin: "ratification draft"
+  rationale: >-
+    The approved proof-debt:W1-T4065 follow-up needs its candidate identifiers
+    recorded in the ratification artifact after acceptance lines are compiled.
+    This task depends on W1-T4698 and handles that final recording step.
   files: ["MASTER-PLAN.md", "plan/tasks.yaml"]

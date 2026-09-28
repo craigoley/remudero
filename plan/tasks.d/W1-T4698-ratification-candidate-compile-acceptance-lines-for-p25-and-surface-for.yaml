@@ -1,6 +1,6 @@
 - id: W1-T4698
   title: "RATIFICATION CANDIDATE: compile acceptance lines for P25 and surface for operator decision"
-  repo: "MASTER-PLAN"
+  repo: remudero
   depends_on: ["W1-T4697", "W1-T111"]
   type: "implement"
   verify:
@@ -10,4 +10,8 @@
   status: "queued"
   attempts: 0
   origin: "ratification draft"
+  rationale: >-
+    The approved proof-debt:W1-T4065 follow-up needs explicit acceptance lines
+    for an operator decision. This task follows W1-T4697's alignment check and
+    prepares the candidate that W1-T4699 can stamp after review.
   files: ["MASTER-PLAN.md", "plan/tasks.yaml"]
