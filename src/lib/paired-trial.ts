@@ -13,17 +13,27 @@
  * on either side is unmeasurable, never a win or a loss for either arm.
  */
 
+import { spawnSync, type execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mkdirSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { exactBinomialHalfPValue } from "./benchmark-aa.js";
 import { activePaidPilotProtocols, PAIRED_TRIAL_STEPS, pairedSampleDraw, paidPilotArmAdmission, paidPilotArmFor,
   readPaidPilotControls, readPaidPilotEvidence, summarizePaidPilotSpend, type PaidPilotArm, type PaidPilotControlState,
   type PaidPilotEvidence, type PaidPilotProtocol, type PaidPilotRow, type PaidPilotSpend, type PairedPilotReportView } from "./benchmark-paid-pilot.js";
 import { benchmarkRunAssignmentReceipt, type BenchmarkStackEvidence } from "./benchmark-run.js";
 import { systemClock, type Clock } from "./clock.js";
+import type { Config } from "./config.js";
+import type { WorkerProviderId } from "./config-schema.js";
+import { billingMode } from "./env.js";
 import { buildEvalCard, normalQuantile, type EvalCard, type EvalCardEvidence } from "./eval-card.js";
 import { scoreCorpusReplay, type CorpusProofOutcome } from "./golden-corpus.js";
-import type { AcceptanceCriterion } from "./plan.js";
-import { execWhitelistedProof, parseWhitelistedProof, type ProofExecutor } from "./review.js";
+import { resolveInstallRoot } from "./install-root.js";
+import type { AcceptanceCriterion, Task } from "./plan.js";
+import { renderImplementPrompt } from "./prompt-render.js";
+import { ensureDeps, execWhitelistedProof, parseWhitelistedProof, registerReviewerCheckout, type ProofExecutor } from "./review.js";
+import { validateWorkerSettingsFile } from "./settings.js";
+import { renderWorkerSettings, spawnWorker, worktreeRemove } from "./worker.js";
 
 export const PAIRED_PILOT_REPORT_VERSION = "benchmark-paired-pilot-v1" as const;
 const PAIRED_ALPHA = 0.05;
@@ -72,6 +82,8 @@ export interface PairedAttemptResult {
   /** Any value here is an isolation breach: the attempt left the sandbox, so the pair is unmeasurable. */
   pushedRef?: string | null;
   prUrl?: string | null;
+  /** A named breach of any other kind: a fleet-branch write, or isolation the dispatcher could not verify. */
+  breach?: string | null;
   cleanup?: () => void;
 }
 
@@ -122,8 +134,9 @@ export interface PairedTrialInput {
   protocols?: (stateDir: string, nowIso: string) => PaidPilotProtocol[];
   readEvidence?: (stateDir: string, protocol: PaidPilotProtocol) => Promise<PaidPilotEvidence>;
   readControls?: (stateDir: string, pilotId: string) => PaidPilotControlState;
-  /** Absent (the production default until a sandboxed dispatcher is wired): a live pair is refused by name. */
+  /** Absent: a live pair is refused by name, `dispatchRefusal` when the caller gave one. */
   dispatchAttempt?: PairedAttemptDispatch;
+  dispatchRefusal?: string;
   grade?: PairedGrader;
   /** Observational only: reports how the side trial ended. Nothing in normal dispatch reads it. */
   settled?: (result: PairedTrialResult) => void;
@@ -180,7 +193,7 @@ async function sampledReasons(context: TrialContext, claimed: boolean): Promise<
   if (admitted.has(input.task.id)) reasons.push("task-already-paired");
   if (admitted.size >= protocol.paired!.maxPairs) reasons.push("pair-cap-reached");
   if (!protocol.paired!.shadow && !claimed) reasons.push("pair-in-flight");
-  if (!protocol.paired!.shadow && input.dispatchAttempt === undefined) reasons.push("attempt-dispatch-not-wired");
+  if (!protocol.paired!.shadow && input.dispatchAttempt === undefined) reasons.push(input.dispatchRefusal ?? "attempt-dispatch-not-wired");
   return reasons;
 }
 
@@ -217,7 +230,7 @@ async function runAttempt(context: TrialContext, arm: PaidPilotArm, position: 0 
     reasons.push(reason);
   }
   let grade: PairedGrade | null = null;
-  if (attempt !== null && (attempt.pushedRef || attempt.prUrl)) reasons.push(`isolation-breach:${arm}`);
+  if (attempt !== null && (attempt.pushedRef || attempt.prUrl || attempt.breach)) reasons.push(`isolation-breach:${arm}`);
   else if (attempt !== null && attempt.headDir !== null) {
     try { grade = await (input.grade ?? ((req) => gradeHeadWithReviewerExecutor(req.criteria, req.headDir)))({ taskId: input.task.id,
       headDir: attempt.headDir, criteria: input.task.acceptance ?? [] }); }
@@ -229,6 +242,7 @@ async function runAttempt(context: TrialContext, arm: PaidPilotArm, position: 0 
   const outcome: CorpusProofOutcome = reasons.length === 0 && grade !== null ? grade.verdict : "unmeasurable";
   if (outcome === "unmeasurable" && grade !== null) reasons.push(`ungradeable:${arm}`);
   safeLog(input.log, PAIRED_TRIAL_STEPS.attempt, { paired_trial: { ...base, outcome, reasons, head_sha: attempt?.headSha ?? null,
+    isolation_breach: attempt?.pushedRef || attempt?.prUrl || attempt?.breach || null,
     grade: grade === null ? null : { passed: grade.passed, failed: grade.failed, unmeasurable: grade.unmeasurable, holdouts: grade.holdouts } },
     served_model: attempt?.servedModel ?? null, billing_mode: attempt?.billingMode ?? null, total_cost_usd: attempt?.costUsd ?? null });
   try { attempt?.cleanup?.(); }
@@ -313,6 +327,167 @@ export async function runPairedTrial(input: PairedTrialInput): Promise<PairedTri
     console.error(JSON.stringify({ event: "paired_trial.observer_unavailable", reason }));
   }
   return result;
+}
+
+/** Every pair a CLI process is asked to run: it can exit before its fire-and-forget pair settles, so only the daemon runs one. */
+export const PAIRED_CLI_REFUSAL = "pair-needs-the-daemon";
+
+/**
+ * BACKSTOP (W1-T4638): the most one sealed side attempt may spend under its own SDK budget. The primary control is the
+ * pilot's cash ceiling, re-read before every paid spawn (`paidArmPauseReasons`); this bounds how far one attempt can
+ * overshoot it, since a task's own budget defaults far above the whole pilot's.
+ */
+export const PAIRED_ATTEMPT_MAX_BUDGET_USD = 15;
+
+/** A pull-request url anywhere in a worker's own words. */
+export const PAIRED_PR_URL_RE = /https?:\/\/[^\s)>\]]+\/pull\/\d+/;
+
+/** Where sealed attempts are cut: beside the fleet's worktrees root, never inside it, so no run reaper walks them. */
+export function pairedAttemptRoot(root: string): string {
+  return join(root, "paired-attempts");
+}
+
+/** The contract a sealed attempt's prompt ends with. It is advice; {@link probeSealedIsolation} is the check. */
+export const SEALED_ATTEMPT_CONTRACT_LINES: readonly string[] = [
+  "# SEALED SIDE ATTEMPT (this section overrides every push, pull request and branch instruction above)",
+  "- This checkout is a DETACHED worktree for a measurement attempt. Nothing you do here is pushed or merged.",
+  "- Commit your change locally with `git commit`, or leave it saved (the harness commits what is left), then STOP.",
+  "- Do NOT `git push`, do NOT open a pull request, and do NOT create, rename or switch to any branch:",
+  "  any of those is an isolation breach and voids the attempt.",
+  "- End with a REPORT. Write no PR_URL line.",
+];
+
+/** `git` in `dir`: trimmed stdout, or null on a non-zero exit. Never throws on a refusal. */
+function gitProbe(dir: string, args: readonly string[]): string | null {
+  const run = spawnSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return run.status === 0 ? run.stdout.trim() : null;
+}
+
+function gitOut(dir: string, args: readonly string[]): string {
+  const out = gitProbe(dir, args);
+  if (out === null) throw new Error(`sealed paired attempt: git ${args.join(" ")} failed in ${dir}`);
+  return out;
+}
+
+/** `<sha> <ref>` lines, from for-each-ref or ls-remote alike. */
+function refPairs(text: string | null): [string, string][] {
+  return (text ?? "").split("\n").map((line) => line.trim().split(/\s+/)).filter((cols) => cols.length === 2)
+    .map(([sha, ref]) => [sha!, ref!]);
+}
+
+/** What the isolation probe reads once the worker returns. */
+export interface SealedProbeInput {
+  repoDir: string;
+  dir: string;
+  base: string;
+  text: string;
+}
+
+export interface SealedIsolationReading {
+  pushedRef: string | null;
+  prUrl: string | null;
+  breach: string | null;
+}
+
+/**
+ * The production isolation check, which trusts nothing the worker says about itself. The attempt's commits are every
+ * sha its detached HEAD visited (reflog and `base..HEAD`) that `base` does not already contain; a remote ref or a
+ * remote-tracking ref carrying one is a push, a local branch carrying one (or a HEAD that is no longer detached) is a
+ * fleet-branch write, and a remote that cannot be read is isolation this probe could not verify.
+ */
+export function probeSealedIsolation(input: SealedProbeInput): SealedIsolationReading {
+  const prUrl = PAIRED_PR_URL_RE.exec(input.text)?.[0] ?? null;
+  const visited = [...(gitProbe(input.dir, ["reflog", "--format=%H", "HEAD"]) ?? "").split("\n"),
+    ...(gitProbe(input.dir, ["rev-list", `${input.base}..HEAD`]) ?? "").split("\n")];
+  const commits = new Set([...new Set(visited)].filter((sha) => sha !== "" && sha !== input.base
+    && gitProbe(input.dir, ["merge-base", "--is-ancestor", sha, input.base]) === null));
+  const local = refPairs(gitProbe(input.repoDir, ["for-each-ref", "--format=%(objectname) %(refname)", "refs/heads", "refs/remotes"]));
+  const remote = gitProbe(input.repoDir, ["ls-remote", "origin"]);
+  const pushed = refPairs(remote).find(([sha]) => commits.has(sha))
+    ?? local.find(([sha, ref]) => ref.startsWith("refs/remotes/") && commits.has(sha));
+  const branch = gitProbe(input.dir, ["symbolic-ref", "-q", "HEAD"])
+    ?? local.find(([sha, ref]) => ref.startsWith("refs/heads/") && commits.has(sha))?.[1] ?? null;
+  const breach = branch !== null ? `branch-write:${branch}` : remote === null ? "isolation-unverified:remote-unreadable" : null;
+  return { pushedRef: pushed?.[1] ?? null, prUrl, breach };
+}
+
+/** A raw detached `git worktree add` at the pair's own base: no branch is ever named, so none can be credited. */
+function cutSealedAttemptTree(repoDir: string, dir: string, base: string): void {
+  mkdirSync(dirname(dir), { recursive: true });
+  gitOut(repoDir, ["worktree", "add", "--detach", dir, base]);
+}
+
+/** Commit whatever the worker left unsaved, locally and under a fixed identity, so the graded head has a sha. */
+function commitSealedEdits(dir: string): void {
+  gitOut(dir, ["add", "-A"]);
+  if (gitOut(dir, ["status", "--porcelain"]) === "") return;
+  gitOut(dir, ["-c", "user.name=remudero paired attempt", "-c", "user.email=paired-attempt@remudero.invalid",
+    "commit", "--quiet", "--no-verify", "-m", "paired side attempt (sealed, never pushed)"]);
+}
+
+/** The production dispatcher's inputs. Every optional field defaults to the real thing. */
+export interface SealedPairedAttemptOptions {
+  task: Task;
+  config: Config;
+  /** The fleet's clone of the task's repo: the attempt borrows its objects, never its branches. */
+  repoDir: string;
+  baseRef?: string;
+  spawn?: typeof spawnWorker;
+  maxBudgetUsd?: number;
+  clockBoundMs?: number;
+  clock?: Clock;
+  installDependencies?: typeof execFileSync;
+  probeIsolation?: (input: SealedProbeInput) => SealedIsolationReading;
+  removeTree?: (repoDir: string, dir: string) => void;
+}
+
+/**
+ * W1-T4638: the production {@link PairedAttemptDispatch}. Each attempt gets a fresh DETACHED worktree at one base shared
+ * by both arms, primed the way the reviewer primes a checkout, and spawns its pinned arm through the ordinary
+ * `spawnWorker` with no assignment sink, so the only rows it leaves are the trial's own. The head is committed locally
+ * and returned for grading; the worktree is removed by `cleanup`, or here when anything throws.
+ */
+export function sealedPairedAttemptDispatcher(options: SealedPairedAttemptOptions): PairedAttemptDispatch {
+  const clock = options.clock ?? systemClock;
+  let base: string | null = null;
+  return async (request) => {
+    base ??= gitOut(options.repoDir, ["rev-parse", "--verify", `${options.baseRef ?? "origin/main"}^{commit}`]);
+    const attemptId = `${request.pairId}-${request.arm}-${clock.now()}`;
+    const dir = join(pairedAttemptRoot(options.config.root), attemptId);
+    const settingsOut = join(options.config.root, "tmp", `worker-settings-${attemptId}.json`);
+    cutSealedAttemptTree(options.repoDir, dir, base);
+    const cleanup = (): void => {
+      rmSync(settingsOut, { force: true });
+      (options.removeTree ?? worktreeRemove)(options.repoDir, dir);
+    };
+    try {
+      registerReviewerCheckout(dir);
+      ensureDeps(dir, options.installDependencies);
+      const installRoot = resolveInstallRoot(options.config);
+      const settingsFile = renderWorkerSettings({ templatePath: join(installRoot, "settings", "worker.json"),
+        hooksDir: join(installRoot, "hooks"), outPath: settingsOut });
+      validateWorkerSettingsFile(settingsFile);
+      const result = await (options.spawn ?? spawnWorker)({
+        cwd: dir, permissionMode: "bypassPermissions", settingsFile, config: options.config,
+        prompt: `${renderImplementPrompt(options.task, "", attemptId)}\n${SEALED_ATTEMPT_CONTRACT_LINES.join("\n")}`,
+        model: request.pin.model, effort: request.pin.effort, mountProvider: request.pin.provider as WorkerProviderId,
+        maxBudgetUsd: Math.min(options.maxBudgetUsd ?? PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_ATTEMPT_MAX_BUDGET_USD),
+        runId: `paired-${attemptId}`, taskId: `${request.pairId}:${request.arm}`,
+        env: { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "remote.origin.pushurl", GIT_CONFIG_VALUE_0: "sealed-paired-attempt://push-refused" },
+        ...(options.clockBoundMs === undefined ? {} : { clockBound: { boundMs: options.clockBoundMs } }),
+      });
+      const reading = (options.probeIsolation ?? probeSealedIsolation)({ repoDir: options.repoDir, dir, base,
+        text: [result.text, ...result.blocks].join("\n") });
+      const sealed = reading.pushedRef === null && reading.prUrl === null && reading.breach === null;
+      const measurable = sealed && !result.apiError && result.usageRefusal === undefined;
+      if (measurable) commitSealedEdits(dir);
+      return { headDir: measurable ? dir : null, headSha: gitProbe(dir, ["rev-parse", "HEAD"]), servedModel: result.servedModel ?? null,
+        billingMode: result.provider === "cash" ? "api" : billingMode(result.childEnvKeys), costUsd: result.costUsd, ...reading, cleanup };
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
+  };
 }
 
 /** A measured pair's two graded outcomes. */
