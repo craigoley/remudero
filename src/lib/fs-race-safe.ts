@@ -76,6 +76,22 @@ export class StillBeingWrittenError extends RmdError {
   }
 }
 
+/** The shape every minted secret here takes: `randomBytes(32).toString("hex")`. */
+export const HEX_SECRET_RE = /^[0-9a-f]{64}$/;
+
+/** A secret file that IS present but does not hold what its minter writes. Refused, never used:
+ *  an empty or short secret is a key anyone can reproduce (an HMAC over `""` forges every link). */
+export class InvalidSecretFileError extends RmdError {
+  readonly reason = "invalid-secret-file";
+  constructor(
+    readonly path: string,
+    readonly problem: string,
+  ) {
+    super("registry", GENERIC_EXIT_CODE, `invalid-secret-file: ${path} ${problem} — refusing to use it; delete it to regenerate`, { path, problem });
+    this.name = "InvalidSecretFileError";
+  }
+}
+
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }

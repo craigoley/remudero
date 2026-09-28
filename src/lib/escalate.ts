@@ -1,9 +1,9 @@
 import { ghExec } from "./github-transport.js";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
-import { createOrReadExclusive } from "./fs-race-safe.js";
+import { createOrReadExclusive, createOrReadPublished, HEX_SECRET_RE, InvalidSecretFileError } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
 import { appendThreadMessage } from "./inbox-thread.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
@@ -1335,27 +1335,35 @@ export function escalationLinkUsedPath(root: string, signature: string): string 
   return join(root, "state", "escalation-links", `${signature}.used`);
 }
 
-/** Create-once, read-thereafter, mode 600 — the discipline `loadServiceTokens` already uses.
- *  A rotation is: stop the daemon, delete the file, start it again. */
+/** Create-once, read-thereafter, mode 600 — the discipline `resolveServiceTokens` uses.
+ *  A rotation is: stop the daemon, delete the file, start it again.
+ *  The secret is PUBLISHED whole over the empty claim (`createOrReadPublished`), so a reader
+ *  never meets a created-but-unwritten file; and a present file that is not a 64-hex secret
+ *  throws {@link InvalidSecretFileError} — an empty key would sign links anyone can forge. */
 export function loadEscalationLinkSecret(
   root: string,
-  io: { create: typeof createOrReadExclusive; write: typeof writeSync; close: typeof closeSync; mkdir: typeof mkdirSync } = {
-    create: createOrReadExclusive,
-    write: writeSync,
-    close: closeSync,
+  io: { claim: typeof createOrReadPublished; mkdir: typeof mkdirSync } = {
+    claim: createOrReadPublished,
     mkdir: mkdirSync,
   },
 ): string {
   const path = escalationLinkSecretPath(root);
   io.mkdir(dirname(path), { recursive: true });
-  const result = io.create(path, 0o600);
+  const result = io.claim(path, 0o600);
   if (result.created) {
-    const secret = randomBytes(32).toString("hex");
-    io.write(result.fd, `${secret}\n`);
-    io.close(result.fd);
-    return secret;
+    try {
+      const secret = randomBytes(32).toString("hex");
+      result.publish(`${secret}\n`);
+      return secret;
+    } finally {
+      result.release();
+    }
   }
-  return result.raw.trim();
+  const secret = result.raw.trim();
+  if (!HEX_SECRET_RE.test(secret)) {
+    throw new InvalidSecretFileError(path, `holds ${secret.length} characters after trim, not a 64-hex secret`);
+  }
+  return secret;
 }
 
 /** The fields a link signs over. Order is fixed: a signature is over this exact string. */
