@@ -37,8 +37,10 @@ export interface LedgerUnionResult {
 }
 
 export interface LedgerUnionOptions {
+  /** Record readers drop rows stamped earlier; the raw-line readers only skip rotations cut earlier. */
   since?: string;
   sinceTs?: string;
+  /** Exact match on the row's `step` field ({@link stepMatches}), honoured by EVERY union reader (W1-T4710). */
   step?: string | readonly string[];
 }
 
@@ -140,21 +142,37 @@ function rotationBeforeWindow(entry: LedgerCorpusEntry, minimumTs: number | unde
   return !Number.isNaN(stampMs) && stampMs < minimumTs;
 }
 
+function stepMatches(row: Record<string, unknown>, want: LedgerUnionOptions["step"]): boolean {
+  if (want === undefined) return true;
+  const step = row.step;
+  if (typeof step !== "string") return false;
+  return typeof want === "string" ? step === want : want.includes(step);
+}
+
 function recordMatchesFilters(row: Record<string, unknown>, opts: LedgerUnionOptions, minimumTs: number | undefined): boolean {
   if (minimumTs !== undefined) {
     const ts = row.ts;
     if (typeof ts !== "string" || Date.parse(ts) < minimumTs) return false;
   }
-  if (opts.step !== undefined) {
-    const step = row.step;
-    if (typeof step !== "string") return false;
-    if (typeof opts.step === "string") {
-      if (step !== opts.step) return false;
-    } else if (!opts.step.includes(step)) {
+  return stepMatches(row, opts.step);
+}
+
+/** W1-T4710 — the raw-line form of {@link stepMatches}: a substring pre-check on the JSON-encoded
+ *  step name rejects most lines unparsed, then the exact match decides. A torn line has no
+ *  verifiable step, so it never survives a step filter. */
+function rawLineStepFilter(want: LedgerUnionOptions["step"]): ((line: string) => boolean) | undefined {
+  if (want === undefined) return undefined;
+  const needles = (typeof want === "string" ? [want] : want).map((step) => JSON.stringify(step));
+  return (line) => {
+    if (!needles.some((needle) => line.includes(needle))) return false;
+    try {
+      const row = parseObject(line);
+      return row !== undefined && stepMatches(row, want);
+    } catch {
+      // deliberate: an unparseable line cannot prove its step, so a step-filtered read excludes it.
       return false;
     }
-  }
-  return true;
+  };
 }
 
 function parseObject(raw: string): Record<string, unknown> | undefined {
@@ -582,6 +600,7 @@ export function readLedgerUnionRawLinesSync(
   const livePath = ledgerLivePath(stateDir);
   const liveFileRead = fsDeps.existsSync(livePath);
   const minimumTs = sinceMs(opts);
+  const stepFilter = rawLineStepFilter(opts.step);
   const seen = new Set<string>();
   const rawLines: string[] = [];
   const unread: string[] = [];
@@ -609,7 +628,7 @@ export function readLedgerUnionRawLinesSync(
       if (end === -1) end = buf.length;
       if (end > start) {
         const line = buf.toString("utf8", start, end).trim();
-        if (line && (!opts.pattern || opts.pattern.test(line))) {
+        if (line && (!opts.pattern || opts.pattern.test(line)) && (!stepFilter || stepFilter(line))) {
           if (opts.dedupe === false) {
             rawLines.push(line);
           } else if (!seen.has(line)) {
