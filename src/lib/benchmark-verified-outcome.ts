@@ -75,8 +75,16 @@ function withoutCurrentPr(file: TaskCaseFile, run: TaskCaseRun): { ended: boolea
   if (!readFoundNone || typeof run.prNumber === "number") return { ended: false, reason: "current-pr-unavailable" };
   if (typeof run.verdict !== "string") return { ended: false, reason: "run-without-terminal-verdict" };
   if (!Object.hasOwn(ENDS_WITHOUT_COMPLETION, run.verdict)) return { ended: false, reason: "run-verdict-unrecognized" };
-  return ENDS_WITHOUT_COMPLETION[run.verdict as RunResult["verdict"]]
-    ? { ended: true, reason: `ended-without-pr:${run.verdict}` } : { ended: false, reason: "current-pr-unavailable" };
+  const ending = prLessEnding(run);
+  return { ended: ending !== null, reason: ending ?? "current-pr-unavailable" };
+}
+
+/** W1-T4652: a run that opened no PR and ended is an ending beside ANOTHER run's PR too; the ending reason,
+ * or null when the run opened a PR, carries no verdict, or its verdict is not an ending. */
+function prLessEnding(run: TaskCaseRun): string | null {
+  if (typeof run.prNumber === "number" || typeof run.verdict !== "string") return null;
+  if (!Object.hasOwn(ENDS_WITHOUT_COMPLETION, run.verdict)) return null;
+  return ENDS_WITHOUT_COMPLETION[run.verdict as RunResult["verdict"]] ? `ended-without-pr:${run.verdict}` : null;
 }
 
 /** No worker-call result, ledger verdict, or closed PR can independently award completion. */
@@ -130,7 +138,11 @@ export function joinVerifiedTaskOutcomes(
           reason = without.reason;
           if (without.ended) disposition = "ended";
         }
-        else if (run.prNumber !== pr.number) reason = "run-pr-mismatch";
+        else if (run.prNumber !== pr.number) {
+          const ending = prLessEnding(run);
+          reason = ending ?? "run-pr-mismatch";
+          if (ending !== null) disposition = "ended";
+        }
         else if (pr.state === "OPEN") { disposition = "censored"; reason = "open-at-cutoff"; }
         else if (pr.state === "CLOSED") reason = "closed-unmerged-unadjudicated";
         else if (!pr.taskCredit || !merged || merged.prNumber !== pr.number) reason = "merge-credit-unavailable";

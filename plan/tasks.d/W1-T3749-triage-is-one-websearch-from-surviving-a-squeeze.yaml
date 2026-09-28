@@ -51,7 +51,7 @@
 
   acceptance:
     - claim: "the triage lane's divertability is decided on measured evidence, and the decision is recorded in the tree"
-      proof: "grep: TRIAGE_WORKER_TOOLS in src/run-task.ts"
+      proof: "grep: TRIAGE_CASH_TOOLS in src/run-task.ts"
     - claim: "whichever answer is taken, a test pins it so the lane cannot silently drift back"
       proof: "unit test: W1-T3749"
   note: |
