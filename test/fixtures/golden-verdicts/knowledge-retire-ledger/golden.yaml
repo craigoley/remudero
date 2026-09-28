@@ -1,0 +1,17 @@
+violation: none
+rule: >
+  W1-T4095 / W1-T3077: this observed retirement keeps the ledger learning's text while
+  removing it from prompt injection. The changed prompt path carries a replayable golden
+  verdict, and both acceptance proofs must execute against the post-pass checkout.
+verdict:
+  state: success
+  testTheater: false
+  criteriaTampered: false
+  capped: false
+arm: true
+changesetContradictions: []
+criteria:
+  - met: true
+    proof_exec: executed_pass
+  - met: true
+    proof_exec: executed_pass
