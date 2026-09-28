@@ -145,7 +145,7 @@ async function activatePilot(dir: string, stateDir: string, aa: BenchmarkAaRepor
     population: Array.from({ length: 24 }, (_, i) => ({ taskId: `PP-T${i + 1}`, repo: CONSENTED[i % 3], taskClass: i % 2 === 0 ? "fix" : "docs", risk: "low" })),
     primaryOutcome: "verified-completion", maturityDays: 14, protocolText: "Paid pilot: ITT verified completion, task unit, fixed horizon.\n",
   }));
-  await runPilotVerb(dir, stateDir, ["activate", "--request", requestPath, "--aa-report", aaPath, "--confirm-cash-ceiling-usd", "100", "--json"], ACT);
+  await runPilotVerb(dir, stateDir, ["activate", "--request", requestPath, "--aa-report", aaPath, "--json"], ACT);
 }
 
 function assignment(taskId: string, pin: typeof PAID_PIN, ts: string): PaidPilotRow {
