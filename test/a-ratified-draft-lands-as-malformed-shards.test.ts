@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +18,8 @@ import {
 import { parseTasksFromYaml } from "../src/lib/plan.js";
 import { changedFilesBlockDrift, hasChangedFilesBlock } from "../src/lib/plan-pr-emitter.js";
 import { lintTask } from "../src/lib/task-linter.js";
+import { lintPlanCommand } from "../src/run-task.js";
+import { isolatedCheckout } from "./helpers/isolated-checkout.js";
 
 // W1-T4700. PR #7608 (`rmd approve verify-human-automate:W1-T4471`) filed shards shaped like
 // MALFORMED below: `repo: master-plan` (no such repository), `verify` an object rather than
@@ -80,6 +83,14 @@ test("the repositories the plan knows come from the fleet registry and the manag
   assert.equal(known.has("master-plan"), false);
   assert.equal(known.has("remudero/master-plan"), false);
   assert.equal(knownPlanRepos(mkdtempSync(join(tmpdir(), "rmd-no-registry-"))), undefined, "no registry names nothing, so the rule is silent");
+  const malformedRoot = mkdtempSync(join(tmpdir(), "rmd-bad-registry-"));
+  try {
+    mkdirSync(join(malformedRoot, ".remudero"));
+    writeFileSync(join(malformedRoot, ".remudero", "daemon-instances.yaml"), "not: a registry\n", "utf8");
+    assert.equal(knownPlanRepos(malformedRoot), undefined, "a malformed registry names nothing either");
+  } finally {
+    rmSync(malformedRoot, { recursive: true, force: true });
+  }
 });
 
 test("the canonical draft example still lints clean, with and without a stamp naming its one id", () => {
@@ -166,5 +177,49 @@ test("the ratify PR body lists exactly the files the approve path wrote — MAST
     } finally {
       rmSync(wt, { recursive: true, force: true });
     }
+  }
+});
+
+async function lintBase(root: string, base: string): Promise<{ exitCode: number; output: string }> {
+  const lines: string[] = [];
+  const original = { log: console.log, warn: console.warn, error: console.error };
+  console.log = console.warn = console.error = (message?: unknown) => void lines.push(String(message));
+  try {
+    const exitCode = await lintPlanCommand(["--plan", join(root, "plan", "tasks.yaml"), "--base", base], { repoRoot: root, offline: true });
+    return { exitCode, output: lines.join("\n") };
+  } finally {
+    Object.assign(console, original);
+  }
+}
+
+test("the real lint-plan --base pass: editing a legacy-shaped shard on main stays green, filing a new one like it fails", async () => {
+  const fixture = isolatedCheckout(REPO_ROOT);
+  try {
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", fixture.root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", ...args], { encoding: "utf8" }).trim();
+    const shard = (id: string) => join(fixture.root, "plan", "tasks.d", `${id}-legacy-shape-fixture.yaml`);
+    mkdirSync(join(fixture.root, "plan", "tasks.d"), { recursive: true });
+    writeFileSync(shard("W1-T4695"), `${malformed("W1-T4695", '"legacy shape fixture"')}\n`, "utf8");
+    git("add", "plan/tasks.d");
+    git("commit", "-q", "-m", "fixture(plan): a legacy-shaped shard already on main");
+    const legacyBase = git("rev-parse", "HEAD");
+
+    writeFileSync(shard("W1-T4695"), `${malformed("W1-T4695", '"legacy shape fixture, retitled"')}\n`, "utf8");
+    git("commit", "-q", "-am", "fixture(plan): edit the legacy shard");
+    const edited = await lintBase(fixture.root, legacyBase);
+    assert.match(edited.output, /1 new\/changed vs/, "the changed shard was really linted");
+    assert.match(edited.output, /⚠ W1-T4695: \[shard-shape\]/, "inherited defects stay visible as warnings");
+    assert.doesNotMatch(edited.output, /✗ W1-T4695/, "and never block");
+    assert.equal(edited.exitCode, 0, edited.output);
+
+    const newBase = git("rev-parse", "HEAD");
+    writeFileSync(shard("W1-T4696"), `${malformed("W1-T4696", '"a new shard in the same shape"')}\n`, "utf8");
+    git("add", "plan/tasks.d");
+    git("commit", "-q", "-m", "fixture(plan): file a new shard shaped like #7608");
+    const filed = await lintBase(fixture.root, newBase);
+    assert.equal(filed.exitCode, 1, filed.output);
+    assert.match(filed.output, /W1-T4696[\s\S]*\[shard-shape\][^\n]*repo "master-plan"/);
+  } finally {
+    fixture.cleanup();
   }
 });

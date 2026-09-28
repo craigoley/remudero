@@ -753,7 +753,6 @@ import {
   type SkillLifecycleAction,
   writeRatificationShards,
   fileRatificationDraft,
-  assertRatificationDraftFileable,
   knownPlanRepos,
   ratificationPrBody,
   writeApprovedSkillFile,
@@ -44862,7 +44861,6 @@ async function approveBatchCommand(
           throw new Error(`rmd approve: refusing to materialize task id(s) for ${payload.proposalId} — ${materialized.reason}`);
         }
         log("approve.id_materialized", { proposal_id: payload.proposalId, ids: materialized.ids });
-        assertRatificationDraftFileable(materialized.fragmentYaml, payload.proposalId, materialized.stampLine, knownPlanRepos(worktreePath));
         const shardRelPaths = writeRatificationShards(worktreePath, materialized.fragmentYaml, payload.proposalId, { mkdirSync, writeFileSync }, join);
         log("approve.shards_written", { proposal_id: payload.proposalId, paths: shardRelPaths });
         allShardRelPaths.push(...shardRelPaths);
@@ -44874,14 +44872,13 @@ async function approveBatchCommand(
       // whole reason a batch cannot hit the EOF-append conflict that sinks N parallel
       // single-approve branches (see lib/inbox.ts's W1-T2471 section header).
       const masterPlanPath = join(worktreePath, "MASTER-PLAN.md");
-      const baseMasterPlan = readFileSync(masterPlanPath, "utf8");
-      const foldedMasterPlan = payloads.reduce((md, p) => applyStampToMasterPlan(md, p.proposalId, p.stampLine), baseMasterPlan);
-      if (foldedMasterPlan !== baseMasterPlan) {
-        writeFileSync(masterPlanPath, foldedMasterPlan, "utf8");
-        allShardRelPaths.push("MASTER-PLAN.md"); // W1-T4700: named only when the fold changed it
-      }
+      const foldedMasterPlan = payloads.reduce(
+        (md, p) => applyStampToMasterPlan(md, p.proposalId, p.stampLine),
+        readFileSync(masterPlanPath, "utf8"),
+      );
+      writeFileSync(masterPlanPath, foldedMasterPlan, "utf8");
 
-      execFileSync("git", ["-C", worktreePath, "add", "--", ...allShardRelPaths], { stdio: "inherit" });
+      execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
       execFileSync("git", ["-C", worktreePath, "commit", "-m", approveBatchCommitMessage(payloads)], { stdio: "inherit" });
       gitPushRunBranch(worktreePath);
       return branch;
@@ -44897,7 +44894,7 @@ async function approveBatchCommand(
       // W1-T2550: same reasoning as the single-proposal openPlanPr above — one local list feeds
       // both the filing-acceptance evidence and the rendered changed-files block, so the batch
       // lane's PR body actually emits it too rather than only defining it.
-      const filedPaths = allShardRelPaths;
+      const filedPaths = [...allShardRelPaths, "MASTER-PLAN.md"];
       const body = buildPlanPrBody({
         intro,
         criteria: filingAcceptanceCriteria(filedIds, filedPaths),
