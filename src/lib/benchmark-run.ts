@@ -459,6 +459,20 @@ export function callerOwnsBenchmarkReceipt(args: SpawnWorkerArgs): boolean {
   return (args as { [CALLER_OWNS_BENCHMARK_RECEIPT]?: boolean })[CALLER_OWNS_BENCHMARK_RECEIPT] === true;
 }
 
+/** W1-T4645: the task and run a judge lane's receipts name. Symbol-keyed like the marker above, so
+ *  it rides every args spread to the receipt wrapper and never reaches the router, which seeds its
+ *  auction draw on `taskId`/`runId` (`auctionDrawSeed`): naming the run cannot move the provider,
+ *  model or effort that serves it. */
+export const BENCHMARK_RECEIPT_IDENTITY: unique symbol = Symbol("rmd.benchmarkReceiptIdentity");
+
+export function withReceiptIdentity(args: SpawnWorkerArgs, identity: { taskId: string; runId: string }): SpawnWorkerArgs {
+  return { ...args, [BENCHMARK_RECEIPT_IDENTITY]: { ...identity } } as SpawnWorkerArgs;
+}
+
+export function receiptIdentity(args: SpawnWorkerArgs): { taskId?: string; runId?: string } {
+  return (args as { [BENCHMARK_RECEIPT_IDENTITY]?: { taskId: string; runId: string } })[BENCHMARK_RECEIPT_IDENTITY] ?? {};
+}
+
 /** W1-T4616: where a worker-call receipt may be written. MEASURED 2026-09-27: most of the ~105/h
  *  `spawn-threw-before-result` rows came from TEST processes — a suite under `node --test` that
  *  reached a real judge spawn with no explicit config resolved the default config's root, which is
@@ -507,12 +521,13 @@ export function benchmarkNonDispatchSpawn(
     // W1-T4613: the caller already receipts this worker; a second pair would count it twice.
     if (callerOwnsBenchmarkReceipt(args)) return raw(args);
     let observedAssignmentId: string | undefined;
+    const named = receiptIdentity(args);
     const write = (step: string, fields: Record<string, unknown>): void => {
       const path = benchmarkEvidenceLedgerPath(args.config);
       if (path === undefined) return;
       appendLedger(path, {
-        run_id: args.runId ?? `${lane}-${observedAssignmentId ?? "unassigned"}`,
-        task_id: args.taskId ?? lane.toUpperCase(), step, lane, ...fields,
+        run_id: args.runId ?? named.runId ?? `${lane}-${observedAssignmentId ?? "unassigned"}`,
+        task_id: args.taskId ?? named.taskId ?? lane.toUpperCase(), step, lane, ...fields,
       });
     };
     const recordAttempt = (fields: Record<string, unknown>): void => {

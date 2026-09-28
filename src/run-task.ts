@@ -899,7 +899,7 @@ const workerBoundaryStack: BenchmarkStackEvidence = {
 import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
 import { benchmarkAaCommand, buildBenchmarkAaReport } from "./lib/benchmark-aa.js";
 import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/benchmark-paid-pilot.js";
-import { pairedPilotReportView, runPairedTrial, type PairedTrialInput } from "./lib/paired-trial.js";
+import { PAIRED_CLI_REFUSAL, pairedPilotReportView, runPairedTrial, sealedPairedAttemptDispatcher, type PairedTrialInput } from "./lib/paired-trial.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
@@ -14307,6 +14307,7 @@ async function runTask(
     managedCheckoutInstall?: (repoDir: string) => void;
     instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
     pairedTrial?: Partial<PairedTrialInput>;
+    pairedTrialHost?: "daemon";
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
@@ -14652,7 +14653,10 @@ async function runTask(
     }
     throw e;
   }
-  void runPairedTrial({ ...opts.pairedTrial, task, lane: "implement", stateDir: join(config.root, "state"), log,
+  void runPairedTrial({ ...(opts.pairedTrialHost === "daemon"
+    ? { dispatchAttempt: sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo), spawn: rawSpawn,
+      maxBudgetUsd: task.budget_usd ?? DEFAULT_BUDGET_USD, clockBoundMs: workerAbandonMs }) }
+    : { dispatchRefusal: PAIRED_CLI_REFUSAL }), ...opts.pairedTrial, task, lane: "implement", stateDir: join(config.root, "state"), log,
     harnessRevision: (opts.benchmarkStackEvidence ?? workerBoundaryStack).harnessRevision });
   try {
     const ctx: RunTaskContext = {
@@ -32699,6 +32703,7 @@ export async function daemonCommand(
             planPath: target.planPath,
             config,
             allowStale,
+            pairedTrialHost: "daemon",
             skipGitSync: !!flagValue(rest, "--plan"),
             owner: target.owner,
             // W1-T2509: EVERY LANE SHARES ONE GATEWAY PER owner/repo. Without this each lane built

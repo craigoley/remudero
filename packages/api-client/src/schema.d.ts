@@ -1075,6 +1075,134 @@ export interface components {
       lifecycleState: "active" | "expired" | "revoked";
       profile: DelegationProfileView;
     };
+    IntentPlanStepInput: {
+      capability: string;
+      summary: string;
+      risk: "low" | "medium" | "high" | "production" | "financial" | "credential" | "destructive";
+      preconditions: (Record<string, never>)[];
+      freshness: Record<string, never>;
+      dryRun: boolean;
+      rollback: Record<string, never>;
+      receiptRef: string;
+      estimatedCostUsd?: number;
+    };
+    IntentPlanProposeRequest: {
+      goal: string;
+      constraints?: (string)[];
+      facts?: (Record<string, never>)[];
+      questions?: (Record<string, never>)[];
+      steps?: (IntentPlanStepInput)[];
+      scope?: Record<string, never>;
+      delegationId?: string;
+      budget?: Record<string, never>;
+      freshness?: Record<string, never>;
+      expiresInMinutes?: number;
+      idempotencyKey?: string;
+    };
+    IntentPlanUnknown: {
+      id: string;
+      question: string;
+    };
+    IntentPlanReceiptEntry: {
+      kind: "propose" | "clarify" | "confirm" | "undo";
+      at: string;
+      issuer?: string;
+      note?: string;
+    };
+    IntentPlanConsequence: {
+      classes: ("financial" | "irreversible")[];
+      summary: string;
+      budgetUsd?: number;
+      ceilingUsd?: number;
+    };
+    IntentPlanExecution: {
+      state: "not-requested" | "awaiting-receipt" | "in-progress" | "succeeded" | "failed" | "refused" | "expired" | "rolled-back" | "partially-rolled-back" | "unknown";
+      actions: (Record<string, never>)[];
+    };
+    IntentPlanView: {
+      planId: string;
+      goal: string;
+      constraints: (string)[];
+      unknowns: (IntentPlanUnknown)[];
+      scope: {
+        /** The resolved repository, `(instance scope)`, or `(unresolved)` while the scope question is open. */
+        repository: string;
+        instanceId?: string;
+      };
+      consequence: IntentPlanConsequence;
+      freshness: "verified" | "stale" | "unavailable";
+      nextDecision: "answer_clarification" | "confirm" | "undo" | "none";
+      observedAt: string;
+      receipts: (IntentPlanReceiptEntry)[];
+      source: string;
+      version: "intent-plan-v1";
+      status: "draft" | "confirmed" | "withdrawn";
+      /** The immutable intent-plan-v1 envelope -- outcome, constraints, facts and sources, questions, steps, scope, consequence, budget, approval, expiry, idempotency key, and undo paths. */
+      plan: Record<string, never>;
+      /** Non-operative (`operative` is always false); `state` is ready or the first blocking state by precedence, with every finding kept. */
+      preview: Record<string, never>;
+      confirmation: Record<string, never>;
+      execution: IntentPlanExecution;
+      events: (Record<string, never>)[];
+    };
+    IntentPlanList: {
+      version: "intent-plan-v1";
+      state: "verified";
+      intentPlans: (IntentPlanView)[];
+      source: "ledger";
+    };
+    /** IntentPlanView flattened (this generator's subset has no allOf) plus `ok` and `existing`. */
+    IntentPlanProposeResult: {
+      ok: boolean;
+      existing: boolean;
+      planId: string;
+      goal: string;
+      constraints: (string)[];
+      unknowns: (IntentPlanUnknown)[];
+      scope: Record<string, never>;
+      consequence: IntentPlanConsequence;
+      freshness: "verified" | "stale" | "unavailable";
+      nextDecision: "answer_clarification" | "confirm" | "undo" | "none";
+      observedAt: string;
+      receipts: (IntentPlanReceiptEntry)[];
+      source: string;
+      status?: "draft" | "confirmed" | "withdrawn";
+      plan?: Record<string, never>;
+      preview?: Record<string, never>;
+      execution?: IntentPlanExecution;
+    };
+    IntentPlanDecisionRequest: {
+      planId: string;
+      action: "clarify" | "confirm" | "undo";
+      /** clarify only. */
+      questionId?: string;
+      /** clarify only. */
+      answer?: string;
+      /** confirm only; when present it must be true. */
+      confirm?: boolean;
+      /** confirm and undo only. */
+      note?: string;
+    };
+    IntentPlanDecisionResult: {
+      ok: boolean;
+      planId: string;
+      action: "clarify" | "confirm" | "undo";
+      disposition: "recorded" | "confirmed" | "withdrawn" | "requested" | "reused";
+      at: string;
+      event: Record<string, never>;
+      plan: IntentPlanView;
+    };
+    IntentPlanDecisionRefusal: {
+      ok: boolean;
+      error: "conflict";
+      planId: string;
+      action: string;
+      code: string;
+      detail: string;
+      /** Present when the refusal itself was recorded (an undo refusal). */
+      at?: string;
+      event?: Record<string, never>;
+    };
     PromotionScope: {
       repo: string;
       /** The unit canary exposure is serialized against; at most one active promotion may hold a given (repo, policyScope) pair. */
@@ -3532,6 +3660,38 @@ export interface paths {
           "403": Error;
           "404": Error;
           "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/intent-plans": {
+    get: {
+      responses: {
+          "200": IntentPlanList;
+          "401": Error;
+          "403": Error;
+        };
+    };
+    post: {
+      responses: {
+          "200": IntentPlanProposeResult;
+          "201": IntentPlanProposeResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/intent-plans/decision": {
+    post: {
+      responses: {
+          "200": IntentPlanDecisionResult;
+          "202": IntentPlanDecisionResult;
+          "400": Error;
+          "401": Error;
+          "403": HighTierRefusal;
+          "404": Error;
+          "409": IntentPlanDecisionRefusal;
         };
     };
   };

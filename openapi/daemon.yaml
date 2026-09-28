@@ -3091,6 +3091,348 @@ components:
         profile:
           $ref: "#/components/schemas/DelegationProfileView"
 
+    # ── W1-T3898 -- intent-plan-v1: the reviewable plan between an operator's sentence and an
+    # automation-action-v1 request. Core owns it; the console reads the top-level fields.
+    IntentPlanStepInput:
+      type: object
+      required: [capability, summary, risk, preconditions, freshness, dryRun, rollback, receiptRef]
+      properties:
+        capability:
+          type: string
+          maxLength: 160
+        summary:
+          type: string
+          maxLength: 320
+        risk:
+          type: string
+          enum: [low, medium, high, production, financial, credential, destructive]
+        preconditions:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        freshness:
+          type: object
+          additionalProperties: true
+        dryRun:
+          type: boolean
+        rollback:
+          type: object
+          additionalProperties: true
+        receiptRef:
+          type: string
+          maxLength: 160
+        estimatedCostUsd:
+          type: number
+
+    IntentPlanProposeRequest:
+      type: object
+      required: [goal]
+      properties:
+        goal:
+          type: string
+          maxLength: 4000
+        constraints:
+          type: array
+          items:
+            type: string
+        facts:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        questions:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/IntentPlanStepInput"
+        scope:
+          type: object
+          additionalProperties: true
+        delegationId:
+          type: string
+          maxLength: 160
+        budget:
+          type: object
+          additionalProperties: true
+        freshness:
+          type: object
+          additionalProperties: true
+        expiresInMinutes:
+          type: integer
+        idempotencyKey:
+          type: string
+          maxLength: 140
+
+    IntentPlanUnknown:
+      type: object
+      required: [id, question]
+      properties:
+        id:
+          type: string
+        question:
+          type: string
+
+    IntentPlanReceiptEntry:
+      type: object
+      required: [kind, at]
+      properties:
+        kind:
+          type: string
+          enum: [propose, clarify, confirm, undo]
+        at:
+          type: string
+          format: date-time
+        issuer:
+          type: string
+        note:
+          type: string
+
+    IntentPlanConsequence:
+      type: object
+      required: [classes, summary]
+      properties:
+        classes:
+          type: array
+          items:
+            type: string
+            enum: [financial, irreversible]
+        summary:
+          type: string
+        budgetUsd:
+          type: number
+        ceilingUsd:
+          type: number
+
+    IntentPlanExecution:
+      type: object
+      required: [state, actions]
+      properties:
+        state:
+          type: string
+          enum: [not-requested, awaiting-receipt, in-progress, succeeded, failed, refused, expired, rolled-back, partially-rolled-back, unknown]
+        actions:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+
+    IntentPlanView:
+      type: object
+      required: [planId, goal, constraints, unknowns, scope, consequence, freshness, nextDecision, observedAt, receipts, source, version, status, plan, preview, confirmation, execution, events]
+      properties:
+        planId:
+          type: string
+        goal:
+          type: string
+        constraints:
+          type: array
+          items:
+            type: string
+        unknowns:
+          type: array
+          items:
+            $ref: "#/components/schemas/IntentPlanUnknown"
+        scope:
+          type: object
+          required: [repository]
+          properties:
+            repository:
+              type: string
+              description: The resolved repository, `(instance scope)`, or `(unresolved)` while the scope question is open.
+            instanceId:
+              type: string
+        consequence:
+          $ref: "#/components/schemas/IntentPlanConsequence"
+        freshness:
+          type: string
+          enum: [verified, stale, unavailable]
+        nextDecision:
+          type: string
+          enum: [answer_clarification, confirm, undo, none]
+        observedAt:
+          type: string
+          format: date-time
+        receipts:
+          type: array
+          items:
+            $ref: "#/components/schemas/IntentPlanReceiptEntry"
+        source:
+          type: string
+        version:
+          type: string
+          enum: [intent-plan-v1]
+        status:
+          type: string
+          enum: [draft, confirmed, withdrawn]
+        plan:
+          type: object
+          description: The immutable intent-plan-v1 envelope -- outcome, constraints, facts and sources, questions, steps, scope, consequence, budget, approval, expiry, idempotency key, and undo paths.
+          additionalProperties: true
+        preview:
+          type: object
+          description: Non-operative (`operative` is always false); `state` is ready or the first blocking state by precedence, with every finding kept.
+          additionalProperties: true
+        confirmation:
+          type: object
+          additionalProperties: true
+        execution:
+          $ref: "#/components/schemas/IntentPlanExecution"
+        events:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+
+    IntentPlanList:
+      type: object
+      required: [version, state, intentPlans, source]
+      properties:
+        version:
+          type: string
+          enum: [intent-plan-v1]
+        state:
+          type: string
+          enum: [verified]
+        intentPlans:
+          type: array
+          items:
+            $ref: "#/components/schemas/IntentPlanView"
+        source:
+          type: string
+          enum: [ledger]
+
+    IntentPlanProposeResult:
+      type: object
+      description: IntentPlanView flattened (this generator's subset has no allOf) plus `ok` and `existing`.
+      required: [ok, existing, planId, goal, constraints, unknowns, scope, consequence, freshness, nextDecision, observedAt, receipts, source]
+      properties:
+        ok:
+          type: boolean
+        existing:
+          type: boolean
+        planId:
+          type: string
+        goal:
+          type: string
+        constraints:
+          type: array
+          items:
+            type: string
+        unknowns:
+          type: array
+          items:
+            $ref: "#/components/schemas/IntentPlanUnknown"
+        scope:
+          type: object
+          additionalProperties: true
+        consequence:
+          $ref: "#/components/schemas/IntentPlanConsequence"
+        freshness:
+          type: string
+          enum: [verified, stale, unavailable]
+        nextDecision:
+          type: string
+          enum: [answer_clarification, confirm, undo, none]
+        observedAt:
+          type: string
+          format: date-time
+        receipts:
+          type: array
+          items:
+            $ref: "#/components/schemas/IntentPlanReceiptEntry"
+        source:
+          type: string
+        status:
+          type: string
+          enum: [draft, confirmed, withdrawn]
+        plan:
+          type: object
+          additionalProperties: true
+        preview:
+          type: object
+          additionalProperties: true
+        execution:
+          $ref: "#/components/schemas/IntentPlanExecution"
+
+    IntentPlanDecisionRequest:
+      type: object
+      required: [planId, action]
+      properties:
+        planId:
+          type: string
+          maxLength: 160
+        action:
+          type: string
+          enum: [clarify, confirm, undo]
+        questionId:
+          type: string
+          maxLength: 160
+          description: clarify only.
+        answer:
+          type: string
+          maxLength: 2000
+          description: clarify only.
+        confirm:
+          type: boolean
+          description: confirm only; when present it must be true.
+        note:
+          type: string
+          maxLength: 1000
+          description: confirm and undo only.
+
+    IntentPlanDecisionResult:
+      type: object
+      required: [ok, planId, action, disposition, at, event, plan]
+      properties:
+        ok:
+          type: boolean
+        planId:
+          type: string
+        action:
+          type: string
+          enum: [clarify, confirm, undo]
+        disposition:
+          type: string
+          enum: [recorded, confirmed, withdrawn, requested, reused]
+        at:
+          type: string
+          format: date-time
+        event:
+          type: object
+          additionalProperties: true
+        plan:
+          $ref: "#/components/schemas/IntentPlanView"
+
+    IntentPlanDecisionRefusal:
+      type: object
+      required: [ok, error, planId, action, code, detail]
+      properties:
+        ok:
+          type: boolean
+        error:
+          type: string
+          enum: [conflict]
+        planId:
+          type: string
+        action:
+          type: string
+        code:
+          type: string
+        detail:
+          type: string
+        at:
+          type: string
+          format: date-time
+          description: Present when the refusal itself was recorded (an undo refusal).
+        event:
+          type: object
+          additionalProperties: true
+
     # ── W1-T3856 -- experiment-promotion-v1: the guarded flow from a candidate policy to measured
     # production exposure (deterministic replay, shadow observation, canary promotion, stop
     # conditions, automatic rollback) that a later-approved experiment-v1 record may take.
@@ -9958,6 +10300,120 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/intent-plans:
+    get:
+      summary: W1-T3898 -- read every intent-plan-v1 with its derived preview, clarification, confirmation and execution.
+      description: >
+        `readIntentPlanStates` folds the ledger union: a plan row stores the producer's request,
+        and the fold rebuilds the plan through `buildIntentPlan`, so a hand-edited row is
+        re-validated by the code that admitted it. Each item carries every field the console's
+        intent-plan-v1 normaliser reads (planId, goal, constraints, unknowns, scope, consequence,
+        freshness, nextDecision, observedAt, receipts, source) plus core's full envelope.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Durable intent plans, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntentPlanList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      summary: W1-T3898 -- propose an intent plan (LOW write tier; a non-operative preview).
+      description: >
+        `buildIntentPlan` researches the goal first (an explicit `repo owner/name` settles the
+        scope; an explicit "at most $N" settles the ceiling) and refuses by name (`400`, `code`
+        and `field`) a forbidden, credential-shaped, unknown, or authority-claiming field
+        (approved, confirmed, permission, model confidence) -- a sentence is never authority.
+        Steps come only from a structured producer; a goal alone previews `unavailable`. Nothing
+        is registered, approved, or executed. An identical request under the same
+        idempotencyKey is `200` (`existing: true`); a different one is `409`.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IntentPlanProposeRequest"
+      responses:
+        "201":
+          description: Plan proposed; the body is the plan's read shape.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntentPlanProposeResult"
+        "200":
+          description: The identical plan already proposed under this idempotencyKey.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntentPlanProposeResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/intent-plans/decision:
+    post:
+      summary: W1-T3898 -- clarify, confirm, or undo an intent plan (HIGH write tier, nonce-confirmed).
+      description: >
+        HIGH like /v1/operator-agent/actions/decision: confirming requests automation actions that
+        mutate, and undo withdraws or rolls them back, so the bearer write token (pinned at LOW) is
+        refused `403` and a HIGH-tier credential must present an X-Confirm-Nonce minted by POST
+        /v1/confirm for this exact request. `clarify` records one answer to an OPEN question; a
+        question is never asked twice and rounds stop at W1-T2499's bound. `confirm` re-runs the
+        preview and, only when it is ready, registers one automation-action-v1 per step (`202`) --
+        the plan then reads `awaiting-receipt`, never success, until each action's completion
+        receipt names its evidence. `undo` appends a withdrawal, a rollback request linked to the
+        completion receipt, or a recorded refusal (`409`); it never rewrites the plan or a receipt.
+        Every refusal is `409` with a `code`.
+      security:
+        - bearerWrite: []
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IntentPlanDecisionRequest"
+      responses:
+        "200":
+          description: An answer recorded, a plan withdrawn or its rollback requested, or an unchanged decision returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntentPlanDecisionResult"
+        "202":
+          description: Confirmed; the linked actions are requested and awaiting their receipts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntentPlanDecisionResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HighTierForbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Refused by name (already-asked, not-open, clarification-exhausted, preview-<state>, plan-withdrawn, action-conflict, irreversible, in-progress, ...).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntentPlanDecisionRefusal"
 
   /v1/operator-agent/emergency/clear:
     post:

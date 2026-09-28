@@ -187,6 +187,19 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
     },
   },
   {
+    file: "src/lib/paired-trial.ts",
+    site: "cutSealedAttemptTree",
+    creates: "a DETACHED worktree at a paired trial's base, for one sealed side attempt that is graded and discarded",
+    disposition: {
+      kind: "exempt",
+      because:
+        "worktreeAdd always names a branch, and a sealed side attempt must never name one: a run-<task>-<ms> " +
+        "branch is exactly what dispatch and credit read as the task's own work (W1-T4638). Both arms are cut " +
+        "at one base resolved once per pair, so the currency question that applies is that the two arms share " +
+        "a base, not that either matches origin/main at the instant it is cut; the attempt is never pushed.",
+    },
+  },
+  {
     file: "src/run-task.ts",
     site: "createFixRungWorktree",
     creates: "a throwaway worktree materialized at a PR's OWN fix branch, for the fix rung to commit/push from",

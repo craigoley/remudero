@@ -212,7 +212,7 @@ test("every exempt row in the real registry carries a non-blank reason (no row s
   assert.deepEqual(blanks, []);
 });
 
-test("the real registry declares EXACTLY the four exempt raw sites — the two this task's own recon found, R-11's merge-base checkout, and W1-T2999's dirty-branch rebase — no more, no fewer", () => {
+test("the real registry declares EXACTLY the five exempt raw sites — the two this task's own recon found, R-11's merge-base checkout, W1-T2999's dirty-branch rebase and W1-T4638's sealed paired attempt — no more, no fewer", () => {
   const exempt = WORKTREE_SITE_REGISTRY.filter((r) => r.disposition.kind === "exempt")
     .map((r) => `${r.file}::${r.site}`)
     .sort();
@@ -220,9 +220,11 @@ test("the real registry declares EXACTLY the four exempt raw sites — the two t
   // own head sha so that head can be rebased onto origin/main. Routing it through `worktreeAdd`
   // would cut a fresh branch off origin/main and discard the head the rung exists to move — the
   // same reason addWorktree above is exempt. The count moves 3 -> 4 deliberately, which is what
-  // this pin exists to make someone say out loud.
+  // this pin exists to make someone say out loud. W1-T4638 moves it 4 -> 5: a sealed paired side
+  // attempt is cut DETACHED because any branch it named is one dispatch and credit could read.
   assert.deepEqual(exempt, [
     "src/lib/composition-root.ts::addWorktree",
+    "src/lib/paired-trial.ts::cutSealedAttemptTree",
     "src/lib/sweep.ts::rebaseDirtyFleetBranchViaGit",
     "src/run-task.ts::buildBaseProofDir",
     "src/run-task.ts::createFixRungWorktree",
@@ -296,6 +298,7 @@ test("findRawWorktreeAddSites finds every real raw site, including both canonica
     sites.sort(),
     [
       "src/lib/composition-root.ts::addWorktree",
+      "src/lib/paired-trial.ts::cutSealedAttemptTree",
       "src/lib/sweep.ts::rebaseDirtyFleetBranchViaGit",
       "src/lib/worker.ts::worktreeAdd",
       "src/lib/worker.ts::worktreeAddAsync",

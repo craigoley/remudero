@@ -1,5 +1,5 @@
 import { ghExec } from "./github-transport.js";
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -17,7 +17,7 @@ import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { validateDecisionSummary, type DecisionSummary, type SummarizeDeps } from "./feedback.js";
 import type { Mount, Mounts } from "./mounts.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
-import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
+import { benchmarkNonDispatchSpawn, withReceiptIdentity } from "./benchmark-run.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import type { WriteTier } from "./service.js";
 
@@ -602,6 +602,12 @@ export async function judgeEscalation(e: Escalation, deps: EscalationJudgeDeps):
  *  is baked into the prompt, so it has no ability to explore the worktree or take any action. */
 export const ESCALATION_JUDGE_TOOLS: string[] = [];
 
+/** W1-T4645: one judge decision's run id — a digest of exactly what was judged. */
+export function escalationJudgeRunId(e: Escalation): string {
+  const digest = createHash("sha256").update(buildEscalationJudgePrompt(e)).digest("hex").slice(0, 12);
+  return `escalation-summary-${e.taskId}-${digest}`;
+}
+
 /** Build the {@link SpawnWorkerArgs} for a real escalation-judge spawn — a pure function so the
  *  "no tools, cheapest mount" contract is unit-testable without a spawn. */
 export function buildEscalationJudgeSpawnArgs(opts: {
@@ -610,7 +616,7 @@ export function buildEscalationJudgeSpawnArgs(opts: {
   cwd: string;
   settingsFile: string;
 }): SpawnWorkerArgs {
-  return {
+  return withReceiptIdentity({
     cwd: opts.cwd,
     permissionMode: "bypassPermissions",
     settingsFile: opts.settingsFile,
@@ -622,7 +628,7 @@ export function buildEscalationJudgeSpawnArgs(opts: {
     // W1-T3614: mount affinity, the same field every other routed spawn passes. Undefined leaves
     // the capacity auction untouched, so an unrouted table behaves exactly as it always did.
     ...(opts.mount.provider === undefined ? {} : { mountProvider: opts.mount.provider }),
-  };
+  }, { taskId: opts.escalation.taskId, runId: escalationJudgeRunId(opts.escalation) });
 }
 
 /** Spawn the real judge and parse its verdict. Untested by unit (it shells out via the SDK); {@link
