@@ -1,0 +1,36 @@
+- id: W1-T4677
+  title: "DISMISSING AN ESCALATION RECORDS NOTHING — make the disposition required (acted, false positive, duplicate, snoozed until), compute each escalation class's precision in the retro, and demote a low-precision class to a board signal instead of an issue"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-operator-1790600000"
+  plan_refs: [W1-T4659]
+  files: [src/lib/panel-actions.ts, src/lib/escalation-precision.ts, test/a-dismissed-escalation-records-why.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: /v1/escalation/mark-handled closes the issue and records only issue_url (src/lib/panel-actions.ts ~446-475).
+    2026-09-26..28: 64 false 'main is red' escalations on #7296 and five issues for one PR (#7561) went out with no way to
+    learn they were noise. Paperclip stores snooze / continue / dismissed_false_positive decisions against its alerts
+    (https://github.com/paperclipai/paperclip/blob/master/doc/execution-semantics.md §12).
+  design: |
+    (i) mark-handled requires a disposition; closing an issue on GitHub without one records 'unrecorded'.
+    (ii) escalation-precision.ts computes acted-on precision per class over the ledger.
+    (iii) A class whose precision is low moves to a board signal (tiered: issue -> digest line -> board), recomputed each
+    retro; MANUAL and HARD_STOP never demote.
+  acceptance:
+    - claim: "mark-handled records the disposition"
+      proof: 'grep: test("W1-T4677: mark-handled records the disposition" in test/a-dismissed-escalation-records-why.test.ts'
+    - claim: "a class with low acted-on precision is demoted to a board signal"
+      proof: 'grep: test("W1-T4677: a class with low acted-on precision is demoted to a board signal" in test/a-dismissed-escalation-records-why.test.ts'
+    - claim: "the new module is called from src/lib/panel-actions.ts"
+      proof: 'grep: escalationClassPrecision( in src/lib/panel-actions.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.
