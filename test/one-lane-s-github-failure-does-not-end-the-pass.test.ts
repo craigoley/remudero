@@ -93,6 +93,28 @@ test("W1-T4466: a create for a branch whose pull request already exists adopts t
   assert.match(said.join("\n"), /already has an open pull request/i);
 });
 
+test("W1-T4730: a generic 422 adopts only a confirmed exact-head open PR", () => {
+  const branch = "run-W1-T4669-1790631369126";
+  const built = {
+    command: "gh" as const,
+    args: ["api", "--method", "POST", "repos/craigoley/remudero/pulls", "-f", `head=${branch}`],
+    options: { cwd: "/tmp", encoding: "utf8" as const },
+  };
+  // The live CLI printed only this generic sentence, with no structured PullRequest error.
+  const rejection = Object.assign(new Error("Command failed: gh api --method POST repos/craigoley/remudero/pulls"), {
+    stderr: "gh: Validation Failed (HTTP 422)\n",
+  });
+  const calls: string[][] = [];
+  const result = runGhPrCreate(built, branch, () => {}, () => {}, (_command, args) => {
+    calls.push(args);
+    if (calls.length === 1) throw rejection;
+    return JSON.stringify([{ html_url: "https://github.com/craigoley/remudero/pull/7677", number: 7677 }]);
+  });
+  assert.equal(result.prUrl, "https://github.com/craigoley/remudero/pull/7677");
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].join(" "), /pulls\?head=craigoley(?:%3A|:)run-W1-T4669-1790631369126&state=open/);
+});
+
 test("W1-T4466 FALSIFIER: any OTHER 422 (unrelated to an existing PR) still throws, unadopted", () => {
   const built = {
     command: "gh" as const,
@@ -102,16 +124,17 @@ test("W1-T4466 FALSIFIER: any OTHER 422 (unrelated to an existing PR) still thro
   const otherValidationFailure = Object.assign(new Error("Command failed: gh api --method POST repos/craigoley/remudero/pulls"), {
     stderr: 'gh: Validation Failed (HTTP 422)\n{"message":"Validation Failed","errors":[{"field":"base","code":"invalid"}]}\n',
   });
-  let lookupCalled = false;
+  let calls = 0;
   const exec = (): string => {
-    lookupCalled = true;
+    calls += 1;
+    if (calls === 1) throw otherValidationFailure;
     return "[]";
   };
   assert.throws(
-    () => runGhPrCreate(built, "run-x", () => {}, () => {}, () => { throw otherValidationFailure; }),
+    () => runGhPrCreate(built, "run-x", () => {}, () => {}, exec),
     (err: unknown) => err === otherValidationFailure,
   );
-  assert.equal(lookupCalled, false, "no head lookup is even attempted for a 422 that does not name an existing PR");
+  assert.equal(calls, 2, "an unrelated 422 receives one exact-head lookup, then rethrows when it finds no PR");
 });
 
 test("W1-T4466: an unreadable or malformed adoption lookup preserves the original create rejection", () => {
