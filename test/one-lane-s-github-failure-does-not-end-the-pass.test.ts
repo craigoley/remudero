@@ -10,10 +10,10 @@
 // lane's work was lost.
 //
 // THE FIX, two independent surfaces:
-//  (i)  `runGhPrCreate` (src/run-task.ts) now detects the "a pull request already exists for this
-//       head" 422 and ADOPTS the existing open PR instead of rethrowing — ledgered
+//  (i)  `runGhPrCreate` (src/run-task.ts) now probes the exact open head on HTTP 422 and ADOPTS
+//       only a confirmed existing PR instead of rethrowing — ledgered
 //       `pr_create.adopted_existing`, carrying the original 422 alongside the adopted PR's own
-//       number/url so the double create stays visible (design ii). Any OTHER 422 still throws.
+//       number/url so the double create stays visible (design ii). A 422 without that PR rethrows.
 //  (iii) the daemon's lane classifier (src/lib/daemon.ts) now recognises a failed GitHub READ off
 //       the known check-runs/combined-status endpoints and ends ONLY that lane — logged under
 //       `daemon.gh_read_failed` — while the pass continues; a WRITE failure keeps today's fatal
