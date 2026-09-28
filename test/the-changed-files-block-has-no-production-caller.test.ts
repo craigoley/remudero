@@ -30,6 +30,7 @@ import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 const RUN_TASK_SRC = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+const INBOX_SRC = readFileSync(join(REPO_ROOT, "src", "lib", "inbox.ts"), "utf8");
 
 /** Slices out an `openPlanPr(branch, ...) {` closure body, up to its own closing `    },` at the
  *  SAME 4-space method indentation — never a bare `\n}` (this closure nests many of its own). */
@@ -45,11 +46,13 @@ function openPlanPrRegion(signature: string): string {
 // list they already hold, so the block is actually emitted, not only defined ═══════════════════
 
 test("W1-T2550: rmd approve's single-proposal openPlanPr passes changedFiles — the SAME list filingAcceptanceCriteria gets", () => {
+  // W1-T4700: the single lane builds its body through ratificationPrBody from the paths fileRatificationDraft wrote.
   const region = openPlanPrRegion("openPlanPr(branch, id) {");
-  assert.match(region, /const filedPaths = \[\.\.\.shardRelPaths, "MASTER-PLAN\.md"\];/, "built from what this ratification actually wrote — not re-derived, not hand-listed");
-  assert.match(region, /buildPlanPrBody\(\{/, "still assembled via the shared gate-contract module, never a hand-rolled body");
-  assert.match(region, /criteria:\s*filingAcceptanceCriteria\(ids,\s*filedPaths\)/, "filing evidence and changed-files now read the SAME local");
-  assert.match(region, /changedFiles:\s*filedPaths/, "the field buildPlanPrBody's own doc says every existing caller omits — no longer true here");
+  assert.match(region, /ratificationPrBody\([^)]*shardRelPaths/, "built from what this ratification actually wrote — not re-derived, not hand-listed");
+  const fn = INBOX_SRC.slice(INBOX_SRC.indexOf("export function ratificationPrBody("), INBOX_SRC.indexOf("\n}\n", INBOX_SRC.indexOf("export function ratificationPrBody(")));
+  assert.match(fn, /buildPlanPrBody\(\{/, "still assembled via the shared gate-contract module, never a hand-rolled body");
+  assert.match(fn, /criteria:\s*filingAcceptanceCriteria\(\[\.\.\.filedIds\],\s*\[\.\.\.writtenPaths\]\)/, "filing evidence and changed-files read the SAME list");
+  assert.match(fn, /changedFiles:\s*\[\.\.\.writtenPaths\]/);
 });
 
 test("W1-T2550: rmd approve's BATCH openPlanPr passes changedFiles too — the second (and last) buildPlanPrBody call site", () => {
@@ -65,9 +68,11 @@ test("W1-T2550: every buildPlanPrBody call site in src/ passes its actual change
   const callSites = [...RUN_TASK_SRC.matchAll(/buildPlanPrBody\(\{/g)];
   assert.equal(
     callSites.length,
-    4,
-    "src/run-task.ts must have the two approval sites, the autonomous plan site, and the approved-skill site (W1-T4338)",
+    3,
+    "src/run-task.ts must have the batch approval site, the autonomous plan site, and the approved-skill site (W1-T4338); " +
+      "the single approval site moved into inbox.ts's ratificationPrBody (W1-T4700), checked below",
   );
+  assert.match(INBOX_SRC, /buildPlanPrBody\(\{[^}]*changedFiles:\s*\[\.\.\.writtenPaths\]/, "inbox.ts's ratificationPrBody passes changedFiles");
   for (const m of callSites) {
     const from = m.index!;
     const to = RUN_TASK_SRC.indexOf("});", from);
