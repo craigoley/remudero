@@ -33322,7 +33322,10 @@ export async function daemonCommand(
                     openWorkspace: () => gardenCheckout({ name: "selector-shadow", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
                     log,
                   },
-                  () => readSelectorShadowRunsAsync(self.owner, self.repo),
+                  () => readSelectorShadowRunsAsync(self.owner, self.repo, undefined, {
+                    cachePath: join(config.root, "state", "selector-shadow-log-cache.json"),
+                    warn: (message) => log("selector-shadow.cache_failed", { message }),
+                  }),
                   (miss) => readSelectorShadowChangedPaths(self.owner, self.repo, miss),
                   ciLearningTaskIdMinter(repoRoot),
                   intervalMs,
@@ -47760,6 +47763,24 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       const encodedAutomatedDecision = process.env[AUTOMATED_RETRO_DECISION_ENV];
       // c8 ignore next
       const automated = encodedAutomatedDecision === undefined ? undefined : decodeAutomatedRetroDecision(encodedAutomatedDecision);
+      // The daemon's retro is a separate process. Its inherited GH_TOKEN is a snapshot and a
+      // full prepublish suite can outlive that token's one-hour life. Refresh in THIS process
+      // before its first GitHub read and keep refreshing until it exits; the daemon's own
+      // refresher cannot update a child process's environment after spawn.
+      if (automated) {
+        const tokenLedger = ledgerPathFor(loadConfig());
+        const tokenRunId = `retro-token-${process.pid}`;
+        const refresh = startInstallationTokenRefresh({
+          log: (step, extra) => appendLedger(tokenLedger, {
+            run_id: tokenRunId,
+            task_id: "RETRO",
+            step,
+            lane: "retro",
+            ...extra,
+          }),
+        });
+        if (refresh.ready) await refresh.ready;
+      }
       /* node:coverage ignore next -- real retro execution reads ledger/plan state and may spawn; retroCommand has injectable tests */
       return await retroCommand(rest, automated ? { automated } : {});
     },

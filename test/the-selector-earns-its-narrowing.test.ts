@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { fixedClock } from "../src/lib/clock.js";
 import {
   SELECTOR_SHADOW_MIN_FAILURES,
   SELECTOR_SHADOW_MIN_RUNS,
@@ -193,6 +194,75 @@ test("the async selector-shadow reader keeps run logs sequential while other tim
     [42, "abc123", "log for 42"],
     [43, "def456", "log for 43"],
   ]);
+});
+
+test("selector-shadow resumes a bounded log window across ticks and daemon restarts", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-cache-`));
+  const cachePath = join(root, "logs.json");
+  const headers = [1, 2, 3].map((id) => ({ id, head_sha: `head-${id}` }));
+  const record: SelectorShadowRecord = { fullRun: true, floorSize: 20, narrowSize: 10, failures: [] };
+  const fetched: number[] = [];
+  const io = {
+    cachePath,
+    freshLogsPerPass: 1,
+    clock: fixedClock(1_000),
+    readJson: async () => ({ workflow_runs: headers }),
+    readLog: async (args: string[]) => {
+      const id = Number(args[2]);
+      fetched.push(id);
+      return `large unrelated log\n${run(id, record).log}`;
+    },
+  };
+
+  const first = await readSelectorShadowRunsAsync("acme", "remudero", 3, io);
+  assert.deepEqual(fetched, [1], "one tick has a strict fresh-log budget");
+  assert.equal(selectorShadowReport(first, 100).verdict, "insufficient", "unread runs cannot certify a window");
+  assert.equal(first[1]?.log, "", "deferred runs remain explicitly incomplete");
+
+  await readSelectorShadowRunsAsync("acme", "remudero", 3, io);
+  const complete = await readSelectorShadowRunsAsync("acme", "remudero", 3, io);
+  assert.deepEqual(fetched, [1, 2, 3]);
+  assert.equal(complete.every((row) => parseSelectorShadowLines(row.log).length === SELECTOR_SHADOW_SHARDS), true);
+  assert.doesNotMatch(readFileSync(cachePath, "utf8"), /large unrelated log/, "only shadow evidence is persisted");
+
+  await readSelectorShadowRunsAsync("acme", "remudero", 3, io);
+  assert.deepEqual(fetched, [1, 2, 3], "a new reader invocation reuses completed runs");
+  headers[1] = { id: 2, head_sha: "replaced-head" };
+  await readSelectorShadowRunsAsync("acme", "remudero", 3, io);
+  assert.deepEqual(fetched, [1, 2, 3, 2], "a run ID with a different head cannot reuse evidence");
+});
+
+test("selector-shadow keeps scanning after an unreadable log without treating it as complete", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-unreadable-`));
+  const cachePath = join(root, "logs.json");
+  const fetched: number[] = [];
+  const warnings: string[] = [];
+  const record: SelectorShadowRecord = { fullRun: true, floorSize: 20, narrowSize: 10, failures: [] };
+  const io = {
+    cachePath,
+    clock: fixedClock(1_000),
+    readJson: async () => ({ workflow_runs: [1, 2].map((id) => ({ id, head_sha: `head-${id}` })) }),
+    readLog: async (args: string[]) => {
+      const id = Number(args[2]);
+      fetched.push(id);
+      if (id === 1) throw new Error("workflow log unavailable");
+      return run(id, record).log;
+    },
+    warn: (message: string) => { warnings.push(message); },
+  };
+  const first = await readSelectorShadowRunsAsync("acme", "remudero", 2, io);
+  assert.deepEqual(fetched, [1, 2], "one bad log does not block later evidence");
+  assert.equal(first[0]?.log, "");
+  assert.equal(selectorShadowReport(first, 100).verdict, "insufficient");
+  assert.match(warnings[0] ?? "", /run 1 log unreadable/);
+  await readSelectorShadowRunsAsync("acme", "remudero", 2, io);
+  assert.deepEqual(fetched, [1, 2], "the incomplete entry backs off across invocations");
+
+  await assert.rejects(readSelectorShadowRunsAsync("acme", "remudero", 2, {
+    ...io,
+    cachePath: join(root, "auth-logs.json"),
+    readLog: async () => { throw new Error("HTTP 401 Bad credentials"); },
+  }), /HTTP 401/, "authentication failures remain visible for credential recovery");
 });
 
 test("W1-T4439: a failed pass is logged by name and never stops the daemon's timer", async () => {
