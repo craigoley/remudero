@@ -586,9 +586,8 @@ export function compareArms(armA, armB) {
 }
 
 /**
- * Group runs into (type, risk, class) CELLS and, WITHIN each, (provider, served_model, effort)
- * ARMS; every cell with two or more arms gets every pairwise {@link compareArms} comparison.
- * W1-T4726: a `neverWorked` run opens and fills no arm, only its cell's `excludedCount`.
+ * Group runs into (type, risk, class) CELLS and, WITHIN each, (provider, served_model, effort) ARMS
+ * (W1-T4726: a `neverWorked` run fills none, only `excludedCount`); pairwise {@link compareArms} per cell.
  */
 export function computeArmSweep(runs, armFields, newestTs, windowEvidence = new Map()) {
   const redispatched = redispatchedRunIds(runs);
