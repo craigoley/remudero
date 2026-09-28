@@ -60,6 +60,9 @@ export interface CorpusPr {
 
 export interface CiFailureCorpusInput {
   prs: CorpusPr[];
+  /** False when a bounded PR listing ended before reaching the requested time boundary. */
+  windowComplete?: boolean;
+  unreadablePrs?: number[];
 }
 
 /** `"repaired"` — a later commit on the same pull request turned this same gate green.
@@ -90,6 +93,8 @@ export type CiFailureCorpusStatus = "clear" | "populated" | "unreadable";
 export interface CiFailureCorpus {
   status: CiFailureCorpusStatus;
   prsScanned: number;
+  windowComplete?: boolean;
+  unreadablePrs?: number[];
   /** Every sha whose rollup could not be read, NAMED rather than silently treated as green. */
   unreadableShas: string[];
   pairs: CiFailurePair[];
@@ -270,9 +275,10 @@ export function collectCiFailureCorpus(input: CiFailureCorpusInput): CiFailureCo
 
   fullyObservedGatePrs.sort((a, b) => a.pr - b.pr || a.gate.localeCompare(b.gate));
 
+  const windowComplete = input.windowComplete !== false;
   const status: CiFailureCorpusStatus =
-    pairs.length > 0 ? "populated" : unreadableShas.length > 0 ? "unreadable" : "clear";
-  return { status, prsScanned: input.prs.length, unreadableShas, pairs, fullyObservedGatePrs };
+    !windowComplete || unreadableShas.length > 0 || (input.unreadablePrs?.length ?? 0) > 0 ? "unreadable" : pairs.length > 0 ? "populated" : "clear";
+  return { status, prsScanned: input.prs.length, ...(windowComplete ? {} : { windowComplete: false }), ...(input.unreadablePrs?.length ? { unreadablePrs: input.unreadablePrs } : {}), unreadableShas, pairs, fullyObservedGatePrs };
 }
 
 /** Read one gate rollup at `sha`, as the two endpoints that together see every gate. `undefined`

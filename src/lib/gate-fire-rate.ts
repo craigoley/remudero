@@ -39,7 +39,7 @@ export interface GateFireRate {
 export interface GateFireRateReport {
   /** `measured` — at least one rollup was read. `unreadable` — rollups existed and none could be
    *  read. `empty` — the window held no commits at all. Only `measured` names quiet gates. */
-  status: "measured" | "unreadable" | "empty";
+  status: "measured" | "partial" | "unreadable" | "empty";
   prsScanned: number;
   gates: GateFireRate[];
   /** Gates that never refused, over at least two pull requests. */
@@ -95,12 +95,12 @@ export function measureGateFireRates(input: CiFailureCorpusInput): GateFireRateR
   const gates = [...byGate.values()]
     .map(({ prSet, ...r }) => ({ ...r, prs: prSet.size, minutes: Math.round(r.minutes * 10) / 10 }))
     .sort((a, b) => a.gate.localeCompare(b.gate));
-  const status = read > 0 ? "measured" : commits > 0 ? "unreadable" : "empty";
+  const status = input.windowComplete === false || (input.unreadablePrs?.length ?? 0) > 0 ? "partial" : read > 0 ? "measured" : commits > 0 ? "unreadable" : "empty";
   const patterned = status === "measured" ? gates.filter((g) => g.prs >= PATTERN_PRS && g.runs > 0) : [];
   return {
     status,
     prsScanned: prs.length,
-    gates: status === "measured" ? gates : [],
+    gates: status === "measured" || status === "partial" ? gates : [],
     neverFired: patterned.filter((g) => g.redRuns === 0).map((g) => g.gate),
     alwaysFired: patterned.filter((g) => g.redRuns === g.runs).map((g) => g.gate),
   };
@@ -131,9 +131,11 @@ export function recordGateFireRates(
         minutes: g.minutes,
       });
     }
-    mkdirSync(stateDir, { recursive: true });
-    writeAtomic(gateFireRatesPath(stateDir), JSON.stringify({ measuredAt: atIso, ...report }, null, 2) + "\n");
   }
+  // Overwrite a prior complete artifact on a partial read. Otherwise the gardener could
+  // act on yesterday's apparently current "never fired" gate after today's corpus was truncated.
+  mkdirSync(stateDir, { recursive: true });
+  writeAtomic(gateFireRatesPath(stateDir), JSON.stringify({ measuredAt: atIso, ...report }, null, 2) + "\n");
   write("gate.fire_rates", {
     measured_at: atIso,
     status: report.status,

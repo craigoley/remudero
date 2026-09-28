@@ -76,10 +76,8 @@ test("daemonCommand: a SELF-TARGET non-dry-run boot wires checkRetroTrigger + ru
     ),
     "the production wiring hands its ledger sink to runRetroTrigger at call time",
   );
-  assert.ok(
-    /else\s+await\s+runAutomatedRetroSubprocess\(decision,\s*\{\s*log\s*\}\)/.test(source),
-    "the default automated-retro hook reaches the subprocess adapter rather than retroCommand in the daemon pid",
-  );
+  // The default subprocess arm and attempt-before-spawn order are exercised with an injected
+  // subprocess runner in retro-trigger-check.test.ts; this test pins the daemon wiring above.
 });
 
 test("W1-T3491 criterion 3: pre-existing fleet controls fence mutable daemon boot callbacks", async () => {
