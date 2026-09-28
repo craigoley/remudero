@@ -61,6 +61,7 @@ export type LintCheck =
   | "proof-name-resolution"
   | "proof-unit-test-unresolvable"
   | "credited-test-path"
+  | "credited-file-coverage"
   | "shared-proof"
   | "unbound-criterion"
   | "post-merge-amendment"
@@ -1410,6 +1411,55 @@ function creditedTestPathViolations(task: Task, opts: LintOpts = {}): LintViolat
     });
   }
   return violations;
+}
+
+// ── CREDITED-FILE-COVERAGE (W1-T3748 — a task declaring two surfaces is credited in full when
+// one ships) ──────────────────────────────────────────────────────────────────────────────────
+// `ownsBranch`/etc (status.ts) ask "which task does this PR belong to" — right for ATTRIBUTION,
+// wrong for COMPLETION, and the fleet uses one answer for both: a task's `files:` can declare two
+// surfaces, a build ship only one, and the branch-name credit path marks the whole task done with
+// no signal in the CREDITING path itself (W1-T3727 built only its alert_fix half; the retro half
+// was refiled as W1-T3746 only because a human happened to re-read the shard). review.ts's
+// `inverseScopeUntouchedFiles` (W1-T458) already renders this same gap, but only as a REVIEW-time
+// PR-comment advisory `unwiredAdvisoriesFor` itself says is "never consulted by state" — outside
+// the linter this repo's credit-time tooling calls. This gives the same comparison a linter home.
+//
+// ADVISORY, NO SEVERITY KNOB, DELIBERATELY: `files:` is already advisory elsewhere by design (see
+// `creditedTestPathViolations`'s plan-only exemption), so this must not refuse on first landing.
+// Ship a loud named warning; measure how often it fires on recent merges; let that decide whether
+// it ever ratchets to block — unlike every other severity-bearing check here, no `LintOpts` field
+// can escalate this one, because "advisory until measured" is not a default to override away.
+//
+// Gated on the SAME `opts.creditedBuild` contract {@link creditedTestPathViolations} uses (a build
+// actually being credited, never a queued task or whole-plan pass) plus a NEW `opts.creditedDiffFiles`
+// — the diff's changed-file list, from the one caller holding a real diff. Absent either ⇒ silent.
+// `plan/` paths are excluded from "declared": the FILES NOTE precedent (W1-T3730) has a filing's
+// own shard ride in `files:`, and a shard is never something an implementation PR re-touches.
+
+/** Every non-`plan/` path this task's `files:` declares that the diff crediting this task never
+ *  touched. See the section comment above for why this is warn-only with no severity override. */
+export function creditedFileCoverageViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  if (opts.creditedBuild !== true || opts.planOnlyFiling === true) return [];
+  const diffFiles = opts.creditedDiffFiles;
+  if (!diffFiles) return [];
+  const touched = new Set(diffFiles);
+  const declared = (task.files ?? []).filter((f) => !f.startsWith("plan/"));
+  const uncovered = declared.filter((f) => !touched.has(f));
+  if (uncovered.length === 0) return [];
+  return [
+    {
+      check: "credited-file-coverage",
+      severity: "warn",
+      message:
+        `task ${task.id} is credited as a build, but its declared files: name path(s) this diff never ` +
+        `touched: ${uncovered.join(", ")}. The branch-name credit path asks only which task a PR belongs ` +
+        "to, never whether the diff covered the declared scope, so this task would otherwise be marked " +
+        "done by a diff that shipped a strict subset of it. Either extend this build to cover the " +
+        "remaining path(s), or state in the PR which ones were deliberately left and why so the " +
+        "under-coverage is a recorded decision rather than a silent one. Advisory only — files: is " +
+        "advisory elsewhere by design and this does not refuse the build.",
+    },
+  ];
 }
 
 // ── PROOF-BASE-DISCRIMINATION (W1-T2835 — the proof that cannot tell head from base) ─────────
@@ -3352,6 +3402,9 @@ export interface LintOpts {
    *  are both SILENT, the same contract `blockedDisposition` and `newMonolithIds` already follow, and
    *  for the same reason — a whole-plan run has no base and must not report the standing population. */
   pathExistsAtBase?: (repoRelPath: string) => boolean;
+  /** W1-T3748 — the diff's changed-file list, for {@link creditedFileCoverageViolations}. Supplied
+   *  only by the one caller holding a real diff; absent ⇒ that check is silent. */
+  creditedDiffFiles?: readonly string[];
   /** Severity for {@link proofBaseDiscriminationViolations}. Default "warn", and NO call site wires
    *  "block": path-presence at base is a HEURISTIC for "the proof passes at base", so a repair whose
    *  target test is RED at base discriminates correctly and a blocking arm would refuse it wrongly. */
@@ -3500,6 +3553,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofNameResolutionViolations(task, opts));
   violations.push(...proofUnitTestUnresolvableViolations(task, opts));
   violations.push(...creditedTestPathViolations(task, opts));
+  violations.push(...creditedFileCoverageViolations(task, opts));
   violations.push(...sharedProofViolations(task));
   violations.push(...unboundCriterionViolations(task, opts));
   violations.push(...proofBaseDiscriminationViolations(task, opts));
