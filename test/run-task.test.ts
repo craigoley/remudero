@@ -7812,7 +7812,7 @@ if (command.includes("required_status_checks")) {
     html_url: "https://github.com/o/r/pull/902",
     state: "open",
     body: "Remudero-Task: W1-T902\\n",
-    updated_at: "2026-09-14T00:00:00Z",
+    updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
     head: { ref: "run-W1-T902-1", sha: "cccc902000000000000000000000000000000c" },
     auto_merge: null,
   }]));
