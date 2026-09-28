@@ -88,7 +88,7 @@ interface AnswerInput {
   question: string;
   repository?: string;
   instance: string;
-  snapshot: Pick<AnalyticsSnapshot, "asOf" | "consoleV1" | "queue">;
+  snapshot: Pick<AnalyticsSnapshot, "asOf" | "consoleV1" | "queue"> & Partial<Pick<AnalyticsSnapshot, "benchmarkEvidence">>;
   inbox?: InboxAnswerEvidence;
   now?: number;
 }
@@ -147,6 +147,13 @@ export function buildOperatorAgentAnswer(input: AnswerInput): OperatorAgentAnswe
       citations: [{ sourceId: "/v1/inbox/threads#message-store", observedAt: sourceAt, freshness: age <= FRESH_MS ? "verified" : "stale", label: "Stored inbox threads", value: String(input.inbox.threadCount) }],
       missingSources: [{ sourceId: "/v1/inbox", reason: "proposal classification and read marks are not part of this bounded thread-message projection" }],
     };
+  }
+  // The ledger union may refresh to an apparently current, zero-valued projection even when
+  // its source is missing or unreadable. The source-quality marker is therefore an authority
+  // guard for every ledger-backed answer, not merely benchmark display metadata.
+  const sourceReason = input.snapshot.benchmarkEvidence?.reason;
+  if (sourceReason && /^ledger-(?:source|live)-(?:missing|unreadable|malformed|torn-tail)$/.test(sourceReason)) {
+    return unavailable("/v1/analytics#ledger-union", `the instance ledger source is ${sourceReason}`);
   }
   const observedAt = input.snapshot.asOf;
   const observedMs = observedAt === null ? NaN : Date.parse(observedAt);

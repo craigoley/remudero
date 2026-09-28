@@ -1,0 +1,36 @@
+- id: W1-T4678
+  title: "A CIRCUIT-BROKEN TASK PAGES THE OPERATOR WITH NO DIAGNOSIS — a cheap verifier reads the evidence first (breaker counts, refusal reasons, PR states, shard hash) and either amends, retires or requeues with a note, or escalates naming an owner; once per new fingerprint"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-operator-1790600000"
+  plan_refs: [W1-T4660, W1-T2487]
+  files: [src/lib/stall-verifier.ts, test/a-stalled-task-is-verified-before-it-pages.test.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: a circuit-broken task escalates straight to the operator (src/lib/escalation-catalogue.ts); W1-T2487 found 26
+    of 50 blocked tasks name no disposition; 2026-09-28 W1-T3116's breaker issue #7432 would have been answered 'correct the
+    credit' although all 7 of its proofs fail on main. Paperclip's task watchdog hashes stopped state into a fingerprint and
+    wakes a narrow-authority verifier once per new fingerprint (doc/TASK-WATCHDOG.md).
+  design: |
+    (i) Before dispatch.circuit_broken.escalated, a cheap-lane verifier reads the evidence and returns one of: amend proof,
+    retire, requeue with a note, escalate with a named owner and the reason.
+    (ii) It runs once per new evidence fingerprint and cannot approve or bypass a gate.
+    (iii) Offline first: replay recent breaker escalations and compare its verdict with the operator's resolution.
+  acceptance:
+    - claim: "the verifier returns one of its four outcomes from the evidence"
+      proof: 'grep: test("W1-T4678: the verifier returns one of its four outcomes from the evidence" in test/a-stalled-task-is-verified-before-it-pages.test.ts'
+    - claim: "an unchanged fingerprint is never verified twice"
+      proof: 'grep: test("W1-T4678: an unchanged fingerprint is never verified twice" in test/a-stalled-task-is-verified-before-it-pages.test.ts'
+    - claim: "the new module is called from src/run-task.ts"
+      proof: 'grep: verifyStalledTask( in src/run-task.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

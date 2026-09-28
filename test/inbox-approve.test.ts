@@ -29,7 +29,8 @@ import {
   writeRatificationShards,
 } from "../src/lib/inbox.js";
 import type { Plan } from "../src/lib/plan.js";
-import { buildPlanPrBody, filingAcceptanceCriteria } from "../src/lib/plan-pr-emitter.js";
+import { filingAcceptanceCriteria } from "../src/lib/plan-pr-emitter.js";
+import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
 import { loadPlanIndex } from "../src/lib/plan-index.js";
 
@@ -625,7 +626,7 @@ test("integration: approveProposal commits without a plan-index artifact and ope
         "gate still reviews (ci + remudero-review); nothing auto-merges without it.",
       ].join("\n");
       const ids = filedTaskIds.length > 0 ? filedTaskIds : [id];
-      capturedBody = buildPlanPrBody({
+      capturedBody = buildFixturePlanPrBody({
         intro,
         criteria: filingAcceptanceCriteria(ids, ["plan/tasks.yaml", "MASTER-PLAN.md"]),
         // NO taskId — a ratification branch is a plan-FILING PR.

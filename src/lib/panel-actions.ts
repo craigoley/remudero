@@ -26,9 +26,9 @@ import {
 import { verifiedActor, type Route } from "./service.js";
 import { appendLedger, RISK_OVERRIDE_RECORDED_STEP, RISK_OVERRIDE_REASON_CLASSES, RISK_OVERRIDE_DISPOSITIONS, type RiskOverrideReasonClass, type RiskOverrideDisposition } from "./ledger.js";
 import type { RiskJudgeVerdictLabel } from "./risk-judge.js";
-import { isPaused, isPrActionName, isPrActionSwitchedOff, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPrAction, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail } from "./fleet-control.js";
+import { isPaused, isPrActionName, isPrActionSwitchedOff, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPrAction, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail, type FleetControlInfo, type PrActionName, type PrActionRequest, type ResumeResult } from "./fleet-control.js";
 import { appendQuestionAnswer } from "./worker.js";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { hashToken } from "./last-seen.js";
 import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from "./status.js";
 import { deriveLastPoll } from "./daemon-health.js";
@@ -138,8 +138,19 @@ function validateOptionalReason(body: unknown): { error: string } | OptionalReas
 /** Ledger one panel action, keyed by `ledgerPath` alone (not the full `PanelActionDeps`) so
  *  panel-graph.ts's routes, which have no `issues` gateway, can ledger through the same
  *  primitive rather than re-deriving the `run_id` shape a second time. */
-export function appendPanelLedger(ledgerPath: string, step: string, taskId: string, origin: string, extra: Record<string, unknown> = {}): void {
-  appendLedger(ledgerPath, { run_id: `PANEL-${Date.now()}`, task_id: taskId, step, origin, ...extra });
+export function appendPanelLedger(ledgerPath: string, step: string, taskId: string, origin: string, extra: Record<string, unknown> = {}): PanelLedgerRow {
+  // W1-T4657: ts and run_id come from ONE clock read and are returned, so an executor can cite the row.
+  const ms = systemClock.now();
+  const row: PanelLedgerRow = { step, ts: fixedClock(ms).iso(), run_id: `PANEL-${ms}` };
+  appendLedger(ledgerPath, { ts: row.ts, run_id: row.run_id, task_id: taskId, step, origin, ...extra });
+  return row;
+}
+
+/** The identity of one appended panel ledger row: the system-of-record reference an executor cites. */
+export interface PanelLedgerRow {
+  readonly step: string;
+  readonly ts: string;
+  readonly run_id: string;
 }
 
 /** Ledger one panel action. Every route below funnels through this so the shape is uniform: step name, the caller's `origin`, plus whatever fields that action names. */
@@ -286,6 +297,13 @@ export function buildControlStatusRoute(deps: ControlStatusDeps): Route {
 
 // ── POST /v1/control/pause ──────────────────────────────────────────────────
 
+/** The pause route's whole side effect, shared with action-executor.ts (W1-T4657) so both run ONE path. */
+export function armPause(deps: Pick<PanelActionDeps, "root" | "ledgerPath">, reason: string | undefined, origin: string, extra: Record<string, unknown> = {}): { info: FleetControlInfo; row: PanelLedgerRow } {
+  const info = requestPause(deps.root, reason);
+  const row = appendPanelLedger(deps.ledgerPath, "panel.pause_requested", PANEL_TASK_ID, origin, { reason: info.reason ?? null, ...extra });
+  return { info, row };
+}
+
 /** POST /v1/control/pause — drain-and-hold, write-scoped. */
 export function buildPauseRoute(deps: PanelActionDeps): Route {
   return {
@@ -295,15 +313,20 @@ export function buildPauseRoute(deps: PanelActionDeps): Route {
     // W1-T404: MIDDLE — reversible (resume clears it) but disruptive.
     tier: "middle",
     handler: jsonAction(validateOptionalReason, (input, req, res) => {
-      const info = requestPause(deps.root, input.reason);
-      const origin = bearerTokenId(req);
-      ledgerPanelAction(deps, "panel.pause_requested", PANEL_TASK_ID, origin, { reason: info.reason ?? null });
+      const { info } = armPause(deps, input.reason, bearerTokenId(req));
       sendJson(res, 200, { paused: true, reason: info.reason ?? null });
     }),
   };
 }
 
 // ── POST /v1/control/resume ─────────────────────────────────────────────────
+
+/** The resume route's whole side effect, shared with action-executor.ts (W1-T4657). */
+export function armResume(deps: Pick<PanelActionDeps, "root" | "ledgerPath">, origin: string, extra: Record<string, unknown> = {}): { result: ResumeResult; row: PanelLedgerRow } {
+  const result = resumeFleet(deps.root);
+  const row = appendPanelLedger(deps.ledgerPath, "panel.resume_requested", PANEL_TASK_ID, origin, { ...result, ...extra });
+  return { result, row };
+}
 
 /** POST /v1/control/resume — clears BOTH STOP and PAUSE, write-scoped. No body required. */
 export function buildResumeRoute(deps: PanelActionDeps): Route {
@@ -314,9 +337,7 @@ export function buildResumeRoute(deps: PanelActionDeps): Route {
     // W1-T404: MIDDLE — reversible but disruptive (clears STOP + PAUSE).
     tier: "middle",
     handler: async (req, res) => {
-      const result = resumeFleet(deps.root);
-      const origin = bearerTokenId(req);
-      ledgerPanelAction(deps, "panel.resume_requested", PANEL_TASK_ID, origin, { ...result });
+      const { result } = armResume(deps, bearerTokenId(req));
       sendJson(res, 200, result);
     },
   };
@@ -740,6 +761,12 @@ function validateTaskId(body: unknown): { error: string } | TaskIdInput {
   return { taskId: body.taskId };
 }
 
+/** The kick route's whole side effect, shared with action-executor.ts (W1-T4657). */
+export function armKick(deps: Pick<PanelActionDeps, "root" | "ledgerPath">, taskId: string, origin: string, extra: Record<string, unknown> = {}): PanelLedgerRow {
+  requestKick(deps.root, taskId, origin);
+  return appendPanelLedger(deps.ledgerPath, "console.kick_requested", taskId, origin, { armed: true, ...extra });
+}
+
 /** POST /v1/drain/kick — the per-row "Run" button. Writes `KICK_REQUESTED-<taskId>`; the daemon
  *  dispatches that task by id through its normal `assertRunnable`-gated path at the next poll.
  *  Ledgers `console.kick_requested`; the dispatch/refusal outcome is the daemon's own line. */
@@ -751,9 +778,7 @@ export function buildKickRoute(deps: Pick<PanelActionDeps, "root" | "ledgerPath"
     // W1-T404: HIGH — dispatches a task: real spend.
     tier: "high",
     handler: jsonAction(validateTaskId, (input, req, res) => {
-      const origin = bearerTokenId(req);
-      requestKick(deps.root, input.taskId, origin);
-      appendPanelLedger(deps.ledgerPath, "console.kick_requested", input.taskId, origin, { armed: true });
+      armKick(deps, input.taskId, bearerTokenId(req));
       sendJson(res, 200, { armed: true, taskId: input.taskId });
     }),
   };
@@ -806,6 +831,35 @@ function validatePrAction(body: unknown): { error: string } | PrActionInput {
   return { action: body.action, prNumber: body.prNumber };
 }
 
+/** Why a switched-off PR action was refused, naming the marker that switched it off. */
+export function prActionSwitchedOffDetail(action: PrActionName): string {
+  return `console ${action} requests are switched off on this daemon (state/CONSOLE_PR_ACTION_OFF-${action})`;
+}
+
+/** The pr-actions route's whole side effect, switch-off refusal included, shared with action-executor.ts (W1-T4657). */
+export function armPrAction(
+  deps: Pick<PanelActionDeps, "root" | "ledgerPath">,
+  action: PrActionName,
+  prNumber: number,
+  origin: string,
+  operator?: string,
+  extra: Record<string, unknown> = {},
+): { switchedOff: true; row: PanelLedgerRow } | { switchedOff: false; request: PrActionRequest; row: PanelLedgerRow } {
+  if (isPrActionSwitchedOff(deps.root, action)) {
+    const row = appendPanelLedger(deps.ledgerPath, "console.pr_action_switched_off", `PR-${prNumber}`, origin, { action, pr_number: prNumber, ...extra });
+    return { switchedOff: true, row };
+  }
+  const request = requestPrAction(deps.root, action, prNumber, origin, operator);
+  const row = appendPanelLedger(deps.ledgerPath, "console.pr_action_requested", `PR-${prNumber}`, origin, {
+    action,
+    pr_number: prNumber,
+    requested_at: request.requestedAt,
+    ...(operator ? { operator } : {}),
+    ...extra,
+  });
+  return { switchedOff: false, request, row };
+}
+
 /**
  * POST /v1/pr-actions — record an operator's bounded repair or review request.
  *
@@ -827,26 +881,12 @@ export function buildPrActionRoute(deps: Pick<PanelActionDeps, "root" | "ledgerP
     // at "low" by W1-T404, must be able to ask for a review or a fix; nothing else moves tier.
     tier: "low",
     handler: jsonAction(validatePrAction, (input, req, res) => {
-      const origin = bearerTokenId(req);
-      if (isPrActionSwitchedOff(deps.root, input.action)) {
-        appendPanelLedger(deps.ledgerPath, "console.pr_action_switched_off", `PR-${input.prNumber}`, origin, {
-          action: input.action,
-          pr_number: input.prNumber,
-        });
-        sendJson(res, 409, {
-          error: "switched_off",
-          detail: `console ${input.action} requests are switched off on this daemon (state/CONSOLE_PR_ACTION_OFF-${input.action})`,
-        });
+      const outcome = armPrAction(deps, input.action, input.prNumber, bearerTokenId(req), operatorDisplayName(req));
+      if (outcome.switchedOff) {
+        sendJson(res, 409, { error: "switched_off", detail: prActionSwitchedOffDetail(input.action) });
         return;
       }
-      const operator = operatorDisplayName(req);
-      const request = requestPrAction(deps.root, input.action, input.prNumber, origin, operator);
-      appendPanelLedger(deps.ledgerPath, "console.pr_action_requested", `PR-${input.prNumber}`, origin, {
-        action: input.action,
-        pr_number: input.prNumber,
-        requested_at: request.requestedAt,
-        ...(operator ? { operator } : {}),
-      });
+      const { request } = outcome;
       sendJson(res, 200, { armed: true, action: request.action, prNumber: request.prNumber, requestedAt: request.requestedAt });
     }),
   };

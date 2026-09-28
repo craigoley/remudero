@@ -1,0 +1,33 @@
+- id: W1-T4683
+  title: "THE RETRO MINTS A NEAR-DUPLICATE INSTEAD OF STRENGTHENING THE FACT — when new evidence matches an existing learning, append it as evidence and raise the fact's proof count (a Beta pseudo-count, not a cutoff), using a similarity pass plus a merge-or-keep check that keeps changed numbers, negations and names apart"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-memory-1790600000"
+  plan_refs: []
+  files: [src/lib/knowledge-dedup.ts, test/new-evidence-strengthens-the-fact-it-matches.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: knowledge-dedup.ts is lexical only and says paraphrases slip through (~14-19); a learning has one evidence?
+    string and no proof count. Hindsight's consolidation prefers updating an existing belief with the new facts as evidence and
+    feeds proof count into ranking as a bounded multiplier (engine/consolidation/prompts.py; retrieval docs,
+    proof_norm = 0.5 + ln(n)/10).
+  design: |
+    (i) Retro intake runs similarity then a merge-or-keep check over each new candidate against active learnings.
+    (ii) A merge appends evidence and increments the proof count; ranking uses it as Beta pseudo-counts.
+    (iii) First: measure the duplication rate over the last 30 days of retro proposals.
+  acceptance:
+    - claim: "matching evidence strengthens the existing fact instead of minting a duplicate"
+      proof: 'grep: test("W1-T4683: matching evidence strengthens the existing fact instead of minting a duplicate" in test/new-evidence-strengthens-the-fact-it-matches.test.ts'
+    - claim: "a changed number keeps the two facts apart"
+      proof: 'grep: test("W1-T4683: a changed number keeps the two facts apart" in test/new-evidence-strengthens-the-fact-it-matches.test.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

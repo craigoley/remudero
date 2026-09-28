@@ -1,0 +1,32 @@
+- id: W1-T4675
+  title: "A QUESTION NOBODY ANSWERS BLOCKS FOREVER — each escalation names one default from its fixed options; once the operator has seen it and an adaptive window passes without objection, the fleet takes the default, ledgered and undoable"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-operator-1790600000"
+  plan_refs: [W1-T4471]
+  files: [src/lib/escalate.ts, test/a-question-carries-a-default-with-undo.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: 'consequence of inaction' is prose only (src/lib/operator-message.ts ~66, escalate.ts ~176-183); nothing
+    executes it. Buzz's request_approval step carries a default timeout (ARCHITECTURE.md, not yet wired in Buzz itself).
+  design: |
+    (i) Measure first: how often the operator's eventual answer matched the recommended option.
+    (ii) A question records its default; after the operator has seen it (read marks) and a window learned from reply latency,
+    the default is applied as an answer with origin 'default', and a single action undoes it.
+    (iii) MANUAL and HARD_STOP classes never auto-apply.
+  acceptance:
+    - claim: "an unanswered question takes its default only after it was seen and the window passed"
+      proof: 'grep: test("W1-T4675: an unanswered question takes its default only after it was seen and the window passed" in test/a-question-carries-a-default-with-undo.test.ts'
+    - claim: "a hard-stop question never takes a default"
+      proof: 'grep: test("W1-T4675: a hard-stop question never takes a default" in test/a-question-carries-a-default-with-undo.test.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

@@ -190,7 +190,10 @@ test("a staged skill draft is READY with no Architect draft, is never queued for
 
 test("the skill PR body carries an executable grep proof on the one file it adds", () => {
   const relPath = ".claude/skills/implement-clean-single-strike/SKILL.md";
-  const body = skillFileApprovePrBody("skill-draft:proc-1", SKILL.name, relPath);
+  const body = skillFileApprovePrBody("skill-draft:proc-1", SKILL.name, relPath, {
+    baseRef: "fixture-base",
+    proofCheck: () => 0,
+  });
   assert.deepEqual(parseAcceptanceBlock(body), [
     { claim: `${relPath} is the approved skill draft implement-clean-single-strike`, proof: `grep: name: implement-clean-single-strike in ${relPath}` },
   ]);

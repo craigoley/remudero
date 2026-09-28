@@ -1,0 +1,38 @@
+- id: W1-T4670
+  title: "EACH SPAWN PICKS ITS MODEL ALONE — borrow NVIDIA Model-Optimizer's AutoQuantize: estimate per queued task the gain from an Opus or high-effort upgrade and its share of the live window, then spend the window where the gain is largest; prove it first on an offline replay of two weeks of ledger history"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-learn-1790600000"
+  plan_refs: [W1-T4617, W1-T4618, W1-T4626]
+  files: [src/lib/upgrade-allocation.ts, test/model-upgrades-are-allocated-across-the-queue.test.ts, src/lib/worker-provider.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: provider choice is per spawn, weighted by squared remaining headroom (src/lib/worker-provider.ts ~480-500);
+    tier is fixed by role (.remudero/mounts.yaml — sonnet workers, opus only at the last attempt). AutoQuantize scores
+    per-layer sensitivity to each format and solves a constrained assignment under a budget
+    (https://github.com/NVIDIA/Model-Optimizer/blob/main/docs/source/announcements/autoquantize.rst), validating a cheap proxy
+    against an expensive measure. W1-T4617 logs routing propensities, W1-T4618 task shape, W1-T4626 ability vs difficulty.
+  design: |
+    (i) Offline first: replay two weeks of ledger history, comparing 'upgrade the tasks with the highest predicted gain per
+    window share' against today's policy on merged-per-window-share.
+    (ii) Only if the replay wins: allocate upgrades across the queue each tick under the live window (a soft budget that moves
+    with headroom, never a fixed cap); a task, its fix rung and reviewer share one decision.
+    (iii) The cheap proxy (repair rounds, reviewer defects) is checked against W1-T4625 paired trials on a subset.
+  acceptance:
+    - claim: "the offline replay compares allocation against today's policy on merged per window share"
+      proof: 'grep: test("W1-T4670: the offline replay compares allocation against today''s policy on merged per window share" in test/model-upgrades-are-allocated-across-the-queue.test.ts'
+    - claim: "upgrades go to the tasks with the highest predicted gain per window share"
+      proof: 'grep: test("W1-T4670: upgrades go to the tasks with the highest predicted gain per window share" in test/model-upgrades-are-allocated-across-the-queue.test.ts'
+    - claim: "the new module is called from src/lib/worker-provider.ts"
+      proof: 'grep: allocateUpgrades( in src/lib/worker-provider.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.
