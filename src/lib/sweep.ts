@@ -11520,6 +11520,13 @@ export async function runSweep(
  * dedup and ledger path. AN EMPTY PASS STILL GETS EXACTLY ONE CALL, or the per-pass heartbeat would
  * vanish on a quiet tick.
  */
+// W1-T4732: overlapping light passes share review admissions. Reserve synchronously at
+// selection time, before either pass can reach an asynchronous reviewer.
+let lightPassSpawningReservations = 0;
+let lightPassPlanFilingReservations = 0;
+const lightPassReservedHeads = new Set<string>();
+const lightPassHeadKey = (pr: OpenPrView): string => `${pr.prNumber}@${pr.headSha}`;
+
 export async function runSweepLightPass(
   openPrs: OpenPrView[],
   deps: SweepDeps,
@@ -11545,7 +11552,16 @@ export async function runSweepLightPass(
   const queueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
   const activeWorkers = (deps.readActiveWorkerCount ?? activeWorkerCount)();
   const semanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
-  const { spawning, planFilings } = selectReviewAdmissions(openPrs, policy, now, outcomes, semanticBound);
+  const availableSpawning = Math.max(0, semanticBound - lightPassSpawningReservations);
+  const availablePlanFilings = Math.max(0, policy.planFilingAdmissionBound - lightPassPlanFilingReservations);
+  const { spawning, planFilings } = selectReviewAdmissions(
+    openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr))),
+    { ...policy, planFilingAdmissionBound: availablePlanFilings }, now, outcomes, availableSpawning,
+  );
+  lightPassSpawningReservations += spawning.length;
+  lightPassPlanFilingReservations += planFilings.length;
+  for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.add(lightPassHeadKey(pr));
+  try {
   // W1-T2931 — one host budget, with review/merge work served before new repair work. The light
   // pass still reconciles every PR concurrently; only the expensive fix-dispatch spending point
   // claims from this shared pool. `activeWorkerCount` is the same process-wide counter the adaptive
@@ -11576,7 +11592,7 @@ export async function runSweepLightPass(
       .map((pr) => pr.prNumber),
   );
   const admittedNumbers = spawning.map((p) => `#${p.prNumber}`).join(", ");
-  return Promise.all(
+  return await Promise.all(
     openPrs.map((pr) => {
       const baseActionable = deps.actionable;
       const baseStandDownReasonFor = deps.standDownReasonFor;
@@ -11607,15 +11623,22 @@ export async function runSweepLightPass(
               standDownReasonFor: (d) =>
                 d === "post-review"
                   ? (pr.isPlanFiling === true
-                      ? `not admitted this pass: at most ${policy.planFilingAdmissionBound} plan-filing ` +
-                        "post-review admissions per light pass"
-                      : `not admitted this pass: semantic post-review admission bound ${semanticBound}` +
+                      ? `not admitted this pass: at most ${availablePlanFilings} plan-filing ` +
+                        (availablePlanFilings === policy.planFilingAdmissionBound
+                          ? "post-review admissions per light pass"
+                          : "post-review admissions available across light passes")
+                      : `not admitted this pass: semantic post-review admission bound ${availableSpawning}` +
                         (admittedNumbers ? `; admitted ${admittedNumbers} ahead` : ""))
                   : baseStandDownReasonFor?.(d),
             };
       return runSweep([pr], scopedDeps, policy);
     }),
   );
+  } finally {
+    lightPassSpawningReservations -= spawning.length;
+    lightPassPlanFilingReservations -= planFilings.length;
+    for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.delete(lightPassHeadKey(pr));
+  }
 }
 
 /** Outcome keys already known, before admission, to make the action-time review guard stand down. */
@@ -11696,7 +11719,7 @@ export function selectReviewAdmissions(
     .sort(oldestFirst)
     .slice(0, bound);
 
-  const spawning = [...rest].sort(oldestFirst).slice(0, Math.max(1, reviewWidth));
+  const spawning = [...rest].sort(oldestFirst).slice(0, Math.max(0, reviewWidth));
   return { spawning, planFilings };
 }
 
