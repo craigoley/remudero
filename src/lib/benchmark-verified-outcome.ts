@@ -1,3 +1,4 @@
+import type { RunResult } from "./run-result.js";
 import type { TaskCaseFile, TaskCaseRun } from "./task-case-file.js";
 
 /** Private checkpoint keys are used only for the join; public groups contain no task or run ID. */
@@ -19,6 +20,9 @@ export interface VerifiedOutcomeGroup {
   selectedModel: string | null;
   assignments: number;
   completed: number;
+  /** W1-T4648: an observed ending with no PR. Not a failure and not missing:
+   * assignments = completed + endedWithoutCompletion + censored + unavailable. */
+  endedWithoutCompletion: number;
   censored: number;
   unavailable: number;
   repairRunsObserved: number;
@@ -31,7 +35,9 @@ export interface BenchmarkVerifiedOutcome {
   source: "task-case-file-v1";
   asOf: string;
   cutoff: string;
-  coverage: { assignments: number; completed: number; censored: number; unavailable: number;
+  /** `reasons` names every assignment neither completed nor censored — each unavailable reason and each
+   * `ended-without-pr:<verdict>` — so its counts sum to endedWithoutCompletion + unavailable. */
+  coverage: { assignments: number; completed: number; endedWithoutCompletion: number; censored: number; unavailable: number;
     reasons: Record<string, number> };
   groups: VerifiedOutcomeGroup[];
   experimentEffect: "unavailable-no-randomized-allocation";
@@ -48,6 +54,31 @@ function runWroteAssignment(run: TaskCaseRun, assignmentId: string): boolean {
   return written.includes(assignmentId);
 }
 
+/** W1-T4648: how each `RunResult` verdict reads once the PR read SUCCEEDED and found no PR. `true` = the run
+ * ended without completing: every `blocked*`, `no_pr` and `failed` verdict. `false` = the verdict claims or
+ * pends completion (`merged`, `already_satisfied`, `awaiting_merge`, `task_already_merged`) or a PR it could
+ * not attribute (`pr_attribution_failed`), which an empty projection contradicts rather than confirms, so
+ * those stay `current-pr-unavailable`. A `Record` over the union: a new verdict will not compile until it
+ * is classified here. An ending is an outcome, never a model-failure claim (W1-T4608). */
+const ENDS_WITHOUT_COMPLETION: Record<RunResult["verdict"], boolean> = {
+  merged: false, already_satisfied: false, awaiting_merge: false, task_already_merged: false,
+  pr_attribution_failed: false, no_pr: true, failed: true, blocked: true, blocked_ci: true, blocked_review: true,
+  blocked_budget: true, blocked_containment: true, blocked_isolation: true, blocked_inflight: true,
+  blocked_git_fetch: true, blocked_illformed: true, blocked_transient: true,
+};
+
+/** A run with no current PR. Only a SUCCESSFUL read that found none, for a run whose own ledger opened
+ * none, can read as an ending; a failed read stays `current-pr-unavailable` whatever the verdict says. */
+function withoutCurrentPr(file: TaskCaseFile, run: TaskCaseRun): { ended: boolean; reason: string } {
+  const readFoundNone = file.pr?.state === "unavailable" && file.pr.reason === "no-pr-in-current-projection"
+    && file.pr.source === "github-pr-read";
+  if (!readFoundNone || typeof run.prNumber === "number") return { ended: false, reason: "current-pr-unavailable" };
+  if (typeof run.verdict !== "string") return { ended: false, reason: "run-without-terminal-verdict" };
+  if (!Object.hasOwn(ENDS_WITHOUT_COMPLETION, run.verdict)) return { ended: false, reason: "run-verdict-unrecognized" };
+  return ENDS_WITHOUT_COMPLETION[run.verdict as RunResult["verdict"]]
+    ? { ended: true, reason: `ended-without-pr:${run.verdict}` } : { ended: false, reason: "current-pr-unavailable" };
+}
+
 /** No worker-call result, ledger verdict, or closed PR can independently award completion. */
 export function joinVerifiedTaskOutcomes(
   assignments: readonly VerifiedAssignment[], caseFiles: readonly TaskCaseFile[], cutoff: string,
@@ -60,12 +91,12 @@ export function joinVerifiedTaskOutcomes(
   }
   const groups = new Map<string, VerifiedOutcomeGroup>();
   const reasons: Record<string, number> = {};
-  let completed = 0; let censored = 0; let unavailable = 0;
+  let completed = 0; let ended = 0; let censored = 0; let unavailable = 0;
   for (const assignment of assignments) {
     const key = JSON.stringify([assignment.taskClass, assignment.selectedModel]);
     const group = groups.get(key) ?? {
       taskClass: assignment.taskClass, selectedModel: assignment.selectedModel,
-      assignments: 0, completed: 0, censored: 0, unavailable: 0, repairRunsObserved: 0,
+      assignments: 0, completed: 0, endedWithoutCompletion: 0, censored: 0, unavailable: 0, repairRunsObserved: 0,
       latency: { observed: 0, totalMs: 0, meanMs: null },
       cost: { apiUsd: 0, subscriptionNotionalUsd: 0, observed: 0, missing: 0, noAttempt: 0 },
     };
@@ -77,7 +108,7 @@ export function joinVerifiedTaskOutcomes(
       if (assignment.billingMode === "api") group.cost.apiUsd += assignment.costUsd;
       else group.cost.subscriptionNotionalUsd += assignment.costUsd;
     }
-    let disposition: "completed" | "censored" | "unavailable" = "unavailable";
+    let disposition: "completed" | "ended" | "censored" | "unavailable" = "unavailable";
     let reason = "";
     const files = assignment.taskId ? byTask.get(assignment.taskId) ?? [] : [];
     if (!assignment.taskId || !assignment.runId) reason = "pre-instrumentation-keys-missing";
@@ -94,7 +125,11 @@ export function joinVerifiedTaskOutcomes(
         const merged = file.mergedSource?.state === "observed" ? file.mergedSource.value : null;
         if (!run) reason = "run-not-in-case-file";
         else if (!runWroteAssignment(run, assignment.assignmentId)) reason = "assignment-run-mismatch";
-        else if (!pr) reason = "current-pr-unavailable";
+        else if (!pr) {
+          const without = withoutCurrentPr(file, run);
+          reason = without.reason;
+          if (without.ended) disposition = "ended";
+        }
         else if (run.prNumber !== pr.number) reason = "run-pr-mismatch";
         else if (pr.state === "OPEN") { disposition = "censored"; reason = "open-at-cutoff"; }
         else if (pr.state === "CLOSED") reason = "closed-unmerged-unadjudicated";
@@ -118,15 +153,19 @@ export function joinVerifiedTaskOutcomes(
     }
     if (disposition === "completed") { completed += 1; group.completed += 1; }
     else if (disposition === "censored") { censored += 1; group.censored += 1; }
-    else { unavailable += 1; group.unavailable += 1; reasons[reason] = (reasons[reason] ?? 0) + 1; }
+    else {
+      if (disposition === "ended") { ended += 1; group.endedWithoutCompletion += 1; }
+      else { unavailable += 1; group.unavailable += 1; }
+      reasons[reason] = (reasons[reason] ?? 0) + 1;
+    }
     groups.set(key, group);
   }
   const values = [...groups.values()].sort((a, b) => JSON.stringify([a.taskClass, a.selectedModel])
     .localeCompare(JSON.stringify([b.taskClass, b.selectedModel])));
   for (const group of values) group.latency.meanMs = group.latency.observed
     ? group.latency.totalMs / group.latency.observed : null;
-  return { state: completed + censored === 0 ? "unavailable" : unavailable ? "observed-partial" : "observed",
+  return { state: completed + ended + censored === 0 ? "unavailable" : unavailable ? "observed-partial" : "observed",
     source: "task-case-file-v1", asOf: cutoff, cutoff,
-    coverage: { assignments: assignments.length, completed, censored, unavailable, reasons },
+    coverage: { assignments: assignments.length, completed, endedWithoutCompletion: ended, censored, unavailable, reasons },
     groups: values, experimentEffect: "unavailable-no-randomized-allocation" };
 }
