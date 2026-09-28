@@ -57,12 +57,13 @@ export function pairedStackEvidence(protocol: Pick<PaidPilotProtocol, "revisions
     environmentRevision: manifest(protocol.revisions.environmentRevision) };
 }
 
-/** What one side attempt is asked to do: its own pinned arm, the pilot's pinned revisions, and no way out. */
-export interface PairedAttemptRequest {
+/** What one side attempt is asked to do: its own pinned arm, the pilot's pinned revisions, and no way out.
+ *  `Arm` is a pilot arm, or an A/A label (W1-T4647): both arms of an A/A pin the one stack. */
+export interface PairedAttemptRequest<Arm extends string = PaidPilotArm> {
   pilotId: string;
   pairId: string;
   taskId: string;
-  arm: PaidPilotArm;
+  arm: Arm;
   position: 0 | 1;
   pin: PaidPilotProtocol["arms"][PaidPilotArm];
   revisions: PaidPilotProtocol["revisions"];
@@ -87,7 +88,7 @@ export interface PairedAttemptResult {
   cleanup?: () => void;
 }
 
-export type PairedAttemptDispatch = (request: PairedAttemptRequest) => Promise<PairedAttemptResult>;
+export type PairedAttemptDispatch<Arm extends string = PaidPilotArm> = (request: PairedAttemptRequest<Arm>) => Promise<PairedAttemptResult>;
 
 function criterionOutcome(criterion: AcceptanceCriterion, headDir: string, exec: ProofExecutor): { outcome: CorpusProofOutcome; reason: string } {
   const whitelisted = parseWhitelistedProof(criterion.proof);
@@ -171,6 +172,13 @@ function admittedPairTasks(rows: readonly PaidPilotRow[]): Set<string> {
 
 /** One process runs at most one live pair; across processes an unreceipted paid spawn marker pauses admission. */
 let pairInFlight = false;
+
+/** The one live-pair slot, shared by the paid pilot and the prospective A/A (W1-T4647): the release, or null when held. */
+export function claimPairSlot(): (() => void) | null {
+  if (pairInFlight) return null;
+  pairInFlight = true;
+  return () => { pairInFlight = false; };
+}
 
 type TrialContext = { input: PairedTrialInput; protocol: PaidPilotProtocol; nowIso: string; pairId: string; order: [PaidPilotArm, PaidPilotArm] };
 
@@ -305,12 +313,10 @@ async function pairedTrial(input: PairedTrialInput, claim: () => boolean): Promi
  * it, so nothing it does or fails to do can reach the normal dispatch that admitted the task.
  */
 export async function runPairedTrial(input: PairedTrialInput): Promise<PairedTrialResult> {
-  let claimed = false;
+  const slot: { release: (() => void) | null } = { release: null };
   const claim = (): boolean => {
-    if (pairInFlight) return false;
-    pairInFlight = true;
-    claimed = true;
-    return true;
+    slot.release = claimPairSlot();
+    return slot.release !== null;
   };
   let result: PairedTrialResult;
   try { result = await pairedTrial(input, claim); }
@@ -319,7 +325,7 @@ export async function runPairedTrial(input: PairedTrialInput): Promise<PairedTri
     safeLog(input.log, "paired_trial.error", { reason });
     result = { state: "refused", pilotId: "unknown", pairId: "unknown", order: [], reasons: [reason] };
   } finally {
-    if (claimed) pairInFlight = false;
+    slot.release?.();
   }
   try { input.settled?.(result); }
   catch {
@@ -447,7 +453,7 @@ export interface SealedPairedAttemptOptions {
  * `spawnWorker` with no assignment sink, so the only rows it leaves are the trial's own. The head is committed locally
  * and returned for grading; the worktree is removed by `cleanup`, or here when anything throws.
  */
-export function sealedPairedAttemptDispatcher(options: SealedPairedAttemptOptions): PairedAttemptDispatch {
+export function sealedPairedAttemptDispatcher(options: SealedPairedAttemptOptions): PairedAttemptDispatch<string> {
   const clock = options.clock ?? systemClock;
   let base: string | null = null;
   return async (request) => {
