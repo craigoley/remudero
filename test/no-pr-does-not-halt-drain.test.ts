@@ -97,8 +97,8 @@ test("haltsDrain: a no_pr result no longer halts, while every genuinely blocking
   }
   assert.deepEqual(
     [...NON_HALTING_VERDICTS].sort(),
-    ["awaiting_merge", "blocked_ci", "blocked_illformed", "no_pr", "task_already_merged"],
-    "the exempt set is exactly these five",
+    ["awaiting_merge", "blocked_ci", "blocked_illformed", "handed_off", "no_pr", "task_already_merged"],
+    "the exempt set is exactly these six",
   );
 });
 

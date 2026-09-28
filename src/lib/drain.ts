@@ -3,7 +3,7 @@
  *  orchestration — deps are plan.ts's ({@link unmetDependencies}), status is GitHub-derived
  *  (status.ts), headroom is headroom.ts (W1-T4), and no LLM decides anything.
  *  INVARIANT: the drain stops on any halting verdict, because a blocked task's dependents would build
- *  on missing work. {@link NON_HALTING_VERDICTS} names the five exceptions, {@link haltsDrain} is the
+ *  on missing work. {@link NON_HALTING_VERDICTS} names the six exceptions, {@link haltsDrain} is the
  *  one predicate both loops apply, and skip-and-continue lives in the daemon loop (W1-T46). */
 // Why: the stop-on-block rule and the argument behind it (W1-T46) — docs/forensics/drain.md.
 
@@ -795,6 +795,8 @@ export function isWorktreeNodeModulesRefusal(err: unknown): err is { reasonClass
  *  here because that justification does not apply to it:
  *    - `blocked_ci`          — the work was pushed and the PR left open.
  *    - `awaiting_merge`      — the PR is already armed and green; GitHub has not materialized it.
+ *    - `handed_off`          — the PR was opened and the runner yielded for source refresh; its
+ *                              merge and review remain with the PR pipeline.
  *    - `no_pr`               — the task did not advance, so dependents face the state they started
  *                              from, and `unmetDependencies` protects them regardless.
  *    - `blocked_illformed`   — the linter refused BEFORE dispatch, at `costUsd: 0`.
@@ -803,12 +805,13 @@ export function isWorktreeNodeModulesRefusal(err: unknown): err is { reasonClass
  *  done" — `continued` is deliberately not `merged`, and the dependency filter is unchanged.
  *  Re-dispatch stays bounded by `isDispatchBreakerTripped` and `isLifetimeDispatchCapExceeded`
  *  (status.ts), and within a pass `excludeIds` never re-offers a continued task.
- *  `awaiting_merge` is deliberately non-crediting: the next projection's material merge evidence
- *  is the only authority that can satisfy dependents. */
+ *  `awaiting_merge` and `handed_off` are deliberately non-crediting: the next projection's
+ *  material merge evidence is the only authority that can satisfy dependents. */
 // Why: the verdicts argued one by one, the reversal on `no_pr`, and the measured surrendered
 // budgets (W1-T388, W1-T392, W1-T393, W1-T24) — docs/forensics/drain.md.
 export const NON_HALTING_VERDICTS: ReadonlySet<string> = new Set([
   "awaiting_merge",
+  "handed_off",
   "blocked_ci",
   "no_pr",
   "blocked_illformed",

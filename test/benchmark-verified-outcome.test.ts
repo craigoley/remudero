@@ -76,6 +76,22 @@ test("open work is censored; closed unmerged work is unavailable, not a model fa
   assert.equal(joinVerifiedTaskOutcomes([assignment()], [closed], cutoff).coverage.reasons["closed-unmerged-unadjudicated"], 1);
 });
 
+test("a freshness hand-off keeps its open PR censored and an unreadable PR unavailable", () => {
+  const handedOffRun = { ...caseFile().runs[0]!, verdict: "handed_off" };
+  const open = caseFile({ runs: [handedOffRun], pr: evidence({ number: 123,
+    url: "https://github.com/craigoley/remudero/pull/123", headSha: sha, state: "OPEN", taskCredit: false }),
+    mergedSource: unavailable("not-merged") });
+  const openOutcome = joinVerifiedTaskOutcomes([assignment()], [open], cutoff);
+  assert.equal(openOutcome.coverage.censored, 1, "the handed-off PR is still pending adjudication");
+
+  const missing = caseFile({ runs: [{ ...handedOffRun, prNumber: null }],
+    pr: { state: "unavailable", reason: "no-pr-in-current-projection", source: "github-pr-read", asOf: cutoff },
+    mergedSource: unavailable("not-merged") });
+  const missingOutcome = joinVerifiedTaskOutcomes([assignment()], [missing], cutoff);
+  assert.equal(missingOutcome.coverage.unavailable, 1, "a missing projected PR cannot turn a hand-off into a failure");
+  assert.equal(missingOutcome.coverage.reasons["current-pr-unavailable"], 1);
+});
+
 test("cohort refreshes the read-only GitHub overlay on a cached ledger without rescanning", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-verified-outcome-"));
   try {
