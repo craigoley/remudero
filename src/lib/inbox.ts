@@ -21,7 +21,11 @@ import { MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "
 import { appendLedger } from "./ledger.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
-import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
+import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
+import { fileURLToPath } from "node:url";
+import { readInstanceRegistryText } from "./instance-mode.js";
+import { parseInstanceRegistry } from "./instance-registry.js";
+import { loadManagedRepos } from "./managed-repos.js";
 import { workerLedgerFields, type WorkerResult } from "./worker.js";
 import type { InterpretReplyResult } from "./reply-interpreter.js";
 import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument } from "yaml";
@@ -1595,9 +1599,30 @@ export type DraftRungOutcome =
 // impl-FU: re-exported from lib/relint.ts so triage, plan and inbox share ONE bound.
 export const MAX_DRAFT_LINT_ATTEMPTS = MAX_RELINT_ATTEMPTS;
 
+/** W1-T4700: the names a task's `repo:` may carry — every fleet-registry instance, the managed set, and `none`
+ *  (status.ts's no-repo sentinel). `undefined` on an unreadable registry, which leaves the repo rule silent. */
+export function knownPlanRepos(repoRoot: string): ReadonlySet<string> | undefined {
+  const text = readInstanceRegistryText(repoRoot);
+  if (text === undefined) return undefined;
+  try {
+    const names = parseInstanceRegistry(text).instances.map((i) => i.repo.slice(i.repo.indexOf("/") + 1));
+    return new Set(["none", ...names, ...loadManagedRepos(repoRoot).map((r) => r.repo)]);
+  } catch {
+    // Deliberate skip: a malformed registry or managed-repos file names no repos, so the rule refuses none.
+    return undefined;
+  }
+}
+
+const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+
 /** Lint a drafted fragment exactly as `rmd lint-plan` would. A fragment that does not parse is itself one block
  *  violation, so it drives a redraft rather than being cached as NOT-READY. */
-export function lintDraftedFragment(fragmentYaml: string, proposalId: string, stampLine?: string): DraftLintViolation[] {
+export function lintDraftedFragment(
+  fragmentYaml: string,
+  proposalId: string,
+  stampLine?: string,
+  knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(HARNESS_ROOT),
+): DraftLintViolation[] {
   let tasks;
   try {
     tasks = parseTasksFromYaml(fragmentYaml, `inbox draft ${proposalId}`);
@@ -1605,7 +1630,7 @@ export function lintDraftedFragment(fragmentYaml: string, proposalId: string, st
     return [{ check: "draft-parse", severity: "block", message: `fragment failed to parse — fix before re-emitting: ${String((e as Error)?.message ?? e)}` }];
   }
   const violations: DraftLintViolation[] = [];
-  for (const task of tasks) violations.push(...filingBlockers(lintTask(task).violations, undefined, true));
+  for (const task of tasks) violations.push(...filingBlockers(lintTask(task, { knownRepos }).violations, undefined, true));
   if (stampLine !== undefined) violations.push(...stampLineViolations(proposalId, stampLine, tasks.map((t) => t.id)));
   return violations;
 }
@@ -2439,8 +2464,8 @@ export interface RatifyGateway {
    *  plus its folded stamp as a NEW COMMIT on that already-pushed, still-open branch — never a new
    *  branch, never a new PR. Returns the SAME branch name it was given. Each approval keeps its own
    *  commit (design iii): this writes ONE more commit onto the shared branch, never squashes or amends
-   *  a prior approval's own. */
-  joinRatificationBranch?(branch: string, payload: RatificationPayload): string;
+   *  a prior approval's own. `prUrl` is that open PR, whose body W1-T4706 rebuilds over the whole branch. */
+  joinRatificationBranch?(branch: string, payload: RatificationPayload, prUrl: string): string;
 }
 
 export type ApproveResult =
@@ -2603,7 +2628,7 @@ export function approveProposal(
   } else if (resumeBranch !== undefined && gateway.completeRatificationBranch) {
     branch = gateway.completeRatificationBranch(resumeBranch, classification.proposalId);
   } else if (joined) {
-    branch = gateway.joinRatificationBranch!(joinable.branch, payload);
+    branch = gateway.joinRatificationBranch!(joinable.branch, payload, joinable.prUrl);
   } else if (skillFile && gateway.writeSkillFile) {
     branch = gateway.writeSkillFile(classification.proposalId, skillFile);
   } else {
@@ -2829,6 +2854,100 @@ export function writeRatificationShards(
   return shards.files.map((f) => f.relPath);
 }
 
+/** W1-T4700: `rmd approve` refused a materialized fragment that fails the draft linter WITH its stamp. */
+export class RatificationDraftRefusedError extends RmdError {
+  constructor(proposalId: string, violations: readonly string[]) {
+    super("plan", 1, `rmd approve: refusing to file ${proposalId} — ${violations.join("; ")}`, { proposalId, violations });
+    this.name = "RatificationDraftRefusedError";
+  }
+}
+
+/** Throws {@link RatificationDraftRefusedError} unless the fragment, as {@link writeRatificationShards} would repair
+ *  it, lints clean WITH its stamp. #7608 filed `repo: master-plan` shards with a `verify` object and no criteria. */
+export function assertRatificationDraftFileable(
+  fragmentYaml: string,
+  proposalId: string,
+  stampLine: string,
+  knownRepos: ReadonlySet<string> | undefined,
+): void {
+  const relinted = relintRatificationFragment(fragmentYaml, proposalId);
+  const linted = lintDraftedFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId, stampLine, knownRepos);
+  const violations = linted.map((v) => `[${v.check}] ${v.message}`);
+  if (!relinted.ok && violations.length === 0) violations.push(relinted.reason);
+  if (violations.length > 0) throw new RatificationDraftRefusedError(proposalId, violations);
+}
+
+/** Check, then write the shards and the stamp. Returns exactly the paths changed: MASTER-PLAN.md only when the
+ *  stamp replaced a bullet, which the PR body's Changed files once named regardless. */
+export function fileRatificationDraft(
+  worktreePath: string,
+  payload: { fragmentYaml: string; proposalId: string; stampLine: string },
+  fs: ShardWriteFs & { readFileSync: (path: string, enc: "utf8") => string },
+  joinPath: (...parts: string[]) => string,
+  knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(worktreePath),
+): string[] {
+  assertRatificationDraftFileable(payload.fragmentYaml, payload.proposalId, payload.stampLine, knownRepos);
+  const written = writeRatificationShards(worktreePath, payload.fragmentYaml, payload.proposalId, fs, joinPath);
+  const masterPlanPath = joinPath(worktreePath, "MASTER-PLAN.md");
+  const before = fs.readFileSync(masterPlanPath, "utf8");
+  const after = applyStampToMasterPlan(before, payload.proposalId, payload.stampLine);
+  if (after === before) return written;
+  fs.writeFileSync(masterPlanPath, after, "utf8");
+  return [...written, "MASTER-PLAN.md"];
+}
+
+/** The ratify PR body: the stamp, then Changed files and criteria over `writtenPaths` — never over the draft. */
+export function ratificationPrBody(
+  stampLine: string,
+  filedIds: readonly string[],
+  writtenPaths: readonly string[],
+  opts: Pick<PlanPrBodyOpts, "proofCwd" | "proofCheck" | "baseRef"> = {},
+): string {
+  const intro = [
+    stampLine,
+    "",
+    "The operator's one-bit approve initiated this PR (MASTER-PLAN P25 ii, W1-T111). The",
+    "gate still reviews (ci + remudero-review); nothing auto-merges without it.",
+  ].join("\n");
+  return buildPlanPrBody({ intro, criteria: filingAcceptanceCriteria([...filedIds], [...writtenPaths]), changedFiles: [...writtenPaths], ...opts });
+}
+
+/** W1-T4706: the batch lane files through the single lane's check. Every member's draft is checked before anything is
+ *  minted or written; each materialized member then goes through {@link fileRatificationDraft}. Returns the union of
+ *  paths written, MASTER-PLAN.md once and only when a stamp changed it. */
+export function fileRatificationBatch(
+  worktreePath: string,
+  payloads: readonly RatificationPayload[],
+  materialize: (payload: RatificationPayload) => RatificationPayload,
+  fs: ShardWriteFs & { readFileSync: (path: string, enc: "utf8") => string },
+  joinPath: (...parts: string[]) => string,
+  knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(worktreePath),
+): { writtenPaths: string[]; filedIds: string[] } {
+  for (const p of payloads) assertRatificationDraftFileable(p.fragmentYaml, p.proposalId, p.stampLine, knownRepos);
+  const written = new Set<string>();
+  const filedIds: string[] = [];
+  for (const payload of payloads) {
+    const filed = materialize(payload);
+    for (const path of fileRatificationDraft(worktreePath, filed, fs, joinPath, knownRepos)) written.add(path);
+    filedIds.push(...[...filed.fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]));
+  }
+  return { writtenPaths: [...written], filedIds };
+}
+
+/** W1-T4706: a joined ratify PR's body over every proposal on its branch — the stamps the current body names plus the
+ *  joining one, over the branch's written paths. #7608 kept its first approve's body: five shards under two. */
+export function joinedRatificationPrBody(
+  currentBody: string,
+  stampLine: string,
+  filedIds: readonly string[],
+  writtenPaths: readonly string[],
+  opts: Pick<PlanPrBodyOpts, "proofCwd" | "proofCheck" | "baseRef"> = {},
+): string {
+  const intro = currentBody.split(CHANGED_FILES_HEADING)[0];
+  const stamps = [...intro.split("\n").map((l) => l.trim()).filter((l) => /^- \S+ .*\bRATIFIED\b.*->/.test(l)), stampLine.trim()];
+  return ratificationPrBody([...new Set(stamps.filter(Boolean))].join("\n"), filedIds, writtenPaths, opts);
+}
+
 /** W1-T4338: write an approved skill draft's SKILL.md, verbatim, at its one path under `worktreePath`. Returns that
  *  repo-relative path. Refuses rather than guesses on a name {@link approvedSkillRelPath} rejects, and refuses to
  *  replace a skill already approved at that path — an approval adds a skill, it never silently rewrites one. */
@@ -3010,7 +3129,7 @@ export type BatchApproveResult =
  * before either gateway call. ONE gateway call each for the WHOLE set, and one ledger line per member, so a reader
  * sees the same one-line-per-proposal receipt either way. A batch of exactly ONE READY classification produces output
  * BYTE-IDENTICAL to {@link approveProposal}'s — test/ratify-batch.test.ts pins it. Both gateway
- * paths use {@link writeRatificationShards} after id materialization.
+ * paths use {@link fileRatificationDraft} after id materialization.
  */
 export function approveBatch(
   classifications: readonly InboxClassification[],

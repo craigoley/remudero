@@ -1,0 +1,47 @@
+- id: W1-T4711
+  title: "A RUN THAT NEVER WORKED IS NOT A CLASS SAMPLE — retro overrun mining, the mount-headroom sweep and the config gardener's budget recalibration read gatherRuns' RunSummary, which carries no stage or backfill flag, so thrown, refused and backfilled runs enter their per-class statistics as $0, zero-turn overruns"
+  repo: remudero
+  depends_on: ["W1-T4709"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-28: consumer audit named by W1-T4709's build (PR #7649)"
+  plan_refs: ["W1-T4655", "W1-T4701", "W1-T4708", "W1-T4709"]
+  files:
+    - src/lib/retro.ts
+    - src/lib/config-gardener.ts
+    - scripts/mount-headroom-sweep.mjs
+    - test/a-run-that-never-worked-is-not-a-class-sample.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T4655, W1-T4701 and W1-T4708 give runs that threw, deferred or were refused before doing any
+    work a terminal verdict with a `stage` in status.ts's `THROWN_RUN_VERDICT_STAGES`, and an
+    operator-approved backfill adds `backfilled: true` verdicts for the historical ones. W1-T4709
+    (PR #7649) keeps them out of cost-anomaly's settled medians via the exported
+    `isNeverWorkedVerdict`. Its audit found three more per-class readers that compute their own
+    numbers over retro.ts's `RunSummary` (`gatherRuns`), which carries neither field:
+    - `mineOverrunClasses` (src/lib/retro.ts): `failed` is in OVERRUN_VERDICTS, so a host-condition
+      refusal is mined as a class overrun; `aggregateByClass` averages are diluted the same way.
+    - `computeClassSweep` (scripts/mount-headroom-sweep.mjs): per-class turn and cost p50/p90 include
+      the zeros.
+    - the config gardener's `budgetCandidate` / `settledImplement` (src/lib/config-gardener.ts):
+      per-class cost p90 and budget recalibration include the $0 runs.
+    The runaway-turns bound in run-task.ts is already safe (it filters numTurns > 0).
+  design: |
+    `gatherRuns` carries a `neverWorked` flag on each RunSummary, set by W1-T4709's
+    `isNeverWorkedVerdict` on the run's terminal verdict (import it; no second rule). Each of the
+    three readers skips `neverWorked` runs for its per-class statistics and reports how many it
+    skipped, so sample sizes stay honest. Runs that did work — including ordinary `failed` verdicts —
+    are counted exactly as before.
+  acceptance:
+    - claim: "a thrown, refused or backfilled run is excluded from retro overrun mining, the mount-headroom per-class percentiles and the gardener's budget recalibration, with the excluded count reported, while an ordinary failed run still counts"
+      proof: "unit test: test/a-run-that-never-worked-is-not-a-class-sample.test.ts"
+  falsifier: |
+    A class of ten real runs and ten refused-dispatch runs at $0 and zero turns: the gardener's
+    per-class cost p90 and the mount-headroom p50 match the ten real runs alone, and retro mines no
+    overrun class from the refusals.

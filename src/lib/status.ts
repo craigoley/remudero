@@ -3015,6 +3015,22 @@ export const ENVIRONMENTAL_BLOCK_VERDICTS: ReadonlySet<string> = new Set([
 ]);
 /** W1-T4597: `failed` verdict stages that are environmental (the Codex output cap, W1-T4595). */
 export const ENVIRONMENTAL_BLOCK_STAGES: ReadonlySet<string> = new Set(["worker.bounded_output"]);
+/** W1-T4655/W1-T4701: the stages of the verdict a THROWN run writes (run-task.ts `endThrownRun`) — its
+ *  ending, never a new signal about the task, so each leaves the streak where its verdict-less run did. */
+export const THROWN_RUN_VERDICT_STAGE_LIST = [
+  "run.error",
+  "managed_checkout.refresh",
+  "worktree.node_modules",
+  "worktree.add",
+  "preflight.containment",
+  "preflight.isolation",
+] as const;
+export type ThrownRunVerdictStage = (typeof THROWN_RUN_VERDICT_STAGE_LIST)[number];
+/** W1-T4708: the stages of the verdict a pre-worktree refusal that RETURNS writes (run-task.ts `endRefusedRun`). */
+export const REFUSED_RUN_VERDICT_STAGE_LIST = ["dispatch.claim", "worktree.stale_base"] as const;
+export type RefusedRunVerdictStage = (typeof REFUSED_RUN_VERDICT_STAGE_LIST)[number];
+/** Every run-ending stage above, thrown or returned: a reader excluding one excludes the other (W1-T4708). */
+export const THROWN_RUN_VERDICT_STAGES: ReadonlySet<string> = new Set([...THROWN_RUN_VERDICT_STAGE_LIST, ...REFUSED_RUN_VERDICT_STAGE_LIST]);
 /** W1-T4597: an environmental block with no deploy since is re-offered after this long. */
 export const ENVIRONMENTAL_BLOCK_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 /** PRIMARY CONTROL (W1-T4597): consecutive environmental re-offers before the block stays durable. */
@@ -3096,8 +3112,9 @@ export function latestIndependentFailureBlock(
     if (line.task_id !== taskId && line.task !== taskId) continue;
     if (line.step === "verdict" && typeof line.run_id === "string") {
       stageByRun.set(line.run_id, line.stage);
-      // W1-T4655: a thrown run's verdict (stage run.error) keeps the streak, as its verdict-less row did.
-      if (line.stage !== "run.error" && !isEnvironmentalBlock(line.verdict, line.stage)) environmentalStreak = 0;
+      // W1-T4655/W1-T4701: a thrown run's verdict keeps the streak, as its verdict-less row did.
+      const thrownRunEnding = typeof line.stage === "string" && THROWN_RUN_VERDICT_STAGES.has(line.stage);
+      if (!thrownRunEnding && !isEnvironmentalBlock(line.verdict, line.stage)) environmentalStreak = 0;
     }
     if (line.step === "run.start") {
       if (retryPending) retrySpent = true;

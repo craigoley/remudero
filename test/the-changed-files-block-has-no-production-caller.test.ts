@@ -11,6 +11,7 @@ import {
   renderChangedFilesBlock,
 } from "../src/lib/plan-pr-emitter.js";
 import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
+import { ratificationPrBody } from "../src/lib/inbox.js";
 
 /**
  * W1-T2550 — `renderChangedFilesBlock` (W1-T2535) had NO production caller at all:
@@ -45,16 +46,21 @@ function openPlanPrRegion(signature: string): string {
 // list they already hold, so the block is actually emitted, not only defined ═══════════════════
 
 test("W1-T2550: rmd approve's single-proposal openPlanPr passes changedFiles — the SAME list filingAcceptanceCriteria gets", () => {
+  // W1-T4700: the single lane builds its body through ratificationPrBody from the paths fileRatificationDraft wrote.
   const region = openPlanPrRegion("openPlanPr(branch, id) {");
-  assert.match(region, /const filedPaths = \[\.\.\.shardRelPaths, "MASTER-PLAN\.md"\];/, "built from what this ratification actually wrote — not re-derived, not hand-listed");
-  assert.match(region, /buildPlanPrBody\(\{/, "still assembled via the shared gate-contract module, never a hand-rolled body");
-  assert.match(region, /criteria:\s*filingAcceptanceCriteria\(ids,\s*filedPaths\)/, "filing evidence and changed-files now read the SAME local");
-  assert.match(region, /changedFiles:\s*filedPaths/, "the field buildPlanPrBody's own doc says every existing caller omits — no longer true here");
+  assert.match(region, /ratificationPrBody\([^)]*shardRelPaths/, "built from what this ratification actually wrote — not re-derived, not hand-listed");
+  // The body itself, behaviourally: Changed files and the filing criteria read the one list of written paths.
+  const written = ["plan/tasks.d/W1-T9001-a-shard.yaml", "MASTER-PLAN.md"];
+  const body = ratificationPrBody("- p1 (x) — RATIFIED 2026-09-28 -> W1-T9001.", ["W1-T9001"], written, { baseRef: "fixture-base", proofCheck: () => 0 });
+  assert.ok(hasChangedFilesBlock(body), "still assembled via the shared gate-contract module, never a hand-rolled body");
+  assert.ok(body.includes(renderChangedFilesBlock(written)), "Changed files is exactly the written paths");
+  for (const c of filingAcceptanceCriteria(["W1-T9001"], written)) assert.ok(body.includes(c.claim), "filing evidence reads the SAME list");
 });
 
 test("W1-T2550: rmd approve's BATCH openPlanPr passes changedFiles too — the second (and last) buildPlanPrBody call site", () => {
   const region = openPlanPrRegion("openPlanPr(branch, ids) {");
-  assert.match(region, /const filedPaths = \[\.\.\.allShardRelPaths, "MASTER-PLAN\.md"\];/);
+  // W1-T4706: the list is what the batch wrote (fileRatificationBatch), never an assumed MASTER-PLAN.md.
+  assert.match(region, /const filedPaths = \[\.\.\.allWrittenPaths\];/);
   assert.match(region, /criteria:\s*filingAcceptanceCriteria\(filedIds,\s*filedPaths\)/);
   assert.match(region, /changedFiles:\s*filedPaths/);
 });
@@ -65,8 +71,9 @@ test("W1-T2550: every buildPlanPrBody call site in src/ passes its actual change
   const callSites = [...RUN_TASK_SRC.matchAll(/buildPlanPrBody\(\{/g)];
   assert.equal(
     callSites.length,
-    4,
-    "src/run-task.ts must have the two approval sites, the autonomous plan site, and the approved-skill site (W1-T4338)",
+    3,
+    "src/run-task.ts must have the batch approval site, the autonomous plan site, and the approved-skill site (W1-T4338); " +
+      "the single approval site moved into inbox.ts's ratificationPrBody (W1-T4700), checked below",
   );
   for (const m of callSites) {
     const from = m.index!;

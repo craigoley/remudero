@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { appendLedger, type LedgerLine } from "./ledger.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, realLedgerFs, type LedgerGrepFsDeps, type LedgerRotationMemo } from "./ledger-union.js";
 import { installPolicyPath } from "./policy.js";
 import { gatherRuns, type LedgerRecord, type RunSummary } from "./retro.js";
+import { THROWN_RUN_VERDICT_STAGES } from "./status.js";
 
 /**
  * W1-T931 COST-ANOMALY SENTINEL (fb-1785237559155-feef92, item 4) — see `plan/policy.yaml`'s
@@ -173,6 +175,28 @@ export interface CostAnomalyFinding {
   /** How many settled runs `medianCostUsd` was computed over — carried so a reader can judge
    *  the median's own weight without a second ledger read. */
   sampleSize: number;
+  /** W1-T4709: settled runs {@link isNeverWorkedVerdict} kept out of the median; absent when none. */
+  excludedCount?: number;
+}
+
+/** W1-T4709: a verdict that ended a run which never did any work — a thrown/deferred run's stage
+ *  (the set itself, never a copy) or an operator backfill. Its span and cost are setup only. */
+export function isNeverWorkedVerdict(line: LedgerRecord | undefined): boolean {
+  if (!line) return false;
+  if (line.backfilled === true) return true;
+  return typeof line.stage === "string" && THROWN_RUN_VERDICT_STAGES.has(line.stage);
+}
+
+/** W1-T4709: run ids whose FIRST `verdict` row (the one `gatherRuns` reads) never worked. */
+export function neverWorkedRunIds(records: readonly LedgerRecord[]): Set<string> {
+  const seen = new Set<string>();
+  const out = new Set<string>();
+  for (const r of records) {
+    if (r.step !== "verdict" || typeof r.run_id !== "string" || seen.has(r.run_id)) continue;
+    seen.add(r.run_id);
+    if (isNeverWorkedVerdict(r)) out.add(r.run_id);
+  }
+  return out;
 }
 
 /**
@@ -187,11 +211,20 @@ export interface CostAnomalyFinding {
  * function stays a pure, re-derivable-from-scratch reduction over `runs` alone, testable without
  * any ledger shape at all.
  */
-export function detectCostAnomalies(runs: readonly RunSummary[], policy: CostAnomalyPolicy): CostAnomalyFinding[] {
+export function detectCostAnomalies(
+  runs: readonly RunSummary[],
+  policy: CostAnomalyPolicy,
+  neverWorked: ReadonlySet<string> = new Set(),
+): CostAnomalyFinding[] {
   const settled = runs.filter((r) => r.verdict !== "incomplete");
   const byClass = new Map<string, RunSummary[]>();
+  const excludedByClass = new Map<string, number>();
   for (const r of settled) {
     const key = r.taskClass ?? "unknown";
+    if (neverWorked.has(r.runId)) {
+      excludedByClass.set(key, (excludedByClass.get(key) ?? 0) + 1);
+      continue;
+    }
     const arr = byClass.get(key) ?? [];
     arr.push(r);
     byClass.set(key, arr);
@@ -201,6 +234,7 @@ export function detectCostAnomalies(runs: readonly RunSummary[], policy: CostAno
     // (ii) A THIN CLASS IS SILENT, NOT ANOMALOUS.
     if (rs.length < policy.minSamples) continue;
     const med = median(rs.map((r) => r.costUsd));
+    const excluded = excludedByClass.get(taskClass) ?? 0;
     for (const r of rs) {
       if (r.costUsd > med * policy.multiplier) {
         out.push({
@@ -211,6 +245,7 @@ export function detectCostAnomalies(runs: readonly RunSummary[], policy: CostAno
           medianCostUsd: round2(med),
           multiplier: policy.multiplier,
           sampleSize: rs.length,
+          ...(excluded > 0 ? { excludedCount: excluded } : {}),
         });
       }
     }
@@ -235,10 +270,14 @@ export function alreadyLedgeredCostAnomalyRunIds(records: readonly LedgerRecord[
  * the second time (design note iv), because every finding it would otherwise re-derive already
  * carries a `cost.anomaly` row for that run id.
  */
-export function pendingCostAnomalies(records: readonly LedgerRecord[], policy: CostAnomalyPolicy): CostAnomalyFinding[] {
+export function pendingCostAnomalies(
+  records: readonly LedgerRecord[],
+  policy: CostAnomalyPolicy,
+  alreadyReported: ReadonlySet<string> = new Set(),
+): CostAnomalyFinding[] {
   const already = alreadyLedgeredCostAnomalyRunIds(records);
   const runs = gatherRuns(records as LedgerRecord[]);
-  return detectCostAnomalies(runs, policy).filter((f) => !already.has(f.runId));
+  return detectCostAnomalies(runs, policy, neverWorkedRunIds(records)).filter((f) => !already.has(f.runId) && !alreadyReported.has(f.runId));
 }
 
 /** Build (never write) the ledger line for one finding — pure, same builder/writer split as
@@ -253,6 +292,7 @@ export function costAnomalyLine(finding: CostAnomalyFinding): LedgerLine {
     median_cost_usd: finding.medianCostUsd,
     multiplier: finding.multiplier,
     sample_size: finding.sampleSize,
+    ...(finding.excludedCount !== undefined ? { excluded_count: finding.excludedCount } : {}),
   };
 }
 
@@ -261,6 +301,8 @@ export interface CostAnomalyDeps {
   /** Defaults to the real `appendLedger` — injectable so a test spies on writes instead of
    *  touching disk (same shape as `src/lib/ledger.ts`'s `LedgerWriterDeps`). */
   writeLedger?: (path: string, line: LedgerLine) => void;
+  /** W1-T4702: run ids already reported in rows `records` no longer holds (the rotated archives). */
+  alreadyReported?: ReadonlySet<string>;
 }
 
 /**
@@ -275,7 +317,7 @@ export function recordCostAnomalies(
   policy: CostAnomalyPolicy,
   deps: CostAnomalyDeps,
 ): CostAnomalyFinding[] {
-  const pending = pendingCostAnomalies(records, policy);
+  const pending = pendingCostAnomalies(records, policy, deps.alreadyReported);
   const writeLedger = deps.writeLedger ?? appendLedger;
   for (const finding of pending) writeLedger(deps.ledgerPath, costAnomalyLine(finding));
   return pending;
@@ -317,7 +359,8 @@ export function costAnomalyIncidentEvent(finding: CostAnomalyFinding): LedgerLin
     name: `cost.anomaly:${finding.taskClass}`,
     message:
       `task ${finding.taskId} (run ${finding.runId}) cost $${finding.costUsd} against class ` +
-      `"${finding.taskClass}"'s median $${finding.medianCostUsd} (×${finding.multiplier}, n=${finding.sampleSize})`,
+      `"${finding.taskClass}"'s median $${finding.medianCostUsd} (×${finding.multiplier}, n=${finding.sampleSize}` +
+      `${finding.excludedCount !== undefined ? `, excluded=${finding.excludedCount}` : ""})`,
   });
 }
 
@@ -339,6 +382,8 @@ interface RunClock {
   startMs: number;
   /** The terminal `verdict` line's ts, in ms — `undefined` while the run is still in flight. */
   endMs?: number;
+  /** W1-T4709: its verdict {@link isNeverWorkedVerdict} — settled, but no sample of the class. */
+  neverWorked?: true;
 }
 
 function runClocks(records: readonly LedgerRecord[]): RunClock[] {
@@ -363,6 +408,7 @@ function runClocks(records: readonly LedgerRecord[]): RunClock[] {
       taskClass: typeof start.task_class === "string" ? start.task_class : "unknown",
       startMs,
       ...(endMs !== undefined && Number.isFinite(endMs) ? { endMs } : {}),
+      ...(isNeverWorkedVerdict(verdictLine) ? { neverWorked: true as const } : {}),
     });
   }
   return out;
@@ -379,9 +425,37 @@ export interface RunningLongFinding {
   multiplier: number;
   /** How many SETTLED runs `medianMs` was computed over. */
   sampleSize: number;
+  /** W1-T4709: settled runs kept out of `medianMs` ({@link isNeverWorkedVerdict}); absent when none. */
+  excludedCount?: number;
 }
 
 export const RUNNING_LONG_STEP = "run.running_long";
+
+/** One class's settled spans (`run.start` -> `verdict`) and how many never-worked runs it left out. */
+export interface SettledSpans {
+  spansMs: number[];
+  excluded: number;
+}
+
+/** W1-T4709: THE settled-span fold — per class, every settled span except a never-worked run's,
+ *  which is counted in `excluded` instead so the sample size stays honest. */
+export function settledSpansByClass(records: readonly LedgerRecord[]): Map<string, SettledSpans> {
+  return settledSpansOf(runClocks(records));
+}
+
+function settledSpansOf(clocks: readonly RunClock[]): Map<string, SettledSpans> {
+  const out = new Map<string, SettledSpans>();
+  for (const c of clocks) {
+    if (c.endMs === undefined) continue;
+    const durationMs = c.endMs - c.startMs;
+    if (durationMs < 0) continue; // a torn/out-of-order pair — never a negative duration
+    const entry = out.get(c.taskClass) ?? { spansMs: [], excluded: 0 };
+    if (c.neverWorked) entry.excluded++;
+    else entry.spansMs.push(durationMs);
+    out.set(c.taskClass, entry);
+  }
+  return out;
+}
 
 /**
  * PURE fold, mirroring {@link detectCostAnomalies}'s shape exactly but over DURATION instead of
@@ -393,19 +467,12 @@ export const RUNNING_LONG_STEP = "run.running_long";
  */
 export function detectRunningLong(records: readonly LedgerRecord[], policy: CostAnomalyPolicy, nowMs: number): RunningLongFinding[] {
   const clocks = runClocks(records);
-  const settledByClass = new Map<string, number[]>();
-  for (const c of clocks) {
-    if (c.endMs === undefined) continue;
-    const durationMs = c.endMs - c.startMs;
-    if (durationMs < 0) continue; // a torn/out-of-order pair — never a negative duration
-    const arr = settledByClass.get(c.taskClass) ?? [];
-    arr.push(durationMs);
-    settledByClass.set(c.taskClass, arr);
-  }
+  const settledByClass = settledSpansOf(clocks);
   const out: RunningLongFinding[] = [];
   for (const c of clocks) {
     if (c.endMs !== undefined) continue; // only a run STILL RUNNING is ever a candidate
-    const durations = settledByClass.get(c.taskClass);
+    const settled = settledByClass.get(c.taskClass);
+    const durations = settled?.spansMs;
     if (!durations || durations.length < policy.minSamples) continue;
     const medianMs = median(durations);
     const elapsedMs = nowMs - c.startMs;
@@ -418,6 +485,7 @@ export function detectRunningLong(records: readonly LedgerRecord[], policy: Cost
         medianMs: Math.round(medianMs),
         multiplier: policy.multiplier,
         sampleSize: durations.length,
+        ...(settled.excluded > 0 ? { excludedCount: settled.excluded } : {}),
       });
     }
   }
@@ -438,9 +506,14 @@ export function alreadyLedgeredRunningLongRunIds(records: readonly LedgerRecord[
 /** {@link detectRunningLong} filtered against {@link alreadyLedgeredRunningLongRunIds} — a
  *  repeated pass over the same (now-ledgered) run returns nothing new for it, mirroring {@link
  *  pendingCostAnomalies}. */
-export function pendingRunningLong(records: readonly LedgerRecord[], policy: CostAnomalyPolicy, nowMs: number): RunningLongFinding[] {
+export function pendingRunningLong(
+  records: readonly LedgerRecord[],
+  policy: CostAnomalyPolicy,
+  nowMs: number,
+  alreadyReported: ReadonlySet<string> = new Set(),
+): RunningLongFinding[] {
   const already = alreadyLedgeredRunningLongRunIds(records);
-  return detectRunningLong(records, policy, nowMs).filter((f) => !already.has(f.runId));
+  return detectRunningLong(records, policy, nowMs).filter((f) => !already.has(f.runId) && !alreadyReported.has(f.runId));
 }
 
 /** Build (never write) the ledger line for one running-long finding — mirrors {@link costAnomalyLine}. */
@@ -454,6 +527,7 @@ export function runningLongLine(finding: RunningLongFinding): LedgerLine {
     median_ms: finding.medianMs,
     multiplier: finding.multiplier,
     sample_size: finding.sampleSize,
+    ...(finding.excludedCount !== undefined ? { excluded_count: finding.excludedCount } : {}),
   };
 }
 
@@ -466,7 +540,7 @@ export function recordRunningLong(
   nowMs: number,
   deps: CostAnomalyDeps,
 ): RunningLongFinding[] {
-  const pending = pendingRunningLong(records, policy, nowMs);
+  const pending = pendingRunningLong(records, policy, nowMs, deps.alreadyReported);
   const writeLedger = deps.writeLedger ?? appendLedger;
   for (const finding of pending) writeLedger(deps.ledgerPath, runningLongLine(finding));
   return pending;
@@ -480,6 +554,78 @@ export function runningLongIncidentEvent(finding: RunningLongFinding): LedgerLin
     name: `run.running_long:${finding.taskClass}`,
     message:
       `task ${finding.taskId} (run ${finding.runId}) has run ${finding.elapsedMs}ms against class ` +
-      `"${finding.taskClass}"'s median ${finding.medianMs}ms (×${finding.multiplier}, n=${finding.sampleSize})`,
+      `"${finding.taskClass}"'s median ${finding.medianMs}ms (×${finding.multiplier}, n=${finding.sampleSize}` +
+      `${finding.excludedCount !== undefined ? `, excluded=${finding.excludedCount}` : ""})`,
   });
+}
+
+// ── W1-T4702: "reported once" must survive rotation ─────────────────────────────────────────
+//
+// Both sentinels' dedupe markers leave the live file: `rotateLedger` archives every
+// `run.running_long` row (it is not a retained step) and keeps only the newest 200 `cost.anomaly`
+// rows. The run's own `run.start` stays live, so a live-only dedupe re-reported it after every
+// rotation: 103,010 running_long rows and as many incident events for 201 runs (2026-09-25..28).
+
+/** The steps whose rows mean "this run was already reported" — read from the archive∪live union. */
+export const REPORTED_ONCE_STEPS: readonly string[] = [COST_ANOMALY_STEP, RUNNING_LONG_STEP];
+
+/** Memo reducer: one `{step, run_id}` row per reported run, so a warm union holds ids, not rows. */
+export function reportedOnceRows(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const seen = new Set<string>();
+  const out: Array<Record<string, unknown>> = [];
+  for (const row of rows) {
+    if (typeof row.step !== "string" || !REPORTED_ONCE_STEPS.includes(row.step) || typeof row.run_id !== "string") continue;
+    const key = `${row.step}\u0000${row.run_id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ step: row.step, run_id: row.run_id });
+  }
+  return out;
+}
+
+/** Already-reported run ids per sentinel. `complete: false` means the union could not be read whole,
+ *  and the caller must then report nothing new (fail closed) rather than re-report. */
+export interface ReportedAnomalies {
+  complete: boolean;
+  costAnomaly: ReadonlySet<string>;
+  runningLong: ReadonlySet<string>;
+  reason?: string;
+}
+
+const reportedOnceMemos = new Map<string, LedgerRotationMemo>();
+
+/**
+ * Every run id either sentinel ever reported, over EVERY rotation plus `liveRows` (the caller's own
+ * live read). Rotations are immutable, so each is parsed once per process (a cold full corpus took
+ * 7 s, a warm pass reads only the memo). An unlistable state directory or an unreadable archive is
+ * incomplete: an absent report there is unknown, not absent.
+ */
+export async function readReportedAnomalies(
+  stateDir: string,
+  liveRows: readonly LedgerRecord[],
+  fsDeps: LedgerGrepFsDeps = realLedgerFs,
+): Promise<ReportedAnomalies> {
+  const incomplete = (reason: string): ReportedAnomalies => ({ complete: false, costAnomaly: new Set(), runningLong: new Set(), reason });
+  try {
+    fsDeps.readdirSync(stateDir);
+  } catch (e) {
+    return incomplete(`state directory unreadable: ${stateDir}: ${String((e as Error)?.message ?? e)}`);
+  }
+  let memo = reportedOnceMemos.get(stateDir);
+  if (memo === undefined) {
+    memo = createLedgerRotationMemo(reportedOnceRows);
+    reportedOnceMemos.set(stateDir, memo);
+  }
+  const read = await readLedgerUnionRecordsMemoized(
+    stateDir,
+    memo,
+    { step: REPORTED_ONCE_STEPS, refuseIncomplete: true, readLiveRecords: () => liveRows as Iterable<Record<string, unknown>> },
+    fsDeps,
+  );
+  if (!read.ok) return incomplete(`unreadable ledger archive(s): ${read.unread.join(", ")}`);
+  return {
+    complete: true,
+    costAnomaly: alreadyLedgeredCostAnomalyRunIds(read.rows),
+    runningLong: alreadyLedgeredRunningLongRunIds(read.rows),
+  };
 }

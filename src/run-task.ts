@@ -689,7 +689,6 @@ import {
 } from "./lib/plan-architect.js";
 import {
   applyFragmentToPlanYaml,
-  applyStampToMasterPlan,
   approveBatch,
   approveBatchCommitMessage,
   approveCommitMessage,
@@ -751,7 +750,11 @@ import {
   type RatifyGateway,
   type ReframeResult,
   type SkillLifecycleAction,
-  writeRatificationShards,
+  fileRatificationBatch,
+  fileRatificationDraft,
+  joinedRatificationPrBody,
+  knownPlanRepos,
+  ratificationPrBody,
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
 import {
@@ -1368,7 +1371,9 @@ import {
   isMergeCreditLine,
   readRequiredStatusCheckContexts,
   persistVerifiedCredit,
-  type RequiredContextsRead,} from "./lib/status.js";
+  type RequiredContextsRead,
+  type ThrownRunVerdictStage,
+  type RefusedRunVerdictStage,} from "./lib/status.js";
 import {
   readyDraftPullRequest,
   DEFAULT_SWEEP_POLICY,
@@ -14781,6 +14786,49 @@ export function runErrorCause(err: unknown): RunErrorCause {
   return "run-error";
 }
 
+/** W1-T4655/W1-T4701: a run that throws still ENDED, so it gets one terminal `failed` row naming where — unless
+ *  it already wrote one. Best-effort: a ledger failure never replaces the error its caller rethrows. */
+export function endThrownRun(
+  log: RunTaskContext["log"],
+  alreadyEnded: boolean,
+  stage: ThrownRunVerdictStage,
+  err: unknown,
+  costUsd: number,
+): void {
+  endRunOnce(log, alreadyEnded, () => ({
+    verdict: "failed",
+    reason: boundedVerdictReason(String((err as Error)?.message ?? err)),
+    stage,
+    cause: runErrorCause(err),
+    cost_usd: costUsd,
+  }));
+}
+
+/** W1-T4708: a pre-worktree refusal that RETURNS gets the same one terminal row, carrying the verdict it returns. */
+export function endRefusedRun(
+  log: RunTaskContext["log"],
+  alreadyEnded: boolean,
+  stage: RefusedRunVerdictStage,
+  result: RunResult,
+  reason: string,
+): RunResult {
+  endRunOnce(log, alreadyEnded, () => ({ verdict: result.verdict, reason: boundedVerdictReason(reason), stage, cost_usd: result.costUsd }));
+  return result;
+}
+
+const boundedVerdictReason = (text: string): string => capStderrExcerpt(scrubGitCredentialText(text), STDERR_EXCERPT_CAP);
+
+/** The once-per-run guard both enders share. Best-effort: a ledger failure never replaces the run's own outcome. */
+function endRunOnce(log: RunTaskContext["log"], alreadyEnded: boolean, row: () => Record<string, unknown>): void {
+  if (alreadyEnded) return;
+  try {
+    log("verdict", { ...row(), ...terminalVerdictFields(null) });
+  } catch {
+    const reason = "thrown-run-verdict-ledger-write-failed";
+    void reason; // the caller's rethrow or return is the authoritative outcome
+  }
+}
+
 /** W1-T4656: a pre-push census refusal read off a push error — the hook's block, the censuses its rows name,
  *  and the baseline files a row itself offers ("or record … in <file>"). Undefined for any other failure. */
 export interface CensusPushRefusal {
@@ -14967,7 +15015,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     workerAbandonMs,
     workerStateSensor,
   } = ctx;
-  // W1-T4655: set BEFORE the write, so the outer catch attempts a verdict at most once per run.
+  // W1-T4655: set BEFORE the write, so no thrown-run exit (endThrownRun) writes a second verdict.
   let verdictWritten = false;
   const log: RunTaskContext["log"] = (step, extra) => {
     if (step === "verdict") verdictWritten = true;
@@ -15259,7 +15307,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say(`verdict: blocked_containment — ${e.message}`);
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_containment" };
     }
-    if (e !== undefined) throw e;
+    if (e !== undefined) {
+      // W1-T4701: a capacity block is a deferral daemon.ts backs off on; the run still ends here.
+      endThrownRun(log, verdictWritten, "preflight.containment", e, costUsd);
+      throw e;
+    }
   }
 
   // ── Isolation PREFLIGHT (W1-T17 / Standing rule 11 / FIELD FINDING 11b): the
@@ -15324,7 +15376,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say(`verdict: blocked_isolation — ${e.message}`);
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_isolation" };
     }
-    if (e !== undefined) throw e;
+    if (e !== undefined) {
+      endThrownRun(log, verdictWritten, "preflight.isolation", e, costUsd);
+      throw e;
+    }
   }
 
   // ── Clone + worktree.
@@ -15408,13 +15463,15 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // git-connectivity failure, not a new failure mode); `taken` mirrors `blocked_inflight`'s
     // own "another holder owns this run right now" (this IS that condition, cross-host instead
     // of same-host) — no new RunResult verdict is introduced for either arm.
-    return {
+    // W1-T4708: ledgered too, or the refused run read as in flight to every reader.
+    const refused: RunResult = {
       taskId,
       runId,
       merged: false,
       costUsd: 0,
       verdict: claimOutcome === "unreachable" ? "blocked_git_fetch" : "blocked_inflight",
     };
+    return endRefusedRun(log, verdictWritten, "dispatch.claim", refused, claimDecision.reason);
   }
 
   // ── Reclaim debris from crashed prior runs (WS-1: a max-turns death left its
@@ -15472,6 +15529,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     );
   } catch (e) {
     log("managed_checkout.refresh_refused", { reason: String((e as Error)?.message ?? e) });
+    // W1-T4701: above the outer catch, so without this row the deferred run read as in flight forever.
+    endThrownRun(log, verdictWritten, "managed_checkout.refresh", e, costUsd);
     releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
     throw e;
   }
@@ -15510,11 +15569,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         `REFUSED: worktree base ${e.base} is behind origin/${e.ref}'s remote head ${e.remoteHead} — ` +
           "refusing before recon/implement/commit spend anything",
       );
+      // W1-T4708: the terminal row lands BEFORE the release, so a throwing release cannot lose it.
+      const refused = endRefusedRun(log, verdictWritten, "worktree.stale_base", { taskId, runId, merged: false, costUsd: 0, verdict: "failed" }, e.message);
       // W1-T1268: this run already holds the dispatch claim taken above — drop it (holder arm)
       // before returning, or a stale base on THIS host would strand the claim for an operator
       // to clear even though nothing is actually in flight.
       releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
-      return { taskId, runId, merged: false, costUsd: 0, verdict: "failed" };
+      return refused;
     }
     if (e instanceof WorktreeNodeModulesRefusedError) {
       // W1-T4193: a DEFERRAL, not a strike. Rethrown so daemon.ts's `isSpawnInfraBlocked` backs off on its
@@ -15525,6 +15586,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         node_modules_source: e.nodeModulesSource,
         ...(e instanceof ManagedCheckoutNotRefreshedError ? { managed_checkout_not_refreshed: e.notRefreshed } : {}),
       });
+      endThrownRun(log, verdictWritten, "worktree.node_modules", e, costUsd);
       say(`REFUSED: ${e.message}`);
       try {
         worktreeRemove(repoDir, worktreePath);
@@ -15542,6 +15604,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     }
     // W1-T2528: any OTHER add failure — ledger it before rethrowing (same idiom as `addLaneWorktree`).
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
+    endThrownRun(log, verdictWritten, "worktree.add", e, costUsd);
     throw e;
   } finally {
     checkoutRefresh.release();
@@ -17520,24 +17583,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       return { taskId, runId, merged: false, costUsd, verdict: "failed" };
     }
     log("run.error", { error: String((err as Error)?.message ?? err) });
-    // W1-T4655: the run DID end, so it gets ONE terminal row naming the harness cause; best-effort,
-    // so a ledger failure never replaces the error rethrown below.
-    if (!verdictWritten) {
-      try {
-        const excerpt = capStderrExcerpt(scrubGitCredentialText(String((err as Error)?.message ?? err)), STDERR_EXCERPT_CAP);
-        log("verdict", {
-          verdict: "failed",
-          reason: excerpt,
-          stage: "run.error",
-          cause: runErrorCause(err),
-          cost_usd: costUsd,
-          ...terminalVerdictFields(null),
-        });
-      } catch {
-        const reason = "run.error-verdict-ledger-write-failed";
-        void reason; // the rethrow below is the authoritative outcome
-      }
-    }
+    // W1-T4655: the run DID end, so it gets ONE terminal row naming the harness cause.
+    endThrownRun(log, verdictWritten, "run.error", err, costUsd);
     // Reclaim the worktree even on an unexpected throw — a dead run must not
     // leave debris that blocks the next one (start-of-run prune is the backstop,
     // but clean up eagerly here too). Best-effort; the ledger already has the
@@ -25169,6 +25216,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       releasedIdsForAdmission = new Set<string>();
     }
   }
+  const knownRepos = knownPlanRepos(checkoutRoot); // W1-T4700: the repo rule's names, read once per pass
   for (const task of plan.tasks) {
     if (scope && !scope.has(task.id)) continue;
     if (wholePlanScope && !wholePlanScope.has(task.id)) continue;
@@ -25239,6 +25287,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
     // is pure — so the predicate is supplied here, the one place holding a real checkout to ask.
     opts.moduleExists = (rel: string) => existsSync(join(checkoutRoot, rel));
+    opts.knownRepos = knownRepos;
     // W1-T497: the reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to this
     // checkout, wired ONLY in --base mode (`scope` is populated iff `baseRef` was given). It
     // shells out per proof — measured ~207ms/proof over the full corpus — so wiring it into the
@@ -25314,7 +25363,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     if (scope && planOnlyFilingDiff === true) {
       const baseTask = oldById?.get(task.id);
       const baseViolations: LintViolation[] | undefined = baseTask
-        ? lintTask(baseTask, { moduleExists: opts.moduleExists }).violations
+        ? lintTask(baseTask, { moduleExists: opts.moduleExists, knownRepos }).violations
         : undefined;
       lintViolations = promoteIntroducedPlanOnlyDiagnostics(
         lintViolations,
@@ -32510,7 +32559,10 @@ export async function daemonCommand(
       return undefined;
     }
   })();
-  const reviewerCodeRecovery = reviewerCodeRecoveryFromLoadedModule(daemonModuleRepoDir, daemonLoadedCodeSha);
+  const reviewerCodeRecovery = {
+    ...reviewerCodeRecoveryFromLoadedModule(daemonModuleRepoDir, daemonLoadedCodeSha),
+    freshTreeReviewAvailable: true,
+  };
   const buildSweepHook: DaemonSweepHookBuilder = deps.buildSweepHook ?? daemonDefaultBuildSweepHook;
   const buildSweepLightHook: DaemonSweepLightHookBuilder = deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook;
 
@@ -44381,6 +44433,7 @@ export async function approveCommand(
   // lets openPlanPr's signature (part of the RatifyGateway interface other tests fake) stay
   // unchanged. Stays empty for an ADOPTED PR (openPlanPr never runs on that path at all).
   let filedTaskIds: string[] = [];
+  let filedStampLine = ""; // W1-T4706: the materialized stamp, for a joined PR's rebuilt body
   // W1-T311: the block {@link materializeDraftTaskIds} reserves for this approve's placeholder
   // ids — held until the PR actually exists (released below, once `result.ok`), so a
   // console-initiated or second-machine approve overlapping this CLI one cannot mint the same
@@ -44470,22 +44523,21 @@ export async function approveCommand(
     }
     log("approve.id_materialized", { proposal_id: payload.proposalId, ids: materialized.ids });
 
-    // ONE SHARD PER DRAFTED TASK, NEVER AN APPEND TO THE MONOLITH. `lint-plan`'s
-    // `monolith-filing` rule refuses a NEW id filed into plan/tasks.yaml in as many words, and
-    // this was the last write site still doing it. It had never met the gate: no proposal had
-    // ever been ratified (0 `ratify.approved` rows before 2026-08-29), so the first successful
-    // approve came back `lint-plan failure` on its own filing and all 17 READY proposals would
-    // have failed identically. `applyFragmentToPlanYaml` (lib/inbox.ts) stays exported and
-    // tested — it is still the monolith composer — but this path no longer reaches it.
-    shardRelPaths = writeRatificationShards(worktreePath, materialized.fragmentYaml, payload.proposalId, { mkdirSync, writeFileSync }, join);
+    // ONE SHARD PER DRAFTED TASK, never a monolith append (`monolith-filing`). W1-T4700: re-linted
+    // WITH the stamp first, refusing before any write; returns only the paths it changed.
+    shardRelPaths = fileRatificationDraft(
+      worktreePath,
+      { fragmentYaml: materialized.fragmentYaml, proposalId: payload.proposalId, stampLine: materialized.stampLine },
+      { mkdirSync, writeFileSync, readFileSync },
+      join,
+    );
     log("approve.shards_written", { proposal_id: payload.proposalId, paths: shardRelPaths });
-    const masterPlanPath = join(worktreePath, "MASTER-PLAN.md");
-    writeFileSync(masterPlanPath, applyStampToMasterPlan(readFileSync(masterPlanPath, "utf8"), payload.proposalId, materialized.stampLine), "utf8");
 
     // materialized.fragmentYaml carries only REAL ids now (materializeDraftTaskIds already
     // rewrote every placeholder) — same per-line `- id: <id>` regex the pre-W1-T311 code used,
     // just over the rewritten text rather than payload.fragmentYaml verbatim.
     filedTaskIds = [...materialized.fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]);
+    filedStampLine = materialized.stampLine;
 
     // W1-T985 — the rare-overlap advisory for the shards this ratification just wrote. Same
     // reader `nextTaskIdCommand` has had since W1-T917, reached here because this lane files
@@ -44500,9 +44552,14 @@ export async function approveCommand(
       deps.overlap,
     );
 
-    execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
+    execFileSync("git", ["-C", worktreePath, "add", "--", ...shardRelPaths], { stdio: "inherit" });
     execFileSync("git", ["-C", worktreePath, "commit", "-m", approveCommitMessage(payload)], { stdio: "inherit" });
   };
+  const branchFiledTaskIds = (path: string): string[] =>
+    execFileSync("git", ["-C", path, "diff", "origin/main...HEAD", "--", "plan/tasks.yaml", "plan/tasks.d"], { encoding: "utf8" })
+      .split("\n")
+      .map((line) => /^\+- id:\s*(\S+)/.exec(line)?.[1])
+      .filter((id): id is string => id !== undefined);
   const gateway: RatifyGateway = deps.gateway ?? {
     // W1-T903 design (iii): evidence (ledger) + a real remote read — never guessed. A cheap
     // ledger-only miss (the overwhelming majority of approve calls: no prior run at all) never
@@ -44560,11 +44617,7 @@ export async function approveCommand(
       // plan/tasks.d/. Scoping this diff to the monolith alone would read ZERO ids off every
       // shard-filed branch and hand `openPlanPr` an empty list — a resumed ratification silently
       // losing the very ids it filed.
-      const diff = execFileSync("git", ["-C", worktreePath, "diff", "origin/main...HEAD", "--", "plan/tasks.yaml", "plan/tasks.d"], { encoding: "utf8" });
-      filedTaskIds = diff
-        .split("\n")
-        .map((line) => /^\+- id:\s*(\S+)/.exec(line)?.[1])
-        .filter((id): id is string => id !== undefined);
+      filedTaskIds = branchFiledTaskIds(worktreePath);
       return branch;
     },
     createRatificationBranch(payload) {
@@ -44591,7 +44644,7 @@ export async function approveCommand(
     // new branch, never a new PR. Checked out at the branch's OWN remote tip (never `origin/main`),
     // the same base `completeRatificationBranch` above uses, so the mint below sees every id
     // already filed on it and never re-mints one.
-    joinRatificationBranch(branch, payload) {
+    joinRatificationBranch(branch, payload, prUrl) {
       const dir = ensureRepoDir();
       const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
       if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
@@ -44604,6 +44657,17 @@ export async function approveCommand(
       materializeAndCommitApproveFragment(worktreePath, payload, `joined ${branch}`);
       gitPushRunBranch(worktreePath);
       log("approve.joined", { proposal_id: payload.proposalId, branch });
+      // W1-T4706: the open PR's body is rebuilt over every proposal on the branch, never left as the first approve's.
+      try {
+        const live = ghJson(["api", `repos/${owner}/${repo}/pulls/${prUrl.match(/\/pull\/(\d+)/)?.[1]}`]) as { body?: string | null };
+        const paths = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", worktreeMergeBase(worktreePath), "HEAD"], { encoding: "utf8" }).split("\n").filter(Boolean);
+        const body = joinedRatificationPrBody(live.body ?? "", filedStampLine, branchFiledTaskIds(worktreePath), paths, { proofCwd: worktreePath });
+        writePrBodyRest(prUrl, body);
+        log("approve.join_body_refreshed", { pr_url: prUrl, paths });
+      } catch (e) {
+        // The commit is already pushed: throwing would leave it unrecorded, so the stale body is ledgered instead.
+        log("approve.join_body_stale", { pr_url: prUrl, error: String((e as Error)?.message ?? e) });
+      }
       return branch;
     },
     // W1-T4338: the skill-draft twin of createRatificationBranch — one SKILL.md, verbatim, on a fresh branch.
@@ -44627,29 +44691,10 @@ export async function approveCommand(
           base: "main",
         }).prUrl;
       }
-      const intro = [
-        classification.draft?.stampLine ?? "",
-        "",
-        "The operator's one-bit approve initiated this PR (MASTER-PLAN P25 ii, W1-T111). The",
-        "gate still reviews (ci + remudero-review); nothing auto-merges without it.",
-      ].join("\n");
-      // W1-T136 (#387 class): a real, rendered, ALWAYS-judgeable Acceptance block — the #387
-      // bug was opening this PR with NO Acceptance section, which fails remudero-review
-      // CLOSED. This is a plan-FILING PR (it introduces filedTaskIds, doesn't implement
-      // them), so the criteria are about the filing itself (filingAcceptanceCriteria), and
-      // NO Remudero-Task trailer is emitted (the correctness rule, lib/plan-pr-emitter.ts).
+      // W1-T136 (#387 class): an ALWAYS-judgeable Acceptance block about the filing itself, and
+      // NO Remudero-Task trailer. W1-T4700: Changed files are the paths the commit wrote.
       const ids = filedTaskIds.length > 0 ? filedTaskIds : [id];
-      // W1-T2550: the SAME path list `filingAcceptanceCriteria` already names as its filing
-      // evidence, now ALSO handed to `changedFiles` so `buildPlanPrBody` emits the rendered
-      // `## Changed files` block (renderChangedFilesBlock, W1-T2535) instead of leaving it
-      // defined-but-never-called. One local so the two arguments can never drift apart.
-      const filedPaths = [...shardRelPaths, "MASTER-PLAN.md"];
-      const body = buildPlanPrBody({
-        intro,
-        criteria: filingAcceptanceCriteria(ids, filedPaths),
-        changedFiles: filedPaths,
-        proofCwd: worktreePath,
-      });
+      const body = ratificationPrBody(classification.draft?.stampLine ?? "", ids, shardRelPaths, { proofCwd: worktreePath });
       assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
       // W1-T903 design (i): REST, not `gh pr create` (GraphQL) — a pure transport swap, since
       // title/body are already fully authored above (no `--fill` autofill to replace).
@@ -44900,7 +44945,7 @@ async function approveBatchCommand(
 
   let repoDir: string | undefined;
   let worktreePath: string | undefined;
-  let allShardRelPaths: string[] = [];
+  let allWrittenPaths: string[] = [];
   let allFiledTaskIds: string[] = [];
   const idBlocks: TaskIdReservationBlock[] = [];
   const ensureRepoDir = (): string => {
@@ -44927,67 +44972,63 @@ async function approveBatchCommand(
       // Q3: ONE mint/reserve/write pass PER ACCEPTED PAYLOAD, sequentially, in the SAME
       // worktree — each iteration's shard write lands on disk before the NEXT payload's own
       // mint runs, so `mintNextTaskIdWithHistory`'s shard-directory scan (its `sources.shards`
-      // term) sees every id minted so far and never re-mints one. This is the exact per-member
-      // loop `createRatificationBranch` (single-proposal path, above) already runs once — Q3's
-      // "the writer is per-fragment and composes with no shared state" claim, exercised N times.
-      for (const payload of payloads) {
-        const materialized = materializeDraftTaskIds(
-          { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
-          {
-            mint: () =>
-              mintNextTaskIdWithHistory({
-                planPath: join(worktreePath as string, "plan", "tasks.yaml"),
-                repoRoot: worktreePath as string,
-                openPrTexts: () => openPrMintTexts(owner, repo),
-              }),
-            reserveBlock: (startId, count) => {
-              const block = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
-                info: { purpose: `rmd approve ${payload.proposalId} (batch run ${runId})` },
-              });
-              idBlocks.push(block);
-              const reserveFrom = block.ids[0];
-              const remote = withIdReservationLogging(
-                log,
-                "approve.id_reservation_failed",
-                () =>
-                  reserveTaskIdBlockRemote(
-                    reserveFrom,
-                    count,
-                    gitRemoteRefReserver({
-                      run: (args) => {
-                        const r = spawnSync("git", ["-C", worktreePath as string, ...args], { encoding: "utf8" });
-                        return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-                      },
-                    }),
-                  ),
-                { proposal_id: payload.proposalId },
-              );
-              return { ids: remote.ids };
+      // term) sees every id minted so far and never re-mints one. W1-T4706: through
+      // fileRatificationBatch, so each member gets the single lane's refusal and written-paths list,
+      // and every member's stamp folds over this worktree's own MASTER-PLAN.md in order (Q2).
+      const batchWorktree = worktreePath;
+      const filed = fileRatificationBatch(
+        batchWorktree,
+        payloads,
+        (payload) => {
+          const materialized = materializeDraftTaskIds(
+            { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
+            {
+              mint: () =>
+                mintNextTaskIdWithHistory({
+                  planPath: join(batchWorktree, "plan", "tasks.yaml"),
+                  repoRoot: batchWorktree,
+                  openPrTexts: () => openPrMintTexts(owner, repo),
+                }),
+              reserveBlock: (startId, count) => {
+                const block = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
+                  info: { purpose: `rmd approve ${payload.proposalId} (batch run ${runId})` },
+                });
+                idBlocks.push(block);
+                const reserveFrom = block.ids[0];
+                const remote = withIdReservationLogging(
+                  log,
+                  "approve.id_reservation_failed",
+                  () =>
+                    reserveTaskIdBlockRemote(
+                      reserveFrom,
+                      count,
+                      gitRemoteRefReserver({
+                        run: (args) => {
+                          const r = spawnSync("git", ["-C", batchWorktree, ...args], { encoding: "utf8" });
+                          return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+                        },
+                      }),
+                    ),
+                  { proposal_id: payload.proposalId },
+                );
+                return { ids: remote.ids };
+              },
             },
-          },
-        );
-        if (!materialized.ok) {
-          throw new Error(`rmd approve: refusing to materialize task id(s) for ${payload.proposalId} — ${materialized.reason}`);
-        }
-        log("approve.id_materialized", { proposal_id: payload.proposalId, ids: materialized.ids });
-        const shardRelPaths = writeRatificationShards(worktreePath, materialized.fragmentYaml, payload.proposalId, { mkdirSync, writeFileSync }, join);
-        log("approve.shards_written", { proposal_id: payload.proposalId, paths: shardRelPaths });
-        allShardRelPaths.push(...shardRelPaths);
-        allFiledTaskIds.push(...[...materialized.fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]));
-      }
-
-      // Q2: fold every accepted member's stamp SEQUENTIALLY over the ONE accumulator, starting
-      // from THIS worktree's own MASTER-PLAN.md (never a value threaded in from outside) — the
-      // whole reason a batch cannot hit the EOF-append conflict that sinks N parallel
-      // single-approve branches (see lib/inbox.ts's W1-T2471 section header).
-      const masterPlanPath = join(worktreePath, "MASTER-PLAN.md");
-      const foldedMasterPlan = payloads.reduce(
-        (md, p) => applyStampToMasterPlan(md, p.proposalId, p.stampLine),
-        readFileSync(masterPlanPath, "utf8"),
+          );
+          if (!materialized.ok) {
+            throw new Error(`rmd approve: refusing to materialize task id(s) for ${payload.proposalId} — ${materialized.reason}`);
+          }
+          log("approve.id_materialized", { proposal_id: payload.proposalId, ids: materialized.ids });
+          return { proposalId: payload.proposalId, fragmentYaml: materialized.fragmentYaml, stampLine: materialized.stampLine };
+        },
+        { mkdirSync, writeFileSync, readFileSync },
+        join,
       );
-      writeFileSync(masterPlanPath, foldedMasterPlan, "utf8");
+      allWrittenPaths = filed.writtenPaths;
+      allFiledTaskIds = filed.filedIds;
+      log("approve.shards_written", { proposal_ids: payloads.map((p) => p.proposalId), paths: allWrittenPaths });
 
-      execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
+      execFileSync("git", ["-C", batchWorktree, "add", "--", ...allWrittenPaths], { stdio: "inherit" });
       execFileSync("git", ["-C", worktreePath, "commit", "-m", approveBatchCommitMessage(payloads)], { stdio: "inherit" });
       gitPushRunBranch(worktreePath);
       return branch;
@@ -45000,10 +45041,9 @@ async function approveBatchCommand(
         "gate still reviews (ci + remudero-review); nothing auto-merges without it.",
       ].join("\n");
       const filedIds = allFiledTaskIds.length > 0 ? allFiledTaskIds : ids;
-      // W1-T2550: same reasoning as the single-proposal openPlanPr above — one local list feeds
-      // both the filing-acceptance evidence and the rendered changed-files block, so the batch
-      // lane's PR body actually emits it too rather than only defining it.
-      const filedPaths = [...allShardRelPaths, "MASTER-PLAN.md"];
+      // W1-T2550: one local list feeds both the filing-acceptance evidence and the rendered
+      // changed-files block. W1-T4706: it is what the batch actually wrote, never an assumed file.
+      const filedPaths = [...allWrittenPaths];
       const body = buildPlanPrBody({
         intro,
         criteria: filingAcceptanceCriteria(filedIds, filedPaths),

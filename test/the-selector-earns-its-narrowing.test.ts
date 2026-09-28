@@ -10,6 +10,7 @@ import {
   SELECTOR_SHADOW_MIN_RUNS,
   SELECTOR_SHADOW_SHARDS,
   parseSelectorShadowLines,
+  readCoverageShardLogsAsync,
   readSelectorShadowChangedPaths,
   readSelectorShadowRuns,
   readSelectorShadowRunsAsync,
@@ -70,6 +71,62 @@ test("W1-T4439: the gardener reports each selection's miss rate from the shadow 
   assert.equal(ready.verdict, "ready");
   assert.equal(ready.narrow.missed, 0);
   assert.match(ready.reason, /W1-T4406 may be reviewed/);
+  const skipped = Array.from({ length: SELECTOR_SHADOW_SHARDS }, (_, i) =>
+    `coverage-shard (${i + 1}/8)\tW1-T2428 fast-lane: class=PLAN_ONLY — skipping Test with coverage`,
+  ).join("\n");
+  const withPlanOnly = selectorShadowReport([...enough, { id: 99, headSha: "plan-only", log: skipped }], 100);
+  assert.equal(withPlanOnly.runsSkipped, 1);
+  assert.equal(withPlanOnly.runsIncomplete, 0);
+  assert.equal(withPlanOnly.verdict, "ready", "an explicit eight-shard plan-only skip is not missing source evidence");
+  const partialSkip = selectorShadowReport([{ id: 100, headSha: "partial", log: skipped.split("\n").slice(0, 7).join("\n") }], 100);
+  assert.equal(partialSkip.runsSkipped, 0);
+  assert.equal(partialSkip.runsIncomplete, 1, "seven skips cannot hide a missing coverage shard");
+});
+
+test("selector-shadow reads all eight coverage job logs instead of a partial run-view aggregate", async () => {
+  const jobs = Array.from({ length: SELECTOR_SHADOW_SHARDS }, (_, i) =>
+    ({ id: i + 101, name: `coverage-shard (${i + 1}/8)`, status: "completed" }));
+  const calls: string[][] = [];
+  const io = {
+    readJson: async (args: string[]) => {
+      calls.push(args);
+      return { total_count: jobs.length + 1, jobs: [...jobs, { id: 999, name: "commitlint", status: "completed" }] };
+    },
+    readText: async (args: string[]) => {
+      calls.push(args);
+      return `AFFECTED-SUITES-SHADOW: ${JSON.stringify({ fullRun: true, floorSize: 20, failures: [] })}`;
+    },
+  };
+  const log = await readCoverageShardLogsAsync("acme", "remudero", 42, io);
+  assert.equal(parseSelectorShadowLines(log).length, SELECTOR_SHADOW_SHARDS);
+  assert.equal(calls.length, 1 + SELECTOR_SHADOW_SHARDS);
+  assert.deepEqual(calls[0], ["api", "repos/acme/remudero/actions/runs/42/jobs?per_page=100"]);
+  assert.deepEqual(calls.at(-1), ["api", "repos/acme/remudero/actions/jobs/108/logs"]);
+  const skippedLog = await readCoverageShardLogsAsync("acme", "remudero", 42, {
+    ...io, readText: async () => "W1-T2428 fast-lane: class=PLAN_ONLY — skipping Test with coverage",
+  });
+  const skippedReport = selectorShadowReport([{ id: 42, headSha: "plan-only", log: skippedLog }], 100);
+  assert.equal(skippedReport.runsSkipped, 1);
+  assert.equal(skippedReport.runsIncomplete, 0);
+  await assert.rejects(readCoverageShardLogsAsync("acme", "remudero", 42, {
+    ...io, readJson: async () => ({ total_count: 101, jobs }),
+  }), /incomplete job list/);
+  await assert.rejects(readCoverageShardLogsAsync("acme", "remudero", 42, {
+    ...io, readJson: async () => ({ total_count: 7, jobs: jobs.slice(0, 7) }),
+  }), /missing coverage jobs/);
+  for (const invalid of [
+    [{ ...jobs[0], status: "in_progress" }, ...jobs.slice(1)],
+    [{ ...jobs[0], id: undefined }, ...jobs.slice(1)],
+    [...jobs, { ...jobs[0], id: 109 }],
+  ]) {
+    await assert.rejects(readCoverageShardLogsAsync("acme", "remudero", 42, {
+      readJson: async () => ({ total_count: invalid.length, jobs: invalid }),
+      readText: async () => { throw new Error("unexpected job-log read"); },
+    }), /invalid coverage job 1/);
+  }
+  await assert.rejects(readCoverageShardLogsAsync("acme", "remudero", 42, {
+    ...io, readText: async () => { throw new Error("job log unavailable"); },
+  }), /job log unavailable/);
 });
 
 test("W1-T4439: a missed failure files a task naming the missing edge", () => {
@@ -109,17 +166,20 @@ test("W1-T4439: a missed failure files a task naming the missing edge", () => {
   assert.equal(landed.length, 1, "the same observed edge files once across passes");
 });
 
-test("W1-T4439: the GitHub reader keeps each run's exact head and comparison", () => {
+test("selector-shadow reads the newest PR runs and filters pending runs locally", () => {
   const calls: string[][] = [];
   const runs = readSelectorShadowRuns("acme", "remudero", 2, {
     readJson: (args) => {
       calls.push(args);
-      return { workflow_runs: [{ id: 42, head_sha: "abc123", pull_requests: [{ number: 7, base: { sha: "def456" } }] }] };
+      return { workflow_runs: [
+        { id: 41, head_sha: "pending", status: "in_progress" },
+        { id: 42, head_sha: "abc123", status: "completed", pull_requests: [{ number: 7, base: { sha: "def456" } }] },
+      ] };
     },
     readLog: (args) => (calls.push(args), "coverage-shard\tAFFECTED-SUITES-SHADOW: {}"),
   });
   assert.deepEqual(calls, [
-    ["api", "repos/acme/remudero/actions/workflows/ci.yml/runs?event=pull_request&status=completed&per_page=2"],
+    ["api", "repos/acme/remudero/actions/workflows/ci.yml/runs?event=pull_request&per_page=100"],
     ["run", "view", "42", "--repo", "acme/remudero", "--log"],
   ]);
   assert.deepEqual(runs, [{ id: 42, headSha: "abc123", baseSha: "def456", prNumber: 7,
@@ -134,7 +194,8 @@ test("W1-T4439: the GitHub reader keeps each run's exact head and comparison", (
   assert.throws(() => readSelectorShadowChangedPaths("acme", "remudero", miss, () => null), /no comparison object for abc123/);
   assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => null, readLog: () => "" }), /no workflow-runs object/);
   assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({}), readLog: () => "" }), /no workflow_runs list/);
-  assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({ workflow_runs: [{ head_sha: "abc123" }] }), readLog: () => "" }), /no id or head SHA/);
+  assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({ workflow_runs: [{ head_sha: "abc123", status: "completed" }] }), readLog: () => "" }), /no id or head SHA/);
+  assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({ workflow_runs: [{ id: 42, head_sha: "abc123" }] }), readLog: () => "" }), /no status/);
 });
 
 test("the scheduled selector-shadow log read yields the daemon loop and does not overlap ticks", async () => {
@@ -177,7 +238,7 @@ test("the async selector-shadow reader keeps run logs sequential while other tim
   const reading = readSelectorShadowRunsAsync("acme", "remudero", 2, {
     readJson: async (args) => {
       calls.push(args);
-      return { workflow_runs: [{ id: 42, head_sha: "abc123" }, { id: 43, head_sha: "def456" }] };
+      return { workflow_runs: [{ id: 42, head_sha: "abc123", status: "completed" }, { id: 43, head_sha: "def456", status: "completed" }] };
     },
     readLog: async (args) => {
       calls.push(args);
@@ -199,7 +260,7 @@ test("the async selector-shadow reader keeps run logs sequential while other tim
 test("selector-shadow resumes a bounded log window across ticks and daemon restarts", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-cache-`));
   const cachePath = join(root, "logs.json");
-  const headers = [1, 2, 3].map((id) => ({ id, head_sha: `head-${id}` }));
+  const headers = [1, 2, 3].map((id) => ({ id, head_sha: `head-${id}`, status: "completed" }));
   const record: SelectorShadowRecord = { fullRun: true, floorSize: 20, narrowSize: 10, failures: [] };
   const fetched: number[] = [];
   const io = {
@@ -227,9 +288,29 @@ test("selector-shadow resumes a bounded log window across ticks and daemon resta
 
   await readSelectorShadowRunsAsync("acme", "remudero", 3, io);
   assert.deepEqual(fetched, [1, 2, 3], "a new reader invocation reuses completed runs");
-  headers[1] = { id: 2, head_sha: "replaced-head" };
+  headers[1] = { id: 2, head_sha: "replaced-head", status: "completed" };
   await readSelectorShadowRunsAsync("acme", "remudero", 3, io);
   assert.deepEqual(fetched, [1, 2, 3, 2], "a run ID with a different head cannot reuse evidence");
+});
+
+test("selector-shadow re-reads an old aggregate cache and remembers explicit plan-only skips", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-cache-upgrade-`));
+  const cachePath = join(root, "logs.json");
+  writeFileSync(cachePath, JSON.stringify({ "42": { headSha: "head-42", log: "", fetchedAt: 1_000, complete: false } }));
+  const skipLog = Array.from({ length: SELECTOR_SHADOW_SHARDS }, (_, i) =>
+    `coverage-shard (${i + 1}/8)\tW1-T2428 fast-lane: class=PLAN_ONLY — skipping Test with coverage`,
+  ).join("\n");
+  let fetched = 0;
+  const io = {
+    cachePath, clock: fixedClock(1_000),
+    readJson: async () => ({ workflow_runs: [{ id: 42, head_sha: "head-42", status: "completed" }] }),
+    readLog: async () => { fetched++; return skipLog; },
+  };
+  const first = await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
+  assert.equal(fetched, 1, "the old aggregate cache is not trusted for six more hours");
+  assert.equal(selectorShadowReport(first, 100).runsSkipped, 1);
+  await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
+  assert.equal(fetched, 1, "an explicit eight-shard skip is complete and reusable");
 });
 
 test("selector-shadow reports a corrupt cache and rebuilds it from run evidence", async () => {
@@ -240,7 +321,7 @@ test("selector-shadow reports a corrupt cache and rebuilds it from run evidence"
   const record: SelectorShadowRecord = { fullRun: true, floorSize: 20, narrowSize: 10, failures: [] };
   const rows = await readSelectorShadowRunsAsync("acme", "remudero", 1, {
     cachePath,
-    readJson: async () => ({ workflow_runs: [{ id: 1, head_sha: "head-1" }] }),
+    readJson: async () => ({ workflow_runs: [{ id: 1, head_sha: "head-1", status: "completed" }] }),
     readLog: async () => run(1, record).log,
     warn: (message) => { warnings.push(message); },
   });
@@ -256,7 +337,7 @@ test("selector-shadow names both cache write failures and re-reads on the next p
   const record: SelectorShadowRecord = { fullRun: true, floorSize: 20, narrowSize: 10, failures: [] };
   const io = {
     cachePath: join(root, "logs.json"),
-    readJson: async () => ({ workflow_runs: [{ id: 1, head_sha: "head-1" }] }),
+    readJson: async () => ({ workflow_runs: [{ id: 1, head_sha: "head-1", status: "completed" }] }),
     readLog: async () => { logReads++; return run(1, record).log; },
     writeCache: () => { throw new Error("disk unavailable"); },
     warn: (message: string) => { warnings.push(message); },
@@ -277,7 +358,7 @@ test("selector-shadow keeps scanning after an unreadable log without treating it
   const io = {
     cachePath,
     clock: fixedClock(1_000),
-    readJson: async () => ({ workflow_runs: [1, 2].map((id) => ({ id, head_sha: `head-${id}` })) }),
+    readJson: async () => ({ workflow_runs: [1, 2].map((id) => ({ id, head_sha: `head-${id}`, status: "completed" })) }),
     readLog: async (args: string[]) => {
       const id = Number(args[2]);
       fetched.push(id);
@@ -348,20 +429,34 @@ test("a self-hosting daemon keeps timers alive while selector-shadow reads a run
     const start = captured?.gardens?.[6];
     assert.ok(start, "a seventh garden is wired after the ci-friction gardener");
     const done = join(home, "log-done");
+    const allDone = join(home, "all-logs-done");
+    const jobs = Array.from({ length: SELECTOR_SHADOW_SHARDS }, (_, i) =>
+      ({ id: i + 101, name: `coverage-shard (${i + 1}/8)`, status: "completed" }));
     const shim = ghShim([
-      { when: "actions/workflows/ci.yml/runs", stdout: JSON.stringify({ workflow_runs: [{ id: 42, head_sha: "abc123" }] }) },
-      { when: "run view 42", stdout: "unparseable log", delaySeconds: 0.5, doneFile: done },
+      { when: "actions/workflows/ci.yml/runs", stdout: JSON.stringify({ workflow_runs: [{ id: 42, head_sha: "abc123", status: "completed" }] }) },
+      { when: "actions/runs/42/jobs", stdout: JSON.stringify({ total_count: jobs.length, jobs }) },
+      { when: "actions/jobs/101/logs", stdout: "unparseable log", delaySeconds: 0.5, doneFile: done },
+      ...jobs.slice(1).map((job, index) => ({
+        when: `actions/jobs/${job.id}/logs`, stdout: "unparseable log",
+        ...(index === jobs.length - 2 ? { doneFile: allDone } : {}),
+      })),
     ], { kind: "selector-shadow-log" });
     process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
     process.env.RMD_GH_TRANSPORT_FLOOR = "advisory";
     const garden = start!(60_000);
     try {
-      for (let waited = 0; !shim.calls().some((call) => call.includes("run view 42")) && waited < 5_000; waited += 10) {
+      for (let waited = 0; !shim.calls().some((call) => call.includes("actions/jobs/101/logs")) && waited < 5_000; waited += 10) {
         await new Promise((r) => setTimeout(r, 10));
       }
-      assert.ok(shim.calls().some((call) => call.includes("run view 42")), "the installed reader reached the fake run-log child");
+      assert.ok(shim.calls().some((call) => call.includes("actions/jobs/101/logs")), "the installed reader reached the coverage job log child");
       await new Promise((r) => setTimeout(r, 20));
       assert.equal(existsSync(done), false, "the daemon event loop ran before the log child finished");
+      // stop() clears future ticks, but the current eight-job read continues. Keep the
+      // shim installed until that read finishes so no later child hits the shared gh stub.
+      for (let waited = 0; !existsSync(allDone) && waited < 5_000; waited += 10) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert.ok(existsSync(allDone), "the current read completed all eight coverage jobs");
     } finally {
       garden.stop();
     }

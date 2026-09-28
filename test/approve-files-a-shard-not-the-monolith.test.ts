@@ -30,9 +30,10 @@ function draft(fragmentYaml: string): DraftedCandidate {
   };
 }
 
-const ONE_TASK = '- id: W1-T2451\n  title: "Evidence anchors expire and nothing re-reads them"\n  repo: remudero\n  type: implement\n  origin: architect\n  files: [src/lib/inbox.ts]\n';
+const ACCEPTANCE = '  acceptance:\n    - claim: "the anchor is re-read"\n      proof: "unit test: the anchor is re-read"\n';
+const ONE_TASK = '- id: W1-T2451\n  title: "Evidence anchors expire and nothing re-reads them"\n  repo: remudero\n  type: implement\n  origin: architect\n  files: [src/lib/inbox.ts]\n' + ACCEPTANCE;
 const TWO_TASKS =
-  ONE_TASK + '- id: W1-T2452\n  title: "The second drafted task, filed beside the first"\n  repo: remudero\n  type: implement\n  origin: architect\n  files: [src/lib/inbox.ts]\n';
+  ONE_TASK + '- id: W1-T2452\n  title: "The second drafted task, filed beside the first"\n  repo: remudero\n  type: implement\n  origin: architect\n  files: [src/lib/inbox.ts]\n' + ACCEPTANCE;
 
 test("ratificationShardFiles: one drafted task yields one plan/tasks.d shard named <id>-<kebab-slug>.yaml, holding a single-element list", () => {
   const r = ratificationShardFiles(ONE_TASK);
