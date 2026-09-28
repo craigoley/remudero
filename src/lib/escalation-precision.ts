@@ -42,12 +42,12 @@ export const NEVER_DEMOTE_CLASSES: ReadonlySet<string> = new Set(["MANUAL", "HAR
 export const ESCALATION_SIGNAL_TIERS = ["issue", "digest", "board"] as const;
 export type EscalationSignalTier = (typeof ESCALATION_SIGNAL_TIERS)[number];
 
-/** Below this acted-on fraction, a class's issues are mostly noise — MEASURED against the incident
+/** PRIMARY CONTROL: below this acted-on fraction, a class's issues are mostly noise — MEASURED against the incident
  *  this task's rationale cites: #7296's 64 false escalations and #7561's five-issues-for-one-PR both
  *  round to an acted-on precision near zero, nowhere near this line. */
 export const LOW_PRECISION_THRESHOLD = 0.34;
 
-/** Below THIS (higher) fraction but at/above {@link LOW_PRECISION_THRESHOLD}, a class is trending
+/** PRIMARY CONTROL: below THIS (higher) fraction but at/above {@link LOW_PRECISION_THRESHOLD}, a class is trending
  *  noisy but not yet noise-dominant — the `digest` middle tier, a one-line-per-retro summary rather
  *  than silence or a fresh issue apiece. */
 export const HIGH_PRECISION_THRESHOLD = 0.6;

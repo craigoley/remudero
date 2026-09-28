@@ -512,7 +512,7 @@ test("POST /v1/quiet-hours writes the quiet-hours flag under fleetControlRoot, n
 test("POST /v1/escalation/mark-handled closes exactly the issue named, through the injected gateway", async () => {
   await withProductionServer(async (h) => {
     const issueUrl = "https://github.com/craigoley/remudero/issues/4242";
-    const res = await post(h.base, "/v1/escalation/mark-handled", { taskId: "W1-T100", issueUrl });
+    const res = await post(h.base, "/v1/escalation/mark-handled", { taskId: "W1-T100", issueUrl, class: "MANUAL", disposition: "acted" });
     assert.equal(res.status, 200);
 
     // RIGHT GATEWAY, RIGHT ARGUMENT. In production this reaches `gh issue close` (ghIssueCloser,
@@ -522,6 +522,8 @@ test("POST /v1/escalation/mark-handled closes exactly the issue named, through t
     const steps = ledgerSteps(h.ledgerPath).filter((s) => s.step === "panel.escalation_marked_handled");
     assert.equal(steps.length, 1);
     assert.equal(steps[0].issue_url, issueUrl);
+    assert.equal(steps[0].class, "MANUAL");
+    assert.equal(steps[0].disposition, "acted");
   });
 });
 
