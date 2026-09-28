@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { rollupFromRest } from "../src/lib/open-prs-rest.js";
 import { checksStateFromRollup, dedupeRollupByLatestAttempt } from "../src/lib/sweep.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const NAME = "acceptance-author-gate";
 const STARTED = "2026-09-28T21:25:45Z";
@@ -22,13 +22,12 @@ function runShippedGate(runs: Run[]): { status: number | null; output: string } 
   };
   const script = yaml.jobs["ci-gate"]?.steps.find((step) => step.run?.includes("runs_json"))?.run;
   assert.ok(script, "the shipped gate must expose its real aggregation step");
-  const dir = mkdtempSync(join(tmpdir(), "check-run-timestamp-tie-"));
+  const shim = ghShim([{ when: "api", stdout: JSON.stringify([{ check_runs: runs }]) }], { kind: "check-run-timestamp-tie" });
   try {
-    writeFileSync(join(dir, "gh"), `#!/usr/bin/env bash\ncat <<'JSON'\n${JSON.stringify([{ check_runs: runs }])}\nJSON\n`, { mode: 0o755 });
     const result = spawnSync("bash", ["-c", script], {
       env: {
         ...process.env,
-        PATH: `${dir}:${process.env.PATH}`,
+        PATH: `${shim.dir}:${process.env.PATH}`,
         GH_TOKEN: "fixture",
         REPO: "example/remudero",
         SHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
@@ -43,7 +42,7 @@ function runShippedGate(runs: Run[]): { status: number | null; output: string } 
     });
     return { status: result.status, output: `${result.stdout ?? ""}${result.stderr ?? ""}` };
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(shim.dir, { recursive: true, force: true });
   }
 }
 

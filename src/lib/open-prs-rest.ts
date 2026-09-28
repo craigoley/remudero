@@ -93,7 +93,6 @@ export function combinedStatusRestArgs(owner: string, repo: string, sha: string)
 
 /** One check run as REST reports it (lowercase enums, snake_case keys). */
 interface RestCheckRun {
-  /** Monotonic GitHub check-run id, used to break equal-second start ties. */
   id?: number;
   name?: string;
   /** "queued" | "in_progress" | "completed" — lowercase, where GraphQL reports "QUEUED" etc. */
@@ -134,7 +133,6 @@ export interface RestRollupEntry {
   conclusion?: string;
   state?: string;
   detailsUrl?: string;
-  /** GitHub check-run id; absent on combined commit-status entries. */
   checkRunId?: number;
   targetUrl?: string;
   /** W1-T2300 — when this attempt started, mapped by {@link rollupFromRest} from a check run's
