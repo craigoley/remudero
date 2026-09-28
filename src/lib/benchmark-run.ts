@@ -374,6 +374,13 @@ export function benchmarkRunAssignmentReceipt(
   };
 }
 
+/** W1-T4650: the provider's own reason a row names no served model (`workerLedgerFields`'
+ *  `served_model_reason`), else the generic one — so "unreportable" reads apart from "unchecked". */
+function servedModelUnavailableReason(row: Record<string, unknown>): string {
+  const reason = row.served_model_reason;
+  return typeof reason === "string" && reason.trim().length > 0 ? reason : "provider-did-not-report-served-model";
+}
+
 function callEvidence(row: Record<string, unknown>) {
   const rawTokens = row.tokens && typeof row.tokens === "object" && !Array.isArray(row.tokens)
     ? row.tokens as Record<string, unknown> : undefined;
@@ -391,7 +398,7 @@ function callEvidence(row: Record<string, unknown>) {
   const otherMode = unavailable("different-billing-mode");
   return {
     workerCall,
-    servedModel: observedString(row.served_model, "provider-did-not-report-served-model"),
+    servedModel: observedString(row.served_model, servedModelUnavailableReason(row)),
     tokens,
     durationMs: observedNonnegative(row.worker_duration_ms, "worker-duration-not-reported"),
     accounting: {
@@ -415,6 +422,8 @@ export function benchmarkWorkerAttemptResources(result: WorkerResult) {
     && result.tokens.output === 0 && result.tokens.cacheRead === 0 && result.tokens.cacheCreation === 0);
   return {
     served_model: fields.served_model,
+    // W1-T4650: the reason rides beside the null it explains; dropping it left every row generic.
+    ...(fields.served_model_reason !== undefined ? { served_model_reason: fields.served_model_reason } : {}),
     worker_duration_ms: fields.worker_duration_ms,
     ...(observedEnvelope ? { billing_mode: fields.billing_mode } : {}),
     ...(tokensObserved ? { tokens: fields.tokens } : {}),

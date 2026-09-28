@@ -104,6 +104,9 @@ interface CodexWorkerResult {
   effort: string;
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
   modelUsage: Record<string, never>;
+  /** W1-T4650: always `null` — see {@link CODEX_SERVED_MODEL_REASON}, which says why. */
+  servedModel?: null;
+  servedModelReason?: string;
   compactionEvents: [];
   compactionFailures: [];
   compactionConfigured: false;
@@ -1775,6 +1778,15 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
   return selectCodexRuntime(value, config, deps, capabilities);
 }
 
+/**
+ * W1-T4650: WHY A CODEX ATTEMPT NAMES NO SERVED MODEL. The `exec --json` stream's events
+ * (`thread.started`, `turn.*`, `item.*`, see {@link CodexJsonEvent}) carry no model id, so what
+ * served the attempt is genuinely unreportable. Saying so by name keeps the row apart from one
+ * that was never checked; `--model` is the REQUEST and is never echoed back as the served model.
+ */
+export const CODEX_SERVED_MODEL_REASON =
+  "codex exec --json names no model: its thread, turn and item events carry no model id";
+
 interface CodexJsonEvent {
   type?: string;
   thread_id?: string;
@@ -3073,6 +3085,10 @@ export interface OpenWeightWorkerResult {
   selectionAssignmentId?: string;
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
   modelUsage: Record<string, never>;
+  /** W1-T4650: the model the provider's own responses named (see {@link cashServedModel}), or
+   *  `null` beside a named {@link servedModelReason}. Never the requested deployment echoed back. */
+  servedModel?: string | null;
+  servedModelReason?: string;
   compactionEvents: [];
   compactionFailures: [];
   compactionConfigured: false;
@@ -3526,9 +3542,44 @@ function openWeightEndpoint(config: Config, model: string): string {
   return new URL(`openai/deployments/${encodeURIComponent(model)}/chat/completions?api-version=2024-10-21`, endpoint).toString();
 }
 
+/** W1-T4650: the named reasons a cash attempt reports no served model. */
+export const CASH_SERVED_MODEL_REASONS = {
+  noResponse: "no cash response was received, so none named the model that served it",
+  unnamed: "a cash response named no model id",
+  mixed: "cash responses in this attempt named different models",
+} as const;
+
+/** The model id ONE cash response names in its `model` field, or `undefined`. Both endpoint
+ *  shapes (Azure chat completions, Foundry Anthropic messages) carry it there. A non-id — blank,
+ *  over-long, or a placeholder such as `<synthetic>` — is not a claim about what served the call. */
+export function cashResponseModel(model: unknown): string | undefined {
+  return typeof model === "string" && SAFE_OPENWEIGHT_MODEL_ID.test(model) ? model : undefined;
+}
+
+/**
+ * W1-T4650: THE SERVED MODEL OF A WHOLE CASH ATTEMPT, from what each response named, in order.
+ *
+ * A tool loop sends one paid request per turn, so one attempt can hold several responses. The
+ * attempt reports a model ONLY when every response received named one and all named the SAME one;
+ * a missing name or a disagreement is a named reason, never a pick of first or last, because an
+ * attempt served by two models has no single served model to compare arms on. The requested
+ * deployment is never a fallback: echoing the ask is the guess W1-T2572 refuses.
+ */
+export function cashServedModel(named: readonly (string | undefined)[]): { servedModel: string | null; servedModelReason?: string } {
+  if (named.length === 0) return { servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.noResponse };
+  if (named.some((model) => model === undefined)) return { servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.unnamed };
+  const distinct = [...new Set(named)].sort();
+  if (distinct.length > 1) {
+    return { servedModel: null, servedModelReason: `${CASH_SERVED_MODEL_REASONS.mixed}: ${distinct.join(", ")}` };
+  }
+  return { servedModel: distinct[0]! };
+}
+
 function openWeightResult(input: {
   model: string;
   effort: string;
+  /** W1-T4650: {@link cashResponseModel} of every response received, in order. */
+  servedModels: readonly (string | undefined)[];
   startedAt: number;
   clock: Pick<Clock, "now" | "iso">;
   text?: string;
@@ -3583,6 +3634,7 @@ function openWeightResult(input: {
     effort: input.effort,
     tokens: { input: input.promptTokens, output: input.completionTokens, cacheRead: input.cacheReadTokens ?? 0, cacheCreation: input.cacheCreationTokens ?? 0 },
     modelUsage: {},
+    ...cashServedModel(input.servedModels),
     compactionEvents: [],
     compactionFailures: [],
     compactionConfigured: false,
@@ -3639,6 +3691,7 @@ export async function spawnFoundryOpusWorker(
   let budgetSettledUsd = 0;
   let text = "";
   let sessionId = "";
+  const servedModels: Array<string | undefined> = [];
   let pending: { requestId: string; reservedUsd: number } | undefined;
   const requestPrefix = `${args.runId ?? args.taskId ?? "foundry-opus"}-${startedAt}-${randomUUID()}`;
   try {
@@ -3696,10 +3749,11 @@ export async function spawnFoundryOpusWorker(
       if (response.status === 404) throw new OpenWeightDeploymentNotFoundError(selection.model);
       if (!response.ok) throw new Error(`cash Opus request failed with HTTP ${response.status}`);
       const payload = await response.json() as {
-        id?: unknown; stop_reason?: unknown; content?: Array<Record<string, unknown>>;
+        id?: unknown; model?: unknown; stop_reason?: unknown; content?: Array<Record<string, unknown>>;
         usage?: { input_tokens?: unknown; output_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown };
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
+      servedModels.push(cashResponseModel(payload.model));
       const usage = payload.usage;
       if (!usage || !validFoundryTokenCount(usage.input_tokens) || !validFoundryTokenCount(usage.output_tokens) ||
           (usage.cache_read_input_tokens !== undefined && !validFoundryTokenCount(usage.cache_read_input_tokens)) ||
@@ -3733,7 +3787,7 @@ export async function spawnFoundryOpusWorker(
       if (calls.length === 0) {
         if (payload.stop_reason !== "end_turn") throw new Error(`cash Opus ended without a complete turn (${String(payload.stop_reason)})`);
         return reconcileBoundedProviderAttempt(openWeightResult({
-          model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns,
+          model: selection.model, effort: selection.effort, servedModels, startedAt, clock, text, sessionId, turns,
           promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens,
           actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd,
         }), args.externalEffect);
@@ -3767,7 +3821,7 @@ export async function spawnFoundryOpusWorker(
       budgetSettledUsd += billed;
     }
     return reconcileBoundedProviderAttempt(openWeightResult({
-      model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns,
+      model: selection.model, effort: selection.effort, servedModels, startedAt, clock, text, sessionId, turns,
       promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens,
       actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd,
       budgetRefused: error instanceof OpenWeightAllowanceExhaustedError,
@@ -3806,6 +3860,7 @@ export async function spawnOpenWeightWorker(
   let turns = 0;
   let sessionId = "";
   let text = "";
+  const servedModels: Array<string | undefined> = [];
   let budgetReservedUsd = 0;
   let budgetSettledUsd = 0;
   // W1-T3666: the reservation the CURRENT turn is still carrying, cleared the instant its own
@@ -3916,10 +3971,12 @@ export async function spawnOpenWeightWorker(
       if (!response.ok) throw new Error(`openweight request failed with HTTP ${response.status}`);
       const payload = await response.json() as {
         id?: unknown;
+        model?: unknown;
         usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
         choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
+      servedModels.push(cashResponseModel(payload.model));
       const turnPromptTokens = typeof payload.usage?.prompt_tokens === "number" ? payload.usage.prompt_tokens : 0;
       const turnCompletionTokens = typeof payload.usage?.completion_tokens === "number" ? payload.usage.completion_tokens : 0;
       promptTokens += turnPromptTokens;
@@ -3956,7 +4013,7 @@ export async function spawnOpenWeightWorker(
       }
       if (calls.length === 0) {
         return reconcileBoundedProviderAttempt(
-          openWeightResult({ model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, budgetReservedUsd, budgetSettledUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd }),
+          openWeightResult({ model: selection.model, effort: selection.effort, servedModels, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, budgetReservedUsd, budgetSettledUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd }),
           args.externalEffect,
         );
       }
@@ -4038,6 +4095,7 @@ export async function spawnOpenWeightWorker(
       openWeightResult({
         model: selection.model,
         effort: selection.effort,
+        servedModels,
         startedAt,
         clock,
         text,
@@ -4249,6 +4307,8 @@ async function spawnCodexWorkerInPrivateTemp(
       effort: selection?.effort ?? args.effort ?? "default",
       tokens: parsed.tokens,
       modelUsage: {},
+      servedModel: null,
+      servedModelReason: CODEX_SERVED_MODEL_REASON,
       compactionEvents: [],
       compactionFailures: [],
       compactionConfigured: false,
