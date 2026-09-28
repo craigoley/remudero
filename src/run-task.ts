@@ -3825,17 +3825,15 @@ export function ghPrCreateFillCommand(
 }
 
 /**
- * True iff `err` is the REST create's 422 for "a branch whose pull request already exists" —
- * `gh api --method POST .../pulls` returning `Validation Failed (HTTP 422)` with a `PullRequest`
- * resource error naming an existing head (W1-T4466 design i). Checked over the joined
- * message+stderr text, mirroring {@link isGhRateLimitError}'s own shape — never `e.status`, which
- * on a `gh` CLI failure is the process EXIT code (always 1), not the HTTP status the API replied
- * with.
+ * True iff REST PR creation received HTTP 422. The CLI may print only "Validation Failed" and
+ * omit GitHub's structured "pull request already exists" detail. A 422 is permission to READ the
+ * exact head's open PR, never proof one exists; {@link adoptExistingPrForHead} must confirm it.
+ * `e.status` is the CLI process exit code, not the HTTP response status.
  */
-function isGhPrAlreadyExistsError(err: unknown): boolean {
+function isGhPrCreateValidationError(err: unknown): boolean {
   const e = err as NodeJS.ErrnoException & { stderr?: string | Buffer; message?: string };
   const text = [String(e?.message ?? ""), e?.stderr != null ? String(e.stderr) : ""].join("\n");
-  return /\b422\b/.test(text) && /pull request already exists/i.test(text);
+  return /\bHTTP\s+422\b/i.test(text);
 }
 
 /** The `repos/{owner}/{repo}/pulls` create argv's own target, read back out of the argv itself —
@@ -3904,7 +3902,8 @@ function adoptExistingPrForHead(
  * "nothing happened".
  *
  * W1-T4466 adds a SECOND classified 422 case: a duplicate create for a branch whose PR another
- * lane (or an earlier step in this same run) already opened. That is adopted rather than
+ * lane (or an earlier step in this same run) already opened. W1-T4730 probes the exact open head
+ * even when GitHub's 422 omits its structured error text. A confirmed PR is adopted rather than
  * rethrown — see {@link adoptExistingPrForHead} — and the adoption is ledgered under
  * `pr_create.adopted_existing`, carrying the ORIGINAL 422 error alongside the adopted PR's own
  * number/url, so the double create stays visible instead of silently absorbed (design ii). Any
@@ -3928,7 +3927,7 @@ export function runGhPrCreate(
           `not retried here (W1-T1202; retry/backoff is W1-T529's)`,
       );
     }
-    if (isGhPrAlreadyExistsError(e)) {
+    if (isGhPrCreateValidationError(e)) {
       const adopted = adoptExistingPrForHead(prCreate, branch, exec);
       if (adopted?.prUrl !== undefined) {
         const ghErr = e as NodeJS.ErrnoException & { stderr?: string | Buffer };
@@ -16739,7 +16738,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // W1-T4425: when the worker already reported its OWN PR, normalize its body from THIS run's
     // plan record before the trailer-amend push below, so `trailer-body-proof-divergence` never
     // reaches CI (#6888, #6929, #6931). Best-effort/no-op cases are documented on the function
-    // itself. The `gh pr create --fill` fallback below has no Acceptance block to diverge.
+    // itself. The fallback below may adopt a worker-opened PR and normalize it afterward.
     if (prUrl) {
       normalizeRunPrAcceptanceFromPlan(prUrl, taskId, task.acceptance ?? [], log);
     }
@@ -16755,6 +16754,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     if (!prUrl) {
       const prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
       prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
+      // A worker may have opened this exact PR without reporting its URL. The generic-422
+      // adoption above discovers it only here, after the earlier direct-PR normalization point.
+      // Reuse that same body repair before review so the adopted worker prose cannot fail the
+      // plan's acceptance gate. A newly created, already-matching body is a no-op.
+      if (prUrl) normalizeRunPrAcceptanceFromPlan(prUrl, taskId, task.acceptance ?? [], log);
     }
     if (!prUrl) {
       log("verdict", {
