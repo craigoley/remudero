@@ -15,8 +15,10 @@
  */
 
 import type { AcceptanceCriterion } from "./plan.js";
-import { acceptanceBlockDiagnostics } from "./review.js";
-import { emDashSeparatedProof } from "./body-repair.js";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { acceptanceBlockDiagnostics, parseWhitelistedProof } from "./review.js";
+import { emDashSeparatedProof, refuseNonDiscriminatingCriteria } from "./body-repair.js";
 import {
   renderCommitNarrativeParagraphs,
   shapeCommitMessage,
@@ -339,6 +341,33 @@ export interface PlanPrBodyOpts {
   speaker?: string;
   whatToDo?: OperatorMessageSlot;
   consequence?: OperatorMessageSlot;
+  /** The fork point to compare with this checkout; the default is `git merge-base origin/main HEAD`. */
+  baseRef?: string;
+  /** `rmd check-proof --base`'s exit status. Injected only to test the author-time decision. */
+  proofCheck?: (proof: string, baseRef: string) => number | null;
+}
+
+function authorBaseRef(): string {
+  const result = spawnSync("git", ["merge-base", "origin/main", "HEAD"], { encoding: "utf8" });
+  const base = result.stdout?.trim();
+  if (result.status !== 0 || !base) {
+    throw new Error("body emission refused: cannot resolve the merge base for acceptance proofs; ask for a human ruling");
+  }
+  return base;
+}
+
+function checkProofAtAuthorTime(proof: string, baseRef: string): number | null {
+  const runTask = fileURLToPath(new URL("../run-task.ts", import.meta.url));
+  const result = spawnSync(
+    process.execPath,
+    ["--import", "tsx", runTask, "check-proof", proof, "--base", baseRef],
+    {
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, RMD_SELF_SYNC_DONE: "1" },
+    },
+  );
+  return result.status;
 }
 
 /**
@@ -347,6 +376,13 @@ export interface PlanPrBodyOpts {
  */
 export function buildPlanPrBody(opts: PlanPrBodyOpts): string {
   const { intro, criteria, taskId, changedFiles } = opts;
+  // The gate's own base execution decides this. A claim's wording cannot say whether its proof
+  // was already true before the diff. Keep synthetic/non-executable legacy inputs for the other
+  // author gate, but never write a runnable stale or zero-match proof into a new body.
+  if (opts.proofCheck || criteria.some((c) => parseWhitelistedProof(c.proof.trim()) !== null)) {
+    const baseRef = opts.baseRef ?? authorBaseRef();
+    refuseNonDiscriminatingCriteria(criteria, (proof) => (opts.proofCheck ?? checkProofAtAuthorTime)(proof, baseRef));
+  }
   // W1-T3362: never credit a task whose record this same diff adds — `filingSelfCreditCheck` refuses it.
   const selfCredit = taskId !== undefined && diffContributesTaskShard(taskId, opts.addedFiles ?? changedFiles ?? []);
   // Order is load-bearing: the changed-files block sits above the Acceptance block, and the narrative slots
