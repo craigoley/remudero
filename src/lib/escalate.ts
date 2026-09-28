@@ -17,9 +17,8 @@ import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { validateDecisionSummary, type DecisionSummary, type SummarizeDeps } from "./feedback.js";
 import type { Mount, Mounts } from "./mounts.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
-import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
+import { benchmarkNonDispatchSpawn, withReceiptIdentity } from "./benchmark-run.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
-import { receiptIdentityOnly } from "./verify-human-judge.js";
 import type { WriteTier } from "./service.js";
 
 /**
@@ -617,9 +616,7 @@ export function buildEscalationJudgeSpawnArgs(opts: {
   cwd: string;
   settingsFile: string;
 }): SpawnWorkerArgs {
-  return {
-    taskId: opts.escalation.taskId,
-    runId: escalationJudgeRunId(opts.escalation),
+  return withReceiptIdentity({
     cwd: opts.cwd,
     permissionMode: "bypassPermissions",
     settingsFile: opts.settingsFile,
@@ -631,7 +628,7 @@ export function buildEscalationJudgeSpawnArgs(opts: {
     // W1-T3614: mount affinity, the same field every other routed spawn passes. Undefined leaves
     // the capacity auction untouched, so an unrouted table behaves exactly as it always did.
     ...(opts.mount.provider === undefined ? {} : { mountProvider: opts.mount.provider }),
-  };
+  }, { taskId: opts.escalation.taskId, runId: escalationJudgeRunId(opts.escalation) });
 }
 
 /** Spawn the real judge and parse its verdict. Untested by unit (it shells out via the SDK); {@link
@@ -643,7 +640,7 @@ export async function spawnEscalationJudgeWorker(opts: {
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): Promise<WorkerResult> {
-  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("escalation-summary", receiptIdentityOnly(spawnWorker));
+  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("escalation-summary");
   return spawn(buildEscalationJudgeSpawnArgs(opts));
 }
 

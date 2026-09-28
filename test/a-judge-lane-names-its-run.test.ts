@@ -5,10 +5,10 @@
  * no task or run id into their spawn arguments, so every receipt they wrote read
  * `<lane>-unassigned` (or `<lane>-<assignment>`) under the lane's own upper-cased name, and joined no
  * task. This suite drives both lanes through the production composition — the lane's receipt
- * wrapper over `receiptIdentityOnly` — with a fake router standing where the real one stands, and
- * pins: every assignment and attempt receipt names the judged task and one per-decision run; and
- * the router is handed exactly the arguments it had before, so the provider, model and effort it
- * selects are identical with and without the new fields.
+ * wrapper over the router — with a fake router standing where the real one stands, and pins: every
+ * assignment and attempt receipt names the judged task and one per-decision run; and the identity
+ * is invisible to the router, so the provider, model and effort it selects are identical with and
+ * without the new fields.
  */
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { benchmarkNonDispatchSpawn } from "../src/lib/benchmark-run.js";
+import { BENCHMARK_RECEIPT_IDENTITY, benchmarkNonDispatchSpawn, receiptIdentity } from "../src/lib/benchmark-run.js";
 import type { Config } from "../src/lib/config.js";
 import { buildEscalationJudgeSpawnArgs, escalationJudgeRunId, spawnEscalationJudgeWorker, type Escalation } from "../src/lib/escalate.js";
 import type { Mount, Mounts } from "../src/lib/mounts.js";
@@ -24,7 +24,6 @@ import { selectWorkerProviderForPolicy, type EffectiveProviderRoutingPolicy } fr
 import { shadowJudgeSampled } from "../src/lib/shadow-judge.js";
 import {
   buildVerifyHumanJudgeSpawnArgs,
-  receiptIdentityOnly,
   spawnVerifyHumanJudgeWorker,
   verifyHumanJudgeRunId,
   type ShardUnderJudgement,
@@ -95,7 +94,7 @@ function router(seen: SpawnWorkerArgs[], assignmentId: string | undefined, text:
 /** The production composition, with this fixture's config named explicitly: an un-configured
  *  receipt under the test runner is never written, and the live ledger is never a test's to write. */
 function lane(name: string, raw: typeof spawnWorker, config: Config): typeof spawnWorker {
-  return (args) => benchmarkNonDispatchSpawn(name, receiptIdentityOnly(raw))({ ...args, config });
+  return (args) => benchmarkNonDispatchSpawn(name, raw)({ ...args, config });
 }
 
 function assertNamesItsRun(rows: Row[], lanes: string[], taskId: string, runId: string): void {
@@ -190,33 +189,37 @@ function routedSelection(args: SpawnWorkerArgs, capability: "balanced" | undefin
   return { seed, selected: recorded.selected, experiment: recorded.routing.experiment };
 }
 
-async function argsTheRouterSees(args: SpawnWorkerArgs): Promise<SpawnWorkerArgs> {
-  const seen: SpawnWorkerArgs[] = [];
-  await receiptIdentityOnly(router(seen, "asg-route", VERDICT))(args);
-  assert.equal(seen.length, 1);
-  return seen[0]!;
+/** The args exactly as the lane built them before W1-T4645: the same object with no identity. */
+function withoutIdentity(args: SpawnWorkerArgs): SpawnWorkerArgs {
+  const before: Record<PropertyKey, unknown> = { ...args };
+  delete before[BENCHMARK_RECEIPT_IDENTITY];
+  return before as unknown as SpawnWorkerArgs;
 }
 
-test("W1-T4645: the router selects the same provider, model and effort with and without the new fields", async () => {
-  const cases: Array<[string, () => SpawnWorkerArgs]> = [
-    ["verify-human-judge", () => buildVerifyHumanJudgeSpawnArgs({ shard: SHARD, mount: MOUNT, cwd: "/w", settingsFile: "s.json" })],
-    ["escalation-summary", () => buildEscalationJudgeSpawnArgs({ escalation: ESCALATION, mount: MOUNT, cwd: "/w", settingsFile: "s.json" })],
+test("W1-T4645: the router selects the same provider, model and effort with and without the new fields", () => {
+  const cases: Array<[string, SpawnWorkerArgs, string]> = [
+    ["verify-human-judge", buildVerifyHumanJudgeSpawnArgs({ shard: SHARD, mount: MOUNT, cwd: "/w", settingsFile: "s.json" }), SHARD.id],
+    ["escalation-summary", buildEscalationJudgeSpawnArgs({ escalation: ESCALATION, mount: MOUNT, cwd: "/w", settingsFile: "s.json" }), ESCALATION.taskId],
   ];
-  for (const [name, build] of cases) {
-    const withFields = build();
-    const { taskId, runId, ...before } = withFields;
-    assert.ok(taskId && runId, `${name}: the lane now names its task and run`);
-    const routed = await argsTheRouterSees(withFields);
-    assert.deepEqual(routed, before, `${name}: the router is handed exactly what it had before`);
+  for (const [name, withFields, taskId] of cases) {
+    const identity = receiptIdentity(withFields);
+    assert.equal(identity.taskId, taskId, `${name}: the lane now names its task`);
+    assert.ok(identity.runId, `${name}: and its run`);
+    const before = withoutIdentity(withFields);
+    assert.equal(receiptIdentity(before).runId, undefined, "control: the stripped copy carries no identity");
+    assert.deepEqual(Object.keys(withFields), Object.keys(before), `${name}: no string-keyed field was added`);
+    assert.equal(withFields.taskId, undefined);
+    assert.equal(withFields.runId, undefined);
     for (const capability of [undefined, "balanced"] as const) {
-      const now = routedSelection(routed, capability);
-      const then = routedSelection(before as SpawnWorkerArgs, capability);
+      const now = routedSelection(withFields, capability);
+      const then = routedSelection(before, capability);
       assert.deepEqual(now.selected, then.selected, `${name}/${capability}: same provider, model and effort`);
       assert.deepEqual(now.experiment, then.experiment, `${name}/${capability}: same experiment arm`);
       assert.deepEqual(now.seed, then.seed);
-      // Control: had the ids reached the router, its draw would be keyed differently.
-      assert.notDeepEqual(routedSelection(withFields, capability).seed, then.seed,
-        `${name}/${capability}: the ids are routing inputs, so dropping them is load-bearing`);
+      // Control: had the ids been plain spawn fields, the router's draw would be keyed differently.
+      const plain = { ...before, taskId: identity.taskId, runId: identity.runId };
+      assert.notDeepEqual(routedSelection(plain, capability).seed, then.seed,
+        `${name}/${capability}: the ids are routing inputs, so keeping them from the router is load-bearing`);
     }
   }
 });

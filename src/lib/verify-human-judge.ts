@@ -22,7 +22,7 @@ import { canonicalWorkerProviderId, enabledWorkerProviders, type Config, type Wo
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { createHash } from "node:crypto";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
-import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
+import { benchmarkNonDispatchSpawn, withReceiptIdentity } from "./benchmark-run.js";
 
 /** What the judge decides for ONE parked shard. None of the values edits or releases a task. */
 export type VerifyHumanDecision = "needs_operator" | "automate" | "backlog";
@@ -334,14 +334,6 @@ export function verifyHumanJudgeRunId(shard: ShardUnderJudgement): string {
   return `verify-human-judge-${shard.id}-${digest}`;
 }
 
-/** W1-T4645: the raw spawn beneath a judge lane's receipt wrapper. The task and run ids reach the
- *  receipts and stop here: the router seeds its auction draw on them (`auctionDrawSeed`), so a
- *  judge naming its run must not change which provider, model or effort serves it. These lanes
- *  never passed either field before, so dropping both hands the router exactly what it had. */
-export function receiptIdentityOnly(raw: typeof spawnWorker): typeof spawnWorker {
-  return ({ taskId: _taskId, runId: _runId, ...routed }) => raw(routed);
-}
-
 /** Pure, so the "no tools, cheapest mount" contract is unit-testable without a spawn. */
 export function buildVerifyHumanJudgeSpawnArgs(opts: {
   shard: ShardUnderJudgement;
@@ -349,9 +341,7 @@ export function buildVerifyHumanJudgeSpawnArgs(opts: {
   cwd: string;
   settingsFile: string;
 }): SpawnWorkerArgs {
-  return {
-    taskId: opts.shard.id,
-    runId: verifyHumanJudgeRunId(opts.shard),
+  return withReceiptIdentity({
     cwd: opts.cwd,
     permissionMode: "bypassPermissions",
     settingsFile: opts.settingsFile,
@@ -361,7 +351,7 @@ export function buildVerifyHumanJudgeSpawnArgs(opts: {
     maxTurns: opts.mount.maxTurns,
     tools: VERIFY_HUMAN_JUDGE_TOOLS,
     ...(opts.mount.provider === undefined ? {} : { mountProvider: opts.mount.provider }),
-  };
+  }, { taskId: opts.shard.id, runId: verifyHumanJudgeRunId(opts.shard) });
 }
 
 /** Spawn and parse. The `spawn` seam is injectable precisely so this IS unit-reachable: the note
@@ -375,7 +365,7 @@ export async function spawnVerifyHumanJudgeWorker(opts: {
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): Promise<WorkerResult> {
-  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("verify-human-judge", receiptIdentityOnly(spawnWorker));
+  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("verify-human-judge");
   return spawn(buildVerifyHumanJudgeSpawnArgs(opts));
 }
 
