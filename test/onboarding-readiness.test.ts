@@ -223,6 +223,23 @@ test("branch rules are complete across pages, and a malformed page cannot prove 
   assert.equal(onboardingReadinessGateway(() => "[]").getBranchRules("acme", "widget", "main"), undefined, "zero pages is not an empty active-rules result");
 });
 
+test("a failed synchronous branch-rules page read preserves HTTP failure or uncertainty", () => {
+  const refused = onboardingReadinessGateway(() => {
+    throw Object.assign(new Error("gh exited"), { stderr: "gh: Server Error (HTTP 503)" });
+  });
+  assert.deepEqual(refused.getBranchRules("acme", "widget", "main"), { status: 503, body: undefined });
+  const unreadable = onboardingReadinessGateway(() => { throw new Error("network unavailable"); });
+  assert.equal(unreadable.getBranchRules("acme", "widget", "main"), undefined);
+});
+
+test("a failed asynchronous installation listing remains unknown, never App absence", async () => {
+  const failed = onboardingReadinessGatewayAsync(async () => { throw new Error("network unavailable"); });
+  assert.equal(await failed.listInstallationRepos(), undefined);
+  const snapshot = await readOnboardingReadinessSnapshot("acme", "widget", failed);
+  assert.equal(snapshot.complete, false);
+  assert.equal(byId(onboardingReadiness("acme", "widget", { repos: [] }, snapshot).checks)["app-access"]!.status, "unknown");
+});
+
 test("agent instructions and the test command name which file answered", () => {
   const agents = (a: OnboardingReadinessApiRead | undefined, c: OnboardingReadinessApiRead | undefined) =>
     statusOf(gateway({ contents: { "AGENTS.md": a, "CLAUDE.md": c } }), "agent-instructions");
