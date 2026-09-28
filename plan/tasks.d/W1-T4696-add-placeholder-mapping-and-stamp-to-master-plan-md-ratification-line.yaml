@@ -1,0 +1,15 @@
+- id: W1-T4696
+  title: Add placeholder mapping and stamp to MASTER-PLAN.md (ratification line)
+  repo: master-plan
+  depends_on:
+    - W1-T4695
+  type: implement
+  verify:
+    proof: "update MASTER-PLAN.md to include RATIFICATION CANDIDATE line referencing W1-T4695; stamp line aligns with format"
+  risk: low
+  status: queued
+  attempts: 0
+  origin: MASTER-PLAN.md
+  files:
+    - MASTER-PLAN.md
+    - plan/tasks.yaml

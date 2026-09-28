@@ -1,0 +1,14 @@
+- id: W1-T4695
+  title: Instantiate ratification skeleton for MASTER-PLAN §7/P25 open plan
+  repo: master-plan
+  depends_on: []
+  type: implement
+  verify:
+    proof: "grep: MASTER-PLAN.md contains an open ratification candidate for §7/P25; skeleton task created"
+  risk: low
+  status: queued
+  attempts: 0
+  origin: plan/tasks.yaml
+  files:
+    - plan/tasks.yaml
+    - MASTER-PLAN.md
