@@ -88,7 +88,8 @@ export type LintCheck =
   | "advisory-routing"
   | "deferred-follow-up"
   | "proof-base-discrimination"
-  | "proof-unit-test-base-wrapper";
+  | "proof-unit-test-base-wrapper"
+  | "shard-shape";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -3299,7 +3300,26 @@ export const PLAN_ONLY_NEW_TASK_DIAGNOSTIC_CHECKS: ReadonlySet<LintCheck> = new 
   "shared-proof",
   "call-site",
   "proof-scope",
+  "shard-shape",
 ]);
+
+/**
+ * W1-T4700 — the filing floor #7608 passed with none of: `verify` in the enum, a `repo` the fleet
+ * knows, and (for an implement task not at `verify: human`) one acceptance criterion. WARN here, promoted
+ * to block on a new or newly-violating plan-only shard above, so legacy shards on main stay warn.
+ */
+export function shardShapeViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const verify: unknown = task.verify;
+  const defects: string[] = [];
+  if (verify !== "auto" && verify !== "human") defects.push(`verify must be "auto" or "human", got ${JSON.stringify(verify)}`);
+  if (opts.knownRepos && !opts.knownRepos.has(task.repo)) {
+    defects.push(`repo ${JSON.stringify(task.repo)} is not a repository the plan knows (${[...opts.knownRepos].sort().join(", ")})`);
+  }
+  if (task.type === "implement" && verify !== "human" && !task.acceptance?.length) {
+    defects.push("an implement task not at verify: human needs at least one acceptance criterion");
+  }
+  return defects.map((d) => ({ check: "shard-shape", severity: "warn", message: `task ${task.id}: ${d}` }));
+}
 
 export function promoteIntroducedPlanOnlyDiagnostics(
   head: readonly LintViolation[],
@@ -3468,6 +3488,8 @@ export interface LintOpts {
    *  per-file count blocks while at-or-below baseline remains advisory. */
   unboundCriterionBaseline?: UnboundCriterionBaseline;
   machineFilingAdmission?: MachineFilingAdmissionContext;
+  /** Repository names a task's `repo:` may carry. Absent ⇒ {@link shardShapeViolations}' repo rule is silent. */
+  knownRepos?: ReadonlySet<string>;
 }
 
 /** Lint one task, aggregating every check below. The hard checks — sizing, headless-fitness,
@@ -3589,6 +3611,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...dispatchPriorityViolations(task));
   violations.push(...advisoryRoutingViolations(task));
   violations.push(...deferredFollowUpViolations(task));
+  violations.push(...shardShapeViolations(task, opts));
   if (opts.mountMaxTurns !== undefined) {
     const warn = budgetSanityWarning(opts.mountMaxTurns, opts.calibration);
     if (warn) violations.push(warn);

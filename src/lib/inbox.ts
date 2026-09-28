@@ -21,7 +21,11 @@ import { MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "
 import { appendLedger } from "./ledger.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
-import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
+import { buildPlanPrBody, buildPlanPrCommitMessage, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
+import { fileURLToPath } from "node:url";
+import { readInstanceRegistryText } from "./instance-mode.js";
+import { parseInstanceRegistry } from "./instance-registry.js";
+import { loadManagedRepos } from "./managed-repos.js";
 import { workerLedgerFields, type WorkerResult } from "./worker.js";
 import type { InterpretReplyResult } from "./reply-interpreter.js";
 import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument } from "yaml";
@@ -1595,9 +1599,30 @@ export type DraftRungOutcome =
 // impl-FU: re-exported from lib/relint.ts so triage, plan and inbox share ONE bound.
 export const MAX_DRAFT_LINT_ATTEMPTS = MAX_RELINT_ATTEMPTS;
 
+/** W1-T4700: the names a task's `repo:` may carry — every fleet-registry instance, the managed set, and `none`
+ *  (status.ts's no-repo sentinel). `undefined` on an unreadable registry, which leaves the repo rule silent. */
+export function knownPlanRepos(repoRoot: string): ReadonlySet<string> | undefined {
+  const text = readInstanceRegistryText(repoRoot);
+  if (text === undefined) return undefined;
+  try {
+    const names = parseInstanceRegistry(text).instances.map((i) => i.repo.slice(i.repo.indexOf("/") + 1));
+    return new Set(["none", ...names, ...loadManagedRepos(repoRoot).map((r) => r.repo)]);
+  } catch {
+    // Deliberate skip: a malformed registry or managed-repos file names no repos, so the rule refuses none.
+    return undefined;
+  }
+}
+
+const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+
 /** Lint a drafted fragment exactly as `rmd lint-plan` would. A fragment that does not parse is itself one block
  *  violation, so it drives a redraft rather than being cached as NOT-READY. */
-export function lintDraftedFragment(fragmentYaml: string, proposalId: string, stampLine?: string): DraftLintViolation[] {
+export function lintDraftedFragment(
+  fragmentYaml: string,
+  proposalId: string,
+  stampLine?: string,
+  knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(HARNESS_ROOT),
+): DraftLintViolation[] {
   let tasks;
   try {
     tasks = parseTasksFromYaml(fragmentYaml, `inbox draft ${proposalId}`);
@@ -1605,7 +1630,7 @@ export function lintDraftedFragment(fragmentYaml: string, proposalId: string, st
     return [{ check: "draft-parse", severity: "block", message: `fragment failed to parse — fix before re-emitting: ${String((e as Error)?.message ?? e)}` }];
   }
   const violations: DraftLintViolation[] = [];
-  for (const task of tasks) violations.push(...filingBlockers(lintTask(task).violations, undefined, true));
+  for (const task of tasks) violations.push(...filingBlockers(lintTask(task, { knownRepos }).violations, undefined, true));
   if (stampLine !== undefined) violations.push(...stampLineViolations(proposalId, stampLine, tasks.map((t) => t.id)));
   return violations;
 }
@@ -2827,6 +2852,64 @@ export function writeRatificationShards(
   fs.mkdirSync(joinPath(worktreePath, "plan", "tasks.d"), { recursive: true });
   for (const file of shards.files) fs.writeFileSync(joinPath(worktreePath, file.relPath), file.contents, "utf8");
   return shards.files.map((f) => f.relPath);
+}
+
+/** W1-T4700: `rmd approve` refused a materialized fragment that fails the draft linter WITH its stamp. */
+export class RatificationDraftRefusedError extends RmdError {
+  constructor(proposalId: string, violations: readonly string[]) {
+    super("plan", 1, `rmd approve: refusing to file ${proposalId} — ${violations.join("; ")}`, { proposalId, violations });
+    this.name = "RatificationDraftRefusedError";
+  }
+}
+
+/** Throws {@link RatificationDraftRefusedError} unless the fragment, as {@link writeRatificationShards} would repair
+ *  it, lints clean WITH its stamp. #7608 filed `repo: master-plan` shards with a `verify` object and no criteria. */
+export function assertRatificationDraftFileable(
+  fragmentYaml: string,
+  proposalId: string,
+  stampLine: string,
+  knownRepos: ReadonlySet<string> | undefined,
+): void {
+  const relinted = relintRatificationFragment(fragmentYaml, proposalId);
+  const linted = lintDraftedFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId, stampLine, knownRepos);
+  const violations = linted.map((v) => `[${v.check}] ${v.message}`);
+  if (!relinted.ok && violations.length === 0) violations.push(relinted.reason);
+  if (violations.length > 0) throw new RatificationDraftRefusedError(proposalId, violations);
+}
+
+/** Check, then write the shards and the stamp. Returns exactly the paths changed: MASTER-PLAN.md only when the
+ *  stamp replaced a bullet, which the PR body's Changed files once named regardless. */
+export function fileRatificationDraft(
+  worktreePath: string,
+  payload: { fragmentYaml: string; proposalId: string; stampLine: string },
+  fs: ShardWriteFs & { readFileSync: (path: string, enc: "utf8") => string },
+  joinPath: (...parts: string[]) => string,
+  knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(worktreePath),
+): string[] {
+  assertRatificationDraftFileable(payload.fragmentYaml, payload.proposalId, payload.stampLine, knownRepos);
+  const written = writeRatificationShards(worktreePath, payload.fragmentYaml, payload.proposalId, fs, joinPath);
+  const masterPlanPath = joinPath(worktreePath, "MASTER-PLAN.md");
+  const before = fs.readFileSync(masterPlanPath, "utf8");
+  const after = applyStampToMasterPlan(before, payload.proposalId, payload.stampLine);
+  if (after === before) return written;
+  fs.writeFileSync(masterPlanPath, after, "utf8");
+  return [...written, "MASTER-PLAN.md"];
+}
+
+/** The ratify PR body: the stamp, then Changed files and criteria over `writtenPaths` — never over the draft. */
+export function ratificationPrBody(
+  stampLine: string,
+  filedIds: readonly string[],
+  writtenPaths: readonly string[],
+  opts: Pick<PlanPrBodyOpts, "proofCwd" | "proofCheck" | "baseRef"> = {},
+): string {
+  const intro = [
+    stampLine,
+    "",
+    "The operator's one-bit approve initiated this PR (MASTER-PLAN P25 ii, W1-T111). The",
+    "gate still reviews (ci + remudero-review); nothing auto-merges without it.",
+  ].join("\n");
+  return buildPlanPrBody({ intro, criteria: filingAcceptanceCriteria([...filedIds], [...writtenPaths]), changedFiles: [...writtenPaths], ...opts });
 }
 
 /** W1-T4338: write an approved skill draft's SKILL.md, verbatim, at its one path under `worktreePath`. Returns that

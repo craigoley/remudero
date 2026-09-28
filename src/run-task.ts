@@ -752,6 +752,10 @@ import {
   type ReframeResult,
   type SkillLifecycleAction,
   writeRatificationShards,
+  fileRatificationDraft,
+  assertRatificationDraftFileable,
+  knownPlanRepos,
+  ratificationPrBody,
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
 import {
@@ -25161,6 +25165,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       releasedIdsForAdmission = new Set<string>();
     }
   }
+  const knownRepos = knownPlanRepos(checkoutRoot); // W1-T4700: the repo rule's names, read once per pass
   for (const task of plan.tasks) {
     if (scope && !scope.has(task.id)) continue;
     if (wholePlanScope && !wholePlanScope.has(task.id)) continue;
@@ -25231,6 +25236,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
     // is pure — so the predicate is supplied here, the one place holding a real checkout to ask.
     opts.moduleExists = (rel: string) => existsSync(join(checkoutRoot, rel));
+    opts.knownRepos = knownRepos;
     // W1-T497: the reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to this
     // checkout, wired ONLY in --base mode (`scope` is populated iff `baseRef` was given). It
     // shells out per proof — measured ~207ms/proof over the full corpus — so wiring it into the
@@ -25306,7 +25312,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     if (scope && planOnlyFilingDiff === true) {
       const baseTask = oldById?.get(task.id);
       const baseViolations: LintViolation[] | undefined = baseTask
-        ? lintTask(baseTask, { moduleExists: opts.moduleExists }).violations
+        ? lintTask(baseTask, { moduleExists: opts.moduleExists, knownRepos }).violations
         : undefined;
       lintViolations = promoteIntroducedPlanOnlyDiagnostics(
         lintViolations,
@@ -44377,17 +44383,15 @@ export async function approveCommand(
     }
     log("approve.id_materialized", { proposal_id: payload.proposalId, ids: materialized.ids });
 
-    // ONE SHARD PER DRAFTED TASK, NEVER AN APPEND TO THE MONOLITH. `lint-plan`'s
-    // `monolith-filing` rule refuses a NEW id filed into plan/tasks.yaml in as many words, and
-    // this was the last write site still doing it. It had never met the gate: no proposal had
-    // ever been ratified (0 `ratify.approved` rows before 2026-08-29), so the first successful
-    // approve came back `lint-plan failure` on its own filing and all 17 READY proposals would
-    // have failed identically. `applyFragmentToPlanYaml` (lib/inbox.ts) stays exported and
-    // tested — it is still the monolith composer — but this path no longer reaches it.
-    shardRelPaths = writeRatificationShards(worktreePath, materialized.fragmentYaml, payload.proposalId, { mkdirSync, writeFileSync }, join);
+    // ONE SHARD PER DRAFTED TASK, never a monolith append (`monolith-filing`). W1-T4700: re-linted
+    // WITH the stamp first, refusing before any write; returns only the paths it changed.
+    shardRelPaths = fileRatificationDraft(
+      worktreePath,
+      { fragmentYaml: materialized.fragmentYaml, proposalId: payload.proposalId, stampLine: materialized.stampLine },
+      { mkdirSync, writeFileSync, readFileSync },
+      join,
+    );
     log("approve.shards_written", { proposal_id: payload.proposalId, paths: shardRelPaths });
-    const masterPlanPath = join(worktreePath, "MASTER-PLAN.md");
-    writeFileSync(masterPlanPath, applyStampToMasterPlan(readFileSync(masterPlanPath, "utf8"), payload.proposalId, materialized.stampLine), "utf8");
 
     // materialized.fragmentYaml carries only REAL ids now (materializeDraftTaskIds already
     // rewrote every placeholder) — same per-line `- id: <id>` regex the pre-W1-T311 code used,
@@ -44407,7 +44411,7 @@ export async function approveCommand(
       deps.overlap,
     );
 
-    execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
+    execFileSync("git", ["-C", worktreePath, "add", "--", ...shardRelPaths], { stdio: "inherit" });
     execFileSync("git", ["-C", worktreePath, "commit", "-m", approveCommitMessage(payload)], { stdio: "inherit" });
   };
   const gateway: RatifyGateway = deps.gateway ?? {
@@ -44534,29 +44538,10 @@ export async function approveCommand(
           base: "main",
         }).prUrl;
       }
-      const intro = [
-        classification.draft?.stampLine ?? "",
-        "",
-        "The operator's one-bit approve initiated this PR (MASTER-PLAN P25 ii, W1-T111). The",
-        "gate still reviews (ci + remudero-review); nothing auto-merges without it.",
-      ].join("\n");
-      // W1-T136 (#387 class): a real, rendered, ALWAYS-judgeable Acceptance block — the #387
-      // bug was opening this PR with NO Acceptance section, which fails remudero-review
-      // CLOSED. This is a plan-FILING PR (it introduces filedTaskIds, doesn't implement
-      // them), so the criteria are about the filing itself (filingAcceptanceCriteria), and
-      // NO Remudero-Task trailer is emitted (the correctness rule, lib/plan-pr-emitter.ts).
+      // W1-T136 (#387 class): an ALWAYS-judgeable Acceptance block about the filing itself, and
+      // NO Remudero-Task trailer. W1-T4700: Changed files are the paths the commit wrote.
       const ids = filedTaskIds.length > 0 ? filedTaskIds : [id];
-      // W1-T2550: the SAME path list `filingAcceptanceCriteria` already names as its filing
-      // evidence, now ALSO handed to `changedFiles` so `buildPlanPrBody` emits the rendered
-      // `## Changed files` block (renderChangedFilesBlock, W1-T2535) instead of leaving it
-      // defined-but-never-called. One local so the two arguments can never drift apart.
-      const filedPaths = [...shardRelPaths, "MASTER-PLAN.md"];
-      const body = buildPlanPrBody({
-        intro,
-        criteria: filingAcceptanceCriteria(ids, filedPaths),
-        changedFiles: filedPaths,
-        proofCwd: worktreePath,
-      });
+      const body = ratificationPrBody(classification.draft?.stampLine ?? "", ids, shardRelPaths, { proofCwd: worktreePath });
       assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
       // W1-T903 design (i): REST, not `gh pr create` (GraphQL) — a pure transport swap, since
       // title/body are already fully authored above (no `--fill` autofill to replace).
@@ -44877,6 +44862,7 @@ async function approveBatchCommand(
           throw new Error(`rmd approve: refusing to materialize task id(s) for ${payload.proposalId} — ${materialized.reason}`);
         }
         log("approve.id_materialized", { proposal_id: payload.proposalId, ids: materialized.ids });
+        assertRatificationDraftFileable(materialized.fragmentYaml, payload.proposalId, materialized.stampLine, knownPlanRepos(worktreePath));
         const shardRelPaths = writeRatificationShards(worktreePath, materialized.fragmentYaml, payload.proposalId, { mkdirSync, writeFileSync }, join);
         log("approve.shards_written", { proposal_id: payload.proposalId, paths: shardRelPaths });
         allShardRelPaths.push(...shardRelPaths);
@@ -44888,13 +44874,14 @@ async function approveBatchCommand(
       // whole reason a batch cannot hit the EOF-append conflict that sinks N parallel
       // single-approve branches (see lib/inbox.ts's W1-T2471 section header).
       const masterPlanPath = join(worktreePath, "MASTER-PLAN.md");
-      const foldedMasterPlan = payloads.reduce(
-        (md, p) => applyStampToMasterPlan(md, p.proposalId, p.stampLine),
-        readFileSync(masterPlanPath, "utf8"),
-      );
-      writeFileSync(masterPlanPath, foldedMasterPlan, "utf8");
+      const baseMasterPlan = readFileSync(masterPlanPath, "utf8");
+      const foldedMasterPlan = payloads.reduce((md, p) => applyStampToMasterPlan(md, p.proposalId, p.stampLine), baseMasterPlan);
+      if (foldedMasterPlan !== baseMasterPlan) {
+        writeFileSync(masterPlanPath, foldedMasterPlan, "utf8");
+        allShardRelPaths.push("MASTER-PLAN.md"); // W1-T4700: named only when the fold changed it
+      }
 
-      execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
+      execFileSync("git", ["-C", worktreePath, "add", "--", ...allShardRelPaths], { stdio: "inherit" });
       execFileSync("git", ["-C", worktreePath, "commit", "-m", approveBatchCommitMessage(payloads)], { stdio: "inherit" });
       gitPushRunBranch(worktreePath);
       return branch;
@@ -44910,7 +44897,7 @@ async function approveBatchCommand(
       // W1-T2550: same reasoning as the single-proposal openPlanPr above — one local list feeds
       // both the filing-acceptance evidence and the rendered changed-files block, so the batch
       // lane's PR body actually emits it too rather than only defining it.
-      const filedPaths = [...allShardRelPaths, "MASTER-PLAN.md"];
+      const filedPaths = allShardRelPaths;
       const body = buildPlanPrBody({
         intro,
         criteria: filingAcceptanceCriteria(filedIds, filedPaths),
