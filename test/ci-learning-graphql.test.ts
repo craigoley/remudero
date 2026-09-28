@@ -44,4 +44,13 @@ test("CI learning treats truncated or malformed GraphQL evidence as unreadable",
   assert.equal(collectCiFailureCorpus({ prs: [{ number: 8, commits }] }).status, "unreadable");
   await assert.rejects(readCiPrGraphql("acme", "repo", 8, async () => ({ errors: [{ message: "denied" }] })), /GraphQL errors/);
   await assert.rejects(readCiPrGraphql("acme", "repo", 8, async () => page("head", [], true, null)), /cursor unreadable/);
+  const unknownContext = await readCiPrGraphql("acme", "repo", 8, async () => page("head", [{ __typename: "UnexpectedGate" }]));
+  assert.equal(unknownContext[0]?.rollup, undefined, "an unknown gate cannot become a green rollup");
+  await assert.rejects(readCiPrGraphql("acme", "repo", 8, async () => ({ data: { repository: { pullRequest: {} } } })),
+    /commit page unreadable/, "a missing connection is not an empty successful PR");
+  await assert.rejects(readCiPrGraphql("acme", "repo", 8, async () => ({ data: { repository: { pullRequest: {
+    commits: { nodes: {}, pageInfo: { hasNextPage: false } },
+  } } } })), /commit page unreadable/, "a non-list commit page is unreadable");
+  await assert.rejects(readCiPrGraphql("acme", "repo", 8, async () => page("", [])),
+    /commit SHA unreadable/, "an empty SHA cannot identify a repair commit");
 });
