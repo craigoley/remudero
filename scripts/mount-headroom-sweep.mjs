@@ -211,7 +211,9 @@ export function computeClassSweep(runs) {
   }
   const out = [];
   for (const [taskClass, rs] of byClass) {
-    const settled = rs.filter(isSettled);
+    // W1-T4711: a `neverWorked` run (thrown, refused, backfilled) is no sample of its class.
+    const settled = rs.filter((r) => isSettled(r) && !r.neverWorked);
+    const excludedCount = rs.filter((r) => isSettled(r) && r.neverWorked).length;
     const turns = settled.map((r) => r.numTurns);
     const costs = settled.map((r) => r.costUsd);
     const passing = settled.filter((r) => r.verdict === PASSING_VERDICT).length;
@@ -233,6 +235,7 @@ export function computeClassSweep(runs) {
       totalSettledCostUsd,
       distinctSettledTasks,
       costPerCompletedTaskUsd: distinctSettledTasks === 0 ? null : round2(totalSettledCostUsd / distinctSettledTasks),
+      ...(excludedCount > 0 ? { excludedCount } : {}),
     });
   }
   out.sort((a, b) => (a.taskClass < b.taskClass ? -1 : a.taskClass > b.taskClass ? 1 : 0));
