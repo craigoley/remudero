@@ -27,6 +27,7 @@ import {
   resolveCatalogueCapability,
 } from "../src/lib/action-executor.js";
 import { buildOperatorAgentRoutes, OPERATOR_AGENT_ACTION_RECEIPT_STEP, OPERATOR_AGENT_ACTION_STEP } from "../src/lib/operator-agent.js";
+import { buildPrActionRoute } from "../src/lib/panel-actions.js";
 
 const WRITE_TOKEN = "executor-write-token";
 const NOW_MS = Date.parse("2026-09-28T11:00:00.000Z");
@@ -271,6 +272,24 @@ test("W1-T4657: a switched-off pr-action is refused with that reason and leaves 
   });
   assert.ok(existsSync(prActionFilePath(fx.root, "review", 42)));
   assert.equal(stepRows(fx.ledgerPath, "console.pr_action_requested").length, 1);
+});
+
+test("W1-T4657: POST /v1/pr-actions refuses a switched-off action through the same armPrAction the executor reuses", async () => {
+  const fx = fixture();
+  const off = prActionSwitchOffPath(fx.root, "fix");
+  mkdirSync(join(off, ".."), { recursive: true });
+  writeFileSync(off, "");
+  const server = createService({ tokens: { read: "r", write: WRITE_TOKEN }, routes: [buildPrActionRoute(fx)] });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const res = await post(`http://127.0.0.1:${(server.address() as AddressInfo).port}`, "/v1/pr-actions", { action: "fix", prNumber: 9 });
+    assert.equal(res.status, 409);
+    assert.deepEqual(res.body, { error: "switched_off", detail: "console fix requests are switched off on this daemon (state/CONSOLE_PR_ACTION_OFF-fix)" });
+  } finally {
+    server.close();
+  }
+  assert.deepEqual(stepRows(fx.ledgerPath, "console.pr_action_switched_off").map((row) => [row.action, row.pr_number, row.task_id]), [["fix", 9, "PR-9"]]);
+  assert.equal(existsSync(prActionFilePath(fx.root, "fix", 9)), false);
 });
 
 test("W1-T4657: a pr-action switched off after admission completes failed, citing the switched-off row", () => {
