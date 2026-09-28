@@ -1,0 +1,35 @@
+- id: W1-T4664
+  title: "A RETRO THAT FAILS PREPUBLISH RE-FIRES EVERY POLL — the marker only advances on publish, so a failing validation left the merge count over threshold and the daemon started a fresh 379-suite Opus retro about every 50 minutes (24 of 37 retros 2026-09-25..28); back off after a failed attempt until new merges or a growing interval justify another"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: recommended follow-ups 1-6 and 8 — automated flow, no stuck PRs, no false alarms"
+  plan_refs: [W1-T4466]
+  files: [src/lib/retro.ts, src/lib/daemon.ts, test/a-retro-that-cannot-publish-backs-off.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-28: 39 retro_triggered rows 2026-09-25..28; 24 of 37 daemon.retro_subprocess.terminal rows end "prepublish
+    validation failed … marker unchanged", 2 more after one attempt. 52 of 83 retro.preflight_failed rows name one host-dependent
+    test (fixed separately by the entrypoint-boot credential scrub). Each failed attempt runs about 11 minutes of prepublish per
+    attempt on claude-opus-5-5. Because saveMarker only runs after publish, mergesSinceMarker stays over the retro threshold and
+    evaluateRetroTrigger fires again on the next poll after the in-memory in-flight guard clears.
+  design: |
+    (i) A retro that ends without publishing records its attempt (merge count seen, when, why) in state the trigger reads.
+    (ii) TIERED, NO FIXED CEILING: the next trigger after a failed attempt requires either a further threshold's worth of merges
+    since that attempt, or a delay that doubles with each consecutive failed attempt; a published retro resets both.
+    (iii) Ledger the back-off decision (daemon.retro_trigger.backoff with the streak and the next eligible time), so a stuck
+    retro is visible rather than silent.
+  acceptance:
+    - claim: "a retro that failed prepublish does not re-fire on the next poll"
+      proof: 'grep: test("W1-T4664: a retro that failed prepublish does not re-fire on the next poll" in test/a-retro-that-cannot-publish-backs-off.test.ts'
+    - claim: "a published retro resets the back-off"
+      proof: 'grep: test("W1-T4664: a published retro resets the back-off" in test/a-retro-that-cannot-publish-backs-off.test.ts'
+  falsifier: |
+    Ignore the recorded failed attempt and the first test sees the trigger fire again.
