@@ -1069,6 +1069,7 @@ function closeSupersededEscalations(e: Escalation, prRef: string, open: OpenIssu
         deps.issues.closeWithComment(issue.url, comment);
         delivered = true;
       } catch (err) {
+        // CANNOT-OBSERVE MEANS WAIT: never rethrown — the ledger row below carries this as `failure`.
         failure = String((err as Error)?.message ?? err);
       }
     }
