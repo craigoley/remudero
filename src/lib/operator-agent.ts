@@ -135,6 +135,7 @@ import {
   type IntentPlanLinkedAction,
   type IntentPlanState,
 } from "./intent-plan.js";
+import { goalEvidenceReader, planStepsForGoal, withPlannedSteps, type GoalBoardView } from "./intent-planner.js";
 import {
   checkEmergencyStop,
   clearEmergencyStop,
@@ -472,6 +473,7 @@ export interface OperatorAgentPromotionHistory extends PromotionRecord {
 export type OperatorAgentRouteDependencies = Pick<PanelActionDeps, "ledgerPath"> & Partial<Pick<PanelActionDeps, "root">> & {
   now?: () => number;
   memory?: OperatorAgentMemorySource;
+  goalBoard?: () => GoalBoardView | undefined;
 };
 
 type ProposalRegistrationInput = { proposal: OperatorAgentProposal };
@@ -3737,6 +3739,12 @@ export function readIntentPlanStates(deps: OperatorAgentRouteDependencies): Inte
   return foldIntentPlans(readOperatorAgentUnion(dirname(deps.ledgerPath), { step: [INTENT_PLAN_LEDGER_STEP, INTENT_PLAN_EVENT_LEDGER_STEP] }).rows);
 }
 
+function proposedRequestDigest(deps: OperatorAgentRouteDependencies, state: IntentPlanState): string {
+  const rows = readOperatorAgentUnion(dirname(deps.ledgerPath), { step: [INTENT_PLAN_LEDGER_STEP, INTENT_PLAN_EVENT_LEDGER_STEP] }).rows;
+  const row = rows.find((item) => item.step === INTENT_PLAN_LEDGER_STEP && item.plan_id === state.plan.planId);
+  return typeof row?.request_digest === "string" ? row.request_digest : state.plan.inputDigest;
+}
+
 function planLinkedActions(deps: OperatorAgentRouteDependencies, state: IntentPlanState): IntentPlanLinkedAction[] {
   const ids = new Set(state.events.flatMap((event) => (event.kind === "confirm" ? event.actionIds : [])));
   return ids.size === 0 ? [] : readOperatorAgentActions(deps).filter((history) => ids.has(history.action.actionId));
@@ -3766,16 +3774,17 @@ export function buildOperatorAgentIntentPlanProposeRoute(deps: OperatorAgentRout
     scope: "write",
     tier: "low",
     handler: jsonAction(
-      (body) => (isRecord(body) ? { body } : { error: "body must be a JSON object" }),
+      (body): { error: string } | { body: Record<string, unknown> } => (isRecord(body) ? { body } : { error: "body must be a JSON object" }),
       (input, req, res) => {
         const proposedBy = bearerTokenId(req);
-        const built = buildIntentPlan(input.body, { clock: clockFromMillisFn(deps.now), proposedBy });
-        if (!built.ok) {
-          sendJson(res, 400, { error: "invalid_request", detail: `${built.code}: ${built.reason}`, code: built.code, field: built.field });
+        const clock = clockFromMillisFn(deps.now);
+        const raw = buildIntentPlan(input.body, { clock, proposedBy });
+        if (!raw.ok) {
+          sendJson(res, 400, { error: "invalid_request", detail: `${raw.code}: ${raw.reason}`, code: raw.code, field: raw.field });
           return;
         }
-        const existing = readIntentPlanStates(deps).find((state) => state.plan.planId === built.plan.planId);
-        if (existing && existing.plan.inputDigest !== built.plan.inputDigest) {
+        const existing = readIntentPlanStates(deps).find((state) => state.plan.planId === raw.plan.planId);
+        if (existing && proposedRequestDigest(deps, existing) !== raw.plan.inputDigest) {
           sendJson(res, 409, { error: "conflict", detail: `idempotencyKey already names plan ${existing.plan.planId} with a different request` });
           return;
         }
@@ -3783,8 +3792,13 @@ export function buildOperatorAgentIntentPlanProposeRoute(deps: OperatorAgentRout
           sendJson(res, 200, { ok: true, existing: true, ...projectPlan(deps, existing) });
           return;
         }
-        appendPanelLedger(deps.ledgerPath, INTENT_PLAN_LEDGER_STEP, built.plan.planId, proposedBy, { plan_id: built.plan.planId, input: input.body, created_at: built.plan.createdAt, proposed_by: proposedBy });
-        sendJson(res, 201, { ok: true, existing: false, ...projectPlan(deps, { plan: built.plan, events: [] }) });
+        const evidence = goalEvidenceReader({ board: deps.goalBoard, ...(deps.root ? { root: deps.root } : {}), clock });
+        const request = raw.plan.steps.length === 0 ? withPlannedSteps(input.body, raw.plan, planStepsForGoal(raw.plan, evidence, clock)) : input.body;
+        const planned = request === input.body ? raw : buildIntentPlan(request, { clock, proposedBy });
+        const [plan, stored] = planned.ok ? [planned.plan, request] : [raw.plan, input.body];
+        const digest = stored === input.body ? {} : { request_digest: raw.plan.inputDigest };
+        appendPanelLedger(deps.ledgerPath, INTENT_PLAN_LEDGER_STEP, plan.planId, proposedBy, { plan_id: plan.planId, input: stored, created_at: plan.createdAt, proposed_by: proposedBy, ...digest });
+        sendJson(res, 201, { ok: true, existing: false, ...projectPlan(deps, { plan, events: [] }) });
       },
     ),
   };
