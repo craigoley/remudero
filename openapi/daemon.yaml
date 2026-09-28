@@ -73,6 +73,46 @@ components:
         exactly POST /v1/incidents/events and falls through to 401 on every other route.
 
   schemas:
+    OperatorAgentAnswer:
+      type: object
+      description: Bounded read-only answer-v1; missing evidence is explicit and citations are dated.
+      required: [version, repository, instance, lens, coverage, answer, citations, missingSources, generatedAt]
+      properties:
+        version: { type: string, enum: [answer-v1] }
+        repository: { type: [string, "null"] }
+        instance: { type: string }
+        lens: { type: string, enum: [current-repository] }
+        coverage: { type: string, enum: [verified, partial, unavailable, unsupported] }
+        answer: { type: string, maxLength: 700 }
+        generatedAt: { type: string, format: date-time }
+        citations:
+          type: array
+          maxItems: 4
+          items:
+            type: object
+            required: [sourceId, observedAt, freshness, label, value]
+            properties:
+              sourceId: { type: string }
+              observedAt: { type: string, format: date-time }
+              freshness: { type: string, enum: [verified, stale] }
+              label: { type: string }
+              value: { type: string }
+        missingSources:
+          type: array
+          items:
+            type: object
+            required: [sourceId, reason]
+            properties:
+              sourceId: { type: string }
+              reason: { type: string }
+    InstanceUnavailable:
+      type: object
+      required: [error, status, instance, reason]
+      properties:
+        error: { type: string, enum: [instance_unavailable] }
+        status: { type: string, enum: [unavailable] }
+        instance: { type: string }
+        reason: { type: string }
     Error:
       type: object
       description: >
@@ -8948,6 +8988,51 @@ paths:
               schema:
                 $ref: "#/components/schemas/ContextExportResult"
 
+  /v1/i/{instance}/operator-agent/ask:
+    post:
+      summary: Read-only answer-v1 for the selected registered instance's own repository.
+      description: >
+        Uses only the server-owned registry identity and that instance's independently refreshed
+        state-root ledger projection and inbox thread store. The request cannot select a different
+        repository or instance. A missing or unreadable evidence source is reported as unavailable;
+        this route never performs an action or writes an operator decision.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [question]
+              properties:
+                question: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        "200":
+          description: The answer-v1 envelope documented by the unprefixed core route below.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentAnswer"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: The registered instance's state or plan is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceUnavailable"
+
   /v1/operator-agent/ask:
     post:
       summary: Read-only, evidence-cited answer-v1 for this serving instance's repository.
@@ -8977,48 +9062,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required: [version, repository, instance, lens, coverage, answer, citations, missingSources, generatedAt]
-                properties:
-                  version:
-                    type: string
-                    enum: [answer-v1]
-                  repository:
-                    type: [string, "null"]
-                  instance:
-                    type: string
-                  lens:
-                    type: string
-                    enum: [current-repository]
-                  coverage:
-                    type: string
-                    enum: [verified, partial, unavailable, unsupported]
-                  answer:
-                    type: string
-                    maxLength: 700
-                  generatedAt:
-                    type: string
-                    format: date-time
-                  citations:
-                    type: array
-                    maxItems: 4
-                    items:
-                      type: object
-                      required: [sourceId, observedAt, freshness, label, value]
-                      properties:
-                        sourceId: { type: string }
-                        observedAt: { type: string, format: date-time }
-                        freshness: { type: string, enum: [verified, stale] }
-                        label: { type: string }
-                        value: { type: string }
-                  missingSources:
-                    type: array
-                    items:
-                      type: object
-                      required: [sourceId, reason]
-                      properties:
-                        sourceId: { type: string }
-                        reason: { type: string }
+                $ref: "#/components/schemas/OperatorAgentAnswer"
         "400":
           $ref: "#/components/responses/InvalidRequest"
         "401":

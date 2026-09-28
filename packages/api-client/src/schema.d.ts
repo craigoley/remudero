@@ -5,6 +5,33 @@
 
 export interface components {
   schemas: {
+    /** Bounded read-only answer-v1; missing evidence is explicit and citations are dated. */
+    OperatorAgentAnswer: {
+      version: "answer-v1";
+      repository: string | null;
+      instance: string;
+      lens: "current-repository";
+      coverage: "verified" | "partial" | "unavailable" | "unsupported";
+      answer: string;
+      generatedAt: string;
+      citations: ({
+        sourceId: string;
+        observedAt: string;
+        freshness: "verified" | "stale";
+        label: string;
+        value: string;
+      })[];
+      missingSources: ({
+        sourceId: string;
+        reason: string;
+      })[];
+    };
+    InstanceUnavailable: {
+      error: "instance_unavailable";
+      status: "unavailable";
+      instance: string;
+      reason: string;
+    };
     /** The JSON error envelope every non-2xx response on the surface returns (src/lib/service.ts's `sendJson` error paths). */
     Error: {
       /** `unauthorized` (401, no/unrecognized bearer token), `forbidden` (403, recognized token missing the required scope), `not_found` (404, no route registered for this method + path), `invalid_request` (400, a write route's JSON body failed validation -- W3-T5's panel-action routes fail loud BEFORE any side effect, src/lib/panel-actions.ts's `jsonAction`), or `internal_error` (500, the route handler threw). */
@@ -3191,29 +3218,21 @@ export interface paths {
         };
     };
   };
+  "/v1/i/{instance}/operator-agent/ask": {
+    post: {
+      responses: {
+          "200": OperatorAgentAnswer;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "503": InstanceUnavailable;
+        };
+    };
+  };
   "/v1/operator-agent/ask": {
     post: {
       responses: {
-          "200": {
-            version: "answer-v1";
-            repository: string | null;
-            instance: string;
-            lens: "current-repository";
-            coverage: "verified" | "partial" | "unavailable" | "unsupported";
-            answer: string;
-            generatedAt: string;
-            citations: ({
-              sourceId: string;
-              observedAt: string;
-              freshness: "verified" | "stale";
-              label: string;
-              value: string;
-            })[];
-            missingSources: ({
-              sourceId: string;
-              reason: string;
-            })[];
-          };
+          "200": OperatorAgentAnswer;
           "400": Error;
           "401": Error;
           "403": Error;
