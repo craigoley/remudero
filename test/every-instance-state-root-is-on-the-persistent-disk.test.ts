@@ -163,9 +163,14 @@ test("every instance state root resolves to the persistent data disk", async (t)
     writeStubs(host);
     const r = run(host, registry, ["--check-state-roots"]);
     assert.equal(r.status, 1, r.out);
-    const failing = r.out.split("\n").filter((l) => /NOT on the persistent data disk/.test(l));
-    assert.ok(failing.some((l) => l.includes("site") && l.includes(site) && l.includes(OS_DISK)), r.out);
-    assert.ok(!failing.some((l) => /\bcore\b|\bconsole\b/.test(l)), `only site may be named as failing:\n${r.out}`);
+    // Match the emitted instance label, not words in the scratch path (which may itself contain
+    // "/core/"). The overall summary also repeats the failure phrase without an instance label.
+    const failing = r.out.split("\n").flatMap((line) => {
+      const match = /^\s+(core|site|console)\s+.*NOT on the persistent data disk/.exec(line);
+      return match ? [{ name: match[1], line }] : [];
+    });
+    assert.deepEqual(failing.map((row) => row.name), ["site"], `only site may be named as failing:\n${r.out}`);
+    assert.ok(failing[0]!.line.includes(site) && failing[0]!.line.includes(OS_DISK), r.out);
     assert.match(r.out, /^\s*core\s.*ok/m);
     assert.match(r.out, /^\s*console\s.*ok/m);
   });

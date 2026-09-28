@@ -23,6 +23,7 @@
  */
 
 import { ghExec, splitGhHeaderBlock } from "./github-transport.js";
+import { parseInstallationRepositoryListing } from "./onboarding-repository-listing.js";
 
 // ── The report shape ────────────────────────────────────────────────────────────────────────
 
@@ -72,8 +73,8 @@ export interface OnboardingReadinessApiRead {
 }
 
 export interface OnboardingReadinessGateway {
-  /** `GET /installation/repositories` (first page) — the repos the Fleet App's installation can
-   *  see, as `owner/name`. `undefined` on a failed/unreadable read. */
+  /** Complete paginated `GET /installation/repositories` — the repos the Fleet App's installation
+   *  can see, as `owner/name`. `undefined` on a failed, malformed, or incomplete read. */
   listInstallationRepos(): string[] | undefined;
   /** `GET /repos/{owner}/{repo}`. */
   getRepo(owner: string, repo: string): OnboardingReadinessApiRead | undefined;
@@ -84,8 +85,9 @@ export interface OnboardingReadinessGateway {
   getContents(owner: string, repo: string, path: string): OnboardingReadinessApiRead | undefined;
 }
 
-/** DETECTION ONLY, mirroring `github-posture.ts`'s own module header: every call below is a bare
- *  `gh api <path> -i` GET — no `-X`/`--method`/`-f`/`-F`/`--input` flag is ever passed. */
+/** DETECTION ONLY, mirroring `github-posture.ts`'s own module header: metadata reads are bare
+ *  `gh api <path> -i` GETs; the installation listing adds `--paginate --jq` to read every page.
+ *  No call passes `-X`/`--method`/`-f`/`-F`/`--input` or writes to GitHub. */
 export function onboardingReadinessGateway(execFileFn: (args: string[]) => string = defaultExec): OnboardingReadinessGateway {
   function apiRead(path: string): OnboardingReadinessApiRead | undefined {
     try {
@@ -108,14 +110,13 @@ export function onboardingReadinessGateway(execFileFn: (args: string[]) => strin
   }
   return {
     listInstallationRepos: () => {
-      // First page only, at GitHub's 100-repo maximum (the default page is 30).
-      const read = apiRead("installation/repositories?per_page=100");
-      if (read === undefined || read.status !== 200) return undefined;
-      const repositories = (read.body as { repositories?: unknown } | undefined)?.repositories;
-      if (!Array.isArray(repositories)) return undefined;
-      return repositories
-        .map((r) => (r as { full_name?: unknown } | null)?.full_name)
-        .filter((n): n is string => typeof n === "string");
+      try {
+        const raw = execFileFn(["api", "installation/repositories?per_page=100", "--paginate", "--jq", ".total_count, .repositories[].full_name"]);
+        return parseInstallationRepositoryListing(raw) ?? undefined;
+      } catch {
+        // A failed installation list cannot prove absence; report this check as unknown.
+        return undefined;
+      }
     },
     getRepo: (owner, repo) => apiRead(`repos/${owner}/${repo}`),
     getBranchProtection: (owner, repo, branch) => apiRead(`repos/${owner}/${repo}/branches/${branch}/protection`),

@@ -8,7 +8,7 @@ const SCRIPT = join(ROOT, "scripts", "proof-discrimination-gate.mjs");
 const gate = (await import(pathToFileURL(SCRIPT).href)) as {
   resolveMergeBase: (baseSha: string, headSha: string, options?: { root?: string; git?: (args: string[], root: string) => { status: number | null; stdout?: string; stderr?: string } }) => { ok: boolean; mergeBase?: string; message?: string };
   criteriaForReview: (body: string, headSha: string, options?: { root?: string }) => { criteria: Array<{ proof?: string }>; source: string };
-  runCheckProof: (proof: string, mergeBase: string, options?: { root?: string }) => { status: number | null; stdout: string; stderr: string; error?: string };
+  runCheckProof: (proof: string, mergeBase: string, options?: { root?: string; spawn?: (file: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => { status: number; stdout: string; stderr: string } }) => { status: number | null; stdout: string; stderr: string; error?: string };
   evaluateProofDiscrimination: (criteria: Array<{ proof?: string }>, mergeBase: string, runProof: (proof: string, base: string) => { status: number | null; stdout: string; stderr?: string; error?: string }) => { stale: Array<{ proof: string; head: string; base: string }>; unreadable: unknown[]; executed: number };
   main: (argv: string[], deps?: Record<string, unknown>) => number;
 };
@@ -75,6 +75,21 @@ test("the public check-proof command reports a real head/base parity through the
   const result = gate.runCheckProof("grep: parseAcceptanceBlock in src/lib/review.ts", "HEAD", { root: ROOT });
   assert.equal(result.status, 5, result.stdout + result.stderr);
   assert.match(result.stdout, /discrimination: executed_stale/);
+});
+
+test("the read-only proof subprocess keeps its pinned head when origin/main advances", () => {
+  const parentGuard = process.env.RMD_SELF_SYNC_DONE;
+  let childGuard: string | undefined;
+  const result = gate.runCheckProof("grep: parseAcceptanceBlock in src/lib/review.ts", "HEAD", {
+    root: ROOT,
+    spawn: (_file, _args, options) => {
+      childGuard = options.env?.RMD_SELF_SYNC_DONE;
+      return { status: 5, stdout: "discrimination: executed_stale", stderr: "" };
+    },
+  });
+  assert.equal(result.status, 5);
+  assert.equal(childGuard, "1", "the diagnostic must not self-sync a detached review head");
+  assert.equal(process.env.RMD_SELF_SYNC_DONE, parentGuard, "the caller's environment must remain untouched");
 });
 
 function logs() {
