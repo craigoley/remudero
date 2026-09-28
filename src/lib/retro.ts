@@ -4244,6 +4244,148 @@ export function checkRetroIntegrity(priorMergesSinceMarker: number, gatherShippe
   return { ok: true };
 }
 
+// ── W1-T4664: a retro that cannot publish backs off ────────────────────────
+//
+// A retro that FIRES but fails prepublish never advances the marker (by design — the runs it
+// read are still unconsumed), so `evaluateRetroTrigger` sees the same over-threshold count on
+// the very next poll: 24 of 37 retros 2026-09-25..28 re-fired inside the hour, each a full
+// 379-suite Opus attempt. A flat retry fence (state/last-retro-attempt.json, PR #7579) stops the
+// worst of it, but applies the SAME wait after the 1st failure and the 50th. This widens it to a
+// TIERED backoff with NO FIXED CEILING (the task's own design (ii)): the wait DOUBLES with each
+// consecutive failed attempt in the same marker cycle, and a further threshold's worth of merges
+// since that attempt opens an early exit independent of the clock. A published retro (the marker
+// moves) resets both — a fresh cycle earns a fresh, un-backed-off first attempt.
+
+/** One recorded automated-retro attempt — what {@link evaluateRetroBackoff} reads back to decide
+ *  whether a new attempt is due. `markerTs` is `null` (never `undefined`) for "no marker yet" so
+ *  it round-trips through JSON and a same-cycle comparison is exact. */
+export interface RetroAttemptRecord {
+  at: string;
+  markerTs: string | null;
+  /** `mergesSinceMarker` the trigger observed AT this attempt — the floor a LATER attempt's own
+   *  count must clear, by a further `mergesThreshold`, for design (ii)'s merges-based exit. */
+  mergesSinceMarker: number;
+  /** Consecutive failed attempts in this SAME marker cycle, this one included. 1 for a first-ever
+   *  attempt or the first attempt of a fresh cycle (the marker just moved). */
+  streak: number;
+}
+
+/** Policy-data (Rule 2) for {@link evaluateRetroBackoff} — the SAME `?? DEFAULT` override shape
+ *  every other retro-cadence policy in this file uses. */
+export interface RetroBackoffPolicy {
+  /** The 1st failure's wait, in ms — doubles per ADDITIONAL consecutive failure, no ceiling. */
+  baseDelayMs: number;
+  /** A further this-many-merges since the failed attempt also opens an early exit. */
+  mergesThreshold: number;
+}
+
+/** Policy-data default: matches the pre-existing flat fence's 6h wait exactly, so a single
+ *  failure behaves exactly as it always did — only a SECOND consecutive failure sees it grow. */
+export function defaultRetroBackoffPolicy(): RetroBackoffPolicy {
+  return { baseDelayMs: 6 * 60 * 60 * 1000, mergesThreshold: DEFAULT_RETRO_MERGES_THRESHOLD };
+}
+
+export type RetroBackoffDecision =
+  | { eligible: true }
+  | { eligible: false; streak: number; nextEligibleAt: string; mergesFloor: number };
+
+/** PURE (W1-T4664). Decide whether a new automated retro attempt is due, given the last recorded
+ *  attempt (if any) and the CURRENT `mergesSinceMarker`/`markerTs`/`now` the trigger is about to
+ *  evaluate. No prior attempt, or a prior attempt against a DIFFERENT `markerTs` (the marker
+ *  moved — a publish landed, resetting the cycle), is always eligible: design (ii)'s "a published
+ *  retro resets both." Otherwise the streak's DOUBLING delay or the merges floor — whichever
+ *  opens first — decides; this function adds no ceiling to either. */
+export function evaluateRetroBackoff(
+  lastAttempt: RetroAttemptRecord | undefined,
+  mergesSinceMarker: number,
+  markerTs: string | undefined,
+  now: Date,
+  policy: RetroBackoffPolicy = defaultRetroBackoffPolicy(),
+): RetroBackoffDecision {
+  if (lastAttempt === undefined || lastAttempt.markerTs !== (markerTs ?? null)) {
+    return { eligible: true };
+  }
+  const delayMs = policy.baseDelayMs * Math.pow(2, Math.max(0, lastAttempt.streak - 1));
+  const nextEligibleAtMs = Date.parse(lastAttempt.at) + delayMs;
+  const mergesFloor = lastAttempt.mergesSinceMarker + policy.mergesThreshold;
+  if (now.getTime() >= nextEligibleAtMs || mergesSinceMarker >= mergesFloor) {
+    return { eligible: true };
+  }
+  return {
+    eligible: false,
+    streak: lastAttempt.streak,
+    nextEligibleAt: new Date(nextEligibleAtMs).toISOString(),
+    mergesFloor,
+  };
+}
+
+/** PURE (W1-T4664). The record {@link evaluateRetroBackoff} should be given NEXT, for an attempt
+ *  starting at `at`. The streak continues (+1) inside the SAME marker cycle as `prior`; it resets
+ *  to 1 whenever the marker moved (a publish) or there is no prior record — design (ii)'s
+ *  "a published retro resets both," applied to the record a caller persists after this attempt. */
+export function nextRetroAttemptRecord(
+  prior: RetroAttemptRecord | undefined,
+  at: Date,
+  markerTs: string | undefined,
+  mergesSinceMarker: number,
+): RetroAttemptRecord {
+  const sameCycle = prior !== undefined && prior.markerTs === (markerTs ?? null);
+  return {
+    at: at.toISOString(),
+    markerTs: markerTs ?? null,
+    mergesSinceMarker,
+    streak: sameCycle ? prior!.streak + 1 : 1,
+  };
+}
+
+/** Load the last recorded automated-retro attempt. Absent, or damaged, both read as `undefined`
+ *  (permits a retry — the marker still guards a real double-publish; this is a soft backoff
+ *  fence, never a hard lock), mirroring {@link loadMarker}'s absent case but NOT its throw-on-
+ *  corrupt one, since a torn attempt record must never stall a retro that would otherwise fire. */
+export function loadRetroAttemptRecord(path: string): RetroAttemptRecord | undefined {
+  let raw: string;
+  try {
+    raw = fsMarker.readFileSync(path, "utf8");
+  } catch {
+    // Deliberately erased, not rethrown: ENOENT ("no attempt yet") and any other read failure
+    // both mean "nothing safely fences this tick" — a soft backoff fence must never itself
+    // become the reason a retro that would otherwise fire gets stuck.
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(raw) as Partial<RetroAttemptRecord> & { at?: unknown };
+    if (typeof parsed.at !== "string") return undefined;
+    return {
+      at: parsed.at,
+      markerTs: typeof parsed.markerTs === "string" ? parsed.markerTs : null,
+      mergesSinceMarker: typeof parsed.mergesSinceMarker === "number" ? parsed.mergesSinceMarker : 0,
+      streak: typeof parsed.streak === "number" && parsed.streak >= 1 ? parsed.streak : 1,
+    };
+  } catch {
+    // Same reasoning as the read above: a torn/damaged attempt record permits a retry rather
+    // than wedging the trigger forever on a file only this soft fence ever writes.
+    return undefined;
+  }
+}
+
+/** Save an attempt record as ONE atomic unit — same staged-temp-file-then-`renameSync` shape as
+ *  {@link saveMarker}, for the same reason: a plain write could be observed torn mid-write. */
+export function saveRetroAttemptRecord(path: string, record: RetroAttemptRecord): void {
+  fsMarker.mkdirSync(dirname(path), { recursive: true });
+  const tmpPath = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const buf = Buffer.from(JSON.stringify(record) + "\n", "utf8");
+  const fd = fsMarker.openSync(tmpPath, "w");
+  try {
+    const written = fsMarker.writeSync(fd, buf, 0, buf.length);
+    if (written !== buf.length) {
+      throw new Error(`short write staging ${tmpPath} for ${path} (${written}/${buf.length} bytes)`);
+    }
+  } finally {
+    fsMarker.closeSync(fd);
+  }
+  fsMarker.renameSync(tmpPath, path);
+}
+
 function round(n: number): number {
   return Math.round(n * 1000) / 1000;
 }
