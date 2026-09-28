@@ -17,8 +17,10 @@
     - src/lib/analytics-route.ts
     - src/lib/serve.ts
     - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
     - test/one-gateway-serves-every-instance.test.ts
     - test/instance-scoped-operator-answer.test.ts
+    - test/every-served-route-is-in-the-contract.test.ts
   status: queued
   attempts: 0
   rationale: |
