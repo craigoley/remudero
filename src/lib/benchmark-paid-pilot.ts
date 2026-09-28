@@ -23,7 +23,7 @@ import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-v
 import { fixedClock, systemClock } from "./clock.js";
 import { loadConfig } from "./config.js";
 import { buildEvalCard, normalQuantile, protocolHash as hashProtocolText, type EvalCard,
-  type EvalCardEvidence } from "./eval-card.js";
+  type EvalCardEvidence, type EvalCardTrial } from "./eval-card.js";
 import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
 import type { TaskCaseFile } from "./task-case-file.js";
 
@@ -741,6 +741,8 @@ export interface PaidPilotReport {
   /** True only once the stopping rule is met and the interval excludes zero; still private and unpublished. */
   winnerDeclared: boolean;
   evalCard: EvalCard | null;
+  /** The evidence `evalCard` was built from; its trial is {@link paidPilotEvalCardTrial} over the protocol. */
+  evalCardEvidence: EvalCardEvidence | null;
   followUps: { kind: "repair"; reason: string; action: string }[];
 }
 
@@ -759,7 +761,7 @@ function reportFrame(protocol: PaidPilotProtocol, nowIso: string, reason: string
     cells: [], sampleRatio: { exposed: { paid: 0, control: 0 }, exactBinomialPValue: null },
     uncertainty: { method: PAID_PILOT_UNCERTAINTY_METHOD, difference: { unavailable: reason } },
     stoppingRule: { rule: PAID_PILOT_STOPPING_RULE, met: false, analysisAt: protocol.analysisAt },
-    conclusion: { state: "no-conclusion", reason }, winnerDeclared: false, evalCard: null, followUps: [],
+    conclusion: { state: "no-conclusion", reason }, winnerDeclared: false, evalCard: null, evalCardEvidence: null, followUps: [],
   };
 }
 
@@ -775,6 +777,16 @@ function projectionUnavailable(input: PaidPilotReportInput): PaidPilotReport {
       sources: { ...prior.sources, unreadSources: input.evidence.unreadSources } };
   const frame = reportFrame(input.protocol, input.nowIso, reason);
   return { ...frame, paidArm, followUps, sources: { ...frame.sources, forms: input.evidence.forms, unreadSources: input.evidence.unreadSources } };
+}
+
+/** The pilot's eval-card trial, built from its persisted protocol alone. */
+export function paidPilotEvalCardTrial(protocol: PaidPilotProtocol): EvalCardTrial {
+  const classes = [...new Set(protocol.population.map((task) => task.taskClass))].sort();
+  return { trialId: protocol.pilotId, kind: "paid-pilot", protocolText: protocol.protocolText,
+    preRegisteredAt: protocol.activatedAt, registeredProtocolHash: protocol.protocolHash,
+    estimand: "intention-to-treat difference in verified completion, paid arm minus subscription control",
+    randomizationUnit: "task", propensity: protocol.assignment.method, plannedAllocation: protocol.assignment.plannedAllocation,
+    cells: ARMS.flatMap((arm) => classes.map((taskClass) => `${arm}|${taskClass}`)), aaReceipt: protocol.aaReceipt.reportHash };
 }
 
 /** Build the private pilot report. Pure over its input; the operator verb supplies the ledger, case files and prior. */
@@ -848,7 +860,6 @@ export function buildPaidPilotReport(input: PaidPilotReportInput): PaidPilotRepo
   const difference = ittDifference(paid, control);
   const decisive = !("unavailable" in difference) && (difference.low > 0 || difference.high < 0) && difference.pValue < 0.05;
   const exposedTotal = paid.exposedUnits + control.exposedUnits;
-  const classes = [...new Set(protocol.population.map((task) => task.taskClass))].sort();
   return {
     ...reportFrame(protocol, nowIso, ""), state: evidence.state, unavailableReason: null, lastGoodAt: nowIso,
     cash: { ceilingUsd: protocol.cash.ceilingUsd, spentEstimateUsd: spend.cashEstimateUsd,
@@ -868,11 +879,7 @@ export function buildPaidPilotReport(input: PaidPilotReportInput): PaidPilotRepo
       : decisive ? { state: "difference-observed", favors: difference.estimate > 0 ? "paid" : "control" }
       : { state: "inconclusive", reason: "no-decisive-difference" },
     winnerDeclared: met && decisive,
-    evalCard: buildEvalCard({ trialId: protocol.pilotId, kind: "paid-pilot", protocolText: protocol.protocolText,
-      preRegisteredAt: protocol.activatedAt, registeredProtocolHash: protocol.protocolHash,
-      estimand: "intention-to-treat difference in verified completion, paid arm minus subscription control",
-      randomizationUnit: "task", propensity: protocol.assignment.method, plannedAllocation: protocol.assignment.plannedAllocation,
-      cells: ARMS.flatMap((arm) => classes.map((taskClass) => `${arm}|${taskClass}`)), aaReceipt: protocol.aaReceipt.reportHash }, card),
+    evalCard: buildEvalCard(paidPilotEvalCardTrial(protocol), card), evalCardEvidence: card,
   };
 }
 

@@ -33,7 +33,7 @@
  * everywhere else in this codebase).
  */
 
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeSync } from "node:fs";
 import { createConnection } from "node:net";
 import { promises as fsPromises } from "node:fs";
 import { execFile, execFileSync } from "node:child_process";
@@ -70,6 +70,9 @@ import {
   INCIDENT_INGEST_ROUTE_PATH,
 } from "./incident-events.js";
 import { buildIncidentsRoute, type IncidentsRouteInput } from "./incident-lifecycle.js";
+import { BENCHMARK_AA_VERSION, TRIAL_ID_RE } from "./benchmark-aa.js";
+import { BENCHMARK_PAID_PILOT_VERSION, loadPaidPilotProtocol, paidPilotEvalCardTrial } from "./benchmark-paid-pilot.js";
+import { emptyEvalCardEvidence, parseEvalCardEvidence, parseEvalCardTrial, type EvalCardEvidence, type EvalCardTrial } from "./eval-card.js";
 import {
   ciIncidentEventLedgerLine,
   createCiIncidentState,
@@ -2435,6 +2438,93 @@ export function assertRoutesScopeComplete(entries: readonly { method?: Method; p
     throw new Error(`route(s) with no declared Scope: ${missing.join(", ")}`);
   }
 }
+/** W1-T4643 BACKSTOP: a trial file larger than this is refused unread, so no GET parses a runaway file. */
+export const EVAL_CARD_SOURCE_MAX_BYTES = 8 * 1024 * 1024;
+
+type EvalCardRead<T> = { ok: true; value: T } | { ok: false; reason: string };
+type TrialFile = { trialId: string; kind: "aa" | "paid-pilot"; role: "report" | "protocol"; path: string; size: number; mtimeMs: number };
+const PILOT_ROLES = [["protocol", ".protocol.json"], ["report", ".report.json"]] as const;
+
+/** The A/A reports and paid-pilot protocols and reports in `stateDir`: one readdir and one stat per match. */
+function listTrialFiles(stateDir: string): EvalCardRead<TrialFile[]> {
+  try {
+    const files: TrialFile[] = [];
+    for (const name of readdirSync(stateDir)) {
+      const pilot = PILOT_ROLES.find(([, suffix]) => name.startsWith(`${BENCHMARK_PAID_PILOT_VERSION}.`) && name.endsWith(suffix));
+      const aa = name.startsWith(`${BENCHMARK_AA_VERSION}.`) && name.endsWith(".json");
+      const trialId = pilot ? name.slice(BENCHMARK_PAID_PILOT_VERSION.length + 1, -pilot[1].length)
+        : aa ? name.slice(BENCHMARK_AA_VERSION.length + 1, -".json".length) : "";
+      const stat = TRIAL_ID_RE.test(trialId) ? statSync(join(stateDir, name), { throwIfNoEntry: false }) : undefined;
+      if (stat?.isFile()) files.push({ trialId, kind: pilot ? "paid-pilot" : "aa", role: pilot ? pilot[0] : "report",
+        path: join(stateDir, name), size: stat.size, mtimeMs: stat.mtimeMs });
+    }
+    return { ok: true, value: files.sort((a, b) => b.mtimeMs - a.mtimeMs || a.trialId.localeCompare(b.trialId)) };
+  } catch {
+    const reason = "trial-registry-unreadable";
+    return { ok: false, reason };
+  }
+}
+
+function readTrialJson(file: TrialFile): EvalCardRead<Record<string, unknown>> {
+  if (file.size > EVAL_CARD_SOURCE_MAX_BYTES) return { ok: false, reason: "trial-file-over-bound" };
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file.path, "utf8"));
+    return parsed !== null && typeof parsed === "object" ? { ok: true, value: parsed as Record<string, unknown> } : { ok: false, reason: "trial-file-not-an-object" };
+  } catch {
+    const reason = "trial-file-unreadable";
+    return { ok: false, reason };
+  }
+}
+
+type EvalCardInput = { trial: EvalCardTrial; evidence: EvalCardEvidence };
+
+/** An A/A report carries the trial and evidence its own card was built from (W1-T4575). */
+function aaEvalCardInput(file: TrialFile): EvalCardRead<EvalCardInput> {
+  const read = readTrialJson(file);
+  if (!read.ok) return read;
+  const input = read.value.version === BENCHMARK_AA_VERSION ? read.value.evalCardInput as Record<string, unknown> | null | undefined : undefined;
+  const trial = parseEvalCardTrial(input?.trial);
+  const evidence = parseEvalCardEvidence(input?.evidence);
+  return trial && evidence && trial.trialId === file.trialId ? { ok: true, value: { trial, evidence } } : { ok: false, reason: "aa-report-has-no-card-input" };
+}
+
+/** A pilot's trial is rebuilt from its protocol (W1-T4603); its evidence is its report's, empty until a report records any. */
+function pilotEvalCardInput(stateDir: string, files: readonly TrialFile[]): EvalCardRead<EvalCardInput> {
+  const protocol = files.find((file) => file.role === "protocol");
+  if (protocol === undefined || protocol.size > EVAL_CARD_SOURCE_MAX_BYTES) return { ok: false, reason: "pilot-protocol-missing-or-over-bound" };
+  const loaded = loadPaidPilotProtocol(stateDir, protocol.trialId);
+  let trial: EvalCardTrial | undefined;
+  try { trial = loaded.ok ? parseEvalCardTrial(paidPilotEvalCardTrial(loaded.protocol)) : undefined; }
+  catch {
+    const reason = "pilot-protocol-malformed";
+    return { ok: false, reason };
+  }
+  if (trial === undefined) return { ok: false, reason: loaded.ok ? "pilot-protocol-malformed" : loaded.reason };
+  const reportFile = files.find((file) => file.role === "report");
+  if (reportFile === undefined) return { ok: true, value: { trial, evidence: emptyEvalCardEvidence() } };
+  const report = readTrialJson(reportFile);
+  if (!report.ok) return report;
+  const recorded = report.value.pilotId === protocol.trialId ? report.value.evalCardEvidence : undefined;
+  const evidence = recorded === null ? emptyEvalCardEvidence() : parseEvalCardEvidence(recorded);
+  return evidence ? { ok: true, value: { trial, evidence } } : { ok: false, reason: "pilot-report-has-no-card-evidence" };
+}
+
+/**
+ * W1-T4643: the eval-card projection's trial source. Resolves `trialId`, or the newest trial file
+ * when none is named, and answers exactly the trial and evidence that trial's own module built its
+ * card from. Unknown, unreadable or malformed answers undefined: the route's empty card, never one
+ * made up here. Private: the card keeps buildEvalCard's own publishability rules.
+ */
+export function readEvalCardInput(stateDir: string, trialId: string | undefined): EvalCardInput | undefined {
+  const listed = listTrialFiles(stateDir);
+  if (!listed.ok) return undefined;
+  const chosen = listed.value.find((file) => trialId === undefined || file.trialId === trialId);
+  if (chosen === undefined) return undefined;
+  const own = listed.value.filter((file) => file.kind === chosen.kind && file.trialId === chosen.trialId);
+  const read = chosen.kind === "aa" ? aaEvalCardInput(chosen) : pilotEvalCardInput(stateDir, own);
+  return read.ok ? read.value : undefined;
+}
+
 interface ServeRoutesAssembly {
   routes: Route[];
   /** The first GitHub App token mint. Absent when App refresh is not configured. */
@@ -2662,7 +2752,8 @@ function assembleServeRoutes(
     buildTaskCardRoute(deps.board),
     // W1-T3352: synchronous read of process-owned state. The server assembly owns refresh and
     // cancellation; this route receives no ledger path or reader capability.
-    buildAnalyticsRoute({ currentSnapshot: currentAnalyticsSnapshot, currentLiveMetrics: deps.liveMetrics, mountsRoot: deps.questionsRoot }),
+    buildAnalyticsRoute({ currentSnapshot: currentAnalyticsSnapshot, currentLiveMetrics: deps.liveMetrics, mountsRoot: deps.questionsRoot,
+      currentEvalCardInput: (trialId) => readEvalCardInput(dirname(deps.ledgerPath), trialId) }),
     // W1-T4563: `/` no longer serves a console -- app.remudero.com is the console (DECISIONS
     // 2026-09-16 and 2026-09-26). It says what this surface is and where to go instead.
     buildGatewayIndexRoute(),
