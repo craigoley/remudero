@@ -62,6 +62,7 @@ export interface SelectorShadowSelectionReport {
 export interface SelectorShadowReport {
   runsRequested: number;
   runsComplete: number;
+  runsSkipped: number;
   runsIncomplete: number;
   fullSuiteSize: number;
   floor: SelectorShadowSelectionReport;
@@ -108,9 +109,9 @@ export function parseSelectorShadowLines(log: string): SelectorShadowRecord[] {
   return records;
 }
 
-function selectorShadowRunHeaders(response: unknown): Array<Omit<SelectorShadowRun, "log">> {
+function selectorShadowRunHeaders(response: unknown, limit: number): Array<Omit<SelectorShadowRun, "log">> {
   const body = response as {
-    workflow_runs?: Array<{ id?: number; head_sha?: string; pull_requests?: Array<{ number?: number; base?: { sha?: string } }> }>;
+    workflow_runs?: Array<{ id?: number; head_sha?: string; status?: string; pull_requests?: Array<{ number?: number; base?: { sha?: string } }> }>;
   } | null;
   if (body === null || typeof body !== "object") throw new Error("selector shadow: GitHub returned no workflow-runs object");
   if (!Array.isArray(body.workflow_runs)) throw new Error("selector shadow: GitHub returned no workflow_runs list");
@@ -118,21 +119,75 @@ function selectorShadowRunHeaders(response: unknown): Array<Omit<SelectorShadowR
     if (!nonnegativeInteger(run.id) || typeof run.head_sha !== "string") {
       throw new Error("selector shadow: a workflow run has no id or head SHA");
     }
+    if (typeof run.status !== "string") throw new Error("selector shadow: a workflow run has no status");
+    if (run.status !== "completed") return null;
     return {
       id: run.id,
       headSha: run.head_sha,
       ...(typeof run.pull_requests?.[0]?.base?.sha === "string" ? { baseSha: run.pull_requests[0].base.sha } : {}),
       ...(nonnegativeInteger(run.pull_requests?.[0]?.number) ? { prNumber: run.pull_requests![0]!.number } : {}),
     };
-  });
+  }).filter((run): run is Omit<SelectorShadowRun, "log"> => run !== null).slice(0, limit);
 }
 
 function selectorShadowRunListArgs(owner: string, repo: string, limit: number): string[] {
-  return ["api", `repos/${owner}/${repo}/actions/workflows/ci.yml/runs?event=pull_request&status=completed&per_page=${limit}`];
+  // The combined event+status query returned only Sept 22-23 runs on Sept 28, while event alone
+  // returned today's runs (98 completed in its newest 100). Filter status locally so a stale
+  // server-side intersection cannot replace the rolling evidence window with ancient history.
+  return ["api", `repos/${owner}/${repo}/actions/workflows/ci.yml/runs?event=pull_request&per_page=${Math.min(100, Math.max(limit, SELECTOR_SHADOW_RUN_LIMIT) + 40)}`];
 }
 
 function selectorShadowRunLogArgs(owner: string, repo: string, id: number): string[] {
   return ["run", "view", String(id), "--repo", `${owner}/${repo}`, "--log"];
+}
+
+/** `gh run view --log` silently omitted all eight coverage jobs in a live 39-job CI run under
+ * App auth. Read the eight job logs by ID so absent evidence stays visible as an error. */
+export async function readCoverageShardLogsAsync(
+  owner: string,
+  repo: string,
+  runId: number,
+  io: { readJson?: (args: string[]) => Promise<unknown>; readText?: (args: string[]) => Promise<string> } = {},
+): Promise<string> {
+  const response = await (io.readJson ?? ghJsonAsync)(["api", `repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=100`]);
+  const body = response as { total_count?: number; jobs?: Array<{ id?: number; name?: string; status?: string }> } | null;
+  if (!body || !Array.isArray(body.jobs) || !nonnegativeInteger(body.total_count) || body.total_count > body.jobs.length) {
+    throw new Error(`selector shadow: incomplete job list for run ${runId}`);
+  }
+  const jobs = new Map<number, number>();
+  for (const job of body.jobs) {
+    const match = /^coverage-shard \(([1-8])\/8\)$/.exec(job.name ?? "");
+    if (!match) continue;
+    const shard = Number(match[1]);
+    if (!nonnegativeInteger(job.id) || job.status !== "completed" || jobs.has(shard)) {
+      throw new Error(`selector shadow: invalid coverage job ${shard} for run ${runId}`);
+    }
+    jobs.set(shard, job.id);
+  }
+  if (jobs.size !== SELECTOR_SHADOW_SHARDS) throw new Error(`selector shadow: missing coverage jobs for run ${runId}`);
+  const readText = io.readText ?? ((args: string[]) => ghTextAsync(args, { maxBuffer: 16 * 1024 * 1024 }));
+  const evidence: string[] = [];
+  for (let shard = 1; shard <= SELECTOR_SHADOW_SHARDS; shard++) {
+    const raw = await readText(["api", `repos/${owner}/${repo}/actions/jobs/${jobs.get(shard)}/logs`]);
+    for (const line of raw.split(/\r?\n/)) {
+      if (line.includes("AFFECTED-SUITES-SHADOW: ") ||
+          (line.includes("W1-T2428 fast-lane: class=") && line.includes("skipping Test with coverage"))) {
+        evidence.push(`coverage-shard (${shard}/8)\t${line}`);
+      }
+    }
+  }
+  return evidence.join("\n");
+}
+
+/** PLAN_ONLY and DOCS_ONLY coverage jobs explicitly skip the shadow command. Require all eight
+ * actual skip lines before excluding a run; a missing or unreadable job is still incomplete. */
+function explicitlySkippedRun(log: string): boolean {
+  const shards = new Set<number>();
+  for (const line of log.split(/\r?\n/)) {
+    const match = /coverage-shard \(([1-8])\/8\).*W1-T2428 fast-lane: class=(PLAN_ONLY|DOCS_ONLY) — skipping Test with coverage/.exec(line);
+    if (match) shards.add(Number(match[1]));
+  }
+  return shards.size === SELECTOR_SHADOW_SHARDS && parseSelectorShadowLines(log).length === 0;
 }
 
 /** Synchronous reader retained for direct/offline callers. The daemon uses the async reader below. */
@@ -144,7 +199,7 @@ export function readSelectorShadowRuns(
 ): SelectorShadowRun[] {
   const readJson = io.readJson ?? ghJson;
   const readLog = io.readLog ?? ((args: string[]) => ghExec(args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }));
-  return selectorShadowRunHeaders(readJson(selectorShadowRunListArgs(owner, repo, limit))).map((run) => ({
+  return selectorShadowRunHeaders(readJson(selectorShadowRunListArgs(owner, repo, limit)), limit).map((run) => ({
     ...run,
     log: readLog(selectorShadowRunLogArgs(owner, repo, run.id)),
   }));
@@ -166,10 +221,9 @@ export async function readSelectorShadowRunsAsync(
   } = {},
 ): Promise<SelectorShadowRun[]> {
   const readJson = io.readJson ?? ghJsonAsync;
-  const readLog = io.readLog ?? ((args: string[]) => ghTextAsync(args, { maxBuffer: 64 * 1024 * 1024 }));
   const writeCache = io.writeCache ?? writeAtomic;
-  const headers = selectorShadowRunHeaders(await readJson(selectorShadowRunListArgs(owner, repo, limit)));
-  type CachedLog = { headSha: string; log: string; fetchedAt: number; complete: boolean };
+  const headers = selectorShadowRunHeaders(await readJson(selectorShadowRunListArgs(owner, repo, limit)), limit);
+  type CachedLog = { headSha: string; log: string; fetchedAt: number; complete: boolean; readerVersion: number };
   let cached: Record<string, CachedLog> = {};
   if (io.cachePath) {
     try {
@@ -181,7 +235,7 @@ export async function readSelectorShadowRunsAsync(
           if (!value || typeof value !== "object") continue;
           const row = value as Partial<CachedLog>;
           if (typeof row.headSha === "string" && typeof row.log === "string" &&
-              typeof row.fetchedAt === "number" && typeof row.complete === "boolean") {
+              typeof row.fetchedAt === "number" && typeof row.complete === "boolean" && row.readerVersion === 2) {
             cached[key] = row as CachedLog;
           }
         }
@@ -211,7 +265,9 @@ export async function readSelectorShadowRunsAsync(
     }
     let fullLog: string;
     try {
-      fullLog = await readLog(selectorShadowRunLogArgs(owner, repo, run.id));
+      fullLog = io.readLog
+        ? await io.readLog(selectorShadowRunLogArgs(owner, repo, run.id))
+        : await readCoverageShardLogsAsync(owner, repo, run.id);
     } catch (error) {
       const detail = `${String((error as Error).message)} ${String((error as { stderr?: string }).stderr ?? "")}`;
       if (!io.cachePath || /Bad credentials|HTTP 401/i.test(detail)) throw error;
@@ -220,12 +276,13 @@ export async function readSelectorShadowRunsAsync(
     }
     freshReads++;
     const log = io.cachePath
-      ? fullLog.split(/\r?\n/).filter((line) => line.includes("AFFECTED-SUITES-SHADOW: ")).join("\n")
+      ? fullLog.split(/\r?\n/).filter((line) => line.includes("AFFECTED-SUITES-SHADOW: ") ||
+          (line.includes("W1-T2428 fast-lane: class=") && line.includes("skipping Test with coverage"))).join("\n")
       : fullLog;
     runs.push({ ...run, log });
     if (io.cachePath) {
-      const complete = parseSelectorShadowLines(log).length === SELECTOR_SHADOW_SHARDS;
-      cached[key] = { headSha: run.headSha, log, fetchedAt: clock.now(), complete };
+      const complete = parseSelectorShadowLines(log).length === SELECTOR_SHADOW_SHARDS || explicitlySkippedRun(log);
+      cached[key] = { headSha: run.headSha, log, fetchedAt: clock.now(), complete, readerVersion: 2 };
       try {
         writeCache(io.cachePath, JSON.stringify(cached) + "\n");
       } catch (error) {
@@ -287,8 +344,13 @@ export function selectorShadowReport(runs: readonly SelectorShadowRun[], fullSui
   const narrowSizes: number[] = [];
   const misses: SelectorShadowMiss[] = [];
   let runsComplete = 0;
+  let runsSkipped = 0;
   let runsIncomplete = 0;
   for (const run of runs) {
+    if (explicitlySkippedRun(run.log)) {
+      runsSkipped += 1;
+      continue;
+    }
     const records = parseSelectorShadowLines(run.log);
     if (records.length !== SELECTOR_SHADOW_SHARDS) {
       runsIncomplete += 1;
@@ -323,7 +385,7 @@ export function selectorShadowReport(runs: readonly SelectorShadowRun[], fullSui
     : verdict === "ready"
       ? `${narrow.failures} failures across ${runsComplete} complete runs with zero misses; W1-T4406 may be reviewed for narrowing`
       : `need ${SELECTOR_SHADOW_MIN_FAILURES} narrow-observed failures across ${SELECTOR_SHADOW_MIN_RUNS} complete runs, zero incomplete runs and a measured narrow size`;
-  return { runsRequested: runs.length, runsComplete, runsIncomplete, fullSuiteSize, floor, narrow, misses, verdict, reason };
+  return { runsRequested: runs.length, runsComplete, runsSkipped, runsIncomplete, fullSuiteSize, floor, narrow, misses, verdict, reason };
 }
 
 /** Count test files with the same suffix the full run selects, from this checkout. */
