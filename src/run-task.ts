@@ -1473,6 +1473,8 @@ import {
   REGENERABLE_ARTIFACT_GENERATORS,
   repairLadderCommand,
   trackRepairLadder,
+  isPostReviewDiffCeilingRefusal,
+  isRetryableReviewThrow,
 } from "./lib/sweep.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -35012,7 +35014,10 @@ function reviewPostRefusedFor(
       l.task_id === taskId &&
       l.pr_url === prUrl &&
       l.head_sha === headSha &&
-      l.review_input_digest === inputDigest,
+      l.review_input_digest === inputDigest &&
+      // A thrown post (a transient 401, a timeout) is the sweep's bounded retry clock, not a refusal;
+      // only the diff-ceiling throw is final. Same classification as the sweep's own fold (W1-T2753).
+      (!isRetryableReviewThrow(l.reason) || isPostReviewDiffCeilingRefusal(l.reason)),
   );
 }
 
