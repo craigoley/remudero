@@ -557,7 +557,15 @@ test("the served routes mount readiness and the repository portfolio on the same
   assert.equal(checkStatus(answer.body, "already-onboarded").status, "warn", "it read the registry route's own path");
   const portfolioRoute = buildServeRoutes(deps).find((r) => r.path === "/v1/repos");
   assert.ok(portfolioRoute, "the repository portfolio route is mounted");
-  const portfolio = await invoke(portfolioRoute, "/v1/repos");
+  let portfolio = await invoke(portfolioRoute, "/v1/repos");
+  // The served read has a 750 ms first-paint budget. Coverage instrumentation can make the
+  // off-thread telemetry pass cross it; a refreshing receipt is valid, but must converge.
+  for (let attempt = 0; !Array.isArray(portfolio.body.repos) && attempt < 50; attempt++) {
+    if ((portfolio.body.staleness as { refreshing?: boolean } | undefined)?.refreshing !== true) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    portfolio = await invoke(portfolioRoute, "/v1/repos");
+  }
   assert.equal(portfolio.status, 200);
+  assert.ok(Array.isArray(portfolio.body.repos), JSON.stringify(portfolio.body));
   assert.deepEqual((portfolio.body.repos as Array<{ id: string }>).map((repo) => repo.id), ["acme/widget"], "the registry-only core instance is in the same served portfolio");
 });
