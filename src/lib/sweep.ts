@@ -126,7 +126,16 @@ import {
   type IssueGateway,
   type OpenIssue,
 } from "./escalate.js";
-import { fetchWorkflowRunObservations, GhPaceFloorStandDownError, paceGhEntry, type GhApiFetcher, type GhCallPacer } from "./open-prs-rest.js";
+import {
+  fetchWorkflowRunObservations,
+  GhPaceFloorStandDownError,
+  isScannerBlockerCandidate,
+  paceGhEntry,
+  type GhApiFetcher,
+  type GhCallPacer,
+  type ScannerAlertIdentity,
+  type ScannerBlockerObservation,
+} from "./open-prs-rest.js";
 // W1-T2384: the supersession types live in a leaf that imports nothing, so open-prs-rest.ts can
 // declare the producer without closing the type cycle this module's value import would complete.
 // Re-exported below, so every existing `from "…/sweep.js"` call site keeps working untouched.
@@ -4064,6 +4073,10 @@ export interface OpenPrView {
    *  "unstable" | "unknown" | …), observed verbatim (W1-T186, alongside {@link mergeable}) — the
    *  escalation names THIS reported value, never only the {@link MergeState} bucket. */
   mergeableState?: string;
+  /** W1-T3980 — the bounded scanner read taken ONLY for {@link isScannerBlockerCandidate}'s
+   *  population (armed, green, review success, `mergeable`, raw `blocked`). `undefined` means not
+   *  a candidate or over the per-pass cap, and every row behaves exactly as before. */
+  scannerBlocker?: ScannerBlockerObservation;
   /** The merge-conflict fix mode's input — the conflicting file list plus both sides' log since
    *  the merge base (W1-T94's new mode, design note iii). Populated when `mergeState === "dirty"`,
    *  mirroring how `ciFailures` is populated only when `checksState === "red"`. */
@@ -6692,6 +6705,33 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       "recording an explicit override with `rmd review <pr> --override-capped-by`",
   },
   {
+    // W1-T3980 — ONE CURRENT CODEQL THREAD IS THE WHOLE BLOCKER. Ordered strictly before
+    // `mergeable`, whose predicate this PR also satisfies: arming again changes nothing while a
+    // required conversation stays open. Only the exact singleton on the task's own run branch
+    // routes to the existing fix rung, inside the shared strike cap; W1-T3920 still owns a
+    // positive-distance PR, which never reaches here.
+    disposition: "blocked-fixable",
+    when: (pr, policy) => repairableCodeqlBlocker(pr) !== undefined && pr.priorStrikes < policy.strikeCap,
+    reason: (pr) => {
+      const alert = repairableCodeqlBlocker(pr);
+      return (
+        `armed, checks green and review success, but mergeable_state is blocked by one current CodeQL review ` +
+        `thread (${alert?.ruleId} at ${alert?.path}:${alert?.line}, alert #${alert?.alertNumber}) — dispatching one ` +
+        `constrained repair on this PR's own branch; CI, CodeQL and remudero-review re-judge the new head`
+      );
+    },
+  },
+  {
+    // W1-T3980 — every OTHER scanner reading on the same blocked population is named, never
+    // repaired and never auto-resolved, so it cannot look like a healthy wait.
+    disposition: "blocked-ambiguous",
+    when: (pr, policy) => scannerBlockerAmbiguity(pr, policy) !== undefined,
+    reason: (pr, policy) =>
+      `armed, checks green and review success, but mergeable_state is blocked and the scanner evidence is not one ` +
+      `current CodeQL thread this fleet may repair (${scannerBlockerAmbiguity(pr, policy)}) — no thread is ` +
+      `resolved and no alert dismissed — escalating`,
+  },
+  {
     // POSITIVE MATCH ONLY (W1-T93): mergeable is NEVER inferred from the mere absence of a
     // failure. It requires required-checks green AND review success, named explicitly — P22's own
     // words, "required contexts green, review success, unmerged".
@@ -7084,6 +7124,82 @@ export function openPrsBehindMain(
     });
   }
   return out;
+}
+
+/* W1-T3980 — AN ARMED PR WITH EVERY REQUIRED CONTEXT GREEN CAN STILL NEVER MERGE. GitHub reports
+ * `mergeable === true` and raw `mergeable_state === "blocked"` when branch protection requires
+ * conversation resolution and one CodeQL review thread is open (console #1579 on 2026-09-21,
+ * `js/unused-local-variable`; core #7495 on 2026-09-27, `js/file-system-race`). Rollup and merge
+ * facts cannot tell that from a stale merge ref or a human discussion, so this PR read `mergeable`,
+ * re-arm was a no-op, and it waited forever with nothing said. `hydrateScannerBlockerObservations`
+ * (open-prs-rest.ts) reads three REST facts for `isScannerBlockerCandidate`'s population only,
+ * capped per pass: distance to main (a positive distance is W1-T3920's refresh, never this route),
+ * open code-scanning alerts on the PR's MERGE ref, and the PR's review comments. REST cannot report
+ * a thread's resolution, so any comment the code-scanning bot did not write is a possibly-open
+ * human or non-CodeQL thread. The classifier's ORDER is the safety case: a truncated or malformed
+ * read, a foreign thread, a non-CodeQL alert and more than one alert each end as named ambiguity
+ * BEFORE a singleton is considered, and the singleton must cite this merge ref, the merge commit
+ * and head read this pass, and a bot thread linking that exact alert. Nothing here resolves a
+ * thread or dismisses an alert: a worker changes code, then CI, CodeQL and review re-judge. */
+
+/** W1-T3980 — written BEFORE the one CodeQL-blocker repair dispatch. Its `dedupe_key`
+ *  ({@link codeqlBlockerDedupeKey}) is what an unchanged later pass reads to start no second
+ *  worker; a new head or a different alert id re-earns exactly one. */
+export const CODEQL_BLOCKER_DISPATCH_STEP = "sweep.codeql_blocker.dispatch";
+
+/** PR, head and alert id — the three facts a repair of one scanner finding is bound to. */
+export function codeqlBlockerDedupeKey(
+  pr: Pick<OpenPrView, "prNumber" | "headSha">,
+  alert: Pick<ScannerAlertIdentity, "alertNumber">,
+): string {
+  return `${pr.prNumber}@${pr.headSha}#${alert.alertNumber}`;
+}
+
+/** W1-T3980 — THE EXACT SINGLETON GUARD. A repair is owed only for one CodeQL alert observed at
+ *  THIS head on THIS PR's merge ref, on a PR still inside the candidate population, whose head is
+ *  the PR task's own rmd run branch. Anything else returns undefined and can never dispatch. */
+export function repairableCodeqlBlocker(pr: OpenPrView): ScannerAlertIdentity | undefined {
+  const blocker = pr.scannerBlocker;
+  if (blocker === undefined || blocker.kind !== "codeql-singleton") return undefined;
+  if (blocker.headSha !== pr.headSha || !isScannerBlockerCandidate(pr)) return undefined;
+  const taskId = pr.taskId;
+  if (taskId === undefined || !fixHeadAcceptable(pr.headRefName, taskId, isSyntheticOrchestratorLaneId(taskId))) {
+    return undefined;
+  }
+  return blocker.alert;
+}
+
+/** W1-T3980 — why a still-blocked candidate's scanner evidence is a question for a human rather
+ *  than a repair: unreadable, stale, multiple, non-CodeQL, human-authored or unthreaded evidence, a
+ *  foreign branch, or an exhausted strike budget. `undefined` when the observation names nothing
+ *  (W1-T3920's positive distance, no alert at all) or when the singleton is repairable. */
+export function scannerBlockerAmbiguity(pr: OpenPrView, policy: Pick<SweepPolicy, "strikeCap">): string | undefined {
+  const blocker = pr.scannerBlocker;
+  if (blocker === undefined || !isScannerBlockerCandidate(pr)) return undefined;
+  if (blocker.kind === "base-behind" || blocker.kind === "no-scanner-alert") return undefined;
+  if (blocker.kind === "ambiguous") return `${blocker.cause}: ${blocker.detail}`;
+  if (blocker.headSha !== pr.headSha) return "stale: the CodeQL alert was observed at a different head";
+  if (repairableCodeqlBlocker(pr) === undefined) return "foreign-branch: the head is not this PR task's rmd-owned run branch";
+  if (pr.priorStrikes >= policy.strikeCap) return `exhausted: fix strikes ${pr.priorStrikes}/${policy.strikeCap}`;
+  return undefined;
+}
+
+/** W1-T3980 — the repair worker's only input, rendered through the ci-log fix mode's fenced,
+ *  enveloped evidence block. Rule id, location and message are scanner output and are labelled
+ *  untrusted; the instruction is a code change on this branch, never a thread or alert action. */
+export function codeqlBlockerCiFailure(alert: ScannerAlertIdentity): CiFailure {
+  return {
+    name: `CodeQL alert #${alert.alertNumber} (${alert.ruleId})`,
+    logTail: [
+      "UNTRUSTED SCANNER EVIDENCE: one unresolved CodeQL review thread is the only merge blocker on",
+      "this armed, green, reviewed pull request.",
+      `rule: ${alert.ruleId}`,
+      `location: ${alert.path}:${alert.line}`,
+      `message: ${alert.message}`,
+      "Change this branch's code so the finding no longer applies, within the task's existing file",
+      "scope. Do not resolve review threads, dismiss alerts, or add suppression comments.",
+    ].join("\n"),
+  };
 }
 
 /** W1-T528 — THE ACTION HALF OF W1-T520: selects AT MOST ONE PR from {@link armedButStalled}'s own
@@ -9858,6 +9974,16 @@ export async function runSweep(
       }
       case "blocked-fixable":
       case "conflicted": {
+        // W1-T3980: a CodeQL-blocker repair dedups on its own PR+head+alert key, written pre-dispatch.
+        const codeqlDedupAlert = disposition === "blocked-fixable" ? repairableCodeqlBlocker(pr) : undefined;
+        if (codeqlDedupAlert) {
+          const key = codeqlBlockerDedupeKey(pr, codeqlDedupAlert);
+          alreadyDone = ledgerLines.some((line) => line.step === CODEQL_BLOCKER_DISPATCH_STEP && line.dedupe_key === key);
+          if (alreadyDone) {
+            dedupStandDownReason = `CodeQL blocker repair already dispatched for ${key} — an unchanged PR, head and alert start no second worker`;
+          }
+          break;
+        }
         // W1-T106: same dedup set as blocked-fixable — see priorActionsFromLedger.
         const dispatchedThisHead = prior.fixed.has(`${pr.prNumber}@${pr.headSha}`);
         // W1-T1110 — RE-ARM A STALLED DISPATCH: `dispatchedThisHead` records only that a fix was
@@ -10093,6 +10219,58 @@ export async function runSweep(
               if (terminal) {
                 acted = false;
                 standDownReason = terminal;
+                break;
+              }
+              // W1-T3980 — the CodeQL-blocker route: the same hold, claim and host admission as the
+              // ordinary dispatch below, its dedupe key ledgered BEFORE the worker starts, and the
+              // scanner fact handed over as fenced ci-log evidence. None of the red-check machinery
+              // below applies to a PR whose every required check is green.
+              const codeqlAlert = repairableCodeqlBlocker(pr);
+              if (codeqlAlert) {
+                const hold = workerAdmissionHoldReason(deps);
+                if (hold) {
+                  acted = false;
+                  standDownReason = hold;
+                  break;
+                }
+                const codeqlClaim = claimFixDispatch(pr);
+                if (!codeqlClaim.ok) {
+                  acted = false;
+                  standDownReason = codeqlClaim.reason;
+                  break;
+                }
+                const codeqlAdmission = claimFixAdmission?.(pr);
+                if (codeqlAdmission && !codeqlAdmission.admitted) {
+                  codeqlClaim.release();
+                  acted = false;
+                  standDownReason = codeqlAdmission.reason;
+                  break;
+                }
+                const dedupeKey = codeqlBlockerDedupeKey(pr, codeqlAlert);
+                appendLine(deps.ledgerPath, {
+                  run_id: deps.runId,
+                  task_id: pr.taskId ?? "SWEEP",
+                  step: CODEQL_BLOCKER_DISPATCH_STEP,
+                  pr_number: pr.prNumber,
+                  pr_url: pr.prUrl,
+                  head_sha: pr.headSha,
+                  dedupe_key: dedupeKey,
+                  alert_number: codeqlAlert.alertNumber,
+                  rule_id: codeqlAlert.ruleId,
+                  path: codeqlAlert.path,
+                  line: codeqlAlert.line,
+                });
+                extraDisposedFields = { codeql_blocker_dedupe_key: dedupeKey };
+                const codeqlEvidence = { unmetCriteria: [], ciFailures: [codeqlBlockerCiFailure(codeqlAlert)] };
+                if (deps.detachFixWait) {
+                  detachSweepAction(codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence)), {
+                    actionKind: "fix-dispatch",
+                    taskId: pr.taskId ?? `PR-${pr.prNumber}`,
+                  });
+                  break;
+                }
+                const codeqlOutcome = await codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence));
+                if (codeqlOutcome !== undefined) spent = dispatchFixSpent(codeqlOutcome);
                 break;
               }
               const missingTrailerRepair = await applyMissingTaskTrailerRepair(pr);
