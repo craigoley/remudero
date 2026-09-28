@@ -1,0 +1,43 @@
+- id: W1-T4706
+  title: "THE BATCH APPROVE LANE FILES WHAT THE SINGLE LANE REFUSES — approveBatchCommand skips W1-T4700's stamp and repo re-check and still lists MASTER-PLAN.md unconditionally, and a ratify PR joined by a later approve keeps the first approve's body"
+  repo: remudero
+  depends_on: ["W1-T4700"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-28: unresolved items named by W1-T4700's build (PR #7632)"
+  plan_refs: ["W1-T4700", "W1-T311", "W1-T111"]
+  files:
+    - src/run-task.ts
+    - src/lib/inbox.ts
+    - test/the-batch-approve-lane-files-what-the-single-lane-refuses.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T4700 (PR #7632) routed the SINGLE-proposal approve path through
+    `assertRatificationDraftFileable` (a stamp whose `-> ids` disagree with the fragment, an unknown
+    repo, a non-enum verify, a verify:auto implement task with no acceptance) and built the PR body
+    from the paths actually written. Its build reports two paths left as they were:
+    - `approveBatchCommand` (src/run-task.ts) — its default gateway has no test seam, so the change
+      was reverted there: it still lists MASTER-PLAN.md unconditionally and does not re-check the
+      stamp or the repo rule (only `writeRatificationShards`' own relint catches verify/acceptance).
+    - `joinRatificationBranch` (src/lib/inbox.ts, RatifyGateway) — a ratify PR joined by a later
+      approve keeps the FIRST approve's body. PR #7608 was two proposals joined: five shards under
+      a two-shard body, which is how the body/diff mismatch reached review.
+  design: |
+    Give `approveBatchCommand` a gateway seam matching the single lane's, route every batch item
+    through `fileRatificationDraft` (so the same refusal and the same written-paths list apply),
+    and derive each batch PR's Changed files from the union of written paths. On a join, rebuild the
+    PR body from the union of all joined proposals' written paths and stamps and PATCH it through
+    the existing GitHub transport (a body edit re-earns review by design). No change to what a
+    single approve files.
+  acceptance:
+    - claim: "a batch approve refuses a fragment the single lane refuses and lists only the files it wrote, and a joined ratify PR's body names every joined proposal's shards"
+      proof: "unit test: test/the-batch-approve-lane-files-what-the-single-lane-refuses.test.ts"
+  falsifier: |
+    Batch-approve #7608's fragment shape (five tasks under a two-id stamp): it must refuse and write
+    nothing, and a join of two proposals must produce a body listing both proposals' shards.
