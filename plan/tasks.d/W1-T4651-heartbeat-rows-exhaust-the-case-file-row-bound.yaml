@@ -1,0 +1,44 @@
+- id: W1-T4651
+  title: "HEARTBEAT ROWS EXHAUST THE CASE FILE'S ROW BOUND — a long-running task's worker.activity / run.running_long / worker.state rows fill the 2000-row cap, and the whole case file refuses as task-row-bound-exceeded though its evidence rows number a few dozen"
+  repo: remudero
+  depends_on: ["W1-T4607"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-28: A/A run 7 — 4 of 27 cohort tasks refused as task-row-bound-exceeded"
+  plan_refs: ["W1-T4607", "W1-T4608", "W1-T4646", "W1-T4648", "W1-T4575"]
+  files:
+    - src/lib/task-case-file.ts
+    - test/heartbeat-rows-do-not-exhaust-the-case-file.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-28 on the seventh operator-approved A/A run (trial aa-retro-2026-09-27, main
+    5f5a06a4): 4 of 27 case files read `ledger: unavailable, task-row-bound-exceeded`, so every
+    exposure of those tasks is `case-file-ledger-unavailable` (4 units in A2). `readTaskCaseLedgers`
+    (src/lib/task-case-file.ts) keeps at most `maxRows` (2000) distinct task-owned rows in ledger
+    order and refuses the whole read once one more arrives. Distinct rows per task over the
+    three-form union for 2026-09, with telemetry = worker.activity + run.running_long + worker.state and
+    evidence = run.start + worker.assignment + worker.attempt + verdict + pr.opened:
+    W1-T3116 4945 rows, telemetry 4609, evidence 17; W1-T3576 2197 / 1874 / 25;
+    W1-T3990 2226 / 1661 / 26; W1-T4457 2554 / 2354 / 22. The bound exists to keep one task's read
+    bounded, but the rows that exceed it are heartbeats, and the tasks it refuses are exactly the
+    long-running ones a benchmark most needs to see.
+  design: |
+    Keep the read bounded, but bound by class rather than by arrival order: rows of a step that no
+    case-file consumer reads for evidence (the heartbeat class above — confirm against every reader
+    of the rows: buildTaskCaseFile, the status projection it passes them to, and taskShapeCovariates
+    in benchmark-run.ts) get their own bounded budget; overflow beyond it is COUNTED (for example
+    `telemetryRowsDropped`) and never refuses the read. Refuse with `task-row-bound-exceeded` only
+    when the non-heartbeat rows alone exceed the bound. `matchingRows` keeps its meaning or gains a
+    sibling count, so no consumer silently reads a smaller number as a smaller task.
+  acceptance:
+    - claim: "a task whose heartbeat rows exceed the row bound still yields an observed case file with every run, assignment and verdict, and counts the heartbeat rows it dropped"
+      proof: "unit test: test/heartbeat-rows-do-not-exhaust-the-case-file.test.ts"
+  falsifier: |
+    Feed 2500 worker.activity rows before one run's verdict: the case file must still record that
+    verdict, and a task with more than the bound of evidence rows must still refuse.
