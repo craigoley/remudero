@@ -1,0 +1,58 @@
+- id: W1-T4649
+  title: "Serve operator-agent answer-v1 from each registered instance's own evidence"
+  repo: remudero
+  depends_on: [W1-T4555]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-28 console agent follow-up: core answers, but site and console instance mounts do not"
+  plan_refs: ["CONSOLE-T75", "W1-T4555"]
+  files:
+    - src/lib/instance-gateway.ts
+    - src/lib/operator-agent-answer.ts
+    - src/lib/analytics-route.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - test/one-gateway-serves-every-instance.test.ts
+    - test/instance-scoped-operator-answer.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T4555 mounted POST /v1/operator-agent/ask for the core serve route. The console
+    sends a separate request to every server-allowlisted instance, but
+    instanceRouteSet currently mounts only status, recent, task card, and control
+    for non-core instances. Site and console therefore return 404, so the agent
+    cannot truthfully answer across all connected repositories. The earlier
+    W1-T4594 reservation mentioned in issue #7237 has no filed shard or PR;
+    this task uses a new, remotely reserved id rather than reclaiming it.
+  design: |
+    Mount the existing answer-v1 contract under each live instance gateway path.
+    Resolve repository and instance identity exclusively from the server-owned
+    registry row; never accept a request-supplied scope or reuse core's identity.
+    Give each instance a bounded, independently refreshed evidence projection
+    from its own state root, ledger, plan, and inbox source when present. Reuse
+    the existing answer builder's typed coverage and citation rules, but do not
+    pass the core analytics snapshot to another instance. An absent or unreadable
+    source returns unavailable or partial with the missing source and observation
+    time, not core figures or invented zeros. Keep the route read-scoped despite
+    POST and preserve the instance availability guard. Do not implement actions
+    here: W1-T4559 is the separate confirmed action handoff. Update the served
+    OpenAPI instance path and document the answer-v1 envelope.
+  acceptance:
+    - claim: "site and console each answer from their own instance-root evidence with their server-owned repository identity"
+      proof: "unit test: instance gateway answers site and console from their own evidence"
+    - claim: "a forged repository cannot redirect an instance answer or borrow core evidence"
+      proof: "unit test: instance answer rejects forged repository scope and core fallback"
+    - claim: "a missing or unreadable instance source is explicitly unavailable or partial with dated evidence"
+      proof: "unit test: instance answer names missing evidence instead of inventing a complete answer"
+    - claim: "the instance answer route is read-only, mounted, and described by the served OpenAPI contract"
+      proof: "unit test: instance answer route is mounted read-only with an OpenAPI declaration"
+  falsifier: |
+    Ask site about capacity while its evidence is absent and core has a fresh
+    capacity count; any response that cites the core count as site evidence,
+    returns verified without site evidence, accepts a forged repository, or
+    appends a write receipt disproves this task.
