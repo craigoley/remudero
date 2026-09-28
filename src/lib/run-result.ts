@@ -47,6 +47,9 @@ export interface RunResult {
     // ledgered override.
     | "task_already_merged"
     | "blocked_transient"
+    // W1-T4662: the worker yielded an open PR so the daemon can refresh its code. This is
+    // neither an API failure nor a completed merge; the next sweep owns the PR.
+    | "handed_off"
     | "pr_attribution_failed"
     | "failed";
 }

@@ -56,12 +56,12 @@ function runWroteAssignment(run: TaskCaseRun, assignmentId: string): boolean {
 
 /** W1-T4648: how each `RunResult` verdict reads once the PR read SUCCEEDED and found no PR. `true` = the run
  * ended without completing: every `blocked*`, `no_pr` and `failed` verdict. `false` = the verdict claims or
- * pends completion (`merged`, `already_satisfied`, `awaiting_merge`, `task_already_merged`) or a PR it could
+ * pends completion (`merged`, `already_satisfied`, `awaiting_merge`, `task_already_merged`, `handed_off`) or a PR it could
  * not attribute (`pr_attribution_failed`), which an empty projection contradicts rather than confirms, so
  * those stay `current-pr-unavailable`. A `Record` over the union: a new verdict will not compile until it
  * is classified here. An ending is an outcome, never a model-failure claim (W1-T4608). */
 const ENDS_WITHOUT_COMPLETION: Record<RunResult["verdict"], boolean> = {
-  merged: false, already_satisfied: false, awaiting_merge: false, task_already_merged: false,
+  merged: false, already_satisfied: false, awaiting_merge: false, task_already_merged: false, handed_off: false,
   pr_attribution_failed: false, no_pr: true, failed: true, blocked: true, blocked_ci: true, blocked_review: true,
   blocked_budget: true, blocked_containment: true, blocked_isolation: true, blocked_inflight: true,
   blocked_git_fetch: true, blocked_illformed: true, blocked_transient: true,
