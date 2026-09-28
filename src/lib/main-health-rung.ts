@@ -16,7 +16,6 @@ import {
   mainHealthEscalationDecision,
   mainHealthFromRollup,
   requeuedCheckKeysFromLedger,
-  REQUIRED_CHECK_FAIL,
   type CiFailure,
   type MainHealthObservation,
   type MainHealthRunHistoryEntry,
@@ -41,8 +40,12 @@ function tripwireIsRed(rollup: readonly RollupCheckEntry[]): boolean {
   const entry = dedupeRollupByLatestAttempt(rollup).find((c) => (c.name ?? c.context) === MAIN_TRIPWIRE_CHECK_NAME);
   if (!entry) return false;
   const state = (entry.state ?? entry.conclusion ?? entry.status ?? "").toUpperCase();
-  return REQUIRED_CHECK_FAIL.has(state);
+  return TRIPWIRE_RED.has(state);
 }
+
+/** Only a tripwire that RAN and failed reads red. A cancelled, timed-out or stale one is no evidence
+ *  either way: 17 of 21 runs on 2026-09-26..28 hit the job timeout and paged a false "main is red". */
+const TRIPWIRE_RED: ReadonlySet<string> = new Set(["FAILURE", "ERROR"]);
 
 /** W1-T4472 design (ii) — a RED main-tripwire on main's newest head reads main red AT ONCE, layered
  *  onto whatever {@link mainHealthFromRollup} already found rather than replacing its reasoning: the
