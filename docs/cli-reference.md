@@ -68,7 +68,7 @@ usage:
   rmd sync [--dry-run]   # The sanctioned dedupe-then-pull recipe for a behind-and-dirty checkout.
   rmd doctor [--json]   # One local, read-only health check with a meaningful exit code (0/1/2).
   rmd status [--json]   # One verb for 'is it running' and 'why is it stalled' from one read model.
-  rmd case-file <task-id> [--json]   # Read one task's sourced plan, run, PR, review, CI, and release evidence.
+  rmd case-file <task-id> [--json] | --tasks <id,id,...> [--tasks-file <path>] [--json]   # Read one task's sourced plan, run, PR, review, CI, and release evidence.
   rmd sweep [--repo <name>] [--dry-run]   # Level-triggered PR-pipeline reconciler: re-derive disposition, take one action.
   rmd fix <pr-number> [--repo <name>]   # Operator verb for the fix rung: dispatch the same rung `rmd sweep` uses.
   rmd wipe-test <task-id> [--factor learnings|recon|rules] [--repo remudero-sandbox] [--allow-non-sandbox]   # P12 A/B harness: run a sandbox task twice, ledger the deltas for one factor.
@@ -654,10 +654,10 @@ W1-T279+W1-T280: ONE verb answering 'is it running' AND 'why is it stalled' from
 Read one task's sourced plan, run, PR, review, CI, and release evidence.
 
 ```
-rmd case-file <task-id> [--json]
+rmd case-file <task-id> [--json] | --tasks <id,id,...> [--tasks-file <path>] [--json]
 ```
 
-W1-T4607: a read-only task case file. It streams a bounded three-form ledger window, joins only task-owned run IDs and exact assignment IDs, then reads the current PR head and its check rollup. Every section says observed, stale, pending, or unavailable with source and as-of; a merge is never reported as a deployment or healthy runtime.
+W1-T4607: a read-only task case file. It streams a bounded three-form ledger window, joins only task-owned run IDs and exact assignment IDs, then reads the current PR head and its check rollup. Every section says observed, stale, pending, or unavailable with source and as-of; a merge is never reported as a deployment or healthy runtime. W1-T4637: a damaged ledger row refuses only a task it could belong to (it names the task or one of its runs, or names no identity and its time is unreadable or inside the window); an unrelated one leaves the section observed with its malformed count and bounded source. --tasks (or --tasks-file) streams the union ONCE and emits a JSON array of task-case-file-v1 under one shared asOf, so a cohort snapshot fits the verified join's freshness window.
 
 ### `rmd sweep`
 
