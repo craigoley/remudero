@@ -41,7 +41,9 @@
     billing mode is `api` is refused before spawn and recorded; cash spend is zero and is reported
     as zero observed, never as unknown. Inert by default: nothing reads, logs or spawns without an
     operator-registered protocol; normal dispatch never changes; it never activates, resumes or
-    touches the paid pilot. Pairs run one at a time under the W1-T4638 per-attempt cap.
+    touches the paid pilot. Pairs run one at a time under the W1-T4638 per-attempt cap. The operator
+    reaches it through an rmd verb (register | report | pause) whose handler calls
+    `runProspectiveAa(...)` in src/run-task.ts.
   acceptance:
     - claim: "a prospective A/A runs both labels on one pinned stack, refuses api billing before spawn, and its receipt is accepted by pilot activation only when clean"
       proof: "unit test: test/a-prospective-aa-earns-a-clean-receipt.test.ts"
