@@ -144,6 +144,7 @@ export function onboardingReadinessGateway(execFileFn: (args: string[]) => strin
     try {
       return parseApiRead(execFileFn(["api", path, "-i"]));
     } catch (err) {
+      // Preserve a definitive HTTP status; a transport failure remains unknown, never absence.
       return parseApiError(err);
     }
   }
@@ -163,6 +164,7 @@ export function onboardingReadinessGateway(execFileFn: (args: string[]) => strin
       try {
         return parseBranchRulePages(execFileFn(branchRuleArgs(owner, repo, branch)));
       } catch (err) {
+        // A failed page read cannot prove there were no later required checks.
         return parseApiError(err);
       }
     },
@@ -178,6 +180,7 @@ export function onboardingReadinessGatewayAsync(read: (args: string[]) => Promis
     try {
       return parseApiRead(await read(["api", path, "-i"]));
     } catch (err) {
+      // Preserve a definitive HTTP status; a transport failure remains unknown, never absence.
       return parseApiError(err);
     }
   }
@@ -186,6 +189,7 @@ export function onboardingReadinessGatewayAsync(read: (args: string[]) => Promis
       try {
         return parseInstallationRepositoryListing(await read(["api", "installation/repositories?per_page=100", "--paginate", "--jq", ".total_count, .repositories[].full_name"])) ?? undefined;
       } catch {
+        // A failed page read is unknown, not evidence that the App has zero repositories.
         return undefined;
       }
     },
@@ -195,6 +199,7 @@ export function onboardingReadinessGatewayAsync(read: (args: string[]) => Promis
       try {
         return parseBranchRulePages(await read(branchRuleArgs(owner, repo, branch)));
       } catch (err) {
+        // A failed page read cannot prove there were no later required checks.
         return parseApiError(err);
       }
     },
@@ -208,6 +213,7 @@ async function unknownOnReadFailure<T>(read: () => Promise<T>): Promise<T | unde
   try {
     return await read();
   } catch {
+    // An injected gateway failure and an unreadable source share the same unknown outcome.
     return undefined;
   }
 }
