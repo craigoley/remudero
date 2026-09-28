@@ -118,6 +118,23 @@ import {
   type DelegationScope,
 } from "./automation-action.js";
 import {
+  buildIntentPlan,
+  clarifyIntentPlan,
+  confirmIntentPlan,
+  foldIntentPlans,
+  INTENT_PLAN_EVENT_LEDGER_STEP,
+  INTENT_PLAN_LEDGER_STEP,
+  INTENT_PLAN_MAX_ANSWER_CHARS,
+  INTENT_PLAN_MAX_NOTE_CHARS,
+  INTENT_PLAN_VERSION,
+  intentPlanActionEligibility,
+  projectIntentPlan,
+  undoIntentPlan,
+  type IntentPlanDecisionResult,
+  type IntentPlanLinkedAction,
+  type IntentPlanState,
+} from "./intent-plan.js";
+import {
   checkEmergencyStop,
   clearEmergencyStop,
   createEmergencyStop,
@@ -3270,16 +3287,18 @@ function validateActionObservationsInput(body: unknown): { error: string } | Act
   };
 }
 
-/** The profile findings for a delegated request, or none when no delegation is named. */
+/** The refusals from outside the action engine: a withdrawing intent plan (W1-T3898), then the
+ *  profile findings for a delegated request. Both only ever subtract. */
 function actionEligibility(deps: OperatorAgentRouteDependencies, history: OperatorAgentActionHistory, input: ActionObservationsInput) {
-  if (input.delegationId === undefined) return [];
-  return delegationEligibility({
+  const plan = intentPlanActionEligibility(readIntentPlanStates(deps), history.action.actionId);
+  if (input.delegationId === undefined) return plan;
+  return [...plan, ...delegationEligibility({
     state: findDelegation(deps, input.delegationId),
     action: history.action,
     ...(history.decision ? { approval: history.decision } : {}),
     ...(input.estimatedCostUsd !== undefined ? { estimatedCostUsd: input.estimatedCostUsd } : {}),
     clock: clockFromMillisFn(deps.now),
-  });
+  })];
 }
 
 function validateActionCompletion(body: unknown): { error: string } | { actionId: string; admissionReceiptId: string; outcome: "succeeded" | "failed"; evidenceRef?: string; reason?: string } {
@@ -3679,6 +3698,157 @@ export function buildOperatorAgentDelegationReplaceRoute(deps: OperatorAgentRout
   };
 }
 
+// ── W1-T3898: intent-plan-v1 routes ─────────────────────────────────────────────────────────
+
+export const OPERATOR_AGENT_INTENT_PLANS_PATH = "/v1/operator-agent/intent-plans";
+
+/** Every intent plan's durable state, folded from the ledger union. */
+export function readIntentPlanStates(deps: OperatorAgentRouteDependencies): IntentPlanState[] {
+  return foldIntentPlans(readOperatorAgentUnion(dirname(deps.ledgerPath), { step: [INTENT_PLAN_LEDGER_STEP, INTENT_PLAN_EVENT_LEDGER_STEP] }).rows);
+}
+
+function planLinkedActions(deps: OperatorAgentRouteDependencies, state: IntentPlanState): IntentPlanLinkedAction[] {
+  const ids = new Set(state.events.flatMap((event) => (event.kind === "confirm" ? event.actionIds : [])));
+  return ids.size === 0 ? [] : readOperatorAgentActions(deps).filter((history) => ids.has(history.action.actionId));
+}
+
+function planDelegation(deps: OperatorAgentRouteDependencies, state: IntentPlanState): DelegationProfileState | undefined {
+  return state.plan.delegationId === undefined ? undefined : findDelegation(deps, state.plan.delegationId);
+}
+
+function projectPlan(deps: OperatorAgentRouteDependencies, state: IntentPlanState) {
+  return projectIntentPlan(state, planLinkedActions(deps, state), clockFromMillisFn(deps.now), planDelegation(deps, state));
+}
+
+/** GET /v1/operator-agent/intent-plans — every intent-plan-v1 with its derived preview and state. */
+export function buildOperatorAgentIntentPlanReadRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "GET",
+    path: OPERATOR_AGENT_INTENT_PLANS_PATH,
+    scope: "read",
+    handler: (_req, res) => sendJson(res, 200, { version: INTENT_PLAN_VERSION, state: "verified", intentPlans: readIntentPlanStates(deps).map((state) => projectPlan(deps, state)), source: "ledger" }),
+  };
+}
+
+/** POST /v1/operator-agent/intent-plans — propose a plan. LOW: a plan is a non-operative preview
+ *  that registers, approves, and executes nothing until a HIGH-tier confirmation. */
+export function buildOperatorAgentIntentPlanProposeRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: OPERATOR_AGENT_INTENT_PLANS_PATH,
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(
+      (body) => (isRecord(body) ? { body } : { error: "body must be a JSON object" }),
+      (input, req, res) => {
+        const proposedBy = bearerTokenId(req);
+        const built = buildIntentPlan(input.body, { clock: clockFromMillisFn(deps.now), proposedBy });
+        if (!built.ok) {
+          sendJson(res, 400, { error: "invalid_request", detail: `${built.code}: ${built.reason}`, code: built.code, field: built.field });
+          return;
+        }
+        const existing = readIntentPlanStates(deps).find((state) => state.plan.planId === built.plan.planId);
+        if (existing && existing.plan.inputDigest !== built.plan.inputDigest) {
+          sendJson(res, 409, { error: "conflict", detail: `idempotencyKey already names plan ${existing.plan.planId} with a different request` });
+          return;
+        }
+        if (existing) {
+          sendJson(res, 200, { ok: true, existing: true, ...projectPlan(deps, existing) });
+          return;
+        }
+        appendPanelLedger(deps.ledgerPath, INTENT_PLAN_LEDGER_STEP, built.plan.planId, proposedBy, { plan_id: built.plan.planId, input: input.body, created_at: built.plan.createdAt, proposed_by: proposedBy });
+        sendJson(res, 201, { ok: true, existing: false, ...projectPlan(deps, { plan: built.plan, events: [] }) });
+      },
+    ),
+  };
+}
+
+type IntentPlanDecisionInput =
+  | { planId: string; action: "clarify"; questionId: string; answer: string }
+  | { planId: string; action: "confirm" | "undo"; note?: string };
+
+const INTENT_PLAN_DECISION_KEYS: Readonly<Record<IntentPlanDecisionInput["action"], ReadonlySet<string>>> = {
+  clarify: new Set(["planId", "action", "questionId", "answer"]),
+  confirm: new Set(["planId", "action", "confirm", "note"]),
+  undo: new Set(["planId", "action", "note"]),
+};
+
+/** A strict per-action allowlist, like the console's own: a body can never widen a decision. */
+function validateIntentPlanDecision(body: unknown): { error: string } | IntentPlanDecisionInput {
+  const redacted = redactedBody(body);
+  if ("error" in redacted) return redacted;
+  const checked = redacted.fields;
+  const signal = findNonAuthoritativeSignal(checked);
+  if (signal) return { error: `non-authoritative-signal: field ${signal} can never authorize a plan decision` };
+  const { action } = checked;
+  if (action !== "clarify" && action !== "confirm" && action !== "undo") return { error: "action must be clarify, confirm, or undo" };
+  const unknown = unknownKeys(checked, INTENT_PLAN_DECISION_KEYS[action]);
+  if (unknown.length > 0) return { error: `unknown field(s) for ${action}: ${unknown.join(", ")}` };
+  if (!boundedString(checked.planId, AUTOMATION_ACTION_MAX_ID_CHARS)) return { error: "planId is required" };
+  if (checked.note !== undefined && !boundedString(checked.note, INTENT_PLAN_MAX_NOTE_CHARS)) return { error: "note must be a bounded string" };
+  if (checked.confirm !== undefined && checked.confirm !== true) return { error: "confirm, when present, must be true" };
+  const planId = checked.planId.trim();
+  if (action !== "clarify") return { planId, action, ...(checked.note !== undefined ? { note: checked.note.trim() } : {}) };
+  if (!boundedString(checked.questionId, AUTOMATION_ACTION_MAX_ID_CHARS) || !boundedString(checked.answer, INTENT_PLAN_MAX_ANSWER_CHARS)) return { error: "clarify requires a questionId and a bounded answer" };
+  return { planId, action, questionId: checked.questionId.trim(), answer: checked.answer.trim() };
+}
+
+/** Registers a confirmation's linked actions, refusing (and writing nothing) when an id or key is
+ *  already bound to a DIFFERENT action. An identical one is a retried confirmation: kept, not re-added. */
+function registerPlanActions(deps: OperatorAgentRouteDependencies, req: IncomingMessage, res: ServerResponse, actions: readonly AutomationAction[]): boolean {
+  const all = readOperatorAgentActions(deps);
+  const conflict = actions.find((action) => all.some((history) => (history.action.actionId === action.actionId || history.action.idempotencyKey === action.idempotencyKey) && JSON.stringify(history.action) !== JSON.stringify(action)));
+  if (conflict) {
+    sendJson(res, 409, { ok: false, error: "conflict", code: "action-conflict", detail: `action ${conflict.actionId} or its idempotency key is already bound to a different action` });
+    return false;
+  }
+  for (const action of actions) {
+    if (!all.some((history) => history.action.actionId === action.actionId)) appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_ACTION_STEP, action.actionId, bearerTokenId(req), { action });
+  }
+  return true;
+}
+
+function respondWithPlanDecision(deps: OperatorAgentRouteDependencies, req: IncomingMessage, res: ServerResponse, state: IntentPlanState, action: string, result: IntentPlanDecisionResult): void {
+  const { planId } = state.plan;
+  if (result.append && result.event) appendPanelLedger(deps.ledgerPath, INTENT_PLAN_EVENT_LEDGER_STEP, planId, bearerTokenId(req), { plan_id: planId, event: result.event });
+  if (result.disposition === "refused") {
+    sendJson(res, 409, { ok: false, error: "conflict", planId, action, code: result.code, detail: result.reason, ...(result.event ? { at: result.event.at, event: result.event } : {}) });
+    return;
+  }
+  const after = readIntentPlanStates(deps).find((item) => item.plan.planId === planId) ?? state;
+  sendJson(res, result.disposition === "confirmed" ? 202 : 200, { ok: true, planId, action, disposition: result.disposition, at: result.event.at, event: result.event, plan: projectPlan(deps, after) });
+}
+
+/** POST /v1/operator-agent/intent-plans/decision — clarify, confirm, or undo. HIGH tier, like
+ *  /v1/operator-agent/actions/decision: confirming requests actions that mutate, and undo withdraws
+ *  or rolls them back, so it takes a stepped-up operator with a confirm nonce, never the bearer
+ *  token. Confirmation calls the intent-plan module BEFORE any executable action is requested. */
+export function buildOperatorAgentIntentPlanDecisionRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: `${OPERATOR_AGENT_INTENT_PLANS_PATH}/decision`,
+    scope: "write",
+    tier: "high",
+    handler: jsonAction(validateIntentPlanDecision, (input, req, res) => {
+      const state = readIntentPlanStates(deps).find((item) => item.plan.planId === input.planId);
+      if (!state) {
+        sendJson(res, 404, { error: "not_found", detail: `no intent plan "${input.planId}"` });
+        return;
+      }
+      const common = { state, issuer: bearerTokenId(req), clock: clockFromMillisFn(deps.now) };
+      const note = input.action !== "clarify" && input.note ? { note: input.note } : {};
+      const delegation = planDelegation(deps, state);
+      const result = input.action === "clarify"
+        ? clarifyIntentPlan({ ...common, questionId: input.questionId, answer: input.answer })
+        : input.action === "confirm"
+          ? confirmIntentPlan({ ...common, ...note, ...(delegation ? { delegation } : {}) })
+          : undoIntentPlan({ ...common, ...note, linked: planLinkedActions(deps, state) });
+      if (result.disposition === "confirmed" && !registerPlanActions(deps, req, res, result.actions ?? [])) return;
+      respondWithPlanDecision(deps, req, res, state, input.action, result);
+    }),
+  };
+}
+
 export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): Route[] {
   return [
     buildContextReadRoute(deps),
@@ -3723,5 +3893,8 @@ export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): 
     buildOperatorAgentDelegationIssueRoute(deps),
     buildOperatorAgentDelegationDecisionRoute(deps),
     buildOperatorAgentDelegationReplaceRoute(deps),
+    buildOperatorAgentIntentPlanReadRoute(deps),
+    buildOperatorAgentIntentPlanProposeRoute(deps),
+    buildOperatorAgentIntentPlanDecisionRoute(deps),
   ];
 }

@@ -253,6 +253,14 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "W1-T3878: ledger-only linked replacement; the original is never rewritten -- covered in test/delegation-profile-versioning.test.ts",
   ],
   [
+    "POST /v1/operator-agent/intent-plans",
+    "W1-T3898: ledger-only intent-plan-v1 proposal (a non-operative preview); covered in test/intent-plan-envelope.test.ts and test/intent-plan-preview.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/intent-plans/decision",
+    "W1-T3898: ledger-only clarify/confirm/undo events plus the confirmation's linked automation actions; covered in test/intent-plan-clarification.test.ts, test/intent-plan-confirmation.test.ts and test/intent-plan-undo.test.ts",
+  ],
+  [
     "POST /v1/context-controls/forget",
     "W1-T3893: production route is mounted; durable forget receipt and restart-safe behavior are covered in test/context-controls-forget.test.ts",
   ],
