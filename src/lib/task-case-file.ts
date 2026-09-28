@@ -42,7 +42,11 @@ export interface CaseLedgerRead {
 export interface TaskCaseRun {
   runId: string;
   startedAt: string | null;
+  /** The run's LAST `worker.assignment` id, kept for compatibility; `assignmentIds` holds them all. */
   assignmentId: string | null;
+  /** Every assignment id the run wrote, in ledger order (W1-T4646: recon, implement, diagnose and fix
+   * rungs share one run). Absent on a case file written before this field existed. */
+  assignmentIds?: string[];
   selectedProvider: string | null;
   selectedModel: string | null;
   servedModel: string | null;
@@ -209,11 +213,11 @@ export function buildTaskCaseFile(input: {
       ...(ledger.malformed ? { malformed: { rows: ledger.malformed, sources: ledger.malformedSources ?? [] } } : {}) },
     "ledger-three-form-union", ledger.asOf)
     : unknown<CaseLedgerValue>("unavailable", ledger.reason ?? "ledger-unavailable", "ledger-three-form-union", ledger.asOf);
-  const byRun = new Map<string, TaskCaseRun>();
+  const byRun = new Map<string, TaskCaseRun & { assignmentIds: string[] }>();
   const assignmentRun = new Map<string, string>();
   if (ledger.state === "observed") for (const row of ledger.rows) {
     const runId = row.run_id as string;
-    const run = byRun.get(runId) ?? { runId, startedAt: null, assignmentId: null,
+    const run = byRun.get(runId) ?? { runId, startedAt: null, assignmentId: null, assignmentIds: [],
       selectedProvider: null, selectedModel: null, servedModel: null, billingMode: null,
       costUsd: null, verdict: null, prNumber: null };
     if (row.step === "run.start") run.startedAt = string(row.ts);
@@ -224,6 +228,7 @@ export function buildTaskCaseFile(input: {
       run.selectedProvider = string(selected?.provider);
       run.selectedModel = string(selected?.model);
       if (run.assignmentId) assignmentRun.set(run.assignmentId, runId);
+      if (run.assignmentId && !run.assignmentIds.includes(run.assignmentId)) run.assignmentIds.push(run.assignmentId);
     }
     if (row.step === "pr.opened") run.prNumber = prNumber(row.pr_url);
     if (row.step === "verdict") run.verdict = string(row.verdict);
