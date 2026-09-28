@@ -4,6 +4,7 @@ import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readF
 import { mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { hostname } from "node:os";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
 // Why: the four CodeQL rounds this helper closed — docs/forensics/fs-race-safe.md#module-header.
 /**
@@ -64,13 +65,14 @@ export function createOrReadExclusive(
 const IN_PROGRESS_READ_ATTEMPTS = 40;
 const IN_PROGRESS_WAIT_MS = 25;
 
-export class StillBeingWrittenError extends Error {
+export class StillBeingWrittenError extends RmdError {
   readonly reason = "still-being-written";
   constructor(
     readonly path: string,
     readonly attempts: number,
   ) {
-    super(`still-being-written: ${path} stayed empty across ${attempts} reads — a creator claimed it and never published; delete it to regenerate`);
+    super("registry", GENERIC_EXIT_CODE, `still-being-written: ${path} stayed empty across ${attempts} reads — a creator claimed it and never published; delete it to regenerate`, { path, attempts });
+    this.name = "StillBeingWrittenError";
   }
 }
 
