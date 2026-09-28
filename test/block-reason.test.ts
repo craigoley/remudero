@@ -69,6 +69,11 @@ test("reasonAboutBlock: awaiting_merge is a non-failure disposition, not a strik
   assert.deepEqual(disposition, { kind: "awaiting_merge" });
 });
 
+test("reasonAboutBlock: a freshness hand-off waits on its PR without a strike or retry", () => {
+  const disposition = reasonAboutBlock(plan(), "A", "handed_off", INITIAL_RETRY_STATE);
+  assert.deepEqual(disposition, { kind: "awaiting_merge" });
+});
+
 test("reasonAboutBlock: a task_already_merged verdict retries (no strike, no halt+escalate) -- it only ever reaches here via the pick-then-merge race, and the task IS merged", () => {
   const plan = loadPlanFromYaml([
     "- id: A",

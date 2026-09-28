@@ -13,6 +13,9 @@
  *   `planRetry` machinery to BOUND how many times the daemon retries the
  *   whole task) -> retry, no strike, bounded by MAX_TRANSIENT_RETRIES.
  *
+ *   A freshness `handed_off` verdict carries an open PR and waits for its review, the same
+ *   disposition as `awaiting_merge`; neither is a failure or a retry attempt.
+ *
  *   Anything else is a real failure (a "strike"). The plan's DAG then decides
  *   between the remaining two buckets, via `transitiveDependents` (plan.ts) —
  *   never a criticality/importance heuristic invented here:
@@ -116,7 +119,7 @@ export function reasonAboutBlock(
   verdict: RunResult["verdict"],
   state: RetryState = INITIAL_RETRY_STATE,
 ): BlockDisposition {
-  if (verdict === "awaiting_merge") return { kind: "awaiting_merge" };
+  if (verdict === "awaiting_merge" || verdict === "handed_off") return { kind: "awaiting_merge" };
   const cls = verdictFailureClass(verdict);
   if (cls === "transient") {
     const action = planRetry(state, "transient");
