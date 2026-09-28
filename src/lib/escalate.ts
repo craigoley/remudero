@@ -967,7 +967,8 @@ export function findDuplicateEscalation(e: EscalationDedupKey, deps: Pick<Escala
  *  outage. `unreadable` lets the caller refuse to create instead, and retry the read next tick —
  *  the condition being escalated is durable and will still be there. */
 export type DedupLookup =
-  | { kind: "none" }
+  // W1-T4659: "none" carries the OPEN list already read, so a new-issue caller can rescan it.
+  | { kind: "none"; open: OpenIssue[] }
   | { kind: "found"; issue: OpenIssue }
   | { kind: "unreadable"; error: unknown };
 
@@ -977,7 +978,7 @@ export type DedupLookup =
  *  CREATING a new issue; every other reader of the dedup search (the pre-strike probe) keeps calling
  *  {@link findDuplicateEscalation} itself, unchanged. */
 function lookupDuplicateEscalation(e: EscalationDedupKey, deps: Pick<EscalateDeps, "issues">): DedupLookup {
-  if (!deps.issues.listOpen) return { kind: "none" };
+  if (!deps.issues.listOpen) return { kind: "none", open: [] };
   let open: OpenIssue[];
   try {
     open = deps.issues.listOpen(NEEDS_HUMAN_LABEL);
@@ -985,7 +986,7 @@ function lookupDuplicateEscalation(e: EscalationDedupKey, deps: Pick<EscalateDep
     return { kind: "unreadable", error };
   }
   const match = matchDuplicateEscalation(e, open);
-  return match ? { kind: "found", issue: match } : { kind: "none" };
+  return match ? { kind: "found", issue: match } : { kind: "none", open };
 }
 
 /** Ledger the `escalation.dedup_unreadable` step and return WITHOUT creating an issue (W1-T2912): a
@@ -1025,6 +1026,64 @@ function recordDuplicateEscalation(e: Escalation, dup: OpenIssue, deps: Escalate
     issue_url: dup.url,
   });
   return dup.url;
+}
+
+/** The issue number out of a `gh issue create` URL — falls back to the raw url on an unrecognized
+ *  shape, for the "superseded by #<n>" citation below. */
+function issueRefFromUrl(url: string): string {
+  const n = /\/(\d+)\s*$/.exec(url)?.[1];
+  return n ? `#${n}` : url;
+}
+
+/**
+ * W1-T4659 — retires the issue(s) a brand-new head just made stale (#7561/W1-T3721 carried five
+ * open issues across two hours of re-pushes, one per head). Fires only from the "opened a
+ * brand-new issue" branch of {@link escalate}/{@link escalateWithJudge} — a dedup-hit touched no
+ * new issue — and only when `e` carries a `headSha`. Scans the SAME `open` list {@link
+ * lookupDuplicateEscalation} already fetched for every OTHER open issue naming the SAME (task, PR)
+ * whose own `**Head:**` line DISAGREES with `e.headSha` (necessarily older — an agreeing head
+ * would already have taken the dedup-hit branch). Never a different task/PR, or no Head line at
+ * all (design clause iii). CANNOT-OBSERVE MEANS WAIT (W1-T130), like {@link
+ * "./escalation-catalogue.js".escalateStarvationCleared}: a close failure leaves that one issue
+ * open and costs a ledger row, never a throw into the caller.
+ */
+function closeSupersededEscalations(e: Escalation, prRef: string, open: OpenIssue[], newIssueUrl: string, deps: EscalateDeps): void {
+  if (!e.headSha) return;
+  const newIssueRef = issueRefFromUrl(newIssueUrl);
+  for (const issue of open) {
+    const body = normalizeCandidateBody(issue.body ?? "");
+    if (TASK_LINE_RE.exec(body)?.[1] !== e.taskId) continue;
+    if (extractPrRef(`${issue.title ?? ""}\n${body}`) !== prRef) continue;
+    const candidateHead = HEAD_SHA_LINE_RE.exec(body)?.[1];
+    if (!candidateHead || candidateHead === e.headSha) continue;
+    const comment =
+      `Superseded by ${newIssueRef} (head \`${e.headSha}\`) — a newer push moved this task/PR forward, so ` +
+      `this issue's head (\`${candidateHead}\`) is stale. Closing automatically (W1-T4659); the new issue ` +
+      `carries the live question.`;
+    let delivered = false;
+    let failure: string | undefined;
+    if (!deps.issues.closeWithComment) {
+      failure = "issue gateway cannot close issues";
+    } else {
+      try {
+        deps.issues.closeWithComment(issue.url, comment);
+        delivered = true;
+      } catch (err) {
+        failure = String((err as Error)?.message ?? err);
+      }
+    }
+    appendLedger(deps.ledgerPath, {
+      run_id: deps.runId,
+      task_id: e.taskId,
+      step: "escalation.superseded",
+      superseded_issue_url: issue.url,
+      superseded_head: candidateHead,
+      new_issue_url: newIssueUrl,
+      new_head: e.headSha,
+      delivered,
+      ...(failure ? { failure } : {}),
+    });
+  }
 }
 
 /** Ensure labels, render the body, create the issue and ledger it — extracted from {@link escalate} so
@@ -1154,11 +1213,15 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
   if (dedup.kind === "found") return recordDuplicateEscalation(resolved, dedup.issue, deps);
   if (dedup.kind === "unreadable") return recordUnreadableDedup(resolved, dedup.error, deps);
   const messageCheck = checkOperatorMessageSafe(resolved);
-  return createEscalationIssue(resolved, deps, {
+  const url = createEscalationIssue(resolved, deps, {
     queueLabel: NEEDS_HUMAN_LABEL,
     step: "escalation.issue_opened",
     messageCheck,
   });
+  // W1-T4659: a new issue for a NEW head retires whichever older-head issue(s) it just superseded.
+  const prRef = extractPrRef(`${resolved.summary}\n${resolved.detail}`);
+  if (prRef) closeSupersededEscalations(resolved, prRef, dedup.open, url, deps);
+  return url;
 }
 
 /** THE JUDGED CHOKE POINT (W1-T349) — {@link escalate} plus the residual escalation judge. Producers
@@ -1193,20 +1256,24 @@ export async function escalateWithJudge(
     judge_reason: verdict.reason,
   });
   const messageCheck = checkOperatorMessageSafe(resolved);
-  if (verdict.decision === "demote") {
-    return createEscalationIssue(resolved, deps, {
-      queueLabel: FLEET_NOTICE_LABEL,
-      step: "escalation.demoted",
-      firstComment: verdict.reason,
-      extra: { judge_reason: verdict.reason },
-      messageCheck,
-    });
-  }
-  return createEscalationIssue(resolved, deps, {
-    queueLabel: NEEDS_HUMAN_LABEL,
-    step: "escalation.issue_opened",
-    messageCheck,
-  });
+  const url =
+    verdict.decision === "demote"
+      ? createEscalationIssue(resolved, deps, {
+          queueLabel: FLEET_NOTICE_LABEL,
+          step: "escalation.demoted",
+          firstComment: verdict.reason,
+          extra: { judge_reason: verdict.reason },
+          messageCheck,
+        })
+      : createEscalationIssue(resolved, deps, {
+          queueLabel: NEEDS_HUMAN_LABEL,
+          step: "escalation.issue_opened",
+          messageCheck,
+        });
+  // W1-T4659: same supersede as escalate() above — either branch just opened a genuinely new issue.
+  const prRef = extractPrRef(`${resolved.summary}\n${resolved.detail}`);
+  if (prRef) closeSupersededEscalations(resolved, prRef, dedup.open, url, deps);
+  return url;
 }
 
 /** NON-THROWING escalation, for callers inside a SUPERVISED LOOP. Returns the issue URL, or `null`
