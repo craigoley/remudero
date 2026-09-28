@@ -83,16 +83,16 @@ export interface GoalStepPlan {
 type PrVerb = "unstick" | "repair" | "review";
 type Intent = { kind: "pr"; verb: PrVerb; prNumber: number } | { kind: "task"; taskId: string } | { kind: "pause" } | { kind: "resume" };
 
-const PR_RE = /\b(unstick|unblock|rescue|fix|repair|re-?review|review)\b[^.;\n#]{0,40}?\b(?:pr|pull request)\s*#?\s*([1-9]\d{0,8})\b/gi;
-const TASK_RE = /\b(?:run|kick(?:\s+off)?|dispatch|start|build)\s+(?:task\s+)?([A-Za-z][A-Za-z0-9]*-T\d{1,6})\b/gi;
+export const PR_RE = /\b(unstick|unblock|rescue|fix|repair|re-?review|review)\b[^.;\n#]{0,40}?\b(?:pr|pull request)\s*#?\s*([1-9]\d{0,8})\b/i;
+export const TASK_RE = /\b(?:run|kick(?:\s+off)?|dispatch|start|build)\s+(?:task\s+)?([A-Za-z][A-Za-z0-9]*-T\d{1,6})\b/i;
 const FLEET_NOUN = String.raw`(?:the\s+)?(?:whole\s+|entire\s+)?(?:fleet|daemon|dispatch(?:ing)?|workers?)\b`;
-const PAUSE_RE = new RegExp(String.raw`\bpause\s+${FLEET_NOUN}`, "gi");
-const RESUME_RE = new RegExp(String.raw`\b(?:resume|unpause)\s+${FLEET_NOUN}`, "gi");
+export const PAUSE_RE = new RegExp(String.raw`\bpause\s+${FLEET_NOUN}`, "i");
+export const RESUME_RE = new RegExp(String.raw`\b(?:resume|unpause)\s+${FLEET_NOUN}`, "i");
 /** Words a goal may carry around its recognised clauses. Anything else is a clause no step covers. */
 const FILLER: ReadonlySet<string> = new Set(
   "a also and an asap away can could for go hey i it just kindly let lets me now ok okay please pls right so thanks the then to us want we would you".split(" "),
 );
-const PR_URL_REPO_RE = /github\.com\/([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100})\/pull\/\d+/i;
+export const PR_URL_REPO_RE = /github\.com\/([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100})\/pull\/\d+/i;
 const VOCABULARY = "unstick, fix or review PR #<n>; run <task id>; pause or resume the fleet";
 
 function clip(text: string, max: number): string {
@@ -113,7 +113,7 @@ function recognise(goal: string): { intents: Intent[]; remainder: string[] } {
   const intents: Intent[] = [];
   let rest = goal;
   const take = (re: RegExp, make: (match: RegExpExecArray) => Intent): void => {
-    rest = rest.replace(re, (...args) => {
+    rest = rest.replace(new RegExp(re.source, "gi"), (...args) => {
       intents.push(make(args as unknown as RegExpExecArray));
       return " ";
     });

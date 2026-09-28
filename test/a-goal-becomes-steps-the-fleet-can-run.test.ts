@@ -20,7 +20,12 @@ import {
   fleetReading,
   goalEvidenceReader,
   GOAL_UNRESOLVED_QUESTION_ID,
+  PAUSE_RE,
   planStepsForGoal,
+  PR_RE,
+  PR_URL_REPO_RE,
+  RESUME_RE,
+  TASK_RE,
   withPlannedSteps,
   type GoalBoardView,
   type GoalEvidenceReader,
@@ -365,4 +370,17 @@ test("W1-T4658: the served propose route reads the board projection rmd serve al
   } finally {
     server.close();
   }
+});
+
+test("W1-T4658: each recogniser pattern accepts its own clause and refuses a near miss", () => {
+  assert.equal(PR_RE.test("unstick PR #42"), true);
+  assert.equal(PR_RE.test("delete PR #42"), false, "a verb outside the recogniser's set is not a PR intent");
+  assert.equal(TASK_RE.test("run W1-T1"), true);
+  assert.equal(TASK_RE.test("run the backlog"), false, "no task id, no task intent");
+  assert.equal(PAUSE_RE.test("pause the fleet"), true);
+  assert.equal(PAUSE_RE.test("unpause the fleet"), false, "unpause is resume, never pause");
+  assert.equal(RESUME_RE.test("resume the fleet"), true);
+  assert.equal(RESUME_RE.test("resume the PR"), false, "resume names only the fleet");
+  assert.equal(PR_URL_REPO_RE.exec(PR_URL)?.[1], "owner/repo");
+  assert.equal(PR_URL_REPO_RE.exec("https://example.com/owner/repo/pull/42"), null, "only a github.com PR url names a repository");
 });
