@@ -921,6 +921,7 @@ import {
   type CiFailureCorpusInput,
   type CorpusPr,
 } from "./lib/ci-failure-corpus.js";
+import { readCiPrGraphql } from "./lib/ci-learning-graphql.js";
 import { measureGateFireRates, recordGateFireRates, type GateFireRateReport, type GateWindowPr } from "./lib/gate-fire-rate.js";
 import {
   fetchMergedCoverageArtifact,
@@ -1608,11 +1609,11 @@ function inspectFreshReviewerWorktree(
   return actualHead === revision && porcelain.trim() === "" ? "reusable" : "unsafe";
 }
 
-/** Attach the worker worktree's established dependency discipline to the reviewer recovery tree.
+/** Attach the worker worktree's established dependency discipline to a separately cut tree.
  * `linked-lockfile-mismatch` remains the helper's diagnostic-only observation: it says the tree
  * is runnable but may explain a later module resolution result. Missing source or a failed link
  * means `bin/rmd` cannot be proven runnable, so this path refuses before spawning it. */
-function prepareFreshReviewerWorktree(repoDir: string, worktreePath: string): boolean {
+function prepareWorktreeToolchain(repoDir: string, worktreePath: string): boolean {
   const linked = linkWorktreeNodeModules(repoDir, worktreePath);
   // This is deliberately the existing common-dir helper rather than a reviewer-local ignore file.
   // Its best-effort contract is retained; it may report a permission diagnostic but cannot turn a
@@ -1664,7 +1665,7 @@ export function buildFreshTreeReviewRunner(
           throw new Error(`reviewer worktree at ${worktree} is not an exact clean detached checkout of ${sha}`);
         }
         if (existing === "absent") deps.addWorktree(repoDir, worktree, sha);
-        if (!(deps.prepareWorktree ?? prepareFreshReviewerWorktree)(repoDir, worktree)) {
+        if (!(deps.prepareWorktree ?? prepareWorktreeToolchain)(repoDir, worktree)) {
           throw new Error(`reviewer worktree at ${worktree} has no runnable canonical node_modules link`);
         }
         prepared.set(sha, worktree);
@@ -2144,9 +2145,10 @@ export function buildSweepEffects(
     dispatchFixPreflightStandDownImpl: dispatchFixPreflightStandDown,
     ghLiveStateImpl: ghLiveState,
     fixRungTaskForImpl: fixRungTaskFor,
-    createFixRungWorktreeImpl: createFixRungWorktree,
+    createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit,
     runFixRungImpl: runFixRung,
+    pushFixRoundImpl: pushFixRound,
     buildFixRungDispatchArgsImpl: buildFixRungDispatchArgs,
     openTaskIdsFromPlanImpl: openTaskIdsFromPlan,
     waitForCiGreenImpl: waitForCiGreen,
@@ -9728,6 +9730,37 @@ export async function runFixRung(opts: {
   // worktree is now stale; the next level-triggered sweep reconstructs both CI and the checkout
   // at the new head. A failed/indeterminate read falls through to the ordinary fix rung.
   let baseRefreshChecked = false;
+  // W1-T4693: the last census refusal of this rung's own push, and what a round does when its push did not
+  // land. A census refusal becomes the next strike's ci-log evidence, as W1-T4656 feeds its first strike;
+  // any other failure ends the rung. Neither waits on CI for a head that never landed.
+  let pushRefusal: CensusPushRefusal | undefined;
+  const censusRefusalIsCurrent = () => pushRefusal !== undefined && noReviewYet && (currentCiFailures ?? []).some((f) => f.name === CENSUS_PUSH_CHECK);
+  const offeredCensusBaselines = () => (censusRefusalIsCurrent() ? pushRefusal!.offeredBaselines : []);
+  const landRoundPush = async (push: () => unknown, headSha: string | undefined, site: string): Promise<FixRungOutcome | "refused" | undefined> => {
+    try {
+      await push();
+      return undefined;
+    } catch (e) {
+      if (!(e instanceof FixRoundPushError)) throw e;
+      const text = (e.refusal?.text ?? e.detail).slice(0, 2000);
+      if (e.refusal) {
+        deps.log("fix.push_refused", { site, strike: strikes, censuses: e.refusal.censuses, refusal: text, head_sha: headSha, pr_head_sha: review.headSha });
+        deps.say(`fix rung: strike ${strikes}/${opts.strikeCap} push REFUSED by the pre-push census (${e.refusal.censuses.join(", ")}) — the next strike gets the refusal`);
+        pushRefusal = e.refusal;
+        currentCiFailures = [{ name: CENSUS_PUSH_CHECK, logTail: e.refusal.text }];
+        everRedCiCheckNames.add(CENSUS_PUSH_CHECK);
+        noReviewYet = true;
+        currentMergeConflict = undefined;
+        // The local head now carries an unpushed commit; merging base into the remote would strand it.
+        baseRefreshChecked = true;
+        return "refused";
+      }
+      deps.log("fix.push_failed", { site, strike: strikes, cause: e.pushCause, error: text, head_sha: headSha, pr_head_sha: review.headSha });
+      const reason = `fix round push failed (${e.pushCause})`;
+      deps.say(`fix rung: ${reason} — standing down without waiting on CI for the old head`);
+      return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: `${reason}: ${text}` };
+    }
+  };
 
   // W1-T2403: `retriggers < retriggerCap` is the SEPARATE bound that stops an unbounded loop the
   // moment `strikes` stops moving (a retrigger-shaped round never increments it, below) — without
@@ -10152,6 +10185,7 @@ export async function runFixRung(opts: {
       generatorFixAttempts++;
       const runGeneratorScript = deps.runGeneratorScript;
       const commitGeneratorOutput = deps.commitGeneratorOutput;
+      let generatorPush: FixRungOutcome | "refused" | undefined;
       const generatorResult = await runGeneratorFixForCiFailures({
         failures: currentCiFailures,
         scripts: deps.packageScripts ?? {},
@@ -10161,9 +10195,13 @@ export async function runFixRung(opts: {
         deps: {
           runScript: runGeneratorScript,
           commit: (o) => commitGeneratorOutput(o),
-          push: (o) => deps.push(o.cwd, o.branch, o.expectedHeadSha),
+          push: async (o) => {
+            generatorPush = await landRoundPush(() => deps.push(o.cwd, o.branch, o.expectedHeadSha), o.expectedHeadSha, "rung.generator_fix");
+          },
         },
       });
+      if (generatorPush === "refused") continue;
+      if (generatorPush) return generatorPush;
       if (generatorResult.applied) {
         deps.log("fix.generator_fix", {
           strike: strikes,
@@ -10243,7 +10281,10 @@ export async function runFixRung(opts: {
     // global) so the coupling is visible at this call site and the scope gate stays PURE — this
     // is the ONLY caller-side state it needs. Reused, unchanged, by the prompt render below so the
     // gate and the instruction it dispatches can never name a different set (design note iii).
-    const reachableRemedyFiles = remedyFilesForFailingChecks((currentCiFailures ?? []).map((f) => f.name));
+    const reachableRemedyFiles = [
+      ...remedyFilesForFailingChecks((currentCiFailures ?? []).map((f) => f.name)),
+      ...offeredCensusBaselines().map((path) => ({ path, job: "census-precheck" })),
+    ];
     if (deps.fetchPrDiffFiles && baselineDiffFiles !== undefined) {
       let currentDiffFiles: string[] | undefined;
       try {
@@ -10760,6 +10801,9 @@ export async function runFixRung(opts: {
         opts.taskId,
         opts.task.files ?? [],
       ),
+      ...(censusRefusalIsCurrent()
+        ? ["", "PRE-PUSH CENSUS (W1-T4693): hooks/pre-push refused the last round's push with the census rows above; the PR still shows its old head.", CENSUS_PUSH_NEVER_BYPASS]
+        : []),
     ].join("\n");
     // W1-T199: TAG THE STRIKE WITH THE VERDICT REGIME IT WAS SPENT AGAINST. A strike
     // spent when no proof could execute is a strike against KEYWORD NOISE; one spent
@@ -10882,7 +10926,7 @@ export async function runFixRung(opts: {
         commitCount: roundStartSha === undefined ? 0 : (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha),
         report,
         worktreePath: opts.worktreePath,
-        declaredPaths: opts.task.files ?? [],
+        declaredPaths: [...(opts.task.files ?? []), ...offeredCensusBaselines()],
         ...options,
         assignmentId: fixResult.selectionAssignmentId,
         log: deps.log,
@@ -11115,7 +11159,9 @@ export async function runFixRung(opts: {
       };
     }
 
-    deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush);
+    const roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush), expectedHeadShaForPush, "rung.strike");
+    if (roundPush === "refused") continue;
+    if (roundPush) return roundPush;
 
     recordHeadProviderAfterPush(
       {
@@ -14753,6 +14799,32 @@ export function censusPushRefusal(err: unknown): CensusPushRefusal | undefined {
 }
 
 const CENSUS_BASELINE_FILES = ["scripts/clock-signature-baseline.json", "scripts/comment-load-baseline.json", "scripts/fixture-copy-baseline.json"];
+const CENSUS_PUSH_CHECK = "pre-push census-precheck";
+const CENSUS_PUSH_NEVER_BYPASS =
+  "Apply the remedy each row names, preferring the code change; record a baseline row only where that row offers\n" +
+  "one. Never push with --no-verify or RMD_PREPUSH_GATES=0: the harness retries the push through the hook.";
+
+/** W1-T4693: a fix round's push that did not land — `refusal` set when the pre-push census refused it. */
+export class FixRoundPushError extends RmdError {
+  constructor(readonly pushCause: RunErrorCause, readonly refusal: CensusPushRefusal | undefined, readonly detail: string) {
+    super("git", GENERIC_EXIT_CODE, `fix round push did not land (${pushCause}): ${detail}`, { pushCause });
+    this.name = "FixRoundPushError";
+  }
+}
+
+/** W1-T4693: the one push both fix-rung sites run. Stderr is piped so a refusal is readable; a foreign head
+ *  still raises; the only silent failure is a remote that already holds this exact head. */
+export function pushFixRound(wt: string, branch: string, expectedHeadSha?: string): void {
+  try {
+    gitPushRunBranch(wt, { expectedHeadSha, exec: (file, args) => void execFileSync(file, args, { stdio: ["ignore", "ignore", "pipe"] }) });
+  } catch (err) {
+    if (err instanceof LanePushForeignHeadError) throw err;
+    // spawnSync, not a try: an unreadable remote simply is not the expected head.
+    const remote = spawnSync("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`], { encoding: "utf8" }).stdout?.split(/\s/)[0];
+    if (expectedHeadSha !== undefined && remote === expectedHeadSha) return;
+    throw new FixRoundPushError(runErrorCause(err), censusPushRefusal(err), String((err as Error)?.message ?? err));
+  }
+}
 
 export type CensusPushRungOutcome =
   | { outcome: "cleared"; strikes: number; remedy: "code-change" | "baseline-row"; baselineFiles: string[] }
@@ -14799,13 +14871,12 @@ export async function repairCensusRefusedPush(input: {
         round: strike,
         branch: input.branch,
         harnessCommits,
-        evidence: { ciFailures: [{ name: "pre-push census-precheck", logTail: refusal.text }] },
+        evidence: { ciFailures: [{ name: CENSUS_PUSH_CHECK, logTail: refusal.text }] },
         reachableRemedyFiles: refusal.offeredBaselines.map((path) => ({ path, job: "census-precheck" })),
       }),
       "",
       "PRE-PUSH CENSUS (W1-T4656): no PR exists yet — hooks/pre-push refused this branch with the census rows above.",
-      "Apply the remedy each row names, preferring the code change; record a baseline row only where that row offers",
-      "one. Never push with --no-verify or RMD_PREPUSH_GATES=0: the harness retries the push through the hook.",
+      CENSUS_PUSH_NEVER_BYPASS,
     ].join("\n");
     const roundStart = head();
     const receipt = fixWorkerReceipt(input.spawn, log, fixWorkerRunId(input.runId, `census${strike}`, systemClock.now()), fixLaneBenchmarkWork(task, input.ledgerPath));
@@ -16861,24 +16932,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // executor `judgeCriterion` itself uses (review.ts's parseWhitelistedProof/
           // execWhitelistedProof) — never a second, hand-rolled grep invocation.
           execAcceptanceGateRepairProof: execGrepProofInWorktree(worktreePath),
-          // W1-T2610: `expectedHeadSha` (the sha this rung just committed) is WIRED here, not
-          // merely accepted — `gitPushRunBranch`'s post-condition re-reads this worktree's HEAD
-          // right before pushing and raises `LanePushForeignHeadError` if it no longer matches,
-          // catching a ref rewound during this rung's own dead time (readRoundCommits/ledger/
-          // follow-up-harvest, above) between the commit and this push. That raise is
-          // deliberately let through (never swallowed by the best-effort catch below): FAIL
-          // DIRECTION per this task's design — a raise parks this one fix round for the
-          // level-triggered sweep to re-derive next pass, while silence here would lose the
-          // round's entire spend and leave the PR looking fixed.
-          push: (wt, _branch, expectedHeadSha) => {
-            try {
-              gitPushRunBranch(wt, { stdio: "ignore", expectedHeadSha });
-            } catch (err) {
-              if (err instanceof LanePushForeignHeadError) throw err;
-              // best-effort — the fix worker may already have pushed itself;
-              // nothing new to push is not an error.
-            }
-          },
+          // W1-T2610 + W1-T4693: `expectedHeadSha` still raises `LanePushForeignHeadError` on a rewound ref;
+          // a refusal or failure now throws `FixRoundPushError`, which `runFixRung` turns into a named round.
+          push: pushFixRound,
           readHeadShaForProvenance: readHeadShaRest,
           issues: ghIssueGateway(owner, task.repo),
           ledgerPath,
@@ -21388,6 +21444,7 @@ export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson):
 
 type CiFailureWindowReader = {
   read: (args: string[]) => Promise<unknown>;
+  readPr?: (owner: string, repo: string, number: number) => Promise<CorpusPr["commits"]>;
   yieldBetweenObservation: () => Promise<void>;
   refreshAuth?: () => Promise<void>;
 };
@@ -21452,35 +21509,39 @@ export async function loadCiFailureWindowAsync(
     if (row.number === undefined) continue;
     if (row.updated_at && Date.parse(row.updated_at) < sinceMs) continue;
     await reader.yieldBetweenObservation();
-    let shas: string[];
+    let commits: CorpusPr["commits"];
     try {
-      const commits = (await reader.read([
-        "api",
-        `repos/${self.owner}/${self.repo}/pulls/${row.number}/commits?per_page=100`,
-      ])) as Array<{ sha?: string }>;
-      if (!Array.isArray(commits)) throw new Error("PR commit list was not an array");
-      if (commits.length === 100) unreadablePrs.push(row.number);
-      shas = commits.map((commit) => commit.sha ?? "").filter((sha) => sha.length > 0);
-    } catch {
+      if (reader.readPr) {
+        commits = await reader.readPr(self.owner, self.repo, row.number);
+      } else {
+        const listed = (await reader.read([
+          "api",
+          `repos/${self.owner}/${self.repo}/pulls/${row.number}/commits?per_page=100`,
+        ])) as Array<{ sha?: string }>;
+        if (!Array.isArray(listed)) throw new Error("PR commit list was not an array");
+        if (listed.length === 100) unreadablePrs.push(row.number);
+        commits = [];
+        for (const sha of listed.map((commit) => commit.sha ?? "").filter((sha) => sha.length > 0)) {
+          await reader.yieldBetweenObservation();
+          const commit: CorpusPr["commits"][number] = { sha };
+          try {
+            const responses = [
+              await reader.read(checkRunsRestArgs(self.owner, self.repo, sha)),
+              await reader.read(combinedStatusRestArgs(self.owner, self.repo, sha)),
+            ];
+            let response = 0;
+            const rollup = rollupAtSha(self.owner, self.repo, sha, () => responses[response++]);
+            if (rollup !== undefined) commit.rollup = rollup;
+          } catch { // unreadable check-runs/status: leave commit.rollup unset, matching rollupAtSha's contract
+          }
+          commits.push(commit);
+        }
+      }
+    } catch (error) {
+      if (ciLearningListError(error).startsWith("authentication")) throw error;
       // Preserve the failed PR as unreadable instead of treating absent commits as green.
       unreadablePrs.push(row.number);
       continue;
-    }
-    const commits: CorpusPr["commits"] = [];
-    for (const sha of shas) {
-      await reader.yieldBetweenObservation();
-      const commit: CorpusPr["commits"][number] = { sha };
-      try {
-        const responses = [
-          await reader.read(checkRunsRestArgs(self.owner, self.repo, sha)),
-          await reader.read(combinedStatusRestArgs(self.owner, self.repo, sha)),
-        ];
-        let response = 0;
-        const rollup = rollupAtSha(self.owner, self.repo, sha, () => responses[response++]);
-        if (rollup !== undefined) commit.rollup = rollup;
-      } catch { // unreadable check-runs/status: leave commit.rollup unset, matching rollupAtSha's contract
-      }
-      commits.push(commit);
     }
     const windowPr: GateWindowPr = { number: row.number, merged: Boolean(row.merged_at), commits };
     // Only a later green commit that repaired an observed red gate has a repair delta to
@@ -31751,6 +31812,8 @@ export function buildCiLearningDaemonHooks(deps: {
   loadWindow?: (days: number) => CiFailureCorpusInput | Promise<CiFailureCorpusInput>;
   /** Test seam for CI-learning's production JSON transport; the default remains {@link ghJsonAsync}. */
   readJson?: (args: string[]) => Promise<unknown>;
+  /** An injected GraphQL reader exercises the production batch path without a network call. */
+  readGraphql?: (args: string[]) => Promise<unknown>;
   /** Injected so a test drives lesson outcomes without the real plan; production reads only the
    *  machine filer's own shard directory. */
   loadLessons?: () => FiledCiLessonsRead;
@@ -31784,6 +31847,9 @@ export function buildCiLearningDaemonHooks(deps: {
           ? deps.loadWindow(days)
           : loadCiFailureWindowAsync(days, {
               read: deps.readJson ?? ghJsonAsync,
+              readPr: deps.readGraphql || !deps.readJson
+                ? (owner, repo, number) => readCiPrGraphql(owner, repo, number, deps.readGraphql ?? ghJsonAsync, () => yieldingSleep(0))
+                : undefined,
               yieldBetweenObservation: () => yieldingSleep(0),
               refreshAuth: deps.readJson ? undefined : async () => { await refreshInstallationToken(); },
             }),
@@ -38622,6 +38688,22 @@ export function createFixRungWorktree(
   return checkoutFixHeadRef(repoDir, worktreePath, branch, deps);
 }
 
+/** The sweep fix lane cuts its own branch-attached worktree, bypassing `worktreeAdd`'s
+ * dependency link. Supply the same local CLI toolchain before its worker can commit; an
+ * unavailable link refuses before a strike instead of failing at the commit-msg hook. */
+export function createFixRungWorktreeWithToolchain(
+  repoDir: string,
+  worktreePath: string,
+  branch: string,
+  prepare: (repoDir: string, worktreePath: string) => boolean = prepareWorktreeToolchain,
+): FixHeadRecovery | undefined {
+  const recovery = createFixRungWorktree(repoDir, worktreePath, branch);
+  if (!prepare(repoDir, worktreePath)) {
+    throw new Error("fix worktree toolchain unavailable: node_modules could not be linked");
+  }
+  return recovery;
+}
+
 /**
  * W1-T2609: the lock KEY for the fix rung's exclusive claim on one (repo, branch)'s
  * checkout→commit→push window — reusing `src/lib/inflight-lock.ts`'s O_EXCL discipline
@@ -41350,6 +41432,33 @@ export async function feedbackReconcileCommand(rest: string[]): Promise<number> 
 export const TRIAGE_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "WebSearch"];
 
 /**
+ * W1-T3749: MEASURED (`cashCanServeToolSurface` over every declared spawn surface in the tree,
+ * live squeeze 2026-09-17) — offering TRIAGE_WORKER_TOOLS verbatim to a blocked-auction divert
+ * REFUSES ("not implementable by cash"), and dropping WebSearch alone is the ONE change that
+ * flips the answer to DIVERTABLE; every other entry is already implemented by the check-runner.
+ *
+ * THE DECISION (the task's option (b), "triage needs it only sometimes" — not (a) "genuinely
+ * needs the network", not (c) "never uses it"): keep WebSearch on the CLAUDE surface above —
+ * `LEARNINGS.md` ("`WebSearch`... Grant them to the Architect only") already treats it as an
+ * Architect-tier privilege, and triagePrompt's own STEP 2 (lib/triage.ts) already conditions
+ * research on "a genuine platform-facts gap", instructing the worker to "skip this step
+ * entirely" otherwise — WebSearch was never promised unconditionally, so a run diverted to cash
+ * without it degrades on the rare external-fact question rather than breaking. Drop it only from
+ * the surface a squeeze diverts to, the same shape `fixRoundGitOwnership`/`FIX_CASH_TOOLS`
+ * (lib/fix-fence.ts) already gives the fix rung for its own reason.
+ *
+ * NOT ADDED TO `OPENWEIGHT_FUNCTIONS` (lib/worker-provider.ts) — the task rules that out by name:
+ * triage reads UNTRUSTED INBOUND TEXT (a feedback entry), and W1-T210 bounded the fix rung so an
+ * untrusted prompt payload could never reach the network; triage shares that exposure.
+ *
+ * NOT WIRED THROUGH `DISPATCH_LANE_TOOL_BOUNDS`/`cashDivertSpawnFields` (lib/worker.ts): this
+ * task's declared scope is `src/run-task.ts` alone, so the spawn call below passes this list
+ * directly as `cashTools` — the same standalone-constant shape `FIX_CASH_TOOLS` already uses,
+ * next to the surface it derives from rather than in the shared table.
+ */
+export const TRIAGE_CASH_TOOLS: readonly string[] = TRIAGE_WORKER_TOOLS.filter((tool) => tool !== "WebSearch");
+
+/**
  * Every path a worker touched in its worktree, measured against `origin/main` — INCLUDING files it
  * CREATED. This is the input `decideTriage` and `decidePlanArchitect` judge a PROPOSED verdict on, so
  * a path missing here is a run that did the work and gets thrown away.
@@ -41739,6 +41848,9 @@ async function triageCommandLocked(
           config,
           prompt,
           tools: TRIAGE_WORKER_TOOLS,
+          // W1-T3749: the surface a BLOCKED auction would divert this run to — TRIAGE_WORKER_TOOLS
+          // minus WebSearch, the one entry `cashCanServeToolSurface` refuses. See TRIAGE_CASH_TOOLS.
+          cashTools: TRIAGE_CASH_TOOLS,
         });
         log("triage.synthesized", {
           attempt,

@@ -179,3 +179,16 @@ test("FALSIFIER 2: a good verdict plus an unanswered question produce NO re-arm 
   const result = deriveDisposition(notRearmed, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(result.disposition, "blocked-ambiguous", "a rung that re-armed here would spin forever on praise or on silence");
 });
+
+test("every answer to the task steers the fix, in order, not only the latest", () => {
+  const result = operatorVerdictEvidence(TASK, [], [
+    questionLine(),
+    answerLine({ answer: "keep the public API unchanged" }),
+    answerLine({ answer: "and also add a regression test for the empty case" }),
+    answerLine({ answer: "keep the public API unchanged" }),
+  ]);
+  assert.equal(
+    result?.constraint,
+    "Operator answer 1 of 2: keep the public API unchanged\n\nOperator answer 2 of 2: and also add a regression test for the empty case",
+  );
+});

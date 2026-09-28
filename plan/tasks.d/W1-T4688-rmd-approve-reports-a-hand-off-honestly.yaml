@@ -1,0 +1,33 @@
+- id: W1-T4688
+  title: "rmd approve EXITS 1 AFTER IT SUCCEEDED — the first skill approval (#7090) opened its PR and then printed 'ci timeout — PR left OPEN' with exit 1, and approve.skill_written was ledgered before the commit that then failed on the first attempt; report the hand-off as a hand-off and ledger a write only once it is committed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-defects-1790600000"
+  plan_refs: [W1-T4338]
+  files: [src/run-task.ts, test/rmd-approve-reports-a-hand-off-honestly.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-24: `rmd approve skill-draft:8aa4458eb462b9a1` opened PR #7090 then printed 'ci timeout — PR left OPEN'
+    and exited 1; the PR merged later through the sweep. On the earlier failed attempt (commitlint), approve.skill_written was
+    already ledgered at 21:33:18Z before approve.error. #7075 made the same distinction for the retro only
+    (retroExitAfterPrOpened).
+  design: |
+    (i) approve's post-PR exit uses the retro's hand-off mapping: a CI timeout or freshness hand-off is a named hand-off
+    exit, not 1; a red CI stays 1.
+    (ii) approve.skill_written is ledgered after the commit succeeds, never before.
+  acceptance:
+    - claim: "an approve whose PR is left for the sweep exits with the hand-off code"
+      proof: 'grep: test("W1-T4688: an approve whose PR is left for the sweep exits with the hand-off code" in test/rmd-approve-reports-a-hand-off-honestly.test.ts'
+    - claim: "the skill write is ledgered only after its commit"
+      proof: 'grep: test("W1-T4688: the skill write is ledgered only after its commit" in test/rmd-approve-reports-a-hand-off-honestly.test.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

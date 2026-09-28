@@ -83,7 +83,7 @@ import {
 } from "./ci-incidents.js";
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
-import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
+import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
 import { buildOperatorAgentAnswer, buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
@@ -2620,10 +2620,12 @@ function assembleServeRoutes(
   // Personal context governance is mounted with the existing operator-agent routes. Its context
   // inventory is metadata-only; raw private content is consumed through the ledger-backed
   // preflight reader, never serialized by the browser-facing console route.
+  const goalBoardCache = createBoardSnapshotCache();
   const operatorAgentRoutes = buildOperatorAgentRoutes({
     ledgerPath: deps.ledgerPath,
     root: deps.fleetControlRoot,
     ...(operatorAgentMemory ? { memory: operatorAgentMemory } : {}),
+    goalBoard: () => ({ plan: deps.board.plan, snapshot: goalBoardCache.get(deps.board) }),
   });
   // W1-T3893: the operator self-service surface (inventory/forget/revoke/export) over the SAME
   // ledger-backed context-governance engine above — same ledgerPath, so a self-service forget and

@@ -1,0 +1,36 @@
+- id: W1-T4662
+  title: "A HEALTHY FRESHNESS YIELD IS LEDGERED AS blocked_transient AND THROTTLES DISPATCH — since #6138 a run that yields its open PR at the CI wait for a daemon restart writes verdict blocked_transient, the same value as a real API failure, and the daemon's API-window hold and lane refill back off on it; give the yield its own verdict"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: recommended follow-ups 1-6 and 8 — automated flow, no stuck PRs, no false alarms"
+  plan_refs: [W1-T4466]
+  files: [src/run-task.ts, src/lib/daemon.ts, test/a-freshness-yield-is-a-handoff-not-a-transient-failure.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-28 (read-only RECON over the ledger union, 383 archives): a run that reaches the CI-wait boundary and
+    yields for a freshness restart logs run.freshness_handoff and then verdict {verdict: "blocked_transient", reason "yielded at
+    the recorded external-wait boundary …"} (src/run-task.ts, the freshness-yield branch added by #6138 on 2026-09-19).
+    Sample: W1-T4620 (PR #7492, merged) — pr.opened → run.awaiting_external → run.freshness_handoff → verdict blocked_transient.
+    Of 94 verdict rows 2026-09-25..28, 55 are blocked_transient. The daemon's API-window hold (src/lib/daemon.ts,
+    apiWindowHoldAfter) and lane refill treat blocked_transient as a closed API window and back dispatch off.
+    INFERRED: healthy yields are throttling dispatch (8 daemon.api_window_hold rows in the window).
+  design: |
+    (i) The freshness yield writes verdict handed_off with reason freshness_yield and the pr_url it yielded.
+    (ii) The API-window hold and lane refill count only genuine transient API failures; a handed_off verdict never starts or
+    extends the hold streak.
+    (iii) Every consumer that switches on blocked_transient is checked for the new value.
+  acceptance:
+    - claim: "a freshness yield is ledgered as a hand-off carrying its PR"
+      proof: 'grep: test("W1-T4662: a freshness yield is ledgered as a hand-off carrying its PR" in test/a-freshness-yield-is-a-handoff-not-a-transient-failure.test.ts'
+    - claim: "a hand-off never starts the API-window hold"
+      proof: 'grep: test("W1-T4662: a hand-off never starts the API-window hold" in test/a-freshness-yield-is-a-handoff-not-a-transient-failure.test.ts'
+  falsifier: |
+    Write blocked_transient on the yield again and the second test sees the hold start.

@@ -1,0 +1,35 @@
+- id: W1-T4659
+  title: "A NEW HEAD OPENS A NEW NEEDS-HUMAN ISSUE AND THE OLD ONE STAYS OPEN FOREVER — W1-T195 deliberately gives each head of a stuck PR its own escalation, but nothing retires the superseded one, so #7561 (W1-T3721) carried five open issues in two hours; close a head's issue when a newer head of the same task and PR escalates"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: recommended follow-ups 1-6 and 8 — automated flow, no stuck PRs, no false alarms"
+  plan_refs: [W1-T195, W1-T104, W1-T345]
+  files: [src/lib/escalate.ts, test/a-superseded-escalation-closes-itself.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-28: needs-human issues #7565, #7571, #7572 and #7573 (plus earlier ones) are all open for W1-T3721 / PR #7561,
+    each carrying a different Head line (bcc9973, f1fd154, 069eaa9, 281af01). matchDuplicateEscalation (src/lib/escalate.ts)
+    vetoes a match when both sides carry a head and they disagree — W1-T195's intent, so a new push gets its own issue — and
+    appending works within one head (#7572 took two appended comments). Nothing closes the issue whose head was superseded,
+    so a PR the fleet keeps re-pushing accumulates one open issue per head.
+  design: |
+    (i) When an escalation for (task, PR) opens a NEW issue because the head differs, close every other OPEN needs-human
+    issue for the same task and PR whose Head line names an older head, with a comment "superseded by #<new> (head <sha>)".
+    (ii) Ledger the close as escalation.superseded with both issue numbers and heads.
+    (iii) Never close an issue for a different PR, a different task, or one with no Head line (legacy producers keep today's
+    behaviour).
+  acceptance:
+    - claim: "a newer head's escalation closes the older head's open issue for the same task and PR"
+      proof: 'grep: test("W1-T4659: a newer head''s escalation closes the older head''s open issue for the same task and PR" in test/a-superseded-escalation-closes-itself.test.ts'
+    - claim: "an issue for a different PR is never closed as superseded"
+      proof: 'grep: test("W1-T4659: an issue for a different PR is never closed as superseded" in test/a-superseded-escalation-closes-itself.test.ts'
+  falsifier: |
+    Skip the supersede close and the first test finds the older head's issue still open.

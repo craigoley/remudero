@@ -10479,8 +10479,11 @@ paths:
         scope; an explicit "at most $N" settles the ceiling) and refuses by name (`400`, `code`
         and `field`) a forbidden, credential-shaped, unknown, or authority-claiming field
         (approved, confirmed, permission, model confidence) -- a sentence is never authority.
-        Steps come only from a structured producer; a goal alone previews `unavailable`. Nothing
-        is registered, approved, or executed. An identical request under the same
+        A request with no steps is answered by W1-T4658's `planStepsForGoal`: deterministic
+        recognisers propose 0-4 steps from the executor catalogue only, each citing the board or
+        fleet-control evidence it was chosen on; an unmatched goal, or missing or stale evidence,
+        yields zero steps (previews `unavailable`) and a `goal-unresolved` question. A request
+        carrying producer steps is stored unchanged. Nothing is registered, approved, or executed. An identical request under the same
         idempotencyKey is `200` (`existing: true`); a different one is `409`.
       security:
         - bearerWrite: []
