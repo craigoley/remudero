@@ -896,6 +896,8 @@ export interface CadenceMarkerDef {
    *  {@link CADENCE_DEFAULT_INTERVAL_MINUTES}, whose conservatism holds only for rungs faster than
    *  a day. Checked by {@link cadenceDefsMisjudgedByFallback}, not left to a comment. */
   intervalMinutes?: number;
+  /** The service that writes this marker, when its liveness is available on this board. */
+  writer?: ServiceName;
 }
 
 /** How many of a rung's OWN intervals may elapse before its marker reads stale.
@@ -929,14 +931,14 @@ export const CADENCE_MARKERS: readonly CadenceMarkerDef[] = [
   // lookback". Judged against the 1440-minute fallback it read stale for 96 of every 168 hours
   // while behaving exactly as designed — measured on the live board 2026-09-18.
   { name: "feedback-docket", file: "last-feedback-docket.json", intervalMinutes: SEVEN_DAYS_MINUTES },
-  { name: "last-seen", file: "last-seen.json" },
+  { name: "last-seen", file: "last-seen.json", writer: "serve" },
 ];
 
-/** THREE STATES, NEVER TWO. `fresh`, `stale` and `never` are three different operator actions:
+/** FOUR STATES. `fresh`, `stale`, `never` and `writer-stopped` are different operator actions:
  *  reporting a never-fired rung as stale sends someone hunting a regression in a rung with no
  *  history, and SKIPPING it — what the latch loop does with an absent file — reports a dead rung as
  *  nothing at all. */
-export type CadenceMarkerState = "fresh" | "stale" | "never";
+export type CadenceMarkerState = "fresh" | "stale" | "never" | "writer-stopped";
 
 export interface CadenceMarkerRow {
   name: string;
@@ -961,8 +963,10 @@ export interface CadenceSection {
  * Judge every cadence marker against its own rung's interval.
  *
  * PURE over injected reads: `readMarkerAgeMs` returns `undefined` for an absent or unparseable
- * marker, which is the `never` state and never a skip. `intervalMinutesFor` returns the rung's
+ * marker, which is the `never` state unless its named writer is stopped. `intervalMinutesFor` returns the rung's
  * declared `minIntervalMinutes`, or `undefined` to take {@link CADENCE_DEFAULT_INTERVAL_MINUTES}.
+ * A named writer observed stopped takes precedence over the marker's age; unsensed is not stopped.
+ * A row that names no writer retains the original three-state judgment.
  */
 /**
  * The registry rows the fallback would MISJUDGE — every def that declares no interval of its own
@@ -994,10 +998,20 @@ export function cadenceMarkerRows(
   markers: readonly CadenceMarkerDef[],
   readMarkerAgeMs: (def: CadenceMarkerDef) => number | undefined,
   intervalMinutesFor: (def: CadenceMarkerDef) => number | undefined,
+  writerStateFor?: (writer: ServiceName) => LivenessState,
 ): CadenceMarkerRow[] {
   return markers.map((def) => {
     const intervalMinutes = def.intervalMinutes ?? intervalMinutesFor(def) ?? CADENCE_DEFAULT_INTERVAL_MINUTES;
     const ageMs = readMarkerAgeMs(def);
+    if (def.writer && writerStateFor?.(def.writer) === "stopped") {
+      return {
+        name: def.name,
+        state: "writer-stopped",
+        ...(ageMs === undefined ? {} : { ageMs }),
+        intervalMinutes,
+        consequence: `writer is not running (${def.writer}) — no cadence is expected`,
+      };
+    }
     if (ageMs === undefined) {
       return {
         name: def.name,
@@ -2165,6 +2179,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
         return cadenceMarkerAgeMs(path, nowMs);
       },
       (def) => (def.policyKey ? resolveCadenceIntervalMinutes(def.policyKey) : undefined),
+      (writer) => livenessState(services.find((service) => service.service === writer)!),
     ),
   };
 
@@ -2333,7 +2348,7 @@ function renderCadenceBlock(cadence: CadenceSection): string[] {
     out.push("no cadence markers tracked");
   } else {
     for (const r of cadence.rows) {
-      const age = r.state === "never" ? "never fired" : `${formatAgeMs(r.ageMs)} ago`;
+      const age = r.state === "never" ? "never fired" : r.state === "writer-stopped" ? "writer not running" : `${formatAgeMs(r.ageMs)} ago`;
       out.push(`${r.name}, ${r.state} (${age}) — ${r.consequence}`);
     }
   }
