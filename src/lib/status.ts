@@ -1294,15 +1294,14 @@ export function seedCountFromCircuitBreak(
   return seed;
 }
 
-/**
- * W1-T2423 — THE RUN VERDICTS THAT MEAN THE TASK WORKER NEVER STARTED. Both are PREFLIGHT PROBES that refuse
- * ahead of every worker and FAIL CLOSED, so a run ending in either tested THE HOST, not the task. W1-T2249 IS
- * SUBSUMED, NOT RE-LITIGATED: it keyed the exclusion on a field stamped at WRITE time, making the rule
- * FORWARD-ONLY over a counter that reads history backwards, which is why it never fired. WHY A VERDICT AND NOT
- * A CHECK: `verdict` is written by the same call that has recorded these refusals all along.
- * Why: the measured verdict distribution is in docs/forensics/status.md
- */
-const PRE_WORKER_REFUSAL_VERDICTS: ReadonlySet<string> = new Set(["blocked_containment", "blocked_isolation"]);
+/** Infrastructure refusals did not give this task a chance to open a PR. Match the run's terminal
+ * verdict, which is already present in historical ledger rows, rather than a newer write-time flag. */
+const INFRASTRUCTURE_REFUSAL_VERDICTS: ReadonlySet<string> = new Set([
+  "blocked_containment",
+  "blocked_isolation",
+  "blocked_transient",
+  "task_already_merged",
+]);
 
 /** Options shared by {@link orphanedRunIds} and every counter built on it — never widened for
  *  anything else, so a caller cannot smuggle unrelated behavior through this bag. */
@@ -1394,50 +1393,68 @@ export function orphanedRunIds(
  * W1-T3523 WIDENS THE EXCLUSION ALONGSIDE W1-T2423's PREFLIGHT-REFUSAL ONE: a `run.start` whose run_id is
  * {@link orphanedRunIds} — infrastructure killed the worker before it wrote anything else — is likewise
  * excluded, because it is evidence about the HOST, not about the task, and an orphan must never cost the task
- * the same dispatch budget a real no-PR attempt does. A run.start with ANY other row for its run_id — even a
- * failing `verdict` — still counts: only a run with genuinely NO evidence past its own start, held stale long
- * enough to rule out "still running", is excused.
+ * the same dispatch budget a real no-PR attempt does. A run.start with any other row is not an orphan; only
+ * the infrastructure refusal verdicts above can exclude such a run. An unrecognised failing verdict counts.
  */
+interface DispatchStreakTally {
+  count: number;
+  excludedDispatches: number;
+  excludedByReason: Record<string, number>;
+}
+
+function dispatchStreakTally(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  index?: LedgerIndex,
+  opts: OrphanDetectionOpts = {},
+): DispatchStreakTally {
+  const rows = indexedTaskRows(lines, taskId, index);
+  // A run's terminal verdict follows its start, so collect exclusions before counting starts.
+  const refusalByRunId = new Map<string, string>();
+  for (const line of rows) {
+    if (
+      line.task_id === taskId &&
+      line.step === "verdict" &&
+      typeof line.verdict === "string" &&
+      INFRASTRUCTURE_REFUSAL_VERDICTS.has(line.verdict) &&
+      typeof line.run_id === "string"
+    ) {
+      refusalByRunId.set(line.run_id, line.verdict);
+    }
+  }
+  const orphanRunIds = orphanedRunIds(lines, taskId, index, opts);
+  let count = 0;
+  let excludedDispatches = 0;
+  let excludedByReason: Record<string, number> = {};
+  for (const line of rows) {
+    if (line.task_id !== taskId) continue;
+    if (line.step === "pr.opened" || isMergeCreditLine(line)) {
+      count = 0; // forward progress — a new PR, or a credited merge, resets the streak
+      excludedDispatches = 0;
+      excludedByReason = {};
+    } else if (line.step === "run.start") {
+      const reason = typeof line.run_id === "string"
+        ? refusalByRunId.get(line.run_id) ?? (orphanRunIds.has(line.run_id) ? "orphaned_run" : undefined)
+        : undefined;
+      if (reason !== undefined) {
+        excludedDispatches++;
+        excludedByReason[reason] = (excludedByReason[reason] ?? 0) + 1;
+        continue;
+      }
+      // Unknown run ids and runs with worker evidence remain counted.
+      count++;
+    }
+  }
+  return { count, excludedDispatches, excludedByReason };
+}
+
 export function dispatchesWithoutNewOwnedPr(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
   index?: LedgerIndex,
   opts: OrphanDetectionOpts = {},
 ): number {
-  const rows = indexedTaskRows(lines, taskId, index);
-  // PRE-SCAN (W1-T2249's shape, widened by W1-T2423) — two passes over the small per-task line set, because a
-  // run's verdict always lands AFTER its `run.start`, so the excluded run ids must be known first.
-  const preWorkerRefusalRunIds = new Set<string>();
-  for (const line of rows) {
-    if (
-      line.task_id === taskId &&
-      line.step === "verdict" &&
-      typeof line.verdict === "string" &&
-      PRE_WORKER_REFUSAL_VERDICTS.has(line.verdict) &&
-      typeof line.run_id === "string"
-    ) {
-      preWorkerRefusalRunIds.add(line.run_id);
-    }
-  }
-  const orphanRunIds = orphanedRunIds(lines, taskId, index, opts);
-  let count = 0;
-  for (const line of rows) {
-    if (line.task_id !== taskId) continue;
-    if (line.step === "pr.opened" || isMergeCreditLine(line)) {
-      count = 0; // forward progress — a new PR, or a credited merge, resets the streak
-    } else if (line.step === "run.start") {
-      // W1-T2423: a dispatch whose OWN run ended before the task worker started is a HOST preflight refusal,
-      // not a dispatch that produced nothing.
-      if (typeof line.run_id === "string" && preWorkerRefusalRunIds.has(line.run_id)) continue;
-      // W1-T3523: a dispatch whose run_id never wrote a SECOND row of any kind, held stale long enough to rule
-      // out "still running" — see {@link orphanedRunIds} — is a HOST killing the worker, not a task producing
-      // nothing. A run with no `run_id` at all, or one with any other row (even a failing verdict), still
-      // counts: unknown stays counted, so a crash can never buy a task extra dispatches.
-      if (typeof line.run_id === "string" && orphanRunIds.has(line.run_id)) continue;
-      count++;
-    }
-  }
-  return count;
+  return dispatchStreakTally(lines, taskId, index, opts).count;
 }
 
 /** True once `taskId` has been dispatched {@link DEFAULT_MAX_TASK_DISPATCHES} times with no new owned PR since
@@ -1661,6 +1678,10 @@ export interface DispatchBreakerDetail {
   ledgerState: DispatchBreakerState;
   /** `dispatchesWithoutNewOwnedPr` at decision time — the count the comparison used. */
   freshCount: number;
+  /** Runs excluded since the last owned PR or merge credit, from this evaluation's ledger scan. */
+  excludedDispatches: number;
+  /** The exclusion count by terminal verdict, plus `orphaned_run` for stale starts with no later row. */
+  excludedByReason: Record<string, number>;
   /** The bound `freshCount` was compared against. */
   maxDispatches: number;
   /** The cache's prior count for this task; absent on the first observation. W1-T2425: the cache may itself
@@ -1693,7 +1714,7 @@ export function evaluateDispatchBreakerDetailed(
   const lines = readLedgerLines(ledgerPath, ledgerFs);
   // R-23: ONE pass to bucket, then per-task lookups — the helpers below otherwise walk the whole array each.
   const index = buildLedgerIndex(lines);
-  const freshCount = dispatchesWithoutNewOwnedPr(lines, taskId, index);
+  const { count: freshCount, excludedDispatches, excludedByReason } = dispatchStreakTally(lines, taskId, index);
   let priorCount = cache.lastCounts.get(taskId);
   // W1-T2425: FIRST OBSERVATION OF THIS TASK IN THIS PROCESS — seed the baseline from the breaker's own on-disk
   // record so the regression arm below is reachable across a restart. Only ever on a MISS (a live process's own
@@ -1706,7 +1727,7 @@ export function evaluateDispatchBreakerDetailed(
     }
   }
   const hasNewOwnedPr = lastPrOpened(lines, taskId, index) !== undefined;
-  const base = { freshCount, maxDispatches, priorCount, hasNewOwnedPr };
+  const base = { freshCount, excludedDispatches, excludedByReason, maxDispatches, priorCount, hasNewOwnedPr };
 
   if (priorCount !== undefined && freshCount < priorCount && !hasNewOwnedPr) {
     // count regressed with nothing in the ledger to explain it
