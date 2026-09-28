@@ -882,6 +882,10 @@ export interface components {
       observations?: (AutomationPreconditionObservation)[];
       /** Execute only; a dry run evaluates preflight and records a dry-run receipt without admitting anything. */
       dryRun?: boolean;
+      /** W1-T3878 -- the delegation-profile-v1 this request acts under. Its eligibility (missing, revoked, stale, expired, unapproved, over budget, out of scope, unlinked, capability, risk ceiling, human gate) enters preflight as refused findings named `delegation-*`. */
+      delegationId?: string;
+      /** W1-T3878 -- the cost an admission under `delegationId` charges against that profile's cost budget. */
+      estimatedCostUsd?: number;
     };
     OperatorAgentActionCompletionRequest: {
       actionId: string;
@@ -905,6 +909,130 @@ export interface components {
       disposition: "admitted" | "dry-run" | "refused" | "reused" | "completed" | "rolled_back";
       receipt: AutomationActionReceipt;
       preflight?: AutomationPreflightResult;
+    };
+    DelegationProfileScope: ({
+      kind: "repository";
+      repository: string;
+    }) | ({
+      kind: "instance";
+      instanceId: string;
+    });
+    /** The action or flow this delegation governs; at least one is required. */
+    DelegationProfileLink: {
+      flowId?: string;
+      actionId?: string;
+    };
+    DelegationProfileBudget: {
+      costUsd: number;
+      /** Counted from the operator's acceptance. */
+      durationMinutes: number;
+    };
+    /** What an issuer supplies (src/lib/delegation-profile.ts's `buildDelegationProfile`). version, revision, createdAt (the server clock) and revocationRef are set by core. A raw prompt, transcript, credential, browser-owned measurement, or a model-confidence / prior-approval / UI-state field anywhere refuses the whole record by name. */
+    DelegationProfileInput: {
+      delegationId: string;
+      principal: string;
+      purpose: string;
+      link: DelegationProfileLink;
+      scope: DelegationProfileScope;
+      dataClasses: (string)[];
+      capabilities: (string)[];
+      capabilitySummary: string;
+      /** The highest risk an action under this profile may declare. */
+      riskTier: "low" | "medium" | "high" | "production" | "financial" | "credential" | "destructive";
+      budget: DelegationProfileBudget;
+      notification: "silent" | "on-refusal" | "on-every-action";
+      approvalLevel: "profile" | "each-action";
+      humanDecision: string;
+      fallbackOwner: string;
+      /** After createdAt and within 90 days of it. */
+      expiresAt: string;
+    };
+    DelegationProfileReceipt: {
+      kind: "accept" | "revoke" | "replace";
+      at: string;
+      note?: string;
+    };
+    /** One profile with its derived state. `riskTier` is the console's four-tier vocabulary (every critical tier reads `critical`); `actionRiskCeiling` is core's own tier. `lifecycleState` answers "may it act at all" and is never folded with `freshness`; `revocation` is present whenever the ledger carries it, including a superseded profile naming its replacement. */
+    DelegationProfileView: {
+      version: "delegation-profile-v1";
+      delegationId: string;
+      revision: number;
+      replaces?: string;
+      principal: string;
+      purpose: string;
+      link: DelegationProfileLink;
+      scope: DelegationProfileScope;
+      dataClasses: (string)[];
+      capabilities: (string)[];
+      capabilitySummary: string;
+      riskTier: "low" | "medium" | "high" | "critical";
+      actionRiskCeiling: "low" | "medium" | "high" | "production" | "financial" | "credential" | "destructive";
+      budget: DelegationProfileBudget;
+      notification: "silent" | "on-refusal" | "on-every-action";
+      approvalLevel: "profile" | "each-action";
+      humanDecision: string;
+      fallbackOwner: string;
+      createdAt: string;
+      expiresAt: string;
+      revocationRef: string;
+      approval: {
+        state: "pending" | "approved" | "denied";
+        decidedAt?: string;
+      };
+      lifecycleState: "active" | "expired" | "revoked";
+      status: "pending" | "active" | "denied" | "revoked" | "superseded" | "expired";
+      revocation?: {
+        reason?: string;
+        revokedAt?: string;
+      };
+      supersededBy?: string;
+      pendingReplacement?: string;
+      spentCostUsd: number;
+      receipts: (DelegationProfileReceipt)[];
+      observedAt: string;
+      freshness: "verified";
+    };
+    DelegationProfileList: {
+      version: "delegation-profile-v1";
+      profiles: (DelegationProfileView)[];
+      source: "ledger";
+    };
+    DelegationProfileIssueRequest: {
+      profile: DelegationProfileInput;
+    };
+    DelegationProfileIssueResult: {
+      ok: boolean;
+      profile: DelegationProfileView;
+    };
+    DelegationDecisionRequest: {
+      delegationId: string;
+      decision: "accepted" | "revoked";
+      note?: string;
+    };
+    DelegationDecisionResult: {
+      ok: boolean;
+      delegationId: string;
+      decision: "accepted" | "revoked";
+      decidedBy: string;
+      at: string;
+      lifecycleState: "active" | "expired" | "revoked";
+      approval: "pending" | "approved" | "denied";
+    };
+    DelegationReplaceRequest: {
+      delegationId: string;
+      note?: string;
+      /** Any DelegationProfileInput field except the identity fields (delegationId, principal, link, scope), which refuse `immutable-field`. Unnamed fields carry over; expiresAt defaults to the predecessor's lifetime from now. */
+      changes?: Record<string, never>;
+    };
+    DelegationReplaceResult: {
+      ok: boolean;
+      /** The profile being replaced; unchanged, and authoritative until the replacement is accepted. */
+      delegationId: string;
+      replacementId: string;
+      at: string;
+      /** The REPLACED profile's lifecycle, which the replacement does not change. */
+      lifecycleState: "active" | "expired" | "revoked";
+      profile: DelegationProfileView;
     };
     PromotionScope: {
       repo: string;
@@ -3327,6 +3455,48 @@ export interface paths {
           "403": Error;
           "404": Error;
           "409": OperatorAgentActionStepResult;
+        };
+    };
+  };
+  "/v1/operator-agent/delegations": {
+    get: {
+      responses: {
+          "200": DelegationProfileList;
+          "401": Error;
+          "403": Error;
+        };
+    };
+    post: {
+      responses: {
+          "201": DelegationProfileIssueResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/delegations/decision": {
+    post: {
+      responses: {
+          "200": DelegationDecisionResult;
+          "400": Error;
+          "401": Error;
+          "403": HighTierRefusal;
+          "404": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/delegations/replace": {
+    post: {
+      responses: {
+          "201": DelegationReplaceResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
         };
     };
   };
