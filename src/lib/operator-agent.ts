@@ -3438,17 +3438,15 @@ export function buildOperatorAgentActionPreflightRoute(deps: OperatorAgentRouteD
   };
 }
 
-/** POST /v1/operator-agent/actions/execute — admit one execution per idempotency key, re-running preflight here. */
+/** POST /v1/operator-agent/actions/execute (and its HIGH twin execute-high) — admit one execution per idempotency key, re-running preflight here. */
 export function buildOperatorAgentActionExecuteRoute(deps: OperatorAgentRouteDependencies): Route {
   return actionExecuteRoute(deps, "/v1/operator-agent/actions/execute", "middle");
 }
 
-/** POST /v1/operator-agent/actions/execute-high — the same, proven HIGH (nonce included), for a HIGH catalogue capability. */
 export function buildOperatorAgentActionExecuteHighRoute(deps: OperatorAgentRouteDependencies): Route {
   return actionExecuteRoute(deps, "/v1/operator-agent/actions/execute-high", "high");
 }
 
-/** W1-T4657: an `rmd.` capability runs through {@link executeCatalogueAction}, with this route's tier as the proven caller tier. */
 function executeCatalogued(deps: OperatorAgentRouteDependencies, req: IncomingMessage, res: ServerResponse, history: OperatorAgentActionHistory, input: ActionObservationsInput, tier: WriteTier): void {
   const origin = bearerTokenId(req);
   const run = executeCatalogueAction({
@@ -3530,7 +3528,6 @@ export function buildOperatorAgentActionCompleteRoute(deps: OperatorAgentRouteDe
         ...(input.reason ? { reason: input.reason } : {}),
         clock: clockFromMillisFn(deps.now),
       });
-      // W1-T4657: a caller's completion is a claim, never executor evidence, catalogue capability or not.
       const claimed = step.disposition === "completed";
       const labelled = claimed ? { ...step, receipt: { ...step.receipt, code: SELF_REPORTED_CODE } } : step;
       respondWithStep(deps, req, res, labelled, 200, claimed ? { evidence_source: SELF_REPORTED_CODE } : {});
