@@ -52,6 +52,14 @@ test("the author-time base is resolved from the checkout whose PR body is being 
   assert.deepEqual(observed, [base]);
 });
 
+test("author-time refuses when the checkout cannot resolve a merge base", () => {
+  const repo = gitRepo({ kind: "author-proof-no-base" });
+  assert.throws(
+    () => buildPlanPrBody({ intro: "A change.", criteria, proofCwd: repo.dir }),
+    /cannot resolve the merge base for acceptance proofs; ask for a human ruling/,
+  );
+});
+
 test("the remedy keeps the test and withdraws the criterion", () => {
   assert.throws(
     () => buildPlanPrBody({ intro: "A change.", criteria, baseRef: BASE, proofCheck: () => 5 }),
