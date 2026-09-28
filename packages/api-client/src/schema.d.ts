@@ -898,6 +898,7 @@ export interface components {
       receiptRef: string;
       linkedReceiptId?: string;
       preflight?: "ready" | "refused" | "stale" | "unknown" | "expired" | "in-progress";
+      /** A refusal's reason; on a completion, W1-T4657's evidence label -- `executor` when the action-catalogue-v1 executor wrote it, `self-reported` when a caller posted it. */
       code?: string;
       reason: string;
       evidenceRef?: string;
@@ -957,6 +958,13 @@ export interface components {
       disposition: "admitted" | "dry-run" | "refused" | "reused" | "completed" | "rolled_back";
       receipt: AutomationActionReceipt;
       preflight?: AutomationPreflightResult;
+      admission?: AutomationActionReceipt;
+      /** W1-T4657 -- the catalogue executor's own ledger row, which the completion's evidenceRef cites. */
+      executor?: {
+        step: string;
+        ts: string;
+        run_id: string;
+      };
     };
     DelegationProfileScope: ({
       kind: "repository";
@@ -3599,6 +3607,20 @@ export interface paths {
           "400": Error;
           "401": Error;
           "403": Error;
+          "404": Error;
+          "409": OperatorAgentActionStepResult;
+          "423": EmergencyStopAdmissionRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/actions/execute-high": {
+    post: {
+      responses: {
+          "200": OperatorAgentActionStepResult;
+          "202": OperatorAgentActionStepResult;
+          "400": Error;
+          "401": Error;
+          "403": HighTierRefusal;
           "404": Error;
           "409": OperatorAgentActionStepResult;
           "423": EmergencyStopAdmissionRefusal;

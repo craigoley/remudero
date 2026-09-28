@@ -2619,6 +2619,7 @@ function assembleServeRoutes(
   // preflight reader, never serialized by the browser-facing console route.
   const operatorAgentRoutes = buildOperatorAgentRoutes({
     ledgerPath: deps.ledgerPath,
+    root: deps.fleetControlRoot,
     ...(operatorAgentMemory ? { memory: operatorAgentMemory } : {}),
   });
   // W1-T3893: the operator self-service surface (inventory/forget/revoke/export) over the SAME
