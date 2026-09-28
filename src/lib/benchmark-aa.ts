@@ -335,7 +335,7 @@ function srmTest(labels: readonly [string, string], counts: Record<string, numbe
 }
 
 type FieldTally = { observed: number; notRecorded: number; noAttempt: number };
-type Disposition = { state: "completed" | "failed" | "censored" | "unavailable"; reason?: string };
+type Disposition = { state: "completed" | "failed" | "endedWithoutCompletion" | "censored" | "unavailable"; reason?: string };
 
 export interface AaArmSummary {
   allocatedUnits: number;
@@ -352,7 +352,9 @@ export interface AaArmSummary {
   stratumMismatches: number;
   joins: { assigned: number; attempted: number; terminal: number; verifiedResolved: number };
   missingness: Record<typeof MISSINGNESS_FIELDS[number], FieldTally>;
-  outcomes: { completed: number; failed: number; censored: number; unavailable: number; reasons: Record<string, number> };
+  /** `endedWithoutCompletion` (W1-T4648): the run ended with no PR — an observed outcome, never missing, never a failure. */
+  outcomes: { completed: number; failed: number; endedWithoutCompletion: number; censored: number; unavailable: number;
+    reasons: Record<string, number> };
   accounting: {
     apiCashEstimate: { assignments: number; usd: number };
     subscriptionNotional: { assignments: number; usd: number };
@@ -367,7 +369,7 @@ function blankArm(): AaArmSummary {
     fallbacks: { provider: 0, selectedModel: 0, effort: 0, servedModel: 0 }, revisions: { different: 0, unpinned: 0 },
     routingOverlap: 0, stratumMismatches: 0, joins: { assigned: 0, attempted: 0, terminal: 0, verifiedResolved: 0 },
     missingness: { servedModel: tally(), tokens: tally(), durationMs: tally(), billingMode: tally(), cost: tally() },
-    outcomes: { completed: 0, failed: 0, censored: 0, unavailable: 0, reasons: {} },
+    outcomes: { completed: 0, failed: 0, endedWithoutCompletion: 0, censored: 0, unavailable: 0, reasons: {} },
     accounting: { apiCashEstimate: { assignments: 0, usd: 0 }, subscriptionNotional: { assignments: 0, usd: 0 },
       unknown: { assignments: 0, reasons: {} } } };
 }
@@ -403,6 +405,7 @@ function unitDisposition(taskAssignments: VerifiedAssignment[], files: readonly 
   if (!files) return { state: "unavailable", reason: "no-verified-outcome-join" };
   const { coverage } = joinVerifiedTaskOutcomes(taskAssignments, files, cutoff);
   if (coverage.completed > 0) return { state: "completed" };
+  if (coverage.endedWithoutCompletion > 0) return { state: "endedWithoutCompletion" };
   if (coverage.reasons["closed-unmerged-unadjudicated"]) return { state: "failed" };
   if (coverage.censored > 0) return { state: "censored", reason: "open-at-cutoff" };
   return { state: "unavailable", reason: Object.keys(coverage.reasons)[0]! };
@@ -685,7 +688,8 @@ export function buildBenchmarkAaReport(input: BenchmarkAaReportInput): Benchmark
     findings.push(finding("unknown-cost", `${count((arm) => arm.accounting.unknown.assignments)} assignments have no known cost; excluded from every total, never zero`, "info"));
   if (count((arm) => arm.joins.assigned - arm.joins.terminal) > 0)
     findings.push(finding("terminal-join-incomplete", `${count((arm) => arm.joins.assigned - arm.joins.terminal)} exposed units lack a terminal receipt`));
-  const unjoinedVerified = count((arm) => arm.exposedUnits - arm.joins.verifiedResolved - arm.outcomes.censored);
+  const unjoinedVerified = count((arm) => arm.exposedUnits - arm.joins.verifiedResolved - arm.outcomes.censored
+    - arm.outcomes.endedWithoutCompletion);
   if (unjoinedVerified > 0) findings.push(finding("verified-join-incomplete", `${unjoinedVerified} exposed units have no verified outcome`));
   if (count((arm) => arm.outcomes.censored) > 0)
     findings.push(finding("immature-outcomes", `${count((arm) => arm.outcomes.censored)} units are open at the cutoff: censored, not failed`, "info"));
@@ -854,7 +858,7 @@ export async function benchmarkAaCommand(rest: string[], build: (input: Benchmar
     for (const label of manifest.labels) {
       const arm = report.arms?.[label];
       print(arm ? `  ${label}: ${arm.allocatedUnits} allocated, ${arm.exposedUnits} exposed, ${arm.joins.terminal} terminal, `
-        + `${arm.joins.verifiedResolved} verified, ${arm.outcomes.censored} censored; cash $${arm.accounting.apiCashEstimate.usd.toFixed(2)}, `
+        + `${arm.joins.verifiedResolved} verified, ${arm.outcomes.endedWithoutCompletion ?? "unrecorded"} ended without a PR, ${arm.outcomes.censored} censored; cash $${arm.accounting.apiCashEstimate.usd.toFixed(2)}, `
         + `notional $${arm.accounting.subscriptionNotional.usd.toFixed(2)}, unknown ${arm.accounting.unknown.assignments}` : `  ${label}: unavailable`);
     }
     for (const item of report.findings) print(`  ${item.severity}: ${item.kind} — ${item.detail}`);
