@@ -156,6 +156,27 @@ test("the sweep fix worktree supplies commitlint before its worker commits", () 
   }
 });
 
+test("an unavailable sweep fix toolchain refuses before a repair can commit", () => {
+  const root = tmp("rmd-fix-toolchain-refusal-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repoDir");
+    cloneOf(upstream, repoDir);
+    execFileSync("git", ["-C", repoDir, "branch", "run-toolchain-refusal"]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", "run-toolchain-refusal"]);
+    const worktree = join(root, "fix-worktree");
+    const originalHead = sha(repoDir, "origin/run-toolchain-refusal");
+    assert.throws(
+      () => createFixRungWorktreeWithToolchain(repoDir, worktree, "run-toolchain-refusal", () => false),
+      /fix worktree toolchain unavailable/,
+    );
+    assert.equal(sha(worktree, "HEAD"), originalHead, "the checkout has made no repair commit");
+    assert.throws(() => lstatSync(join(worktree, "node_modules")), { code: "ENOENT" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("absent local ref: created fresh at origin/<branch> — unchanged from the old sequence", () => {
   const root = tmp("rmd-fbcs-absent-");
   try {
