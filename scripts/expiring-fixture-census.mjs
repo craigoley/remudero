@@ -80,6 +80,12 @@ export const AGED_FIELDS = [
     source: "src/lib/follow-up-policy.ts",
     evidence: ["Date.parse(current.snoozedUntil)", "> now"],
   },
+  {
+    field: "freshUntil",
+    threshold: "operator preference evaluation time",
+    source: "src/lib/preference-policy.ts",
+    evidence: ["Date.parse(preference.freshUntil)", "now >"],
+  },
 ];
 
 /** The population ratchet: each file's measured fixture count as captured on W1-T3334.
