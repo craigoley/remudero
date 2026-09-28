@@ -7600,10 +7600,15 @@ export function operatorVerdictEvidence(
     parts.push(`Operator marked this run "${verdict}": ${note}`);
   }
 
-  const answer = lastMatching(questionLines, (l) => typeof l.answer === "string" && l.task === taskId);
-  if (answer && typeof answer.answer === "string" && answer.answer.trim() !== "") {
-    parts.push(answer.answer);
-  }
+  const answers = [
+    ...new Set(
+      questionLines
+        .filter((l) => l.task === taskId && typeof l.answer === "string" && l.answer.trim() !== "")
+        .map((l) => (l.answer as string).trim()),
+    ),
+  ];
+  if (answers.length === 1) parts.push(answers[0]!);
+  else answers.forEach((a, i) => parts.push(`Operator answer ${i + 1} of ${answers.length}: ${a}`));
 
   return parts.length > 0 ? { constraint: parts.join("\n\n") } : undefined;
 }
