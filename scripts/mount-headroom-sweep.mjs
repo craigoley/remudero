@@ -176,11 +176,16 @@ function isSettled(run) {
 /**
  * Every run_id that is NOT the earliest (`startTs`, then `runId`) run of its own `taskId` — a
  * RE-DISPATCH. Computed over the WHOLE corpus, since a later attempt can resolve to a different
- * `task_class` than its first one did.
+ * `task_class` than its first one did. W1-T4726: a `neverWorked` run is no attempt, only `excludedCount`.
  */
-export function redispatchedRunIds(allRuns) {
+export function redispatchedRunIdsCounted(allRuns) {
   const byTask = new Map();
+  let excludedCount = 0;
   for (const r of allRuns) {
+    if (r.neverWorked) {
+      excludedCount++;
+      continue;
+    }
     const arr = byTask.get(r.taskId) ?? [];
     arr.push(r);
     byTask.set(r.taskId, arr);
@@ -193,7 +198,11 @@ export function redispatchedRunIds(allRuns) {
     );
     for (let i = 1; i < sorted.length; i++) out.add(sorted[i].runId);
   }
-  return out;
+  return { ids: out, ...(excludedCount > 0 ? { excludedCount } : {}) };
+}
+
+export function redispatchedRunIds(allRuns) {
+  return redispatchedRunIdsCounted(allRuns).ids;
 }
 
 /**
@@ -577,8 +586,8 @@ export function compareArms(armA, armB) {
 }
 
 /**
- * Group runs into (type, risk, class) CELLS and, WITHIN each, (provider, served_model, effort)
- * ARMS; every cell with two or more arms gets every pairwise {@link compareArms} comparison.
+ * Group runs into (type, risk, class) CELLS and, WITHIN each, (provider, served_model, effort) ARMS
+ * (W1-T4726: a `neverWorked` run fills none, only `excludedCount`); pairwise {@link compareArms} per cell.
  */
 export function computeArmSweep(runs, armFields, newestTs, windowEvidence = new Map()) {
   const redispatched = redispatchedRunIds(runs);
@@ -595,8 +604,13 @@ export function computeArmSweep(runs, armFields, newestTs, windowEvidence = new 
         risk: r.risk ?? "unknown",
         taskClass: r.taskClass ?? "unknown",
         armsByKey: new Map(),
+        excludedCount: 0,
       };
       cellsByKey.set(cellKey, cell);
+    }
+    if (r.neverWorked) {
+      cell.excludedCount++;
+      continue;
     }
     let arm = cell.armsByKey.get(armKey);
     if (!arm) {
@@ -682,7 +696,8 @@ export function computeArmSweep(runs, armFields, newestTs, windowEvidence = new 
     for (let i = 0; i < arms.length; i++) {
       for (let j = i + 1; j < arms.length; j++) comparisons.push(compareArms(arms[i], arms[j]));
     }
-    cells.push({ cellKey: cell.cellKey, type: cell.type, risk: cell.risk, taskClass: cell.taskClass, arms, comparisons });
+    const { excludedCount } = cell;
+    cells.push({ cellKey: cell.cellKey, type: cell.type, risk: cell.risk, taskClass: cell.taskClass, arms, comparisons, ...(excludedCount > 0 ? { excludedCount } : {}) });
   }
   cells.sort((a, b) => (a.cellKey < b.cellKey ? -1 : a.cellKey > b.cellKey ? 1 : 0));
   return cells;
