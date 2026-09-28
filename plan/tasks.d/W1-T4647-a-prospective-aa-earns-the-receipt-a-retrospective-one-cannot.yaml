@@ -1,0 +1,54 @@
+- id: W1-T4647
+  title: "A RETROSPECTIVE A/A CAN NEVER EARN THE RECEIPT PILOT ACTIVATION REQUIRES — fleet history is not on one pinned stack, so run the A/A prospectively: two labels on one pinned stack through the paired-trial seam, subscription only, zero cash"
+  repo: remudero
+  depends_on: ["W1-T4638", "W1-T4646"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-28: third operator-approved A/A run read integrity-concerns on findings a retrospective cohort cannot avoid"
+  plan_refs: ["W1-T4575", "W1-T4603", "W1-T4625", "W1-T4638", "W1-T4646"]
+  files:
+    - src/lib/benchmark-aa-prospective.ts
+    - src/lib/paired-trial.ts
+    - src/run-task.ts
+    - test/a-prospective-aa-earns-a-clean-receipt.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    Paid-pilot activation (`citeAaReceipt`, src/lib/benchmark-paid-pilot.ts)
+    refuses anything but a current receipt whose verdict is `no-integrity-concern-detected`. The
+    third operator-approved A/A (trial aa-retro-2026-09-27, 2026-09-28) read `integrity-concerns`,
+    and most of its findings are STRUCTURAL to a retrospective cohort, not defects a fix removes:
+    `stack-deviation` (live routing served other models), `unpinned-revision-at-run` (1041
+    revision fields unavailable at assignment), a live routing-experiment tag on a trial task, and
+    `differential-missingness:servedModel` (p=0.049). Fleet history was never run on one pinned
+    stack, so no amount of join repair makes it one. The only path to the receipt the operator's
+    "A/A before A/B" ruling requires is an A/A whose exposures are CREATED on the pinned stack.
+    W1-T4625/W1-T4638 already built that seam: isolated side attempts, graded by the task's own
+    proofs through the reviewer's executor, never pushed, never reviewed, never merged.
+  design: |
+    A prospective A/A protocol drives the paired-trial seam with BOTH arms set to the manifest's
+    one pinned stack (`parseAaTrialManifest`), labels A1/A2 in a seeded order per task. Each side
+    attempt's assignment and attempt receipts carry the trial id, the label and the full pinned
+    revisions, so the existing A/A analysis (`benchmark-aa.ts`) reads them with no stack deviation,
+    no unpinned revision and no routing tag by construction. The report and receipt are the
+    existing `BENCHMARK_AA_VERSION` / `BENCHMARK_AA_RECEIPT_VERSION` shapes, so pilot activation
+    needs no change to accept them. SPEND: subscription billing only — an attempt whose resolved
+    billing mode is `api` is refused before spawn and recorded; cash spend is zero and is reported
+    as zero observed, never as unknown. Inert by default: nothing reads, logs or spawns without an
+    operator-registered protocol; normal dispatch never changes; it never activates, resumes or
+    touches the paid pilot. Pairs run one at a time under the W1-T4638 per-attempt cap. The operator
+    reaches it through an rmd verb (register | report | pause) whose handler calls
+    `runProspectiveAa(...)` in src/run-task.ts.
+  acceptance:
+    - claim: "a prospective A/A runs both labels on one pinned stack, refuses api billing before spawn, and its receipt is accepted by pilot activation only when clean"
+      proof: "unit test: test/a-prospective-aa-earns-a-clean-receipt.test.ts"
+    - claim: "the operator reaches the prospective A/A through an rmd verb that registers, reports and pauses it"
+      proof: "grep: runProspectiveAa( in src/run-task.ts"
+  falsifier: |
+    Let one side attempt route through the live policy instead of the pinned stack: the report
+    reads stack-deviation and pilot activation refuses the receipt.
