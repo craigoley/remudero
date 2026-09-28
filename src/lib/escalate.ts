@@ -603,8 +603,7 @@ export async function judgeEscalation(e: Escalation, deps: EscalationJudgeDeps):
  *  is baked into the prompt, so it has no ability to explore the worktree or take any action. */
 export const ESCALATION_JUDGE_TOOLS: string[] = [];
 
-/** W1-T4645: one escalation-judge decision's run id — a digest of exactly what was judged, so the
- *  same escalation re-judged joins one run and a different one never shares it. */
+/** W1-T4645: one judge decision's run id — a digest of exactly what was judged. */
 export function escalationJudgeRunId(e: Escalation): string {
   const digest = createHash("sha256").update(buildEscalationJudgePrompt(e)).digest("hex").slice(0, 12);
   return `escalation-summary-${e.taskId}-${digest}`;
