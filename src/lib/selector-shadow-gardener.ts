@@ -162,10 +162,12 @@ export async function readSelectorShadowRunsAsync(
     clock?: Clock;
     freshLogsPerPass?: number;
     warn?: (message: string) => void;
+    writeCache?: (path: string, contents: string) => void;
   } = {},
 ): Promise<SelectorShadowRun[]> {
   const readJson = io.readJson ?? ghJsonAsync;
   const readLog = io.readLog ?? ((args: string[]) => ghTextAsync(args, { maxBuffer: 64 * 1024 * 1024 }));
+  const writeCache = io.writeCache ?? writeAtomic;
   const headers = selectorShadowRunHeaders(await readJson(selectorShadowRunListArgs(owner, repo, limit)));
   type CachedLog = { headSha: string; log: string; fetchedAt: number; complete: boolean };
   let cached: Record<string, CachedLog> = {};
@@ -225,7 +227,7 @@ export async function readSelectorShadowRunsAsync(
       const complete = parseSelectorShadowLines(log).length === SELECTOR_SHADOW_SHARDS;
       cached[key] = { headSha: run.headSha, log, fetchedAt: clock.now(), complete };
       try {
-        writeAtomic(io.cachePath, JSON.stringify(cached) + "\n");
+        writeCache(io.cachePath, JSON.stringify(cached) + "\n");
       } catch (error) {
         io.warn?.(`selector shadow log cache write failed: ${String((error as Error).message)}`);
       }
@@ -234,7 +236,7 @@ export async function readSelectorShadowRunsAsync(
   if (io.cachePath) {
     const wanted = new Set(headers.map((run) => String(run.id)));
     cached = Object.fromEntries(Object.entries(cached).filter(([key]) => wanted.has(key)));
-    try { writeAtomic(io.cachePath, JSON.stringify(cached) + "\n"); }
+    try { writeCache(io.cachePath, JSON.stringify(cached) + "\n"); }
     catch (error) { io.warn?.(`selector shadow log cache prune failed: ${String((error as Error).message)}`); }
   }
   return runs;

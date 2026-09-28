@@ -232,6 +232,42 @@ test("selector-shadow resumes a bounded log window across ticks and daemon resta
   assert.deepEqual(fetched, [1, 2, 3, 2], "a run ID with a different head cannot reuse evidence");
 });
 
+test("selector-shadow reports a corrupt cache and rebuilds it from run evidence", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-corrupt-`));
+  const cachePath = join(root, "logs.json");
+  writeFileSync(cachePath, "{invalid json");
+  const warnings: string[] = [];
+  const record: SelectorShadowRecord = { fullRun: true, floorSize: 20, narrowSize: 10, failures: [] };
+  const rows = await readSelectorShadowRunsAsync("acme", "remudero", 1, {
+    cachePath,
+    readJson: async () => ({ workflow_runs: [{ id: 1, head_sha: "head-1" }] }),
+    readLog: async () => run(1, record).log,
+    warn: (message) => { warnings.push(message); },
+  });
+  assert.match(warnings[0] ?? "", /log cache unreadable/);
+  assert.equal(parseSelectorShadowLines(rows[0]?.log ?? "").length, SELECTOR_SHADOW_SHARDS);
+  assert.doesNotThrow(() => JSON.parse(readFileSync(cachePath, "utf8")), "the replacement cache is valid JSON");
+});
+
+test("selector-shadow names both cache write failures and re-reads on the next pass", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-write-`));
+  const warnings: string[] = [];
+  let logReads = 0;
+  const record: SelectorShadowRecord = { fullRun: true, floorSize: 20, narrowSize: 10, failures: [] };
+  const io = {
+    cachePath: join(root, "logs.json"),
+    readJson: async () => ({ workflow_runs: [{ id: 1, head_sha: "head-1" }] }),
+    readLog: async () => { logReads++; return run(1, record).log; },
+    writeCache: () => { throw new Error("disk unavailable"); },
+    warn: (message: string) => { warnings.push(message); },
+  };
+  const first = await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
+  assert.equal(parseSelectorShadowLines(first[0]?.log ?? "").length, SELECTOR_SHADOW_SHARDS);
+  assert.deepEqual(warnings.map((message) => message.includes("cache write failed") ? "write" : message.includes("cache prune failed") ? "prune" : "other"), ["write", "prune"]);
+  await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
+  assert.equal(logReads, 2, "a failed cache write cannot be mistaken for persisted evidence");
+});
+
 test("selector-shadow keeps scanning after an unreadable log without treating it as complete", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-unreadable-`));
   const cachePath = join(root, "logs.json");

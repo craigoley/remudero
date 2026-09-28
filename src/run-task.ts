@@ -28460,6 +28460,8 @@ async function retroCommand(
      * by a human and keeps its existing behavior unchanged.
      */
     automated?: { reason: "merges" | "days" | "followups"; mergesSinceMarker: number; daysSinceMarker: number };
+    /** The detached automated retro owns its own App token renewal loop. */
+    startTokenRefresh?: typeof startInstallationTokenRefresh;
     /**
      * Injectable GitHub gateway for this command's two {@link projectPlan} passes (the plan-health
      * sweep and the orientation section) — the same shape `spawn` above already uses, and the
@@ -28504,6 +28506,21 @@ async function retroCommand(
   const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("retro");
   const config = loadConfig();
   const ledgerPath = ledgerPathFor(config);
+  // The daemon's inherited GH_TOKEN is a snapshot. A prepublish pass can outlive its one-hour
+  // lifetime, so the automated retro starts and awaits its own first mint before GitHub reads.
+  if (opts.automated) {
+    const tokenRunId = `retro-token-${process.pid}`;
+    const refresh = (opts.startTokenRefresh ?? startInstallationTokenRefresh)({
+      log: (step, extra) => appendLedger(ledgerPath, {
+        run_id: tokenRunId,
+        task_id: "RETRO",
+        step,
+        lane: "retro",
+        ...extra,
+      }),
+    });
+    if (refresh.ready) await refresh.ready;
+  }
   const markerPath = join(config.root, "state", "last-retro.json");
   const learningsPath = join(repoRoot, "LEARNINGS.md");
   // W1-T242: a corrupt-but-present marker (e.g. a torn write from a crash, or a manual
@@ -47763,24 +47780,6 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       const encodedAutomatedDecision = process.env[AUTOMATED_RETRO_DECISION_ENV];
       // c8 ignore next
       const automated = encodedAutomatedDecision === undefined ? undefined : decodeAutomatedRetroDecision(encodedAutomatedDecision);
-      // The daemon's retro is a separate process. Its inherited GH_TOKEN is a snapshot and a
-      // full prepublish suite can outlive that token's one-hour life. Refresh in THIS process
-      // before its first GitHub read and keep refreshing until it exits; the daemon's own
-      // refresher cannot update a child process's environment after spawn.
-      if (automated) {
-        const tokenLedger = ledgerPathFor(loadConfig());
-        const tokenRunId = `retro-token-${process.pid}`;
-        const refresh = startInstallationTokenRefresh({
-          log: (step, extra) => appendLedger(tokenLedger, {
-            run_id: tokenRunId,
-            task_id: "RETRO",
-            step,
-            lane: "retro",
-            ...extra,
-          }),
-        });
-        if (refresh.ready) await refresh.ready;
-      }
       /* node:coverage ignore next -- real retro execution reads ledger/plan state and may spawn; retroCommand has injectable tests */
       return await retroCommand(rest, automated ? { automated } : {});
     },
