@@ -2147,6 +2147,7 @@ export function buildSweepEffects(
     createFixRungWorktreeImpl: createFixRungWorktree,
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit,
     runFixRungImpl: runFixRung,
+    pushFixRoundImpl: pushFixRound,
     buildFixRungDispatchArgsImpl: buildFixRungDispatchArgs,
     openTaskIdsFromPlanImpl: openTaskIdsFromPlan,
     waitForCiGreenImpl: waitForCiGreen,
@@ -9728,6 +9729,37 @@ export async function runFixRung(opts: {
   // worktree is now stale; the next level-triggered sweep reconstructs both CI and the checkout
   // at the new head. A failed/indeterminate read falls through to the ordinary fix rung.
   let baseRefreshChecked = false;
+  // W1-T4693: the last census refusal of this rung's own push, and what a round does when its push did not
+  // land. A census refusal becomes the next strike's ci-log evidence, as W1-T4656 feeds its first strike;
+  // any other failure ends the rung. Neither waits on CI for a head that never landed.
+  let pushRefusal: CensusPushRefusal | undefined;
+  const censusRefusalIsCurrent = () => pushRefusal !== undefined && noReviewYet && (currentCiFailures ?? []).some((f) => f.name === CENSUS_PUSH_CHECK);
+  const offeredCensusBaselines = () => (censusRefusalIsCurrent() ? pushRefusal!.offeredBaselines : []);
+  const landRoundPush = async (push: () => unknown, headSha: string | undefined, site: string): Promise<FixRungOutcome | "refused" | undefined> => {
+    try {
+      await push();
+      return undefined;
+    } catch (e) {
+      if (!(e instanceof FixRoundPushError)) throw e;
+      const text = (e.refusal?.text ?? e.detail).slice(0, 2000);
+      if (e.refusal) {
+        deps.log("fix.push_refused", { site, strike: strikes, censuses: e.refusal.censuses, refusal: text, head_sha: headSha, pr_head_sha: review.headSha });
+        deps.say(`fix rung: strike ${strikes}/${opts.strikeCap} push REFUSED by the pre-push census (${e.refusal.censuses.join(", ")}) — the next strike gets the refusal`);
+        pushRefusal = e.refusal;
+        currentCiFailures = [{ name: CENSUS_PUSH_CHECK, logTail: e.refusal.text }];
+        everRedCiCheckNames.add(CENSUS_PUSH_CHECK);
+        noReviewYet = true;
+        currentMergeConflict = undefined;
+        // The local head now carries an unpushed commit; merging base into the remote would strand it.
+        baseRefreshChecked = true;
+        return "refused";
+      }
+      deps.log("fix.push_failed", { site, strike: strikes, cause: e.pushCause, error: text, head_sha: headSha, pr_head_sha: review.headSha });
+      const reason = `fix round push failed (${e.pushCause})`;
+      deps.say(`fix rung: ${reason} — standing down without waiting on CI for the old head`);
+      return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: `${reason}: ${text}` };
+    }
+  };
 
   // W1-T2403: `retriggers < retriggerCap` is the SEPARATE bound that stops an unbounded loop the
   // moment `strikes` stops moving (a retrigger-shaped round never increments it, below) — without
@@ -10152,6 +10184,7 @@ export async function runFixRung(opts: {
       generatorFixAttempts++;
       const runGeneratorScript = deps.runGeneratorScript;
       const commitGeneratorOutput = deps.commitGeneratorOutput;
+      let generatorPush: FixRungOutcome | "refused" | undefined;
       const generatorResult = await runGeneratorFixForCiFailures({
         failures: currentCiFailures,
         scripts: deps.packageScripts ?? {},
@@ -10161,9 +10194,13 @@ export async function runFixRung(opts: {
         deps: {
           runScript: runGeneratorScript,
           commit: (o) => commitGeneratorOutput(o),
-          push: (o) => deps.push(o.cwd, o.branch, o.expectedHeadSha),
+          push: async (o) => {
+            generatorPush = await landRoundPush(() => deps.push(o.cwd, o.branch, o.expectedHeadSha), o.expectedHeadSha, "rung.generator_fix");
+          },
         },
       });
+      if (generatorPush === "refused") continue;
+      if (generatorPush) return generatorPush;
       if (generatorResult.applied) {
         deps.log("fix.generator_fix", {
           strike: strikes,
@@ -10243,7 +10280,10 @@ export async function runFixRung(opts: {
     // global) so the coupling is visible at this call site and the scope gate stays PURE — this
     // is the ONLY caller-side state it needs. Reused, unchanged, by the prompt render below so the
     // gate and the instruction it dispatches can never name a different set (design note iii).
-    const reachableRemedyFiles = remedyFilesForFailingChecks((currentCiFailures ?? []).map((f) => f.name));
+    const reachableRemedyFiles = [
+      ...remedyFilesForFailingChecks((currentCiFailures ?? []).map((f) => f.name)),
+      ...offeredCensusBaselines().map((path) => ({ path, job: "census-precheck" })),
+    ];
     if (deps.fetchPrDiffFiles && baselineDiffFiles !== undefined) {
       let currentDiffFiles: string[] | undefined;
       try {
@@ -10760,6 +10800,9 @@ export async function runFixRung(opts: {
         opts.taskId,
         opts.task.files ?? [],
       ),
+      ...(censusRefusalIsCurrent()
+        ? ["", "PRE-PUSH CENSUS (W1-T4693): hooks/pre-push refused the last round's push with the census rows above; the PR still shows its old head.", CENSUS_PUSH_NEVER_BYPASS]
+        : []),
     ].join("\n");
     // W1-T199: TAG THE STRIKE WITH THE VERDICT REGIME IT WAS SPENT AGAINST. A strike
     // spent when no proof could execute is a strike against KEYWORD NOISE; one spent
@@ -10882,7 +10925,7 @@ export async function runFixRung(opts: {
         commitCount: roundStartSha === undefined ? 0 : (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha),
         report,
         worktreePath: opts.worktreePath,
-        declaredPaths: opts.task.files ?? [],
+        declaredPaths: [...(opts.task.files ?? []), ...offeredCensusBaselines()],
         ...options,
         assignmentId: fixResult.selectionAssignmentId,
         log: deps.log,
@@ -11115,7 +11158,9 @@ export async function runFixRung(opts: {
       };
     }
 
-    deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush);
+    const roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush), expectedHeadShaForPush, "rung.strike");
+    if (roundPush === "refused") continue;
+    if (roundPush) return roundPush;
 
     recordHeadProviderAfterPush(
       {
@@ -14753,6 +14798,32 @@ export function censusPushRefusal(err: unknown): CensusPushRefusal | undefined {
 }
 
 const CENSUS_BASELINE_FILES = ["scripts/clock-signature-baseline.json", "scripts/comment-load-baseline.json", "scripts/fixture-copy-baseline.json"];
+const CENSUS_PUSH_CHECK = "pre-push census-precheck";
+const CENSUS_PUSH_NEVER_BYPASS =
+  "Apply the remedy each row names, preferring the code change; record a baseline row only where that row offers\n" +
+  "one. Never push with --no-verify or RMD_PREPUSH_GATES=0: the harness retries the push through the hook.";
+
+/** W1-T4693: a fix round's push that did not land — `refusal` set when the pre-push census refused it. */
+export class FixRoundPushError extends RmdError {
+  constructor(readonly pushCause: RunErrorCause, readonly refusal: CensusPushRefusal | undefined, readonly detail: string) {
+    super("git", GENERIC_EXIT_CODE, `fix round push did not land (${pushCause}): ${detail}`, { pushCause });
+    this.name = "FixRoundPushError";
+  }
+}
+
+/** W1-T4693: the one push both fix-rung sites run. Stderr is piped so a refusal is readable; a foreign head
+ *  still raises; the only silent failure is a remote that already holds this exact head. */
+export function pushFixRound(wt: string, branch: string, expectedHeadSha?: string): void {
+  try {
+    gitPushRunBranch(wt, { expectedHeadSha, exec: (file, args) => void execFileSync(file, args, { stdio: ["ignore", "ignore", "pipe"] }) });
+  } catch (err) {
+    if (err instanceof LanePushForeignHeadError) throw err;
+    // spawnSync, not a try: an unreadable remote simply is not the expected head.
+    const remote = spawnSync("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`], { encoding: "utf8" }).stdout?.split(/\s/)[0];
+    if (expectedHeadSha !== undefined && remote === expectedHeadSha) return;
+    throw new FixRoundPushError(runErrorCause(err), censusPushRefusal(err), String((err as Error)?.message ?? err));
+  }
+}
 
 export type CensusPushRungOutcome =
   | { outcome: "cleared"; strikes: number; remedy: "code-change" | "baseline-row"; baselineFiles: string[] }
@@ -14799,13 +14870,12 @@ export async function repairCensusRefusedPush(input: {
         round: strike,
         branch: input.branch,
         harnessCommits,
-        evidence: { ciFailures: [{ name: "pre-push census-precheck", logTail: refusal.text }] },
+        evidence: { ciFailures: [{ name: CENSUS_PUSH_CHECK, logTail: refusal.text }] },
         reachableRemedyFiles: refusal.offeredBaselines.map((path) => ({ path, job: "census-precheck" })),
       }),
       "",
       "PRE-PUSH CENSUS (W1-T4656): no PR exists yet — hooks/pre-push refused this branch with the census rows above.",
-      "Apply the remedy each row names, preferring the code change; record a baseline row only where that row offers",
-      "one. Never push with --no-verify or RMD_PREPUSH_GATES=0: the harness retries the push through the hook.",
+      CENSUS_PUSH_NEVER_BYPASS,
     ].join("\n");
     const roundStart = head();
     const receipt = fixWorkerReceipt(input.spawn, log, fixWorkerRunId(input.runId, `census${strike}`, systemClock.now()), fixLaneBenchmarkWork(task, input.ledgerPath));
@@ -16861,24 +16931,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // executor `judgeCriterion` itself uses (review.ts's parseWhitelistedProof/
           // execWhitelistedProof) — never a second, hand-rolled grep invocation.
           execAcceptanceGateRepairProof: execGrepProofInWorktree(worktreePath),
-          // W1-T2610: `expectedHeadSha` (the sha this rung just committed) is WIRED here, not
-          // merely accepted — `gitPushRunBranch`'s post-condition re-reads this worktree's HEAD
-          // right before pushing and raises `LanePushForeignHeadError` if it no longer matches,
-          // catching a ref rewound during this rung's own dead time (readRoundCommits/ledger/
-          // follow-up-harvest, above) between the commit and this push. That raise is
-          // deliberately let through (never swallowed by the best-effort catch below): FAIL
-          // DIRECTION per this task's design — a raise parks this one fix round for the
-          // level-triggered sweep to re-derive next pass, while silence here would lose the
-          // round's entire spend and leave the PR looking fixed.
-          push: (wt, _branch, expectedHeadSha) => {
-            try {
-              gitPushRunBranch(wt, { stdio: "ignore", expectedHeadSha });
-            } catch (err) {
-              if (err instanceof LanePushForeignHeadError) throw err;
-              // best-effort — the fix worker may already have pushed itself;
-              // nothing new to push is not an error.
-            }
-          },
+          // W1-T2610 + W1-T4693: `expectedHeadSha` still raises `LanePushForeignHeadError` on a rewound ref;
+          // a refusal or failure now throws `FixRoundPushError`, which `runFixRung` turns into a named round.
+          push: pushFixRound,
           readHeadShaForProvenance: readHeadShaRest,
           issues: ghIssueGateway(owner, task.repo),
           ledgerPath,
