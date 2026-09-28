@@ -1,0 +1,40 @@
+- id: W1-T4726
+  title: "A NEVER-WORKED RUN JUDGES NO CANARY AND FILLS NO ARM — the config gardener's canary cohort, the mount-headroom per-arm cells and its re-dispatch set still read thrown, refused and backfilled runs as settled work"
+  repo: remudero
+  depends_on: ["W1-T4711"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-28: unresolved items named by W1-T4711's build (PR #7663)"
+  plan_refs: ["W1-T4709", "W1-T4711"]
+  files:
+    - src/lib/config-gardener.ts
+    - scripts/mount-headroom-sweep.mjs
+    - test/a-never-worked-run-judges-no-canary-and-fills-no-arm.test.ts
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    W1-T4711 (merged, PR #7663) sets `RunSummary.neverWorked` in retro.ts's `gatherRuns` (via
+    src/lib/never-worked.ts's `isNeverWorkedVerdict`) and excludes flagged runs from retro overrun
+    mining, the mount-headroom per-class percentiles and the gardener's budget recalibration. Its
+    build named three readers it left as they were:
+    - config-gardener's canary judging — `splitCohort` / `cohortOutcome` (through `settledImplement`)
+      still counts a never-worked run as a settled task, so a refused or thrown dispatch reads as a
+      canary outcome;
+    - mount-headroom-sweep's `computeArmSweep` per-arm cells still include never-worked runs;
+    - `redispatchedRunIds` counts a refusal followed by a real run as a re-dispatch, marking the real
+      run re-dispatched.
+  design: |
+    Each reader skips `neverWorked` runs (the flag W1-T4711 already sets; no second rule) and reports
+    how many it skipped. For `redispatchedRunIds`, a never-worked prior run does not make its
+    successor a re-dispatch. Runs that did work are judged exactly as before.
+  acceptance:
+    - claim: "a never-worked run neither enters a canary cohort's outcome nor a mount-headroom arm cell, and a real run after a refusal is not marked re-dispatched"
+      proof: "unit test: test/a-never-worked-run-judges-no-canary-and-fills-no-arm.test.ts"
+  falsifier: |
+    A canary cohort of five real runs and five refused dispatches: the cohort outcome matches the
+    five real runs alone, and the first real run after a refusal is not in the re-dispatched set.
