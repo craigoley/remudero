@@ -162,6 +162,15 @@ function parseProbeArgs(argv) {
   return parsed.values;
 }
 
+/** The completion budget a probe sends: the adapter's own, refused before transport if it ever
+ *  drops below {@link COMPLETION_TOKEN_FLOOR} (a truncated reasoning reply is not evidence). */
+export function probeCompletionTokens(adapterBudget = OPENWEIGHT_MAX_COMPLETION_TOKENS) {
+  if (adapterBudget < COMPLETION_TOKEN_FLOOR) {
+    throw new ProbeRefusal("completion-budget", `the adapter completion budget is below ${COMPLETION_TOKEN_FLOOR}`);
+  }
+  return adapterBudget;
+}
+
 function requireProbeShape(values) {
   const mode = values.mode;
   if (!PROBE_MODES.includes(mode)) throw new ProbeRefusal("bad-mode", `--mode must be one of ${PROBE_MODES.join(", ")}`);
@@ -196,9 +205,7 @@ function requireProbeShape(values) {
   if (temperatureField.temperature !== PROBE_TEMPERATURE) {
     throw new ProbeRefusal("temperature-unsupported", `--model does not accept temperature ${PROBE_TEMPERATURE}, so its probe is not replayable`);
   }
-  if (OPENWEIGHT_MAX_COMPLETION_TOKENS < COMPLETION_TOKEN_FLOOR) {
-    throw new ProbeRefusal("completion-budget", `the adapter completion budget is below ${COMPLETION_TOKEN_FLOOR}`);
-  }
+  probeCompletionTokens();
   if (values.name !== undefined && !SESSION_NAME_RE.test(values.name)) {
     throw new ProbeRefusal("bad-name", "--name must be a plain directory name");
   }
@@ -271,8 +278,9 @@ function resolveOutputTarget(values, deps) {
   return real;
 }
 
-function defaultRunKeyCommand(command, args) {
-  const result = spawnSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+/** Run the key-retrieval command. stderr is counted, never kept, so it cannot reach a log. */
+export function defaultRunKeyCommand(command, args, spawn = spawnSync) {
+  const result = spawn(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
   return { status: result.status, stdout: result.stdout ?? "", stderrBytes: (result.stderr ?? "").length, failed: Boolean(result.error) };
 }
 
@@ -474,7 +482,7 @@ async function runSession({ shape, prompt, sessionDir, sessionName, source, crea
   const url = new URL(`openai/deployments/${encodeURIComponent(shape.model)}/chat/completions?api-version=${PROBE_API_VERSION}`, shape.endpoint).toString();
   const endpoint = { host: shape.endpoint.host, url, deployment: shape.model, apiVersion: PROBE_API_VERSION };
   const messages = [{ role: "system", content: OPENWEIGHT_OUTPUT_CONTRACT }, { role: "user", content: prompt }];
-  const body = { model: shape.model, messages, temperature: PROBE_TEMPERATURE, max_completion_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS };
+  const body = { model: shape.model, messages, temperature: PROBE_TEMPERATURE, max_completion_tokens: probeCompletionTokens() };
   const promptRecord = { system: OPENWEIGHT_OUTPUT_CONTRACT, user: prompt, sha256: sha256(prompt) };
   writeEvidence(join(sessionDir, ".gitignore"), "*\n", secrets);
   writeEvidence(join(sessionDir, "session.json"), {
@@ -520,12 +528,13 @@ async function runSession({ shape, prompt, sessionDir, sessionName, source, crea
   return { exitCode, sessionDir, summary };
 }
 
-/** The real transport: one POST with the adapter's own deadline. Never used by a test. */
-export async function fetchTransport({ url, method, headers, body, timeoutMs }) {
+/** The real transport: one POST with the adapter's own deadline. Tests pass a recorder as
+ *  `fetchImpl`; nothing in the suite reaches the network. */
+export async function fetchTransport({ url, method, headers, body, timeoutMs }, fetchImpl = fetch) {
   const abort = new AbortController();
   const deadline = setTimeout(() => abort.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { method, headers, body, signal: abort.signal });
+    const response = await fetchImpl(url, { method, headers, body, signal: abort.signal });
     return { status: response.status, text: await response.text() };
   } finally {
     clearTimeout(deadline);

@@ -53,6 +53,16 @@ const probe = probeModule as {
   redactSecrets(text: string, secrets: string[]): string;
   azureKeyCommand(account: string, group: string): { command: string; args: string[] };
   findCliCredential(argv: string[]): string | null;
+  probeCompletionTokens(adapterBudget?: number): number;
+  defaultRunKeyCommand(
+    command: string,
+    args: string[],
+    spawn: (command: string, args: string[], options: Record<string, unknown>) => { status: number | null; stdout?: string; stderr?: string; error?: Error },
+  ): { status: number | null; stdout: string; stderrBytes: number; failed: boolean };
+  fetchTransport(
+    request: TransportRequest,
+    fetchImpl: (url: string, init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<{ status: number; text(): Promise<string> }>,
+  ): Promise<TransportReply>;
   REDACTED: string;
   MAX_PROBE_RUNS: number;
   COMPLETION_TOKEN_FLOOR: number;
@@ -504,4 +514,64 @@ test("openweight probe schema refuses a record missing its raw output", () => {
     "request.headers api-key redacted",
   ]);
   assert.deepEqual(probe.validateRunRecord({ ...record, validation: { verdict: "error", reasons: [] }, response: null }), ["error"]);
+});
+
+test("openweight probe keeps a malformed reply as evidence rather than crashing", async () => {
+  const { outDir, promptFile } = scratch();
+  const { calls, transport } = recordingTransport([
+    chatReply("just a sentence, not a shard"),
+    chatReply("- id: W1-T9999\n  title: \"no acceptance\""),
+    { status: 200, text: JSON.stringify({ choices: [{ message: { role: "assistant", content: null }, finish_reason: "stop" }] }) },
+    { status: 200, text: "<html>gateway page</html>" },
+  ]);
+  const result = await probe.runProbe(
+    ["--mode", "authoring", ...common({ outDir, promptFile }), "--runs", "4", "--name", "malformed"],
+    baseDeps({ transport }),
+  );
+  assert.equal(result.exitCode, 1, "a non-JSON body stops the session");
+  assert.equal(calls.length, 4);
+  const records = [1, 2, 3, 4].map((i) => JSON.parse(readFileSync(join(outDir, "malformed", `run-00${i}.json`), "utf8")));
+  for (const record of records) assert.deepEqual(probe.validateRunRecord(record), []);
+  assert.deepEqual(records[0].validation, { verdict: "fail", reasons: ["document is not a task-shard mapping"] });
+  assert.deepEqual(records[1].validation, { verdict: "fail", reasons: ["missing non-empty acceptance list"] });
+  assert.deepEqual(records[2].validation, { verdict: "error", reasons: ["response has no assistant content"] });
+  assert.equal(records[3].response.raw, "<html>gateway page</html>", "even an unparseable body is retained verbatim");
+  assert.equal(records[3].error, "response body is not JSON");
+  assert.deepEqual(
+    { requested: result.summary?.requested, pass: result.summary?.pass, fail: result.summary?.fail, error: result.summary?.error },
+    { requested: 4, pass: 0, fail: 2, error: 2 },
+  );
+});
+
+test("openweight probe completion budget refuses a ceiling below the measured floor", () => {
+  assert.ok(probe.probeCompletionTokens() >= 5000);
+  assert.equal(probe.probeCompletionTokens(5000), 5000);
+  assert.throws(() => probe.probeCompletionTokens(1500), (error: Error & { code?: string }) => error.code === "completion-budget");
+});
+
+test("openweight probe default seams record their calls without a network or a real key", async () => {
+  const spawned: Array<{ command: string; args: string[]; options: Record<string, unknown> }> = [];
+  const ok = probe.defaultRunKeyCommand("az", ["x"], (command, args, options) => {
+    spawned.push({ command, args, options });
+    return { status: 0, stdout: `${FAKE_KEY}\n`, stderr: "warning text" };
+  });
+  assert.deepEqual(ok, { status: 0, stdout: `${FAKE_KEY}\n`, stderrBytes: 12, failed: false });
+  assert.deepEqual(spawned, [{ command: "az", args: ["x"], options: { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 } }]);
+  const missing = probe.defaultRunKeyCommand("az", [], () => ({ status: null, error: new Error("spawn az ENOENT") }));
+  assert.deepEqual(missing, { status: null, stdout: "", stderrBytes: 0, failed: true });
+
+  const fetched: Array<{ url: string; init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal } }> = [];
+  const reply = await probe.fetchTransport(
+    { url: EXPECTED_URL, method: "POST", headers: { "api-key": FAKE_KEY }, body: "{}", timeoutMs: 60_000 },
+    async (url, init) => {
+      fetched.push({ url, init });
+      return { status: 200, text: async () => "raw body" };
+    },
+  );
+  assert.deepEqual(reply, { status: 200, text: "raw body" });
+  assert.equal(fetched.length, 1);
+  assert.equal(fetched[0].url, EXPECTED_URL);
+  assert.equal(fetched[0].init.method, "POST");
+  assert.equal(fetched[0].init.body, "{}");
+  assert.equal(fetched[0].init.signal.aborted, false, "the deadline is armed, not fired");
 });
