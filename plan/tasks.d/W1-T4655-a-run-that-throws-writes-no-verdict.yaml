@@ -1,0 +1,42 @@
+- id: W1-T4655
+  title: "A RUN THAT THROWS WRITES NO VERDICT — runTask's catch ledgers run.error and rethrows, so 96 runs since 2026-09-24 ended with no terminal verdict row and every verdict consumer reads a finished run as missing"
+  repo: remudero
+  depends_on: ["W1-T4648"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-28: A/A run 8 — 34 of 35 verdict-less runs ended in run.error"
+  plan_refs: ["W1-T4607", "W1-T4608", "W1-T4648", "W1-T4652", "W1-T4575"]
+  files:
+    - src/run-task.ts
+    - test/a-run-that-throws-writes-no-verdict.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-28 over the ledger union (every .gz rotation plus the live file): 96 distinct
+    runs logged `run.error` between 2026-09-24 and 2026-09-28, and none of them wrote a `verdict`
+    row. runTask's outer catch (src/run-task.ts, `log("run.error", ...)` then `throw err`) reclaims
+    the worktree and rethrows, so the run's only terminal record is the error line. In the 27-task
+    A/A cohort, 34 of the 35 runs that carry assignments but no verdict ended this way, and the
+    verified-outcome join (W1-T4648/W1-T4652) can only read them `run-without-terminal-verdict`.
+    Causes seen: a pre-push census refusal of the orchestrator's push (34 of the 96, see W1-T4656),
+    GitHub API bodies that would not parse, a failed git push, check-run reads. Every consumer of
+    verdicts — case files, verified outcomes, the A/A, drift, self-forecast — therefore treats a
+    run that demonstrably ended as one whose ending is unknown.
+  design: |
+    Before rethrowing, the catch writes a terminal `verdict` row for the run with a verdict that
+    already exists in RunResult's union and names the harness cause (for example `failed` with a
+    `cause: "run-error"` and the bounded error text), so the row is unmistakably a harness ending,
+    never a model judgement. Write it best-effort (a ledger failure must not replace the original
+    throw) and exactly once per run. Rethrow unchanged, so every caller's behaviour is identical.
+    W1-T4648's ENDS_WITHOUT_COMPLETION then classifies it without a new rule.
+  acceptance:
+    - claim: "a run whose body throws writes exactly one terminal verdict row naming the harness cause before the error propagates, and the original error still reaches the caller"
+      proof: "unit test: test/a-run-that-throws-writes-no-verdict.test.ts"
+  falsifier: |
+    Make the implement step throw after the worker returns: the run's ledger must hold one verdict row
+    with the run-error cause, and runTask must still reject with the same error.
