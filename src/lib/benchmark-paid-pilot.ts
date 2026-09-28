@@ -997,14 +997,13 @@ export interface BenchmarkPaidPilotCommandInput {
 }
 
 const USAGE = "usage: rmd benchmark-paid-pilot activate --request <request.json> --aa-report <aa-report.json> "
-  + "--confirm-cash-ceiling-usd 100 [--state-dir <dir>] [--json] | rmd benchmark-paid-pilot report --pilot <id> "
+  + "[--state-dir <dir>] [--json] | rmd benchmark-paid-pilot report --pilot <id> "
   + "[--case-files <snapshot.json>] [--out <report.json>] [--state-dir <dir>] [--json] | rmd benchmark-paid-pilot pause|resume "
   + "--pilot <id> [--note <text>] [--state-dir <dir>]";
 
 function activateCommand(values: Record<string, string | boolean | undefined>, stateDir: string, nowIso: string,
   activate: (input: PaidPilotActivationInput) => PaidPilotActivation, print: (line: string) => void): number {
   const refuse = (reason: string) => { print(`benchmark-paid-pilot: activation refused (${reason}); nothing was activated`); return 2; };
-  if (values["confirm-cash-ceiling-usd"] !== String(PAID_PILOT_CASH_CEILING_USD)) return refuse("cash-ceiling-not-confirmed");
   if (typeof values.request !== "string" || typeof values["aa-report"] !== "string") return refuse("request-and-aa-report-required");
   const raw = readJson(values.request);
   const parsed = raw.ok ? parsePaidPilotRequest(raw.value) : { ok: false as const, reason: "request-unreadable" };
@@ -1122,7 +1121,7 @@ export async function benchmarkPaidPilotCommand(rest: string[], activate: (input
   let values: Record<string, string | boolean | undefined>;
   try {
     values = parseArgs({ args, strict: true, allowPositionals: false, options: {
-      request: { type: "string" }, "aa-report": { type: "string" }, "confirm-cash-ceiling-usd": { type: "string" },
+      request: { type: "string" }, "aa-report": { type: "string" },
       pilot: { type: "string" }, "case-files": { type: "string" }, out: { type: "string" }, "state-dir": { type: "string" },
       note: { type: "string" }, json: { type: "boolean" } } }).values;
   } catch {
