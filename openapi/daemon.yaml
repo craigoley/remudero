@@ -1351,6 +1351,8 @@ components:
         source:
           type: string
           enum: [ledger]
+        presentation:
+          $ref: "#/components/schemas/OperatorAgentProposalPresentation"
 
     ContextRetention:
       type: object
@@ -1741,6 +1743,287 @@ components:
         updatedAt:
           type: string
           format: date-time
+
+    OperatorPreferenceScope:
+      type: object
+      description: W1-T3895 -- a learned preference belongs to one principal in one repository, optionally one surface.
+      required: [principalId, repository]
+      properties:
+        principalId:
+          type: string
+          minLength: 1
+        repository:
+          type: string
+          minLength: 1
+        surface:
+          type: string
+
+    OperatorPreferenceEffect:
+      type: object
+      description: The whole effect vocabulary. None of these can grant a capability, raise a budget, lower an approval level, or suppress a refusal.
+      required: [kind, value]
+      properties:
+        kind:
+          type: string
+          enum: [ordering, notification-style, clarification-wording]
+        value:
+          type: string
+          minLength: 1
+
+    OperatorPreferenceLifecycle:
+      type: string
+      enum: [proposed, accepted, rejected, corrected, opted_out, deleted, expired, unmeasurable]
+
+    OperatorPreferenceReceiptSummary:
+      type: object
+      required: [receiptId, action, lifecycle, at]
+      properties:
+        receiptId:
+          type: string
+        action:
+          type: string
+          enum: [accept, reject, correct, opt-out, delete]
+        lifecycle:
+          $ref: "#/components/schemas/OperatorPreferenceLifecycle"
+        at:
+          type: string
+          format: date-time
+
+    OperatorPreferenceProjection:
+      type: object
+      description: >
+        The `preference-hypothesis-v1` projection of one ledgered `operator-preference-v1` record
+        (src/lib/preference-policy.ts's `projectOperatorPreference`). Evidence is bounded decision
+        references only; a deleted preference withholds its anchors and explanation.
+      required: [version, preferenceId, scope, effect, evidence, confidence, freshness, expiresAt, explanation, application, lifecycle, source, observedAt, receipts]
+      properties:
+        version:
+          type: string
+          enum: [preference-hypothesis-v1]
+        preferenceId:
+          type: string
+        scope:
+          $ref: "#/components/schemas/OperatorPreferenceScope"
+        effect:
+          $ref: "#/components/schemas/OperatorPreferenceEffect"
+        evidence:
+          type: object
+          required: [summary, sampleFloor, sampleSize, source, observedAt, freshness]
+          properties:
+            summary:
+              type: string
+            sampleFloor:
+              type: integer
+            sampleSize:
+              type: integer
+            source:
+              type: string
+            observedAt:
+              type: string
+              format: date-time
+            freshness:
+              type: string
+              enum: [verified, stale]
+            anchors:
+              type: array
+              items:
+                type: string
+        confidence:
+          type: object
+          description: "`value` is 0 with `source` `insufficient` or `unmeasurable` when the evidence cannot measure the preference."
+          required: [value, source, sampleFloor]
+          properties:
+            value:
+              type: number
+            source:
+              type: string
+            sampleFloor:
+              type: integer
+        freshness:
+          type: string
+          enum: [verified, stale]
+        expiresAt:
+          type: string
+          format: date-time
+        explanation:
+          type: string
+        application:
+          type: object
+          required: [state, effect, nonAuthorityGuarantee, reason]
+          properties:
+            state:
+              type: string
+              enum: [applied, shadow, not_applied]
+            effect:
+              type: string
+            nonAuthorityGuarantee:
+              type: string
+              enum: [presentation_only]
+            reason:
+              type: string
+        lifecycle:
+          $ref: "#/components/schemas/OperatorPreferenceLifecycle"
+        source:
+          type: string
+        observedAt:
+          type: string
+          format: date-time
+        supersedes:
+          type: string
+          description: The earlier hypothesis for the same scope and effect this one replaced.
+        receipts:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperatorPreferenceReceiptSummary"
+
+    OperatorPreferenceList:
+      type: object
+      required: [source, stale, scope, preferences]
+      properties:
+        source:
+          type: string
+          enum: [ledger]
+        stale:
+          type: boolean
+        scope:
+          $ref: "#/components/schemas/OperatorPreferenceScope"
+        preferences:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperatorPreferenceProjection"
+
+    OperatorPreferenceProposalRequest:
+      type: object
+      description: Scope and effect only. Evidence, confidence, and authority are never accepted from the caller.
+      required: [scope, effect]
+      additionalProperties: false
+      properties:
+        scope:
+          $ref: "#/components/schemas/OperatorPreferenceScope"
+        effect:
+          $ref: "#/components/schemas/OperatorPreferenceEffect"
+
+    OperatorPreferenceProposalResult:
+      type: object
+      required: [ok, existing, preference]
+      properties:
+        ok:
+          type: boolean
+        existing:
+          type: boolean
+        preference:
+          $ref: "#/components/schemas/OperatorPreferenceProjection"
+
+    OperatorPreferenceActionRequest:
+      type: object
+      description: >
+        One operator action on one preference. `correction` is required to correct. A note is
+        ledgered only as present and a correction only as a digest; neither raw text is stored.
+      required: [preferenceId, scope]
+      additionalProperties: false
+      properties:
+        action:
+          type: string
+          enum: [accept, reject, correct, opt-out, delete]
+        preferenceId:
+          type: string
+          minLength: 1
+        scope:
+          $ref: "#/components/schemas/OperatorPreferenceScope"
+        note:
+          type: string
+        correction:
+          type: string
+        requestId:
+          type: string
+          description: Idempotency key -- a repeated requestId for the same action returns the original receipt.
+
+    OperatorPreferenceReceipt:
+      type: object
+      description: The durable, linked receipt of one preference action.
+      required: [ok, receiptId, preferenceId, linkedTo, action, lifecycle, previousLifecycle, at, scope]
+      properties:
+        ok:
+          type: boolean
+        receiptId:
+          type: string
+        preferenceId:
+          type: string
+        linkedTo:
+          type: string
+        action:
+          type: string
+          enum: [accept, reject, correct, opt-out, delete]
+        lifecycle:
+          $ref: "#/components/schemas/OperatorPreferenceLifecycle"
+        previousLifecycle:
+          $ref: "#/components/schemas/OperatorPreferenceLifecycle"
+        at:
+          type: string
+          format: date-time
+        scope:
+          $ref: "#/components/schemas/OperatorPreferenceScope"
+        requestId:
+          type: string
+        previousReceiptId:
+          type: string
+        hasNote:
+          type: boolean
+        correctionDigest:
+          type: string
+
+    OperatorPreferenceRefusal:
+      type: object
+      description: A refused preference action or proposal; nothing was recorded.
+      required: [error, code, detail]
+      properties:
+        error:
+          type: string
+          enum: [conflict, not_found]
+        code:
+          type: string
+          description: "`not_found`, `scope_mismatch`, `already_deleted`, `opted_out`, `stale_evidence`, or `invalid_transition`."
+        detail:
+          type: string
+
+    OperatorAgentProposalPresentation:
+      type: object
+      description: >
+        W1-T3895 -- present only when GET /v1/operator-agent/proposals names a principal scope. The
+        proposals were checked for authority and refusal first; accepted preferences only reordered
+        the actionable ones.
+      required: [scope, applied, skipped, refusals]
+      properties:
+        scope:
+          $ref: "#/components/schemas/OperatorPreferenceScope"
+        applied:
+          type: array
+          items:
+            type: string
+        skipped:
+          type: array
+          items:
+            type: object
+            required: [preferenceId, reason]
+            properties:
+              preferenceId:
+                type: string
+              reason:
+                type: string
+        refusals:
+          type: array
+          items:
+            type: object
+            required: [proposalId, code]
+            properties:
+              proposalId:
+                type: string
+              code:
+                type: string
+        notificationStyle:
+          type: string
+        clarificationWording:
+          type: string
 
     OperatorAgentExperimentScope:
       type: object
@@ -7892,9 +8175,30 @@ paths:
       description: >
         Returns only proposal, decision, and observed-outcome records reconstructed from the
         append-only ledger, including supported rotated ledger files. No raw analytics payload or
-        bearer token is returned.
+        bearer token is returned. W1-T3895: naming a `principalId` and `repository` narrows the list
+        to that repository and applies the principal's accepted preferences AFTER each proposal's
+        authority and emergency-stop refusal are settled (see `presentation`).
       security:
         - bearerRead: []
+      parameters:
+        - name: principalId
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+        - name: repository
+          in: query
+          required: false
+          description: Required when principalId is present.
+          schema:
+            type: string
+            minLength: 1
+        - name: surface
+          in: query
+          required: false
+          schema:
+            type: string
       responses:
         "200":
           description: Durable operator-agent history.
@@ -8031,6 +8335,281 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /v1/operator-agent/preferences:
+    get:
+      summary: Read a principal's learned operator preferences in one repository.
+      description: >
+        W1-T3895 -- folds `operator-preference-v1` records and their lifecycle events from the
+        ledger into `preference-hypothesis-v1` projections. Opted-out and deleted preferences stay
+        listed with their lifecycle; only an accepted, measured, fresh, unexpired one applies.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: principalId
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - name: repository
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - name: surface
+          in: query
+          required: false
+          description: When present, only preferences for this surface (or for every surface) are listed.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The principal's preferences in the repository.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceList"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/operator-agent/preferences/propose:
+    post:
+      summary: Replay ledgered operator decisions into a shadow-mode preference hypothesis.
+      description: >
+        Confidence is computed from bounded operator decisions in the repository, never accepted
+        from the caller; below the sample floor, or with no decision that measures the effect, the
+        hypothesis is recorded as unmeasurable. It stays `proposed` until the operator accepts it.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorPreferenceProposalRequest"
+      responses:
+        "201":
+          description: A new hypothesis was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceProposalResult"
+        "200":
+          description: The same live hypothesis already exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceProposalResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: The operator opted out of this kind of preference in this scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+        "503":
+          description: The operator-agent memory has not completed its first refresh.
+
+  /v1/operator-agent/preferences/accept:
+    post:
+      summary: Accept a proposed preference so it may apply to presentation.
+      description: Appends one linked `panel.operator_preference_event` receipt. A refusal records nothing.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorPreferenceActionRequest"
+      responses:
+        "200":
+          description: The durable receipt (or the original one, for a repeated requestId).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceReceipt"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such preference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+        "409":
+          description: The action conflicts with the preference's scope or lifecycle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+
+  /v1/operator-agent/preferences/reject:
+    post:
+      summary: Reject a preference; it stops applying.
+      description: Appends one linked `panel.operator_preference_event` receipt. A refusal records nothing.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorPreferenceActionRequest"
+      responses:
+        "200":
+          description: The durable receipt (or the original one, for a repeated requestId).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceReceipt"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such preference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+        "409":
+          description: The action conflicts with the preference's scope or lifecycle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+
+  /v1/operator-agent/preferences/correct:
+    post:
+      summary: Correct a preference; it stops applying until re-proposed.
+      description: Appends one linked `panel.operator_preference_event` receipt. A refusal records nothing.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorPreferenceActionRequest"
+      responses:
+        "200":
+          description: The durable receipt (or the original one, for a repeated requestId).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceReceipt"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such preference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+        "409":
+          description: The action conflicts with the preference's scope or lifecycle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+
+  /v1/operator-agent/preferences/opt-out:
+    post:
+      summary: Opt out of a preference; only deletion remains possible.
+      description: Appends one linked `panel.operator_preference_event` receipt. A refusal records nothing.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorPreferenceActionRequest"
+      responses:
+        "200":
+          description: The durable receipt (or the original one, for a repeated requestId).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceReceipt"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such preference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+        "409":
+          description: The action conflicts with the preference's scope or lifecycle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+
+  /v1/operator-agent/preferences/delete:
+    post:
+      summary: Delete a preference; its evidence is no longer served.
+      description: Appends one linked `panel.operator_preference_event` receipt. A refusal records nothing.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorPreferenceActionRequest"
+      responses:
+        "200":
+          description: The durable receipt (or the original one, for a repeated requestId).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceReceipt"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such preference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
+        "409":
+          description: The action conflicts with the preference's scope or lifecycle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorPreferenceRefusal"
 
   /v1/operator-agent/experiments:
     get:

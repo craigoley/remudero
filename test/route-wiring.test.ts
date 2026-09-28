@@ -129,6 +129,30 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "ledger-only operator-agent settings write; route validation and durable read-back are covered in test/operator-agent.test.ts",
   ],
   [
+    "POST /v1/operator-agent/preferences/propose",
+    "W1-T3895: ledger-only preference hypothesis write with no gateway or root to mis-wire; replay, sample floor, and opt-out refusal are covered in test/preference-policy-scope.test.ts and test/preference-policy-optout.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/preferences/accept",
+    "W1-T3895: ledger-only preference lifecycle receipt; acceptance gating is covered in test/preference-policy-expiry.test.ts and test/preference-policy-application.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/preferences/reject",
+    "W1-T3895: ledger-only preference lifecycle receipt; covered in test/preference-policy-expiry.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/preferences/correct",
+    "W1-T3895: ledger-only preference lifecycle receipt; covered in test/preference-policy-expiry.test.ts and test/preference-policy-evidence.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/preferences/opt-out",
+    "W1-T3895: ledger-only preference lifecycle receipt; covered in test/preference-policy-optout.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/preferences/delete",
+    "W1-T3895: ledger-only preference lifecycle receipt; covered in test/preference-policy-optout.test.ts",
+  ],
+  [
     "POST /v1/operator-agent/emergency/stop",
     "W1-T3900: incident-linked emergency stop issuance and validation are covered in test/emergency-control-receipts.test.ts",
   ],

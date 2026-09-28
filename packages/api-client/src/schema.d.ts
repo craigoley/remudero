@@ -417,6 +417,7 @@ export interface components {
     OperatorAgentProposalList: {
       proposals: (OperatorAgentHistory)[];
       source: "ledger";
+      presentation?: OperatorAgentProposalPresentation;
     };
     ContextRetention: {
       policy: string;
@@ -556,6 +557,125 @@ export interface components {
       source: "ledger" | "default";
       scope?: OperatorAgentSettingsScope;
       updatedAt?: string;
+    };
+    /** W1-T3895 -- a learned preference belongs to one principal in one repository, optionally one surface. */
+    OperatorPreferenceScope: {
+      principalId: string;
+      repository: string;
+      surface?: string;
+    };
+    /** The whole effect vocabulary. None of these can grant a capability, raise a budget, lower an approval level, or suppress a refusal. */
+    OperatorPreferenceEffect: {
+      kind: "ordering" | "notification-style" | "clarification-wording";
+      value: string;
+    };
+    OperatorPreferenceLifecycle: "proposed" | "accepted" | "rejected" | "corrected" | "opted_out" | "deleted" | "expired" | "unmeasurable";
+    OperatorPreferenceReceiptSummary: {
+      receiptId: string;
+      action: "accept" | "reject" | "correct" | "opt-out" | "delete";
+      lifecycle: OperatorPreferenceLifecycle;
+      at: string;
+    };
+    /** The `preference-hypothesis-v1` projection of one ledgered `operator-preference-v1` record (src/lib/preference-policy.ts's `projectOperatorPreference`). Evidence is bounded decision references only; a deleted preference withholds its anchors and explanation. */
+    OperatorPreferenceProjection: {
+      version: "preference-hypothesis-v1";
+      preferenceId: string;
+      scope: OperatorPreferenceScope;
+      effect: OperatorPreferenceEffect;
+      evidence: {
+        summary: string;
+        sampleFloor: number;
+        sampleSize: number;
+        source: string;
+        observedAt: string;
+        freshness: "verified" | "stale";
+        anchors?: (string)[];
+      };
+      /** `value` is 0 with `source` `insufficient` or `unmeasurable` when the evidence cannot measure the preference. */
+      confidence: {
+        value: number;
+        source: string;
+        sampleFloor: number;
+      };
+      freshness: "verified" | "stale";
+      expiresAt: string;
+      explanation: string;
+      application: {
+        state: "applied" | "shadow" | "not_applied";
+        effect: string;
+        nonAuthorityGuarantee: "presentation_only";
+        reason: string;
+      };
+      lifecycle: OperatorPreferenceLifecycle;
+      source: string;
+      observedAt: string;
+      /** The earlier hypothesis for the same scope and effect this one replaced. */
+      supersedes?: string;
+      receipts: (OperatorPreferenceReceiptSummary)[];
+    };
+    OperatorPreferenceList: {
+      source: "ledger";
+      stale: boolean;
+      scope: OperatorPreferenceScope;
+      preferences: (OperatorPreferenceProjection)[];
+    };
+    /** Scope and effect only. Evidence, confidence, and authority are never accepted from the caller. */
+    OperatorPreferenceProposalRequest: {
+      scope: OperatorPreferenceScope;
+      effect: OperatorPreferenceEffect;
+    };
+    OperatorPreferenceProposalResult: {
+      ok: boolean;
+      existing: boolean;
+      preference: OperatorPreferenceProjection;
+    };
+    /** One operator action on one preference. `correction` is required to correct. A note is ledgered only as present and a correction only as a digest; neither raw text is stored. */
+    OperatorPreferenceActionRequest: {
+      action?: "accept" | "reject" | "correct" | "opt-out" | "delete";
+      preferenceId: string;
+      scope: OperatorPreferenceScope;
+      note?: string;
+      correction?: string;
+      /** Idempotency key -- a repeated requestId for the same action returns the original receipt. */
+      requestId?: string;
+    };
+    /** The durable, linked receipt of one preference action. */
+    OperatorPreferenceReceipt: {
+      ok: boolean;
+      receiptId: string;
+      preferenceId: string;
+      linkedTo: string;
+      action: "accept" | "reject" | "correct" | "opt-out" | "delete";
+      lifecycle: OperatorPreferenceLifecycle;
+      previousLifecycle: OperatorPreferenceLifecycle;
+      at: string;
+      scope: OperatorPreferenceScope;
+      requestId?: string;
+      previousReceiptId?: string;
+      hasNote?: boolean;
+      correctionDigest?: string;
+    };
+    /** A refused preference action or proposal; nothing was recorded. */
+    OperatorPreferenceRefusal: {
+      error: "conflict" | "not_found";
+      /** `not_found`, `scope_mismatch`, `already_deleted`, `opted_out`, `stale_evidence`, or `invalid_transition`. */
+      code: string;
+      detail: string;
+    };
+    /** W1-T3895 -- present only when GET /v1/operator-agent/proposals names a principal scope. The proposals were checked for authority and refusal first; accepted preferences only reordered the actionable ones. */
+    OperatorAgentProposalPresentation: {
+      scope: OperatorPreferenceScope;
+      applied: (string)[];
+      skipped: ({
+        preferenceId: string;
+        reason: string;
+      })[];
+      refusals: ({
+        proposalId: string;
+        code: string;
+      })[];
+      notificationStyle?: string;
+      clarificationWording?: string;
     };
     OperatorAgentExperimentScope: {
       repo: string;
@@ -2850,6 +2970,89 @@ export interface paths {
           "400": Error;
           "401": Error;
           "403": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/preferences": {
+    get: {
+      responses: {
+          "200": OperatorPreferenceList;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/preferences/propose": {
+    post: {
+      responses: {
+          "200": OperatorPreferenceProposalResult;
+          "201": OperatorPreferenceProposalResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": OperatorPreferenceRefusal;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/operator-agent/preferences/accept": {
+    post: {
+      responses: {
+          "200": OperatorPreferenceReceipt;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": OperatorPreferenceRefusal;
+          "409": OperatorPreferenceRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/preferences/reject": {
+    post: {
+      responses: {
+          "200": OperatorPreferenceReceipt;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": OperatorPreferenceRefusal;
+          "409": OperatorPreferenceRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/preferences/correct": {
+    post: {
+      responses: {
+          "200": OperatorPreferenceReceipt;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": OperatorPreferenceRefusal;
+          "409": OperatorPreferenceRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/preferences/opt-out": {
+    post: {
+      responses: {
+          "200": OperatorPreferenceReceipt;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": OperatorPreferenceRefusal;
+          "409": OperatorPreferenceRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/preferences/delete": {
+    post: {
+      responses: {
+          "200": OperatorPreferenceReceipt;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": OperatorPreferenceRefusal;
+          "409": OperatorPreferenceRefusal;
         };
     };
   };

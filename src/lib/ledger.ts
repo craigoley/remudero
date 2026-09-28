@@ -448,6 +448,9 @@ export const CONTEXT_DELETED_LEDGER_STEP = "panel.context_deleted";
 export const EMERGENCY_STOP_ISSUED_LEDGER_STEP = "panel.emergency_stop_issued";
 export const EMERGENCY_STOP_CLEARED_LEDGER_STEP = "panel.emergency_stop_cleared";
 
+export const OPERATOR_PREFERENCE_PROPOSED_LEDGER_STEP = "panel.operator_preference_proposed";
+export const OPERATOR_PREFERENCE_EVENT_LEDGER_STEP = "panel.operator_preference_event";
+
 /** W1-T2244 (design vii): the two signals an override can carry, OPPOSITE for a calibrator.
  *  `judge_wrong` says the escalation was a miscalibration; `risk_accepted` says it was correct and
  *  the operator knowingly took the cost. One "overridden" flag would collapse both into judge error.
@@ -711,6 +714,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   CONTEXT_DELETED_LEDGER_STEP,
   EMERGENCY_STOP_ISSUED_LEDGER_STEP,
   EMERGENCY_STOP_CLEARED_LEDGER_STEP,
+  OPERATOR_PREFERENCE_PROPOSED_LEDGER_STEP,
+  OPERATOR_PREFERENCE_EVENT_LEDGER_STEP,
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: test/ledger-rotation.test.ts
   // anchors its mutation check on those three lines followed by `]);` and asserts the needle occurs
   // EXACTLY once. A block appended after them silently breaks that anchor.

@@ -115,6 +115,27 @@ import {
   type EmergencyStopClearPolicy,
   type EmergencyStopScope,
 } from "./emergency-control.js";
+import {
+  applyScopedPreference,
+  evaluatePreference,
+  foldOperatorPreferences,
+  inferPreferenceHypothesis,
+  OPERATOR_PREFERENCE_LEDGER_STEPS,
+  PREFERENCE_ACTIONS,
+  PREFERENCE_EFFECT_KINDS,
+  preferenceDecisionSamples,
+  preferenceListedFor,
+  preferenceReceipt,
+  projectOperatorPreference,
+  samePreferenceScope,
+  transitionPreference,
+  validatePreferenceEffect,
+  validatePreferenceScope,
+  type PreferenceAction,
+  type PreferenceEffect,
+  type PreferenceScope,
+  type PreferenceState,
+} from "./preference-policy.js";
 
 export const OPERATOR_AGENT_PROPOSAL_STEP = "panel.operator_agent_proposal";
 export const OPERATOR_AGENT_DECISION_STEP = "panel.operator_agent_decision";
@@ -1610,9 +1631,19 @@ export function buildOperatorAgentProposalReadRoute(deps: OperatorAgentRouteDepe
     method: "GET",
     path: "/v1/operator-agent/proposals",
     scope: "read",
-    handler: (_req, res) => {
+    handler: (req, res) => {
       if (rejectColdOperatorAgentMemory(deps, res)) return;
-      sendJson(res, 200, { proposals: readOperatorAgentHistory(deps), source: "ledger" });
+      const requested = requestedPreferenceScope(req, false);
+      if (requested.error) {
+        sendJson(res, 400, { error: "invalid_request", detail: requested.error });
+        return;
+      }
+      const proposals = readOperatorAgentHistory(deps);
+      if (!requested.scope) {
+        sendJson(res, 200, { proposals, source: "ledger" });
+        return;
+      }
+      sendJson(res, 200, { ...presentOperatorAgentProposals(deps, proposals, requested.scope), source: "ledger" });
     },
   };
 }
@@ -2540,6 +2571,179 @@ export function buildOperatorAgentSettingsWriteRoute(deps: OperatorAgentRouteDep
   };
 }
 
+// ── W1-T3895: learned operator preferences (policy in preference-policy.ts) ──────────────────
+
+const PREFERENCE_PROPOSAL_KEYS: ReadonlySet<string> = new Set(["scope", "effect"]);
+const PREFERENCE_ACTION_KEYS: ReadonlySet<string> = new Set(["action", "preferenceId", "scope", "note", "correction", "requestId"]);
+const LEDGER_ONLY_FIELDS = "evidence, confidence, and authority come only from the ledger";
+
+function unknownKeys(body: Record<string, unknown>, allowed: ReadonlySet<string>): string[] {
+  return Object.keys(body).filter((key) => !allowed.has(key));
+}
+
+function validatePreferenceProposal(body: unknown): { error: string } | { scope: PreferenceScope; effect: PreferenceEffect } {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  const extra = unknownKeys(body, PREFERENCE_PROPOSAL_KEYS);
+  if (extra.length > 0) return { error: `unknown field(s) ${extra.join(", ")}: ${LEDGER_ONLY_FIELDS}` };
+  const scope = validatePreferenceScope(body.scope);
+  if (!scope) return { error: "scope requires a bounded principalId and repository" };
+  const effect = validatePreferenceEffect(body.effect);
+  if (!effect) return { error: `effect.kind must be one of ${PREFERENCE_EFFECT_KINDS.join(", ")} with a permitted value` };
+  return { scope, effect };
+}
+
+type PreferenceActionBody = { preferenceId: string; scope: PreferenceScope; note?: string; correction?: string; requestId?: string };
+
+function preferenceActionValidator(action: PreferenceAction): (body: unknown) => { error: string } | PreferenceActionBody {
+  return (body) => {
+    if (!isRecord(body)) return { error: "body must be a JSON object" };
+    const extra = unknownKeys(body, PREFERENCE_ACTION_KEYS);
+    if (extra.length > 0) return { error: `unknown field(s) ${extra.join(", ")}: ${LEDGER_ONLY_FIELDS}` };
+    if (body.action !== undefined && body.action !== action) return { error: `action must be ${action} on this route` };
+    const scope = validatePreferenceScope(body.scope);
+    if (!boundedString(body.preferenceId, MAX_ID) || !scope) return { error: "preferenceId and scope are required" };
+    if (action === "correct" ? !boundedString(body.correction, MAX_NOTE) : body.correction !== undefined && !boundedString(body.correction, MAX_NOTE)) {
+      return { error: "correction must be bounded text, and is required to correct" };
+    }
+    if ((body.note !== undefined && !boundedString(body.note, MAX_NOTE)) || (body.requestId !== undefined && !boundedString(body.requestId, MAX_ID))) {
+      return { error: "note and requestId must be bounded text" };
+    }
+    return {
+      preferenceId: body.preferenceId.trim(),
+      scope,
+      ...(body.note ? { note: body.note as string } : {}),
+      ...(body.correction ? { correction: body.correction as string } : {}),
+      ...(body.requestId ? { requestId: (body.requestId as string).trim() } : {}),
+    };
+  };
+}
+
+function readOperatorPreferenceStates(deps: OperatorAgentRouteDependencies, now: number): PreferenceState[] {
+  return foldOperatorPreferences(readOperatorAgentUnion(dirname(deps.ledgerPath), { step: OPERATOR_PREFERENCE_LEDGER_STEPS }).rows, now);
+}
+
+function requestedPreferenceScope(req: { url?: string }, required: boolean): { scope?: PreferenceScope; error?: string } {
+  const url = new URL(req.url ?? "/", "http://rmd.local");
+  const principalId = url.searchParams.get("principalId");
+  if (principalId === null && !required) return {};
+  const surface = url.searchParams.get("surface");
+  const scope = validatePreferenceScope({ principalId, repository: url.searchParams.get("repository"), ...(surface === null ? {} : { surface }) });
+  return scope ? { scope } : { error: "principalId and repository query parameters must identify the preference scope" };
+}
+
+/**
+ * The operator-agent path's one preference application. Authority (the proposal's own status) and
+ * refusal (an active emergency stop) are settled FIRST; applyScopedPreference( then only reorders
+ * what those checks already decided and never writes a verdict.
+ */
+function presentOperatorAgentProposals(deps: OperatorAgentRouteDependencies, proposals: OperatorAgentHistory[], scope: PreferenceScope) {
+  const now = clockFromMillisFn(deps.now).now();
+  const stops = activeEmergencyStops(deps);
+  const items = proposals
+    .filter((proposal) => proposal.repo === scope.repository)
+    .map((proposal) => {
+      const admission = checkEmergencyStop(stops, { actionKind: "action-admission", repo: proposal.repo, principal: scope.principalId }, now);
+      const authority = { checked: true, actionable: admission.ok && proposal.status === "pending", ...(admission.ok ? {} : { refusal: admission.code }) };
+      return { id: proposal.proposalId, category: proposal.category, authority, proposal };
+    });
+  const { items: ordered, ...presentation } = applyScopedPreference({ scope, items, preferences: readOperatorPreferenceStates(deps, now) });
+  const refusals = items.flatMap((item) => (item.authority.refusal ? [{ proposalId: item.id, code: item.authority.refusal }] : []));
+  return { proposals: ordered.map((item) => item.proposal), presentation: { scope, ...presentation, refusals } };
+}
+
+/** GET /v1/operator-agent/preferences — a principal's learned preferences in one repository. */
+export function buildOperatorPreferenceReadRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "GET",
+    path: "/v1/operator-agent/preferences",
+    scope: "read",
+    handler: (req, res) => {
+      const requested = requestedPreferenceScope(req, true);
+      const scope = requested.scope;
+      if (!scope) {
+        sendJson(res, 400, { error: "invalid_request", detail: requested.error });
+        return;
+      }
+      const states = readOperatorPreferenceStates(deps, clockFromMillisFn(deps.now).now());
+      const preferences = states.filter((state) => preferenceListedFor(state.preference.scope, scope)).map(projectOperatorPreference);
+      sendJson(res, 200, { source: "ledger", stale: false, scope, preferences });
+    },
+  };
+}
+
+/** POST /v1/operator-agent/preferences/propose — replay ledgered decisions into a shadow hypothesis. */
+export function buildOperatorPreferenceProposeRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/preferences/propose",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validatePreferenceProposal, (input, req, res) => {
+      if (rejectColdOperatorAgentMemory(deps, res)) return;
+      const now = clockFromMillisFn(deps.now).now();
+      const same = readOperatorPreferenceStates(deps, now).filter(
+        (state) => samePreferenceScope(state.preference.scope, input.scope) && state.preference.effect.kind === input.effect.kind,
+      );
+      if (same.some((state) => state.lifecycle === "opted_out")) {
+        sendJson(res, 409, { error: "conflict", code: "opted_out", detail: `the operator opted out of ${input.effect.kind} preferences in this scope` });
+        return;
+      }
+      const live = same.find((state) => state.preference.effect.value === input.effect.value && (state.lifecycle === "proposed" || state.lifecycle === "accepted"));
+      if (live) {
+        sendJson(res, 200, { ok: true, existing: true, preference: projectOperatorPreference(live) });
+        return;
+      }
+      const decisions = preferenceDecisionSamples(readOperatorAgentHistory(deps), input.scope.repository);
+      const preference = inferPreferenceHypothesis({ ...input, decisions, now, supersedes: same.at(-1)?.preference.preferenceId });
+      appendPanelLedger(deps.ledgerPath, OPERATOR_PREFERENCE_LEDGER_STEPS[0], preference.preferenceId, bearerTokenId(req), { preference });
+      sendJson(res, 201, { ok: true, existing: false, preference: projectOperatorPreference(evaluatePreference(preference, [], now)) });
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/preferences/{accept,reject,correct,opt-out,delete} — one linked receipt. */
+function buildOperatorPreferenceActionRoute(deps: OperatorAgentRouteDependencies, action: PreferenceAction): Route {
+  return {
+    method: "POST",
+    path: `/v1/operator-agent/preferences/${action}`,
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(preferenceActionValidator(action), (input, req, res) => {
+      const clock = clockFromMillisFn(deps.now);
+      const state = readOperatorPreferenceStates(deps, clock.now()).find((candidate) => candidate.preference.preferenceId === input.preferenceId);
+      if (!state) {
+        sendJson(res, 404, { error: "not_found", code: "not_found", detail: `no learned preference ${JSON.stringify(input.preferenceId)}` });
+        return;
+      }
+      if (!samePreferenceScope(state.preference.scope, input.scope)) {
+        sendJson(res, 409, { error: "conflict", code: "scope_mismatch", detail: "the preference belongs to a different principal, repository, or surface" });
+        return;
+      }
+      const replayed = state.events.find((event) => input.requestId !== undefined && event.requestId === input.requestId && event.action === action);
+      if (replayed) {
+        sendJson(res, 200, { ok: true, linkedTo: replayed.preferenceId, ...replayed });
+        return;
+      }
+      const transition = transitionPreference(state, action);
+      if (!transition.ok) {
+        sendJson(res, 409, { error: "conflict", code: transition.code, detail: transition.detail });
+        return;
+      }
+      const event = preferenceReceipt(state, transition.lifecycle, { ...input, action, at: clock.iso() });
+      appendPanelLedger(deps.ledgerPath, OPERATOR_PREFERENCE_LEDGER_STEPS[1], state.preference.preferenceId, bearerTokenId(req), { event });
+      sendJson(res, 200, { ok: true, linkedTo: event.preferenceId, ...event });
+    }),
+  };
+}
+
+export function buildOperatorPreferenceRoutes(deps: OperatorAgentRouteDependencies): Route[] {
+  return [
+    buildOperatorPreferenceReadRoute(deps),
+    buildOperatorPreferenceProposeRoute(deps),
+    ...PREFERENCE_ACTIONS.map((action) => buildOperatorPreferenceActionRoute(deps, action)),
+  ];
+}
+
 // ── W1-T3900: emergency-stop circuit ────────────────────────────────────────────────────────
 // Ledger-backed, UNLIKE the delegation store just below: an emergency stop must survive a daemon
 // restart mid-incident (ledger.ts's EMERGENCY_STOP_ISSUED_LEDGER_STEP doc explains why it is
@@ -3262,6 +3466,7 @@ export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): 
     buildOperatorAgentConsequencesReadRoute(deps),
     buildOperatorAgentConsequencesDecisionRoute(deps),
     ...buildOperatorAgentConsequencesWriteRefusalRoutes(),
+    ...buildOperatorPreferenceRoutes(deps),
     buildOperatorAgentFollowUpReadRoute(deps),
     buildOperatorAgentSettingsReadRoute(deps),
     buildOperatorAgentSettingsWriteRoute(deps),
