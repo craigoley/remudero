@@ -963,10 +963,12 @@ export interface CadenceSection {
  * Judge every cadence marker against its own rung's interval.
  *
  * PURE over injected reads: `readMarkerAgeMs` returns `undefined` for an absent or unparseable
- * marker, which is the `never` state unless its named writer is stopped. `intervalMinutesFor` returns the rung's
- * declared `minIntervalMinutes`, or `undefined` to take {@link CADENCE_DEFAULT_INTERVAL_MINUTES}.
- * A named writer observed stopped takes precedence over the marker's age; unsensed is not stopped.
- * A row that names no writer retains the original three-state judgment.
+ * marker, which is always the `never` state — a rung that has never fired names no writer that
+ * could excuse it, and folding an absent marker into `writer-stopped` would only trade one
+ * misleading verdict for another. `intervalMinutesFor` returns the rung's declared
+ * `minIntervalMinutes`, or `undefined` to take {@link CADENCE_DEFAULT_INTERVAL_MINUTES}.
+ * For a marker that HAS fired, a named writer observed stopped takes precedence over its age;
+ * unsensed is not stopped. A row that names no writer retains the original three-state judgment.
  */
 /**
  * The registry rows the fallback would MISJUDGE — every def that declares no interval of its own
@@ -1003,21 +1005,24 @@ export function cadenceMarkerRows(
   return markers.map((def) => {
     const intervalMinutes = def.intervalMinutes ?? intervalMinutesFor(def) ?? CADENCE_DEFAULT_INTERVAL_MINUTES;
     const ageMs = readMarkerAgeMs(def);
-    if (def.writer && writerStateFor?.(def.writer) === "stopped") {
-      return {
-        name: def.name,
-        state: "writer-stopped",
-        ...(ageMs === undefined ? {} : { ageMs }),
-        intervalMinutes,
-        consequence: `writer is not running (${def.writer}) — no cadence is expected`,
-      };
-    }
     if (ageMs === undefined) {
       return {
         name: def.name,
         state: "never",
         intervalMinutes,
         consequence: `no ${def.file} has ever been written — this rung has never fired, which is not the same as overdue`,
+      };
+    }
+    // A marker that HAS fired at least once: a named writer positively observed stopped supersedes
+    // its age — the row says the writer is down and says nothing about cadence. Unsensed is not
+    // stopped (W1-T3241's distinction); a row naming no writer keeps the age-only judgment below.
+    if (def.writer && writerStateFor?.(def.writer) === "stopped") {
+      return {
+        name: def.name,
+        state: "writer-stopped",
+        ageMs,
+        intervalMinutes,
+        consequence: `writer is not running (${def.writer}) — no cadence is expected`,
       };
     }
     const budgetMs = intervalMinutes * 60_000 * CADENCE_STALE_INTERVALS;
