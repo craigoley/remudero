@@ -963,10 +963,14 @@ export interface CadenceSection {
  * Judge every cadence marker against its own rung's interval.
  *
  * PURE over injected reads: `readMarkerAgeMs` returns `undefined` for an absent or unparseable
- * marker, which is the `never` state unless its named writer is stopped. `intervalMinutesFor` returns the rung's
- * declared `minIntervalMinutes`, or `undefined` to take {@link CADENCE_DEFAULT_INTERVAL_MINUTES}.
- * A named writer observed stopped takes precedence over the marker's age; unsensed is not stopped.
- * A row that names no writer retains the original three-state judgment.
+ * marker, which is always the `never` state — a marker that has never been written says nothing
+ * about the writer's CURRENT liveness, so a stopped writer does not override it. `intervalMinutesFor`
+ * returns the rung's declared `minIntervalMinutes`, or `undefined` to take {@link
+ * CADENCE_DEFAULT_INTERVAL_MINUTES}. Only a marker that HAS aged past its budget is re-checked
+ * against its named writer: a positively-stopped writer turns that verdict from `stale` into
+ * `writer-stopped`, because a deliberately-down service is not a failing cadence. unsensed is not stopped
+ * — only a positive observation suppresses the verdict. A row that names no writer, or whose writer
+ * is not observed stopped, retains the original three-state judgment.
  */
 /**
  * The registry rows the fallback would MISJUDGE — every def that declares no interval of its own
@@ -1003,16 +1007,10 @@ export function cadenceMarkerRows(
   return markers.map((def) => {
     const intervalMinutes = def.intervalMinutes ?? intervalMinutesFor(def) ?? CADENCE_DEFAULT_INTERVAL_MINUTES;
     const ageMs = readMarkerAgeMs(def);
-    if (def.writer && writerStateFor?.(def.writer) === "stopped") {
-      return {
-        name: def.name,
-        state: "writer-stopped",
-        ...(ageMs === undefined ? {} : { ageMs }),
-        intervalMinutes,
-        consequence: `writer is not running (${def.writer}) — no cadence is expected`,
-      };
-    }
     if (ageMs === undefined) {
+      // A marker that has NEVER been written is its own fact, independent of the writer's current
+      // liveness — a writer that is down right now says nothing about whether the rung ever fired
+      // in the past, so "never" stands even when {@link writerStateFor} reports it stopped.
       return {
         name: def.name,
         state: "never",
@@ -1023,6 +1021,21 @@ export function cadenceMarkerRows(
     const budgetMs = intervalMinutes * 60_000 * CADENCE_STALE_INTERVALS;
     if (ageMs <= budgetMs) {
       return { name: def.name, state: "fresh", ageMs, intervalMinutes, consequence: `advanced within ${CADENCE_STALE_INTERVALS} of its own intervals` };
+    }
+    // The marker HAS aged past its own budget. Before reading that as a failing cadence, check
+    // whether its named writer is positively observed stopped — a deliberately-down service left a
+    // marker that will not advance no matter how long it waits, which is not the same defect as a
+    // running writer that stopped advancing. Unsensed (the sensor itself could not be asked) is
+    // deliberately NOT treated as stopped here: an unknown liveness must not suppress a real stale
+    // reading.
+    if (def.writer && writerStateFor?.(def.writer) === "stopped") {
+      return {
+        name: def.name,
+        state: "writer-stopped",
+        ageMs,
+        intervalMinutes,
+        consequence: `writer is not running (${def.writer}) — no cadence is expected`,
+      };
     }
     return {
       name: def.name,
