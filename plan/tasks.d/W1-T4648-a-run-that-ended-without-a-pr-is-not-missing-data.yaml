@@ -1,0 +1,49 @@
+- id: W1-T4648
+  title: "A RUN THAT ENDED WITHOUT A PR IS NOT MISSING DATA — joinVerifiedTaskOutcomes has no outcome for a run whose terminal verdict is no_pr, failed or blocked_*, so an observed non-completion reads current-pr-unavailable beside real GitHub read failures, and only runs that opened a PR are ever measured"
+  repo: remudero
+  depends_on: ["W1-T4608", "W1-T4646"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-28: fourth operator-approved A/A run, after W1-T4646 cleared every assignment-run-mismatch"
+  plan_refs: ["W1-T4608", "W1-T4646", "W1-T4575", "W1-T4623", "W1-T4636", "W1-T4647"]
+  files:
+    - src/lib/benchmark-verified-outcome.ts
+    - src/lib/benchmark-aa.ts
+    - test/a-run-that-ended-without-a-pr-is-not-missing-data.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-28 on the fourth A/A run (trial aa-retro-2026-09-27) at origin/main 26161a48:
+    W1-T4646 cleared all 12 `assignment-run-mismatch` refusals, and the same units now stop one step
+    later at `current-pr-unavailable` — 9 of 27 exposed units (A1 5, A2 4). In the batch case files,
+    11 of 27 tasks carry `pr: {state: unavailable, reason: no-pr-in-current-projection}`: the
+    projection was READ and holds no PR. Their runs carry terminal verdicts — `no_pr` (W1-T1258,
+    W1-T3342, W1-T3510, W1-T4081), `failed` (W1-T3187) — i.e. OBSERVED endings, not absent evidence.
+    `joinVerifiedTaskOutcomes` (src/lib/benchmark-verified-outcome.ts) has only completed /
+    censored / unavailable, so it files an observed non-completion under the same reason as a
+    GitHub read failure. Two harms: (1) every completion rate is conditioned on the run opening a
+    PR — survivorship — and (2) the A/A's missingness finding counts observed endings as missing,
+    which can raise or mask `differential-missingness` for the wrong reason. W1-T4608's rule stands:
+    a run that ended without a PR is NOT automatically a model failure. It is also not unknown.
+  design: |
+    Add a fourth disposition, `ended-without-completion`, reached only when the case file's PR read
+    SUCCEEDED and found no PR (`no-pr-in-current-projection`, never a read failure) AND the run
+    carries a terminal verdict other than `merged`/`already_satisfied`/`awaiting_merge`. Its reason
+    names the verdict (`ended-without-pr:<verdict>`). It is an outcome, not a model-failure claim:
+    nothing labels it a loss for a model. A run with no terminal verdict stays unavailable under its
+    own named reason (`run-without-terminal-verdict`), and a failed PR read stays
+    `current-pr-unavailable`. Coverage and groups gain an additive count, and the invariant
+    `assignments = completed + endedWithoutCompletion + censored + unavailable` holds. The A/A
+    counts the new disposition as observed for missingness and reports it per arm; consumers that
+    only read `completed` are unchanged.
+  acceptance:
+    - claim: "a run whose projection holds no PR and whose terminal verdict is no_pr or failed reads ended-without-completion with its verdict named, a failed PR read stays current-pr-unavailable, and the A/A does not count it as missing"
+      proof: "unit test: test/a-run-that-ended-without-a-pr-is-not-missing-data.test.ts"
+  falsifier: |
+    Give the join a case file whose PR read failed and whose run verdict is no_pr: it must still
+    read current-pr-unavailable, never ended-without-completion.
