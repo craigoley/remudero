@@ -438,6 +438,9 @@ const DSC_WITH_DUPLICATE =
   type: implement
   origin: "test fixture (W1-T2676 coverage, not a real plan entry)"
   files: [src/lib/merge-hold.ts, src/run-task.ts, test/merge-hold.test.ts]
+  acceptance:
+    - claim: "the merge hold fixture works"
+      proof: "unit test: test/merge-hold.test.ts"
 `;
 
 async function runDscBase(baseMerged: boolean): Promise<string> {

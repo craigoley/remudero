@@ -3303,11 +3303,7 @@ export const PLAN_ONLY_NEW_TASK_DIAGNOSTIC_CHECKS: ReadonlySet<LintCheck> = new 
   "shard-shape",
 ]);
 
-/**
- * W1-T4700 — the filing floor #7608 passed with none of: `verify` in the enum, a `repo` the fleet
- * knows, and (for an implement task not at `verify: human`) one acceptance criterion. WARN here, promoted
- * to block on a new or newly-violating plan-only shard above, so legacy shards on main stay warn.
- */
+/** W1-T4700 (#7608): verify in the enum, a known repo, criteria unless human. WARN; promoted above when introduced. */
 export function shardShapeViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const verify: unknown = task.verify;
   const defects: string[] = [];
@@ -3315,7 +3311,7 @@ export function shardShapeViolations(task: Task, opts: LintOpts = {}): LintViola
   if (opts.knownRepos && !opts.knownRepos.has(task.repo)) {
     defects.push(`repo ${JSON.stringify(task.repo)} is not a repository the plan knows (${[...opts.knownRepos].sort().join(", ")})`);
   }
-  if (task.type === "implement" && verify !== "human" && !task.acceptance?.length) {
+  if (task.type === "implement" && verify !== "human" && (task.acceptance ?? []).length === 0) {
     defects.push("an implement task not at verify: human needs at least one acceptance criterion");
   }
   return defects.map((d) => ({ check: "shard-shape", severity: "warn", message: `task ${task.id}: ${d}` }));
