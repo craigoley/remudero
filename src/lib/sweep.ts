@@ -3,6 +3,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
+// @ts-expect-error The canonical parser is a plain .mjs script and intentionally has no TS declaration file.
+import { refusedGateNamesFromReport } from "../../scripts/expiring-fixture-census.mjs";
 import {
   armAutoMergeDetailed,
   armFailureAction,
@@ -3339,6 +3341,28 @@ export function failingTestFilesFromCiFailures(failures: readonly CiFailure[]): 
   return [...paths];
 }
 
+/**
+ * W1-T3720 — `failure.name` is the CHECK-RUN's own name, and a bundled ci.yml job (W1-T4399's
+ * `commitlint` job runs comment-load-ratchet, expiring-fixture-census and console-parity as
+ * `continue-on-error` steps of ONE job, then reports every constituent under ONE check-run name)
+ * lies about which gate actually refused: `comment-load-ratchet` prints OK while
+ * `expiring-fixture-census` is the one that blocked, and the check-run still posts as
+ * `comment-load-ratchet = failure`. `refusedGateNamesFromReport` (scripts/expiring-fixture-
+ * census.mjs, the shared `emitCiReport` encoder's own home) reads the gate name straight off the
+ * report text's own `<gate>: BLOCKED ...` first token — never a hand-written gate-to-job table —
+ * so a bundled failure is attributed to whichever gate(s) actually said BLOCKED, and a tail naming
+ * none falls back to `failure.name` unchanged: a genuinely single-gate or non-report-emitting
+ * failure (a real test failure, a lint error) attributes exactly as it always has.
+ *
+ * NEVER used in place of `failure.name` for anything that is itself a required CONTEXT (branch
+ * protection, `pr.redRequiredChecks`) — only for deciding which gate's OWN remedy surface a
+ * red check evidences, so a rename here can never move what GitHub or ci-gate.yml require.
+ */
+export function refusedGateNamesFromCiFailure(failure: Pick<CiFailure, "name" | "logTail">): string[] {
+  const refused = refusedGateNamesFromReport(failure.logTail) as string[];
+  return refused.length > 0 ? refused : [failure.name];
+}
+
 /** Extract source paths only from the existing, distinctive diff-coverage report. */
 export function failingSourceFilesFromCiFailures(failures: readonly CiFailure[]): string[] {
   const report = diffCoverageReport(failures);
@@ -5044,7 +5068,9 @@ export function recordableRatchetRepairFor(
 ): string[] | undefined {
   // A dirty PR runs no checks at all (W1-T106), so a red name on one is stale by construction.
   if (pr.mergeState === "dirty") return undefined;
-  const red = [...new Set([...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map((f) => f.name)])].filter(Boolean);
+  const red = [
+    ...new Set([...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).flatMap((f) => refusedGateNamesFromCiFailure(f))]),
+  ].filter(Boolean);
   if (red.length === 0) return undefined;
   const admitted = recordableRatchetScripts(generators);
   const scripts: string[] = [];
@@ -5088,7 +5114,9 @@ export function ratifiedBaselineRatchetRepairFor(
   pr: Pick<OpenPrView, "redRequiredChecks" | "ciFailures" | "mergeState">,
 ): RatifiedBaselineRatchetScript[] | undefined {
   if (pr.mergeState === "dirty") return undefined;
-  const red = [...new Set([...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map((failure) => failure.name)])].filter(Boolean);
+  const red = [
+    ...new Set([...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).flatMap((failure) => refusedGateNamesFromCiFailure(failure))]),
+  ].filter(Boolean);
   if (red.length === 0) return undefined;
   const scripts: RatifiedBaselineRatchetScript[] = [];
   for (const checkName of red) {

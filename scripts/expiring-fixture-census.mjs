@@ -487,6 +487,32 @@ export function emitCiReport(tool, report, { blocked, env = process.env, log = c
   return true;
 }
 
+// W1-T3720 — THE BUNDLED-JOB NAME LIES; THE REPORT NEVER DOES. `emitCiReport` above -- and its
+// identical siblings in scripts/{coverage-ratchet,diff-coverage}.mjs -- always writes `<gate>:
+// BLOCKED -- ...` or `<gate>: OK -- ...` as the FIRST TOKEN of the report it emits. ci.yml's
+// `commitlint` job (W1-T4399) runs several such gates as `continue-on-error` steps of ONE job and
+// reports every constituent's outcome under a single check-run name (its own report() step bundles
+// comment-load-ratchet, expiring-fixture-census and console-parity under "comment-load-ratchet");
+// a reader that trusts that bundled name over the report text is told the wrong gate refused.
+// Exported here -- the one file that OWNS the encoder -- so a reader (src/lib/sweep.ts) derives the
+// name from the report's own first token instead of duplicating this pattern as a second,
+// independently-driftable copy. `##[error]` is GitHub's own rendering of the `::error::` workflow
+// command emitCiReport writes above, so a raw job LOG line parses identically to a step-summary
+// line with no such prefix.
+const GATE_REPORT_HEADLINE = /^(?:##\[error\])?([a-z][a-z0-9-]*): (BLOCKED|OK)\b/gm;
+
+/** Every gate name whose OWN report, anywhere in `text`, says BLOCKED — sorted, deduplicated, and
+ *  empty when none did. `text` is arbitrary job-log or check-run text; this never trusts a
+ *  hand-written gate-to-job table (this task's own falsifier: such a table goes stale the next
+ *  gate a bundle adds, while the report's own first token never can). */
+export function refusedGateNamesFromReport(text) {
+  const refused = new Set();
+  for (const match of String(text ?? "").matchAll(GATE_REPORT_HEADLINE)) {
+    if (match[2] === "BLOCKED") refused.add(match[1]);
+  }
+  return [...refused].sort();
+}
+
 export function main({
   execFile = execFileSync,
   readFile = (p) => readFileSync(p, "utf8"),
