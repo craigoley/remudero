@@ -58,10 +58,12 @@ import { installPolicyPath, loadDefaultPolicy, PolicyError } from "./policy.js";
 import {
   costAnomalyIncidentEvent,
   loadDefaultCostAnomalyPolicy,
+  readReportedAnomalies,
   recordCostAnomalies,
   recordRunningLong,
   runningLongIncidentEvent,
   type CostAnomalyPolicy,
+  type ReportedAnomalies,
 } from "./cost-anomaly.js";
 import {
   acceptanceBlockDiagnostics,
@@ -8191,6 +8193,8 @@ export interface SweepDeps {
    *  `cost-anomaly.ts`'s header for the rationale. Omitted, `runSweep` resolves the default,
    *  memoized for the process lifetime. */
   costAnomalyPolicy?: CostAnomalyPolicy;
+  /** W1-T4702 — both sentinels' already-reported run ids over archive∪live; default reads the union. */
+  readReportedAnomalies?: (liveLines: ReadonlyArray<Record<string, unknown>>) => Promise<ReportedAnomalies>;
 }
 
 /** What one PR's reconciliation did this sweep. */
@@ -9252,6 +9256,9 @@ export function readyDraftPullRequest(
   }
 }
 
+/** W1-T4702 — the last incomplete-union reason logged, so a persistent gap is logged once. */
+let lastReportedAnomalyGap: string | undefined;
+
 export async function runSweep(
   openPrs: OpenPrView[],
   deps: SweepDeps,
@@ -9383,12 +9390,25 @@ export async function runSweep(
   // on the daemon's cadence. Independent of `openPrs`, guarded by `!deps.dryRun`, and wrapped in the
   // SAME throw containment — a detector failure must never fail the reconciliation pass it shares a
   // ledger read with. `recordCostAnomalies` is idempotent per run id.
-  if (!deps.dryRun) {
+  // W1-T4702: "already reported" comes from the archive∪live union, since rotation archives both
+  // sentinels' markers; an incomplete union reports nothing new this pass (fail closed, logged once).
+  const readReported = deps.readReportedAnomalies ?? ((live) => readReportedAnomalies(dirname(deps.ledgerPath), live));
+  const reported = deps.dryRun
+    ? undefined
+    : await Promise.resolve()
+      .then(() => readReported(ledgerLines))
+      .catch((e): ReportedAnomalies => ({ complete: false, costAnomaly: new Set(), runningLong: new Set(), reason: String((e as Error)?.message ?? e) }));
+  if (reported && !reported.complete) {
+    if (reported.reason !== lastReportedAnomalyGap) log("sweep.anomaly_dedupe.incomplete", { reason: reported.reason });
+    lastReportedAnomalyGap = reported.reason;
+  } else if (reported) {
+    lastReportedAnomalyGap = undefined;
     const anomalyPolicy = deps.costAnomalyPolicy ?? loadDefaultCostAnomalyPolicy();
     try {
       const newCostAnomalies = recordCostAnomalies(ledgerLines, anomalyPolicy, {
         ledgerPath: deps.ledgerPath,
         writeLedger: appendLine,
+        alreadyReported: reported.costAnomaly,
       });
       // W1-T4417: a `cost.anomaly` row nobody reads is not a report — route each NEW finding into
       // the SRE gardener's incident ingest (W1-T4383), grouped by task CLASS, not by run.
@@ -9409,6 +9429,7 @@ export async function runSweep(
       const newRunningLong = recordRunningLong(ledgerLines, anomalyPolicy, now, {
         ledgerPath: deps.ledgerPath,
         writeLedger: appendLine,
+        alreadyReported: reported.runningLong,
       });
       for (const finding of newRunningLong) {
         appendLine(deps.ledgerPath, runningLongIncidentEvent(finding));

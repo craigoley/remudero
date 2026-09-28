@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { appendLedger, type LedgerLine } from "./ledger.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, realLedgerFs, type LedgerGrepFsDeps, type LedgerRotationMemo } from "./ledger-union.js";
 import { installPolicyPath } from "./policy.js";
 import { gatherRuns, type LedgerRecord, type RunSummary } from "./retro.js";
 
@@ -235,10 +236,14 @@ export function alreadyLedgeredCostAnomalyRunIds(records: readonly LedgerRecord[
  * the second time (design note iv), because every finding it would otherwise re-derive already
  * carries a `cost.anomaly` row for that run id.
  */
-export function pendingCostAnomalies(records: readonly LedgerRecord[], policy: CostAnomalyPolicy): CostAnomalyFinding[] {
+export function pendingCostAnomalies(
+  records: readonly LedgerRecord[],
+  policy: CostAnomalyPolicy,
+  alreadyReported: ReadonlySet<string> = new Set(),
+): CostAnomalyFinding[] {
   const already = alreadyLedgeredCostAnomalyRunIds(records);
   const runs = gatherRuns(records as LedgerRecord[]);
-  return detectCostAnomalies(runs, policy).filter((f) => !already.has(f.runId));
+  return detectCostAnomalies(runs, policy).filter((f) => !already.has(f.runId) && !alreadyReported.has(f.runId));
 }
 
 /** Build (never write) the ledger line for one finding — pure, same builder/writer split as
@@ -261,6 +266,8 @@ export interface CostAnomalyDeps {
   /** Defaults to the real `appendLedger` — injectable so a test spies on writes instead of
    *  touching disk (same shape as `src/lib/ledger.ts`'s `LedgerWriterDeps`). */
   writeLedger?: (path: string, line: LedgerLine) => void;
+  /** W1-T4702: run ids already reported in rows `records` no longer holds (the rotated archives). */
+  alreadyReported?: ReadonlySet<string>;
 }
 
 /**
@@ -275,7 +282,7 @@ export function recordCostAnomalies(
   policy: CostAnomalyPolicy,
   deps: CostAnomalyDeps,
 ): CostAnomalyFinding[] {
-  const pending = pendingCostAnomalies(records, policy);
+  const pending = pendingCostAnomalies(records, policy, deps.alreadyReported);
   const writeLedger = deps.writeLedger ?? appendLedger;
   for (const finding of pending) writeLedger(deps.ledgerPath, costAnomalyLine(finding));
   return pending;
@@ -438,9 +445,14 @@ export function alreadyLedgeredRunningLongRunIds(records: readonly LedgerRecord[
 /** {@link detectRunningLong} filtered against {@link alreadyLedgeredRunningLongRunIds} — a
  *  repeated pass over the same (now-ledgered) run returns nothing new for it, mirroring {@link
  *  pendingCostAnomalies}. */
-export function pendingRunningLong(records: readonly LedgerRecord[], policy: CostAnomalyPolicy, nowMs: number): RunningLongFinding[] {
+export function pendingRunningLong(
+  records: readonly LedgerRecord[],
+  policy: CostAnomalyPolicy,
+  nowMs: number,
+  alreadyReported: ReadonlySet<string> = new Set(),
+): RunningLongFinding[] {
   const already = alreadyLedgeredRunningLongRunIds(records);
-  return detectRunningLong(records, policy, nowMs).filter((f) => !already.has(f.runId));
+  return detectRunningLong(records, policy, nowMs).filter((f) => !already.has(f.runId) && !alreadyReported.has(f.runId));
 }
 
 /** Build (never write) the ledger line for one running-long finding — mirrors {@link costAnomalyLine}. */
@@ -466,7 +478,7 @@ export function recordRunningLong(
   nowMs: number,
   deps: CostAnomalyDeps,
 ): RunningLongFinding[] {
-  const pending = pendingRunningLong(records, policy, nowMs);
+  const pending = pendingRunningLong(records, policy, nowMs, deps.alreadyReported);
   const writeLedger = deps.writeLedger ?? appendLedger;
   for (const finding of pending) writeLedger(deps.ledgerPath, runningLongLine(finding));
   return pending;
@@ -482,4 +494,75 @@ export function runningLongIncidentEvent(finding: RunningLongFinding): LedgerLin
       `task ${finding.taskId} (run ${finding.runId}) has run ${finding.elapsedMs}ms against class ` +
       `"${finding.taskClass}"'s median ${finding.medianMs}ms (×${finding.multiplier}, n=${finding.sampleSize})`,
   });
+}
+
+// ── W1-T4702: "reported once" must survive rotation ─────────────────────────────────────────
+//
+// Both sentinels' dedupe markers leave the live file: `rotateLedger` archives every
+// `run.running_long` row (it is not a retained step) and keeps only the newest 200 `cost.anomaly`
+// rows. The run's own `run.start` stays live, so a live-only dedupe re-reported it after every
+// rotation: 103,010 running_long rows and as many incident events for 201 runs (2026-09-25..28).
+
+/** The steps whose rows mean "this run was already reported" — read from the archive∪live union. */
+export const REPORTED_ONCE_STEPS: readonly string[] = [COST_ANOMALY_STEP, RUNNING_LONG_STEP];
+
+/** Memo reducer: one `{step, run_id}` row per reported run, so a warm union holds ids, not rows. */
+export function reportedOnceRows(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const seen = new Set<string>();
+  const out: Array<Record<string, unknown>> = [];
+  for (const row of rows) {
+    if (typeof row.step !== "string" || !REPORTED_ONCE_STEPS.includes(row.step) || typeof row.run_id !== "string") continue;
+    const key = `${row.step}\u0000${row.run_id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ step: row.step, run_id: row.run_id });
+  }
+  return out;
+}
+
+/** Already-reported run ids per sentinel. `complete: false` means the union could not be read whole,
+ *  and the caller must then report nothing new (fail closed) rather than re-report. */
+export interface ReportedAnomalies {
+  complete: boolean;
+  costAnomaly: ReadonlySet<string>;
+  runningLong: ReadonlySet<string>;
+  reason?: string;
+}
+
+const reportedOnceMemos = new Map<string, LedgerRotationMemo>();
+
+/**
+ * Every run id either sentinel ever reported, over EVERY rotation plus `liveRows` (the caller's own
+ * live read). Rotations are immutable, so each is parsed once per process (a cold full corpus took
+ * 7 s, a warm pass reads only the memo). An unlistable state directory or an unreadable archive is
+ * incomplete: an absent report there is unknown, not absent.
+ */
+export async function readReportedAnomalies(
+  stateDir: string,
+  liveRows: readonly LedgerRecord[],
+  fsDeps: LedgerGrepFsDeps = realLedgerFs,
+): Promise<ReportedAnomalies> {
+  const incomplete = (reason: string): ReportedAnomalies => ({ complete: false, costAnomaly: new Set(), runningLong: new Set(), reason });
+  try {
+    fsDeps.readdirSync(stateDir);
+  } catch (e) {
+    return incomplete(`state directory unreadable: ${stateDir}: ${String((e as Error)?.message ?? e)}`);
+  }
+  let memo = reportedOnceMemos.get(stateDir);
+  if (memo === undefined) {
+    memo = createLedgerRotationMemo(reportedOnceRows);
+    reportedOnceMemos.set(stateDir, memo);
+  }
+  const read = await readLedgerUnionRecordsMemoized(
+    stateDir,
+    memo,
+    { step: REPORTED_ONCE_STEPS, refuseIncomplete: true, readLiveRecords: () => liveRows as Iterable<Record<string, unknown>> },
+    fsDeps,
+  );
+  if (!read.ok) return incomplete(`unreadable ledger archive(s): ${read.unread.join(", ")}`);
+  return {
+    complete: true,
+    costAnomaly: alreadyLedgeredCostAnomalyRunIds(read.rows),
+    runningLong: alreadyLedgeredRunningLongRunIds(read.rows),
+  };
 }
