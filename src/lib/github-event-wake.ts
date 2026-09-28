@@ -58,6 +58,17 @@ export function isAllowlistedGithubEvent(event: string, action: string | undefin
   }
 }
 
+/** Only the OWNER's new, non-bot comment on a `needs-human` issue wakes the sweep (W1-T4471's reply). */
+export function isOwnerEscalationReply(event: string, action: string | undefined, body: unknown): boolean {
+  if (event !== "issue_comment" || action !== "created") return false;
+  if (typeof body !== "object" || body === null) return false;
+  const { comment, issue } = body as { comment?: Record<string, unknown>; issue?: Record<string, unknown> };
+  const user = comment?.user as { type?: unknown } | undefined;
+  if (comment?.author_association !== "OWNER" || user?.type === "Bot") return false;
+  const labels = Array.isArray(issue?.labels) ? (issue!.labels as Array<{ name?: unknown }>) : [];
+  return labels.some((l) => l?.name === "needs-human");
+}
+
 // ── (ii) SIGNATURE VERIFICATION — HMAC-SHA256 over the byte-identical raw body ──────────────
 
 const SIGNATURE_HEADER_PATTERN = /^sha256=([0-9a-f]+)$/i;
@@ -591,7 +602,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
 
       const event = firstHeader(req, "x-github-event");
       const action = extractAction(body);
-      if (!event || !isAllowlistedGithubEvent(event, action)) {
+      if (!event || !(isAllowlistedGithubEvent(event, action) || isOwnerEscalationReply(event, action, body))) {
         if (opts.counters) countWake(opts.counters, "ignored", event, action);
         else log("github.wake.ignored", { reason: "unsupported_event_or_action", event, action });
         sendJson(res, 202, { error: "ignored" });
