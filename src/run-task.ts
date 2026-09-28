@@ -481,6 +481,8 @@ import {
   hydrateWorkflowRuns,
   hydrateMergeStateObservations,
   hydrateMergeStates,
+  hydrateScannerBlockerObservations,
+  isScannerBlockerCandidate,
   liveStateFromRest,
   mapRestPr,
   openPrsRestArgs,
@@ -36068,6 +36070,23 @@ export function buildOpenPrViews(
     )
     .map((pr) => ({ number: pr.number, headRefOid: pr.headRefOid }));
   const reviewReuseCurrent = hydrateReviewReuseFacts(owner, repo, "main", reviewOrphanedPrs, fetch);
+  const scannerBlockers = hydrateScannerBlockerObservations(
+    owner,
+    repo,
+    raw
+      .filter((pr) =>
+        isScannerBlockerCandidate({
+          autoMergeArmed: pr.autoMergeRequest != null,
+          isDraft: pr.isDraft,
+          checksState: checksStateFromRollup(pr.statusCheckRollup, requiredContexts),
+          reviewState: reviewStateFromRollup(pr.statusCheckRollup),
+          mergeable: mergeStateObservations.get(pr.number)?.mergeable,
+          mergeableState: mergeStateObservations.get(pr.number)?.mergeableState,
+        }),
+      )
+      .map((pr) => ({ number: pr.number, headSha: pr.headRefOid, merge: mergeStateObservations.get(pr.number) })),
+    fetch,
+  );
 
   return raw.map((pr) => {
     const planFiling = planFilingClassifications.get(pr.number) ?? { isPlanFiling: false, source: "unreadable" as const };
@@ -36341,6 +36360,7 @@ export function buildOpenPrViews(
       // both raw fields so the stale-blocked refresh predicate is reachable in the real gateway.
       mergeable: mergeStateObservations.get(pr.number)?.mergeable,
       mergeableState: mergeStateObservations.get(pr.number)?.mergeableState,
+      scannerBlocker: scannerBlockers.get(pr.number),
       workflowRuns: workflowRuns.get(pr.number),
       // W1-T2384: the supersessionVerdict producer W1-T920 deferred and never filed — populated
       // ONLY for a PR `supersededBy` above just flagged (the hydration was scoped to exactly that
