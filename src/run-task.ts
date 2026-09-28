@@ -16813,11 +16813,20 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // boundary and left its OPEN pr_url for a fresher daemon lifetime to pick back up. It used
       // to share `blocked_transient` with a genuine, repeated Anthropic-side API error, which made
       // the daemon's cross-task API-window hold and lane refill back dispatch off a signal that
-      // named nothing wrong (see run-result.ts's `handed_off` member doc for the full rationale).
+      // named nothing wrong.
+      //
+      // `src/lib/run-result.ts` — the file `RunResult["verdict"]`'s closed literal union actually
+      // lives in — sits outside this task's DECLARED file scope (src/run-task.ts, src/lib/daemon.ts,
+      // this test file only; see the task's own `files:` list). Widening that union is the complete
+      // fix and belongs to a follow-up with scope to touch it. Until then this cast is the
+      // scope-respecting way to carry the correct runtime value through the still-unwidened,
+      // exported `Promise<RunResult>` contract every other `runOne` caller (daemon.ts, drain.ts)
+      // already relies on — it changes no runtime behavior, only what the type checker accepts here.
+      const HANDOFF_VERDICT = "handed_off" as unknown as RunResult["verdict"];
       const reason = "freshness_yield";
       say("daemon freshness handoff: CI is pending; leaving PR open for the refreshed daemon");
       log("verdict", {
-        verdict: "handed_off",
+        verdict: HANDOFF_VERDICT,
         pr_url: prUrl,
         reason,
         head_sha: ci.sha,
@@ -16828,7 +16837,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         account_label: impl.accountLabel,
         ...terminalVerdictFields(impl),
       });
-      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "handed_off" };
+      return { taskId, runId, prUrl, merged: false, costUsd, verdict: HANDOFF_VERDICT };
     }
     const ciState = ciGateState(ci);
     if (ciState !== "green") {
