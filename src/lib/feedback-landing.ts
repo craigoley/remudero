@@ -259,9 +259,7 @@ function listRelFiles(root: string, relDir: string): string[] {
   return out;
 }
 
-/** Local inbox copies are worktree changes made by captureFeedback, not arbitrary clean files
- *  already committed on a feature branch. In particular, a PR that commits feedback records
- *  must not cause a daemon boot in that PR checkout to create a second landing PR for them. */
+/** Only local inbox writes belong in the sweep; clean committed PR records are not captures. */
 function listDirtyRelFiles(root: string, relDir: string, git: GitExec): string[] {
   const present = new Set(listRelFiles(root, relDir));
   const candidates = [
@@ -878,12 +876,7 @@ function finishLanding(
   return withRefused({ landed: true, files: build.unlanded, prUrl, pushed: true }, build.refused);
 }
 
-/** Acknowledge any byte-identical, untracked queue copy already on fetched origin/main, then land
- *  every remaining untracked or worktree-modified `plan/feedback/**` inbox file absent or changed
- *  upstream. Clean files already committed on a feature branch are not local inbox writes and
- *  must not be re-landed as a nested PR. Never throws. Scans disk because `captureFeedback`'s
- *  local copy is the durable buffer even offline — unlike {@link landContent}, this path
- *  legitimately needs a real file to read. */
+/** Land untracked or modified inbox writes, never clean PR files; scanning disk preserves offline captures. */
 interface LandPendingOpts extends LandFeedbackOpts {
   /** Internal compatibility seam: only the named sweep publishes acknowledgement evidence. */
   reportAcknowledgement?: boolean;
