@@ -1907,12 +1907,7 @@ export interface ApiWindowHoldDisposition {
 export function reasonAboutApiWindow(
   state: ApiWindowHoldState,
   taskId: string,
-  // W1-T4662: `| "handed_off"` widens this PARAMETER only — `RunResult["verdict"]` itself (in
-  // src/lib/run-result.ts) is outside this task's declared file scope, so the closed union stays
-  // untouched there. Every real caller still passes a plain `RunResult["verdict"]` (a subtype of
-  // this wider parameter type); only run-task.ts's freshness-handoff branch (and this file's own
-  // test) passes the literal this widening exists to accept.
-  verdict: RunResult["verdict"] | "handed_off",
+  verdict: RunResult["verdict"],
   pollIntervalMs: number,
   maxHoldMs: number = DEFAULT_MAX_API_WINDOW_HOLD_MS,
 ): ApiWindowHoldDisposition {
