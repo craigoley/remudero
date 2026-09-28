@@ -1,22 +1,41 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-09-26T20:02:26.407Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-09-28T19:40:58.942Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-40 run(s) since the last retro marker. Verdicts: {"blocked_containment":5,"blocked_transient":10,"incomplete":25}.
+40 run(s) since the last retro marker. Verdicts: {"blocked_containment":2,"blocked_isolation":1,"incomplete":31,"merged":2,"no_pr":4}.
 
 ### Shipped since marker
-- RETRO → https://github.com/craigoley/remudero/pull/7309 (gate-side merge; run ended incomplete)
+- RETRO → https://github.com/craigoley/remudero/pull/7332 (gate-side merge; run ended incomplete)
+- W1-T3056 → https://github.com/craigoley/remudero/pull/7514 (gate-side merge; run ended incomplete)
+- W1-T3574 → https://github.com/craigoley/remudero/pull/7412 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_transient)
+- W1-T3673 → https://github.com/craigoley/remudero/pull/7419 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
+- W1-T3675 → https://github.com/craigoley/remudero/pull/7434 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_transient)
+- W1-T3677 → https://github.com/craigoley/remudero/pull/7437 (gate-side merge; run ended incomplete)
+- W1-T3718 → https://github.com/craigoley/remudero/pull/7451 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3721 → https://github.com/craigoley/remudero/pull/7561 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_transient)
+- W1-T3748 → https://github.com/craigoley/remudero/pull/7567 (gate-side merge; run ended incomplete)
+- W1-T3749 → https://github.com/craigoley/remudero/pull/7569 (gate-side merge; run ended incomplete)
+- W1-T3760 → https://github.com/craigoley/remudero/pull/7615 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed failed)
+- W1-T4438 → https://github.com/craigoley/remudero/pull/7407 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_transient)
+- W1-T4455 → https://github.com/craigoley/remudero/pull/7404 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
+- W1-T4477 → https://github.com/craigoley/remudero/pull/7325 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_transient)
+- W1-T4479 → https://github.com/craigoley/remudero/pull/7335 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T4620 → https://github.com/craigoley/remudero/pull/7492 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_transient)
+- W1-T4631 → https://github.com/craigoley/remudero/pull/7496 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T4633 → https://github.com/craigoley/remudero/pull/7479 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_transient)
+- W1-T4659 → https://github.com/craigoley/remudero/pull/7628 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_transient)
+- W1-T4660 → https://github.com/craigoley/remudero/pull/7627 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_transient)
 
 ## Next runnable task
 
-**W1-T3992** — FEEDBACK LANDING AUTO-MERGE MUST WAIT FOR THE SHARED REVIEW LANE — follow up the terminal W1-T3990 plan credit with the open-or-reuse implementation
+**W1-T3990** — FEEDBACK LANDING MUST POST remudero-review BEFORE ARMING AUTO-MERGE — landing PR creation currently arms GitHub auto-merge with the required review context absent, so a healthy data-only landing can sit blocked until an operator runs rmd review
 
-- risk: high · depends_on: W1-T3990
+- risk: high · depends_on: (none)
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 
