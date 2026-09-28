@@ -1912,7 +1912,9 @@ export function reasonAboutApiWindow(
   maxHoldMs: number = DEFAULT_MAX_API_WINDOW_HOLD_MS,
 ): ApiWindowHoldDisposition {
   // A real verdict resets to the floor: this dispatch reached a decisive outcome, so whatever streak
-  // of ambiguous refusals preceded it is over, one way or another.
+  // of ambiguous refusals preceded it is over, one way or another. W1-T4662: `handed_off` (a
+  // healthy freshness yield leaving its PR open for the next daemon lifetime) is one such real
+  // verdict — it never advances or extends this streak, only a genuine, repeated API failure does.
   if (verdict !== "blocked_transient") return { state: INITIAL_API_WINDOW_HOLD_STATE, holdMs: 0 };
   const streak = taskId === state.lastTaskId ? state.streak : state.streak + 1;
   const nextState: ApiWindowHoldState = { streak, lastTaskId: taskId };
@@ -4301,6 +4303,8 @@ export async function runDaemon(
     const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined => {
       inFlightTasks.delete(finished);
       if (outcome.status === "rejected") refillClosed ??= "a lane rejected";
+      // W1-T4662: `handed_off` (a healthy freshness yield) deliberately does NOT match here — only
+      // a genuine, repeated `blocked_transient` API failure closes this lane's refill.
       else if (outcome.value.verdict === "blocked_transient") refillClosed ??= "blocked_transient";
       const governed = refillClosed ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
       const stopped = deps.checkStop?.();

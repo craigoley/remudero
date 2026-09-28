@@ -16809,12 +16809,15 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       externalWaitFreshness: opts.externalWaitFreshness,
     });
     if (ci.state === "freshness_handoff") {
-      const reason =
-        `daemon code advanced ${ci.oldSha.slice(0, 7)}..${ci.newSha.slice(0, 7)} while CI was pending; ` +
-        "yielded at the recorded external-wait boundary so the next daemon lifetime can review this PR";
+      // W1-T4662: this is a HAND-OFF, never a failure — a healthy run that reached the CI-wait
+      // boundary and left its OPEN pr_url for a fresher daemon lifetime to pick back up. It used
+      // to share `blocked_transient` with a genuine, repeated Anthropic-side API error, which made
+      // the daemon's cross-task API-window hold and lane refill back dispatch off a signal that
+      // named nothing wrong (see run-result.ts's `handed_off` member doc for the full rationale).
+      const reason = "freshness_yield";
       say("daemon freshness handoff: CI is pending; leaving PR open for the refreshed daemon");
       log("verdict", {
-        verdict: "blocked_transient",
+        verdict: "handed_off",
         pr_url: prUrl,
         reason,
         head_sha: ci.sha,
@@ -16825,7 +16828,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         account_label: impl.accountLabel,
         ...terminalVerdictFields(impl),
       });
-      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_transient" };
+      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "handed_off" };
     }
     const ciState = ciGateState(ci);
     if (ciState !== "green") {
