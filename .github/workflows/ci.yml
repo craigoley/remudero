@@ -964,20 +964,32 @@ jobs:
             local check_name="$1"
             shift
             local conclusion="success"
+            local attempt=1 error
             for outcome in "$@"; do
               if [ "$outcome" != "success" ] && [ "$outcome" != "skipped" ]; then
                 conclusion="failure"
               fi
             done
-            gh api "repos/${GITHUB_REPOSITORY}/check-runs" \
-              -f "name=${check_name}" \
-              -f "head_sha=${HEAD_SHA}" \
-              -f "external_id=job:${POSTING_JOB_ID}" \
-              -f "status=completed" \
-              -f "conclusion=${conclusion}" \
-              -f "output[title]=${check_name}" \
-              -f "output[summary]=W1-T4399: reported by this job's ${check_name} step(s) (outcome(s): $*)" \
-              >/dev/null
+            while true; do
+              if error=$(gh api "repos/${GITHUB_REPOSITORY}/check-runs" \
+                -f "name=${check_name}" \
+                -f "head_sha=${HEAD_SHA}" \
+                -f "external_id=job:${POSTING_JOB_ID}" \
+                -f "status=completed" \
+                -f "conclusion=${conclusion}" \
+                -f "output[title]=${check_name}" \
+                -f "output[summary]=W1-T4399: reported by this job's ${check_name} step(s) (outcome(s): $*)" \
+                2>&1 >/dev/null); then
+                break
+              fi
+              if [ "$attempt" -ge 4 ] || ! [[ "$error" =~ HTTP\ (429|500|502|503|504) ]]; then
+                echo "check-run post failed for ${check_name} after ${attempt} attempt(s): ${error}" >&2
+                return 1
+              fi
+              echo "check-run post for ${check_name} hit a transient GitHub error; retrying attempt $((attempt + 1))/4" >&2
+              sleep "$((2 ** attempt))"
+              attempt=$((attempt + 1))
+            done
             echo "W1-T4399: reported ${check_name} = ${conclusion} (step outcome(s): $*)"
           }
           report "commitlint" "${OUTCOME_COMMITLINT}" "${OUTCOME_RULE_CHECKS}"
