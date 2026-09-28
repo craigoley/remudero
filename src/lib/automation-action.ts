@@ -20,7 +20,8 @@
  * proof must fail. See test/agent-delegation-{envelope,acceptance,replay,human-gates,receipts}.test.ts.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { fixedClock, type Clock } from "./clock.js";
 
 /** Named once so an envelope's own `schema` field and every doc reference to it can never drift. */
 export const DELEGATION_ENVELOPE_SCHEMA_VERSION = "agent-delegation-envelope-v1" as const;
@@ -603,5 +604,716 @@ export function forwardDelegation(
       outcome: "executed",
       reason: `forwarded to ${request.newRecipient} as envelope ${envelope.id}`,
     },
+  };
+}
+
+// ── W1-T3855: automation-action-v1 — the execution/preflight seam ─────────────────────────────
+//
+// Everything below is the step between "the system recommends this" and "the system may execute
+// this". An action DECLARES its scope, risk, preconditions, freshness bound, idempotency key,
+// expiry, dry-run capability, approval policy, rollback/refusal path, and authoritative receipt
+// reference; preflight answers with one of six explicit outcomes; execution is two-phase
+// (admission -> completion) so a claimed success always names its authoritative evidence; and
+// rollback is a NEW linked receipt, never a mutation. Pure: no I/O, time only through `Clock`.
+// operator-agent.ts is the durable producer that ledgers what this validates and decides.
+
+/** Named once so a record's own `version` and every consumer's pin can never drift. */
+export const AUTOMATION_ACTION_VERSION = "automation-action-v1" as const;
+
+/** The six preflight outcomes. Only `ready` admits an execution; the other five each name why not. */
+export const AUTOMATION_PREFLIGHT_OUTCOMES = ["ready", "refused", "stale", "unknown", "expired", "in-progress"] as const;
+export type AutomationPreflightOutcome = (typeof AUTOMATION_PREFLIGHT_OUTCOMES)[number];
+
+/** A field name that must never enter the public contract: raw prompts, transcripts, credentials,
+ *  arbitrary model prose, and browser-owned measurements. Matched against every KEY of a submitted
+ *  record, recursively, so the refusal does not depend on where a caller nests it. */
+export const AUTOMATION_ACTION_FORBIDDEN_FIELD_RE =
+  /^(?:raw_?)?(?:prompts?|transcripts?|messages|credentials?|passwords?|secrets?|tokens?|api_?keys?|authorization|cookies?|model_?(?:output|prose|response|text|reasoning)|completion|reasoning|chain_?of_?thought|browser_?[a-z_]*|web_?vitals|client_?metrics)$/i;
+
+/** A VALUE shaped like a credential, refused wherever it appears in a text field. */
+export const AUTOMATION_ACTION_SECRET_VALUE_RE =
+  /(?:\bbearer\s+[A-Za-z0-9._~+/-]{8,}|\bgh[pousr]_[A-Za-z0-9]{16,}|\bgithub_pat_|\bsk-[A-Za-z0-9]{8,}|-----BEGIN [A-Z ]*PRIVATE KEY|\b(?:password|secret|api[_-]?key)\s*[:=])/i;
+
+/** PRIMARY CONTROL: the only cap on an id-shaped field (action id, idempotency key, capability,
+ *  scope names) before it enters a durable automation-action record or receipt. */
+export const AUTOMATION_ACTION_MAX_ID_CHARS = 160;
+/** PRIMARY CONTROL: the only cap on a prose-shaped field (a precondition, plan, refusal, reason)
+ *  — the contract carries a bounded summary, never arbitrary model prose. */
+export const AUTOMATION_ACTION_MAX_TEXT_CHARS = 320;
+/** PRIMARY CONTROL: how many preconditions one action may declare. */
+export const AUTOMATION_ACTION_MAX_PRECONDITIONS = 12;
+/** PRIMARY CONTROL: how many precondition observations one preflight or execution may submit. */
+export const AUTOMATION_ACTION_MAX_OBSERVATIONS = 24;
+/** BACKSTOP: receipts one action may accumulate. A healthy action writes a handful (a refusal or
+ *  two, one admission, one completion, maybe one rollback); reaching this means a caller is
+ *  retrying a refused execution in a loop, so the engine stops appending rather than grow forever. */
+export const AUTOMATION_ACTION_MAX_RECEIPTS = 100;
+/** PRIMARY CONTROL: the longest freshness window an action may declare (30 days) — a precondition
+ *  observed longer ago than this can never be current enough to act on. */
+export const AUTOMATION_ACTION_MAX_FRESHNESS_SECONDS = 30 * 24 * 60 * 60;
+
+export interface AutomationActionScope {
+  /** The flow this action belongs to. At least one of `flowId`/`experimentId` is required. */
+  readonly flowId?: string;
+  /** The experiment-v1 record (W1-T3853) that requested this action, when one did. */
+  readonly experimentId?: string;
+  /** The repository or instance the action touches. At least one of the two is required. */
+  readonly repo?: string;
+  readonly instance?: string;
+}
+
+export interface AutomationActionPrecondition {
+  /** Stable id an observation names to answer this precondition. */
+  readonly id: string;
+  /** The authoritative source the observation must come from (e.g. `ledger:queue-latency`). */
+  readonly source: string;
+  readonly description: string;
+}
+
+/** `none`: no human decision needed. `human`: an operator decision must approve before execution.
+ *  Every tier in {@link DELEGATION_GATED_RISK_TIERS} MUST declare `human`. */
+export type AutomationApprovalPolicy = "none" | "human";
+
+/** How the action is undone — or, for an irreversible one, the path a rollback request takes instead. */
+export type AutomationActionRollback =
+  | { readonly mode: "reversible"; readonly plan: string }
+  | { readonly mode: "irreversible"; readonly refusal: string };
+
+/**
+ * An `automation-action-v1` record. Immutable once registered: approval, execution, completion,
+ * and rollback are all appended as linked events against its `actionId`, never written back here.
+ */
+export interface AutomationAction {
+  readonly version: typeof AUTOMATION_ACTION_VERSION;
+  readonly actionId: string;
+  /** The capability this action exercises, matched by exact string like {@link DelegationCapabilityRef}. */
+  readonly capability: DelegationCapabilityRef;
+  readonly summary: string;
+  readonly scope: AutomationActionScope;
+  readonly risk: DelegationRiskTier;
+  readonly preconditions: readonly AutomationActionPrecondition[];
+  /** Every precondition observation must be at most this old when preflight runs. */
+  readonly freshness: { readonly maxAgeSeconds: number };
+  /** One execution per key: a second request with the same key returns the first's receipt. */
+  readonly idempotencyKey: string;
+  readonly createdAt: string;
+  readonly expiresAt: string;
+  /** Whether a dry run is meaningful for this action; a dry-run request on `false` is refused. */
+  readonly dryRun: boolean;
+  readonly approval: { readonly policy: AutomationApprovalPolicy };
+  readonly rollback: AutomationActionRollback;
+  /** The authoritative system of record whose receipt proves what happened (e.g. `github:owner/repo/pulls`). */
+  readonly receiptRef: string;
+}
+
+/** Every named reason {@link validateAutomationAction} refuses a record for. */
+export type AutomationActionValidationCode =
+  | "not-an-object"
+  | "invalid-version"
+  | "forbidden-field"
+  | "secret-value"
+  | "missing-identity"
+  | "missing-scope"
+  | "invalid-risk"
+  | "missing-preconditions"
+  | "missing-freshness"
+  | "missing-idempotency-key"
+  | "invalid-expiry"
+  | "missing-dry-run"
+  | "missing-approval"
+  | "approval-too-weak"
+  | "missing-rollback"
+  | "missing-receipt-ref";
+
+export type AutomationActionValidation =
+  | { readonly ok: true; readonly action: AutomationAction }
+  | { readonly ok: false; readonly code: AutomationActionValidationCode; readonly field: string; readonly reason: string };
+
+const AUTOMATION_RISK_TIERS: readonly DelegationRiskTier[] = ["low", "medium", "high", "production", "financial", "credential", "destructive"];
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function boundedField(value: unknown, max: number): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= max;
+}
+
+function validInstant(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function toIso(value: string): string {
+  return fixedClock(Date.parse(value)).iso();
+}
+
+/** The first forbidden key anywhere in `value`, as a dotted path, or `undefined`. Depth-bounded
+ *  so a hostile, deeply nested body cannot turn the scan itself into the cost. */
+export function findForbiddenAutomationField(value: unknown, path = "", depth = 0): string | undefined {
+  if (depth > 8 || typeof value !== "object" || value === null) return undefined;
+  const entries = Array.isArray(value) ? value.map((item, index) => [String(index), item] as const) : Object.entries(value);
+  for (const [key, child] of entries) {
+    const childPath = path ? `${path}.${key}` : key;
+    if (!Array.isArray(value) && AUTOMATION_ACTION_FORBIDDEN_FIELD_RE.test(key)) return childPath;
+    const nested = findForbiddenAutomationField(child, childPath, depth + 1);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+/** The first string anywhere in `value` shaped like a credential, as a dotted path, or `undefined`. */
+function findSecretValue(value: unknown, path = "", depth = 0): string | undefined {
+  if (typeof value === "string") return AUTOMATION_ACTION_SECRET_VALUE_RE.test(value) ? path || "(value)" : undefined;
+  if (depth > 8 || typeof value !== "object" || value === null) return undefined;
+  const entries = Array.isArray(value) ? value.map((item, index) => [String(index), item] as const) : Object.entries(value);
+  for (const [key, child] of entries) {
+    const nested = findSecretValue(child, path ? `${path}.${key}` : key, depth + 1);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+/** Refuses redaction violations for any submitted record (action, observation, completion). */
+export function automationRedactionViolation(value: unknown): { code: "forbidden-field" | "secret-value"; field: string } | undefined {
+  const forbidden = findForbiddenAutomationField(value);
+  if (forbidden) return { code: "forbidden-field", field: forbidden };
+  const secret = findSecretValue(value);
+  if (secret) return { code: "secret-value", field: secret };
+  return undefined;
+}
+
+function validateAutomationScope(value: unknown): AutomationActionScope | null {
+  if (!isPlainObject(value)) return null;
+  const scope: { flowId?: string; experimentId?: string; repo?: string; instance?: string } = {};
+  for (const field of ["flowId", "experimentId", "repo", "instance"] as const) {
+    if (value[field] === undefined) continue;
+    if (!boundedField(value[field], AUTOMATION_ACTION_MAX_ID_CHARS)) return null;
+    scope[field] = value[field].trim();
+  }
+  if (!scope.flowId && !scope.experimentId) return null;
+  if (!scope.repo && !scope.instance) return null;
+  return scope;
+}
+
+function validatePreconditions(value: unknown): AutomationActionPrecondition[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > AUTOMATION_ACTION_MAX_PRECONDITIONS) return null;
+  const seen = new Set<string>();
+  const out: AutomationActionPrecondition[] = [];
+  for (const item of value) {
+    if (!isPlainObject(item) || !boundedField(item.id, AUTOMATION_ACTION_MAX_ID_CHARS)) return null;
+    if (!boundedField(item.source, AUTOMATION_ACTION_MAX_ID_CHARS) || !boundedField(item.description, AUTOMATION_ACTION_MAX_TEXT_CHARS)) return null;
+    const id = item.id.trim();
+    if (seen.has(id)) return null;
+    seen.add(id);
+    out.push({ id, source: item.source.trim(), description: item.description.trim() });
+  }
+  return out;
+}
+
+function validateRollbackPath(value: unknown): AutomationActionRollback | null {
+  if (!isPlainObject(value)) return null;
+  if (value.mode === "reversible" && boundedField(value.plan, AUTOMATION_ACTION_MAX_TEXT_CHARS)) return { mode: "reversible", plan: value.plan.trim() };
+  if (value.mode === "irreversible" && boundedField(value.refusal, AUTOMATION_ACTION_MAX_TEXT_CHARS)) return { mode: "irreversible", refusal: value.refusal.trim() };
+  return null;
+}
+
+/**
+ * Validates an `automation-action-v1` record and returns a whitelisted copy — any field this
+ * contract does not name is dropped, and any field it FORBIDS (raw prompt, transcript, credential,
+ * model prose, browser-owned measurement) or a credential-shaped value refuses the whole record.
+ * An incomplete scope, freshness, approval, or rollback declaration is refused BY NAME before
+ * execution can ever be requested.
+ */
+export function validateAutomationAction(value: unknown): AutomationActionValidation {
+  const refuse = (code: AutomationActionValidationCode, field: string, reason: string): AutomationActionValidation => ({ ok: false, code, field, reason });
+  if (!isPlainObject(value)) return refuse("not-an-object", "action", "an automation action must be a JSON object");
+  const redaction = automationRedactionViolation(value);
+  if (redaction) return refuse(redaction.code, redaction.field, `field ${redaction.field} may not enter the automation-action contract`);
+  if (value.version !== AUTOMATION_ACTION_VERSION) return refuse("invalid-version", "version", `version must be ${AUTOMATION_ACTION_VERSION}`);
+  if (!boundedField(value.actionId, AUTOMATION_ACTION_MAX_ID_CHARS) || !boundedField(value.capability, AUTOMATION_ACTION_MAX_ID_CHARS) || !boundedField(value.summary, AUTOMATION_ACTION_MAX_TEXT_CHARS)) {
+    return refuse("missing-identity", "actionId", "actionId, capability, and a bounded summary are required");
+  }
+  const scope = validateAutomationScope(value.scope);
+  if (!scope) return refuse("missing-scope", "scope", "scope must name a flowId or experimentId AND a repo or instance");
+  if (typeof value.risk !== "string" || !AUTOMATION_RISK_TIERS.includes(value.risk as DelegationRiskTier)) {
+    return refuse("invalid-risk", "risk", `risk must be one of ${AUTOMATION_RISK_TIERS.join(", ")}`);
+  }
+  const risk = value.risk as DelegationRiskTier;
+  const preconditions = validatePreconditions(value.preconditions);
+  if (!preconditions) return refuse("missing-preconditions", "preconditions", `1-${AUTOMATION_ACTION_MAX_PRECONDITIONS} uniquely identified preconditions with a source are required`);
+  const maxAgeSeconds = isPlainObject(value.freshness) ? value.freshness.maxAgeSeconds : undefined;
+  if (typeof maxAgeSeconds !== "number" || !Number.isInteger(maxAgeSeconds) || maxAgeSeconds <= 0 || maxAgeSeconds > AUTOMATION_ACTION_MAX_FRESHNESS_SECONDS) {
+    return refuse("missing-freshness", "freshness.maxAgeSeconds", `freshness.maxAgeSeconds must be an integer in 1..${AUTOMATION_ACTION_MAX_FRESHNESS_SECONDS}`);
+  }
+  if (!boundedField(value.idempotencyKey, AUTOMATION_ACTION_MAX_ID_CHARS)) return refuse("missing-idempotency-key", "idempotencyKey", "a bounded idempotencyKey is required");
+  if (!validInstant(value.createdAt) || !validInstant(value.expiresAt) || Date.parse(value.expiresAt) <= Date.parse(value.createdAt)) {
+    return refuse("invalid-expiry", "expiresAt", "createdAt and a later expiresAt are required");
+  }
+  if (typeof value.dryRun !== "boolean") return refuse("missing-dry-run", "dryRun", "dryRun must declare whether a dry run is supported");
+  const policy = isPlainObject(value.approval) ? value.approval.policy : undefined;
+  if (policy !== "none" && policy !== "human") return refuse("missing-approval", "approval.policy", "approval.policy must be none or human");
+  if (delegationRequiresHumanGate(risk) && policy !== "human") {
+    return refuse("approval-too-weak", "approval.policy", `a ${risk}-risk action must declare approval.policy human`);
+  }
+  const rollback = validateRollbackPath(value.rollback);
+  if (!rollback) return refuse("missing-rollback", "rollback", "rollback must be reversible with a plan or irreversible with a refusal path");
+  if (!boundedField(value.receiptRef, AUTOMATION_ACTION_MAX_ID_CHARS)) return refuse("missing-receipt-ref", "receiptRef", "an authoritative receiptRef is required");
+  return {
+    ok: true,
+    action: deepFreeze({
+      version: AUTOMATION_ACTION_VERSION,
+      actionId: value.actionId.trim(),
+      capability: value.capability.trim(),
+      summary: value.summary.trim(),
+      scope,
+      risk,
+      preconditions,
+      freshness: { maxAgeSeconds },
+      idempotencyKey: value.idempotencyKey.trim(),
+      createdAt: toIso(value.createdAt),
+      expiresAt: toIso(value.expiresAt),
+      dryRun: value.dryRun,
+      approval: { policy },
+      rollback,
+      receiptRef: value.receiptRef.trim(),
+    }),
+  };
+}
+
+/** One observed answer to one declared precondition. `unavailable` means the source could not be
+ *  read — it is never read as satisfied. */
+export interface AutomationPreconditionObservation {
+  readonly preconditionId: string;
+  readonly state: "satisfied" | "unsatisfied" | "unavailable";
+  readonly source: string;
+  readonly observedAt: string;
+  readonly reason?: string;
+}
+
+/** Validates a caller-submitted observation list, dropping nothing silently: a malformed entry
+ *  refuses the whole list (`null`), and the redaction rules apply exactly as to an action. */
+export function validateAutomationObservations(value: unknown): AutomationPreconditionObservation[] | null {
+  if (!Array.isArray(value) || value.length > AUTOMATION_ACTION_MAX_OBSERVATIONS || automationRedactionViolation(value)) return null;
+  const out: AutomationPreconditionObservation[] = [];
+  for (const item of value) {
+    if (!isPlainObject(item) || !boundedField(item.preconditionId, AUTOMATION_ACTION_MAX_ID_CHARS) || !boundedField(item.source, AUTOMATION_ACTION_MAX_ID_CHARS)) return null;
+    if (item.state !== "satisfied" && item.state !== "unsatisfied" && item.state !== "unavailable") return null;
+    if (!validInstant(item.observedAt)) return null;
+    if (item.reason !== undefined && !boundedField(item.reason, AUTOMATION_ACTION_MAX_TEXT_CHARS)) return null;
+    out.push({
+      preconditionId: item.preconditionId.trim(),
+      state: item.state,
+      source: item.source.trim(),
+      observedAt: toIso(item.observedAt),
+      ...(item.reason !== undefined ? { reason: item.reason.trim() } : {}),
+    });
+  }
+  return out;
+}
+
+/** The latest durable operator decision on an action whose approval policy is `human`. */
+export interface AutomationApprovalDecision {
+  readonly decision: "approved" | "rejected";
+  readonly decidedBy: string;
+  readonly decidedAt: string;
+}
+
+export type AutomationApprovalState = "not-required" | "pending" | "approved" | "rejected";
+
+export type AutomationReceiptKind = "execution" | "completion" | "rollback";
+export type AutomationReceiptOutcome = "in-progress" | "dry-run" | "refused" | "succeeded" | "failed" | "rolled_back";
+
+/** One bounded, append-only receipt. Execution, completion, and rollback each append a NEW one
+ *  linked by `linkedReceiptId`; nothing ever rewrites an earlier receipt. */
+export interface AutomationActionReceipt {
+  readonly version: typeof AUTOMATION_ACTION_VERSION;
+  readonly receiptId: string;
+  readonly actionId: string;
+  readonly idempotencyKey: string;
+  readonly kind: AutomationReceiptKind;
+  readonly outcome: AutomationReceiptOutcome;
+  readonly at: string;
+  readonly receiptRef: string;
+  readonly linkedReceiptId?: string;
+  readonly preflight?: AutomationPreflightOutcome;
+  readonly code?: string;
+  readonly reason: string;
+  /** The authoritative evidence (PR, deployment, ledger receipt) a completion or rollback names. */
+  readonly evidenceRef?: string;
+}
+
+export interface AutomationPreflightFinding {
+  readonly outcome: Exclude<AutomationPreflightOutcome, "ready">;
+  readonly code: string;
+  readonly detail: string;
+  readonly preconditionId?: string;
+  readonly receiptId?: string;
+}
+
+export interface AutomationPreflightResult {
+  readonly version: typeof AUTOMATION_ACTION_VERSION;
+  readonly actionId: string;
+  readonly outcome: AutomationPreflightOutcome;
+  readonly evaluatedAt: string;
+  readonly approval: AutomationApprovalState;
+  readonly findings: readonly AutomationPreflightFinding[];
+}
+
+/** Whether `receipt` is the ADMISSION that claims `idempotencyKey` — the only receipt kind that
+ *  burns a key. A refusal or a dry run leaves the key free for a later, fresher attempt. */
+function isAdmission(receipt: AutomationActionReceipt, idempotencyKey: string): boolean {
+  return receipt.kind === "execution" && receipt.outcome === "in-progress" && receipt.idempotencyKey === idempotencyKey;
+}
+
+function completionFor(receipts: readonly AutomationActionReceipt[], admissionId: string): AutomationActionReceipt | undefined {
+  return receipts.find((receipt) => receipt.kind === "completion" && receipt.linkedReceiptId === admissionId);
+}
+
+function rollbackFor(receipts: readonly AutomationActionReceipt[], completionId: string): AutomationActionReceipt | undefined {
+  return receipts.find((receipt) => receipt.kind === "rollback" && receipt.outcome === "rolled_back" && receipt.linkedReceiptId === completionId);
+}
+
+/** The approval state an action's policy and its latest durable decision imply. */
+export function automationApprovalState(action: AutomationAction, decision: AutomationApprovalDecision | undefined): AutomationApprovalState {
+  if (action.approval.policy === "none") return "not-required";
+  if (!decision) return "pending";
+  return decision.decision;
+}
+
+/** A browser-owned measurement is never authoritative evidence for an execution decision. */
+function browserOwned(source: string): boolean {
+  return /^(?:browser|client|web)[:_-]/i.test(source);
+}
+
+export interface AutomationPreflightInput {
+  readonly action: AutomationAction;
+  readonly observations: readonly AutomationPreconditionObservation[];
+  readonly receipts: readonly AutomationActionReceipt[];
+  readonly approval?: AutomationApprovalDecision;
+  readonly clock: Clock;
+}
+
+function preconditionFinding(
+  precondition: AutomationActionPrecondition,
+  observation: AutomationPreconditionObservation | undefined,
+  nowMs: number,
+  maxAgeMs: number,
+): AutomationPreflightFinding | undefined {
+  const at = { preconditionId: precondition.id };
+  if (!observation) return { ...at, outcome: "unknown", code: "not-observed", detail: `precondition ${precondition.id} has no observation` };
+  if (browserOwned(observation.source) || observation.source !== precondition.source) {
+    return { ...at, outcome: "unknown", code: "unauthoritative-source", detail: `precondition ${precondition.id} must be observed from ${precondition.source}, not ${observation.source}` };
+  }
+  if (observation.state === "unavailable") {
+    return { ...at, outcome: "unknown", code: "source-unavailable", detail: observation.reason ?? `source ${observation.source} was unavailable` };
+  }
+  const observedMs = Date.parse(observation.observedAt);
+  if (observedMs > nowMs) return { ...at, outcome: "unknown", code: "observed-in-future", detail: `observation of ${precondition.id} is dated after the preflight` };
+  if (observation.state === "unsatisfied") {
+    return { ...at, outcome: "refused", code: "precondition-unsatisfied", detail: observation.reason ?? `precondition ${precondition.id} is not satisfied` };
+  }
+  if (nowMs - observedMs > maxAgeMs) {
+    return { ...at, outcome: "stale", code: "observation-stale", detail: `observation of ${precondition.id} is older than ${maxAgeMs / 1000}s` };
+  }
+  return undefined;
+}
+
+/**
+ * Preflight: `expired`, then `in-progress` (an admitted execution with no completion yet), then
+ * the approval gate and a finished execution (`refused`), then every precondition — where a
+ * refusal outranks an unknown, and an unknown outranks a stale observation. Only when nothing is
+ * found is the outcome `ready`: a missing observation, an unavailable or browser-owned source, or
+ * an observation from the wrong source is `unknown`, NEVER a healthy action.
+ */
+export function preflightAutomationAction(input: AutomationPreflightInput): AutomationPreflightResult {
+  const { action, clock } = input;
+  const nowMs = clock.now();
+  const approval = automationApprovalState(action, input.approval);
+  const result = (outcome: AutomationPreflightOutcome, findings: AutomationPreflightFinding[]): AutomationPreflightResult => ({
+    version: AUTOMATION_ACTION_VERSION,
+    actionId: action.actionId,
+    outcome,
+    evaluatedAt: clock.iso(),
+    approval,
+    findings,
+  });
+  if (nowMs >= Date.parse(action.expiresAt)) {
+    return result("expired", [{ outcome: "expired", code: "action-expired", detail: `action ${action.actionId} expired at ${action.expiresAt}` }]);
+  }
+  const admission = input.receipts.find((receipt) => isAdmission(receipt, action.idempotencyKey));
+  if (admission) {
+    const completion = completionFor(input.receipts, admission.receiptId);
+    if (!completion) {
+      return result("in-progress", [{ outcome: "in-progress", code: "execution-in-progress", detail: `execution ${admission.receiptId} has not completed`, receiptId: admission.receiptId }]);
+    }
+    return result("refused", [{ outcome: "refused", code: "already-executed", detail: `idempotency key already executed as ${completion.receiptId}`, receiptId: completion.receiptId }]);
+  }
+  const findings: AutomationPreflightFinding[] = [];
+  if (approval === "pending") findings.push({ outcome: "refused", code: "approval-pending", detail: `a ${action.risk}-risk action needs an operator approval` });
+  if (approval === "rejected") findings.push({ outcome: "refused", code: "approval-rejected", detail: "an operator rejected this action" });
+  const maxAgeMs = action.freshness.maxAgeSeconds * 1000;
+  for (const precondition of action.preconditions) {
+    const observation = [...input.observations].reverse().find((item) => item.preconditionId === precondition.id);
+    const finding = preconditionFinding(precondition, observation, nowMs, maxAgeMs);
+    if (finding) findings.push(finding);
+  }
+  for (const outcome of ["refused", "unknown", "stale"] as const) {
+    if (findings.some((finding) => finding.outcome === outcome)) return result(outcome, findings);
+  }
+  return result("ready", findings);
+}
+
+function boundedReason(value: string): string {
+  return boundedText(value, AUTOMATION_ACTION_MAX_TEXT_CHARS);
+}
+
+/** Deterministic: the same action, kind, position, and instant always name the same receipt, so a
+ *  replayed ledger row is recognisable as the same receipt rather than a second one. */
+function automationReceiptId(actionId: string, kind: AutomationReceiptKind, sequence: number, at: string): string {
+  return `aar-${createHash("sha256").update(`${actionId}\u0000${kind}\u0000${sequence}\u0000${at}`).digest("hex").slice(0, 24)}`;
+}
+
+function makeAutomationReceipt(
+  action: AutomationAction,
+  receipts: readonly AutomationActionReceipt[],
+  at: string,
+  fields: Omit<AutomationActionReceipt, "version" | "receiptId" | "actionId" | "idempotencyKey" | "at" | "receiptRef">,
+): AutomationActionReceipt {
+  return {
+    version: AUTOMATION_ACTION_VERSION,
+    receiptId: automationReceiptId(action.actionId, fields.kind, receipts.length, at),
+    actionId: action.actionId,
+    idempotencyKey: action.idempotencyKey,
+    at,
+    receiptRef: action.receiptRef,
+    ...fields,
+    reason: boundedReason(fields.reason),
+  };
+}
+
+/** What an engine step decided. `append` is false when the answer is an EXISTING receipt (an
+ *  idempotent replay) or the receipt history is full — the durable layer appends only when true. */
+export interface AutomationStepResult {
+  readonly disposition: "admitted" | "dry-run" | "refused" | "reused" | "completed" | "rolled_back";
+  readonly receipt: AutomationActionReceipt;
+  readonly append: boolean;
+  readonly preflight?: AutomationPreflightResult;
+}
+
+function historyFull(action: AutomationAction, receipts: readonly AutomationActionReceipt[], at: string, kind: AutomationReceiptKind): AutomationStepResult | undefined {
+  if (receipts.length < AUTOMATION_ACTION_MAX_RECEIPTS) return undefined;
+  return {
+    disposition: "refused",
+    append: false,
+    receipt: makeAutomationReceipt(action, receipts, at, { kind, outcome: "refused", code: "receipt-history-full", reason: `action ${action.actionId} already holds ${receipts.length} receipts` }),
+  };
+}
+
+export interface AutomationExecutionInput extends AutomationPreflightInput {
+  readonly dryRun?: boolean;
+}
+
+/**
+ * The execution admission step. A duplicate idempotency key returns the EXISTING receipt (the
+ * completion when there is one, else the admission) and appends nothing — the side effect is
+ * never requested twice. Otherwise preflight runs HERE, at execution time, never trusted from an
+ * earlier call: anything but `ready` appends a refusal naming the preflight outcome. A `ready`
+ * action is admitted `in-progress` — never `succeeded` — until {@link completeAutomationAction}
+ * records the authoritative evidence.
+ */
+export function executeAutomationAction(input: AutomationExecutionInput): AutomationStepResult {
+  const { action, receipts } = input;
+  const at = input.clock.iso();
+  const admission = receipts.find((receipt) => isAdmission(receipt, action.idempotencyKey));
+  if (admission) {
+    const completion = completionFor(receipts, admission.receiptId);
+    const latest = completion ? rollbackFor(receipts, completion.receiptId) ?? completion : admission;
+    return { disposition: "reused", receipt: latest, append: false };
+  }
+  const full = historyFull(action, receipts, at, "execution");
+  if (full) return full;
+  if (input.dryRun && !action.dryRun) {
+    return {
+      disposition: "refused",
+      append: true,
+      receipt: makeAutomationReceipt(action, receipts, at, { kind: "execution", outcome: "refused", code: "dry-run-unsupported", reason: `action ${action.actionId} does not support a dry run` }),
+    };
+  }
+  const preflight = preflightAutomationAction(input);
+  if (preflight.outcome !== "ready") {
+    const first = preflight.findings[0];
+    return {
+      disposition: "refused",
+      append: true,
+      preflight,
+      receipt: makeAutomationReceipt(action, receipts, at, {
+        kind: "execution",
+        outcome: "refused",
+        preflight: preflight.outcome,
+        ...(first ? { code: first.code } : {}),
+        reason: first?.detail ?? `preflight answered ${preflight.outcome}`,
+      }),
+    };
+  }
+  if (input.dryRun) {
+    return {
+      disposition: "dry-run",
+      append: true,
+      preflight,
+      receipt: makeAutomationReceipt(action, receipts, at, { kind: "execution", outcome: "dry-run", preflight: "ready", reason: "dry run: preflight ready, nothing executed" }),
+    };
+  }
+  return {
+    disposition: "admitted",
+    append: true,
+    preflight,
+    receipt: makeAutomationReceipt(action, receipts, at, { kind: "execution", outcome: "in-progress", preflight: "ready", reason: "admitted: preflight ready, awaiting completion evidence" }),
+  };
+}
+
+export interface AutomationCompletionInput {
+  readonly action: AutomationAction;
+  readonly receipts: readonly AutomationActionReceipt[];
+  readonly admissionReceiptId: string;
+  readonly outcome: "succeeded" | "failed";
+  /** Required for `succeeded`: success is claimed only with the authoritative evidence that proves it. */
+  readonly evidenceRef?: string;
+  readonly reason?: string;
+  readonly clock: Clock;
+}
+
+/**
+ * Records how an admitted execution ended, as a NEW receipt linked to the admission. A second
+ * completion of the same admission returns the first unchanged; completing anything but an
+ * in-progress admission, or claiming success with no evidence, is refused and appends nothing.
+ */
+export function completeAutomationAction(input: AutomationCompletionInput): AutomationStepResult {
+  const { action, receipts } = input;
+  const at = input.clock.iso();
+  const refuse = (code: string, reason: string): AutomationStepResult => ({
+    disposition: "refused",
+    append: false,
+    receipt: makeAutomationReceipt(action, receipts, at, { kind: "completion", outcome: "refused", code, linkedReceiptId: input.admissionReceiptId, reason }),
+  });
+  const admission = receipts.find((receipt) => receipt.receiptId === input.admissionReceiptId && isAdmission(receipt, action.idempotencyKey));
+  if (!admission) return refuse("not-admitted", `receipt ${input.admissionReceiptId} is not an in-progress admission of action ${action.actionId}`);
+  const existing = completionFor(receipts, admission.receiptId);
+  if (existing) return { disposition: "reused", receipt: existing, append: false };
+  if (input.outcome === "succeeded" && !boundedField(input.evidenceRef, AUTOMATION_ACTION_MAX_ID_CHARS)) {
+    return refuse("evidence-required", "a succeeded completion must name its authoritative evidenceRef");
+  }
+  const full = historyFull(action, receipts, at, "completion");
+  if (full) return full;
+  return {
+    disposition: "completed",
+    append: true,
+    receipt: makeAutomationReceipt(action, receipts, at, {
+      kind: "completion",
+      outcome: input.outcome,
+      linkedReceiptId: admission.receiptId,
+      ...(input.evidenceRef ? { evidenceRef: input.evidenceRef.trim() } : {}),
+      reason: input.reason ?? `execution ${input.outcome}`,
+    }),
+  };
+}
+
+export interface AutomationRollbackInput {
+  readonly action: AutomationAction;
+  readonly receipts: readonly AutomationActionReceipt[];
+  readonly reason: string;
+  readonly evidenceRef: string;
+  readonly clock: Clock;
+}
+
+/**
+ * Rollback is a NEW receipt linked to the completion it undoes — the admission and completion
+ * stay exactly as recorded. Refused (and appended, so the refusal is on record) for an
+ * irreversible action, naming its declared refusal path; refused without appending when nothing
+ * has completed. A second rollback returns the first.
+ */
+export function rollbackAutomationAction(input: AutomationRollbackInput): AutomationStepResult {
+  const { action, receipts } = input;
+  const at = input.clock.iso();
+  const completion = [...receipts].reverse().find((receipt) => receipt.kind === "completion" && receipt.outcome !== "refused");
+  if (!completion) {
+    return {
+      disposition: "refused",
+      append: false,
+      receipt: makeAutomationReceipt(action, receipts, at, { kind: "rollback", outcome: "refused", code: "nothing-to-roll-back", reason: `action ${action.actionId} has no completed execution` }),
+    };
+  }
+  const existing = rollbackFor(receipts, completion.receiptId);
+  if (existing) return { disposition: "reused", receipt: existing, append: false };
+  const full = historyFull(action, receipts, at, "rollback");
+  if (full) return full;
+  if (action.rollback.mode === "irreversible") {
+    return {
+      disposition: "refused",
+      append: true,
+      receipt: makeAutomationReceipt(action, receipts, at, { kind: "rollback", outcome: "refused", code: "irreversible", linkedReceiptId: completion.receiptId, reason: action.rollback.refusal }),
+    };
+  }
+  return {
+    disposition: "rolled_back",
+    append: true,
+    receipt: makeAutomationReceipt(action, receipts, at, {
+      kind: "rollback",
+      outcome: "rolled_back",
+      linkedReceiptId: completion.receiptId,
+      evidenceRef: boundedText(input.evidenceRef.trim(), AUTOMATION_ACTION_MAX_ID_CHARS),
+      reason: input.reason,
+    }),
+  };
+}
+
+export type AutomationActionState = "registered" | "approved" | "rejected" | "in-progress" | "succeeded" | "failed" | "rolled_back" | "expired";
+
+/** The current state an action's receipts and approval imply — derived, never stored. */
+export function automationActionState(
+  action: AutomationAction,
+  receipts: readonly AutomationActionReceipt[],
+  approval: AutomationApprovalDecision | undefined,
+  clock: Clock,
+): AutomationActionState {
+  const admission = receipts.find((receipt) => isAdmission(receipt, action.idempotencyKey));
+  const completion = admission ? completionFor(receipts, admission.receiptId) : undefined;
+  if (completion && rollbackFor(receipts, completion.receiptId)) return "rolled_back";
+  if (completion) return completion.outcome === "succeeded" ? "succeeded" : "failed";
+  if (admission) return "in-progress";
+  if (clock.now() >= Date.parse(action.expiresAt)) return "expired";
+  const approvalState = automationApprovalState(action, approval);
+  if (approvalState === "approved" || approvalState === "rejected") return approvalState;
+  return "registered";
+}
+
+/** Re-validates a receipt read back from the ledger, so a hand-edited or foreign row can never
+ *  enter a projection with an unbounded or forbidden field. */
+export function validateAutomationReceipt(value: unknown): AutomationActionReceipt | null {
+  if (!isPlainObject(value) || value.version !== AUTOMATION_ACTION_VERSION || automationRedactionViolation(value)) return null;
+  const kinds: readonly string[] = ["execution", "completion", "rollback"];
+  const outcomes: readonly string[] = ["in-progress", "dry-run", "refused", "succeeded", "failed", "rolled_back"];
+  if (typeof value.kind !== "string" || !kinds.includes(value.kind) || typeof value.outcome !== "string" || !outcomes.includes(value.outcome)) return null;
+  for (const field of ["receiptId", "actionId", "idempotencyKey", "receiptRef"] as const) {
+    if (!boundedField(value[field], AUTOMATION_ACTION_MAX_ID_CHARS)) return null;
+  }
+  if (!validInstant(value.at) || typeof value.reason !== "string" || value.reason.length > AUTOMATION_ACTION_MAX_TEXT_CHARS + 1) return null;
+  for (const field of ["linkedReceiptId", "evidenceRef", "code"] as const) {
+    if (value[field] !== undefined && !boundedField(value[field], AUTOMATION_ACTION_MAX_ID_CHARS)) return null;
+  }
+  if (value.preflight !== undefined && !(AUTOMATION_PREFLIGHT_OUTCOMES as readonly unknown[]).includes(value.preflight)) return null;
+  return {
+    version: AUTOMATION_ACTION_VERSION,
+    receiptId: value.receiptId as string,
+    actionId: value.actionId as string,
+    idempotencyKey: value.idempotencyKey as string,
+    kind: value.kind as AutomationReceiptKind,
+    outcome: value.outcome as AutomationReceiptOutcome,
+    at: value.at,
+    receiptRef: value.receiptRef as string,
+    ...(value.linkedReceiptId !== undefined ? { linkedReceiptId: value.linkedReceiptId as string } : {}),
+    ...(value.preflight !== undefined ? { preflight: value.preflight as AutomationPreflightOutcome } : {}),
+    ...(value.code !== undefined ? { code: value.code as string } : {}),
+    reason: value.reason,
+    ...(value.evidenceRef !== undefined ? { evidenceRef: value.evidenceRef as string } : {}),
   };
 }

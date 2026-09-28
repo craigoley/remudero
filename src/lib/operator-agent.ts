@@ -9,7 +9,7 @@
 
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
-import type { ServerResponse } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Route } from "./service.js";
 import { clockFromMillisFn, fixedClock } from "./clock.js";
 import { EMERGENCY_STOP_CLEARED_LEDGER_STEP, EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "./ledger.js";
@@ -72,9 +72,30 @@ import {
 } from "./consequence-policy.js";
 import {
   acceptDelegationEnvelope,
+  AUTOMATION_ACTION_MAX_ID_CHARS,
+  AUTOMATION_ACTION_MAX_RECEIPTS,
+  AUTOMATION_ACTION_MAX_TEXT_CHARS,
+  AUTOMATION_ACTION_VERSION,
+  automationActionState,
+  automationApprovalState,
+  automationRedactionViolation,
+  completeAutomationAction,
   createDelegationEnvelope,
+  executeAutomationAction,
   executeBoundedDelegation,
   InMemoryDelegationEnvelopeStore,
+  preflightAutomationAction,
+  rollbackAutomationAction,
+  validateAutomationAction,
+  validateAutomationObservations,
+  validateAutomationReceipt,
+  type AutomationAction,
+  type AutomationActionReceipt,
+  type AutomationActionState,
+  type AutomationApprovalDecision,
+  type AutomationApprovalState,
+  type AutomationPreconditionObservation,
+  type AutomationStepResult,
   type DelegationCapabilityRef,
   type DelegationHumanApproval,
   type DelegationRiskTier,
@@ -119,6 +140,10 @@ export const CONTEXT_DELETED_STEP = "panel.context_deleted";
  *  executeBoundedDelegation( before this ledgers — never a raw prompt or secret, only the
  *  resulting {@link DelegationReceipt}. */
 export const OPERATOR_AGENT_DELEGATION_HANDOFF_STEP = "panel.operator_agent_delegation_handoff";
+/** W1-T3855: the automation-action-v1 record, its operator decision, and every appended receipt. */
+export const OPERATOR_AGENT_ACTION_STEP = "panel.operator_agent_action";
+export const OPERATOR_AGENT_ACTION_DECISION_STEP = "panel.operator_agent_action_decision";
+export const OPERATOR_AGENT_ACTION_RECEIPT_STEP = "panel.operator_agent_action_receipt";
 /** W1-T3900: audit trail only (never re-read to decide anything), so — unlike
  *  EMERGENCY_STOP_ISSUED_LEDGER_STEP/EMERGENCY_STOP_CLEARED_LEDGER_STEP (ledger.ts) — these stay
  *  local, matching OPERATOR_AGENT_PROPOSAL_STEP's precedent just above. */
@@ -2901,6 +2926,317 @@ export function buildOperatorAgentDelegationHandoffRoute(deps: OperatorAgentRout
   };
 }
 
+// ── W1-T3855: automation-action-v1 routes ───────────────────────────────────────────────────
+
+export interface OperatorAgentActionHistory {
+  action: AutomationAction;
+  state: AutomationActionState;
+  approval: AutomationApprovalState;
+  decision?: AutomationApprovalDecision;
+  receipts: AutomationActionReceipt[];
+}
+
+function readActionRows(ledgerPath: string): Array<Record<string, unknown>> {
+  return readOperatorAgentUnion(dirname(ledgerPath), {
+    step: [OPERATOR_AGENT_ACTION_STEP, OPERATOR_AGENT_ACTION_DECISION_STEP, OPERATOR_AGENT_ACTION_RECEIPT_STEP],
+  }).rows;
+}
+
+function actionDecisionFromRow(row: Record<string, unknown>): { actionId: string; decision: AutomationApprovalDecision } | null {
+  if (row.step !== OPERATOR_AGENT_ACTION_DECISION_STEP || !boundedString(row.action_id, AUTOMATION_ACTION_MAX_ID_CHARS)) return null;
+  if ((row.decision !== "approved" && row.decision !== "rejected") || !iso(row.at) || !boundedString(row.decided_by, AUTOMATION_ACTION_MAX_ID_CHARS)) return null;
+  return { actionId: row.action_id, decision: { decision: row.decision, decidedBy: row.decided_by, decidedAt: fixedClock(Date.parse(row.at)).iso() } };
+}
+
+/** Folds the ledger union into one history per action: the FIRST record per id wins (a later
+ *  row can never rewrite it), the first decision stands, and receipts append in ledger order. */
+export function readOperatorAgentActions(deps: OperatorAgentRouteDependencies): OperatorAgentActionHistory[] {
+  const actions = new Map<string, AutomationAction>();
+  const decisions = new Map<string, AutomationApprovalDecision>();
+  const receipts = new Map<string, AutomationActionReceipt[]>();
+  for (const row of readActionRows(deps.ledgerPath)) {
+    if (row.step === OPERATOR_AGENT_ACTION_STEP) {
+      const validated = validateAutomationAction(row.action);
+      if (validated.ok && !actions.has(validated.action.actionId)) actions.set(validated.action.actionId, validated.action);
+    }
+    const decision = actionDecisionFromRow(row);
+    if (decision && actions.has(decision.actionId) && !decisions.has(decision.actionId)) decisions.set(decision.actionId, decision.decision);
+    const receipt = row.step === OPERATOR_AGENT_ACTION_RECEIPT_STEP ? validateAutomationReceipt(row.receipt) : null;
+    if (receipt && actions.has(receipt.actionId)) {
+      const prior = receipts.get(receipt.actionId) ?? [];
+      if (prior.length < AUTOMATION_ACTION_MAX_RECEIPTS && !prior.some((item) => item.receiptId === receipt.receiptId)) receipts.set(receipt.actionId, [...prior, receipt]);
+    }
+  }
+  const clock = clockFromMillisFn(deps.now);
+  return [...actions.values()]
+    .map((action): OperatorAgentActionHistory => {
+      const decision = decisions.get(action.actionId);
+      const history = receipts.get(action.actionId) ?? [];
+      return {
+        action,
+        state: automationActionState(action, history, decision, clock),
+        approval: automationApprovalState(action, decision),
+        ...(decision ? { decision } : {}),
+        receipts: history,
+      };
+    })
+    .sort((left, right) => Date.parse(right.action.createdAt) - Date.parse(left.action.createdAt) || left.action.actionId.localeCompare(right.action.actionId));
+}
+
+function findAction(deps: OperatorAgentRouteDependencies, actionId: string): OperatorAgentActionHistory | undefined {
+  return readOperatorAgentActions(deps).find((history) => history.action.actionId === actionId);
+}
+
+function redactedBody(body: unknown): { error: string } | { fields: Record<string, unknown> } {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  const violation = automationRedactionViolation(body);
+  if (violation) return { error: `${violation.code}: field ${violation.field} may not enter the automation-action contract` };
+  return { fields: body };
+}
+
+function validateActionRegistration(body: unknown): { error: string } | { action: AutomationAction } {
+  const redacted = redactedBody(body);
+  if ("error" in redacted) return redacted;
+  const checked = redacted.fields;
+  const validated = validateAutomationAction(checked.action);
+  return validated.ok ? { action: validated.action } : { error: `${validated.code}: ${validated.reason}` };
+}
+
+function validateActionId(body: Record<string, unknown>): string | null {
+  return boundedString(body.actionId, AUTOMATION_ACTION_MAX_ID_CHARS) ? body.actionId.trim() : null;
+}
+
+function validateActionDecision(body: unknown): { error: string } | { actionId: string; decision: "approved" | "rejected" } {
+  const redacted = redactedBody(body);
+  if ("error" in redacted) return redacted;
+  const checked = redacted.fields;
+  const actionId = validateActionId(checked);
+  if (!actionId) return { error: "actionId is required" };
+  if (checked.decision !== "approved" && checked.decision !== "rejected") return { error: "decision must be approved or rejected" };
+  return { actionId, decision: checked.decision };
+}
+
+function validateActionObservationsInput(body: unknown): { error: string } | { actionId: string; observations: AutomationPreconditionObservation[]; dryRun: boolean } {
+  const redacted = redactedBody(body);
+  if ("error" in redacted) return redacted;
+  const checked = redacted.fields;
+  const actionId = validateActionId(checked);
+  if (!actionId) return { error: "actionId is required" };
+  const observations = validateAutomationObservations(checked.observations ?? []);
+  if (!observations) return { error: "observations must be a bounded array of {preconditionId, state, source, observedAt}" };
+  if (checked.dryRun !== undefined && typeof checked.dryRun !== "boolean") return { error: "dryRun must be a boolean" };
+  return { actionId, observations, dryRun: checked.dryRun === true };
+}
+
+function validateActionCompletion(body: unknown): { error: string } | { actionId: string; admissionReceiptId: string; outcome: "succeeded" | "failed"; evidenceRef?: string; reason?: string } {
+  const redacted = redactedBody(body);
+  if ("error" in redacted) return redacted;
+  const checked = redacted.fields;
+  const actionId = validateActionId(checked);
+  if (!actionId || !boundedString(checked.admissionReceiptId, AUTOMATION_ACTION_MAX_ID_CHARS)) return { error: "actionId and admissionReceiptId are required" };
+  if (checked.outcome !== "succeeded" && checked.outcome !== "failed") return { error: "outcome must be succeeded or failed" };
+  if (checked.evidenceRef !== undefined && !boundedString(checked.evidenceRef, AUTOMATION_ACTION_MAX_ID_CHARS)) return { error: "evidenceRef must be a bounded string" };
+  if (checked.reason !== undefined && !boundedString(checked.reason, AUTOMATION_ACTION_MAX_TEXT_CHARS)) return { error: "reason must be a bounded string" };
+  return {
+    actionId,
+    admissionReceiptId: checked.admissionReceiptId.trim(),
+    outcome: checked.outcome,
+    ...(checked.evidenceRef !== undefined ? { evidenceRef: checked.evidenceRef.trim() } : {}),
+    ...(checked.reason !== undefined ? { reason: checked.reason.trim() } : {}),
+  };
+}
+
+function validateActionRollback(body: unknown): { error: string } | { actionId: string; reason: string; evidenceRef: string } {
+  const redacted = redactedBody(body);
+  if ("error" in redacted) return redacted;
+  const checked = redacted.fields;
+  const actionId = validateActionId(checked);
+  if (!actionId) return { error: "actionId is required" };
+  if (!boundedString(checked.reason, AUTOMATION_ACTION_MAX_TEXT_CHARS) || !boundedString(checked.evidenceRef, AUTOMATION_ACTION_MAX_ID_CHARS)) {
+    return { error: "rollback requires a bounded reason and the evidenceRef that proves it" };
+  }
+  return { actionId, reason: checked.reason.trim(), evidenceRef: checked.evidenceRef.trim() };
+}
+
+function requireAction(deps: OperatorAgentRouteDependencies, actionId: string, res: ServerResponse): OperatorAgentActionHistory | undefined {
+  const history = findAction(deps, actionId);
+  if (!history) sendJson(res, 404, { error: "not_found", detail: `no automation action "${actionId}"` });
+  return history;
+}
+
+/** Appends the engine's receipt only when it decided a NEW one, and answers with its disposition. */
+function respondWithStep(deps: OperatorAgentRouteDependencies, req: IncomingMessage, res: ServerResponse, step: AutomationStepResult, okStatus: number): void {
+  if (step.append) {
+    appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_ACTION_RECEIPT_STEP, step.receipt.actionId, bearerTokenId(req), { action_id: step.receipt.actionId, receipt: step.receipt });
+  }
+  const ok = step.disposition !== "refused";
+  sendJson(res, ok ? okStatus : 409, { ok, disposition: step.disposition, receipt: step.receipt, ...(step.preflight ? { preflight: step.preflight } : {}) });
+}
+
+/** GET /v1/operator-agent/actions — every automation-action-v1 record with its derived state and receipts. */
+export function buildOperatorAgentActionReadRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "GET",
+    path: "/v1/operator-agent/actions",
+    scope: "read",
+    handler: (_req, res) => sendJson(res, 200, { version: AUTOMATION_ACTION_VERSION, actions: readOperatorAgentActions(deps), source: "ledger" }),
+  };
+}
+
+/** POST /v1/operator-agent/actions — register an action; identical re-registration is idempotent. */
+export function buildOperatorAgentActionRegisterRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/actions",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validateActionRegistration, (input, req, res) => {
+      const all = readOperatorAgentActions(deps);
+      const existing = all.find((history) => history.action.actionId === input.action.actionId);
+      if (existing) {
+        if (JSON.stringify(existing.action) !== JSON.stringify(input.action)) {
+          sendJson(res, 409, { error: "conflict", detail: `actionId ${input.action.actionId} already names a different action` });
+          return;
+        }
+        sendJson(res, 200, { ok: true, existing: true, action: existing });
+        return;
+      }
+      const keyHolder = all.find((history) => history.action.idempotencyKey === input.action.idempotencyKey);
+      if (keyHolder) {
+        sendJson(res, 409, { error: "conflict", detail: `idempotencyKey is already bound to action ${keyHolder.action.actionId}` });
+        return;
+      }
+      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_ACTION_STEP, input.action.actionId, bearerTokenId(req), { action: input.action });
+      sendJson(res, 201, { ok: true, existing: false, action: input.action });
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/actions/decision — the operator approval a `human`-policy action needs.
+ *  MIDDLE tier: the shared bearer write token (LOW) cannot approve; a verified operator can. */
+export function buildOperatorAgentActionDecisionRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/actions/decision",
+    scope: "write",
+    tier: "middle",
+    handler: jsonAction(validateActionDecision, (input, req, res) => {
+      const history = requireAction(deps, input.actionId, res);
+      if (!history) return;
+      if (history.approval !== "pending" || history.state === "expired") {
+        sendJson(res, 409, { error: "conflict", detail: `action ${input.actionId} is ${history.state} with approval ${history.approval}; nothing to decide` });
+        return;
+      }
+      const at = clockFromMillisFn(deps.now).iso();
+      const decidedBy = bearerTokenId(req);
+      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_ACTION_DECISION_STEP, input.actionId, decidedBy, { action_id: input.actionId, decision: input.decision, decided_by: decidedBy, at });
+      sendJson(res, 200, { ok: true, actionId: input.actionId, decision: input.decision, decidedBy, at });
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/actions/preflight — evaluate without executing or appending anything. */
+export function buildOperatorAgentActionPreflightRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/actions/preflight",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validateActionObservationsInput, (input, _req, res) => {
+      const history = requireAction(deps, input.actionId, res);
+      if (!history) return;
+      const preflight = preflightAutomationAction({
+        action: history.action,
+        observations: input.observations,
+        receipts: history.receipts,
+        ...(history.decision ? { approval: history.decision } : {}),
+        clock: clockFromMillisFn(deps.now),
+      });
+      sendJson(res, 200, { preflight });
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/actions/execute — admit one execution per idempotency key, re-running preflight here. */
+export function buildOperatorAgentActionExecuteRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/actions/execute",
+    scope: "write",
+    tier: "middle",
+    handler: jsonAction(validateActionObservationsInput, (input, req, res) => {
+      const history = requireAction(deps, input.actionId, res);
+      if (!history) return;
+      const clock = clockFromMillisFn(deps.now);
+      const admission = checkEmergencyStop(
+        activeEmergencyStops(deps),
+        { actionKind: "action-admission", repo: history.action.scope.repo, instance: history.action.scope.instance },
+        clock.now(),
+      );
+      if (!admission.ok) {
+        appendPanelLedger(deps.ledgerPath, EMERGENCY_STOP_REFUSAL_STEP, input.actionId, bearerTokenId(req), { receipt: admission.receipt });
+        sendJson(res, 423, { ok: false, error: "emergency_stop_active", code: admission.code, receipt: admission.receipt });
+        return;
+      }
+      const step = executeAutomationAction({
+        action: history.action,
+        observations: input.observations,
+        receipts: history.receipts,
+        ...(history.decision ? { approval: history.decision } : {}),
+        dryRun: input.dryRun,
+        clock,
+      });
+      respondWithStep(deps, req, res, step, step.disposition === "admitted" ? 202 : 200);
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/actions/complete — record how an admitted execution ended, with its evidence. */
+export function buildOperatorAgentActionCompleteRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/actions/complete",
+    scope: "write",
+    tier: "middle",
+    handler: jsonAction(validateActionCompletion, (input, req, res) => {
+      const history = requireAction(deps, input.actionId, res);
+      if (!history) return;
+      const step = completeAutomationAction({
+        action: history.action,
+        receipts: history.receipts,
+        admissionReceiptId: input.admissionReceiptId,
+        outcome: input.outcome,
+        ...(input.evidenceRef ? { evidenceRef: input.evidenceRef } : {}),
+        ...(input.reason ? { reason: input.reason } : {}),
+        clock: clockFromMillisFn(deps.now),
+      });
+      respondWithStep(deps, req, res, step, 200);
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/actions/rollback — append a linked rollback receipt; history is never rewritten. */
+export function buildOperatorAgentActionRollbackRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/actions/rollback",
+    scope: "write",
+    tier: "middle",
+    handler: jsonAction(validateActionRollback, (input, req, res) => {
+      const history = requireAction(deps, input.actionId, res);
+      if (!history) return;
+      const step = rollbackAutomationAction({
+        action: history.action,
+        receipts: history.receipts,
+        reason: input.reason,
+        evidenceRef: input.evidenceRef,
+        clock: clockFromMillisFn(deps.now),
+      });
+      respondWithStep(deps, req, res, step, 200);
+    }),
+  };
+}
+
 export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): Route[] {
   return [
     buildContextReadRoute(deps),
@@ -2930,6 +3266,13 @@ export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): 
     buildOperatorAgentSettingsReadRoute(deps),
     buildOperatorAgentSettingsWriteRoute(deps),
     buildOperatorAgentDelegationHandoffRoute(deps),
+    buildOperatorAgentActionReadRoute(deps),
+    buildOperatorAgentActionRegisterRoute(deps),
+    buildOperatorAgentActionDecisionRoute(deps),
+    buildOperatorAgentActionPreflightRoute(deps),
+    buildOperatorAgentActionExecuteRoute(deps),
+    buildOperatorAgentActionCompleteRoute(deps),
+    buildOperatorAgentActionRollbackRoute(deps),
     buildEmergencyStopIssueRoute(deps),
     buildEmergencyStopClearRoute(deps),
     buildEmergencyStopStatusRoute(deps),
