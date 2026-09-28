@@ -8469,7 +8469,9 @@ function reviewerCodeFreshnessBackoffReason(
   const ageMinutes = Math.max(0, (now - attemptedAt) / 60_000);
   // The daemon can retry with a fresh reviewer tree after a short bounded pause.
   // Direct callers and unreadable refusals retain the original pending ceiling.
-  const ceiling = refusal.freshness === "stale" && recovery?.freshTreeReviewAvailable === true
+  const ceiling = refusal.freshness === "stale" &&
+    typeof refusal.requiredOriginMainSha === "string" && refusal.requiredOriginMainSha.length > 0 &&
+    recovery?.freshTreeReviewAvailable === true
     ? Math.min(5, policy.pendingCeilingMinutes)
     : policy.pendingCeilingMinutes;
   if (ageMinutes >= ceiling) return undefined;

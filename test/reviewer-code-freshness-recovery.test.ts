@@ -99,6 +99,39 @@ test("a fresh-tree recovery stays bounded for five minutes after the refusal", a
   assert.deepEqual(later, [pr.prNumber]);
 });
 
+test("unreadable or unattributed reviewer code keeps the sixty-minute pending bound", async () => {
+  for (const freshness of ["stale", "unreadable"] as const) {
+    const path = ledgerPath();
+    const pr = {
+      ...pendingReview(),
+      reviewPendingOwnerDead: false,
+      reviewPendingSince: new Date(NOW - 15 * 60_000).toISOString(),
+    };
+    appendLedger(path, {
+      ts: new Date(NOW - 10 * 60_000).toISOString(),
+      run_id: "REVIEW-OLD",
+      task_id: pr.taskId ?? "",
+      step: "review.post_refused",
+      pr_url: pr.prUrl,
+      head_sha: pr.headSha,
+      review_input_digest: pr.reviewInputDigest,
+      reviewer_code_freshness: freshness,
+      reason: `reviewer-code freshness ${freshness}`,
+    });
+    const posted: number[] = [];
+    await runSweep([pr], sweepDeps(path, posted, {
+      reviewerCodeRecovery: {
+        loadedCodeSha: "older-code",
+        isLoadedCodeAtOrAfter: () => false,
+        freshTreeReviewAvailable: true,
+      },
+    }), DEFAULT_SWEEP_POLICY);
+    assert.deepEqual(posted, []);
+    const disposed = readLedgerLines(path).findLast((line) => line.step === "sweep.disposed");
+    assert.match(String(disposed?.stand_down_reason), /freshness recovery backoff remains inside the 60m/);
+  }
+});
+
 function sweepDeps(path: string, posted: number[], over: Partial<SweepDeps> = {}): SweepDeps {
   return {
     arm: () => {},
