@@ -146,13 +146,17 @@ test("W1-T4439: a missed failure files a task naming the missing edge", () => {
     repoRoot: root,
     openWorkspace: () => ({
       root,
+      branch: "selector-shadow-garden-test",
       land: (opts: { paths: string[]; title: string; body: string }) =>
         (landed.push(opts), "https://github.com/acme/remudero/pull/99"),
       dispose: () => {},
     }),
     log: (step: string) => { events.push(step); },
   };
-  const pass = () => runSelectorShadowGardener(deps, () => [observed], () => ["scripts/clock-signature-ratchet.mjs"], () => "W1-T9001");
+  const pass = () => runSelectorShadowGardener(deps, () => [observed], () => ["scripts/clock-signature-ratchet.mjs"], (branch) => {
+    assert.equal(branch, "selector-shadow-garden-test");
+    return "W1-T9001";
+  });
   const report = pass();
   assert.equal(report.verdict, "misses");
   assert.equal(landed.length, 1);

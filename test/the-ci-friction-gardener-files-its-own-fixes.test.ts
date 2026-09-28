@@ -155,7 +155,7 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
   const deps: GardenerDeps = {
     stateDir: join(root, "state"),
     repoRoot: root,
-    openWorkspace: () => ({ root, land: (opts) => (landed.push(opts), "https://github.com/acme/remudero/pull/99"), dispose: () => {} }),
+    openWorkspace: () => ({ root, branch: "ci-friction-garden-test", land: (opts) => (landed.push(opts), "https://github.com/acme/remudero/pull/99"), dispose: () => {} }),
     log: () => {},
     seed: 1,
   };
@@ -172,7 +172,7 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
       alwaysFired: [],
     }),
     planOrigins: () => [ciFrictionOrigin(tracked.cause)],
-    mintTaskId: () => `W1-T900${++minted}`,
+    mintTaskId: (branch) => (assert.equal(branch, "ci-friction-garden-test"), `W1-T900${++minted}`),
   };
 
   const spec = ciFrictionGardenSpec(deps, sources);
@@ -218,6 +218,7 @@ test("W1-T4435: the gardener preserves an existing trend log while appending a n
     repoRoot: root,
     openWorkspace: () => ({
       root,
+      branch: "ci-friction-garden-test",
       land: (opts) => (landed.push(opts), "https://github.com/acme/remudero/pull/100"),
       dispose: () => {},
     }),
@@ -230,7 +231,7 @@ test("W1-T4435: the gardener preserves an existing trend log while appending a n
       { step: "fix.dispatch", run_id: "run-existing-log", mode: "merge-conflict", round: 1, ts: "2026-09-24T04:25:00.000Z" },
     ],
     planOrigins: () => [],
-    mintTaskId: () => "W1-T9003",
+    mintTaskId: (branch) => (assert.equal(branch, "ci-friction-garden-test"), "W1-T9003"),
   };
 
   const pass = runGarden(ciFrictionGardenSpec(deps, sources), deps);

@@ -434,7 +434,7 @@ export function runSelectorShadowGardener(
   deps: GardenerDeps,
   readRuns: () => SelectorShadowRun[],
   readChangedPaths: (miss: SelectorShadowMiss) => string[],
-  mintTaskId: () => string,
+  mintTaskId: (filingBranch: string) => string,
 ): SelectorShadowReport {
   const path = join(deps.stateDir, "selector-shadow-gardener.json");
   const stored = readFileIfExists(path);
@@ -446,15 +446,16 @@ export function runSelectorShadowGardener(
   const miss = report.misses.find((m) => !filed.has(selectorShadowMissKey(m)));
   if (miss) {
     const changedPaths = readChangedPaths(miss);
-    const taskId = mintTaskId();
-    const name = `${taskId.toLowerCase()}-selector-shadow-miss.yaml`;
-    const relativePath = join("plan", "tasks.d", name);
-    const contents = selectorShadowMissTask(miss, taskId, changedPaths);
-    const task = loadPlanFromYaml(contents, name).tasks[0];
-    const lint = lintTask(task);
-    if (!lint.ok) throw new Error(`selector shadow: missed-edge task failed lint: ${lint.violations.map((v) => v.check).join(", ")}`);
     const workspace = deps.openWorkspace();
     try {
+      if (!workspace.branch) throw new Error("selector shadow: filing workspace has no branch for task-id reservation");
+      const taskId = mintTaskId(workspace.branch);
+      const name = `${taskId.toLowerCase()}-selector-shadow-miss.yaml`;
+      const relativePath = join("plan", "tasks.d", name);
+      const contents = selectorShadowMissTask(miss, taskId, changedPaths);
+      const task = loadPlanFromYaml(contents, name).tasks[0];
+      const lint = lintTask(task);
+      if (!lint.ok) throw new Error(`selector shadow: missed-edge task failed lint: ${lint.violations.map((v) => v.check).join(", ")}`);
       writeAtomic(join(workspace.root, relativePath), contents);
       const originProof = selectorShadowMissKey(miss).replaceAll(".", "\\.");
       const prUrl = workspace.land({
@@ -478,7 +479,7 @@ export function startSelectorShadowGardener(
   deps: GardenerDeps,
   readRuns: () => SelectorShadowRun[] | Promise<SelectorShadowRun[]>,
   readChangedPaths: (miss: SelectorShadowMiss) => string[],
-  mintTaskId: () => string,
+  mintTaskId: (filingBranch: string) => string,
   intervalMs: number,
 ): { stop: () => void } {
   let running = false;

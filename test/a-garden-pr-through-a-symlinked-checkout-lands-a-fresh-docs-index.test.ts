@@ -61,6 +61,7 @@ test("a garden PR run through a symlinked checkout path lands a fresh docs index
     writeFileSync(join(garden.root, "docs", "gate-garden-log.md"), "# Gate garden log\n\nRefreshed 2 gate rows.\n");
     withLiveWritesAllowed(() => garden.land({ paths: ["docs/gate-garden-log.md"], title: "chore(gates): refresh", body: "b" }));
     const branch = "gate-garden-1790195325864";
+    assert.equal(garden.branch, branch, "the branch a gardener reserves under is the branch it lands");
     assert.ok(GARDEN_BRANCH_RE.test(branch));
     const landed = origin.git("show", "--name-only", "--format=", branch).split("\n").filter(Boolean).sort();
     assert.deepEqual(landed, ["docs/docs-index.json", "docs/gate-garden-log.md"], "the index rides with the log that changed it");
