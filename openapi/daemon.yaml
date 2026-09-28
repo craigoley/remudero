@@ -309,7 +309,11 @@ components:
 
     RepoDashboardTelemetry:
       type: object
-      description: Per-repository telemetry, unavailable until a durable per-repo aggregation source exists.
+      description: >
+        Trailing seven-day per-repository worker telemetry from the ledger. Models are the distinct
+        provider-reported served models, never requested or routed model assignments. A null
+        modelsused means the ledger was unavailable or at least one worker row in the window did
+        not report its served model; an empty array means no worker rows ran in the window.
       required:
         - tokens7d
         - modelsused
@@ -318,7 +322,7 @@ components:
         tokens7d:
           type: [number, "null"]
         modelsused:
-          type: array
+          type: [array, "null"]
           items:
             type: string
         cost_7d:
@@ -1970,6 +1974,353 @@ components:
           type: string
         rollback:
           $ref: "#/components/schemas/OperatorAgentExperimentRollback"
+
+    # ── W1-T3855 -- automation-action-v1: the explicit preflight, idempotency, approval, rollback,
+    # and receipt contract between a recommendation and an execution (src/lib/automation-action.ts).
+    AutomationActionScope:
+      type: object
+      description: >
+        Names a flowId or experimentId AND a repo or instance; a record missing either half is
+        refused `missing-scope`.
+      properties:
+        flowId:
+          type: string
+          maxLength: 160
+        experimentId:
+          type: string
+          maxLength: 160
+        repo:
+          type: string
+          maxLength: 160
+        instance:
+          type: string
+          maxLength: 160
+
+    AutomationActionPrecondition:
+      type: object
+      required: [id, source, description]
+      properties:
+        id:
+          type: string
+          maxLength: 160
+        source:
+          type: string
+          maxLength: 160
+          description: The authoritative source an observation must come from.
+        description:
+          type: string
+          maxLength: 320
+
+    AutomationActionRollback:
+      type: object
+      required: [mode]
+      description: A reversible action names its plan; an irreversible one names the refusal path a rollback request takes instead.
+      properties:
+        mode:
+          type: string
+          enum: [reversible, irreversible]
+        plan:
+          type: string
+          maxLength: 320
+        refusal:
+          type: string
+          maxLength: 320
+
+    AutomationAction:
+      type: object
+      description: >
+        An immutable automation-action-v1 record (src/lib/automation-action.ts's
+        `validateAutomationAction`). Fields the contract does not name are dropped; a raw prompt,
+        transcript, credential, model prose, or browser-owned measurement field -- or a
+        credential-shaped value -- refuses the whole record.
+      required: [version, actionId, capability, summary, scope, risk, preconditions, freshness, idempotencyKey, createdAt, expiresAt, dryRun, approval, rollback, receiptRef]
+      properties:
+        version:
+          type: string
+          enum: [automation-action-v1]
+        actionId:
+          type: string
+          maxLength: 160
+        capability:
+          type: string
+          maxLength: 160
+        summary:
+          type: string
+          maxLength: 320
+        scope:
+          $ref: "#/components/schemas/AutomationActionScope"
+        risk:
+          type: string
+          enum: [low, medium, high, production, financial, credential, destructive]
+        preconditions:
+          type: array
+          minItems: 1
+          maxItems: 12
+          items:
+            $ref: "#/components/schemas/AutomationActionPrecondition"
+        freshness:
+          type: object
+          required: [maxAgeSeconds]
+          properties:
+            maxAgeSeconds:
+              type: integer
+              minimum: 1
+              maximum: 2592000
+        idempotencyKey:
+          type: string
+          maxLength: 160
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        dryRun:
+          type: boolean
+        approval:
+          type: object
+          required: [policy]
+          properties:
+            policy:
+              type: string
+              enum: [none, human]
+              description: high, production, financial, credential and destructive risk must declare human.
+        rollback:
+          $ref: "#/components/schemas/AutomationActionRollback"
+        receiptRef:
+          type: string
+          maxLength: 160
+          description: The authoritative system of record whose receipt proves what happened.
+
+    AutomationPreconditionObservation:
+      type: object
+      required: [preconditionId, state, source, observedAt]
+      properties:
+        preconditionId:
+          type: string
+          maxLength: 160
+        state:
+          type: string
+          enum: [satisfied, unsatisfied, unavailable]
+        source:
+          type: string
+          maxLength: 160
+        observedAt:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          maxLength: 320
+
+    AutomationPreflightFinding:
+      type: object
+      required: [outcome, code, detail]
+      properties:
+        outcome:
+          type: string
+          enum: [refused, stale, unknown, expired, in-progress]
+        code:
+          type: string
+        detail:
+          type: string
+        preconditionId:
+          type: string
+        receiptId:
+          type: string
+
+    AutomationPreflightResult:
+      type: object
+      required: [version, actionId, outcome, evaluatedAt, approval, findings]
+      properties:
+        version:
+          type: string
+          enum: [automation-action-v1]
+        actionId:
+          type: string
+        outcome:
+          type: string
+          enum: [ready, refused, stale, unknown, expired, in-progress]
+        evaluatedAt:
+          type: string
+          format: date-time
+        approval:
+          type: string
+          enum: [not-required, pending, approved, rejected]
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutomationPreflightFinding"
+
+    AutomationActionReceipt:
+      type: object
+      description: One bounded, append-only receipt; completion and rollback link to what they follow via linkedReceiptId.
+      required: [version, receiptId, actionId, idempotencyKey, kind, outcome, at, receiptRef, reason]
+      properties:
+        version:
+          type: string
+          enum: [automation-action-v1]
+        receiptId:
+          type: string
+        actionId:
+          type: string
+        idempotencyKey:
+          type: string
+        kind:
+          type: string
+          enum: [execution, completion, rollback]
+        outcome:
+          type: string
+          enum: [in-progress, dry-run, refused, succeeded, failed, rolled_back]
+        at:
+          type: string
+          format: date-time
+        receiptRef:
+          type: string
+        linkedReceiptId:
+          type: string
+        preflight:
+          type: string
+          enum: [ready, refused, stale, unknown, expired, in-progress]
+        code:
+          type: string
+        reason:
+          type: string
+          maxLength: 321
+        evidenceRef:
+          type: string
+
+    OperatorAgentActionHistory:
+      type: object
+      required: [action, state, approval, receipts]
+      properties:
+        action:
+          $ref: "#/components/schemas/AutomationAction"
+        state:
+          type: string
+          enum: [registered, approved, rejected, in-progress, succeeded, failed, rolled_back, expired]
+        approval:
+          type: string
+          enum: [not-required, pending, approved, rejected]
+        decision:
+          type: object
+          required: [decision, decidedBy, decidedAt]
+          properties:
+            decision:
+              type: string
+              enum: [approved, rejected]
+            decidedBy:
+              type: string
+            decidedAt:
+              type: string
+              format: date-time
+        receipts:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/AutomationActionReceipt"
+
+    OperatorAgentActionList:
+      type: object
+      required: [version, actions, source]
+      properties:
+        version:
+          type: string
+          enum: [automation-action-v1]
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperatorAgentActionHistory"
+        source:
+          type: string
+          enum: [ledger]
+
+    OperatorAgentActionRegistration:
+      type: object
+      required: [action]
+      properties:
+        action:
+          $ref: "#/components/schemas/AutomationAction"
+
+    OperatorAgentActionDecisionRequest:
+      type: object
+      required: [actionId, decision]
+      properties:
+        actionId:
+          type: string
+        decision:
+          type: string
+          enum: [approved, rejected]
+
+    OperatorAgentActionObservationRequest:
+      type: object
+      required: [actionId]
+      properties:
+        actionId:
+          type: string
+        observations:
+          type: array
+          maxItems: 24
+          items:
+            $ref: "#/components/schemas/AutomationPreconditionObservation"
+        dryRun:
+          type: boolean
+          description: Execute only; a dry run evaluates preflight and records a dry-run receipt without admitting anything.
+
+    OperatorAgentActionCompletionRequest:
+      type: object
+      required: [actionId, admissionReceiptId, outcome]
+      properties:
+        actionId:
+          type: string
+        admissionReceiptId:
+          type: string
+        outcome:
+          type: string
+          enum: [succeeded, failed]
+        evidenceRef:
+          type: string
+          maxLength: 160
+          description: Required for succeeded -- success is claimed only with the evidence that proves it.
+        reason:
+          type: string
+          maxLength: 320
+
+    OperatorAgentActionRollbackRequest:
+      type: object
+      required: [actionId, reason, evidenceRef]
+      properties:
+        actionId:
+          type: string
+        reason:
+          type: string
+          maxLength: 320
+        evidenceRef:
+          type: string
+          maxLength: 160
+
+    OperatorAgentActionPreflightResponse:
+      type: object
+      required: [preflight]
+      properties:
+        preflight:
+          $ref: "#/components/schemas/AutomationPreflightResult"
+
+    OperatorAgentActionStepResult:
+      type: object
+      description: >
+        An engine step's disposition and the receipt it decided. `reused` returns the EXISTING
+        receipt for a duplicate idempotency key, completion, or rollback, and appends nothing.
+      required: [ok, disposition, receipt]
+      properties:
+        ok:
+          type: boolean
+        disposition:
+          type: string
+          enum: [admitted, dry-run, refused, reused, completed, rolled_back]
+        receipt:
+          $ref: "#/components/schemas/AutomationActionReceipt"
+        preflight:
+          $ref: "#/components/schemas/AutomationPreflightResult"
 
     # ── W1-T3856 -- experiment-promotion-v1: the guarded flow from a candidate policy to measured
     # production exposure (deterministic replay, shadow observation, canary promotion, stop
@@ -8200,6 +8551,246 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EmergencyStopAdmissionRefusal"
+
+  /v1/operator-agent/actions:
+    get:
+      summary: W1-T3855 -- read every automation-action-v1 record with its derived state and receipts.
+      description: >
+        `readOperatorAgentActions` over the ledger union. The first record per actionId wins, the
+        first operator decision stands, and receipts append in ledger order; state is derived
+        from them, never stored.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Durable automation-action history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      summary: W1-T3855 -- register an automation action before anything may execute it.
+      description: >
+        Validates scope, risk, preconditions, freshness, idempotency key, expiry, dry-run
+        capability, approval policy, rollback/refusal path and receipt reference, refusing an
+        incomplete record by name (`400`, detail `<code>: <reason>`). An identical
+        re-registration is `200`; a different record under the same actionId, or a second action
+        bound to the same idempotencyKey, is `409`.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentActionRegistration"
+      responses:
+        "201":
+          description: Action registered.
+        "200":
+          description: Identical action already registered.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/actions/decision:
+    post:
+      summary: W1-T3855 -- approve or reject a human-policy action (HIGH write tier, nonce-confirmed).
+      description: >
+        Only an action whose approval policy is `human` and that is still pending and unexpired
+        can be decided; the first decision stands (`409` afterwards). The decider is the
+        verified request identity, never a body field. HIGH write tier (operator ruling
+        2026-09-28): the bearer write token (pinned at LOW) is refused `403`, and a HIGH-tier
+        credential must present an X-Confirm-Nonce minted by POST /v1/confirm for this exact request.
+      security:
+        - bearerWrite: []
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentActionDecisionRequest"
+      responses:
+        "200":
+          description: Decision recorded.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HighTierForbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/actions/preflight:
+    post:
+      summary: W1-T3855 -- evaluate an action's preflight without executing or recording anything.
+      description: >
+        Answers ready, refused, stale, unknown, expired or in-progress with every finding. A
+        missing observation, an unavailable or browser-owned source, or an observation from the
+        wrong source is `unknown`, never ready.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentActionObservationRequest"
+      responses:
+        "200":
+          description: The preflight result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionPreflightResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator-agent/actions/execute:
+    post:
+      summary: W1-T3855 -- admit one execution per idempotency key (MIDDLE write tier).
+      description: >
+        Re-runs preflight at execution time. A duplicate idempotency key returns the existing
+        receipt (`200`, `reused`) and appends nothing; anything but a ready preflight appends a
+        refusal (`409`); a dry run appends a dry-run receipt (`200`); a ready action is admitted
+        `in-progress` (`202`) -- never succeeded -- until POST /v1/operator-agent/actions/complete
+        records its evidence. An active emergency stop covering the action's repo or instance
+        refuses it first (`423`).
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentActionObservationRequest"
+      responses:
+        "202":
+          description: Admitted in-progress.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "200":
+          description: A dry run, or the existing receipt for a duplicate idempotency key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Refused; the receipt names the preflight outcome and code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "423":
+          description: An active emergency stop covers this action; the refusal receipt names the stop.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmergencyStopAdmissionRefusal"
+
+  /v1/operator-agent/actions/complete:
+    post:
+      summary: W1-T3855 -- record how an admitted execution ended (MIDDLE write tier).
+      description: >
+        Appends a completion receipt linked to the admission. `succeeded` requires an
+        evidenceRef; a second completion returns the first; completing anything but an
+        in-progress admission is `409` and appends nothing.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentActionCompletionRequest"
+      responses:
+        "200":
+          description: Completion recorded, or the existing completion returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Refused (`not-admitted`, `evidence-required`, `receipt-history-full`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+
+  /v1/operator-agent/actions/rollback:
+    post:
+      summary: W1-T3855 -- append a rollback linked to the completion it undoes (MIDDLE write tier).
+      description: >
+        Never rewrites the admission or completion. An irreversible action's rollback is refused
+        and that refusal recorded, naming its declared refusal path; with nothing completed it is
+        refused without a record; a second rollback returns the first.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentActionRollbackRequest"
+      responses:
+        "200":
+          description: Rollback recorded, or the existing rollback returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Refused (`nothing-to-roll-back`, `irreversible`, `receipt-history-full`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
 
   /v1/operator-agent/emergency/clear:
     post:

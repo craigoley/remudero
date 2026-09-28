@@ -9,10 +9,12 @@
  * merge are never held by missing telemetry.
  * INVARIANT: cash is the API-billed worker-call estimate, never an invoice. Subscription notional
  * cost is reported apart and never depletes the ceiling, and a missing price is unknown, not zero.
+ * W1-T4625 adds `design: "paired"` (paired-trial.ts): both arms run on each sampled task, `arm` names the
+ * arm that runs FIRST, and cash counts only the paired paid attempt. `unpaired` stays valid and is the default.
  */
 
 import { createHash, createHmac, randomUUID } from "node:crypto";
-import { linkSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, linkSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 import { aaArmFor, aaStackHash, BENCHMARK_AA_RECEIPT_VERSION, BENCHMARK_AA_VERSION, exactBinomialHalfPValue,
@@ -37,11 +39,18 @@ export const PAID_PILOT_AA_RECEIPT_MAX_AGE_MS = 24 * 3_600_000;
 export const PAID_PILOT_REPO_COUNT = 3;
 export const PAID_PILOT_UNCERTAINTY_METHOD = "intention-to-treat difference in verified completion, two-sided Wald 95% interval" as const;
 export const PAID_PILOT_STOPPING_RULE = "fixed horizon: one analysis at expiry plus the maturity window; no interim winner" as const;
+export const PAIRED_UNCERTAINTY_METHOD = "paired: exact McNemar binomial test on discordant pairs, paired difference with a two-sided Wald 95% interval" as const;
+/** BACKSTOP: the largest pair cap a paired protocol may pre-register; the cash ceiling is the primary control. */
+export const PAIRED_MAX_PAIRS_CEILING = 500;
+export const PAID_PILOT_CONTROL_VERSION = "benchmark-paid-pilot-control-v1" as const;
+/** The paired trial's own ledger steps; no dispatch, review or merge reader consumes them. */
+export const PAIRED_TRIAL_STEPS = { decision: "paired_trial.decision", spawn: "paired_trial.spawn",
+  attempt: "paired_trial.attempt", pair: "paired_trial.pair" } as const;
 export const REPO_IDENTITY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/;
 const REVISION_FIELDS = ["harnessRevision", "promptRevision", "toolRevision", "scorerRevision", "environmentRevision"] as const;
 const ARMS = ["paid", "control"] as const;
 const BILLING = { paid: "api", control: "subscription" } as const;
-const EVIDENCE_STEPS = ["worker.assignment", "worker.attempt"];
+const EVIDENCE_STEPS = ["worker.assignment", "worker.attempt", ...Object.values(PAIRED_TRIAL_STEPS)];
 const PROTOCOL_SUFFIX = ".protocol.json";
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -59,6 +68,9 @@ function sha256(value: string): string {
 export type PaidPilotArm = typeof ARMS[number];
 type RevisionField = typeof REVISION_FIELDS[number];
 type ArmPin = { provider: string; model: string; effort: string };
+export type PaidPilotDesign = "unpaired" | "paired";
+/** The paired design's pre-registered sampler: a seeded task-level rate, a pair cap and the shadow flag. */
+export type PairedDesign = { samplingRate: number; maxPairs: number; shadow: boolean };
 
 export interface PaidPilotTask {
   taskId: string;
@@ -82,6 +94,22 @@ export interface PaidPilotRequest {
   primaryOutcome: "verified-completion";
   maturityDays: number;
   protocolText: string;
+  design: PaidPilotDesign;
+  paired: PairedDesign | null;
+}
+
+function parseDesign(raw: Record<string, unknown>): { design: PaidPilotDesign; paired: PairedDesign | null } | string {
+  if (raw.design === undefined || raw.design === "unpaired")
+    return raw.paired === undefined ? { design: "unpaired", paired: null } : "paired-settings-need-paired-design";
+  if (raw.design !== "paired") return "design-invalid";
+  const paired = record(raw.paired);
+  if (paired === undefined) return "paired-settings-missing";
+  const { samplingRate, maxPairs, shadow } = paired;
+  if (typeof samplingRate !== "number" || !(samplingRate > 0 && samplingRate <= 1)) return "paired-sampling-rate-invalid";
+  if (typeof maxPairs !== "number" || !Number.isInteger(maxPairs) || maxPairs < 1 || maxPairs > PAIRED_MAX_PAIRS_CEILING)
+    return "paired-max-pairs-invalid";
+  if (typeof shadow !== "boolean") return "paired-shadow-flag-required";
+  return { design: "paired", paired: { samplingRate, maxPairs, shadow } };
 }
 
 function parsePopulation(value: unknown, repos: ReadonlySet<unknown>): PaidPilotTask[] | string {
@@ -139,19 +167,28 @@ export function parsePaidPilotRequest(value: unknown): { ok: true; request: Paid
     return refuse("maturity-days-invalid");
   const protocolText = text(raw.protocolText);
   if (protocolText === null) return refuse("protocol-text-missing");
+  const design = parseDesign(raw);
+  if (typeof design === "string") return refuse(design);
   return { ok: true, request: {
     version: PAID_PILOT_REQUEST_VERSION, pilotId: raw.pilotId,
     approval: { reference, approvedAt: text(record(raw.approval)?.approvedAt) },
     repos: repos.map((repo) => ({ repo: repo!.repo as string, consentReceipt: repo!.consentReceipt as string })),
     pseudonymSalt, assignmentSeed, arms: arms as Record<PaidPilotArm, ArmPin>,
     revisions: revisions as Record<RevisionField, string>, strataRevision, population,
-    primaryOutcome: "verified-completion", maturityDays, protocolText,
+    primaryOutcome: "verified-completion", maturityDays, protocolText, ...design,
   } };
 }
 
 /** The W1-T4575 draw, seeded by the pilot: no run, retry or spawn enters it, so no attempt moves a task. */
 export function paidPilotArmFor(seed: string, taskId: string): PaidPilotArm {
   return aaArmFor(seed, taskId, ARMS) as PaidPilotArm;
+}
+
+export const PAIRED_SAMPLE_METHOD = "sha256(benchmark-paired-sample-v1, seed, taskId) first 32 bits / 2^32 < samplingRate" as const;
+
+/** W1-T4625's task-level sampling draw in [0, 1): seeded, independent of the order draw, and stable per task. */
+export function pairedSampleDraw(seed: string, taskId: string): number {
+  return createHash("sha256").update(`benchmark-paired-sample-v1\0${seed}\0${taskId}`).digest().readUInt32BE(0) / 2 ** 32;
 }
 
 function pseudonym(salt: string, value: string): string {
@@ -213,7 +250,10 @@ export interface PaidPilotProtocol {
   strataRevision: string;
   primaryOutcome: "verified-completion";
   maturityDays: number;
-  uncertaintyMethod: typeof PAID_PILOT_UNCERTAINTY_METHOD;
+  /** `paired`: every sampled task runs both arms, and `population[].arm` is the arm whose attempt runs first. */
+  design: PaidPilotDesign;
+  paired: (PairedDesign & { sampleMethod: string }) | null;
+  uncertaintyMethod: typeof PAID_PILOT_UNCERTAINTY_METHOD | typeof PAIRED_UNCERTAINTY_METHOD;
   stoppingRule: typeof PAID_PILOT_STOPPING_RULE;
   aaReceipt: PaidPilotAaCitation;
   protocolText: string;
@@ -236,7 +276,9 @@ export interface PaidPilotReceipt {
   armStackHashes: Record<PaidPilotArm, string>;
   primaryOutcome: "verified-completion";
   maturityDays: number;
-  uncertaintyMethod: typeof PAID_PILOT_UNCERTAINTY_METHOD;
+  design: PaidPilotDesign;
+  paired: PaidPilotProtocol["paired"];
+  uncertaintyMethod: PaidPilotProtocol["uncertaintyMethod"];
   stoppingRule: typeof PAID_PILOT_STOPPING_RULE;
   aaReportHash: string;
   protocolHash: string;
@@ -248,8 +290,9 @@ export interface PaidPilotActivationInput {
   /** The parsed `benchmark-aa-v1` report whose receipt vouches for the pipeline; undefined when unreadable. */
   aaReport: unknown;
   nowIso: string;
-  /** Every pilot protocol already persisted; `expiresAt` null when it could not be read. */
-  existing: readonly { pilotId: string; expiresAt: string | null }[];
+  /** Every pilot protocol already persisted; `expiresAt` null when it could not be read. A shadow protocol
+   *  blocks only another shadow, so an operator can shadow a paired design before the live clock starts. */
+  existing: readonly { pilotId: string; expiresAt: string | null; shadow?: boolean }[];
 }
 
 export type PaidPilotActivation = { ok: true; protocol: PaidPilotProtocol; receipt: PaidPilotReceipt } | { ok: false; reason: string };
@@ -260,7 +303,8 @@ export function activateBenchmarkPaidPilot(input: PaidPilotActivationInput): Pai
   const nowMs = Date.parse(nowIso);
   if (!Number.isFinite(nowMs)) return { ok: false, reason: "activation-clock-invalid" };
   if (input.existing.some((entry) => entry.pilotId === request.pilotId)) return { ok: false, reason: "pilot-already-activated" };
-  if (input.existing.some((entry) => entry.expiresAt === null || Date.parse(entry.expiresAt) > nowMs))
+  const shadow = request.paired?.shadow === true;
+  if (input.existing.some((entry) => entry.expiresAt === null || ((entry.shadow === true) === shadow && Date.parse(entry.expiresAt) > nowMs)))
     return { ok: false, reason: "another-pilot-active" };
   const cited = citeAaReceipt(input.aaReport, nowMs);
   if (!cited.ok) return cited;
@@ -281,7 +325,9 @@ export function activateBenchmarkPaidPilot(input: PaidPilotActivationInput): Pai
       receiptHash: allocationReceiptHash(request.assignmentSeed, request.pseudonymSalt, request.population) },
     population, populationHash: sha256(JSON.stringify(population.map((task) => task.taskId).sort())),
     arms, revisions: request.revisions, strataRevision: request.strataRevision, primaryOutcome: request.primaryOutcome,
-    maturityDays: request.maturityDays, uncertaintyMethod: PAID_PILOT_UNCERTAINTY_METHOD, stoppingRule: PAID_PILOT_STOPPING_RULE,
+    maturityDays: request.maturityDays, design: request.design,
+    paired: request.paired === null ? null : { ...request.paired, sampleMethod: PAIRED_SAMPLE_METHOD },
+    uncertaintyMethod: request.design === "paired" ? PAIRED_UNCERTAINTY_METHOD : PAID_PILOT_UNCERTAINTY_METHOD, stoppingRule: PAID_PILOT_STOPPING_RULE,
     aaReceipt: cited.citation, protocolText: request.protocolText, protocolHash: hashProtocolText(request.protocolText),
   };
   const protocol: PaidPilotProtocol = { ...body, digest: sha256(JSON.stringify(body)) };
@@ -290,7 +336,8 @@ export function activateBenchmarkPaidPilot(input: PaidPilotActivationInput): Pai
     cashCeilingUsd: protocol.cash.ceilingUsd, repoPseudonyms: protocol.repos.map((repo) => repo.pseudonym),
     populationSize: population.length, populationHash: protocol.populationHash, seedHash: protocol.assignment.seedHash,
     allocationReceiptHash: protocol.assignment.receiptHash, armStackHashes: { paid: arms.paid.stackHash, control: arms.control.stackHash },
-    primaryOutcome: protocol.primaryOutcome, maturityDays: protocol.maturityDays, uncertaintyMethod: protocol.uncertaintyMethod,
+    primaryOutcome: protocol.primaryOutcome, maturityDays: protocol.maturityDays, design: protocol.design, paired: protocol.paired,
+    uncertaintyMethod: protocol.uncertaintyMethod,
     stoppingRule: protocol.stoppingRule, aaReportHash: cited.citation.reportHash, protocolHash: protocol.protocolHash,
     protocolDigest: protocol.digest,
   };
@@ -306,7 +353,36 @@ function allocationDrift(protocol: PaidPilotProtocol): string | null {
   return redrawn ? null : "allocation-drift:draw-changed";
 }
 
+const PAIRED_ROW_STEPS: ReadonlySet<string> = new Set(Object.values(PAIRED_TRIAL_STEPS));
+
+function strings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function armOrNull(value: unknown): PaidPilotArm | null {
+  return value === "paid" || value === "control" ? value : null;
+}
+
+/** Only the paired trial's own whitelisted fields for THIS pilot survive; anything else on the row is dropped. */
+function projectPairedFields(row: Record<string, unknown>, protocol: PaidPilotProtocol): PairedTrialRowFields | null {
+  const paired = record(row.paired_trial);
+  const pairId = text(paired?.pair_id);
+  if (!PAIRED_ROW_STEPS.has(String(row.step)) || paired?.pilot_id !== protocol.pilotId || pairId === null) return null;
+  const outcomes = record(paired.outcomes);
+  return { pairId, arm: armOrNull(paired.arm), shadow: paired.shadow === true,
+    sampled: typeof paired.sampled === "boolean" ? paired.sampled : null,
+    admitted: typeof paired.admitted === "boolean" ? paired.admitted : null,
+    order: Array.isArray(paired.order) && paired.order.length === 2 && paired.order.every((arm) => armOrNull(arm) !== null)
+      ? paired.order as PaidPilotArm[] : null,
+    reasons: strings(paired.reasons), deviations: strings(paired.stack_deviations),
+    outcome: text(paired.outcome),
+    outcomes: outcomes === undefined ? null : { paid: text(outcomes.paid) ?? "missing", control: text(outcomes.control) ?? "missing" },
+    status: text(paired.status) };
+}
+
 function projectRow(row: Record<string, unknown>, protocol: PaidPilotProtocol): PaidPilotRow {
+  const paired = projectPairedFields(row, protocol);
+  const pairedRef = paired !== null && paired.arm !== null ? `${paired.pairId}:${paired.arm}` : null;
   const assignment = record(row.worker_assignment);
   const selected = record(assignment?.selected);
   const receipt = record(row.benchmark_run);
@@ -315,7 +391,8 @@ function projectRow(row: Record<string, unknown>, protocol: PaidPilotProtocol): 
   const cost = row.total_cost_usd;
   return {
     ts: row.ts as string, step: row.step as string, taskId: row.task_id as string, runId: text(row.run_id),
-    assignmentId: text(assignment?.id), selectionAssignmentId: text(row.selection_assignment_id),
+    assignmentId: row.step === PAIRED_TRIAL_STEPS.spawn ? pairedRef : text(assignment?.id),
+    selectionAssignmentId: row.step === PAIRED_TRIAL_STEPS.attempt ? pairedRef : text(row.selection_assignment_id),
     selected: { provider: text(selected?.provider), model: text(selected?.model), effort: text(selected?.effort) },
     recordedArm: allocation?.method === "randomized" && allocation.experimentId === protocol.pilotId ? text(allocation.arm) : null,
     revisionsOffPin: pins.filter((pin, i) => pin?.state === "observed"
@@ -325,7 +402,24 @@ function projectRow(row: Record<string, unknown>, protocol: PaidPilotProtocol): 
     billingMode: row.billing_mode === "api" || row.billing_mode === "subscription" ? row.billing_mode : null,
     cost: cost === undefined || cost === null ? { state: "missing" }
       : typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? { state: "observed", usd: cost } : { state: "invalid" },
+    paired,
   };
+}
+
+/** A paired-trial row's projected fields (W1-T4625): the decision, spawn marker, attempt and pair records. */
+export interface PairedTrialRowFields {
+  pairId: string;
+  arm: PaidPilotArm | null;
+  shadow: boolean;
+  sampled: boolean | null;
+  admitted: boolean | null;
+  order: PaidPilotArm[] | null;
+  reasons: string[];
+  /** Stack deviations the trial recorded, such as an executing harness off the protocol's pin. */
+  deviations: string[];
+  outcome: string | null;
+  outcomes: Record<PaidPilotArm, string> | null;
+  status: string | null;
 }
 
 /** One projected, privacy-reduced pilot row: no host, prompt, account label or raw text survives it. */
@@ -343,6 +437,8 @@ export interface PaidPilotRow {
   servedModel: string | null;
   billingMode: "api" | "subscription" | null;
   cost: { state: "observed"; usd: number } | { state: "missing" } | { state: "invalid" };
+  /** Present only on this pilot's paired-trial rows. */
+  paired: PairedTrialRowFields | null;
 }
 
 export interface PaidPilotEvidence {
@@ -416,13 +512,14 @@ function indexRows(rows: readonly PaidPilotRow[]) {
   const attempts = new Map<string, PaidPilotRow[]>();
   const unattributed: PaidPilotRow[] = [];
   for (const row of [...rows].sort((a, b) => a.ts.localeCompare(b.ts))) {
-    if (row.step === "worker.assignment" && row.assignmentId !== null && !assignments.has(row.assignmentId)) {
+    if ((row.step === "worker.assignment" || row.step === PAIRED_TRIAL_STEPS.spawn) && row.assignmentId !== null
+      && !assignments.has(row.assignmentId)) {
       assignments.set(row.assignmentId, row);
       byTask.set(row.taskId, [...(byTask.get(row.taskId) ?? []), row]);
     }
   }
   for (const row of rows) {
-    if (row.step !== "worker.attempt") continue;
+    if (row.step !== "worker.attempt" && row.step !== PAIRED_TRIAL_STEPS.attempt) continue;
     if (row.selectionAssignmentId !== null && assignments.has(row.selectionAssignmentId))
       attempts.set(row.selectionAssignmentId, [...(attempts.get(row.selectionAssignmentId) ?? []), row]);
     else unattributed.push(row);
@@ -444,18 +541,30 @@ export interface PaidPilotSpend {
   labelDrift: number;
 }
 
-/** Per-call accounting over distinct API-billed worker receipts. A replayed receipt counts once; a missing price is never zero. */
+/** The rows a design spends through: a paired pilot counts only its own side attempts, never normal dispatch. */
+function spendRows(rows: readonly PaidPilotRow[], protocol: PaidPilotProtocol): PaidPilotRow[] {
+  return protocol.design === "paired"
+    ? rows.filter((row) => row.paired !== null && (row.step === PAIRED_TRIAL_STEPS.spawn || row.step === PAIRED_TRIAL_STEPS.attempt))
+    : rows.filter((row) => !PAIRED_ROW_STEPS.has(row.step));
+}
+
+/** Per-call accounting over distinct API-billed worker receipts. A replayed receipt counts once; a missing price is never zero.
+ *  Paired: cash is the paid attempt alone, and an API-billed control attempt is ambiguous rather than cash. */
 export function summarizePaidPilotSpend(rows: readonly PaidPilotRow[], protocol: PaidPilotProtocol): PaidPilotSpend {
   const armOf = new Map(protocol.population.map((task) => [task.taskId, task.arm]));
+  const paired = protocol.design === "paired";
   const spend: PaidPilotSpend = { cashEstimateUsd: 0, cashReceipts: 0, notionalUsd: 0, notionalReceipts: 0, missingReceipts: 0,
     ambiguousReceipts: 0, labelDrift: 0 };
-  const index = indexRows(rows);
+  const index = indexRows(spendRows(rows, protocol));
   for (const row of index.assignments.values()) {
     if (row.recordedArm !== null && row.recordedArm !== armOf.get(row.taskId)) spend.labelDrift += 1;
-    if (!index.attempts.has(row.assignmentId!) && (armOf.get(row.taskId) === "paid" || row.selected.provider === "cash")) spend.missingReceipts += 1;
+    const paidCall = paired ? row.paired?.arm === "paid" : armOf.get(row.taskId) === "paid" || row.selected.provider === "cash";
+    if (!index.attempts.has(row.assignmentId!) && paidCall) spend.missingReceipts += 1;
   }
   for (const row of [...index.attempts.values()].flat()) {
-    const kind = costClass(row);
+    const classified = costClass(row);
+    const kind = !paired || row.paired?.arm === "paid" ? classified : classified === "cash" ? "billing-mode-not-reported"
+      : classified === "billing-mode-not-reported" ? "notional-price-missing" : classified;
     if (kind === "cash") { spend.cashEstimateUsd = Math.round((spend.cashEstimateUsd + (row.cost as { usd: number }).usd) * 1e6) / 1e6; spend.cashReceipts += 1; }
     else if (kind === "notional") { spend.notionalUsd = Math.round((spend.notionalUsd + (row.cost as { usd: number }).usd) * 1e6) / 1e6; spend.notionalReceipts += 1; }
     else if (kind === "cash-price-missing") spend.missingReceipts += 1;
@@ -493,6 +602,8 @@ export interface PaidPilotAdmissionInput {
   /** Consulted only for a paid-arm task; ordinary work never waits on it. */
   evidence: PaidPilotEvidence;
   nextCallReserveUsd?: number;
+  /** The operator's append-only pause/resume control file, read by {@link readPaidPilotControls}. */
+  controls?: PaidPilotControlState;
 }
 
 export interface PaidPilotAdmission {
@@ -511,8 +622,9 @@ export function paidPilotArmAdmission(input: PaidPilotAdmissionInput): PaidPilot
   if ("unavailable" in input.protocol) return answer(null, "paused", [`protocol-unreadable:${input.protocol.unavailable}`]);
   const task = input.protocol.population.find((entry) => entry.taskId === input.taskId);
   if (input.lane !== "implement" || task === undefined) return answer(null, "not-applicable", ["not-pilot-work"]);
-  if (task.arm === "control") return answer("control", "not-applicable", ["subscription-control-arm"]);
+  if (input.protocol.design !== "paired" && task.arm === "control") return answer("control", "not-applicable", ["subscription-control-arm"]);
   const { reasons, spend } = paidArmPauseReasons(input.protocol, input.evidence, input.nowIso, input.nextCallReserveUsd);
+  if (input.controls?.paused === true) reasons.push(input.controls.reason ?? "operator-paused");
   const remaining = spend === null ? null : Math.max(0, input.protocol.cash.ceilingUsd - spend.cashEstimateUsd);
   return answer("paid", reasons.length === 0 ? "admitted" : "paused", reasons, remaining);
 }
@@ -671,7 +783,7 @@ export function buildPaidPilotReport(input: PaidPilotReportInput): PaidPilotRepo
   if (evidence.state === "unavailable") return projectionUnavailable(input);
   const pause = paidArmPauseReasons(protocol, evidence, nowIso);
   const spend = pause.spend!;
-  const index = indexRows(evidence.rows);
+  const index = indexRows(spendRows(evidence.rows, protocol));
   const filesByTask = new Map<string, TaskCaseFile[]>();
   for (const file of input.caseFiles ?? []) filesByTask.set(file.taskId, [...(filesByTask.get(file.taskId) ?? []), file]);
   const met = !(Date.parse(nowIso) < Date.parse(protocol.analysisAt));
@@ -781,7 +893,8 @@ export function loadPaidPilotProtocol(stateDir: string, pilotId: string): { ok: 
   return { ok: true, protocol: protocol as unknown as PaidPilotProtocol };
 }
 
-function listPaidPilotProtocols(stateDir: string): { ok: true; entries: { pilotId: string; expiresAt: string | null }[] } | { ok: false; reason: string } {
+function listPaidPilotProtocols(stateDir: string): { ok: true; entries: { pilotId: string; expiresAt: string | null; shadow: boolean;
+  protocol: PaidPilotProtocol | null }[] } | { ok: false; reason: string } {
   let names: string[];
   try { names = readdirSync(stateDir); }
   catch {
@@ -792,8 +905,64 @@ function listPaidPilotProtocols(stateDir: string): { ok: true; entries: { pilotI
   return { ok: true, entries: names.filter((name) => name.startsWith(prefix) && name.endsWith(PROTOCOL_SUFFIX)).map((name) => {
     const pilotId = name.slice(prefix.length, -PROTOCOL_SUFFIX.length);
     const loaded = loadPaidPilotProtocol(stateDir, pilotId);
-    return { pilotId, expiresAt: loaded.ok && typeof loaded.protocol.expiresAt === "string" ? loaded.protocol.expiresAt : null };
+    return { pilotId, expiresAt: loaded.ok && typeof loaded.protocol.expiresAt === "string" ? loaded.protocol.expiresAt : null,
+      shadow: loaded.ok && loaded.protocol.paired?.shadow === true, protocol: loaded.ok ? loaded.protocol : null };
   }) };
+}
+
+/** Every readable protocol whose window holds `nowIso`. An unreadable state dir proves no pilot active, so it answers none. */
+export function activePaidPilotProtocols(stateDir: string, nowIso: string): PaidPilotProtocol[] {
+  const listed = listPaidPilotProtocols(stateDir);
+  if (!listed.ok) return [];
+  const nowMs = Date.parse(nowIso);
+  return listed.entries.flatMap(({ protocol }) => protocol !== null && Date.parse(protocol.activatedAt) <= nowMs
+    && nowMs < Date.parse(protocol.expiresAt) ? [protocol] : []);
+}
+
+function controlsPath(stateDir: string, pilotId: string): string {
+  return join(stateDir, `${BENCHMARK_PAID_PILOT_VERSION}.${pilotId}.controls.ndjson`);
+}
+
+export interface PaidPilotControlState {
+  state: "observed" | "unavailable";
+  paused: boolean;
+  /** Why the paid arm is held; null while it is not. */
+  reason: string | null;
+  entries: number;
+  lastAction: "pause" | "resume" | null;
+  lastAt: string | null;
+}
+
+/** The operator's append-only control file; the newest entry wins. Unreadable or malformed holds the paid arm. */
+export function readPaidPilotControls(stateDir: string, pilotId: string): PaidPilotControlState {
+  const held = (reason: string): PaidPilotControlState => ({ state: "unavailable", paused: true, reason, entries: 0, lastAction: null, lastAt: null });
+  let raw: string;
+  try { raw = readFileSync(controlsPath(stateDir, pilotId), "utf8"); }
+  catch (error) {
+    const reason = (error as NodeJS.ErrnoException).code === "ENOENT" ? "no-control-file" : "controls-unreadable";
+    return reason === "no-control-file" ? { state: "observed", paused: false, reason: null, entries: 0, lastAction: null, lastAt: null } : held(reason);
+  }
+  const lines = raw.split("\n").filter((line) => line.trim().length > 0);
+  let last: Record<string, unknown> | undefined;
+  for (const line of lines) {
+    try { last = record(JSON.parse(line)); }
+    catch {
+      const reason = "controls-malformed";
+      return held(reason);
+    }
+    if (last?.version !== PAID_PILOT_CONTROL_VERSION || last.pilotId !== pilotId || (last.action !== "pause" && last.action !== "resume"))
+      return held("controls-malformed");
+  }
+  const lastAction = last === undefined ? null : last.action as "pause" | "resume";
+  return { state: "observed", paused: lastAction === "pause", reason: lastAction === "pause" ? "operator-paused" : null,
+    entries: lines.length, lastAction, lastAt: last === undefined ? null : text(last.at) };
+}
+
+/** Append one pause or resume. Append-only: an entry is never rewritten, so the file is its own audit trail. */
+export function appendPaidPilotControl(stateDir: string, pilotId: string, action: "pause" | "resume", nowIso: string, note: string | null): string {
+  const path = controlsPath(stateDir, pilotId);
+  appendFileSync(path, `${JSON.stringify({ version: PAID_PILOT_CONTROL_VERSION, pilotId, action, at: nowIso, note })}\n`, { flag: "a" });
+  return path;
 }
 
 /** Exclusive publish: link refuses an existing path, so a protocol is written once and never overwritten. */
@@ -812,16 +981,25 @@ function readJson(path: string): { ok: true; value: unknown } | { ok: false; rea
   }
 }
 
+/** A paired protocol's report view, built by paired-trial.ts and injected so this module never imports it. */
+export interface PairedPilotReportView {
+  report: Record<string, unknown>;
+  lines: string[];
+  observed: boolean;
+}
+
 export interface BenchmarkPaidPilotCommandInput {
   nowIso?: string;
   print?: (line: string) => void;
   resolveStateDir?: () => string;
   readEvidence?: (stateDir: string, protocol: PaidPilotProtocol) => Promise<PaidPilotEvidence>;
+  pairedReport?: (input: { protocol: PaidPilotProtocol; evidence: PaidPilotEvidence; nowIso: string }) => PairedPilotReportView;
 }
 
 const USAGE = "usage: rmd benchmark-paid-pilot activate --request <request.json> --aa-report <aa-report.json> "
   + "--confirm-cash-ceiling-usd 100 [--state-dir <dir>] [--json] | rmd benchmark-paid-pilot report --pilot <id> "
-  + "[--case-files <snapshot.json>] [--out <report.json>] [--state-dir <dir>] [--json]";
+  + "[--case-files <snapshot.json>] [--out <report.json>] [--state-dir <dir>] [--json] | rmd benchmark-paid-pilot pause|resume "
+  + "--pilot <id> [--note <text>] [--state-dir <dir>]";
 
 function activateCommand(values: Record<string, string | boolean | undefined>, stateDir: string, nowIso: string,
   activate: (input: PaidPilotActivationInput) => PaidPilotActivation, print: (line: string) => void): number {
@@ -862,14 +1040,47 @@ function readPrior(path: string, pilotId: string): { prior?: PaidPilotReport } {
   return prior?.version === BENCHMARK_PAID_PILOT_VERSION && prior.pilotId === pilotId ? { prior: prior as unknown as PaidPilotReport } : {};
 }
 
-function writeAtomically(path: string, report: PaidPilotReport): void {
+function writeAtomically(path: string, report: PaidPilotReport | Record<string, unknown>): void {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(report, null, 2)}\n`);
   renameSync(temporary, path);
 }
 
+function pairedReportCommand(values: Record<string, string | boolean | undefined>, protocol: PaidPilotProtocol, evidence: PaidPilotEvidence,
+  nowIso: string, out: string, pairedReport: BenchmarkPaidPilotCommandInput["pairedReport"], print: (line: string) => void): number {
+  if (pairedReport === undefined) { print("benchmark-paid-pilot: report refused (paired-report-not-wired)"); return 2; }
+  const view = pairedReport({ protocol, evidence, nowIso });
+  try { writeAtomically(out, view.report); }
+  catch {
+    const reason = "report-not-persisted";
+    print(`benchmark-paid-pilot: ${reason} (${out})`);
+  }
+  if (values.json === true) print(JSON.stringify(view.report));
+  else for (const line of view.lines) print(line);
+  return view.observed ? 0 : 1;
+}
+
+function controlCommand(action: "pause" | "resume", values: Record<string, string | boolean | undefined>, stateDir: string, nowIso: string,
+  print: (line: string) => void): number {
+  if (typeof values.pilot !== "string" || !TRIAL_ID_RE.test(values.pilot)) { print(USAGE); return 2; }
+  const loaded = loadPaidPilotProtocol(stateDir, values.pilot);
+  if (!loaded.ok) { print(`benchmark-paid-pilot: ${action} refused (${loaded.reason})`); return 2; }
+  let path: string;
+  try { path = appendPaidPilotControl(stateDir, values.pilot, action, nowIso, typeof values.note === "string" ? values.note : null); }
+  catch {
+    const reason = "control-not-recorded";
+    print(`benchmark-paid-pilot: ${action} refused (${reason})`);
+    return 2;
+  }
+  print(action === "pause"
+    ? `benchmark-paid-pilot ${values.pilot}: paused at ${nowIso}; no new pair or paid-arm work is admitted, in-flight attempts finish; control file ${path}`
+    : `benchmark-paid-pilot ${values.pilot}: resumed at ${nowIso}; admission reads the ordinary pause reasons again; control file ${path}`);
+  return 0;
+}
+
 async function reportCommand(values: Record<string, string | boolean | undefined>, stateDir: string, nowIso: string,
-  readEvidence: (stateDir: string, protocol: PaidPilotProtocol) => Promise<PaidPilotEvidence>, print: (line: string) => void): Promise<number> {
+  readEvidence: (stateDir: string, protocol: PaidPilotProtocol) => Promise<PaidPilotEvidence>, print: (line: string) => void,
+  pairedReport?: BenchmarkPaidPilotCommandInput["pairedReport"]): Promise<number> {
   if (typeof values.pilot !== "string" || !TRIAL_ID_RE.test(values.pilot)) { print(USAGE); return 2; }
   const loaded = loadPaidPilotProtocol(stateDir, values.pilot);
   if (!loaded.ok) { print(`benchmark-paid-pilot: report refused (${loaded.reason})`); return 2; }
@@ -882,6 +1093,7 @@ async function reportCommand(values: Record<string, string | boolean | undefined
     const reason = "spend-source-read-failed";
     evidence = unavailableEvidence(reason);
   }
+  if (loaded.protocol.design === "paired") return pairedReportCommand(values, loaded.protocol, evidence, nowIso, out, pairedReport, print);
   const report = buildPaidPilotReport({ protocol: loaded.protocol, evidence, nowIso, ...(caseFiles ? { caseFiles } : {}),
     ...readPrior(out, values.pilot) });
   try { writeAtomically(out, report); }
@@ -901,7 +1113,8 @@ async function reportCommand(values: Record<string, string | boolean | undefined
   return report.state === "observed" || report.state === "observed-partial" ? 0 : 1;
 }
 
-/** The operator verb. `activate` is the only path that starts the pilot; `report` reads and writes only its own report file. */
+/** The operator verb. `activate` is the only path that starts the pilot; `report` reads and writes only its own report file;
+ *  `pause`/`resume` append to the control file admission reads. */
 export async function benchmarkPaidPilotCommand(rest: string[], activate: (input: PaidPilotActivationInput) => PaidPilotActivation,
   input: BenchmarkPaidPilotCommandInput = {}): Promise<number> {
   const print = input.print ?? ((line: string) => console.log(line));
@@ -911,16 +1124,17 @@ export async function benchmarkPaidPilotCommand(rest: string[], activate: (input
     values = parseArgs({ args, strict: true, allowPositionals: false, options: {
       request: { type: "string" }, "aa-report": { type: "string" }, "confirm-cash-ceiling-usd": { type: "string" },
       pilot: { type: "string" }, "case-files": { type: "string" }, out: { type: "string" }, "state-dir": { type: "string" },
-      json: { type: "boolean" } } }).values;
+      note: { type: "string" }, json: { type: "boolean" } } }).values;
   } catch {
     const reason = "arguments-invalid";
     print(`${USAGE} (${reason})`);
     return 2;
   }
-  if (verb !== "activate" && verb !== "report") { print(USAGE); return 2; }
+  if (verb !== "activate" && verb !== "report" && verb !== "pause" && verb !== "resume") { print(USAGE); return 2; }
   const stateDir = typeof values["state-dir"] === "string" ? values["state-dir"]
     : (input.resolveStateDir ?? (() => join(loadConfig().root, "state")))();
   const nowIso = input.nowIso ?? systemClock.iso();
   if (verb === "activate") return activateCommand(values, stateDir, nowIso, activate, print);
-  return reportCommand(values, stateDir, nowIso, input.readEvidence ?? readPaidPilotEvidence, print);
+  if (verb === "pause" || verb === "resume") return controlCommand(verb, values, stateDir, nowIso, print);
+  return reportCommand(values, stateDir, nowIso, input.readEvidence ?? readPaidPilotEvidence, print, input.pairedReport);
 }

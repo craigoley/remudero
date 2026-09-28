@@ -77,10 +77,10 @@ export interface components {
       last_run: string | null;
       alerts: (string)[] | null;
     };
-    /** Per-repository telemetry, unavailable until a durable per-repo aggregation source exists. */
+    /** Trailing seven-day per-repository worker telemetry from the ledger. Models are the distinct provider-reported served models, never requested or routed model assignments. A null modelsused means the ledger was unavailable or at least one worker row in the window did not report its served model; an empty array means no worker rows ran in the window. */
     RepoDashboardTelemetry: {
       tokens7d: number | null;
-      modelsused: (string)[];
+      modelsused: (string)[] | null;
       cost_7d: number | null;
     };
     /** Per-repository settings, unavailable until durable settings persistence exists. */
@@ -652,6 +652,139 @@ export interface components {
     OperatorAgentExperimentRollbackRequest: {
       experimentId: string;
       rollback: OperatorAgentExperimentRollback;
+    };
+    /** Names a flowId or experimentId AND a repo or instance; a record missing either half is refused `missing-scope`. */
+    AutomationActionScope: {
+      flowId?: string;
+      experimentId?: string;
+      repo?: string;
+      instance?: string;
+    };
+    AutomationActionPrecondition: {
+      id: string;
+      /** The authoritative source an observation must come from. */
+      source: string;
+      description: string;
+    };
+    /** A reversible action names its plan; an irreversible one names the refusal path a rollback request takes instead. */
+    AutomationActionRollback: {
+      mode: "reversible" | "irreversible";
+      plan?: string;
+      refusal?: string;
+    };
+    /** An immutable automation-action-v1 record (src/lib/automation-action.ts's `validateAutomationAction`). Fields the contract does not name are dropped; a raw prompt, transcript, credential, model prose, or browser-owned measurement field -- or a credential-shaped value -- refuses the whole record. */
+    AutomationAction: {
+      version: "automation-action-v1";
+      actionId: string;
+      capability: string;
+      summary: string;
+      scope: AutomationActionScope;
+      risk: "low" | "medium" | "high" | "production" | "financial" | "credential" | "destructive";
+      preconditions: (AutomationActionPrecondition)[];
+      freshness: {
+        maxAgeSeconds: number;
+      };
+      idempotencyKey: string;
+      createdAt: string;
+      expiresAt: string;
+      dryRun: boolean;
+      approval: {
+        /** high, production, financial, credential and destructive risk must declare human. */
+        policy: "none" | "human";
+      };
+      rollback: AutomationActionRollback;
+      /** The authoritative system of record whose receipt proves what happened. */
+      receiptRef: string;
+    };
+    AutomationPreconditionObservation: {
+      preconditionId: string;
+      state: "satisfied" | "unsatisfied" | "unavailable";
+      source: string;
+      observedAt: string;
+      reason?: string;
+    };
+    AutomationPreflightFinding: {
+      outcome: "refused" | "stale" | "unknown" | "expired" | "in-progress";
+      code: string;
+      detail: string;
+      preconditionId?: string;
+      receiptId?: string;
+    };
+    AutomationPreflightResult: {
+      version: "automation-action-v1";
+      actionId: string;
+      outcome: "ready" | "refused" | "stale" | "unknown" | "expired" | "in-progress";
+      evaluatedAt: string;
+      approval: "not-required" | "pending" | "approved" | "rejected";
+      findings: (AutomationPreflightFinding)[];
+    };
+    /** One bounded, append-only receipt; completion and rollback link to what they follow via linkedReceiptId. */
+    AutomationActionReceipt: {
+      version: "automation-action-v1";
+      receiptId: string;
+      actionId: string;
+      idempotencyKey: string;
+      kind: "execution" | "completion" | "rollback";
+      outcome: "in-progress" | "dry-run" | "refused" | "succeeded" | "failed" | "rolled_back";
+      at: string;
+      receiptRef: string;
+      linkedReceiptId?: string;
+      preflight?: "ready" | "refused" | "stale" | "unknown" | "expired" | "in-progress";
+      code?: string;
+      reason: string;
+      evidenceRef?: string;
+    };
+    OperatorAgentActionHistory: {
+      action: AutomationAction;
+      state: "registered" | "approved" | "rejected" | "in-progress" | "succeeded" | "failed" | "rolled_back" | "expired";
+      approval: "not-required" | "pending" | "approved" | "rejected";
+      decision?: {
+        decision: "approved" | "rejected";
+        decidedBy: string;
+        decidedAt: string;
+      };
+      receipts: (AutomationActionReceipt)[];
+    };
+    OperatorAgentActionList: {
+      version: "automation-action-v1";
+      actions: (OperatorAgentActionHistory)[];
+      source: "ledger";
+    };
+    OperatorAgentActionRegistration: {
+      action: AutomationAction;
+    };
+    OperatorAgentActionDecisionRequest: {
+      actionId: string;
+      decision: "approved" | "rejected";
+    };
+    OperatorAgentActionObservationRequest: {
+      actionId: string;
+      observations?: (AutomationPreconditionObservation)[];
+      /** Execute only; a dry run evaluates preflight and records a dry-run receipt without admitting anything. */
+      dryRun?: boolean;
+    };
+    OperatorAgentActionCompletionRequest: {
+      actionId: string;
+      admissionReceiptId: string;
+      outcome: "succeeded" | "failed";
+      /** Required for succeeded -- success is claimed only with the evidence that proves it. */
+      evidenceRef?: string;
+      reason?: string;
+    };
+    OperatorAgentActionRollbackRequest: {
+      actionId: string;
+      reason: string;
+      evidenceRef: string;
+    };
+    OperatorAgentActionPreflightResponse: {
+      preflight: AutomationPreflightResult;
+    };
+    /** An engine step's disposition and the receipt it decided. `reused` returns the EXISTING receipt for a duplicate idempotency key, completion, or rollback, and appends nothing. */
+    OperatorAgentActionStepResult: {
+      ok: boolean;
+      disposition: "admitted" | "dry-run" | "refused" | "reused" | "completed" | "rolled_back";
+      receipt: AutomationActionReceipt;
+      preflight?: AutomationPreflightResult;
     };
     PromotionScope: {
       repo: string;
@@ -2911,6 +3044,86 @@ export interface paths {
           "403": HighTierForbidden;
           "409": OperatorAgentDelegationHandoffRefusal;
           "423": EmergencyStopAdmissionRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/actions": {
+    get: {
+      responses: {
+          "200": OperatorAgentActionList;
+          "401": Error;
+          "403": Error;
+        };
+    };
+    post: {
+      responses: {
+          "200": undefined;
+          "201": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/actions/decision": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": HighTierRefusal;
+          "404": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/actions/preflight": {
+    post: {
+      responses: {
+          "200": OperatorAgentActionPreflightResponse;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/actions/execute": {
+    post: {
+      responses: {
+          "200": OperatorAgentActionStepResult;
+          "202": OperatorAgentActionStepResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": OperatorAgentActionStepResult;
+          "423": EmergencyStopAdmissionRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/actions/complete": {
+    post: {
+      responses: {
+          "200": OperatorAgentActionStepResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": OperatorAgentActionStepResult;
+        };
+    };
+  };
+  "/v1/operator-agent/actions/rollback": {
+    post: {
+      responses: {
+          "200": OperatorAgentActionStepResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": OperatorAgentActionStepResult;
         };
     };
   };

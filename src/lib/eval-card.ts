@@ -160,7 +160,7 @@ export interface EvalCardPowerSpec {
 
 export interface EvalCardTrial {
   trialId: string;
-  kind: "aa" | "paid-pilot" | "paired" | "ab";
+  kind: "aa" | "paid-pilot" | "paired" | "paired-pilot" | "ab";
   protocolText: string | null;
   /** When the protocol was committed (ISO time). */
   preRegisteredAt: string | null;

@@ -205,7 +205,14 @@ import {
   type RegistryDrift,
 } from "./instance-registry.js";
 import { daemonInstanceRegistryPath } from "./deployer.js";
-import { onboardingReadiness, type OnboardingReadinessGateway, type OnboardingRegistryRead } from "./onboarding-readiness.js";
+import {
+  onboardingReadiness,
+  readOnboardingReadinessSnapshot,
+  type OnboardingReadinessGateway,
+  type OnboardingReadinessGatewayAsync,
+  type OnboardingReadinessSnapshot,
+  type OnboardingRegistryRead,
+} from "./onboarding-readiness.js";
 import { buildOnboardingRepositoryInventoryRoute, type OnboardingInventoryRouteOptions } from "./onboarding-repository-inventory.js";
 import {
   buildProviderAuthRoutes,
@@ -473,8 +480,10 @@ export interface ServeDeps {
   /** W1-T4264: `GET /v1/onboarding/readiness`'s inputs; `gateway` defaults to the real GitHub reads. */
   onboardingReadiness?: {
     gateway?: OnboardingReadinessGateway;
+    asyncGateway?: OnboardingReadinessGatewayAsync;
     repoRegistryPath?: string;
     readText?: (path: string) => Promise<string>;
+    clock?: Clock;
   };
   /** Read-only, paginated GitHub-token inventory for the console onboarding candidate list. */
   onboardingRepositoryInventory?: OnboardingInventoryRouteOptions;
@@ -1822,6 +1831,35 @@ export type OnboardingReadinessRouteInput = NonNullable<ServeDeps["onboardingRea
  */
 export function buildOnboardingReadinessRoute(deps: OnboardingReadinessRouteInput): Route {
   const readText = deps.readText ?? ((path: string) => fsPromises.readFile(path, "utf8"));
+  const clock = deps.clock ?? systemClock;
+  const cache = new Map<string, { atMs: number; snapshot: OnboardingReadinessSnapshot }>();
+  const inflight = new Map<string, Promise<OnboardingReadinessSnapshot>>();
+  const ttlMs = 30_000;
+  const maxCached = 128;
+  async function evidence(owner: string, name: string): Promise<OnboardingReadinessGateway> {
+    // The legacy synchronous seam remains for deterministic callers only; production takes the
+    // bounded async path. Cache GitHub evidence, never the registry-derived already-onboarded state.
+    if (deps.gateway) return deps.gateway;
+    const key = `${owner}/${name}`.toLowerCase();
+    const warm = cache.get(key);
+    const ageMs = warm === undefined ? -1 : clock.now() - warm.atMs;
+    if (warm && ageMs >= 0 && ageMs < ttlMs) return warm.snapshot;
+    const pending = inflight.get(key);
+    if (pending) return pending;
+    const request = readOnboardingReadinessSnapshot(owner, name, deps.asyncGateway);
+    inflight.set(key, request);
+    try {
+      const snapshot = await request;
+      if (snapshot.complete) {
+        cache.delete(key);
+        cache.set(key, { atMs: clock.now(), snapshot });
+        if (cache.size > maxCached) cache.delete(cache.keys().next().value!);
+      }
+      return snapshot;
+    } finally {
+      if (inflight.get(key) === request) inflight.delete(key);
+    }
+  }
   return {
     method: "GET",
     path: "/v1/onboarding/readiness",
@@ -1841,7 +1879,7 @@ export function buildOnboardingReadinessRoute(deps: OnboardingReadinessRouteInpu
       } catch (error) {
         registry = { unreadable: error instanceof InstanceRegistryError ? error.code : "unreadable" };
       }
-      sendJson(res, 200, onboardingReadiness(owner, name, registry, deps.gateway));
+      sendJson(res, 200, onboardingReadiness(owner, name, registry, await evidence(owner, name)));
     },
   };
 }

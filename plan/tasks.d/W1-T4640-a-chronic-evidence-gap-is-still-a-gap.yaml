@@ -1,0 +1,40 @@
+- id: W1-T4640
+  title: "THE EVIDENCE GARDENER ADOPTS A BROKEN LANE AS ITS HEALTHY BASELINE — the first observation becomes the baseline, so a lane that never recorded a field reads healthy forever and only a later drop is filed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: medium
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-28: thread audit of dropped follow-ups, verified against origin/main and the live ledger"
+  plan_refs: ["W1-T4622", "W1-T4639"]
+  files:
+    - src/lib/evidence-coverage-gardener.ts
+    - test/a-chronic-evidence-gap-is-still-a-gap.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-28 from the live gardener state (evidence-coverage-gardener.json, first pass
+    2026-09-27T17:53Z): `judgeCoverageCell` files only `absent` (observed === 0) or `below-baseline`
+    (a drop past the tolerance), and the first healthy-looking reading becomes the baseline. It
+    baselined escalation-summary assignment coverage at 0.19%, verify-human-judge assignment
+    coverage at 3.4%, run-task served-model coverage at 49% and run-task outcome coverage at 29% as
+    healthy, so none of those lanes will ever be filed. The same gaps were independently measured
+    the same day (W1-T4639: 64 of 522 run-task assignments join a worker.attempt receipt; 1381
+    failure receipts carry no assignment id).
+  design: |
+    Add an absolute floor per required field (a named PRIMARY CONTROL; e.g. 0.9 for
+    assignment/outcome joins, calibrated in the PR against the measured lanes) below which a lane-
+    field is a `below-floor` gap regardless of its baseline, filed through the same dedup-keyed
+    follow-up path with the observed ratio and denominator. A cell below the floor never becomes (or
+    refreshes) the baseline; existing sub-floor baselines in the state file are discarded on read.
+    Thin lanes stay `insufficient`. Nothing gates a PR.
+  acceptance:
+    - claim: "a lane-field whose coverage sits below the absolute floor is filed as a gap even when it never dropped, and a sub-floor reading never becomes the baseline"
+      proof: "unit test: test/a-chronic-evidence-gap-is-still-a-gap.test.ts"
+  falsifier: |
+    Replay the measured state: escalation-summary at 0.19% assignment coverage is adopted as healthy
+    and never filed.

@@ -22,7 +22,7 @@
  * repo, not remudero's own posture" sibling.
  */
 
-import { ghExec, splitGhHeaderBlock } from "./github-transport.js";
+import { ghExec, ghTextAsync, splitGhHeaderBlock } from "./github-transport.js";
 import { parseInstallationRepositoryListing } from "./onboarding-repository-listing.js";
 
 // ── The report shape ────────────────────────────────────────────────────────────────────────
@@ -80,32 +80,72 @@ export interface OnboardingReadinessGateway {
   getRepo(owner: string, repo: string): OnboardingReadinessApiRead | undefined;
   /** `GET /repos/{owner}/{repo}/branches/{branch}/protection`. */
   getBranchProtection(owner: string, repo: string, branch: string): OnboardingReadinessApiRead | undefined;
+  /** Active repository and organization rulesets applying to the default branch. */
+  getBranchRules(owner: string, repo: string, branch: string): OnboardingReadinessApiRead | undefined;
   /** `GET /repos/{owner}/{repo}/contents/{path}` — a file (object, base64 `content`) or a
    *  directory (array of entries); a 404 status means "confirmed absent", not a failed read. */
   getContents(owner: string, repo: string, path: string): OnboardingReadinessApiRead | undefined;
 }
 
+/** The served route uses bounded async GitHub reads; the synchronous gateway remains for CLI
+ * callers and the pure report's deterministic tests. */
+export interface OnboardingReadinessGatewayAsync {
+  listInstallationRepos(): Promise<string[] | undefined>;
+  getRepo(owner: string, repo: string): Promise<OnboardingReadinessApiRead | undefined>;
+  getBranchProtection(owner: string, repo: string, branch: string): Promise<OnboardingReadinessApiRead | undefined>;
+  getBranchRules(owner: string, repo: string, branch: string): Promise<OnboardingReadinessApiRead | undefined>;
+  getContents(owner: string, repo: string, path: string): Promise<OnboardingReadinessApiRead | undefined>;
+}
+
+export interface OnboardingReadinessSnapshot extends OnboardingReadinessGateway {
+  /** Only a complete set of GitHub answers may be reused on another request. */
+  complete: boolean;
+}
+
+function parseApiRead(raw: string): OnboardingReadinessApiRead | undefined {
+  const { headers, body } = splitGhHeaderBlock(raw);
+  const statusMatch = /^HTTP\/\d(?:\.\d)?\s+(\d+)/.exec(headers);
+  const status = statusMatch ? Number(statusMatch[1]) : 200;
+  const trimmed = body.trim();
+  if (trimmed === "") return { status, body: undefined };
+  const parsed = parseJson(trimmed);
+  return parsed.ok ? { status, body: parsed.value } : undefined;
+}
+
+function parseApiError(err: unknown): OnboardingReadinessApiRead | undefined {
+  // gh exits non-zero for both HTTP errors and transport failures. Only the former proves status.
+  const text = `${(err as { stderr?: string | Buffer })?.stderr ?? ""} ${(err as { message?: string })?.message ?? ""}`;
+  const statusMatch = /\bHTTP\s+(\d+)\b/.exec(text);
+  return statusMatch ? { status: Number(statusMatch[1]), body: undefined } : undefined;
+}
+
+/** `gh api --paginate --slurp` supplies one array per completed page. A missing or malformed
+ * page is unknown, never evidence that no required checks exist on a later page. */
+function parseBranchRulePages(raw: string): OnboardingReadinessApiRead | undefined {
+  const parsed = parseJson(raw.trim());
+  if (!parsed.ok || !Array.isArray(parsed.value) || parsed.value.length === 0 || parsed.value.length > 20) return undefined;
+  const rules: unknown[] = [];
+  for (const page of parsed.value) {
+    if (!Array.isArray(page) || page.length > 100) return undefined;
+    rules.push(...page);
+  }
+  return { status: 200, body: rules };
+}
+
+function branchRuleArgs(owner: string, repo: string, branch: string): string[] {
+  return ["api", `repos/${owner}/${repo}/rules/branches/${encodeURIComponent(branch)}?per_page=100`, "--paginate", "--slurp"];
+}
+
 /** DETECTION ONLY, mirroring `github-posture.ts`'s own module header: metadata reads are bare
- *  `gh api <path> -i` GETs; the installation listing adds `--paginate --jq` to read every page.
+ *  `gh api <path> -i` GETs; installation and branch-rule lists paginate to completion.
  *  No call passes `-X`/`--method`/`-f`/`-F`/`--input` or writes to GitHub. */
 export function onboardingReadinessGateway(execFileFn: (args: string[]) => string = defaultExec): OnboardingReadinessGateway {
   function apiRead(path: string): OnboardingReadinessApiRead | undefined {
     try {
-      const raw = execFileFn(["api", path, "-i"]);
-      const { headers, body } = splitGhHeaderBlock(raw);
-      const statusMatch = /^HTTP\/\d(?:\.\d)?\s+(\d+)/.exec(headers);
-      const status = statusMatch ? Number(statusMatch[1]) : 200;
-      const trimmed = body.trim();
-      if (trimmed === "") return { status, body: undefined };
-      const parsed = parseJson(trimmed);
-      return parsed.ok ? { status, body: parsed.value } : undefined; // An unparsable body is a failed read.
+      return parseApiRead(execFileFn(["api", path, "-i"]));
     } catch (err) {
-      // `gh` exits non-zero for every non-2xx response AND for a genuine transport failure; only
-      // the former names its status in the error text (`gh: Not Found (HTTP 404)`) — a definitive
-      // answer this module can still classify. Anything else is truly unreadable.
-      const text = `${(err as { stderr?: string | Buffer })?.stderr ?? ""} ${(err as { message?: string })?.message ?? ""}`;
-      const statusMatch = /\bHTTP\s+(\d+)\b/.exec(text);
-      return statusMatch ? { status: Number(statusMatch[1]), body: undefined } : undefined;
+      // Preserve a definitive HTTP status; a transport failure remains unknown, never absence.
+      return parseApiError(err);
     }
   }
   return {
@@ -119,8 +159,94 @@ export function onboardingReadinessGateway(execFileFn: (args: string[]) => strin
       }
     },
     getRepo: (owner, repo) => apiRead(`repos/${owner}/${repo}`),
-    getBranchProtection: (owner, repo, branch) => apiRead(`repos/${owner}/${repo}/branches/${branch}/protection`),
+    getBranchProtection: (owner, repo, branch) => apiRead(`repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}/protection`),
+    getBranchRules: (owner, repo, branch) => {
+      try {
+        return parseBranchRulePages(execFileFn(branchRuleArgs(owner, repo, branch)));
+      } catch (err) {
+        // A failed page read cannot prove there were no later required checks.
+        return parseApiError(err);
+      }
+    },
     getContents: (owner, repo, path) => apiRead(`repos/${owner}/${repo}/contents/${path}`),
+  };
+}
+
+const defaultReadAsync = (args: string[]): Promise<string> => ghTextAsync(args, { maxBuffer: 2 * 1024 * 1024, timeout: 15_000 });
+
+/** The request path must not block Node's event loop while `gh` waits on GitHub. */
+export function onboardingReadinessGatewayAsync(read: (args: string[]) => Promise<string> = defaultReadAsync): OnboardingReadinessGatewayAsync {
+  async function apiRead(path: string): Promise<OnboardingReadinessApiRead | undefined> {
+    try {
+      return parseApiRead(await read(["api", path, "-i"]));
+    } catch (err) {
+      // Preserve a definitive HTTP status; a transport failure remains unknown, never absence.
+      return parseApiError(err);
+    }
+  }
+  return {
+    listInstallationRepos: async () => {
+      try {
+        return parseInstallationRepositoryListing(await read(["api", "installation/repositories?per_page=100", "--paginate", "--jq", ".total_count, .repositories[].full_name"])) ?? undefined;
+      } catch {
+        // A failed page read is unknown, not evidence that the App has zero repositories.
+        return undefined;
+      }
+    },
+    getRepo: (owner, repo) => apiRead(`repos/${owner}/${repo}`),
+    getBranchProtection: (owner, repo, branch) => apiRead(`repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}/protection`),
+    getBranchRules: async (owner, repo, branch) => {
+      try {
+        return parseBranchRulePages(await read(branchRuleArgs(owner, repo, branch)));
+      } catch (err) {
+        // A failed page read cannot prove there were no later required checks.
+        return parseApiError(err);
+      }
+    },
+    getContents: (owner, repo, path) => apiRead(`repos/${owner}/${repo}/contents/${path}`),
+  };
+}
+
+const READINESS_CONTENT_PATHS = [".github/workflows", "AGENTS.md", "CLAUDE.md", "package.json", "Makefile", "pyproject.toml", "plan"] as const;
+
+async function unknownOnReadFailure<T>(read: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await read();
+  } catch {
+    // An injected gateway failure and an unreadable source share the same unknown outcome.
+    return undefined;
+  }
+}
+
+/** Collect GitHub evidence concurrently, then let the existing pure classifier interpret it.
+ * Missing/failed reads stay undefined, never a guessed absence. The returned snapshot is safe to
+ * cache; the caller still supplies a freshly read fleet registry to `onboardingReadiness`. */
+export async function readOnboardingReadinessSnapshot(
+  owner: string,
+  repo: string,
+  gateway: OnboardingReadinessGatewayAsync = onboardingReadinessGatewayAsync(),
+): Promise<OnboardingReadinessSnapshot> {
+  const [installed, repoRead, ...contents] = await Promise.all([
+    unknownOnReadFailure(() => gateway.listInstallationRepos()),
+    unknownOnReadFailure(() => gateway.getRepo(owner, repo)),
+    ...READINESS_CONTENT_PATHS.map((path) => unknownOnReadFailure(() => gateway.getContents(owner, repo, path))),
+  ]);
+  const branch = (repoRead?.body as { default_branch?: unknown } | null)?.default_branch;
+  const [protection, rules] = repoRead?.status === 200 && typeof branch === "string" && branch
+    ? await Promise.all([
+      unknownOnReadFailure(() => gateway.getBranchProtection(owner, repo, branch)),
+      unknownOnReadFailure(() => gateway.getBranchRules(owner, repo, branch)),
+    ])
+    : [undefined, undefined];
+  const byPath = new Map<string, OnboardingReadinessApiRead | undefined>(READINESS_CONTENT_PATHS.map((path, index) => [path, contents[index]]));
+  return {
+    complete: installed !== undefined && repoRead !== undefined && contents.every((read) => read !== undefined)
+      && (repoRead.status !== 200 || (typeof branch === "string" && branch.length > 0 && protection !== undefined && rules !== undefined)),
+    listInstallationRepos: () => installed,
+    getRepo: () => repoRead,
+    getBranchProtection: (_owner, _repo, requestedBranch) => requestedBranch === branch ? protection : undefined,
+    getBranchRules: (_owner, _repo, requestedBranch) => requestedBranch === branch ? rules : undefined,
+    getContents: (_owner, _repo, path) => byPath.get(path),
   };
 }
 
@@ -190,28 +316,64 @@ function checkBranchProtection(
   if (defaultBranch === undefined) {
     return check("branch-protection", "unknown", "default branch unknown — cannot check its protection");
   }
-  const read = gateway.getBranchProtection(owner, repo, defaultBranch);
-  if (read === undefined) {
-    return check("branch-protection", "unknown", "branch protection read failed");
+  const classic = gateway.getBranchProtection(owner, repo, defaultBranch);
+  const rules = gateway.getBranchRules(owner, repo, defaultBranch);
+  const classicChecks = classic?.status === 200 ? parseClassicRequiredChecks(classic.body) : undefined;
+  const activeRules = rules?.status === 200 ? parseActiveBranchRules(rules.body) : undefined;
+  const rulesetChecks = activeRules?.requiredChecks;
+  const requiredChecks = [...new Set([...(classicChecks ?? []), ...(rulesetChecks ?? [])])].sort();
+  if (requiredChecks.length > 0) {
+    const source = classicChecks?.length && rulesetChecks?.length ? "classic protection and active rulesets"
+      : classicChecks?.length ? "classic branch protection" : "active rulesets";
+    return check("branch-protection", "pass", `${defaultBranch} has ${requiredChecks.length} required status check(s) through ${source}`, requiredChecks.join(", "));
   }
-  if (read.status === 404) {
-    return check("branch-protection", "fail", `${defaultBranch} has no branch protection configured`);
+  if (classic === undefined || (classic.status !== 200 && classic.status !== 404) || (classic.status === 200 && classicChecks === undefined)
+    || rules === undefined || rules.status !== 200 || activeRules === undefined) {
+    return check("branch-protection", "unknown", "classic protection or active rulesets could not be read completely");
   }
-  if (read.status !== 200) {
-    return check("branch-protection", "unknown", `branch protection read returned HTTP ${read.status}`);
+  if (classic.status === 200 || activeRules.count > 0) {
+    return check("branch-protection", "warn", `${defaultBranch} has protection but no required status checks`);
   }
-  const body = read.body as { required_status_checks?: { contexts?: unknown } } | null;
-  const contexts = body?.required_status_checks?.contexts;
-  const requiredChecks = Array.isArray(contexts) ? contexts.filter((c): c is string => typeof c === "string") : [];
-  if (requiredChecks.length === 0) {
-    return check("branch-protection", "warn", `${defaultBranch} is protected but declares no required status checks`);
+  return check("branch-protection", "fail", `${defaultBranch} has no classic branch protection or active rulesets`);
+}
+
+function parseClassicRequiredChecks(body: unknown): string[] | undefined {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const required = (body as { required_status_checks?: unknown }).required_status_checks;
+  if (required == null) return [];
+  if (typeof required !== "object" || Array.isArray(required)) return undefined;
+  const value = required as { contexts?: unknown; checks?: unknown };
+  if (value.contexts !== undefined && !Array.isArray(value.contexts)) return undefined;
+  if (value.checks !== undefined && !Array.isArray(value.checks)) return undefined;
+  const contexts = Array.isArray(value.contexts) ? value.contexts.filter((c): c is string => typeof c === "string" && c.length > 0) : [];
+  const checks: string[] = [];
+  if (Array.isArray(value.checks)) {
+    for (const entry of value.checks) {
+      const context = (entry as { context?: unknown } | null)?.context;
+      if (typeof context !== "string" || !context) return undefined;
+      checks.push(context);
+    }
   }
-  return check(
-    "branch-protection",
-    "pass",
-    `${defaultBranch} is protected with ${requiredChecks.length} required status check(s)`,
-    requiredChecks.join(", "),
-  );
+  return [...new Set([...contexts, ...checks])];
+}
+
+/** GitHub's branch-rules endpoint returns only ACTIVE rules, including organization rulesets. */
+function parseActiveBranchRules(body: unknown): { count: number; requiredChecks: string[] } | undefined {
+  if (!Array.isArray(body)) return undefined;
+  const requiredChecks: string[] = [];
+  for (const item of body) {
+    if (!item || typeof item !== "object" || Array.isArray(item) || typeof (item as { type?: unknown }).type !== "string") return undefined;
+    const rule = item as { type: string; parameters?: { required_status_checks?: unknown } };
+    if (rule.type !== "required_status_checks") continue;
+    const checks = rule.parameters?.required_status_checks;
+    if (!Array.isArray(checks)) return undefined;
+    for (const entry of checks) {
+      const context = (entry as { context?: unknown } | null)?.context;
+      if (typeof context !== "string" || !context) return undefined;
+      requiredChecks.push(context);
+    }
+  }
+  return { count: body.length, requiredChecks };
 }
 
 function checkCiWorkflows(owner: string, repo: string, gateway: OnboardingReadinessGateway): OnboardingReadinessCheck {

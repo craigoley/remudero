@@ -281,7 +281,7 @@ export type CorpusProofOutcome = "pass" | "fail" | "unmeasurable";
 /** Score a replay by the task's OWN proofs: any fail fails; otherwise any unmeasurable or missing outcome makes
  *  the whole replay unmeasurable — never a pass; only every proof passing is a pass. */
 export function scoreCorpusReplay(
-  item: GoldenCorpusItem,
+  item: Pick<GoldenCorpusItem, "proofs">,
   outcomes: readonly CorpusProofOutcome[],
 ): { verdict: CorpusProofOutcome; passed: number; failed: number; unmeasurable: number } {
   let passed = 0;

@@ -487,6 +487,14 @@ export function spawnFailureDetail(error: unknown, assignmentObserved: boolean):
   return { pre_selection: !assignmentObserved, error_class: errorClass, ...(code ? { error_code: code } : {}), error_message: message };
 }
 
+/** W1-T4639: the join half of a `worker.attempt` receipt — the assignment id it answers, or a named
+ *  reason the row can carry none: the spawn threw before any assignment was written, or a result came
+ *  back with no assignment observed. An attempt row is never silently unjoined. */
+export function attemptAssignmentJoin(assignmentId: string | undefined, threw: boolean): Record<string, string> {
+  if (assignmentId) return { selection_assignment_id: assignmentId };
+  return { selection_assignment_unavailable_reason: threw ? "spawn-threw-before-assignment" : "assignment-not-observed" };
+}
+
 /** Capture an auxiliary worker call without turning telemetry into a worker or PR gate. The
  * caller's existing assignment sink remains authoritative when one is supplied. */
 export function benchmarkNonDispatchSpawn(
@@ -537,13 +545,13 @@ export function benchmarkNonDispatchSpawn(
             reason: "worker-result-fields-unavailable",
             error_class: error instanceof TypeError ? "TypeError" : error instanceof Error ? "Error" : "non-error" }));
         }
-        recordAttempt({ ...(attempt.selectionAssignmentId ? { selection_assignment_id: attempt.selectionAssignmentId } : {}),
+        recordAttempt({ ...attemptAssignmentJoin(attempt.selectionAssignmentId, false),
           attempted_model: attempt.model, success: false, worker_failure: attempt.reason, ...resources });
         try { args.onModelFallbackAttempt?.(attempt); }
         catch { console.error(JSON.stringify({ event: "benchmark.non_dispatch_fallback_hook_unavailable", lane })); }
       } });
     } catch (error) {
-      recordAttempt({ ...(observedAssignmentId ? { selection_assignment_id: observedAssignmentId } : {}),
+      recordAttempt({ ...attemptAssignmentJoin(observedAssignmentId, true),
         success: false, worker_failure: "spawn-threw-before-result",
         ...spawnFailureDetail(error, observedAssignmentId !== undefined) });
       throw error;
@@ -558,7 +566,7 @@ export function benchmarkNonDispatchSpawn(
         reason: "worker-result-fields-unavailable",
         error_class: error instanceof TypeError ? "TypeError" : error instanceof Error ? "Error" : "non-error" }));
     }
-    recordAttempt({ ...(assignmentId ? { selection_assignment_id: assignmentId } : {}),
+    recordAttempt({ ...attemptAssignmentJoin(assignmentId, false),
       ...(result.isError || result.apiError || result.usageRefusal ? { success: false }
         : observedEnvelope ? { success: true } : {}), ...resources });
     return result;
