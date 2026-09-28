@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 20.00
-  risk: medium
+  risk: high
   band_meaning: span
   origin: "operator session 2026-09-28: A/A runs 3-6 flag differential-missingness:servedModel (p=0.049, p=0.041); traced to provider-dependent recording"
   plan_refs: ["W1-T2572", "W1-T4575", "W1-T4623", "W1-T4647"]
