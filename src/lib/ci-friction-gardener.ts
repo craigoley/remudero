@@ -300,7 +300,7 @@ export interface CiFrictionGardenSources {
   planOrigins: () => readonly string[];
   /** THE RESERVATION PATH (task-id-reservation.ts via `ciLearningTaskIdMinter`, run-task.ts),
    *  never `max(id)+1` — see that minter's own doc for why. */
-  mintTaskId: () => string;
+  mintTaskId: (filingBranch?: string) => string;
 }
 
 function draftCandidates(inv: CiFrictionInventory): CiFrictionGardenAction[] {
@@ -347,7 +347,8 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
     apply: (ws, plan, scorecard) => {
       const action = plan.actions[0];
       if (!action) return undefined;
-      const taskId = sources.mintTaskId();
+      if (!ws.branch) throw new Error("ci-friction gardener: filing workspace has no branch for task-id reservation");
+      const taskId = sources.mintTaskId(ws.branch);
       const contents = ciFrictionShardYaml(action.price, taskId);
       const verdict = ciFrictionRecordVerdict(contents, `ci-friction:${taskId}`);
       if (!verdict.ok) throw new Error(`ci-friction gardener: drafted record failed lint (${verdict.reason})`);

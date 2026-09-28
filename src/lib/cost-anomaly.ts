@@ -5,6 +5,7 @@ import { appendLedger, type LedgerLine } from "./ledger.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, realLedgerFs, type LedgerGrepFsDeps, type LedgerRotationMemo } from "./ledger-union.js";
 import { installPolicyPath } from "./policy.js";
 import { gatherRuns, type LedgerRecord, type RunSummary } from "./retro.js";
+import { isNeverWorkedVerdict } from "./never-worked.js";
 
 /**
  * W1-T931 COST-ANOMALY SENTINEL (fb-1785237559155-feef92, item 4) — see `plan/policy.yaml`'s
@@ -174,6 +175,23 @@ export interface CostAnomalyFinding {
   /** How many settled runs `medianCostUsd` was computed over — carried so a reader can judge
    *  the median's own weight without a second ledger read. */
   sampleSize: number;
+  /** W1-T4709: settled runs {@link isNeverWorkedVerdict} kept out of the median; absent when none. */
+  excludedCount?: number;
+}
+
+// W1-T4711: the rule lives in a leaf retro.ts can import too; re-exported so callers stay put.
+export { isNeverWorkedVerdict };
+
+/** W1-T4709: run ids whose FIRST `verdict` row (the one `gatherRuns` reads) never worked. */
+export function neverWorkedRunIds(records: readonly LedgerRecord[]): Set<string> {
+  const seen = new Set<string>();
+  const out = new Set<string>();
+  for (const r of records) {
+    if (r.step !== "verdict" || typeof r.run_id !== "string" || seen.has(r.run_id)) continue;
+    seen.add(r.run_id);
+    if (isNeverWorkedVerdict(r)) out.add(r.run_id);
+  }
+  return out;
 }
 
 /**
@@ -188,11 +206,20 @@ export interface CostAnomalyFinding {
  * function stays a pure, re-derivable-from-scratch reduction over `runs` alone, testable without
  * any ledger shape at all.
  */
-export function detectCostAnomalies(runs: readonly RunSummary[], policy: CostAnomalyPolicy): CostAnomalyFinding[] {
+export function detectCostAnomalies(
+  runs: readonly RunSummary[],
+  policy: CostAnomalyPolicy,
+  neverWorked: ReadonlySet<string> = new Set(),
+): CostAnomalyFinding[] {
   const settled = runs.filter((r) => r.verdict !== "incomplete");
   const byClass = new Map<string, RunSummary[]>();
+  const excludedByClass = new Map<string, number>();
   for (const r of settled) {
     const key = r.taskClass ?? "unknown";
+    if (neverWorked.has(r.runId)) {
+      excludedByClass.set(key, (excludedByClass.get(key) ?? 0) + 1);
+      continue;
+    }
     const arr = byClass.get(key) ?? [];
     arr.push(r);
     byClass.set(key, arr);
@@ -202,6 +229,7 @@ export function detectCostAnomalies(runs: readonly RunSummary[], policy: CostAno
     // (ii) A THIN CLASS IS SILENT, NOT ANOMALOUS.
     if (rs.length < policy.minSamples) continue;
     const med = median(rs.map((r) => r.costUsd));
+    const excluded = excludedByClass.get(taskClass) ?? 0;
     for (const r of rs) {
       if (r.costUsd > med * policy.multiplier) {
         out.push({
@@ -212,6 +240,7 @@ export function detectCostAnomalies(runs: readonly RunSummary[], policy: CostAno
           medianCostUsd: round2(med),
           multiplier: policy.multiplier,
           sampleSize: rs.length,
+          ...(excluded > 0 ? { excludedCount: excluded } : {}),
         });
       }
     }
@@ -243,7 +272,7 @@ export function pendingCostAnomalies(
 ): CostAnomalyFinding[] {
   const already = alreadyLedgeredCostAnomalyRunIds(records);
   const runs = gatherRuns(records as LedgerRecord[]);
-  return detectCostAnomalies(runs, policy).filter((f) => !already.has(f.runId) && !alreadyReported.has(f.runId));
+  return detectCostAnomalies(runs, policy, neverWorkedRunIds(records)).filter((f) => !already.has(f.runId) && !alreadyReported.has(f.runId));
 }
 
 /** Build (never write) the ledger line for one finding — pure, same builder/writer split as
@@ -258,6 +287,7 @@ export function costAnomalyLine(finding: CostAnomalyFinding): LedgerLine {
     median_cost_usd: finding.medianCostUsd,
     multiplier: finding.multiplier,
     sample_size: finding.sampleSize,
+    ...(finding.excludedCount !== undefined ? { excluded_count: finding.excludedCount } : {}),
   };
 }
 
@@ -324,7 +354,8 @@ export function costAnomalyIncidentEvent(finding: CostAnomalyFinding): LedgerLin
     name: `cost.anomaly:${finding.taskClass}`,
     message:
       `task ${finding.taskId} (run ${finding.runId}) cost $${finding.costUsd} against class ` +
-      `"${finding.taskClass}"'s median $${finding.medianCostUsd} (×${finding.multiplier}, n=${finding.sampleSize})`,
+      `"${finding.taskClass}"'s median $${finding.medianCostUsd} (×${finding.multiplier}, n=${finding.sampleSize}` +
+      `${finding.excludedCount !== undefined ? `, excluded=${finding.excludedCount}` : ""})`,
   });
 }
 
@@ -346,6 +377,8 @@ interface RunClock {
   startMs: number;
   /** The terminal `verdict` line's ts, in ms — `undefined` while the run is still in flight. */
   endMs?: number;
+  /** W1-T4709: its verdict {@link isNeverWorkedVerdict} — settled, but no sample of the class. */
+  neverWorked?: true;
 }
 
 function runClocks(records: readonly LedgerRecord[]): RunClock[] {
@@ -370,6 +403,7 @@ function runClocks(records: readonly LedgerRecord[]): RunClock[] {
       taskClass: typeof start.task_class === "string" ? start.task_class : "unknown",
       startMs,
       ...(endMs !== undefined && Number.isFinite(endMs) ? { endMs } : {}),
+      ...(isNeverWorkedVerdict(verdictLine) ? { neverWorked: true as const } : {}),
     });
   }
   return out;
@@ -386,9 +420,37 @@ export interface RunningLongFinding {
   multiplier: number;
   /** How many SETTLED runs `medianMs` was computed over. */
   sampleSize: number;
+  /** W1-T4709: settled runs kept out of `medianMs` ({@link isNeverWorkedVerdict}); absent when none. */
+  excludedCount?: number;
 }
 
 export const RUNNING_LONG_STEP = "run.running_long";
+
+/** One class's settled spans (`run.start` -> `verdict`) and how many never-worked runs it left out. */
+export interface SettledSpans {
+  spansMs: number[];
+  excluded: number;
+}
+
+/** W1-T4709: THE settled-span fold — per class, every settled span except a never-worked run's,
+ *  which is counted in `excluded` instead so the sample size stays honest. */
+export function settledSpansByClass(records: readonly LedgerRecord[]): Map<string, SettledSpans> {
+  return settledSpansOf(runClocks(records));
+}
+
+function settledSpansOf(clocks: readonly RunClock[]): Map<string, SettledSpans> {
+  const out = new Map<string, SettledSpans>();
+  for (const c of clocks) {
+    if (c.endMs === undefined) continue;
+    const durationMs = c.endMs - c.startMs;
+    if (durationMs < 0) continue; // a torn/out-of-order pair — never a negative duration
+    const entry = out.get(c.taskClass) ?? { spansMs: [], excluded: 0 };
+    if (c.neverWorked) entry.excluded++;
+    else entry.spansMs.push(durationMs);
+    out.set(c.taskClass, entry);
+  }
+  return out;
+}
 
 /**
  * PURE fold, mirroring {@link detectCostAnomalies}'s shape exactly but over DURATION instead of
@@ -400,19 +462,12 @@ export const RUNNING_LONG_STEP = "run.running_long";
  */
 export function detectRunningLong(records: readonly LedgerRecord[], policy: CostAnomalyPolicy, nowMs: number): RunningLongFinding[] {
   const clocks = runClocks(records);
-  const settledByClass = new Map<string, number[]>();
-  for (const c of clocks) {
-    if (c.endMs === undefined) continue;
-    const durationMs = c.endMs - c.startMs;
-    if (durationMs < 0) continue; // a torn/out-of-order pair — never a negative duration
-    const arr = settledByClass.get(c.taskClass) ?? [];
-    arr.push(durationMs);
-    settledByClass.set(c.taskClass, arr);
-  }
+  const settledByClass = settledSpansOf(clocks);
   const out: RunningLongFinding[] = [];
   for (const c of clocks) {
     if (c.endMs !== undefined) continue; // only a run STILL RUNNING is ever a candidate
-    const durations = settledByClass.get(c.taskClass);
+    const settled = settledByClass.get(c.taskClass);
+    const durations = settled?.spansMs;
     if (!durations || durations.length < policy.minSamples) continue;
     const medianMs = median(durations);
     const elapsedMs = nowMs - c.startMs;
@@ -425,6 +480,7 @@ export function detectRunningLong(records: readonly LedgerRecord[], policy: Cost
         medianMs: Math.round(medianMs),
         multiplier: policy.multiplier,
         sampleSize: durations.length,
+        ...(settled.excluded > 0 ? { excludedCount: settled.excluded } : {}),
       });
     }
   }
@@ -466,6 +522,7 @@ export function runningLongLine(finding: RunningLongFinding): LedgerLine {
     median_ms: finding.medianMs,
     multiplier: finding.multiplier,
     sample_size: finding.sampleSize,
+    ...(finding.excludedCount !== undefined ? { excluded_count: finding.excludedCount } : {}),
   };
 }
 
@@ -492,7 +549,8 @@ export function runningLongIncidentEvent(finding: RunningLongFinding): LedgerLin
     name: `run.running_long:${finding.taskClass}`,
     message:
       `task ${finding.taskId} (run ${finding.runId}) has run ${finding.elapsedMs}ms against class ` +
-      `"${finding.taskClass}"'s median ${finding.medianMs}ms (×${finding.multiplier}, n=${finding.sampleSize})`,
+      `"${finding.taskClass}"'s median ${finding.medianMs}ms (×${finding.multiplier}, n=${finding.sampleSize}` +
+      `${finding.excludedCount !== undefined ? `, excluded=${finding.excludedCount}` : ""})`,
   });
 }
 

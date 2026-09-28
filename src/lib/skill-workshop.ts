@@ -20,6 +20,12 @@ import { createHash } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
 import type { Task } from "./plan.js";
+import {
+  mineTranscriptWorkflows,
+  renderTranscriptWorkflowSteps,
+  type TranscriptLedgerRow,
+  type TranscriptRun,
+} from "./workflow-mining.js";
 
 /** The fields {@link renderSkillDraft} reads off a mined procedural candidate — see this module's
  *  header for why this duplicates retro.ts's `ProceduralCandidate` rather than importing it. */
@@ -82,14 +88,30 @@ export function proceduralCandidateHash(candidate: ProceduralCandidateLike): str
     .slice(0, 16);
 }
 
+/** The transcript corpus {@link renderSkillDraft} mines a distinguishing workflow from (W1-T4668,
+ *  design clause ii) — optional so the existing call site (retro.ts's `buildGather`, unchanged by
+ *  this task) keeps drafting off signals alone until a future caller wires the ledger through. */
+export interface TranscriptContext {
+  runs: readonly TranscriptRun[];
+  records: readonly TranscriptLedgerRow[];
+}
+
 /**
  * Render one procedural candidate as a Claude Code skill draft (design clause i). `undefined` for
  * a candidate under the two-run floor: {@link import("./retro.js").mineProceduralCandidates}
  * already enforces this threshold, but a caller handing this function a single-run candidate
  * directly (a test, or a future caller that skips mining) must get NOTHING rather than an
  * anecdote dressed as a proven procedure.
+ *
+ * `transcripts`, when supplied, mines the SAME candidate's task type for a {@link
+ * TranscriptWorkflow} (workflow-mining.ts, W1-T4668) and appends its distinguishing steps —
+ * actual tool-call steps every first-attempt-success run of this shape took that no repaired run
+ * ever needed — after the signal-derived steps, so the Procedure section stops restating the
+ * outcome ("resolve on the first attempt") and starts naming what a successful worker actually
+ * DID. A shape with no transcript workflow (none mined, or none matching this candidate's task
+ * type) leaves the Procedure section exactly as before.
  */
-export function renderSkillDraft(candidate: ProceduralCandidateLike): SkillDraft | undefined {
+export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts?: TranscriptContext): SkillDraft | undefined {
   if (candidate.supportingRuns < 2) return undefined;
   const hash = proceduralCandidateHash(candidate);
   const procedureKey = procedureKeyFor(candidate);
@@ -99,9 +121,14 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike): SkillDraft
   const description = `A procedure shape proven across ${candidate.supportingRuns} merged ${candidate.taskType} run(s): ${candidate.signals.join(" + ")}.`;
   const appliesTo = injectableSkillTaskType(candidate.taskType);
   const steps = candidate.signals.map((key) => `- ${PROCEDURAL_STEP_TEXT[key] ?? key}`);
+  const workflow = transcripts
+    ? mineTranscriptWorkflows(transcripts.runs, transcripts.records).find((w) => w.taskType === candidate.taskType)
+    : undefined;
+  const workflowSteps = workflow ? renderTranscriptWorkflowSteps(workflow) : [];
   const evidence = [
     ...candidate.runIds.map((runId) => `- [src: run#${runId}]`),
     `- Filed under: ${candidate.taskIds.join(", ")}`,
+    ...(workflow ? workflow.runIds.map((runId) => `- [src: transcript#${runId}]`) : []),
   ];
   const markdown = [
     "---",
@@ -116,6 +143,7 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike): SkillDraft
     "## Procedure",
     "",
     ...steps,
+    ...workflowSteps,
     "",
     "## Evidence",
     "",

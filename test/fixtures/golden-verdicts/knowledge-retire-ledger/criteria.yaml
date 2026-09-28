@@ -1,0 +1,4 @@
+- claim: this pass is recorded in the garden log
+  proof: "grep: ^## Pass 2026-09-28T19:01:48.637Z$ in docs/knowledge-garden-log.md"
+- claim: the gardener's retire of ledger-corpus-needs-the-resolver is marked in its entry
+  proof: "grep: knowledge gardener: retire ledger-corpus-needs-the-resolver$ in learnings/architecture.yaml"

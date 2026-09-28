@@ -13,7 +13,16 @@
  * performs no I/O and holds no ledger or HTTP concerns — src/lib/operator-agent.ts is the durable
  * producer/consumer that persists the records this module validates and advances, mirroring the
  * experiment-v1 split between record shape and ledger wiring.
+ *
+ * W1-T4665: the fix-rung prompt is the first candidate ever proposed through reflective evolution
+ * (prompt-evolution.ts) rather than hand-written. `proposePromptEvolutionPromotion`, below, is the
+ * ONLY bridge between that module's candidates and this one's guarded path — it wraps a candidate as
+ * a `proposed` PromotionRecord and nothing else in the codebase installs one directly, so a prompt
+ * candidate reaches production only by clearing this module's shadow -> canary -> observing ->
+ * promoted state machine with rollback, exactly like any other promotion.
  */
+
+import { proposePromptCandidates, type PromptCandidate } from "./prompt-evolution.js";
 
 export const EXPERIMENT_PROMOTION_VERSION = "experiment-promotion-v1";
 
@@ -199,6 +208,69 @@ export function validatePromotionRecord(value: unknown): PromotionRecord | null 
     createdAt: new Date(value.createdAt).toISOString(),
     state: "proposed",
   };
+}
+
+// --- Prompt evolution wiring (W1-T4665) --------------------------------------------------------
+
+/** Everything `proposePromptEvolutionPromotion` needs beyond the candidate itself: the same shape
+ *  `validatePromotionRecord` requires of every other promotion, so a prompt candidate carries the
+ *  identical comparable baseline and canary guardrails as any hand-proposed candidate. */
+export interface PromptEvolutionPromotionInput {
+  basePrompt: string;
+  transcripts: readonly unknown[];
+  seed: string;
+  baseline: string;
+  scope: PromotionScope;
+  comparisonPopulation: string;
+  denominatorFloor: number;
+  observationWindow: PromotionObservationWindow;
+  guardMetrics: PromotionGuardMetric[];
+  maxExposure: number;
+  owner: string;
+  expiresAt: string;
+  createdAt: string;
+  rollback: PromotionRollback;
+}
+
+export interface PromptEvolutionPromotionOutcome {
+  candidates: PromptCandidate[];
+  winner: PromptCandidate | undefined;
+  promotion: PromotionRecord | null;
+}
+
+/**
+ * The ONLY route a fix-rung prompt candidate may take toward production: propose candidates from
+ * recorded fix transcripts via prompt-evolution.ts's reflective, held-out-scored search
+ * (`proposePromptCandidates`), then wrap the leading candidate as a `proposed` `PromotionRecord` —
+ * validated by the exact same `validatePromotionRecord` every other candidate must pass — so it
+ * still has to clear this module's replayPromotion -> approved -> shadow -> canary -> observing ->
+ * promoted path with rollback before it is ever exposed. Nothing else in this codebase installs a
+ * prompt candidate directly: this function performs no I/O itself and returns `promotion: null`
+ * whenever no candidate was proposed or the wrapped record fails validation, rather than a partial
+ * or unguarded promotion.
+ */
+export function proposePromptEvolutionPromotion(input: PromptEvolutionPromotionInput): PromptEvolutionPromotionOutcome {
+  const candidates = proposePromptCandidates(input.basePrompt, input.transcripts, input.seed);
+  const winner = candidates[0];
+  if (!winner) return { candidates, winner: undefined, promotion: null };
+  const promotion = validatePromotionRecord({
+    version: EXPERIMENT_PROMOTION_VERSION,
+    promotionId: `prompt-evolution:${input.seed}:${winner.id}`,
+    candidate: winner.id,
+    baseline: input.baseline,
+    scope: input.scope,
+    comparisonPopulation: input.comparisonPopulation,
+    denominatorFloor: input.denominatorFloor,
+    observationWindow: input.observationWindow,
+    guardMetrics: input.guardMetrics,
+    maxExposure: input.maxExposure,
+    owner: input.owner,
+    expiresAt: input.expiresAt,
+    rollback: input.rollback,
+    createdAt: input.createdAt,
+    state: "proposed",
+  });
+  return { candidates, winner, promotion };
 }
 
 // --- Replay ------------------------------------------------------------------------------------

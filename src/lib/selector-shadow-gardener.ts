@@ -422,7 +422,7 @@ export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string,
     `  note: ${q(`W1-T4439 observed ${miss.selection} miss on coverage run ${miss.runId}${miss.prNumber ? ` for PR #${miss.prNumber}` : ""} at ${miss.headSha}: ${edge}. The changed paths are candidate missing edges, not guessed import edges. Inspect the exact head and teach the selector the missing dependency before W1-T4406 narrows CI.`)}`,
     "  acceptance:",
     `    - claim: ${q(`the ${miss.selection} selector includes ${miss.file} when this edge is exercised`)}`,
-    `      proof: ${q(`grep: ${miss.file} in src/lib/affected-suites.ts`)}`,
+    `      proof: ${q(`grep: ${miss.file.replaceAll(".", "\\.")} in src/lib/affected-suites.ts`)}`,
     "",
   ].join("\n");
 }
@@ -434,7 +434,7 @@ export function runSelectorShadowGardener(
   deps: GardenerDeps,
   readRuns: () => SelectorShadowRun[],
   readChangedPaths: (miss: SelectorShadowMiss) => string[],
-  mintTaskId: () => string,
+  mintTaskId: (filingBranch: string) => string,
 ): SelectorShadowReport {
   const path = join(deps.stateDir, "selector-shadow-gardener.json");
   const stored = readFileIfExists(path);
@@ -446,20 +446,22 @@ export function runSelectorShadowGardener(
   const miss = report.misses.find((m) => !filed.has(selectorShadowMissKey(m)));
   if (miss) {
     const changedPaths = readChangedPaths(miss);
-    const taskId = mintTaskId();
-    const name = `${taskId.toLowerCase()}-selector-shadow-miss.yaml`;
-    const relativePath = join("plan", "tasks.d", name);
-    const contents = selectorShadowMissTask(miss, taskId, changedPaths);
-    const task = loadPlanFromYaml(contents, name).tasks[0];
-    const lint = lintTask(task);
-    if (!lint.ok) throw new Error(`selector shadow: missed-edge task failed lint: ${lint.violations.map((v) => v.check).join(", ")}`);
     const workspace = deps.openWorkspace();
     try {
+      if (!workspace.branch) throw new Error("selector shadow: filing workspace has no branch for task-id reservation");
+      const taskId = mintTaskId(workspace.branch);
+      const name = `${taskId.toLowerCase()}-selector-shadow-miss.yaml`;
+      const relativePath = join("plan", "tasks.d", name);
+      const contents = selectorShadowMissTask(miss, taskId, changedPaths);
+      const task = loadPlanFromYaml(contents, name).tasks[0];
+      const lint = lintTask(task);
+      if (!lint.ok) throw new Error(`selector shadow: missed-edge task failed lint: ${lint.violations.map((v) => v.check).join(", ")}`);
       writeAtomic(join(workspace.root, relativePath), contents);
+      const originProof = selectorShadowMissKey(miss).replaceAll(".", "\\.");
       const prUrl = workspace.land({
         paths: [relativePath],
         title: `fix(selector): file missed ${miss.selection} edge for ${miss.file.split("/").at(-1)}`,
-        body: `The W1-T4439 shadow record observed ${miss.selection} miss on run ${miss.runId}: ${changedPaths.length ? changedPaths.join(", ") : miss.headSha} -> ${miss.file}.\n\nThe task is parked for review; W1-T4406 remains gated.\n\nRemudero-Task: ${taskId}`,
+        body: `The W1-T4439 shadow record observed ${miss.selection} miss on run ${miss.runId}: ${changedPaths.length ? changedPaths.join(", ") : miss.headSha} -> ${miss.file}.\n\nThe task is parked for review; W1-T4406 remains gated.\n\n## Acceptance\n\n- claim: the missed selector edge is recorded as a parked task\n  proof: grep: ${originProof} in ${relativePath}`,
       });
       if (!prUrl) throw new Error("selector shadow: task PR was not opened");
       filed.add(selectorShadowMissKey(miss));
@@ -477,7 +479,7 @@ export function startSelectorShadowGardener(
   deps: GardenerDeps,
   readRuns: () => SelectorShadowRun[] | Promise<SelectorShadowRun[]>,
   readChangedPaths: (miss: SelectorShadowMiss) => string[],
-  mintTaskId: () => string,
+  mintTaskId: (filingBranch: string) => string,
   intervalMs: number,
 ): { stop: () => void } {
   let running = false;

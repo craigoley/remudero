@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { parse as parseYaml } from "yaml";
 
 import { fixedClock } from "../src/lib/clock.js";
 import {
@@ -144,13 +146,17 @@ test("W1-T4439: a missed failure files a task naming the missing edge", () => {
     repoRoot: root,
     openWorkspace: () => ({
       root,
+      branch: "selector-shadow-garden-test",
       land: (opts: { paths: string[]; title: string; body: string }) =>
         (landed.push(opts), "https://github.com/acme/remudero/pull/99"),
       dispose: () => {},
     }),
     log: (step: string) => { events.push(step); },
   };
-  const pass = () => runSelectorShadowGardener(deps, () => [observed], () => ["scripts/clock-signature-ratchet.mjs"], () => "W1-T9001");
+  const pass = () => runSelectorShadowGardener(deps, () => [observed], () => ["scripts/clock-signature-ratchet.mjs"], (branch) => {
+    assert.equal(branch, "selector-shadow-garden-test");
+    return "W1-T9001";
+  });
   const report = pass();
   assert.equal(report.verdict, "misses");
   assert.equal(landed.length, 1);
@@ -160,6 +166,13 @@ test("W1-T4439: a missed failure files a task naming the missing edge", () => {
   assert.match(task, /at abc123/);
   assert.match(task, /origin: "selector-shadow:abc123:narrow:test\/a\.test\.ts"/);
   assert.match(task, /verify: human/);
+  const filed = parseYaml(task) as Array<{ acceptance: Array<{ proof: string }> }>;
+  assert.equal(filed[0]!.acceptance[0]!.proof, "grep: test/a\\.test\\.ts in src/lib/affected-suites.ts");
+  assert.match(landed[0]!.body, /## Acceptance/);
+  assert.doesNotMatch(landed[0]!.body, /Remudero-Task:/);
+  const proof = landed[0]!.body.match(/proof: grep: (.+) in plan\/tasks\.d\/w1-t9001-selector-shadow-miss\.yaml/)?.[1];
+  assert.ok(proof);
+  assert.match(execFileSync("grep", ["-arn", "--", proof, join(root, landed[0]!.paths[0]!)], { encoding: "utf8" }), /origin:/);
   assert.ok(events.includes("selector-shadow.report"));
   assert.ok(events.includes("selector-shadow.miss_filed"));
   pass();
