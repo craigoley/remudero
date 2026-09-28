@@ -252,7 +252,7 @@ test("W1-T3793: external wait handoff releases claims with freshness evidence", 
         externalWaitFreshness: () => STALE,
       }),
     );
-    assert.equal(result.verdict, "blocked_transient", "the run returns a retryable named outcome, not a CI failure");
+    assert.equal(result.verdict, "handed_off", "the run returns a named hand-off with its open PR");
     assert.equal(result.prUrl, PR_URL);
     const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
       .split("\n")
@@ -270,7 +270,7 @@ test("W1-T3793: external wait handoff releases claims with freshness evidence", 
       { old_sha: OLD_SHA, new_sha: NEW_SHA, head_sha: HEAD_SHA },
       "the handoff ledger record carries both freshness revisions and the CI head it leaves for the next daemon",
     );
-    assert.equal(ledger.some((line) => line.step === "verdict" && line.verdict === "blocked_transient"), true);
+    assert.equal(ledger.some((line) => line.step === "verdict" && line.verdict === "handed_off"), true);
     assert.equal(
       ledger.some((line) => line.step === "dispatch.claim_released" && line.dropped === true),
       true,
@@ -315,7 +315,7 @@ test("DAEMON WIRING: the production runOne supplies a material freshness handoff
       },
       runTask: async (taskId, options) => {
         forwarded = options;
-        return { taskId, runId: "freshness-handoff-test", merged: false, costUsd: 0, verdict: "blocked_transient" };
+        return { taskId, runId: "freshness-handoff-test", merged: false, costUsd: 0, verdict: "handed_off" };
       },
     });
     assert.equal(code, 0, "the composition root reaches the injected daemon loop");
@@ -326,7 +326,7 @@ test("DAEMON WIRING: the production runOne supplies a material freshness handoff
       .trim()
       .split(/\s+/)[0];
     const result = await captured.runOne("T-FRESHNESS-HANDOFF");
-    assert.equal(result.verdict, "blocked_transient");
+    assert.equal(result.verdict, "handed_off");
     assert.ok(forwarded, "the daemon runOne invokes its configured runTask implementation");
     const freshness = forwarded.externalWaitFreshness?.();
     assert.deepEqual(freshness, { stale: true, oldSha, newSha }, "only a clean material origin advance crosses the daemon handoff boundary");
