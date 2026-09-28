@@ -46559,9 +46559,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "case-file",
-    syntax: "rmd case-file <task-id> [--json]",
+    syntax: "rmd case-file <task-id> [--json] | --tasks <id,id,...> [--tasks-file <path>] [--json]",
     summary: "Read one task's sourced plan, run, PR, review, CI, and release evidence.",
-    detail: "W1-T4607: a read-only task case file. It streams a bounded three-form ledger window, joins only task-owned run IDs and exact assignment IDs, then reads the current PR head and its check rollup. Every section says observed, stale, pending, or unavailable with source and as-of; a merge is never reported as a deployment or healthy runtime.",
+    detail: "W1-T4607: a read-only task case file. It streams a bounded three-form ledger window, joins only task-owned run IDs and exact assignment IDs, then reads the current PR head and its check rollup. Every section says observed, stale, pending, or unavailable with source and as-of; a merge is never reported as a deployment or healthy runtime. W1-T4637: a damaged ledger row refuses only a task it could belong to (it names the task or one of its runs, or names no identity and its time is unreadable or inside the window); an unrelated one leaves the section observed with its malformed count and bounded source. --tasks (or --tasks-file) streams the union ONCE and emits a JSON array of task-case-file-v1 under one shared asOf, so a cohort snapshot fits the verified join's freshness window.",
   },
   {
     name: "sweep",
