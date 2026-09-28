@@ -429,8 +429,7 @@ test("W1-T2610: control — with no rewind, the same wiring pushes normally and 
 // ── claim 4 (structural) — BOTH literal call sites carry the wiring, not just one ───────────
 
 test("W1-T2610: both fix-rung push deps route through pushFixRound, which passes expectedHeadSha to gitPushRunBranch (grep-verifiable)", () => {
-  const runTask = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
-  const sweep = readFileSync(fileURLToPath(new URL("../src/lib/sweep.ts", import.meta.url)), "utf8");
+  const [runTask, sweep] = ["../src/run-task.ts", "../src/lib/sweep.ts"].map((p) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8"));
   // W1-T4693: the run loop's dep and the sweep's dep are the one shared helper, not two closures.
   assert.equal((runTask.match(/^ {10}push: pushFixRound,$/gm) ?? []).length, 1, "runTaskBody's fix rung pushes through pushFixRound");
   assert.equal((sweep.match(/^ {12}push: pushFixRound,$/gm) ?? []).length, 1, "the sweep's fix dispatch pushes through pushFixRound");

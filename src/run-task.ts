@@ -14803,9 +14803,9 @@ const CENSUS_PUSH_NEVER_BYPASS =
   "one. Never push with --no-verify or RMD_PREPUSH_GATES=0: the harness retries the push through the hook.";
 
 /** W1-T4693: a fix round's push that did not land — `refusal` set when the pre-push census refused it. */
-export class FixRoundPushError extends Error {
+export class FixRoundPushError extends RmdError {
   constructor(readonly pushCause: RunErrorCause, readonly refusal: CensusPushRefusal | undefined, readonly detail: string) {
-    super(`fix round push did not land (${pushCause}): ${detail}`);
+    super("git", GENERIC_EXIT_CODE, `fix round push did not land (${pushCause}): ${detail}`, { pushCause });
     this.name = "FixRoundPushError";
   }
 }
@@ -14817,12 +14817,8 @@ export function pushFixRound(wt: string, branch: string, expectedHeadSha?: strin
     gitPushRunBranch(wt, { expectedHeadSha, exec: (file, args) => void execFileSync(file, args, { stdio: ["ignore", "ignore", "pipe"] }) });
   } catch (err) {
     if (err instanceof LanePushForeignHeadError) throw err;
-    let remote: string | undefined;
-    try {
-      remote = execFileSync("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`], { encoding: "utf8" }).split(/\s/)[0];
-    } catch {
-      remote = undefined;
-    }
+    // spawnSync, not a try: an unreadable remote simply is not the expected head.
+    const remote = spawnSync("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`], { encoding: "utf8" }).stdout?.split(/\s/)[0];
     if (expectedHeadSha !== undefined && remote === expectedHeadSha) return;
     throw new FixRoundPushError(runErrorCause(err), censusPushRefusal(err), String((err as Error)?.message ?? err));
   }
