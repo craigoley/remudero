@@ -13,6 +13,7 @@
   files:
     - src/lib/benchmark-aa-prospective.ts
     - src/lib/paired-trial.ts
+    - src/run-task.ts
     - test/a-prospective-aa-earns-a-clean-receipt.test.ts
   status: queued
   priority: 2
@@ -44,6 +45,8 @@
   acceptance:
     - claim: "a prospective A/A runs both labels on one pinned stack, refuses api billing before spawn, and its receipt is accepted by pilot activation only when clean"
       proof: "unit test: test/a-prospective-aa-earns-a-clean-receipt.test.ts"
+    - claim: "the operator reaches the prospective A/A through an rmd verb that registers, reports and pauses it"
+      proof: "grep: runProspectiveAa( in src/run-task.ts"
   falsifier: |
     Let one side attempt route through the live policy instead of the pinned stack: the report
     reads stack-deviation and pilot activation refuses the receipt.
