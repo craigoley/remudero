@@ -160,7 +160,7 @@ function activationArgs(dir: string, request: Record<string, unknown>, report: u
   const aaPath = join(dir, "aa-report.json");
   writeFileSync(requestPath, JSON.stringify(request));
   writeFileSync(aaPath, JSON.stringify(report));
-  return ["activate", "--request", requestPath, "--aa-report", aaPath, "--confirm-cash-ceiling-usd", "100", "--state-dir", stateDir];
+  return ["activate", "--request", requestPath, "--aa-report", aaPath, "--state-dir", stateDir];
 }
 
 const plus = (iso: string, ms: number) => new Date(Date.parse(iso) + ms).toISOString();
@@ -532,7 +532,7 @@ test("paid benchmark pilot reports evidence without fabricated wins", async () =
 
 test("rmd benchmark-paid-pilot is an operator verb, and a refused activation starts nothing", async () => {
   const { COMMANDS, HANDLERS } = await import("../src/run-task.js");
-  assert.ok(COMMANDS.some((spec) => spec.name === "benchmark-paid-pilot" && spec.syntax.includes("--confirm-cash-ceiling-usd 100")));
+  assert.ok(COMMANDS.some((spec) => spec.name === "benchmark-paid-pilot" && spec.syntax.includes("activate --request") && !spec.syntax.includes("confirm-cash-ceiling")));
   const home = mkdtempSync(join(tmpdir(), "rmd-benchmark-paid-pilot-home-"));
   const savedHome = process.env.HOME;
   const savedLog = console.log;
@@ -558,6 +558,15 @@ test("rmd benchmark-paid-pilot is an operator verb, and a refused activation sta
   }
 });
 
+test("paid pilot activation no longer takes a confirm cash ceiling flag", async () => {
+  // Operator ruling 2026-09-28: the confirm flag is gone; the $100 ceiling stays in the protocol.
+  await withDir(async (dir) => {
+    const good = activationArgs(dir, pilotRequest(), aaReport());
+    const printed = (await runVerb([...good, "--confirm-cash-ceiling-usd", "100"], ACT, activateBenchmarkPaidPilot)).printed[0]!;
+    assert.match(printed, /arguments-invalid/);
+  });
+});
+
 test("rmd benchmark-paid-pilot refuses malformed invocations by name", async () => {
   await withDir(async (dir) => {
     const reasonOf = async (args: string[], activate = activateBenchmarkPaidPilot) => (await runVerb(args, ACT, activate)).printed[0]!;
@@ -566,8 +575,6 @@ test("rmd benchmark-paid-pilot refuses malformed invocations by name", async () 
     assert.match(await reasonOf(["activate", "--nope"]), /arguments-invalid/);
     const good = activationArgs(dir, pilotRequest(), aaReport());
     const without = (flag: string) => good.filter((_, i) => good[i] !== flag && good[i - 1] !== flag);
-    assert.match(await reasonOf(without("--confirm-cash-ceiling-usd")), /cash-ceiling-not-confirmed/);
-    assert.match(await reasonOf([...without("--confirm-cash-ceiling-usd"), "--confirm-cash-ceiling-usd", "1000"]), /cash-ceiling-not-confirmed/);
     assert.match(await reasonOf(without("--request")), /request-and-aa-report-required/);
     assert.match(await reasonOf(good.map((arg) => arg.endsWith("request-pilot-fixture-1.json") ? join(dir, "missing.json") : arg)), /request-unreadable/);
     writeFileSync(join(dir, "bad-request.json"), JSON.stringify({ version: "v0" }));

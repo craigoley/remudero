@@ -127,7 +127,7 @@ async function stateWith(request?: Record<string, unknown>): Promise<{ dir: stri
   writeFileSync(join(dir, "request.json"), JSON.stringify(request));
   writeFileSync(join(dir, "aa.json"), JSON.stringify(aaReport()));
   const { code, printed } = await verb(["activate", "--request", join(dir, "request.json"), "--aa-report", join(dir, "aa.json"),
-    "--confirm-cash-ceiling-usd", "100", "--state-dir", stateDir], ACT);
+    "--state-dir", stateDir], ACT);
   assert.equal(code, 0, printed.join("\n"));
   const loaded = loadPaidPilotProtocol(stateDir, String(request.pilotId));
   assert.ok(loaded.ok);
@@ -248,11 +248,11 @@ test("shadow records without spawning, and the pilot report shows the shadow dec
   const live = pilotRequest({ pilotId: "live-1" });
   writeFileSync(join(shadow.dir, "live.json"), JSON.stringify(live));
   const alongside = await verb(["activate", "--request", join(shadow.dir, "live.json"), "--aa-report", join(shadow.dir, "aa.json"),
-    "--confirm-cash-ceiling-usd", "100", "--state-dir", shadow.stateDir], ACT);
+    "--state-dir", shadow.stateDir], ACT);
   assert.equal(alongside.code, 0, "a shadow pilot does not block the live activation that follows it");
   writeFileSync(join(shadow.dir, "shadow2.json"), JSON.stringify(pilotRequest({ pilotId: "shadow-2", paired: { samplingRate: 1, maxPairs: 1, shadow: true } })));
   const second = await verb(["activate", "--request", join(shadow.dir, "shadow2.json"), "--aa-report", join(shadow.dir, "aa.json"),
-    "--confirm-cash-ceiling-usd", "100", "--state-dir", shadow.stateDir], ACT);
+    "--state-dir", shadow.stateDir], ACT);
   assert.equal(second.code, 2);
   assert.match(second.printed.join("\n"), /another-pilot-active/);
   const both = activePaidPilotProtocols(shadow.stateDir, DURING).map((entry) => entry.pilotId).sort();
