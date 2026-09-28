@@ -41,7 +41,7 @@ const baseEvidence: StallEvidence = {
   shardHash: "shard-a",
 };
 
-test('W1-T4678: the verifier returns one of its four outcomes from the evidence', () => {
+test("W1-T4678: the verifier returns one of its four outcomes from the evidence", () => {
   const cases: Array<{ name: string; evidence: StallEvidence; kind: "amend" | "retire" | "requeue" | "escalate" }> = [
     {
       name: "a merged PR the breaker's own scan missed",
@@ -83,7 +83,7 @@ test('W1-T4678: the verifier returns one of its four outcomes from the evidence'
   }
 });
 
-test('W1-T4678: an unchanged fingerprint is never verified twice', () => {
+test("W1-T4678: an unchanged fingerprint is never verified twice", () => {
   withLedger("unchanged-fp", (ledgerPath) => {
     const first = verifyStalledTask("W1-STALL", baseEvidence, ctx(ledgerPath));
     assert.equal(first.alreadyVerified, false);
