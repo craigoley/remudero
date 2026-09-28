@@ -1,0 +1,13 @@
+- id: W1-T4699
+  title: "Stamp ready: embed placeholders New-IDs into MASTER-PLAN ratification artifact"
+  repo: "MASTER-PLAN"
+  depends_on: ["W1-T4698", "W1-T112"]
+  type: "implement"
+  verify:
+    - activity: "stamp-embed"
+      proof: "grep: stamp placeholder list matches fragment"
+  risk: "low"
+  status: "queued"
+  attempts: 0
+  origin: "ratification draft"
+  files: ["MASTER-PLAN.md", "plan/tasks.yaml"]

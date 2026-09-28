@@ -1,0 +1,13 @@
+- id: W1-T4697
+  title: "MASTER-PLAN §7/P25 ratification groundwork: confirm alignment with existing plan"
+  repo: "MASTER-PLAN"
+  depends_on: ["W1-T110"]
+  type: "implement"
+  verify:
+    - activity: "alignment-check"
+      proof: "grep: MASTER-PLAN.md alignment with plan/tasks.yaml"
+  risk: "low"
+  status: "queued"
+  attempts: 0
+  origin: "ratification draft"
+  files: ["MASTER-PLAN.md", "plan/tasks.yaml"]

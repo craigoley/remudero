@@ -1,0 +1,13 @@
+- id: W1-T4698
+  title: "RATIFICATION CANDIDATE: compile acceptance lines for P25 and surface for operator decision"
+  repo: "MASTER-PLAN"
+  depends_on: ["W1-T4697", "W1-T111"]
+  type: "implement"
+  verify:
+    - activity: "acceptance-merge-criteria"
+      proof: "grep: verify acceptance lines against plan-checks"
+  risk: "low"
+  status: "queued"
+  attempts: 0
+  origin: "ratification draft"
+  files: ["MASTER-PLAN.md", "plan/tasks.yaml"]
