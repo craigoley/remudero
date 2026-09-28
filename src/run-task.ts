@@ -886,7 +886,7 @@ import {
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
 // Prompt, tools, scorer and environment remain unavailable until immutable trial artifacts exist.
@@ -14026,7 +14026,7 @@ export function recordBenchmarkWorkerAttempt(
     try {
       const assignment = selected();
       log("worker.attempt", {
-        ...(assignment ? { selection_assignment_id: assignment.id } : {}),
+        ...attemptAssignmentJoin(assignment?.id, true),
         success: false,
         worker_failure: "spawn-threw-before-result",
         ...spawnFailureDetail(error, assignment !== undefined),
@@ -14048,7 +14048,7 @@ export function recordBenchmarkWorkerAttempt(
       const assignmentId = resultId ?? selection?.id;
       const resultEnvelopeObserved = typeof result.subtype === "string" && result.subtype.length > 0;
       log("worker.attempt", {
-        ...(assignmentId ? { selection_assignment_id: assignmentId } : {}),
+        ...attemptAssignmentJoin(assignmentId, false),
         ...(resultId && selection && resultId !== selection.id ? { assignment_observed: false } : {}),
         ...(result.isError || result.apiError || result.usageRefusal
           ? { success: false }
@@ -14102,8 +14102,7 @@ export function dispatchFallbackObserver(
         reason: "worker-result-fields-unavailable",
         error_class: error instanceof TypeError ? "TypeError" : error instanceof Error ? "Error" : "non-error" }));
     }
-    try { log("worker.attempt", { ...(attempt.selectionAssignmentId
-      ? { selection_assignment_id: attempt.selectionAssignmentId } : {}),
+    try { log("worker.attempt", { ...attemptAssignmentJoin(attempt.selectionAssignmentId, false),
       attempted_model: attempt.model, success: false, worker_failure: attempt.reason, ...resources }); }
     catch { console.error(JSON.stringify({ event: "benchmark.dispatch_fallback_attempt_unavailable",
       reason: "ledger-write-failed" })); }
