@@ -991,6 +991,9 @@ export interface AutomationPreflightInput {
   readonly receipts: readonly AutomationActionReceipt[];
   readonly approval?: AutomationApprovalDecision;
   readonly clock: Clock;
+  /** W1-T3878: refusals an authority OUTSIDE this engine derived (delegation-profile.ts's
+   *  `delegationEligibility`), merged into the findings so a refused profile is never `ready`. */
+  readonly eligibility?: readonly AutomationPreflightFinding[];
 }
 
 function preconditionFinding(
@@ -1051,6 +1054,7 @@ export function preflightAutomationAction(input: AutomationPreflightInput): Auto
   const findings: AutomationPreflightFinding[] = [];
   if (approval === "pending") findings.push({ outcome: "refused", code: "approval-pending", detail: `a ${action.risk}-risk action needs an operator approval` });
   if (approval === "rejected") findings.push({ outcome: "refused", code: "approval-rejected", detail: "an operator rejected this action" });
+  findings.push(...(input.eligibility ?? []));
   const maxAgeMs = action.freshness.maxAgeSeconds * 1000;
   for (const precondition of action.preconditions) {
     const observation = [...input.observations].reverse().find((item) => item.preconditionId === precondition.id);
@@ -1169,6 +1173,24 @@ export function executeAutomationAction(input: AutomationExecutionInput): Automa
     preflight,
     receipt: makeAutomationReceipt(action, receipts, at, { kind: "execution", outcome: "in-progress", preflight: "ready", reason: "admitted: preflight ready, awaiting completion evidence" }),
   };
+}
+
+export interface AutomationEvaluationInput extends AutomationExecutionInput {
+  /** Required here, unlike on {@link AutomationExecutionInput}: an empty list is an explicit
+   *  statement that the caller's authority check found nothing to refuse, never an omission. */
+  readonly eligibility: readonly AutomationPreflightFinding[];
+}
+
+/**
+ * W1-T3878: the execution seam for a request that carries a delegation's authority. Eligibility is
+ * DERIVED from a delegation profile plus this action's own authoritative preflight — the profile's
+ * refusals enter preflight as findings, so the first-precedence outcome and the refusal receipt
+ * name them exactly like a precondition. A non-refusal finding cannot widen anything: eligibility
+ * only ever subtracts, so one claiming any other outcome is coerced to `refused`.
+ */
+export function evaluateAutomationAction(input: AutomationEvaluationInput): AutomationStepResult {
+  const eligibility = input.eligibility.map((finding) => (finding.outcome === "refused" ? finding : { ...finding, outcome: "refused" as const }));
+  return executeAutomationAction({ ...input, eligibility });
 }
 
 export interface AutomationCompletionInput {

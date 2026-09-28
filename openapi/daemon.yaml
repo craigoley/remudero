@@ -2548,6 +2548,18 @@ components:
         dryRun:
           type: boolean
           description: Execute only; a dry run evaluates preflight and records a dry-run receipt without admitting anything.
+        delegationId:
+          type: string
+          maxLength: 160
+          description: >
+            W1-T3878 -- the delegation-profile-v1 this request acts under. Its eligibility (missing,
+            revoked, stale, expired, unapproved, over budget, out of scope, unlinked, capability,
+            risk ceiling, human gate) enters preflight as refused findings named `delegation-*`.
+        estimatedCostUsd:
+          type: number
+          minimum: 0
+          maximum: 10000
+          description: W1-T3878 -- the cost an admission under `delegationId` charges against that profile's cost budget.
 
     OperatorAgentActionCompletionRequest:
       type: object
@@ -2604,6 +2616,340 @@ components:
           $ref: "#/components/schemas/AutomationActionReceipt"
         preflight:
           $ref: "#/components/schemas/AutomationPreflightResult"
+
+    # ── W1-T3878 -- delegation-profile-v1: the trust budget every delegation carries ──────────
+    DelegationProfileScope:
+      oneOf:
+        - type: object
+          required: [kind, repository]
+          properties:
+            kind:
+              type: string
+              enum: [repository]
+            repository:
+              type: string
+              maxLength: 160
+        - type: object
+          required: [kind, instanceId]
+          properties:
+            kind:
+              type: string
+              enum: [instance]
+            instanceId:
+              type: string
+              maxLength: 160
+
+    DelegationProfileLink:
+      type: object
+      description: The action or flow this delegation governs; at least one is required.
+      properties:
+        flowId:
+          type: string
+          maxLength: 160
+        actionId:
+          type: string
+          maxLength: 160
+
+    DelegationProfileBudget:
+      type: object
+      required: [costUsd, durationMinutes]
+      properties:
+        costUsd:
+          type: number
+          minimum: 0
+          maximum: 10000
+        durationMinutes:
+          type: integer
+          minimum: 1
+          maximum: 129600
+          description: Counted from the operator's acceptance.
+
+    DelegationProfileInput:
+      type: object
+      description: >
+        What an issuer supplies (src/lib/delegation-profile.ts's `buildDelegationProfile`). version,
+        revision, createdAt (the server clock) and revocationRef are set by core. A raw prompt,
+        transcript, credential, browser-owned measurement, or a model-confidence / prior-approval /
+        UI-state field anywhere refuses the whole record by name.
+      required: [delegationId, principal, purpose, link, scope, dataClasses, capabilities, capabilitySummary, riskTier, budget, notification, approvalLevel, humanDecision, fallbackOwner, expiresAt]
+      properties:
+        delegationId:
+          type: string
+          maxLength: 160
+        principal:
+          type: string
+          maxLength: 160
+        purpose:
+          type: string
+          maxLength: 320
+        link:
+          $ref: "#/components/schemas/DelegationProfileLink"
+        scope:
+          $ref: "#/components/schemas/DelegationProfileScope"
+        dataClasses:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            type: string
+            maxLength: 120
+        capabilities:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            type: string
+            maxLength: 160
+        capabilitySummary:
+          type: string
+          maxLength: 320
+        riskTier:
+          type: string
+          description: The highest risk an action under this profile may declare.
+          enum: [low, medium, high, production, financial, credential, destructive]
+        budget:
+          $ref: "#/components/schemas/DelegationProfileBudget"
+        notification:
+          type: string
+          enum: [silent, on-refusal, on-every-action]
+        approvalLevel:
+          type: string
+          enum: [profile, each-action]
+        humanDecision:
+          type: string
+          maxLength: 320
+        fallbackOwner:
+          type: string
+          maxLength: 160
+        expiresAt:
+          type: string
+          format: date-time
+          description: After createdAt and within 90 days of it.
+
+    DelegationProfileReceipt:
+      type: object
+      required: [kind, at]
+      properties:
+        kind:
+          type: string
+          enum: [accept, revoke, replace]
+        at:
+          type: string
+          format: date-time
+        note:
+          type: string
+          maxLength: 320
+
+    DelegationProfileView:
+      type: object
+      description: >
+        One profile with its derived state. `riskTier` is the console's four-tier vocabulary (every
+        critical tier reads `critical`); `actionRiskCeiling` is core's own tier. `lifecycleState`
+        answers "may it act at all" and is never folded with `freshness`; `revocation` is present
+        whenever the ledger carries it, including a superseded profile naming its replacement.
+      required: [version, delegationId, revision, principal, purpose, link, scope, dataClasses, capabilities, capabilitySummary, riskTier, actionRiskCeiling, budget, notification, approvalLevel, humanDecision, fallbackOwner, createdAt, expiresAt, revocationRef, approval, lifecycleState, status, spentCostUsd, receipts, observedAt, freshness]
+      properties:
+        version:
+          type: string
+          enum: [delegation-profile-v1]
+        delegationId:
+          type: string
+        revision:
+          type: integer
+          minimum: 1
+        replaces:
+          type: string
+        principal:
+          type: string
+        purpose:
+          type: string
+        link:
+          $ref: "#/components/schemas/DelegationProfileLink"
+        scope:
+          $ref: "#/components/schemas/DelegationProfileScope"
+        dataClasses:
+          type: array
+          items:
+            type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        capabilitySummary:
+          type: string
+        riskTier:
+          type: string
+          enum: [low, medium, high, critical]
+        actionRiskCeiling:
+          type: string
+          enum: [low, medium, high, production, financial, credential, destructive]
+        budget:
+          $ref: "#/components/schemas/DelegationProfileBudget"
+        notification:
+          type: string
+          enum: [silent, on-refusal, on-every-action]
+        approvalLevel:
+          type: string
+          enum: [profile, each-action]
+        humanDecision:
+          type: string
+        fallbackOwner:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        revocationRef:
+          type: string
+        approval:
+          type: object
+          required: [state]
+          properties:
+            state:
+              type: string
+              enum: [pending, approved, denied]
+            decidedAt:
+              type: string
+              format: date-time
+        lifecycleState:
+          type: string
+          enum: [active, expired, revoked]
+        status:
+          type: string
+          enum: [pending, active, denied, revoked, superseded, expired]
+        revocation:
+          type: object
+          properties:
+            reason:
+              type: string
+            revokedAt:
+              type: string
+              format: date-time
+        supersededBy:
+          type: string
+        pendingReplacement:
+          type: string
+        spentCostUsd:
+          type: number
+        receipts:
+          type: array
+          items:
+            $ref: "#/components/schemas/DelegationProfileReceipt"
+        observedAt:
+          type: string
+          format: date-time
+        freshness:
+          type: string
+          enum: [verified]
+
+    DelegationProfileList:
+      type: object
+      required: [version, profiles, source]
+      properties:
+        version:
+          type: string
+          enum: [delegation-profile-v1]
+        profiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/DelegationProfileView"
+        source:
+          type: string
+          enum: [ledger]
+
+    DelegationProfileIssueRequest:
+      type: object
+      required: [profile]
+      properties:
+        profile:
+          $ref: "#/components/schemas/DelegationProfileInput"
+
+    DelegationProfileIssueResult:
+      type: object
+      required: [ok, profile]
+      properties:
+        ok:
+          type: boolean
+        profile:
+          $ref: "#/components/schemas/DelegationProfileView"
+
+    DelegationDecisionRequest:
+      type: object
+      required: [delegationId, decision]
+      properties:
+        delegationId:
+          type: string
+          maxLength: 160
+        decision:
+          type: string
+          enum: [accepted, revoked]
+        note:
+          type: string
+          maxLength: 320
+
+    DelegationDecisionResult:
+      type: object
+      required: [ok, delegationId, decision, decidedBy, at, lifecycleState, approval]
+      properties:
+        ok:
+          type: boolean
+        delegationId:
+          type: string
+        decision:
+          type: string
+          enum: [accepted, revoked]
+        decidedBy:
+          type: string
+        at:
+          type: string
+          format: date-time
+        lifecycleState:
+          type: string
+          enum: [active, expired, revoked]
+        approval:
+          type: string
+          enum: [pending, approved, denied]
+
+    DelegationReplaceRequest:
+      type: object
+      required: [delegationId]
+      properties:
+        delegationId:
+          type: string
+          maxLength: 160
+        note:
+          type: string
+          maxLength: 320
+        changes:
+          type: object
+          description: >
+            Any DelegationProfileInput field except the identity fields (delegationId, principal,
+            link, scope), which refuse `immutable-field`. Unnamed fields carry over; expiresAt
+            defaults to the predecessor's lifetime from now.
+          additionalProperties: true
+
+    DelegationReplaceResult:
+      type: object
+      required: [ok, delegationId, replacementId, at, lifecycleState, profile]
+      properties:
+        ok:
+          type: boolean
+        delegationId:
+          type: string
+          description: The profile being replaced; unchanged, and authoritative until the replacement is accepted.
+        replacementId:
+          type: string
+        at:
+          type: string
+          format: date-time
+        lifecycleState:
+          type: string
+          description: The REPLACED profile's lifecycle, which the replacement does not change.
+          enum: [active, expired, revoked]
+        profile:
+          $ref: "#/components/schemas/DelegationProfileView"
 
     # ── W1-T3856 -- experiment-promotion-v1: the guarded flow from a candidate policy to measured
     # production exposure (deterministic replay, shadow observation, canary promotion, stop
@@ -9370,6 +9716,129 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OperatorAgentActionStepResult"
+
+  /v1/operator-agent/delegations:
+    get:
+      summary: W1-T3878 -- read every delegation-profile-v1 with its derived approval, lifecycle and spend.
+      description: >
+        `readDelegationProfiles` folds the ledger union: the first record per delegationId wins, a
+        revocation is terminal, the first acceptance stands, an accepted replacement supersedes its
+        predecessor, and admitted executions under a profile sum into `spentCostUsd`.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Durable delegation profiles.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegationProfileList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      summary: W1-T3878 -- issue a delegation profile (LOW write tier; pending until accepted).
+      description: >
+        `buildDelegationProfile` refuses an incomplete record by name (`400`, `code` and `field`).
+        The issued profile is `pending` and authorizes nothing until a HIGH-tier acceptance. A
+        second issue under the same delegationId is `409` -- change a profile by replacing it.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DelegationProfileIssueRequest"
+      responses:
+        "201":
+          description: Profile issued, pending approval.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegationProfileIssueResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/delegations/decision:
+    post:
+      summary: W1-T3878 -- accept or revoke a delegation profile (HIGH write tier, nonce-confirmed).
+      description: >
+        Accepting GRANTS a trust budget, so this is HIGH like /v1/operator-agent/actions/decision:
+        the bearer write token (pinned at LOW) is refused `403`, and a HIGH-tier credential must
+        present an X-Confirm-Nonce minted by POST /v1/confirm for this exact request. Only a pending
+        profile is accepted, never one whose predecessor was revoked; revocation is terminal, and
+        revoking a pending profile denies it. The decider is the verified identity, never a body
+        field. A model-confidence, prior-approval or UI-state field is refused `400`.
+      security:
+        - bearerWrite: []
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DelegationDecisionRequest"
+      responses:
+        "200":
+          description: Decision recorded; `lifecycleState` is the profile's state after it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegationDecisionResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HighTierForbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/delegations/replace:
+    post:
+      summary: W1-T3878 -- issue a linked replacement for a profile (LOW write tier; pending until accepted).
+      description: >
+        `buildDelegationReplacement` never mutates the original: the replacement is the next
+        revision with a derived id, `replaces` set, and a `replace` receipt on the original, which
+        stays authoritative until the replacement is accepted and is superseded from then on. A
+        revoked, denied or superseded profile, or one already being replaced, is `409`; naming an
+        identity field in `changes` is `400` `immutable-field`.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DelegationReplaceRequest"
+      responses:
+        "201":
+          description: Replacement issued, pending approval.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegationReplaceResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
 
   /v1/operator-agent/emergency/clear:
     post:

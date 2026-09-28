@@ -241,6 +241,18 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "W1-T3855: ledger-only rollback receipt linked to its completion; covered in test/automation-action-contract.test.ts",
   ],
   [
+    "POST /v1/operator-agent/delegations",
+    "W1-T3878: ledger-only delegation-profile-v1 issue; validation and refusals by name are covered in test/delegation-profile-scope.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/delegations/decision",
+    "W1-T3878: ledger-only accept/revoke of a delegation profile; covered in test/delegation-profile-escalation.test.ts and test/delegation-profile-refusals.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/delegations/replace",
+    "W1-T3878: ledger-only linked replacement; the original is never rewritten -- covered in test/delegation-profile-versioning.test.ts",
+  ],
+  [
     "POST /v1/context-controls/forget",
     "W1-T3893: production route is mounted; durable forget receipt and restart-safe behavior are covered in test/context-controls-forget.test.ts",
   ],
