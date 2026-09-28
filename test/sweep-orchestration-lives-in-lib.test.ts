@@ -265,6 +265,7 @@ test("W1-T2890: dispatchFix moved to lib wires owner recovery and fix-rung adapt
       runNpmScriptImpl: async () => ({ status: 0, stdout: "ok", stderr: "" }),
       commitGeneratorOutputImpl: () => "commit123",
       readPackageScriptsImpl: () => ({ test: "node --test" }),
+      pushFixRoundImpl: (...args: unknown[]) => void adapterCalls.push(`pushFixRound:${args.join(",")}`),
       runFixRungImpl: async (args: any) => {
         await args.deps.spawn({ resumeSessionId: "", task: { id: "W1-T2890" } });
         await args.deps.fetchCiFailures("https://github.com/craigoley/remudero/pull/2890");
@@ -296,7 +297,11 @@ test("W1-T2890: dispatchFix moved to lib wires owner recovery and fix-rung adapt
       { unmetCriteria: [], ciFailures: [{ name: "ci", logTail: "red" }] } as never,
     );
 
-    assert.deepEqual(adapterCalls, ["publishAhead", "remove"]);
+    assert.deepEqual(adapterCalls, [
+      "publishAhead",
+      "remove",
+      "pushFixRound:/tmp/rmd-no-such-worktree,run-W1-T2890-1789022939729,expected",
+    ]);
     assert.ok(logs.some((l) => l.step === "sweep.fix.checkout_owner_ahead_published"));
     assert.ok(logs.some((l) => l.step === "sweep.fix.checkout_owner_reclaimed"));
     assert.ok(logs.some((l) => l.step === "fix.dispatch" && l.extra?.task_id === "W1-T2890"));

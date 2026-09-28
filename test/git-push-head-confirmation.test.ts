@@ -9,7 +9,7 @@ import { test } from "node:test";
 
 import { gitPushRunBranch, LanePushForeignHeadError, type PushExec, type GitCapture } from "../src/lib/git-push.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { runFixRung } from "../src/run-task.js";
+import { pushFixRound, runFixRung } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
@@ -250,18 +250,11 @@ function workerResult(): WorkerResult {
 
 const FIX_RUNG_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
 
-/** The EXACT shape both `src/run-task.ts` `push:` closures use — literal duplicate so this test
- *  proves what production actually runs, not a paraphrase of it. */
+/** Both fix-rung `push:` deps ARE `pushFixRound` (W1-T4693), so this drives the real one, recording each call. */
 function productionShapedPush(pushed: Array<{ wt: string; branch: string; expectedHeadSha?: string }>) {
   return (wt: string, branch: string, expectedHeadSha?: string): void => {
     pushed.push({ wt, branch, expectedHeadSha });
-    try {
-      gitPushRunBranch(wt, { stdio: "ignore", expectedHeadSha });
-    } catch (err) {
-      if (err instanceof LanePushForeignHeadError) throw err;
-      // best-effort — the fix worker may already have pushed itself; nothing new to push is
-      // not an error. (Same catch shape as both production call sites.)
-    }
+    pushFixRound(wt, branch, expectedHeadSha);
   };
 }
 
@@ -435,12 +428,12 @@ test("W1-T2610: control — with no rewind, the same wiring pushes normally and 
 
 // ── claim 4 (structural) — BOTH literal call sites carry the wiring, not just one ───────────
 
-test("W1-T2610: both fix-rung push closures in src/run-task.ts pass expectedHeadSha to gitPushRunBranch (grep-verifiable)", () => {
-  const src = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
-  const matches = src.match(/gitPushRunBranch\(wt, \{ stdio: "ignore", expectedHeadSha \}\);/g) ?? [];
-  assert.equal(
-    matches.length,
-    2,
-    `expected exactly the two fix-rung call sites (run-loop + sweep) to wire expectedHeadSha, found ${matches.length}`,
-  );
+test("W1-T2610: both fix-rung push deps route through pushFixRound, which passes expectedHeadSha to gitPushRunBranch (grep-verifiable)", () => {
+  const runTask = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  const sweep = readFileSync(fileURLToPath(new URL("../src/lib/sweep.ts", import.meta.url)), "utf8");
+  // W1-T4693: the run loop's dep and the sweep's dep are the one shared helper, not two closures.
+  assert.equal((runTask.match(/^ {10}push: pushFixRound,$/gm) ?? []).length, 1, "runTaskBody's fix rung pushes through pushFixRound");
+  assert.equal((sweep.match(/^ {12}push: pushFixRound,$/gm) ?? []).length, 1, "the sweep's fix dispatch pushes through pushFixRound");
+  assert.match(runTask, /pushFixRoundImpl: pushFixRound,/, "the sweep entrypoint injects the same helper");
+  assert.match(runTask, /gitPushRunBranch\(wt, \{ expectedHeadSha, exec: /, "the helper threads expectedHeadSha to the leaf");
 });

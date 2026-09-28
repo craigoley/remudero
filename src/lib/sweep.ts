@@ -19,7 +19,7 @@ import { diagnoseBodyDefects } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
 import { systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
-import { gitPushEmptyCommit, gitPushRunBranch, LanePushForeignHeadError } from "./git-push.js";
+import { gitPushEmptyCommit, gitPushRunBranch } from "./git-push.js";
 import { ghJson, ghJsonAsync } from "./github-transport.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
@@ -1124,6 +1124,7 @@ export interface BuildSweepEffectsDeps {
   createFixRungWorktreeImpl?: SweepRuntimeFn;
   captureWorktreeSnapshotImpl?: SweepRuntimeFn;
   runFixRungImpl?: SweepRuntimeFn;
+  pushFixRoundImpl?: SweepRuntimeFn;
   buildFixRungDispatchArgsImpl?: SweepRuntimeFn;
   openTaskIdsFromPlanImpl?: SweepRuntimeFn;
   waitForCiGreenImpl?: SweepRuntimeFn;
@@ -1508,6 +1509,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     createFixRungWorktreeImpl: createFixRungWorktree = requiredSweepRuntime("createFixRungWorktreeImpl"),
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit = requiredSweepRuntime("captureWorktreeSnapshotImpl"),
     runFixRungImpl: runFixRung = requiredSweepRuntime("runFixRungImpl"),
+    pushFixRoundImpl: pushFixRound = requiredSweepRuntime("pushFixRoundImpl"),
     buildFixRungDispatchArgsImpl: buildFixRungDispatchArgs = requiredSweepRuntime("buildFixRungDispatchArgsImpl"),
     openTaskIdsFromPlanImpl: openTaskIdsFromPlan = requiredSweepRuntime("openTaskIdsFromPlanImpl"),
     waitForCiGreenImpl: waitForCiGreen = requiredSweepRuntime("waitForCiGreenImpl"),
@@ -2838,20 +2840,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             },
             runReview,
             fetchPrBody: fetchPrBodyViaGh,
-            // W1-T2610: same wiring as the run-loop's fix-rung `push:` closure above —
-            // `expectedHeadSha` is the sha this rung just committed, so `gitPushRunBranch`'s
-            // post-condition can catch a ref rewound between the commit and this push instead of
-            // silently no-op'ing. The resulting `LanePushForeignHeadError` is let through
-            // (never swallowed below) so the round parks rather than reporting a push that
-            // moved nothing as success.
-            push: (wt: string, _branch: string, expectedHeadSha: string) => {
-              try {
-                gitPushRunBranch(wt, { stdio: "ignore", expectedHeadSha });
-              } catch (err) {
-                if (err instanceof LanePushForeignHeadError) throw err;
-                /* best-effort — the worker may already have pushed */
-              }
-            },
+            // W1-T4693: the run loop's own push (`pushFixRound`), so a refused round is named, never swallowed.
+            push: pushFixRound,
             readHeadShaForProvenance: readHeadShaRest,
             issues,
             ledgerPath,
