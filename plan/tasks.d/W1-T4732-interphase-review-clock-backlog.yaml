@@ -1,0 +1,38 @@
+- id: W1-T4732
+  title: "A LONG LIGHT-PASS REVIEW HOLDS NEWLY GREEN PRS OUT OF THE NEXT REVIEW PASS"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: human
+  origin: "operator repair 2026-09-28: PR #7672 review held the interphase light pass while #7681 and #7682 became green"
+  plan_refs: [W1-T2852, W1-T463, W1-T2584]
+  files: [src/lib/daemon.ts, src/lib/sweep.ts, test/review-clock-new-green-backlog.test.ts, test/event-review-clock-all-phases.test.ts]
+  note: "Keep the review clock bounded and preserve per-head ownership, freshness draining and review capacity. A later green PR must not wait for an unrelated long reviewer merely because it became green after the previous light pass started."
+  rationale: |
+    At 22:27 UTC the daemon's light pass started a review for #7672 while #7681
+    still had CI pending. #7681 was fully green by 22:34 and #7682 by 22:56,
+    but neither entered review by 22:58. The live #7672 reviewer remained
+    active. startInterphaseReviewClock awaits sweepLight; runSweepLightPass
+    awaits runSweep; runSweep awaits every review in its worker pool. The clock
+    therefore cannot observe a later green head until the entire earlier
+    review finishes, despite the review admission policy's width of three.
+  design: |
+    Allow one bounded review-only follow-up light pass while an earlier light
+    pass is awaiting its review. A GitHub wake must be retained until the
+    follow-up can run. Count in-flight review attempts against the same
+    semantic review width across overlapping passes, so overlap cannot grow
+    provider or host concurrency beyond the existing policy. Keep the per-head
+    mutex and durable pending status authoritative, never launch a duplicate
+    review on one head. stop() must prevent new passes and await both admitted
+    passes before the freshness drain exits. Concurrent follow-ups must not
+    dispatch fixes, merges, closes or escalations.
+  acceptance:
+    - claim: "a newly green PR starts review before an unrelated long review settles"
+      proof: 'grep: test("W1-T4732: a newly green PR starts review before an earlier review settles" in test/review-clock-new-green-backlog.test.ts'
+    - claim: "overlap stays inside review capacity and drains before freshness exit"
+      proof: 'grep: test("W1-T4732: overlapping light passes respect review width and drain on stop" in test/review-clock-new-green-backlog.test.ts'
