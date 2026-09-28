@@ -1360,7 +1360,8 @@ import {
   isMergeCreditLine,
   readRequiredStatusCheckContexts,
   persistVerifiedCredit,
-  type RequiredContextsRead,} from "./lib/status.js";
+  type RequiredContextsRead,
+  type ThrownRunVerdictStage,} from "./lib/status.js";
 import {
   readyDraftPullRequest,
   DEFAULT_SWEEP_POLICY,
@@ -14773,6 +14774,25 @@ export function runErrorCause(err: unknown): RunErrorCause {
   return "run-error";
 }
 
+/** W1-T4655/W1-T4701: a run that throws still ENDED, so it gets one terminal `failed` row naming where — unless
+ *  it already wrote one. Best-effort: a ledger failure never replaces the error its caller rethrows. */
+export function endThrownRun(
+  log: RunTaskContext["log"],
+  alreadyEnded: boolean,
+  stage: ThrownRunVerdictStage,
+  err: unknown,
+  costUsd: number,
+): void {
+  if (alreadyEnded) return;
+  try {
+    const excerpt = capStderrExcerpt(scrubGitCredentialText(String((err as Error)?.message ?? err)), STDERR_EXCERPT_CAP);
+    log("verdict", { verdict: "failed", reason: excerpt, stage, cause: runErrorCause(err), cost_usd: costUsd, ...terminalVerdictFields(null) });
+  } catch {
+    const reason = "thrown-run-verdict-ledger-write-failed";
+    void reason; // the caller's rethrow is the authoritative outcome
+  }
+}
+
 /** W1-T4656: a pre-push census refusal read off a push error — the hook's block, the censuses its rows name,
  *  and the baseline files a row itself offers ("or record … in <file>"). Undefined for any other failure. */
 export interface CensusPushRefusal {
@@ -14959,7 +14979,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     workerAbandonMs,
     workerStateSensor,
   } = ctx;
-  // W1-T4655: set BEFORE the write, so the outer catch attempts a verdict at most once per run.
+  // W1-T4655: set BEFORE the write, so no thrown-run exit (endThrownRun) writes a second verdict.
   let verdictWritten = false;
   const log: RunTaskContext["log"] = (step, extra) => {
     if (step === "verdict") verdictWritten = true;
@@ -15251,7 +15271,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say(`verdict: blocked_containment — ${e.message}`);
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_containment" };
     }
-    if (e !== undefined) throw e;
+    if (e !== undefined) {
+      // W1-T4701: a capacity block is a deferral daemon.ts backs off on; the run still ends here.
+      endThrownRun(log, verdictWritten, "preflight.containment", e, costUsd);
+      throw e;
+    }
   }
 
   // ── Isolation PREFLIGHT (W1-T17 / Standing rule 11 / FIELD FINDING 11b): the
@@ -15316,7 +15340,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say(`verdict: blocked_isolation — ${e.message}`);
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_isolation" };
     }
-    if (e !== undefined) throw e;
+    if (e !== undefined) {
+      endThrownRun(log, verdictWritten, "preflight.isolation", e, costUsd);
+      throw e;
+    }
   }
 
   // ── Clone + worktree.
@@ -15464,6 +15491,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     );
   } catch (e) {
     log("managed_checkout.refresh_refused", { reason: String((e as Error)?.message ?? e) });
+    // W1-T4701: above the outer catch, so without this row the deferred run read as in flight forever.
+    endThrownRun(log, verdictWritten, "managed_checkout.refresh", e, costUsd);
     releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
     throw e;
   }
@@ -15517,6 +15546,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         node_modules_source: e.nodeModulesSource,
         ...(e instanceof ManagedCheckoutNotRefreshedError ? { managed_checkout_not_refreshed: e.notRefreshed } : {}),
       });
+      endThrownRun(log, verdictWritten, "worktree.node_modules", e, costUsd);
       say(`REFUSED: ${e.message}`);
       try {
         worktreeRemove(repoDir, worktreePath);
@@ -15534,6 +15564,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     }
     // W1-T2528: any OTHER add failure — ledger it before rethrowing (same idiom as `addLaneWorktree`).
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
+    endThrownRun(log, verdictWritten, "worktree.add", e, costUsd);
     throw e;
   } finally {
     checkoutRefresh.release();
@@ -17512,24 +17543,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       return { taskId, runId, merged: false, costUsd, verdict: "failed" };
     }
     log("run.error", { error: String((err as Error)?.message ?? err) });
-    // W1-T4655: the run DID end, so it gets ONE terminal row naming the harness cause; best-effort,
-    // so a ledger failure never replaces the error rethrown below.
-    if (!verdictWritten) {
-      try {
-        const excerpt = capStderrExcerpt(scrubGitCredentialText(String((err as Error)?.message ?? err)), STDERR_EXCERPT_CAP);
-        log("verdict", {
-          verdict: "failed",
-          reason: excerpt,
-          stage: "run.error",
-          cause: runErrorCause(err),
-          cost_usd: costUsd,
-          ...terminalVerdictFields(null),
-        });
-      } catch {
-        const reason = "run.error-verdict-ledger-write-failed";
-        void reason; // the rethrow below is the authoritative outcome
-      }
-    }
+    // W1-T4655: the run DID end, so it gets ONE terminal row naming the harness cause.
+    endThrownRun(log, verdictWritten, "run.error", err, costUsd);
     // Reclaim the worktree even on an unexpected throw — a dead run must not
     // leave debris that blocks the next one (start-of-run prune is the backstop,
     // but clean up eagerly here too). Best-effort; the ledger already has the
