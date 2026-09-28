@@ -41,6 +41,7 @@ import { EXECUTOR_EVIDENCE_CODE, SELF_REPORTED_CODE, resolveCatalogueCapability 
 import { fixedClock, type Clock } from "./clock.js";
 import { DELEGATION_PROFILE_MAX_COST_USD, delegationEligibility, findNonAuthoritativeSignal, type DelegationProfileState } from "./delegation-profile.js";
 import { DEFAULT_MAX_ROUNDS } from "./reply-interpreter.js";
+import { resolveCatalogueCapability } from "./action-executor.js";
 
 /** Named once so a record's own `version` and every consumer's pin can never drift. */
 export const INTENT_PLAN_VERSION = "intent-plan-v1" as const;
@@ -267,8 +268,10 @@ function validateScope(value: unknown): IntentPlanScope | null {
   return scope;
 }
 
-function stepApprovalPolicy(risk: DelegationRiskTier, rollback: AutomationActionRollback): AutomationApprovalPolicy {
-  return delegationRequiresHumanGate(risk) || rollback.mode === "irreversible" ? "human" : "none";
+/** W1-T4658: a catalogue entry demanding human approval (a MEDIUM fleet pause) is never derived weaker. */
+function stepApprovalPolicy(capability: string, risk: DelegationRiskTier, rollback: AutomationActionRollback): AutomationApprovalPolicy {
+  const catalogue = resolveCatalogueCapability(capability);
+  return delegationRequiresHumanGate(risk) || rollback.mode === "irreversible" || (catalogue.ok && catalogue.entry.approval === "human") ? "human" : "none";
 }
 
 /** One step, validated by the automation-action-v1 validator itself over a probe envelope, so a
@@ -291,7 +294,7 @@ function validateStep(value: unknown, stepId: string): IntentPlanStep | string {
   });
   if (!probe.ok) return `${probe.code}: ${probe.reason}`;
   const { capability, summary, risk, preconditions, freshness, dryRun, rollback, receiptRef } = probe.action;
-  return { stepId, capability, summary, risk, preconditions, freshness, dryRun, rollback, receiptRef, estimatedCostUsd: cost, approvalPolicy: stepApprovalPolicy(risk, rollback) };
+  return { stepId, capability, summary, risk, preconditions, freshness, dryRun, rollback, receiptRef, estimatedCostUsd: cost, approvalPolicy: stepApprovalPolicy(capability, risk, rollback) };
 }
 
 function distinctMatches(goal: string, re: RegExp): string[] {
