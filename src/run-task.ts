@@ -1364,7 +1364,8 @@ import {
   readRequiredStatusCheckContexts,
   persistVerifiedCredit,
   type RequiredContextsRead,
-  type ThrownRunVerdictStage,} from "./lib/status.js";
+  type ThrownRunVerdictStage,
+  type RefusedRunVerdictStage,} from "./lib/status.js";
 import {
   readyDraftPullRequest,
   DEFAULT_SWEEP_POLICY,
@@ -14786,13 +14787,37 @@ export function endThrownRun(
   err: unknown,
   costUsd: number,
 ): void {
+  endRunOnce(log, alreadyEnded, () => ({
+    verdict: "failed",
+    reason: boundedVerdictReason(String((err as Error)?.message ?? err)),
+    stage,
+    cause: runErrorCause(err),
+    cost_usd: costUsd,
+  }));
+}
+
+/** W1-T4708: a pre-worktree refusal that RETURNS gets the same one terminal row, carrying the verdict it returns. */
+export function endRefusedRun(
+  log: RunTaskContext["log"],
+  alreadyEnded: boolean,
+  stage: RefusedRunVerdictStage,
+  result: RunResult,
+  reason: string,
+): RunResult {
+  endRunOnce(log, alreadyEnded, () => ({ verdict: result.verdict, reason: boundedVerdictReason(reason), stage, cost_usd: result.costUsd }));
+  return result;
+}
+
+const boundedVerdictReason = (text: string): string => capStderrExcerpt(scrubGitCredentialText(text), STDERR_EXCERPT_CAP);
+
+/** The once-per-run guard both enders share. Best-effort: a ledger failure never replaces the run's own outcome. */
+function endRunOnce(log: RunTaskContext["log"], alreadyEnded: boolean, row: () => Record<string, unknown>): void {
   if (alreadyEnded) return;
   try {
-    const excerpt = capStderrExcerpt(scrubGitCredentialText(String((err as Error)?.message ?? err)), STDERR_EXCERPT_CAP);
-    log("verdict", { verdict: "failed", reason: excerpt, stage, cause: runErrorCause(err), cost_usd: costUsd, ...terminalVerdictFields(null) });
+    log("verdict", { ...row(), ...terminalVerdictFields(null) });
   } catch {
     const reason = "thrown-run-verdict-ledger-write-failed";
-    void reason; // the caller's rethrow is the authoritative outcome
+    void reason; // the caller's rethrow or return is the authoritative outcome
   }
 }
 
@@ -15430,13 +15455,15 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // git-connectivity failure, not a new failure mode); `taken` mirrors `blocked_inflight`'s
     // own "another holder owns this run right now" (this IS that condition, cross-host instead
     // of same-host) — no new RunResult verdict is introduced for either arm.
-    return {
+    // W1-T4708: ledgered too, or the refused run read as in flight to every reader.
+    const refused: RunResult = {
       taskId,
       runId,
       merged: false,
       costUsd: 0,
       verdict: claimOutcome === "unreachable" ? "blocked_git_fetch" : "blocked_inflight",
     };
+    return endRefusedRun(log, verdictWritten, "dispatch.claim", refused, claimDecision.reason);
   }
 
   // ── Reclaim debris from crashed prior runs (WS-1: a max-turns death left its
@@ -15534,11 +15561,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         `REFUSED: worktree base ${e.base} is behind origin/${e.ref}'s remote head ${e.remoteHead} — ` +
           "refusing before recon/implement/commit spend anything",
       );
+      // W1-T4708: the terminal row lands BEFORE the release, so a throwing release cannot lose it.
+      const refused = endRefusedRun(log, verdictWritten, "worktree.stale_base", { taskId, runId, merged: false, costUsd: 0, verdict: "failed" }, e.message);
       // W1-T1268: this run already holds the dispatch claim taken above — drop it (holder arm)
       // before returning, or a stale base on THIS host would strand the claim for an operator
       // to clear even though nothing is actually in flight.
       releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
-      return { taskId, runId, merged: false, costUsd: 0, verdict: "failed" };
+      return refused;
     }
     if (e instanceof WorktreeNodeModulesRefusedError) {
       // W1-T4193: a DEFERRAL, not a strike. Rethrown so daemon.ts's `isSpawnInfraBlocked` backs off on its
