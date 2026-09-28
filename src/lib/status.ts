@@ -3075,7 +3075,8 @@ export function latestIndependentFailureBlock(
     if (line.task_id !== taskId && line.task !== taskId) continue;
     if (line.step === "verdict" && typeof line.run_id === "string") {
       stageByRun.set(line.run_id, line.stage);
-      if (!isEnvironmentalBlock(line.verdict, line.stage)) environmentalStreak = 0;
+      // W1-T4655: a thrown run's verdict (stage run.error) keeps the streak, as its verdict-less row did.
+      if (line.stage !== "run.error" && !isEnvironmentalBlock(line.verdict, line.stage)) environmentalStreak = 0;
     }
     if (line.step === "run.start") {
       if (retryPending) retrySpent = true;
