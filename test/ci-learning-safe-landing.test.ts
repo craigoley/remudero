@@ -14,7 +14,7 @@ import {
   landCiLearningShards,
   landingIdentity,
 } from "../src/lib/feedback-landing.js";
-import { buildCiLearningCadenceRunner, ciLearningCommand, ciLearningPlanOrigins } from "../src/run-task.js";
+import { buildCiLearningCadenceRunner, ciLearningCommand, ciLearningPlanOrigins, ciLearningTaskIdMinter } from "../src/run-task.js";
 import {
   ciLearningRecordVerdict,
   ciLearningShardYaml,
@@ -442,6 +442,20 @@ test("W1-T3542 criterion 1: manual ci-learning uses the isolated landing queue t
   const manualCheckout = cloneRoot(manualBare);
   const manualRoot = stateRoot();
   const manualGh = fakeGh("https://github.com/o/r/pull/3542");
+  let reservedBeforeLandingPush = false;
+  const manualGit = (args: string[], opts?: { env?: NodeJS.ProcessEnv }): string => {
+    if (args[0] === "push" && args.some((arg) => arg.endsWith(`:refs/heads/${CI_LEARNING_LANDING_BRANCH}`))) {
+      const reservation = git(manualBare, "for-each-ref", "--format=%(refname)", "refs/rmd-id/").trim();
+      assert.ok(reservation, "the task id is reserved before the landing branch is pushed");
+      assert.throws(() => landingBranchFiles(manualBare), /Command failed: git/);
+      reservedBeforeLandingPush = true;
+    }
+    return execFileSync("git", ["-C", manualCheckout, ...args], {
+      encoding: "utf8",
+      env: opts?.env ?? GIT_ENV,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  };
   const code = withLiveWritesAllowed(() =>
     ciLearningCommand(["--force"], {
       root: manualRoot,
@@ -449,11 +463,12 @@ test("W1-T3542 criterion 1: manual ci-learning uses the isolated landing queue t
       loadWindow: () => repairedWindow(),
       planOrigins: [],
       landShards: (drafts, checkoutRoot, deps) =>
-        landCiLearningShards(drafts, checkoutRoot, { ...deps, gh: manualGh.gh }),
+        landCiLearningShards(drafts, checkoutRoot, { ...deps, gh: manualGh.gh, git: manualGit }),
     }),
   );
 
   assert.equal(code, 0, "the manual operator command still succeeds");
+  assert.equal(reservedBeforeLandingPush, true, "the manual run pushes only after reserving its id");
   assert.equal(git(manualCheckout, "status", "--porcelain").trim(), "", "the manual run leaves its checkout clean");
   assert.equal(pendingFiles(manualRoot).length, 1, "the manual run retains exact bytes in the durable queue");
   assert.equal(
@@ -469,6 +484,38 @@ test("W1-T3542 criterion 1: manual ci-learning uses the isolated landing queue t
     /branch=ci-learning-landing/,
     "the reservation names the dedicated landing branch rather than the manual checkout's main branch",
   );
+});
+
+test("a main-bound reservation is refused before a manual CI-learning draft can be staged", () => {
+  const bareOrigin = makeBareOrigin();
+  const checkout = cloneRoot(bareOrigin);
+  const root = stateRoot();
+  const errors: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+  let code = -1;
+  try {
+    code = withLiveWritesAllowed(() =>
+      ciLearningCommand(["--force"], {
+        root,
+        checkoutRoot: checkout,
+        loadWindow: () => repairedWindow(),
+        planOrigins: [],
+        landShards: (drafts, checkoutRoot, deps) =>
+          landCiLearningShards(drafts, checkoutRoot, {
+            ...deps,
+            mintTaskId: () => ciLearningTaskIdMinter(checkoutRoot)(),
+          }),
+      }),
+    );
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.equal(code, 0, "the operator command reports its drafts even when landing is refused");
+  assert.match(errors.join("\n"), /NOT FILED.*cannot reserve a task id from main/);
+  assert.deepEqual(pendingFiles(root), [], "a refused reservation never creates a durable shard");
+  assert.throws(() => landingBranchFiles(bareOrigin), /Command failed: git/);
 });
 
 test("the CI-learning reservation names the scoped landing branch that will file it", () => {
