@@ -1,0 +1,49 @@
+- id: W1-T4650
+  title: "ONLY CLAUDE ATTEMPTS NAME THE MODEL THAT SERVED THEM — cash responses carry a model field nobody reads, codex's stream carries none and says nothing, and the attempt receipt drops served_model_reason, so served-model missingness tracks the provider mix and reads as an A/A integrity finding"
+  repo: remudero
+  depends_on: ["W1-T2572"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  band_meaning: span
+  origin: "operator session 2026-09-28: A/A runs 3-6 flag differential-missingness:servedModel (p=0.049, p=0.041); traced to provider-dependent recording"
+  plan_refs: ["W1-T2572", "W1-T4575", "W1-T4623", "W1-T4647"]
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/benchmark-run.ts
+    - test/every-provider-names-its-served-model-or-why-not.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-28 over the ledger union (every .gz rotation plus the live file), worker.attempt
+    rows 2026-09-24..28 joined to their worker.assignment by selection_assignment_id:
+    claude attempts record served_model in 242 of 258; codex (gpt-6-sol, gpt-6-luna) in 0 of 100;
+    cash (gpt-5-nano, gpt-oss-120b) in 0 of 260. None of the 1757 rows without a served model carry
+    `served_model_reason`, although W1-T2572's `workerLedgerFields` writes one: the attempt receipt
+    is built by `benchmarkWorkerAttemptResources` (src/lib/benchmark-run.ts), which copies
+    `served_model` and drops the reason, and the receipt then names the generic
+    `provider-did-not-report-served-model`. Causes, per provider:
+    - cash: `spawnOpenWeightWorker` (src/lib/worker-provider.ts) parses the response payload for id,
+      stop_reason, content and usage, but not its `model` field, which the provider returns;
+    - codex: the `exec --json` events (thread.started, turn.*, item.*) carry no model id, so a codex
+      attempt is genuinely unreportable and must say so by name rather than by silence.
+    Consequence: served-model missingness is a function of which providers an arm happened to be
+    routed to. Every retrospective A/A (runs 3-6) reports `differential-missingness:servedModel`
+    (p=0.049, 0.041) from routing mix, not from an integrity defect, and drift / forecast consumers
+    cannot tell "unreportable" from "never checked".
+  design: |
+    Cash: read the response's `model` and report it as `servedModel` only when it is a real id
+    (never echo the request — W1-T2572's rule); otherwise name the reason. Codex: set
+    `servedModelReason` to a fixed, named reason stating the stream carries no model id. Attempt
+    receipt: `benchmarkWorkerAttemptResources` carries `served_model_reason` beside
+    `served_model`, and the receipt's unavailable reason uses it instead of the generic string.
+    Claude behaviour is unchanged. No routing, billing or selection change.
+  acceptance:
+    - claim: "a cash attempt records the model its response names, a codex attempt records a named reason instead of silence, and the attempt receipt carries the provider's own served-model reason"
+      proof: "unit test: test/every-provider-names-its-served-model-or-why-not.test.ts"
+  falsifier: |
+    A cash response naming a model other than the one requested: the attempt row must record the
+    response's model, never the requested one.
