@@ -10,6 +10,7 @@
   risk: high
   band_meaning: span
   origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-memory-1790600000"
   plan_refs: [W1-T4606]
   files: [src/lib/standing-briefs.ts, test/each-learnings-shard-has-a-standing-brief.test.ts, src/lib/learnings.ts]
   status: queued
