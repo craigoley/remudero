@@ -1608,11 +1608,11 @@ function inspectFreshReviewerWorktree(
   return actualHead === revision && porcelain.trim() === "" ? "reusable" : "unsafe";
 }
 
-/** Attach the worker worktree's established dependency discipline to the reviewer recovery tree.
+/** Attach the worker worktree's established dependency discipline to a separately cut tree.
  * `linked-lockfile-mismatch` remains the helper's diagnostic-only observation: it says the tree
  * is runnable but may explain a later module resolution result. Missing source or a failed link
  * means `bin/rmd` cannot be proven runnable, so this path refuses before spawning it. */
-function prepareFreshReviewerWorktree(repoDir: string, worktreePath: string): boolean {
+function prepareWorktreeToolchain(repoDir: string, worktreePath: string): boolean {
   const linked = linkWorktreeNodeModules(repoDir, worktreePath);
   // This is deliberately the existing common-dir helper rather than a reviewer-local ignore file.
   // Its best-effort contract is retained; it may report a permission diagnostic but cannot turn a
@@ -1664,7 +1664,7 @@ export function buildFreshTreeReviewRunner(
           throw new Error(`reviewer worktree at ${worktree} is not an exact clean detached checkout of ${sha}`);
         }
         if (existing === "absent") deps.addWorktree(repoDir, worktree, sha);
-        if (!(deps.prepareWorktree ?? prepareFreshReviewerWorktree)(repoDir, worktree)) {
+        if (!(deps.prepareWorktree ?? prepareWorktreeToolchain)(repoDir, worktree)) {
           throw new Error(`reviewer worktree at ${worktree} has no runnable canonical node_modules link`);
         }
         prepared.set(sha, worktree);
@@ -2144,7 +2144,7 @@ export function buildSweepEffects(
     dispatchFixPreflightStandDownImpl: dispatchFixPreflightStandDown,
     ghLiveStateImpl: ghLiveState,
     fixRungTaskForImpl: fixRungTaskFor,
-    createFixRungWorktreeImpl: createFixRungWorktree,
+    createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit,
     runFixRungImpl: runFixRung,
     buildFixRungDispatchArgsImpl: buildFixRungDispatchArgs,
@@ -38600,6 +38600,22 @@ export function createFixRungWorktree(
   execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" });
   execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`], { stdio: "pipe" });
   return checkoutFixHeadRef(repoDir, worktreePath, branch, deps);
+}
+
+/** The sweep fix lane cuts its own branch-attached worktree, bypassing `worktreeAdd`'s
+ * dependency link. Supply the same local CLI toolchain before its worker can commit; an
+ * unavailable link refuses before a strike instead of failing at the commit-msg hook. */
+export function createFixRungWorktreeWithToolchain(
+  repoDir: string,
+  worktreePath: string,
+  branch: string,
+  prepare: (repoDir: string, worktreePath: string) => boolean = prepareWorktreeToolchain,
+): FixHeadRecovery | undefined {
+  const recovery = createFixRungWorktree(repoDir, worktreePath, branch);
+  if (!prepare(repoDir, worktreePath)) {
+    throw new Error("fix worktree toolchain unavailable: node_modules could not be linked");
+  }
+  return recovery;
 }
 
 /**
