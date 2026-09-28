@@ -525,10 +525,12 @@ test("an unreadable or invalid registry makes only already-onboarded unknown, wi
   assert.match(checkStatus(invalid.body, "already-onboarded").reason, /\(invalid_repo\)/);
 });
 
-test("the served routes mount the readiness route on the registry buildRegistryRoute reads", async (t) => {
+test("the served routes mount readiness and the repository portfolio on the same instance registry", async (t) => {
   const dir = fixtureDir(t);
   const repoRegistryPath = join(dir, "registry.yaml");
   writeFileSync(repoRegistryPath, REGISTRY);
+  writeFileSync(join(dir, "tasks.yaml"), "[]\n");
+  writeFileSync(join(dir, "ledger.ndjson"), "");
   const deps = {
     board: { plan: { tasks: [], byId: new Map() }, ledgerPath: join(dir, "ledger.ndjson"), github: {} },
     panelGraph: {
@@ -553,4 +555,9 @@ test("the served routes mount the readiness route on the registry buildRegistryR
   assert.ok(route, "the readiness route is mounted");
   const answer = await invoke(route, "/v1/onboarding/readiness?repo=acme/widget");
   assert.equal(checkStatus(answer.body, "already-onboarded").status, "warn", "it read the registry route's own path");
+  const portfolioRoute = buildServeRoutes(deps).find((r) => r.path === "/v1/repos");
+  assert.ok(portfolioRoute, "the repository portfolio route is mounted");
+  const portfolio = await invoke(portfolioRoute, "/v1/repos");
+  assert.equal(portfolio.status, 200);
+  assert.deepEqual((portfolio.body.repos as Array<{ id: string }>).map((repo) => repo.id), ["acme/widget"], "the registry-only core instance is in the same served portfolio");
 });
