@@ -11551,12 +11551,12 @@ export async function runSweepLightPass(
   };
   const queueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
   const activeWorkers = (deps.readActiveWorkerCount ?? activeWorkerCount)();
-  const semanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
-  const availableSpawning = Math.max(0, semanticBound - lightPassSpawningReservations);
+  const policySemanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
+  const semanticBound = Math.max(0, policySemanticBound - lightPassSpawningReservations);
   const availablePlanFilings = Math.max(0, policy.planFilingAdmissionBound - lightPassPlanFilingReservations);
   const { spawning, planFilings } = selectReviewAdmissions(
     openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr))),
-    { ...policy, planFilingAdmissionBound: availablePlanFilings }, now, outcomes, availableSpawning,
+    { ...policy, planFilingAdmissionBound: availablePlanFilings }, now, outcomes, semanticBound,
   );
   lightPassSpawningReservations += spawning.length;
   lightPassPlanFilingReservations += planFilings.length;
@@ -11627,7 +11627,7 @@ export async function runSweepLightPass(
                         (availablePlanFilings === policy.planFilingAdmissionBound
                           ? "post-review admissions per light pass"
                           : "post-review admissions available across light passes")
-                      : `not admitted this pass: semantic post-review admission bound ${availableSpawning}` +
+                      : `not admitted this pass: semantic post-review admission bound ${semanticBound}` +
                         (admittedNumbers ? `; admitted ${admittedNumbers} ahead` : ""))
                   : baseStandDownReasonFor?.(d),
             };

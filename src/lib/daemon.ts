@@ -1354,7 +1354,7 @@ export function startInterphaseReviewClock(
     stop: async () => {
       active = false;
       if (runner) await runner;
-      await Promise.all(activePasses);
+      if (activePasses.size > 0) await Promise.all(activePasses);
       return { eventWakeSeen, passes };
     },
   };
