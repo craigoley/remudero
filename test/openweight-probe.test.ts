@@ -15,6 +15,10 @@ import { fileURLToPath } from "node:url";
 // suite consumes is typed immediately below rather than left as any.
 import * as probeModule from "../scripts/openweight-probe.mjs";
 import { OPENWEIGHT_OUTPUT_CONTRACT } from "../src/lib/worker-provider.js";
+import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+
+let otherRepo: GitRepo | undefined;
+const otherWorkTree = (): string => (otherRepo ??= gitRepo({ kind: "openweight-probe-other" })).dir;
 
 interface TransportRequest {
   url: string;
@@ -371,13 +375,8 @@ const REFUSALS: RefusalCase[] = [
   },
   {
     name: "--out-dir inside another git work tree",
-    argv: (p) => ["--mode", "authoring", "--prompt-file", p.promptFile, "--out-dir", join(p.root, "other-repo", "evidence"), "--endpoint", ENDPOINT],
-    deps: (p) => {
-      mkdirSync(join(p.root, "other-repo"));
-      const init = spawnSync("git", ["init", "-q", join(p.root, "other-repo")], { encoding: "utf8" });
-      assert.equal(init.status, 0, init.stderr);
-      return { insideGitWorkTree: undefined };
-    },
+    argv: (p) => ["--mode", "authoring", "--prompt-file", p.promptFile, "--out-dir", join(otherWorkTree(), "evidence"), "--endpoint", ENDPOINT],
+    deps: () => ({ insideGitWorkTree: undefined }),
     code: "output-in-git-work-tree",
   },
   {
