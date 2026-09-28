@@ -1,0 +1,33 @@
+- id: W1-T4685
+  title: "799 IDENTICAL daemon.pause ROWS SAT BESIDE 800 TICKS — collapse repeated 'same gate, same condition' observations into one gate.observed row carrying first seen, last seen and a count, flushed when the condition changes or on a heartbeat"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  plan_refs: []
+  files: [src/lib/gate-observations.ts, test/a-repeated-gate-observation-is-one-row.test.ts, src/lib/daemon.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: this Mac's ledger held 799 identical daemon.pause rows against 800 daemon.tick rows; deduplication exists
+    only per emitter. Ledger volume drives the known OOM risk in ledger readers (memory: daemon OOM profile). Paperclip keeps
+    one durable diagnostic per unchanged gate with a count (doc/execution-semantics.md §5).
+  design: |
+    (i) gate-observations.ts: key (lane, gate, condition hash); first/last seen and count; flush on change or heartbeat.
+    (ii) Migrate the highest-volume repeated emitters first, measured by exact-repeat share across archives.
+    (iii) Readers that count occurrences read the count, never rows.
+  acceptance:
+    - claim: "an unchanged gate observation increments one row instead of appending"
+      proof: 'grep: test("W1-T4685: an unchanged gate observation increments one row instead of appending" in test/a-repeated-gate-observation-is-one-row.test.ts'
+    - claim: "a changed condition flushes a new row"
+      proof: 'grep: test("W1-T4685: a changed condition flushes a new row" in test/a-repeated-gate-observation-is-one-row.test.ts'
+    - claim: "the new module is called from src/lib/daemon.ts"
+      proof: 'grep: observeGate( in src/lib/daemon.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

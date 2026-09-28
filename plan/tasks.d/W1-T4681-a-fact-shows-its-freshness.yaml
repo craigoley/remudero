@@ -1,0 +1,31 @@
+- id: W1-T4681
+  title: "65 OF 85 LEARNINGS CAN NEVER BE RE-VERIFIED — compute how many commits touched each fact's files or symbols since it was earned and show a 'verify first' note in the prompt when that churn is high relative to the corpus, instead of any cutoff"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  plan_refs: []
+  files: [src/lib/learnings.ts, test/a-fact-shows-its-freshness.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: 20 of 85 learnings carry an assertion; the GitOrigin + lineSha256 drift check exists (src/lib/learnings.ts
+    ~79-86, ~808) but no learnings/*.yaml entry sets origin:. Hindsight marks observations stale when unconsolidated newer
+    memories are in scope (hindsight-docs/docs/developer/observations.mdx, 'Freshness Awareness').
+  design: |
+    (i) For each fact, count commits touching its files/symbols since its earned date.
+    (ii) Offline first: join churn with used-rate and outcome credit; stop if unrelated.
+    (iii) Injected facts carry a 'verify first' note ranked by relative churn, never dropped by a threshold.
+  acceptance:
+    - claim: "a fact whose files changed since it was earned carries a verify-first note"
+      proof: 'grep: test("W1-T4681: a fact whose files changed since it was earned carries a verify-first note" in test/a-fact-shows-its-freshness.test.ts'
+    - claim: "a fact untouched since it was earned carries none"
+      proof: 'grep: test("W1-T4681: a fact untouched since it was earned carries none" in test/a-fact-shows-its-freshness.test.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.
