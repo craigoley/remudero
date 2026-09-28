@@ -24,6 +24,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import {
   consoleAppUrl,
   enabledWorkerProviders,
@@ -952,7 +953,10 @@ export async function caseFileCommand(rest: string[], deps: CaseFileCommandInput
   const ledgers = batch ? await (deps.readLedgers ?? readTaskCaseLedgers)(stateDir, taskIds, asOf)
     : new Map([[taskIds[0], await (deps.readLedger ?? readTaskCaseLedger)(stateDir, taskIds[0], asOf)]]);
   let gateway: ReturnType<typeof buildBatchedGithub> | undefined;
-  const github = (owner: string, repo: string) => gateway ??= (deps.buildGithub ?? buildBatchedGithub)(owner, repo);
+  // A cold walk stops at the board's page ceiling, below this repository's closed-PR count, so every
+  // older task read as indeterminate. The daemon's persisted snapshot turns it into a delta read.
+  const github = (owner: string, repo: string) => gateway ??= (deps.buildGithub ?? buildBatchedGithub)(owner, repo,
+    { snapshotCache: createBoardSnapshotCache(dirname(stateDir), owner, repo) });
   const files = tasks.map((task) => assembleCaseFile(task, ledgers.get(task.id)!, asOf, root, deps, github));
   // JSON is also the default so every evidence state, source, and as-of remains machine-readable.
   out(JSON.stringify(batch ? files : files[0], null, 2));
