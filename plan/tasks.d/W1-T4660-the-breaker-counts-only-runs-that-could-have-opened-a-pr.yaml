@@ -1,0 +1,36 @@
+- id: W1-T4660
+  title: "THE DISPATCH CIRCUIT BREAKER HALTS TASKS FOR INFRASTRUCTURE, NOT TASK FAILURE — seven of eight open breaker issues are tasks whose every run ended blocked_containment (an inconclusive probe) or blocked_transient before a worker could open a PR, and each now waits on a human; count only runs that reached a worker toward the streak"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: recommended follow-ups 1-6 and 8 — automated flow, no stuck PRs, no false alarms"
+  plan_refs: [W1-T316]
+  files: [src/lib/status.ts, test/the-breaker-counts-only-runs-that-could-have-opened-a-pr.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-28: open breaker issues #7556 (W1-T4627), #7410 (W1-T4480), #7377 (W1-T4559), #7351 (W1-T4266), #7269
+    (W1-T4447), #7264 (W1-T4481), #7268 (W1-T4407). Their run verdicts in the ledger union: W1-T4627, W1-T4480 and W1-T4559
+    only blocked_containment ("containment UNPROVEN: no OS-denial was observed for the outside-cwd write — the write may never
+    have been attempted"); W1-T4447 and W1-T4481 only blocked_transient; W1-T4266 3 containment + 1 transient. None ever opened
+    a PR. evaluateDispatchBreakerDetailed (src/lib/status.ts) counts dispatches with no new owned PR regardless of why the run
+    ended, so a harness probe or an API outage converts into a human-gated halt. blocked_containment occurred 13 times and
+    blocked_transient 55 times across all runs 2026-09-24..28.
+  design: |
+    (i) A run whose terminal verdict is an infrastructure refusal — blocked_containment, blocked_isolation, blocked_transient,
+    task_already_merged — does not advance the no-new-PR streak; the breaker still counts every run that reached a worker.
+    (ii) The breaker's ledgered detail names how many dispatches were excluded and why, so a halted task shows its real count.
+    (iii) Infrastructure refusals keep their own existing escalations (toolchain, containment); nothing is silenced.
+  acceptance:
+    - claim: "runs refused by an inconclusive containment probe never trip the breaker"
+      proof: 'grep: test("W1-T4660: runs refused by an inconclusive containment probe never trip the breaker" in test/the-breaker-counts-only-runs-that-could-have-opened-a-pr.test.ts'
+    - claim: "worker runs that open no PR still trip it"
+      proof: 'grep: test("W1-T4660: worker runs that open no PR still trip it" in test/the-breaker-counts-only-runs-that-could-have-opened-a-pr.test.ts'
+  falsifier: |
+    Count every run.start and the first test trips the breaker on containment refusals alone.
