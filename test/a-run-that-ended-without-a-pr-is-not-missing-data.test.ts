@@ -29,7 +29,7 @@ const ledger = (rows: Row[]): CaseLedgerRead => ({ state: "observed", rows, asOf
   windowStart: "2026-08-29T12:10:00.000Z", forms: { gzip: 1, plain: 1, live: 1 }, unread: [], malformed: 0, truncated: false });
 
 /** One run's own ledger rows as the case file reads them: start, assignment, and (optionally) a verdict. */
-function runLedger(taskId: string, n: number, verdict: string | null): Row[] {
+function runRowsOf(taskId: string, n: number, verdict: string | null): Row[] {
   const row = (step: string, rest: Row) => ({ ts: "2026-09-28T11:00:00.000Z", task_id: taskId, run_id: `${taskId}-${n}`, step, ...rest });
   return [row("run.start", {}),
     row("worker.assignment", { worker_assignment: { id: `${taskId}-a${n}`, selected: { provider: "claude", model: "claude-sonnet-5" } } }),
@@ -37,7 +37,7 @@ function runLedger(taskId: string, n: number, verdict: string | null): Row[] {
 }
 
 const caseFile = (taskId: string, verdict: string | null, prRead: CasePrRead): TaskCaseFile =>
-  buildTaskCaseFile({ task: taskOf(taskId), projection: noPrProjection(taskId), ledger: ledger(runLedger(taskId, 1, verdict)), prRead, asOf: NOW });
+  buildTaskCaseFile({ task: taskOf(taskId), projection: noPrProjection(taskId), ledger: ledger(runRowsOf(taskId, 1, verdict)), prRead, asOf: NOW });
 
 const assignmentOf = (taskId: string): VerifiedAssignment => ({ assignmentId: `${taskId}-a1`, taskId, runId: `${taskId}-1`,
   assignedAt: "2026-09-28T11:00:00.000Z", taskClass: "fix", selectedModel: "claude-sonnet-5", servedModel: "claude-sonnet-5",
