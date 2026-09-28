@@ -979,6 +979,10 @@ test(
       github: offlineGh,
         spawn,
         automated: { reason: "merges", mergesSinceMarker: 5, daysSinceMarker: 1 },
+        startTokenRefresh: ({ log }) => {
+          log?.("github_app.token_refreshed", { source: "retro-test" });
+          return { armed: true, ready: Promise.resolve() };
+        },
       }));
       assert.equal(exitCode, 1);
       assert.equal(spawnCalls, 0, "the integrity gate must abort BEFORE the Architect is ever spawned");
@@ -991,6 +995,8 @@ test(
         .split("\n")
         .map((l) => JSON.parse(l));
       const abortLine = ledgerLines.find((l) => l.step === "retro_aborted_integrity");
+      assert.ok(ledgerLines.some((l) => l.step === "github_app.token_refreshed" && l.lane === "retro"),
+        "the automated child records its own token refresh before the integrity gate");
       assert.ok(abortLine, "a loud retro_aborted_integrity ledger line must be written");
       assert.equal(abortLine.merges_since_marker, 5);
       assert.equal(abortLine.gather_shipped, 0);
@@ -1029,6 +1035,7 @@ test("retroCommand: an automated run whose gather DOES credit merges passes the 
       github: offlineGh,
       spawn: fx.fakeSpawn,
       automated: { reason: "days", mergesSinceMarker: 0, daysSinceMarker: 8 },
+      startTokenRefresh: () => ({ armed: false }),
       prepublishPreflight: fx.prepublishPreflight,
     }));
     // mergesSinceMarker: 0 -> checkRetroIntegrity's `priorMergesSinceMarker > 0` guard
@@ -1087,7 +1094,8 @@ test(
         // -> gh pr create -> ownership assert -> pr.opened -> marker save), gated by
         // opts.automated exactly as the real daemon wiring (run-task.ts's daemonCommand
         // / retroTriggerCheck) invokes it in production. Never a stand-in.
-        await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, automated: decision, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
+        await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, automated: decision,
+          startTokenRefresh: () => ({ armed: false }), github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
       };
 
       const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];

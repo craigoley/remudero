@@ -2,6 +2,7 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
+import { systemClock, type Clock } from "./clock.js";
 import type { GardenerDeps } from "./gardener.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { loadPlanFromYaml } from "./plan.js";
@@ -14,6 +15,10 @@ export const SELECTOR_SHADOW_RUN_LIMIT = 60;
 export const SELECTOR_SHADOW_SHARDS = 8;
 export const SELECTOR_SHADOW_MIN_FAILURES = 30;
 export const SELECTOR_SHADOW_MIN_RUNS = 40;
+/** A background pass may fetch only this many previously unseen workflow logs. */
+export const SELECTOR_SHADOW_FRESH_LOGS_PER_PASS = 8;
+/** Incomplete completed-run logs get a second look, but never on every daemon tick. */
+export const SELECTOR_SHADOW_INCOMPLETE_RETRY_MS = 6 * 60 * 60 * 1000;
 
 export interface SelectorShadowRun {
   id: number;
@@ -150,14 +155,89 @@ export async function readSelectorShadowRunsAsync(
   owner: string,
   repo: string,
   limit = SELECTOR_SHADOW_RUN_LIMIT,
-  io: { readJson?: (args: string[]) => Promise<unknown>; readLog?: (args: string[]) => Promise<string> } = {},
+  io: {
+    readJson?: (args: string[]) => Promise<unknown>;
+    readLog?: (args: string[]) => Promise<string>;
+    cachePath?: string;
+    clock?: Clock;
+    freshLogsPerPass?: number;
+    warn?: (message: string) => void;
+    writeCache?: (path: string, contents: string) => void;
+  } = {},
 ): Promise<SelectorShadowRun[]> {
   const readJson = io.readJson ?? ghJsonAsync;
   const readLog = io.readLog ?? ((args: string[]) => ghTextAsync(args, { maxBuffer: 64 * 1024 * 1024 }));
+  const writeCache = io.writeCache ?? writeAtomic;
   const headers = selectorShadowRunHeaders(await readJson(selectorShadowRunListArgs(owner, repo, limit)));
+  type CachedLog = { headSha: string; log: string; fetchedAt: number; complete: boolean };
+  let cached: Record<string, CachedLog> = {};
+  if (io.cachePath) {
+    try {
+      const raw = readFileIfExists(io.cachePath);
+      if (raw) {
+        const parsed: unknown = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid cache object");
+        for (const [key, value] of Object.entries(parsed)) {
+          if (!value || typeof value !== "object") continue;
+          const row = value as Partial<CachedLog>;
+          if (typeof row.headSha === "string" && typeof row.log === "string" &&
+              typeof row.fetchedAt === "number" && typeof row.complete === "boolean") {
+            cached[key] = row as CachedLog;
+          }
+        }
+      }
+    } catch (error) {
+      io.warn?.(`selector shadow log cache unreadable: ${String((error as Error).message)}`);
+    }
+  }
+  const clock = io.clock ?? systemClock;
+  const freshLimit = io.cachePath ? (io.freshLogsPerPass ?? SELECTOR_SHADOW_FRESH_LOGS_PER_PASS) : Infinity;
+  let freshReads = 0;
   const runs: SelectorShadowRun[] = [];
   for (const run of headers) {
-    runs.push({ ...run, log: await readLog(selectorShadowRunLogArgs(owner, repo, run.id)) });
+    const key = String(run.id);
+    const hit = cached[key];
+    const reusable = hit?.headSha === run.headSha &&
+      (hit.complete || (clock.now() - hit.fetchedAt >= 0 && clock.now() - hit.fetchedAt < SELECTOR_SHADOW_INCOMPLETE_RETRY_MS));
+    if (reusable) {
+      runs.push({ ...run, log: hit.log });
+      continue;
+    }
+    if (freshReads >= freshLimit) {
+      // A placeholder keeps the report INSUFFICIENT until the whole requested window is read.
+      // Returning only the fetched prefix could certify narrowing while newer runs are absent.
+      runs.push({ ...run, log: "" });
+      continue;
+    }
+    let fullLog: string;
+    try {
+      fullLog = await readLog(selectorShadowRunLogArgs(owner, repo, run.id));
+    } catch (error) {
+      const detail = `${String((error as Error).message)} ${String((error as { stderr?: string }).stderr ?? "")}`;
+      if (!io.cachePath || /Bad credentials|HTTP 401/i.test(detail)) throw error;
+      io.warn?.(`selector shadow run ${run.id} log unreadable: ${String((error as Error).message)}`);
+      fullLog = "";
+    }
+    freshReads++;
+    const log = io.cachePath
+      ? fullLog.split(/\r?\n/).filter((line) => line.includes("AFFECTED-SUITES-SHADOW: ")).join("\n")
+      : fullLog;
+    runs.push({ ...run, log });
+    if (io.cachePath) {
+      const complete = parseSelectorShadowLines(log).length === SELECTOR_SHADOW_SHARDS;
+      cached[key] = { headSha: run.headSha, log, fetchedAt: clock.now(), complete };
+      try {
+        writeCache(io.cachePath, JSON.stringify(cached) + "\n");
+      } catch (error) {
+        io.warn?.(`selector shadow log cache write failed: ${String((error as Error).message)}`);
+      }
+    }
+  }
+  if (io.cachePath) {
+    const wanted = new Set(headers.map((run) => String(run.id)));
+    cached = Object.fromEntries(Object.entries(cached).filter(([key]) => wanted.has(key)));
+    try { writeCache(io.cachePath, JSON.stringify(cached) + "\n"); }
+    catch (error) { io.warn?.(`selector shadow log cache prune failed: ${String((error as Error).message)}`); }
   }
   return runs;
 }

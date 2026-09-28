@@ -28521,6 +28521,8 @@ async function retroCommand(
      * by a human and keeps its existing behavior unchanged.
      */
     automated?: { reason: "merges" | "days" | "followups"; mergesSinceMarker: number; daysSinceMarker: number };
+    /** The detached automated retro owns its own App token renewal loop. */
+    startTokenRefresh?: typeof startInstallationTokenRefresh;
     /**
      * Injectable GitHub gateway for this command's two {@link projectPlan} passes (the plan-health
      * sweep and the orientation section) — the same shape `spawn` above already uses, and the
@@ -28565,6 +28567,21 @@ async function retroCommand(
   const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("retro");
   const config = loadConfig();
   const ledgerPath = ledgerPathFor(config);
+  // The daemon's inherited GH_TOKEN is a snapshot. A prepublish pass can outlive its one-hour
+  // lifetime, so the automated retro starts and awaits its own first mint before GitHub reads.
+  if (opts.automated) {
+    const tokenRunId = `retro-token-${process.pid}`;
+    const refresh = (opts.startTokenRefresh ?? startInstallationTokenRefresh)({
+      log: (step, extra) => appendLedger(ledgerPath, {
+        run_id: tokenRunId,
+        task_id: "RETRO",
+        step,
+        lane: "retro",
+        ...extra,
+      }),
+    });
+    if (refresh.ready) await refresh.ready;
+  }
   const markerPath = join(config.root, "state", "last-retro.json");
   const learningsPath = join(repoRoot, "LEARNINGS.md");
   // W1-T242: a corrupt-but-present marker (e.g. a torn write from a crash, or a manual
@@ -33388,7 +33405,10 @@ export async function daemonCommand(
                     openWorkspace: () => gardenCheckout({ name: "selector-shadow", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
                     log,
                   },
-                  () => readSelectorShadowRunsAsync(self.owner, self.repo),
+                  () => readSelectorShadowRunsAsync(self.owner, self.repo, undefined, {
+                    cachePath: join(config.root, "state", "selector-shadow-log-cache.json"),
+                    warn: (message) => log("selector-shadow.cache_failed", { message }),
+                  }),
                   (miss) => readSelectorShadowChangedPaths(self.owner, self.repo, miss),
                   ciLearningTaskIdMinter(repoRoot),
                   intervalMs,

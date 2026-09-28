@@ -20,6 +20,7 @@ import {
   GH_APP_INSTALLATION_ID_ENV,
   GH_APP_PRIVATE_KEY_PATH_ENV,
   INSTALLATION_TOKEN_LIFETIME_MS,
+  REFRESH_FAILURE_RETRY_MS,
   REFRESH_MARGIN_MS,
   nextRefreshDelayMs,
   refreshInstallationToken,
@@ -220,6 +221,8 @@ test("W1-T1024: no ledger row or log line carries the key or token value", async
 
 test("W1-T1024: the refresh margin is strictly inside the token life", () => {
   assert.equal(INSTALLATION_TOKEN_LIFETIME_MS, 60 * 60 * 1000);
+  assert.equal(REFRESH_MARGIN_MS, 20 * 60 * 1000, "renew before the observed multi-minute event-loop delay can consume the old five-minute window");
+  assert.equal(REFRESH_FAILURE_RETRY_MS, 2 * 60 * 1000, "failed exchanges retry several times inside the renewed window");
   assert.ok(REFRESH_MARGIN_MS > 0, "a zero margin would refresh exactly at expiry, not before it");
   assert.ok(
     REFRESH_MARGIN_MS < INSTALLATION_TOKEN_LIFETIME_MS,
@@ -304,7 +307,7 @@ test("startInstallationTokenRefresh: a FAILED mint still reschedules on the marg
   });
   assert.equal(res.armed, true);
   await new Promise((r) => setImmediate(r));
-  assert.deepEqual(delays, [REFRESH_MARGIN_MS], "a failed mint retries on the margin");
+  assert.deepEqual(delays, [REFRESH_FAILURE_RETRY_MS], "a failed mint retries before the margin elapses");
 });
 
 // ── W1-T3011: A failed scheduled refresh must not outwait the retained expiry ─────────────────
@@ -420,7 +423,7 @@ test("W1-T3011: a first-mint failure retains the existing bounded retry cadence"
   assert.equal(res.armed, true);
   await res.ready;
   assert.equal(refreshes, 1);
-  assert.deepEqual(delays, [REFRESH_MARGIN_MS], "without a prior expiry there is no edge to derive from");
+  assert.deepEqual(delays, [REFRESH_FAILURE_RETRY_MS], "without a prior expiry the bounded failure cadence applies");
 });
 
 test("W1-T3011: an expired retained token clamps the failure retry to immediate", async () => {
@@ -611,7 +614,7 @@ test("W1-T1068: a rejected refresh still arms the next timer", async () => {
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(
     delays,
-    [REFRESH_MARGIN_MS],
+    [REFRESH_FAILURE_RETRY_MS],
     "a rejected first mint must retry on the margin when no retained expiry exists yet",
   );
 });
@@ -649,7 +652,7 @@ test("W1-T1068: a throwing ledger write still leaves the loop armed", async () =
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(
     delays,
-    [REFRESH_MARGIN_MS],
+    [REFRESH_FAILURE_RETRY_MS],
     "a throwing ledger write (ENOSPC/EACCES/EROFS) must not stop the loop rearming",
   );
 });
@@ -679,7 +682,7 @@ test("W1-T1068: the next timer is armed before any explanatory write", async () 
   assert.ok(order.some((e) => e.startsWith("setTimer:")), "the timer must be armed even when every explanatory write throws");
   assert.equal(
     order[0],
-    `setTimer:${REFRESH_MARGIN_MS}`,
+    `setTimer:${REFRESH_FAILURE_RETRY_MS}`,
     "the reschedule must happen before any explanatory write is even attempted",
   );
 });
