@@ -141,7 +141,7 @@ function registeredProtocols(stateDir: string): { protocol: ProspectiveAaProtoco
   });
 }
 
-/** What one side attempt of a pair did, as the pair records it. */
+/** How one admission's pair ended. Observational only: nothing in normal dispatch reads it. */
 export interface ProspectiveAaPairResult {
   state: "inert" | "not-eligible" | "refused" | "measured" | "unmeasurable";
   trialId: string | null;
@@ -157,7 +157,7 @@ function revisionsOf(stack: AaTrialManifest["stack"]) {
   return { harnessRevision, promptRevision, toolRevision, scorerRevision, environmentRevision };
 }
 
-/** The pair's input. Every optional field defaults to the production path; nothing here reads config. */
+/** The pair's input. Every optional field defaults to the production path; the pair never loads config itself. */
 export interface ProspectiveAaPairInput {
   task: { id: string; acceptance?: readonly AcceptanceCriterion[] };
   lane: string;
