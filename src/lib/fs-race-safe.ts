@@ -9,12 +9,10 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 // Why: the four CodeQL rounds this helper closed — docs/forensics/fs-race-safe.md#module-header.
 /**
  * The `js/file-system-race`-safe idiom for a state file created ONCE and read on every later call
- * — config.ts's `loadConfig`, worker-home.ts's `ensureWorkerKeychain`, and, via this helper,
- * serve.ts's `resolveServiceTokens`. {@link createOrReadExclusive} opens with `O_CREAT|O_EXCL` in
- * one syscall — no separate existence check a peer could race between. Success hands back the
- * descriptor so the caller writes through it directly; EEXIST reads the file back through a
- * fresh descriptor, never `existsSync`-then-`readFileSync(path, ...)`.
- * FALSIFIER: test/fs-race-alerts.test.ts.
+ * (one with content goes through {@link createOrReadPublished}). {@link createOrReadExclusive}
+ * opens with `O_CREAT|O_EXCL` in one syscall — no separate existence check a peer could race
+ * between. Success hands back the descriptor; EEXIST reads the file back through a fresh
+ * descriptor, never `existsSync`-then-`readFileSync(path, ...)`. FALSIFIER: test/fs-race-alerts.test.ts.
  */
 export type CreateOrReadResult = { created: true; fd: number } | { created: false; raw: string };
 
@@ -76,11 +74,9 @@ export class StillBeingWrittenError extends RmdError {
   }
 }
 
-/** The shape every minted secret here takes: `randomBytes(32).toString("hex")`. */
 export const HEX_SECRET_RE = /^[0-9a-f]{64}$/;
 
-/** A secret file that IS present but does not hold what its minter writes. Refused, never used:
- *  an empty or short secret is a key anyone can reproduce (an HMAC over `""` forges every link). */
+/** A present secret file not holding what its minter writes: refused, as a short key is forgeable. */
 export class InvalidSecretFileError extends RmdError {
   readonly reason = "invalid-secret-file";
   constructor(

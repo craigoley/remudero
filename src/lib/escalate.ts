@@ -1335,11 +1335,8 @@ export function escalationLinkUsedPath(root: string, signature: string): string 
   return join(root, "state", "escalation-links", `${signature}.used`);
 }
 
-/** Create-once, read-thereafter, mode 600 — the discipline `resolveServiceTokens` uses.
- *  A rotation is: stop the daemon, delete the file, start it again.
- *  The secret is PUBLISHED whole over the empty claim (`createOrReadPublished`), so a reader
- *  never meets a created-but-unwritten file; and a present file that is not a 64-hex secret
- *  throws {@link InvalidSecretFileError} — an empty key would sign links anyone can forge. */
+/** Create-once, published whole, mode 600; a file that is not a 64-hex secret throws (an empty
+ *  key forges every link). A rotation is: stop the daemon, delete the file, start it again. */
 export function loadEscalationLinkSecret(
   root: string,
   io: { claim: typeof createOrReadPublished; mkdir: typeof mkdirSync } = {
