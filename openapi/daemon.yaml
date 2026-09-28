@@ -2606,6 +2606,9 @@ components:
           enum: [ready, refused, stale, unknown, expired, in-progress]
         code:
           type: string
+          description: >
+            A refusal's reason; on a completion, W1-T4657's evidence label -- `executor` when the
+            action-catalogue-v1 executor wrote it, `self-reported` when a caller posted it.
         reason:
           type: string
           maxLength: 321
@@ -2756,6 +2759,20 @@ components:
           $ref: "#/components/schemas/AutomationActionReceipt"
         preflight:
           $ref: "#/components/schemas/AutomationPreflightResult"
+        admission:
+          $ref: "#/components/schemas/AutomationActionReceipt"
+        executor:
+          type: object
+          description: W1-T4657 -- the catalogue executor's own ledger row, which the completion's evidenceRef cites.
+          required: [step, ts, run_id]
+          properties:
+            step:
+              type: string
+            ts:
+              type: string
+              format: date-time
+            run_id:
+              type: string
 
     # ── W1-T3878 -- delegation-profile-v1: the trust budget every delegation carries ──────────
     DelegationProfileScope:
@@ -10061,7 +10078,11 @@ paths:
         refusal (`409`); a dry run appends a dry-run receipt (`200`); a ready action is admitted
         `in-progress` (`202`) -- never succeeded -- until POST /v1/operator-agent/actions/complete
         records its evidence. An active emergency stop covering the action's repo or instance
-        refuses it first (`423`).
+        refuses it first (`423`). W1-T4657 -- a capability in the `rmd.` namespace is run by the
+        action-catalogue-v1 executor instead: `200` `completed` with a completion receipt whose
+        evidenceRef names the executor's own ledger row, `200` `reused` for a repeat, `409` for a
+        refusal (`no-executor`, `tier-insufficient`, `switched-off`, ...). This route proves MIDDLE,
+        so a HIGH catalogue capability is refused here and runs only via /actions/execute-high.
       security:
         - bearerWrite: []
       requestBody:
@@ -10089,6 +10110,57 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Refused; the receipt names the preflight outcome and code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "423":
+          description: An active emergency stop covers this action; the refusal receipt names the stop.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmergencyStopAdmissionRefusal"
+
+  /v1/operator-agent/actions/execute-high:
+    post:
+      summary: W1-T4657 -- execute an action as /actions/execute does, proven HIGH (HIGH write tier).
+      description: >
+        Identical to POST /v1/operator-agent/actions/execute, but dispatched at the HIGH tier with a
+        confirm nonce, so a HIGH-tier catalogue capability (`rmd.task.kick:<taskId>`, which reuses
+        POST /v1/drain/kick's handler) can run. Its approval still comes from /actions/decision.
+      security:
+        - bearerWrite: []
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentActionObservationRequest"
+      responses:
+        "202":
+          description: A non-catalogue action admitted in-progress.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "200":
+          description: A catalogue action completed by its executor, a dry run, or the existing receipt for a duplicate idempotency key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HighTierForbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
