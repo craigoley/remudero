@@ -2934,8 +2934,6 @@ export function fileRatificationBatch(
   return { writtenPaths: [...written], filedIds };
 }
 
-const RATIFIED_STAMP_RE = /^- \S+ .*\bRATIFIED\b.*->/;
-
 /** W1-T4706: a joined ratify PR's body over every proposal on its branch — the stamps the current body names plus the
  *  joining one, over the branch's written paths. #7608 kept its first approve's body: five shards under two. */
 export function joinedRatificationPrBody(
@@ -2946,7 +2944,7 @@ export function joinedRatificationPrBody(
   opts: Pick<PlanPrBodyOpts, "proofCwd" | "proofCheck" | "baseRef"> = {},
 ): string {
   const intro = currentBody.split(CHANGED_FILES_HEADING)[0];
-  const stamps = [...intro.split("\n").map((l) => l.trim()).filter((l) => RATIFIED_STAMP_RE.test(l)), stampLine.trim()];
+  const stamps = [...intro.split("\n").map((l) => l.trim()).filter((l) => /^- \S+ .*\bRATIFIED\b.*->/.test(l)), stampLine.trim()];
   return ratificationPrBody([...new Set(stamps.filter(Boolean))].join("\n"), filedIds, writtenPaths, opts);
 }
 
