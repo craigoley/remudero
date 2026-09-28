@@ -126,6 +126,13 @@ export interface DeclaredFileBaseFact {
  * present at the base and referenced by the change's own tests. Empty input is false — "nothing was
  * declared missing" is a different fact from "every missing thing is explained", and only the second
  * may suppress an escalation.
+ *
+ * W1-T3056: STILL UNWIRED, DELIBERATELY — the OPERATOR RULING took ending (a) (wire the computed
+ * fact into the prompt) but a partial (a) is the sanctioned first half: nothing today PRODUCES a
+ * {@link DeclaredFileBaseFact} (a merge-base read cross-referenced against the change's own changed
+ * test files), so this predicate has no caller yet. {@link declaredFilesAbsentFromChange} below,
+ * which needs only inputs already in hand, is the half that IS wired. Building the base-fact
+ * producer and wiring this one too is the second half, not this task's scope.
  */
 export function isTestOnlyCompletionOfExistingBehaviour(facts: readonly DeclaredFileBaseFact[]): boolean {
   if (facts.length === 0) return false;
@@ -136,6 +143,10 @@ export function isTestOnlyCompletionOfExistingBehaviour(facts: readonly Declared
  * The declared paths the ACTUAL CHANGE does not touch. Pure set arithmetic over the two lists the
  * judge is already given; a truncated change view yields no facts at all, because a path missing
  * from a capped list is not a path missing from the change.
+ *
+ * W1-T3056: WIRED into {@link buildRiskJudgePrompt} — its result is rendered as a computed
+ * "DECLARED FILES THE ACTUAL CHANGE DOES NOT TOUCH" line, replacing the judge's own LLM inference
+ * over the same two lists with the set arithmetic below.
  */
 export function declaredFilesAbsentFromChange(
   declared: readonly string[] | undefined,
@@ -402,6 +413,22 @@ export function buildRiskJudgePrompt(input: RiskJudgeInput): string {
   const scrubbed = scrubRiskJudgeInput(input);
   const safeInput = scrubbed.input;
   const filesLine = safeInput.change.files?.length ? safeInput.change.files.join(", ") : "(no files listed)";
+  // W1-T3056 (a): a COMPUTED fact — set arithmetic over the two lists already rendered below —
+  // replaces the LLM's own inference over them. `declaredFilesAbsentFromChange` already declines
+  // on a truncated/absent view, so this note appears only when the mismatch is real. This is the
+  // FACT alone, never the verdict: an absent declared file can mean the work was not done, or that
+  // it already had (a test-only completion, W1-T2991) — the judge still weighs which.
+  const declaredAbsentFromChange = declaredFilesAbsentFromChange(safeInput.change.files, safeInput.change.changeView);
+  const declaredAbsentNote =
+    declaredAbsentFromChange.length > 0
+      ? [
+          ``,
+          `DECLARED FILES THE ACTUAL CHANGE DOES NOT TOUCH (computed, not inferred, W1-T3056): ${declaredAbsentFromChange.join(", ")}`,
+          `This fact alone does not decide anything: it may mean the work was not done, or that it`,
+          `was already done and this change only completes it. Weigh it with everything else here —`,
+          `do not classify HIGH on this mismatch alone.`,
+        ]
+      : [];
   // W1-T2371: NARROWED ONLY on the founding shape, and the narrowing is stated to the judge rather
   // than applied silently — it may still classify HIGH for any other reason it sees.
   const planOnlyAmendmentNote = isPlanOnlyAmendment(safeInput.change.description, safeInput.change.changeView)
@@ -472,6 +499,7 @@ export function buildRiskJudgePrompt(input: RiskJudgeInput): string {
     `FILES TOUCHED (declared): ${filesLine}`,
     ``,
     ...renderChangeViewLines(safeInput.change.changeView),
+    ...declaredAbsentNote,
     ``,
     renderRecord("GATES STATE", safeInput.gatesState),
     ``,
