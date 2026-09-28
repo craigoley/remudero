@@ -39,3 +39,9 @@ Learnings used when offered: 13%. Dangling Why pointers: 0.
 - retire maxbudget-between-turns: Workers offered it have rarely used it, compared with other learnings.
 
 Learnings used when offered: 12%. Dangling Why pointers: 0.
+
+## Pass 2026-09-28T19:01:48.637Z
+
+- retire ledger-corpus-needs-the-resolver: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 12%. Dangling Why pointers: 0.
