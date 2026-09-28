@@ -1240,6 +1240,29 @@ const LIVENESS_NEXT_ACTIONS: readonly NextActionRule<LivenessCtx>[] = [
     },
   },
   {
+    // W1-T3759: a daemon this panel CAN read liveness for (running, or unsensed — {@link
+    // canCompareHeadVsOrigin}) with NO `daemon.boot` `head_sha` on record must not fall through
+    // silently, and must not be told `rmd deploy` either — the deploy path skips for that SAME
+    // missing record ("daemon running head not recorded ... mount staleness cannot be ruled
+    // out", deployer.ts) so that advice is guaranteed not to work. Name the gap instead. Checked
+    // AFTER the stale rule (a real stale verdict still wins) and BEFORE the "no sensor"/"stopped"
+    // rules below, which cover a DIFFERENT absence (the service itself, not its head).
+    applies: (ctx) => {
+      const row = ctx.services.find((s) => s.service === "daemon");
+      return (
+        ctx.headVsOriginMain.status === "unknown" &&
+        row !== undefined &&
+        row.headSha === undefined &&
+        livenessState(row) !== "stopped" &&
+        livenessState(row) !== "unknown"
+      );
+    },
+    action: () =>
+      "unknown running head — no `daemon.boot` head_sha is on record, so head vs origin/main " +
+      "cannot be judged; `rmd deploy` cannot clear this (it skips for the same missing record) " +
+      "— the gap is in the boot record, not in the code needing a deploy",
+  },
+  {
     // A daemon row reading `"unknown"` must never be advised on as a `"stopped"` one — `rmd up` is nonsense
     // for a process this panel could not sense. Checked BEFORE the `"stopped"` rule so the unknown case wins.
     applies: (ctx) => {
