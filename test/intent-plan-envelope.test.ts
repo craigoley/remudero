@@ -9,7 +9,7 @@ import {
   buildIntentPlan,
   foldIntentPlans,
   INTENT_PLAN_AUTHORITY_FIELD_RE,
-  INTENT_PLAN_CEILING_MENTION_RE,
+  INTENT_PLAN_SPEND_MENTION_RE,
   INTENT_PLAN_DEFAULT_TTL_MINUTES,
   INTENT_PLAN_EVENT_LEDGER_STEP,
   INTENT_PLAN_LEDGER_STEP,
@@ -99,8 +99,8 @@ test("W1-T3898: the goal research patterns match explicit references only", () =
   assert.equal(INTENT_PLAN_REPO_MENTION_RE.test("fix CI in repo owner/repo today"), true);
   assert.equal(INTENT_PLAN_REPO_MENTION_RE.test("see https://github.com/owner/repo/pulls"), true);
   assert.equal(INTENT_PLAN_REPO_MENTION_RE.test("fix src/lib/serve.ts and/or the docs"), false, "a bare path or and/or is never a repository");
-  assert.equal(INTENT_PLAN_CEILING_MENTION_RE.test("spend no more than $30"), true);
-  assert.equal(INTENT_PLAN_CEILING_MENTION_RE.test("it costs $30 a day now"), false, "a price is not a ceiling");
+  assert.equal(INTENT_PLAN_SPEND_MENTION_RE.test("spend no more than $30"), true);
+  assert.equal(INTENT_PLAN_SPEND_MENTION_RE.test("it costs $30 a day now"), false, "a price is not a ceiling");
   assert.equal(INTENT_PLAN_SCOPE_ANSWER_RE.test("repo owner/repo"), true);
   assert.equal(INTENT_PLAN_SCOPE_ANSWER_RE.test("instance prod-1"), true);
   assert.equal(INTENT_PLAN_SCOPE_ANSWER_RE.test("probably the main one"), false);

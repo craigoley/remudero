@@ -79,7 +79,7 @@ export const INTENT_PLAN_AUTHORITY_FIELD_RE =
  *  github.com URL. A bare `a/b` is not one — `and/or` and `src/x.ts` must never become a scope. */
 export const INTENT_PLAN_REPO_MENTION_RE = /(?:\brepo(?:sitory)?:?\s+`?|github\.com\/)([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{0,99}[A-Za-z0-9_-])/i;
 /** An EXPLICIT spend ceiling in a goal ("at most $20", "under $5", "budget of $100"). */
-export const INTENT_PLAN_CEILING_MENTION_RE = /\b(?:at most|under|up to|no more than|max(?:imum)?(?: of)?|budget(?: of)?|ceiling(?: of)?|cap(?: of)?)\s+\$\s?(\d{1,5}(?:\.\d{1,2})?)(?!\d|\.\d)/i;
+export const INTENT_PLAN_SPEND_MENTION_RE = /\b(?:at most|under|up to|no more than|max(?:imum)?(?: of)?|budget(?: of)?|ceiling(?: of)?|cap(?: of)?)\s+\$\s?(\d{1,5}(?:\.\d{1,2})?)(?!\d|\.\d)/i;
 /** A scope answer: one `owner/name` repository (optionally prefixed `repo`), or `instance <id>`. */
 export const INTENT_PLAN_SCOPE_ANSWER_RE =
   /^(?:(?:repo(?:sitory)?:?\s+)?([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{0,99}[A-Za-z0-9_-])|instance:?\s+([A-Za-z0-9][A-Za-z0-9_.:-]{0,159}))\.?$/i;
@@ -363,7 +363,7 @@ export function buildIntentPlan(input: unknown, opts: { readonly clock: Clock; r
     steps.push(step);
   }
   const repositories = distinctMatches(goal, INTENT_PLAN_REPO_MENTION_RE);
-  const ceilingsUsd = distinctMatches(goal, INTENT_PLAN_CEILING_MENTION_RE).map(Number);
+  const ceilingsUsd = distinctMatches(goal, INTENT_PLAN_SPEND_MENTION_RE).map(Number);
   const researched = (statement: string): IntentPlanFact => ({ statement, source: "goal", observedAt: createdAt, availability: "available" });
   const scope = scopeInput.repo || scopeInput.instance || repositories.length !== 1 ? scopeInput : { ...scopeInput, repo: repositories[0]! };
   const ceilingUsd = ceilingInput ?? (ceilingsUsd.length === 1 ? ceilingsUsd[0] : undefined);
