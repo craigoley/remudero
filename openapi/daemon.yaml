@@ -710,6 +710,27 @@ components:
           type: string
           format: date-time
 
+    PrActionSwitchedOff:
+      type: object
+      description: >
+        POST /v1/pr-actions' 409 body (src/lib/panel-actions.ts's `buildPrActionRoute`): the
+        operator switched this action off on this daemon -- the marker
+        `state/CONSOLE_PR_ACTION_OFF-<action>` exists (src/lib/fleet-control.ts's
+        `isPrActionSwitchedOff`). Nothing was recorded but the `console.pr_action_switched_off`
+        ledger row. A dedicated refusal rather than a member of the shared Error enum, which a
+        consumer switches over exhaustively (packages/daemon-client-smoke).
+      required:
+        - error
+        - detail
+      properties:
+        error:
+          type: string
+          enum:
+            - switched_off
+        detail:
+          type: string
+          description: Names the switched-off action and the marker file that switched it off.
+
     MarkEscalationHandledRequest:
       type: object
       description: >
@@ -931,7 +952,10 @@ components:
 
     FeedbackInboxResult:
       type: object
-      description: GET /v1/feedback's body -- every captured feedback entry, oldest first.
+      description: >
+        GET /v1/feedback's body -- every captured feedback entry, oldest first. Served through the
+        console read cache (src/lib/serve.ts's `boundConsoleReadRoute`), so `rmd serve` also
+        splices in `staleness`; a cold or stalled cache answers `{entries: [], staleness}`.
       required:
         - entries
       properties:
@@ -939,6 +963,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/FeedbackEntry"
+        staleness:
+          $ref: "#/components/schemas/ConsoleResponseStaleness"
 
     SubmitFeedbackRequest:
       type: object
@@ -8420,6 +8446,13 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: >
+            The requested action is switched off on this daemon; no request was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrActionSwitchedOff"
 
   /v1/escalation/mark-handled:
     post:
