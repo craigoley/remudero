@@ -193,6 +193,30 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "ledger-only delegation handoff receipt; envelope, replay, human-gate, and receipt behavior are covered in test/agent-delegation-*.test.ts",
   ],
   [
+    "POST /v1/operator-agent/actions",
+    "W1-T3855: ledger-only automation-action-v1 registration; validation and idempotent re-registration are covered in test/automation-action-contract.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/actions/decision",
+    "W1-T3855: ledger-only operator approval of a human-policy action; covered in test/operator-agent-automation-actions.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/actions/preflight",
+    "W1-T3855: evaluates and records nothing; the six preflight outcomes are covered in test/automation-action-contract.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/actions/execute",
+    "W1-T3855: ledger-only admission receipt; idempotency, emergency-stop refusal, and dry runs are covered in test/automation-action-contract.test.ts and test/operator-agent-automation-actions.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/actions/complete",
+    "W1-T3855: ledger-only completion receipt linked to its admission; covered in test/automation-action-contract.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/actions/rollback",
+    "W1-T3855: ledger-only rollback receipt linked to its completion; covered in test/automation-action-contract.test.ts",
+  ],
+  [
     "POST /v1/context-controls/forget",
     "W1-T3893: production route is mounted; durable forget receipt and restart-safe behavior are covered in test/context-controls-forget.test.ts",
   ],
