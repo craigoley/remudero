@@ -9,7 +9,7 @@
 
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
-import type { ServerResponse } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Route } from "./service.js";
 import { clockFromMillisFn, fixedClock } from "./clock.js";
 import { EMERGENCY_STOP_CLEARED_LEDGER_STEP, EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "./ledger.js";
@@ -71,10 +71,47 @@ import {
   type ConsequenceActionInput,
 } from "./consequence-policy.js";
 import {
+  buildDelegationProfile,
+  buildDelegationReplacement,
+  DELEGATION_DECISION_LEDGER_STEP,
+  DELEGATION_PROFILE_LEDGER_STEP,
+  DELEGATION_PROFILE_MAX_COST_USD,
+  DELEGATION_PROFILE_MAX_TEXT_CHARS,
+  DELEGATION_PROFILE_VERSION,
+  delegationEligibility,
+  delegationLifecycleState,
+  delegationProfileStatus,
+  findNonAuthoritativeSignal,
+  foldDelegationProfiles,
+  projectDelegationProfile,
+  type DelegationProfileState,
+} from "./delegation-profile.js";
+import {
   acceptDelegationEnvelope,
+  AUTOMATION_ACTION_MAX_ID_CHARS,
+  AUTOMATION_ACTION_MAX_RECEIPTS,
+  AUTOMATION_ACTION_MAX_TEXT_CHARS,
+  AUTOMATION_ACTION_VERSION,
+  automationActionState,
+  automationApprovalState,
+  automationRedactionViolation,
+  completeAutomationAction,
   createDelegationEnvelope,
+  evaluateAutomationAction,
   executeBoundedDelegation,
   InMemoryDelegationEnvelopeStore,
+  preflightAutomationAction,
+  rollbackAutomationAction,
+  validateAutomationAction,
+  validateAutomationObservations,
+  validateAutomationReceipt,
+  type AutomationAction,
+  type AutomationActionReceipt,
+  type AutomationActionState,
+  type AutomationApprovalDecision,
+  type AutomationApprovalState,
+  type AutomationPreconditionObservation,
+  type AutomationStepResult,
   type DelegationCapabilityRef,
   type DelegationHumanApproval,
   type DelegationRiskTier,
@@ -94,6 +131,27 @@ import {
   type EmergencyStopClearPolicy,
   type EmergencyStopScope,
 } from "./emergency-control.js";
+import {
+  applyScopedPreference,
+  evaluatePreference,
+  foldOperatorPreferences,
+  inferPreferenceHypothesis,
+  OPERATOR_PREFERENCE_LEDGER_STEPS,
+  PREFERENCE_ACTIONS,
+  PREFERENCE_EFFECT_KINDS,
+  preferenceDecisionSamples,
+  preferenceListedFor,
+  preferenceReceipt,
+  projectOperatorPreference,
+  samePreferenceScope,
+  transitionPreference,
+  validatePreferenceEffect,
+  validatePreferenceScope,
+  type PreferenceAction,
+  type PreferenceEffect,
+  type PreferenceScope,
+  type PreferenceState,
+} from "./preference-policy.js";
 
 export const OPERATOR_AGENT_PROPOSAL_STEP = "panel.operator_agent_proposal";
 export const OPERATOR_AGENT_DECISION_STEP = "panel.operator_agent_decision";
@@ -119,6 +177,10 @@ export const CONTEXT_DELETED_STEP = "panel.context_deleted";
  *  executeBoundedDelegation( before this ledgers — never a raw prompt or secret, only the
  *  resulting {@link DelegationReceipt}. */
 export const OPERATOR_AGENT_DELEGATION_HANDOFF_STEP = "panel.operator_agent_delegation_handoff";
+/** W1-T3855: the automation-action-v1 record, its operator decision, and every appended receipt. */
+export const OPERATOR_AGENT_ACTION_STEP = "panel.operator_agent_action";
+export const OPERATOR_AGENT_ACTION_DECISION_STEP = "panel.operator_agent_action_decision";
+export const OPERATOR_AGENT_ACTION_RECEIPT_STEP = "panel.operator_agent_action_receipt";
 /** W1-T3900: audit trail only (never re-read to decide anything), so — unlike
  *  EMERGENCY_STOP_ISSUED_LEDGER_STEP/EMERGENCY_STOP_CLEARED_LEDGER_STEP (ledger.ts) — these stay
  *  local, matching OPERATOR_AGENT_PROPOSAL_STEP's precedent just above. */
@@ -1585,9 +1647,19 @@ export function buildOperatorAgentProposalReadRoute(deps: OperatorAgentRouteDepe
     method: "GET",
     path: "/v1/operator-agent/proposals",
     scope: "read",
-    handler: (_req, res) => {
+    handler: (req, res) => {
       if (rejectColdOperatorAgentMemory(deps, res)) return;
-      sendJson(res, 200, { proposals: readOperatorAgentHistory(deps), source: "ledger" });
+      const requested = requestedPreferenceScope(req, false);
+      if (requested.error) {
+        sendJson(res, 400, { error: "invalid_request", detail: requested.error });
+        return;
+      }
+      const proposals = readOperatorAgentHistory(deps);
+      if (!requested.scope) {
+        sendJson(res, 200, { proposals, source: "ledger" });
+        return;
+      }
+      sendJson(res, 200, { ...presentOperatorAgentProposals(deps, proposals, requested.scope), source: "ledger" });
     },
   };
 }
@@ -2515,6 +2587,179 @@ export function buildOperatorAgentSettingsWriteRoute(deps: OperatorAgentRouteDep
   };
 }
 
+// ── W1-T3895: learned operator preferences (policy in preference-policy.ts) ──────────────────
+
+const PREFERENCE_PROPOSAL_KEYS: ReadonlySet<string> = new Set(["scope", "effect"]);
+const PREFERENCE_ACTION_KEYS: ReadonlySet<string> = new Set(["action", "preferenceId", "scope", "note", "correction", "requestId"]);
+const LEDGER_ONLY_FIELDS = "evidence, confidence, and authority come only from the ledger";
+
+function unknownKeys(body: Record<string, unknown>, allowed: ReadonlySet<string>): string[] {
+  return Object.keys(body).filter((key) => !allowed.has(key));
+}
+
+function validatePreferenceProposal(body: unknown): { error: string } | { scope: PreferenceScope; effect: PreferenceEffect } {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  const extra = unknownKeys(body, PREFERENCE_PROPOSAL_KEYS);
+  if (extra.length > 0) return { error: `unknown field(s) ${extra.join(", ")}: ${LEDGER_ONLY_FIELDS}` };
+  const scope = validatePreferenceScope(body.scope);
+  if (!scope) return { error: "scope requires a bounded principalId and repository" };
+  const effect = validatePreferenceEffect(body.effect);
+  if (!effect) return { error: `effect.kind must be one of ${PREFERENCE_EFFECT_KINDS.join(", ")} with a permitted value` };
+  return { scope, effect };
+}
+
+type PreferenceActionBody = { preferenceId: string; scope: PreferenceScope; note?: string; correction?: string; requestId?: string };
+
+function preferenceActionValidator(action: PreferenceAction): (body: unknown) => { error: string } | PreferenceActionBody {
+  return (body) => {
+    if (!isRecord(body)) return { error: "body must be a JSON object" };
+    const extra = unknownKeys(body, PREFERENCE_ACTION_KEYS);
+    if (extra.length > 0) return { error: `unknown field(s) ${extra.join(", ")}: ${LEDGER_ONLY_FIELDS}` };
+    if (body.action !== undefined && body.action !== action) return { error: `action must be ${action} on this route` };
+    const scope = validatePreferenceScope(body.scope);
+    if (!boundedString(body.preferenceId, MAX_ID) || !scope) return { error: "preferenceId and scope are required" };
+    if (action === "correct" ? !boundedString(body.correction, MAX_NOTE) : body.correction !== undefined && !boundedString(body.correction, MAX_NOTE)) {
+      return { error: "correction must be bounded text, and is required to correct" };
+    }
+    if ((body.note !== undefined && !boundedString(body.note, MAX_NOTE)) || (body.requestId !== undefined && !boundedString(body.requestId, MAX_ID))) {
+      return { error: "note and requestId must be bounded text" };
+    }
+    return {
+      preferenceId: body.preferenceId.trim(),
+      scope,
+      ...(body.note ? { note: body.note as string } : {}),
+      ...(body.correction ? { correction: body.correction as string } : {}),
+      ...(body.requestId ? { requestId: (body.requestId as string).trim() } : {}),
+    };
+  };
+}
+
+function readOperatorPreferenceStates(deps: OperatorAgentRouteDependencies, now: number): PreferenceState[] {
+  return foldOperatorPreferences(readOperatorAgentUnion(dirname(deps.ledgerPath), { step: OPERATOR_PREFERENCE_LEDGER_STEPS }).rows, now);
+}
+
+function requestedPreferenceScope(req: { url?: string }, required: boolean): { scope?: PreferenceScope; error?: string } {
+  const url = new URL(req.url ?? "/", "http://rmd.local");
+  const principalId = url.searchParams.get("principalId");
+  if (principalId === null && !required) return {};
+  const surface = url.searchParams.get("surface");
+  const scope = validatePreferenceScope({ principalId, repository: url.searchParams.get("repository"), ...(surface === null ? {} : { surface }) });
+  return scope ? { scope } : { error: "principalId and repository query parameters must identify the preference scope" };
+}
+
+/**
+ * The operator-agent path's one preference application. Authority (the proposal's own status) and
+ * refusal (an active emergency stop) are settled FIRST; applyScopedPreference( then only reorders
+ * what those checks already decided and never writes a verdict.
+ */
+function presentOperatorAgentProposals(deps: OperatorAgentRouteDependencies, proposals: OperatorAgentHistory[], scope: PreferenceScope) {
+  const now = clockFromMillisFn(deps.now).now();
+  const stops = activeEmergencyStops(deps);
+  const items = proposals
+    .filter((proposal) => proposal.repo === scope.repository)
+    .map((proposal) => {
+      const admission = checkEmergencyStop(stops, { actionKind: "action-admission", repo: proposal.repo, principal: scope.principalId }, now);
+      const authority = { checked: true, actionable: admission.ok && proposal.status === "pending", ...(admission.ok ? {} : { refusal: admission.code }) };
+      return { id: proposal.proposalId, category: proposal.category, authority, proposal };
+    });
+  const { items: ordered, ...presentation } = applyScopedPreference({ scope, items, preferences: readOperatorPreferenceStates(deps, now) });
+  const refusals = items.flatMap((item) => (item.authority.refusal ? [{ proposalId: item.id, code: item.authority.refusal }] : []));
+  return { proposals: ordered.map((item) => item.proposal), presentation: { scope, ...presentation, refusals } };
+}
+
+/** GET /v1/operator-agent/preferences — a principal's learned preferences in one repository. */
+export function buildOperatorPreferenceReadRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "GET",
+    path: "/v1/operator-agent/preferences",
+    scope: "read",
+    handler: (req, res) => {
+      const requested = requestedPreferenceScope(req, true);
+      const scope = requested.scope;
+      if (!scope) {
+        sendJson(res, 400, { error: "invalid_request", detail: requested.error });
+        return;
+      }
+      const states = readOperatorPreferenceStates(deps, clockFromMillisFn(deps.now).now());
+      const preferences = states.filter((state) => preferenceListedFor(state.preference.scope, scope)).map(projectOperatorPreference);
+      sendJson(res, 200, { source: "ledger", stale: false, scope, preferences });
+    },
+  };
+}
+
+/** POST /v1/operator-agent/preferences/propose — replay ledgered decisions into a shadow hypothesis. */
+export function buildOperatorPreferenceProposeRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/preferences/propose",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validatePreferenceProposal, (input, req, res) => {
+      if (rejectColdOperatorAgentMemory(deps, res)) return;
+      const now = clockFromMillisFn(deps.now).now();
+      const same = readOperatorPreferenceStates(deps, now).filter(
+        (state) => samePreferenceScope(state.preference.scope, input.scope) && state.preference.effect.kind === input.effect.kind,
+      );
+      if (same.some((state) => state.lifecycle === "opted_out")) {
+        sendJson(res, 409, { error: "conflict", code: "opted_out", detail: `the operator opted out of ${input.effect.kind} preferences in this scope` });
+        return;
+      }
+      const live = same.find((state) => state.preference.effect.value === input.effect.value && (state.lifecycle === "proposed" || state.lifecycle === "accepted"));
+      if (live) {
+        sendJson(res, 200, { ok: true, existing: true, preference: projectOperatorPreference(live) });
+        return;
+      }
+      const decisions = preferenceDecisionSamples(readOperatorAgentHistory(deps), input.scope.repository);
+      const preference = inferPreferenceHypothesis({ ...input, decisions, now, supersedes: same.at(-1)?.preference.preferenceId });
+      appendPanelLedger(deps.ledgerPath, OPERATOR_PREFERENCE_LEDGER_STEPS[0], preference.preferenceId, bearerTokenId(req), { preference });
+      sendJson(res, 201, { ok: true, existing: false, preference: projectOperatorPreference(evaluatePreference(preference, [], now)) });
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/preferences/{accept,reject,correct,opt-out,delete} — one linked receipt. */
+function buildOperatorPreferenceActionRoute(deps: OperatorAgentRouteDependencies, action: PreferenceAction): Route {
+  return {
+    method: "POST",
+    path: `/v1/operator-agent/preferences/${action}`,
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(preferenceActionValidator(action), (input, req, res) => {
+      const clock = clockFromMillisFn(deps.now);
+      const state = readOperatorPreferenceStates(deps, clock.now()).find((candidate) => candidate.preference.preferenceId === input.preferenceId);
+      if (!state) {
+        sendJson(res, 404, { error: "not_found", code: "not_found", detail: `no learned preference ${JSON.stringify(input.preferenceId)}` });
+        return;
+      }
+      if (!samePreferenceScope(state.preference.scope, input.scope)) {
+        sendJson(res, 409, { error: "conflict", code: "scope_mismatch", detail: "the preference belongs to a different principal, repository, or surface" });
+        return;
+      }
+      const replayed = state.events.find((event) => input.requestId !== undefined && event.requestId === input.requestId && event.action === action);
+      if (replayed) {
+        sendJson(res, 200, { ok: true, linkedTo: replayed.preferenceId, ...replayed });
+        return;
+      }
+      const transition = transitionPreference(state, action);
+      if (!transition.ok) {
+        sendJson(res, 409, { error: "conflict", code: transition.code, detail: transition.detail });
+        return;
+      }
+      const event = preferenceReceipt(state, transition.lifecycle, { ...input, action, at: clock.iso() });
+      appendPanelLedger(deps.ledgerPath, OPERATOR_PREFERENCE_LEDGER_STEPS[1], state.preference.preferenceId, bearerTokenId(req), { event });
+      sendJson(res, 200, { ok: true, linkedTo: event.preferenceId, ...event });
+    }),
+  };
+}
+
+export function buildOperatorPreferenceRoutes(deps: OperatorAgentRouteDependencies): Route[] {
+  return [
+    buildOperatorPreferenceReadRoute(deps),
+    buildOperatorPreferenceProposeRoute(deps),
+    ...PREFERENCE_ACTIONS.map((action) => buildOperatorPreferenceActionRoute(deps, action)),
+  ];
+}
+
 // ── W1-T3900: emergency-stop circuit ────────────────────────────────────────────────────────
 // Ledger-backed, UNLIKE the delegation store just below: an emergency stop must survive a daemon
 // restart mid-incident (ledger.ts's EMERGENCY_STOP_ISSUED_LEDGER_STEP doc explains why it is
@@ -2901,6 +3146,539 @@ export function buildOperatorAgentDelegationHandoffRoute(deps: OperatorAgentRout
   };
 }
 
+// ── W1-T3855: automation-action-v1 routes ───────────────────────────────────────────────────
+
+export interface OperatorAgentActionHistory {
+  action: AutomationAction;
+  state: AutomationActionState;
+  approval: AutomationApprovalState;
+  decision?: AutomationApprovalDecision;
+  receipts: AutomationActionReceipt[];
+}
+
+function readActionRows(ledgerPath: string): Array<Record<string, unknown>> {
+  return readOperatorAgentUnion(dirname(ledgerPath), {
+    step: [OPERATOR_AGENT_ACTION_STEP, OPERATOR_AGENT_ACTION_DECISION_STEP, OPERATOR_AGENT_ACTION_RECEIPT_STEP],
+  }).rows;
+}
+
+function actionDecisionFromRow(row: Record<string, unknown>): { actionId: string; decision: AutomationApprovalDecision } | null {
+  if (row.step !== OPERATOR_AGENT_ACTION_DECISION_STEP || !boundedString(row.action_id, AUTOMATION_ACTION_MAX_ID_CHARS)) return null;
+  if ((row.decision !== "approved" && row.decision !== "rejected") || !iso(row.at) || !boundedString(row.decided_by, AUTOMATION_ACTION_MAX_ID_CHARS)) return null;
+  return { actionId: row.action_id, decision: { decision: row.decision, decidedBy: row.decided_by, decidedAt: fixedClock(Date.parse(row.at)).iso() } };
+}
+
+/** Folds the ledger union into one history per action: the FIRST record per id wins (a later
+ *  row can never rewrite it), the first decision stands, and receipts append in ledger order. */
+export function readOperatorAgentActions(deps: OperatorAgentRouteDependencies): OperatorAgentActionHistory[] {
+  const actions = new Map<string, AutomationAction>();
+  const decisions = new Map<string, AutomationApprovalDecision>();
+  const receipts = new Map<string, AutomationActionReceipt[]>();
+  for (const row of readActionRows(deps.ledgerPath)) {
+    if (row.step === OPERATOR_AGENT_ACTION_STEP) {
+      const validated = validateAutomationAction(row.action);
+      if (validated.ok && !actions.has(validated.action.actionId)) actions.set(validated.action.actionId, validated.action);
+    }
+    const decision = actionDecisionFromRow(row);
+    if (decision && actions.has(decision.actionId) && !decisions.has(decision.actionId)) decisions.set(decision.actionId, decision.decision);
+    const receipt = row.step === OPERATOR_AGENT_ACTION_RECEIPT_STEP ? validateAutomationReceipt(row.receipt) : null;
+    if (receipt && actions.has(receipt.actionId)) {
+      const prior = receipts.get(receipt.actionId) ?? [];
+      if (prior.length < AUTOMATION_ACTION_MAX_RECEIPTS && !prior.some((item) => item.receiptId === receipt.receiptId)) receipts.set(receipt.actionId, [...prior, receipt]);
+    }
+  }
+  const clock = clockFromMillisFn(deps.now);
+  return [...actions.values()]
+    .map((action): OperatorAgentActionHistory => {
+      const decision = decisions.get(action.actionId);
+      const history = receipts.get(action.actionId) ?? [];
+      return {
+        action,
+        state: automationActionState(action, history, decision, clock),
+        approval: automationApprovalState(action, decision),
+        ...(decision ? { decision } : {}),
+        receipts: history,
+      };
+    })
+    .sort((left, right) => Date.parse(right.action.createdAt) - Date.parse(left.action.createdAt) || left.action.actionId.localeCompare(right.action.actionId));
+}
+
+function findAction(deps: OperatorAgentRouteDependencies, actionId: string): OperatorAgentActionHistory | undefined {
+  return readOperatorAgentActions(deps).find((history) => history.action.actionId === actionId);
+}
+
+function redactedBody(body: unknown): { error: string } | { fields: Record<string, unknown> } {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  const violation = automationRedactionViolation(body);
+  if (violation) return { error: `${violation.code}: field ${violation.field} may not enter the automation-action contract` };
+  return { fields: body };
+}
+
+function validateActionRegistration(body: unknown): { error: string } | { action: AutomationAction } {
+  const redacted = redactedBody(body);
+  if ("error" in redacted) return redacted;
+  const checked = redacted.fields;
+  const validated = validateAutomationAction(checked.action);
+  return validated.ok ? { action: validated.action } : { error: `${validated.code}: ${validated.reason}` };
+}
+
+function validateActionId(body: Record<string, unknown>): string | null {
+  return boundedString(body.actionId, AUTOMATION_ACTION_MAX_ID_CHARS) ? body.actionId.trim() : null;
+}
+
+function validateActionDecision(body: unknown): { error: string } | { actionId: string; decision: "approved" | "rejected" } {
+  const redacted = redactedBody(body);
+  if ("error" in redacted) return redacted;
+  const checked = redacted.fields;
+  const actionId = validateActionId(checked);
+  if (!actionId) return { error: "actionId is required" };
+  if (checked.decision !== "approved" && checked.decision !== "rejected") return { error: "decision must be approved or rejected" };
+  return { actionId, decision: checked.decision };
+}
+
+interface ActionObservationsInput {
+  actionId: string;
+  observations: AutomationPreconditionObservation[];
+  dryRun: boolean;
+  /** W1-T3878: the delegation whose profile this request acts under, when an agent requests it. */
+  delegationId?: string;
+  estimatedCostUsd?: number;
+}
+
+function validateActionObservationsInput(body: unknown): { error: string } | ActionObservationsInput {
+  const redacted = redactedBody(body);
+  if ("error" in redacted) return redacted;
+  const checked = redacted.fields;
+  const signal = findNonAuthoritativeSignal(checked);
+  if (signal) return { error: `non-authoritative-signal: field ${signal} can never authorize an action` };
+  const actionId = validateActionId(checked);
+  if (!actionId) return { error: "actionId is required" };
+  const observations = validateAutomationObservations(checked.observations ?? []);
+  if (!observations) return { error: "observations must be a bounded array of {preconditionId, state, source, observedAt}" };
+  if (checked.dryRun !== undefined && typeof checked.dryRun !== "boolean") return { error: "dryRun must be a boolean" };
+  if (checked.delegationId !== undefined && !boundedString(checked.delegationId, AUTOMATION_ACTION_MAX_ID_CHARS)) return { error: "delegationId must be a bounded string" };
+  const cost = checked.estimatedCostUsd;
+  if (cost !== undefined && (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0 || cost > DELEGATION_PROFILE_MAX_COST_USD)) {
+    return { error: `estimatedCostUsd must be a number in 0..${DELEGATION_PROFILE_MAX_COST_USD}` };
+  }
+  return {
+    actionId,
+    observations,
+    dryRun: checked.dryRun === true,
+    ...(checked.delegationId !== undefined ? { delegationId: checked.delegationId.trim() } : {}),
+    ...(cost !== undefined ? { estimatedCostUsd: cost } : {}),
+  };
+}
+
+/** The profile findings for a delegated request, or none when no delegation is named. */
+function actionEligibility(deps: OperatorAgentRouteDependencies, history: OperatorAgentActionHistory, input: ActionObservationsInput) {
+  if (input.delegationId === undefined) return [];
+  return delegationEligibility({
+    state: findDelegation(deps, input.delegationId),
+    action: history.action,
+    ...(history.decision ? { approval: history.decision } : {}),
+    ...(input.estimatedCostUsd !== undefined ? { estimatedCostUsd: input.estimatedCostUsd } : {}),
+    clock: clockFromMillisFn(deps.now),
+  });
+}
+
+function validateActionCompletion(body: unknown): { error: string } | { actionId: string; admissionReceiptId: string; outcome: "succeeded" | "failed"; evidenceRef?: string; reason?: string } {
+  const redacted = redactedBody(body);
+  if ("error" in redacted) return redacted;
+  const checked = redacted.fields;
+  const actionId = validateActionId(checked);
+  if (!actionId || !boundedString(checked.admissionReceiptId, AUTOMATION_ACTION_MAX_ID_CHARS)) return { error: "actionId and admissionReceiptId are required" };
+  if (checked.outcome !== "succeeded" && checked.outcome !== "failed") return { error: "outcome must be succeeded or failed" };
+  if (checked.evidenceRef !== undefined && !boundedString(checked.evidenceRef, AUTOMATION_ACTION_MAX_ID_CHARS)) return { error: "evidenceRef must be a bounded string" };
+  if (checked.reason !== undefined && !boundedString(checked.reason, AUTOMATION_ACTION_MAX_TEXT_CHARS)) return { error: "reason must be a bounded string" };
+  return {
+    actionId,
+    admissionReceiptId: checked.admissionReceiptId.trim(),
+    outcome: checked.outcome,
+    ...(checked.evidenceRef !== undefined ? { evidenceRef: checked.evidenceRef.trim() } : {}),
+    ...(checked.reason !== undefined ? { reason: checked.reason.trim() } : {}),
+  };
+}
+
+function validateActionRollback(body: unknown): { error: string } | { actionId: string; reason: string; evidenceRef: string } {
+  const redacted = redactedBody(body);
+  if ("error" in redacted) return redacted;
+  const checked = redacted.fields;
+  const actionId = validateActionId(checked);
+  if (!actionId) return { error: "actionId is required" };
+  if (!boundedString(checked.reason, AUTOMATION_ACTION_MAX_TEXT_CHARS) || !boundedString(checked.evidenceRef, AUTOMATION_ACTION_MAX_ID_CHARS)) {
+    return { error: "rollback requires a bounded reason and the evidenceRef that proves it" };
+  }
+  return { actionId, reason: checked.reason.trim(), evidenceRef: checked.evidenceRef.trim() };
+}
+
+function requireAction(deps: OperatorAgentRouteDependencies, actionId: string, res: ServerResponse): OperatorAgentActionHistory | undefined {
+  const history = findAction(deps, actionId);
+  if (!history) sendJson(res, 404, { error: "not_found", detail: `no automation action "${actionId}"` });
+  return history;
+}
+
+/** Appends the engine's receipt only when it decided a NEW one, and answers with its disposition. */
+function respondWithStep(
+  deps: OperatorAgentRouteDependencies,
+  req: IncomingMessage,
+  res: ServerResponse,
+  step: AutomationStepResult,
+  okStatus: number,
+  extra: Record<string, unknown> = {},
+): void {
+  if (step.append) {
+    appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_ACTION_RECEIPT_STEP, step.receipt.actionId, bearerTokenId(req), { action_id: step.receipt.actionId, receipt: step.receipt, ...extra });
+  }
+  const ok = step.disposition !== "refused";
+  sendJson(res, ok ? okStatus : 409, { ok, disposition: step.disposition, receipt: step.receipt, ...(step.preflight ? { preflight: step.preflight } : {}) });
+}
+
+/** GET /v1/operator-agent/actions — every automation-action-v1 record with its derived state and receipts. */
+export function buildOperatorAgentActionReadRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "GET",
+    path: "/v1/operator-agent/actions",
+    scope: "read",
+    handler: (_req, res) => sendJson(res, 200, { version: AUTOMATION_ACTION_VERSION, actions: readOperatorAgentActions(deps), source: "ledger" }),
+  };
+}
+
+/** POST /v1/operator-agent/actions — register an action; identical re-registration is idempotent. */
+export function buildOperatorAgentActionRegisterRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/actions",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validateActionRegistration, (input, req, res) => {
+      const all = readOperatorAgentActions(deps);
+      const existing = all.find((history) => history.action.actionId === input.action.actionId);
+      if (existing) {
+        if (JSON.stringify(existing.action) !== JSON.stringify(input.action)) {
+          sendJson(res, 409, { error: "conflict", detail: `actionId ${input.action.actionId} already names a different action` });
+          return;
+        }
+        sendJson(res, 200, { ok: true, existing: true, action: existing });
+        return;
+      }
+      const keyHolder = all.find((history) => history.action.idempotencyKey === input.action.idempotencyKey);
+      if (keyHolder) {
+        sendJson(res, 409, { error: "conflict", detail: `idempotencyKey is already bound to action ${keyHolder.action.actionId}` });
+        return;
+      }
+      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_ACTION_STEP, input.action.actionId, bearerTokenId(req), { action: input.action });
+      sendJson(res, 201, { ok: true, existing: false, action: input.action });
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/actions/decision — the operator approval a `human`-policy action needs.
+ *  HIGH tier (operator ruling 2026-09-28): a stepped-up operator with a confirm nonce, never the bearer token. */
+export function buildOperatorAgentActionDecisionRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/actions/decision",
+    scope: "write",
+    tier: "high",
+    handler: jsonAction(validateActionDecision, (input, req, res) => {
+      const history = requireAction(deps, input.actionId, res);
+      if (!history) return;
+      if (history.approval !== "pending" || history.state === "expired") {
+        sendJson(res, 409, { error: "conflict", detail: `action ${input.actionId} is ${history.state} with approval ${history.approval}; nothing to decide` });
+        return;
+      }
+      const at = clockFromMillisFn(deps.now).iso();
+      const decidedBy = bearerTokenId(req);
+      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_ACTION_DECISION_STEP, input.actionId, decidedBy, { action_id: input.actionId, decision: input.decision, decided_by: decidedBy, at });
+      sendJson(res, 200, { ok: true, actionId: input.actionId, decision: input.decision, decidedBy, at });
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/actions/preflight — evaluate without executing or appending anything. */
+export function buildOperatorAgentActionPreflightRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/actions/preflight",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validateActionObservationsInput, (input, _req, res) => {
+      const history = requireAction(deps, input.actionId, res);
+      if (!history) return;
+      const preflight = preflightAutomationAction({
+        action: history.action,
+        observations: input.observations,
+        receipts: history.receipts,
+        ...(history.decision ? { approval: history.decision } : {}),
+        clock: clockFromMillisFn(deps.now),
+        eligibility: actionEligibility(deps, history, input),
+      });
+      sendJson(res, 200, { preflight });
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/actions/execute — admit one execution per idempotency key, re-running preflight here. */
+export function buildOperatorAgentActionExecuteRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/actions/execute",
+    scope: "write",
+    tier: "middle",
+    handler: jsonAction(validateActionObservationsInput, (input, req, res) => {
+      const history = requireAction(deps, input.actionId, res);
+      if (!history) return;
+      const clock = clockFromMillisFn(deps.now);
+      const admission = checkEmergencyStop(
+        activeEmergencyStops(deps),
+        { actionKind: "action-admission", repo: history.action.scope.repo, instance: history.action.scope.instance },
+        clock.now(),
+      );
+      if (!admission.ok) {
+        appendPanelLedger(deps.ledgerPath, EMERGENCY_STOP_REFUSAL_STEP, input.actionId, bearerTokenId(req), { receipt: admission.receipt });
+        sendJson(res, 423, { ok: false, error: "emergency_stop_active", code: admission.code, receipt: admission.receipt });
+        return;
+      }
+      // W1-T3878: a delegated request's eligibility is derived from its profile and fed into this
+      // action's own preflight; an admission under a profile ledgers its cost against the budget.
+      const step = evaluateAutomationAction({
+        action: history.action,
+        observations: input.observations,
+        receipts: history.receipts,
+        ...(history.decision ? { approval: history.decision } : {}),
+        dryRun: input.dryRun,
+        clock,
+        eligibility: actionEligibility(deps, history, input),
+      });
+      const usage = input.delegationId !== undefined && step.disposition === "admitted"
+        ? { delegation_id: input.delegationId, delegation_cost_usd: input.estimatedCostUsd ?? 0 }
+        : {};
+      respondWithStep(deps, req, res, step, step.disposition === "admitted" ? 202 : 200, usage);
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/actions/complete — record how an admitted execution ended, with its evidence. */
+export function buildOperatorAgentActionCompleteRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/actions/complete",
+    scope: "write",
+    tier: "middle",
+    handler: jsonAction(validateActionCompletion, (input, req, res) => {
+      const history = requireAction(deps, input.actionId, res);
+      if (!history) return;
+      const step = completeAutomationAction({
+        action: history.action,
+        receipts: history.receipts,
+        admissionReceiptId: input.admissionReceiptId,
+        outcome: input.outcome,
+        ...(input.evidenceRef ? { evidenceRef: input.evidenceRef } : {}),
+        ...(input.reason ? { reason: input.reason } : {}),
+        clock: clockFromMillisFn(deps.now),
+      });
+      respondWithStep(deps, req, res, step, 200);
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/actions/rollback — append a linked rollback receipt; history is never rewritten. */
+export function buildOperatorAgentActionRollbackRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/actions/rollback",
+    scope: "write",
+    tier: "middle",
+    handler: jsonAction(validateActionRollback, (input, req, res) => {
+      const history = requireAction(deps, input.actionId, res);
+      if (!history) return;
+      const step = rollbackAutomationAction({
+        action: history.action,
+        receipts: history.receipts,
+        reason: input.reason,
+        evidenceRef: input.evidenceRef,
+        clock: clockFromMillisFn(deps.now),
+      });
+      respondWithStep(deps, req, res, step, 200);
+    }),
+  };
+}
+
+// ── W1-T3878: delegation-profile-v1 routes ───────────────────────────────────────────────────
+
+/** Every delegation profile's durable state, folded from the ledger union. */
+export function readDelegationProfiles(deps: OperatorAgentRouteDependencies): DelegationProfileState[] {
+  const rows = readOperatorAgentUnion(dirname(deps.ledgerPath), {
+    step: [DELEGATION_PROFILE_LEDGER_STEP, DELEGATION_DECISION_LEDGER_STEP, OPERATOR_AGENT_ACTION_RECEIPT_STEP],
+  }).rows;
+  return foldDelegationProfiles(rows, OPERATOR_AGENT_ACTION_RECEIPT_STEP);
+}
+
+function findDelegation(deps: OperatorAgentRouteDependencies, delegationId: string): DelegationProfileState | undefined {
+  return readDelegationProfiles(deps).find((state) => state.profile.delegationId === delegationId);
+}
+
+function requireDelegation(deps: OperatorAgentRouteDependencies, delegationId: string, res: ServerResponse): DelegationProfileState | undefined {
+  const state = findDelegation(deps, delegationId);
+  if (!state) sendJson(res, 404, { error: "not_found", detail: `no delegation profile "${delegationId}"` });
+  return state;
+}
+
+function validateDelegationTarget(body: unknown): { error: string } | { delegationId: string; note?: string; fields: Record<string, unknown> } {
+  const redacted = redactedBody(body);
+  if ("error" in redacted) return redacted;
+  const checked = redacted.fields;
+  const signal = findNonAuthoritativeSignal(checked);
+  if (signal) return { error: `non-authoritative-signal: field ${signal} can never authorize a delegation` };
+  if (!boundedString(checked.delegationId, AUTOMATION_ACTION_MAX_ID_CHARS)) return { error: "delegationId is required" };
+  if (checked.note !== undefined && !boundedString(checked.note, DELEGATION_PROFILE_MAX_TEXT_CHARS)) return { error: "note must be a bounded string" };
+  return { delegationId: checked.delegationId.trim(), ...(checked.note !== undefined ? { note: checked.note.trim() } : {}), fields: checked };
+}
+
+function validateDelegationDecision(body: unknown): { error: string } | { delegationId: string; decision: "accepted" | "revoked"; note?: string } {
+  const target = validateDelegationTarget(body);
+  if ("error" in target) return target;
+  const { decision } = target.fields;
+  if (decision !== "accepted" && decision !== "revoked") return { error: "decision must be accepted or revoked" };
+  return { delegationId: target.delegationId, decision, ...(target.note ? { note: target.note } : {}) };
+}
+
+function validateDelegationReplace(body: unknown): { error: string } | { delegationId: string; note?: string; changes?: unknown } {
+  const target = validateDelegationTarget(body);
+  if ("error" in target) return target;
+  return { delegationId: target.delegationId, ...(target.note ? { note: target.note } : {}), ...(target.fields.changes !== undefined ? { changes: target.fields.changes } : {}) };
+}
+
+/** GET /v1/operator-agent/delegations — every delegation-profile-v1 with its derived lifecycle. */
+export function buildOperatorAgentDelegationReadRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "GET",
+    path: "/v1/operator-agent/delegations",
+    scope: "read",
+    handler: (_req, res) => {
+      const clock = clockFromMillisFn(deps.now);
+      sendJson(res, 200, { version: DELEGATION_PROFILE_VERSION, profiles: readDelegationProfiles(deps).map((state) => projectDelegationProfile(state, clock)), source: "ledger" });
+    },
+  };
+}
+
+/** POST /v1/operator-agent/delegations — issue a profile. LOW: it is `pending` and grants nothing
+ *  until a HIGH-tier operator acceptance on /v1/operator-agent/delegations/decision. */
+export function buildOperatorAgentDelegationIssueRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/delegations",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(
+      (body) => (isRecord(body) ? { profile: body.profile } : { error: "body must be a JSON object" }),
+      (input, req, res) => {
+        const clock = clockFromMillisFn(deps.now);
+        const built = buildDelegationProfile(input.profile, { clock });
+        if (!built.ok) {
+          sendJson(res, 400, { error: "invalid_request", detail: `${built.code}: ${built.reason}`, code: built.code, field: built.field });
+          return;
+        }
+        if (findDelegation(deps, built.profile.delegationId)) {
+          sendJson(res, 409, { error: "conflict", detail: `delegationId ${built.profile.delegationId} is already issued; replace it instead` });
+          return;
+        }
+        appendPanelLedger(deps.ledgerPath, DELEGATION_PROFILE_LEDGER_STEP, built.profile.delegationId, bearerTokenId(req), { profile: built.profile });
+        sendJson(res, 201, { ok: true, profile: projectDelegationProfile({ profile: built.profile, approval: "pending", spentCostUsd: 0, receipts: [] }, clock) });
+      },
+    ),
+  };
+}
+
+/** Why this decision cannot be recorded, or `undefined`. Only a pending profile is accepted, and
+ *  never one whose predecessor was revoked; a revoked, denied, or superseded one is terminal. */
+function delegationDecisionRefusal(
+  deps: OperatorAgentRouteDependencies,
+  state: DelegationProfileState,
+  decision: "accepted" | "revoked",
+  status: ReturnType<typeof delegationProfileStatus>,
+): string | undefined {
+  const id = state.profile.delegationId;
+  if (decision === "revoked") return status === "revoked" || status === "denied" || status === "superseded" ? `delegation ${id} is already ${status}` : undefined;
+  if (status !== "pending") return `delegation ${id} is ${status}; only a pending profile can be accepted`;
+  const predecessor = state.profile.replaces ? findDelegation(deps, state.profile.replaces) : undefined;
+  return predecessor?.revokedAt ? `the profile it replaces, ${predecessor.profile.delegationId}, was revoked` : undefined;
+}
+
+/** POST /v1/operator-agent/delegations/decision — accept or revoke. HIGH tier, like
+ *  /v1/operator-agent/actions/decision: accepting GRANTS a trust budget, so it takes a stepped-up
+ *  operator with a confirm nonce, never the bearer token. The decider is the verified identity. */
+export function buildOperatorAgentDelegationDecisionRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/delegations/decision",
+    scope: "write",
+    tier: "high",
+    handler: jsonAction(validateDelegationDecision, (input, req, res) => {
+      const state = requireDelegation(deps, input.delegationId, res);
+      if (!state) return;
+      const clock = clockFromMillisFn(deps.now);
+      const refusal = delegationDecisionRefusal(deps, state, input.decision, delegationProfileStatus(state, clock));
+      if (refusal) {
+        sendJson(res, 409, { error: "conflict", detail: refusal });
+        return;
+      }
+      const at = clock.iso();
+      const decidedBy = bearerTokenId(req);
+      appendPanelLedger(deps.ledgerPath, DELEGATION_DECISION_LEDGER_STEP, input.delegationId, decidedBy, {
+        delegation_id: input.delegationId,
+        decision: input.decision,
+        decided_by: decidedBy,
+        at,
+        ...(input.note ? { note: input.note } : {}),
+      });
+      const after = findDelegation(deps, input.delegationId) ?? state;
+      sendJson(res, 200, { ok: true, delegationId: input.delegationId, decision: input.decision, decidedBy, at, lifecycleState: delegationLifecycleState(delegationProfileStatus(after, clock)), approval: after.approval });
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/delegations/replace — issue a linked replacement; the original is never
+ *  rewritten and stays authoritative until the replacement is accepted. LOW, like issuing: the
+ *  replacement is `pending` and grants nothing until a HIGH-tier acceptance. */
+export function buildOperatorAgentDelegationReplaceRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/delegations/replace",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validateDelegationReplace, (input, req, res) => {
+      const state = requireDelegation(deps, input.delegationId, res);
+      if (!state) return;
+      const clock = clockFromMillisFn(deps.now);
+      const status = delegationProfileStatus(state, clock);
+      if (status === "revoked" || status === "denied" || status === "superseded" || state.pendingReplacement) {
+        sendJson(res, 409, { error: "conflict", detail: `delegation ${input.delegationId} is ${state.pendingReplacement ? `already being replaced by ${state.pendingReplacement}` : status}` });
+        return;
+      }
+      const built = buildDelegationReplacement(state.profile, input.changes, clock);
+      if (!built.ok) {
+        sendJson(res, 400, { error: "invalid_request", detail: `${built.code}: ${built.reason}`, code: built.code, field: built.field });
+        return;
+      }
+      if (findDelegation(deps, built.profile.delegationId)) {
+        sendJson(res, 409, { error: "conflict", detail: `replacement id ${built.profile.delegationId} is already issued` });
+        return;
+      }
+      appendPanelLedger(deps.ledgerPath, DELEGATION_PROFILE_LEDGER_STEP, built.profile.delegationId, bearerTokenId(req), { profile: built.profile, ...(input.note ? { note: input.note } : {}) });
+      sendJson(res, 201, {
+        ok: true,
+        delegationId: input.delegationId,
+        replacementId: built.profile.delegationId,
+        at: built.profile.createdAt,
+        lifecycleState: delegationLifecycleState(status),
+        profile: projectDelegationProfile({ profile: built.profile, approval: "pending", spentCostUsd: 0, receipts: [] }, clock),
+      });
+    }),
+  };
+}
+
 export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): Route[] {
   return [
     buildContextReadRoute(deps),
@@ -2926,12 +3704,24 @@ export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): 
     buildOperatorAgentConsequencesReadRoute(deps),
     buildOperatorAgentConsequencesDecisionRoute(deps),
     ...buildOperatorAgentConsequencesWriteRefusalRoutes(),
+    ...buildOperatorPreferenceRoutes(deps),
     buildOperatorAgentFollowUpReadRoute(deps),
     buildOperatorAgentSettingsReadRoute(deps),
     buildOperatorAgentSettingsWriteRoute(deps),
     buildOperatorAgentDelegationHandoffRoute(deps),
+    buildOperatorAgentActionReadRoute(deps),
+    buildOperatorAgentActionRegisterRoute(deps),
+    buildOperatorAgentActionDecisionRoute(deps),
+    buildOperatorAgentActionPreflightRoute(deps),
+    buildOperatorAgentActionExecuteRoute(deps),
+    buildOperatorAgentActionCompleteRoute(deps),
+    buildOperatorAgentActionRollbackRoute(deps),
     buildEmergencyStopIssueRoute(deps),
     buildEmergencyStopClearRoute(deps),
     buildEmergencyStopStatusRoute(deps),
+    buildOperatorAgentDelegationReadRoute(deps),
+    buildOperatorAgentDelegationIssueRoute(deps),
+    buildOperatorAgentDelegationDecisionRoute(deps),
+    buildOperatorAgentDelegationReplaceRoute(deps),
   ];
 }

@@ -481,6 +481,8 @@ import {
   hydrateWorkflowRuns,
   hydrateMergeStateObservations,
   hydrateMergeStates,
+  hydrateScannerBlockerObservations,
+  isScannerBlockerCandidate,
   liveStateFromRest,
   mapRestPr,
   openPrsRestArgs,
@@ -886,7 +888,7 @@ import {
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
 // Prompt, tools, scorer and environment remain unavailable until immutable trial artifacts exist.
@@ -896,6 +898,7 @@ const workerBoundaryStack: BenchmarkStackEvidence = {
 import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
 import { benchmarkAaCommand, buildBenchmarkAaReport } from "./lib/benchmark-aa.js";
 import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/benchmark-paid-pilot.js";
+import { pairedPilotReportView, runPairedTrial, type PairedTrialInput } from "./lib/paired-trial.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
@@ -14026,7 +14029,7 @@ export function recordBenchmarkWorkerAttempt(
     try {
       const assignment = selected();
       log("worker.attempt", {
-        ...(assignment ? { selection_assignment_id: assignment.id } : {}),
+        ...attemptAssignmentJoin(assignment?.id, true),
         success: false,
         worker_failure: "spawn-threw-before-result",
         ...spawnFailureDetail(error, assignment !== undefined),
@@ -14048,7 +14051,7 @@ export function recordBenchmarkWorkerAttempt(
       const assignmentId = resultId ?? selection?.id;
       const resultEnvelopeObserved = typeof result.subtype === "string" && result.subtype.length > 0;
       log("worker.attempt", {
-        ...(assignmentId ? { selection_assignment_id: assignmentId } : {}),
+        ...attemptAssignmentJoin(assignmentId, false),
         ...(resultId && selection && resultId !== selection.id ? { assignment_observed: false } : {}),
         ...(result.isError || result.apiError || result.usageRefusal
           ? { success: false }
@@ -14102,8 +14105,7 @@ export function dispatchFallbackObserver(
         reason: "worker-result-fields-unavailable",
         error_class: error instanceof TypeError ? "TypeError" : error instanceof Error ? "Error" : "non-error" }));
     }
-    try { log("worker.attempt", { ...(attempt.selectionAssignmentId
-      ? { selection_assignment_id: attempt.selectionAssignmentId } : {}),
+    try { log("worker.attempt", { ...attemptAssignmentJoin(attempt.selectionAssignmentId, false),
       attempted_model: attempt.model, success: false, worker_failure: attempt.reason, ...resources }); }
     catch { console.error(JSON.stringify({ event: "benchmark.dispatch_fallback_attempt_unavailable",
       reason: "ledger-write-failed" })); }
@@ -14304,6 +14306,7 @@ async function runTask(
     /** W1-T4356: reinstalls a fast-forwarded managed checkout; default {@link ensureInstallFresh}'s `npm ci`. */
     managedCheckoutInstall?: (repoDir: string) => void;
     instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
+    pairedTrial?: Partial<PairedTrialInput>;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
@@ -14649,6 +14652,8 @@ async function runTask(
     }
     throw e;
   }
+  void runPairedTrial({ ...opts.pairedTrial, task, lane: "implement", stateDir: join(config.root, "state"), log,
+    harnessRevision: (opts.benchmarkStackEvidence ?? workerBoundaryStack).harnessRevision });
   try {
     const ctx: RunTaskContext = {
       cashContainmentBoundary,
@@ -36065,6 +36070,23 @@ export function buildOpenPrViews(
     )
     .map((pr) => ({ number: pr.number, headRefOid: pr.headRefOid }));
   const reviewReuseCurrent = hydrateReviewReuseFacts(owner, repo, "main", reviewOrphanedPrs, fetch);
+  const scannerBlockers = hydrateScannerBlockerObservations(
+    owner,
+    repo,
+    raw
+      .filter((pr) =>
+        isScannerBlockerCandidate({
+          autoMergeArmed: pr.autoMergeRequest != null,
+          isDraft: pr.isDraft,
+          checksState: checksStateFromRollup(pr.statusCheckRollup, requiredContexts),
+          reviewState: reviewStateFromRollup(pr.statusCheckRollup),
+          mergeable: mergeStateObservations.get(pr.number)?.mergeable,
+          mergeableState: mergeStateObservations.get(pr.number)?.mergeableState,
+        }),
+      )
+      .map((pr) => ({ number: pr.number, headSha: pr.headRefOid, merge: mergeStateObservations.get(pr.number) })),
+    fetch,
+  );
 
   return raw.map((pr) => {
     const planFiling = planFilingClassifications.get(pr.number) ?? { isPlanFiling: false, source: "unreadable" as const };
@@ -36338,6 +36360,7 @@ export function buildOpenPrViews(
       // both raw fields so the stale-blocked refresh predicate is reachable in the real gateway.
       mergeable: mergeStateObservations.get(pr.number)?.mergeable,
       mergeableState: mergeStateObservations.get(pr.number)?.mergeableState,
+      scannerBlocker: scannerBlockers.get(pr.number),
       workflowRuns: workflowRuns.get(pr.number),
       // W1-T2384: the supersessionVerdict producer W1-T920 deferred and never filed — populated
       // ONLY for a PR `supersededBy` above just flagged (the hydration was scoped to exactly that
@@ -46372,9 +46395,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "benchmark-paid-pilot",
-    syntax: "rmd benchmark-paid-pilot activate --request <request.json> --aa-report <aa-report.json> --confirm-cash-ceiling-usd 100 [--state-dir <dir>] [--json] | report --pilot <id> [--case-files <snapshot.json>] [--out <report.json>] [--state-dir <dir>] [--json]",
-    summary: "Activate the approved $100/7-day paid pilot by hand, or report it; only its paid arm ever pauses.",
-    detail: "W1-T4603: `activate` is the only way the paid pilot starts; no daemon cadence, PR check or build starts it. It reads a benchmark-paid-pilot-request-v1 file (three consented repos, a task assignment seed and eligible population, a paid API-billed arm and a subscription control arm pinned to provider, model and effort, immutable harness, prompt, tool, scorer and environment revisions, verified completion as the primary outcome, a maturity window and the pre-registered protocol text) and the current benchmark-aa-v1 report, and refuses by name when that A/A receipt is missing, tampered, older than 24 hours, stale, inconclusive or reports integrity concerns, or when --confirm-cash-ceiling-usd 100 is absent. It then writes the immutable protocol and a privacy-safe benchmark-paid-pilot-receipt-v1 once to <state-dir>/benchmark-paid-pilot-v1.<pilot>.protocol.json: UTC start and expiry (the seven days start at activation), the $100 aggregate cash ceiling, the repos, the seed and population, the pinned arms, the outcome, maturity window, uncertainty method, stopping rule and the cited A/A receipt. A second activation refuses and never restarts the clock. Tasks keep the W1-T4575 stable draw, and retries, fallbacks, crossovers and non-starters stay in their original arm. Cash counts only API-billed worker-call estimates from the three-form ledger union, never subscription notional cost and never an invoice; a missing price is unknown, not zero. The paid arm alone pauses on missing or ambiguous cost evidence, expiry, an exhausted budget, allocation drift or an unreadable source the spend window needs; ordinary subscription dispatch, review, CI and merge continue. `report` writes a private report by task class and arm (verified completion, human effort, recovery, later defects, cash estimates and notional cost apart, denominators, missingness, censoring, the interval and the pinned revisions) to --out (default <state-dir>/benchmark-paid-pilot-v1.<pilot>.report.json); a report that cannot read its sources keeps the last dated one, marks it stale and names a repair follow-up. No winner is declared before the stopping rule, and nothing is exported.",
+    syntax: "rmd benchmark-paid-pilot activate --request <request.json> --aa-report <aa-report.json> [--state-dir <dir>] [--json] | report --pilot <id> [--case-files <snapshot.json>] [--out <report.json>] [--state-dir <dir>] [--json] | pause|resume --pilot <id> [--note <text>] [--state-dir <dir>]",
+    summary: "Activate, report, pause or resume the approved $100/7-day paid pilot; only its paid arm pauses.",
+    detail: "W1-T4603: `activate` is the only way the paid pilot starts; no daemon cadence, PR check or build starts it. It reads a benchmark-paid-pilot-request-v1 file (three consented repos, a task assignment seed and eligible population, a paid API-billed arm and a subscription control arm pinned to provider, model and effort, immutable harness, prompt, tool, scorer and environment revisions, verified completion as the primary outcome, a maturity window and the pre-registered protocol text) and the current benchmark-aa-v1 report, and refuses by name when that A/A receipt is missing, tampered, older than 24 hours, stale, inconclusive or reports integrity concerns, or when is absent. It then writes the immutable protocol and a privacy-safe benchmark-paid-pilot-receipt-v1 once to <state-dir>/benchmark-paid-pilot-v1.<pilot>.protocol.json: UTC start and expiry (the seven days start at activation), the $100 aggregate cash ceiling, the repos, the seed and population, the pinned arms, the outcome, maturity window, uncertainty method, stopping rule and the cited A/A receipt. A second activation refuses and never restarts the clock. Tasks keep the W1-T4575 stable draw, and retries, fallbacks, crossovers and non-starters stay in their original arm. Cash counts only API-billed worker-call estimates from the three-form ledger union, never subscription notional cost and never an invoice; a missing price is unknown, not zero. The paid arm alone pauses on missing or ambiguous cost evidence, expiry, an exhausted budget, allocation drift or an unreadable source the spend window needs; ordinary subscription dispatch, review, CI and merge continue. `report` writes a private report by task class and arm (verified completion, human effort, recovery, later defects, cash estimates and notional cost apart, denominators, missingness, censoring, the interval and the pinned revisions) to --out (default <state-dir>/benchmark-paid-pilot-v1.<pilot>.report.json); a report that cannot read its sources keeps the last dated one, marks it stale and names a repair follow-up. No winner is declared before the stopping rule, and nothing is exported. W1-T4625: a request with design `paired` (samplingRate, maxPairs, shadow) samples each eligible population task by a seeded draw at the point normal dispatch admits it, and runs two extra isolated side attempts, one per pinned arm in a seeded order, graded by the task's own proofs and holdouts through the reviewer's executor; normal dispatch, review and merge are unchanged, and cash counts only the paid side attempt. A shadow protocol records every decision (sampled, admitted, order) and never spawns, and does not block the live activation that follows it. `pause` and `resume` append to <state-dir>/benchmark-paid-pilot-v1.<pilot>.controls.ndjson, which admission reads: a pause stops new pairs and new paid-arm work, and in-flight attempts finish. A paired `report` gives the shadow decisions, the pairs, per-attempt cost, an exact McNemar test on discordant pairs, the paired difference with its interval and an eval-card-v1 of kind paired-pilot.",
   },
   {
     name: "ledger-compact",
@@ -46559,9 +46582,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "case-file",
-    syntax: "rmd case-file <task-id> [--json]",
+    syntax: "rmd case-file <task-id> [--json] | --tasks <id,id,...> [--tasks-file <path>] [--json]",
     summary: "Read one task's sourced plan, run, PR, review, CI, and release evidence.",
-    detail: "W1-T4607: a read-only task case file. It streams a bounded three-form ledger window, joins only task-owned run IDs and exact assignment IDs, then reads the current PR head and its check rollup. Every section says observed, stale, pending, or unavailable with source and as-of; a merge is never reported as a deployment or healthy runtime.",
+    detail: "W1-T4607: a read-only task case file. It streams a bounded three-form ledger window, joins only task-owned run IDs and exact assignment IDs, then reads the current PR head and its check rollup. Every section says observed, stale, pending, or unavailable with source and as-of; a merge is never reported as a deployment or healthy runtime. W1-T4637: a damaged ledger row refuses only a task it could belong to (it names the task or one of its runs, or names no identity and its time is unreadable or inside the window); an unrelated one leaves the section observed with its malformed count and bounded source. --tasks (or --tasks-file) streams the union ONCE and emits a JSON array of task-case-file-v1 under one shared asOf, so a cohort snapshot fits the verified join's freshness window.",
   },
   {
     name: "sweep",
@@ -47333,7 +47356,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
   ["benchmark-aa", async (rest) => await benchmarkAaCommand(rest, (input) => buildBenchmarkAaReport(input))],
-  ["benchmark-paid-pilot", async (rest) => await benchmarkPaidPilotCommand(rest, (input) => activateBenchmarkPaidPilot(input))],
+  ["benchmark-paid-pilot", async (rest) => await benchmarkPaidPilotCommand(rest, (input) => activateBenchmarkPaidPilot(input),
+    { pairedReport: pairedPilotReportView })],
   ["memory-lint", (rest) => memoryLintCommand(rest)],
   ["ledger-compact", (rest) => ledgerCompactCommand(rest)],
   ["hand-runs", (rest) => handRunsCommand(rest)],

@@ -129,6 +129,30 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "ledger-only operator-agent settings write; route validation and durable read-back are covered in test/operator-agent.test.ts",
   ],
   [
+    "POST /v1/operator-agent/preferences/propose",
+    "W1-T3895: ledger-only preference hypothesis write with no gateway or root to mis-wire; replay, sample floor, and opt-out refusal are covered in test/preference-policy-scope.test.ts and test/preference-policy-optout.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/preferences/accept",
+    "W1-T3895: ledger-only preference lifecycle receipt; acceptance gating is covered in test/preference-policy-expiry.test.ts and test/preference-policy-application.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/preferences/reject",
+    "W1-T3895: ledger-only preference lifecycle receipt; covered in test/preference-policy-expiry.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/preferences/correct",
+    "W1-T3895: ledger-only preference lifecycle receipt; covered in test/preference-policy-expiry.test.ts and test/preference-policy-evidence.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/preferences/opt-out",
+    "W1-T3895: ledger-only preference lifecycle receipt; covered in test/preference-policy-optout.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/preferences/delete",
+    "W1-T3895: ledger-only preference lifecycle receipt; covered in test/preference-policy-optout.test.ts",
+  ],
+  [
     "POST /v1/operator-agent/emergency/stop",
     "W1-T3900: incident-linked emergency stop issuance and validation are covered in test/emergency-control-receipts.test.ts",
   ],
@@ -191,6 +215,42 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
   [
     "POST /v1/operator-agent/delegation/handoff",
     "ledger-only delegation handoff receipt; envelope, replay, human-gate, and receipt behavior are covered in test/agent-delegation-*.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/actions",
+    "W1-T3855: ledger-only automation-action-v1 registration; validation and idempotent re-registration are covered in test/automation-action-contract.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/actions/decision",
+    "W1-T3855: ledger-only operator approval of a human-policy action; covered in test/operator-agent-automation-actions.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/actions/preflight",
+    "W1-T3855: evaluates and records nothing; the six preflight outcomes are covered in test/automation-action-contract.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/actions/execute",
+    "W1-T3855: ledger-only admission receipt; idempotency, emergency-stop refusal, and dry runs are covered in test/automation-action-contract.test.ts and test/operator-agent-automation-actions.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/actions/complete",
+    "W1-T3855: ledger-only completion receipt linked to its admission; covered in test/automation-action-contract.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/actions/rollback",
+    "W1-T3855: ledger-only rollback receipt linked to its completion; covered in test/automation-action-contract.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/delegations",
+    "W1-T3878: ledger-only delegation-profile-v1 issue; validation and refusals by name are covered in test/delegation-profile-scope.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/delegations/decision",
+    "W1-T3878: ledger-only accept/revoke of a delegation profile; covered in test/delegation-profile-escalation.test.ts and test/delegation-profile-refusals.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/delegations/replace",
+    "W1-T3878: ledger-only linked replacement; the original is never rewritten -- covered in test/delegation-profile-versioning.test.ts",
   ],
   [
     "POST /v1/context-controls/forget",

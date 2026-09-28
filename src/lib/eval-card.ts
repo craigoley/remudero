@@ -160,7 +160,7 @@ export interface EvalCardPowerSpec {
 
 export interface EvalCardTrial {
   trialId: string;
-  kind: "aa" | "paid-pilot" | "paired" | "ab";
+  kind: "aa" | "paid-pilot" | "paired" | "paired-pilot" | "ab";
   protocolText: string | null;
   /** When the protocol was committed (ISO time). */
   preRegisteredAt: string | null;
@@ -209,6 +209,35 @@ export interface EvalCardEvidence {
 
 export function emptyEvalCardEvidence(): EvalCardEvidence {
   return { assignments: [], outcomes: [], reviewRows: [], deviations: [] };
+}
+
+type Fields = Record<string, unknown>;
+const isFields = (value: unknown): value is Fields => value !== null && typeof value === "object" && !Array.isArray(value);
+const isText = (value: unknown): value is string => typeof value === "string";
+const isTextOrNull = (value: unknown): boolean => value === null || typeof value === "string";
+const TRIAL_KINDS: readonly unknown[] = ["aa", "paid-pilot", "paired", "ab"];
+
+/** A persisted trial read back from JSON, or undefined when its shape is not one buildEvalCard accepts. */
+export function parseEvalCardTrial(value: unknown): EvalCardTrial | undefined {
+  if (!isFields(value) || !isText(value.trialId) || !TRIAL_KINDS.includes(value.kind)) return undefined;
+  if (!isTextOrNull(value.protocolText) || !isTextOrNull(value.preRegisteredAt)) return undefined;
+  if (!isText(value.estimand) || !isText(value.randomizationUnit) || !isFields(value.plannedAllocation)) return undefined;
+  if (!Object.values(value.plannedAllocation).every((share) => typeof share === "number")) return undefined;
+  if (value.cells !== undefined && !(Array.isArray(value.cells) && value.cells.every(isText))) return undefined;
+  return value as unknown as EvalCardTrial;
+}
+
+/** Persisted evidence read back from JSON, or undefined when any row is not the shape buildEvalCard reads. */
+export function parseEvalCardEvidence(value: unknown): EvalCardEvidence | undefined {
+  if (!isFields(value)) return undefined;
+  const { assignments, outcomes, reviewRows, deviations } = value;
+  if (!Array.isArray(assignments) || !Array.isArray(outcomes) || !Array.isArray(reviewRows) || !Array.isArray(deviations)) return undefined;
+  const rowsOk = assignments.every((a) => isFields(a) && isText(a.unitId) && isText(a.arm) && isText(a.assignedAt))
+    && outcomes.every((o) => isFields(o) && isText(o.unitId) && isText(o.arm) && isText(o.stratum)
+      && (o.success === null || typeof o.success === "boolean"))
+    && reviewRows.every(isFields)
+    && deviations.every((d) => isFields(d) && isTextOrNull(d.at) && isText(d.kind) && isText(d.description));
+  return rowsOk ? { assignments, outcomes, reviewRows, deviations } as EvalCardEvidence : undefined;
 }
 
 const GRADER_DEGRADES = ["executed_stale", "not_executable", "exec_error"] as const satisfies readonly ProofExecOutcome[];

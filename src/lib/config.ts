@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { closeSync, mkdirSync, writeSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { canonicalWorkerProviderId, validateConfigShape, WORKER_PROVIDER_IDS, type Config, type WorkerProviderId } from "./config-schema.js";
-import { createOrReadExclusive } from "./fs-race-safe.js";
+import { createOrReadPublished } from "./fs-race-safe.js";
 export { canonicalWorkerProviderId, WORKER_PROVIDER_IDS } from "./config-schema.js";
 export type { Config, WorkerProviderId } from "./config-schema.js";
 
@@ -532,15 +532,16 @@ function resolveClaudeBin(reason: string): string {
 // Why: the CodeQL js/file-system-race TOCTOU rounds this shape closes — docs/forensics/config.md#loadconfig.
 /**
  * Load the instance config, creating it on first run with resolved defaults (`root` defaults to
- * `~/Remudero`). `createOrReadExclusive` (`fs-race-safe.ts`) folds the exists-check and the
- * create into one atomic `open(p, "wx")`, and reads through the file descriptor rather than the
- * path on the `EEXIST` fallback. `resolveClaudeBin()` runs only after an exclusive create wins,
- * or when an existing config is missing the field.
+ * `~/Remudero`). `createOrReadPublished` (`fs-race-safe.ts`) folds the exists-check and the
+ * create into one atomic `open(p, "wx")`, publishes the defaults by atomic rename so no reader
+ * ever parses a half-written file, and reads through a descriptor on the `EEXIST` fallback.
+ * `resolveClaudeBin()` runs only after an exclusive create wins, or when an existing config is
+ * missing the field.
  */
 export function loadConfig(): Config {
   const p = configPath();
   mkdirSync(dirname(p), { recursive: true });
-  const result = createOrReadExclusive(p, 0o600);
+  const result = createOrReadPublished(p, 0o600);
   if (result.created) {
     try {
       const created = validateConfigShape(
@@ -551,10 +552,10 @@ export function loadConfig(): Config {
         `${p} (created defaults)`,
       );
       validateConfig(created);
-      writeSync(result.fd, JSON.stringify(created, null, 2) + "\n");
+      result.publish(JSON.stringify(created, null, 2) + "\n");
       return created;
     } finally {
-      closeSync(result.fd);
+      result.release();
     }
   }
   const parsed = JSON.parse(result.raw) as unknown;

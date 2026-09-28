@@ -4,6 +4,7 @@ import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readF
 import { mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { hostname } from "node:os";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
 // Why: the four CodeQL rounds this helper closed — docs/forensics/fs-race-safe.md#module-header.
 /**
@@ -17,13 +18,10 @@ import { hostname } from "node:os";
  */
 export type CreateOrReadResult = { created: true; fd: number } | { created: false; raw: string };
 
-/** Attempts before giving up on the create/read flip-flop below. Two already covers any realistic
- *  interleaving — a retry needs a peer to have both created and unlinked the file since our last
- *  syscall — so this only stops a pathological peer from spinning this process forever. */
+/** BACKSTOP: two covers any real create/unlink flip-flop; this stops a pathological peer spinning us. */
 const CREATE_OR_READ_ATTEMPTS = 3;
 
-/** The three syscalls this helper makes, injectable so a test can drive the check-then-act
- *  WINDOW deterministically. Appended LAST so no positional caller shifts. */
+/** The syscalls this helper makes, injectable so a test drives the check-then-act WINDOW itself. */
 export interface FsRaceSyscalls {
   openSync: typeof openSync;
   readFileSync: typeof readFileSync;
@@ -61,6 +59,61 @@ export function createOrReadExclusive(
       fsImpl.closeSync(readFd);
     }
   }
+}
+
+/** BACKSTOP: ~1s of looks at an EMPTY file, so a creator that died mid-claim cannot hang readers. */
+const IN_PROGRESS_READ_ATTEMPTS = 40;
+const IN_PROGRESS_WAIT_MS = 25;
+
+export class StillBeingWrittenError extends RmdError {
+  readonly reason = "still-being-written";
+  constructor(
+    readonly path: string,
+    readonly attempts: number,
+  ) {
+    super("registry", GENERIC_EXIT_CODE, `still-being-written: ${path} stayed empty across ${attempts} reads — a creator claimed it and never published; delete it to regenerate`, { path, attempts });
+    this.name = "StillBeingWrittenError";
+  }
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** `release` (in a `finally`) withdraws a claim nothing was published over, so a retry can create. */
+export type PublishedClaimResult =
+  | { created: true; publish: (raw: string) => void; release: () => void }
+  | { created: false; raw: string };
+
+/** {@link createOrReadExclusive} whose `publish` renames OVER the empty claim; readers wait out zero bytes. */
+export function createOrReadPublished(
+  path: string,
+  mode: number,
+  fsImpl: FsRaceSyscalls = { openSync, readFileSync, closeSync },
+  sleep: (ms: number) => void = sleepSync,
+): PublishedClaimResult {
+  for (let attempt = 1; ; attempt++) {
+    const result = createOrReadExclusive(path, mode, fsImpl);
+    if (result.created) return publishableClaim(path, result.fd, mode);
+    if (result.raw !== "") return { created: false, raw: result.raw };
+    if (attempt >= IN_PROGRESS_READ_ATTEMPTS) throw new StillBeingWrittenError(path, attempt);
+    sleep(IN_PROGRESS_WAIT_MS);
+  }
+}
+
+function publishableClaim(path: string, claimFd: number, mode: number): PublishedClaimResult {
+  let published = false;
+  return {
+    created: true,
+    publish: (raw) => {
+      writeAtomic(path, raw, { mode, tmpTag: "publish" });
+      published = true;
+    },
+    release: () => {
+      closeSync(claimFd);
+      if (!published) rmSync(path, { force: true });
+    },
+  };
 }
 
 /** Reads a file's contents, or `undefined` if it doesn't exist — one `readFileSync` guarded by a

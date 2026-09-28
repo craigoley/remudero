@@ -7798,7 +7798,7 @@ test("buildSweepLightHook: runs the restricted light sweep over an empty PR set 
   }
 });
 
-function ghStubForCancelledLightRequeue(callsFile: string): string {
+function ghStubForCancelledLightRequeue(callsFile: string, updatedAt: string): string {
   return `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
@@ -7812,7 +7812,7 @@ if (command.includes("required_status_checks")) {
     html_url: "https://github.com/o/r/pull/902",
     state: "open",
     body: "Remudero-Task: W1-T902\\n",
-    updated_at: "2026-09-14T00:00:00Z",
+    updated_at: ${JSON.stringify(updatedAt)},
     head: { ref: "run-W1-T902-1", sha: "cccc902000000000000000000000000000000c" },
     auto_merge: null,
   }]));
@@ -7843,7 +7843,10 @@ test("buildSweepLightHook: a cancelled-only CI PR reaches its separate requeue b
   const root = mkdtempSync(join(tmpdir(), "rmd-lighthook-requeue-"));
   const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-lighthook-requeue-`));
   const callsFile = join(root, "gh-calls.ndjson");
-  writeFileSync(join(bin, "gh"), ghStubForCancelledLightRequeue(callsFile), { mode: 0o755 });
+  // Keep the fake PR inside the real sweep's 14-day activity window. A pinned timestamp makes
+  // this requeue regression silently turn into a stale-PR test at a future wall-clock boundary.
+  const updatedAt = new Date(Date.now() - 60_000).toISOString();
+  writeFileSync(join(bin, "gh"), ghStubForCancelledLightRequeue(callsFile, updatedAt), { mode: 0o755 });
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}:${oldPath}`;
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];

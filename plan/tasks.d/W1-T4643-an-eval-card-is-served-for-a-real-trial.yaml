@@ -1,0 +1,41 @@
+- id: W1-T4643
+  title: "THE EVAL CARD ROUTE CAN NEVER SHOW A TRIAL — analytics-route asks deps.currentEvalCardInput for the requested trial, but serve.ts never supplies it, so every eval-card-v1 request returns the empty card"
+  repo: remudero
+  depends_on: ["W1-T4630", "W1-T4575", "W1-T4603"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-28: thread audit of dropped follow-ups, verified against origin/main and the live ledger"
+  plan_refs: ["W1-T4630", "W1-T4575", "W1-T4603", "W1-T4625"]
+  files:
+    - src/lib/serve.ts
+    - src/lib/eval-card.ts
+    - test/an-eval-card-is-served-for-a-real-trial.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    VERIFIED 2026-09-28: `currentEvalCardInput` is declared and read only in src/lib/analytics-
+    route.ts; no production caller supplies it, so `?projectionVersion=eval-card-v1` always builds
+    from `emptyEvalCardEvidence()`. Trials now exist that produce eval cards: the A/A (W1-T4575)
+    writes `benchmark-aa-v1.<trial>.json` into the state dir (a live one exists for trial aa-
+    retro-2026-09-27), and the paid pilot (W1-T4603, paired design W1-T4625) writes its protocol and
+    report files there.
+  design: |
+    In serve.ts, supply `currentEvalCardInput(trialId)` from a trial registry read from the state
+    dir: list the A/A reports and paid-pilot reports/protocols, resolve the requested trial id (or
+    the newest when none is given), and return the trial plus its evidence as each module already
+    builds for its own eval card. An unreadable or unknown trial returns undefined (the route's
+    empty card), never a fabricated one. Private: the card keeps its existing publishability rules;
+    nothing is exported or published.
+  acceptance:
+    - claim: "the eval-card route returns the card of a real trial found in the state dir, and an unknown trial still reads the empty card"
+      proof: "unit test: test/an-eval-card-is-served-for-a-real-trial.test.ts"
+    - claim: "serve wires the eval-card trial source"
+      proof: "grep: currentEvalCardInput in src/lib/serve.ts"
+  falsifier: |
+    Revert the change: the eval-card route returns the empty card even with an A/A report in the
+    state dir.

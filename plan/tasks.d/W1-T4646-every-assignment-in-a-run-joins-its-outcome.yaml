@@ -1,0 +1,45 @@
+- id: W1-T4646
+  title: "A RUN'S CASE FILE REMEMBERS ONLY ITS LAST ASSIGNMENT — buildTaskCaseFile overwrites run.assignmentId per worker.assignment row, so every earlier assignment in a multi-assignment run is refused as assignment-run-mismatch and verified coverage is roughly halved"
+  repo: remudero
+  depends_on: ["W1-T4637"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-28: third operator-approved A/A run (after W1-T4637) found half the verified joins refused as assignment-run-mismatch"
+  plan_refs: ["W1-T4607", "W1-T4608", "W1-T4637", "W1-T4575", "W1-T4623", "W1-T4636"]
+  files:
+    - src/lib/task-case-file.ts
+    - src/lib/benchmark-verified-outcome.ts
+    - test/every-assignment-in-a-run-joins-its-outcome.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-28 on the third operator-approved A/A run (after W1-T4637 unblocked case
+    files): verified outcomes rose from 0 to 13 of 27 tasks, but 12 exposures still read
+    `assignment-run-mismatch`. `buildTaskCaseFile` (src/lib/task-case-file.ts) sets
+    `run.assignmentId = string(assignment?.id)` for every `worker.assignment` row, so only the run's
+    LAST assignment survives, and `joinVerifiedTaskOutcomes` (src/lib/benchmark-verified-outcome.ts)
+    refuses any assignment whose id differs. Over the live union for 2026-09-20..27, 200 of 235 run-
+    task runs carry two or more assignments (recon, implement, diagnose, fix rungs: 168 runs with 2,
+    9 with 3, 5 with 4, 18 with 6), so every earlier assignment in those runs is unjoinable. The
+    case file already builds `assignmentRun` (assignment id -> run id) for every assignment; it is
+    simply not what the join consults. Every verified-outcome consumer is undercounted: model drift
+    (W1-T4623), self-forecast calibration (W1-T4636), the A/A (W1-T4575), the paid-pilot report and
+    field trials.
+  design: |
+    Carry every assignment id a run wrote (e.g. `TaskCaseRun.assignmentIds: string[]`, keeping
+    `assignmentId` as the last for compatibility) and make `joinVerifiedTaskOutcomes` accept an
+    assignment when its id is any of the run's assignments. The run's outcome is shared by all of
+    its assignments; per-assignment cost and served model stay per assignment. Keep the refusal for
+    an assignment id the run never wrote. Case-file output stays backward compatible (an added
+    field).
+  acceptance:
+    - claim: "every assignment a run wrote joins that run's verified outcome, and an assignment id the run never wrote is still refused"
+      proof: "unit test: test/every-assignment-in-a-run-joins-its-outcome.test.ts"
+  falsifier: |
+    Replay a recon+implement run: the recon assignment reads assignment-run-mismatch although its
+    run merged.

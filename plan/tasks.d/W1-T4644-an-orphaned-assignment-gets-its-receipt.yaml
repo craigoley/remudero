@@ -1,0 +1,41 @@
+- id: W1-T4644
+  title: "AN ASSIGNMENT WHOSE WORKER DIED WITH ITS PROCESS NEVER GETS A RECEIPT — a daemon restart or kill mid-worker leaves the worker.assignment with no worker.attempt, and no in-process path survives to write one"
+  repo: remudero
+  depends_on: ["W1-T4639"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-28: follow-ups from the W1-T4639 build (PR 7518), operator asked to file both"
+  plan_refs: ["W1-T4639", "W1-T4616", "W1-T4603"]
+  files:
+    - src/run-task.ts
+    - src/lib/benchmark-run.ts
+    - test/an-orphaned-assignment-gets-its-receipt.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-28 by the W1-T4639 build (PR 7518) over the live union: after each lane's
+    receipt code shipped, joins are near-complete (run-task 65/66, review 27/29, inbox-draft
+    152/156, retro 66/67, sweep-fix 12/15, daemon 17/19), and the stragglers cluster at the same
+    timestamps as daemon restarts — workers killed in flight. Their assignments stay unjoined
+    forever, so cost, billing mode and served model read `no-attempt`, the A/A counts them as
+    unknown cost, and W1-T4603's paid pilot would pause its paid arm on exactly such a missing
+    receipt.
+  design: |
+    When a run's worker is found orphaned — at daemon boot or in the orphan sweep that matches
+    process markers to held in-flight locks — write exactly one `worker.attempt` receipt for each of
+    that run's `worker.assignment` ids that has none, with `selection_assignment_id`, `success:
+    false`, `worker_failure: "orphaned-by-process-exit"` and cost/billing/served-model as explicit
+    unavailable reasons. Idempotent: an assignment that already has a receipt, or a second reclaim
+    pass, writes nothing. Receipts only; no routing or spend change, and reclaim behaviour is
+    otherwise unchanged.
+  acceptance:
+    - claim: "a run orphaned by process exit gets exactly one worker.attempt receipt per unreceipted assignment, carrying its assignment id and orphaned-by-process-exit, and a second reclaim writes nothing"
+      proof: "unit test: test/an-orphaned-assignment-gets-its-receipt.test.ts"
+  falsifier: |
+    Kill a fake worker mid-run and reclaim it: its assignment is left without a worker.attempt
+    receipt.

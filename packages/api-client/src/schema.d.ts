@@ -77,10 +77,10 @@ export interface components {
       last_run: string | null;
       alerts: (string)[] | null;
     };
-    /** Per-repository telemetry, unavailable until a durable per-repo aggregation source exists. */
+    /** Trailing seven-day per-repository worker telemetry from the ledger. Models are the distinct provider-reported served models, never requested or routed model assignments. A null modelsused means the ledger was unavailable or at least one worker row in the window did not report its served model; an empty array means no worker rows ran in the window. */
     RepoDashboardTelemetry: {
       tokens7d: number | null;
-      modelsused: (string)[];
+      modelsused: (string)[] | null;
       cost_7d: number | null;
     };
     /** Per-repository settings, unavailable until durable settings persistence exists. */
@@ -417,6 +417,7 @@ export interface components {
     OperatorAgentProposalList: {
       proposals: (OperatorAgentHistory)[];
       source: "ledger";
+      presentation?: OperatorAgentProposalPresentation;
     };
     ContextRetention: {
       policy: string;
@@ -557,6 +558,125 @@ export interface components {
       scope?: OperatorAgentSettingsScope;
       updatedAt?: string;
     };
+    /** W1-T3895 -- a learned preference belongs to one principal in one repository, optionally one surface. */
+    OperatorPreferenceScope: {
+      principalId: string;
+      repository: string;
+      surface?: string;
+    };
+    /** The whole effect vocabulary. None of these can grant a capability, raise a budget, lower an approval level, or suppress a refusal. */
+    OperatorPreferenceEffect: {
+      kind: "ordering" | "notification-style" | "clarification-wording";
+      value: string;
+    };
+    OperatorPreferenceLifecycle: "proposed" | "accepted" | "rejected" | "corrected" | "opted_out" | "deleted" | "expired" | "unmeasurable";
+    OperatorPreferenceReceiptSummary: {
+      receiptId: string;
+      action: "accept" | "reject" | "correct" | "opt-out" | "delete";
+      lifecycle: OperatorPreferenceLifecycle;
+      at: string;
+    };
+    /** The `preference-hypothesis-v1` projection of one ledgered `operator-preference-v1` record (src/lib/preference-policy.ts's `projectOperatorPreference`). Evidence is bounded decision references only; a deleted preference withholds its anchors and explanation. */
+    OperatorPreferenceProjection: {
+      version: "preference-hypothesis-v1";
+      preferenceId: string;
+      scope: OperatorPreferenceScope;
+      effect: OperatorPreferenceEffect;
+      evidence: {
+        summary: string;
+        sampleFloor: number;
+        sampleSize: number;
+        source: string;
+        observedAt: string;
+        freshness: "verified" | "stale";
+        anchors?: (string)[];
+      };
+      /** `value` is 0 with `source` `insufficient` or `unmeasurable` when the evidence cannot measure the preference. */
+      confidence: {
+        value: number;
+        source: string;
+        sampleFloor: number;
+      };
+      freshness: "verified" | "stale";
+      expiresAt: string;
+      explanation: string;
+      application: {
+        state: "applied" | "shadow" | "not_applied";
+        effect: string;
+        nonAuthorityGuarantee: "presentation_only";
+        reason: string;
+      };
+      lifecycle: OperatorPreferenceLifecycle;
+      source: string;
+      observedAt: string;
+      /** The earlier hypothesis for the same scope and effect this one replaced. */
+      supersedes?: string;
+      receipts: (OperatorPreferenceReceiptSummary)[];
+    };
+    OperatorPreferenceList: {
+      source: "ledger";
+      stale: boolean;
+      scope: OperatorPreferenceScope;
+      preferences: (OperatorPreferenceProjection)[];
+    };
+    /** Scope and effect only. Evidence, confidence, and authority are never accepted from the caller. */
+    OperatorPreferenceProposalRequest: {
+      scope: OperatorPreferenceScope;
+      effect: OperatorPreferenceEffect;
+    };
+    OperatorPreferenceProposalResult: {
+      ok: boolean;
+      existing: boolean;
+      preference: OperatorPreferenceProjection;
+    };
+    /** One operator action on one preference. `correction` is required to correct. A note is ledgered only as present and a correction only as a digest; neither raw text is stored. */
+    OperatorPreferenceActionRequest: {
+      action?: "accept" | "reject" | "correct" | "opt-out" | "delete";
+      preferenceId: string;
+      scope: OperatorPreferenceScope;
+      note?: string;
+      correction?: string;
+      /** Idempotency key -- a repeated requestId for the same action returns the original receipt. */
+      requestId?: string;
+    };
+    /** The durable, linked receipt of one preference action. */
+    OperatorPreferenceReceipt: {
+      ok: boolean;
+      receiptId: string;
+      preferenceId: string;
+      linkedTo: string;
+      action: "accept" | "reject" | "correct" | "opt-out" | "delete";
+      lifecycle: OperatorPreferenceLifecycle;
+      previousLifecycle: OperatorPreferenceLifecycle;
+      at: string;
+      scope: OperatorPreferenceScope;
+      requestId?: string;
+      previousReceiptId?: string;
+      hasNote?: boolean;
+      correctionDigest?: string;
+    };
+    /** A refused preference action or proposal; nothing was recorded. */
+    OperatorPreferenceRefusal: {
+      error: "conflict" | "not_found";
+      /** `not_found`, `scope_mismatch`, `already_deleted`, `opted_out`, `stale_evidence`, or `invalid_transition`. */
+      code: string;
+      detail: string;
+    };
+    /** W1-T3895 -- present only when GET /v1/operator-agent/proposals names a principal scope. The proposals were checked for authority and refusal first; accepted preferences only reordered the actionable ones. */
+    OperatorAgentProposalPresentation: {
+      scope: OperatorPreferenceScope;
+      applied: (string)[];
+      skipped: ({
+        preferenceId: string;
+        reason: string;
+      })[];
+      refusals: ({
+        proposalId: string;
+        code: string;
+      })[];
+      notificationStyle?: string;
+      clarificationWording?: string;
+    };
     OperatorAgentExperimentScope: {
       repo: string;
       taskType?: string;
@@ -652,6 +772,267 @@ export interface components {
     OperatorAgentExperimentRollbackRequest: {
       experimentId: string;
       rollback: OperatorAgentExperimentRollback;
+    };
+    /** Names a flowId or experimentId AND a repo or instance; a record missing either half is refused `missing-scope`. */
+    AutomationActionScope: {
+      flowId?: string;
+      experimentId?: string;
+      repo?: string;
+      instance?: string;
+    };
+    AutomationActionPrecondition: {
+      id: string;
+      /** The authoritative source an observation must come from. */
+      source: string;
+      description: string;
+    };
+    /** A reversible action names its plan; an irreversible one names the refusal path a rollback request takes instead. */
+    AutomationActionRollback: {
+      mode: "reversible" | "irreversible";
+      plan?: string;
+      refusal?: string;
+    };
+    /** An immutable automation-action-v1 record (src/lib/automation-action.ts's `validateAutomationAction`). Fields the contract does not name are dropped; a raw prompt, transcript, credential, model prose, or browser-owned measurement field -- or a credential-shaped value -- refuses the whole record. */
+    AutomationAction: {
+      version: "automation-action-v1";
+      actionId: string;
+      capability: string;
+      summary: string;
+      scope: AutomationActionScope;
+      risk: "low" | "medium" | "high" | "production" | "financial" | "credential" | "destructive";
+      preconditions: (AutomationActionPrecondition)[];
+      freshness: {
+        maxAgeSeconds: number;
+      };
+      idempotencyKey: string;
+      createdAt: string;
+      expiresAt: string;
+      dryRun: boolean;
+      approval: {
+        /** high, production, financial, credential and destructive risk must declare human. */
+        policy: "none" | "human";
+      };
+      rollback: AutomationActionRollback;
+      /** The authoritative system of record whose receipt proves what happened. */
+      receiptRef: string;
+    };
+    AutomationPreconditionObservation: {
+      preconditionId: string;
+      state: "satisfied" | "unsatisfied" | "unavailable";
+      source: string;
+      observedAt: string;
+      reason?: string;
+    };
+    AutomationPreflightFinding: {
+      outcome: "refused" | "stale" | "unknown" | "expired" | "in-progress";
+      code: string;
+      detail: string;
+      preconditionId?: string;
+      receiptId?: string;
+    };
+    AutomationPreflightResult: {
+      version: "automation-action-v1";
+      actionId: string;
+      outcome: "ready" | "refused" | "stale" | "unknown" | "expired" | "in-progress";
+      evaluatedAt: string;
+      approval: "not-required" | "pending" | "approved" | "rejected";
+      findings: (AutomationPreflightFinding)[];
+    };
+    /** One bounded, append-only receipt; completion and rollback link to what they follow via linkedReceiptId. */
+    AutomationActionReceipt: {
+      version: "automation-action-v1";
+      receiptId: string;
+      actionId: string;
+      idempotencyKey: string;
+      kind: "execution" | "completion" | "rollback";
+      outcome: "in-progress" | "dry-run" | "refused" | "succeeded" | "failed" | "rolled_back";
+      at: string;
+      receiptRef: string;
+      linkedReceiptId?: string;
+      preflight?: "ready" | "refused" | "stale" | "unknown" | "expired" | "in-progress";
+      code?: string;
+      reason: string;
+      evidenceRef?: string;
+    };
+    OperatorAgentActionHistory: {
+      action: AutomationAction;
+      state: "registered" | "approved" | "rejected" | "in-progress" | "succeeded" | "failed" | "rolled_back" | "expired";
+      approval: "not-required" | "pending" | "approved" | "rejected";
+      decision?: {
+        decision: "approved" | "rejected";
+        decidedBy: string;
+        decidedAt: string;
+      };
+      receipts: (AutomationActionReceipt)[];
+    };
+    OperatorAgentActionList: {
+      version: "automation-action-v1";
+      actions: (OperatorAgentActionHistory)[];
+      source: "ledger";
+    };
+    OperatorAgentActionRegistration: {
+      action: AutomationAction;
+    };
+    OperatorAgentActionDecisionRequest: {
+      actionId: string;
+      decision: "approved" | "rejected";
+    };
+    OperatorAgentActionObservationRequest: {
+      actionId: string;
+      observations?: (AutomationPreconditionObservation)[];
+      /** Execute only; a dry run evaluates preflight and records a dry-run receipt without admitting anything. */
+      dryRun?: boolean;
+      /** W1-T3878 -- the delegation-profile-v1 this request acts under. Its eligibility (missing, revoked, stale, expired, unapproved, over budget, out of scope, unlinked, capability, risk ceiling, human gate) enters preflight as refused findings named `delegation-*`. */
+      delegationId?: string;
+      /** W1-T3878 -- the cost an admission under `delegationId` charges against that profile's cost budget. */
+      estimatedCostUsd?: number;
+    };
+    OperatorAgentActionCompletionRequest: {
+      actionId: string;
+      admissionReceiptId: string;
+      outcome: "succeeded" | "failed";
+      /** Required for succeeded -- success is claimed only with the evidence that proves it. */
+      evidenceRef?: string;
+      reason?: string;
+    };
+    OperatorAgentActionRollbackRequest: {
+      actionId: string;
+      reason: string;
+      evidenceRef: string;
+    };
+    OperatorAgentActionPreflightResponse: {
+      preflight: AutomationPreflightResult;
+    };
+    /** An engine step's disposition and the receipt it decided. `reused` returns the EXISTING receipt for a duplicate idempotency key, completion, or rollback, and appends nothing. */
+    OperatorAgentActionStepResult: {
+      ok: boolean;
+      disposition: "admitted" | "dry-run" | "refused" | "reused" | "completed" | "rolled_back";
+      receipt: AutomationActionReceipt;
+      preflight?: AutomationPreflightResult;
+    };
+    DelegationProfileScope: ({
+      kind: "repository";
+      repository: string;
+    }) | ({
+      kind: "instance";
+      instanceId: string;
+    });
+    /** The action or flow this delegation governs; at least one is required. */
+    DelegationProfileLink: {
+      flowId?: string;
+      actionId?: string;
+    };
+    DelegationProfileBudget: {
+      costUsd: number;
+      /** Counted from the operator's acceptance. */
+      durationMinutes: number;
+    };
+    /** What an issuer supplies (src/lib/delegation-profile.ts's `buildDelegationProfile`). version, revision, createdAt (the server clock) and revocationRef are set by core. A raw prompt, transcript, credential, browser-owned measurement, or a model-confidence / prior-approval / UI-state field anywhere refuses the whole record by name. */
+    DelegationProfileInput: {
+      delegationId: string;
+      principal: string;
+      purpose: string;
+      link: DelegationProfileLink;
+      scope: DelegationProfileScope;
+      dataClasses: (string)[];
+      capabilities: (string)[];
+      capabilitySummary: string;
+      /** The highest risk an action under this profile may declare. */
+      riskTier: "low" | "medium" | "high" | "production" | "financial" | "credential" | "destructive";
+      budget: DelegationProfileBudget;
+      notification: "silent" | "on-refusal" | "on-every-action";
+      approvalLevel: "profile" | "each-action";
+      humanDecision: string;
+      fallbackOwner: string;
+      /** After createdAt and within 90 days of it. */
+      expiresAt: string;
+    };
+    DelegationProfileReceipt: {
+      kind: "accept" | "revoke" | "replace";
+      at: string;
+      note?: string;
+    };
+    /** One profile with its derived state. `riskTier` is the console's four-tier vocabulary (every critical tier reads `critical`); `actionRiskCeiling` is core's own tier. `lifecycleState` answers "may it act at all" and is never folded with `freshness`; `revocation` is present whenever the ledger carries it, including a superseded profile naming its replacement. */
+    DelegationProfileView: {
+      version: "delegation-profile-v1";
+      delegationId: string;
+      revision: number;
+      replaces?: string;
+      principal: string;
+      purpose: string;
+      link: DelegationProfileLink;
+      scope: DelegationProfileScope;
+      dataClasses: (string)[];
+      capabilities: (string)[];
+      capabilitySummary: string;
+      riskTier: "low" | "medium" | "high" | "critical";
+      actionRiskCeiling: "low" | "medium" | "high" | "production" | "financial" | "credential" | "destructive";
+      budget: DelegationProfileBudget;
+      notification: "silent" | "on-refusal" | "on-every-action";
+      approvalLevel: "profile" | "each-action";
+      humanDecision: string;
+      fallbackOwner: string;
+      createdAt: string;
+      expiresAt: string;
+      revocationRef: string;
+      approval: {
+        state: "pending" | "approved" | "denied";
+        decidedAt?: string;
+      };
+      lifecycleState: "active" | "expired" | "revoked";
+      status: "pending" | "active" | "denied" | "revoked" | "superseded" | "expired";
+      revocation?: {
+        reason?: string;
+        revokedAt?: string;
+      };
+      supersededBy?: string;
+      pendingReplacement?: string;
+      spentCostUsd: number;
+      receipts: (DelegationProfileReceipt)[];
+      observedAt: string;
+      freshness: "verified";
+    };
+    DelegationProfileList: {
+      version: "delegation-profile-v1";
+      profiles: (DelegationProfileView)[];
+      source: "ledger";
+    };
+    DelegationProfileIssueRequest: {
+      profile: DelegationProfileInput;
+    };
+    DelegationProfileIssueResult: {
+      ok: boolean;
+      profile: DelegationProfileView;
+    };
+    DelegationDecisionRequest: {
+      delegationId: string;
+      decision: "accepted" | "revoked";
+      note?: string;
+    };
+    DelegationDecisionResult: {
+      ok: boolean;
+      delegationId: string;
+      decision: "accepted" | "revoked";
+      decidedBy: string;
+      at: string;
+      lifecycleState: "active" | "expired" | "revoked";
+      approval: "pending" | "approved" | "denied";
+    };
+    DelegationReplaceRequest: {
+      delegationId: string;
+      note?: string;
+      /** Any DelegationProfileInput field except the identity fields (delegationId, principal, link, scope), which refuse `immutable-field`. Unnamed fields carry over; expiresAt defaults to the predecessor's lifetime from now. */
+      changes?: Record<string, never>;
+    };
+    DelegationReplaceResult: {
+      ok: boolean;
+      /** The profile being replaced; unchanged, and authoritative until the replacement is accepted. */
+      delegationId: string;
+      replacementId: string;
+      at: string;
+      /** The REPLACED profile's lifecycle, which the replacement does not change. */
+      lifecycleState: "active" | "expired" | "revoked";
+      profile: DelegationProfileView;
     };
     PromotionScope: {
       repo: string;
@@ -2720,6 +3101,89 @@ export interface paths {
         };
     };
   };
+  "/v1/operator-agent/preferences": {
+    get: {
+      responses: {
+          "200": OperatorPreferenceList;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/preferences/propose": {
+    post: {
+      responses: {
+          "200": OperatorPreferenceProposalResult;
+          "201": OperatorPreferenceProposalResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": OperatorPreferenceRefusal;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/operator-agent/preferences/accept": {
+    post: {
+      responses: {
+          "200": OperatorPreferenceReceipt;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": OperatorPreferenceRefusal;
+          "409": OperatorPreferenceRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/preferences/reject": {
+    post: {
+      responses: {
+          "200": OperatorPreferenceReceipt;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": OperatorPreferenceRefusal;
+          "409": OperatorPreferenceRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/preferences/correct": {
+    post: {
+      responses: {
+          "200": OperatorPreferenceReceipt;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": OperatorPreferenceRefusal;
+          "409": OperatorPreferenceRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/preferences/opt-out": {
+    post: {
+      responses: {
+          "200": OperatorPreferenceReceipt;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": OperatorPreferenceRefusal;
+          "409": OperatorPreferenceRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/preferences/delete": {
+    post: {
+      responses: {
+          "200": OperatorPreferenceReceipt;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": OperatorPreferenceRefusal;
+          "409": OperatorPreferenceRefusal;
+        };
+    };
+  };
   "/v1/operator-agent/experiments": {
     get: {
       responses: {
@@ -2911,6 +3375,128 @@ export interface paths {
           "403": HighTierForbidden;
           "409": OperatorAgentDelegationHandoffRefusal;
           "423": EmergencyStopAdmissionRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/actions": {
+    get: {
+      responses: {
+          "200": OperatorAgentActionList;
+          "401": Error;
+          "403": Error;
+        };
+    };
+    post: {
+      responses: {
+          "200": undefined;
+          "201": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/actions/decision": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": HighTierRefusal;
+          "404": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/actions/preflight": {
+    post: {
+      responses: {
+          "200": OperatorAgentActionPreflightResponse;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/actions/execute": {
+    post: {
+      responses: {
+          "200": OperatorAgentActionStepResult;
+          "202": OperatorAgentActionStepResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": OperatorAgentActionStepResult;
+          "423": EmergencyStopAdmissionRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/actions/complete": {
+    post: {
+      responses: {
+          "200": OperatorAgentActionStepResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": OperatorAgentActionStepResult;
+        };
+    };
+  };
+  "/v1/operator-agent/actions/rollback": {
+    post: {
+      responses: {
+          "200": OperatorAgentActionStepResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": OperatorAgentActionStepResult;
+        };
+    };
+  };
+  "/v1/operator-agent/delegations": {
+    get: {
+      responses: {
+          "200": DelegationProfileList;
+          "401": Error;
+          "403": Error;
+        };
+    };
+    post: {
+      responses: {
+          "201": DelegationProfileIssueResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/delegations/decision": {
+    post: {
+      responses: {
+          "200": DelegationDecisionResult;
+          "400": Error;
+          "401": Error;
+          "403": HighTierRefusal;
+          "404": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/delegations/replace": {
+    post: {
+      responses: {
+          "201": DelegationReplaceResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
         };
     };
   };
