@@ -3287,8 +3287,7 @@ function validateActionObservationsInput(body: unknown): { error: string } | Act
   };
 }
 
-/** The refusals from outside the action engine: a withdrawing intent plan (W1-T3898), then the
- *  profile findings for a delegated request. Both only ever subtract. */
+/** Refusals from outside the engine: a withdrawing intent plan (W1-T3898), then a delegation's profile. */
 function actionEligibility(deps: OperatorAgentRouteDependencies, history: OperatorAgentActionHistory, input: ActionObservationsInput) {
   const plan = intentPlanActionEligibility(readIntentPlanStates(deps), history.action.actionId);
   if (input.delegationId === undefined) return plan;
@@ -3698,11 +3697,8 @@ export function buildOperatorAgentDelegationReplaceRoute(deps: OperatorAgentRout
   };
 }
 
-// ── W1-T3898: intent-plan-v1 routes ─────────────────────────────────────────────────────────
-
 export const OPERATOR_AGENT_INTENT_PLANS_PATH = "/v1/operator-agent/intent-plans";
 
-/** Every intent plan's durable state, folded from the ledger union. */
 export function readIntentPlanStates(deps: OperatorAgentRouteDependencies): IntentPlanState[] {
   return foldIntentPlans(readOperatorAgentUnion(dirname(deps.ledgerPath), { step: [INTENT_PLAN_LEDGER_STEP, INTENT_PLAN_EVENT_LEDGER_STEP] }).rows);
 }
@@ -3720,7 +3716,6 @@ function projectPlan(deps: OperatorAgentRouteDependencies, state: IntentPlanStat
   return projectIntentPlan(state, planLinkedActions(deps, state), clockFromMillisFn(deps.now), planDelegation(deps, state));
 }
 
-/** GET /v1/operator-agent/intent-plans — every intent-plan-v1 with its derived preview and state. */
 export function buildOperatorAgentIntentPlanReadRoute(deps: OperatorAgentRouteDependencies): Route {
   return {
     method: "GET",
@@ -3730,8 +3725,6 @@ export function buildOperatorAgentIntentPlanReadRoute(deps: OperatorAgentRouteDe
   };
 }
 
-/** POST /v1/operator-agent/intent-plans — propose a plan. LOW: a plan is a non-operative preview
- *  that registers, approves, and executes nothing until a HIGH-tier confirmation. */
 export function buildOperatorAgentIntentPlanProposeRoute(deps: OperatorAgentRouteDependencies): Route {
   return {
     method: "POST",
@@ -3773,7 +3766,6 @@ const INTENT_PLAN_DECISION_KEYS: Readonly<Record<IntentPlanDecisionInput["action
   undo: new Set(["planId", "action", "note"]),
 };
 
-/** A strict per-action allowlist, like the console's own: a body can never widen a decision. */
 function validateIntentPlanDecision(body: unknown): { error: string } | IntentPlanDecisionInput {
   const redacted = redactedBody(body);
   if ("error" in redacted) return redacted;
@@ -3793,8 +3785,6 @@ function validateIntentPlanDecision(body: unknown): { error: string } | IntentPl
   return { planId, action, questionId: checked.questionId.trim(), answer: checked.answer.trim() };
 }
 
-/** Registers a confirmation's linked actions, refusing (and writing nothing) when an id or key is
- *  already bound to a DIFFERENT action. An identical one is a retried confirmation: kept, not re-added. */
 function registerPlanActions(deps: OperatorAgentRouteDependencies, req: IncomingMessage, res: ServerResponse, actions: readonly AutomationAction[]): boolean {
   const all = readOperatorAgentActions(deps);
   const conflict = actions.find((action) => all.some((history) => (history.action.actionId === action.actionId || history.action.idempotencyKey === action.idempotencyKey) && JSON.stringify(history.action) !== JSON.stringify(action)));
@@ -3819,10 +3809,6 @@ function respondWithPlanDecision(deps: OperatorAgentRouteDependencies, req: Inco
   sendJson(res, result.disposition === "confirmed" ? 202 : 200, { ok: true, planId, action, disposition: result.disposition, at: result.event.at, event: result.event, plan: projectPlan(deps, after) });
 }
 
-/** POST /v1/operator-agent/intent-plans/decision — clarify, confirm, or undo. HIGH tier, like
- *  /v1/operator-agent/actions/decision: confirming requests actions that mutate, and undo withdraws
- *  or rolls them back, so it takes a stepped-up operator with a confirm nonce, never the bearer
- *  token. Confirmation calls the intent-plan module BEFORE any executable action is requested. */
 export function buildOperatorAgentIntentPlanDecisionRoute(deps: OperatorAgentRouteDependencies): Route {
   return {
     method: "POST",
