@@ -228,16 +228,16 @@ jobs:
             # THEN DEDUPED BY NAME (W1-T123): a SHA accumulates one check-run PER ATTEMPT, so a
             # re-run of a required check leaves its earlier failed attempt in the list forever
             # unless we narrow to one row per name. Group by `name` and keep only the attempt with
-            # the latest `started_at` -- a name whose failed attempt is followed by a later
-            # success now reads as that success; everything downstream evaluates ONLY this
-            # deduped, latest-per-name list.
+            # the latest `started_at`, breaking same-second ties by numeric check-run id -- a
+            # name whose failed attempt is followed by a later success reads as that success;
+            # everything downstream evaluates ONLY this deduped, latest-per-name list.
             # (`--slurp` can't combine with `-q`, so flatten the page array with a separate jq.)
             local raw attempt=1
             while [ "${attempt}" -le "${RETRY_ATTEMPTS}" ]; do
               if raw="$(gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" --paginate --slurp)"; then
-                jq -c '[ .[].check_runs[] | {name, status, conclusion, started_at} ]
+                jq -c '[ .[].check_runs[] | {id, name, status, conclusion, started_at} ]
                         | group_by(.name)
-                        | map(max_by(.started_at))' <<< "${raw}"
+                        | map(max_by([.started_at, (.id // 0)]))' <<< "${raw}"
                 return 0
               fi
               echo "ci-gate: check-runs read FAILED (attempt ${attempt}/${RETRY_ATTEMPTS}) -- retrying in ${RETRY_BACKOFF_SECONDS}s" >&2
