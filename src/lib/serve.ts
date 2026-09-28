@@ -33,7 +33,7 @@
  * everywhere else in this codebase).
  */
 
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createConnection } from "node:net";
 import { promises as fsPromises } from "node:fs";
 import { execFile, execFileSync } from "node:child_process";
@@ -41,7 +41,7 @@ import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
-import { createOrReadExclusive } from "./fs-race-safe.js";
+import { createOrReadPublished, HEX_SECRET_RE, InvalidSecretFileError } from "./fs-race-safe.js";
 import {
   assertWriteTiersComplete,
   createConfirmNonceStore,
@@ -3528,23 +3528,44 @@ export function serviceTokensPath(configRoot: string): string {
  * redirected to a world-readable `serve.log`. Any token that reached a log, a terminal
  * transcript, or a chat window is compromised and must be rotated, not merely un-shared.
  *
- * CodeQL js/file-system-race, round 4 (alert #61): the `wx` attempt and the EEXIST fallback
- * read both go through the shared `createOrReadExclusive` helper (fs-race-safe.ts) — the same
- * one config.ts's `loadConfig` uses — rather than a fourth open-coded copy of this exact
- * create-or-read shape.
+ * CodeQL js/file-system-race (alert #61) and the half-written read: `createOrReadPublished`
+ * (fs-race-safe.ts, as config.ts's `loadConfig`) publishes the pair whole over the `wx` claim,
+ * so no reader parses an empty file. A present file that is not JSON holding a 64-hex `read`
+ * and `write` throws {@link InvalidSecretFileError} rather than serving on a broken pair.
  */
 export function resolveServiceTokens(configRoot: string): ServiceTokens {
   const p = serviceTokensPath(configRoot);
   mkdirSync(dirname(p), { recursive: true });
-  const result = createOrReadExclusive(p, 0o600);
+  const result = createOrReadPublished(p, 0o600);
   if (result.created) {
     try {
       const created: ServiceTokens = { read: randomBytes(32).toString("hex"), write: randomBytes(32).toString("hex") };
-      writeSync(result.fd, JSON.stringify(created, null, 2) + "\n");
+      result.publish(JSON.stringify(created, null, 2) + "\n");
       return created;
     } finally {
-      closeSync(result.fd);
+      result.release();
     }
   }
-  return JSON.parse(result.raw) as ServiceTokens;
+  return parseServiceTokens(p, result.raw);
+}
+
+function parseServiceTokens(path: string, raw: string): ServiceTokens {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    const reason = "service-tokens-not-json";
+    throw new InvalidSecretFileError(path, `is not valid JSON (${reason}: ${(err as Error).message})`);
+  }
+  const fields = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  for (const key of ["read", "write"] as const) {
+    const value = fields[key];
+    if (typeof value !== "string" || !HEX_SECRET_RE.test(value)) {
+      throw new InvalidSecretFileError(path, `has no 64-hex "${key}" token`);
+    }
+  }
+  if (fields.ingest !== undefined && typeof fields.ingest !== "string") {
+    throw new InvalidSecretFileError(path, `has a non-string "ingest" token`);
+  }
+  return fields as unknown as ServiceTokens;
 }
