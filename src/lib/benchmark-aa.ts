@@ -14,7 +14,7 @@ import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 import { runBenchmarkCohortPass, type BenchmarkCohortSnapshot } from "./benchmark-cohort.js";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
-import { systemClock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 import { loadConfig } from "./config.js";
 import { buildEvalCard, chiSquareGoodnessOfFit, normalCdf, SRM_ALPHA, type EvalCard, type EvalCardEvidence,
   type EvalCardTrial } from "./eval-card.js";
@@ -408,6 +408,14 @@ function unitDisposition(taskAssignments: VerifiedAssignment[], files: readonly 
   return { state: "unavailable", reason: Object.keys(coverage.reasons)[0]! };
 }
 
+/** W1-T4647: a prospective unit's outcome is its side attempt's grade on the terminal row; it is never merged. */
+function gradedDisposition(exposures: readonly AaRow[], terminals: ReadonlyMap<string, AaRow>): Disposition {
+  if (exposures.length === 0) return { state: "unavailable", reason: "non-starter" };
+  const grades = exposures.map((exposure) => terminals.get(exposure.assignmentId!)?.success ?? null);
+  if (grades.includes(true)) return { state: "completed" };
+  return grades.includes(false) ? { state: "failed" } : { state: "unavailable", reason: "no-graded-terminal" };
+}
+
 export type AaCohortReconciliation =
   | { state: "not-requested" }
   | { state: "unavailable"; reason: string; lastGoodAt: string | null }
@@ -435,6 +443,8 @@ export interface BenchmarkAaReportInput {
   cohort?: BenchmarkCohortSnapshot | { state: "unavailable"; reason: string };
   /** The last persisted report: kept, marked stale, when this refresh cannot read its sources. */
   prior?: BenchmarkAaReport;
+  /** `graded-terminal` (W1-T4647, a prospective trial): outcomes are the graded terminal rows, not the case-file join. */
+  outcomeSource?: "verified-case-files" | "graded-terminal";
 }
 
 export interface AaFinding {
@@ -646,7 +656,8 @@ export function buildBenchmarkAaReport(input: BenchmarkAaReportInput): Benchmark
     }
     if (attempted) summary.joins.attempted += 1;
     if (terminal) summary.joins.terminal += 1;
-    const disposition = unitDisposition(verified, filesByTask.get(task.taskId) ?? (input.caseFiles ? [] : undefined), nowIso);
+    const disposition = input.outcomeSource === "graded-terminal" ? gradedDisposition(exposures, index.terminals)
+      : unitDisposition(verified, filesByTask.get(task.taskId) ?? (input.caseFiles ? [] : undefined), nowIso);
     summary.outcomes[disposition.state] += 1;
     if (disposition.reason && disposition.state === "unavailable") bump(summary.outcomes.reasons, disposition.reason);
     if (disposition.state === "completed" || disposition.state === "failed") summary.joins.verifiedResolved += 1;
@@ -789,6 +800,8 @@ export interface BenchmarkAaCommandInput {
   nowIso?: string;
   print?: (line: string) => void;
   resolveStateDir?: () => string;
+  /** W1-T4647: the prospective subcommand's time source; the retrospective verb reads nowIso. */
+  clock?: Clock;
   readEvidence?: (stateDir: string, taskIds: ReadonlySet<string>) => Promise<AaLedgerEvidence>;
   readCohort?: (stateDir: string) => Promise<BenchmarkCohortSnapshot>;
 }
