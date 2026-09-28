@@ -63,6 +63,74 @@ export function createOrReadExclusive(
   }
 }
 
+/** BACKSTOP: how many times a reader looks at an EMPTY file before giving up on its creator. The
+ *  creator's claim-to-publish span is one `which claude` plus a validation — milliseconds — so
+ *  this only stops a creator that died mid-claim from hanging every later reader forever. */
+const IN_PROGRESS_READ_ATTEMPTS = 40;
+
+/** The pause between two looks at an empty file; with the attempts above, about a second. */
+const IN_PROGRESS_WAIT_MS = 25;
+
+/** The named reason a reader gives up with: the file it found stayed empty — a creator claimed
+ *  the path and never published. Deleting the empty file lets the next caller create it. */
+export class StillBeingWrittenError extends Error {
+  readonly reason = "still-being-written";
+  constructor(
+    readonly path: string,
+    readonly attempts: number,
+  ) {
+    super(`still-being-written: ${path} stayed empty across ${attempts} reads — a creator claimed it and never published; delete it to regenerate`);
+  }
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** A won claim on an empty path: `publish` renames the whole content over it in one step, and
+ *  `release` closes the claim — withdrawing it first if nothing was published, so the next caller
+ *  becomes the creator instead of waiting on a writer that is gone. Call `release` in a `finally`. */
+export type PublishedClaimResult =
+  | { created: true; publish: (raw: string) => void; release: () => void }
+  | { created: false; raw: string };
+
+/**
+ * {@link createOrReadExclusive} for a file whose readers must never see it half-written. The
+ * winner of the `wx` claim gets a {@link PublishedClaimResult} whose `publish` renames the content
+ * OVER its own empty claim, so the path only ever holds zero bytes or the whole file. A reader
+ * that finds zero bytes treats it as in progress and looks again, a bounded number of times,
+ * then throws {@link StillBeingWrittenError}. A non-empty file is handed back unjudged.
+ */
+export function createOrReadPublished(
+  path: string,
+  mode: number,
+  fsImpl: FsRaceSyscalls = { openSync, readFileSync, closeSync },
+  sleep: (ms: number) => void = sleepSync,
+): PublishedClaimResult {
+  for (let attempt = 1; ; attempt++) {
+    const result = createOrReadExclusive(path, mode, fsImpl);
+    if (result.created) return publishableClaim(path, result.fd, mode);
+    if (result.raw !== "") return { created: false, raw: result.raw };
+    if (attempt >= IN_PROGRESS_READ_ATTEMPTS) throw new StillBeingWrittenError(path, attempt);
+    sleep(IN_PROGRESS_WAIT_MS);
+  }
+}
+
+function publishableClaim(path: string, claimFd: number, mode: number): PublishedClaimResult {
+  let published = false;
+  return {
+    created: true,
+    publish: (raw) => {
+      writeAtomic(path, raw, { mode, tmpTag: "publish" });
+      published = true;
+    },
+    release: () => {
+      closeSync(claimFd);
+      if (!published) rmSync(path, { force: true }); // `force`: already gone is fine
+    },
+  };
+}
+
 /** Reads a file's contents, or `undefined` if it doesn't exist — one `readFileSync` guarded by a
  *  catch on `ENOENT`, never a separate `existsSync` check (the create side's own TOCTOU shape).
  *  Why: replaces separate private copies in run-task.ts and panel-graph.ts —
