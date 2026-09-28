@@ -41330,6 +41330,33 @@ export async function feedbackReconcileCommand(rest: string[]): Promise<number> 
 export const TRIAGE_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "WebSearch"];
 
 /**
+ * W1-T3749: MEASURED (`cashCanServeToolSurface` over every declared spawn surface in the tree,
+ * live squeeze 2026-09-17) — offering TRIAGE_WORKER_TOOLS verbatim to a blocked-auction divert
+ * REFUSES ("not implementable by cash"), and dropping WebSearch alone is the ONE change that
+ * flips the answer to DIVERTABLE; every other entry is already implemented by the check-runner.
+ *
+ * THE DECISION (the task's option (b), "triage needs it only sometimes" — not (a) "genuinely
+ * needs the network", not (c) "never uses it"): keep WebSearch on the CLAUDE surface above —
+ * `LEARNINGS.md` ("`WebSearch`... Grant them to the Architect only") already treats it as an
+ * Architect-tier privilege, and triagePrompt's own STEP 2 (lib/triage.ts) already conditions
+ * research on "a genuine platform-facts gap", instructing the worker to "skip this step
+ * entirely" otherwise — WebSearch was never promised unconditionally, so a run diverted to cash
+ * without it degrades on the rare external-fact question rather than breaking. Drop it only from
+ * the surface a squeeze diverts to, the same shape `fixRoundGitOwnership`/`FIX_CASH_TOOLS`
+ * (lib/fix-fence.ts) already gives the fix rung for its own reason.
+ *
+ * NOT ADDED TO `OPENWEIGHT_FUNCTIONS` (lib/worker-provider.ts) — the task rules that out by name:
+ * triage reads UNTRUSTED INBOUND TEXT (a feedback entry), and W1-T210 bounded the fix rung so an
+ * untrusted prompt payload could never reach the network; triage shares that exposure.
+ *
+ * NOT WIRED THROUGH `DISPATCH_LANE_TOOL_BOUNDS`/`cashDivertSpawnFields` (lib/worker.ts): this
+ * task's declared scope is `src/run-task.ts` alone, so the spawn call below passes this list
+ * directly as `cashTools` — the same standalone-constant shape `FIX_CASH_TOOLS` already uses,
+ * next to the surface it derives from rather than in the shared table.
+ */
+export const TRIAGE_CASH_TOOLS: readonly string[] = TRIAGE_WORKER_TOOLS.filter((tool) => tool !== "WebSearch");
+
+/**
  * Every path a worker touched in its worktree, measured against `origin/main` — INCLUDING files it
  * CREATED. This is the input `decideTriage` and `decidePlanArchitect` judge a PROPOSED verdict on, so
  * a path missing here is a run that did the work and gets thrown away.
@@ -41719,6 +41746,9 @@ async function triageCommandLocked(
           config,
           prompt,
           tools: TRIAGE_WORKER_TOOLS,
+          // W1-T3749: the surface a BLOCKED auction would divert this run to — TRIAGE_WORKER_TOOLS
+          // minus WebSearch, the one entry `cashCanServeToolSurface` refuses. See TRIAGE_CASH_TOOLS.
+          cashTools: TRIAGE_CASH_TOOLS,
         });
         log("triage.synthesized", {
           attempt,
