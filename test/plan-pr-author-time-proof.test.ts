@@ -4,7 +4,10 @@ import { buildPlanPrBody } from "../src/lib/plan-pr-emitter.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const BASE = "0123456789abcdef0123456789abcdef01234567";
-const criteria = [{ claim: "the behavior is observable", proof: "unit test: a discriminating criterion is written through untouched" }];
+const criteria = [{
+  claim: "the author-time criterion is written through untouched",
+  proof: "grep: a discriminating criterion is written through untouched in test/plan-pr-author-time-proof.test.ts",
+}];
 
 test("a criterion that passes at base is refused at author time", () => {
   assert.throws(
@@ -58,7 +61,11 @@ test("the remedy keeps the test and withdraws the criterion", () => {
 
 test("a discriminating criterion is written through untouched", () => {
   const body = buildPlanPrBody({ intro: "A change.", criteria, baseRef: BASE, proofCheck: () => 0 });
-  assert.equal(body, "A change.\n\nAcceptance:\n- the behavior is observable | unit test: a discriminating criterion is written through untouched\n");
+  assert.equal(
+    body,
+    "A change.\n\nAcceptance:\n- the author-time criterion is written through untouched | " +
+      "grep: a discriminating criterion is written through untouched in test/plan-pr-author-time-proof.test.ts\n",
+  );
 });
 
 test("a body with no discriminating criterion asks for a human", () => {
