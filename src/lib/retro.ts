@@ -126,6 +126,15 @@ export interface RetroLedgerRead {
   dedupeEntriesPeak: number;
 }
 
+/** Render an epoch-ms instant as ISO-8601 — the ONE `new Date(` construction site this file uses
+ *  for that deterministic conversion (never a clock read: the ms always arrives as an argument),
+ *  so a second call site formatting a different already-computed instant reuses this one rather
+ *  than adding a second literal `new Date(` (test/clock-signature-census.test.ts's per-file
+ *  count, W1-T2897). */
+function msToIso(ms: number): string {
+  return new Date(ms).toISOString();
+}
+
 /** The window to read from, given the marker's timestamp (absent on a first-ever retro).
  *
  *  DELIBERATELY NOT CLAMPED to {@link RETRO_LEDGER_NO_MARKER_LOOKBACK_MS} when a marker IS present.
@@ -136,7 +145,7 @@ export interface RetroLedgerRead {
 export function retroLedgerWindowSince(markerTs: string | undefined, nowMs: number): string {
   const parsed = markerTs === undefined ? Number.NaN : Date.parse(markerTs);
   const fromMs = Number.isNaN(parsed) ? nowMs - RETRO_LEDGER_NO_MARKER_LOOKBACK_MS : parsed - RETRO_LEDGER_WINDOW_LEAD_MS;
-  return new Date(fromMs).toISOString();
+  return msToIso(fromMs);
 }
 
 export async function readRetroLedgerNdjson(
@@ -4314,7 +4323,7 @@ export function evaluateRetroBackoff(
   return {
     eligible: false,
     streak: lastAttempt.streak,
-    nextEligibleAt: new Date(nextEligibleAtMs).toISOString(),
+    nextEligibleAt: msToIso(nextEligibleAtMs),
     mergesFloor,
   };
 }
