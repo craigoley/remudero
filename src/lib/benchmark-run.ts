@@ -2,12 +2,15 @@
  * envelope deliberately contains neither IDs nor content, and grants no publication rights. */
 import { loadConfig } from "./config.js";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { isTestRunner } from "./live-write-guard.js";
+import { fixedClock } from "./clock.js";
+import { readInflightLock, sweepStaleInflightLocks, type InflightLockInfo, type InflightSweepResult } from "./inflight-lock.js";
+import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { Config } from "./config.js";
 import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 
@@ -571,4 +574,90 @@ export function benchmarkNonDispatchSpawn(
         : observedEnvelope ? { success: true } : {}), ...resources });
     return result;
   };
+}
+
+/** W1-T4644: the failure an orphaned assignment's receipt names — its worker died with its process. */
+export const ORPHANED_BY_PROCESS_EXIT = "orphaned-by-process-exit";
+const ORPHAN_EVIDENCE_REASON = "worker-process-exited-before-result";
+
+/** The trailing epoch-ms stamp every minted run id carries (`<task>-<ms>`, `review-PR<n>-<ms>`). */
+export const RUN_ID_EPOCH_RE = /-(\d{13})$/;
+
+export interface OrphanedRun { runId: string; taskId: string; startedAt?: string; detectedBy: string }
+
+/** The earliest instant the run can have written a row: its run id's stamp or its lock's start. */
+export function orphanedRunWindowStart(run: Pick<OrphanedRun, "runId" | "startedAt">): string | undefined {
+  const starts: number[] = [];
+  const stamp = RUN_ID_EPOCH_RE.exec(run.runId)?.[1];
+  if (stamp !== undefined) starts.push(Number(stamp));
+  const locked = run.startedAt === undefined ? Number.NaN : Date.parse(run.startedAt);
+  if (Number.isFinite(locked)) starts.push(locked);
+  return starts.length === 0 ? undefined : fixedClock(Math.min(...starts)).iso();
+}
+
+/** The run's `worker.assignment` rows that no `worker.attempt` answers, one per assignment id. */
+export function unreceiptedAssignments(rows: ReadonlyArray<Record<string, unknown>>, runId: string): Record<string, unknown>[] {
+  const receipted = new Set<string>();
+  const assignments = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    if (row.run_id !== runId) continue;
+    if (row.step === "worker.attempt" && typeof row.selection_assignment_id === "string") receipted.add(row.selection_assignment_id);
+    const assignment = row.step === "worker.assignment" ? row.worker_assignment as { id?: unknown } | undefined : undefined;
+    const id = assignment && typeof assignment === "object" ? assignment.id : undefined;
+    if (typeof id === "string" && id.length > 0 && !assignments.has(id)) assignments.set(id, row);
+  }
+  return [...assignments].filter(([id]) => !receipted.has(id)).map(([, row]) => row);
+}
+
+/** The receipt an orphaned assignment gets: a failed call whose resources are named gaps, not zeros. */
+export function orphanedAttemptFields(assignmentId: string, detectedBy: string): Record<string, unknown> {
+  const gap = unavailable(ORPHAN_EVIDENCE_REASON);
+  const fields = { ...attemptAssignmentJoin(assignmentId, false), success: false, worker_failure: ORPHANED_BY_PROCESS_EXIT,
+    orphan_detected_by: detectedBy, served_model_unavailable_reason: ORPHAN_EVIDENCE_REASON,
+    billing_mode_unavailable_reason: ORPHAN_EVIDENCE_REASON, cost_unavailable_reason: ORPHAN_EVIDENCE_REASON };
+  const receipt = benchmarkRunAttemptReceipt({ step: "worker.attempt", ...fields })!;
+  return { ...fields, benchmark_run: { ...receipt, servedModel: gap, tokens: gap, durationMs: gap,
+    accounting: { source: receipt.accounting.source, billingMode: gap, apiCostUsd: gap, subscriptionNotionalUsd: gap } } };
+}
+
+/** W1-T4644: write one receipt per unreceipted assignment of a run found orphaned. Reads only the
+ *  run's own window of the ledger union, and writes nothing when that read is partial or torn,
+ *  so a receipt it cannot see is never duplicated. Never throws: a receipt is evidence, not reclaim. */
+export function receiptOrphanedAssignments(run: OrphanedRun, ledgerPath: string): { written: number; reason?: string } {
+  let written = 0;
+  try {
+    const sinceTs = orphanedRunWindowStart(run);
+    if (sinceTs === undefined) return { written, reason: "run-window-unknown" };
+    const needle = JSON.stringify(run.runId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const read = readLedgerUnionRecordsSync(dirname(ledgerPath), { sinceTs, pattern: new RegExp(needle),
+      step: ["worker.assignment", "worker.attempt"], refuseIncomplete: true });
+    if (!read.ok || read.torn > 0) return { written, reason: "run-ledger-window-incomplete" };
+    for (const row of unreceiptedAssignments(read.rows, run.runId)) {
+      const id = (row.worker_assignment as { id: string }).id;
+      appendLedger(ledgerPath, { run_id: run.runId, task_id: typeof row.task_id === "string" ? row.task_id : run.taskId,
+        step: "worker.attempt", ...(typeof row.lane === "string" ? { lane: row.lane } : {}), ...orphanedAttemptFields(id, run.detectedBy) });
+      written += 1;
+    }
+    return { written };
+  } catch {
+    const reason = "orphan-receipt-failed";
+    return { written, reason };
+  }
+}
+
+/** The in-flight lock sweep, receipting each reaped lock's run: its holder died without releasing it. */
+export function sweepInflightLocksWithReceipts(inflightDir: string, ledgerPath: string): InflightSweepResult {
+  const holders = new Map<string, InflightLockInfo>();
+  const entries = existsSync(inflightDir) ? readdirSync(inflightDir) : [];
+  for (const entry of entries.filter((name) => name.endsWith(".lock"))) {
+    const holder = readInflightLock(inflightDir, entry.slice(0, -".lock".length));
+    if (holder) holders.set(entry.slice(0, -".lock".length), holder);
+  }
+  const swept = sweepStaleInflightLocks(inflightDir);
+  for (const taskId of swept.reaped) {
+    const holder = holders.get(taskId);
+    if (holder) receiptOrphanedAssignments({ runId: holder.run_id, taskId, startedAt: holder.startedAt,
+      detectedBy: "inflight-lock-sweep" }, ledgerPath);
+  }
+  return swept;
 }

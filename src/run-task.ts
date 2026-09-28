@@ -411,6 +411,7 @@ import {
   killProcessGroup,
   sweepOrphanWorkers,
   workerInstallationScope,
+  type OrphanSweepDeps,
 } from "./lib/worker-containment.js";
 import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
@@ -888,7 +889,7 @@ import {
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
 // Prompt, tools, scorer and environment remain unavailable until immutable trial artifacts exist.
@@ -2315,7 +2316,6 @@ import {
   InflightLockError,
   parseInflightLockInfo,
   readInflightLock,
-  sweepStaleInflightLocks,
   type InflightLockHandle,
   type InflightSweepResult,
 } from "./lib/inflight-lock.js";
@@ -32381,15 +32381,7 @@ export async function daemonCommand(
       readMarkers: defaultReadMarkers,
       isRunActive: (candidateRunId) => liveInflightRuns(inflightDir).some((r) => r.runId === candidateRunId),
       kill: (pid) => killProcessGroup(pid),
-      ledger: (line) =>
-        appendLedger(ledgerPath, {
-          run_id: line.run_id,
-          task_id: line.task_id,
-          worker_scope: line.worker_scope,
-          step: "worker_orphan_killed",
-          pid: line.pid,
-          cmdline: line.cmdline,
-        }),
+      ledger: orphanWorkerKillLedger(ledgerPath),
     });
   // W1-T530: the feedback-landing sweep, ONE shared closure wired into BOTH daemonBoot's
   // boot-time param (below) and DaemonDeps.sweepFeedbackLanding (the per-poll half, at the deps
@@ -32473,7 +32465,7 @@ export async function daemonCommand(
       // pollIntervalMs/the headroom curve from — never a second, independently-resolved read.
       return sweepStaleTempDirs({ maxAgeMs: policy.values.sweep.tmpMaxAgeMs });
     },
-    () => sweepStaleInflightLocks(join(config.root, "state", "inflight")),
+    () => sweepInflightLocksWithReceipts(join(config.root, "state", "inflight"), ledgerPath),
     // W1-T235: the boot-time worker-keychain unlock, explicit and ledgered
     // (`daemon.worker_keychain`) — macOS only; elsewhere the rung is absent.
     process.platform === "darwin"
@@ -38766,7 +38758,7 @@ export function runInflightLockSweepRung(
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): InflightSweepResult {
   try {
-    const swept = sweepStaleInflightLocks(join(config.root, "state", "inflight"));
+    const swept = sweepInflightLocksWithReceipts(join(config.root, "state", "inflight"), ledgerPathFor(config));
     // `kept` alone conflates a confirmed-live holder with an unverifiable-foreign-host one
     // (W1-T461) — the per-poll site the boot sweep's own doc calls out as the one that must not
     // stay silent (design clause iii), so `live`/`unverifiable_foreign_host` ride the same line.
@@ -38782,6 +38774,20 @@ export function runInflightLockSweepRung(
     log("daemon.inflight_sweep", { error: String((e as Error)?.message ?? e) });
     return { reaped: [], kept: [], live: [], unverifiableForeignHost: [] };
   }
+}
+
+export function orphanWorkerKillLedger(ledgerPath: string): OrphanSweepDeps["ledger"] {
+  return (line) => {
+    appendLedger(ledgerPath, {
+      run_id: line.run_id,
+      task_id: line.task_id,
+      worker_scope: line.worker_scope,
+      step: "worker_orphan_killed",
+      pid: line.pid,
+      cmdline: line.cmdline,
+    });
+    receiptOrphanedAssignments({ runId: line.run_id, taskId: line.task_id, detectedBy: "orphan-process-sweep" }, ledgerPath);
+  };
 }
 
 /**
