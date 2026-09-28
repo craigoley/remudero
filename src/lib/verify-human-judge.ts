@@ -20,8 +20,9 @@ import type { Proposal } from "./inbox.js";
 import type { Mount, Mounts } from "./mounts.js";
 import { canonicalWorkerProviderId, enabledWorkerProviders, type Config, type WorkerProviderId } from "./config.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
+import { createHash } from "node:crypto";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
-import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
+import { benchmarkNonDispatchSpawn, withReceiptIdentity } from "./benchmark-run.js";
 
 /** What the judge decides for ONE parked shard. None of the values edits or releases a task. */
 export type VerifyHumanDecision = "needs_operator" | "automate" | "backlog";
@@ -325,6 +326,14 @@ export function automationProposalFromJudgedShard(shard: ShardUnderJudgement, ve
  *  in the prompt, so it can neither explore the worktree nor take any action. */
 export const VERIFY_HUMAN_JUDGE_TOOLS: string[] = [];
 
+/** W1-T4645: one judge decision's run id. The decision is keyed by {@link observedStateKey}, as
+ *  its prior verdict is, so a re-ask after a failed verdict and the shadow judge's paired call join
+ *  the same run. Deterministic, which keeps the spawn-args builder pure. */
+export function verifyHumanJudgeRunId(shard: ShardUnderJudgement): string {
+  const digest = createHash("sha256").update(observedStateKey(shard)).digest("hex").slice(0, 12);
+  return `verify-human-judge-${shard.id}-${digest}`;
+}
+
 /** Pure, so the "no tools, cheapest mount" contract is unit-testable without a spawn. */
 export function buildVerifyHumanJudgeSpawnArgs(opts: {
   shard: ShardUnderJudgement;
@@ -332,7 +341,7 @@ export function buildVerifyHumanJudgeSpawnArgs(opts: {
   cwd: string;
   settingsFile: string;
 }): SpawnWorkerArgs {
-  return {
+  return withReceiptIdentity({
     cwd: opts.cwd,
     permissionMode: "bypassPermissions",
     settingsFile: opts.settingsFile,
@@ -342,7 +351,7 @@ export function buildVerifyHumanJudgeSpawnArgs(opts: {
     maxTurns: opts.mount.maxTurns,
     tools: VERIFY_HUMAN_JUDGE_TOOLS,
     ...(opts.mount.provider === undefined ? {} : { mountProvider: opts.mount.provider }),
-  };
+  }, { taskId: opts.shard.id, runId: verifyHumanJudgeRunId(opts.shard) });
 }
 
 /** Spawn and parse. The `spawn` seam is injectable precisely so this IS unit-reachable: the note
