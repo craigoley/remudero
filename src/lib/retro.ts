@@ -4269,7 +4269,7 @@ export function checkRetroIntegrity(priorMergesSinceMarker: number, gatherShippe
  *  whether a new attempt is due. `markerTs` is `null` (never `undefined`) for "no marker yet" so
  *  it round-trips through JSON and a same-cycle comparison is exact. */
 export interface RetroAttemptRecord {
-  at: string;
+  retroAttemptAt: string;
   markerTs: string | null;
   /** `mergesSinceMarker` the trigger observed AT this attempt — the floor a LATER attempt's own
    *  count must clear, by a further `mergesThreshold`, for design (ii)'s merges-based exit. */
@@ -4315,7 +4315,7 @@ export function evaluateRetroBackoff(
     return { eligible: true };
   }
   const delayMs = policy.baseDelayMs * Math.pow(2, Math.max(0, lastAttempt.streak - 1));
-  const nextEligibleAtMs = Date.parse(lastAttempt.at) + delayMs;
+  const nextEligibleAtMs = Date.parse(lastAttempt.retroAttemptAt) + delayMs;
   const mergesFloor = lastAttempt.mergesSinceMarker + policy.mergesThreshold;
   if (now.getTime() >= nextEligibleAtMs || mergesSinceMarker >= mergesFloor) {
     return { eligible: true };
@@ -4340,7 +4340,7 @@ export function nextRetroAttemptRecord(
 ): RetroAttemptRecord {
   const sameCycle = prior !== undefined && prior.markerTs === (markerTs ?? null);
   return {
-    at: at.toISOString(),
+    retroAttemptAt: at.toISOString(),
     markerTs: markerTs ?? null,
     mergesSinceMarker,
     streak: sameCycle ? prior!.streak + 1 : 1,
@@ -4362,10 +4362,10 @@ export function loadRetroAttemptRecord(path: string): RetroAttemptRecord | undef
     return undefined;
   }
   try {
-    const parsed = JSON.parse(raw) as Partial<RetroAttemptRecord> & { at?: unknown };
-    if (typeof parsed.at !== "string") return undefined;
+    const parsed = JSON.parse(raw) as Partial<RetroAttemptRecord>;
+    if (typeof parsed.retroAttemptAt !== "string") return undefined;
     return {
-      at: parsed.at,
+      retroAttemptAt: parsed.retroAttemptAt,
       markerTs: typeof parsed.markerTs === "string" ? parsed.markerTs : null,
       mergesSinceMarker: typeof parsed.mergesSinceMarker === "number" ? parsed.mergesSinceMarker : 0,
       streak: typeof parsed.streak === "number" && parsed.streak >= 1 ? parsed.streak : 1,

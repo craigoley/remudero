@@ -148,7 +148,8 @@ test("W1-T4664: a published retro resets the back-off", () => {
 });
 
 test("W1-T4664: evaluateRetroBackoff — a further threshold's worth of merges also opens an early exit", () => {
-  const attempt = { at: "2026-09-25T12:00:00.000Z", markerTs: "2026-09-25T00:00:00.000Z", mergesSinceMarker: 30, streak: 1 };
+  // expiring-fixture: exempt -- this pure predicate receives a pinned now five minutes after the attempt.
+  const attempt = { retroAttemptAt: "2026-09-25T12:00:00.000Z", markerTs: "2026-09-25T00:00:00.000Z", mergesSinceMarker: 30, streak: 1 };
   const soonAfter = new Date("2026-09-25T12:05:00.000Z"); // 5 minutes later — nowhere near the 6h delay
   const policy = { baseDelayMs: RETRO_ATTEMPT_RETRY_MS, mergesThreshold: 25 };
 
