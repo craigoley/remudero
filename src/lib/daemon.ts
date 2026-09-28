@@ -3270,6 +3270,8 @@ export async function runDaemon(
                     // The UNREADABLE count rides the row: a partial window must never read as a clean one (P48).
                     log("ci_learning_cadence.ran", {
                       status: result.status,
+                      window_complete: result.windowComplete ?? true,
+                      unreadable_prs: result.unreadablePrCount ?? 0,
                       drafts: result.draftCount,
                       excluded: result.excludedCount,
                       unreadable: result.unreadableCount,
