@@ -20,6 +20,7 @@ import { buildEvalCard, chiSquareGoodnessOfFit, normalCdf, SRM_ALPHA, type EvalC
   type EvalCardTrial } from "./eval-card.js";
 import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
 import type { TaskCaseFile } from "./task-case-file.js";
+import { CODEX_SERVED_MODEL_REASON } from "./worker-provider.js";
 
 export const BENCHMARK_AA_VERSION = "benchmark-aa-v1" as const;
 export const BENCHMARK_AA_TRIAL_VERSION = "benchmark-aa-trial-v1" as const;
@@ -33,6 +34,16 @@ const REVISION_FIELDS = ["harnessRevision", "promptRevision", "toolRevision", "s
 const EVIDENCE_STEPS = ["worker.assignment", "worker.attempt", "verdict"];
 const MISSINGNESS_FIELDS = ["servedModel", "tokens", "durationMs", "billingMode", "cost"] as const;
 const DIFFERENTIAL_FIELDS = ["servedModel", "cost"] as const;
+
+/**
+ * W1-T4707: A SERVED MODEL THE PROVIDER CANNOT REPORT IS NOT MISSING EVIDENCE. Each key is a
+ * provider-declared reason (W1-T4650) meaning the stream carries no model id at all, mapped to the
+ * provider that declares it; such an attempt leaves the served-model missingness test. Every other
+ * null stays notRecorded: no reason (rows before W1-T4650), the generic fallback, and all three
+ * CASH_SERVED_MODEL_REASONS, because a cash response DOES carry `model` — `noResponse` and
+ * `unnamed` are evidence the attempt lost, and `mixed` is two models seen, not a declared absence.
+ */
+const UNREPORTABLE_SERVED_MODEL_REASONS: ReadonlyMap<string, string> = new Map([[CODEX_SERVED_MODEL_REASON, "codex"]]);
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -199,6 +210,7 @@ function projectRow(row: Record<string, unknown>): AaRow {
     routingExperiment: text(record(record(assignment?.routing)?.decision)?.ab),
     success: typeof row.success === "boolean" ? row.success : null,
     servedModel: text(row.served_model),
+    servedModelReason: text(row.served_model_reason),
     billingMode: row.billing_mode === "api" || row.billing_mode === "subscription" ? row.billing_mode : null,
     costUsd: typeof row.total_cost_usd === "number" && Number.isFinite(row.total_cost_usd) && row.total_cost_usd >= 0
       ? row.total_cost_usd : null,
@@ -228,6 +240,8 @@ export interface AaRow {
   routingExperiment: string | null;
   success: boolean | null;
   servedModel: string | null;
+  /** W1-T4650's named reason beside a null `servedModel`; absent on rows that predate it. */
+  servedModelReason?: string | null;
   billingMode: "api" | "subscription" | null;
   costUsd: number | null;
   tokensObserved: boolean;
@@ -352,6 +366,9 @@ export interface AaArmSummary {
   stratumMismatches: number;
   joins: { assigned: number; attempted: number; terminal: number; verifiedResolved: number };
   missingness: Record<typeof MISSINGNESS_FIELDS[number], FieldTally>;
+  /** W1-T4707: attempts whose provider declared the served model unreportable, by that provider. They are
+   *  outside `missingness.servedModel`, which counts reportable assignments only. Absent from older reports. */
+  servedModelUnreportable?: { assignments: number; providers: Record<string, number> };
   /** `endedWithoutCompletion` (W1-T4648): the run ended with no PR — an observed outcome, never missing, never a failure. */
   outcomes: { completed: number; failed: number; endedWithoutCompletion: number; censored: number; unavailable: number;
     reasons: Record<string, number> };
@@ -363,12 +380,15 @@ export interface AaArmSummary {
   };
 }
 
-function blankArm(): AaArmSummary {
+type BuiltArm = AaArmSummary & { servedModelUnreportable: NonNullable<AaArmSummary["servedModelUnreportable"]> };
+
+function blankArm(): BuiltArm {
   const tally = (): FieldTally => ({ observed: 0, notRecorded: 0, noAttempt: 0 });
   return { allocatedUnits: 0, exposedUnits: 0, nonStarters: 0, assignments: 0, retries: 0, crossovers: 0,
     fallbacks: { provider: 0, selectedModel: 0, effort: 0, servedModel: 0 }, revisions: { different: 0, unpinned: 0 },
     routingOverlap: 0, stratumMismatches: 0, joins: { assigned: 0, attempted: 0, terminal: 0, verifiedResolved: 0 },
     missingness: { servedModel: tally(), tokens: tally(), durationMs: tally(), billingMode: tally(), cost: tally() },
+    servedModelUnreportable: { assignments: 0, providers: {} },
     outcomes: { completed: 0, failed: 0, endedWithoutCompletion: 0, censored: 0, unavailable: 0, reasons: {} },
     accounting: { apiCashEstimate: { assignments: 0, usd: 0 }, subscriptionNotional: { assignments: 0, usd: 0 },
       unknown: { assignments: 0, reasons: {} } } };
@@ -595,7 +615,7 @@ export function buildBenchmarkAaReport(input: BenchmarkAaReportInput): Benchmark
   const allocation = buildAaAllocationReceipt(manifest);
   if (evidence.state === "unavailable") return staleOrUnavailable(input, allocation);
   const labels = manifest.labels;
-  const arms: Record<string, AaArmSummary> = { [labels[0]]: blankArm(), [labels[1]]: blankArm() };
+  const arms: Record<string, BuiltArm> = { [labels[0]]: blankArm(), [labels[1]]: blankArm() };
   const index = indexRows(evidence.rows);
   const byTask = new Map<string, AaRow[]>();
   for (const row of index.assignments.values()) byTask.set(row.taskId, [...(byTask.get(row.taskId) ?? []), row]);
@@ -638,7 +658,13 @@ export function buildBenchmarkAaReport(input: BenchmarkAaReportInput): Benchmark
       if (exposure.routingExperiment !== null) summary.routingOverlap += 1;
       if ((exposure.work.taskClass !== null && exposure.work.taskClass !== task.taskClass)
         || (exposure.work.risk !== null && exposure.work.risk !== task.risk)) summary.stratumMismatches += 1;
+      const unreportableBy = call?.servedModel === null ? UNREPORTABLE_SERVED_MODEL_REASONS.get(call.servedModelReason ?? "") : undefined;
+      if (unreportableBy !== undefined) {
+        summary.servedModelUnreportable.assignments += 1;
+        bump(summary.servedModelUnreportable.providers, unreportableBy);
+      }
       for (const field of MISSINGNESS_FIELDS) {
+        if (field === "servedModel" && unreportableBy !== undefined) continue;
         const observed = call === undefined ? false : { servedModel: call.servedModel !== null, tokens: call.tokensObserved,
           durationMs: call.durationObserved, billingMode: call.billingMode !== null, cost: call.costUsd !== null }[field];
         summary.missingness[field][call === undefined ? "noAttempt" : observed ? "observed" : "notRecorded"] += 1;
@@ -687,9 +713,22 @@ export function buildBenchmarkAaReport(input: BenchmarkAaReportInput): Benchmark
   if (evalCard.aa.state === "observed" && evalCard.aa.pValue < AA_FALSE_DIFFERENCE_ALPHA)
     findings.push(finding("spurious-difference", `identical arms differ by ${evalCard.aa.difference.estimate.toFixed(3)} (p=${evalCard.aa.pValue.toFixed(4)}); the pipeline would have reported a model effect that cannot exist`));
   const [armA, armB] = [arms[labels[0]]!, arms[labels[1]]!];
+  // W1-T4707: servedModel's denominator is the REPORTABLE assignments, so the test sees genuinely missing evidence only.
+  const unreportable = (arm: BuiltArm) => arm.servedModelUnreportable.assignments;
   for (const field of DIFFERENTIAL_FIELDS) {
-    const p = twoProportionPValue(armA.missingness[field].observed, armA.assignments, armB.missingness[field].observed, armB.assignments);
+    const reportable = (arm: BuiltArm) => arm.assignments - (field === "servedModel" ? unreportable(arm) : 0);
+    const p = twoProportionPValue(armA.missingness[field].observed, reportable(armA), armB.missingness[field].observed, reportable(armB));
     if (p < AA_FALSE_DIFFERENCE_ALPHA) findings.push(finding(`differential-missingness:${field}`, `${field} observed share differs between arms (p=${p.toFixed(4)})`));
+  }
+  const unreportableP = twoProportionPValue(unreportable(armA), armA.assignments, unreportable(armB), armB.assignments);
+  if (unreportableP < AA_FALSE_DIFFERENCE_ALPHA) {
+    const share = (label: string) => {
+      const arm = arms[label]!;
+      const providers = Object.entries(arm.servedModelUnreportable.providers).sort().map(([name, n]) => `${name} ${n}`).join(", ");
+      return `${label} ${unreportable(arm)}/${arm.assignments}${providers ? ` (${providers})` : ""}`;
+    };
+    findings.push(finding("served-model-unreportable-mix", `served model declared unreportable: ${share(labels[0])}, ${share(labels[1])} `
+      + `(p=${unreportableP.toFixed(4)}); the arms saw different provider mixes, not dropped evidence`, "info"));
   }
   const subscription = (arm: AaArmSummary) => arm.accounting.subscriptionNotional.assignments;
   const known = (arm: AaArmSummary) => arm.accounting.subscriptionNotional.assignments + arm.accounting.apiCashEstimate.assignments;
