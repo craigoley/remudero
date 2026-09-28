@@ -28,9 +28,11 @@ import {
 } from "../src/lib/intent-planner.js";
 import { buildOperatorAgentRoutes } from "../src/lib/operator-agent.js";
 import type { Plan, Task } from "../src/lib/plan.js";
+import { buildServeRoutes } from "../src/lib/serve.js";
 import { createService } from "../src/lib/service.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { at, CLOCK, HOUR, MINUTE, NOW_MS, READ_TOKEN, rowsAt, tempStatePath, WRITE_TOKEN } from "./helpers/delegation-profile-fixture.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 import { stepInput } from "./helpers/intent-plan-fixture.js";
 
 const PROPOSER = "operator:owner";
@@ -333,4 +335,34 @@ test("W1-T4658: a planner-produced rmd.fleet.pause action carries approval human
   assert.ok(!planned.codes.includes("approval-too-weak"), JSON.stringify(planned.codes));
   assert.equal(planned.result.disposition, "completed", JSON.stringify(planned.result.receipt));
   assert.equal(isPaused(root), true, "the executor's own handler paused the fleet");
+});
+
+test("W1-T4658: the served propose route reads the board projection rmd serve already builds, so a goal to run an eligible task is planned", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}intent-planner-serve-`));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  writeFileSync(ledgerPath, "");
+  const github = fakeGitHub({ findMergedByTrailerAll: () => [], findMergedByHeadBranch: () => [], listMergedHeadBranches: () => [], listOpenHeadBranches: () => [], readTruncated: () => false });
+  const routes = buildServeRoutes({
+    board: { plan: planOf(task("W1-T1")), ledgerPath, github },
+    panelGraph: { root, planPath: join(root, "missing", "tasks.yaml"), ledgerPath, github: { prView: () => null }, statusGithub: github, ratify: { approve() {}, reframe() {} } },
+    ledgerPath,
+    issues: { close() {} },
+    fleetControlRoot: root,
+    questionsRoot: root,
+    tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    githubAppRefresh: { start: () => ({ armed: false }) },
+  }).filter((route) => route.method === "POST" && route.path === PLANS_PATH);
+  assert.equal(routes.length, 1);
+  const server = createService({ tokens: { read: READ_TOKEN, write: WRITE_TOKEN }, routes });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const proposed = await post(`http://127.0.0.1:${(server.address() as AddressInfo).port}`, { goal: "run W1-T1" });
+    assert.equal(proposed.status, 201, JSON.stringify(proposed.body));
+    const plan = proposed.body.plan as IntentPlan;
+    assert.deepEqual(plan.steps.map((step) => [step.capability, step.risk, step.approvalPolicy]), [["rmd.task.kick:W1-T1", "high", "human"]]);
+    assert.ok(plan.facts.some((fact) => fact.source === "/v1/status#tasks"), "eligibility is cited from the served board");
+  } finally {
+    server.close();
+  }
 });
