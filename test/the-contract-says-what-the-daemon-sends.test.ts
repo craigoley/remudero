@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import { captureFeedback, setFeedbackStatus } from "../src/lib/feedback.js";
+import { prActionSwitchOffPath } from "../src/lib/fleet-control.js";
 import { buildServeRoutes, buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 
@@ -145,11 +146,11 @@ async function withServer<T>(deps: ServeDeps, fn: (base: string) => Promise<T>):
   }
 }
 
-async function call(base: string, method: string, path: string, headers: Record<string, string>): Promise<{ status: number; body: unknown }> {
+async function call(base: string, method: string, path: string, headers: Record<string, string>, payload: unknown = {}): Promise<{ status: number; body: unknown }> {
   const res = await fetch(`${base}${path}`, {
     method,
     headers: { ...headers, "content-type": "application/json" },
-    ...(method === "GET" ? {} : { body: "{}" }),
+    ...(method === "GET" ? {} : { body: JSON.stringify(payload) }),
   });
   return { status: res.status, body: await res.json() };
 }
@@ -278,11 +279,52 @@ test("every entry GET /v1/feedback serves -- a reply, the grill it answered, a m
     assert.equal(entries.length, 3, "control: all three captured entries are served");
     assert.equal(entries.find((e) => e.id === reply.id)?.reply_to, grill.id);
     assert.equal(entries.find((e) => e.id === grill.id)?.answered_by, reply.id);
-    // The ENTRIES, each against the item schema the route declares. The envelope around them also
-    // carries the console read cache's `staleness`, a route-level field this task does not own.
+    // The ENTRIES, each against the item schema the route declares. The envelope around them, with
+    // the console read cache's `staleness`, is the next test's.
     const inbox = resolve(declaredBody("/v1/feedback", "GET", 200));
     const entrySchema = (inbox.properties as Record<string, Schema>).entries!.items as Schema;
     assert.deepEqual(entrySchema, { $ref: "#/components/schemas/FeedbackEntry" });
     assert.deepEqual(entries.flatMap((entry, i) => violations(entry, entrySchema, `entries[${i}]`)), []);
   });
+});
+
+test("the whole GET /v1/feedback envelope, the read cache's staleness included, validates against FeedbackInboxResult", async (t) => {
+  const root = tmpRoot(t);
+  const land = {
+    git: (): string => {
+      throw new Error("no git in this fixture");
+    },
+  };
+  captureFeedback(root, { raw: "an entry so the envelope is not empty", origin: "ui", land });
+  await withServer(depsFor(root), async (base) => {
+    const sent = await call(base, "GET", "/v1/feedback", bearerRead);
+    assert.equal(sent.status, 200);
+    const body = sent.body as { entries: unknown[]; staleness?: { status?: unknown } };
+    // CONTROL: the envelope must really carry both the entry and the cache's splice, or this
+    // validation would pass over a body that never exercised the declaration.
+    assert.equal(body.entries.length, 1);
+    assert.ok(body.staleness && typeof body.staleness.status === "string", `the console read cache splices staleness, got ${JSON.stringify(body)}`);
+    assertSends("/v1/feedback", "GET", 200, sent.body);
+  });
+});
+
+test("the /v1/pr-actions switched_off 409 the daemon sends validates against its declared 409", async (t) => {
+  const root = tmpRoot(t);
+  const deps = depsFor(root);
+  const request = { action: "fix", prNumber: 4642 };
+  await withServer(deps, async (base) => {
+    // CONTROL: with no switch-off marker the same request is recorded, so the 409 below is the
+    // marker's doing and not a refusal of the request itself.
+    const armed = await call(base, "POST", "/v1/pr-actions", bearerWrite, request);
+    assert.equal(armed.status, 200, `control: an unswitched request is recorded, got ${JSON.stringify(armed.body)}`);
+    assertSends("/v1/pr-actions", "POST", 200, armed.body);
+
+    writeFileSync(prActionSwitchOffPath(root, "fix"), "");
+    const refused = await call(base, "POST", "/v1/pr-actions", bearerWrite, request);
+    assert.equal(refused.status, 409);
+    assert.equal((refused.body as { error: string }).error, "switched_off");
+    assertSends("/v1/pr-actions", "POST", 409, refused.body);
+  });
+  // The shared Error enum stays closed: switched_off is the dedicated schema's, not Error's.
+  assert.notEqual(violations({ error: "switched_off" }, { $ref: "#/components/schemas/Error" }).length, 0);
 });

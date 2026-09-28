@@ -934,6 +934,7 @@ import {
   measurementCadenceCheck,
   ciLearningCadenceCheck,
   CI_LEARNING_MINT_CEILING,
+  ciLearningLookbackDays,
   type CiLearningCadencePolicy,
   type CiLearningCadenceRunResult,
   measurementCadenceMarkerPath,
@@ -942,9 +943,8 @@ import {
   fileCiLearningShards,
   mintCiLearningShards,
   readMeasurementCadenceMarker,
+  recordCiLearningAttempt,
   recordCiLearningCadenceFire,
-  releaseCiLearningCadenceFire,
-  CI_LEARNING_WINDOW_DAYS,
   recordMeasurementCadenceFire,
   readWipeTestAblationEvidence,
   recordWipeTestCadenceFire,
@@ -2256,6 +2256,7 @@ import {
   type WorkerStreamObserver,
   type WorkerStreamEvent, type WorkerSelectionAssignment,
   WorkerAbandonedError,
+  SubscriptionOnlyRefusedError,
 } from "./lib/worker.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
@@ -14698,6 +14699,31 @@ async function runTask(
   }
 }
 
+/** W1-T4655: the closed set of HARNESS causes a run that threw is ledgered under — never a model judgement. */
+export type RunErrorCause =
+  | "census-refused-push"
+  | "git-push-failed"
+  | "git-commit-failed"
+  | "pr-create-failed"
+  | "github-read-failed"
+  | "base-proof-refused"
+  | "subscription-only-refused"
+  | "run-error";
+
+/** Classifies a thrown run by the message shapes measured on the fleet ledger 2026-09-24..28; census first,
+ *  since a census refusal is also a failed push. Anything unrecognised stays the generic `run-error`. */
+export function runErrorCause(err: unknown): RunErrorCause {
+  if (err instanceof SubscriptionOnlyRefusedError) return "subscription-only-refused";
+  const text = String((err as Error)?.message ?? err);
+  if (/^census-precheck:/m.test(text)) return "census-refused-push";
+  if (/^Command failed: git (?:-C \S+ )?push /m.test(text)) return "git-push-failed";
+  if (/^Command failed: git (?:-C \S+ )?commit /m.test(text)) return "git-commit-failed";
+  if (/^Command failed: gh (?:api --method POST \S+\/pulls |pr create)/m.test(text)) return "pr-create-failed";
+  if (/^Command failed: gh |^gh api response body was unreadable/m.test(text)) return "github-read-failed";
+  if (/^openPullRequestChecked: /.test(text)) return "base-proof-refused";
+  return "run-error";
+}
+
 export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   const {
     config,
@@ -14705,7 +14731,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     github,
     isMerged,
     ledgerPath,
-    log,
+    log: ctxLog,
     openTaskIds,
     opts,
     owner,
@@ -14722,6 +14748,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     workerAbandonMs,
     workerStateSensor,
   } = ctx;
+  // W1-T4655: set BEFORE the write, so the outer catch attempts a verdict at most once per run.
+  let verdictWritten = false;
+  const log: RunTaskContext["log"] = (step, extra) => {
+    if (step === "verdict") verdictWritten = true;
+    ctxLog(step, extra);
+  };
   // Direct callers of the exported body retain ordinary routing.  Production runTask always
   // supplies the shared object so the preflight and its spawn wrapper observe the same decision.
   const cashContainmentState = ctx.cashContainmentState ?? { contained: false };
@@ -17251,6 +17283,24 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       return { taskId, runId, merged: false, costUsd, verdict: "failed" };
     }
     log("run.error", { error: String((err as Error)?.message ?? err) });
+    // W1-T4655: the run DID end, so it gets ONE terminal row naming the harness cause; best-effort,
+    // so a ledger failure never replaces the error rethrown below.
+    if (!verdictWritten) {
+      try {
+        const excerpt = capStderrExcerpt(scrubGitCredentialText(String((err as Error)?.message ?? err)), STDERR_EXCERPT_CAP);
+        log("verdict", {
+          verdict: "failed",
+          reason: excerpt,
+          stage: "run.error",
+          cause: runErrorCause(err),
+          cost_usd: costUsd,
+          ...terminalVerdictFields(null),
+        });
+      } catch {
+        const reason = "run.error-verdict-ledger-write-failed";
+        void reason; // the rethrow below is the authoritative outcome
+      }
+    }
     // Reclaim the worktree even on an unexpected throw — a dead run must not
     // leave debris that blocks the next one (start-of-run prune is the backstop,
     // but clean up eagerly here too). Best-effort; the ledger already has the
@@ -21129,16 +21179,20 @@ export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson):
     `repos/${self.owner}/${self.repo}/pulls?state=all&sort=updated&direction=desc&per_page=100`,
   ]) ?? []) as Array<{ number?: number; updated_at?: string; merged_at?: string | null }>;
   const prs: CorpusPr[] = [];
+  const unreadablePrs: number[] = [];
   for (const row of rows) {
     if (row.number === undefined) continue;
     if (row.updated_at && Date.parse(row.updated_at) < sinceMs) continue;
     let shas: string[] = [];
     try {
-      const commits = (fetch(["api", `repos/${self.owner}/${self.repo}/pulls/${row.number}/commits?per_page=100`]) ??
-        []) as Array<{ sha?: string }>;
+      const commits = fetch(["api", `repos/${self.owner}/${self.repo}/pulls/${row.number}/commits?per_page=100`]) as Array<{ sha?: string }>;
+      if (!Array.isArray(commits)) throw new Error("PR commit list was not an array");
+      if (commits.length === 100) unreadablePrs.push(row.number);
       shas = commits.map((c) => c.sha ?? "").filter((x) => x.length > 0);
     } catch {
-      continue; // a pull request whose commit list is unreadable contributes nothing, silently to nobody
+      // A failed commit read makes this PR unreadable; it cannot count as a clean repair.
+      unreadablePrs.push(row.number);
+      continue;
     }
     const windowPr: GateWindowPr = {
       number: row.number,
@@ -21154,13 +21208,27 @@ export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson):
     };
     prs.push(windowPr);
   }
-  return { prs };
+  const oldestListedMs = rows.length ? Date.parse(rows[rows.length - 1].updated_at ?? "") : NaN;
+  const windowComplete = rows.length < 100 || (Number.isFinite(oldestListedMs) && oldestListedMs < sinceMs);
+  return { prs, ...(windowComplete ? {} : { windowComplete: false }), ...(unreadablePrs.length ? { unreadablePrs } : {}) };
 }
 
 type CiFailureWindowReader = {
   read: (args: string[]) => Promise<unknown>;
   yieldBetweenObservation: () => Promise<void>;
+  refreshAuth?: () => Promise<void>;
 };
+
+function ciLearningListError(error: unknown): string {
+  const e = error as { message?: string; stderr?: string; code?: string | number; signal?: string };
+  const detail = `${e.message ?? ""} ${e.stderr ?? ""}`;
+  const reason = /Bad credentials|HTTP 401/i.test(detail) ? "authentication"
+    : /rate limit|HTTP 429|HTTP 403/i.test(detail) ? "rate-limit"
+    : /timed out|timeout|ETIMEDOUT/i.test(detail) ? "timeout"
+    : /ENOBUFS|maxBuffer/i.test(detail) ? "response-buffer"
+    : "transport";
+  return `${reason} (code=${String(e.code ?? "unknown")}, signal=${String(e.signal ?? "none")})`;
+}
 
 // Async CI-learning reader: preserve the synchronous corpus shape while yielding between reads.
 export async function loadCiFailureWindowAsync(
@@ -21170,11 +21238,43 @@ export async function loadCiFailureWindowAsync(
 ): Promise<CiFailureCorpusInput> {
   const self = resolveOwnerRepo();
   const sinceMs = clock.now() - days * 24 * 60 * 60 * 1000;
-  const rows = (await reader.read([
-    "api",
-    `repos/${self.owner}/${self.repo}/pulls?state=all&sort=updated&direction=desc&per_page=100`,
-  ])) as Array<{ number?: number; updated_at?: string; merged_at?: string | null }>;
+  const rows: Array<{ number?: number; updated_at?: string; merged_at?: string | null }> = [];
+  let windowComplete = false;
+  // The old one-page read silently covered <20 hours on a 3-day request in the live repo.
+  // Five pages cap work while covering today's observed PR rate; a still-saturated fifth
+  // page is explicitly partial, so no gate gardener treats it as a complete census.
+  for (let page = 1; page <= 5; page++) {
+    const listArgs = [
+      "api",
+      `repos/${self.owner}/${self.repo}/pulls?state=all&sort=updated&direction=desc&per_page=100&page=${page}`,
+      "--cache", "5m",
+      "--jq", "[.[] | {number, updated_at, merged_at}]",
+    ];
+    let pageRows: typeof rows;
+    try {
+      pageRows = await reader.read(listArgs) as typeof rows;
+    } catch (firstError) {
+      // A transient CLI/auth failure must not spend the daily allowance. One bounded
+      // reauthentication and retry; a second failure remains a named error.
+      await reader.refreshAuth?.();
+      await reader.yieldBetweenObservation();
+      try {
+        pageRows = await reader.read(listArgs) as typeof rows;
+      } catch (secondError) {
+        throw new Error(`CI-learning PR page ${page} unreadable after two bounded reads: first ${ciLearningListError(firstError)}, second ${ciLearningListError(secondError)}`);
+      }
+    }
+    if (!Array.isArray(pageRows)) throw new Error(`CI-learning PR page ${page} was not a JSON array`);
+    rows.push(...pageRows);
+    const oldestMs = pageRows.length ? Date.parse(pageRows[pageRows.length - 1].updated_at ?? "") : NaN;
+    if (pageRows.length < 100 || (Number.isFinite(oldestMs) && oldestMs < sinceMs)) {
+      windowComplete = true;
+      break;
+    }
+    await reader.yieldBetweenObservation();
+  }
   const prs: CorpusPr[] = [];
+  const unreadablePrs: number[] = [];
   for (const row of rows ?? []) {
     if (row.number === undefined) continue;
     if (row.updated_at && Date.parse(row.updated_at) < sinceMs) continue;
@@ -21185,9 +21285,13 @@ export async function loadCiFailureWindowAsync(
         "api",
         `repos/${self.owner}/${self.repo}/pulls/${row.number}/commits?per_page=100`,
       ])) as Array<{ sha?: string }>;
-      shas = (commits ?? []).map((commit) => commit.sha ?? "").filter((sha) => sha.length > 0);
+      if (!Array.isArray(commits)) throw new Error("PR commit list was not an array");
+      if (commits.length === 100) unreadablePrs.push(row.number);
+      shas = commits.map((commit) => commit.sha ?? "").filter((sha) => sha.length > 0);
     } catch {
-      continue; // Preserve the synchronous reader's skip: an unreadable commit list is not a clean PR.
+      // Preserve the failed PR as unreadable instead of treating absent commits as green.
+      unreadablePrs.push(row.number);
+      continue;
     }
     const commits: CorpusPr["commits"] = [];
     for (const sha of shas) {
@@ -21203,21 +21307,31 @@ export async function loadCiFailureWindowAsync(
         if (rollup !== undefined) commit.rollup = rollup;
       } catch { // unreadable check-runs/status: leave commit.rollup unset, matching rollupAtSha's contract
       }
+      commits.push(commit);
+    }
+    const windowPr: GateWindowPr = { number: row.number, merged: Boolean(row.merged_at), commits };
+    // Only a later green commit that repaired an observed red gate has a repair delta to
+    // attribute. Most PR commits need no diff read; gate fire rates use rollups, not files.
+    const repairedShas = new Set(
+      collectCiFailureCorpus({ prs: [windowPr] }).pairs
+        .filter((pair) => pair.state === "repaired" && pair.greenSha)
+        .map((pair) => pair.greenSha!),
+    );
+    for (const sha of repairedShas) {
       try {
         const changed = await reader.read(["api", `repos/${self.owner}/${self.repo}/commits/${sha}`]) as
           | { files?: Array<{ filename?: string }> }
           | undefined;
         if (Array.isArray(changed?.files)) {
+          const commit = commits.find((candidate) => candidate.sha === sha)!;
           commit.changedFiles = changed.files.map((file) => file.filename ?? "").filter((file) => file.length > 0);
         }
       } catch { // unreadable commit diff: leave changedFiles unset, never [] ("changed nothing")
       }
-      commits.push(commit);
     }
-    const windowPr: GateWindowPr = { number: row.number, merged: Boolean(row.merged_at), commits };
     prs.push(windowPr);
   }
-  return { prs };
+  return { prs, ...(windowComplete ? {} : { windowComplete: false }), ...(unreadablePrs.length ? { unreadablePrs } : {}) };
 }
 
 /** Paths one commit changed; `undefined` on a failed read — never `[]`, which would read as "this
@@ -21276,6 +21390,8 @@ export function ciFailuresCommand(rest: string[], deps: CiFailuresCommandDeps = 
   const corpus = collectCiFailureCorpus(input);
   console.log(`rmd ci-failures — ${days} day window, ${corpus.prsScanned} pull request(s) scanned`);
   console.log(`  status: ${corpus.status}`);
+  if (corpus.windowComplete === false) console.log("  PR listing reached its page bound before the requested time boundary; this is a partial window");
+  if (corpus.unreadablePrs?.length) console.log(`  UNREADABLE PR commit lists: ${corpus.unreadablePrs.join(", ")}`);
   if (corpus.unreadableShas.length > 0) {
     console.log(`  UNREADABLE rollups (never counted as green): ${corpus.unreadableShas.length}`);
   }
@@ -22018,6 +22134,15 @@ export function verdictCalibrationCommand(rest: string[], opts: { stateDir?: str
       console.log(
         `  ${label.padEnd(14)} n=${c.total} — revert rate ${revertPct}% (${c.revertedCount}/${c.total}), follow-up-fix rate ${fixPct}% (${c.followupFixedCount}/${c.total}) — lane(s): ${c.lanes}`,
       );
+    }
+  }
+  if ((report.byLane?.length ?? 0) > 0) {
+    console.log("\nby arm lane (rates require the population floor within each lane):");
+    for (const c of report.byLane ?? []) {
+      const rates = c.revertRate === null
+        ? `UNMEASURABLE (below ${report.minPopulationFloor})`
+        : `revert ${(c.revertRate * 100).toFixed(1)}%, follow-up-fix ${(c.followupFixRate! * 100).toFixed(1)}%`;
+      console.log(`  ${c.lane} / ${c.verdictClass}: n=${c.total}, ${rates}; reverted ${c.revertedCount}, follow-up-fixed ${c.followupFixedCount}`);
     }
   }
   console.log("");
@@ -25901,6 +26026,33 @@ let lastRetroTriggerDecline:
   | { ledgerPath: string; fingerprint: string }
   | undefined;
 
+/** A persistent attempt fence survives daemon restarts while the publication marker is frozen. */
+export const RETRO_ATTEMPT_RETRY_MS = 6 * 60 * 60 * 1000;
+
+export function retroAttemptPath(root: string): string {
+  return join(root, "state", "last-retro-attempt.json");
+}
+
+export function recordRetroAttempt(root: string, at: Date): void {
+  const marker = resolveMarkerForGather(join(root, "state", "last-retro.json"));
+  const markerTs = marker.kind === "ok" ? marker.marker.ts : null;
+  const path = retroAttemptPath(root);
+  mkdirSync(dirname(path), { recursive: true });
+  writeAtomic(path, JSON.stringify({ at: at.toISOString(), markerTs }) + "\n");
+}
+
+export function recentRetroAttempt(root: string, markerTs: string | undefined, now: Date): boolean {
+  try {
+    const attempt = JSON.parse(readFileSync(retroAttemptPath(root), "utf8")) as { at?: unknown; markerTs?: unknown };
+    if (attempt.markerTs !== (markerTs ?? null) || typeof attempt.at !== "string") return false;
+    const elapsed = now.getTime() - Date.parse(attempt.at);
+    return Number.isFinite(elapsed) && elapsed >= 0 && elapsed < RETRO_ATTEMPT_RETRY_MS;
+  } catch {
+    // A missing or damaged attempt fence permits a retry; the publication marker still guards success.
+    return false;
+  }
+}
+
 function reportRetroTriggerDecline(
   ledgerPath: string,
   marker: { ts: string } | undefined,
@@ -25987,6 +26139,10 @@ export function retroTriggerCheck(
   const markerResolution = resolveMarkerForGather(markerPath);
   if (markerResolution.kind === "corrupt") return undefined;
   const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
+  if (recentRetroAttempt(config.root, marker?.ts, now)) {
+    reportRetroTriggerDecline(ledgerPath, marker, now, "automated retro already attempted in this marker cycle; retry after six hours");
+    return undefined;
+  }
   const github = deps.github ?? retroShippedGithubGateway();
   const githubUnavailable = github.unavailable?.();
   if (githubUnavailable) {
@@ -26437,6 +26593,8 @@ export function lastLedgerCompactionFiredAtMs(lines: readonly string[]): number 
 export function buildRetroDaemonHooks(deps: {
   check?: () => RetroTriggerDecision | undefined;
   runRetro?: (rest: string[], opts: { automated: Extract<RetroTriggerDecision, { fire: true }> }) => Promise<number>;
+  config?: Config;
+  runSubprocess?: typeof runAutomatedRetroSubprocess;
 } = {}): {
   checkRetroTrigger: () => RetroTriggerDecision | undefined;
   // The optional `log` is supplied by the CALLER at invocation time (daemonCommand's own
@@ -26454,7 +26612,10 @@ export function buildRetroDaemonHooks(deps: {
     checkRetroTrigger: () => check(),
     runRetroTrigger: async (decision, log) => {
       if (deps.runRetro) await deps.runRetro([], { automated: decision });
-      else await runAutomatedRetroSubprocess(decision, { log });
+      else {
+        recordRetroAttempt((deps.config ?? loadConfig()).root, systemClock.date());
+        await (deps.runSubprocess ?? runAutomatedRetroSubprocess)(decision, { log });
+      }
     },
   };
 }
@@ -31381,10 +31542,10 @@ function memoiseBoardSnapshotByRepo(
 /**
  * W1-T2972: the CI-failure learning rung's PRODUCER, mirroring {@link buildDigestCadenceDaemonHooks}.
  * THE HALF W1-T2959 DID NOT SHIP — it built the row, marker, decision and minter, all green, but
- * only the CLI verb called them, so the "daily" loop ran by hand. RECORD THE FIRE FIRST, per
- * {@link buildMeasurementCadenceDaemonHooks}'s crash-safety discipline: a throwing body costs one
- * skipped period, never a re-fire on every poll forever. It stages MARKED, PARKED shards outside
- * the checkout and lands them only through the dedicated gated PR (W1-T3492).
+ * only the CLI verb called them, so the "daily" loop ran by hand. Record an attempt first and
+ * the successful fire after the body: a throwing body retries after thirty minutes without
+ * re-firing on every poll or spending the day's success allowance. It stages MARKED, PARKED shards
+ * outside the checkout and lands them only through the dedicated gated PR (W1-T3492).
  */
 export function buildCiLearningDaemonHooks(deps: {
   config?: Config;
@@ -31434,6 +31595,7 @@ export function buildCiLearningDaemonHooks(deps: {
           : loadCiFailureWindowAsync(days, {
               read: deps.readJson ?? ghJsonAsync,
               yieldBetweenObservation: () => yieldingSleep(0),
+              refreshAuth: deps.readJson ? undefined : async () => { await refreshInstallationToken(); },
             }),
       loadLessons: deps.loadLessons,
       fileShards: deps.fileShards,
@@ -31447,6 +31609,8 @@ export function buildCiLearningDaemonHooks(deps: {
  *  LANDED. Reporting only drafts is what made a rung that filed nothing indistinguishable from a
  *  clean one (W1-T3324). */
 export interface CiLearningCadenceRunnerResult extends CiLearningCadenceRunResult {
+  windowComplete?: boolean;
+  unreadablePrCount?: number;
   /** W1-T4115: what the gate fire-rate measurement over the same window found. */
   gateFireRates?: { status: GateFireRateReport["status"]; gates: number; neverFired: string[]; alwaysFired: string[] };
   filedCount: number;
@@ -31465,10 +31629,10 @@ export interface CiLearningCadenceRunnerResult extends CiLearningCadenceRunResul
  * IT PASSES THE REAL ORIGIN SURFACE. The previous arm passed `[]`, so wiring the filer alone would
  * re-file the same cause on every firing.
  *
- * THE FIRE IS STILL RECORDED FIRST — that ordering guards a crash-loop re-running an expensive
- * window — but a run that THREW BEFORE DOING ANY WORK RELEASES IT. The observed shape: a
- * `Bad credentials (HTTP 401)` from the window read, with `maxPerDay: 1`, spent the whole day and
- * produced nothing. A run that filed keeps its fire.
+ * An attempt marker is recorded before the window read, guarding a crash loop for thirty minutes.
+ * The daily fire is recorded only after the run completes. A failed or interrupted read therefore
+ * retries after the short bound instead of spending the day's sole success allowance. The old
+ * fire-first design left a marker after a daemon restart with no `ci_learning_cadence.ran` receipt.
  */
 export function buildCiLearningCadenceRunner(deps: {
   root: string;
@@ -31482,7 +31646,7 @@ export function buildCiLearningCadenceRunner(deps: {
   mergedOrigins?: (checkoutRoot: string) => string[];
   mintTaskId?: (filingBranch?: string) => string;
   recordFire?: (root: string, at: Date) => void;
-  releaseFire?: (root: string) => void;
+  recordAttempt?: (root: string, at: Date) => void;
   windowDays?: number;
   /** W1-T3324: the time source as src/lib/clock.ts's shared {@link Clock} port. A bare
    *  `() => Date` with a `?? new Date()` fallback is the legacy shape the clock-signature census
@@ -31491,16 +31655,15 @@ export function buildCiLearningCadenceRunner(deps: {
 }): () => Promise<CiLearningCadenceRunnerResult> {
   return async () => {
     const at = (deps.clock ?? systemClock).date();
-    (deps.recordFire ?? recordCiLearningCadenceFire)(deps.root, at);
+    (deps.recordAttempt ?? recordCiLearningAttempt)(deps.root, at);
     let corpus: ReturnType<typeof collectCiFailureCorpus>;
     let window: CiFailureCorpusInput;
     try {
-      window = await deps.loadWindow(deps.windowDays ?? CI_LEARNING_WINDOW_DAYS);
+      window = await deps.loadWindow(deps.windowDays ?? ciLearningLookbackDays(deps.root, at));
       corpus = collectCiFailureCorpus(window);
     } catch (e) {
-      // NO WORK WAS DONE, so the allowance is returned rather than spent. Rethrown, never swallowed:
-      // the caller's `ci_learning_cadence.run_failed` row is how this becomes visible.
-      (deps.releaseFire ?? releaseCiLearningCadenceFire)(deps.root);
+      // No successful fire was recorded. The attempt marker gives a bounded retry after a
+      // transient read failure or a daemon restart; the caller records the exact failure.
       throw e;
     }
     const planOrigins = deps.planOrigins ?? ciLearningPlanOrigins(deps.checkoutRoot);
@@ -31551,9 +31714,11 @@ export function buildCiLearningCadenceRunner(deps: {
       (step, extra) => appendLedger(join(stateDir, LEDGER_FILENAME), { run_id: `GATE-FIRE-RATES-${at.getTime()}`, task_id: "DAEMON", step, ...extra }),
       at.toISOString(),
     );
-    return {
+    const completed: CiLearningCadenceRunnerResult = {
       gateFireRates: { status: gateFireRates.status, gates: gateFireRates.gates.length, neverFired: gateFireRates.neverFired, alwaysFired: gateFireRates.alwaysFired },
       status: result.status,
+      windowComplete: corpus.windowComplete !== false,
+      unreadablePrCount: corpus.unreadablePrs?.length ?? 0,
       draftCount: result.drafts.length,
       excludedCount: result.excludedFindings.length,
       unreadableCount: result.unreadableShas.length,
@@ -31562,6 +31727,8 @@ export function buildCiLearningCadenceRunner(deps: {
       skippedCount: skipped,
       refusedCount: refused,
     };
+    (deps.recordFire ?? recordCiLearningCadenceFire)(deps.root, at);
+    return completed;
   };
 }
 

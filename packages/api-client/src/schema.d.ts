@@ -210,6 +210,12 @@ export interface components {
       prNumber: number;
       requestedAt: string;
     };
+    /** POST /v1/pr-actions' 409 body (src/lib/panel-actions.ts's `buildPrActionRoute`): the operator switched this action off on this daemon -- the marker `state/CONSOLE_PR_ACTION_OFF-<action>` exists (src/lib/fleet-control.ts's `isPrActionSwitchedOff`). Nothing was recorded but the `console.pr_action_switched_off` ledger row. A dedicated refusal rather than a member of the shared Error enum, which a consumer switches over exhaustively (packages/daemon-client-smoke). */
+    PrActionSwitchedOff: {
+      error: "switched_off";
+      /** Names the switched-off action and the marker file that switched it off. */
+      detail: string;
+    };
     /** POST /v1/escalation/mark-handled's body (W1-T182) -- the NEEDS ME affordance an ESCALATION row (any class: BLOCKED/MANUAL/HARD_STOP/GRILL) actually supports, distinct from ApproveManualRequest's MANUAL-queue check-off: "approve" has no defined verb for an escalation. Closes the named `needs-human`-labeled GitHub issue (src/lib/escalate.ts); the name is deliberately "mark handled", not "approve" or "resolve" -- closing the issue does not, by itself, imply the underlying block is fixed. */
     MarkEscalationHandledRequest: {
       taskId: string;
@@ -272,9 +278,10 @@ export interface components {
       /** GET /v1/feedback only (W1-T1257): true when `discharged` could not be determined because the merged-set read failed or was truncated -- a partial read, never mistaken for "not discharged". Mutually exclusive with `discharged`; a read-time decoration only, exactly like `unverified`. */
       dischargeUndecidable?: boolean;
     };
-    /** GET /v1/feedback's body -- every captured feedback entry, oldest first. */
+    /** GET /v1/feedback's body -- every captured feedback entry, oldest first. Served through the console read cache (src/lib/serve.ts's `boundConsoleReadRoute`), so `rmd serve` also splices in `staleness`; a cold or stalled cache answers `{entries: [], staleness}`. */
     FeedbackInboxResult: {
       entries: (FeedbackEntry)[];
+      staleness?: ConsoleResponseStaleness;
     };
     /** POST /v1/feedback's body -- submit feedback from the panel (ALWAYS captured with origin: ui, never taken from this body). `replyTo`, if given, must name an existing entry parked `grilling` -- this is "answer a grill" v1 (src/lib/panel-graph.ts's header explains why): the answer is captured as a fresh feedback entry that re-enters triage, rather than a second, parallel answer-delivery primitive ahead of the still-unbuilt W1-T42 grill mechanics. */
     SubmitFeedbackRequest: {
@@ -3014,6 +3021,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+          "409": PrActionSwitchedOff;
         };
     };
   };

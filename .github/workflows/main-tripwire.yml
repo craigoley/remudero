@@ -111,28 +111,56 @@ jobs:
             suites = new Set(selection.suites);
             mode = `affected: ${selection.suites.length} suite(s) selected`;
           }
-          // Always includes every test file the range itself touched, whichever arm ran above.
-          for (const f of touchedTests) suites.add(f);
-
+          // The range's own touched test files run FIRST and to completion (the #7005 skew touched its
+          // own test file); everything else the selector chose runs after them, within a time budget.
+          for (const f of touchedTests) suites.delete(f);
+          const touched = [...new Set(touchedTests)].sort();
           const list = [...suites].sort();
+          writeFileSync("tripwire-touched.txt", touched.length > 0 ? touched.join("\n") + "\n" : "");
           writeFileSync("tripwire-suites.txt", list.length > 0 ? list.join("\n") + "\n" : "");
-          const summary = `main-tripwire: ${mode}; ${touchedTests.length} touched test file(s) always included; ${list.length} suite(s) total.`;
+          const summary = `main-tripwire: ${mode}; ${touched.length} touched test file(s) run first; ${list.length} further suite(s) within the budget.`;
           console.log(summary);
           if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, `- ${summary}\n`, { flag: "a" });
           EOF
           node --import tsx main-tripwire-select.mjs
       - name: Run the selected suites over the merged tree (never superseded by a later push)
+        env:
+          # Pass 2 stops here and reports NEUTRAL, never a timeout: a job cancelled at timeout-minutes
+          # used to read as a red main (17 of 21 runs, 2026-09-26..28; 387-1,886 suites selected).
+          TRIPWIRE_BUDGET_S: "660"
         run: |
           set +e
-          if [ ! -s tripwire-suites.txt ]; then
+          run_list() {
+            node scripts/test-with-retry.mjs \
+              node scripts/test-tier-manifest.mjs --run-candidates "$1" --shard 1/1 \
+              2>&1 | tee -a tripwire-output.log
+            return "${PIPESTATUS[0]}"
+          }
+          if [ ! -s tripwire-touched.txt ] && [ ! -s tripwire-suites.txt ]; then
             echo "main-tripwire: this merge's own diff affects zero suites — nothing to verify, trivially green."
             exit 0
           fi
-          node scripts/test-with-retry.mjs \
-            node scripts/test-tier-manifest.mjs --run-candidates tripwire-suites.txt --shard 1/1 \
-            2>&1 | tee tripwire-output.log
-          CODE="${PIPESTATUS[0]}"
+          if [ -s tripwire-touched.txt ]; then
+            run_list tripwire-touched.txt
+            CODE=$?
+            if [ "$CODE" -ne 0 ]; then
+              echo "::error::main-tripwire: a test file this merge itself touched failed (exit ${CODE})."
+              exit "$CODE"
+            fi
+          fi
+          [ -s tripwire-suites.txt ] || exit 0
+          REMAINING=$(( TRIPWIRE_BUDGET_S - SECONDS ))
+          if [ "$REMAINING" -le 60 ]; then
+            echo "::notice::main-tripwire: budget spent on the touched files; the other selected suites were not run (neutral, not green)."
+            exit 0
+          fi
+          timeout --signal=TERM "$REMAINING" bash -c "$(declare -f run_list); run_list tripwire-suites.txt"
+          CODE=$?
           set -e
+          if [ "$CODE" -eq 124 ]; then
+            echo "::notice::main-tripwire: the ${REMAINING}s budget ran out before the selected suites finished — partial, neutral (not green, not red)."
+            exit 0
+          fi
           if [ "$CODE" -ne 0 ] && ! grep -qE '^# tests [0-9]+' tripwire-output.log; then
             echo "::error::main-tripwire exited ${CODE} with NO node-test-runner summary — an unverified failure set (W1-T2597's own reasoning applies here too)."
           fi

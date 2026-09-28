@@ -152,8 +152,13 @@ function writeNpmStub(dir: string, rec: string): void {
  * host's configuration instead of its own. Each test still sets what it needs explicitly.
  */
 function ambientWithoutRmdControls(): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("RMD_")));
+  return Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("RMD_") && !HOST_GITHUB_CREDENTIAL.test(k)));
 }
+
+/** The host's own GitHub credentials never reach a fixture. In the fleet container GH_APP_* are set, so
+ *  idle-starved-probe.sh minted an App token through a fixture tree with no tsx and exited 2 — the
+ *  retro's prepublish failed on this suite 52 times (2026-09-26..28) while it passed on the Mac. */
+const HOST_GITHUB_CREDENTIAL = /^(GH_APP_|GH_TOKEN$|GITHUB_TOKEN$)/;
 
 /**
  * Boot the real entrypoint against `home`, which persists across calls so a SECOND boot sees the
@@ -1488,5 +1493,18 @@ test("W1-T2993: the entrypoint boot fixture cannot block indefinitely", () => {
   } finally {
     if (restore === undefined) delete process.env.RMD_RESTART_THROTTLE_S;
     else process.env.RMD_RESTART_THROTTLE_S = restore;
+  }
+});
+
+test("a fixture boot never inherits the host's GitHub App credentials or token", () => {
+  const names = ["GH_APP_ID", "GH_APP_INSTALLATION_ID", "GH_APP_PRIVATE_KEY_PATH", "GH_TOKEN"] as const;
+  const saved = names.map((n) => process.env[n]);
+  names.forEach((n) => (process.env[n] = `host-${n}`));
+  try {
+    const env = ambientWithoutRmdControls();
+    assert.deepEqual(names.filter((n) => n in env), [], "no host credential reaches the fixture environment");
+    assert.equal(env.PATH, process.env.PATH, "control: ordinary ambient variables still pass through");
+  } finally {
+    names.forEach((n, i) => (saved[i] === undefined ? delete process.env[n] : (process.env[n] = saved[i])));
   }
 });

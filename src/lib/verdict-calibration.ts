@@ -422,6 +422,11 @@ export interface ClassOutcome {
   taskIds: string[];
 }
 
+/** A class measured within one arm lane. The aggregate class above still refuses a blended rate. */
+export interface LaneClassOutcome extends ClassOutcome {
+  lane: string;
+}
+
 export interface UnmeasurableRow {
   taskId: string;
   /** Absent exactly when the row's own {@link VerdictRow.headSha} was absent — see that field's
@@ -439,6 +444,8 @@ export interface VerdictCalibrationReport {
   /** One entry per {@link VerdictClass}, always all three, even at `total: 0` — an empty corpus
    *  prints counts and refuses rates rather than omitting a class outright. */
   classes: ClassOutcome[];
+  /** Observed (lane, class) populations, with a rate only when that population clears the floor. */
+  byLane?: LaneClassOutcome[];
   /** Rows whose merge sha (or verdict class) could not be recovered — P48's no-naked-zero
    *  clause: every one of these is named, never folded into a denominator as if measured. */
   unmeasurable: UnmeasurableRow[];
@@ -487,6 +494,7 @@ export function verdictCalibrationReport(
   const totals = new Map<VerdictClass, { total: number; reverted: number; fixed: number; lanes: Set<string>; taskIds: string[] }>(
     VERDICT_CLASSES.map((c) => [c, { total: 0, reverted: 0, fixed: 0, lanes: new Set<string>(), taskIds: [] }]),
   );
+  const laneTotals = new Map<string, { verdictClass: VerdictClass; lane: string; total: number; reverted: number; fixed: number; taskIds: string[] }>();
   const unmeasurable: UnmeasurableRow[] = [];
   const unmeasurableByCause: Record<UnmeasurableCause, number> = {
     "no-head-sha": 0,
@@ -530,9 +538,21 @@ export function verdictCalibrationReport(
     bucket.taskIds.push(row.taskId);
     // W1-T2258 — every row is counted regardless of lane (never a second silent drop), but the
     // LANE it came from travels with the bucket so the rate below can refuse to blend lanes.
-    bucket.lanes.add(row.lane ?? "review");
-    if (wasReverted(commits, merge, row.taskId, policy.windowDays)) bucket.reverted += 1;
-    if (hasFollowupFix(commits, merge, row.taskId, policy.windowDays)) bucket.fixed += 1;
+    const lane = row.lane ?? "review";
+    bucket.lanes.add(lane);
+    const key = `${lane}\0${row.verdictClass}`;
+    const laneBucket = laneTotals.get(key) ?? { verdictClass: row.verdictClass, lane, total: 0, reverted: 0, fixed: 0, taskIds: [] };
+    laneBucket.total += 1;
+    laneBucket.taskIds.push(row.taskId);
+    laneTotals.set(key, laneBucket);
+    if (wasReverted(commits, merge, row.taskId, policy.windowDays)) {
+      bucket.reverted += 1;
+      laneBucket.reverted += 1;
+    }
+    if (hasFollowupFix(commits, merge, row.taskId, policy.windowDays)) {
+      bucket.fixed += 1;
+      laneBucket.fixed += 1;
+    }
   }
 
   const classes: ClassOutcome[] = VERDICT_CLASSES.map((verdictClass) => {
@@ -560,7 +580,22 @@ export function verdictCalibrationReport(
 
   const armsClassified = classes.reduce((sum, c) => sum + c.total, 0);
 
-  return { policy, minPopulationFloor, classes, unmeasurable, armsSeen: verdictRows.length, armsClassified, unmeasurableByCause };
+  const byLane: LaneClassOutcome[] = [...laneTotals.values()]
+    .sort((a, b) => a.lane.localeCompare(b.lane) || VERDICT_CLASSES.indexOf(a.verdictClass) - VERDICT_CLASSES.indexOf(b.verdictClass))
+    .map((b) => ({
+      verdictClass: b.verdictClass,
+      lane: b.lane,
+      lanes: b.lane,
+      total: b.total,
+      revertedCount: b.reverted,
+      followupFixedCount: b.fixed,
+      revertRate: b.total < minPopulationFloor ? null : b.reverted / b.total,
+      followupFixRate: b.total < minPopulationFloor ? null : b.fixed / b.total,
+      ...(b.total < minPopulationFloor ? { rateRefusedReason: "below-population-floor" as const } : {}),
+      taskIds: b.taskIds,
+    }));
+
+  return { policy, minPopulationFloor, classes, byLane, unmeasurable, armsSeen: verdictRows.length, armsClassified, unmeasurableByCause };
 }
 
 // ── W1-T3082: drift bands, classification, escalation ──────────────────────────────────────────

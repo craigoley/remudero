@@ -1,0 +1,56 @@
+- id: W1-T4657
+  title: "AN APPROVED AUTOMATION ACTION HAS NO EXECUTOR — automation-action-v1, delegation handoffs and intent plans all authorise, but nothing performs the step and completion is self-reported; bind a small catalogue of capability refs to the daemon's existing served executors and take the completion receipt from the executor's own ledger row"
+  repo: remudero
+  depends_on: ["W1-T3855", "W1-T3883", "W1-T3898"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-28: follow-up research on the goal-only intent plans the console sends"
+  plan_refs: ["W1-T3855", "W1-T3878", "W1-T3883", "W1-T3898", "W1-T4077"]
+  files:
+    - src/lib/action-executor.ts
+    - src/lib/operator-agent.ts
+    - test/an-approved-action-has-an-executor.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-09-28 at origin/main: `DelegationCapabilityRef` (src/lib/automation-action.ts) is a free
+    string with no registry; `executeBoundedDelegation` verifies an envelope and returns an
+    authorised-or-refused receipt, but performs no side effect; `/v1/operator-agent/actions/complete`
+    accepts a caller-supplied `evidenceRef`, so completion is self-reported; and W1-T3898's intent
+    plans derive one action per step that nothing executes. The whole operator-agent automation
+    stack therefore records intent and approval while every step is still done by hand. Meanwhile
+    the daemon already serves real, receipted executors whose own ledger rows are the system of
+    record: POST /v1/drain/kick (`console.kick_requested`), POST /v1/pr-actions
+    (`console.pr_action_requested`, `console.pr_action_switched_off`), the drain request
+    (`console.drain_requested`), pause (`panel.pause_requested`) and resume (`fleet.resume`),
+    POST /v1/questions/answer (`panel.question_answered`), POST /v1/manual/approve
+    (`panel.manual_approved`).
+  design: |
+    A new `src/lib/action-executor.ts` holds a closed, versioned catalogue: each entry binds one
+    capability ref (for example `rmd.task.kick`, `rmd.pr.review`, `rmd.pr.repair`, `rmd.fleet.pause`,
+    `rmd.fleet.resume`) to the SAME handler its served route already calls (never a second
+    side-effect path), the risk tier and approval policy the action must declare, whether it is
+    reversible and its rollback capability (pause <-> resume), and the ledger step that proves it
+    ran. Execution happens only for an action whose preflight is `ready`, whose approval policy is
+    satisfied, and whose idempotency key has not executed; the executor then writes the completion
+    receipt itself with `evidenceRef` pointing at the executor's own ledger row (step, ts, run_id).
+    An unknown capability is refused by name (`no-executor`); a catalogue entry whose route is
+    switched off (pr-actions' `switched_off`) is refused with that reason. The self-reported
+    completion path stays for capabilities outside the catalogue but is labelled `self-reported`,
+    so a reader can tell an executor receipt from a caller's claim. v1 is LOW-tier and reversible
+    operations plus pause/resume under human approval; nothing financial, destructive or
+    credential-touching enters the catalogue.
+  acceptance:
+    - claim: "an approved, preflight-ready action whose capability is in the catalogue runs through that capability's existing handler exactly once and its completion receipt cites the executor's own ledger row; an unknown capability is refused as no-executor"
+      proof: "unit test: test/an-approved-action-has-an-executor.test.ts"
+    - claim: "the operator-agent completion path consults the executor catalogue before accepting a self-reported completion"
+      proof: "grep: executeCatalogueAction( in src/lib/operator-agent.ts"
+  falsifier: |
+    Approve a `rmd.task.kick` action twice under one idempotency key: the kick handler runs once, and
+    the second request returns the first receipt; a completion posted by the caller for a catalogue
+    capability is labelled self-reported, never as executor evidence.

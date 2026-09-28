@@ -1,0 +1,46 @@
+- id: W1-T4658
+  title: "A GOAL BECOMES STEPS THE FLEET CAN RUN — every intent plan the console sends is goal-only and previews unavailable (no-bounded-step); propose 0-4 steps from the executor catalogue only, grounded in evidence the operator agent can cite, and never as authority"
+  repo: remudero
+  depends_on: ["W1-T3898", "W1-T4657"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-28: W1-T3898 console follow-up 4 (goal-only proposals preview unavailable)"
+  plan_refs: ["W1-T2499", "W1-T3898", "W1-T4657", "W1-T3855"]
+  files:
+    - src/lib/intent-planner.ts
+    - src/lib/operator-agent.ts
+    - test/a-goal-becomes-steps-the-fleet-can-run.test.ts
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    W1-T3898 (merged 2026-09-28) builds and previews an intent plan from a producer's steps, and
+    names its own gap: the console sends only a goal, so every such plan previews `unavailable`
+    (`no-bounded-step`) and the operator gets a clarification loop with nothing to confirm. Steps
+    cannot be invented freely: W1-T4657 makes a step executable only when its capability is in the
+    executor catalogue, so the planner's vocabulary is exactly that catalogue.
+  design: |
+    `src/lib/intent-planner.ts` maps a goal plus observed state to at most four automation-action-v1
+    drafts, each using ONLY a catalogue capability (W1-T4657). v1 is deterministic and evidence-led,
+    not generative: a small set of intent recognisers (for example "unstick PR <n>" -> pr.repair
+    when its checks are red, pr.review when review is stale; "run <task id>" -> task.kick when the
+    task is dispatch-eligible; "pause the fleet" -> fleet.pause with resume as rollback), each step
+    carrying the evidence it was chosen on (the ledger/GitHub fact, cited as the operator agent's
+    ask route cites) and the risk tier and approval the catalogue entry dictates. A goal no
+    recogniser matches yields zero steps and a clarification question naming what it could not
+    resolve, never a guessed step. The planner never sets approval, never widens scope, and its
+    output goes through `buildIntentPlan` and the existing preview, so every W1-T3898 refusal still
+    applies. A later, separately filed version may add a model-drafted step behind the same
+    catalogue and validator, measured against this deterministic baseline.
+  acceptance:
+    - claim: "a goal a recogniser matches yields catalogue-only steps with cited evidence that preview ready, and a goal none matches yields zero steps and a clarification question rather than a guessed step"
+      proof: "unit test: test/a-goal-becomes-steps-the-fleet-can-run.test.ts"
+    - claim: "the intent-plan propose route calls the planner for a goal-only proposal before building the plan"
+      proof: "grep: planStepsForGoal( in src/lib/operator-agent.ts"
+  falsifier: |
+    A goal naming a capability outside the catalogue ("delete the repo") must produce zero steps and
+    a clarification, never a drafted action.
