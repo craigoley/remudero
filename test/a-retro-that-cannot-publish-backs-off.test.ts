@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, mkdirSync } from "node:fs";
+import fsDefault, { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -65,6 +65,10 @@ test("W1-T4664: a retro that failed prepublish does not re-fire on the next poll
   const github = healthyGithub();
   const decision = retroTriggerCheck(nextPoll, { config, github });
   assert.equal(decision, undefined, "a poll inside the back-off window declines rather than re-firing");
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  assert.equal(retroTriggerCheck(nextPoll, { config, github }), undefined, "the next identical poll is also backed off");
+  const backoffRows = readFileSync(ledgerPath, "utf8").split("\n").filter((line) => line.includes('"step":"daemon.retro_trigger.backoff"'));
+  assert.equal(backoffRows.length, 1, "one marker cycle and eligibility boundary emits one back-off receipt");
   assert.equal(
     recentRetroAttempt(config.root, markerTs, nextPoll),
     true,
@@ -96,6 +100,25 @@ test("W1-T4664: a retro that failed prepublish does not re-fire on the next poll
   const doubledElapsed = new Date(nextPoll.getTime() + 2 * RETRO_ATTEMPT_RETRY_MS + 1);
   const eligibleAfterDouble = evaluateRetroBackoff(secondRecord, secondRecord!.mergesSinceMarker, markerTs, doubledElapsed, defaultRetroBackoffPolicy());
   assert.equal(eligibleAfterDouble.eligible, true, "eligibility opens once the DOUBLED delay has actually elapsed");
+});
+
+test("W1-T4664: a malformed attempt record permits a retry", () => {
+  const { config } = fixtureRoot();
+  const path = retroAttemptPath(config.root);
+  writeFileSync(path, "{broken", "utf8");
+  assert.equal(loadRetroAttemptRecord(path), undefined, "a torn JSON record does not fence future retros");
+});
+
+test("W1-T4664: a short staged attempt write is rejected before publication", (t) => {
+  const { config } = fixtureRoot();
+  const path = retroAttemptPath(config.root);
+  t.mock.method(fsDefault, "writeSync", () => 0);
+  assert.throws(
+    () => recordRetroAttempt(config.root, new Date(), 30),
+    /short write staging/,
+    "a partial staged write cannot become the persisted attempt record",
+  );
+  assert.equal(loadRetroAttemptRecord(path), undefined, "the published path remains absent after the failed stage");
 });
 
 test("W1-T4664: a published retro resets the back-off", () => {
