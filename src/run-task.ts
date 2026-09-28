@@ -921,6 +921,7 @@ import {
   type CiFailureCorpusInput,
   type CorpusPr,
 } from "./lib/ci-failure-corpus.js";
+import { readCiPrGraphql } from "./lib/ci-learning-graphql.js";
 import { measureGateFireRates, recordGateFireRates, type GateFireRateReport, type GateWindowPr } from "./lib/gate-fire-rate.js";
 import {
   fetchMergedCoverageArtifact,
@@ -21443,6 +21444,7 @@ export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson):
 
 type CiFailureWindowReader = {
   read: (args: string[]) => Promise<unknown>;
+  readPr?: (owner: string, repo: string, number: number) => Promise<CorpusPr["commits"]>;
   yieldBetweenObservation: () => Promise<void>;
   refreshAuth?: () => Promise<void>;
 };
@@ -21507,35 +21509,39 @@ export async function loadCiFailureWindowAsync(
     if (row.number === undefined) continue;
     if (row.updated_at && Date.parse(row.updated_at) < sinceMs) continue;
     await reader.yieldBetweenObservation();
-    let shas: string[];
+    let commits: CorpusPr["commits"];
     try {
-      const commits = (await reader.read([
-        "api",
-        `repos/${self.owner}/${self.repo}/pulls/${row.number}/commits?per_page=100`,
-      ])) as Array<{ sha?: string }>;
-      if (!Array.isArray(commits)) throw new Error("PR commit list was not an array");
-      if (commits.length === 100) unreadablePrs.push(row.number);
-      shas = commits.map((commit) => commit.sha ?? "").filter((sha) => sha.length > 0);
-    } catch {
+      if (reader.readPr) {
+        commits = await reader.readPr(self.owner, self.repo, row.number);
+      } else {
+        const listed = (await reader.read([
+          "api",
+          `repos/${self.owner}/${self.repo}/pulls/${row.number}/commits?per_page=100`,
+        ])) as Array<{ sha?: string }>;
+        if (!Array.isArray(listed)) throw new Error("PR commit list was not an array");
+        if (listed.length === 100) unreadablePrs.push(row.number);
+        commits = [];
+        for (const sha of listed.map((commit) => commit.sha ?? "").filter((sha) => sha.length > 0)) {
+          await reader.yieldBetweenObservation();
+          const commit: CorpusPr["commits"][number] = { sha };
+          try {
+            const responses = [
+              await reader.read(checkRunsRestArgs(self.owner, self.repo, sha)),
+              await reader.read(combinedStatusRestArgs(self.owner, self.repo, sha)),
+            ];
+            let response = 0;
+            const rollup = rollupAtSha(self.owner, self.repo, sha, () => responses[response++]);
+            if (rollup !== undefined) commit.rollup = rollup;
+          } catch { // unreadable check-runs/status: leave commit.rollup unset, matching rollupAtSha's contract
+          }
+          commits.push(commit);
+        }
+      }
+    } catch (error) {
+      if (ciLearningListError(error).startsWith("authentication")) throw error;
       // Preserve the failed PR as unreadable instead of treating absent commits as green.
       unreadablePrs.push(row.number);
       continue;
-    }
-    const commits: CorpusPr["commits"] = [];
-    for (const sha of shas) {
-      await reader.yieldBetweenObservation();
-      const commit: CorpusPr["commits"][number] = { sha };
-      try {
-        const responses = [
-          await reader.read(checkRunsRestArgs(self.owner, self.repo, sha)),
-          await reader.read(combinedStatusRestArgs(self.owner, self.repo, sha)),
-        ];
-        let response = 0;
-        const rollup = rollupAtSha(self.owner, self.repo, sha, () => responses[response++]);
-        if (rollup !== undefined) commit.rollup = rollup;
-      } catch { // unreadable check-runs/status: leave commit.rollup unset, matching rollupAtSha's contract
-      }
-      commits.push(commit);
     }
     const windowPr: GateWindowPr = { number: row.number, merged: Boolean(row.merged_at), commits };
     // Only a later green commit that repaired an observed red gate has a repair delta to
@@ -31789,6 +31795,8 @@ export function buildCiLearningDaemonHooks(deps: {
   loadWindow?: (days: number) => CiFailureCorpusInput | Promise<CiFailureCorpusInput>;
   /** Test seam for CI-learning's production JSON transport; the default remains {@link ghJsonAsync}. */
   readJson?: (args: string[]) => Promise<unknown>;
+  /** An injected GraphQL reader exercises the production batch path without a network call. */
+  readGraphql?: (args: string[]) => Promise<unknown>;
   /** Injected so a test drives lesson outcomes without the real plan; production reads only the
    *  machine filer's own shard directory. */
   loadLessons?: () => FiledCiLessonsRead;
@@ -31822,6 +31830,9 @@ export function buildCiLearningDaemonHooks(deps: {
           ? deps.loadWindow(days)
           : loadCiFailureWindowAsync(days, {
               read: deps.readJson ?? ghJsonAsync,
+              readPr: deps.readGraphql || !deps.readJson
+                ? (owner, repo, number) => readCiPrGraphql(owner, repo, number, deps.readGraphql ?? ghJsonAsync, () => yieldingSleep(0))
+                : undefined,
               yieldBetweenObservation: () => yieldingSleep(0),
               refreshAuth: deps.readJson ? undefined : async () => { await refreshInstallationToken(); },
             }),
