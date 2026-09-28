@@ -151,7 +151,7 @@ async function activatePilot(dir: string, stateDir: string, aa: BenchmarkAaRepor
 function assignment(taskId: string, pin: typeof PAID_PIN, ts: string): PaidPilotRow {
   return { ts, step: "worker.assignment", taskId, runId: `${taskId}-1`, assignmentId: `${taskId}-a1`, selectionAssignmentId: null,
     selected: { ...pin }, recordedArm: null, revisionsOffPin: 0, revisionsUnpinned: 0, servedModel: null, billingMode: null,
-    cost: { state: "missing" } };
+    cost: { state: "missing" }, paired: null };
 }
 
 async function reportPilot(dir: string, stateDir: string): Promise<PaidPilotReport> {
