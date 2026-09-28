@@ -1,0 +1,40 @@
+- id: W1-T4665
+  title: "NO PROMPT IN THE FLEET HAS EVER BEEN OPTIMIZED AGAINST ITS OWN GRADERS — every implement, fix and reviewer prompt is hand-written although each task carries executable base-vs-head proofs; run GEPA-style reflective prompt evolution on the fix-rung prompt, scored on held-out recorded failures, and promote only through experiment-promotion"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-learn-1790600000"
+  plan_refs: [W1-T4619, W1-T4450, W1-T4617]
+  files: [src/lib/prompt-evolution.ts, src/lib/experiment-promotion.ts, test/the-fix-prompt-is-optimized-against-its-own-graders.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-28: no prompt variant is generated anywhere (grep GEPA/DSPy/MIPRO: no hits); experiment-promotion.ts
+    replayPromotion can already test a candidate against recorded cases and golden-corpus.ts (W1-T4619) supplies graded
+    tasks, but every candidate is human-written. GEPA (https://arxiv.org/abs/2507.19457, ICLR 2026 oral; gepa-ai/gepa)
+    reflects on execution traces in natural language, keeps a Pareto front of prompts and beat GRPO by 6% on average with up to
+    35x fewer rollouts, and MIPROv2 by more than 10%. The fix rung is the first target: on 2026-09-24, 62 of 65 fix rounds
+    ended commit_refused — a machine-checkable failure.
+  design: |
+    (i) prompt-evolution.ts proposes candidate fix-rung prompts from recorded fix transcripts, their commit_refused
+    reasons and reviewer verdicts (reflection, not random mutation), keeping a Pareto set across task shapes.
+    (ii) Candidates are scored on a held-out half of recorded failures by re-running the fix rung in sealed side worktrees
+    (the paired-trial surface), never a pushed branch.
+    (iii) A candidate reaches production only through experiment-promotion's shadow -> canary -> rollback path, and only
+    after W1-T4669's multi-seed, shuffled-order check passes.
+  acceptance:
+    - claim: "candidates are proposed from recorded fix transcripts and scored on a held-out half"
+      proof: 'grep: test("W1-T4665: candidates are proposed from recorded fix transcripts and scored on a held-out half" in test/the-fix-prompt-is-optimized-against-its-own-graders.test.ts'
+    - claim: "no candidate reaches production except through experiment-promotion"
+      proof: 'grep: test("W1-T4665: no candidate reaches production except through experiment-promotion" in test/the-fix-prompt-is-optimized-against-its-own-graders.test.ts'
+    - claim: "the new module is called from src/lib/experiment-promotion.ts"
+      proof: 'grep: proposePromptCandidates( in src/lib/experiment-promotion.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

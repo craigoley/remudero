@@ -1,0 +1,37 @@
+- id: W1-T4668
+  title: "THE RETRO MINES PROCEDURES FROM LEDGER SIGNALS ONLY — the skill drafts say 'resolve on the first attempt' because the miner never reads what a successful worker actually did; learn step-by-step workflows from successful versus failed transcripts of the same task shape (AWM/ACE style) and stage them as skill drafts"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-learn-1790600000"
+  plan_refs: [W1-T2766, W1-T4338]
+  files: [src/lib/workflow-mining.ts, src/lib/skill-workshop.ts, test/workflows-are-mined-from-run-transcripts.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-28: mineProceduralCandidates (src/lib/retro.ts) groups runs by fixed ledger signals ('no LLM, no I/O');
+    the staged skill drafts restate outcomes ('Resolve the task on the first attempt', 'Execute every acceptance criterion as
+    a real proof') — skill-draft:88d9945f's 861-byte markdown. Worker transcripts exist (src/lib/worker.ts) but nothing learns
+    from them. Agent Workflow Memory (https://arxiv.org/abs/2409.07429): +24.6% and +51.1% relative success; ACE
+    (https://arxiv.org/abs/2510.04618): +10.6% with an itemized, evolving playbook.
+  design: |
+    (i) For a task shape with enough merged runs, compare the tool-call sequences of first-attempt successes with runs that
+    needed repair, and extract the reusable steps (commands, files read first, checks run) as a workflow.
+    (ii) Stage the workflow as the skill draft's Procedure section (skill-workshop.ts), citing the runs it came from.
+    (iii) A workflow with no step that distinguishes success from repair is not staged.
+  acceptance:
+    - claim: "a staged procedure lists steps taken from successful transcripts"
+      proof: 'grep: test("W1-T4668: a staged procedure lists steps taken from successful transcripts" in test/workflows-are-mined-from-run-transcripts.test.ts'
+    - claim: "a shape with no distinguishing step stages nothing"
+      proof: 'grep: test("W1-T4668: a shape with no distinguishing step stages nothing" in test/workflows-are-mined-from-run-transcripts.test.ts'
+    - claim: "the new module is called from src/lib/skill-workshop.ts"
+      proof: 'grep: mineTranscriptWorkflows( in src/lib/skill-workshop.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.
