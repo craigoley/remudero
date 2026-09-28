@@ -32296,6 +32296,7 @@ export function gardenCheckout(opts: {
   const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   return {
     root,
+    branch,
     land: ({ paths, title, body }) => {
       git("add", "--", ...paths);
       // A garden log under docs/ changes what docs/docs-index.json must say, and docs-index-check
