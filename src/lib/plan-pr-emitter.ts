@@ -353,7 +353,7 @@ function authorBaseRef(cwd: string): string {
   const result = spawnSync("git", ["merge-base", "origin/main", "HEAD"], { cwd, encoding: "utf8" });
   const base = result.stdout?.trim();
   if (result.status !== 0 || !base) {
-    throw new Error("body emission refused: cannot resolve the merge base for acceptance proofs; ask for a human ruling");
+    throw new Error(`body emission refused: cannot resolve the merge base for acceptance proofs; ask for a human ruling (checkout: ${cwd})`);
   }
   return base;
 }
