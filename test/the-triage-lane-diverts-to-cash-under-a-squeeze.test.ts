@@ -30,22 +30,22 @@ import { test } from "node:test";
 import { cashCanServeToolSurface } from "../src/lib/worker.js";
 import { TRIAGE_CASH_TOOLS, TRIAGE_WORKER_TOOLS } from "../src/run-task.js";
 
-test("triage-cash-divert: the Claude surface keeps WebSearch — the Architect-tier research grant", () => {
+test("W1-T3749: triage-cash-divert: the Claude surface keeps WebSearch — the Architect-tier research grant", () => {
   assert.ok(TRIAGE_WORKER_TOOLS.includes("WebSearch"), "triage's own STEP 2 (lib/triage.ts) instructs it to research");
 });
 
-test("triage-cash-divert: THE REAL PREDICATE — the cash adapter refuses TRIAGE_WORKER_TOOLS as-is", () => {
+test("W1-T3749: triage-cash-divert: THE REAL PREDICATE — the cash adapter refuses TRIAGE_WORKER_TOOLS as-is", () => {
   // This is the bug the task names: WebSearch is the one entry the check-runner does not
   // implement, so offering the Claude surface unmodified to a blocked-auction divert refuses the
   // whole lane for that one entry.
   assert.equal(cashCanServeToolSurface(TRIAGE_WORKER_TOOLS), false);
 });
 
-test("triage-cash-divert: the cash adapter accepts TRIAGE_CASH_TOOLS — the divert this task fixes", () => {
+test("W1-T3749: triage-cash-divert: the cash adapter accepts TRIAGE_CASH_TOOLS — the divert this task fixes", () => {
   assert.equal(cashCanServeToolSurface(TRIAGE_CASH_TOOLS), true);
 });
 
-test("triage-cash-divert: TRIAGE_CASH_TOOLS drops WebSearch and nothing else", () => {
+test("W1-T3749: triage-cash-divert: TRIAGE_CASH_TOOLS drops WebSearch and nothing else", () => {
   assert.equal(TRIAGE_CASH_TOOLS.includes("WebSearch"), false);
   const everyOtherEntry = TRIAGE_WORKER_TOOLS.filter((tool) => tool !== "WebSearch");
   assert.deepEqual([...TRIAGE_CASH_TOOLS], everyOtherEntry, "the divert must degrade by exactly one capability");
