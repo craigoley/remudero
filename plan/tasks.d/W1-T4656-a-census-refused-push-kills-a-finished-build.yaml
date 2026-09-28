@@ -34,8 +34,10 @@
     the refusal text to the existing fix rung on the same worktree (bounded by the rung's own
     attempt budget), then retry the push. If the rung cannot clear it, end with a terminal verdict
     naming the census (W1-T4655's shape), and keep the branch evidence the way W1-T434 keeps an
-    overrun branch. Never bypass the hook (no --no-verify), and never edit a census baseline to
-    pass: the rung must change the code.
+    overrun branch. Never bypass the hook (no --no-verify). The rung applies the remedy the refusal
+    itself names, preferring the code change: a baseline row is legitimate only where that census's
+    own message offers it (clock-signature does: "or record the row in" its baseline), and the
+    rung records WHICH remedy it took so a baseline bump is visible, never silent.
   acceptance:
     - claim: "a census refusal of the orchestrator's push reaches the fix rung with the refusal text and the push is retried, and a refusal the rung cannot clear ends with a terminal verdict naming the census instead of run.error"
       proof: "unit test: test/a-census-refused-push-kills-a-finished-build.test.ts"
