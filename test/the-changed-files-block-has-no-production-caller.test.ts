@@ -59,7 +59,8 @@ test("W1-T2550: rmd approve's single-proposal openPlanPr passes changedFiles —
 
 test("W1-T2550: rmd approve's BATCH openPlanPr passes changedFiles too — the second (and last) buildPlanPrBody call site", () => {
   const region = openPlanPrRegion("openPlanPr(branch, ids) {");
-  assert.match(region, /const filedPaths = \[\.\.\.allShardRelPaths, "MASTER-PLAN\.md"\];/);
+  // W1-T4706: the list is what the batch wrote (fileRatificationBatch), never an assumed MASTER-PLAN.md.
+  assert.match(region, /const filedPaths = \[\.\.\.allWrittenPaths\];/);
   assert.match(region, /criteria:\s*filingAcceptanceCriteria\(filedIds,\s*filedPaths\)/);
   assert.match(region, /changedFiles:\s*filedPaths/);
 });

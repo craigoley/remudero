@@ -21,7 +21,7 @@ import { MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "
 import { appendLedger } from "./ledger.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
-import { buildPlanPrBody, buildPlanPrCommitMessage, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
+import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
 import { fileURLToPath } from "node:url";
 import { readInstanceRegistryText } from "./instance-mode.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
@@ -2464,8 +2464,8 @@ export interface RatifyGateway {
    *  plus its folded stamp as a NEW COMMIT on that already-pushed, still-open branch — never a new
    *  branch, never a new PR. Returns the SAME branch name it was given. Each approval keeps its own
    *  commit (design iii): this writes ONE more commit onto the shared branch, never squashes or amends
-   *  a prior approval's own. */
-  joinRatificationBranch?(branch: string, payload: RatificationPayload): string;
+   *  a prior approval's own. `prUrl` is that open PR, whose body W1-T4706 rebuilds over the whole branch. */
+  joinRatificationBranch?(branch: string, payload: RatificationPayload, prUrl: string): string;
 }
 
 export type ApproveResult =
@@ -2628,7 +2628,7 @@ export function approveProposal(
   } else if (resumeBranch !== undefined && gateway.completeRatificationBranch) {
     branch = gateway.completeRatificationBranch(resumeBranch, classification.proposalId);
   } else if (joined) {
-    branch = gateway.joinRatificationBranch!(joinable.branch, payload);
+    branch = gateway.joinRatificationBranch!(joinable.branch, payload, joinable.prUrl);
   } else if (skillFile && gateway.writeSkillFile) {
     branch = gateway.writeSkillFile(classification.proposalId, skillFile);
   } else {
@@ -2912,6 +2912,42 @@ export function ratificationPrBody(
   return buildPlanPrBody({ intro, criteria: filingAcceptanceCriteria([...filedIds], [...writtenPaths]), changedFiles: [...writtenPaths], ...opts });
 }
 
+/** W1-T4706: the batch lane files through the single lane's check. Every member's draft is checked before anything is
+ *  minted or written; each materialized member then goes through {@link fileRatificationDraft}. Returns the union of
+ *  paths written, MASTER-PLAN.md once and only when a stamp changed it. */
+export function fileRatificationBatch(
+  worktreePath: string,
+  payloads: readonly RatificationPayload[],
+  materialize: (payload: RatificationPayload) => RatificationPayload,
+  fs: ShardWriteFs & { readFileSync: (path: string, enc: "utf8") => string },
+  joinPath: (...parts: string[]) => string,
+  knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(worktreePath),
+): { writtenPaths: string[]; filedIds: string[] } {
+  for (const p of payloads) assertRatificationDraftFileable(p.fragmentYaml, p.proposalId, p.stampLine, knownRepos);
+  const written = new Set<string>();
+  const filedIds: string[] = [];
+  for (const payload of payloads) {
+    const filed = materialize(payload);
+    for (const path of fileRatificationDraft(worktreePath, filed, fs, joinPath, knownRepos)) written.add(path);
+    filedIds.push(...[...filed.fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]));
+  }
+  return { writtenPaths: [...written], filedIds };
+}
+
+/** W1-T4706: a joined ratify PR's body over every proposal on its branch — the stamps the current body names plus the
+ *  joining one, over the branch's written paths. #7608 kept its first approve's body: five shards under two. */
+export function joinedRatificationPrBody(
+  currentBody: string,
+  stampLine: string,
+  filedIds: readonly string[],
+  writtenPaths: readonly string[],
+  opts: Pick<PlanPrBodyOpts, "proofCwd" | "proofCheck" | "baseRef"> = {},
+): string {
+  const intro = currentBody.split(CHANGED_FILES_HEADING)[0];
+  const stamps = [...intro.split("\n").map((l) => l.trim()).filter((l) => /^- \S+ .*\bRATIFIED\b.*->/.test(l)), stampLine.trim()];
+  return ratificationPrBody([...new Set(stamps.filter(Boolean))].join("\n"), filedIds, writtenPaths, opts);
+}
+
 /** W1-T4338: write an approved skill draft's SKILL.md, verbatim, at its one path under `worktreePath`. Returns that
  *  repo-relative path. Refuses rather than guesses on a name {@link approvedSkillRelPath} rejects, and refuses to
  *  replace a skill already approved at that path — an approval adds a skill, it never silently rewrites one. */
@@ -3093,7 +3129,7 @@ export type BatchApproveResult =
  * before either gateway call. ONE gateway call each for the WHOLE set, and one ledger line per member, so a reader
  * sees the same one-line-per-proposal receipt either way. A batch of exactly ONE READY classification produces output
  * BYTE-IDENTICAL to {@link approveProposal}'s — test/ratify-batch.test.ts pins it. Both gateway
- * paths use {@link writeRatificationShards} after id materialization.
+ * paths use {@link fileRatificationDraft} after id materialization.
  */
 export function approveBatch(
   classifications: readonly InboxClassification[],

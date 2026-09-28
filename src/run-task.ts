@@ -689,7 +689,6 @@ import {
 } from "./lib/plan-architect.js";
 import {
   applyFragmentToPlanYaml,
-  applyStampToMasterPlan,
   approveBatch,
   approveBatchCommitMessage,
   approveCommitMessage,
@@ -751,8 +750,9 @@ import {
   type RatifyGateway,
   type ReframeResult,
   type SkillLifecycleAction,
-  writeRatificationShards,
+  fileRatificationBatch,
   fileRatificationDraft,
+  joinedRatificationPrBody,
   knownPlanRepos,
   ratificationPrBody,
   writeApprovedSkillFile,
@@ -44340,6 +44340,7 @@ export async function approveCommand(
   // lets openPlanPr's signature (part of the RatifyGateway interface other tests fake) stay
   // unchanged. Stays empty for an ADOPTED PR (openPlanPr never runs on that path at all).
   let filedTaskIds: string[] = [];
+  let filedStampLine = ""; // W1-T4706: the materialized stamp, for a joined PR's rebuilt body
   // W1-T311: the block {@link materializeDraftTaskIds} reserves for this approve's placeholder
   // ids — held until the PR actually exists (released below, once `result.ok`), so a
   // console-initiated or second-machine approve overlapping this CLI one cannot mint the same
@@ -44443,6 +44444,7 @@ export async function approveCommand(
     // rewrote every placeholder) — same per-line `- id: <id>` regex the pre-W1-T311 code used,
     // just over the rewritten text rather than payload.fragmentYaml verbatim.
     filedTaskIds = [...materialized.fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]);
+    filedStampLine = materialized.stampLine;
 
     // W1-T985 — the rare-overlap advisory for the shards this ratification just wrote. Same
     // reader `nextTaskIdCommand` has had since W1-T917, reached here because this lane files
@@ -44460,6 +44462,11 @@ export async function approveCommand(
     execFileSync("git", ["-C", worktreePath, "add", "--", ...shardRelPaths], { stdio: "inherit" });
     execFileSync("git", ["-C", worktreePath, "commit", "-m", approveCommitMessage(payload)], { stdio: "inherit" });
   };
+  const branchFiledTaskIds = (path: string): string[] =>
+    execFileSync("git", ["-C", path, "diff", "origin/main...HEAD", "--", "plan/tasks.yaml", "plan/tasks.d"], { encoding: "utf8" })
+      .split("\n")
+      .map((line) => /^\+- id:\s*(\S+)/.exec(line)?.[1])
+      .filter((id): id is string => id !== undefined);
   const gateway: RatifyGateway = deps.gateway ?? {
     // W1-T903 design (iii): evidence (ledger) + a real remote read — never guessed. A cheap
     // ledger-only miss (the overwhelming majority of approve calls: no prior run at all) never
@@ -44517,11 +44524,7 @@ export async function approveCommand(
       // plan/tasks.d/. Scoping this diff to the monolith alone would read ZERO ids off every
       // shard-filed branch and hand `openPlanPr` an empty list — a resumed ratification silently
       // losing the very ids it filed.
-      const diff = execFileSync("git", ["-C", worktreePath, "diff", "origin/main...HEAD", "--", "plan/tasks.yaml", "plan/tasks.d"], { encoding: "utf8" });
-      filedTaskIds = diff
-        .split("\n")
-        .map((line) => /^\+- id:\s*(\S+)/.exec(line)?.[1])
-        .filter((id): id is string => id !== undefined);
+      filedTaskIds = branchFiledTaskIds(worktreePath);
       return branch;
     },
     createRatificationBranch(payload) {
@@ -44548,7 +44551,7 @@ export async function approveCommand(
     // new branch, never a new PR. Checked out at the branch's OWN remote tip (never `origin/main`),
     // the same base `completeRatificationBranch` above uses, so the mint below sees every id
     // already filed on it and never re-mints one.
-    joinRatificationBranch(branch, payload) {
+    joinRatificationBranch(branch, payload, prUrl) {
       const dir = ensureRepoDir();
       const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
       if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
@@ -44561,6 +44564,17 @@ export async function approveCommand(
       materializeAndCommitApproveFragment(worktreePath, payload, `joined ${branch}`);
       gitPushRunBranch(worktreePath);
       log("approve.joined", { proposal_id: payload.proposalId, branch });
+      // W1-T4706: the open PR's body is rebuilt over every proposal on the branch, never left as the first approve's.
+      try {
+        const live = ghJson(["api", `repos/${owner}/${repo}/pulls/${prUrl.match(/\/pull\/(\d+)/)?.[1]}`]) as { body?: string | null };
+        const paths = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", worktreeMergeBase(worktreePath), "HEAD"], { encoding: "utf8" }).split("\n").filter(Boolean);
+        const body = joinedRatificationPrBody(live.body ?? "", filedStampLine, branchFiledTaskIds(worktreePath), paths, { proofCwd: worktreePath });
+        writePrBodyRest(prUrl, body);
+        log("approve.join_body_refreshed", { pr_url: prUrl, paths });
+      } catch (e) {
+        // The commit is already pushed: throwing would leave it unrecorded, so the stale body is ledgered instead.
+        log("approve.join_body_stale", { pr_url: prUrl, error: String((e as Error)?.message ?? e) });
+      }
       return branch;
     },
     // W1-T4338: the skill-draft twin of createRatificationBranch — one SKILL.md, verbatim, on a fresh branch.
@@ -44838,7 +44852,7 @@ async function approveBatchCommand(
 
   let repoDir: string | undefined;
   let worktreePath: string | undefined;
-  let allShardRelPaths: string[] = [];
+  let allWrittenPaths: string[] = [];
   let allFiledTaskIds: string[] = [];
   const idBlocks: TaskIdReservationBlock[] = [];
   const ensureRepoDir = (): string => {
@@ -44865,67 +44879,63 @@ async function approveBatchCommand(
       // Q3: ONE mint/reserve/write pass PER ACCEPTED PAYLOAD, sequentially, in the SAME
       // worktree — each iteration's shard write lands on disk before the NEXT payload's own
       // mint runs, so `mintNextTaskIdWithHistory`'s shard-directory scan (its `sources.shards`
-      // term) sees every id minted so far and never re-mints one. This is the exact per-member
-      // loop `createRatificationBranch` (single-proposal path, above) already runs once — Q3's
-      // "the writer is per-fragment and composes with no shared state" claim, exercised N times.
-      for (const payload of payloads) {
-        const materialized = materializeDraftTaskIds(
-          { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
-          {
-            mint: () =>
-              mintNextTaskIdWithHistory({
-                planPath: join(worktreePath as string, "plan", "tasks.yaml"),
-                repoRoot: worktreePath as string,
-                openPrTexts: () => openPrMintTexts(owner, repo),
-              }),
-            reserveBlock: (startId, count) => {
-              const block = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
-                info: { purpose: `rmd approve ${payload.proposalId} (batch run ${runId})` },
-              });
-              idBlocks.push(block);
-              const reserveFrom = block.ids[0];
-              const remote = withIdReservationLogging(
-                log,
-                "approve.id_reservation_failed",
-                () =>
-                  reserveTaskIdBlockRemote(
-                    reserveFrom,
-                    count,
-                    gitRemoteRefReserver({
-                      run: (args) => {
-                        const r = spawnSync("git", ["-C", worktreePath as string, ...args], { encoding: "utf8" });
-                        return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-                      },
-                    }),
-                  ),
-                { proposal_id: payload.proposalId },
-              );
-              return { ids: remote.ids };
+      // term) sees every id minted so far and never re-mints one. W1-T4706: through
+      // fileRatificationBatch, so each member gets the single lane's refusal and written-paths list,
+      // and every member's stamp folds over this worktree's own MASTER-PLAN.md in order (Q2).
+      const batchWorktree = worktreePath;
+      const filed = fileRatificationBatch(
+        batchWorktree,
+        payloads,
+        (payload) => {
+          const materialized = materializeDraftTaskIds(
+            { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
+            {
+              mint: () =>
+                mintNextTaskIdWithHistory({
+                  planPath: join(batchWorktree, "plan", "tasks.yaml"),
+                  repoRoot: batchWorktree,
+                  openPrTexts: () => openPrMintTexts(owner, repo),
+                }),
+              reserveBlock: (startId, count) => {
+                const block = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
+                  info: { purpose: `rmd approve ${payload.proposalId} (batch run ${runId})` },
+                });
+                idBlocks.push(block);
+                const reserveFrom = block.ids[0];
+                const remote = withIdReservationLogging(
+                  log,
+                  "approve.id_reservation_failed",
+                  () =>
+                    reserveTaskIdBlockRemote(
+                      reserveFrom,
+                      count,
+                      gitRemoteRefReserver({
+                        run: (args) => {
+                          const r = spawnSync("git", ["-C", batchWorktree, ...args], { encoding: "utf8" });
+                          return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+                        },
+                      }),
+                    ),
+                  { proposal_id: payload.proposalId },
+                );
+                return { ids: remote.ids };
+              },
             },
-          },
-        );
-        if (!materialized.ok) {
-          throw new Error(`rmd approve: refusing to materialize task id(s) for ${payload.proposalId} — ${materialized.reason}`);
-        }
-        log("approve.id_materialized", { proposal_id: payload.proposalId, ids: materialized.ids });
-        const shardRelPaths = writeRatificationShards(worktreePath, materialized.fragmentYaml, payload.proposalId, { mkdirSync, writeFileSync }, join);
-        log("approve.shards_written", { proposal_id: payload.proposalId, paths: shardRelPaths });
-        allShardRelPaths.push(...shardRelPaths);
-        allFiledTaskIds.push(...[...materialized.fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]));
-      }
-
-      // Q2: fold every accepted member's stamp SEQUENTIALLY over the ONE accumulator, starting
-      // from THIS worktree's own MASTER-PLAN.md (never a value threaded in from outside) — the
-      // whole reason a batch cannot hit the EOF-append conflict that sinks N parallel
-      // single-approve branches (see lib/inbox.ts's W1-T2471 section header).
-      const masterPlanPath = join(worktreePath, "MASTER-PLAN.md");
-      const foldedMasterPlan = payloads.reduce(
-        (md, p) => applyStampToMasterPlan(md, p.proposalId, p.stampLine),
-        readFileSync(masterPlanPath, "utf8"),
+          );
+          if (!materialized.ok) {
+            throw new Error(`rmd approve: refusing to materialize task id(s) for ${payload.proposalId} — ${materialized.reason}`);
+          }
+          log("approve.id_materialized", { proposal_id: payload.proposalId, ids: materialized.ids });
+          return { proposalId: payload.proposalId, fragmentYaml: materialized.fragmentYaml, stampLine: materialized.stampLine };
+        },
+        { mkdirSync, writeFileSync, readFileSync },
+        join,
       );
-      writeFileSync(masterPlanPath, foldedMasterPlan, "utf8");
+      allWrittenPaths = filed.writtenPaths;
+      allFiledTaskIds = filed.filedIds;
+      log("approve.shards_written", { proposal_ids: payloads.map((p) => p.proposalId), paths: allWrittenPaths });
 
-      execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
+      execFileSync("git", ["-C", batchWorktree, "add", "--", ...allWrittenPaths], { stdio: "inherit" });
       execFileSync("git", ["-C", worktreePath, "commit", "-m", approveBatchCommitMessage(payloads)], { stdio: "inherit" });
       gitPushRunBranch(worktreePath);
       return branch;
@@ -44938,10 +44948,9 @@ async function approveBatchCommand(
         "gate still reviews (ci + remudero-review); nothing auto-merges without it.",
       ].join("\n");
       const filedIds = allFiledTaskIds.length > 0 ? allFiledTaskIds : ids;
-      // W1-T2550: same reasoning as the single-proposal openPlanPr above — one local list feeds
-      // both the filing-acceptance evidence and the rendered changed-files block, so the batch
-      // lane's PR body actually emits it too rather than only defining it.
-      const filedPaths = [...allShardRelPaths, "MASTER-PLAN.md"];
+      // W1-T2550: one local list feeds both the filing-acceptance evidence and the rendered
+      // changed-files block. W1-T4706: it is what the batch actually wrote, never an assumed file.
+      const filedPaths = [...allWrittenPaths];
       const body = buildPlanPrBody({
         intro,
         criteria: filingAcceptanceCriteria(filedIds, filedPaths),
