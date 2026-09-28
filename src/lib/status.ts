@@ -3026,7 +3026,11 @@ export const THROWN_RUN_VERDICT_STAGE_LIST = [
   "preflight.isolation",
 ] as const;
 export type ThrownRunVerdictStage = (typeof THROWN_RUN_VERDICT_STAGE_LIST)[number];
-export const THROWN_RUN_VERDICT_STAGES: ReadonlySet<string> = new Set(THROWN_RUN_VERDICT_STAGE_LIST);
+/** W1-T4708: the stages of the verdict a pre-worktree refusal that RETURNS writes (run-task.ts `endRefusedRun`). */
+export const REFUSED_RUN_VERDICT_STAGE_LIST = ["dispatch.claim", "worktree.stale_base"] as const;
+export type RefusedRunVerdictStage = (typeof REFUSED_RUN_VERDICT_STAGE_LIST)[number];
+/** Every run-ending stage above, thrown or returned: a reader excluding one excludes the other (W1-T4708). */
+export const THROWN_RUN_VERDICT_STAGES: ReadonlySet<string> = new Set([...THROWN_RUN_VERDICT_STAGE_LIST, ...REFUSED_RUN_VERDICT_STAGE_LIST]);
 /** W1-T4597: an environmental block with no deploy since is re-offered after this long. */
 export const ENVIRONMENTAL_BLOCK_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 /** PRIMARY CONTROL (W1-T4597): consecutive environmental re-offers before the block stays durable. */
