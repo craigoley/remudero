@@ -11,8 +11,16 @@
   origin: oper#crashed-run-loses-its-budget-2026-08-23
   plan_refs: ["W1-T299", "W1-T1213"]
   status: blocked
+  retirement: closed
   attempts: 0
   rationale: |
+    CLOSED UNBUILT 2026-09-28 BY ITS OWN RULE (design (iv): "IF THE ANSWER IS ONE OR TWO, CLOSE THIS TASK
+    UNBUILT"). Q2 measured on the daemon host over the ledger union (rmd ledger-grep, all archives), task runs
+    (run_id W1-T<n>-<epoch>) since 2026-09-14: 779 started; 331 carry no ending row of any kind (verdict, run.error,
+    pr.opened, run.freshness_handoff, run.awaiting_external, dispatch.claim_released); of those, 2 show worker
+    activity (W1-T3679-1789751542869, W1-T4457-1790438016785). Two crashed runs with work in two weeks does not pay
+    for a durable session supplier. The 331 endingless runs are a separate finding: W1-T4655 (a terminal verdict on
+    the error path) and W1-T4662 (the freshness hand-off verdict) give them an ending.
     ★ FILED `status: blocked` ON PURPOSE. The population that would justify building this HAS NOT
     BEEN MEASURED, and the operator's own brief says a count of one or two makes it low priority.
     The unblocking condition is stated under design (iv) as a runnable query. DO NOT DISPATCH

@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -176,6 +176,33 @@ test("the unprefixed routes still answer for the core instance", async (t) => {
   });
   assert.equal(instancePath("site", "/"), undefined, "the shell document is never re-mounted under a prefix");
   assert.equal(instancePath("site", "/v1/i/core/status"), undefined, "a prefixed path is never prefixed twice");
+});
+
+test("the full serve lifecycle refreshes a non-core answer cache from that instance's ledger", async (t) => {
+  const { deps, stateBase } = fleet(t);
+  const ledger = join(stateBase, "site", "state", "ledger.ndjson");
+  const now = Date.now();
+  writeFileSync(ledger, readFileSync(ledger, "utf8") + JSON.stringify({
+    ts: new Date(now).toISOString(), step: "scheduler.capacity", repo: "craigoley/remudero-site",
+    configured_capacity: 3, admitted_lanes: 3, active_workers: 2, queued_work: 1,
+    window_start: new Date(now - 60_000).toISOString(), window_end: new Date(now).toISOString(),
+  }) + "\n");
+  await withServer(deps, async (url) => {
+    let answer: { status: number; body: { coverage: string; answer: string; repository: string } } | undefined;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const response = await fetch(`${url}/v1/i/site/operator-agent/ask`, {
+        method: "POST", headers: { authorization: `Bearer ${READ}`, "content-type": "application/json" },
+        body: JSON.stringify({ question: "What is worker capacity?" }),
+      });
+      answer = { status: response.status, body: await response.json() as { coverage: string; answer: string; repository: string } };
+      if (answer.body.coverage === "verified") break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(answer?.status, 200);
+    assert.equal(answer.body.coverage, "verified", "listening starts the site's independent cache refresh");
+    assert.equal(answer.body.repository, "craigoley/remudero-site");
+    assert.match(answer.body.answer, /2 of 3 workers/);
+  });
 });
 
 test("an instance whose state is unreadable answers unavailable with the reason", async (t) => {

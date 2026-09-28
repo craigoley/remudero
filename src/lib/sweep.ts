@@ -1177,6 +1177,8 @@ export interface BuildSweepEffectsDeps {
   decideRegisteredFixOwnerRecoveryImpl?: SweepRuntimeFn;
   fixRungCheckoutRefusedErrorImpl?: SweepRuntimeCtor;
   defaultBudgetUsd?: number;
+  /** W1-T3721 — isolates the author-time body proof gate in sweep tests that use synthetic worktrees. */
+  buildPlanPrBodyImpl?: typeof buildPlanPrBody;
 }
 
 export type ReviewDispatchMode =
@@ -1537,6 +1539,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     decideRegisteredFixOwnerRecoveryImpl: decideRegisteredFixOwnerRecovery = requiredSweepRuntime("decideRegisteredFixOwnerRecoveryImpl"),
     fixRungCheckoutRefusedErrorImpl: FixRungCheckoutRefusedError = requiredSweepRuntimeCtor("fixRungCheckoutRefusedErrorImpl"),
     defaultBudgetUsd = 100,
+    buildPlanPrBodyImpl = buildPlanPrBody,
     updatePrBodyImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updatePrBodyImpl"]>>("updatePrBodyImpl"),
   } = deps;
 
@@ -3149,7 +3152,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         assertLiveWriteAllowed("gh-pr-create", `opening the plan-only repair PR for ${taskId}'s shard`);
         const created = createPlanPrRest(ghJsonForBuild, owner, repo, {
           title: `chore(plan): flag a stale proof in ${taskId}'s shard for architect repair`,
-          body: buildPlanPrBody({
+          body: buildPlanPrBodyImpl({
             intro:
               `AUTOMATED PLAN REPAIR (W1-T3390): ${pr.prUrl} is capped and its shared fix budget is ` +
               `spent. Its criterion "${proof0.claim}" declares proof \`${proof0.proof}\`, which review ` +
@@ -3163,6 +3166,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               },
             ],
             changedFiles: [shardRelPath],
+            proofCwd: worktreePath,
           }),
           head: branch,
           base: "main",
@@ -7596,10 +7600,15 @@ export function operatorVerdictEvidence(
     parts.push(`Operator marked this run "${verdict}": ${note}`);
   }
 
-  const answer = lastMatching(questionLines, (l) => typeof l.answer === "string" && l.task === taskId);
-  if (answer && typeof answer.answer === "string" && answer.answer.trim() !== "") {
-    parts.push(answer.answer);
-  }
+  const answers = [
+    ...new Set(
+      questionLines
+        .filter((l) => l.task === taskId && typeof l.answer === "string" && l.answer.trim() !== "")
+        .map((l) => (l.answer as string).trim()),
+    ),
+  ];
+  if (answers.length === 1) parts.push(answers[0]!);
+  else answers.forEach((a, i) => parts.push(`Operator answer ${i + 1} of ${answers.length}: ${a}`));
 
   return parts.length > 0 ? { constraint: parts.join("\n\n") } : undefined;
 }
@@ -8343,7 +8352,7 @@ function isReopenedClosedLifecycleRefusal(reason: unknown): boolean {
 
 const RETRYABLE_REVIEW_THROW_PREFIX = "post-review attempt threw — standing down rather than retrying this head unbounded:";
 
-function isRetryableReviewThrow(reason: unknown): boolean {
+export function isRetryableReviewThrow(reason: unknown): boolean {
   return typeof reason === "string" && reason.startsWith(RETRYABLE_REVIEW_THROW_PREFIX);
 }
 

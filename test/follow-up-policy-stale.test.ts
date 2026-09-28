@@ -29,7 +29,7 @@ test("stale and unavailable evidence suppresses instead of producing a healthy r
 
 test("terminal source, expired deadline, and unavailable dependency are explicit refusals", () => {
   assert.equal(evaluate(base, { sourceTerminal: true }).state, "suppressed");
-  assert.equal(evaluate({ ...base, deadline: "2026-09-21T11:00:00.000Z" }).state, "expired");
+  assert.equal(evaluate({ ...base, deadline: "2026-09-21T11:00:00.000Z" }).state, "expired"); // expiring-fixture: exempt -- evaluate() pins now to 2026-09-21T12:00Z; this deadline is always one hour earlier, never compared with the wall clock
   assert.equal(evaluate({ ...base, dependency: "owner response" }, { dependencyAvailable: false }).state, "blocked");
 });
 

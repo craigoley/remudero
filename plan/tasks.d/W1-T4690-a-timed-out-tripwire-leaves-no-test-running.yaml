@@ -1,0 +1,30 @@
+- id: W1-T4690
+  title: "THE TRIPWIRE'S BUDGET CUT-OFF LEAVES ITS TESTS RUNNING — timeout stops the pass-2 shell but not the node and tee grandchildren, which keep running until the runner reaps the job; run pass 2 in its own process group and end the whole group at the budget"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-defects-1790600000"
+  plan_refs: [W1-T4472]
+  files: [.github/workflows/main-tripwire.yml, test/every-merge-to-main-gets-a-fast-verdict.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-28 (throwaway run on the Linux fleet host of the #7589 run step, fake node on PATH): at a 65 s budget
+    the step exited 0 with the neutral notice, but the fake test process ('sleep 300') was still running afterwards (two
+    orphans, cleaned up by hand). The Actions runner reaps orphans at job end, so the effect is bounded, not absent.
+  design: |
+    (i) Start pass 2 with setsid so it leads its own process group; on budget expiry send TERM, then KILL, to the whole
+    group.
+    (ii) Prove it the same way: a throwaway run leaves zero test processes behind.
+  acceptance:
+    - claim: "the budgeted pass runs in its own process group and the whole group ends at the budget"
+      proof: 'grep: test("W1-T4690: the budgeted pass runs in its own process group and the whole group ends at the budget" in test/every-merge-to-main-gets-a-fast-verdict.test.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

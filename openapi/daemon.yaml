@@ -73,6 +73,46 @@ components:
         exactly POST /v1/incidents/events and falls through to 401 on every other route.
 
   schemas:
+    OperatorAgentAnswer:
+      type: object
+      description: Bounded read-only answer-v1; missing evidence is explicit and citations are dated.
+      required: [version, repository, instance, lens, coverage, answer, citations, missingSources, generatedAt]
+      properties:
+        version: { type: string, enum: [answer-v1] }
+        repository: { type: [string, "null"] }
+        instance: { type: string }
+        lens: { type: string, enum: [current-repository] }
+        coverage: { type: string, enum: [verified, partial, unavailable, unsupported] }
+        answer: { type: string, maxLength: 700 }
+        generatedAt: { type: string, format: date-time }
+        citations:
+          type: array
+          maxItems: 4
+          items:
+            type: object
+            required: [sourceId, observedAt, freshness, label, value]
+            properties:
+              sourceId: { type: string }
+              observedAt: { type: string, format: date-time }
+              freshness: { type: string, enum: [verified, stale] }
+              label: { type: string }
+              value: { type: string }
+        missingSources:
+          type: array
+          items:
+            type: object
+            required: [sourceId, reason]
+            properties:
+              sourceId: { type: string }
+              reason: { type: string }
+    InstanceUnavailable:
+      type: object
+      required: [error, status, instance, reason]
+      properties:
+        error: { type: string, enum: [instance_unavailable] }
+        status: { type: string, enum: [unavailable] }
+        instance: { type: string }
+        reason: { type: string }
     Error:
       type: object
       description: >
@@ -2632,6 +2672,9 @@ components:
           enum: [ready, refused, stale, unknown, expired, in-progress]
         code:
           type: string
+          description: >
+            A refusal's reason; on a completion, W1-T4657's evidence label -- `executor` when the
+            action-catalogue-v1 executor wrote it, `self-reported` when a caller posted it.
         reason:
           type: string
           maxLength: 321
@@ -2782,6 +2825,20 @@ components:
           $ref: "#/components/schemas/AutomationActionReceipt"
         preflight:
           $ref: "#/components/schemas/AutomationPreflightResult"
+        admission:
+          $ref: "#/components/schemas/AutomationActionReceipt"
+        executor:
+          type: object
+          description: W1-T4657 -- the catalogue executor's own ledger row, which the completion's evidenceRef cites.
+          required: [step, ts, run_id]
+          properties:
+            step:
+              type: string
+            ts:
+              type: string
+              format: date-time
+            run_id:
+              type: string
 
     # ── W1-T3878 -- delegation-profile-v1: the trust budget every delegation carries ──────────
     DelegationProfileScope:
@@ -8931,6 +8988,51 @@ paths:
               schema:
                 $ref: "#/components/schemas/ContextExportResult"
 
+  /v1/i/{instance}/operator-agent/ask:
+    post:
+      summary: Read-only answer-v1 for the selected registered instance's own repository.
+      description: >
+        Uses only the server-owned registry identity and that instance's independently refreshed
+        state-root ledger projection and inbox thread store. The request cannot select a different
+        repository or instance. A missing or unreadable evidence source is reported as unavailable;
+        this route never performs an action or writes an operator decision.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [question]
+              properties:
+                question: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        "200":
+          description: The answer-v1 envelope documented by the unprefixed core route below.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentAnswer"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: The registered instance's state or plan is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceUnavailable"
+
   /v1/operator-agent/ask:
     post:
       summary: Read-only, evidence-cited answer-v1 for this serving instance's repository.
@@ -8960,48 +9062,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required: [version, repository, instance, lens, coverage, answer, citations, missingSources, generatedAt]
-                properties:
-                  version:
-                    type: string
-                    enum: [answer-v1]
-                  repository:
-                    type: [string, "null"]
-                  instance:
-                    type: string
-                  lens:
-                    type: string
-                    enum: [current-repository]
-                  coverage:
-                    type: string
-                    enum: [verified, partial, unavailable, unsupported]
-                  answer:
-                    type: string
-                    maxLength: 700
-                  generatedAt:
-                    type: string
-                    format: date-time
-                  citations:
-                    type: array
-                    maxItems: 4
-                    items:
-                      type: object
-                      required: [sourceId, observedAt, freshness, label, value]
-                      properties:
-                        sourceId: { type: string }
-                        observedAt: { type: string, format: date-time }
-                        freshness: { type: string, enum: [verified, stale] }
-                        label: { type: string }
-                        value: { type: string }
-                  missingSources:
-                    type: array
-                    items:
-                      type: object
-                      required: [sourceId, reason]
-                      properties:
-                        sourceId: { type: string }
-                        reason: { type: string }
+                $ref: "#/components/schemas/OperatorAgentAnswer"
         "400":
           $ref: "#/components/responses/InvalidRequest"
         "401":
@@ -10094,7 +10155,11 @@ paths:
         refusal (`409`); a dry run appends a dry-run receipt (`200`); a ready action is admitted
         `in-progress` (`202`) -- never succeeded -- until POST /v1/operator-agent/actions/complete
         records its evidence. An active emergency stop covering the action's repo or instance
-        refuses it first (`423`).
+        refuses it first (`423`). W1-T4657 -- a capability in the `rmd.` namespace is run by the
+        action-catalogue-v1 executor instead: `200` `completed` with a completion receipt whose
+        evidenceRef names the executor's own ledger row, `200` `reused` for a repeat, `409` for a
+        refusal (`no-executor`, `tier-insufficient`, `switched-off`, ...). This route proves MIDDLE,
+        so a HIGH catalogue capability is refused here and runs only via /actions/execute-high.
       security:
         - bearerWrite: []
       requestBody:
@@ -10122,6 +10187,57 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Refused; the receipt names the preflight outcome and code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "423":
+          description: An active emergency stop covers this action; the refusal receipt names the stop.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmergencyStopAdmissionRefusal"
+
+  /v1/operator-agent/actions/execute-high:
+    post:
+      summary: W1-T4657 -- execute an action as /actions/execute does, proven HIGH (HIGH write tier).
+      description: >
+        Identical to POST /v1/operator-agent/actions/execute, but dispatched at the HIGH tier with a
+        confirm nonce, so a HIGH-tier catalogue capability (`rmd.task.kick:<taskId>`, which reuses
+        POST /v1/drain/kick's handler) can run. Its approval still comes from /actions/decision.
+      security:
+        - bearerWrite: []
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentActionObservationRequest"
+      responses:
+        "202":
+          description: A non-catalogue action admitted in-progress.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "200":
+          description: A catalogue action completed by its executor, a dry run, or the existing receipt for a duplicate idempotency key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HighTierForbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -10363,8 +10479,11 @@ paths:
         scope; an explicit "at most $N" settles the ceiling) and refuses by name (`400`, `code`
         and `field`) a forbidden, credential-shaped, unknown, or authority-claiming field
         (approved, confirmed, permission, model confidence) -- a sentence is never authority.
-        Steps come only from a structured producer; a goal alone previews `unavailable`. Nothing
-        is registered, approved, or executed. An identical request under the same
+        A request with no steps is answered by W1-T4658's `planStepsForGoal`: deterministic
+        recognisers propose 0-4 steps from the executor catalogue only, each citing the board or
+        fleet-control evidence it was chosen on; an unmatched goal, or missing or stale evidence,
+        yields zero steps (previews `unavailable`) and a `goal-unresolved` question. A request
+        carrying producer steps is stored unchanged. Nothing is registered, approved, or executed. An identical request under the same
         idempotencyKey is `200` (`existing: true`); a different one is `409`.
       security:
         - bearerWrite: []

@@ -8709,6 +8709,32 @@ test("buildOpenPrViews: a zero-runs required check with a refusal for this exact
   }
 });
 
+test("buildOpenPrViews: a transient thrown review post (a 401) is not a refusal, so a green PR is not escalated as blocked", () => {
+  const sha = "deadbeef0000000000000000000000000000000";
+  const taskId = "W1-T900";
+  const prUrl = "https://github.com/o/r/pull/900";
+  const body = `Remudero-Task: ${taskId}\n`;
+  const throwRow = (reason: string) => JSON.stringify({ ts: "2026-07-30T00:00:00Z", run_id: "SWEEP-0", task_id: taskId,
+    step: "review.post_refused", head_sha: sha, pr_url: prUrl, review_input_digest: reviewInputDigest(sha, body), reason }) + "\n";
+  const cases: Array<[string, boolean, string]> = [
+    ["post-review attempt threw — standing down rather than retrying this head unbounded: Command failed: gh api repos/o/r/pulls/900 -i\ngh: Bad credentials (HTTP 401)\n",
+      false, "a transient throw stays on the sweep's bounded retry clock"],
+    ["post-review attempt threw — standing down rather than retrying this head unbounded: HTTP 406 diff exceeded the maximum number of files (300)",
+      true, "the diff-ceiling throw is final for this head"],
+  ];
+  for (const [reason, refused, why] of cases) {
+    const root = mkdtempSync(join(tmpdir(), "rmd-openprviews-"));
+    const ledgerPath = join(root, "ledger.ndjson");
+    writeFileSync(ledgerPath, throwRow(reason));
+    try {
+      const views = withGhStub(ghStubForOpenPrViews({ sha, taskId }), () => buildOpenPrViews("o", "r", ledgerPath));
+      assert.equal(views[0].reviewPostRefused, refused, why);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("buildOpenPrViews: a body edit on the same head resets an older refusal immediately", () => {
   const sha = "deadbeef0000000000000000000000000000000";
   const taskId = "W1-T900";

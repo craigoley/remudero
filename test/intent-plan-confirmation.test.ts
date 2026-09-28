@@ -104,7 +104,7 @@ test("W1-T3898: confirming over HTTP requests the actions and reports awaiting-r
     const complete = await postJson(base, "/v1/operator-agent/actions/complete", { actionId, admissionReceiptId: admission, outcome: "succeeded", evidenceRef: "github:owner/repo/deployments/42" });
     assert.equal(complete.status, 200, JSON.stringify(complete.body));
     const [plan] = await readPlans(base);
-    assert.deepEqual(plan!.execution, { state: "succeeded", actions: [{ actionId, state: "succeeded", evidenceRef: "github:owner/repo/deployments/42" }] });
+    assert.deepEqual(plan!.execution, { state: "succeeded", actions: [{ actionId, state: "succeeded", evidenceRule: "self-reported", evidenceRef: "github:owner/repo/deployments/42" }] });
   }, NOW_MS + 2 * MINUTE);
 });
 

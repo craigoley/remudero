@@ -83,7 +83,7 @@ import {
 } from "./ci-incidents.js";
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
-import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
+import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
 import { buildOperatorAgentAnswer, buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
@@ -152,6 +152,7 @@ import {
   coldAnalyticsSnapshot,
   createAnalyticsSnapshotCache,
   type AnalyticsSnapshot,
+  type AnalyticsSnapshotCache,
   type AnalyticsSnapshotCacheDeps,
 } from "./analytics-route.js";
 import type { LiveAnalyticsMetrics } from "./analytics-live-metrics.js";
@@ -2527,6 +2528,7 @@ export function readEvalCardInput(stateDir: string, trialId: string | undefined)
 
 interface ServeRoutesAssembly {
   routes: Route[];
+  instanceAnalyticsCaches: AnalyticsSnapshotCache[];
   /** The first GitHub App token mint. Absent when App refresh is not configured. */
   githubAppReady?: Promise<void>;
 }
@@ -2537,6 +2539,7 @@ function assembleServeRoutes(
   currentAnalyticsSnapshot: () => AnalyticsSnapshot = coldAnalyticsSnapshot,
   operatorAgentMemory?: OperatorAgentMemorySource,
 ): ServeRoutesAssembly {
+  const instanceAnalyticsCaches: AnalyticsSnapshotCache[] = [];
   const modelApprovals = deps.modelApprovals ?? [];
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
@@ -2617,9 +2620,12 @@ function assembleServeRoutes(
   // Personal context governance is mounted with the existing operator-agent routes. Its context
   // inventory is metadata-only; raw private content is consumed through the ledger-backed
   // preflight reader, never serialized by the browser-facing console route.
+  const goalBoardCache = createBoardSnapshotCache();
   const operatorAgentRoutes = buildOperatorAgentRoutes({
     ledgerPath: deps.ledgerPath,
+    root: deps.fleetControlRoot,
     ...(operatorAgentMemory ? { memory: operatorAgentMemory } : {}),
+    goalBoard: () => ({ plan: deps.board.plan, snapshot: goalBoardCache.get(deps.board) }),
   });
   // W1-T3893: the operator self-service surface (inventory/forget/revoke/export) over the SAME
   // ledger-backed context-governance engine above — same ledgerPath, so a self-service forget and
@@ -2843,6 +2849,7 @@ function assembleServeRoutes(
       log: deps.log,
       bound: (reads, board) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), { ...deps, board, consoleSnapshots: undefined }),
       ...deps.instances,
+      onAnalyticsCache: (cache) => instanceAnalyticsCaches.push(cache),
     }),
   );
   // W1-T404 design (iii): `ci-parity:drift`-shaped completeness, run inside the PRODUCT function
@@ -2854,7 +2861,7 @@ function assembleServeRoutes(
   // tier sibling, as the runtime backstop for whatever the compiler cannot see. See
   // `assertRoutesScopeComplete`'s own doc.
   assertRoutesScopeComplete(routes);
-  return { routes, githubAppReady: githubAppRefresh.ready };
+  return { routes, instanceAnalyticsCaches, githubAppReady: githubAppRefresh.ready };
 }
 
 /** Every REST route `rmd serve` registers — board, panel actions, panel graph, and the shell. */
@@ -3049,6 +3056,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   server.on("close", stopWakeSummary);
   server.once("listening", analyticsCache.start);
   server.on("close", analyticsCache.stop);
+  server.once("listening", () => { for (const cache of routeAssembly.instanceAnalyticsCaches) cache.start(); });
+  server.on("close", () => { for (const cache of routeAssembly.instanceAnalyticsCaches) cache.stop(); });
   server.once("listening", liveAnalyticsCache.start);
   server.on("close", liveAnalyticsCache.stop);
   server.on("close", watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances }));

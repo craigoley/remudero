@@ -286,6 +286,7 @@ const COVERED: ReadonlySet<string> = new Set([
   "POST /v1/questions/answer",
   "POST /v1/policy/daily-cost-ceiling",
   "POST /v1/policy/daily-cost-ceiling/clear",
+  "POST /v1/operator-agent/actions/execute-high",
 ]);
 
 // ── Production-shaped assembly ───────────────────────────────────────────────
@@ -371,7 +372,15 @@ async function withProductionServer<T>(fn: (h: Harness) => Promise<T>): Promise<
 const TAILNET_CAP = "remudero:console";
 
 /** HIGH-tier routes also need the server-issued second factor — confirm, then replay with it. */
-const HIGH_TIER = new Set(["/v1/manual/approve", "/v1/drain/kick", "/v1/drain/run", "/v1/inbox/approve", "/v1/skills/run"]);
+const HIGH_TIER = new Set([
+  "/v1/manual/approve",
+  "/v1/drain/kick",
+  "/v1/drain/run",
+  "/v1/inbox/approve",
+  "/v1/skills/run",
+  "/v1/operator-agent/actions/decision",
+  "/v1/operator-agent/actions/execute-high",
+]);
 
 async function post(
   base: string,
@@ -560,6 +569,40 @@ test("POST /v1/pr-actions writes one bounded request under fleetControlRoot, not
     );
     assert.deepEqual(pendingPrActions(h.questionsRoot), [], "the request must not be written under questionsRoot");
     assert.equal(ledgerSteps(h.ledgerPath).filter((step) => step.step === "console.pr_action_requested").length, 1);
+  });
+});
+
+test("W1-T4657: POST /v1/operator-agent/actions/execute-high runs an approved kick through the kick handler under fleetControlRoot", async () => {
+  await withProductionServer(async (h) => {
+    const action = {
+      version: "automation-action-v1",
+      actionId: "action:wiring-kick",
+      capability: "rmd.task.kick:W1-T4657",
+      summary: "Kick the wiring task.",
+      scope: { flowId: "flow:wiring", repo: "owner/repo" },
+      risk: "high",
+      preconditions: [{ id: "queue", source: "ledger:queue", description: "The queue read is current." }],
+      freshness: { maxAgeSeconds: 600 },
+      idempotencyKey: "idem:wiring-kick",
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      dryRun: false,
+      approval: { policy: "human" },
+      rollback: { mode: "irreversible", refusal: "a dispatched task cannot be un-dispatched" },
+      receiptRef: "ledger:panel.operator_agent_action_receipt",
+    };
+    assert.equal((await post(h.base, "/v1/operator-agent/actions", { action })).status, 201);
+    assert.equal((await post(h.base, "/v1/operator-agent/actions/decision", { actionId: action.actionId, decision: "approved" })).status, 200);
+    const observations = [{ preconditionId: "queue", state: "satisfied", source: "ledger:queue", observedAt: new Date(Date.now() - 1_000).toISOString() }];
+    const res = await post(h.base, "/v1/operator-agent/actions/execute-high", { actionId: action.actionId, observations });
+    const body = (await res.json()) as { disposition: string; receipt: { evidenceRef?: string } };
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.equal(body.disposition, "completed");
+    assert.ok(existsSync(kickFilePath(h.fleetRoot, "W1-T4657")), "the kick marker must land at the daemon's fleet-control root");
+    assert.ok(!existsSync(kickFilePath(h.questionsRoot, "W1-T4657")), "and never under questionsRoot");
+    const kick = ledgerSteps(h.ledgerPath).filter((row) => row.step === "console.kick_requested");
+    assert.equal(kick.length, 1);
+    assert.equal(body.receipt.evidenceRef, `ledger:console.kick_requested@${kick[0]!.ts}#${kick[0]!.run_id}`);
   });
 });
 

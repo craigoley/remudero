@@ -10,7 +10,7 @@
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Route } from "./service.js";
+import type { Route, WriteTier } from "./service.js";
 import { clockFromMillisFn, fixedClock } from "./clock.js";
 import { EMERGENCY_STOP_CLEARED_LEDGER_STEP, EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "./ledger.js";
 import {
@@ -117,6 +117,7 @@ import {
   type DelegationRiskTier,
   type DelegationScope,
 } from "./automation-action.js";
+import { ACTION_CATALOGUE_NAMESPACE, SELF_REPORTED_CODE, executeCatalogueAction } from "./action-executor.js";
 import {
   buildIntentPlan,
   clarifyIntentPlan,
@@ -134,6 +135,7 @@ import {
   type IntentPlanLinkedAction,
   type IntentPlanState,
 } from "./intent-plan.js";
+import { goalEvidenceReader, planStepsForGoal, withPlannedSteps, type GoalBoardView } from "./intent-planner.js";
 import {
   checkEmergencyStop,
   clearEmergencyStop,
@@ -468,9 +470,10 @@ export interface OperatorAgentPromotionHistory extends PromotionRecord {
   events: OperatorAgentPromotionEvent[];
 }
 
-export type OperatorAgentRouteDependencies = Pick<PanelActionDeps, "ledgerPath"> & {
+export type OperatorAgentRouteDependencies = Pick<PanelActionDeps, "ledgerPath"> & Partial<Pick<PanelActionDeps, "root">> & {
   now?: () => number;
   memory?: OperatorAgentMemorySource;
+  goalBoard?: () => GoalBoardView | undefined;
 };
 
 type ProposalRegistrationInput = { proposal: OperatorAgentProposal };
@@ -3437,13 +3440,40 @@ export function buildOperatorAgentActionPreflightRoute(deps: OperatorAgentRouteD
   };
 }
 
-/** POST /v1/operator-agent/actions/execute — admit one execution per idempotency key, re-running preflight here. */
+/** POST /v1/operator-agent/actions/execute (and its HIGH twin execute-high) — admit one execution per idempotency key, re-running preflight here. */
 export function buildOperatorAgentActionExecuteRoute(deps: OperatorAgentRouteDependencies): Route {
+  return actionExecuteRoute(deps, "/v1/operator-agent/actions/execute", "middle");
+}
+
+export function buildOperatorAgentActionExecuteHighRoute(deps: OperatorAgentRouteDependencies): Route {
+  return actionExecuteRoute(deps, "/v1/operator-agent/actions/execute-high", "high");
+}
+
+function executeCatalogued(deps: OperatorAgentRouteDependencies, req: IncomingMessage, res: ServerResponse, history: OperatorAgentActionHistory, input: ActionObservationsInput, tier: WriteTier): void {
+  const origin = bearerTokenId(req);
+  const run = executeCatalogueAction({
+    action: history.action,
+    receipts: history.receipts,
+    ...(history.decision ? { approval: history.decision } : {}),
+    observations: input.observations,
+    eligibility: actionEligibility(deps, history, input),
+    dryRun: input.dryRun,
+    clock: clockFromMillisFn(deps.now),
+    callerTier: tier,
+    origin,
+    ...(deps.root ? { executor: { root: deps.root, ledgerPath: deps.ledgerPath } } : {}),
+    ...(input.delegationId !== undefined ? { admissionExtra: { delegation_id: input.delegationId, delegation_cost_usd: input.estimatedCostUsd ?? 0 } } : {}),
+    appendReceipt: (receipt, extra) => appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_ACTION_RECEIPT_STEP, receipt.actionId, origin, { action_id: receipt.actionId, receipt, ...extra }),
+  });
+  sendJson(res, run.disposition === "refused" ? 409 : 200, { ok: run.disposition !== "refused", ...run });
+}
+
+function actionExecuteRoute(deps: OperatorAgentRouteDependencies, path: string, tier: "middle" | "high"): Route {
   return {
     method: "POST",
-    path: "/v1/operator-agent/actions/execute",
+    path,
     scope: "write",
-    tier: "middle",
+    tier,
     handler: jsonAction(validateActionObservationsInput, (input, req, res) => {
       const history = requireAction(deps, input.actionId, res);
       if (!history) return;
@@ -3456,6 +3486,10 @@ export function buildOperatorAgentActionExecuteRoute(deps: OperatorAgentRouteDep
       if (!admission.ok) {
         appendPanelLedger(deps.ledgerPath, EMERGENCY_STOP_REFUSAL_STEP, input.actionId, bearerTokenId(req), { receipt: admission.receipt });
         sendJson(res, 423, { ok: false, error: "emergency_stop_active", code: admission.code, receipt: admission.receipt });
+        return;
+      }
+      if (history.action.capability.startsWith(ACTION_CATALOGUE_NAMESPACE)) {
+        executeCatalogued(deps, req, res, history, input, tier);
         return;
       }
       // W1-T3878: a delegated request's eligibility is derived from its profile and fed into this
@@ -3496,7 +3530,9 @@ export function buildOperatorAgentActionCompleteRoute(deps: OperatorAgentRouteDe
         ...(input.reason ? { reason: input.reason } : {}),
         clock: clockFromMillisFn(deps.now),
       });
-      respondWithStep(deps, req, res, step, 200);
+      const claimed = step.disposition === "completed";
+      const labelled = claimed ? { ...step, receipt: { ...step.receipt, code: SELF_REPORTED_CODE } } : step;
+      respondWithStep(deps, req, res, labelled, 200, claimed ? { evidence_source: SELF_REPORTED_CODE } : {});
     }),
   };
 }
@@ -3703,6 +3739,12 @@ export function readIntentPlanStates(deps: OperatorAgentRouteDependencies): Inte
   return foldIntentPlans(readOperatorAgentUnion(dirname(deps.ledgerPath), { step: [INTENT_PLAN_LEDGER_STEP, INTENT_PLAN_EVENT_LEDGER_STEP] }).rows);
 }
 
+function proposedRequestDigest(deps: OperatorAgentRouteDependencies, state: IntentPlanState): string {
+  const rows = readOperatorAgentUnion(dirname(deps.ledgerPath), { step: [INTENT_PLAN_LEDGER_STEP, INTENT_PLAN_EVENT_LEDGER_STEP] }).rows;
+  const row = rows.find((item) => item.step === INTENT_PLAN_LEDGER_STEP && item.plan_id === state.plan.planId);
+  return typeof row?.request_digest === "string" ? row.request_digest : state.plan.inputDigest;
+}
+
 function planLinkedActions(deps: OperatorAgentRouteDependencies, state: IntentPlanState): IntentPlanLinkedAction[] {
   const ids = new Set(state.events.flatMap((event) => (event.kind === "confirm" ? event.actionIds : [])));
   return ids.size === 0 ? [] : readOperatorAgentActions(deps).filter((history) => ids.has(history.action.actionId));
@@ -3732,16 +3774,17 @@ export function buildOperatorAgentIntentPlanProposeRoute(deps: OperatorAgentRout
     scope: "write",
     tier: "low",
     handler: jsonAction(
-      (body) => (isRecord(body) ? { body } : { error: "body must be a JSON object" }),
+      (body): { error: string } | { body: Record<string, unknown> } => (isRecord(body) ? { body } : { error: "body must be a JSON object" }),
       (input, req, res) => {
         const proposedBy = bearerTokenId(req);
-        const built = buildIntentPlan(input.body, { clock: clockFromMillisFn(deps.now), proposedBy });
-        if (!built.ok) {
-          sendJson(res, 400, { error: "invalid_request", detail: `${built.code}: ${built.reason}`, code: built.code, field: built.field });
+        const clock = clockFromMillisFn(deps.now);
+        const raw = buildIntentPlan(input.body, { clock, proposedBy });
+        if (!raw.ok) {
+          sendJson(res, 400, { error: "invalid_request", detail: `${raw.code}: ${raw.reason}`, code: raw.code, field: raw.field });
           return;
         }
-        const existing = readIntentPlanStates(deps).find((state) => state.plan.planId === built.plan.planId);
-        if (existing && existing.plan.inputDigest !== built.plan.inputDigest) {
+        const existing = readIntentPlanStates(deps).find((state) => state.plan.planId === raw.plan.planId);
+        if (existing && proposedRequestDigest(deps, existing) !== raw.plan.inputDigest) {
           sendJson(res, 409, { error: "conflict", detail: `idempotencyKey already names plan ${existing.plan.planId} with a different request` });
           return;
         }
@@ -3749,8 +3792,13 @@ export function buildOperatorAgentIntentPlanProposeRoute(deps: OperatorAgentRout
           sendJson(res, 200, { ok: true, existing: true, ...projectPlan(deps, existing) });
           return;
         }
-        appendPanelLedger(deps.ledgerPath, INTENT_PLAN_LEDGER_STEP, built.plan.planId, proposedBy, { plan_id: built.plan.planId, input: input.body, created_at: built.plan.createdAt, proposed_by: proposedBy });
-        sendJson(res, 201, { ok: true, existing: false, ...projectPlan(deps, { plan: built.plan, events: [] }) });
+        const evidence = goalEvidenceReader({ board: deps.goalBoard, ...(deps.root ? { root: deps.root } : {}), clock });
+        const request = raw.plan.steps.length === 0 ? withPlannedSteps(input.body, raw.plan, planStepsForGoal(raw.plan, evidence, clock)) : input.body;
+        const planned = request === input.body ? raw : buildIntentPlan(request, { clock, proposedBy });
+        const [plan, stored] = planned.ok ? [planned.plan, request] : [raw.plan, input.body];
+        const digest = stored === input.body ? {} : { request_digest: raw.plan.inputDigest };
+        appendPanelLedger(deps.ledgerPath, INTENT_PLAN_LEDGER_STEP, plan.planId, proposedBy, { plan_id: plan.planId, input: stored, created_at: plan.createdAt, proposed_by: proposedBy, ...digest });
+        sendJson(res, 201, { ok: true, existing: false, ...projectPlan(deps, { plan, events: [] }) });
       },
     ),
   };
@@ -3870,6 +3918,7 @@ export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): 
     buildOperatorAgentActionDecisionRoute(deps),
     buildOperatorAgentActionPreflightRoute(deps),
     buildOperatorAgentActionExecuteRoute(deps),
+    buildOperatorAgentActionExecuteHighRoute(deps),
     buildOperatorAgentActionCompleteRoute(deps),
     buildOperatorAgentActionRollbackRoute(deps),
     buildEmergencyStopIssueRoute(deps),

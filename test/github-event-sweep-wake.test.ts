@@ -17,6 +17,7 @@ import {
   createPersistentDeliveryDedupStore,
   createSweepWakeSignal,
   isAllowlistedGithubEvent,
+  isOwnerEscalationReply,
   readGithubWebhookSecret,
   readSweepWakeMarker,
   sweepWakeMarkerPath,
@@ -945,4 +946,45 @@ test("daemon SIGTERM cleanup closes the GitHub wake watcher before re-raising th
     else process.env.HOME = oldHome;
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("the owner's reply on an escalation issue wakes the sweep, and no other comment does", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-github-reply-"));
+  const markerPath = sweepWakeMarkerPath(root);
+  const route = createGitHubEventWakeHandler({
+    secret: SECRET,
+    repository: REPOSITORY,
+    markerPath,
+    dedup: createDeliveryDedupStore(10),
+    log: () => {},
+  });
+  const comment = (association: string, userType: string, labels: string[], action = "created") =>
+    JSON.stringify({
+      action,
+      repository: { full_name: REPOSITORY },
+      issue: { number: 7573, labels: labels.map((name) => ({ name })) },
+      comment: { author_association: association, user: { type: userType }, body: "revise-spec" },
+    });
+  try {
+    await withRoute(route, async (url) => {
+      const post = (body: string, id: string) =>
+        fetch(url, { method: "POST", headers: webhookHeaders(body, id, "issue_comment"), body });
+      for (const [body, id] of [
+        [comment("OWNER", "Bot", ["needs-human"]), "fleet-bot"],
+        [comment("CONTRIBUTOR", "User", ["needs-human"]), "a-contributor"],
+        [comment("OWNER", "User", ["bug"]), "not-an-escalation"],
+        [comment("OWNER", "User", ["needs-human"], "edited"), "an-edit"],
+      ] as const) {
+        const res = await post(body, id);
+        assert.deepEqual(await res.json(), { error: "ignored" }, id);
+        assert.equal(consumeSweepWakeMarker(markerPath), undefined, id);
+      }
+      const reply = await post(comment("OWNER", "User", ["needs-human", "needs-question"]), "owner-reply");
+      assert.deepEqual(await reply.json(), { accepted: true });
+      assert.equal(consumeSweepWakeMarker(markerPath)?.deliveryId, "owner-reply");
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  assert.equal(isOwnerEscalationReply("issue_comment", "created", null), false, "a bodiless delivery never wakes");
 });
