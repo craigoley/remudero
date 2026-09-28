@@ -2256,6 +2256,7 @@ import {
   type WorkerStreamObserver,
   type WorkerStreamEvent, type WorkerSelectionAssignment,
   WorkerAbandonedError,
+  SubscriptionOnlyRefusedError,
 } from "./lib/worker.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
@@ -14698,6 +14699,31 @@ async function runTask(
   }
 }
 
+/** W1-T4655: the closed set of HARNESS causes a run that threw is ledgered under — never a model judgement. */
+export type RunErrorCause =
+  | "census-refused-push"
+  | "git-push-failed"
+  | "git-commit-failed"
+  | "pr-create-failed"
+  | "github-read-failed"
+  | "base-proof-refused"
+  | "subscription-only-refused"
+  | "run-error";
+
+/** Classifies a thrown run by the message shapes measured on the fleet ledger 2026-09-24..28; census first,
+ *  since a census refusal is also a failed push. Anything unrecognised stays the generic `run-error`. */
+export function runErrorCause(err: unknown): RunErrorCause {
+  if (err instanceof SubscriptionOnlyRefusedError) return "subscription-only-refused";
+  const text = String((err as Error)?.message ?? err);
+  if (/^census-precheck:/m.test(text)) return "census-refused-push";
+  if (/^Command failed: git (?:-C \S+ )?push /m.test(text)) return "git-push-failed";
+  if (/^Command failed: git (?:-C \S+ )?commit /m.test(text)) return "git-commit-failed";
+  if (/^Command failed: gh (?:api --method POST \S+\/pulls |pr create)/m.test(text)) return "pr-create-failed";
+  if (/^Command failed: gh |^gh api response body was unreadable/m.test(text)) return "github-read-failed";
+  if (/^openPullRequestChecked: /.test(text)) return "base-proof-refused";
+  return "run-error";
+}
+
 export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   const {
     config,
@@ -14705,7 +14731,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     github,
     isMerged,
     ledgerPath,
-    log,
+    log: ctxLog,
     openTaskIds,
     opts,
     owner,
@@ -14722,6 +14748,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     workerAbandonMs,
     workerStateSensor,
   } = ctx;
+  // W1-T4655: set BEFORE the write, so the outer catch attempts a verdict at most once per run.
+  let verdictWritten = false;
+  const log: RunTaskContext["log"] = (step, extra) => {
+    if (step === "verdict") verdictWritten = true;
+    ctxLog(step, extra);
+  };
   // Direct callers of the exported body retain ordinary routing.  Production runTask always
   // supplies the shared object so the preflight and its spawn wrapper observe the same decision.
   const cashContainmentState = ctx.cashContainmentState ?? { contained: false };
@@ -17251,6 +17283,24 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       return { taskId, runId, merged: false, costUsd, verdict: "failed" };
     }
     log("run.error", { error: String((err as Error)?.message ?? err) });
+    // W1-T4655: the run DID end, so it gets ONE terminal row naming the harness cause; best-effort,
+    // so a ledger failure never replaces the error rethrown below.
+    if (!verdictWritten) {
+      try {
+        const excerpt = capStderrExcerpt(scrubGitCredentialText(String((err as Error)?.message ?? err)), STDERR_EXCERPT_CAP);
+        log("verdict", {
+          verdict: "failed",
+          reason: excerpt,
+          stage: "run.error",
+          cause: runErrorCause(err),
+          cost_usd: costUsd,
+          ...terminalVerdictFields(null),
+        });
+      } catch {
+        const reason = "run.error-verdict-ledger-write-failed";
+        void reason; // the rethrow below is the authoritative outcome
+      }
+    }
     // Reclaim the worktree even on an unexpected throw — a dead run must not
     // leave debris that blocks the next one (start-of-run prune is the backstop,
     // but clean up eagerly here too). Best-effort; the ledger already has the
