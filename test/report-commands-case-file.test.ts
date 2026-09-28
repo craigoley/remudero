@@ -114,3 +114,17 @@ test("operator command with no projected PR performs no PR read", async () => {
   assert.equal(code, 0);
   assert.equal(JSON.parse(printed[0]).pr.reason, "no-pr-in-current-projection");
 });
+
+test("a throttled status read with no PR number is not an observed absence of a PR", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-case-throttled-"));
+  writeFileSync(join(stateDir, "ledger.ndjson"), "");
+  const throttled: string[] = [];
+  const throttledCode = await caseFileCommand([task.id], {
+    stateDir, nowIso: () => "2026-09-27T14:00:00.000Z", resolveOwnerRepo: () => ({ owner: "craigoley", repo: "remudero" }),
+    readTask: () => task, readProjection: () => ({ taskId: task.id, status: "queued", merged: false, source: "throttled",
+      indeterminate: true, unavailableReason: "rate_limit" } as StatusProjection),
+    readPr: () => { throw new Error("must not read PR"); }, out: (line) => throttled.push(line),
+  });
+  assert.equal(throttledCode, 0);
+  assert.equal(JSON.parse(throttled[0]).pr.reason, "projection-indeterminate:rate_limit");
+});
