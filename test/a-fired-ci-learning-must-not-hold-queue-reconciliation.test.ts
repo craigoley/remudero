@@ -13,6 +13,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { runDaemon } from "../src/lib/daemon.js";
+import { collectCiFailureCorpus } from "../src/lib/ci-failure-corpus.js";
+import { measureGateFireRates } from "../src/lib/gate-fire-rate.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { drainDetachedSweepActions, detachedActionInFlight } from "../src/lib/sweep.js";
 import {
@@ -116,17 +118,17 @@ test("W1-T3997: a second fired ci-learning action is refused while the first is 
   assert.equal(detachedActionInFlight("ci-learning"), false, "the registry releases after the corpus settles");
 });
 
-test("W1-T3997: an unreadable detached ci-learning corpus releases its fire", async () => {
+test("W1-T3997: an unreadable detached ci-learning corpus preserves the daily allowance", async () => {
   assert.equal(detachedActionInFlight("ci-learning"), false, "precondition: no prior detached corpus remains");
   const fires: string[] = [];
-  const releases: string[] = [];
+  const attempts: string[] = [];
   const lines: string[] = [];
   const runCiLearningCadence = buildCiLearningCadenceRunner({
     root: "/tmp/w1t3997-state",
     checkoutRoot: "/tmp/w1t3997-checkout",
     loadWindow: async () => { throw new Error("GitHub corpus unreadable"); },
     recordFire: () => fires.push("fired"),
-    releaseFire: () => releases.push("released"),
+    recordAttempt: () => attempts.push("attempted"),
   });
 
   await runDaemon(fixturePlan(), {
@@ -139,8 +141,8 @@ test("W1-T3997: an unreadable detached ci-learning corpus releases its fire", as
   }, { max: 1 });
   await drainDetachedSweepActions({ boundMs: 5_000 });
 
-  assert.deepEqual(fires, ["fired"], "the cadence fire is still recorded before the read begins");
-  assert.deepEqual(releases, ["released"], "unreadable input returns the allowance instead of spending a false success");
+  assert.deepEqual(attempts, ["attempted"], "a failed read still gets a bounded retry marker");
+  assert.deepEqual(fires, [], "unreadable input never spends the successful daily allowance");
   assert.ok(lines.includes("ci_learning_cadence.run_failed"), "the failed detached run is ledger-visible");
   assert.equal(lines.includes("ci_learning_cadence.ran"), false, "missing evidence never emits a successful lesson result");
 });
@@ -194,12 +196,75 @@ test("W1-T3997: asynchronous CI-learning collection yields between unreadable an
     prs: [
       // W1-T4115: the window also says whether each pull request merged (none of these carry merged_at).
       { number: 13, merged: false, commits: [{ sha: "head13" }] },
-      { number: 14, merged: false, commits: [{ sha: "head14", rollup: [], changedFiles: ["src/lib/learn.ts"] }] },
+      { number: 14, merged: false, commits: [{ sha: "head14", rollup: [] }] },
     ],
+    unreadablePrs: [12],
   });
   assert.equal(yields, 5, "the reader yields once per eligible PR and once per observed commit");
   assert.ok(calls.some((request) => request.includes("pulls/12/commits")), "control: the unreadable PR branch executed");
   assert.ok(calls.some((request) => request.includes("check-runs")), "control: the unreadable rollup branch executed");
+  assert.equal(calls.some((request) => request.endsWith("/commits/head14")), false, "no repair pair means no commit-detail read");
+});
+
+test("CI learning reads commit files only for a proven red-to-green repair", async () => {
+  const calls: string[] = [];
+  const window = await loadCiFailureWindowAsync(1, {
+    read: async (args) => {
+      const request = args[1] ?? "";
+      calls.push(request);
+      if (request.includes("pulls?state=all")) return [{ number: 41, updated_at: "2999-01-01T00:00:00Z" }];
+      if (request.includes("pulls/41/commits")) return [{ sha: "red" }, { sha: "green" }];
+      if (request.includes("check-runs")) return { check_runs: [{ name: "ci", status: "completed", conclusion: request.includes("red") ? "failure" : "success" }] };
+      if (request.endsWith("/status")) return { statuses: [] };
+      if (request.endsWith("/commits/green")) return { files: [{ filename: "src/fix.ts" }] };
+      throw new Error(`unexpected request: ${request}`);
+    },
+    yieldBetweenObservation: async () => {},
+  });
+  assert.equal(calls.filter((call) => call.endsWith("/commits/green")).length, 1);
+  assert.equal(calls.some((call) => call.endsWith("/commits/red")), false);
+  assert.deepEqual(collectCiFailureCorpus(window).pairs.map((pair) => [pair.state, pair.repairFiles]), [["repaired", ["src/fix.ts"]]]);
+});
+
+test("a saturated first PR page is explicitly partial, never a clean three-day census", async () => {
+  let pages = 0;
+  const window = await loadCiFailureWindowAsync(3, {
+    read: async () => { pages += 1; return Array.from({ length: 100 }, () => ({ updated_at: "2999-01-01T00:00:00Z" })); },
+    yieldBetweenObservation: async () => {},
+  });
+  assert.equal(pages, 5, "the page budget is explicit and bounded");
+  assert.equal(window.windowComplete, false);
+  assert.equal(collectCiFailureCorpus(window).status, "unreadable");
+  assert.equal(measureGateFireRates(window).status, "partial");
+});
+
+test("CI learning paginates until the requested time boundary is actually observed", async () => {
+  const pages: string[] = [];
+  const window = await loadCiFailureWindowAsync(3, {
+    read: async (args) => {
+      pages.push(args[1] ?? "");
+      return args[1]?.endsWith("&page=1")
+        ? Array.from({ length: 100 }, () => ({ updated_at: "2999-01-01T00:00:00Z" }))
+        : [{ updated_at: "2000-01-01T00:00:00Z" }];
+    },
+    yieldBetweenObservation: async () => {},
+  });
+  assert.equal(pages.length, 2);
+  assert.equal(window.windowComplete, undefined, "a proven complete window carries no partial marker");
+  assert.equal(collectCiFailureCorpus(window).status, "clear");
+});
+
+test("the first PR listing retries once after reauthentication and names a repeated failure", async () => {
+  let calls = 0;
+  let refreshes = 0;
+  const reader = {
+    read: async () => { calls += 1; throw Object.assign(new Error("Command failed: gh api"), { stderr: "Bad credentials (HTTP 401)", code: 1 }); },
+    refreshAuth: async () => { refreshes += 1; },
+    yieldBetweenObservation: async () => {},
+  };
+  await assert.rejects(loadCiFailureWindowAsync(1, reader), /first authentication .* second authentication/);
+  assert.equal(calls, 2, "one initial read plus one retry, never an unbounded loop");
+  assert.equal(refreshes, 1);
 });
 
 test("W1-T3997: the daemon's own production wiring reaches the real async reader, not just a test double", async () => {

@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { retroTriggerCheck, buildRetroDaemonHooks } from "../src/run-task.js";
+import { retroTriggerCheck, buildRetroDaemonHooks, recordRetroAttempt, recentRetroAttempt, RETRO_ATTEMPT_RETRY_MS } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import { saveMarker, type RetroTriggerDecision, type ShippedGithub } from "../src/lib/retro.js";
 import { loadPolicy, policyPath, type Policy } from "../src/lib/policy.js";
@@ -79,6 +79,26 @@ function creditingGithub(): ShippedGithub {
     unavailable: () => undefined,
   };
 }
+
+test("an automated retro attempt survives daemon restart and defers the same marker cycle for six hours", () => {
+  const { config, markerPath } = fixtureRoot();
+  const markerTs = "2026-09-01T00:00:00.000Z";
+  saveMarker(markerPath, { ts: markerTs, learnings_count: 0, runs_seen: 0 });
+  const started = new Date("2026-09-10T12:00:00.000Z");
+  recordRetroAttempt(config.root, started);
+  assert.equal(recentRetroAttempt(config.root, markerTs, new Date(started.getTime() + RETRO_ATTEMPT_RETRY_MS - 1)), true);
+  let githubReads = 0;
+  const github: ShippedGithub = {
+    ...healthyGithub(),
+    unavailable: () => { githubReads += 1; return undefined; },
+  };
+  assert.equal(retroTriggerCheck(new Date("2026-09-10T12:30:00.000Z"), { config, github }), undefined);
+  assert.equal(githubReads, 0, "the retry fence stops expensive GitHub and ledger reads before they begin");
+  assert.equal(retroTriggerCheck(new Date(started.getTime() + RETRO_ATTEMPT_RETRY_MS), { config, github })?.fire, true);
+  assert.equal(githubReads, 1);
+  saveMarker(markerPath, { ts: "2026-09-11T00:00:00.000Z", learnings_count: 0, runs_seen: 0 });
+  assert.equal(recentRetroAttempt(config.root, "2026-09-11T00:00:00.000Z", new Date("2026-09-11T01:00:00.000Z")), false);
+});
 
 test("W1-T264 acceptance 2 — retroTriggerCheck passes the loaded policy to evaluateRetroTrigger", () => {
   const { config, markerPath } = fixtureRoot();

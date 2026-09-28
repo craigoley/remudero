@@ -189,6 +189,34 @@ test("FALSIFIER: the SAME total (at the population floor) refuses the rate the i
   assert.equal(fullPass.followupFixRate, null);
   assert.equal(fullPass.rateRefusedReason, "mixed-lane-population", "told apart from a below-floor refusal");
   assert.equal(fullPass.lanes, "review, sweep", "the lanes are NAMED, not merely hidden behind a null");
+  assert.deepEqual(
+    report.byLane!.map((outcome) => [outcome.lane, outcome.total, outcome.revertRate, outcome.rateRefusedReason]),
+    [["review", MIN_POPULATION_FLOOR - 1, null, "below-population-floor"], ["sweep", 1, null, "below-population-floor"]],
+    "splitting a mixed population never invents a rate below the floor",
+  );
+});
+
+test("a mixed aggregate still exposes independently measured rates for each sufficiently populated arm lane", () => {
+  const commits = Array.from({ length: MIN_POPULATION_FLOOR * 2 }, (_, i) => ({
+    sha: `${i}`.repeat(40).slice(0, 40),
+    ts: "2026-01-01T00:00:00+00:00",
+    subject: `feat(x): thing (W1-T9${i})`,
+    files: [],
+  }));
+  const rows: VerdictRow[] = commits.map((_, i) => ({
+    taskId: `W1-T9${i}`,
+    headSha: `sha9${i}`,
+    armedTs: "2025-12-31T23:50:00.000Z",
+    verdictClass: "full-pass",
+    lane: i < MIN_POPULATION_FLOOR ? "review" : "sweep",
+  }));
+  const report = verdictCalibrationReport(rows, dumpOf(commits));
+  assert.equal(report.classes[0].revertRate, null, "the aggregate continues to refuse a blended rate");
+  assert.deepEqual(report.byLane!.map((row) => [row.lane, row.total, row.revertRate]), [
+    ["review", MIN_POPULATION_FLOOR, 0],
+    ["sweep", MIN_POPULATION_FLOOR, 0],
+  ]);
+  assert.equal(report.byLane!.reduce((total, row) => total + row.total, 0), report.armsClassified);
 });
 
 test("verdictCalibrationReport: a class below the population floor still refuses for the ORIGINAL reason, not relabelled as a lane mix", () => {

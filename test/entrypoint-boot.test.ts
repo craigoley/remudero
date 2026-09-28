@@ -149,10 +149,12 @@ function writeNpmStub(dir: string, rec: string): void {
  *
  * Scrubbing the whole `RMD_` prefix rather than that single name is deliberate: every one of them is
  * a control this script or its children read, so a fixture inheriting any of them measures the
- * host's configuration instead of its own. Each test still sets what it needs explicitly.
+ * host's configuration instead of its own. The idle probe also reads `GH_APP_*`; inheriting the
+ * daemon's App configuration makes a fixture with a stubbed `gh` try to mint a real token from a
+ * minimal checkout with no tsx package. Each test still sets what it needs explicitly.
  */
 function ambientWithoutRmdControls(): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("RMD_")));
+  return Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("RMD_") && !k.startsWith("GH_APP_")));
 }
 
 /**
@@ -1411,6 +1413,27 @@ test("W1-T2994: the entrypoint fixture does not inherit ambient RMD_ controls", 
   } finally {
     if (prior === undefined) delete process.env.RMD_RESTART_THROTTLE_S;
     else process.env.RMD_RESTART_THROTTLE_S = prior;
+  }
+});
+
+test("idle probe fixture does not inherit the daemon's GitHub App controls", () => {
+  const prior = {
+    GH_APP_ID: process.env.GH_APP_ID,
+    GH_APP_INSTALLATION_ID: process.env.GH_APP_INSTALLATION_ID,
+    GH_APP_PRIVATE_KEY_PATH: process.env.GH_APP_PRIVATE_KEY_PATH,
+  };
+  process.env.GH_APP_ID = "fixture-app";
+  process.env.GH_APP_INSTALLATION_ID = "1";
+  process.env.GH_APP_PRIVATE_KEY_PATH = "/nonexistent/fixture-key";
+  try {
+    const scrubbed = ambientWithoutRmdControls();
+    assert.equal(Object.keys(scrubbed).some((key) => key.startsWith("GH_APP_")), false);
+    assert.equal(process.env.GH_APP_ID, "fixture-app", "positive control: the ambient App config was present");
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 
