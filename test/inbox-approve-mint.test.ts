@@ -43,6 +43,9 @@ const P34_STYLE_FRAGMENT = [
   "  attempts: 0",
   "  origin: feedback#fb-example",
   "  files: [src/lib/example.ts]",
+  "  acceptance:",
+  '    - claim: "the first drafted task works"',
+  '      proof: "unit test: the first drafted task works"',
   "- id: NEW-2",
   "  title: second drafted task, depends on the first",
   "  repo: remudero",
@@ -54,6 +57,9 @@ const P34_STYLE_FRAGMENT = [
   "  attempts: 0",
   "  origin: feedback#fb-example",
   "  files: [src/lib/example.ts]",
+  "  acceptance:",
+  '    - claim: "the second drafted task works"',
+  '      proof: "unit test: the second drafted task works"',
   "",
 ].join("\n");
 

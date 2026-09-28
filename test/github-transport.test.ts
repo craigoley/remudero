@@ -285,6 +285,9 @@ test("approveBatchCommand (via approveCommand with 2+ bare ids) with repoDir abs
         "  verify: auto",
         "  status: queued",
         "  attempts: 0",
+        "  acceptance:",
+        `    - claim: "fixture task ${slug} works"`,
+        `      proof: "unit test: fixture task ${slug} works"`,
         "",
       ].join("\n");
     mkdirSync(join(configRoot, "state"), { recursive: true });
