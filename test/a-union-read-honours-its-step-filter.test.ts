@@ -151,7 +151,8 @@ test("W1-T4710: every union reader honours step identically — none silently ig
   }
 });
 
-const NOW = Date.parse("2026-09-21T12:00:00.000Z");
+// Stamped from the clock, never a fixed date: a fixed activity stamp crosses sweep.staleDays on its own.
+const NOW = Date.now();
 
 function greenPr(): OpenPrView {
   return {
@@ -162,7 +163,7 @@ function greenPr(): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-21T11:00:00.000Z",
+    lastActivityAt: new Date(NOW - 60 * 60 * 1000).toISOString(),
     headSha: HEAD,
     autoMergeArmed: false,
   };
