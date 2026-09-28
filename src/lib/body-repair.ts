@@ -44,6 +44,35 @@ export interface BodyCriterion {
   proof: string;
 }
 
+/** `check-proof --base` exit codes, kept at the body boundary where its verdict is acted on. */
+export function refuseNonDiscriminatingCriteria(
+  criteria: readonly BodyCriterion[],
+  checkProofAtBase: (proof: string) => number | null,
+): void {
+  const problems: string[] = [];
+  let discriminating = 0;
+  criteria.forEach((criterion, index) => {
+    const status = checkProofAtBase(criterion.proof);
+    if (status === 0) {
+      discriminating++;
+    } else if (status === 5) {
+      problems.push(
+        `criterion ${index + 1} (${criterion.proof}) passes at both head and base; ` +
+          "keep the test, withdraw the criterion, and name why it was withdrawn in the body",
+      );
+    } else if (status === 3) {
+      problems.push(`criterion ${index + 1} (${criterion.proof}) matches no tests; point it at a test that runs`);
+    } else if (status !== 0) {
+      problems.push(`criterion ${index + 1} (${criterion.proof}) could not prove this head (check-proof exit ${status})`);
+    }
+  });
+  if (problems.length === 0) return;
+  if (discriminating === 0) {
+    problems.push("ask for a human ruling: this body has no discriminating criterion");
+  }
+  throw new Error(`body emission refused:\n${problems.join("\n")}`);
+}
+
 /**
  * One diagnosed defect. `repair` is present ONLY when it is derivable from observed state; a defect
  * that is real but whose fix requires a judgement carries `repair: undefined` and is reported for a
