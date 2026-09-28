@@ -111,11 +111,11 @@ components:
         required_tier:
           type: string
           description: >
-            W1-T404 -- present only on a 403 refused for an insufficient WRITE TIER (once
-            src/lib/service.ts's `enforceWriteTiers` is turned on; not yet set by `rmd serve`'s
-            own production wiring). `low` (bookkeeping), `middle` (reversible but disruptive,
-            or a spend force multiplier) or `high` (spends money or moves code) -- the tier the
-            caller's token was missing, alongside `required_scope: write`.
+            W1-T404 -- present only on a 403 refused for an insufficient WRITE TIER by
+            src/lib/service.ts's dispatch gate, which `enforceWriteTiers` turns on and `rmd
+            serve`'s production wiring sets (W1-T500). `low` (bookkeeping), `middle` (reversible
+            but disruptive, or a spend force multiplier) or `high` (spends money or moves code)
+            -- the tier the caller's credential was missing, alongside `required_scope: write`.
           enum:
             - low
             - middle
@@ -407,6 +407,29 @@ components:
           items:
             $ref: "#/components/schemas/RepoDashboardEntry"
 
+    RegistryUnavailable:
+      type: object
+      description: >
+        GET /v1/registry's 503 body (src/lib/serve.ts's `buildRegistryRoute`): the repo registry
+        could not be read, or src/lib/instance-registry.ts's `parseInstanceRegistry` refused it.
+        Path-free on purpose -- an fs error embeds the absolute path, so only a code is echoed.
+        A dedicated refusal rather than a member of the shared Error enum, which a consumer
+        switches over exhaustively (packages/daemon-client-smoke).
+      required:
+        - error
+        - reason
+      properties:
+        error:
+          type: string
+          enum:
+            - registry_unavailable
+        reason:
+          type: string
+          description: >
+            `unreadable` when the file could not be read, else the parser's
+            `InstanceRegistryErrorCode` (`no_instances_block`, `malformed_line`,
+            `duplicate_instance`, ...).
+
     RegistryResult:
       type: object
       description: >
@@ -646,8 +669,8 @@ components:
       description: >
         A bounded operator request to run the established repair or review command against one
         pull request in this daemon instance. The request is recorded for the daemon's next poll;
-        this HTTP route never starts a worker itself. HIGH-tier confirmation is required by the
-        service before this schema is accepted.
+        this HTTP route never starts a worker itself. The route is LOW tier (W1-T4077), so no
+        confirmation nonce precedes this body.
       additionalProperties: false
       required:
         - action
@@ -748,24 +771,141 @@ components:
           items:
             type: string
         origin:
-          type: string
-          enum:
-            - cli
-            - ui
-            - issue
+          description: >
+            src/lib/feedback.ts's `FeedbackOrigin`: a human capture method, or one of the
+            machine-origin shapes `isValidFeedbackOrigin` admits (`issue#<n>`, W1-T57;
+            `alert#<source>-<id>`, W1-T56; `repair#<surface>`, W1-T905; `incident#<sha256>`,
+            W1-T4385) naming the source that produced the entry.
+          oneOf:
+            - type: string
+              enum:
+                - cli
+                - ui
+                - issue
+            - type: string
+              pattern: "^(issue#[0-9]+|alert#(code-scanning|dependabot|secret-scanning)-.+|repair#[a-z][a-z-]*|incident#[0-9a-f]{64})$"
         status:
           type: string
+          description: >
+            The lifecycle (new -> grilling -> proposed -> accepted/rejected), plus `answered`
+            (W1-T2278): the terminal arm a `grilling` entry reaches once a reply names it, the
+            same write that sets `answered_by`.
           enum:
             - new
             - grilling
             - proposed
             - accepted
             - rejected
+            - answered
+        reply_to:
+          type:
+            - string
+            - "null"
+          description: >
+            W1-T2278 -- the `grilling` entry this entry answers, when captured through POST
+            /v1/feedback's `replyTo`; null otherwise.
+        answered_by:
+          type:
+            - string
+            - "null"
+          description: >
+            W1-T2278 -- the reverse edge of `reply_to`: the id of the entry that answered this one,
+            set in the same write that moves it to `answered`; null or absent otherwise.
+        thread_id:
+          type:
+            - string
+            - "null"
+          description: >
+            W1-T2496 -- the escalation thread this entry replies to, via POST
+            /v1/escalation/reply; a different edge than `reply_to`. Null when none.
+        submission_key:
+          type:
+            - string
+            - "null"
+          description: >
+            W1-T2302 -- the console-minted per-submission key a repeat of the same submit is
+            recognised by. Null when none was supplied.
         proposal_pr:
           type:
             - string
             - "null"
           description: Set once `rmd triage` opens a proposal PR for this entry; null until then.
+        summary:
+          type:
+            - object
+            - "null"
+          description: >
+            W1-T313 -- src/lib/feedback.ts's `DecisionSummary`, the plain-language decision card
+            generated once when the entry moves to `proposed`; null until then or on a summarizer
+            failure.
+          required:
+            - headline
+            - what_happened
+            - decision
+            - options
+          properties:
+            headline:
+              type: string
+            what_happened:
+              type: string
+            decision:
+              type: string
+            options:
+              type: array
+              items:
+                type: object
+                required:
+                  - label
+                  - consequence
+                properties:
+                  label:
+                    type: string
+                  consequence:
+                    type: string
+        expansion:
+          type:
+            - object
+            - "null"
+          description: >
+            W1-T350 -- src/lib/feedback.ts's `FeedbackExpansion`, attached at capture from the
+            console's preview; null when no preview ran.
+          required:
+            - claim
+            - evidence
+            - recon
+            - falsifying_check
+          properties:
+            claim:
+              type: string
+            evidence:
+              type: string
+            recon:
+              type: array
+              items:
+                type: string
+            falsifying_check:
+              type: string
+        upstream:
+          type: object
+          description: >
+            W1-T397 -- present only when a home-repo pointer is configured and this checkout is not
+            the home repo: whether the entry's upstream PR landed.
+          required:
+            - home
+            - status
+          properties:
+            home:
+              type: string
+              description: "`owner/repo` of the configured home repo."
+            status:
+              type: string
+              enum:
+                - landed
+                - unreachable
+            pr_url:
+              type: string
+            error:
+              type: string
         unverified:
           type: boolean
           description: >
@@ -3570,32 +3710,6 @@ components:
       properties:
         action:
           $ref: "#/components/schemas/OperatorAgentConsequenceAction"
-
-    HighTierForbidden:
-      type: object
-      description: >
-        A 403 on a HIGH-tier write route (W1-T404). `forbidden` is src/lib/service.ts's scope/tier
-        gate: `required_scope` names the missing scope, and `required_tier` is present when the
-        credential's write tier is too low -- the bearer write token is pinned at LOW, so it never
-        reaches a HIGH route. `confirm_nonce_required` is the same dispatcher refusing a request
-        whose X-Confirm-Nonce is absent or was not issued by POST /v1/confirm for this exact
-        method, path and payload (POST /v1/operator-agent/consequences/decision's handler also
-        refuses a missing nonce itself, naming the `consequenceId`).
-      required:
-        - error
-      properties:
-        error:
-          type: string
-          enum: [forbidden, confirm_nonce_required]
-        required_scope:
-          type: string
-          enum: [read, write]
-        required_tier:
-          type: string
-          enum: [low, middle, high]
-        consequenceId:
-          type: string
-          description: Present only on the consequence decision handler's own missing-nonce refusal.
 
     OperatorAgentConsequenceReceipt:
       type: object
@@ -6630,6 +6744,8 @@ components:
         at LOW, so only a stepped-up operator session reaches HIGH). `confirm_nonce_required` --
         the tier was granted but no `X-Confirm-Nonce` was presented, or the nonce was unknown,
         expired (5 minutes), already spent, or bound to a different method, path or raw body.
+        W1-T4642 folded W1-T4612's `HighTierForbidden` schema into this one: the two differed
+        only by `consequenceId`.
       required:
         - error
       properties:
@@ -6649,6 +6765,11 @@ components:
             - low
             - middle
             - high
+        consequenceId:
+          type: string
+          description: >
+            Present only on POST /v1/operator-agent/consequences/decision's own missing-nonce
+            refusal, naming the pending consequence it refused.
 
     ConfirmNonceRequest:
       type: object
@@ -7747,7 +7868,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/RegistryUnavailable"
 
   /v1/status:
     get:
@@ -7919,7 +8040,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/HighTierForbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -7928,10 +8049,12 @@ paths:
       summary: Queue one confirmed pull-request repair or review in this daemon instance.
       description: >
         W1-T3989: the console can request `fix` for an actionable red PR or `review` for a
-        green PR waiting only for Remudero review. This is a HIGH-tier, exact-payload-confirmed
-        action. The handler writes durable intent and returns immediately; the daemon consumes at
-        most one request per poll through its existing `rmd fix` or `rmd review` command path.
-        A successful receipt is intentionally not a worker-start or PR-success claim.
+        green PR waiting only for Remudero review. LOW tier, by W1-T4077's operator ruling
+        (2026-09-22): the route executes nothing and takes no `X-Confirm-Nonce`, so the console's
+        bearer write token (pinned at LOW) reaches it. The handler writes durable intent and
+        returns immediately; the daemon consumes at most one request per poll through its
+        existing `rmd fix` or `rmd review` command path, which keeps its own rails. A successful
+        receipt is intentionally not a worker-start or PR-success claim.
       security:
         - bearerWrite: []
       requestBody:
@@ -7952,11 +8075,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          description: Missing write authority or the required high-tier confirmation nonce.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -9399,7 +9518,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/HighTierForbidden"
+                $ref: "#/components/schemas/HighTierRefusal"
         "404":
           description: No pending consequence with this id exists (`not_found`).
           content:
@@ -9463,7 +9582,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/HighTierForbidden"
+                $ref: "#/components/schemas/HighTierRefusal"
         "409":
           description: "Refused at acceptance (`stage: accept`, with `code` and `detail`) or at execution (a refused `receipt` naming its `code`)."
           content:
@@ -9883,7 +10002,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/HighTierForbidden"
+                $ref: "#/components/schemas/HighTierRefusal"
         "404":
           description: No emergency stop with this id was ever issued (`not_found`, with a `detail`).
           content:
@@ -9964,7 +10083,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/HighTierForbidden"
+                $ref: "#/components/schemas/HighTierRefusal"
 
   /v1/operator-agent/follow-ups:
     get:
@@ -10040,7 +10159,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/HighTierForbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -10953,13 +11072,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          description: >
-            Missing write authority, a token below the HIGH write tier, or (when write tiers are
-            enforced) a missing or unmatched `X-Confirm-Nonce` (`confirm_nonce_required`).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
+          $ref: "#/components/responses/HighTierForbidden"
         "404":
           description: "`not_found` -- no active proposal with this id."
           content:

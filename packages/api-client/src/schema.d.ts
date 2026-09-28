@@ -13,7 +13,7 @@ export interface components {
       required_scope?: "read" | "write";
       /** W1-T4609 -- a human-readable reason accompanying `invalid_request` (400) and a route-level `not_found` (404); the service-level 401/403/404/500 envelopes omit it. */
       detail?: string;
-      /** W1-T404 -- present only on a 403 refused for an insufficient WRITE TIER (once src/lib/service.ts's `enforceWriteTiers` is turned on; not yet set by `rmd serve`'s own production wiring). `low` (bookkeeping), `middle` (reversible but disruptive, or a spend force multiplier) or `high` (spends money or moves code) -- the tier the caller's token was missing, alongside `required_scope: write`. */
+      /** W1-T404 -- present only on a 403 refused for an insufficient WRITE TIER by src/lib/service.ts's dispatch gate, which `enforceWriteTiers` turns on and `rmd serve`'s production wiring sets (W1-T500). `low` (bookkeeping), `middle` (reversible but disruptive, or a spend force multiplier) or `high` (spends money or moves code) -- the tier the caller's credential was missing, alongside `required_scope: write`. */
       required_tier?: "low" | "middle" | "high";
     };
     /** One task's projected merge-state, derived from GitHub (src/lib/status.ts's `StatusProjection` -- never written back to plan/tasks.yaml). This is the per-task "live state" the read-only board (W3-T2) renders. */
@@ -111,6 +111,12 @@ export interface components {
       source: "managed-repos";
       repos: (RepoDashboardEntry)[];
     };
+    /** GET /v1/registry's 503 body (src/lib/serve.ts's `buildRegistryRoute`): the repo registry could not be read, or src/lib/instance-registry.ts's `parseInstanceRegistry` refused it. Path-free on purpose -- an fs error embeds the absolute path, so only a code is echoed. A dedicated refusal rather than a member of the shared Error enum, which a consumer switches over exhaustively (packages/daemon-client-smoke). */
+    RegistryUnavailable: {
+      error: "registry_unavailable";
+      /** `unreadable` when the file could not be read, else the parser's `InstanceRegistryErrorCode` (`no_instances_block`, `malformed_line`, `duplicate_instance`, ...). */
+      reason: string;
+    };
     /** W1-T4227 -- GET /v1/registry: the fleet as projects -> repos -> instances, read from the one registry (`.remudero/daemon-instances.yaml`, src/lib/instance-registry.ts). It carries names, repos and instance prefixes ONLY -- never a path, state dir, credential dir, image or token. `drift` is present only when the host's copy is readable and names a different instance set; `hostRegistry` says how that comparison went. */
     RegistryResult: {
       projects: (RegistryProject)[];
@@ -192,7 +198,7 @@ export interface components {
       taskId: string;
       issueUrl: string;
     };
-    /** A bounded operator request to run the established repair or review command against one pull request in this daemon instance. The request is recorded for the daemon's next poll; this HTTP route never starts a worker itself. HIGH-tier confirmation is required by the service before this schema is accepted. */
+    /** A bounded operator request to run the established repair or review command against one pull request in this daemon instance. The request is recorded for the daemon's next poll; this HTTP route never starts a worker itself. The route is LOW tier (W1-T4077), so no confirmation nonce precedes this body. */
     PrActionRequest: {
       action: "fix" | "review";
       prNumber: number;
@@ -220,10 +226,45 @@ export interface components {
       ts: string;
       raw: string;
       attachments: (string)[];
-      origin: "cli" | "ui" | "issue";
-      status: "new" | "grilling" | "proposed" | "accepted" | "rejected";
+      /** src/lib/feedback.ts's `FeedbackOrigin`: a human capture method, or one of the machine-origin shapes `isValidFeedbackOrigin` admits (`issue#<n>`, W1-T57; `alert#<source>-<id>`, W1-T56; `repair#<surface>`, W1-T905; `incident#<sha256>`, W1-T4385) naming the source that produced the entry. */
+      origin: ("cli" | "ui" | "issue") | (string);
+      /** The lifecycle (new -> grilling -> proposed -> accepted/rejected), plus `answered` (W1-T2278): the terminal arm a `grilling` entry reaches once a reply names it, the same write that sets `answered_by`. */
+      status: "new" | "grilling" | "proposed" | "accepted" | "rejected" | "answered";
+      /** W1-T2278 -- the `grilling` entry this entry answers, when captured through POST /v1/feedback's `replyTo`; null otherwise. */
+      reply_to?: string | null;
+      /** W1-T2278 -- the reverse edge of `reply_to`: the id of the entry that answered this one, set in the same write that moves it to `answered`; null or absent otherwise. */
+      answered_by?: string | null;
+      /** W1-T2496 -- the escalation thread this entry replies to, via POST /v1/escalation/reply; a different edge than `reply_to`. Null when none. */
+      thread_id?: string | null;
+      /** W1-T2302 -- the console-minted per-submission key a repeat of the same submit is recognised by. Null when none was supplied. */
+      submission_key?: string | null;
       /** Set once `rmd triage` opens a proposal PR for this entry; null until then. */
       proposal_pr: string | null;
+      /** W1-T313 -- src/lib/feedback.ts's `DecisionSummary`, the plain-language decision card generated once when the entry moves to `proposed`; null until then or on a summarizer failure. */
+      summary?: {
+        headline: string;
+        what_happened: string;
+        decision: string;
+        options: ({
+          label: string;
+          consequence: string;
+        })[];
+      } | null;
+      /** W1-T350 -- src/lib/feedback.ts's `FeedbackExpansion`, attached at capture from the console's preview; null when no preview ran. */
+      expansion?: {
+        claim: string;
+        evidence: string;
+        recon: (string)[];
+        falsifying_check: string;
+      } | null;
+      /** W1-T397 -- present only when a home-repo pointer is configured and this checkout is not the home repo: whether the entry's upstream PR landed. */
+      upstream?: {
+        /** `owner/repo` of the configured home repo. */
+        home: string;
+        status: "landed" | "unreachable";
+        pr_url?: string;
+        error?: string;
+      };
       /** GET /v1/feedback only (W1-T257): true when this `proposed` entry's proposal_pr merge state could not be read (GitHub outage) -- the row is kept, never dropped. Never written to plan/feedback/<id>.yaml; a read-time decoration only. */
       unverified?: boolean;
       /** GET /v1/feedback only (W1-T1257): true when every task this entry filed (`origin: feedback#<id>`) is credited MERGED -- the work the proposal produced has shipped, even though `status` still names a decision about the proposal itself. Derived fresh on every read, like `unverified` above; never written to plan/feedback/<id>.yaml and never auto-advances `status` -- whether a discharged entry should advance stays a human call. */
@@ -1253,14 +1294,6 @@ export interface components {
     };
     OperatorAgentConsequencePreflightRequest: {
       action: OperatorAgentConsequenceAction;
-    };
-    /** A 403 on a HIGH-tier write route (W1-T404). `forbidden` is src/lib/service.ts's scope/tier gate: `required_scope` names the missing scope, and `required_tier` is present when the credential's write tier is too low -- the bearer write token is pinned at LOW, so it never reaches a HIGH route. `confirm_nonce_required` is the same dispatcher refusing a request whose X-Confirm-Nonce is absent or was not issued by POST /v1/confirm for this exact method, path and payload (POST /v1/operator-agent/consequences/decision's handler also refuses a missing nonce itself, naming the `consequenceId`). */
-    HighTierForbidden: {
-      error: "forbidden" | "confirm_nonce_required";
-      required_scope?: "read" | "write";
-      required_tier?: "low" | "middle" | "high";
-      /** Present only on the consequence decision handler's own missing-nonce refusal. */
-      consequenceId?: string;
     };
     /** One recorded decision on a pending consequence (src/lib/operator-agent.ts's `ConsequenceDecisionReceipt`). */
     OperatorAgentConsequenceReceipt: {
@@ -2433,11 +2466,13 @@ export interface components {
       error: "bad-request" | "forged" | "expired" | "already-used" | "invalid_request" | "unavailable";
       detail: string;
     };
-    /** The 403 body a HIGH-tier write returns from src/lib/service.ts's dispatch gate, before its handler runs. `forbidden` -- the credential lacks write scope (`required_scope`) or its granted write tier is below HIGH (`required_tier: high`; the bearer write token is pinned at LOW, so only a stepped-up operator session reaches HIGH). `confirm_nonce_required` -- the tier was granted but no `X-Confirm-Nonce` was presented, or the nonce was unknown, expired (5 minutes), already spent, or bound to a different method, path or raw body. */
+    /** The 403 body a HIGH-tier write returns from src/lib/service.ts's dispatch gate, before its handler runs. `forbidden` -- the credential lacks write scope (`required_scope`) or its granted write tier is below HIGH (`required_tier: high`; the bearer write token is pinned at LOW, so only a stepped-up operator session reaches HIGH). `confirm_nonce_required` -- the tier was granted but no `X-Confirm-Nonce` was presented, or the nonce was unknown, expired (5 minutes), already spent, or bound to a different method, path or raw body. W1-T4642 folded W1-T4612's `HighTierForbidden` schema into this one: the two differed only by `consequenceId`. */
     HighTierRefusal: {
       error: "forbidden" | "confirm_nonce_required";
       required_scope?: "read" | "write";
       required_tier?: "low" | "middle" | "high";
+      /** Present only on POST /v1/operator-agent/consequences/decision's own missing-nonce refusal, naming the pending consequence it refused. */
+      consequenceId?: string;
     };
     /** POST /v1/confirm's body (src/lib/service.ts's `validateConfirmNonceRequest`) -- names the exact HIGH-tier call the returned nonce will authorize. The nonce is consumed only by a request whose method, path and RAW body bytes equal these fields exactly. */
     ConfirmNonceRequest: {
@@ -2775,7 +2810,7 @@ export interface paths {
           "200": RegistryResult;
           "401": Error;
           "403": Error;
-          "503": Error;
+          "503": RegistryUnavailable;
         };
     };
   };
@@ -2838,7 +2873,7 @@ export interface paths {
           "200": ApproveManualResult;
           "400": Error;
           "401": Error;
-          "403": Error;
+          "403": HighTierRefusal;
           "404": Error;
         };
     };
@@ -3360,7 +3395,7 @@ export interface paths {
           "200": OperatorAgentConsequenceDecisionResult;
           "400": Error;
           "401": Error;
-          "403": HighTierForbidden;
+          "403": HighTierRefusal;
           "404": OperatorAgentConsequenceDecisionRefusal;
           "409": OperatorAgentConsequenceDecisionRefusal;
         };
@@ -3372,7 +3407,7 @@ export interface paths {
           "200": OperatorAgentDelegationHandoffResult;
           "400": Error;
           "401": Error;
-          "403": HighTierForbidden;
+          "403": HighTierRefusal;
           "409": OperatorAgentDelegationHandoffRefusal;
           "423": EmergencyStopAdmissionRefusal;
         };
@@ -3506,7 +3541,7 @@ export interface paths {
           "200": EmergencyStopClearResult;
           "400": Error;
           "401": Error;
-          "403": HighTierForbidden;
+          "403": HighTierRefusal;
           "404": Error;
           "409": EmergencyStopClearRefusal;
         };
@@ -3527,7 +3562,7 @@ export interface paths {
           "201": EmergencyStopIssueResult;
           "400": Error;
           "401": Error;
-          "403": HighTierForbidden;
+          "403": HighTierRefusal;
         };
     };
   };
@@ -3556,7 +3591,7 @@ export interface paths {
           "200": RunSkillResult;
           "400": Error;
           "401": Error;
-          "403": Error;
+          "403": HighTierRefusal;
           "404": Error;
         };
     };
@@ -3813,7 +3848,7 @@ export interface paths {
           "200": InboxProposalStartedResult;
           "400": Error;
           "401": Error;
-          "403": Error;
+          "403": HighTierRefusal;
           "404": InboxRefusal;
           "409": InboxRefusal;
         };
