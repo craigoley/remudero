@@ -76,21 +76,29 @@ test("a cash attempt that received no response names that reason", async () => {
   assert.equal(result.servedModelReason, CASH_SERVED_MODEL_REASONS.noResponse);
 });
 
-test("a Foundry Opus cash response records the model its message names", async () => {
+async function runFoundry(stopReason: string) {
   const f = cashFixture();
   try {
-    const result = await spawnOpenWeightWorker({
+    return await spawnOpenWeightWorker({
       cwd: f.root, workerHome: join(f.root, "home"), prompt: "classify", cashSqueezed: true,
       env: { RMD_FOUNDRY_CLAUDE_API_KEY: "test-only-key", RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://foundry.example.test/anthropic" },
       clock: fixedClock(NOW),
       fetchImpl: async () => new Response(JSON.stringify({
-        id: "msg-1", model: "claude-opus-5-5-20260920", stop_reason: "end_turn",
+        id: "msg-1", model: "claude-opus-5-5-20260920", stop_reason: stopReason,
         content: [{ type: "text", text: "done" }], usage: { input_tokens: 10, output_tokens: 4 },
       }), { status: 200 }),
     }, f.config, { model: "claude-opus-5-5", effort: "medium" });
-    assert.equal(result.isError, false, result.stderr);
-    assert.equal(result.servedModel, "claude-opus-5-5-20260920");
   } finally { f.cleanup(); }
+}
+
+test("a Foundry Opus cash response records the model its message names, on success and on a failed turn", async () => {
+  const ok = await runFoundry("end_turn");
+  assert.equal(ok.isError, false, ok.stderr);
+  assert.equal(ok.servedModel, "claude-opus-5-5-20260920");
+  // A truncated reply is a failed attempt, but the response that reported it still named its model.
+  const truncated = await runFoundry("max_tokens");
+  assert.equal(truncated.isError, true);
+  assert.equal(truncated.servedModel, "claude-opus-5-5-20260920");
 });
 
 test("a multi-response cash attempt reports a model only when every response named the same one", () => {
