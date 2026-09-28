@@ -62,15 +62,17 @@
     correct; the cost is that nothing says so until CI does.
   acceptance:
     - claim: "an acceptance criterion whose proof passes at the base too is refused when the body is written, not after a build"
-      proof: "unit test: a criterion that passes at base is refused at author time"
+      proof: "grep: a criterion that passes at base is refused at author time in test/plan-pr-author-time-proof.test.ts"
     - claim: "the author-time refusal consults the same base execution the gate uses rather than guessing from the claim's wording"
-      proof: "unit test: the author-time refusal executes against base, never a wording heuristic"
+      proof: "grep: the author-time refusal executes against base, never a wording heuristic in test/plan-pr-author-time-proof.test.ts"
     - claim: "the refusal tells the author to keep the test and withdraw the criterion, never to delete the test"
-      proof: "unit test: the remedy keeps the test and withdraws the criterion"
+      proof: "grep: the remedy keeps the test and withdraws the criterion in test/plan-pr-author-time-proof.test.ts"
     - claim: "a criterion that genuinely discriminates is written through untouched"
-      proof: "unit test: a discriminating criterion is written through untouched"
+      proof: "grep: a discriminating criterion is written through untouched in test/plan-pr-author-time-proof.test.ts"
     - claim: "a diff that can produce no discriminating criterion at all is reported as needing a human, not silently emptied"
-      proof: "unit test: a body with no discriminating criterion asks for a human"
+      proof: "grep: a body with no discriminating criterion asks for a human in test/plan-pr-author-time-proof.test.ts"
+    - claim: "the emitted-body gate calls the shared base-execution refusal predicate"
+      proof: "grep: refuseNonDiscriminatingCriteria( in src/lib/plan-pr-emitter.ts"
   falsifier: |
     Implement the predicate as a regex over the claim's prose and the second assertion goes red --
     which is the specific wrong fix here, because #5843's criteria read like ordinary behaviour
@@ -83,7 +85,22 @@
   # against the base are two files for one concern: what may be written into an acceptance block.
   # Splitting leaves an emitter asking a question no verb answers.
   origin: human
-  files: [src/lib/plan-pr-emitter.ts, src/lib/body-repair.ts]
+  files:
+    - src/lib/plan-pr-emitter.ts
+    - src/lib/body-repair.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts
+    - test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts
+    - test/a-filing-body-never-credits-the-task-it-files.test.ts
+    - test/generated-text-message-standard.test.ts
+    - test/helpers/plan-pr-body-fixture.ts
+    - test/inbox-approve.test.ts
+    - test/plan-pr-author-time-proof.test.ts
+    - test/plan-pr-emitter.test.ts
+    - test/retro-acceptance-block-shape.test.ts
+    - test/skill-draft-ratification.test.ts
+    - test/the-changed-files-block-has-no-production-caller.test.ts
   status: queued
   attempts: 0
   note: |
