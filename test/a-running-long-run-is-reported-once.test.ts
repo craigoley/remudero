@@ -16,6 +16,7 @@ import { appendLedger, rotateLedger } from "../src/lib/ledger.js";
 import { realLedgerFs } from "../src/lib/ledger-union.js";
 import { parseLedger } from "../src/lib/retro.js";
 import { runSweep, type SweepDeps } from "../src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // W1-T4702 — a running-long run was reported on every sweep, not once. `rotateLedger` archives every
 // `run.running_long` row (and all but the newest 200 `cost.anomaly` rows) while the run's own
@@ -31,7 +32,7 @@ function iso(ms: number): string {
 }
 
 function stateDir(): { dir: string; ledgerPath: string } {
-  const dir = mkdtempSync(join(tmpdir(), "running-long-once-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}running-long-once-`));
   return { dir, ledgerPath: join(dir, "ledger.ndjson") };
 }
 
