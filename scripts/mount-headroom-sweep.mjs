@@ -197,8 +197,8 @@ export function redispatchedRunIds(allRuns) {
 }
 
 /**
- * Group SETTLED runs by `task_class` (`"unknown"` for none) and compute per class: turn/cost
- * p50/p90/max, the outcome split, and cost PER COMPLETED TASK (never per run — see this file's header).
+ * Group SETTLED runs by `task_class` (`"unknown"` for none; W1-T4711: a `neverWorked` run is no sample,
+ * only `excludedCount`): turn/cost p50/p90/max, outcome split, cost PER COMPLETED TASK (see the header).
  */
 export function computeClassSweep(runs) {
   const redispatched = redispatchedRunIds(runs);
@@ -211,7 +211,6 @@ export function computeClassSweep(runs) {
   }
   const out = [];
   for (const [taskClass, rs] of byClass) {
-    // W1-T4711: a `neverWorked` run (thrown, refused, backfilled) is no sample of its class.
     const settled = rs.filter((r) => isSettled(r) && !r.neverWorked);
     const excludedCount = rs.filter((r) => isSettled(r) && r.neverWorked).length;
     const turns = settled.map((r) => r.numTurns);
