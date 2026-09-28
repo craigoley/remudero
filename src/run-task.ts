@@ -837,6 +837,7 @@ import {
   reconcileRetroChangesetClaim,
   renderAcceptanceBlock,
   replaceAcceptanceBlock,
+  type PlanPrBodyOpts,
 } from "./lib/plan-pr-emitter.js";
 import {
   findTaskShard,
@@ -42021,6 +42022,7 @@ export async function planCommand(
       intro: `rmd plan --mode=${mode} proposed plan-only changes.`,
       criteria: filingAcceptanceCriteria(reservedIds, planPrFiles),
       changedFiles: planPrFiles,
+      proofCwd: worktreePath,
     });
     gitPushRunBranch(worktreePath);
 
@@ -42869,7 +42871,12 @@ export function skillFileApproveCommitMessage(proposalId: string, relPath: strin
 }
 
 /** W1-T4338: the PR body for an approved skill draft — an executable Acceptance proof on the file this PR adds. */
-export function skillFileApprovePrBody(proposalId: string, name: string, relPath: string): string {
+export function skillFileApprovePrBody(
+  proposalId: string,
+  name: string,
+  relPath: string,
+  proofContext: Pick<PlanPrBodyOpts, "baseRef" | "proofCheck" | "proofCwd"> = {},
+): string {
   const filedPaths = [relPath];
   return buildPlanPrBody({
     intro: [
@@ -42880,6 +42887,7 @@ export function skillFileApprovePrBody(proposalId: string, name: string, relPath
     ].join("\n"),
     criteria: [{ claim: `${relPath} is the approved skill draft ${name}`, proof: `grep: name: ${name} in ${relPath}` }],
     changedFiles: filedPaths,
+    ...proofContext,
   });
 }
 
@@ -44047,7 +44055,7 @@ export async function approveCommand(
         assertLiveWriteAllowed("gh-pr-create", `opening a skill PR against ${owner}/${repo}`);
         return createPlanPrRest(ghJson, owner, repo, {
           title: `chore(skill): add approved skill ${classification.skillFile.name} via rmd approve`,
-          body: skillFileApprovePrBody(id, classification.skillFile.name, skillRelPath),
+          body: skillFileApprovePrBody(id, classification.skillFile.name, skillRelPath, { proofCwd: worktreePath }),
           head: branch,
           base: "main",
         }).prUrl;
@@ -44073,6 +44081,7 @@ export async function approveCommand(
         intro,
         criteria: filingAcceptanceCriteria(ids, filedPaths),
         changedFiles: filedPaths,
+        proofCwd: worktreePath,
       });
       assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
       // W1-T903 design (i): REST, not `gh pr create` (GraphQL) — a pure transport swap, since
@@ -44432,6 +44441,7 @@ async function approveBatchCommand(
         intro,
         criteria: filingAcceptanceCriteria(filedIds, filedPaths),
         changedFiles: filedPaths,
+        proofCwd: worktreePath,
       });
       assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
       const created = createPlanPrRest(ghJson, owner, repo, {

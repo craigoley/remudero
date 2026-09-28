@@ -15,7 +15,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { buildPlanPrBody, diffContributesTaskShard, filingAcceptanceCriteria } from "../src/lib/plan-pr-emitter.js";
+import { diffContributesTaskShard, filingAcceptanceCriteria } from "../src/lib/plan-pr-emitter.js";
+import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
 import { extractTaskTrailerId, filingSelfCreditCheck } from "../src/lib/review.js";
 // @ts-expect-error — `scripts/**` sits outside tsconfig's `include`, so this executable .mjs has
 // no declaration output (TS7016). The seam is declared below rather than left as `any`, the same
@@ -46,7 +47,7 @@ function rootWithFiledShard(): { root: string; cleanup: () => void } {
 
 /** The shape a filing flow hands the emitter — including a `taskId`, the very mistake under test. */
 function filingBody(taskId: string | undefined): string {
-  return buildPlanPrBody({
+  return buildFixturePlanPrBody({
     intro: `Files ${FILED_ID}.`,
     criteria: filingAcceptanceCriteria([FILED_ID], [SHARD]),
     changedFiles: [SHARD],
@@ -85,7 +86,7 @@ test("W1-T3362: the emitted filing body passes the acceptance author-time gate",
 });
 
 test("W1-T3362: an implementing body keeps its trailer when the diff adds no shard for that task", () => {
-  const body = buildPlanPrBody({
+  const body = buildFixturePlanPrBody({
     intro: `Implements ${FILED_ID}.`,
     criteria: [{ claim: "the thing works", proof: "unit test: the thing works" }],
     changedFiles: ["src/lib/the-thing.ts", "test/the-thing.test.ts"],
@@ -96,7 +97,7 @@ test("W1-T3362: an implementing body keeps its trailer when the diff adds no sha
   assert.equal(evaluateGate({ body, introducedTaskIds: [] }).defect, undefined);
 
   // No changed-files list at all: nothing says the diff contributes a shard, so the credit stays.
-  const bare = buildPlanPrBody({
+  const bare = buildFixturePlanPrBody({
     intro: `Implements ${FILED_ID}.`,
     criteria: [{ claim: "the thing works", proof: "unit test: the thing works" }],
     taskId: FILED_ID,
@@ -104,7 +105,7 @@ test("W1-T3362: an implementing body keeps its trailer when the diff adds no sha
   assert.equal(extractTaskTrailerId(bare), FILED_ID);
 
   // A shard for a DIFFERENT task in the diff is not this task's record; a prefix of another id is not either.
-  const other = buildPlanPrBody({
+  const other = buildFixturePlanPrBody({
     intro: `Implements ${FILED_ID}.`,
     criteria: [{ claim: "the thing works", proof: "unit test: the thing works" }],
     changedFiles: ["plan/tasks.d/W1-T90011-another.yaml", "plan/tasks.d/W1-T1-x.yaml"],
@@ -114,7 +115,7 @@ test("W1-T3362: an implementing body keeps its trailer when the diff adds no sha
 
   // A plan task that merely EDITS its own existing shard still credits itself when the caller says the
   // shard was not added (W1-T1004: some tasks deliver plan text).
-  const edit = buildPlanPrBody({
+  const edit = buildFixturePlanPrBody({
     intro: `Implements ${FILED_ID}.`,
     criteria: [{ claim: "the shard says it", proof: `grep: id: ${FILED_ID} in ${SHARD}` }],
     changedFiles: [SHARD],

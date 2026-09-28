@@ -1177,6 +1177,8 @@ export interface BuildSweepEffectsDeps {
   decideRegisteredFixOwnerRecoveryImpl?: SweepRuntimeFn;
   fixRungCheckoutRefusedErrorImpl?: SweepRuntimeCtor;
   defaultBudgetUsd?: number;
+  /** W1-T3721 — isolates the author-time body proof gate in sweep tests that use synthetic worktrees. */
+  buildPlanPrBodyImpl?: typeof buildPlanPrBody;
 }
 
 export type ReviewDispatchMode =
@@ -1537,6 +1539,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     decideRegisteredFixOwnerRecoveryImpl: decideRegisteredFixOwnerRecovery = requiredSweepRuntime("decideRegisteredFixOwnerRecoveryImpl"),
     fixRungCheckoutRefusedErrorImpl: FixRungCheckoutRefusedError = requiredSweepRuntimeCtor("fixRungCheckoutRefusedErrorImpl"),
     defaultBudgetUsd = 100,
+    buildPlanPrBodyImpl = buildPlanPrBody,
     updatePrBodyImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updatePrBodyImpl"]>>("updatePrBodyImpl"),
   } = deps;
 
@@ -3149,7 +3152,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         assertLiveWriteAllowed("gh-pr-create", `opening the plan-only repair PR for ${taskId}'s shard`);
         const created = createPlanPrRest(ghJsonForBuild, owner, repo, {
           title: `chore(plan): flag a stale proof in ${taskId}'s shard for architect repair`,
-          body: buildPlanPrBody({
+          body: buildPlanPrBodyImpl({
             intro:
               `AUTOMATED PLAN REPAIR (W1-T3390): ${pr.prUrl} is capped and its shared fix budget is ` +
               `spent. Its criterion "${proof0.claim}" declares proof \`${proof0.proof}\`, which review ` +
@@ -3163,6 +3166,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               },
             ],
             changedFiles: [shardRelPath],
+            proofCwd: worktreePath,
           }),
           head: branch,
           base: "main",

@@ -5,12 +5,12 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   CHANGED_FILES_HEADING,
-  buildPlanPrBody,
   changedFilesBlockDrift,
   filingAcceptanceCriteria,
   hasChangedFilesBlock,
   renderChangedFilesBlock,
 } from "../src/lib/plan-pr-emitter.js";
+import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
 
 /**
  * W1-T2550 — `renderChangedFilesBlock` (W1-T2535) had NO production caller at all:
@@ -94,7 +94,7 @@ test("W1-T2550: autonomous rmd plan captures committed files after regeneration 
 test("W1-T2550: the exact composition the wired call site uses (filedPaths fed to both criteria and changedFiles) renders the block", () => {
   const shardRelPaths = ["plan/tasks.d/W1-T9001-example.yaml"];
   const filedPaths = [...shardRelPaths, "MASTER-PLAN.md"];
-  const body = buildPlanPrBody({
+  const body = buildFixturePlanPrBody({
     intro: "Filing W1-T9001.",
     criteria: filingAcceptanceCriteria(["W1-T9001"], filedPaths),
     changedFiles: filedPaths,
@@ -127,7 +127,7 @@ test("W1-T2550: the rendered block is a restatement of filedPaths, never a secon
 
 test("W1-T2550: a block left behind by a later-added file (the source-size-ratchet shape) is caught by changedFilesBlockDrift", () => {
   const filedPathsAtWriteTime = ["plan/tasks.d/W1-T1-a.yaml", "MASTER-PLAN.md"];
-  const body = buildPlanPrBody({
+  const body = buildFixturePlanPrBody({
     intro: "Filing W1-T1.",
     criteria: filingAcceptanceCriteria(["W1-T1"], filedPathsAtWriteTime),
     changedFiles: filedPathsAtWriteTime,
@@ -144,7 +144,7 @@ test("W1-T2550: a block left behind by a later-added file (the source-size-ratch
 test("W1-T2550: buildPlanPrBody with changedFiles omitted is byte-identical to its pre-wiring shape — nothing existing changes", () => {
   const criteria = [{ claim: "W1-T9999 filed as a well-formed plan task shard", proof: "unit test: test/fixture.test.ts" }];
   assert.equal(
-    buildPlanPrBody({ intro: "Filing W1-T9999.", criteria }),
+    buildFixturePlanPrBody({ intro: "Filing W1-T9999.", criteria }),
     "Filing W1-T9999.\n\nAcceptance:\n- W1-T9999 filed as a well-formed plan task shard | unit test: test/fixture.test.ts\n",
   );
 });
