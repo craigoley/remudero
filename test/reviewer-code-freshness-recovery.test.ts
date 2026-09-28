@@ -31,9 +31,9 @@ function pendingReview(): OpenPrView {
   };
 }
 
-function appendWithheldReview(path: string, pr: OpenPrView, freshness: "stale" | "unreadable" = "stale"): void {
+function appendWithheldReview(path: string, pr: OpenPrView, freshness: "stale" | "unreadable" = "stale", at = NOW - 30 * 60_000): void {
   appendLedger(path, {
-    ts: new Date(NOW - 30 * 60_000).toISOString(),
+    ts: new Date(at).toISOString(),
     run_id: "REVIEW-OLD",
     task_id: pr.taskId ?? "",
     step: "review.post_refused",
@@ -45,6 +45,59 @@ function appendWithheldReview(path: string, pr: OpenPrView, freshness: "stale" |
     reason: `reviewer-code freshness ${freshness}`,
   });
 }
+
+test("a completed stale-code refusal releases its own pending status through the fresh-tree runner", async () => {
+  const path = ledgerPath();
+  const pr = {
+    ...pendingReview(),
+    reviewPendingOwnerDead: false,
+    reviewPendingSince: new Date(NOW - 15 * 60_000).toISOString(),
+  };
+  appendWithheldReview(path, pr, "stale", NOW - 10 * 60_000);
+  const posted: number[] = [];
+  await runSweep([pr], sweepDeps(path, posted, {
+    reviewerCodeRecovery: {
+      loadedCodeSha: "older-code",
+      isLoadedCodeAtOrAfter: () => false,
+      freshTreeReviewAvailable: true,
+    },
+  }), DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(posted, [pr.prNumber]);
+
+  const newerPending = { ...pr, reviewPendingSince: new Date(NOW - 5 * 60_000).toISOString() };
+  const afterNewStart: number[] = [];
+  await runSweep([newerPending], sweepDeps(path, afterNewStart, {
+    reviewerCodeRecovery: {
+      loadedCodeSha: "older-code",
+      isLoadedCodeAtOrAfter: () => false,
+      freshTreeReviewAvailable: true,
+    },
+  }), DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(afterNewStart, [], "an earlier refusal does not preempt a newer in-flight review");
+});
+
+test("a fresh-tree recovery stays bounded for five minutes after the refusal", async () => {
+  const path = ledgerPath();
+  const pr = {
+    ...pendingReview(),
+    reviewPendingOwnerDead: false,
+    reviewPendingSince: new Date(NOW - 4 * 60_000).toISOString(),
+  };
+  appendWithheldReview(path, pr, "stale", NOW - 2 * 60_000);
+  const early: number[] = [];
+  const recovery = {
+    loadedCodeSha: "older-code",
+    isLoadedCodeAtOrAfter: () => false,
+    freshTreeReviewAvailable: true,
+  };
+  await runSweep([pr], sweepDeps(path, early, { reviewerCodeRecovery: recovery }), DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(early, []);
+  const disposed = readLedgerLines(path).findLast((line) => line.step === "sweep.disposed");
+  assert.match(String(disposed?.stand_down_reason), /freshness recovery backoff remains inside the 5m/);
+  const later: number[] = [];
+  await runSweep([pr], sweepDeps(path, later, { reviewerCodeRecovery: recovery, now: () => NOW + 4 * 60_000 }), DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(later, [pr.prNumber]);
+});
 
 function sweepDeps(path: string, posted: number[], over: Partial<SweepDeps> = {}): SweepDeps {
   return {
