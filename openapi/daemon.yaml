@@ -8604,13 +8604,17 @@ paths:
 
   /v1/operator-agent/actions/decision:
     post:
-      summary: W1-T3855 -- approve or reject a human-policy action (MIDDLE write tier).
+      summary: W1-T3855 -- approve or reject a human-policy action (HIGH write tier, nonce-confirmed).
       description: >
         Only an action whose approval policy is `human` and that is still pending and unexpired
         can be decided; the first decision stands (`409` afterwards). The decider is the
-        verified request identity, never a body field.
+        verified request identity, never a body field. HIGH write tier (operator ruling
+        2026-09-28): the bearer write token (pinned at LOW) is refused `403`, and a HIGH-tier
+        credential must present an X-Confirm-Nonce minted by POST /v1/confirm for this exact request.
       security:
         - bearerWrite: []
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
       requestBody:
         required: true
         content:
@@ -8625,7 +8629,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/HighTierForbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":

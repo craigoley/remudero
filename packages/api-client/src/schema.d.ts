@@ -3072,7 +3072,7 @@ export interface paths {
           "200": undefined;
           "400": Error;
           "401": Error;
-          "403": Error;
+          "403": HighTierRefusal;
           "404": Error;
           "409": Error;
         };

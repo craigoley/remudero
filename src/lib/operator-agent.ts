@@ -3113,13 +3113,13 @@ export function buildOperatorAgentActionRegisterRoute(deps: OperatorAgentRouteDe
 }
 
 /** POST /v1/operator-agent/actions/decision — the operator approval a `human`-policy action needs.
- *  MIDDLE tier: the shared bearer write token (LOW) cannot approve; a verified operator can. */
+ *  HIGH tier (operator ruling 2026-09-28): a stepped-up operator with a confirm nonce, never the bearer token. */
 export function buildOperatorAgentActionDecisionRoute(deps: OperatorAgentRouteDependencies): Route {
   return {
     method: "POST",
     path: "/v1/operator-agent/actions/decision",
     scope: "write",
-    tier: "middle",
+    tier: "high",
     handler: jsonAction(validateActionDecision, (input, req, res) => {
       const history = requireAction(deps, input.actionId, res);
       if (!history) return;
