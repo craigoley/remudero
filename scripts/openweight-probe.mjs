@@ -17,7 +17,7 @@
 // refused before anything else is parsed, and a resolved key that also appears anywhere in argv is
 // refused before transport. Every byte written to disk or printed passes through redactSecrets, and
 // the recorded request headers carry `[REDACTED]` in place of the key.
-//
+
 // OUTPUT: `--out-dir` is required and is refused inside this repository or inside ANY git work
 // tree, so generated evidence cannot land where it could be committed. Each invocation creates one
 // NEW named session directory (never overwritten) holding a `*` .gitignore, session.json, one
