@@ -1,0 +1,40 @@
+- id: W1-T4641
+  title: "A SECOND PROCESS CAN PARSE THE CONFIG WHILE THE FIRST IS STILL WRITING IT — createOrReadExclusive's EEXIST path reads the file another process just created but has not yet filled, and loadConfig throws Unexpected end of JSON input"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-28: thread audit of dropped follow-ups, verified against origin/main and the live ledger"
+  plan_refs: ["W1-T4574"]
+  files:
+    - src/lib/fs-race-safe.ts
+    - src/lib/config.ts
+    - test/a-reader-never-parses-a-half-written-config.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-27 on core PR 7495's coverage shard 5/8: a test that let `fieldTrialsCommand`
+    fall back to the real `loadConfig()` failed with `SyntaxError: Unexpected end of JSON input` at
+    config.ts's JSON.parse while a parallel test process was creating the default config.
+    `createOrReadExclusive` (src/lib/fs-race-safe.ts) opens with `wx`; the loser reads the path on
+    EEXIST and retries only on ENOENT, so it can read the winner's empty or partial file between its
+    `open(wx)` and its `writeSync`. The test was fixed by injecting config, but the window is real
+    for any two rmd processes starting against a fresh config root, and it will keep surfacing as
+    flaky CI for any test that forgets to inject config.
+  design: |
+    Close the window at the writer or the reader: the creator writes the full default to a temporary
+    file and publishes it with an atomic link/rename (so the path never exists half-written), or the
+    EEXIST reader treats an empty or unparseable file as in-progress and retries a bounded number of
+    times before failing with a named reason. Keep the CodeQL file-system-race posture (no
+    existsSync-then-write).
+  acceptance:
+    - claim: "a reader racing the creator of the default config never parses an empty or partial file: it waits for the complete config or fails with a named reason"
+      proof: "unit test: test/a-reader-never-parses-a-half-written-config.test.ts"
+  falsifier: |
+    Interleave a creator between open(wx) and its write: the reader throws Unexpected end of JSON
+    input.
