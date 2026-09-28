@@ -5,7 +5,7 @@ import { appendLedger, type LedgerLine } from "./ledger.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, realLedgerFs, type LedgerGrepFsDeps, type LedgerRotationMemo } from "./ledger-union.js";
 import { installPolicyPath } from "./policy.js";
 import { gatherRuns, type LedgerRecord, type RunSummary } from "./retro.js";
-import { THROWN_RUN_VERDICT_STAGES } from "./status.js";
+import { isNeverWorkedVerdict } from "./never-worked.js";
 
 /**
  * W1-T931 COST-ANOMALY SENTINEL (fb-1785237559155-feef92, item 4) — see `plan/policy.yaml`'s
@@ -179,13 +179,8 @@ export interface CostAnomalyFinding {
   excludedCount?: number;
 }
 
-/** W1-T4709: a verdict that ended a run which never did any work — a thrown/deferred run's stage
- *  (the set itself, never a copy) or an operator backfill. Its span and cost are setup only. */
-export function isNeverWorkedVerdict(line: LedgerRecord | undefined): boolean {
-  if (!line) return false;
-  if (line.backfilled === true) return true;
-  return typeof line.stage === "string" && THROWN_RUN_VERDICT_STAGES.has(line.stage);
-}
+// W1-T4711: the rule lives in a leaf retro.ts can import too; re-exported so callers stay put.
+export { isNeverWorkedVerdict };
 
 /** W1-T4709: run ids whose FIRST `verdict` row (the one `gatherRuns` reads) never worked. */
 export function neverWorkedRunIds(records: readonly LedgerRecord[]): Set<string> {

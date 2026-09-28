@@ -62,6 +62,8 @@ export interface GardenPlan<C extends string, A extends GardenAction<C>> {
 /** A place to make a pass's changes and land them as one PR. */
 export interface GardenCheckout {
   root: string;
+  /** Landing branch, when a garden reserves a task id before filing its PR. */
+  branch?: string;
   /** Commit the paths and open the PR — always ready for review, never a draft. */
   land: (opts: { paths: string[]; title: string; body: string }) => string | undefined;
   dispose: () => void;

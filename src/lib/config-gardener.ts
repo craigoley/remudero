@@ -82,6 +82,8 @@ export interface ConfigGardenAction extends GardenAction<ConfigGardenClass> {
   exposure: number;
   shadowMetrics: PromotionGuardMetric[];
   shadowObservations: GuardObservation[];
+  /** W1-T4711: `neverWorked` runs kept out of the class sample this action was derived from; absent when none. */
+  excludedCount?: number;
 }
 
 export interface ConfigCanary {
@@ -190,6 +192,19 @@ export function recalibratedBudget(costs: number[]): number {
 }
 
 const settledImplement = (r: RunSummary) => r.type === "implement" && r.verdict !== "incomplete";
+
+/** Settled implement costs per class, `neverWorked` runs skipped and counted per class (W1-T4711):
+ *  a $0 refusal is no sample of what the class costs. */
+export function settledClassCosts(runs: RunSummary[]): { byClass: Map<string, number[]>; excluded: Map<string, number> } {
+  const byClass = new Map<string, number[]>();
+  const excluded = new Map<string, number>();
+  for (const r of runs.filter(settledImplement)) {
+    const key = r.taskClass ?? "unknown";
+    if (r.neverWorked) excluded.set(key, (excluded.get(key) ?? 0) + 1);
+    else byClass.set(key, [...(byClass.get(key) ?? []), r.costUsd]);
+  }
+  return { byClass, excluded };
+}
 
 /** Distinct settled tasks among `runs`, how many merged, and their summed cost. */
 export function cohortOutcome(runs: RunSummary[]): CohortOutcome {
@@ -304,8 +319,7 @@ function shuffled<T>(items: T[], rng: () => number): T[] {
 /** The class whose queued budgets are furthest from its observed costs, as one canary over a random
  *  cohort of them. The cohort is at most half the mismatched shards, so the rest can judge it. */
 export function budgetCandidate(inv: ConfigInventory, rng: () => number): ConfigGardenAction | undefined {
-  const byClass = new Map<string, number[]>();
-  for (const r of inv.runs.filter(settledImplement)) byClass.set(r.taskClass ?? "unknown", [...(byClass.get(r.taskClass ?? "unknown") ?? []), r.costUsd]);
+  const { byClass, excluded } = settledClassCosts(inv.runs);
   let best: { taskClass: string; costs: number[]; budget: number; off: QueuedBudget[] } | undefined;
   for (const [taskClass, costs] of [...byClass].sort(([a], [b]) => a.localeCompare(b))) {
     if (costs.length < BUDGET_MIN_SAMPLES) continue;
@@ -320,11 +334,12 @@ export function budgetCandidate(inv: ConfigInventory, rng: () => number): Config
   const inClass = inv.queued.filter((q) => q.taskClass === best!.taskClass).length;
   const overrun = best.costs.filter((c) => c > best!.budget).length / best.costs.length;
   const cohortPop = population({ kind: "tasks", taskClass: best.taskClass, taskIds: [] });
+  const excludedCount = excluded.get(best.taskClass) ?? 0;
   return {
     class: "recalibrate-budget",
     target: best.taskClass,
     scope: `budget:${best.taskClass}`,
-    reason: `class ${best.taskClass}: p90 of ${best.costs.length} settled implement runs is $${usd(nearestRank(best.costs, 90))}; ${best.off.length} queued shard(s) declare a budget ${Math.round(BUDGET_MIN_CHANGE * 100)}%+ away from $${usd(best.budget)}.`,
+    reason: `class ${best.taskClass}: p90 of ${best.costs.length} settled implement runs is $${usd(nearestRank(best.costs, 90))}; ${best.off.length} queued shard(s) declare a budget ${Math.round(BUDGET_MIN_CHANGE * 100)}%+ away from $${usd(best.budget)}.${excludedCount > 0 ? ` ${excludedCount} never-worked run(s) excluded.` : ""}`,
     edits: cohort.map((q) => ({ path: q.shard, from: q.line, to: `  budget_usd: ${usd(best!.budget)}` })),
     cohort: { kind: "tasks", taskClass: best.taskClass, taskIds: cohort.map((q) => q.id) },
     candidate: `budget_usd ${usd(best.budget)} for ${cohort.length} queued ${best.taskClass} shard(s)`,
@@ -332,6 +347,7 @@ export function budgetCandidate(inv: ConfigInventory, rng: () => number): Config
     exposure: Math.min(1, cohort.length / Math.max(inClass, 1)),
     shadowMetrics: [{ metricName: "shadow_overrun_rate", unit: "fraction", direction: "max", abortThreshold: BUDGET_MAX_SHADOW_OVERRUN }],
     shadowObservations: [{ metricName: "shadow_overrun_rate", value: overrun, denominator: best.costs.length, freshness: "verified", comparisonPopulation: cohortPop, observedAt: inv.nowIso }],
+    ...(excludedCount > 0 ? { excludedCount } : {}),
   };
 }
 

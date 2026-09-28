@@ -97,7 +97,8 @@ test("learnings-v2: the live corpus retains its baseline V1 artifact hash", () =
   // corpus still hashes to the previous pin 316723ed… under this code, so only the data moved.
   // #7245 retired 2 more the same way (the operator again kept the three a test requires active); main's
   // corpus still hashes to the previous pin 715eac5c… under this code, so only the data moved.
-  assert.equal(computeArtifactHash(corpus), "0cc5c5221a558baa29463504859572209fe17cfc5235b9bf2d56d3e55c0279f3");
+  // #7647 retired ledger-corpus-needs-the-resolver without changing its text or the hash algorithm.
+  assert.equal(computeArtifactHash(corpus), "a2dc415af6c4914ff3c219f057b7f8eb2d8a016bd2ad599f5ea5b343fcad3924");
 });
 
 test("learnings-v2: a V1 or legacy artifact carrying origin is refused before trust", () => {

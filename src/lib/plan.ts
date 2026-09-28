@@ -237,15 +237,16 @@ export interface MachineFilingAdmissionContext {
   pathExistsAtBase?: (repoRelPath: string) => boolean;
 }
 
-function isParkedCiLearningProposal(task: Task): boolean {
+function isParkedMachineProposal(task: Task): boolean {
   return (
     task.author_class === "machine" &&
     task.verify === "human" &&
     task.status !== "blocked" &&
     (task.depends_on ?? []).length === 0 &&
-    task.origin?.startsWith("ci-learning:") === true &&
     task.files?.length === 1 &&
-    task.files[0] === "learnings/ci.yaml"
+    ((task.origin?.startsWith("ci-learning:") === true && task.files[0] === "learnings/ci.yaml") ||
+      (task.origin?.startsWith("selector-shadow:") === true && task.files[0] === "src/lib/affected-suites.ts") ||
+      (task.origin?.startsWith("ci-friction:") === true && task.files[0] === "docs/ci-friction-remedies.md"))
   );
 }
 
@@ -929,7 +930,7 @@ export function machineFilingAdmissionViolations(
       `task ${task.id} is not selectable by runnableCandidates under the current releasedIds: ` +
         `task ${task.id} is blocked${task.note ? `: ${task.note}` : ""}`,
     );
-  } else if (task.verify === "human" && !context.releasedIds.has(task.id) && !isParkedCiLearningProposal(task)) {
+  } else if (task.verify === "human" && !context.releasedIds.has(task.id) && !isParkedMachineProposal(task)) {
     reasons.push(
       `task ${task.id} is not selectable by runnableCandidates under the current releasedIds: ` +
         `task ${task.id} is verify:human — not auto-runnable by the proto-runner`,
