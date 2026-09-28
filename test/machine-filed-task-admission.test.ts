@@ -122,6 +122,27 @@ test("W1-T3843: the canonical ci-learning shard is allowed to remain parked for 
   assert.equal(result.violations.some((v) => v.check === "machine-filing-admission"), false);
 });
 
+test("parked selector and CI friction proposals file without becoming auto-runnable", () => {
+  for (const [origin, file] of [
+    ["selector-shadow:abc123:narrow:test/a.test.ts", "src/lib/affected-suites.ts"],
+    ["ci-friction:coverage-ratchet", "docs/ci-friction-remedies.md"],
+  ]) {
+    const filed = task({ author_class: "machine", origin, files: [file] });
+    const result = lintTask(filed, {
+      machineFilingAdmission: {
+        plan: planFor(filed), releasedIds: new Set(), pathExists: () => true,
+      },
+    });
+    assert.equal(result.violations.find((v) => v.check === "machine-filing-admission"), undefined, origin);
+    assert.equal(filed.verify, "human", "the filing exemption does not release the task");
+  }
+  const wrongFile = task({ author_class: "machine", origin: "selector-shadow:abc123:narrow:test/a.test.ts" });
+  const refused = lintTask(wrongFile, {
+    machineFilingAdmission: { plan: planFor(wrongFile), releasedIds: new Set(), pathExists: () => true },
+  });
+  assert.ok(refused.violations.some((v) => v.check === "machine-filing-admission"));
+});
+
 test("W1-T4111: a machine-filed task the plan gardener retired is admitted without a selectability refusal", () => {
   const retired = task({ author_class: "machine", status: "blocked", retirement: "withdrawn", note: "plan gardener: merge into W1-T1" });
   const result = lintTask(retired, {

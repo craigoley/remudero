@@ -422,7 +422,7 @@ export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string,
     `  note: ${q(`W1-T4439 observed ${miss.selection} miss on coverage run ${miss.runId}${miss.prNumber ? ` for PR #${miss.prNumber}` : ""} at ${miss.headSha}: ${edge}. The changed paths are candidate missing edges, not guessed import edges. Inspect the exact head and teach the selector the missing dependency before W1-T4406 narrows CI.`)}`,
     "  acceptance:",
     `    - claim: ${q(`the ${miss.selection} selector includes ${miss.file} when this edge is exercised`)}`,
-    `      proof: ${q(`grep: ${miss.file} in src/lib/affected-suites.ts`)}`,
+    `      proof: ${q(`grep: ${miss.file.replaceAll(".", "\\.")} in src/lib/affected-suites.ts`)}`,
     "",
   ].join("\n");
 }
@@ -456,10 +456,11 @@ export function runSelectorShadowGardener(
     const workspace = deps.openWorkspace();
     try {
       writeAtomic(join(workspace.root, relativePath), contents);
+      const originProof = selectorShadowMissKey(miss).replaceAll(".", "\\.");
       const prUrl = workspace.land({
         paths: [relativePath],
         title: `fix(selector): file missed ${miss.selection} edge for ${miss.file.split("/").at(-1)}`,
-        body: `The W1-T4439 shadow record observed ${miss.selection} miss on run ${miss.runId}: ${changedPaths.length ? changedPaths.join(", ") : miss.headSha} -> ${miss.file}.\n\nThe task is parked for review; W1-T4406 remains gated.\n\nRemudero-Task: ${taskId}`,
+        body: `The W1-T4439 shadow record observed ${miss.selection} miss on run ${miss.runId}: ${changedPaths.length ? changedPaths.join(", ") : miss.headSha} -> ${miss.file}.\n\nThe task is parked for review; W1-T4406 remains gated.\n\n## Acceptance\n\n- claim: the missed selector edge is recorded as a parked task\n  proof: grep: ${originProof} in ${relativePath}`,
       });
       if (!prUrl) throw new Error("selector shadow: task PR was not opened");
       filed.add(selectorShadowMissKey(miss));
