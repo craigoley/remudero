@@ -2,6 +2,7 @@
  *  ledger and LEARNINGS into a structured gather a higher-tier Architect worker then synthesises
  *  into a plan-only PR: generation deterministic here, publication with the gate and the human. */
 
+import { fixDispatchCountsAttributed } from "./workflow-mining.js";
 import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
 // Import the DEFAULT export so a test's `t.mock.method` can intercept the marker's reads and
@@ -2531,13 +2532,7 @@ export const PROCEDURAL_SUCCESS_SIGNALS: ReadonlyArray<ProceduralSuccessSignal> 
 
 /** Count of `fix.dispatch` ledger lines per `run_id` — zero means a run never needed a fix rung. */
 export function fixDispatchCountByRun(records: LedgerRecord[]): Map<string, number> {
-  const out = new Map<string, number>();
-  for (const r of records) {
-    if (r.step !== "fix.dispatch" || !r.run_id) continue;
-    const key = String(r.run_id);
-    out.set(key, (out.get(key) ?? 0) + 1);
-  }
-  return out;
+  return fixDispatchCountsAttributed(records);
 }
 
 /** ONE mined procedural-success candidate — a reusable shape shared by >= `threshold` merged runs. */

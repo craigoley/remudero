@@ -34,3 +34,29 @@ test("the retro's skill drafts carry the workflow mined from successful transcri
   assert.match(draft!.markdown, /Call `Grep`/, "the distinguishing step from the successful transcripts is in the Procedure");
   assert.match(draft!.markdown, /\[src: transcript#P1\]/);
 });
+
+test("a fix round dispatched under the daemon's run id is counted against the run it repaired", async () => {
+  const { fixDispatchCountsAttributed } = await import("../src/lib/workflow-mining.js");
+  const rows = [
+    { ts: "2026-09-20T00:00:00.000Z", run_id: "W1-T4900-1", task_id: "W1-T4900", step: "run.start" },
+    { ts: "2026-09-20T01:00:00.000Z", run_id: "DAEMON-7", task_id: "W1-T4900", step: "fix.dispatch" },
+    { ts: "2026-09-21T00:00:00.000Z", run_id: "W1-T4900-2", task_id: "W1-T4900", step: "run.start" },
+    { ts: "2026-09-21T01:00:00.000Z", run_id: "DAEMON-8", task_id: "W1-T4900", step: "fix.dispatch" },
+    { ts: "2026-09-21T02:00:00.000Z", run_id: "DAEMON-9", task_id: "W1-T4900", step: "fix.dispatch" },
+  ];
+  const counts = fixDispatchCountsAttributed(rows);
+  assert.equal(counts.get("W1-T4900-1"), 1);
+  assert.equal(counts.get("W1-T4900-2"), 2, "each fix round goes to the latest run started before it");
+  assert.equal(counts.get("DAEMON-8"), undefined, "never to the daemon's own run id");
+});
+
+test("a merged run the sweep had to repair is not a clean single strike", () => {
+  const ledgerNdjson = [
+    ...run("C1", "W1-T4820", 1, ["Read"], false),
+    ...run("C2", "W1-T4821", 2, ["Read"], false),
+    JSON.stringify({ ts: "2026-05-02T00:00:05.000Z", run_id: "DAEMON-1", task_id: "W1-T4821", step: "fix.dispatch" }),
+  ].join("\n");
+  const gather = buildGather({ ledgerNdjson, learningsMd: "" });
+  const clean = gather.proceduralCandidates.find((c) => c.signals.includes("clean_single_strike"));
+  assert.ok(!clean || !clean.runIds.includes("C2"), "C2 was repaired by a DAEMON-keyed fix round");
+});
