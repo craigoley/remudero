@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-defects-1790600000"
   plan_refs: [W1-T3116, W1-T2397]
   files: [src/run-task.ts, test/a-sibling-build-that-does-not-exist-does-not-block-dispatch.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-28: needs-human #7432 (circuit breaker). W1-T3116's five runs on 2026-09-27 each passed the

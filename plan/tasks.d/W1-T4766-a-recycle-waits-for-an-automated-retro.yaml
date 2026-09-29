@@ -7,7 +7,7 @@
   risk: high
   band_meaning: span
   plan_refs: [W1-T4197, W1-T4198, W1-T4199]
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator request 2026-09-29: repair self-improvement paths"
   files: [deploy/recycle-container.sh, test/recycle-container.test.ts]

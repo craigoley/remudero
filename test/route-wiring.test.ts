@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { declaredConsoleRoutes } from "./helpers/declared-routes.js";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
+import { OPERATOR_SESSION_HEADER } from "../src/lib/service.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
 import { drainNowFilePath, kickFilePath, pauseFilePath, pendingPrActions, quietHoursFilePath, stopFilePath } from "../src/lib/fleet-control.js";
 import type { Plan } from "../src/lib/plan.js";
@@ -275,6 +277,7 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
 ]);
 
 const COVERED: ReadonlySet<string> = new Set([
+  "POST /v1/control/assistant-action",
   "POST /v1/control/stop",
   "POST /v1/control/resume",
   "POST /v1/control/pause",
@@ -300,6 +303,7 @@ interface Harness {
   ledgerPath: string;
   /** Every issue URL the route asked the gateway to close. */
   closed: string[];
+  operatorSession?: string;
 }
 
 function fakeTraceGithub(): TraceGithub {
@@ -320,7 +324,7 @@ function planOf(): Plan {
  * difference is the whole instrument: a misrooted route writes into the other one and every
  * assertion below notices.
  */
-async function withProductionServer<T>(fn: (h: Harness) => Promise<T>): Promise<T> {
+async function withProductionServer<T>(fn: (h: Harness) => Promise<T>, operator = false): Promise<T> {
   const fleetRoot = mkdtempSync(join(tmpdir(), "rmd-wiring-fleet-"));
   const questionsRoot = mkdtempSync(join(tmpdir(), "rmd-wiring-questions-"));
   const ledgerRoot = mkdtempSync(join(tmpdir(), "rmd-wiring-ledger-"));
@@ -334,6 +338,15 @@ async function withProductionServer<T>(fn: (h: Harness) => Promise<T>): Promise<
 
   const closed: string[] = [];
   const issues: IssueCloser = { close: (url: string) => void closed.push(url) };
+  const issuer = "https://route-wiring.example";
+  const origin = "https://console.route-wiring.example";
+  const signer = operator ? generateKeyPairSync("rsa", { modulusLength: 2048 }) : undefined;
+  const jwk = signer ? { ...signer.publicKey.export({ format: "jwk" }), kid: "route-wiring", alg: "RS256", use: "sig" } : undefined;
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const now = Math.floor(Date.now() / 1000);
+  const header = encode({ alg: "RS256", typ: "JWT", kid: "route-wiring" });
+  const payload = encode({ iss: issuer, sub: "route-wiring-operator", azp: origin, iat: now, nbf: now, exp: now + 300, fva: [120, -1] });
+  const operatorSession = signer ? `${header}.${payload}.${sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), signer.privateKey).toString("base64url")}` : undefined;
 
   const deps: ServeDeps = {
     board: { plan: planOf(), ledgerPath, github: fakeGitHub() },
@@ -354,6 +367,10 @@ async function withProductionServer<T>(fn: (h: Harness) => Promise<T>): Promise<
     // HIGH, so the request must arrive the way the operator's does — over the tailnet, whose
     // grantor declares `writeTier: "high"`.
     identity: { trustedLocalAddress: "127.0.0.1", capability: TAILNET_CAP },
+    ...(operator ? {
+      operatorIdentity: { issuer, allowedOrigins: [origin], operatorUserIds: ["route-wiring-operator"] },
+      operatorIdentityIo: { fetchImpl: (async () => new Response(JSON.stringify({ keys: [jwk] }))) as typeof fetch },
+    } : {}),
     pollMs: 50,
     log: () => {},
   };
@@ -362,7 +379,7 @@ async function withProductionServer<T>(fn: (h: Harness) => Promise<T>): Promise<
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
   try {
-    return await fn({ base: `http://127.0.0.1:${port}`, fleetRoot, questionsRoot, ledgerPath, closed });
+    return await fn({ base: `http://127.0.0.1:${port}`, fleetRoot, questionsRoot, ledgerPath, closed, operatorSession });
   } finally {
     server.close();
   }
@@ -450,6 +467,26 @@ test("every declared write route is either wiring-tested here or listed as expli
 });
 
 // ── 1. STOP — the highest-consequence control ────────────────────────────────
+
+test("POST /v1/control/assistant-action binds a verified operator to the fleet root and ledger", async () => {
+  await withProductionServer(async (h) => {
+    const body = { actionId: "route-wiring-action-01", instance: "core", action: "pause", reason: "reviewed operator hold" };
+    assert.equal((await post(h.base, "/v1/control/assistant-action", body)).status, 403,
+      "a tailnet write grant without a verified operator cannot dispatch an assistant action");
+    const send = () => fetch(`${h.base}/v1/control/assistant-action`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json", [OPERATOR_SESSION_HEADER]: h.operatorSession! },
+      body: JSON.stringify(body),
+    });
+    const first = await send();
+    assert.equal(first.status, 200);
+    const receipt = await first.json();
+    assert.deepEqual(await (await send()).json(), receipt, "the same operator retry gets the stored receipt");
+    assert.ok(existsSync(pauseFilePath(h.fleetRoot)));
+    assert.ok(!existsSync(pauseFilePath(h.questionsRoot)));
+    assert.equal(ledgerSteps(h.ledgerPath).filter((row) => row.step === "panel.pause_requested" && row.assistant_action_id === body.actionId).length, 1);
+  }, true);
+});
 
 test("POST /v1/control/stop writes the stop flag under fleetControlRoot, not questionsRoot", async () => {
   await withProductionServer(async (h) => {

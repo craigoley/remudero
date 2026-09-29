@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 30.00
+  budget_usd: 15.50
   risk: high
   band_meaning: span
   origin: "session: 2026-09-24 release-tag design"

@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-memory-1790600000"
   plan_refs: [W1-T4338]
   files: [src/lib/knowledge-gardener.ts, test/a-retracted-fact-is-pulled-from-what-cites-it.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: learnings have lifecycle states and reverted-PR recall (src/lib/learnings.ts ~1344), but skills, doctrine
