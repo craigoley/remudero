@@ -2,8 +2,9 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
-import { ledgerLivePath, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { systemClock, type Clock } from "./clock.js";
+import { gardenLedgerBucket, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
+import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 
 /**
  * lib/test-gardener.ts (W1-T4112) — the test suite tends itself.
@@ -197,14 +198,14 @@ export function testGardenInventory(repoRoot: string, stateDir: string, probe: T
   return { candidates: [...durationCandidates, ...retierFlakerCandidates(stateDir, probe, committed, testFiles)] };
 }
 
-/** Modification times of everything a pass reads, so an unchanged manifest/proposal/ledger costs a
+/** Modification times of the manifest and proposal, and the ledger's hour bucket, so an unchanged pass costs a
  *  few stats — mirrors {@link import("./plan-gardener.js").planCheapFingerprint}. */
-export function testGardenCheapFingerprint(repoRoot: string, stateDir: string, probe: TestManifestProbe): string {
+export function testGardenCheapFingerprint(repoRoot: string, stateDir: string, probe: TestManifestProbe, clock: Clock = systemClock): string {
   const mtime = (p: string) => (existsSync(p) ? statSync(p).mtimeMs : 0);
   return [
     mtime(join(repoRoot, probe.DEFAULT_MANIFEST_RELATIVE_PATH)),
     mtime(testManifestProposalPath(stateDir)),
-    mtime(ledgerLivePath(stateDir)),
+    gardenLedgerBucket(clock),
   ].join(",");
 }
 
@@ -242,7 +243,7 @@ export function testGardenSpec(deps: GardenerDeps, probe: TestManifestProbe): Ga
       "retier-flaker": "moving a file to the slow tier is judged by retry count — a judgement call on whether it is truly flaky.",
       "shrink-baseline": "shrinking a committed duration downward is judged by the manifest's total baseline size — a judgement call on trusting one fresh measurement.",
     },
-    cheapFingerprint: () => testGardenCheapFingerprint(deps.repoRoot, deps.stateDir, probe),
+    cheapFingerprint: () => testGardenCheapFingerprint(deps.repoRoot, deps.stateDir, probe, deps.clock),
     inventory: () => testGardenInventory(deps.repoRoot, deps.stateDir, probe),
     fingerprint: (inv) => inv.candidates.map((a) => a.target).join(","),
     candidates: (inv) => inv.candidates,
