@@ -2669,12 +2669,12 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       capability: requestedCapability,
     });
 
-    // Captured in its own binding, never re-invoked, so a mid-run answer can reach THIS session's `streamInput`
-    // (W1-T4673). `runQuery(...)` does not spawn yet -- the CLI process spawn is lazy, on the first pull -- so hoisting
-    // it out of the thunk below is free.
-    const liveQuery = runQuery({ prompt: args.prompt, options });
-    const unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
+    let unregisterRunningWorker: (() => void) | undefined;
     try {
+      // A query factory can throw synchronously. Keep its creation inside this cleanup boundary
+      // so a provider refusal cannot leave the watchdog running after the caller catches it.
+      const liveQuery = runQuery({ prompt: args.prompt, options });
+      unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
       const result = await withWorkerGroupTeardown(
         pidRef,
         () =>
