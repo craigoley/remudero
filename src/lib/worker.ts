@@ -384,6 +384,7 @@ export type RoutingRule =
   | "preference-bypassed"
   | "cash-fallback"
   | "cash-opus-fallback"
+  | "cash-sonnet-fallback"
   | "overflow-fallback"
   | "cash-trial";
 
@@ -965,9 +966,11 @@ export interface SpawnWorkerArgs {
   cashSqueezed?: boolean;
   /** Only the blocked-subscription frontier fallback may select paid Foundry Opus. */
   cashOpusEmergency?: boolean;
+  /** W1-T4785: only the blocked-subscription balanced fallback selects Foundry Sonnet, tried first. */
+  cashSonnetEmergency?: boolean;
   /** Set only by the two blocked-auction fallbacks, so the retried spawn records the rule and the
    *  subscription readings that sent it there rather than claiming plain mount affinity. */
-  routingFallback?: { rule: "cash-fallback" | "cash-opus-fallback" | "overflow-fallback"; capacities: ProviderCapacity[] };
+  routingFallback?: { rule: "cash-fallback" | "cash-opus-fallback" | "cash-sonnet-fallback" | "overflow-fallback"; capacities: ProviderCapacity[] };
   /** The cash-simple trial's decision for this run; the cash arm also restricts the cash ladder. */
   routingTrial?: { id: string; arm: string; reason: string; models?: readonly string[] };
   /** Reasoning effort (mount-resolved, §9): 'low'|'medium'|'high'|'xhigh'|'max'. */
@@ -1992,6 +1995,14 @@ export async function runOpenWeightWalkingLadder(
   throw lastRefusal;
 }
 
+/** True when a Foundry Sonnet attempt failed at zero cost, so the Luna ladder may still carry it. */
+function sonnetRefusedBeforeTransport(result: WorkerResult): boolean {
+  if (!result.isError) return false;
+  if ((result.budgetSettledUsd ?? 0) > 0) return false;
+  return result.budgetRefused === true || result.openWeightDeploymentAbsent !== undefined ||
+    (result.budgetReservedUsd ?? 0) === 0;
+}
+
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const releaseWorkerOccupancy = claimWorkerOccupancy();
   try {
@@ -2180,6 +2191,24 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         // serveable cash equivalent, and admit one whose equivalent was never declared.
         const divertTools = args.cashTools ?? args.tools;
         const refusal = cashFallbackRefusal(config, divertTools);
+        // W1-T4785: a squeezed BALANCED task tries Foundry Sonnet 5.5 first; Luna stays the fallback.
+        const sonnetEnv = args.env ?? process.env;
+        if (refusal === undefined && requestedCapability === "balanced" &&
+            sonnetEnv[FOUNDRY_CLAUDE_API_KEY_ENV] && sonnetEnv[FOUNDRY_CLAUDE_ENDPOINT_ENV]) {
+          console.error(JSON.stringify({
+            event: "worker.provider.cash_sonnet_fallback",
+            reason: "no subscription had readable headroom",
+            requested_model: args.model,
+          }));
+          return await spawnWorker({
+            ...args,
+            mountProvider: "cash" as WorkerProviderId,
+            cashSqueezed: true,
+            cashSonnetEmergency: true,
+            routingFallback: { rule: "cash-sonnet-fallback", capacities },
+            ...(divertTools === undefined ? {} : { tools: [...divertTools] }),
+          });
+        }
         if (refusal === undefined) {
           console.error(JSON.stringify({
             event: "worker.provider.cash_fallback",
@@ -2404,6 +2433,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // make the gate stricter.
     const openWeight: OpenWeightModelSelection = args.cashOpusEmergency === true
       ? { model: "claude-opus-5-5", effort: args.effort ?? "medium", capability: "frontier", alternatives: [] }
+      : args.cashSonnetEmergency === true
+      ? { model: "claude-sonnet-5-5", effort: args.effort ?? "medium", capability: "balanced", alternatives: [] }
       : selectOpenWeightModel(
       capabilities,
       args.model,
@@ -2449,6 +2480,21 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         },
       );
       result.selectionAssignmentId = selectionAssignmentId;
+      // W1-T4785: a Sonnet attempt refused before any money moved re-enters as plain cash-fallback so
+      // the Luna ladder carries it; a run that billed is returned as is, never charged twice.
+      if (args.cashSonnetEmergency === true && sonnetRefusedBeforeTransport(result)) {
+        console.error(JSON.stringify({
+          event: "worker.provider.cash_sonnet_fallback_refused",
+          reason: result.budgetRefused ? "foundry claude cap exhausted"
+            : result.openWeightDeploymentAbsent ? "deployment absent" : "refused before transport",
+          next: "cash-fallback",
+        }));
+        return await spawnWorker({
+          ...args,
+          cashSonnetEmergency: false,
+          routingFallback: { rule: "cash-fallback", capacities: args.routingFallback?.capacities ?? [] },
+        });
+      }
       return result;
     } finally {
       reapWorkerHome(workerHomeRoot, workerHome);
