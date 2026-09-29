@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "console issue #1816: a reusable prepared token dispatches each confirmed action again"
   plan_refs: [W1-T4228, W1-T4657]
-  files: [src/lib/panel-actions.ts, src/lib/instance-gateway.ts, src/lib/serve.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/assistant-control-idempotency.test.ts]
+  files: [src/lib/panel-actions.ts, src/lib/instance-gateway.ts, src/lib/serve.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/assistant-control-idempotency.test.ts, test/route-wiring.test.ts, test/every-served-route-is-in-the-contract.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -19,6 +19,8 @@
     retry. Core's approved-action executor already has durable admission for catalogued
     core actions, but the per-instance gateway exposes only direct pause/resume/stop routes.
     A console-local spent-token cache cannot protect restarts or replicas.
+    The existing write-route wiring and served-contract censuses also require explicit
+    positive coverage for the new route family, including registered non-core instances.
   design: |
     Add an instance-rooted, middle-tier assistant-control admission for a stable action ID,
     exact action, reason and target. Bind the ID to a canonical payload and the mounted
