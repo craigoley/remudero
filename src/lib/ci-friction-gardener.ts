@@ -165,10 +165,73 @@ function causeFromDispatchMode(mode: unknown): CiFrictionCause {
   return mode === "merge-conflict" ? { kind: "conflict", name: "merge-conflict" } : { kind: "check", name: typeof mode === "string" ? mode : "unknown" };
 }
 
+/** The one line a red check's log tail names its failure by: the failing test FILE when the log
+ *  names one, else the first failure line with its volatile parts (timestamps, shas, counts)
+ *  removed so two rounds of the same failure share one signature. `undefined` when neither exists. */
+export function ciFailureSignature(logTail: string): string | undefined {
+  const lines = logTail.split("\n");
+  const failing = lines.filter((l) => /not ok|✖|FAIL|fail(?:ed|ure)?\b|Error|refused|BLOCKED/.test(l));
+  // The file a failure line names, else (a stack frame under it) the first file the tail names.
+  for (const l of failing.length > 0 ? [...failing, ...lines] : []) {
+    const file = /(test\/[\w./-]+\.test\.[mc]?[jt]s)/.exec(l)?.[1];
+    if (file) return file;
+  }
+  const first = failing[0]
+    ?.replace(/^\S+\s+\d{4}-\d\d-\d\dT[\d:.]+Z\s*/, "")
+    .replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/g, "")
+    .replace(/\b[0-9a-f]{7,40}\b/g, "")
+    .replace(/\d+/g, "N")
+    .trim();
+  return first ? first.slice(0, 120) : undefined;
+}
+
+/** A refused commit's reason, stripped of its volatile parts, so every round refused the same way
+ *  prices ONE harness cause (`fix_refusal:<reason>`) rather than one per sha. */
+export function refusalReasonKey(reason: unknown): string {
+  if (typeof reason !== "string" || reason.trim() === "") return "commit_refused";
+  return kebabSlug(reason.split(/ — |: /)[0]!.replace(/\b[0-9a-f]{7,40}\b/g, "").replace(/\d+/g, "n"), 60);
+}
+
+/** A matrix check's FAMILY: `coverage-shard (5/8)` and `coverage-shard (5/4)` are one cause, so a
+ *  shard-count change in ci.yml never splits one failure's cost across names. */
+export function ciCheckFamily(check: string): string {
+  return check.replace(/\s*\(\d+\/\d+\)\s*$/, "");
+}
+
+function ciLogCauses(r: LedgerRecord, redByHead: ReadonlyMap<string, string[]>, flaky: ReadonlySet<string>): CiFrictionCause[] {
+  const own = Array.isArray(r.ci_failures)
+    ? (r.ci_failures as Array<{ check?: unknown; signature?: unknown }>).filter((f) => typeof f.check === "string")
+    : [];
+  const failures = own.length > 0
+    ? own.map((f) => ({ check: f.check as string, signature: typeof f.signature === "string" ? f.signature : undefined }))
+    : (typeof r.head_sha === "string" ? redByHead.get(r.head_sha) ?? [] : []).map((check) => ({ check, signature: undefined as string | undefined }));
+  if (failures.length === 0) return [{ kind: "check", name: "ci-log" }];
+  return failures.map(({ check, signature }) => ({
+    kind: "check",
+    name: `ci-log:${kebabSlug(ciCheckFamily(check), 40)}${signature ? `:${kebabSlug(signature, 60)}` : ""}${signature && flaky.has(signature) ? ":flaky" : ""}`,
+  }));
+}
+
+/** `head_sha -> the red checks the sweep saw on it`, from `sweep.disposed` (its `red_checks`, or
+ *  the check its reason names, "<check> failed on <sha>"). */
+function redChecksByHead(records: readonly LedgerRecord[]): Map<string, string[]> {
+  const index = new Map<string, string[]>();
+  for (const r of records) {
+    if (r.step !== "sweep.disposed" || typeof r.head_sha !== "string") continue;
+    const listed = Array.isArray(r.red_checks) ? (r.red_checks as unknown[]).filter((c): c is string => typeof c === "string") : [];
+    const named = typeof r.reason === "string" ? /([^—]+?) failed on [0-9a-f]{7}/.exec(r.reason)?.[1]?.trim() : undefined;
+    const checks = listed.length > 0 ? listed : named ? [named] : [];
+    if (checks.length > 0) index.set(r.head_sha, checks);
+  }
+  return index;
+}
+
 interface RoundBoundary {
   ts: string;
   round?: number;
   cause: CiFrictionCause;
+  /** A round that repaired several red checks at once: its minutes split evenly across them. */
+  split?: CiFrictionCause[];
   /** The round's own worker minutes (`elapsed_ms`, W1-T1219), when the row carries them. */
   elapsed?: number;
   /** The pull request the round's head belongs to, for a run that logged no `pr.opened`. */
@@ -199,14 +262,13 @@ export function headPrIndex(records: readonly LedgerRecord[]): Map<string, numbe
 export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): CiFrictionRound[] {
   const prByRun = runPrIndex(records);
   const prByHead = headPrIndex(records);
-  const refusedRounds = new Map<string, Set<number>>();
-  for (const r of records) {
-    if (r.step === "fix.commit_refused" && typeof r.run_id === "string" && typeof r.round === "number") {
-      const set = refusedRounds.get(r.run_id) ?? new Set<number>();
-      set.add(r.round);
-      refusedRounds.set(r.run_id, set);
-    }
-  }
+  const redByHead = redChecksByHead(records);
+  const flaky = new Set(records.filter((r) => r.step === "test.flake_retry" && typeof r.file === "string").map((r) => r.file as string));
+  // A refusal belongs to the latest dispatch of the same run on the same round: a numbered round
+  // (an implement run) or, for the sweep's "resume"/"fresh" rounds, the same head sha.
+  const roundKey = (r: LedgerRecord): string | undefined =>
+    typeof r.run_id !== "string" ? undefined : typeof r.round === "number" ? `${r.run_id}#${r.round}` : typeof r.head_sha === "string" ? `${r.run_id}@${r.head_sha}` : undefined;
+  const lastDispatch = new Map<string, RoundBoundary>();
   const byRun = new Map<string, RoundBoundary[]>();
   const opens = new Map<string, string>();
   for (const r of records) {
@@ -217,12 +279,21 @@ export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): Ci
     }
     if (r.step === "fix.dispatch") {
       const round = typeof r.round === "number" ? r.round : undefined;
-      const refused = round !== undefined && refusedRounds.get(r.run_id)?.has(round);
-      const cause: CiFrictionCause = refused ? { kind: "fix_refusal", name: "commit_refused" } : causeFromDispatchMode(r.mode);
+      const split = r.mode === "ci-log" ? ciLogCauses(r, redByHead, flaky) : undefined;
       const list = byRun.get(r.run_id) ?? [];
       const elapsed = typeof r.elapsed_ms === "number" && r.elapsed_ms > 0 ? r.elapsed_ms / 60_000 : undefined;
-      list.push({ ts: r.ts, round, cause, elapsed, pr: typeof r.head_sha === "string" ? prByHead.get(r.head_sha) : undefined });
+      const boundary: RoundBoundary = { ts: r.ts, round, cause: causeFromDispatchMode(r.mode), split, elapsed, pr: typeof r.head_sha === "string" ? prByHead.get(r.head_sha) : undefined };
+      list.push(boundary);
       byRun.set(r.run_id, list);
+      const key = roundKey(r);
+      if (key) lastDispatch.set(key, boundary);
+    } else if (r.step === "fix.commit_refused") {
+      const key = roundKey(r);
+      const boundary = key ? lastDispatch.get(key) : undefined;
+      if (boundary) {
+        boundary.cause = { kind: "fix_refusal", name: refusalReasonKey(r.reason) };
+        boundary.split = undefined;
+      }
     } else if (r.step === "fix.base_refreshed") {
       const files = Array.isArray(r.matching_base_files) ? (r.matching_base_files as unknown[]).filter((f): f is string => typeof f === "string") : [];
       const list = byRun.get(r.run_id) ?? [];
@@ -239,7 +310,10 @@ export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): Ci
       const pr = runPr ?? boundary.pr;
       // A gap between two rows of a shared sweep run spans OTHER PRs' work, so it prices nothing.
       const minutes = boundary.elapsed ?? (runPr !== undefined ? minutesBetween(prevTs, boundary.ts) : undefined);
-      if (pr !== undefined && minutes !== undefined) rounds.push({ pr, cause: boundary.cause, minutes, at: boundary.ts });
+      if (pr !== undefined && minutes !== undefined) {
+        const causes = boundary.split ?? [boundary.cause];
+        for (const cause of causes) rounds.push({ pr, cause, minutes: minutes / causes.length, at: boundary.ts });
+      }
       prevTs = boundary.ts;
     }
   }
