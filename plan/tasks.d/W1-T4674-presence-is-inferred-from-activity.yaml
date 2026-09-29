@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-operator-1790600000"
   plan_refs: [W1-T2696]
   files: [src/lib/presence.ts, src/lib/escalate.ts, test/presence-is-inferred-from-activity.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: only `rmd away on|off` (src/lib/escalate.ts ~419-462). Buzz's presence is a lease expiring after 3x the

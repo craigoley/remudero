@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-memory-1790600000"
   plan_refs: []
   files: [src/lib/gate-observations.ts, test/a-repeated-gate-observation-is-one-row.test.ts, src/lib/daemon.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: this Mac's ledger held 799 identical daemon.pause rows against 800 daemon.tick rows; deduplication exists

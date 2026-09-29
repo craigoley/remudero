@@ -6,7 +6,7 @@
   verify: auto
   risk: high
   band_meaning: span
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator request 2026-09-29: repair self-improvement paths; observed PR #7141 canary unmeasurable"
   files: [src/lib/config-gardener.ts, test/worker-config-tends-itself.test.ts]

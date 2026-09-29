@@ -14,7 +14,7 @@
     - src/run-task.ts
     - test/adoption-report-has-a-producer.test.ts
     - test/measurement-cadence-verify-human-fixture.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: PR #7735's coverage shard 2 twice reached its 39-minute limit without a test
