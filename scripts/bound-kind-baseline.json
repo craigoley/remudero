@@ -63,7 +63,6 @@
     "src/lib/worker.ts:ACTIVITY_WALK_ENTRY_CAP",
     "src/lib/worker.ts:REPORT_EXCERPT_CAP",
     "src/lib/worker.ts:STDERR_EXCERPT_CAP",
-    "src/run-task.ts:DEFAULT_PROMOTION_MAX_ENTRIES_PER_CYCLE",
     "src/run-task.ts:DOWN_SAFE_BOUNDARY_ATTEMPTS",
     "src/run-task.ts:DOWN_SAFE_BOUNDARY_DELAY_MS",
     "src/run-task.ts:NPM_CI_TIMEOUT_MS",
