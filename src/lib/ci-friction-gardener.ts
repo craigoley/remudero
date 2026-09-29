@@ -71,11 +71,24 @@ export interface CiFrictionRound {
   pr: number;
   cause: CiFrictionCause;
   minutes: number;
+  /** When the round ended — the recency weight's clock. Absent, the round counts in full. */
+  at?: string;
+}
+
+/** A round this old counts half; one twice as old a quarter. A smooth fade, never a cutoff date,
+ *  so the ranking follows the fleet's CURRENT load and a fixed cause visibly falls. */
+export const CI_FRICTION_HALF_LIFE_MS = 7 * 24 * 3_600_000;
+
+/** The recency weight of a round ending at `at`, seen from `nowMs`. */
+export function ciFrictionRecencyWeight(at: string | undefined, nowMs: number, halfLifeMs = CI_FRICTION_HALF_LIFE_MS): number {
+  const t = at === undefined ? NaN : Date.parse(at);
+  return Number.isFinite(t) ? 0.5 ** (Math.max(0, nowMs - t) / halfLifeMs) : 1;
 }
 
 export interface CiFrictionCausePrice {
   cause: CiFrictionCause;
-  /** PR minutes lost to this cause — the ONLY field this module ranks by. */
+  /** PR minutes lost to this cause, recency-weighted when a clock is given — the ONLY field this
+   *  module ranks by. */
   minutes: number;
   /** How often it fired — reported for context; ranking by this instead of minutes is the
    *  falsifier: a frequent one-minute check must never outrank a rare 25-minute one. */
@@ -87,12 +100,13 @@ export interface CiFrictionCausePrice {
 export function priceCiFrictionCauses(
   ledgerRounds: readonly CiFrictionRound[],
   gateFireRates?: GateFireRateReport,
+  nowMs?: number,
 ): CiFrictionCausePrice[] {
   const rows = new Map<string, { cause: CiFrictionCause; minutes: number; rounds: number; prSet: Set<number>; prs: number }>();
   for (const r of ledgerRounds) {
     const key = ciFrictionCauseKey(r.cause);
     const row = rows.get(key) ?? { cause: r.cause, minutes: 0, rounds: 0, prSet: new Set<number>(), prs: 0 };
-    row.minutes += r.minutes;
+    row.minutes += nowMs === undefined ? r.minutes : r.minutes * ciFrictionRecencyWeight(r.at, nowMs);
     row.rounds += 1;
     row.prSet.add(r.pr);
     rows.set(key, row);
@@ -154,16 +168,36 @@ interface RoundBoundary {
   ts: string;
   round?: number;
   cause: CiFrictionCause;
+  /** The round's own worker minutes (`elapsed_ms`, W1-T1219), when the row carries them. */
+  elapsed?: number;
+  /** The pull request the round's head belongs to, for a run that logged no `pr.opened`. */
+  pr?: number;
+}
+
+/** `head_sha -> pull request`, from any row naming both (the sweep's `sweep.disposed`). The daemon
+ *  sweep's fix rounds share one `DAEMON-*` run id across many PRs and log no `pr.opened`, so the
+ *  head they repaired is the only thing that ties a round to its PR. */
+export function headPrIndex(records: readonly LedgerRecord[]): Map<string, number> {
+  const index = new Map<string, number>();
+  for (const r of records) {
+    if (typeof r.head_sha !== "string" || index.has(r.head_sha)) continue;
+    const pr = typeof r.pr_number === "number" ? r.pr_number : prNumberFromUrl(r.pr_url);
+    if (pr !== undefined) index.set(r.head_sha, pr);
+  }
+  return index;
 }
 
 /**
- * Every `fix.dispatch` / `fix.base_refreshed` round, attributed to a cause and priced by the
- * wall-clock minutes since the run's previous round (or its `pr.opened`, for the first). A round
+ * Every `fix.dispatch` / `fix.base_refreshed` round, attributed to a cause and priced by its own
+ * worker minutes (`elapsed_ms`, dispatch to the round's end) when the row carries them, else the
+ * wall-clock minutes since the run's previous round (or its `pr.opened`, for the first). A sweep
+ * round (a `DAEMON-*` run, no `pr.opened`) is tied to its PR by the head it repaired. A round
  * whose own `fix.commit_refused` fired is priced as `fix_refusal` instead of whatever triggered it
  * — the harness bought no progress that round, which is the waste design point (iv) asks for.
  */
 export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): CiFrictionRound[] {
   const prByRun = runPrIndex(records);
+  const prByHead = headPrIndex(records);
   const refusedRounds = new Map<string, Set<number>>();
   for (const r of records) {
     if (r.step === "fix.commit_refused" && typeof r.run_id === "string" && typeof r.round === "number") {
@@ -185,7 +219,8 @@ export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): Ci
       const refused = round !== undefined && refusedRounds.get(r.run_id)?.has(round);
       const cause: CiFrictionCause = refused ? { kind: "fix_refusal", name: "commit_refused" } : causeFromDispatchMode(r.mode);
       const list = byRun.get(r.run_id) ?? [];
-      list.push({ ts: r.ts, round, cause });
+      const elapsed = typeof r.elapsed_ms === "number" && r.elapsed_ms > 0 ? r.elapsed_ms / 60_000 : undefined;
+      list.push({ ts: r.ts, round, cause, elapsed, pr: typeof r.head_sha === "string" ? prByHead.get(r.head_sha) : undefined });
       byRun.set(r.run_id, list);
     } else if (r.step === "fix.base_refreshed") {
       const files = Array.isArray(r.matching_base_files) ? (r.matching_base_files as unknown[]).filter((f): f is string => typeof f === "string") : [];
@@ -196,13 +231,14 @@ export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): Ci
   }
   const rounds: CiFrictionRound[] = [];
   for (const [runId, list] of byRun) {
-    const pr = prByRun.get(runId);
-    if (pr === undefined) continue;
+    const runPr = prByRun.get(runId);
     const sorted = [...list].sort((a, b) => a.ts.localeCompare(b.ts));
     let prevTs = opens.get(runId) ?? sorted[0]?.ts;
     for (const boundary of sorted) {
-      const minutes = minutesBetween(prevTs, boundary.ts);
-      if (minutes !== undefined) rounds.push({ pr, cause: boundary.cause, minutes });
+      const pr = runPr ?? boundary.pr;
+      // A gap between two rows of a shared sweep run spans OTHER PRs' work, so it prices nothing.
+      const minutes = boundary.elapsed ?? (runPr !== undefined ? minutesBetween(prevTs, boundary.ts) : undefined);
+      if (pr !== undefined && minutes !== undefined) rounds.push({ pr, cause: boundary.cause, minutes, at: boundary.ts });
       prevTs = boundary.ts;
     }
   }
@@ -383,7 +419,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
     },
     inventory: () => {
       const rounds = ciFrictionRoundsFromLedger(sources.ledgerRecords());
-      const priced = priceCiFrictionCauses(rounds, sources.gateFireRates?.());
+      const priced = priceCiFrictionCauses(rounds, sources.gateFireRates?.(), clock.now());
       return { priced, untracked: costliestUntrackedCause(priced, sources.planOrigins()) };
     },
     // The plan's own `origin:` lines decide whether the costliest cause is filed — never a recorded
