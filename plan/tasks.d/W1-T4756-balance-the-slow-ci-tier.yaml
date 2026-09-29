@@ -1,0 +1,59 @@
+- id: W1-T4756
+  title: "Split the slow CI tier into balanced shards while preserving its required verdict"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "main CI test-slow run 36528741046 canceled at its 35-minute job limit on 2026-09-29"
+  plan_refs: [W1-T2904, W1-T3207, W1-T4406]
+  files:
+    - .github/workflows/ci.yml
+    - .github/workflows/ci-gate.yml
+    - src/lib/ci-parity.ts
+    - test/slow-tier-shard-contract.test.ts
+    - test/preflight-ci-parity.test.ts
+    - test/the-slow-tier-runs-on-main.test.ts
+    - test/workflow-single-suite-run.test.ts
+    - test/workflow-playwright-install.test.ts
+    - test/a-slow-tier-suite-is-never-re-measured.test.ts
+    - test/the-full-suite-runs-in-the-merge-queue.test.ts
+    - test/the-test-shards-are-sized-by-wall-time.test.ts
+    - test/ci-sharding.test.ts
+    - test/test-with-retry.test.ts
+    - test/plan-reading-fast-lane-sharding.test.ts
+    - test/every-pr-check-is-required-or-advisory.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: main run 36525660484's test-slow job passed in 34m36s, only 24 seconds
+    below its 35-minute job bound. The next main run, 36528741046, was canceled at
+    35m16s while its slow-tier test command was still producing passing TAP lines.
+    Later main runs queued behind it; repeated merges cannot get a current green main
+    result while this single job sits at the limit. The current manifest lists 97
+    slow-tier files. Its existing duration-balancer splits them into disjoint 48/49-file
+    sets with recorded totals 715855/715821 ms. The canceled run has no completed test
+    summary, so its test verdict is unknown; its active TAP stream shows the wall-clock
+    bound, rather than a reported test failure, stopped this attempt.
+  design: |
+    Use the existing `test-tier-manifest.mjs --run slow --shard <index>/2` selector in
+    two CI jobs on separate runners. Keep one stable, required `test-slow` check as an
+    always-running aggregator that refuses if either shard is absent, canceled, or red.
+    Register the new shard job in CI parity and the check classification without
+    weakening the stable required name. Preserve the push, pull_request, and merge_group
+    test populations, including the source-PR skip ruling. Adapt local CI parity and
+    the existing workflow contract tests to the new job layout.
+    Do not merely raise the 35-minute timeout or silently skip slow files.
+  acceptance:
+    - claim: "both balanced shards cover the slow tier exactly once and the stable verdict fails closed"
+      proof: 'unit test: test/slow-tier-shard-contract.test.ts'
+  falsifier: |
+    Remove either slow shard from the workflow or force it to skip: the stable test-slow
+    aggregator must refuse. A duplicate or omitted manifest file must fail the union
+    test. The unchanged 97-file population must run on main and merge_group.
+  note: |
+    W1-T4756 was reserved on origin by plan-slow-tier-1790653000000 before filing.
