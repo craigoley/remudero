@@ -147,6 +147,7 @@ test("private Field Trials joins terminal cost by assignment and separates API e
     worker_assignment: { id, selected: { model: "claude-sonnet-5-5" } } });
   const rows = [assignment("api"), assignment("subscription"), assignment("without-attempt"),
     { step: "worker.activity", ts: T(10, 1), selection_assignment_id: "api", total_cost_usd: 900 },
+    { step: "worker.attempt", ts: T(10, 1), selection_assignment_id: "api", cost_usd: 0.5, billing_mode: "api" },
     { step: "worker.attempt", ts: T(10, 2), selection_assignment_id: "api", total_cost_usd: 0.25, billing_mode: "api" },
     { step: "worker.attempt", ts: T(10, 3), selection_assignment_id: "subscription", total_cost_usd: 0.75,
       billing_mode: "subscription" }];
@@ -158,6 +159,8 @@ test("private Field Trials joins terminal cost by assignment and separates API e
     nonStarterAssignments, costMissingAssignments, apiCostEstimateUsd, subscriptionNotionalUsd })),
   [{ assignments: 3, attemptReceipts: 2, nonStarterAssignments: 1, costMissingAssignments: 1,
     apiCostEstimateUsd: 0.25, subscriptionNotionalUsd: 0.75 }]);
+  assert.equal(projectFlowRow(rows[4]!, "legacy-cost").costUsd, 0.5,
+    "a legacy terminal cost remains readable, while the newer attempt wins the assignment join");
 });
 
 test("field trials join three repo ledger and GitHub histories with explicit missingness", async () => {
