@@ -35855,6 +35855,12 @@ export type CiAnnotationFetch = (owner: string, repo: string, checkRunId: string
 export type CiJobLogFetch = (owner: string, repo: string, jobId: string) => string;
 
 export const BARE_EXIT_CODE_ANNOTATION = "Process completed with exit code 1";
+/** The runner's own exit line, as GitHub really writes it: any code, with a trailing period. It
+ *  says only THAT a step failed, so it is never evidence of WHY. */
+const BARE_EXIT_CODE_LINE = /^(?:Error: )?Process completed with exit code \d+\.?$/;
+export function isBareExitCodeAnnotation(message: string): boolean {
+  return BARE_EXIT_CODE_LINE.test(message.trim());
+}
 /** PRIMARY CONTROL: per pass, this is the default ceiling on annotation API reads. */
 export const DEFAULT_CI_ANNOTATION_READ_LIMIT = 8;
 
@@ -35879,12 +35885,18 @@ function ciFetchOptions(options: CiAnnotationFetch | CiFailureFetchOptions | und
   };
 }
 
-/** The real annotations read: `gh api` against the endpoint that answers, parsed as JSON. */
+/** The real annotations read: `gh api` against the endpoint that answers, parsed as JSON. Only
+ *  FAILURE-level annotations are kept: every ubuntu-latest job also carries a runner-image
+ *  `notice`, and that notice was being handed to fix workers as the failure. */
 export function defaultCiAnnotationFetch(owner: string, repo: string, checkRunId: string): string[] {
-  const out = ghExec(["api", `repos/${owner}/${repo}/check-runs/${checkRunId}/annotations`, "--jq", ".[].message"],
+  const out = ghExec(["api", `repos/${owner}/${repo}/check-runs/${checkRunId}/annotations`],
     { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
   );
-  return out.split("\n").filter((l) => l.trim() !== "");
+  const annotations = JSON.parse(out) as Array<{ annotation_level?: string; message?: string }>;
+  return annotations
+    .filter((a) => a.annotation_level === "failure" && typeof a.message === "string")
+    .flatMap((a) => (a.message as string).split("\n"))
+    .filter((l) => l.trim() !== "");
 }
 
 /** The real Actions job-log read. This endpoint stayed readable when `gh run view --log` returned zero bytes. */
@@ -35896,25 +35908,54 @@ export function defaultCiJobLogFetch(owner: string, repo: string, jobId: string)
   });
 }
 
+/** GitHub's job-log endpoint stamps every line; every line pattern below is anchored after it. */
+const ACTIONS_LOG_TIMESTAMP = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z ?/;
+/** PRIMARY CONTROL: lines of a failed step's own output kept before each `##[error]` marker. */
+export const CI_STEP_ERROR_CONTEXT_LINES = 8;
+
+/** Each failed step's own last output lines, read back from its `##[error]` marker to the step's
+ *  header. In a job that runs many gates this is what names WHICH gate failed and why. */
+function stepErrorContext(lines: readonly string[]): number[] {
+  const kept: number[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!lines[index].startsWith("##[error]")) continue;
+    let start = index;
+    while (start > 0 && index - start < CI_STEP_ERROR_CONTEXT_LINES && !/^##\[(?:end)?group\]/.test(lines[start - 1])) start -= 1;
+    for (let at = start; at <= index; at += 1) kept.push(at);
+  }
+  return kept;
+}
+
 export function extractCiFailureRegion(log: string, tailLines: number): string {
-  const lines = log.split("\n");
+  const lines = log.split("\n").map((line) => line.replace(ACTIONS_LOG_TIMESTAMP, ""));
   const kept = new Set<number>();
+  const isRetryLine = (line: string) => /FLAKE-RETRY(?:-RECOVERED)?\s*:/.test(line);
   let inTapFailure = false;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     if (/^\s*not ok \d+ - /.test(line)) inTapFailure = true;
     if (inTapFailure) kept.add(index);
     if (inTapFailure && /^\s*\.\.\.\s*$/.test(line)) inTapFailure = false;
-    if (/FLAKE-RETRY(?:-RECOVERED)?\s*:/.test(line)) kept.add(index);
+    if (isRetryLine(line)) kept.add(index);
   }
-  if (kept.size > 0) {
-    return [...kept]
+  const stepErrors = stepErrorContext(lines);
+  // One copy of each retry line: a shard repeats the same one dozens of times.
+  const region = (indexes: Iterable<number>) => {
+    const retrySeen = new Set<string>();
+    return [...new Set(indexes)]
       .sort((a, b) => a - b)
+      .filter((index) => {
+        if (!isRetryLine(lines[index])) return true;
+        const seen = retrySeen.has(lines[index].trim());
+        retrySeen.add(lines[index].trim());
+        return !seen;
+      })
       .slice(-Math.max(1, tailLines))
       .map((index) => lines[index])
       .join("\n")
       .trim();
-  }
+  };
+  if (kept.size > 0) return region([...kept, ...stepErrors]);
   const failingTestsAt = lines.findIndex((line) => /(?:✖|✕|✗|x)\s+failing tests:/i.test(line.trim()));
   if (failingTestsAt >= 0) {
     const summaryAt = lines.findIndex(
@@ -35924,6 +35965,7 @@ export function extractCiFailureRegion(log: string, tailLines: number): string {
     const end = summaryAt >= 0 ? summaryAt : failingTestsAt + tailLines;
     return lines.slice(failingTestsAt, Math.min(end, failingTestsAt + tailLines)).join("\n").trim();
   }
+  if (stepErrors.length > 0) return region(stepErrors);
   return lines.slice(-tailLines).join("\n").trim();
 }
 
@@ -35986,11 +36028,10 @@ export function fetchCiFailures(
       try {
         annotationReads += 1;
         const messages = fetch.fetchAnnotations(owner, repo, jobId).filter((m) => m.trim() !== "");
-        const bareExitOnly =
-          messages.length > 0 &&
-          messages.every((m) => m.trim() === BARE_EXIT_CODE_ANNOTATION || m.trim() === `Error: ${BARE_EXIT_CODE_ANNOTATION}`);
-        if (messages.length > 0 && !bareExitOnly) {
-          logTail = messages.join("\n").split("\n").slice(-tailLines).join("\n");
+        const evidence = messages.filter((m) => !isBareExitCodeAnnotation(m));
+        const bareExitOnly = messages.length > 0 && evidence.length === 0;
+        if (evidence.length > 0) {
+          logTail = evidence.join("\n").split("\n").slice(-tailLines).join("\n");
           logUnavailable = undefined;
           tailSource = "annotations";
           annotationFallback = { outcome: "recovered" };
