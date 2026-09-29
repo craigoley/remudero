@@ -223,7 +223,7 @@ test("coverage validates the tier manifest before Playwright or an instrumented 
 });
 
 test("the required slow job suppresses duplicate plan-reading execution only after exact validation", () => {
-  const slow = (workflow.jobs["test-slow"].steps ?? []).map((step) => step.run ?? "").join("\n");
+  const slow = (workflow.jobs["test-slow-shard"].steps ?? []).map((step) => step.run ?? "").join("\n");
   assert.match(slow, /diff-class\.mjs --changed-files/);
   assert.match(slow, new RegExp(`--select-candidates plan-reading-suites\\.txt --shard 1/${CI_SHARD_COUNT}`));
   assert.match(slow, /plan-reading matrix established/);

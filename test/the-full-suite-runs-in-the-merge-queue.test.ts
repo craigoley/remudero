@@ -145,7 +145,7 @@ test("W1-T4406: the merge group runs the full instrumented suite", () => {
   // test-slow carries no job-level `if:` at all (W1-T4396) and already treats "not pull_request"
   // as its full-suite lane — merge_group falls straight into that existing PUSH-shaped branch, so
   // the slow tier runs on the queue's own commit with no separate wiring or duplicated code.
-  const establishRun = findStep("test-slow", "Establish whether the exact plan-reading matrix owns this diff (W1-T3191)").run!;
+  const establishRun = findStep("test-slow-shard", "Establish whether the exact plan-reading matrix owns this diff (W1-T3191)").run!;
   const established = runStep(establishRun, { GITHUB_EVENT_NAME: "merge_group" });
   assert.equal(established.status, 0, established.out);
   const outputs = Object.fromEntries(
@@ -156,12 +156,12 @@ test("W1-T4406: the merge group runs the full instrumented suite", () => {
   );
   assert.deepEqual(outputs, { class: "PUSH", established: "false" }, "merge_group falls into the same full-suite lane a push already takes");
 
-  const runSlow = findStep("test-slow", "Run the slow tier").run!.replaceAll("${{ steps.plan-reading.outputs.established }}", "false").replaceAll("${{ steps.plan-reading.outputs.class }}", "PUSH");
+  const runSlow = findStep("test-slow-shard", "Run the slow tier").run!.replaceAll("${{ matrix.shard }}", "1").replaceAll("${{ steps.plan-reading.outputs.established }}", "false").replaceAll("${{ steps.plan-reading.outputs.class }}", "PUSH");
   const slow = runStep(runSlow, { GITHUB_EVENT_NAME: "merge_group" });
   assert.equal(slow.status, 0, slow.out);
   assert.equal(
     slow.calls.trim(),
-    "node scripts/test-with-retry.mjs node scripts/test-tier-manifest.mjs --run slow --base HEAD",
+    "node scripts/test-with-retry.mjs node scripts/test-tier-manifest.mjs --run slow --shard 1/2 --base HEAD",
     "the merge queue's own commit must run the full slow tier through the failed-file retry, exactly like a push",
   );
 });

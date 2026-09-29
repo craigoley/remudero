@@ -609,7 +609,7 @@ jobs:
               ;;
           esac
 
-  test-slow:
+  test-slow-shard:
     # W1-T2904: the SLOW tier, split out of the `ci` matrix's file-count sharding, which cannot
     # balance a suite where one file (test/run-task.test.ts, ~58s alone) sits wherever its hash
     # happens to land while most files finish in well under a second. `npm run test:slow` reads
@@ -617,8 +617,12 @@ jobs:
     # heuristic) and runs exactly the files at or above its threshold. It is REQUIRED through
     # ci-gate before the fast shards may exclude those files. It registers on every pull_request
     # event (W1-T1033), so the required context is never silently absent.
-    name: test-slow
+    name: test-slow-shard (${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     # W1-T4396: no job-level if — the push lane runs the slow tier too. W1-T3207 skips it on a
     # SOURCE pull request, so without this the 107 slowest files ran on main nowhere at all. It is
     # its own job, so it never lengthens the fast shards' critical path.
@@ -707,18 +711,38 @@ jobs:
           if [ "${{ steps.plan-reading.outputs.class }}" = "PUSH" ]; then
             # W1-T4396: main's push lane. One bounded failed-file retry, as the fast shards get.
             echo "W1-T4396: push to main — running the slow tier."
-            node scripts/test-with-retry.mjs node scripts/test-tier-manifest.mjs --run slow --base HEAD
+            node scripts/test-with-retry.mjs node scripts/test-tier-manifest.mjs --run slow --shard ${{ matrix.shard }}/2 --base HEAD
           else
-            npm run --silent test:slow -- --base "origin/${GITHUB_BASE_REF}"
+            npm run --silent test:slow -- --shard ${{ matrix.shard }}/2 --base "origin/${GITHUB_BASE_REF}"
           fi
       - name: Upload slow-tier duration evidence (structured Node test events, W1-T3302)
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: test-duration-slow
+          name: test-duration-slow-${{ matrix.shard }}
           path: ${{ runner.temp }}/test-duration
           retention-days: 1
           if-no-files-found: ignore
+
+  test-slow:
+    # Stable required verdict. A matrix failure, cancellation, or skipped shard must never be
+    # reported as a successful slow tier. `always()` registers this check even after an upstream
+    # refusal, and the exact successful matrix result is the only accepted state.
+    name: test-slow
+    needs: [test-slow-shard]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require both slow-tier shards
+        env:
+          SHARD_RESULT: ${{ needs.test-slow-shard.result }}
+        run: |
+          if [ "$SHARD_RESULT" != "success" ]; then
+            echo "test-slow: slow-tier matrix result is '${SHARD_RESULT}'; both shards must succeed."
+            exit 1
+          fi
+          echo "test-slow: both slow-tier shards succeeded."
 
   commitlint:
     # W1-T4399 — ~17 one-minute gates (commitlint, leak-grep, learnings-budget-ratchet,

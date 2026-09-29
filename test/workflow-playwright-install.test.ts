@@ -54,8 +54,8 @@ test("W1-T1027: every playwright-carrying job exists and has exactly one install
   const steps = playwrightInstallSteps(jobs);
   assert.deepEqual(
     steps.map(([jobId]) => jobId).sort(),
-    ["ci", "coverage-ratchet", "test-slow"],
-    "expected `ci`, `coverage-ratchet`, and `test-slow` to carry a playwright install step",
+    ["ci", "coverage-ratchet", "test-slow-shard"],
+    "expected `ci`, `coverage-ratchet`, and `test-slow-shard` to carry a playwright install step",
   );
 });
 
@@ -97,7 +97,7 @@ test("W1-T1027: source-capable jobs retain the exact no-apt install command; cov
   assert.equal(Object.keys(runs).length, 3, "expected exactly three install steps");
   assert.equal(
     runs.ci,
-    runs["test-slow"],
+    runs["test-slow-shard"],
     "the unguarded install steps must stay byte-identical — PR #2150 took the board down on the copy " +
       "that had not been fixed, five minutes after PR #2148 hung on the other",
   );

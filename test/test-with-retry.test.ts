@@ -247,7 +247,7 @@ test("test-with-retry: ci's SOURCE shard reaches the wrapper with its option bef
     3,
     "only ci's SOURCE lane, test-slow's push lane and the coverage lane may name the wrapper directly",
   );
-  assert.match(executable, /node scripts\/test-with-retry\.mjs node scripts\/test-tier-manifest\.mjs --run slow --base HEAD/);
+  assert.match(executable, /node scripts\/test-with-retry\.mjs node scripts\/test-tier-manifest\.mjs --run slow --shard \$\{\{ matrix\.shard \}\}\/2 --base HEAD/);
   // W1-T4398: the coverage lane's call is the uninstrumented-retry mode — never a whole-suite
   // re-run of the instrumented command (the 2026-08-28 ruling).
   const coverageJob = executable.slice(executable.indexOf("\n  coverage-ratchet:\n"), executable.indexOf("\n  coverage-ratchet-required:\n"));
