@@ -3104,6 +3104,29 @@ interface PrOwnerVerdict {
   filesRead: number;
   fix?: PrOwnerFixEvidence;
   sweep?: PrOwnerSweepEvidence;
+  claim?: PrOwnerClaim;
+}
+
+interface PrOwnerClaim {
+  key: string;
+  pid: number;
+  runId: string;
+  stale: boolean;
+}
+
+interface PrOwnerClaimRead {
+  claims: PrOwnerClaim[];
+  unreadable?: string;
+}
+
+function readPrOwnerClaims(inflightDir: string): PrOwnerClaimRead {
+  const { locks, unreadableReason } = readLockFilesFrom(inflightDir);
+  const claims: PrOwnerClaim[] = [];
+  for (const key of locks.filter((k) => k.startsWith(FIX_BRANCH_CLAIM_PREFIX))) {
+    const holder = readInflightLock(inflightDir, key);
+    if (holder) claims.push({ key, pid: holder.pid, runId: holder.run_id, stale: isHolderStale(holder, { isPidAlive: defaultIsPidAlive }) });
+  }
+  return { claims, unreadable: unreadableReason };
 }
 
 interface PrOwnerLedgerRead {
@@ -3190,7 +3213,11 @@ function activeSweepRow(row: Record<string, unknown>): boolean {
   return false;
 }
 
-export function derivePrOwnerVerdict(prNumber: number, corpus: PrOwnerLedgerRead): PrOwnerVerdict {
+export function derivePrOwnerVerdict(
+  prNumber: number,
+  corpus: PrOwnerLedgerRead,
+  claimRead: PrOwnerClaimRead = { claims: [] },
+): PrOwnerVerdict {
   const compressedArchiveCount = corpus.archiveFiles.filter((p) => p.endsWith(".ndjson.gz")).length;
   const corpusNewestTs = stringField(newestLedgerRow(corpus.rows) ?? {}, "ts");
   const base = {
@@ -3228,21 +3255,33 @@ export function derivePrOwnerVerdict(prNumber: number, corpus: PrOwnerLedgerRead
   });
   const latestFix = newestLedgerRow(fixRows);
   const latestSweep = newestLedgerRow(sweepRows);
+  const claimTaskIds = [...taskIds, ...fixRows.map((row) => stringField(row, "task_id")).filter((v): v is string => !!v)];
+  const related = claimRead.claims.filter((c) => claimTaskIds.some((id) => c.key.includes(`run-${id}-`)));
+  const liveClaim = related.find((c) => !c.stale);
+  const staleClaim = related.find((c) => c.stale);
 
-  if (latestFix !== undefined || (latestSweep !== undefined && activeSweepRow(latestSweep))) {
+  if (latestFix !== undefined || liveClaim !== undefined || (latestSweep !== undefined && activeSweepRow(latestSweep))) {
     return {
       ...base,
       verdict: "OWNED",
-      reason: latestFix !== undefined ? "fix.dispatch found for this pull request" : "active sweep disposition found for this pull request",
+      reason: liveClaim !== undefined
+        ? `live fix branch claim held by pid ${liveClaim.pid} (run ${liveClaim.runId})`
+        : latestFix !== undefined ? "fix.dispatch found for this pull request" : "active sweep disposition found for this pull request",
+      ...(liveClaim !== undefined ? { claim: liveClaim } : {}),
       ...(latestFix !== undefined ? { fix: summarizeFixRow(latestFix) } : {}),
       ...(latestSweep !== undefined ? { sweep: summarizeSweepRow(latestSweep) } : {}),
     };
   }
 
+  if (claimRead.unreadable !== undefined) {
+    return { ...base, verdict: "UNKNOWN", reason: `inflight claims unreadable: ${claimRead.unreadable}` };
+  }
+
   return {
     ...base,
     verdict: "FREE",
-    reason: "no fix.dispatch row or active sweep disposition found for this pull request",
+    reason: "no fix.dispatch row or active sweep disposition found for this pull request" +
+      (staleClaim !== undefined ? `; ignored stale branch claim held by dead pid ${staleClaim.pid}` : ""),
     ...(latestSweep !== undefined ? { sweep: summarizeSweepRow(latestSweep) } : {}),
   };
 }
@@ -3261,6 +3300,7 @@ function renderPrOwnerVerdict(v: PrOwnerVerdict): string {
         `strike=${strike}, mode=${v.fix.mode ?? "unknown"}, head=${v.fix.headSha ?? "unknown"}`,
     );
   }
+  if (v.claim) lines.push(`  fix branch claim: ${v.claim.key}, pid=${v.claim.pid}, run=${v.claim.runId}`);
   if (v.sweep) {
     lines.push(
       `  sweep.disposed: ts=${v.sweep.ts ?? "unknown"}, task=${v.sweep.taskId ?? "unknown"}, run=${v.sweep.runId ?? "unknown"}, ` +
@@ -3304,7 +3344,7 @@ export function prOwnerCommand(
       filesRead: 0,
     };
   }
-  (deps.write ?? console.log)(renderPrOwnerVerdict(derivePrOwnerVerdict(prNumber, corpus)));
+  (deps.write ?? console.log)(renderPrOwnerVerdict(derivePrOwnerVerdict(prNumber, corpus, readPrOwnerClaims(join(stateDir, "inflight")))));
   return 0;
 }
 
