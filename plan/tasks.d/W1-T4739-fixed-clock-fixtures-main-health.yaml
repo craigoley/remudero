@@ -1,0 +1,46 @@
+- id: W1-T4739
+  title: "MAIN CI IS RED ON FOUR FIXED-CLOCK FIXTURES — explain their frozen clocks so the expiring-fixture census does not mistake them for wall-clock deadlines"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "main-health audit 2026-09-29: CI run 36508734538 on 4de83b4b failed expiring-fixture-census"
+  plan_refs: [W1-T3272, W1-T3655, W1-T3986]
+  files:
+    - test/follow-up-policy-stale.test.ts
+    - test/follow-up-policy-stops.test.ts
+    - test/review-reuse-discrimination-outcome.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: main CI's ci-shard 1/8 failed on four 2026-09-22 literals that enter the seven-day
+    warning window before their 2026-10-06 crossing. The follow-up tests pass an explicit fixed
+    2026-09-21 evaluation clock. The two review-reuse fixtures call postReview directly, outside
+    the sweep stale-days disposition. Aging only those two lastActivityAt values to 2026-08-01
+    left all nine focused tests green, confirming their result does not depend on that age.
+    The main-branch census correctly blocks; the missing fixture explanations are the defect.
+  design: |
+    Add an expiring-fixture: exempt marker and a precise reason beside each of the four literals.
+    Preserve their dates and the census population. Do not change production stale-days policy,
+    the warning window, the census, or its baseline. Run the three focused suites and the real
+    push-to-main census; deleting a marker must make the census refuse again.
+  acceptance:
+    - claim: "the stale follow-up fixture names its injected evaluation clock"
+      proof: 'grep: expiring-fixture: exempt -- evaluate pins now to 2026-09-21; no wall-clock read in test/follow-up-policy-stale.test.ts'
+    - claim: "the stopped follow-up fixture names its injected fixed clock"
+      proof: 'grep: expiring-fixture: exempt -- fixedClock pins policy evaluation to 2026-09-21 in test/follow-up-policy-stops.test.ts'
+    - claim: "the direct adapterFixture review-reuse case bypasses stale-days disposition"
+      proof: 'grep: expiring-fixture: exempt -- direct postReview adapterFixture bypasses stale-days disposition in test/review-reuse-discrimination-outcome.test.ts'
+    - claim: "the direct run-task adapter review-reuse case bypasses stale-days disposition"
+      proof: 'grep: expiring-fixture: exempt -- direct postReview run-task adapter fixture bypasses stale-days disposition in test/review-reuse-discrimination-outcome.test.ts'
+  falsifier: |
+    Delete either review-reuse exemption or either follow-up exemption and run the main-branch
+    census at the current wall clock: the deleted line must return as an expiring crossing.
+    All three focused suites must remain green with the annotated fixtures.
+  note: |
+    W1-T4739 was reserved on origin by plan-main-expiring-fixtures-1790647000000 before filing.
