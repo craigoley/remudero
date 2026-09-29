@@ -1,7 +1,9 @@
 /**
  * The console's read snapshots: every cached `GET` answers from an in-memory buffer, and compute runs
  * off the request path (stale-while-revalidate). A request only waits on compute when no usable buffer
- * exists (cold, invalidated by a write, or outlived its viewer), and then only under the route budget.
+ * exists (cold, invalidated by a write, or outlived both its viewer and its freshness bound), and then only
+ * under the route budget. `stale` means older than {@link CONSOLE_SNAPSHOT_FRESH_FOR_MS} or a failed refresh;
+ * `refreshing` separately says a newer answer is being computed.
  *
  * - One entry per (reader, url): `/v1/status` carries a per-token recap and `/v1/feedback` a `?status`
  *   filter, so a key without either would hand one reader another's answer.
@@ -42,10 +44,17 @@ export const CONSOLE_SNAPSHOT_MIN_REFRESH_MS: Readonly<Record<string, number>> =
   "/v1/daemon-health": 5_000,
   "/v1/inbox": 10_000,
   "/v1/repos": 10_000,
+  "/v1/repos/summary": 10_000,
   "/v1/feedback": 10_000,
   "/v1/operator-activity": 15_000,
 };
 const DEFAULT_MIN_REFRESH_MS = 2_000;
+/** Per-path freshness bound, for a read whose data moves slower than it refreshes: a seven-day repository
+ *  projection a minute old is not stale. Unlisted paths are fresh for one refresh period plus the budget. */
+export const CONSOLE_SNAPSHOT_FRESH_FOR_MS: Readonly<Record<string, number>> = {
+  "/v1/repos": 300_000,
+  "/v1/repos/summary": 300_000,
+};
 export const CONSOLE_SNAPSHOT_VIEWER_IDLE_MS = 60_000;
 export const COMPUTE_DUTY_DIVISOR = 10;
 const MAX_ENTRIES_PER_ROUTE = 16;
@@ -228,6 +237,8 @@ export interface ConsoleSnapshotCacheOptions {
   setTimer?: (run: () => void, ms: number) => void;
   /** Restores this route's snapshots at creation and persists each changed one, so a restart answers warm. */
   store?: ConsoleSnapshotStore;
+  /** Overrides {@link CONSOLE_SNAPSHOT_FRESH_FOR_MS} for this route. */
+  freshForMs?: number;
 }
 
 interface SnapshotEntry {
@@ -260,6 +271,8 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
   const entries = new Map<string, SnapshotEntry>();
 
   const periodOf = (entry: SnapshotEntry): number => Math.max(minRefreshMs, entry.computeMs * COMPUTE_DUTY_DIVISOR);
+  const freshForOf = (entry: SnapshotEntry): number =>
+    Math.max(periodOf(entry) + budgetMs, options.freshForMs ?? CONSOLE_SNAPSHOT_FRESH_FOR_MS[route.path] ?? 0);
   const viewed = (entry: SnapshotEntry): boolean => clock.now() - entry.lastReadAtMs <= CONSOLE_SNAPSHOT_VIEWER_IDLE_MS;
 
   const entryFor = (req: IncomingMessage): SnapshotEntry => {
@@ -329,7 +342,7 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
 
   /** Fresh means within the period this entry refreshes on; a failed last refresh is never fresh. */
   const stalenessOf = (entry: SnapshotEntry, cached: BufferedRouteResponse | undefined): ConsoleResponseStaleness => {
-    const staleness = responseStaleness(clock.now(), cached?.generatedAtMs, entry.refreshPromise !== undefined, budgetMs, periodOf(entry) + budgetMs, entry.lastError);
+    const staleness = responseStaleness(clock.now(), cached?.generatedAtMs, entry.refreshPromise !== undefined, budgetMs, freshForOf(entry), entry.lastError);
     if (entry.lastError !== undefined && cached) return { ...staleness, status: "stale", stale: true };
     if (entry.restoredFrom !== undefined) return { ...staleness, status: "stale", stale: true, reason: `restored from before a serve restart (code ${entry.restoredFrom})` };
     return staleness;
@@ -365,7 +378,8 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
     entry.lastReq = req;
     const cached = entry.cached;
     const acknowledges = req.headers?.[RECAP_ACK_HEADER] !== undefined;
-    if (!cached || acknowledges || !wasViewed || entry.generation !== generation.current()) {
+    const withinBound = cached !== undefined && clock.now() - cached.generatedAtMs <= freshForOf(entry);
+    if (!cached || acknowledges || !(wasViewed || withinBound) || entry.generation !== generation.current()) {
       await raceRefresh(entry, req, res);
       return;
     }

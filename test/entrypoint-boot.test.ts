@@ -791,7 +791,7 @@ test("W1-T490: the entrypoint's freshness code is the SAME NUMBER as DAEMON_EXIT
   assert.equal(/^DAEMON_EXIT_STALE=(\d+)$/m.test(script.replace(/^DAEMON_EXIT_STALE=\d+$/m, "# gone")), false);
 });
 
-test("idle_starved: supervised entrypoint stays asleep on an empty probe, then wakes on a new PR", () => {
+test("idle_starved: an empty PR board stays quiet, then a new PR wakes within two 300-second pulses", () => {
   const shellCode = readFileSync(SCRIPT, "utf8").match(/^DAEMON_EXIT_IDLE_STARVED=(\d+)$/m);
   assert.equal(Number(shellCode?.[1]), DAEMON_EXIT_IDLE_STARVED, "Node and shell must agree on the idle exit code");
   const origin = makeOrigin();
@@ -828,10 +828,52 @@ test("idle_starved: supervised entrypoint stays asleep on an empty probe, then w
   });
   assert.equal(run.status, 0, run.stderr);
   assert.ok(existsSync(join(home, "Remudero", "state", "woke")), "new PR relaunched the daemon");
-  assert.match(run.stderr, /idle_starved: fake\/remudero-site remains empty/);
-  assert.match(run.stderr, /idle_starved: wake .*probe exit 10/);
+  assert.match(run.stderr, /idle_starved: wake .*pr-board probe exit 10/);
   const ledger = readFileSync(join(home, "Remudero", "state", "ledger.ndjson"), "utf8");
-  assert.equal(ledger.split("daemon.idle_starved.pulse").length - 1, 12, "two 30-minute windows emit six pulses each");
+  assert.equal(ledger.split("daemon.idle_starved.pulse").length - 1, 2, "the second quick probe must wake, not wait for the 30-minute full probe");
+});
+
+test("idle_starved: six empty PR checks still run the full-state probe before the next window", () => {
+  const origin = makeOrigin();
+  mkdirSync(join(origin, "deploy"), { recursive: true });
+  writeFileSync(join(origin, "deploy", "idle-starved-probe.sh"), readFileSync(join(REPO_ROOT, "deploy", "idle-starved-probe.sh")));
+  writeFileSync(join(origin, "bin", "rmd"), [
+    "#!/usr/bin/env bash",
+    'state="$HOME/Remudero/state"',
+    'mkdir -p "$state" "$HOME/Remudero/repos"',
+    'if [ ! -e "$state/first-run" ]; then',
+    '  touch "$state/first-run"',
+    '  git clone -q "$RMD_REPO_URL" "$HOME/Remudero/repos/remudero-site"',
+    `  exit ${DAEMON_EXIT_IDLE_STARVED}`,
+    "fi",
+    'touch "$state/woke"',
+    "exit 0",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  git(origin, ["add", "-A"]);
+  commit(origin, "full idle probe fixture");
+  const home = freshHome();
+  const run = boot(home, origin, {
+    cmd: ["./bin/rmd", "daemon", "--repo", "fake/remudero-site"],
+    env: { RMD_RESTART_THROTTLE_S: "1", GH_TOKEN: "fixture-token" },
+    stubs: {
+      sleep: "#!/usr/bin/env bash\nexit 0\n",
+      gh: [
+        "#!/usr/bin/env bash",
+        'state="$HOME/Remudero/state"',
+        'n=$(wc -l < "$state/pr-probes" 2>/dev/null || echo 0)',
+        'printf "probe\\n" >> "$state/pr-probes"',
+        'if [ "$n" -lt 6 ]; then printf "[]"; else printf "[{\\"number\\":1}]"; fi',
+        "",
+      ].join("\n"),
+    },
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.ok(existsSync(join(home, "Remudero", "state", "woke")));
+  assert.match(run.stderr, /idle_starved: fake\/remudero-site remains empty/, "the sixth probe was full-state, not another PR-only probe");
+  assert.match(run.stderr, /idle_starved: wake .*pr-board probe exit 10/);
+  const ledger = readFileSync(join(home, "Remudero", "state", "ledger.ndjson"), "utf8");
+  assert.equal(ledger.split("daemon.idle_starved.pulse").length - 1, 7);
 });
 
 test("idle_starved: an inbox reply between the Node decision and quiet sleep still wakes the daemon", () => {
@@ -870,7 +912,7 @@ test("idle_starved: an inbox reply between the Node decision and quiet sleep sti
     "the changed inbox must wake before an unchanged GitHub board is consulted");
 });
 
-test("idle_starved: an uncertain remote probe wakes Node without permanently disabling quiet mode", () => {
+test("idle_starved: an unreadable quick PR board wakes after one pulse without disabling quiet mode", () => {
   const origin = makeOrigin();
   mkdirSync(join(origin, "deploy"), { recursive: true });
   writeFileSync(join(origin, "deploy", "idle-starved-probe.sh"), readFileSync(join(REPO_ROOT, "deploy", "idle-starved-probe.sh")));
@@ -900,6 +942,9 @@ test("idle_starved: an uncertain remote probe wakes Node without permanently dis
   });
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stderr, /idle_starved: remote probe uncertain/);
+  const ledger = readFileSync(join(home, "Remudero", "state", "ledger.ndjson"), "utf8");
+  assert.equal(ledger.split("daemon.idle_starved.pulse").length - 1, 1,
+    "an unreadable quick PR check wakes without waiting for the sixth full-state probe");
   assert.equal(readFileSync(join(home, "Remudero", "state", "quiet-flag-after-uncertain-probe"), "utf8"), "1",
     "a transient API failure must not spend the container's ability to return to zero-token idle");
 });

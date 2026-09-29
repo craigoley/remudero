@@ -58,6 +58,23 @@ test("W1-T3385: a verify-human proposal whose shard has MERGED is retired too", 
   assert.equal(c.state, "retired");
 });
 
+test("a closed verify-human task leaves a history item, not a new decision", () => {
+  const closed = { ...task("W1-T1041"), verify: "human" as const, status: "blocked" as const, retirement: "closed" as const };
+  const plan = { tasks: [closed], byId: new Map([[closed.id, closed]]) } as Plan;
+  const c = classifyProposal(proposal("verify-human:W1-T1041"), undefined, ctxWith(plan, []));
+  assert.equal(c.state, "retired");
+  assert.match(c.retiredReason ?? "", /explicitly closed in the plan/);
+  assert.notEqual(classifyProposal(proposal("proof-debt:W1-T1041:0"), undefined, ctxWith(plan, [])).state, "retired",
+    "a closed implementation does not automatically erase a different finding");
+});
+
+test("a merely blocked or absent verify-human task is not silently retired", () => {
+  const blocked = { ...task("W1-T1041"), verify: "human" as const, status: "blocked" as const };
+  const plan = { tasks: [blocked], byId: new Map([[blocked.id, blocked]]) } as Plan;
+  assert.notEqual(classifyProposal(proposal("verify-human:W1-T1041"), undefined, ctxWith(plan, [])).state, "retired");
+  assert.notEqual(classifyProposal(proposal("verify-human:W1-T9999"), undefined, ctxWith(plan, [])).state, "retired");
+});
+
 test("W1-T3385: an UNMERGED task's proposal is untouched — the finding is still live", () => {
   const c = classifyProposal(proposal("proof-debt:W1-T965:3"), undefined, ctxWith(planOf("W1-T965"), []));
   assert.notEqual(c.state, "retired", "retiring a live finding is the expensive direction");

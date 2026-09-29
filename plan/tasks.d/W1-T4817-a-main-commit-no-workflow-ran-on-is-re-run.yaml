@@ -1,0 +1,40 @@
+- id: W1-T4817
+  title: "A MAIN COMMIT NO WORKFLOW RAN ON IS NEVER NOTICED — when two fleet auto-merges land seconds apart GitHub can fire no push event for the first, so CI, the tripwire and the image build never run on it. Detect a main commit with zero workflow runs and dispatch the workflows its paths call for, at main's head"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-29: go with all of those follow ups (missed runs on main)"
+  note: "reservation hand-off: plan-followups-1790712493000 -> plan-followups-1790712493000"
+  plan_refs: [W1-T4809]
+  files: [src/lib/main-run-gaps.ts, src/lib/sweep.ts, .github/workflows/ci.yml, .github/workflows/main-tripwire.yml, test/a-main-commit-no-workflow-ran-on-is-re-run.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-29: main commits 30f3c7b58 (#7823, 15:06) and 9b694d664 (15:24) have zero workflow runs of any
+    kind; `gh run list --commit` is empty and GitHub's activity log for main has no entry moving main to either. Each
+    merged seconds before another fleet auto-merge. The next push's before..after diff excluded them, so path-filtered
+    workflows (acr-build) never saw their changes, and CI's verdict on them exists only through a later commit's run.
+    W1-T4809 covers the image half; this covers detection for every workflow. ci.yml and main-tripwire.yml have no
+    workflow_dispatch trigger today, so nothing can be re-run by hand either.
+  design: |
+    (i) findMainCommitsWithNoRuns (new module) lists recent first-parent main commits and the workflow runs per head
+    sha, and returns the commits with none. A commit is judged only once a later commit's runs exist, which proves
+    the event pipeline had time to deliver.
+    (ii) The sweep dispatches, at main's head (which contains the commit), each workflow whose push paths the commit
+    touches (ci.yml and main-tripwire.yml gain a workflow_dispatch trigger), records main.run_gap.dispatched with the
+    commit, and never dispatches twice for one commit.
+  acceptance:
+    - claim: "a main commit with zero workflow runs is found"
+      proof: 'grep: test("W1-T4817: a main commit with zero workflow runs is found" in test/a-main-commit-no-workflow-ran-on-is-re-run.test.ts'
+    - claim: "the gap dispatches its workflows once, at main's head"
+      proof: 'grep: test("W1-T4817: the gap dispatches its workflows once, at main head" in test/a-main-commit-no-workflow-ran-on-is-re-run.test.ts'
+    - claim: "the sweep calls the gap finder"
+      proof: 'grep: findMainCommitsWithNoRuns( in src/lib/sweep.ts'
+  falsifier: |
+    Treat any main commit as covered by its successor's runs and the first test finds nothing on the 30f3c7b58 shape.

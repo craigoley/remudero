@@ -89,7 +89,7 @@ export type AttentionSourceState = "observed" | "partial" | "unavailable";
 export interface AttentionCensusInput {
   views: ThreadSummaryView[];
   classifications: InboxClassification[];
-  taskFacts: ReadonlyMap<string, { verify: string; repo: string; title: string }>;
+  taskFacts: ReadonlyMap<string, { verify: string; repo: string; title: string; status?: string; retirement?: string }>;
   releasedTaskIds: ReadonlySet<string>;
   releaseReceipts?: ReadonlyMap<string, string>;
   mergedTaskIds?: ReadonlySet<string>;
@@ -108,25 +108,28 @@ export interface AttentionCensusInput {
 export function buildAttentionCensus(input: AttentionCensusInput) {
   const byId = new Map(input.classifications.map((c) => [c.proposalId, c]));
   const visibleIds = new Set(input.views.map((view) => view.proposalId));
-  const releasedHistory: ThreadSummaryView[] = input.classifications.flatMap((c) => {
-    const taskId = /^verify-human:(W\d+-T\d+)$/.exec(c.proposalId)?.[1];
-    if (!taskId || c.state !== "retired" || !input.releasedTaskIds.has(taskId) || visibleIds.has(c.proposalId)) return [];
+  const terminalHistory: ThreadSummaryView[] = input.classifications.flatMap((c) => {
+    const taskId = /^verify-human:(W\d+-T[A-Za-z0-9]+)$/.exec(c.proposalId)?.[1];
+    if (!taskId || c.state !== "retired" || visibleIds.has(c.proposalId)) return [];
+    const task = input.taskFacts.get(taskId);
+    if (!input.releasedTaskIds.has(taskId) && !(task?.status === "blocked" && task.retirement)) return [];
     return [{
       threadId: inboxThreadId(c.proposalId), proposalId: c.proposalId,
-      headline: c.proposalId, snippet: c.retiredReason ?? "Released to the fleet",
+      headline: c.proposalId, snippet: c.retiredReason ?? "Closed in the plan or released to the fleet",
       waitingOn: "daemon" as const, attention: "history" as const,
       lastActivity: null, messageCount: 1, unread: false,
     }];
   });
-  const items = [...input.views, ...releasedHistory].map((view) => {
+  const items = [...input.views, ...terminalHistory].map((view) => {
     const classification = byId.get(view.proposalId);
-    const taskId = /^verify-human:(W\d+-T\d+)$/.exec(view.proposalId)?.[1];
+    const taskId = /^verify-human:(W\d+-T[A-Za-z0-9]+)$/.exec(view.proposalId)?.[1];
     const task = taskId ? input.taskFacts.get(taskId) : undefined;
     const judge = taskId ? input.judgeByTask.get(taskId) : undefined;
     const released = taskId ? input.releasedTaskIds.has(taskId) : false;
     const sourceFacts: Array<{ source: string; detail: string }> = [];
     if (classification) sourceFacts.push({ source: "classification", detail: `${view.proposalId}: ${classification.state}${classification.reasons.length ? `; predicates: ${classification.reasons.map((reason) => reason.predicate).join(", ")}` : ""}` });
     if (task) sourceFacts.push({ source: "plan", detail: `${taskId}: verify: ${task.verify}; repo: ${task.repo}; ${task.title}` });
+    if (task?.status === "blocked" && task.retirement) sourceFacts.push({ source: "plan-lifecycle", detail: `${taskId}: status blocked; retirement ${task.retirement}` });
     if (judge) sourceFacts.push({ source: "judge", detail: `${judge.decision}: ${judge.reason.slice(0, 300)}` });
     if (released) sourceFacts.push({ source: "ledger", detail: input.releaseReceipts?.get(taskId!) ?? `${taskId}: ratify.approved released verify-human` });
     if (taskId && input.mergedTaskIds?.has(taskId)) sourceFacts.push({ source: "githubProjection", detail: `${taskId}: merged task credit observed` });

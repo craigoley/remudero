@@ -1388,3 +1388,15 @@ test("the injected offline gateway is consulted by retroCommand, so no real one 
     else process.env.HOME = savedHome;
   }
 });
+
+test("retroCommand: a real retro spawns no learnings promotion judge (retired 2026-09-29)", async (t) => {
+  // The pass re-judged the same four learnings 352 times in 14 days and nothing read its output.
+  // Each judge was a fresh spawn with an EMPTY tool list; the Architect's own spawn never is.
+  const fx = setupFakeRetroFixture(t);
+  await fx.run(async () => {
+    await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
+    assert.ok(fx.spawnArgs.length > 0, "the Architect itself was spawned, so an empty count below is not vacuous");
+    const judgeSpawns = fx.spawnArgs.filter((args) => Array.isArray(args.tools) && args.tools.length === 0);
+    assert.equal(judgeSpawns.length, 0, "no tool-less promotion judge is spawned");
+  });
+});
