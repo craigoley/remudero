@@ -8,6 +8,7 @@ import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js"
 import { loadPlan, loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { lintTask } from "./task-linter.js";
+import { machineShardHeaderLines } from "./machine-filing.js";
 
 /** W1-T4439: evidence from the full coverage shards before W1-T4406 may narrow PR CI. */
 // PRIMARY CONTROL: a rolling 60-run window holds the first-day rate (~20 failures in 40 runs)
@@ -518,11 +519,7 @@ export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string,
     "  repo: remudero",
     "  depends_on: []",
     "  type: implement",
-    "  verify: human",
-    "  risk: high",
-    "  status: queued",
-    "  attempts: 0",
-    "  author_class: machine",
+    ...machineShardHeaderLines(["src/lib/affected-suites.ts"]),
     `  origin: ${q(origin)}`,
     "  files: [src/lib/affected-suites.ts]",
     `  note: ${q(`W1-T4439 first observed a ${miss.selection} miss on coverage run ${miss.runId}${miss.prNumber ? ` for PR #${miss.prNumber}` : ""} at ${miss.headSha}: ${edge}. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again.`)}`,

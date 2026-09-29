@@ -11,6 +11,7 @@ import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync } fro
 import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { lintTask } from "./task-linter.js";
+import { renderMachineShard } from "./machine-filing.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import type { LedgerRecord } from "./retro.js";
 
@@ -285,32 +286,17 @@ const CI_FRICTION_SLUG_MAX = 72;
 
 /** Render ONE draft as a single-element YAML task list — the shard file's whole contents. */
 export function ciFrictionShardYaml(price: CiFrictionCausePrice, taskId: string): string {
-  const q = (v: string) => JSON.stringify(v);
   const key = ciFrictionCauseKey(price.cause);
   const origin = ciFrictionOrigin(price.cause);
-  const title = `THE CI FRICTION GARDENER'S COSTLIEST UNTRACKED CAUSE — ${key} cost ${price.minutes} PR minute(s) across ${price.rounds} round(s) on ${price.prs} pull request(s), and nothing tracks it`;
-  return [
-    `- id: ${taskId}`,
-    `  title: ${q(title)}`,
-    "  repo: remudero",
-    "  depends_on: []",
-    "  type: implement",
-    // PARKED: isDispatchEligible refuses `verify !== "auto"`, so this waits for a person.
-    "  verify: human",
-    "  risk: low",
-    "  status: queued",
-    "  attempts: 0",
-    // LAW 5: the author class rides the record.
-    "  author_class: machine",
-    `  origin: ${q(origin)}`,
-    "  files:",
-    `    - ${CI_FRICTION_REMEDIES_FILE}`,
-    "  acceptance:",
-    `    - claim: ${q(`the ${key} cause of PR friction has a recorded remedy`)}`,
-    `      proof: ${q(`grep: ${origin} in ${CI_FRICTION_REMEDIES_FILE}`)}`,
-    `  note: ${q(`Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. ${key} priced at ${price.minutes} PR minute(s) across ${price.rounds} round(s) on ${price.prs} pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED AND PARKED — a person decides the remedy, and records it in ${CI_FRICTION_REMEDIES_FILE} naming "${origin}" once it lands.`)}`,
-    "",
-  ].join("\n");
+  // The shared machine-filing path (operator ruling 2026-09-29): the header, verify and risk are its.
+  return renderMachineShard({
+    taskId,
+    title: `THE CI FRICTION GARDENER'S COSTLIEST UNTRACKED CAUSE — ${key} cost ${price.minutes} PR minute(s) across ${price.rounds} round(s) on ${price.prs} pull request(s), and nothing tracks it`,
+    origin,
+    files: [CI_FRICTION_REMEDIES_FILE],
+    acceptance: [{ claim: `the ${key} cause of PR friction has a recorded remedy`, proof: `grep: ${origin} in ${CI_FRICTION_REMEDIES_FILE}` }],
+    note: `Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. ${key} priced at ${price.minutes} PR minute(s) across ${price.rounds} round(s) on ${price.prs} pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in ${CI_FRICTION_REMEDIES_FILE} naming "${origin}" once it lands.`,
+  }).text;
 }
 
 /** Parse rendered shard bytes back and lint them — a record this rung cannot get past the repo's

@@ -3207,3 +3207,69 @@ ledger (all three rotation forms, deduplicated):
   `buildSkillEffectivenessReport`'s RETIRE-CANDIDATE.
 - A rebuilt promotion should judge each entry once per content, and write to a home that more than one
   instance reads.
+
+
+## 2026-09-29 — OPERATOR RULING: an LLM judge in the middle of machine-filed work; the operator RATIFIES it to release
+
+*Operator-authored, recorded at the operator's instruction on 2026-09-29:*
+
+> "Why are they verifying human risk high? They shouldn't be. There should be an LLM judge in the
+> middle deciding what needs that level of escalation and what can be automated. Fix the CI friction
+> gardener so it doesn't make those mistakes or make the rules lighter so that these can flow
+> through… Think deeply and do research to get it right. Innovate as you go."
+
+And on the reviewer: "it's both. Fix the workers and make the judge less strict unless things are
+really risky or broken and require that."
+
+**THIS IS LAW 5's "A JUDGE THE OPERATOR RATIFIED".** `machineAuthorVerifyViolation` (W1-T2977) already
+lets a machine-authored record sit at `verify: auto` when it carries a `proceed` `risk_ruling` pinned to
+itself. This ruling ratifies `src/lib/machine-filing-judge.ts` as the judge that writes those rulings.
+
+- **FILERS NO LONGER CHOOSE `verify:` OR `risk:`.** Every machine filer (ci-friction, selector-shadow,
+  the CI-learning rung, and the feedback landing that carries its drafts) renders the one header in
+  `src/lib/machine-filing.ts`. `verify: human` there means UNJUDGED. `risk:` is read from what the
+  record touches: `high` (with `band_meaning: blast-radius`) only for secrets, auth, permissions, CI,
+  deploy, settings or the operator's own policy and rulings; otherwise `low`.
+- **THE JUDGE RULES, ON THE RECORD.** A daemon pass asks the risk judge about every unjudged or stale
+  machine record and pins the answer as `risk_ruling`. `proceed` → `verify: auto`, dispatchable.
+  `escalate` → stays `verify: human`, pinned, and its reasons are staged in the inbox. The rulings land
+  as one plan-only PR per pass through the ordinary review and merge gates; closing it declines them
+  and the judge does not re-ask until a record changes.
+- **ESCALATE ONLY WHAT IS REALLY RISKY OR BROKEN.** The judge is told: touching secrets, credentials,
+  auth or permissions; deleting data, branches or history; merge, deploy, infrastructure or review
+  policy; an irreversible action; or a finding it cannot verify from what it is shown. Everything else
+  flows — its PR still passes CI and review. A `proceed` the record cannot honour at `verify: auto`
+  (it would fail the linter) is escalated as broken, with the lint reason.
+- **EARNED AUTONOMY, NO FIXED BAR.** Each filer family's record — its merged tasks as credit, the ones
+  a person retired `closed`/`retired` as debit, plus its gardener's Beta credit beyond the Beta(3,1)
+  prior — is shown to the judge and sets the confidence a `low` verdict needs:
+  `1 − (1 − policy threshold) × 2 × mean`. An even record keeps `plan/policy.yaml`'s threshold; a family
+  that keeps helping needs less, one that keeps failing approaches certainty, and both recover as the
+  outcomes move. A `withdrawn` duplicate is neither credit nor debit.
+- **FAIL SAFE.** A judge that throws, times out or returns no verdict writes nothing: the record stays
+  parked, a `machine_judge.unavailable` row names the reason, and the next pass asks again. An outage is
+  never an escalation and never a release.
+- **ON THE RECORD, NOT THE LEDGER — THE PINNED RULING IS THE ONLY RELEASE A MACHINE RECORD GETS.** The
+  verify-human release (2026-09-22) writes `ratify.approved` rows, and the dispatcher reads releases from
+  the LIVE ledger, which rotation caps at 200 rows per step and sheds by age. Measured 2026-09-29: 151
+  task ids carry a release row across the rotations, 76 in the live ledger, so releases silently lapsed
+  and those tasks parked again. No judge releases a machine-authored record by a ledger row from here on:
+  its pinned `risk_ruling` lives in git, cannot be rotated away, and editing the record changes its pin,
+  which re-opens the question. (An operator's own `rmd approve` still writes the ledger row, and is still
+  exposed to the same rotation; that is a separate defect, not changed here.)
+- **THE VERIFY-HUMAN SWEEP HANDS MACHINE RECORDS TO THIS JUDGE.** W1-T3188's judge now routes and
+  releases only operator-authored `verify: human` records, through its existing arm; machine-authored
+  ones are routed (inbox on escalate) and released (pinned ruling) here.
+
+- **SUPERSEDES W1-T4014's "must NOT auto-release".** W1-T4014 (2026-09-22) set as a non-negotiable design
+  constraint that "a rung that released its own proposals would be a machine ruling on guidance" and
+  that "nothing in the path releases a proposal without a person". That constraint predates this ruling
+  and is replaced by it: a release by the judge the operator ratified here IS the release Law 5 allows.
+  W1-T4014's visibility deliverable stands; its "release is never automatic" criterion no longer does and
+  should be amended to "nothing releases a machine proposal except a person or this ratified judge".
+
+**NOT DECIDED HERE:** whether this judge may also release OPERATOR-authored `verify: human` records by
+pinned ruling. They stay on the verify-human sweep's existing path.
+
+Rollback: remove the `machine-judge` garden from the daemon's gardens and revert the filers to the
+literal header; records already pinned stay valid, and reverting any one to `verify: human` parks it.
