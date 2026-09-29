@@ -1,9 +1,11 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { systemClock, type Clock } from "./clock.js";
-import { gardenLedgerBucket, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
+import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
+import { gardenLedgerBucket, runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
+import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 
 /**
@@ -222,15 +224,138 @@ export function applyTestGardenActions(root: string, probe: TestManifestProbe, a
 }
 
 function prBody(actions: TestGardenAction[], probe: TestManifestProbe): string {
-  const proofs = actions.flatMap((a) => [`- claim: ${a.target} records ${a.edit.to}`, `  proof: grep: "${a.edit.key}": ${a.edit.to} in ${a.file}`]);
+  // A first adoption moves every measured row at once (2,094 on 2026-09-29): one bullet and one
+  // proof per row would overrun GitHub's 65,536-character body limit, so the body names the
+  // largest rows and the manifest diff stays the complete record.
+  const largest = [...actions].sort((a, b) => b.edit.to - a.edit.to || a.target.localeCompare(b.target));
+  const listed = largest.slice(0, TEST_GARDEN_BODY_ROWS);
+  const proofs = largest.slice(0, TEST_GARDEN_PROOF_ROWS)
+    .flatMap((a) => [`- claim: ${a.target} records ${a.edit.to}`, `  proof: grep: "${a.edit.key}": ${a.edit.to} in ${a.file}`]);
   return [
     `The test-suite gardener (W1-T4112) tends ${probe.DEFAULT_MANIFEST_RELATIVE_PATH} from its own measurements and the fleet's flake ledger.`,
     "",
-    ...actions.map((a) => `- **${a.class}** \`${a.target}\`: ${a.reason}`),
+    ...listed.map((a) => `- **${a.class}** \`${a.target}\`: ${a.reason}`),
+    ...(actions.length > listed.length ? [`- …and ${actions.length - listed.length} more row(s); the manifest diff is the complete record.`] : []),
     "",
     "## Acceptance",
     ...proofs,
   ].join("\n");
+}
+
+/** How many rows a garden PR body lists, and how many it proves, largest recorded duration first. */
+export const TEST_GARDEN_BODY_ROWS = 25;
+export const TEST_GARDEN_PROOF_ROWS = 5;
+
+/** Where the last adopted CI proposal came from, so an unchanged main run is never downloaded twice. */
+export function testManifestProposalSourcePath(stateDir: string): string {
+  return join(stateDir, "test-tier-manifest-proposal.source.json");
+}
+
+export type TestProposalFeed =
+  | { status: "fresh" | "unchanged"; runId: number }
+  | { status: "absent"; reason: string; runId?: number };
+
+/**
+ * The adoption half W1-T4112 left for a follow-up: CI's flake-retry-aggregate job builds
+ * `test-tier-manifest-proposal` on every main push and keeps it seven days, and nothing ever
+ * fetched it, so ADOPT-DURATIONS and SHRINK-BASELINE had no input and the gardener never acted.
+ * This copies the newest successful main run's proposal into {@link testManifestProposalPath}.
+ * `gh run download` unpacks the artifact itself, so no zip is parsed here.
+ */
+export async function refreshTestManifestProposalAsync(
+  owner: string,
+  repo: string,
+  stateDir: string,
+  io: { readJson?: (args: string[]) => Promise<unknown>; download?: (args: string[]) => Promise<string> } = {},
+): Promise<TestProposalFeed> {
+  const readJson = io.readJson ?? ghJsonAsync;
+  const download = io.download ?? ((args: string[]) => ghTextAsync(args));
+  const runs = await readJson(["api", `repos/${owner}/${repo}/actions/workflows/ci.yml/runs?event=push&branch=main&per_page=10`,
+    "--jq", "[.workflow_runs[] | {id, status, conclusion}]"]);
+  if (!Array.isArray(runs)) throw new Error("test gardener: GitHub returned no main-run list");
+  const run = (runs as Array<{ id?: unknown; status?: unknown; conclusion?: unknown }>)
+    .find((r) => r.status === "completed" && r.conclusion === "success" && typeof r.id === "number");
+  if (!run) return { status: "absent", reason: "no successful main run among the newest ten" };
+  const runId = run.id as number;
+  const sourcePath = testManifestProposalSourcePath(stateDir);
+  const source = readFileIfExists(sourcePath);
+  if (source !== undefined && (JSON.parse(source) as { runId?: number }).runId === runId) {
+    return existsSync(testManifestProposalPath(stateDir)) ? { status: "unchanged", runId } : { status: "absent", reason: `run ${runId} published no proposal`, runId };
+  }
+  const dir = join(stateDir, "test-tier-manifest-proposal.download");
+  rmSync(dir, { recursive: true, force: true });
+  try {
+    await download(["run", "download", String(runId), "--repo", `${owner}/${repo}`, "--name", TEST_MANIFEST_PROPOSAL_ARTIFACT, "--dir", dir]);
+  } catch (error) {
+    const detail = `${String((error as Error).message)} ${String((error as { stderr?: string }).stderr ?? "")}`;
+    // A main run with no duration evidence uploads no proposal (ci.yml `if-no-files-found: ignore`).
+    // That run is recorded so it is not asked again; every other failure is the caller's to log.
+    if (!/no valid artifacts found|no artifact matches/i.test(detail)) throw error;
+    writeAtomic(sourcePath, JSON.stringify({ runId, artifact: "absent" }) + "\n");
+    return { status: "absent", reason: `run ${runId} published no proposal`, runId };
+  }
+  const text = readFileSync(join(dir, "test-tier-manifest.next.json"), "utf8");
+  const proposal = JSON.parse(text) as { thresholdMs?: unknown; files?: unknown };
+  if (typeof proposal.thresholdMs !== "number" || !proposal.files || typeof proposal.files !== "object" ||
+      Object.values(proposal.files).some((ms) => typeof ms !== "number")) {
+    throw new Error(`test gardener: run ${runId}'s manifest proposal is not a {thresholdMs, files} manifest`);
+  }
+  writeAtomic(testManifestProposalPath(stateDir), text);
+  writeAtomic(sourcePath, JSON.stringify({ runId }) + "\n");
+  rmSync(dir, { recursive: true, force: true });
+  return { status: "fresh", runId };
+}
+
+export const TEST_MANIFEST_PROPOSAL_ARTIFACT = "test-tier-manifest-proposal";
+
+/**
+ * Run the test garden on the daemon interval, one pass at a time. Once an hour (the ledger bucket
+ * its cheap fingerprint already uses) it first refreshes the CI proposal, then writes one
+ * `test.pass` row whatever the pass did, so a gardener with nothing to act on says why instead of
+ * going silent (it wrote one scorecard on 2026-09-25 and nothing after).
+ */
+export function startTestGarden(
+  spec: GardenSpec<TestGardenClass, TestGardenInventory, TestGardenAction, GardenCheckout>,
+  deps: GardenerDeps,
+  refresh: () => Promise<TestProposalFeed>,
+  intervalMs: number,
+): { stop: () => void } {
+  const clock = deps.clock ?? systemClock;
+  let running = false;
+  let reportedBucket: number | undefined;
+  const tick = async () => {
+    if (running) return;
+    running = true;
+    try {
+      const bucket = gardenLedgerBucket(clock);
+      const hourly = bucket !== reportedBucket;
+      let feed: TestProposalFeed | { status: "failed"; error: string } | undefined;
+      if (hourly) {
+        try {
+          feed = await refresh();
+        } catch (e) {
+          feed = { status: "failed", error: String((e as Error)?.message ?? e) };
+          deps.log("test.evidence_failed", { error: feed.error });
+        }
+      }
+      const pass = runGarden(spec, deps);
+      if (hourly) {
+        reportedBucket = bucket;
+        deps.log("test.pass", {
+          ran: pass.ran, feed, pr_url: pass.prUrl ?? null,
+          proposal_present: existsSync(testManifestProposalPath(deps.stateDir)),
+        });
+      }
+    } catch (e) {
+      deps.log("test.gardener_failed", { error: String((e as Error)?.message ?? e) });
+    } finally {
+      running = false;
+    }
+  };
+  void tick();
+  const timer = setInterval(() => void tick(), intervalMs);
+  timer.unref?.();
+  return { stop: () => clearInterval(timer) };
 }
 
 /** The test suite as a gardener spec, over a probe loaded by {@link loadTestManifestProbe}. */

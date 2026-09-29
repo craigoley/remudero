@@ -58,6 +58,7 @@
     "reap-branches",
     "receipt",
     "relay",
+    "release",
     "repair-ladder",
     "replay-goldens",
     "retro",

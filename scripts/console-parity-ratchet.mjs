@@ -136,6 +136,10 @@ export const CLI_ONLY = {
       "check-acceptance",
       "retro",
       "correct",
+      // W1-T4691: appends the operator-attributable dispatch.breaker_released ledger row directly
+      // and best-effort closes the circuit-breaker escalation via local `gh` — the same class as
+      // `correct` immediately above it. A console route is plausible follow-up work, not this task.
+      "release",
       "triage",
       "ratify",
       "learnings",

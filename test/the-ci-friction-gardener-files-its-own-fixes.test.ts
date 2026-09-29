@@ -27,10 +27,13 @@ import { criterionFieldTampered, planOnlyDiff } from "../src/lib/review.js";
 import {
   appendCiFrictionTrendRow,
   CI_FRICTION_GARDEN_CLASSES,
+<<<<<<< HEAD
   CI_FRICTION_HALF_LIFE_MS,
   ciFailureSignature,
   ciFrictionRecencyWeight,
   refusalReasonKey,
+=======
+>>>>>>> origin/main
   CI_FRICTION_REMEDIES_FILE,
   ciFrictionGardenLogPath,
   ciFrictionCauseKey,
@@ -487,6 +490,7 @@ test("a self-hosting daemon wires the ci-friction gardener with its escalation p
     else process.env.HOME = oldHome;
   }
 });
+<<<<<<< HEAD
 
 test("a sweep fix round with no pr.opened is priced by its own worker minutes and tied to its PR by head", () => {
   const records: LedgerRecord[] = [
@@ -560,3 +564,5 @@ test("a sweep refusal on a resume round is priced as fix_refusal by its reason",
   ]);
   assert.equal(refusalReasonKey(undefined), "commit_refused");
 });
+=======
+>>>>>>> origin/main

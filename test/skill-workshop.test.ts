@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -175,9 +175,31 @@ test("scanSkillDraft: an instruction-shaped line the untrusted envelope would fe
 
 const REACHABLE_NO = describeWorkerSkillReachability([]);
 
+/** Two clean implement runs that both called `Grep`, and one repaired run that never did, so the
+ *  transcript miner (W1-T4668) finds one distinguishing step. */
+function minedTranscripts(tool: string) {
+  const runs = [
+    { runId: "P1", taskId: "W1-T300", type: "implement", verdict: "merged" },
+    { runId: "P2", taskId: "W1-T301", type: "implement", verdict: "merged" },
+    { runId: "D1", taskId: "W1-T302", type: "implement", verdict: "merged" },
+  ];
+  const activity = (runId: string, taskId: string, tools: string[]) => [
+    { ts: `2026-05-01T00:00:00.000Z`, run_id: runId, task_id: taskId, step: "run.start" },
+    ...tools.map((t) => ({ run_id: runId, task_id: taskId, step: "worker.activity", event_kind: "tool-executing", tool_name: t })),
+  ];
+  const records = [
+    ...activity("P1", "W1-T300", [tool, "Edit"]),
+    ...activity("P2", "W1-T301", [tool, "Edit"]),
+    ...activity("D1", "W1-T302", ["Edit"]),
+    { ts: `2026-05-01T00:00:01.000Z`, run_id: "D1", task_id: "W1-T302", step: "fix.dispatch" },
+  ];
+  return { runs, records };
+}
+const MINED_GREP = minedTranscripts("Grep");
+
 test("stageSkillDraft: a scanned, passing draft is staged as one inbox proposal naming the future .claude/skills write, and a re-run stages nothing twice", () => {
   const registryPath = join(tmpDir("skill-workshop-stage-"), "inbox-proposals.json");
-  const draft = renderSkillDraft(candidate())!;
+  const draft = renderSkillDraft(candidate(), MINED_GREP)!;
   const allowlist = workerAllowlistFromSettings(fixtureSettings());
 
   const first = stageSkillDraft(registryPath, draft, allowlist, REACHABLE_NO);
@@ -284,4 +306,46 @@ test("scanSkillDraft: a single-star deny glob stays inside ONE path segment, whe
   // CONTROL: `**` is the arm that does cross. Without this the test above would pass even if the
   // single-star arm had simply failed to match anything at all.
   assert.equal(scanSkillDraft(acrossSegments, withPattern("/etc/**.conf")).ok, false);
+});
+
+// ── an outcome-only draft is not a procedure, and a draft that gains mined steps replaces it ───
+
+test("stageSkillDraft refuses a draft whose every Procedure step only restates its mining signal", () => {
+  const registryPath = join(tmpDir("skill-workshop-outcome-only-"), "inbox-proposals.json");
+  const draft = renderSkillDraft(candidate())!;
+  const result = stageSkillDraft(registryPath, draft, workerAllowlistFromSettings(fixtureSettings()), REACHABLE_NO);
+  assert.equal(result.refused, true);
+  assert.equal(result.staged, false);
+  assert.match(result.reason!, /outcome-only/);
+  assert.equal(loadProposalRegistry(registryPath).length, 0, "nothing is staged for a draft that names no step");
+});
+
+test("stageSkillDraft replaces a staged procedure when the same procedure is mined with more steps and never with fewer", () => {
+  const registryPath = join(tmpDir("skill-workshop-refresh-"), "inbox-proposals.json");
+  const allowlist = workerAllowlistFromSettings(fixtureSettings());
+  const draft = renderSkillDraft(candidate(), MINED_GREP)!;
+  const id = skillDraftProposalId(draft.procedureKey);
+  // The shape every live proposal has today: staged with an outcome-only file before this bar.
+  const outcomeOnly = renderSkillDraft(candidate())!;
+  writeFileSync(
+    registryPath,
+    JSON.stringify({ proposals: [{ id, summary: "staged earlier", evidenceAnchors: [], skillFile: { name: outcomeOnly.name, markdown: outcomeOnly.markdown } }] }),
+    "utf8",
+  );
+
+  const refreshed = stageSkillDraft(registryPath, draft, allowlist, REACHABLE_NO);
+  assert.equal(refreshed.refreshed, true);
+  assert.equal(refreshed.alreadyStaged, true);
+  assert.equal(refreshed.staged, false);
+  const stored = loadProposalRegistry(registryPath).find((p) => p.id === id);
+  assert.match(stored!.skillFile!.markdown, /Call `Grep`/, "approval now writes the procedure with the mined step");
+
+  // A later window mines one step instead of three: it is a procedure, so it is not refused, but
+  // it does not downgrade what approval would write.
+  const fewer = { ...draft, markdown: draft.markdown.replace(/## Procedure\n[\s\S]*?(?=## Evidence)/, "## Procedure\n\n- Call `Glob` once.\n\n") };
+  const again = stageSkillDraft(registryPath, fewer, allowlist, REACHABLE_NO);
+  assert.equal(again.refused, false);
+  assert.equal(again.alreadyStaged, true);
+  assert.equal(again.refreshed, undefined, "fewer steps never replace what is staged");
+  assert.match(loadProposalRegistry(registryPath).find((p) => p.id === id)!.skillFile!.markdown, /Call `Grep`/);
 });

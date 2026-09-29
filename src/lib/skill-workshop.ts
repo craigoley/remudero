@@ -345,7 +345,31 @@ export interface StageSkillDraftResult {
   alreadyStaged: boolean;
   /** An entry staged before W1-T4338 had no skill file; this call added it (and refreshed its summary). */
   backfilled?: boolean;
+  /** The staged entry's Procedure named fewer steps than this draft's, so this call replaced it. */
+  refreshed?: boolean;
   reason?: string;
+}
+
+/**
+ * Why a draft whose every Procedure step restates its mining signal is refused. MEASURED
+ * 2026-09-29: all 18 staged skill-draft proposals were this shape ("Resolve the task on the first
+ * attempt"), and the one approved (#7090) is injected into every implement prompt. Merged share of
+ * implement runs read 36% in the three days before it and 37% in the three days after.
+ */
+const OUTCOME_ONLY_REFUSAL =
+  "outcome-only: every Procedure step restates the signal the runs were mined on, so the draft names no step a worker could take";
+
+/** True when a draft has Procedure steps and every one is a {@link PROCEDURAL_STEP_TEXT} outcome line. */
+function isOutcomeOnlyProcedure(markdown: string): boolean {
+  const outcomes = new Set(Object.values(PROCEDURAL_STEP_TEXT).map((text) => `- ${text}`));
+  const steps = skillProcedureSteps(markdown);
+  return steps.length > 0 && steps.every((line) => outcomes.has(line));
+}
+
+/** The step lines of a SKILL.md's `## Procedure` section, in order. */
+function skillProcedureSteps(markdown: string): string[] {
+  const section = /^## Procedure\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(markdown)?.[1] ?? "";
+  return section.split("\n").filter((line) => line.startsWith("- "));
 }
 
 /**
@@ -366,21 +390,34 @@ export function stageSkillDraft(
   if (!scan.ok) {
     return { refused: true, staged: false, alreadyStaged: false, reason: `${scan.reason} (offending line: "${scan.offendingLine}")` };
   }
+  if (isOutcomeOnlyProcedure(draft.markdown)) {
+    return { refused: true, staged: false, alreadyStaged: false, reason: OUTCOME_ONLY_REFUSAL };
+  }
   const id = skillDraftProposalId(draft.procedureKey);
   let staged = false;
   let alreadyStaged = false;
   let backfilled = false;
+  let refreshed = false;
   updateProposalRegistry(
     registryPath,
     (current) => {
       staged = false;
       alreadyStaged = false;
       backfilled = false;
+      refreshed = false;
       const existing = current.findIndex((p) => p.id === id);
       const skillFile = { name: draft.name, markdown: draft.markdown };
       if (existing >= 0) {
         alreadyStaged = true;
-        if (current[existing].skillFile) return null; // already staged with its file — never a duplicate write
+        const stored = current[existing].skillFile;
+        // The id is the PROCEDURE, so a draft whose Procedure grew (the transcript-mined steps of
+        // W1-T4668) must replace the stored text, or approval writes the older, emptier skill.
+        // Only MORE steps replace it: a window that mined fewer never downgrades what is staged.
+        if (stored && skillProcedureSteps(draft.markdown).length > skillProcedureSteps(stored.markdown).length) {
+          refreshed = true;
+          return current.map((p, i) => (i === existing ? { ...p, summary: skillDraftSummary(draft, reachability), skillFile } : p));
+        }
+        if (stored) return null; // already staged with its file — never a duplicate write
         // Staged before W1-T4338: give it the file approval now writes, or it can only ever be declined.
         backfilled = true;
         return current.map((p, i) => (i === existing ? { ...p, summary: skillDraftSummary(draft, reachability), skillFile } : p));
@@ -395,7 +432,14 @@ export function stageSkillDraft(
     staged,
     alreadyStaged,
     ...(backfilled ? { backfilled: true } : {}),
-    reason: backfilled ? "already staged; skill file backfilled" : alreadyStaged ? "already staged" : undefined,
+    ...(refreshed ? { refreshed: true } : {}),
+    reason: backfilled
+      ? "already staged; skill file backfilled"
+      : refreshed
+        ? "already staged; procedure refreshed with more steps"
+        : alreadyStaged
+          ? "already staged"
+          : undefined,
   };
 }
 
@@ -922,7 +966,7 @@ export function stageSkillDrafts(
   for (const draft of drafts) {
     try {
       const r = stageOne(registryPath, draft, allowlist, reachability);
-      log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, backfilled: r.backfilled === true, refused: r.refused, reason: r.reason });
+      log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, backfilled: r.backfilled === true, refreshed: r.refreshed === true, refused: r.refused, reason: r.reason });
     } catch (e) {
       log("skill.stage_failed", { name: draft.name, error: String((e as Error)?.message ?? e) });
     }

@@ -1272,6 +1272,13 @@ export function isMergeCreditLine(line: Record<string, unknown>): boolean {
  * but a refusal row is written by the DAEMON and carries the refused task elsewhere. The step literal is INLINE
  * on purpose — the rotation test scans consumer sources TEXTUALLY, so a symbol would blind that gate.
  * Why: W1-T1279 was refused every tick for 84 hours, then a restart let a fresh process dispatch
+ *
+ * W1-T4691 — A HALTED TASK IS FORWARD PROGRESS TOO, WHEN AN OPERATOR SAYS SO. `dispatch.breaker_released`
+ * (`rmd release`) is the ONLY reset a task with no new owned PR can ever produce — the breaker itself would
+ * otherwise never re-open, because the trip survives a compaction (W1-T2425's own invariant) and a task the
+ * breaker refuses to dispatch can never open the `pr.opened` line that resets it any other way. It joins the
+ * SAME reset arm as `pr.opened`/a merge credit, deliberately: it is an explicit, attributable operator row,
+ * never an inference, so the archive-reading approach W1-T2425's tests forbid stays forbidden.
  */
 export function seedCountFromCircuitBreak(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -1282,7 +1289,10 @@ export function seedCountFromCircuitBreak(
   // The ONE helper reading `task` as well as `task_id` — see {@link LedgerIndex} for why the bucket is keyed on
   // both, which is what keeps this scan's row set unchanged.
   for (const line of indexedTaskRows(lines, taskId, index)) {
-    if (line.task_id === taskId && (line.step === "pr.opened" || isMergeCreditLine(line))) {
+    if (
+      line.task_id === taskId &&
+      (line.step === "pr.opened" || isMergeCreditLine(line) || line.step === "dispatch.breaker_released")
+    ) {
       seed = undefined; // forward progress — the same reset the counter itself applies
       continue;
     }
@@ -1412,6 +1422,10 @@ export function orphanedRunIds(
  * excluded, because it is evidence about the HOST, not about the task, and an orphan must never cost the task
  * the same dispatch budget a real no-PR attempt does. A run.start with any other row is not an orphan; only
  * the infrastructure refusal verdicts above can exclude such a run. An unrecognised failing verdict counts.
+ *
+ * W1-T4691: `dispatch.breaker_released` (`rmd release`) resets this streak exactly like `pr.opened` or a
+ * merge credit — the ONE reset a task the breaker has already halted can still receive, since it needs no
+ * new owned PR to produce it. See {@link seedCountFromCircuitBreak}'s doc for the cross-restart half.
  */
 interface DispatchStreakTally {
   count: number;
@@ -1444,8 +1458,8 @@ function dispatchStreakTally(
   let excludedByReason: Record<string, number> = {};
   for (const line of rows) {
     if (line.task_id !== taskId) continue;
-    if (line.step === "pr.opened" || isMergeCreditLine(line)) {
-      count = 0; // forward progress — a new PR, or a credited merge, resets the streak
+    if (line.step === "pr.opened" || isMergeCreditLine(line) || line.step === "dispatch.breaker_released") {
+      count = 0; // forward progress — a new PR, a credited merge, or an operator release resets the streak
       excludedDispatches = 0;
       excludedByReason = {};
     } else if (line.step === "run.start") {

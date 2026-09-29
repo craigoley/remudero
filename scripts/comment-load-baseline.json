@@ -150,7 +150,7 @@
   "src/lib/learnings.ts": 501,
   "src/lib/ledger-grep.ts": 202,
   "src/lib/ledger-replay.ts": 86,
-  "src/lib/ledger.ts": 750,
+  "src/lib/ledger.ts": 753,
   "src/lib/live-write-guard.ts": 123,
   "src/lib/log-rotation.ts": 50,
   "src/lib/managed-repos.ts": 20,

@@ -143,7 +143,7 @@ const BASELINE_COMMAND_NAMES = [
   "pr-owner",
   "reframe",
   "risk-judge-eval",
-  "rule", "relay", "repair-ladder", "replay", "replay-goldens", "restore", "resume", "retro", "review", "routing-ab", "rule-efficacy", "run-task",
+  "rule", "relay", "release", "repair-ladder", "replay", "replay-goldens", "restore", "resume", "retro", "review", "routing-ab", "rule-efficacy", "run-task",
   "serve", "serve-plist", "skill", "status", "stop", "sweep", "sync", "trace", "triage", "up",
   "verdict-calibration",
   "verify-human-sweep", "wipe-test",
@@ -166,6 +166,8 @@ const BASELINE_COMMAND_NAMES = [
 // W1-T4574: `field-trials` — the observational ledger x GitHub aggregate snapshot — joins the registry.
 // `decline` and `restore` — the terminal's route to the console's inbox decline and its reversal,
 // through the same applyProposalVerdict the serve routes use — join the registry.
+// W1-T4691: `release` — the sanctioned circuit-breaker release for a halted task (`rmd release
+// <task-id> --reason "<text>"`) — joins the registry.
 test("COMMANDS carries the reviewed command-name inventory", () => {
   // The reviewed edit is the NAME added to the list above, beside its line of provenance. No count
   // literal rides with it: two PRs each adding a verb raise the same number from the same base, git
