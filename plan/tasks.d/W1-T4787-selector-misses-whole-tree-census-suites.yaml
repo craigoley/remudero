@@ -1,0 +1,32 @@
+- id: W1-T4787
+  title: "The affected-suite selector misses whole-tree census suites that fail on both passes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  origin: "selector-shadow audit 2026-09-29; consolidates W1-T4733 W1-T4734 W1-T4735 W1-T4736 W1-T4737 W1-T4740 W1-T4741 W1-T4754 W1-T4755"
+  plan_refs: [W1-T4404, W1-T4439, W1-T4406]
+  files: [scripts/diff-class.mjs]
+  note: |
+    Selector-shadow audit, 2026-09-29: of the 35 filed selector-shadow-miss shards, 26 were
+    retry-recovered flakes and are withdrawn as noise. The other nine, each red on BOTH passes,
+    are one cause: a suite that reads the whole source tree (a census or ratchet) has no import
+    edge from the file a PR changes, and censusSuiteFiles (scripts/diff-class.mjs) did not
+    recognise these five as tree walkers:
+      test/deps-interface-census.test.ts: floor and narrow, runs 36499053634 and 36503850915 (W1-T4735, W1-T4736, W1-T4740, W1-T4741)
+      test/fast-gate-admits-the-census-class.test.ts: narrow, runs 36495528731 and 36497528005 (W1-T4733, W1-T4734)
+      test/cycle-ratchet.test.ts: narrow, run 36506282002 (W1-T4737)
+      test/a-gate-run-leaves-the-tracked-tree-clean.test.ts: narrow, run 36525454210 (W1-T4754)
+      test/source-size-baseline-is-enforced.test.ts: narrow, run 36525454210 (W1-T4755)
+    Those nine shards are withdrawn as duplicates of this one. Teach the census selection to
+    recognise a suite that enumerates the tree through a helper rather than naming these files;
+    each run's changed paths are in the withdrawn shards' notes. Later misses of these suites are
+    ledgered by the gardener as selector-shadow.miss_evidence rows.
+  acceptance:
+    - claim: "the floor and narrow selections include each of the five observed whole-tree suites for the changed paths that missed them"
+      proof: "unit test: the selector reaches every whole-tree census suite the shadow record saw missed"
+    - claim: "a suite that walks the source tree through a shared helper is selected for any src change"
+      proof: "unit test: a suite that enumerates the tree through a helper is a census suite"
