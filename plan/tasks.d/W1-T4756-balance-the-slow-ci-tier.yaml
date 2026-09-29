@@ -15,6 +15,7 @@
     - .github/workflows/ci.yml
     - .github/workflows/ci-gate.yml
     - src/lib/ci-parity.ts
+    - src/lib/gate-posture.ts
     - test/slow-tier-shard-contract.test.ts
     - test/preflight-ci-parity.test.ts
     - test/the-slow-tier-runs-on-main.test.ts
@@ -27,6 +28,12 @@
     - test/ci-sharding.test.ts
     - test/test-with-retry.test.ts
     - test/plan-reading-fast-lane-sharding.test.ts
+    - test/a-cancelled-shard-is-not-a-broken-diff.test.ts
+    - test/a-hung-shard-does-not-read-as-a-broken-diff.test.ts
+    - test/fast-lane-classifier.test.ts
+    - test/push-ci-on-main.test.ts
+    - test/the-blocked-resting-state-has-many-producers.test.ts
+    - test/the-ci-gate-does-not-hold-a-runner.test.ts
     - test/every-pr-check-is-required-or-advisory.test.ts
   status: queued
   attempts: 0
@@ -47,7 +54,8 @@
     Register the new shard job in CI parity and the check classification without
     weakening the stable required name. Preserve the push, pull_request, and merge_group
     test populations, including the source-PR skip ruling. Adapt local CI parity and
-    the existing workflow contract tests to the new job layout.
+    the existing workflow contract tests to the new job layout, including the
+    workflow mutation ratchet's unmutated census corpus.
     Do not merely raise the 35-minute timeout or silently skip slow files.
   acceptance:
     - claim: "both balanced shards cover the slow tier exactly once and the stable verdict fails closed"
@@ -58,3 +66,5 @@
     test. The unchanged 97-file population must run on main and merge_group.
   note: |
     W1-T4756 was reserved on origin by plan-slow-tier-1790653000000 before filing.
+    Scope amended after PR #7757's workflow mutation check found six old job-shape
+    tests failing before mutation; those tests must describe the new required verdict.
