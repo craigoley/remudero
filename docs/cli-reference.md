@@ -77,6 +77,7 @@ usage:
   rmd resume   # Fleet control: clear PAUSE (and any STOP); spawns resume.
   rmd away [on|off]   # Set/show operator presence; batches escalations into a recap while away.
   rmd correct <task-id> --pr <n> [--reason <text>]   # Sanctioned operator-correction writer: name a task's true merged PR.
+  rmd release <task-id> --reason <text>   # Release a halted task's dispatch circuit breaker; dispatchable next tick.
   rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option "label|detail"]...   # Open a needs-human GitHub issue; MANUAL/HARD_STOP also fire a real-time ping.
   rmd notify <message>   # Real-time iMessage ping (osascript).
   rmd digest [--since <iso>] [--dry-run]   # Roll up the ledger into one daily digest message.
@@ -738,6 +739,16 @@ rmd correct <task-id> --pr <n> [--reason <text>]
 ```
 
 sanctioned operator-correction writer (P9/W1-T75): appends a correction.provenance ledger line naming the task's TRUE merged PR, SUPREME over every deriveStatus rung; prints derived status before/after
+
+### `rmd release`
+
+Release a halted task's dispatch circuit breaker; dispatchable next tick.
+
+```
+rmd release <task-id> --reason <text>
+```
+
+W1-T4691: the sanctioned release for a task the dispatch circuit breaker has halted with no new owned PR since — a trip the breaker's own W1-T2425 restart guard deliberately never clears on its own. Appends an explicit, attributable dispatch.breaker_released ledger row (never an inference, never an archive read) that dispatchesWithoutNewOwnedPr/seedCountFromCircuitBreak read exactly like a new pr.opened, so the task is dispatchable on the daemon's next tick; best-effort closes the task's open circuit-breaker needs-human issue with a pointer to the row.
 
 ### `rmd escalate`
 
