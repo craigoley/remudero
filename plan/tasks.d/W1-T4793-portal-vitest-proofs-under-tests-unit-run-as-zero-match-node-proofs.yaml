@@ -1,0 +1,44 @@
+- id: W1-T4793
+  title: "AN EXACT VITEST PROOF UNDER A REGISTERED TARGET'S tests/unit/ IS EXECUTED AS A ZERO-MATCH NODE test/** PROOF — the review proof runner must resolve the target's registered Vitest suite root for both direct-path and name-filtered forms, refuse ambiguity, and keep zero-match test-theater protection (issue #5314, private portal PR #8 PORTAL-T1)"
+  repo: remudero
+  depends_on: ["W1-T3525"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/lib/review.ts, test/portal-vitest-proof-runner.test.ts]
+  origin: "feedback#fb-1789259749891-f16610"
+  plan_refs: ["W1-T3525", "W1-T3178", "W1-T72", "W1-T3073"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3525 introduced the owner/repo-keyed suite registry, yet private portal PR #8 (PORTAL-T1) has
+    its exact Vitest proofs under tests/unit/ executed as zero-match Node test/** proofs. The
+    direct-path matcher (TEST_PATH_EXACT_RE) and the test-path scan still recognise only node-style
+    roots, so a registered Vitest target's path form never reaches its registry entry, or the target
+    is not resolved/registered as intended. The implementer must first REPRODUCE against the actual
+    portal shape (tests/unit/rmd-control.test.ts) and locate which stage drops the registry lookup.
+  design: |
+    (i) Direct-path proofs and name-filtered proofs for a registered Vitest target resolve through the
+    SAME registry entry, with the target's pinned checkout-local runner and correct output parsing.
+    (ii) A path or title resolvable under more than one registered root is REFUSED with an explicit
+    ambiguity explainer, never guessed.
+    (iii) craigoley/remudero's node --test argv is byte-identical; no argv change for existing arms.
+    (iv) W1-T72 nameFiltered zero-match / all-skipped classification stays: no-match is never a pass.
+    (v) PORTAL-T1's acceptance text is NOT edited to conceal the defect; PR #8 review is re-run after
+    the fix lands as an operational follow-up.
+  acceptance:
+    - claim: "a direct-path Vitest proof under a registered target's tests/unit/ resolves to that target's Vitest suite, not a node test/** run"
+      proof: "unit test: test/portal-vitest-proof-runner.test.ts"
+    - claim: "a name-filtered Vitest proof for the same target executes under Vitest and a zero-match or all-skipped result is classified no-match, never pass"
+      proof: "unit test: test/portal-vitest-proof-runner.test.ts"
+    - claim: "an ambiguous path or title across registered roots is refused with an explicit explainer"
+      proof: "unit test: test/portal-vitest-proof-runner.test.ts"
+    - claim: "existing craigoley/remudero node --test argv is byte-identical after the change"
+      proof: "unit test: test/portal-vitest-proof-runner.test.ts"
+  falsifier: |
+    CLOSE IF a direct-path tests/unit/*.test.ts proof for the portal target already resolves to Vitest
+    with a passing reproduction test. DO NOT weaken PORTAL-T1 acceptance or the zero-match guard.
+  note: |
+    Overlaps fb-1789282068794-2f0b7d (same issue #5314); one task covers both.
