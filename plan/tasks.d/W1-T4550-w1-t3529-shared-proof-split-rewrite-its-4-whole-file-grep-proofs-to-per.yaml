@@ -5,6 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
+  priority: 1
   risk: low
   budget_usd: 30.00
   files: [plan/tasks.d/W1-T3529-run-review-evidence-target.yaml]
