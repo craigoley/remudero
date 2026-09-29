@@ -1392,8 +1392,13 @@ export function orphanedRunIds(
   const livenessBoundMs = opts.livenessBoundMs ?? DEFAULT_LIVENESS_BOUND_MS;
   const rowCountByRunId = new Map<string, number>();
   const startTsByRunId = new Map<string, string>();
+  const counted = new Set<string>();
   for (const line of indexedTaskRows(lines, taskId, index)) {
     if (line.task_id !== taskId || typeof line.run_id !== "string") continue;
+    // A rotation union replays retained rows once per archive; a replayed lone run.start is still an orphan.
+    const key = `${line.run_id}|${String(line.step)}|${String(line.ts)}`;
+    if (counted.has(key)) continue;
+    counted.add(key);
     rowCountByRunId.set(line.run_id, (rowCountByRunId.get(line.run_id) ?? 0) + 1);
     if (line.step === "run.start" && typeof line.ts === "string" && !startTsByRunId.has(line.run_id)) {
       startTsByRunId.set(line.run_id, line.ts);
@@ -1439,7 +1444,18 @@ interface DispatchStreakTally {
  *  2026-09-29: six released tasks still read circuit-broken). Already-ordered rows, and rows missing a
  *  `ts`, keep input order; the sort is stable. */
 function taskRowsInTimeOrder(rows: ReadonlyArray<Record<string, unknown>>, taskId: string): ReadonlyArray<Record<string, unknown>> {
-  const own = rows.filter((line) => line.task_id === taskId);
+  // Each rotation re-archives the rows the live file retained, so a union carries up to one copy per
+  // archive (measured 2026-09-29: W1-T2982's 32 dispatches read as 1,584). One step for one run at
+  // one instant is one event, so its copies collapse here; rows without a ts or run_id are kept as they are.
+  const seen = new Set<string>();
+  const own = rows.filter((line) => {
+    if (line.task_id !== taskId) return false;
+    if (typeof line.ts !== "string" || typeof line.run_id !== "string") return true;
+    const key = `${line.run_id}|${String(line.step)}|${line.ts}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   if (!own.every((line) => typeof line.ts === "string")) return own;
   let ordered = true;
   for (let i = 1; i < own.length && ordered; i++) ordered = (own[i - 1]!.ts as string) <= (own[i]!.ts as string);
