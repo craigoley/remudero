@@ -34,16 +34,20 @@ function sigmoid(x: number): number {
   return x >= 0 ? 1 / (1 + Math.exp(-x)) : Math.exp(x) / (1 + Math.exp(x));
 }
 
+/** {@link estimateUpgradeGain}'s input, NAMED rather than inlined: diff-coverage.mjs only exempts
+ *  an erased `interface`/`type X = {` body, not an inline multi-line parameter type literal. */
+export interface UpgradeGainInput {
+  baseline: UpgradeAbilityReading;
+  upgraded: UpgradeAbilityReading;
+  taskDifficulty: UpgradeAbilityReading;
+}
+
 /**
  * The probability-of-merge delta an upgrade buys for one task, from the ability map's own
  * P(success) = sigmoid(theta_model + theta_role - beta_task): the same role and task difficulty
  * cancel out of the subtraction, leaving only the ability gap between the two tiers.
  */
-export function estimateUpgradeGain(input: {
-  baseline: UpgradeAbilityReading;
-  upgraded: UpgradeAbilityReading;
-  taskDifficulty: UpgradeAbilityReading;
-}): UpgradeGain {
+export function estimateUpgradeGain(input: UpgradeGainInput): UpgradeGain {
   if (input.baseline.state !== "estimated") return { state: "unavailable", reason: "baseline-ability-insufficient" };
   if (input.upgraded.state !== "estimated") return { state: "unavailable", reason: "upgraded-ability-insufficient" };
   if (input.taskDifficulty.state !== "estimated") return { state: "unavailable", reason: "task-difficulty-insufficient" };
