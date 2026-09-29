@@ -6,7 +6,7 @@
   verify: auto
   risk: high
   band_meaning: span
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator request 2026-09-29: repair self-improvement paths"
   files: [src/lib/selector-shadow-gardener.ts, test/the-selector-earns-its-narrowing.test.ts]

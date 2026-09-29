@@ -49,7 +49,7 @@ export interface InboxThreadItem {
   proposalId: string;
   summary: string;
   plain: PlainInboxMessage;
-  state: "ready" | "drafting" | "notReady" | "declined";
+  state: "ready" | "drafting" | "notReady" | "declined" | "retired";
 }
 
 export interface ThreadMessageView {
@@ -91,6 +91,7 @@ export interface AttentionCensusInput {
   classifications: InboxClassification[];
   taskFacts: ReadonlyMap<string, { verify: string; repo: string; title: string }>;
   releasedTaskIds: ReadonlySet<string>;
+  releaseReceipts?: ReadonlyMap<string, string>;
   mergedTaskIds?: ReadonlySet<string>;
   judgeByTask: ReadonlyMap<string, { decision: string; reason: string }>;
   sources: {
@@ -106,7 +107,18 @@ export interface AttentionCensusInput {
  * overcount decisions when a missing ledger hides a release; only verifiedCounts are lower bounds. */
 export function buildAttentionCensus(input: AttentionCensusInput) {
   const byId = new Map(input.classifications.map((c) => [c.proposalId, c]));
-  const items = input.views.map((view) => {
+  const visibleIds = new Set(input.views.map((view) => view.proposalId));
+  const releasedHistory: ThreadSummaryView[] = input.classifications.flatMap((c) => {
+    const taskId = /^verify-human:(W\d+-T\d+)$/.exec(c.proposalId)?.[1];
+    if (!taskId || c.state !== "retired" || !input.releasedTaskIds.has(taskId) || visibleIds.has(c.proposalId)) return [];
+    return [{
+      threadId: inboxThreadId(c.proposalId), proposalId: c.proposalId,
+      headline: c.proposalId, snippet: c.retiredReason ?? "Released to the fleet",
+      waitingOn: "daemon" as const, attention: "history" as const,
+      lastActivity: null, messageCount: 1, unread: false,
+    }];
+  });
+  const items = [...input.views, ...releasedHistory].map((view) => {
     const classification = byId.get(view.proposalId);
     const taskId = /^verify-human:(W\d+-T\d+)$/.exec(view.proposalId)?.[1];
     const task = taskId ? input.taskFacts.get(taskId) : undefined;
@@ -116,7 +128,7 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
     if (classification) sourceFacts.push({ source: "classification", detail: `${view.proposalId}: ${classification.state}${classification.reasons.length ? `; predicates: ${classification.reasons.map((reason) => reason.predicate).join(", ")}` : ""}` });
     if (task) sourceFacts.push({ source: "plan", detail: `${taskId}: verify: ${task.verify}; repo: ${task.repo}; ${task.title}` });
     if (judge) sourceFacts.push({ source: "judge", detail: `${judge.decision}: ${judge.reason.slice(0, 300)}` });
-    if (released) sourceFacts.push({ source: "ledger", detail: `${taskId}: ratify.approved released verify-human` });
+    if (released) sourceFacts.push({ source: "ledger", detail: input.releaseReceipts?.get(taskId!) ?? `${taskId}: ratify.approved released verify-human` });
     if (taskId && input.mergedTaskIds?.has(taskId)) sourceFacts.push({ source: "githubProjection", detail: `${taskId}: merged task credit observed` });
     if (classification?.retiredReason) sourceFacts.push({ source: "classification", detail: classification.retiredReason });
     const whyMe = view.attention === "decision"
@@ -153,6 +165,7 @@ const ACTIONS_BY_STATE: Record<InboxThreadItem["state"], InboxThreadAction[]> = 
   drafting: ["decline", "edit"],
   notReady: ["decline", "edit"],
   declined: ["restore"],
+  retired: [],
 };
 
 function openingMessage(item: InboxThreadItem): ThreadMessageView {
@@ -215,6 +228,7 @@ function detailFor(item: InboxThreadItem, stored: ThreadMessage[], marks: ReadMa
 }
 
 function attentionFor(item: InboxThreadItem, last: ThreadMessageView): ThreadSummaryView["attention"] {
+  if (item.state === "retired") return "history";
   if (last.from === "operator") return "awaiting_daemon";
   if (last.extra?.question === true) return "reply";
   if (item.state === "declined") return "history";
@@ -233,7 +247,7 @@ export function listThreadViews(
   marks: ReadMarks,
 ): ThreadSummaryView[] {
   const views = items
-    .filter((item) => item.state !== "declined" || (threads.get(inboxThreadId(item.proposalId))?.length ?? 0) > 0)
+    .filter((item) => item.state !== "retired" && (item.state !== "declined" || (threads.get(inboxThreadId(item.proposalId))?.length ?? 0) > 0))
     .map((item) => {
       const { details: _details, messages: _messages, ...summary } = detailFor(item, threads.get(inboxThreadId(item.proposalId)) ?? [], marks);
       return summary;

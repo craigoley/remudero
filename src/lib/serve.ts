@@ -100,6 +100,7 @@ import {
   buildKickRoute,
   buildMergeHoldRoute,
   buildPauseRoute,
+  buildAssistantControlRoute,
   buildPrActionRoute,
   buildQuietHoursRoute,
   buildResumeRoute,
@@ -2682,6 +2683,7 @@ function assembleServeRoutes(
     buildPauseRoute(fleetControlDeps),
     buildResumeRoute(fleetControlDeps),
     buildStopRoute(fleetControlDeps),
+    buildAssistantControlRoute({ ...fleetControlDeps, claimRoot: deps.fleetControlRoot, instance: deps.instances?.coreInstance ?? CORE_INSTANCE }),
     buildQuietHoursRoute(fleetControlDeps),
     buildAnswerQuestionRoute(questionDeps),
     buildApproveManualRoute(fleetControlDeps),
@@ -2849,6 +2851,7 @@ function assembleServeRoutes(
       log: deps.log,
       bound: (reads, board) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), { ...deps, board, consoleSnapshots: undefined }),
       ...deps.instances,
+      assistantClaimRoot: deps.fleetControlRoot,
       onAnalyticsCache: (cache) => instanceAnalyticsCaches.push(cache),
     }),
   );

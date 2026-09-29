@@ -19,6 +19,7 @@ import {
   mountCandidate,
   readConfigCanaryFile,
   readConfigCanaries,
+  writeConfigCanaries,
   recalibratedBudget,
   reverseEdits,
   routeLine,
@@ -142,6 +143,97 @@ function exposedBudgetCanary() {
   assert.equal(exposed.exposedAt, new Date(h.now()).toISOString());
   return { h, cohort, exposedAt: h.now() };
 }
+
+test("W1-T4786: shadow snapshot survives clock advancement before landing", () => {
+  const h = harness();
+  const originalClock = h.deps.clock;
+  h.deps.clock = { ...originalClock, iso: () => new Date(h.now() + 1000).toISOString() };
+  h.pass();
+  const canary = readConfigCanaries(h.deps.stateDir)[0]!;
+  assert.equal(canary.promotion.state, "shadow");
+  assert.equal(canary.promotion.observationWindow.start, canary.shadowObservations[0]?.observedAt);
+});
+
+test("W1-T4786: merged unmeasurable shadow rolls back and releases pending", () => {
+  const h = harness();
+  h.pass();
+  const c = readConfigCanaries(h.deps.stateDir)[0]!;
+  writeConfigCanaries(h.deps.stateDir, [{ ...c, promotion: { ...c.promotion, state: "unmeasurable" } }]);
+  h.setPr("merged");
+  h.advance(2 * HOUR);
+  h.pass();
+  assert.equal(readConfigCanaries(h.deps.stateDir)[0]?.promotion.state, "rolled_back");
+  assert.equal(h.landed.length, 2, "the merged edits receive an exact rollback PR");
+  for (const id of h.ids) assert.equal(h.budgetOf(id), "30.00");
+  const state = readGardenState(gardenStatePath(h.deps.stateDir, "config"), CONFIG_GARDEN_CLASSES);
+  assert.equal(state.pending, undefined);
+  assert.deepEqual(state.classes["recalibrate-budget"], { alpha: 3, beta: 2 });
+  assert.ok(h.logs.some((l) => l.step === "config.canary_rolled_back" && String(l.extra?.reason).includes("pre-exposure unmeasurable")));
+});
+
+test("W1-T4786: unknown pre-exposure PR waits without rollback", () => {
+  const h = harness();
+  h.pass();
+  const c = readConfigCanaries(h.deps.stateDir)[0]!;
+  writeConfigCanaries(h.deps.stateDir, [{ ...c, promotion: { ...c.promotion, state: "unmeasurable" } }]);
+  h.setPr("unknown");
+  h.advance(2 * HOUR);
+  h.pass();
+  assert.equal(h.landed.length, 1);
+  assert.equal(readConfigCanaries(h.deps.stateDir)[0]?.promotion.state, "unmeasurable");
+  assert.ok(readGardenState(gardenStatePath(h.deps.stateDir, "config"), CONFIG_GARDEN_CLASSES).pending);
+});
+
+test("W1-T4786: closed pre-exposure PR debits without a rollback PR", () => {
+  const h = harness();
+  h.pass();
+  const c = readConfigCanaries(h.deps.stateDir)[0]!;
+  writeConfigCanaries(h.deps.stateDir, [{ ...c, promotion: { ...c.promotion, state: "unmeasurable" } }]);
+  h.setPr("closed");
+  h.advance(2 * HOUR);
+  h.pass();
+  assert.equal(h.landed.length, 1);
+  assert.equal(readConfigCanaries(h.deps.stateDir)[0]?.promotion.state, "rolled_back");
+  const state = readGardenState(gardenStatePath(h.deps.stateDir, "config"), CONFIG_GARDEN_CLASSES);
+  assert.equal(state.pending, undefined);
+  assert.deepEqual(state.classes["recalibrate-budget"], { alpha: 3, beta: 2 });
+});
+
+test("W1-T4786: partial rollback refuses before any file changes", () => {
+  const h = harness();
+  h.pass();
+  const c = readConfigCanaries(h.deps.stateDir)[0]!;
+  writeConfigCanaries(h.deps.stateDir, [{ ...c, promotion: { ...c.promotion, state: "unmeasurable" } }]);
+  const before = new Map(h.ids.map((id) => [id, readFileSync(join(h.root, "plan", "tasks.d", `${id}-x.yaml`), "utf8")]));
+  if (c.cohort.kind !== "tasks") throw new Error("budget canary must name a task cohort");
+  const changedId = c.cohort.taskIds.at(-1)!;
+  const changedPath = join(h.root, "plan", "tasks.d", `${changedId}-x.yaml`);
+  writeFileSync(changedPath, before.get(changedId)!.replace("budget_usd: 9.00", "budget_usd: 11.00"));
+  before.set(changedId, readFileSync(changedPath, "utf8"));
+  h.setPr("merged");
+  h.advance(2 * HOUR);
+  assert.throws(() => h.pass(), /rollback line changed or ambiguous/);
+  for (const id of h.ids) assert.equal(readFileSync(join(h.root, "plan", "tasks.d", `${id}-x.yaml`), "utf8"), before.get(id));
+  assert.equal(h.landed.length, 1, "an incomplete rollback is never published");
+  assert.ok(readGardenState(gardenStatePath(h.deps.stateDir, "config"), CONFIG_GARDEN_CLASSES).pending);
+});
+
+test("W1-T4786: missing rollback PR receipt keeps the canary pending", () => {
+  const h = harness();
+  h.pass();
+  const c = readConfigCanaries(h.deps.stateDir)[0]!;
+  writeConfigCanaries(h.deps.stateDir, [{ ...c, promotion: { ...c.promotion, state: "unmeasurable" } }]);
+  const openWorkspace = h.deps.openWorkspace;
+  h.deps.openWorkspace = () => {
+    const ws = openWorkspace();
+    return { ...ws, land: (opts) => opts.title.startsWith("revert(config):") ? undefined : ws.land(opts) };
+  };
+  h.setPr("merged");
+  h.advance(2 * HOUR);
+  assert.throws(() => h.pass(), /rollback PR was not opened/);
+  assert.equal(readConfigCanaries(h.deps.stateDir)[0]?.promotion.state, "unmeasurable");
+  assert.ok(readGardenState(gardenStatePath(h.deps.stateDir, "config"), CONFIG_GARDEN_CLASSES).pending);
+});
 
 test("W1-T4113: a budget recalibration runs as a canary and rolls back on a guardrail breach", () => {
   const { h, cohort } = exposedBudgetCanary();
@@ -402,12 +494,12 @@ test("W1-T4113: rollback reports when the canary lines have moved on", () => {
   cohort.forEach((id, i) => h.rows.push(...run(`c${i}`, id, h.now() + HOUR, "blocked", 9.4)));
   rest.forEach((id, i) => h.rows.push(...run(`r${i}`, id, h.now() + HOUR, "merged", 5)));
   h.advance(2 * HOUR);
-  h.pass();
+  assert.throws(() => h.pass(), /rollback line changed or ambiguous/);
 
   const judged = readConfigCanaries(h.deps.stateDir)[0]!;
-  assert.equal(judged.promotion.state, "rolled_back");
+  assert.equal(judged.promotion.state, "canary", "an unproven rollback cannot settle the canary");
   assert.equal(judged.rollbackPrUrl, undefined, "no rollback PR claims to restore lines that changed independently");
   assert.equal(h.landed.length, 1);
-  assert.ok(h.logs.some((l) => l.step === "config.rollback_nothing_to_revert" && l.extra?.pr_url === judged.prUrl));
+  assert.ok(readGardenState(gardenStatePath(h.deps.stateDir, "config"), CONFIG_GARDEN_CLASSES).pending);
   for (const id of cohort) assert.equal(h.budgetOf(id), "31.00");
 });

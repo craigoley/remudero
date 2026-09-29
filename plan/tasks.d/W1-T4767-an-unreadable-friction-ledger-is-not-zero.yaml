@@ -6,7 +6,7 @@
   verify: auto
   risk: high
   band_meaning: span
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator request 2026-09-29: repair self-improvement paths"
   files: [src/lib/ci-friction-gardener.ts, src/lib/ledger-union.ts, src/run-task.ts, test/ledger-union.test.ts, test/the-ci-friction-gardener-files-its-own-fixes.test.ts]

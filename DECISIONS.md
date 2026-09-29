@@ -3129,6 +3129,24 @@ $25 squeeze-day cash ceiling.
 **Sources read 2026-09-24:** Microsoft Azure GPT-6 launch pricing;
 Microsoft Foundry Claude Messages API and deployment guidance; Anthropic Opus 5.5 price sheet.
 
+## 2026-09-29 — OPERATOR RULING: a balanced subscription squeeze runs on Foundry Sonnet 5.5
+
+**Operator-authored direction:** Switch the cash lanes to Sonnet 5.5, as a **balanced squeeze
+emergency**. When both subscriptions block a balanced (`sonnet`) task, it runs on Foundry Claude
+Sonnet 5.5. Routine cash stays on the measured gpt-5-nano, gpt-oss-120b and Luna rows.
+
+- This mirrors the 2026-09-24 Foundry Opus emergency for frontier. Sonnet uses the same
+  `/anthropic/v1/messages` adapter, endpoint and daemon key.
+- Opus and Sonnet reservations share one Foundry Claude cap: $5 per UTC day ordinarily and $10
+  on a squeeze, still inside the shared cash `dailyCapUsd`.
+- A refusal before transport (cap exhausted, absent credentials, unsupported tool surface) falls
+  through to the existing Luna cash fallback, so the ruling never holds a task that runs today.
+- The subscription router's `sonnet` alias leads with `claude-sonnet-5-5` separately (#7819).
+- The deployment exists: `claude-sonnet-5-5` (GlobalStandard, version 2) on synthwatch-foundry
+  answered a 200 through the daemon's own endpoint and key on 2026-09-29.
+- Anthropic lists Sonnet 5.5 at $2 input and $10 output per million tokens.
+- Built by W1-T4785.
+
 ## 2026-09-26 — W1-T4583: the in-repo contract-coverage ratchet is RETIRED; the contract is checked where it is served and where it is consumed
 
 *Operator direction record: carried out under the operator's 2026-09-26 instruction to "file items that need filed, fix items that need fixed, build items that need built" for the old-console follow-up audit that named this ratchet as measuring nothing.*
@@ -3156,3 +3174,36 @@ closed: W1-T4568 stays parked (`verify: human` holds it from dispatch) with thre
 cold first read over 5 s, or the corpus past 5 GB / 10M rows). If it is built, node:sqlite remains the
 recommended store (in-process, no new dependency). Rollback: release W1-T4568 for build.
 
+
+## 2026-09-29 — OPERATOR DECISION: retire the outcome-only approved skill and the retro's learnings promotion pass
+
+*Operator direction record: the operator delegated these two calls to the coordinator's recommendation
+on 2026-09-29 ("proceed"). Recorded by hand; not a machine auto-choose resolution.*
+
+Both stages are retired for the same reason: a learning-loop stage whose output reaches no worker, or reaches
+one without effect, costs spend and attention and returns nothing. Measured over 2026-09-15..29 on the core
+ledger (all three rotation forms, deduplicated):
+
+- **SKILL `implement-clean-single-strike-8aa4458e` (approved in #7090) is RETIRED by #7837.** Its whole
+  procedure is "Resolve the task on the first attempt". That restates the signal the runs were mined on and
+  names no step. Measured:
+  - it was injected into 399 implement prompts;
+  - workers self-reported using it in 8 of 114 `skills.used` rows;
+  - among runs it was injected into, the merged share of implement runs was 36% (59/164) in the three days
+    before its approval and 37% (44/120) in the three days after.
+  All 18 staged `skill-draft:` proposals have the same outcome-only shape, and #7833 stops the workshop
+  staging that shape. Rollback: restore the SKILL.md from #7837's parent.
+- **THE RETRO'S LEARNINGS PROMOTION PASS (P32/W1-T1059/W1-T1249) is RETIRED by #7844.**
+  `selectPromotionCycleEntries` sorts by id and takes five, so every retro spawned a fresh judge for the
+  same entries: 352 `promotion.verdict` rows on 4 ids, 258 of them "promoted". The pass writes nothing, and
+  each daemon instance has its own `<root>/learnings-user` home, so no worker could read a promoted entry.
+  The learnings.ts pipeline (`promoteEntry`, `runPromotionPass`, scrub, taint) is kept. Rollback: revert
+  #7844.
+
+**REVISIT CONDITION — rebuild both when the transcript miner yields real multi-step procedures.**
+- That means `mineTranscriptWorkflows` (workflow-mining.ts) returns a workflow with two or more
+  distinguishing steps over a live retro window. Over 2026-09-21..29 it returned none.
+- A rebuilt skill release should ride the shared risk-judge release path, and retire itself on
+  `buildSkillEffectivenessReport`'s RETIRE-CANDIDATE.
+- A rebuilt promotion should judge each entry once per content, and write to a home that more than one
+  instance reads.
