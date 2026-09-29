@@ -111,3 +111,17 @@ test("a run the harness refused before any worker ran never trips the breaker, w
   const realFailures = Array.from({ length: 5 }, (_, i) => thrown(`add-${i}`, "worktree.add")).flat();
   assert.equal(isDispatchBreakerTripped(realFailures, TASK), true, "a failed worktree add still counts");
 });
+
+test("a count lowered by newly excluded infrastructure runs releases the task instead of reading indeterminate", () => {
+  const rows = [
+    ...Array.from({ length: 3 }, (_, i) => run(`worker-${i}`, "no_pr")).flat(),
+    ...Array.from({ length: 2 }, (_, i) => run(`containment-${i}`, "blocked_containment")).flat(),
+    { task_id: "DAEMON", task: TASK, step: "dispatch.circuit_broken", freshCount: 5 },
+  ];
+  const detail = evaluateDispatchBreakerDetailed(ledgerWith(rows), TASK, createDispatchBreakerCache());
+  assert.equal(detail.priorCount, 5, "the old trip seeds the prior count, as W1-T4627's did");
+  assert.equal(detail.freshCount, 3);
+  assert.equal(detail.excludedDispatches, 2);
+  assert.notEqual(detail.state, "indeterminate", "the drop is exactly the reclassified runs, so it is explained");
+  assert.equal(detail.state, "clear");
+});

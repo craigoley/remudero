@@ -1745,8 +1745,8 @@ export function evaluateDispatchBreakerDetailed(
   const hasNewOwnedPr = lastPrOpened(lines, taskId, index) !== undefined;
   const base = { freshCount, excludedDispatches, excludedByReason, maxDispatches, priorCount, hasNewOwnedPr };
 
-  if (priorCount !== undefined && freshCount < priorCount && !hasNewOwnedPr) {
-    // count regressed with nothing in the ledger to explain it
+  if (priorCount !== undefined && freshCount + excludedDispatches < priorCount && !hasNewOwnedPr) {
+    // count regressed with nothing in the ledger to explain it — runs now excluded as infrastructure DO explain it
     return { ...base, state: "indeterminate", ledgerState: "indeterminate" };
   }
 
