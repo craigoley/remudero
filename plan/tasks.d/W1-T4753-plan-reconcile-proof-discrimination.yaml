@@ -32,7 +32,7 @@
     queued, then show the generated proof matches only the reconciled field at the head.
   acceptance:
     - claim: "plan reconciliation distinguishes a YAML status change from prose on the base"
-      proof: 'unit test: W1-T4753 plan reconciliation proves YAML status field instead of prose'
+      proof: 'unit test: test/plan-reconcile-proof-discrimination.test.ts'
   falsifier: |
     Restore the unanchored proof and rerun the focused test: it must fail because the
     base prose satisfies the generated pattern. With the anchored proof restored, the
