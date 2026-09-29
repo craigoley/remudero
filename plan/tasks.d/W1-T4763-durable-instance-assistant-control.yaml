@@ -1,0 +1,44 @@
+- id: W1-T4763
+  title: "Give per-instance assistant control actions a durable exact-target idempotency boundary"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "console issue #1816: a reusable prepared token dispatches each confirmed action again"
+  plan_refs: [W1-T4228, W1-T4657]
+  files: [src/lib/panel-actions.ts, src/lib/instance-gateway.ts, src/lib/serve.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/assistant-control-idempotency.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    The console's five-minute prepared token protects target review but not replay. Its
+    existing instance control routes mint a fresh operation and run the side effect on every
+    retry. Core's approved-action executor already has durable admission for catalogued
+    core actions, but the per-instance gateway exposes only direct pause/resume/stop routes.
+    A console-local spent-token cache cannot protect restarts or replicas.
+  design: |
+    Add an instance-rooted, middle-tier assistant-control admission for a stable action ID,
+    exact action, reason and target. Bind the ID to a canonical payload and the mounted
+    instance; the first request durably claims it before any side effect, then records the
+    reused control action's source receipt. A same-key/same-payload retry returns the first
+    receipt or explicit in-progress/unknown status without a second pause/resume/stop.
+    Same key with changed payload refuses. An interrupted attempt must never be silently
+    retried or represented as success. Use atomic cross-process claim semantics, preserve
+    ledger history, reject malformed IDs, and do not weaken existing write-tier and
+    instance authorization. Prefer the existing panel-action side-effect helpers and
+    approved-action receipt vocabulary over a parallel optimistic executor. Wire both core
+    and non-core instance routes and version the OpenAPI/client contract.
+  acceptance:
+    - claim: "sequential and concurrent exact retries perform at most one control side effect"
+      proof: 'grep: test("W1-T4763: exact retries dispatch only once across handlers" in test/assistant-control-idempotency.test.ts'
+    - claim: "changed payload and retry after unknown outcome refuse or remain unknown"
+      proof: 'grep: test("W1-T4763: changed or interrupted action never becomes success" in test/assistant-control-idempotency.test.ts'
+    - claim: "the same action ID cannot cross instance roots or bypass the write tier"
+      proof: 'grep: test("W1-T4763: instance target and write tier remain authoritative" in test/assistant-control-idempotency.test.ts'
+  falsifier: |
+    Run two handlers against one state root and the same key concurrently; there must be one
+    durable claim and at most one control row. Interrupt after claim but before completion,
+    retry after a restart, and verify an explicit unknown without another side effect.
