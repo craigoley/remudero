@@ -29,6 +29,7 @@ import { resolveLedgerUnion } from "./ledger-union.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
 import { planParallelAttempts, type ShapeGain, type TaskShape } from "./parallel-attempts.js";
+import { strikeScheduleFor, type StrikePassRate } from "./strike-schedule.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, createPlanPrRest, probeExistingPlanPr } from "./plan-pr-emitter.js";
 import {
   DEFAULT_RISK,
@@ -2452,6 +2453,19 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           task_id: task.id,
           prior_strikes: pr.priorStrikes,
           ...planParallelAttempts({ task, priorStrikes: pr.priorStrikes, gains: new Map<TaskShape, ShapeGain>() }),
+        });
+        // W1-T4671: the strike-schedule DECISION for this task's shape — never an effect, same
+        // posture as the parallel-attempts plan just above. `strikeScheduleFor` only says how many
+        // cheap (sonnet) strikes this shape's MEASURED pass rate earns before the ladder steps up
+        // to the opus mount (design (ii)); `rates` is an EMPTY map for now, so every shape resolves
+        // DEFAULT_CHEAP_STRIKE_BUDGET — cheap-first stays the default until a live per-strike pass
+        // rate source is wired in. This ledgers the decision point without changing today's fixed
+        // two-strike-then-opus dispatch.
+        log("sweep.fix.strike_schedule_plan", {
+          pr_number: pr.prNumber,
+          task_id: task.id,
+          prior_strikes: pr.priorStrikes,
+          ...strikeScheduleFor({ task, rates: new Map<string, StrikePassRate>() }),
         });
         if (!realBranch || !fixHeadAcceptable(realBranch, task.id, synthetic)) {
           // The guard above is UNCHANGED — this decides nothing, it only explains the decline
