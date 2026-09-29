@@ -3267,8 +3267,7 @@ itself. This ruling ratifies `src/lib/machine-filing-judge.ts` as the judge that
   task ids carry a release row across the rotations, 76 in the live ledger, so releases silently lapsed
   and those tasks parked again. No judge releases a machine-authored record by a ledger row from here on:
   its pinned `risk_ruling` lives in git, cannot be rotated away, and editing the record changes its pin,
-  which re-opens the question. (An operator's own `rmd approve` still writes the ledger row, and is still
-  exposed to the same rotation; that is a separate defect, not changed here.)
+  which re-opens the question. (An operator's own `rmd approve` is made durable the same way; see below.)
 - **THE VERIFY-HUMAN SWEEP HANDS MACHINE RECORDS TO THIS JUDGE.** W1-T3188's judge now routes and
   releases only operator-authored `verify: human` records, through its existing arm; machine-authored
   ones are routed (inbox on escalate) and released (pinned ruling) here.
@@ -3280,8 +3279,17 @@ itself. This ruling ratifies `src/lib/machine-filing-judge.ts` as the judge that
   W1-T4014's visibility deliverable stands; its "release is never automatic" criterion no longer does and
   should be amended to "nothing releases a machine proposal except a person or this ratified judge".
 
-**NOT DECIDED HERE:** whether this judge may also release OPERATOR-authored `verify: human` records by
-pinned ruling. They stay on the verify-human sweep's existing path.
+**OPERATOR `verify: human` RECORDS TOO (operator answer, 2026-09-29: "YES … EXCEPT ruling-shaped records").**
+The same judge, the same backstop and the same pinned ruling apply to every operator-authored `verify:
+human` record, except a ruling-shaped one (the linter's `rulingVerifyViolation` trigger: it declares
+DECISIONS.md). Ruling-shaped records stay on the W1-T3188 sweep, whose release arm now refuses them.
+The judge's rule gains one escalation clause for these records: it asks for a decision only the
+operator can make (his priorities, budget, preference or policy).
+
+**`rmd approve` IS DURABLE.** The operator's release still writes its `ratify.approved` row, which
+takes effect at once. It is also kept in `state/operator-releases.json`, which rotation does not touch,
+and the judge's next pass pins it on the record as an `operator` ruling. That pass asks no model and
+runs no backstop, because the operator's bit is the decision.
 
 Rollback: remove the `machine-judge` garden from the daemon's gardens and revert the filers to the
 literal header; records already pinned stay valid, and reverting any one to `verify: human` parks it.
