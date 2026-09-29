@@ -309,7 +309,7 @@ test("W1-T4095: the gardener's seeded timer survives a failing pass and its stat
   await new Promise((resolve) => setTimeout(resolve, 40));
   pump.stop();
   assert.ok(calls >= 1, "the seeded pass acted, so it reached the throwing workspace");
-  assert.ok(rows.includes("knowledge.gardener_failed"), "the throw was logged and the timer kept running");
+  assert.ok(rows.includes("knowledge.garden_filing_failed"), "the failed filing was ledgered and the timer kept running");
   writeFileSync(gardenerStatePath(join(root, "state")), "{ torn");
   assert.deepEqual(readGardenerState(gardenerStatePath(join(root, "state"))).classes, initialGardenerState().classes);
   writeFileSync(gardenerStatePath(join(root, "state")), "null");

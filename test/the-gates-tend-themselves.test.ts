@@ -196,7 +196,11 @@ test("W1-T4116: edits refuse what they cannot do exactly", async () => {
   assert.equal(rationale.kind, "demote");
   const root = seededGates({ ciGate: CI_GATE(rationale.kind === "demote" ? rationale.rationale : "") });
   off(root, "tighten", "refresh");
-  assert.throws(() => runGarden(gateGardenSpec(deps(root, []), probes), deps(root, [])), /gate-monotonic would refuse/);
+  // A refused filing lands nothing and is ledgered with its reason, to be retried after a backoff.
+  const failures: string[] = [];
+  const refusing = { ...deps(root, []), log: (step: string, e?: Record<string, unknown>) => void (step === "gate.garden_filing_failed" && failures.push(String(e?.reason))) };
+  assert.equal(runGarden(gateGardenSpec(refusing, probes), refusing).prUrl, undefined);
+  assert.match(failures.join("\n"), /gate-monotonic would refuse/);
   assert.ok(!existsSync(join(root, "docs/gate-garden-log.md")));
 });
 

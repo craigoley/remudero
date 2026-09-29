@@ -4925,12 +4925,47 @@ export const CI_GATE_CHECK_NAME = "ci-gate";
 /** #2918 — `ci-gate` REPORTED AS A FAILURE IT CANNOT BE. It is a DOWNSTREAM AGGREGATOR: red BECAUSE
  *  a sibling is red, so a list naming both reports two failures where there is one and a worker
  *  handed the second can only chase a symptom. THE ONE CASE THAT IS KEPT is `ci-gate` failing ALONE
- *  — the stale-verdict shape {@link staleCiGateTransition} names — so a non-empty list never empties. */
+ *  — the stale-verdict shape {@link staleCiGateTransition} names — so a non-empty list never empties.
+ *  A matrix aggregator ({@link CI_MATRIX_AGGREGATORS}) is dropped the same way once a shard of its
+ *  own failed: the shard's log names the failing test, the aggregator's only points at it. */
 export function withoutDownstreamGateFailure(failures: readonly CiFailure[]): CiFailure[] {
   const others = failures.filter((f) => f.name !== CI_GATE_CHECK_NAME);
   // Nothing else failed ⇒ the gate IS the signal. Also covers the empty list unchanged.
   if (others.length === 0) return [...failures];
-  return others;
+  return others.filter((f) => !aggregatorRedBecauseOfShard(f.name, others));
+}
+
+/** ci.yml's matrix aggregators. Each required check on the left goes red when a matrix check its
+ *  pattern names fails, and its own log then says only "a coverage shard FAILED — open the shard
+ *  log". Measured 2026-09-29: 69 of 82 red coverage-ratchet heads were a failing shard. */
+export const CI_MATRIX_AGGREGATORS: ReadonlyArray<{ readonly aggregator: string; readonly constituent: RegExp }> = [
+  { aggregator: "coverage-ratchet", constituent: /^coverage-shard \(\d+\/\d+\)$/ },
+  { aggregator: "ci", constituent: /^ci-shard \(\d+\/\d+\)$/ },
+  { aggregator: "test-slow", constituent: /^test-slow-shard \(\d+\/\d+\)$/ },
+];
+
+/** True when `name` is a matrix aggregator and one of its own shards FAILED in `failures`. A shard
+ *  that was only CANCELLED does not count: the aggregator's log then carries the hang diagnosis. */
+function aggregatorRedBecauseOfShard(name: string, failures: readonly CiFailure[]): boolean {
+  const entry = CI_MATRIX_AGGREGATORS.find((a) => a.aggregator === name);
+  return (
+    entry !== undefined &&
+    failures.some((f) => entry.constituent.test(f.name) && (f.conclusion ?? "FAILURE") !== "CANCELLED")
+  );
+}
+
+/** The rollup a still-pending PR's evidence is read from: each red required check, plus the matrix
+ *  checks of every red aggregator among them, so the failing shard's own log is the one read. */
+export function earlyRedEvidenceRollup<T extends RollupCheckEntry>(
+  rollup: readonly T[] | undefined,
+  redRequired: readonly string[],
+): T[] {
+  const red = new Set(redRequired);
+  const shards = CI_MATRIX_AGGREGATORS.filter((a) => red.has(a.aggregator)).map((a) => a.constituent);
+  return (rollup ?? []).filter((check) => {
+    const name = check.name ?? check.context ?? "";
+    return red.has(name) || shards.some((p) => p.test(name));
+  });
 }
 
 /** W1-T1275 — the ONE (head, sibling-transition) shape that makes `ci-gate`'s concluded verdict

@@ -1005,6 +1005,10 @@ export interface DeployDeps {
   alert: (message: string, failedHead: string, kind: DeployFailureKind) => void;
   /** Consume the operator marker after a terminal outcome (success or rollback). */
   clearMarker: () => void;
+  /** Retract the recorded failure (state/DEPLOY_FAILED + DEPLOY_LAST_FAILED) once a deploy is VERIFIED
+   *  healthy. Without it nothing ever unlinked the latch: core, console and site each carried a failure
+   *  days older than their newest `deploy.ok` (measured 2026-09-29). Optional for fake-dep callers. */
+  clearFailure?: () => void;
 
   // ── DEFERRAL CEILING (W1-T341) ── each cycle is a fresh launchd one-shot with no in-memory
   // continuity, so the idle-gate wait needs its own persisted clock. All three OPTIONAL: an
@@ -1370,6 +1374,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   const health = assessBootHealth(deps.waitBootHealth(kickstartAt), opts.health);
   if (health.healthy) {
     deps.clearMarker();
+    deps.clearFailure?.();
     deps.log("deploy.ok", { to: short(toHead), reason: health.reason });
     deps.setRestartPressureState?.(
       resetDeployRestartPressure(deps.restartPressureState?.() ?? { total: 0, scoredShas: [] }, deps.now()),
@@ -2011,6 +2016,15 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         unlinkSync(deployMarkerPath(o.stateRoot));
       } catch {
         /* already gone */
+      }
+    },
+    clearFailure: () => {
+      for (const path of [deployFailedAlertPath(o.stateRoot), deployLastFailedPath(o.stateRoot)]) {
+        try {
+          unlinkSync(path);
+        } catch {
+          /* already gone */
+        }
       }
     },
     // W1-T341's ceiling clock, persisted because a fresh process cannot remember it between
