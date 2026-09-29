@@ -1,6 +1,25 @@
 import { createHash } from "node:crypto";
 import { citation } from "./provenance.js";
-import type { LearningEntry } from "./learnings.js";
+
+/**
+ * The subset of `LearningEntry` (learnings.ts) this module actually reads. Declared LOCALLY
+ * rather than imported: learnings.ts imports {@link buildStandingBrief} from this file, so an
+ * `import type { LearningEntry } from "./learnings.js"` here would close a cycle — and
+ * dependency-cruiser's swc-based extractor (`.dependency-cruiser.cjs`'s `no-circular` rule,
+ * `error` since W1-T2895) counts a type-only import exactly like a value import for cycle
+ * detection, so that cycle would still fail CI even though it erases at build time. Any object
+ * shaped like `LearningEntry` (a strict superset of these three fields) satisfies this
+ * structurally, so `buildShardStandingBriefs` (learnings.ts) can pass its own entries straight
+ * through with no cast.
+ */
+export interface StandingBriefSourceEntry {
+  /** Stable slug used in the injected citation `[src: learnings#<id>]`. */
+  id: string;
+  /** The actionable claim text this module renders into a brief line. */
+  fact: string;
+  /** Only `"active"` entries are summarised; see {@link activeSortedById}. */
+  lifecycle: string;
+}
 
 /**
  * Standing briefs (W1-T4680): OBSERVED, learnings enter a prompt as flat lines under a char
@@ -41,22 +60,22 @@ export interface StandingBrief {
   rendered: string;
 }
 
-function claimHashOf(entry: LearningEntry): string {
+function claimHashOf(entry: StandingBriefSourceEntry): string {
   return createHash("sha256").update(`${entry.id}\u0000${entry.fact}`).digest("hex");
 }
 
-function renderClaimLine(entry: LearningEntry): string {
+function renderClaimLine(entry: StandingBriefSourceEntry): string {
   return `- ${entry.fact} ${citation(`learnings#${entry.id}`)}`;
 }
 
-function activeSortedById(entries: readonly LearningEntry[]): LearningEntry[] {
+function activeSortedById(entries: readonly StandingBriefSourceEntry[]): StandingBriefSourceEntry[] {
   return entries
     .filter((e) => e.lifecycle === "active")
     .slice()
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
-function shardHashOf(active: readonly LearningEntry[]): string {
+function shardHashOf(active: readonly StandingBriefSourceEntry[]): string {
   const h = createHash("sha256");
   for (const entry of active) h.update(`${entry.id}\u0000${entry.fact}\u0000`);
   return h.digest("hex");
@@ -75,7 +94,7 @@ function shardHashOf(active: readonly LearningEntry[]): string {
  * entry's edit never rewrites a sibling claim's wording.
  */
 export function buildStandingBrief(
-  entries: readonly LearningEntry[],
+  entries: readonly StandingBriefSourceEntry[],
   shard: string,
   previous?: StandingBrief,
 ): StandingBrief {
@@ -105,7 +124,10 @@ export function buildStandingBrief(
  * `entries` must have a claim in `brief`, and every claim's rendered `text` must cite its own id.
  * Returns the ids that fail either requirement; empty means the brief is complete.
  */
-export function findMissingOrUncitedClaims(entries: readonly LearningEntry[], brief: StandingBrief): string[] {
+export function findMissingOrUncitedClaims(
+  entries: readonly StandingBriefSourceEntry[],
+  brief: StandingBrief,
+): string[] {
   const active = activeSortedById(entries);
   const claimsById = new Map(brief.claims.map((c) => [c.id, c] as const));
   const bad = new Set<string>();
