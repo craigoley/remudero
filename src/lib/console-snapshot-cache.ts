@@ -42,6 +42,7 @@ export const CONSOLE_SNAPSHOT_MIN_REFRESH_MS: Readonly<Record<string, number>> =
   "/v1/daemon-health": 5_000,
   "/v1/inbox": 10_000,
   "/v1/repos": 10_000,
+  "/v1/repos/summary": 10_000,
   "/v1/feedback": 10_000,
   "/v1/operator-activity": 15_000,
 };

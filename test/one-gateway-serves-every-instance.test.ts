@@ -104,6 +104,15 @@ async function get(url: string, path: string): Promise<{ status: number; body: R
   return { status: res.status, body: (await res.json()) as Record<string, unknown> };
 }
 
+/** A cached read's first answer may be its budget fallback while the off-thread pass runs; wait for the pass. */
+async function getComputed(url: string, path: string): Promise<{ status: number; body: Record<string, unknown> }> {
+  for (let attempt = 0; ; attempt += 1) {
+    const read = await get(url, path);
+    if (read.body.repos !== undefined || attempt >= 100) return read;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 async function post(url: string, path: string): Promise<{ status: number; body: Record<string, unknown> }> {
   const res = await fetch(`${url}${path}`, {
     method: "POST",
@@ -158,14 +167,23 @@ test("a repository projection reads the selected instance's ledger and plan, not
     served_model: "site-served-model", tokens: { input: 13, output: 0, cacheRead: 0, cacheCreation: 0 },
   }) + "\n");
   await withServer(deps, async (url) => {
-    const scoped = await get(url, "/v1/i/site/repos");
+    const scoped = await getComputed(url, "/v1/i/site/repos");
     assert.equal(scoped.status, 200);
     const rows = scoped.body.repos as Array<{ id: string; source: string; health: { queuedtasks: number | null }; telemetry: { tokens7d: number | null; modelsused: string[] | null } }>;
     assert.deepEqual(rows.map((row) => row.id), ["craigoley/remudero-site"]);
     assert.equal(rows[0]?.source, "instance-registry");
     assert.equal(rows[0]?.health.queuedtasks, 1, "the site plan owns its task count");
-    assert.deepEqual(rows[0]?.telemetry, { tokens7d: 13, modelsused: ["site-served-model"], cost_7d: 1.25 });
-    const core = await get(url, "/v1/repos");
+    assert.deepEqual(rows[0]?.telemetry, {
+      measurementClass: "observed", tokens7d: 13, cache_read_tokens7d: 0, cash_usd_7d: 1.25, cost_7d: 1.25,
+      subscription: { calls7d: 0, tokens7d: 0, windows: [] }, modelsused: ["site-served-model"],
+    });
+    const summary = await getComputed(url, "/v1/i/site/repos/summary");
+    assert.equal(summary.status, 200);
+    const card = (summary.body.repos as Array<{ id: string; active: boolean | null; actions: Array<{ id: string; path?: string }> }>)[0];
+    assert.equal(card?.id, "craigoley/remudero-site");
+    assert.equal(card?.active, true, "the site card reads the site's own fleet-control root");
+    assert.equal(card?.actions[0]?.path, "control/pause");
+    const core = await getComputed(url, "/v1/repos");
     const coreSite = (core.body.repos as Array<{ id: string; telemetry: { tokens7d: number | null } }>).find((row) => row.id === "craigoley/remudero-site");
     assert.equal(coreSite?.telemetry.tokens7d, 0, "the unscoped core route never reads site worker costs");
     assert.equal((await fetch(`${url}/v1/i/site/repos`)).status, 401, "scoped telemetry still requires the read bearer");
