@@ -91,6 +91,9 @@ export interface FlowRow {
   selectedModel: string | null;
   servedModel: string | null;
   taskClass: string | null;
+  risk: string | null;
+  workLane: string | null;
+  stackPinned: { harness: boolean; prompt: boolean; tool: boolean; scorer: boolean; environment: boolean } | null;
   success: boolean | null;
   prRepo: string | null;
   prNumber: number | null;
@@ -108,7 +111,13 @@ function flowRelevant(row: Record<string, unknown>): boolean {
 /** Only these fields leave the raw row; prompts, bodies and free text never enter the snapshot. */
 export function projectFlowRow(row: Record<string, unknown>, fingerprint: string): FlowRow {
   const assignment = record(row.worker_assignment);
-  const taskClass = record(record(record(row.benchmark_run)?.work)?.taskClass);
+  const benchmark = record(row.benchmark_run);
+  const work = record(benchmark?.work);
+  const taskClass = record(work?.taskClass);
+  const risk = record(work?.risk);
+  const lane = record(record(work?.shape)?.lane);
+  const stack = record(benchmark?.stack);
+  const pinned = (field: string) => record(stack?.[field])?.state === "observed";
   const url = PR_URL_RE.exec(String(row.pr_url ?? ""));
   return {
     fingerprint, ts: iso(row.ts), step: String(row.step), host: text(row.host), actor: text(row.actor),
@@ -117,6 +126,10 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     requestedModel: text(record(assignment?.requested)?.model), selectedModel: text(record(assignment?.selected)?.model),
     servedModel: text(row.served_model),
     taskClass: taskClass?.state === "observed" ? text(taskClass.value) : text(row.task_class),
+    risk: risk?.state === "observed" ? text(risk.value) : text(row.risk),
+    workLane: lane?.state === "observed" ? text(lane.value) : text(row.worker_rung),
+    stackPinned: assignment ? { harness: pinned("harnessRevision"), prompt: pinned("promptRevision"),
+      tool: pinned("toolRevision"), scorer: pinned("scorerRevision"), environment: pinned("environmentRevision") } : null,
     success: typeof row.success === "boolean" ? row.success : null,
     prRepo: url?.[1] ?? null, prNumber: url ? Number(url[2]) : Number.isSafeInteger(row.pr_number) ? row.pr_number as number : null,
     headSha: text(row.head_sha), verdict: text(row.verdict), action: text(row.action),
@@ -357,6 +370,10 @@ export interface FieldTrialsFlowSnapshot {
   observational: true;
   causalClaims: "none";
   followUpWindowDays: number;
+  /** Private assignment metadata coverage by source and selected model; absent revisions stay absent. */
+  assignmentTelemetry: { source: string; selectedModel: string; assignments: number; taskClass: number; risk: number;
+    workLane: number; harnessPinned: number; promptPinned: number; toolPinned: number; scorerPinned: number;
+    environmentPinned: number }[];
   provenance: { sources: { label: string; repo: string; ledger: Omit<FieldTrialsLedgerRead, "rows"> & { rows: number };
     github: { pulls: GithubCursor | null; commits: GithubCursor | null; deployments: GithubCursor | null;
       prs: number; commitsKnown: number; deploymentsKnown: number } }[];
@@ -597,6 +614,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   const transitions: ModelTransition[] = [];
   const reasons: string[] = [];
   const privateKeys = new Set<string>();
+  const assignmentTelemetry = new Map<string, FieldTrialsFlowSnapshot["assignmentTelemetry"][number]>();
   const links: FieldTrialsFlowSnapshot["links"] = { prs: 0, matched: 0, ambiguous: 0, unmatched: 0,
     byPath: { trailer: 0, branch: 0, ledger: 0, multiplePaths: 0 }, ledgerPrNotInGithub: 0, githubOnlyTasks: 0,
     unmatchedPrs: [], ambiguousPrs: [] };
@@ -620,6 +638,23 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
       revertedAt: new Map(pulls.filter((pull) => pull.revertsPr !== null && pull.mergedAt !== null).map((pull) => [pull.revertsPr!, pull.mergedAt!])) };
     const rowsByTask = new Map<string, FlowRow[]>();
     for (const row of ledgerRows) {
+      if (row.step === "worker.assignment") {
+        const selectedModel = row.selectedModel ?? "unknown";
+        const key = JSON.stringify([source.label, selectedModel]);
+        const counts = assignmentTelemetry.get(key) ?? { source: source.label, selectedModel, assignments: 0,
+          taskClass: 0, risk: 0, workLane: 0, harnessPinned: 0, promptPinned: 0, toolPinned: 0,
+          scorerPinned: 0, environmentPinned: 0 };
+        counts.assignments += 1;
+        counts.taskClass += Number(row.taskClass !== null);
+        counts.risk += Number(row.risk !== null);
+        counts.workLane += Number(row.workLane !== null);
+        counts.harnessPinned += Number(row.stackPinned?.harness === true);
+        counts.promptPinned += Number(row.stackPinned?.prompt === true);
+        counts.toolPinned += Number(row.stackPinned?.tool === true);
+        counts.scorerPinned += Number(row.stackPinned?.scorer === true);
+        counts.environmentPinned += Number(row.stackPinned?.environment === true);
+        assignmentTelemetry.set(key, counts);
+      }
       for (const key of [row.taskId, row.runId, row.assignmentId, row.host, row.headSha]) if (key !== null) privateKeys.add(key);
       if (row.taskId !== null) {
         const taskRows = rowsByTask.get(row.taskId);
@@ -689,6 +724,8 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   return { version: FIELD_TRIALS_FLOW_VERSION, asOf: input.asOf,
     state: !anyObserved ? "unavailable" : reasons.length > 0 ? "observed-partial" : "observed", reasons,
     observational: true, causalClaims: "none", followUpWindowDays: FOLLOW_UP_WINDOW_DAYS,
+    assignmentTelemetry: [...assignmentTelemetry.values()].sort((a, b) => a.source.localeCompare(b.source)
+      || a.selectedModel.localeCompare(b.selectedModel)),
     provenance: { sources: provenance, githubPass: input.githubPass ?? null }, links, families,
     rebuild: { rebuiltPartitions: rebuilt, reusedPartitions: reused.count }, privateKeys: [...privateKeys].sort() };
 }

@@ -125,6 +125,22 @@ test("field trials regexes admit only safe labels, model names and GitHub PR URL
   assert.equal(projectFlowRow({ step: "fix.dispatch", task_id: "T", pr_number: 7 }, "f").prNumber, 7);
 });
 
+test("private Field Trials counts assignment class, risk, lane and effective stack pin coverage", () => {
+  const observedValue = (value: string) => ({ state: "observed", value });
+  const assignment = { step: "worker.assignment", ts: T(10), task_id: "W1-T4900", run_id: "W1-T4900-run",
+    worker_assignment: { id: "assignment-1", requested: { model: "sonnet" },
+      selected: { model: "claude-sonnet-5-5" } },
+    benchmark_run: { work: { taskClass: observedValue("docs"), risk: observedValue("low"),
+      shape: { lane: observedValue("fix") } }, stack: { harnessRevision: observedValue("a".repeat(40)),
+      promptRevision: { state: "unavailable", reason: "not-pinned" } } } };
+  const source: FieldTrialsSource = { label: "core", repo: "acme/core", ledger: flowReadOf([assignment]) };
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(10), sources: [source],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
+  assert.deepEqual(snapshot.assignmentTelemetry, [{ source: "core", selectedModel: "claude-sonnet-5-5", assignments: 1,
+    taskClass: 1, risk: 1, workLane: 1, harnessPinned: 1, promptPinned: 0, toolPinned: 0,
+    scorerPinned: 0, environmentPinned: 0 }]);
+});
+
 test("field trials join three repo ledger and GitHub histories with explicit missingness", async () => {
   const root = tempDir("join");
   try {
