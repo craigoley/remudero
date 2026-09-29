@@ -1318,7 +1318,7 @@
     "test/onboarding-repository-inventory.test.ts": 1583,
     "test/one-effect-surface-has-one-recorded-list.test.ts": 2699,
     "test/one-fetch-and-one-plan-load-per-tick.test.ts": 3093,
-    "test/one-gateway-serves-every-instance.test.ts": 2369,
+    "test/one-gateway-serves-every-instance.test.ts": 5000,
     "test/one-invocation-is-one-burst.test.ts": 327,
     "test/one-lane-s-github-failure-does-not-end-the-pass.test.ts": 2011,
     "test/one-manifest-predicate-reads-the-declared-workspaces.test.ts": 1847,
