@@ -2195,6 +2195,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
               assertModelAllowed("claude-sonnet-5-5", config);
             } catch (reason) {
               foundryRefusal = reason instanceof Error ? reason.message : String(reason);
+              console.error(JSON.stringify({ event: "worker.provider.cash_sonnet_unavailable", reason: foundryRefusal }));
             }
             if (foundryRefusal === undefined) {
               console.error(JSON.stringify({ event: "worker.provider.cash_sonnet_fallback", reason: "both subscriptions blocked", requested_model: args.model }));
