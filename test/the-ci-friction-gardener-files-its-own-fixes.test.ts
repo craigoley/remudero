@@ -28,7 +28,10 @@ import {
   appendCiFrictionTrendRow,
   CI_FRICTION_GARDEN_CLASSES,
   CI_FRICTION_HALF_LIFE_MS,
+  ciFailureSignature,
   ciFrictionRecencyWeight,
+  refusalReasonKey,
+  ciCheckFamily,
   CI_FRICTION_REMEDIES_FILE,
   ciFrictionGardenLogPath,
   ciFrictionCauseKey,
@@ -108,7 +111,7 @@ test("W1-T4435: the gardener prices each cause in PR minutes", () => {
   ];
   const withRefusal = priceCiFrictionCauses(ciFrictionRoundsFromLedger(refused));
   const refusal = withRefusal.find((p) => p.cause.kind === "fix_refusal");
-  assert.equal(refusal?.cause.name, "commit_refused");
+  assert.equal(refusal?.cause.name, "diff-exceeds-declared-scope", "named by its reason, so each harness refusal is its own cause");
   assert.equal(refusal?.minutes, 3);
   const mainMerge = withRefusal.find((p) => p.cause.kind === "main_merge");
   assert.equal(mainMerge?.cause.name, "src/lib/shared.ts");
@@ -518,4 +521,56 @@ test("an old friction round fades by its half-life so a cause that stops recurri
   // Two half-lives with no new rounds: the cause's price is a quarter of what it was.
   const later = priceCiFrictionCauses(rounds, undefined, now + 2 * CI_FRICTION_HALF_LIFE_MS);
   assert.equal(later.find((p) => p.cause.name === "ci-log")!.minutes, Math.round(recent.find((p) => p.cause.name === "ci-log")!.minutes / 4 * 10) / 10);
+});
+
+test("a ci-log round is priced against each red check and the failing test file its log names", () => {
+  const records: LedgerRecord[] = [
+    { step: "sweep.disposed", run_id: "DAEMON-1", pr_number: 7816, head_sha: "aaa", red_checks: ["coverage-shard (5/8)", "commitlint"], ts: "2026-09-29T12:44:00.000Z" },
+    { step: "fix.dispatch", run_id: "DAEMON-1", round: "resume", mode: "ci-log", head_sha: "aaa", elapsed_ms: 600_000, ts: "2026-09-29T12:54:00.000Z" },
+    // An older sweep row names its check only in its reason.
+    { step: "sweep.disposed", run_id: "DAEMON-1", pr_number: 7817, head_sha: "bbb", reason: "fix strikes exhausted (2/2) — coverage-ratchet failed on bbb1234 — ci-log fix", ts: "2026-09-29T13:00:00.000Z" },
+    { step: "fix.dispatch", run_id: "DAEMON-1", round: "resume", mode: "ci-log", head_sha: "bbb", elapsed_ms: 120_000, ts: "2026-09-29T13:02:00.000Z" },
+    // A dispatch that carries its own failures names the failing test, and a retried file is flaky.
+    { step: "test.flake_retry", file: "test/house-layout.test.ts", ts: "2026-09-29T12:00:00.000Z" },
+    { step: "sweep.disposed", run_id: "DAEMON-1", pr_number: 7818, head_sha: "ccc", ts: "2026-09-29T13:10:00.000Z" },
+    { step: "fix.dispatch", run_id: "DAEMON-1", round: "resume", mode: "ci-log", head_sha: "ccc", elapsed_ms: 60_000, ts: "2026-09-29T13:11:00.000Z",
+      ci_failures: [{ check: "coverage-shard (5/8)", signature: ciFailureSignature("coverage-shard (5/8)\t2026-09-29T13:05:00.1Z not ok 3 - test/house-layout.test.ts") }] },
+  ];
+  const byName = new Map(ciFrictionRoundsFromLedger(records).map((r) => [`${r.pr}:${r.cause.name}`, r.minutes]));
+  assert.deepEqual(Object.fromEntries(byName), {
+    "7816:ci-log:coverage-shard": 5,
+    "7816:ci-log:commitlint": 5,
+    "7817:ci-log:coverage-ratchet": 2,
+    "7818:ci-log:coverage-shard:test-house-layout-test-ts:flaky": 1,
+  });
+  assert.equal(ciFailureSignature("2026-09-29T13:05:00.1Z Error: census abc1234def refused 12 rows"), "Error: census  refused N rows");
+  assert.equal(ciFailureSignature("all green"), undefined);
+});
+
+test("a sweep refusal on a resume round is priced as fix_refusal by its reason", () => {
+  const records: LedgerRecord[] = [
+    { step: "sweep.disposed", run_id: "DAEMON-1", pr_number: 7816, head_sha: "aaa", red_checks: ["coverage-ratchet"], ts: "2026-09-29T12:44:00.000Z" },
+    { step: "fix.dispatch", run_id: "DAEMON-1", round: "resume", mode: "ci-log", head_sha: "aaa", elapsed_ms: 510_000, ts: "2026-09-29T12:52:59.949Z" },
+    { step: "fix.commit_refused", run_id: "DAEMON-1", round: "resume", mode: "ci-log", head_sha: "aaa", reason: "no anchored COMMIT_MESSAGE line in the report", ts: "2026-09-29T12:52:59.952Z" },
+    // The next round on the SAME unmoved head is its own round: the earlier refusal does not taint it.
+    { step: "fix.dispatch", run_id: "DAEMON-1", round: "fresh", mode: "ci-log", head_sha: "aaa", elapsed_ms: 60_000, ts: "2026-09-29T13:10:00.000Z" },
+  ];
+  assert.deepEqual(ciFrictionRoundsFromLedger(records).map((r) => [r.cause.kind, r.cause.name, r.minutes]), [
+    ["fix_refusal", "no-anchored-commit-message-line-in-the-report", 8.5],
+    ["check", "ci-log:coverage-ratchet", 1],
+  ]);
+  assert.equal(refusalReasonKey(undefined), "commit_refused");
+});
+
+test("coverage-shard checks from different CI matrix sizes price as one shard family", () => {
+  const records: LedgerRecord[] = [
+    { step: "sweep.disposed", run_id: "DAEMON-1", pr_number: 1, head_sha: "aaa", red_checks: ["coverage-shard (5/8)"], ts: "2026-09-29T12:00:00.000Z" },
+    { step: "fix.dispatch", run_id: "DAEMON-1", round: "resume", mode: "ci-log", head_sha: "aaa", elapsed_ms: 60_000, ts: "2026-09-29T12:01:00.000Z" },
+    { step: "sweep.disposed", run_id: "DAEMON-1", pr_number: 2, head_sha: "bbb", red_checks: ["coverage-shard (5/4)"], ts: "2026-09-29T12:02:00.000Z" },
+    { step: "fix.dispatch", run_id: "DAEMON-1", round: "resume", mode: "ci-log", head_sha: "bbb", elapsed_ms: 120_000, ts: "2026-09-29T12:03:00.000Z" },
+  ];
+  const priced = priceCiFrictionCauses(ciFrictionRoundsFromLedger(records));
+  assert.deepEqual(priced.map((p) => [p.cause.name, p.minutes, p.rounds]), [["ci-log:coverage-shard", 3, 2]]);
+  assert.equal(ciCheckFamily("ci-shard (1/4)"), "ci-shard");
+  assert.equal(ciCheckFamily("commitlint"), "commitlint");
 });
