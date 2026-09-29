@@ -191,6 +191,12 @@ export function refusalReasonKey(reason: unknown): string {
   return kebabSlug(reason.split(/ — |: /)[0]!.replace(/\b[0-9a-f]{7,40}\b/g, "").replace(/\d+/g, "n"), 60);
 }
 
+/** A matrix check's FAMILY: `coverage-shard (5/8)` and `coverage-shard (5/4)` are one cause, so a
+ *  shard-count change in ci.yml never splits one failure's cost across names. */
+export function ciCheckFamily(check: string): string {
+  return check.replace(/\s*\(\d+\/\d+\)\s*$/, "");
+}
+
 function ciLogCauses(r: LedgerRecord, redByHead: ReadonlyMap<string, string[]>, flaky: ReadonlySet<string>): CiFrictionCause[] {
   const own = Array.isArray(r.ci_failures)
     ? (r.ci_failures as Array<{ check?: unknown; signature?: unknown }>).filter((f) => typeof f.check === "string")
@@ -201,7 +207,7 @@ function ciLogCauses(r: LedgerRecord, redByHead: ReadonlyMap<string, string[]>, 
   if (failures.length === 0) return [{ kind: "check", name: "ci-log" }];
   return failures.map(({ check, signature }) => ({
     kind: "check",
-    name: `ci-log:${kebabSlug(check, 40)}${signature ? `:${kebabSlug(signature, 60)}` : ""}${signature && flaky.has(signature) ? ":flaky" : ""}`,
+    name: `ci-log:${kebabSlug(ciCheckFamily(check), 40)}${signature ? `:${kebabSlug(signature, 60)}` : ""}${signature && flaky.has(signature) ? ":flaky" : ""}`,
   }));
 }
 

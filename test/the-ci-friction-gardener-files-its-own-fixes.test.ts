@@ -31,6 +31,7 @@ import {
   ciFailureSignature,
   ciFrictionRecencyWeight,
   refusalReasonKey,
+  ciCheckFamily,
   CI_FRICTION_REMEDIES_FILE,
   ciFrictionGardenLogPath,
   ciFrictionCauseKey,
@@ -537,10 +538,10 @@ test("a ci-log round is priced against each red check and the failing test file 
   ];
   const byName = new Map(ciFrictionRoundsFromLedger(records).map((r) => [`${r.pr}:${r.cause.name}`, r.minutes]));
   assert.deepEqual(Object.fromEntries(byName), {
-    "7816:ci-log:coverage-shard-5-8": 5,
+    "7816:ci-log:coverage-shard": 5,
     "7816:ci-log:commitlint": 5,
     "7817:ci-log:coverage-ratchet": 2,
-    "7818:ci-log:coverage-shard-5-8:test-house-layout-test-ts:flaky": 1,
+    "7818:ci-log:coverage-shard:test-house-layout-test-ts:flaky": 1,
   });
   assert.equal(ciFailureSignature("2026-09-29T13:05:00.1Z Error: census abc1234def refused 12 rows"), "Error: census  refused N rows");
   assert.equal(ciFailureSignature("all green"), undefined);
@@ -559,4 +560,17 @@ test("a sweep refusal on a resume round is priced as fix_refusal by its reason",
     ["check", "ci-log:coverage-ratchet", 1],
   ]);
   assert.equal(refusalReasonKey(undefined), "commit_refused");
+});
+
+test("coverage-shard checks from different CI matrix sizes price as one shard family", () => {
+  const records: LedgerRecord[] = [
+    { step: "sweep.disposed", run_id: "DAEMON-1", pr_number: 1, head_sha: "aaa", red_checks: ["coverage-shard (5/8)"], ts: "2026-09-29T12:00:00.000Z" },
+    { step: "fix.dispatch", run_id: "DAEMON-1", round: "resume", mode: "ci-log", head_sha: "aaa", elapsed_ms: 60_000, ts: "2026-09-29T12:01:00.000Z" },
+    { step: "sweep.disposed", run_id: "DAEMON-1", pr_number: 2, head_sha: "bbb", red_checks: ["coverage-shard (5/4)"], ts: "2026-09-29T12:02:00.000Z" },
+    { step: "fix.dispatch", run_id: "DAEMON-1", round: "resume", mode: "ci-log", head_sha: "bbb", elapsed_ms: 120_000, ts: "2026-09-29T12:03:00.000Z" },
+  ];
+  const priced = priceCiFrictionCauses(ciFrictionRoundsFromLedger(records));
+  assert.deepEqual(priced.map((p) => [p.cause.name, p.minutes, p.rounds]), [["ci-log:coverage-shard", 3, 2]]);
+  assert.equal(ciCheckFamily("ci-shard (1/4)"), "ci-shard");
+  assert.equal(ciCheckFamily("commitlint"), "commitlint");
 });
