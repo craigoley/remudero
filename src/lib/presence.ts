@@ -1,5 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { readLedgerLines } from "./status.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { systemClock } from "./clock.js";
 
@@ -74,8 +74,37 @@ function ledgerPathAt(root: string): string {
   return join(root, "state", LEDGER_FILENAME);
 }
 
+/**
+ * THE LIVE FILE ALONE — never a rotation (presence only ever cares about recent activity, and a
+ * rotated file is by definition not recent). Deliberately NOT `status.ts`'s `readLedgerLines`:
+ * that function's own module transitively imports this task's caller (`escalate.ts`, through
+ * `plan-architect.ts`'s typed `Escalation`/`EscalationOption` import), so reaching for it here
+ * would close `escalate.ts -> presence.ts -> status.ts -> plan-architect.ts -> escalate.ts` into
+ * a real import cycle (`.dependency-cruiser.cjs`'s `no-circular`, `severity: "error"` since
+ * W1-T2895 — see test/no-circular-is-an-error.test.ts). This mirrors `status.ts`'s own parsing
+ * exactly (one JSON object per non-blank line, a malformed line dropped rather than thrown) but
+ * stays a true leaf: presence.ts imports nothing that imports escalate.ts.
+ */
+function readLiveLedgerLines(path: string): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  if (!existsSync(path)) return out;
+  for (const raw of readFileSync(path, "utf8").split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    try {
+      out.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      // deliberate: a torn/malformed ledger line carries no activity signal either way, and
+      // status.ts's own readLedgerLines already surfaces torn lines to whichever caller needs
+      // that signal (rmd doctor, receipts) — this module only infers recent activity, so a bad
+      // line is silently skipped rather than counted for or against attendance.
+    }
+  }
+  return out;
+}
+
 function ledgerActivity(root: string): ActivityEvent[] {
-  const lines = readLedgerLines(ledgerPathAt(root)); // ledger-read-intent: live — only recent activity matters, never a rotation.
+  const lines = readLiveLedgerLines(ledgerPathAt(root));
   const events: ActivityEvent[] = [];
   for (const line of lines) {
     const source = classifyLedgerLine(line);
@@ -90,7 +119,7 @@ function ledgerActivity(root: string): ActivityEvent[] {
  *  task id. Exported so a lease can be learned, and so a sibling module (e.g. W1-T4675) that also
  *  wants a reply-latency distribution can read the same numbers rather than re-deriving them. */
 export function replyLatenciesMs(root: string): number[] {
-  const lines = readLedgerLines(ledgerPathAt(root)); // ledger-read-intent: live
+  const lines = readLiveLedgerLines(ledgerPathAt(root));
   const openedAt = new Map<string, number>();
   const latencies: number[] = [];
   for (const line of lines) {
