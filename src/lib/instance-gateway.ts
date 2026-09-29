@@ -43,6 +43,7 @@ import {
   type IssueCloser,
 } from "./panel-actions.js";
 import { loadPlan, type Plan } from "./plan.js";
+import { buildRepoDashboardRoute } from "./repo-dashboard-route.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { Route } from "./service.js";
 import type { GitHub } from "./status.js";
@@ -154,7 +155,11 @@ export function instanceRouteSet(
   currentAnalyticsSnapshot: () => AnalyticsSnapshot = coldAnalyticsSnapshot,
 ): Route[] {
   const panel = { root: root.root, ledgerPath: root.ledgerPath, issues: opts.issues ?? { close() {} } };
-  const reads = [buildStatusRoute(board), buildRecentRoute(board), buildTaskCardRoute(board)];
+  const [owner, name] = repository.split("/");
+  const reads = [
+    buildStatusRoute(board), buildRecentRoute(board), buildTaskCardRoute(board),
+    buildRepoDashboardRoute({ root: root.root, ledgerPath: root.ledgerPath, planPath: root.planPath, instanceRepository: { owner, repo: name } }),
+  ];
   return [
     ...(opts.bound ? opts.bound(reads, board) : reads),
     buildOperatorAgentAnswerRoute(() => ({
