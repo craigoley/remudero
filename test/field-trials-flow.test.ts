@@ -43,7 +43,7 @@ function taskRows(task: string, day: number, repo: string, prNumber: number, opt
 }
 
 function flowReadOf(rows: Record<string, unknown>[]): FieldTrialsLedgerRead {
-  return { state: "observed", reason: null, forms: { gzip: 0, plain: 0, live: 1 }, malformedRows: 0, duplicateRows: 0, unreadSources: 0,
+  return { state: "observed", reason: null, forms: { gzip: 0, plain: 0, live: 1 }, malformedRows: 0, duplicateRows: 0, futureRows: 0, unreadSources: 0,
     newestTs: null, rows: rows.map((value, index) => projectFlowRow(value, `fp-${index}-${JSON.stringify(value).length}`)) };
 }
 
@@ -123,6 +123,44 @@ test("field trials regexes admit only safe labels, model names and GitHub PR URL
     "a censored unit leaves the risk set without counting as an event");
   assert.equal(kaplanMeierQuantile([{ ms: 5, observed: false }], 0.5), null, "all-censored work never reaches a median");
   assert.equal(projectFlowRow({ step: "fix.dispatch", task_id: "T", pr_number: 7 }, "f").prNumber, 7);
+});
+
+test("private Field Trials counts assignment class, risk, lane and effective stack pin coverage", () => {
+  const observedValue = (value: string) => ({ state: "observed", value });
+  const assignment = { step: "worker.assignment", ts: T(10), task_id: "W1-T4900", run_id: "W1-T4900-run",
+    worker_assignment: { id: "assignment-1", requested: { model: "sonnet" },
+      selected: { model: "claude-sonnet-5-5" } },
+    benchmark_run: { work: { taskClass: observedValue("docs"), risk: observedValue("low"),
+      shape: { lane: observedValue("fix") } }, stack: { harnessRevision: observedValue("a".repeat(40)),
+      promptRevision: { state: "unavailable", reason: "not-pinned" } } } };
+  const source: FieldTrialsSource = { label: "core", repo: "acme/core", ledger: flowReadOf([assignment]) };
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(10), sources: [source],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
+  assert.deepEqual(snapshot.assignmentTelemetry, [{ source: "core", selectedModel: "claude-sonnet-5-5", assignments: 1,
+    taskClass: 1, risk: 1, workLane: 1, harnessPinned: 1, promptPinned: 0, toolPinned: 0,
+    scorerPinned: 0, environmentPinned: 0, attemptReceipts: 0, nonStarterAssignments: 1,
+    costMissingAssignments: 1, apiCostEstimateUsd: 0, subscriptionNotionalUsd: 0 }]);
+});
+
+test("private Field Trials joins terminal cost by assignment and separates API estimates from subscription notional cost", () => {
+  const assignment = (id: string) => ({ step: "worker.assignment", ts: T(10), task_id: `W1-${id}`,
+    worker_assignment: { id, selected: { model: "claude-sonnet-5-5" } } });
+  const rows = [assignment("api"), assignment("subscription"), assignment("without-attempt"),
+    { step: "worker.activity", ts: T(10, 1), selection_assignment_id: "api", total_cost_usd: 900 },
+    { step: "worker.attempt", ts: T(10, 1), selection_assignment_id: "api", cost_usd: 0.5, billing_mode: "api" },
+    { step: "worker.attempt", ts: T(10, 2), selection_assignment_id: "api", total_cost_usd: 0.25, billing_mode: "api" },
+    { step: "worker.attempt", ts: T(10, 3), selection_assignment_id: "subscription", total_cost_usd: 0.75,
+      billing_mode: "subscription" }];
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(11),
+    sources: [{ label: "core", repo: "acme/core", ledger: flowReadOf(rows) }],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
+  assert.deepEqual(snapshot.assignmentTelemetry.map(({ assignments, attemptReceipts, nonStarterAssignments,
+    costMissingAssignments, apiCostEstimateUsd, subscriptionNotionalUsd }) => ({ assignments, attemptReceipts,
+    nonStarterAssignments, costMissingAssignments, apiCostEstimateUsd, subscriptionNotionalUsd })),
+  [{ assignments: 3, attemptReceipts: 2, nonStarterAssignments: 1, costMissingAssignments: 1,
+    apiCostEstimateUsd: 0.25, subscriptionNotionalUsd: 0.75 }]);
+  assert.equal(projectFlowRow(rows[4]!, "legacy-cost").costUsd, 0.5,
+    "a legacy terminal cost remains readable, while the newer attempt wins the assignment join");
 });
 
 test("field trials join three repo ledger and GitHub histories with explicit missingness", async () => {
@@ -515,12 +553,14 @@ test("field trials ledger reader counts every form and never calls an unreadable
     assert.equal((await readFieldTrialsLedger(join(root, "empty"))).reason, "ledger-source-missing");
     const dir = join(root, "state");
     writeLedger([row("run.start", "T1-reader", "r", T(2)), row("noise.step", null, null, T(3)),
-      row("anything", "T1-reader", "r", T(4), { actor: "operator" })], { dir });
+      row("anything", "T1-reader", "r", T(4), { actor: "operator" }),
+      row("worker.assignment", "T1-future", "r", T(8))], { dir });
     writeFileSync(join(dir, "ledger.2026-09-01T00-00-00-000Z.ndjson.gz"), gzipSync("not a ledger line\n").subarray(0, 12));
-    const read = await readFieldTrialsLedger(dir);
+    const read = await readFieldTrialsLedger(dir, Date.parse(T(4)));
     assert.deepEqual([read.state, read.reason, read.unreadSources, read.forms.gzip], ["observed-partial", "ledger-source-unreadable", 1, 1]);
     assert.deepEqual(read.rows.map((item) => item.step), ["run.start", "anything"], "an operator's own row is kept as a human touch");
     assert.equal(read.newestTs, T(4));
+    assert.equal(read.futureRows, 1, "a future-dated assignment cannot advance the watermark or enter an observed cohort");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

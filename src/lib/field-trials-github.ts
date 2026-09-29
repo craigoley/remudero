@@ -15,7 +15,7 @@
  * change deployed or was correct; field-trials-flow.ts reads these facts and keeps those separate.
  */
 import { fixedClock } from "./clock.js";
-import { ghTextAsync } from "./github-transport.js";
+import { ghInteractiveRead } from "./github-transport.js";
 
 export const FIELD_TRIALS_GITHUB_VERSION = "field-trials-github-v1" as const;
 
@@ -64,7 +64,8 @@ export function pageOf(body: string): GithubPage {
 
 /** The default seam: `gh api <path>` through the paced, bounded GitHub transport. A failed or refused
  *  read is a reason, never a throw, so the pass records where to resume. */
-export function ghApiFetch(read: (args: string[]) => Promise<string> = (args) => ghTextAsync(args, { maxBuffer: GH_MAX_BUFFER_BYTES })): GithubPageFetch {
+export function ghApiFetch(read: (args: string[]) => Promise<string> = async (args) => String(await ghInteractiveRead(args,
+  { encoding: "utf8", maxBuffer: GH_MAX_BUFFER_BYTES }))): GithubPageFetch {
   return async (path) => {
     let body: string;
     try { body = await read(["api", path]); }

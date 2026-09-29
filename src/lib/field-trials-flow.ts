@@ -91,6 +91,11 @@ export interface FlowRow {
   selectedModel: string | null;
   servedModel: string | null;
   taskClass: string | null;
+  risk: string | null;
+  workLane: string | null;
+  stackPinned: { harness: boolean; prompt: boolean; tool: boolean; scorer: boolean; environment: boolean } | null;
+  costUsd: number | null;
+  billingMode: "api" | "subscription" | null;
   success: boolean | null;
   prRepo: string | null;
   prNumber: number | null;
@@ -108,7 +113,13 @@ function flowRelevant(row: Record<string, unknown>): boolean {
 /** Only these fields leave the raw row; prompts, bodies and free text never enter the snapshot. */
 export function projectFlowRow(row: Record<string, unknown>, fingerprint: string): FlowRow {
   const assignment = record(row.worker_assignment);
-  const taskClass = record(record(record(row.benchmark_run)?.work)?.taskClass);
+  const benchmark = record(row.benchmark_run);
+  const work = record(benchmark?.work);
+  const taskClass = record(work?.taskClass);
+  const risk = record(work?.risk);
+  const lane = record(record(work?.shape)?.lane);
+  const stack = record(benchmark?.stack);
+  const pinned = (field: string) => record(stack?.[field])?.state === "observed";
   const url = PR_URL_RE.exec(String(row.pr_url ?? ""));
   return {
     fingerprint, ts: iso(row.ts), step: String(row.step), host: text(row.host), actor: text(row.actor),
@@ -117,6 +128,14 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     requestedModel: text(record(assignment?.requested)?.model), selectedModel: text(record(assignment?.selected)?.model),
     servedModel: text(row.served_model),
     taskClass: taskClass?.state === "observed" ? text(taskClass.value) : text(row.task_class),
+    risk: risk?.state === "observed" ? text(risk.value) : text(row.risk),
+    workLane: lane?.state === "observed" ? text(lane.value) : text(row.worker_rung),
+    stackPinned: assignment ? { harness: pinned("harnessRevision"), prompt: pinned("promptRevision"),
+      tool: pinned("toolRevision"), scorer: pinned("scorerRevision"), environment: pinned("environmentRevision") } : null,
+    costUsd: typeof row.total_cost_usd === "number" && Number.isFinite(row.total_cost_usd) && row.total_cost_usd >= 0
+      ? row.total_cost_usd : typeof row.cost_usd === "number" && Number.isFinite(row.cost_usd) && row.cost_usd >= 0
+        ? row.cost_usd : null,
+    billingMode: row.billing_mode === "api" || row.billing_mode === "subscription" ? row.billing_mode : null,
     success: typeof row.success === "boolean" ? row.success : null,
     prRepo: url?.[1] ?? null, prNumber: url ? Number(url[2]) : Number.isSafeInteger(row.pr_number) ? row.pr_number as number : null,
     headSha: text(row.head_sha), verdict: text(row.verdict), action: text(row.action),
@@ -129,18 +148,19 @@ export interface FieldTrialsLedgerRead {
   forms: { gzip: number; plain: number; live: number };
   malformedRows: number;
   duplicateRows: number;
+  futureRows: number;
   unreadSources: number;
   newestTs: string | null;
   rows: FlowRow[];
 }
 
 export function unavailableLedger(reason: string): FieldTrialsLedgerRead {
-  return { state: "unavailable", reason, forms: { gzip: 0, plain: 0, live: 0 }, malformedRows: 0, duplicateRows: 0,
+  return { state: "unavailable", reason, forms: { gzip: 0, plain: 0, live: 0 }, malformedRows: 0, duplicateRows: 0, futureRows: 0,
     unreadSources: 0, newestTs: null, rows: [] };
 }
 
 /** The audited three-form union: every form counted, exact replayed lines counted as duplicates once. */
-export async function readFieldTrialsLedger(stateDir: string): Promise<FieldTrialsLedgerRead> {
+export async function readFieldTrialsLedger(stateDir: string, nowMs = systemClock.now()): Promise<FieldTrialsLedgerRead> {
   let names: string[];
   try { names = readdirSync(stateDir); }
   catch {
@@ -156,6 +176,7 @@ export async function readFieldTrialsLedger(stateDir: string): Promise<FieldTria
   const rows: FlowRow[] = [];
   let malformedRows = 0;
   let duplicateRows = 0;
+  let futureRows = 0;
   let unreadSources = 0;
   let newestTs: string | null = null;
   for await (const row of openLedgerUnion(stateDir, {
@@ -168,13 +189,16 @@ export async function readFieldTrialsLedger(stateDir: string): Promise<FieldTria
       if (seen.has(fingerprint)) { duplicateRows += 1; return; }
       seen.add(fingerprint);
       const ts = iso(accepted.ts);
+      // A stray clock-forward row cannot create a future cohort or advance the source watermark.
+      if (ts !== null && Date.parse(ts) > nowMs + 5 * 60_000) { futureRows += 1; return; }
       if (ts !== null && (newestTs === null || ts > newestTs)) newestTs = ts;
       if (flowRelevant(accepted)) rows.push(projectFlowRow(accepted, fingerprint));
     },
   })) void row;
-  const partial = unreadSources > 0 ? "ledger-source-unreadable" : malformedRows > 0 ? "ledger-source-malformed" : null;
+  const partial = unreadSources > 0 ? "ledger-source-unreadable" : malformedRows > 0 ? "ledger-source-malformed"
+    : futureRows > 0 ? "ledger-source-future-dated" : null;
   return { state: partial ? "observed-partial" : "observed", reason: partial, forms, malformedRows, duplicateRows,
-    unreadSources, newestTs, rows };
+    futureRows, unreadSources, newestTs, rows };
 }
 
 export interface FieldTrialsSource {
@@ -357,6 +381,11 @@ export interface FieldTrialsFlowSnapshot {
   observational: true;
   causalClaims: "none";
   followUpWindowDays: number;
+  /** Private assignment metadata coverage by source and selected model; absent revisions stay absent. */
+  assignmentTelemetry: { source: string; selectedModel: string; assignments: number; taskClass: number; risk: number;
+    workLane: number; harnessPinned: number; promptPinned: number; toolPinned: number; scorerPinned: number;
+    environmentPinned: number; attemptReceipts: number; nonStarterAssignments: number; costMissingAssignments: number;
+    apiCostEstimateUsd: number; subscriptionNotionalUsd: number }[];
   provenance: { sources: { label: string; repo: string; ledger: Omit<FieldTrialsLedgerRead, "rows"> & { rows: number };
     github: { pulls: GithubCursor | null; commits: GithubCursor | null; deployments: GithubCursor | null;
       prs: number; commitsKnown: number; deploymentsKnown: number } }[];
@@ -597,6 +626,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   const transitions: ModelTransition[] = [];
   const reasons: string[] = [];
   const privateKeys = new Set<string>();
+  const assignmentTelemetry = new Map<string, FieldTrialsFlowSnapshot["assignmentTelemetry"][number]>();
   const links: FieldTrialsFlowSnapshot["links"] = { prs: 0, matched: 0, ambiguous: 0, unmatched: 0,
     byPath: { trailer: 0, branch: 0, ledger: 0, multiplePaths: 0 }, ledgerPrNotInGithub: 0, githubOnlyTasks: 0,
     unmatchedPrs: [], ambiguousPrs: [] };
@@ -619,9 +649,44 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
       mergedByNumber: new Map(pulls.filter((pull) => pull.mergedAt !== null).map((pull) => [pull.number, pull])),
       revertedAt: new Map(pulls.filter((pull) => pull.revertsPr !== null && pull.mergedAt !== null).map((pull) => [pull.revertsPr!, pull.mergedAt!])) };
     const rowsByTask = new Map<string, FlowRow[]>();
+    const attemptByAssignment = new Map<string, FlowRow>();
     for (const row of ledgerRows) {
+      if (row.step !== "worker.attempt" || row.assignmentId === null) continue;
+      const prior = attemptByAssignment.get(row.assignmentId);
+      if (prior === undefined || (row.ts ?? "") >= (prior.ts ?? "")) attemptByAssignment.set(row.assignmentId, row);
+    }
+    for (const row of ledgerRows) {
+      if (row.step === "worker.assignment") {
+        const selectedModel = row.selectedModel ?? "unknown";
+        const key = JSON.stringify([source.label, selectedModel]);
+        const counts = assignmentTelemetry.get(key) ?? { source: source.label, selectedModel, assignments: 0,
+          taskClass: 0, risk: 0, workLane: 0, harnessPinned: 0, promptPinned: 0, toolPinned: 0,
+          scorerPinned: 0, environmentPinned: 0, attemptReceipts: 0, nonStarterAssignments: 0,
+          costMissingAssignments: 0, apiCostEstimateUsd: 0, subscriptionNotionalUsd: 0 };
+        counts.assignments += 1;
+        counts.taskClass += Number(row.taskClass !== null);
+        counts.risk += Number(row.risk !== null);
+        counts.workLane += Number(row.workLane !== null);
+        counts.harnessPinned += Number(row.stackPinned?.harness === true);
+        counts.promptPinned += Number(row.stackPinned?.prompt === true);
+        counts.toolPinned += Number(row.stackPinned?.tool === true);
+        counts.scorerPinned += Number(row.stackPinned?.scorer === true);
+        counts.environmentPinned += Number(row.stackPinned?.environment === true);
+        const attempt = row.assignmentId === null ? undefined : attemptByAssignment.get(row.assignmentId);
+        if (attempt === undefined) counts.nonStarterAssignments += 1;
+        else counts.attemptReceipts += 1;
+        if (attempt?.costUsd === null || attempt?.costUsd === undefined || attempt.billingMode === null)
+          counts.costMissingAssignments += 1;
+        else if (attempt.billingMode === "api") counts.apiCostEstimateUsd += attempt.costUsd;
+        else counts.subscriptionNotionalUsd += attempt.costUsd;
+        assignmentTelemetry.set(key, counts);
+      }
       for (const key of [row.taskId, row.runId, row.assignmentId, row.host, row.headSha]) if (key !== null) privateKeys.add(key);
-      if (row.taskId !== null) rowsByTask.set(row.taskId, [...(rowsByTask.get(row.taskId) ?? []), row]);
+      if (row.taskId !== null) {
+        const taskRows = rowsByTask.get(row.taskId);
+        if (taskRows) taskRows.push(row);
+        else rowsByTask.set(row.taskId, [row]);
+      }
     }
     const ledgerTasksOfPr = new Map<number, Set<string>>();
     for (const row of ledgerRows) {
@@ -685,6 +750,8 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   return { version: FIELD_TRIALS_FLOW_VERSION, asOf: input.asOf,
     state: !anyObserved ? "unavailable" : reasons.length > 0 ? "observed-partial" : "observed", reasons,
     observational: true, causalClaims: "none", followUpWindowDays: FOLLOW_UP_WINDOW_DAYS,
+    assignmentTelemetry: [...assignmentTelemetry.values()].sort((a, b) => a.source.localeCompare(b.source)
+      || a.selectedModel.localeCompare(b.selectedModel)),
     provenance: { sources: provenance, githubPass: input.githubPass ?? null }, links, families,
     rebuild: { rebuiltPartitions: rebuilt, reusedPartitions: reused.count }, privateKeys: [...privateKeys].sort() };
 }
@@ -727,7 +794,8 @@ export interface FieldTrialsRelease {
   causalClaims: "none";
   followUpWindowDays: number;
   sources: { source: string; rights: string; receiptHash: string; publicSourceUrl: string | null;
-    ledger: { state: string; reason: string | null; forms: Record<string, number>; malformedRows: number; unreadSources: number };
+    ledger: { state: string; reason: string | null; forms: Record<string, number>; malformedRows: number;
+      futureRows: number; unreadSources: number };
     github: Record<string, { state: string; reason: string | null; asOf: string | null; pagesRead: number } | null> }[];
   withheld: { reason: string; sources: number }[];
   links: { prs: number; matched: number; ambiguous: number; unmatched: number; ledgerPrNotInGithub: number } | null;
@@ -881,7 +949,8 @@ export function buildFieldTrialsRelease(snapshot: FieldTrialsFlowSnapshot, conse
       : { state: value.state, reason: value.reason, asOf: value.asOf, pagesRead: value.pagesRead };
     sources.push({ source: pseudonym(source.label), rights: grant.rights, receiptHash, publicSourceUrl: grant.publicSourceUrl ?? null,
       ledger: { state: source.ledger.state, reason: source.ledger.reason, forms: source.ledger.forms,
-        malformedRows: source.ledger.malformedRows, unreadSources: source.ledger.unreadSources },
+        malformedRows: source.ledger.malformedRows, futureRows: source.ledger.futureRows,
+        unreadSources: source.ledger.unreadSources },
       github: { pulls: cursor(source.github.pulls), commits: cursor(source.github.commits), deployments: cursor(source.github.deployments) } });
   }
   if (included.size === 0) return { state: "withheld", reason: "no-aggregate-consent" };
