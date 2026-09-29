@@ -2,7 +2,7 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import { systemClock, type Clock } from "./clock.js";
+import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import type { GardenerDeps } from "./gardener.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { loadPlanFromYaml } from "./plan.js";
@@ -19,6 +19,8 @@ export const SELECTOR_SHADOW_MIN_RUNS = 40;
 export const SELECTOR_SHADOW_FRESH_LOGS_PER_PASS = 8;
 /** Incomplete completed-run logs get a second look, but never on every daemon tick. */
 export const SELECTOR_SHADOW_INCOMPLETE_RETRY_MS = 6 * 60 * 60 * 1000;
+/** A selector decision cannot rest on a workflow list older than the current PR activity. */
+export const SELECTOR_SHADOW_RECENT_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
 
 export interface SelectorShadowRun {
   id: number;
@@ -109,9 +111,9 @@ export function parseSelectorShadowLines(log: string): SelectorShadowRecord[] {
   return records;
 }
 
-function selectorShadowRunHeaders(response: unknown, limit: number): Array<Omit<SelectorShadowRun, "log">> {
+function selectorShadowRunHeaders(response: unknown, limit: number, sinceMs: number, nowMs: number): Array<Omit<SelectorShadowRun, "log">> {
   const body = response as {
-    workflow_runs?: Array<{ id?: number; head_sha?: string; status?: string; pull_requests?: Array<{ number?: number; base?: { sha?: string } }> }>;
+    workflow_runs?: Array<{ id?: number; head_sha?: string; status?: string; created_at?: string; pull_requests?: Array<{ number?: number; base?: { sha?: string } }> }>;
   } | null;
   if (body === null || typeof body !== "object") throw new Error("selector shadow: GitHub returned no workflow-runs object");
   if (!Array.isArray(body.workflow_runs)) throw new Error("selector shadow: GitHub returned no workflow_runs list");
@@ -120,6 +122,10 @@ function selectorShadowRunHeaders(response: unknown, limit: number): Array<Omit<
       throw new Error("selector shadow: a workflow run has no id or head SHA");
     }
     if (typeof run.status !== "string") throw new Error("selector shadow: a workflow run has no status");
+    const createdMs = typeof run.created_at === "string" ? Date.parse(run.created_at) : NaN;
+    if (!Number.isFinite(createdMs) || createdMs < sinceMs || createdMs > nowMs + 5 * 60 * 1000) {
+      throw new Error(`selector shadow: workflow run ${run.id} has a missing or stale creation date`);
+    }
     if (run.status !== "completed") return null;
     return {
       id: run.id,
@@ -130,11 +136,12 @@ function selectorShadowRunHeaders(response: unknown, limit: number): Array<Omit<
   }).filter((run): run is Omit<SelectorShadowRun, "log"> => run !== null).slice(0, limit);
 }
 
-function selectorShadowRunListArgs(owner: string, repo: string, limit: number): string[] {
+function selectorShadowRunListArgs(owner: string, repo: string, limit: number, sinceMs: number): string[] {
   // The combined event+status query returned only Sept 22-23 runs on Sept 28, while event alone
   // returned today's runs (98 completed in its newest 100). Filter status locally so a stale
   // server-side intersection cannot replace the rolling evidence window with ancient history.
-  return ["api", `repos/${owner}/${repo}/actions/workflows/ci.yml/runs?event=pull_request&per_page=${Math.min(100, Math.max(limit, SELECTOR_SHADOW_RUN_LIMIT) + 40)}`];
+  const created = encodeURIComponent(`>=${clockFromMillisFn(() => sinceMs).iso()}`);
+  return ["api", `repos/${owner}/${repo}/actions/workflows/ci.yml/runs?event=pull_request&per_page=${Math.min(100, Math.max(limit, SELECTOR_SHADOW_RUN_LIMIT) + 40)}&created=${created}`];
 }
 
 function selectorShadowRunLogArgs(owner: string, repo: string, id: number): string[] {
@@ -195,11 +202,13 @@ export function readSelectorShadowRuns(
   owner: string,
   repo: string,
   limit = SELECTOR_SHADOW_RUN_LIMIT,
-  io: { readJson?: (args: string[]) => unknown; readLog?: (args: string[]) => string } = {},
+  io: { readJson?: (args: string[]) => unknown; readLog?: (args: string[]) => string; clock?: Clock } = {},
 ): SelectorShadowRun[] {
   const readJson = io.readJson ?? ghJson;
   const readLog = io.readLog ?? ((args: string[]) => ghExec(args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }));
-  return selectorShadowRunHeaders(readJson(selectorShadowRunListArgs(owner, repo, limit)), limit).map((run) => ({
+  const nowMs = (io.clock ?? systemClock).now();
+  const sinceMs = nowMs - SELECTOR_SHADOW_RECENT_WINDOW_MS;
+  return selectorShadowRunHeaders(readJson(selectorShadowRunListArgs(owner, repo, limit, sinceMs)), limit, sinceMs, nowMs).map((run) => ({
     ...run,
     log: readLog(selectorShadowRunLogArgs(owner, repo, run.id)),
   }));
@@ -222,7 +231,9 @@ export async function readSelectorShadowRunsAsync(
 ): Promise<SelectorShadowRun[]> {
   const readJson = io.readJson ?? ghJsonAsync;
   const writeCache = io.writeCache ?? writeAtomic;
-  const headers = selectorShadowRunHeaders(await readJson(selectorShadowRunListArgs(owner, repo, limit)), limit);
+  const nowMs = (io.clock ?? systemClock).now();
+  const sinceMs = nowMs - SELECTOR_SHADOW_RECENT_WINDOW_MS;
+  const headers = selectorShadowRunHeaders(await readJson(selectorShadowRunListArgs(owner, repo, limit, sinceMs)), limit, sinceMs, nowMs);
   type CachedLog = { headSha: string; log: string; fetchedAt: number; complete: boolean; readerVersion: number };
   let cached: Record<string, CachedLog> = {};
   if (io.cachePath) {
