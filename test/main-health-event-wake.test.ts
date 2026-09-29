@@ -168,6 +168,15 @@ test("W1-T2787: main health still runs when the awakened full sweep refuses an a
       const handle = setTimeout(() => reject(new Error(`daemon did not refuse the concurrent wake: ${steps.join(",")}`)), 2_000);
       handle.unref();
     });
+    // W1-T4732: the review clock may keep a bounded wait open while a prior pass is
+    // unresolved. This fixture owns that wait's timers, so advance its one-second
+    // quanta through shutdown; a real clock does this without the test's help.
+    let settled = false;
+    void running.then(() => { settled = true; }, () => { settled = true; });
+    for (let tick = 0; tick < 5 && !settled; tick++) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      timers.advance(1_000);
+    }
     const summary = await Promise.race([running, timeout]);
     assert.equal(summary.stopReason, "stopped");
     assert.equal(observations, 1, "main health runs at settlement before sweep admission is known");
