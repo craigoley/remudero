@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   status: queued
   attempts: 0
@@ -14,3 +14,13 @@
   acceptance:
     - claim: "the narrow selector includes test/serve-browser-teardown.test.ts when this edge is exercised"
       proof: "grep: test/serve-browser-teardown\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
+    reasons:
+      - "The declared file is a single source file, src/lib/affected-suites.ts. It is a test-selector mapping, not secrets, auth, deletion, merge/deploy policy or infrastructure."
+      - "The description says a test file should be added to the narrow selector. Acceptance is a grep check that can be verified, and the change is reversible."
+      - "The family has no track record (0 merged, 0 declined; Beta mean 0.50). That is neutral, not a concern, and the PR still goes through CI and review."
+    judged_at: "2026-09-29T19:03:22.689Z"
+    pin: "61d8ef0e490d359758f9c80d63fc2534c9fbca14a2df939165de422c6d166648"
