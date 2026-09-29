@@ -161,7 +161,7 @@ import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
-import { startCiFrictionGardener, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
+import { startCiFrictionGardener, readCiFrictionLedgerRecords, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener, startEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
@@ -814,7 +814,6 @@ import {
   shippedSince,
   stampCitationsAndCommit,
   type GitLogCommit,
-  type LedgerRecord,
   type MastMapping,
   type PlanStateTruthResolver,
   type RetroTriggerDecision,
@@ -33662,10 +33661,7 @@ export async function daemonCommand(
                     log,
                   };
                   const sources: CiFrictionGardenSources = {
-                    ledgerRecords: () => {
-                      const read = readLedgerUnionRecordsSync(stateDir, { requireArchives: true, refuseIncomplete: true });
-                      return read.ok ? (read.rows as LedgerRecord[]) : [];
-                    },
+                    ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
                     gateFireRates: () => readGateFireRateReport(stateDir),
                     planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
                     mintTaskId: ciLearningTaskIdMinter(repoRoot),

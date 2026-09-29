@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runGarden, type GardenCheckout } from "../src/lib/gardener.js";
+import { gardenStatePath, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
 import {
   CI_FRICTION_GARDEN_CLASSES,
   CI_FRICTION_GARDEN_LOG,
@@ -18,6 +18,7 @@ import {
   ciFrictionOrigin,
   ciFrictionRecordVerdict,
   ciFrictionRoundsFromLedger,
+  readCiFrictionLedgerRecords,
   ciFrictionShardYaml,
   costliestUntrackedCause,
   priceCiFrictionCauses,
@@ -240,4 +241,40 @@ test("W1-T4435: the gardener preserves an existing trend log while appending a n
   const appendedLog = readFileSync(join(root, CI_FRICTION_GARDEN_LOG), "utf8");
   assert.ok(appendedLog.startsWith(priorLog), "the previous trend receipt must be retained");
   assert.equal(appendedLog.trim().split("\n").filter((line) => line.startsWith("| 2026-")).length, 1);
+});
+
+test("W1-T4767: an unreadable ledger fails the garden pass without a zero scorecard", () => {
+  const root = gitRepo({ kind: "w1t4767-unreadable-garden" }).dir;
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const archive = join(stateDir, "ledger.2026-01-01T00-00-00-000Z.ndjson");
+  writeFileSync(archive, "");
+  const events: string[] = [];
+  const deps: GardenerDeps = {
+    stateDir, repoRoot: root,
+    openWorkspace: () => { throw new Error("no action should be filed"); },
+    log: (step) => { events.push(step); },
+  };
+  const sources: CiFrictionGardenSources = {
+    ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
+    planOrigins: () => [],
+    mintTaskId: () => { throw new Error("no task should be minted"); },
+  };
+  const spec = ciFrictionGardenSpec(deps, sources);
+  assert.deepEqual(runGarden(spec, deps).scorecard?.causes, 0);
+  const statePath = gardenStatePath(stateDir, "ci-friction");
+  const previous = readFileSync(statePath, "utf8");
+  writeFileSync(join(stateDir, "ledger.2026-01-02T00-00-00-000Z.ndjson.gz"), "invalid gzip");
+  assert.throws(() => runGarden(spec, deps), /ci-friction ledger union unreadable: unread ledger file/);
+  assert.equal(readFileSync(statePath, "utf8"), previous, "failed evidence leaves the prior pass receipt intact");
+  assert.deepEqual(events, ["ci-friction.scorecard"], "a failed read emits no clean scorecard or task");
+});
+
+test("W1-T4767: a readable empty ledger remains a valid measured input", () => {
+  const root = gitRepo({ kind: "w1t4767-empty-ledger" }).dir;
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  assert.throws(() => readCiFrictionLedgerRecords(stateDir), /no ledger rotations/);
+  writeFileSync(join(stateDir, "ledger.2026-01-01T00-00-00-000Z.ndjson"), "");
+  assert.deepEqual(readCiFrictionLedgerRecords(stateDir), []);
 });
