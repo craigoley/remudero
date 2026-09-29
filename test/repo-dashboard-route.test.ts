@@ -10,6 +10,21 @@ import { fixedClock } from "../src/lib/clock.js";
 import { loadManagedRepos } from "../src/lib/managed-repos.js";
 
 const READ_TOKEN = "repo-dashboard-read-token";
+const UNMEASURED = {
+  health: { status: "unknown", condition: "unknown", reasons: ["no ledger"], queuedtasks: null, queued: null, errorrate: null, runs7d: null, last_run: null, alerts: null },
+  telemetry: { measurementClass: "not-collected", tokens7d: null, cache_read_tokens7d: null, cash_usd_7d: null, cost_7d: null, subscription: null, modelsused: null },
+  settings: { proofpolicy: null, workerpoolsize: null, alertthreshold: null },
+  actions: [
+    { id: "toggleonoff", available: false, reason: "this instance does not operate the repository" },
+    { id: "viewlogs", available: false, reason: "this instance does not operate the repository" },
+    { id: "configure", available: false, reason: "no config key holds a per-repository proof policy, worker pool size or alert threshold" },
+    { id: "test_run", available: false, reason: "core has no on-demand test-run endpoint" },
+  ],
+  not_computed: {
+    connected_at: "no registry records when a repository was connected",
+    settings: "no config key holds a per-repository proof policy, worker pool size or alert threshold",
+  },
+};
 
 function fixtureRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "rmd-repo-dashboard-route-"));
@@ -50,9 +65,7 @@ test("GET /v1/repos projects validated managed identities and leaves unsupported
           active: null,
           managed: true,
           source: "managed-repos",
-          health: { status: "unknown", queuedtasks: null, errorrate: null, last_run: null, alerts: null },
-          telemetry: { tokens7d: null, modelsused: null, cost_7d: null },
-          settings: { proofpolicy: null, workerpoolsize: null, alertthreshold: null },
+          ...UNMEASURED,
         },
         {
           id: "octo/beta",
@@ -62,9 +75,7 @@ test("GET /v1/repos projects validated managed identities and leaves unsupported
           active: null,
           managed: true,
           source: "managed-repos",
-          health: { status: "unknown", queuedtasks: null, errorrate: null, last_run: null, alerts: null },
-          telemetry: { tokens7d: null, modelsused: null, cost_7d: null },
-          settings: { proofpolicy: null, workerpoolsize: null, alertthreshold: null },
+          ...UNMEASURED,
         },
       ],
     });

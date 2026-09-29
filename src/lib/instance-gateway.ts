@@ -43,7 +43,7 @@ import {
   type IssueCloser,
 } from "./panel-actions.js";
 import { loadPlan, type Plan } from "./plan.js";
-import { buildRepoDashboardRoute } from "./repo-dashboard-route.js";
+import { buildRepoDashboardRoutes } from "./repo-dashboard-route.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { Route } from "./service.js";
 import type { GitHub } from "./status.js";
@@ -81,7 +81,7 @@ export interface InstanceGatewayOptions {
   controlStatus?: Omit<ControlStatusDeps, "root" | "ledgerPath">;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** Applied to each instance's raw read routes — serve.ts's per-route read cache and projection. */
-  bound?: (routes: Route[], board: BoardDeps) => Route[];
+  bound?: (routes: Route[], board: BoardDeps, instance?: string) => Route[];
   /** W1-T4418 liveness seams: the row reader, the `gh` runner behind its escalation, the clock, the timer. */
   readLastRows?: ReadLastRows;
   gh?: (args: string[]) => string;
@@ -158,10 +158,13 @@ export function instanceRouteSet(
   const [owner, name] = repository.split("/");
   const reads = [
     buildStatusRoute(board), buildRecentRoute(board), buildTaskCardRoute(board),
-    buildRepoDashboardRoute({ root: root.root, ledgerPath: root.ledgerPath, planPath: root.planPath, instanceRepository: { owner, repo: name } }),
+    ...buildRepoDashboardRoutes({
+      root: root.root, ledgerPath: root.ledgerPath, planPath: root.planPath, instanceRepository: { owner, repo: name },
+      controlRoot: root.root, incidentsDir: join(root.root, "state"),
+    }),
   ];
   return [
-    ...(opts.bound ? opts.bound(reads, board) : reads),
+    ...(opts.bound ? opts.bound(reads, board, root.instance) : reads),
     buildOperatorAgentAnswerRoute(() => ({
       repository,
       instance: root.instance,
