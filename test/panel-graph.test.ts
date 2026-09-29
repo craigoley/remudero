@@ -476,6 +476,53 @@ test("POST /v1/feedback with replyTo naming a NON-grilling entry -> 400 (nothing
   });
 });
 
+// ── W1-T4202: the reply route reads the entry's status from fetched origin/main, not the checkout ──
+
+/** A git-repo root whose `origin/main` holds `plan/feedback/<id>.yaml` at `mainStatus` while the working
+ *  checkout's copy sits at `checkoutStatus` — the daemon-checkout-lags-main split the reply route must survive. */
+function splitFeedbackRoot(mainStatus: FeedbackEntry["status"], checkoutStatus: FeedbackEntry["status"]): { root: string; id: string } {
+  const root = gitTmpRoot();
+  const entry = captureFeedback(root, { raw: "does this want a CLI flag or a config default?", origin: "cli" });
+  setFeedbackStatus(root, entry.id, mainStatus);
+  commitAll(root);
+  execFileSync("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], { cwd: root, stdio: "pipe" });
+  setFeedbackStatus(root, entry.id, checkoutStatus);
+  return { root, id: entry.id };
+}
+
+test("W1-T4202: a grill reply is accepted when main has the entry at grilling and the checkout lags", async () => {
+  const { root, id } = splitFeedbackRoot("grilling", "new");
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "a config default, please", replyTo: id });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { entry: FeedbackEntry };
+    assert.match(body.entry.raw, new RegExp(`^\\[answer to feedback#${id}\\] a config default, please$`));
+  });
+  assert.equal(readFeedbackEntry(root, id).status, "answered");
+});
+
+test("W1-T4202: a reply to an entry not at grilling is still refused", async () => {
+  const ahead = splitFeedbackRoot("new", "grilling");
+  await withService(depsFor(ahead.root, emptyPlanPath(ahead.root)), async (base) => {
+    for (const path of ["/v1/feedback", "/v1/feedback/preview"]) {
+      const res = await post(base, path, WRITE_TOKEN, { text: "x", replyTo: ahead.id });
+      assert.equal(res.status, 400);
+      const detail = ((await res.json()) as { detail: string }).detail;
+      assert.match(detail, /not parked at grilling \(status: new, read from origin\/main\)/);
+    }
+  });
+  assert.equal(readFeedbackEntry(ahead.root, ahead.id).status, "grilling");
+
+  const noMain = tmpRoot();
+  const stale = captureFeedback(noMain, { raw: "already new", origin: "cli" });
+  await withService(depsFor(noMain, emptyPlanPath(noMain)), async (base) => {
+    const res = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "x", replyTo: stale.id });
+    assert.equal(res.status, 400);
+    assert.match(((await res.json()) as { detail: string }).detail, /status: new, read from the checkout \(origin\/main unreadable\)/);
+  });
+});
+
 // ── W1-T2302: submissionKey — a repeat of the SAME console submission must never file a second
 // durable entry (fb-1785969338913-dc3d0f: two byte-identical entries, five seconds apart, from
 // one operator's clicks — nothing on the server could tell a retry from a new filing). ────────
