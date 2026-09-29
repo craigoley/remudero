@@ -17,7 +17,9 @@ import { fileURLToPath } from "node:url";
 import { fixedClock } from "../src/lib/clock.js";
 import { runnableCandidates } from "../src/lib/drain.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { deterministicEscalation, machineShardHeaderLines, machineShardRisk, renderMachineShard } from "../src/lib/machine-filing.js";
+import { costPriority, deterministicEscalation, machineShardHeaderLines, machineShardRisk, renderMachineShard, UNPRICED_PRIORITY } from "../src/lib/machine-filing.js";
+import { ciFrictionShardYaml } from "../src/lib/ci-friction-gardener.js";
+import { ciLearningShardYaml } from "../src/lib/measurement-cadence.js";
 import {
   earnedConfidenceBar,
   familyTrackRecord,
@@ -665,6 +667,33 @@ test("the verify-human release refuses a ruling-shaped record", async () => {
     { task: () => task, riskJudge: async () => verdict("low", 0.99), writeRelease: () => ({ code: 0, message: "x", released: true }) },
   );
   assert.equal(out.kind, "escalated");
+});
+
+test("released work dispatches costliest first and unpriced work mid-queue", async () => {
+  assert.ok(costPriority(465) < costPriority(81) && costPriority(81) < costPriority(15), "more cost dispatches sooner");
+  assert.equal(costPriority(0), 90);
+  assert.equal(costPriority(1e9), 1);
+  assert.equal(costPriority(27), UNPRICED_PRIORITY);
+  const friction = ciFrictionShardYaml({ cause: { kind: "check", name: "reviewer-unmet" }, minutes: 465.7, rounds: 40, prs: 30 } as never, "W1-T9200");
+  assert.match(friction, new RegExp(`^ {2}priority: ${costPriority(465.7)}$`, "m"), "ci-friction prices its PR minutes");
+  const lesson = ciLearningShardYaml({ findingId: "ci-learning:1:ci-gate", title: "t", gate: "ci-gate", pr: 1, prs: Array.from({ length: 36 }, (_, i) => i + 1), repairFiles: [], dominantRepairFiles: [], author_class: "machine", verify: "human", remedySurface: "learnings/*.yaml" }, "W1-T9201");
+  assert.match(lesson, new RegExp(`^ {2}priority: ${costPriority(36)}$`, "m"), "the CI-learning rung prices its occurrences");
+
+  const root = planDir({
+    "W1-T9200-x.yaml": friction,
+    "W1-T9202-x.yaml": machineShard("W1-T9202"),
+    "W1-T9203-x.yaml": operatorShard("W1-T9203"),
+  });
+  try {
+    await runMachineFilingJudge(ports(root, async () => verdict("low", 0.95)).p);
+    const plan = readPlan(root);
+    assert.equal(plan.byId.get("W1-T9202")!.priority, UNPRICED_PRIORITY, "a machine release with no cost goes mid-queue");
+    assert.equal(plan.byId.get("W1-T9203")!.priority, undefined, "an operator record's priority is his");
+    assert.equal(plan.byId.get("W1-T9202")!.risk_ruling?.pin, taskRulingPin(plan.byId.get("W1-T9202")!), "priority is inside the pin");
+    assert.deepEqual(dispatchable(plan), ["W1-T9200", "W1-T9202", "W1-T9203"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("shardRelPath names a shard by its plan directory and refuses the monolith, a nested path and a non-yaml file", () => {
