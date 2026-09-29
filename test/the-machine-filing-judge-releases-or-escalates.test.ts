@@ -27,15 +27,17 @@ import {
   needsMachineJudgement,
   renderRuledShard,
   runMachineFilingJudge,
+  startMachineFilingJudge,
   type MachineJudgePorts,
 } from "../src/lib/machine-filing-judge.js";
+import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import type { Proposal } from "../src/lib/inbox.js";
 import { loadPlan, loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
 import type { RiskJudgeInput, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
 import { selectorShadowMissTask } from "../src/lib/selector-shadow-gardener.js";
 import { machineAuthorVerifyViolation, taskRulingPin } from "../src/lib/task-linter.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { parkedVerifyHumanShards, productionMachineFilingJudgePorts } from "../src/run-task.js";
+import { daemonCommand, parkedVerifyHumanShards, productionMachineFilingJudgePorts } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const CLOCK = fixedClock(1790700000000);
@@ -346,5 +348,83 @@ test("the production machine judge lands one plan PR and waits on it before aski
     origin.cleanup();
     seed.cleanup();
     local.cleanup();
+  }
+});
+
+test("a ruling whose shard is absent from the landing tree is refused and nothing is written", async () => {
+  const judged = planDir({ "W1-T9070-x.yaml": machineShard("W1-T9070") });
+  const landing = planDir({});
+  try {
+    const { p, logs } = ports(judged, async () => verdict("low", 0.9), { writeRoot: landing });
+    const report = await runMachineFilingJudge(p);
+    assert.deepEqual(report.refused, ["W1-T9070"]);
+    assert.deepEqual(report.proceeded, []);
+    assert.match(String(logs.find((l) => l.step === "machine_judge.refused")?.extra?.reason), /absent from the landing tree/);
+  } finally {
+    rmSync(judged, { recursive: true, force: true });
+    rmSync(landing, { recursive: true, force: true });
+  }
+});
+
+test("the machine judge runs one pass at a time and logs a failed pass", async () => {
+  const root = planDir({ "W1-T9080-x.yaml": machineShard("W1-T9080") });
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  let asked = 0;
+  const { p } = ports(root, async () => {
+    asked += 1;
+    await gate;
+    return verdict("low", 0.9);
+  });
+  const judge = startMachineFilingJudge(p, 5);
+  try {
+    for (let waited = 0; asked === 0 && waited < 5_000; waited += 5) await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(asked, 1, "later ticks skip while a pass is still running");
+  } finally {
+    judge.stop();
+    release();
+    rmSync(root, { recursive: true, force: true });
+  }
+  const logs: string[] = [];
+  const failing = startMachineFilingJudge(
+    { ...ports(root, async () => verdict("low", 0.9)).p, plan: () => { throw new Error("plan unreadable"); }, log: (step) => void logs.push(step) },
+    60_000,
+  );
+  try {
+    for (let waited = 0; logs.length === 0 && waited < 5_000; waited += 5) await new Promise((r) => setTimeout(r, 5));
+  } finally {
+    failing.stop();
+  }
+  assert.deepEqual(logs, ["machine_judge.failed"]);
+});
+
+test("a self-hosting daemon wires the machine judge as its ninth garden", async () => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}machine-judge-home-`));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  let captured: DaemonDeps | undefined;
+  try {
+    await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan, d): Promise<DaemonSummary> => {
+        captured = d;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    // plan, gate, test, config, export, ci-friction, selector-shadow, evidence-coverage, then this one.
+    const start = captured?.gardens?.[8];
+    assert.ok(start, "a ninth garden is wired after the evidence-coverage gardener");
+    // Stopped before its first tick, so no judge is spawned against the real plan.
+    start!(60 * 60 * 1000).stop();
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
   }
 });
