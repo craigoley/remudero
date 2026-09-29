@@ -2410,6 +2410,7 @@ import {
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
+import { asOwnerRepoUnresolvable } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
 let composedRealGraph: ComposedRealGraph | undefined;
@@ -18876,15 +18877,15 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // `gh pr view` resolves the PR in the CWD — so a sandbox PR could never be gated. The lib
   // layer (runReview / postReviewStatus) already takes owner+repo; only the CLI was pinned.
   let defaults: { owner: string; repo: string } | undefined;
-  let defaultsFailure = "";
+  let defaultsFailure: ReturnType<typeof asOwnerRepoUnresolvable> | undefined;
   try {
     defaults = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
   } catch (e) {
-    const reason = String((e as Error)?.message ?? e).split("\n")[0]!;
+    const reason = asOwnerRepoUnresolvable(e, repoRoot);
     defaultsFailure = reason;
   }
-  if (!defaults && !(flagValue(rest, "--repo") ?? "").includes("/")) {
-    console.error(`rmd review: no origin remote resolvable here (${defaultsFailure}) — pass --repo <owner>/<repo>`);
+  if (defaultsFailure && !(flagValue(rest, "--repo") ?? "").includes("/")) {
+    console.error(`rmd review: ${defaultsFailure.message}`);
     return 1;
   }
   const selfTarget = defaults ?? { owner: "", repo: "" };
