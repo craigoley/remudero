@@ -471,6 +471,16 @@ verify_human_judge:
   context_budget: 60000
   provider: openweight
 
+# The machine-filing judge (operator ruling 2026-09-29) releases machine-filed tasks with no person
+# asked, so it is the one judge where a miss dispatches work. MEASURED 2026-09-29 on five probe records,
+# each judged twice: haiku/low proceeded on "delete every merged remote branch" both times and
+# escalated only 6 of 10 correctly; sonnet/low got 9 of 10 at ~$0.038 a judgment against haiku's ~$0.025.
+machine_filing_judge:
+  model: sonnet
+  effort: low
+  max_turns: 400
+  context_budget: 60000
+
 # ── max_turns is a RUNAWAY CLIFF, not a work limit (§9 tripwire re-base) ────────
 # The implement/reviewer/fix/diagnose worker lanes stay at a FLAT 400 — a tripwire
 # set WAY above any real run, whose only job is to kill a genuinely runaway loop.
