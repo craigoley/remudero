@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { once } from "node:events";
 
-import { buildAssistantControlRoute } from "../src/lib/panel-actions.js";
+import { buildAssistantControlRoute, buildAssistantControlCapabilityRoute, buildAssistantControlReceiptRoute } from "../src/lib/panel-actions.js";
 import { instanceRouteSet, mountUnderInstance } from "../src/lib/instance-gateway.js";
 import { createService, type Route, type Scope } from "../src/lib/service.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
@@ -46,6 +46,14 @@ function post(base: string, path: string, body: unknown, verified = true) {
     headers: { authorization: "Bearer write-token", "content-type": "application/json", ...(verified ? { "x-verified-operator": "yes" } : {}) },
     body: JSON.stringify(body),
   });
+}
+
+function get(base: string, path: string, verified = true) {
+  return fetch(`${base}${path}`, { headers: { authorization: "Bearer read-token", ...(verified ? { "x-verified-operator": "yes" } : {}) } });
+}
+
+function controlRoutes(deps: Parameters<typeof buildAssistantControlRoute>[0]): Route[] {
+  return [buildAssistantControlRoute(deps), buildAssistantControlCapabilityRoute(deps), buildAssistantControlReceiptRoute(deps)];
 }
 
 const childServer = `
@@ -175,7 +183,13 @@ test("W1-T4763: instance target and write tier remain authoritative", async (t) 
     { assistantClaimRoot: shared }, "craigoley/remudero-site",
   ).find((route) => route.path === "/v1/control/assistant-action");
   assert.ok(siteRoute, "the non-core instance gateway must mount the same admission contract");
-  const server = await listen([coreRoute, ...mountUnderInstance([siteRoute], "site")]);
+  const siteReads = instanceRouteSet(
+    { root: site, ledgerPath: ledger(site), planPath: join(site, "plan", "tasks.yaml"), instance: "site" },
+    { plan: { tasks: [], byId: new Map() }, ledgerPath: ledger(site), github: fakeGitHub() },
+    { assistantClaimRoot: shared, assistantBootSha: "b".repeat(40) }, "craigoley/remudero-site",
+  ).filter((route) => route.path === "/v1/control/assistant-action/status" || route.path === "/v1/control/assistant-action/receipt");
+  assert.equal(siteReads.length, 2);
+  const server = await listen([coreRoute, ...mountUnderInstance([siteRoute, ...siteReads], "site")]);
   const unattributed = await listen([coreRoute], null);
   t.after(() => close(server.server));
   t.after(() => close(unattributed.server));
@@ -185,6 +199,14 @@ test("W1-T4763: instance target and write tier remain authoritative", async (t) 
   assert.equal((await post(server.base, "/v1/control/assistant-action", { ...input, instance: "site" })).status, 409);
   assert.equal((await post(server.base, "/v1/control/assistant-action", input)).status, 200);
   assert.equal((await post(server.base, "/v1/i/site/control/assistant-action", { ...input, instance: "site" })).status, 409);
+  const siteStatus = await get(server.base, "/v1/i/site/control/assistant-action/status");
+  assert.equal(siteStatus.status, 200);
+  assert.deepEqual((await siteStatus.json() as { instance: string; repository: string; bootSha: string }), {
+    contract: "assistant-control-v2", bootSha: "b".repeat(40), instance: "site", repository: "craigoley/remudero-site",
+    admission: "writable_unverified", claimStore: "shared_root_configured_topology_unverified",
+  });
+  assert.equal((await get(server.base, `/v1/i/site/control/assistant-action/receipt?actionId=${input.actionId}`)).status, 409,
+    "a selected instance must not resolve the core action's receipt through a shared claim store");
   assert.equal(rows(ledger(shared)).filter((row) => row.step === "panel.pause_requested").length, 1);
   assert.equal(rows(ledger(site)).filter((row) => row.step === "panel.pause_requested").length, 0);
 });
@@ -254,4 +276,68 @@ test("W1-T4763: unavailable admission and unreadable claims never dispatch", asy
   assert.equal(unresolved.status, 202);
   assert.equal((await unresolved.json() as { status: string }).status, "unknown");
   assert.equal(rows(ledger(shared)).filter((row) => row.step === "panel.pause_requested").length, 0);
+});
+
+test("assistant-action read contract distinguishes old route, unverified caller, and configured-but-unproven topology", async (t) => {
+  const shared = root();
+  t.after(() => rmSync(shared, { recursive: true, force: true }));
+  const deps = { root: shared, ledgerPath: ledger(shared), claimRoot: shared, instance: "core", repository: "craigoley/remudero", bootSha: "a".repeat(40) };
+  const old = await listen([buildAssistantControlRoute(deps)]);
+  const current = await listen(controlRoutes(deps));
+  t.after(async () => { await close(old.server); await close(current.server); });
+  assert.equal((await get(old.base, "/v1/control/assistant-action/status")).status, 404);
+  assert.equal((await get(current.base, "/v1/control/assistant-action/status", false)).status, 403);
+  assert.equal((await get(current.base, "/v1/control/assistant-action/receipt?actionId=control-read-01", false)).status, 403);
+  const response = await get(current.base, "/v1/control/assistant-action/status");
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    contract: "assistant-control-v2", bootSha: deps.bootSha, instance: "core", repository: deps.repository,
+    admission: "uninitialized", claimStore: "shared_root_configured_topology_unverified",
+  });
+  assert.equal(existsSync(join(shared, "state", "assistant-control-actions")), false, "read-only status never creates claim storage");
+  const unavailable = await listen(controlRoutes({ ...deps, claimRoot: join(shared, "missing-root") }));
+  t.after(() => close(unavailable.server));
+  const unavailableStatus = await get(unavailable.base, "/v1/control/assistant-action/status");
+  assert.equal((await unavailableStatus.json() as { admission: string }).admission, "unavailable");
+  assert.equal((await get(unavailable.base, "/v1/control/assistant-action/receipt?actionId=control-read-01")).status, 503);
+});
+
+test("assistant-action receipt lookup resolves exact result after restart and never dispatches a GET", async (t) => {
+  const shared = root();
+  t.after(() => rmSync(shared, { recursive: true, force: true }));
+  const deps = { root: shared, ledgerPath: ledger(shared), claimRoot: shared, instance: "core", repository: "craigoley/remudero" };
+  const first = await listen(controlRoutes(deps));
+  const input = { actionId: "control-read-02", instance: "core", action: "pause" };
+  assert.equal((await get(first.base, `/v1/control/assistant-action/receipt?actionId=${input.actionId}`)).status, 404);
+  const issued = await post(first.base, "/v1/control/assistant-action", input);
+  assert.equal(issued.status, 200);
+  const receipt = await issued.json();
+  await close(first.server);
+  const restarted = await listen(controlRoutes(deps));
+  t.after(() => close(restarted.server));
+  const lookedUp = await get(restarted.base, `/v1/control/assistant-action/receipt?actionId=${input.actionId}`);
+  assert.equal(lookedUp.status, 200);
+  assert.deepEqual(await lookedUp.json(), receipt);
+  assert.equal(rows(ledger(shared)).filter((row) => row.step === "panel.pause_requested").length, 1);
+});
+
+test("assistant-action lookup keeps interrupted, corrupt, and cross-actor or target claims distinct", async (t) => {
+  const shared = root();
+  t.after(() => rmSync(shared, { recursive: true, force: true }));
+  const deps = { root: shared, ledgerPath: ledger(shared), claimRoot: shared, instance: "core", repository: "craigoley/remudero" };
+  const interrupted = await listen(controlRoutes({ ...deps, afterClaim: () => { throw new Error("interrupt"); } }));
+  const otherActor = await listen(controlRoutes(deps), "operator:other");
+  const otherInstance = await listen(controlRoutes({ ...deps, instance: "site" }));
+  t.after(async () => { await close(interrupted.server); await close(otherActor.server); await close(otherInstance.server); });
+  const input = { actionId: "control-read-03", instance: "core", action: "stop" };
+  assert.equal((await post(interrupted.base, "/v1/control/assistant-action", input)).status, 503);
+  const path = `/v1/control/assistant-action/receipt?actionId=${input.actionId}`;
+  assert.equal((await get(interrupted.base, path)).status, 202);
+  assert.equal((await get(otherActor.base, path)).status, 409);
+  assert.equal((await get(otherInstance.base, path)).status, 409);
+  assert.equal((await post(otherActor.base, "/v1/control/assistant-action", input)).status, 409);
+  const key = createHash("sha256").update("control-read-04").digest("hex");
+  writeFileSync(join(shared, "state", "assistant-control-actions", `${key}.claim.json`), "{");
+  assert.equal((await get(interrupted.base, "/v1/control/assistant-action/receipt?actionId=control-read-04")).status, 503);
+  assert.equal(rows(ledger(shared)).filter((row) => row.step === "panel.stop_requested").length, 0);
 });
