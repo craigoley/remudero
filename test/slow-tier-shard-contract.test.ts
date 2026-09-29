@@ -62,7 +62,7 @@ test("W1-T4756 criterion 1: stable required slow verdict refuses a missing, red,
   assert.equal(aggregate.name, "test-slow");
   assert.deepEqual(aggregate.needs, ["test-slow-shard"]);
   assert.equal(aggregate.if, "${{ always() }}");
-  const body = aggregate.steps?.find((step) => step.name === "Require both slow-tier shards")?.run;
+  const body = aggregate.steps?.find((step) => step.name === "Collapse both slow-tier shards into the stable required check")?.run;
   assert.ok(body);
   for (const matrixResult of ["failure", "skipped", "cancelled", ""]) {
     const result: ReturnType<typeof spawnSync> = spawnSync("bash", ["-eo", "pipefail", "-c", body], {

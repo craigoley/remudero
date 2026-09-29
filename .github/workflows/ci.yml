@@ -734,16 +734,105 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require both slow-tier shards
+      - name: Collapse both slow-tier shards into the stable required check
         env:
           SHARD_RESULT: ${{ needs.test-slow-shard.result }}
+          RUN_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_REPO_SLUG: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$SHARD_RESULT" != "success" ]; then
-            echo "test-slow: slow-tier matrix result is '${SHARD_RESULT}'; both shards must succeed."
-            exit 1
-          fi
-          echo "test-slow: both slow-tier shards succeeded."
+          print_unfinished_test_from_logs() {
+            if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GH_REPO_SLUG:-}" ]; then
+              echo "  Last started unfinished test: unavailable (workflow run id is not present)."
+              return 0
+            fi
+            LOG_FILE="$(mktemp)"
+            if ! gh run view "$GITHUB_RUN_ID" --repo "$GH_REPO_SLUG" --log > "$LOG_FILE" 2>/dev/null; then
+              echo "  Last started unfinished test: unavailable (could not read workflow logs)."
+              return 0
+            fi
+            node - "$LOG_FILE" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const text = readFileSync(process.argv[2], "utf8");
+          const active = new Map();
+          let order = 0;
+          for (const raw of text.split(/\r?\n/)) {
+            const parts = raw.split("\t");
+            const job = parts.length >= 3 ? parts[0] : "workflow log";
+            let line = parts.length >= 3 ? parts.slice(2).join("\t") : raw;
+            line = line.replace(/^\d{4}-\d\d-\d\dT\S+\s+/, "");
+            const started = line.match(/^\s*# Subtest: (.+?)\s*$/);
+            if (started) {
+              active.set(job, { job, name: started[1], order: ++order });
+              continue;
+            }
+            const finished = line.match(/^\s*(?:ok|not ok) \d+(?: - (.*?))?\s*$/);
+            if (!finished) continue;
+            const name = finished[1];
+            if (!name) {
+              active.delete(job);
+              continue;
+            }
+            for (const [key, value] of active.entries()) {
+              if (value.name === name) active.delete(key);
+            }
+          }
+          const newest = [...active.values()].sort((a, b) => b.order - a.order)[0];
+          if (newest) {
+            console.log(`  Last started unfinished test: ${newest.name} (${newest.job}).`);
+          } else {
+            console.log("  Last started unfinished test: unavailable (no started-without-finished TAP test found).");
+          }
+          NODE
+            rm -f "$LOG_FILE"
+          }
 
+          case "$SHARD_RESULT" in
+            success)
+            echo "test-slow: both slow-tier shards succeeded."
+              ;;
+            failure)
+              echo "test-slow: a test shard FAILED (matrix result: failure) — open the shard log; this is a real break until that log says otherwise."
+              exit 1
+              ;;
+            cancelled)
+              # W1-T3345: a newer push means this sha is not the one that merges (a non-result); an
+              # UNCHANGED head means a shard died at its ceiling: tests DID NOT run. Fails closed.
+              CURRENT_HEAD=""
+              if [ -n "${PR_NUMBER:-}" ]; then
+                CURRENT_HEAD="$(gh api "repos/${GH_REPO_SLUG}/pulls/${PR_NUMBER}" --jq .head.sha 2>/dev/null || true)"
+              fi
+              if [ -n "$CURRENT_HEAD" ] && [ -n "${RUN_HEAD_SHA:-}" ] && [ "$CURRENT_HEAD" != "$RUN_HEAD_SHA" ]; then
+                echo "test-slow: SUPERSEDED — this run measured ${RUN_HEAD_SHA}, the PR head is now ${CURRENT_HEAD}."
+                echo "  The newer head runs its own shards and is what merge gates on, so this cancelled"
+                echo "  run is a non-result rather than a failure. Not blocking."
+                exit 0
+              fi
+              if [ -z "$CURRENT_HEAD" ]; then
+                echo "::error::test-slow: the shard matrix was CANCELLED and the current PR head could not be"
+                echo "  read — refusing, because an unreadable answer is not permission to pass an"
+                echo "  unmeasured head. A cancellation is not by itself evidence of a test failure."
+                echo "  Open the shard log."
+                exit 1
+              fi
+              echo "::error::test-slow: SHARD HANG — the matrix was cancelled while the PR head"
+              echo "  (${RUN_HEAD_SHA}) was unchanged, so nothing superseded it: a shard was killed at its"
+              echo "  timeout-minutes ceiling. THE TESTS DID NOT RUN — this is NOT a failure of this"
+              echo "  diff, and re-running the same sha will hang again: a cancellation is not by itself"
+              echo "  evidence of a test failure."
+              print_unfinished_test_from_logs
+              exit 1
+              ;;
+            skipped)
+              echo "test-slow: the shard matrix never ran (matrix result: skipped) — nothing was measured, so nothing is certified. Open the workflow run to see which upstream job gated it."
+              exit 1
+              ;;
+            *)
+              echo "test-slow: unrecognised matrix result '${SHARD_RESULT}' — refusing. A required check must never pass a state it does not understand."
+              exit 1
+              ;;
+          esac
   commitlint:
     # W1-T4399 — ~17 one-minute gates (commitlint, leak-grep, learnings-budget-ratchet,
     # jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise,
@@ -1810,7 +1899,7 @@ jobs:
     # exactly as W1-T4405's design note keeps `remudero-review` off the queue's own requirements.
     name: ci-gate
     runs-on: ubuntu-latest
-    needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow, commitlint, leak-grep, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
+    needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
     # `always()` must still aggregate a FAILED dependency, but alone it also survives normal
     # cancellation and keeps a superseded PR run's concurrency slot occupied (W1-T4604).
     # GitHub re-evaluates this job condition when cancelling: the second arm releases that run.
