@@ -40,7 +40,7 @@ function entry(id: string, overrides: Partial<LearningEntry> = {}): LearningEntr
   };
 }
 
-test('W1-T4681: a fact whose files changed since it was earned carries a verify-first note', () => {
+test("W1-T4681: a fact whose files changed since it was earned carries a verify-first note", () => {
   const touched = entry("touched");
   const readChurnCommits: ChurnCommitReader = (_repoDir, files) =>
     files.includes("src/lib/x.ts") ? 3 : 0;
@@ -59,7 +59,7 @@ test('W1-T4681: a fact whose files changed since it was earned carries a verify-
   assert.match(rendered, /\[src: learnings#touched\]/);
 });
 
-test('W1-T4681: a fact untouched since it was earned carries none', () => {
+test("W1-T4681: a fact untouched since it was earned carries none", () => {
   const untouched = entry("untouched");
   const readChurnCommits: ChurnCommitReader = () => 0;
 
