@@ -41,6 +41,12 @@ import {
   cashWebSearchEndpoint,
   performCashWebSearch,
 } from "./cash-web-bridge.js";
+import {
+  allocateUpgrades,
+  type LiveUpgradeWindow,
+  type UpgradeAllocationDecision,
+  type UpgradeCandidateTask,
+} from "./upgrade-allocation.js";
 
 interface CodexSpawnArgs {
   cwd: string;
@@ -576,6 +582,24 @@ export function selectionPropensity(input: {
     candidates: providers.map((provider) => ({ provider, probability: probability.get(provider) ?? 0 })),
     draw: { value: draw.value, seed: draw.seed, ...(draw.key ? { key: draw.key } : {}) },
   };
+}
+
+/**
+ * W1-T4670: allocate the live window's model-upgrade budget across `candidates` — the tasks
+ * currently queued — spending it where predicted gain per window share is largest
+ * ({@link allocateUpgrades}, upgrade-allocation.ts). ADDITIVE ONLY: the configured mounts table's
+ * fixed per-role tier and {@link selectWorkerProvider}'s own auction stay the live spawn path
+ * exactly as they are today; this exposes the AutoQuantize-style decision to a future caller
+ * without acting on it. Design point (ii) gates actually spending on it behind the offline
+ * replay winning ({@link import("./upgrade-allocation.js").replayUpgradeAllocationPolicy}) — an
+ * empty `candidates` array (the default until an operator wires a real queue snapshot through)
+ * costs nothing and upgrades nothing.
+ */
+export function queuedUpgradeAllocation(
+  candidates: readonly UpgradeCandidateTask[],
+  liveWindow: LiveUpgradeWindow,
+): UpgradeAllocationDecision[] {
+  return allocateUpgrades(candidates, liveWindow);
 }
 
 export function claudeCapacityFromUsage(
