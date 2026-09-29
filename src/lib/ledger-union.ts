@@ -892,7 +892,9 @@ export function readLedgerUnionRecordsSync(
       addBuffer(fsDeps.readFileSync(livePath));
       return opts.satisfied?.(stepsSeen) ?? false;
     } catch {
-      // deliberate: an unreadable live file degrades to whatever rotations already supplied.
+      // Best-effort readers retain rotations; strict readers must not call a failed live read
+      // a complete corpus. The final `ok` decision below uses this same unread list.
+      if (opts.refuseIncomplete) unread.push(livePath);
       return false;
     }
   };
