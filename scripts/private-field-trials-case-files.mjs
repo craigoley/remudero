@@ -51,7 +51,15 @@ let searches = 0;
 let searchMatched = 0;
 let searchAmbiguous = 0;
 let searchUnreadable = 0;
-for (const taskId of withoutLedgerPr.slice(0, maxPrSearches)) {
+// Always probe the newest gaps. Rotate the remainder daily so older unlinked tasks are not
+// starved by the same recent tasks consuming every night's fixed search allowance.
+const freshSearches = Math.min(10, maxPrSearches, withoutLedgerPr.length);
+const backlog = withoutLedgerPr.slice(freshSearches);
+const rotationBudget = Math.min(maxPrSearches - freshSearches, backlog.length);
+const rotationStart = backlog.length === 0 ? 0 : Math.floor(systemClock.now() / 86_400_000) * rotationBudget % backlog.length;
+const searchTaskIds = [...withoutLedgerPr.slice(0, freshSearches),
+  ...Array.from({ length: rotationBudget }, (_, index) => backlog[(rotationStart + index) % backlog.length])];
+for (const taskId of searchTaskIds) {
   searches += 1;
   try {
     const candidates = JSON.parse(await ghTextAsync(["pr", "list", "--repo", "craigoley/remudero",
@@ -107,6 +115,7 @@ console.log(JSON.stringify({ event: "field_trials.case_files", asOf: files[0]?.a
   selected: selected.length, candidates: taskIds.length, withoutLedgerPr: withoutLedgerPr.length,
   withoutPrAfterSearch: taskIds.length - withPr.length,
   prSearches: searches, prSearchMatched: searchMatched, prSearchAmbiguous: searchAmbiguous,
-  prSearchUnreadable: searchUnreadable, prSearchDeferred: Math.max(0, withoutLedgerPr.length - searches),
+  prSearchUnreadable: searchUnreadable, prSearchFresh: freshSearches, prSearchRotated: rotationBudget,
+  prSearchDeferred: Math.max(0, withoutLedgerPr.length - searches),
   overBound: Math.max(0, withPr.length - selected.length),
   outsidePlan, ledger: read.state, path: out }));
