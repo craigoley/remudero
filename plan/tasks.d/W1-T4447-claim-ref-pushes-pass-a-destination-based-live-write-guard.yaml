@@ -6,7 +6,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 25.00
+  budget_usd: 15.50
   risk: high
   band_meaning: span
   origin: "2026-09-24 console/daemon incident follow-up: the shared pause hold leaked by a worker's test run"

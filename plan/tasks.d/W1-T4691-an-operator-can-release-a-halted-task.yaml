@@ -13,7 +13,9 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-release-halted-1790690000"
   plan_refs: [W1-T2425, W1-T4660, W1-T206]
   files: [src/lib/status.ts, src/run-task.ts, scripts/console-parity-ratchet.mjs, docs/cli-reference.md, docs/operator-guide.md, test/help-renders-a-summary-not-a-paragraph.test.ts, test/an-operator-can-release-a-halted-task.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4691 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     OBSERVED 2026-09-29 (breaker evaluated with live code 5776a2f28 over the live ledger): W1-T4480, W1-T4559, W1-T4266,
