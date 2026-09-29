@@ -18,6 +18,7 @@ import type { ProofExecOutcome } from "./review.js";
 import type { GoldenClass, GoldenTask } from "./replay.js";
 import type { InstanceLiveness } from "./fleet-liveness.js";
 import { HEADROOM_LIMIT_PCT, headroomExhausted, type UsageSnapshot } from "./headroom.js";
+import { mineSyntheticTasks, type SyntheticMiningOptions, type SyntheticPilotReport } from "./synthetic-tasks.js";
 
 /** The exact phrase review.ts's W1-T362 arm appends when a `unit test:` proof was re-run at the merge-base
  *  and did NOT pass there. Its absence on an `executed_pass` is "no discrimination was measured". */
@@ -201,6 +202,21 @@ export function deriveGoldenCorpus(input: GoldenCorpusInput): { items: GoldenCor
   }
   items.sort((a, b) => (a.mergedAt < b.mergedAt ? 1 : a.mergedAt > b.mergedAt ? -1 : a.taskId.localeCompare(b.taskId)));
   return { items, excluded };
+}
+
+/** Run the bounded synthetic pilot over already graded merged work; its records never enter the plan. */
+export function mineSyntheticTasksFromGoldenCorpus(
+  items: readonly GoldenCorpusItem[], options: SyntheticMiningOptions,
+): SyntheticPilotReport {
+  return mineSyntheticTasks(items, options);
+}
+
+/** Derive the merged history first, then report both its admission gaps and the 30-task pilot's keep rate. */
+export function mineSyntheticPilotFromMergedHistory(
+  input: GoldenCorpusInput, options: SyntheticMiningOptions,
+): SyntheticPilotReport & { corpusExcluded: GoldenCorpusExclusion[] } {
+  const corpus = deriveGoldenCorpus(input);
+  return { ...mineSyntheticTasks(corpus.items, options), corpusExcluded: corpus.excluded };
 }
 
 function classFor(type: string): GoldenClass {
