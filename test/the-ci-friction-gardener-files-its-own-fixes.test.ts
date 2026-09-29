@@ -4,15 +4,31 @@
  * drafts a parked task for the costliest cause nothing already tracks.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { GARDEN_LEDGER_BUCKET_MS, gardenStatePath, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
 import {
+  GARDEN_FILING_ESCALATE_AT,
+  GARDEN_FILING_RETRY_BASE_MS,
+  GARDEN_LEDGER_BUCKET_MS,
+  gardenStatePath,
+  readGardenState,
+  runGarden,
+  type GardenCheckout,
+} from "../src/lib/gardener.js";
+import type { Escalation } from "../src/lib/escalate.js";
+import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { daemonCommand } from "../src/run-task.js";
+import { rule15SplitViolation } from "../src/lib/ci-parity.js";
+import { criterionFieldTampered, planOnlyDiff } from "../src/lib/review.js";
+import {
+  appendCiFrictionTrendRow,
   CI_FRICTION_GARDEN_CLASSES,
-  CI_FRICTION_GARDEN_LOG,
   CI_FRICTION_REMEDIES_FILE,
+  ciFrictionGardenLogPath,
   ciFrictionCauseKey,
   ciFrictionGardenSpec,
   ciFrictionOrigin,
@@ -144,7 +160,7 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
   assert.match(malformed.reason, /^unparseable:/);
 
   // Wired end-to-end through the gardener framework: ONE class, judged by whether its PR merges,
-  // and the SAME pass writes the weekly trend row beside the drafted shard.
+  // and the SAME pass writes the trend row into the state dir — never into the filing PR.
   const repo = gitRepo({ kind: "w1t4435" });
   const root = repo.dir;
   mkdirSync(join(root, "state"), { recursive: true });
@@ -195,24 +211,20 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
   assert.match(shard, new RegExp(`^ {2}origin: "${ciFrictionOrigin(untracked.cause).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"$`, "m"));
   assert.match(landed[0]!.body, new RegExp(`proof: grep: ${ciFrictionOrigin(untracked.cause)} in ${relPath}`));
 
-  assert.ok(landed[0]!.paths.includes(CI_FRICTION_GARDEN_LOG));
-  const log = readFileSync(join(root, CI_FRICTION_GARDEN_LOG), "utf8");
+  assert.deepEqual(landed[0]!.paths, [relPath], "the filing PR carries the shard alone");
+  const log = readFileSync(ciFrictionGardenLogPath(deps.stateDir), "utf8");
   assert.match(log, /\| pass \| total PR minutes \| costliest cause \|/);
   // 90 (ci) + 30 (main_merge) = 120 total priced this pass, topped by the check gate-fire-rate priced higher.
   assert.match(log, /\| 2026-.*\| 120 \| check:ci \(90m\) \|/);
-  // The PR body's OWN proof line names a row that really landed in the log — not just a heading
-  // this pass never writes.
-  const row = log.trim().split("\n").at(-1)!;
-  assert.ok(landed[0]!.body.includes(`proof: grep: ${row} in ${CI_FRICTION_GARDEN_LOG}`));
+  assert.ok(landed[0]!.body.includes(`grep: ${ciFrictionOrigin(untracked.cause)} in ${CI_FRICTION_REMEDIES_FILE}`), "the body names the proof that will carry the shard's criterion");
 });
 
 test("W1-T4435: the gardener preserves an existing trend log while appending a new pass", () => {
   const root = gitRepo({ kind: "w1t4435-existing-garden-log" }).dir;
   const stateDir = join(root, "state");
   mkdirSync(stateDir, { recursive: true });
-  mkdirSync(join(root, "docs"), { recursive: true });
   const priorLog = "# prior garden receipt\n| prior row |\n";
-  writeFileSync(join(root, CI_FRICTION_GARDEN_LOG), priorLog);
+  writeFileSync(ciFrictionGardenLogPath(stateDir), priorLog);
 
   const landed: Array<{ paths: string[]; title: string; body: string }> = [];
   const deps: GardenerDeps = {
@@ -239,9 +251,12 @@ test("W1-T4435: the gardener preserves an existing trend log while appending a n
   const pass = runGarden(ciFrictionGardenSpec(deps, sources), deps);
   assert.deepEqual(pass.plan?.acting, ["draft"]);
   assert.equal(landed.length, 1);
-  const appendedLog = readFileSync(join(root, CI_FRICTION_GARDEN_LOG), "utf8");
+  const appendedLog = readFileSync(ciFrictionGardenLogPath(stateDir), "utf8");
   assert.ok(appendedLog.startsWith(priorLog), "the previous trend receipt must be retained");
   assert.equal(appendedLog.trim().split("\n").filter((line) => line.startsWith("| 2026-")).length, 1);
+  // An unchanged pricing appends nothing: the log records the total MOVING, not every look.
+  appendCiFrictionTrendRow(ciFrictionGardenLogPath(stateDir), "2026-09-30T00:00:00.000Z", pass.scorecard!.priced as never);
+  assert.equal(readFileSync(ciFrictionGardenLogPath(stateDir), "utf8"), appendedLog);
 });
 
 test("W1-T4767: an unreadable ledger fails the garden pass without a zero scorecard", () => {
@@ -320,4 +335,149 @@ test("a growing live ledger does not re-read the ci-friction union within the ho
   nowMs += GARDEN_LEDGER_BUCKET_MS;
   runGarden(spec, deps);
   assert.equal(reads, 3, "the next hour's pass still reads the union");
+});
+
+// ── The filing loop closes: plan-only shape, retry on failure, a stale pass re-files ─────────
+
+function frictionFixture(kind: string, land: GardenCheckout["land"], extra: Partial<GardenerDeps> = {}) {
+  const repo = gitRepo({ kind });
+  const stateDir = join(repo.dir, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  let minted = 0;
+  const deps: GardenerDeps = {
+    stateDir,
+    repoRoot: repo.dir,
+    openWorkspace: () => ({ root: repo.dir, branch: "ci-friction-garden-1", land, dispose: () => {} }),
+    log: (step, e) => { events.push({ step, extra: e }); },
+    seed: 1,
+    ...extra,
+  };
+  let origins: string[] = [];
+  const sources: CiFrictionGardenSources = {
+    ledgerRecords: () => [],
+    gateFireRates: () => ({
+      status: "measured",
+      prsScanned: 19,
+      gates: [{ gate: "reviewer-unmet", prs: 19, runs: 26, redRuns: 26, refusals: 26, repaired: 26, overridden: 0, minutes: 465.7 }],
+      neverFired: [],
+      alwaysFired: [],
+    }),
+    planOrigins: () => origins,
+    mintTaskId: () => `W1-T95${String(++minted).padStart(2, "0")}`,
+  };
+  return { repo, deps, events, sources, spec: ciFrictionGardenSpec(deps, sources), track: (o: string[]) => { origins = o; } };
+}
+
+test("a ci-friction filing lands as a plan-only diff the Rule 15 precheck passes", () => {
+  let diff = "";
+  let base = "";
+  const fx = frictionFixture("ci-friction-rule15", (opts) => {
+    fx.repo.git("add", "--", ...opts.paths);
+    fx.repo.git("commit", "-q", "-m", opts.title);
+    diff = fx.repo.git("diff", base, "HEAD");
+    return "https://github.com/acme/remudero/pull/7";
+  });
+  base = fx.repo.git("rev-parse", "HEAD");
+  const pass = runGarden(fx.spec, fx.deps);
+  assert.equal(pass.prUrl, "https://github.com/acme/remudero/pull/7");
+  assert.ok(criterionFieldTampered(diff), "the filing really adds a criterion, so the precheck is not vacuous");
+  assert.equal(rule15SplitViolation(diff).refused, false, "a shard-only filing is the plan-only shape Rule 15 exempts");
+  assert.ok(planOnlyDiff(diff));
+});
+
+test("a failed ci-friction filing push leaves the finding eligible to retry after a backoff", () => {
+  let nowMs = Date.UTC(2026, 8, 25, 15, 27, 0);
+  let failNext = true;
+  const landed: string[][] = [];
+  const fx = frictionFixture("ci-friction-retry", (opts) => {
+    if (failNext) throw new Error("rule15-precheck: THIS DIFF WILL BE REFUSED under Standing rule 15");
+    landed.push(opts.paths);
+    return "https://github.com/acme/remudero/pull/8";
+  }, { clock: clockFromMillisFn(() => nowMs) });
+
+  const failed = runGarden(fx.spec, fx.deps);
+  assert.equal(failed.prUrl, undefined);
+  const statePath = gardenStatePath(fx.deps.stateDir, "ci-friction");
+  const afterFailure = readGardenState(statePath, CI_FRICTION_GARDEN_CLASSES);
+  assert.equal(afterFailure.lastPass, undefined, "a failed filing records no pass");
+  assert.equal(afterFailure.filingFailures?.count, 1);
+  const row = fx.events.find((e) => e.step === "ci-friction.garden_filing_failed");
+  assert.match(String(row?.extra?.reason), /rule15-precheck/, "the ledger carries the failure's reason");
+
+  failNext = false;
+  assert.equal(runGarden(fx.spec, fx.deps).ran, false, "the retry waits out its backoff");
+  nowMs += GARDEN_FILING_RETRY_BASE_MS;
+  const retried = runGarden(fx.spec, fx.deps);
+  assert.equal(retried.prUrl, "https://github.com/acme/remudero/pull/8", "the same finding is filed on retry");
+  assert.equal(landed.length, 1);
+  const settled = readGardenState(statePath, CI_FRICTION_GARDEN_CLASSES);
+  assert.equal(settled.filingFailures, undefined, "a landing ends the failure streak");
+  assert.equal(settled.lastPass?.landed, "https://github.com/acme/remudero/pull/8");
+});
+
+test("a third consecutive failed filing escalates to a person", () => {
+  let nowMs = Date.UTC(2026, 8, 25, 15, 27, 0);
+  const raised: Escalation[] = [];
+  const fx = frictionFixture("ci-friction-escalate", () => { throw new Error("push refused"); }, {
+    clock: clockFromMillisFn(() => nowMs),
+    escalate: (e) => (raised.push(e), "https://github.com/acme/remudero/issues/1"),
+  });
+  for (let attempt = 1; attempt <= GARDEN_FILING_ESCALATE_AT + 1; attempt++) {
+    runGarden(fx.spec, fx.deps);
+    nowMs += GARDEN_FILING_RETRY_BASE_MS * 2 ** attempt;
+  }
+  assert.equal(fx.events.filter((e) => e.step === "ci-friction.garden_filing_failed").length, GARDEN_FILING_ESCALATE_AT + 1);
+  assert.equal(raised.length, 1, "one escalation per streak, never one per retry");
+  assert.match(raised[0]!.detail, /push refused/);
+  assert.equal(fx.events.find((e) => e.step === "ci-friction.garden_filing_escalated")?.extra?.issue_url, "https://github.com/acme/remudero/issues/1");
+});
+
+test("a stale recorded ci-friction pass with no matching task re-files the finding", () => {
+  const landed: string[][] = [];
+  const fx = frictionFixture("ci-friction-stale", (opts) => (landed.push(opts.paths), `https://github.com/acme/remudero/pull/${10 + landed.length}`));
+  const fingerprint = fx.spec.fingerprint(fx.spec.inventory());
+  const statePath = gardenStatePath(fx.deps.stateDir, "ci-friction");
+  // The host's shape on 2026-09-29: a pass that drew no action recorded this very fingerprint.
+  writeFileSync(statePath, JSON.stringify({ classes: { draft: { alpha: 3, beta: 1 } }, lastCheap: "an-earlier-hour", lastPass: { fingerprint } }));
+  assert.equal(runGarden(fx.spec, fx.deps).prUrl, "https://github.com/acme/remudero/pull/11", "no task carries the origin, so the recorded pass is not trusted");
+
+  // A pass that LANDED the filing is trusted, even once its PR is decided: a declined filing is not re-filed.
+  writeFileSync(statePath, JSON.stringify({ ...JSON.parse(readFileSync(statePath, "utf8")), pending: undefined, lastCheap: "later" }));
+  assert.equal(runGarden(fx.spec, fx.deps).ran, false);
+  // Once the plan carries the origin, the cause is tracked and nothing is re-filed.
+  fx.track(["ci-friction:check:reviewer-unmet"]);
+  writeFileSync(statePath, JSON.stringify({ classes: { draft: { alpha: 3, beta: 1 } }, lastCheap: "later", lastPass: { fingerprint } }));
+  assert.equal(runGarden(fx.spec, fx.deps).prUrl, undefined);
+  assert.equal(landed.length, 1);
+});
+
+test("a self-hosting daemon wires the ci-friction gardener with its escalation path", async () => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}ci-friction-home-`));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  let captured: DaemonDeps | undefined;
+  try {
+    await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan, d): Promise<DaemonSummary> => {
+        captured = d;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    // plan, gate, test, config, export, then ci-friction (W1-T4435).
+    const garden = captured!.gardens![5]!(60_000);
+    garden.stop();
+    // No ledger rotation exists in this fresh root, so the pass fails loudly under its own name.
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
+    assert.match(ledger, /"step":"ci-friction\.gardener_failed".*no ledger rotations/);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+  }
 });
