@@ -19,7 +19,7 @@ import type { Mount, Mounts } from "./mounts.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { benchmarkNonDispatchSpawn, withReceiptIdentity } from "./benchmark-run.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
-import { inferOperatorPresence } from "./presence.js";
+import { inferOperatorPresence, learnLeaseMs, replyLatenciesMs } from "./presence.js";
 import type { WriteTier } from "./service.js";
 
 /**
@@ -470,6 +470,107 @@ export function setPresenceMode(root: string, mode: PresenceMode): void {
  *  default, returns `true` for every class exactly as before this flag existed. */
 export function deliversRealtime(root: string): boolean {
   return presenceMode(root) === "attended";
+}
+
+// ── A DEFAULT ANSWER, LEDGERED AND UNDOABLE (W1-T4675, MASTER-PLAN §4) ──────────────────────
+//
+// `e.recommendation` already names the machine's default (§4); nothing ACTED on it, so a
+// QUESTION nobody answered sat open forever. Once a QUESTION-shaped escalation ({@link
+// classifyAsk} — an ACTION has no "default" to fall back to) has been SEEN and an ADAPTIVE
+// WINDOW passes unanswered, the fleet takes the recommendation as the answer, ledgered with
+// origin `"default"`, reversible by one {@link undoDefaultAnswer} call. MANUAL/HARD_STOP never
+// auto-default (design iii), checked BEFORE the question/action split. The window is LEARNED
+// (design ii), reusing presence.ts's own reply-latency lease rather than a second computation —
+// its doc names this task as the sibling reader. This module carries no state: "seen" is a read
+// mark the caller supplies. Why: docs/forensics/escalate.md.
+
+const NEVER_AUTO_DEFAULT_CLASSES: ReadonlySet<EscalationClass> = new Set(["MANUAL", "HARD_STOP"]);
+
+/** Why {@link shouldApplyDefault} refused — named, never a bare boolean. */
+export type DefaultApplyRefusal = "never-auto-defaults" | "not-a-question" | "not-seen" | "window-not-passed";
+
+export type DefaultApplyDecision =
+  | { readonly applied: true; readonly option: string }
+  | { readonly applied: false; readonly reason: DefaultApplyRefusal };
+
+/** Pure, total, no I/O: should `e`'s recommendation apply as its answer right now? The
+ *  never-auto-default check runs FIRST (design iii), before question/action, seen or window. */
+export function shouldApplyDefault(
+  e: Escalation,
+  opts: { readonly seenAtMs?: number; readonly nowMs: number; readonly windowMs: number },
+): DefaultApplyDecision {
+  if (NEVER_AUTO_DEFAULT_CLASSES.has(e.class)) return { applied: false, reason: "never-auto-defaults" };
+  if (classifyAsk(e) !== "question") return { applied: false, reason: "not-a-question" };
+  if (opts.seenAtMs === undefined) return { applied: false, reason: "not-seen" };
+  if (opts.nowMs - opts.seenAtMs < opts.windowMs) return { applied: false, reason: "window-not-passed" };
+  return { applied: true, option: e.recommendation };
+}
+
+/** The window a seen question must sit unanswered before its default applies (design ii) —
+ *  learned from presence.ts's own reply-latency lease, never a fixed number. */
+export function defaultAnswerWindowMs(root: string): number {
+  return learnLeaseMs(replyLatenciesMs(root));
+}
+
+export const DEFAULT_ANSWER_APPLIED_STEP = "escalation.default_applied";
+/** The single-action undo step (design ii). */
+export const DEFAULT_ANSWER_UNDONE_STEP = "escalation.default_undone";
+/** Origin a taken default carries — read back like an operator's own typed answer. */
+export const DEFAULT_ANSWER_ORIGIN = "default";
+
+/** What {@link applyDefaultAnswer} hands back so a caller can later {@link undoDefaultAnswer}
+ *  the SAME default without re-deriving it. */
+export interface AppliedDefaultAnswer {
+  readonly taskId: string;
+  readonly class: EscalationClass;
+  readonly option: string;
+  readonly origin: "default";
+  readonly appliedAtMs: number;
+}
+
+/** Apply `e`'s default now if {@link shouldApplyDefault} says yes, ledgering {@link
+ *  DEFAULT_ANSWER_APPLIED_STEP}. A refusal writes nothing — no trace of a change that never
+ *  happened. */
+export function applyDefaultAnswer(
+  e: Escalation,
+  opts: { readonly seenAtMs?: number; readonly nowMs: number; readonly windowMs: number },
+  deps: EscalateDeps,
+): DefaultApplyDecision & { readonly answer?: AppliedDefaultAnswer } {
+  const decision = shouldApplyDefault(e, opts);
+  if (!decision.applied) return decision;
+  const answer: AppliedDefaultAnswer = {
+    taskId: e.taskId,
+    class: e.class,
+    option: decision.option,
+    origin: DEFAULT_ANSWER_ORIGIN,
+    appliedAtMs: opts.nowMs,
+  };
+  appendLedger(deps.ledgerPath, {
+    run_id: deps.runId,
+    task_id: e.taskId,
+    step: DEFAULT_ANSWER_APPLIED_STEP,
+    class: e.class,
+    option: answer.option,
+    origin: answer.origin,
+    seen_at_ms: opts.seenAtMs,
+    applied_at_ms: answer.appliedAtMs,
+    window_ms: opts.windowMs,
+  });
+  return { ...decision, answer };
+}
+
+/** Undo ONE previously-applied default (design ii, "a single action undoes it") — ledgers
+ *  {@link DEFAULT_ANSWER_UNDONE_STEP} naming the same option and the applied instant reversed. */
+export function undoDefaultAnswer(answer: AppliedDefaultAnswer, deps: EscalateDeps): void {
+  appendLedger(deps.ledgerPath, {
+    run_id: deps.runId,
+    task_id: answer.taskId,
+    step: DEFAULT_ANSWER_UNDONE_STEP,
+    class: answer.class,
+    option: answer.option,
+    origin: answer.origin,
+    undoes_applied_at_ms: answer.appliedAtMs,
+  });
 }
 
 // ── RESIDUAL ESCALATION JUDGE (W1-T349, MASTER-PLAN §4B) ───────────────────────────────────
