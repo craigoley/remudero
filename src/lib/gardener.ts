@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
+import type { Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { sampleBeta, seededRandom } from "./knowledge-value.js";
 
@@ -37,11 +38,14 @@ export interface ClassRecord {
 
 export interface GardenState<C extends string> {
   classes: Record<C, ClassRecord>;
-  lastPass?: { fingerprint: string };
+  /** `landed` names the PR that pass opened, so a spec's {@link GardenSpec.unfinished} cannot re-file it. */
+  lastPass?: { fingerprint: string; landed?: string };
   /** The cheap fingerprint of the last look, so an idle tick reads nothing more. */
   lastCheap?: string;
   /** The one class whose PR is awaiting its outcome. While it waits, no new PR is opened. */
   pending?: { prUrl: string; actionClass: C; baseline: Outcome; atMerge?: Outcome };
+  /** The current streak of passes whose filing threw, which defers the next attempt ({@link gardenFilingRetryAt}). */
+  filingFailures?: { count: number; lastAt: string; reason: string };
 }
 
 export type PrState = "open" | "merged" | "closed" | "unknown";
@@ -80,6 +84,8 @@ export interface GardenerDeps<W extends GardenCheckout = GardenCheckout> {
   prState?: (prUrl: string) => PrState;
   seed?: number;
   clock?: Clock;
+  /** Raises a failure streak to a person (escalate.ts); absent, the streak is ledgered only. */
+  escalate?: (escalation: Escalation) => string;
 }
 
 export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout> {
@@ -91,6 +97,9 @@ export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W ex
   cheapFingerprint: () => string;
   inventory: () => I;
   fingerprint: (inventory: I) => string;
+  /** True when the inventory itself shows the work is still undone (a ci-friction cause no plan task
+   *  tracks), so a matching fingerprint from a pass that landed nothing is not trusted as done. */
+  unfinished?: (inventory: I) => boolean;
   /** The evidence a class without `review` is judged on, read from the current inventory. */
   metric?: (inventory: I, actionClass: C) => Outcome;
   /** Every action any class could take now. Called after the class draws, with the same rng. */
@@ -212,18 +221,48 @@ export function gardenLedgerBucket(clock: Clock): number {
   return Math.floor(clock.now() / GARDEN_LEDGER_BUCKET_MS);
 }
 
+/** A failed filing's first retry waits this long; each further consecutive failure doubles it. */
+export const GARDEN_FILING_RETRY_BASE_MS = 15 * 60_000;
+const GARDEN_FILING_RETRY_MAX_MS = 24 * 3_600_000;
+/** The consecutive failure that is raised to a person — earlier ones are retried quietly. */
+export const GARDEN_FILING_ESCALATE_AT = 3;
+
+/** When a gardener whose filings keep failing may try again; `undefined` when nothing failed. */
+export function gardenFilingRetryAt(failures: GardenState<string>["filingFailures"]): number | undefined {
+  if (!failures) return undefined;
+  const wait = Math.min(GARDEN_FILING_RETRY_BASE_MS * 2 ** (failures.count - 1), GARDEN_FILING_RETRY_MAX_MS);
+  return Date.parse(failures.lastAt) + wait;
+}
+
+function gardenFilingEscalation(name: string, failures: NonNullable<GardenState<string>["filingFailures"]>): Escalation {
+  return {
+    class: "BLOCKED",
+    taskId: `${name}-gardener`,
+    summary: `the ${name} gardener's filing has failed ${failures.count} times in a row`,
+    detail: `Each pass had work, but opening its PR threw, so nothing landed. Latest reason:\n\n${failures.reason}\n\nIt keeps retrying with a doubling wait; the ledger's \`${name}.garden_filing_failed\` rows carry each attempt.`,
+    options: [
+      { label: "fix-filing", detail: "repair what the latest reason names; the next retry then lands on its own" },
+      { label: "switch-off", detail: `touch state/${name.toUpperCase()}_OFF-<class> to stop the class` },
+    ],
+    recommendation: "fix-filing",
+    headDedup: "independent",
+  };
+}
+
 /** One pass of the gardener `spec` describes. Returns what it did. */
 export function runGarden<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
   deps: GardenerDeps<W>,
 ): { ran: boolean; plan?: GardenPlan<C, A>; prUrl?: string; scorecard?: Record<string, unknown> } {
   const statePath = gardenStatePath(deps.stateDir, spec.name);
+  if ((gardenFilingRetryAt(readGardenState(statePath, spec.classes).filingFailures) ?? 0) > (deps.clock ?? systemClock).now()) return { ran: false };
   const cheap = spec.cheapFingerprint();
   if (readGardenState(statePath, spec.classes).lastCheap === cheap) return { ran: false };
   const inventory = spec.inventory();
   const fingerprint = spec.fingerprint(inventory);
   let state = readGardenState(statePath, spec.classes);
-  if (state.lastPass?.fingerprint === fingerprint) {
+  const trusted = state.pending !== undefined || state.lastPass?.landed !== undefined || !spec.unfinished?.(inventory);
+  if (state.lastPass?.fingerprint === fingerprint && trusted) {
     writeAtomic(statePath, JSON.stringify({ ...state, lastCheap: cheap }, null, 2) + "\n");
     return { ran: false };
   }
@@ -250,22 +289,36 @@ export function runGarden<C extends string, I, A extends GardenAction<C>, W exte
   const acting = plan.acting[0];
   let prUrl: string | undefined;
   if (acting !== undefined && plan.actions.length > 0) {
-    const ws = deps.openWorkspace();
     try {
-      const landing = spec.apply(ws, plan, scorecard);
-      if (landing) {
-        const why = spec.review?.[acting];
-        prUrl = ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing);
+      const ws = deps.openWorkspace();
+      try {
+        const landing = spec.apply(ws, plan, scorecard);
+        if (landing) {
+          const why = spec.review?.[acting];
+          prUrl = ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing);
+        }
+      } finally {
+        ws.dispose();
       }
-    } finally {
-      ws.dispose();
+    } catch (e) {
+      // A failed filing is not a pass: no fingerprint is recorded, so the same work is retried once
+      // the doubling wait elapses, and a streak is raised to a person instead of going silent.
+      const reason = String((e as Error)?.message ?? e);
+      const failures = { count: (state.filingFailures?.count ?? 0) + 1, lastAt: clock.iso(), reason };
+      writeAtomic(statePath, JSON.stringify({ ...state, filingFailures: failures }, null, 2) + "\n");
+      deps.log(`${spec.name}.garden_filing_failed`, { attempt: failures.count, reason, retry_after_ms: gardenFilingRetryAt(failures)! - clock.now() });
+      if (failures.count === GARDEN_FILING_ESCALATE_AT && deps.escalate) {
+        deps.log(`${spec.name}.garden_filing_escalated`, { attempt: failures.count, issue_url: deps.escalate(gardenFilingEscalation(spec.name, failures)) });
+      }
+      return { ran: true, plan, scorecard };
     }
   }
   deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: prUrl ?? null, awaiting: state.pending?.prUrl ?? null });
   // Only a class whose changes landed as a PR is judged, and only on its own metric from this moment.
   const baseline = (c: C): Outcome => (spec.review?.[c] ? { trials: 0, successes: 0 } : metricOf(spec, inventory, c));
   const pending = prUrl && acting !== undefined ? { prUrl, actionClass: acting, baseline: baseline(acting) } : state.pending;
-  writeAtomic(statePath, JSON.stringify({ ...state, pending, lastCheap: cheap, lastPass: { fingerprint } }, null, 2) + "\n");
+  const lastPass = prUrl ? { fingerprint, landed: prUrl } : { fingerprint };
+  writeAtomic(statePath, JSON.stringify({ ...state, pending, lastCheap: cheap, lastPass, filingFailures: undefined }, null, 2) + "\n");
   return { ran: true, plan, prUrl, scorecard };
 }
 
