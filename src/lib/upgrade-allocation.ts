@@ -1,60 +1,26 @@
 /**
  * lib/upgrade-allocation.ts — spend the live window's model-upgrade budget where predicted gain
  * per window share is largest (W1-T4670), borrowing NVIDIA Model-Optimizer's AutoQuantize: score
- * each candidate's sensitivity to the expensive option (here: the merge-probability an
- * Opus/high-effort upgrade buys) and solve a constrained assignment under a budget, instead of the
- * two mechanisms that already exist and answer a DIFFERENT question:
- *   - `.remudero/mounts.yaml` fixes tier BY ROLE (workers capped at sonnet; opus/frontier reserved
- *     for the Architect or a last-attempt escalation) — a static rule, never a per-task estimate.
- *   - `selectWorkerProvider` (worker-provider.ts) auctions WHICH SUBSCRIPTION serves a spawn,
- *     weighted by squared remaining headroom — it never asks whether THIS spawn is worth the
- *     expensive tier at all.
- * This module answers "of the tasks queued right now, which ones' upgrade is worth the window
- * share it costs" — a ranking and a cutoff, not a subscription pick.
+ * each candidate's sensitivity to the expensive option and solve a constrained assignment under a
+ * budget. Answers a question neither existing mechanism does: `.remudero/mounts.yaml` fixes tier
+ * BY ROLE (a static rule) and `selectWorkerProvider` (worker-provider.ts) auctions WHICH
+ * SUBSCRIPTION serves a spawn (never whether THIS spawn deserves the expensive tier).
  *
- * GAIN COMES FROM THE ABILITY MAP (W1-T4626, ability-map.ts). That module already separates a
- * model's ability from a task's difficulty: P(success) = sigmoid(theta_model + theta_role -
- * beta_task). `estimateUpgradeGain` takes two ability readings at the same task/role — the tier a
- * task would run at today and the tier an upgrade would grant — and returns the probability delta
- * upgrading buys. `AbilityCell` values (ability-map.ts) satisfy `UpgradeAbilityReading`
- * structurally, so a caller can pass them straight through; this module deliberately does not
- * import ability-map.ts, so a fit failure there can never make an upgrade decision throw here.
- * Either reading being `insufficient` (thin evidence — ability-map.ts's own discipline) makes the
- * gain "unavailable", never a fabricated number: this module never guesses a gain it cannot
- * compute, and an unavailable gain can never outrank — or be outranked by — a computed one.
+ * INVARIANT: an unavailable or non-positive gain is never admitted, however cheap its window
+ * share — `estimateUpgradeGain`/`allocateUpgrades` read `AbilityCell`-shaped readings
+ * (ability-map.ts, W1-T4626) structurally (no import, so a fit failure there cannot throw here)
+ * and refuse to compare a computed gain against an unknown one.
  *
- * ALLOCATION IS A GREEDY KNAPSACK ON GAIN PER UNIT COST (bang-per-buck) — the same shape
- * AutoQuantize's per-layer sensitivity-under-a-budget solve takes
- * (https://github.com/NVIDIA/Model-Optimizer/blob/main/docs/source/announcements/autoquantize.rst):
- * rank candidates by gain/windowSharePercent descending, admit while the running total of
- * windowSharePercent stays inside the live window's soft budget (a number that moves with
- * headroom — see {@link LiveUpgradeWindow} — never a fixed cap). A non-positive or unavailable
- * gain is never admitted, however cheap: spending window share on a task with no shown benefit is
- * exactly the waste this module exists to avoid.
+ * TRAP this avoids: spending the live window on an unproven policy. Design point (ii) (spending
+ * live) is gated on design point (i) (the offline replay) winning first — see
+ * `replayUpgradeAllocationPolicy`, which compares this allocation against TODAY's recorded
+ * outcomes on the same merged-per-window-share metric. `worker-provider.ts`'s call site
+ * (`queuedUpgradeAllocation`) is therefore additive only, never wired into today's spawn path.
  *
- * THE OFFLINE REPLAY (design point i) is `replayUpgradeAllocationPolicy`: pure, over a corpus of
- * ledger-shaped rows, comparing this allocation against TODAY's policy (every row keeps its own
- * recorded outcome) on the SAME metric — merged per window-share percent — so the two numbers are
- * comparable on their face. `resolveUpgradeAllocationReplay` points that pure core at a real
- * ledger corpus through `resolveReplayLedgerLines` (ledger-replay.ts), which already reads the
- * archive∪live union spanning however much history is retained — reused rather than re-built,
- * because a SECOND ledger-corpus reader would drift from the first one's refuse-on-partial-
- * coverage discipline. Today's ledger rows carry no `upgrade_gain`/`window_share_percent` fields
- * yet (W1-T4617/W1-T4618/W1-T4626 log propensity, task shape and ability separately, not this
- * module's joined view) — `extractUpgradeReplayRow` reads them ONLY where present and this resolve
- * wrapper refuses honestly with zero rows rather than fabricating a verdict from an empty corpus;
- * wiring a writer for those joined fields is this module's own declared follow-up.
- *
- * Design point (ii), spending the live window, is gated on the offline replay WINNING — spending
- * budget on an unproven policy is exactly the mistake "prove it first" exists to prevent. That is
- * why `worker-provider.ts`'s own call site (`queuedUpgradeAllocation`) is additive: it exposes
- * this module's decision to a future caller without wiring it into today's spawn path, which stays
- * governed by `.remudero/mounts.yaml` and `selectWorkerProvider` until an operator, holding a
- * replay verdict in hand, decides otherwise.
- *
- * Design point (iii), checking this cheap proxy against W1-T4625 paired trials on a subset, is
- * also out of this module's scope — it validates the PROXY (repair rounds, reviewer defects)
- * against a ground truth this module never touches.
+ * Today's ledger rows carry none of the joined `task_id`/`window_share_percent`/`upgrade_gain`
+ * fields this replay reads yet — `resolveUpgradeAllocationReplay` refuses honestly on that rather
+ * than fabricating a verdict. Design (iii), validating the gain proxy against W1-T4625 paired
+ * trials, is out of scope. FALSIFIER: test/model-upgrades-are-allocated-across-the-queue.test.ts.
  */
 
 /** One ability-map cell, read structurally — `AbilityCell` (ability-map.ts) satisfies this without
