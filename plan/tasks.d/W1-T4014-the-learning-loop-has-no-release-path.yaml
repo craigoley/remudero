@@ -46,9 +46,13 @@
     operator-facing state. What does not exist is a row that says so, and an idea of what "release"
     means as an action — today an operator would have to hand-edit `verify:` in 41 shards.
 
-    DESIGN CONSTRAINT, NOT NEGOTIABLE: this must NOT auto-release. Law 5's boundary is the point of
-    the parking, and a rung that released its own proposals would be a machine ruling on guidance.
-    The deliverable is VISIBILITY plus a one-action release path, never an automatic one.
+    DESIGN CONSTRAINT (AMENDED 2026-09-29): the rung must not release its own proposals. Law 5's
+    boundary is the point of the parking. But the operator ruled on 2026-09-29: "There should be an
+    LLM judge in the middle deciding what needs that level of escalation and what can be automated",
+    and he ratified the machine-filing judge (DECISIONS.md, 2026-09-29) as Law 5's "a judge the
+    operator ratified". So a release by a person OR by that ratified judge is allowed; a release by
+    the filing rung itself is not. The deliverable is VISIBILITY of what still awaits a ruling, plus
+    the one-action release path.
 
     A SECOND READING TO RULE ON WHILE HERE: 42 proposals in six days, zero released, may mean the
     RATE is wrong rather than the surface. If an operator would never plausibly rule on 7 items a
@@ -64,8 +68,8 @@
       proof: "unit test: W1-T4014: parked proposals are counted for the operator"
     - claim: "the count distinguishes awaiting-a-ruling from ordinary backlog"
       proof: "unit test: W1-T4014: parked is not conflated with queued"
-    - claim: "nothing in the path releases a proposal without a person"
-      proof: "unit test: W1-T4014: release is never automatic"
+    - claim: "nothing releases a machine proposal except a person or the operator-ratified machine-filing judge (operator ruling 2026-09-29)"
+      proof: "unit test: W1-T4014: only a person or the ratified judge releases a proposal"
   note: |
     reservation hand-off: plan/file-improvement-loops-1790075116 -> plan/file-improvement-loops-1790075116
 

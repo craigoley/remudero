@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-operator-1790600000"
   plan_refs: [W1-T4471]
   files: [src/lib/escalate.ts, test/a-question-carries-a-default-with-undo.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: 'consequence of inaction' is prose only (src/lib/operator-message.ts ~66, escalate.ts ~176-183); nothing
