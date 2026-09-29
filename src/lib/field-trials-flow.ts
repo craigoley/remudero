@@ -1044,9 +1044,11 @@ export function recordRelease(manifest: FieldTrialsReleaseManifest, entry: Field
 
 function writeJsonAtomically(path: string, value: unknown): string {
   const encoded = `${JSON.stringify(value, null, 2)}\n`;
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, encoded);
+  // The container starts with a 022 umask. These snapshots and release candidates stay private
+  // even when that process default differs from the host wrapper's 077 umask.
+  writeFileSync(temporary, encoded, { mode: 0o600 });
   renameSync(temporary, path);
   return sha256(encoded);
 }
@@ -1130,7 +1132,7 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
   const config = (input.resolveConfig ?? loadConfig)();
   const outDir = typeof values["out-dir"] === "string" ? values["out-dir"] : join(config.root, "state", "field-trials");
   const nowIso = input.nowIso ?? systemClock.iso();
-  mkdirSync(outDir, { recursive: true });
+  mkdirSync(outDir, { recursive: true, mode: 0o700 });
   const manifestPath = join(outDir, "field-trials-release-manifest.json");
   const manifest = parseReleaseManifest(readJson(manifestPath));
   if (typeof values.revoke === "string") {

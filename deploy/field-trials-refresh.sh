@@ -26,6 +26,18 @@ for dir in "$CORE" "$SITE" "$CONSOLE"; do
   fi
 done
 
+# The Docker process has its own umask. Tighten the exact private output tree before either
+# container writes, including snapshots produced by an older image with 755/644 defaults.
+PRIVATE_OUT="$CORE/state/field-trials"
+mkdir -p "$PRIVATE_OUT"
+harden_private_output() {
+  find "$PRIVATE_OUT" -type d -exec chmod 700 {} +
+  find "$PRIVATE_OUT" -type f -exec chmod 600 {} +
+}
+harden_private_output
+# Also cover a failed or old image that writes a broad-mode temporary file before exiting.
+trap harden_private_output EXIT
+
 LOCK="$CORE/state/field-trials-refresh.lock"
 exec 9>"$LOCK"
 if ! flock -n 9; then echo "field-trials-refresh: another pass is active"; exit 0; fi
@@ -48,7 +60,8 @@ else
   docker run --rm --network host --volumes-from remudero-daemon \
     --env "GH_APP_ID=$APP_ID" --env "GH_APP_INSTALLATION_ID=$INSTALLATION_ID" \
     --env "GH_APP_PRIVATE_KEY_PATH=$KEY_PATH" \
-    --workdir /app --entrypoint /usr/local/bin/node "$IMAGE" \
+    --workdir /app --entrypoint /bin/sh "$IMAGE" \
+    -c 'umask 077; exec "$@"' field-trials-refresh /usr/local/bin/node \
     --import tsx scripts/private-field-trials-case-files.mjs
 fi
 
@@ -58,8 +71,8 @@ docker run --rm --network host --volumes-from remudero-daemon \
   "${CASE_MOUNT[@]}" \
   --env "GH_APP_ID=$APP_ID" --env "GH_APP_INSTALLATION_ID=$INSTALLATION_ID" \
   --env "GH_APP_PRIVATE_KEY_PATH=$KEY_PATH" \
-  --workdir /app --entrypoint /app/bin/rmd "$IMAGE" \
-  field-trials \
+  --workdir /app --entrypoint /bin/sh "$IMAGE" \
+  -c 'umask 077; exec "$@"' field-trials-refresh /app/bin/rmd field-trials \
   --source core=craigoley/remudero --source site=craigoley/remudero-site --source console=craigoley/remudero-console \
   --ledger core=/home/node/Remudero/state --ledger site=/field-trials/site --ledger console=/field-trials/console \
   --out-dir /home/node/Remudero/state/field-trials --max-pages "$MAX_PAGES" \
