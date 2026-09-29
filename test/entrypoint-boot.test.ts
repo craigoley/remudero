@@ -912,7 +912,7 @@ test("idle_starved: an inbox reply between the Node decision and quiet sleep sti
     "the changed inbox must wake before an unchanged GitHub board is consulted");
 });
 
-test("idle_starved: an uncertain remote probe wakes Node without permanently disabling quiet mode", () => {
+test("idle_starved: an unreadable quick PR board wakes after one pulse without disabling quiet mode", () => {
   const origin = makeOrigin();
   mkdirSync(join(origin, "deploy"), { recursive: true });
   writeFileSync(join(origin, "deploy", "idle-starved-probe.sh"), readFileSync(join(REPO_ROOT, "deploy", "idle-starved-probe.sh")));
@@ -942,6 +942,9 @@ test("idle_starved: an uncertain remote probe wakes Node without permanently dis
   });
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stderr, /idle_starved: remote probe uncertain/);
+  const ledger = readFileSync(join(home, "Remudero", "state", "ledger.ndjson"), "utf8");
+  assert.equal(ledger.split("daemon.idle_starved.pulse").length - 1, 1,
+    "an unreadable quick PR check wakes without waiting for the sixth full-state probe");
   assert.equal(readFileSync(join(home, "Remudero", "state", "quiet-flag-after-uncertain-probe"), "utf8"), "1",
     "a transient API failure must not spend the container's ability to return to zero-token idle");
 });
