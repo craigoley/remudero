@@ -1,0 +1,32 @@
+- id: W1-T4764
+  title: "THE SELECTOR SHADOW GARDENER CAN READ AUGUST RUNS AS THE LATEST CI — bound the Actions query to a recent created window and refuse a stale response before it can score narrowing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  origin: "operator request 2026-09-29: repair self-improvement paths"
+  files: [src/lib/selector-shadow-gardener.ts, test/the-selector-earns-its-narrowing.test.ts]
+  rationale: |
+    Observed on 2026-09-29: the unbounded Actions request for the newest pull_request CI runs
+    returned 2026-09-23 entries, and later 2026-08-20 runs with no coverage shards. The same
+    endpoint with a created lower bound returned 2026-09-29 runs. The gardener repeatedly logged
+    a generic gh failure or insufficient evidence while a later pass filed a real missed edge.
+    A stale response must not become a measured clean or ready decision.
+    The existing selector suite spans more than this task, so Rule 19 prices the test surface
+    at risk:high rather than treating it as a new own-falsifier suite.
+  design: |
+    Query a bounded recent creation window using an injected clock. Check the returned run dates
+    against the requested window before reading job logs. If the service ignores the filter or
+    dates are missing, report an unreadable corpus and keep the previous report. Keep incomplete
+    and pending runs explicit; a sparse window must stay insufficient.
+  acceptance:
+    - claim: "the selector lists runs in a dated recent window"
+      proof: 'grep: test("W1-T4764: the selector lists runs in a dated recent window" in test/the-selector-earns-its-narrowing.test.ts'
+    - claim: "a stale or undated run response cannot produce a ready verdict"
+      proof: 'grep: test("W1-T4764: a stale or undated run response cannot produce a ready verdict" in test/the-selector-earns-its-narrowing.test.ts'
+  falsifier: |
+    Remove the creation filter or freshness check and the named tests fail.

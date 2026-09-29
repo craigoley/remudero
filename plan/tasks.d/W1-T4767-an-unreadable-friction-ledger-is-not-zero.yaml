@@ -1,0 +1,32 @@
+- id: W1-T4767
+  title: "THE CI FRICTION GARDENER TURNS AN UNREADABLE LEDGER UNION INTO AN EMPTY CORPUS — refuse that pass with the source reason and preserve its prior scorecard"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  origin: "operator request 2026-09-29: repair self-improvement paths"
+  files: [src/lib/ci-friction-gardener.ts, src/lib/ledger-union.ts, src/run-task.ts, test/ledger-union.test.ts, test/the-ci-friction-gardener-files-its-own-fixes.test.ts]
+  rationale: |
+    The daemon wiring currently maps readLedgerUnionRecordsSync(...).ok=false to []. That is
+    indistinguishable downstream from a measured zero-friction ledger. A garden pass can cache a
+    false fingerprint or scorecard, weakening the process that should learn from PR repairs.
+    The union reader also swallows live-file read failures, so the strict option must report
+    that failure while retaining best-effort behavior for other callers. Rule 19 prices the
+    existing broad test suites and the production composition root as a span.
+  design: |
+    Preserve the ledger union reader's refusal reason at the production seam. An unreadable
+    archive or live file fails the garden pass with a named ledger error; it writes no scorecard,
+    task, or clean fingerprint. A readable empty corpus remains valid and distinguishable.
+  acceptance:
+    - claim: "an unreadable ledger fails the garden pass without a zero scorecard"
+      proof: 'grep: test("W1-T4767: an unreadable ledger fails the garden pass without a zero scorecard" in test/the-ci-friction-gardener-files-its-own-fixes.test.ts'
+    - claim: "a readable empty ledger remains a valid measured input"
+      proof: 'grep: test("W1-T4767: a readable empty ledger remains a valid measured input" in test/the-ci-friction-gardener-files-its-own-fixes.test.ts'
+    - claim: "a strict union read reports a live-file read failure"
+      proof: 'grep: test("W1-T4767: a strict union read reports a live-file read failure" in test/ledger-union.test.ts'
+  falsifier: |
+    Restore the empty-list fallback and the unreadable-ledger test fails.
