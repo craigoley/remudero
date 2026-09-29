@@ -3,10 +3,18 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { GoldenCorpusItem, HeldOutProof } from "./golden-corpus.js";
 import { execWhitelistedProof, parseWhitelistedProof, type ProofExecutor, type WhitelistedProof } from "./review.js";
 
 const PILOT_SIZE = 30;
+
+/** Only the corpus fields the miner reads; the corpus may depend on this module without a cycle. */
+interface SyntheticSourceItem {
+  readonly taskId: string;
+  readonly headSha?: string;
+  readonly prUrl?: string;
+  readonly spec?: { readonly type: string; readonly verify: string; readonly files: readonly string[] };
+  readonly proofs: readonly { readonly claim: string; readonly proof: string; readonly holdout: boolean }[];
+}
 
 export interface SyntheticTaskRecord {
   readonly id: string;
@@ -14,14 +22,14 @@ export interface SyntheticTaskRecord {
   readonly dispatchable: false;
   readonly sourceTaskId: string;
   readonly sourcePrUrl?: string;
-  readonly spec?: GoldenCorpusItem["spec"];
+  readonly spec?: SyntheticSourceItem["spec"];
   readonly mainSha: string;
   readonly mergedSha: string;
   /** A git patch to apply in reverse to main when replaying this task. */
   readonly reversePatch: string;
   readonly grading: { readonly main: "pass"; readonly candidate: "fail" };
   /** The scorer stays inside this sealed record, never in a production task shard. */
-  readonly proofs: readonly HeldOutProof[];
+  readonly proofs: SyntheticSourceItem["proofs"];
 }
 
 export interface SyntheticPilotReport {
@@ -45,7 +53,7 @@ function git(repoDir: string, args: string[], input?: string): string {
   });
 }
 
-function mergedCommit(repoDir: string, mainSha: string, item: GoldenCorpusItem): string | undefined {
+function mergedCommit(repoDir: string, mainSha: string, item: SyntheticSourceItem): string | undefined {
   const trailer = `Remudero-Task: ${item.taskId}`;
   const matches = git(repoDir, ["log", mainSha, "--format=%H", "--fixed-strings", `--grep=${trailer}`, "-10"])
     .trim().split("\n").filter(Boolean);
@@ -62,9 +70,9 @@ function isNonTestPath(path: string): boolean {
     !path.split("/").includes("__tests__") && !/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path);
 }
 
-function taskProofs(item: GoldenCorpusItem): WhitelistedProof[] | undefined {
+function taskProofs(item: SyntheticSourceItem): WhitelistedProof[] | undefined {
   const parsed = item.proofs.map((entry) => parseWhitelistedProof(entry.proof));
-  if (!parsed.some((proof) => proof?.kind === "test")) return undefined;
+  if (!parsed.some((proof) => proof !== null && proof.kind === "test")) return undefined;
   return parsed.every((proof) => proof !== null) ? parsed as WhitelistedProof[] : undefined;
 }
 
@@ -85,7 +93,7 @@ function grade(proofs: readonly WhitelistedProof[], dir: string, execProof: Proo
  * Recheck each task's unit proofs against today's main and a reverse-applied, non-test patch. An
  * unresolvable merge, patch conflict, proof error or no-match is excluded by name, never counted as red.
  */
-export function mineSyntheticTasks(items: readonly GoldenCorpusItem[], options: SyntheticMiningOptions): SyntheticPilotReport {
+export function mineSyntheticTasks(items: readonly SyntheticSourceItem[], options: SyntheticMiningOptions): SyntheticPilotReport {
   const pilotSize = Number.isFinite(options.pilotSize) ? Math.trunc(options.pilotSize!) : PILOT_SIZE;
   const sampled = Math.min(items.length, Math.max(0, Math.min(PILOT_SIZE, pilotSize)));
   const kept: SyntheticTaskRecord[] = [];
