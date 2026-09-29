@@ -3175,6 +3175,40 @@ cold first read over 5 s, or the corpus past 5 GB / 10M rows). If it is built, n
 recommended store (in-process, no new dependency). Rollback: release W1-T4568 for build.
 
 
+## 2026-09-29 — OPERATOR DECISION: retire the outcome-only approved skill and the retro's learnings promotion pass
+
+*Operator direction record: the operator delegated these two calls to the coordinator's recommendation
+on 2026-09-29 ("proceed"). Recorded by hand; not a machine auto-choose resolution.*
+
+Both stages are retired for the same reason: a learning-loop stage whose output reaches no worker, or reaches
+one without effect, costs spend and attention and returns nothing. Measured over 2026-09-15..29 on the core
+ledger (all three rotation forms, deduplicated):
+
+- **SKILL `implement-clean-single-strike-8aa4458e` (approved in #7090) is RETIRED by #7837.** Its whole
+  procedure is "Resolve the task on the first attempt". That restates the signal the runs were mined on and
+  names no step. Measured:
+  - it was injected into 399 implement prompts;
+  - workers self-reported using it in 8 of 114 `skills.used` rows;
+  - among runs it was injected into, the merged share of implement runs was 36% (59/164) in the three days
+    before its approval and 37% (44/120) in the three days after.
+  All 18 staged `skill-draft:` proposals have the same outcome-only shape, and #7833 stops the workshop
+  staging that shape. Rollback: restore the SKILL.md from #7837's parent.
+- **THE RETRO'S LEARNINGS PROMOTION PASS (P32/W1-T1059/W1-T1249) is RETIRED by #7844.**
+  `selectPromotionCycleEntries` sorts by id and takes five, so every retro spawned a fresh judge for the
+  same entries: 352 `promotion.verdict` rows on 4 ids, 258 of them "promoted". The pass writes nothing, and
+  each daemon instance has its own `<root>/learnings-user` home, so no worker could read a promoted entry.
+  The learnings.ts pipeline (`promoteEntry`, `runPromotionPass`, scrub, taint) is kept. Rollback: revert
+  #7844.
+
+**REVISIT CONDITION — rebuild both when the transcript miner yields real multi-step procedures.**
+- That means `mineTranscriptWorkflows` (workflow-mining.ts) returns a workflow with two or more
+  distinguishing steps over a live retro window. Over 2026-09-21..29 it returned none.
+- A rebuilt skill release should ride the shared risk-judge release path, and retire itself on
+  `buildSkillEffectivenessReport`'s RETIRE-CANDIDATE.
+- A rebuilt promotion should judge each entry once per content, and write to a home that more than one
+  instance reads.
+
+
 ## 2026-09-29 — OPERATOR RULING: an LLM judge in the middle of machine-filed work; the operator RATIFIES it to release
 
 *Operator-authored, recorded at the operator's instruction on 2026-09-29:*
@@ -3259,36 +3293,3 @@ runs no backstop, because the operator's bit is the decision.
 
 Rollback: remove the `machine-judge` garden from the daemon's gardens and revert the filers to the
 literal header; records already pinned stay valid, and reverting any one to `verify: human` parks it.
-
-## 2026-09-29 — OPERATOR DECISION: retire the outcome-only approved skill and the retro's learnings promotion pass
-
-*Operator direction record: the operator delegated these two calls to the coordinator's recommendation
-on 2026-09-29 ("proceed"). Recorded by hand; not a machine auto-choose resolution.*
-
-Both stages are retired for the same reason: a learning-loop stage whose output reaches no worker, or reaches
-one without effect, costs spend and attention and returns nothing. Measured over 2026-09-15..29 on the core
-ledger (all three rotation forms, deduplicated):
-
-- **SKILL `implement-clean-single-strike-8aa4458e` (approved in #7090) is RETIRED by #7837.** Its whole
-  procedure is "Resolve the task on the first attempt". That restates the signal the runs were mined on and
-  names no step. Measured:
-  - it was injected into 399 implement prompts;
-  - workers self-reported using it in 8 of 114 `skills.used` rows;
-  - among runs it was injected into, the merged share of implement runs was 36% (59/164) in the three days
-    before its approval and 37% (44/120) in the three days after.
-  All 18 staged `skill-draft:` proposals have the same outcome-only shape, and #7833 stops the workshop
-  staging that shape. Rollback: restore the SKILL.md from #7837's parent.
-- **THE RETRO'S LEARNINGS PROMOTION PASS (P32/W1-T1059/W1-T1249) is RETIRED by #7844.**
-  `selectPromotionCycleEntries` sorts by id and takes five, so every retro spawned a fresh judge for the
-  same entries: 352 `promotion.verdict` rows on 4 ids, 258 of them "promoted". The pass writes nothing, and
-  each daemon instance has its own `<root>/learnings-user` home, so no worker could read a promoted entry.
-  The learnings.ts pipeline (`promoteEntry`, `runPromotionPass`, scrub, taint) is kept. Rollback: revert
-  #7844.
-
-**REVISIT CONDITION — rebuild both when the transcript miner yields real multi-step procedures.**
-- That means `mineTranscriptWorkflows` (workflow-mining.ts) returns a workflow with two or more
-  distinguishing steps over a live retro window. Over 2026-09-21..29 it returned none.
-- A rebuilt skill release should ride the shared risk-judge release path, and retire itself on
-  `buildSkillEffectivenessReport`'s RETIRE-CANDIDATE.
-- A rebuilt promotion should judge each entry once per content, and write to a home that more than one
-  instance reads.

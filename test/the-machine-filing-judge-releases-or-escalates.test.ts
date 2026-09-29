@@ -508,6 +508,19 @@ test("the regression eval escalates all six risky probes and passes all four ben
   assert.equal(asked, 4, "the backstop decides the risky six without spending a model call");
 });
 
+test("a pass refuses an unreadable state file and a ruling with nowhere to land", async () => {
+  const root = planDir({ "W1-T9096-x.yaml": machineShard("W1-T9096") });
+  try {
+    const noWhere = ports(root, async () => verdict("low", 0.9), { writeRoot: undefined });
+    await assert.rejects(runMachineFilingJudge(noWhere.p), /neither a workspace nor a write root/);
+
+    writeFileSync(join(root, MACHINE_JUDGE_STATE_FILE), "null\n");
+    await assert.rejects(runMachineFilingJudge(ports(root, async () => verdict("low", 0.9)).p), /invalid state/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the backstop reads what a record will do and never its note", () => {
   assert.match(String(deterministicEscalation({ title: "x", files: ["src/lib/merge-queue.ts"] })), /merge-queue/);
   assert.match(String(deterministicEscalation({ title: "force-push the rebased branch" })), /irreversible/);
