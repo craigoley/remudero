@@ -116,10 +116,11 @@ export function mineSyntheticTasks(items: readonly SyntheticSourceItem[], option
 
     const root = mkdtempSync(join(tmpdir(), "rmd-synthetic-task-"));
     const candidateDir = join(root, "candidate");
-    let added = false;
     try {
-      git(options.repoDir, ["worktree", "add", "--quiet", "--detach", candidateDir, mainSha]);
-      added = true;
+      // A sealed candidate needs a detached, disposable checkout at this exact SHA.
+      // A local shared clone keeps its index and refs separate while borrowing source objects.
+      git(options.repoDir, ["clone", "--quiet", "--shared", "--no-checkout", options.repoDir, candidateDir]);
+      git(candidateDir, ["checkout", "--quiet", "--detach", mainSha]);
       const modules = join(options.repoDir, "node_modules");
       if (existsSync(modules)) symlinkSync(modules, join(candidateDir, "node_modules"), "dir");
       const mainGrade = grade(proofs, candidateDir, execProof);
@@ -139,7 +140,6 @@ export function mineSyntheticTasks(items: readonly SyntheticSourceItem[], option
     } catch (error) {
       reject(`candidate could not be measured: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
-      if (added) git(options.repoDir, ["worktree", "remove", "--force", candidateDir]);
       rmSync(root, { recursive: true, force: true });
     }
   }
