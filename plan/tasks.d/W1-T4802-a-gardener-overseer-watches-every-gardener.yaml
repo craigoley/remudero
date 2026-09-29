@@ -1,0 +1,110 @@
+- id: W1-T4802
+  title: "NOTHING WATCHES THE GARDENERS — selector-shadow failed 513 times in four days, ci-friction sat inert for four days after one failed filing and the test gardener merged near-identical proposals hourly, all unnoticed; add an overseer that tracks each gardener's liveness, the effect of its merged changes and its churn, answers in self-healing tiers, and feeds effect back into each class's Beta record"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator direction 2026-09-29 (closing the self-improvement loop): a meta-gardener that watches every gardener"
+  plan_refs: [W1-T4110, W1-T4435, W1-T4112]
+  files:
+    - src/lib/gardener-overseer.ts
+    - src/lib/gardener.ts
+    - src/run-task.ts
+    - test/gardener-overseer.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-29 (core ledger on the Azure host, state/*-gardener.json, origin/main 43a9a0361):
+    (1) `selector-shadow.gardener_failed` fired 513 times from 2026-09-25 to 2026-09-29 ("Bad
+        credentials" on its `gh api .../actions/workflows/ci.yml/runs` reads) and nobody noticed.
+        `startGarden`'s catch in src/lib/gardener.ts only ledgers `<name>.gardener_failed`; no streak
+        is kept and nothing escalates. Selector-shadow, test, config and evidence-coverage run their
+        own starters with the same ledger-only catch.
+    (2) The test gardener never acted from its build until #7840 (`lastPass.fingerprint` was empty).
+    (3) The ci-friction gardener was inert from 09-25 to 09-29: its filing was refused by Rule 15
+        eight times, then it recorded the fingerprint as its last pass and its skip-if-unchanged
+        check suppressed every retry. #7834 fixed that one path, and `runGarden` now escalates a
+        FILING streak at `GARDEN_FILING_ESCALATE_AT`. A pass that throws before filing, or a
+        gardener that simply stops passing, is still invisible.
+    (4) The test gardener then thrashed: `adopt-durations` merged #7856, #7864, #7876, #7878 and
+        #7884 on 09-29, each rewriting about 2,100 rows of scripts/test-tier-manifest.json; three of
+        them within 90 minutes. Each merge credits the class (`judgeGardenDecision`), so the Beta
+        record rewards the churn.
+    (5) Review-class changes (ci-friction's `draft`, the plan gardener's proposals) are judged by
+        merge alone. No one checks whether the cost a merged change targeted fell afterwards, e.g.
+        whether ci-friction's recency-weighted price (`priceCiFrictionCauses`) for the cause it
+        filed dropped once the filed task shipped.
+    Every gardener already writes the evidence: `<name>.scorecard`, `<name>.gardener_failed`,
+    `<name>.garden_filing_failed`, `<name>.garden_filing_escalated`, `<name>.gardener_judged`
+    ledger rows (evidence-coverage uses `evidence_coverage.`), plus `state/<name>-gardener.json`.
+    What is missing is one reader over all of them.
+  design: |
+    (i) src/lib/gardener-overseer.ts, its own-timer loop beside the other gardens (the
+    `startGarden` pattern: never two passes at once, a catch that ledgers). It DISCOVERS gardeners
+    from ledger step suffixes (`.scorecard`, `.gardener_failed`, `.garden_filing_failed`,
+    `.gardener_judged`) and `state/*-gardener.json` files, read through the ledger union so
+    rotation cannot hide a streak. No gardener list is hard-coded, so a new gardener is watched
+    from its first row.
+    (ii) LIVENESS, per gardener: last successful pass, current `gardener_failed` streak, and
+    silence. Silence is measured against THAT gardener's own observed pass cadence (its median
+    gap between rows), never a fixed number of hours. Answers are tiered and self-healing, with
+    no hard thresholds: tier 1 ledgers `gardener_overseer.noticed`; tier 2 heals what it safely
+    can, by clearing that gardener's `lastCheap` and a `lastPass` that landed nothing so the next
+    pass re-reads its inventory (the ci-friction failure mode), and ledgers
+    `gardener_overseer.healed`; tier 3, when the streak or silence persists after a heal,
+    escalates once per episode through the existing `escalate` dep (escalate.ts `Escalation`,
+    `headDedup: "independent"`), naming the latest error. It never re-escalates a filing streak
+    `runGarden` has already escalated (`<name>.garden_filing_escalated`); that one belongs to
+    gardener.ts.
+    (iii) EFFECT: for each merged gardener PR, compare the cost it targeted before the merge and
+    after. The cost is the gardener's own metric where it has one (`GardenSpec.metric`); for
+    ci-friction it is the recency-weighted price of the filed cause
+    (`priceCiFrictionCauses` + `ciFrictionOrigin`), measured once the filed task's own PR has
+    merged. A fall beyond one standard error credits the class and a rise debits it, the same
+    rule `judgeGardenPending` uses; otherwise it waits. The overseer never writes another
+    gardener's state file (that races its pass). It writes the verdict to
+    `state/<name>-gardener-effects.json`, and gardener.ts `runGarden` folds pending effect
+    verdicts into its own `classes` record at the start of a pass, then clears them.
+    (iv) CHURN: repeated near-identical proposals from one gardener and class, i.e. PRs whose
+    titles differ only in counts and whose changed-path sets overlap, landing faster than the
+    class's own metric could move. A churn episode debits that class through the same effects
+    file, so the Beta draw itself slows the thrash (self-healing), and it escalates only when
+    the debits do not slow it.
+    (v) A weekly `gardener_overseer.scorecard` ledger row: per gardener, passes, failures, the
+    longest silence, PRs opened, merged and closed, effect credits and debits, churn episodes, and
+    each class's Beta mean.
+    (vi) Wire it in src/run-task.ts's `gardens` list on the self target, with `escalate` supplied
+    the way the ci-friction garden's deps supply `raiseDuplicate`. Off switch:
+    `state/GARDENER_OVERSEER_OFF`.
+    Out of scope: repairing any one gardener's defect (selector-shadow's credentials, the test
+    gardener's cadence); the machine-filing verify and risk policy (machine-filing.ts).
+  acceptance:
+    - claim: "a gardener whose passes keep failing is noticed then healed then escalated once"
+      proof: 'grep: test("W1-T4802: a failure streak is noticed then healed then escalated once" in test/gardener-overseer.test.ts'
+    - claim: "silence is judged against the gardener's own cadence rather than a fixed limit"
+      proof: 'grep: test("W1-T4802: silence is judged against the gardener own cadence" in test/gardener-overseer.test.ts'
+    - claim: "a filing streak gardener.ts already escalated is not escalated again"
+      proof: 'grep: test("W1-T4802: a filing streak already escalated is not escalated again" in test/gardener-overseer.test.ts'
+    - claim: "a merged change whose targeted cost fell credits its class and one whose cost rose debits it"
+      proof: 'grep: test("W1-T4802: an effect verdict reaches the class Beta record on the next pass" in test/gardener-overseer.test.ts'
+    - claim: "near-identical proposals from one class are a churn episode that debits the class"
+      proof: 'grep: test("W1-T4802: near-identical proposals debit the class as churn" in test/gardener-overseer.test.ts'
+    - claim: "a weekly scorecard row covers every gardener seen in the ledger"
+      proof: 'grep: test("W1-T4802: the weekly scorecard names every gardener seen" in test/gardener-overseer.test.ts'
+    - claim: "the daemon runs the overseer"
+      proof: "grep: startGardenerOverseer( in src/run-task.ts"
+  falsifier: |
+    Measure silence against a fixed hour count: a gardener that passes daily is flagged all day
+    and the cadence test fails. Drop the `garden_filing_escalated` check: the filing-streak test
+    sees a second escalation. Write the effect verdict straight into `<name>-gardener.json` from
+    the overseer: the fold test's concurrent pass overwrites it and the class record is unchanged.
+  note: |
+    Reserved from the operator checkout for branch file/three-new-gardeners-1790707389087.
+    Scope-time checks 2026-09-29: no run-W1-T4802-* branch; no merged PR carries its trailer
+    (96 recent merged PRs read, 16 carry some trailer). No plan record on origin/main or on any
+    of 213 origin heads matches overseer, gardener liveness or gardener_failed.

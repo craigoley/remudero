@@ -17,14 +17,21 @@ import { fileURLToPath } from "node:url";
 import { fixedClock } from "../src/lib/clock.js";
 import { runnableCandidates } from "../src/lib/drain.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+<<<<<<< HEAD
 import { costPriority, deterministicEscalation, machineShardHeaderLines, machineShardRisk, renderMachineShard, UNPRICED_PRIORITY } from "../src/lib/machine-filing.js";
 import { ciFrictionShardYaml } from "../src/lib/ci-friction-gardener.js";
 import { ciLearningShardYaml } from "../src/lib/measurement-cadence.js";
+=======
+import { deterministicEscalation, machineShardHeaderLines, machineShardRisk, renderMachineShard } from "../src/lib/machine-filing.js";
+>>>>>>> origin/main
 import {
   earnedConfidenceBar,
   familyTrackRecord,
   gardenFamilyRecord,
+<<<<<<< HEAD
   isRulingShaped,
+=======
+>>>>>>> origin/main
   judgeMachineShard,
   MACHINE_JUDGE_STATE_FILE,
   readOperatorReleases,
@@ -531,6 +538,7 @@ test("the backstop reads what a record will do and never its note", () => {
   assert.equal(deterministicEscalation({ title: "record the lesson", acceptance: [{ claim: "a learnings entry exists" }] }), undefined);
 });
 
+<<<<<<< HEAD
 const operatorShard = (id: string, over: { title?: string; files?: string[] } = {}) =>
   machineShard(id, { ...over, origin: `operator-request#${id}` }).replace("  author_class: machine\n", "");
 
@@ -696,6 +704,8 @@ test("released work dispatches costliest first and unpriced work mid-queue", asy
   }
 });
 
+=======
+>>>>>>> origin/main
 test("shardRelPath names a shard by its plan directory and refuses the monolith, a nested path and a non-yaml file", () => {
   assert.equal(shardRelPath({ sourcePath: "/repo/plan/tasks.d/W1-T1-x.yaml" }), "plan/tasks.d/W1-T1-x.yaml");
   assert.equal(shardRelPath({ sourcePath: "plan\\tasks.d\\W1-T1-x.yml" }), "plan/tasks.d/W1-T1-x.yml", "a windows-style label is normalised");

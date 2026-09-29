@@ -38,8 +38,13 @@ import {
   type RiskJudgeVerdict,
   type RiskPolicy,
 } from "./risk-judge.js";
+<<<<<<< HEAD
 import { deterministicEscalation, UNPRICED_PRIORITY } from "./machine-filing.js";
 import { lintTask, rulingVerifyViolation, taskRulingPin } from "./task-linter.js";
+=======
+import { deterministicEscalation } from "./machine-filing.js";
+import { lintTask, taskRulingPin } from "./task-linter.js";
+>>>>>>> origin/main
 
 /** The operator's escalation rule, handed to the judge verbatim in its gates state. */
 export const MACHINE_JUDGE_ESCALATE_ONLY_IF =
