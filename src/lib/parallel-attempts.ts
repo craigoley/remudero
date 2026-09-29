@@ -108,8 +108,10 @@ export function shapeGainPays(gain: ShapeGain | undefined): boolean {
   return gain.gain > 0 && gain.gainPerExtraWindow >= MIN_GAIN_PER_EXTRA_WINDOW;
 }
 
-/** How many sealed side attempts to run when a shape's measured gain pays. A scheduler capacity
- *  ceiling only — {@link shapeGainPays}, not this constant, is what decides whether to run any. */
+/** PRIMARY CONTROL — how many sealed side attempts to run when a shape's measured gain pays. It
+ *  directly bounds `k` in {@link planParallelAttempts} on every call, not only once some other
+ *  check has already failed; {@link shapeGainPays} is the SEPARATE decision of whether to run
+ *  any attempts at all. */
 export const DEFAULT_MAX_PARALLEL_K = 3;
 
 export interface ParallelAttemptsPlanInput {
