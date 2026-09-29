@@ -163,6 +163,7 @@ import { loadTestManifestProbe, refreshTestManifestProposalAsync, startTestGarde
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { startCiFrictionGardener, readCiFrictionLedgerRecords, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, selectorShadowFlakeLedger, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
+import { gardenFamilyRecord, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener, startEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
@@ -249,7 +250,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export", "ci-friction", "selector-shadow"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "machine-judge"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -33723,6 +33724,11 @@ export async function daemonCommand(
                   intervalMs,
                 ),
                 (intervalMs: number) => startEvidenceCoverageGardener(() => runEvidenceCoverageGardener(daemonEvidenceCoverageInput({ stateDir: join(config.root, "state"), root: repoRoot, log })), log, intervalMs),
+                // Operator ruling 2026-09-29: the LLM judge in the middle of machine-filed work.
+                (intervalMs: number) => startMachineFilingJudge(
+                  productionMachineFilingJudgePorts({ repoRoot, stateDir: join(config.root, "state"), worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                  intervalMs,
+                ),
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
                 // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
                 // registry instance" has no selector yet -- `RegistryInstance` carries no role or
@@ -44013,6 +44019,41 @@ export function priorVerifyHumanVerdicts(rows: readonly Record<string, unknown>[
  * TOUCHES NO PLAN FILE. It reads the plan, writes ledger rows and stages proposals. `--dry-run`
  * judges nothing and spends nothing; it reports which shards a real pass WOULD ask about.
  */
+/** The daemon's machine-filing judge (operator ruling 2026-09-29) over this checkout's plan, mounts
+ *  and policy. The risk judge is built on first use, as {@link productionVerifyHumanRelease}'s is. */
+export function productionMachineFilingJudgePorts(opts: {
+  repoRoot: string;
+  stateDir: string;
+  worktreesRoot: string;
+  owner: string;
+  repo: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  spawn?: typeof spawnWorker;
+  fetcher?: GhApiFetcher;
+  clock?: Clock;
+}): MachineJudgePorts {
+  let judge: ((input: RiskJudgeInput) => Promise<RiskJudgeVerdict>) | undefined;
+  const fetcher = opts.fetcher ?? ghJson;
+  return {
+    stateDir: opts.stateDir,
+    plan: () => loadPlan(resolveRepoLayout(opts.repoRoot).planMonolith),
+    riskJudge: (input) => {
+      if (!judge) {
+        const mounts = loadMounts(mountsPath(opts.repoRoot));
+        judge = realRiskJudge({ mount: mounts.machine_filing_judge ?? resolveRiskJudgeMount(mounts), cwd: opts.repoRoot, settingsFile: join(opts.repoRoot, "settings", "worker.json"), spawn: opts.spawn ?? ledgeredNonDispatchSpawn("risk-judge") });
+      }
+      return judge(input);
+    },
+    riskPolicy: () => readRiskPolicy(policyPath(opts.repoRoot)),
+    gardenRecord: (family) => gardenFamilyRecord(opts.stateDir, family),
+    openWorkspace: () => gardenCheckout({ name: "machine-judge", repoDir: opts.repoRoot, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, fetcher, clock: opts.clock }),
+    prState: (prUrl) => gardenPrState(opts.owner, opts.repo, prUrl, fetcher),
+    stageProposal: (proposal) => void stageInboxProposalOnce(join(opts.stateDir, "inbox-proposals.json"), proposal),
+    log: opts.log,
+    clock: opts.clock ?? systemClock,
+  };
+}
+
 /**
  * The PRODUCTION continue arm, shared by the daemon cadence and `rmd verify-human-sweep`. See
  * lib/verify-human-release.ts for the contract: a filing-time risk judge must say PROCEED, and the
@@ -44165,7 +44206,8 @@ export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock):
   const nowMs = clock.now();
   const out: ShardUnderJudgement[] = [];
   for (const task of plan.tasks) {
-    if (task.verify !== "human" || task.status !== "queued") continue;
+    // Machine-filed records are the machine-filing judge's: it routes AND releases them, pinned.
+    if (task.verify !== "human" || task.status !== "queued" || task.author_class === "machine") continue;
     const deps = task.depends_on ?? [];
     out.push({
       id: task.id,

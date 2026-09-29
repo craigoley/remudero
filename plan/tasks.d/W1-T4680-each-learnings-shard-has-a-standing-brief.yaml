@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-memory-1790600000"
   plan_refs: [W1-T4606]
   files: [src/lib/standing-briefs.ts, test/each-learnings-shard-has-a-standing-brief.test.ts, src/lib/learnings.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: learnings enter the prompt as flat lines under an 8,148-char budget (src/lib/learnings.ts ~41-49) and 34% of
