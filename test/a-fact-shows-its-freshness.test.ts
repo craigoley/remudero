@@ -11,6 +11,9 @@
  * only annotated — so a worker who reads it knows to verify first.
  */
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -22,6 +25,7 @@ import {
   type ChurnCommitReader,
   type LearningEntry,
 } from "../src/lib/learnings.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 function entry(id: string, overrides: Partial<LearningEntry> = {}): LearningEntry {
   return {
@@ -94,4 +98,24 @@ test("W1-T4681: an entry with no cited date has unknowable churn, not zero-guess
   const readChurnCommits: ChurnCommitReader = () => 7; // would be "high" if consulted at all
   const churn = computeEntryChurn(neverCited, "/repo", readChurnCommits);
   assert.equal(churn, 0);
+});
+
+test("W1-T4681: the default churn reader counts real commits on a fact's files since it was earned", () => {
+  const repo = gitRepo({ seedCommit: false, kind: "churn" });
+  mkdirSync(join(repo.dir, "src"));
+  for (const file of ["src/x.ts", "src/x.ts", "src/other.ts"]) {
+    writeFileSync(join(repo.dir, file), `${Math.random()}\n`);
+    repo.git("add", file);
+    repo.git("commit", "--quiet", "-m", `touch ${file}`);
+  }
+  const earlier = entry("earlier", { files: ["src/x.ts"], cited: "2000-01-01" });
+  assert.equal(computeEntryChurn(earlier, repo.dir), 2);
+  assert.deepEqual(computeCorpusChurn([earlier], repo.dir), { earlier: 2 });
+  const untouched = entry("untouched", { files: ["src/never-committed.ts"], cited: "2000-01-01" });
+  assert.equal(computeEntryChurn(untouched, repo.dir), 0);
+});
+
+test("W1-T4681: the default churn reader reads an unreadable repository as unknowable churn, zero", () => {
+  const missing = join(tmpdir(), "churn-no-such-repo-w1-t4681");
+  assert.equal(computeEntryChurn(entry("unreadable"), missing), 0);
 });

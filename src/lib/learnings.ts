@@ -833,7 +833,6 @@ export function attestLearningOrigin(
 export type ChurnCommitReader = (repoDir: string, files: string[], sinceIso: string) => number; // W1-T4681: commits on `files` since `sinceIso`
 
 function defaultChurnCommitReader(repoDir: string, files: string[], sinceIso: string): number {
-  if (files.length === 0) return 0;
   let output: string;
   try {
     output = execFileSync(
