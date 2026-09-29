@@ -154,7 +154,7 @@ export interface ExperimentReport {
   revisitOn: string;
   revisitDue: boolean;
   assignments: number;
-  excludedAssignments: { genericUnit: number; changedTreatment: number };
+  excludedAssignments: { genericUnit: number; changedTreatment: number; unverifiedTreatment: number };
   /** Tasks whose tagged assignments landed in BOTH arms; counted under their first arm. */
   mixedTasks: number;
   /** W1-T4617: tasks served an arm other than the one they were assigned at least once. */
@@ -190,7 +190,7 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
   const crossed = new Set<string>();
   const assignmentTask = new Map<string, string>();
   const receipts = new Map<string, { minutes?: number; tokens?: number; cost?: number; billingMode?: "api" | "subscription"; attempted?: true }>();
-  const excludedAssignments = { genericUnit: 0, changedTreatment: 0 };
+  const excludedAssignments = { genericUnit: 0, changedTreatment: 0, unverifiedTreatment: 0 };
   const merges: Array<{ task: string; ts: string }> = [];
   const fixes: Array<{ task: string; ts: string }> = [];
   for (const row of rows) {
@@ -206,7 +206,8 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       const considered = Array.isArray(decision.considered) ? decision.considered as Row[] : [];
       const claudeCandidate = considered.find((candidate) => candidate.provider === "claude");
       const candidateModel = str(claudeCandidate?.model);
-      if (candidateModel !== undefined && !experiment.claudeModel.test(candidateModel)) {
+      if (candidateModel === undefined) { excludedAssignments.unverifiedTreatment += 1; continue; }
+      if (!experiment.claudeModel.test(candidateModel)) {
         excludedAssignments.changedTreatment += 1;
         continue;
       }
@@ -308,7 +309,7 @@ export async function routingAbCommand(rest: string[], opts: RoutingAbCommandOpt
   print(`state dir: ${stateDir} (${rows.length} ledger rows read)`);
   for (const report of reports) {
     const status = report.sufficient ? "measured" : "insufficient sample";
-    print(`${report.id}: ${status}; ${report.assignments} assignments, ${report.mixedTasks} tasks in both arms, ${report.crossoverTasks} crossover tasks; ${report.excludedAssignments.genericUnit} generic units and ${report.excludedAssignments.changedTreatment} changed treatments excluded; revisit ${report.revisitOn}${report.revisitDue ? " (DUE)" : ""}`);
+    print(`${report.id}: ${status}; ${report.assignments} assignments, ${report.mixedTasks} tasks in both arms, ${report.crossoverTasks} crossover tasks; ${report.excludedAssignments.genericUnit} generic units, ${report.excludedAssignments.changedTreatment} changed treatments and ${report.excludedAssignments.unverifiedTreatment} unverified treatments excluded; revisit ${report.revisitOn}${report.revisitDue ? " (DUE)" : ""}`);
     for (const arm of report.arms) {
       print(
         `  ${arm.arm} (${arm.provider}): ${arm.tasks} tasks, ${arm.merged} merged (${fmt(arm.mergeRate, 100, "%")}), ` +

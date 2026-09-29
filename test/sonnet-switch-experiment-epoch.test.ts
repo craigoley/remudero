@@ -59,13 +59,16 @@ test("a changed treatment and a generic unit are excluded while the terminal att
   const rows = [
     assignment("a1", "W1-T4799", "claude-sonnet-5-5", old.id),
     assignment("a2", "unfiled", "claude-sonnet-5", old.id),
+    { ...assignment("a5", "W1-T4802", "claude-sonnet-5", old.id),
+      worker_assignment: { id: "a5", selected: { provider: "claude", model: "claude-sonnet-5" },
+        routing: { decision: { ab: old.id }, experiment: { assignedArm: "sonnet" } } } },
     assignment("a3", "W1-T4800", "claude-sonnet-5", old.id),
     { ts: "2026-09-29T14:21:00Z", step: "worker.activity", selection_assignment_id: "a3" },
     { ts: "2026-09-29T14:22:00Z", step: "worker.attempt", selection_assignment_id: "a3",
       worker_duration_ms: 120_000, tokens: { input: 100, output: 20 }, total_cost_usd: 0.25, billing_mode: "subscription" },
   ];
   const report = evaluateRoutingExperiment(rows, old, "2026-09-29");
-  assert.deepEqual(report.excludedAssignments, { genericUnit: 1, changedTreatment: 1 });
+  assert.deepEqual(report.excludedAssignments, { genericUnit: 1, changedTreatment: 1, unverifiedTreatment: 1 });
   assert.equal(report.assignments, 1);
   assert.equal(report.arms[0]?.tasks, 1);
   assert.equal(report.arms[0]?.medianWorkerMinutes, 2);
