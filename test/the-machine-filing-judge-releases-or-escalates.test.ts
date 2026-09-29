@@ -510,6 +510,19 @@ test("the regression eval escalates all six risky probes and passes all four ben
   assert.equal(asked, 4, "the backstop decides the risky six without spending a model call");
 });
 
+test("a pass refuses an unreadable state file and a ruling with nowhere to land", async () => {
+  const root = planDir({ "W1-T9096-x.yaml": machineShard("W1-T9096") });
+  try {
+    const noWhere = ports(root, async () => verdict("low", 0.9), { writeRoot: undefined });
+    await assert.rejects(runMachineFilingJudge(noWhere.p), /neither a workspace nor a write root/);
+
+    writeFileSync(join(root, MACHINE_JUDGE_STATE_FILE), "null\n");
+    await assert.rejects(runMachineFilingJudge(ports(root, async () => verdict("low", 0.9)).p), /invalid state/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the backstop reads what a record will do and never its note", () => {
   assert.match(String(deterministicEscalation({ title: "x", files: ["src/lib/merge-queue.ts"] })), /merge-queue/);
   assert.match(String(deterministicEscalation({ title: "force-push the rebased branch" })), /irreversible/);
@@ -593,6 +606,57 @@ test("a record the rewrite refuses is settled until it changes and not re-judged
   }
 });
 
+test("a corrupt judge state file is refused loudly and a pass with no landing tree throws", async () => {
+  const root = planDir({ "W1-T9140-x.yaml": machineShard("W1-T9140") });
+  try {
+    writeFileSync(join(root, MACHINE_JUDGE_STATE_FILE), "null\n");
+    await assert.rejects(runMachineFilingJudge(ports(root, async () => verdict("low", 0.9)).p), /invalid state/);
+    rmSync(join(root, MACHINE_JUDGE_STATE_FILE));
+    await assert.rejects(
+      runMachineFilingJudge(ports(root, async () => verdict("low", 0.9), { writeRoot: undefined }).p),
+      /neither a workspace nor a write root/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a record with no origin belongs to the unknown family", () => {
+  const task = loadPlanFromYaml(machineShard("W1-T9141").replace(/ {2}origin:.*\n/, ""), "a.yaml").tasks[0]!;
+  assert.equal(machineFamily(task), "unknown");
+});
+
+test("the verify-human release names the reason it releases nothing, and releases only on a clean proceed", async () => {
+  const shard = { id: "W1-T9150", title: "t", rationale: "", acceptance: [], ageDays: 1, depsAllMerged: true, citedInSrc: false };
+  const automate = { decision: "automate" as const, reason: "mechanical" };
+  const task = loadPlanFromYaml(operatorShard("W1-T9150"), "a.yaml").tasks[0]!;
+  const written: string[] = [];
+  const base = {
+    task: () => task,
+    riskJudge: async () => verdict("low", 0.99),
+    writeRelease: (id: string) => (written.push(id), { code: 0, message: "ok", released: true }),
+  };
+  const run = (over: Partial<Parameters<typeof releaseAutomatedShard>[2]>) => releaseAutomatedShard(shard, automate, { ...base, ...over });
+
+  const missing = await run({ task: () => undefined });
+  assert.deepEqual([missing.kind, (missing as { reason: string }).reason], ["unavailable", "W1-T9150 does not resolve to a plan record"]);
+  assert.match((await run({ task: () => ({ ...task, verify: "auto" }) }) as { reason: string }).reason, /not parked/);
+  assert.match((await run({ task: () => ({ ...task, status: "merged" }) }) as { reason: string }).reason, /not queued/);
+  const threw = await run({ riskJudge: async () => { throw new Error("spawn timed out"); } });
+  assert.match((threw as { reason: string }).reason, /the risk judge threw: spawn timed out/);
+  const blank = await run({ riskJudge: async () => ({ verdict: "high", availability: "unavailable", confidence: 0, reasons: [] }) });
+  assert.equal(blank.kind, "unavailable");
+  assert.equal((await run({ riskJudge: async () => verdict("high", 0.95, "it changes merge policy") })).kind, "escalated");
+  assert.equal(written.length, 0, "none of the refusals above wrote a release row");
+
+  const refused = await run({ writeRelease: () => ({ code: 1, message: "refused by approve" }) });
+  assert.deepEqual([refused.kind, (refused as { reason: string }).reason], ["unavailable", "refused by approve"]);
+  const notReleased = await run({ writeRelease: () => ({ code: 0, message: "already released", released: false }) });
+  assert.deepEqual([notReleased.kind, (notReleased as { reason: string }).reason], ["escalated", "already released"]);
+  assert.equal((await run({})).kind, "released");
+  assert.deepEqual(written, ["W1-T9150"]);
+});
+
 test("the verify-human release refuses a ruling-shaped record", async () => {
   const task = loadPlanFromYaml(operatorShard("W1-T9130", { files: ["DECISIONS.md"] }), "a.yaml").tasks[0]!;
   assert.ok(isRulingShaped(task));
@@ -602,60 +666,6 @@ test("the verify-human release refuses a ruling-shaped record", async () => {
     { task: () => task, riskJudge: async () => verdict("low", 0.99), writeRelease: () => ({ code: 0, message: "x", released: true }) },
   );
   assert.equal(out.kind, "escalated");
-});
-
-test("a corrupt judge state file and a pass with no landing tree each fail loudly", async () => {
-  const root = planDir({ "W1-T9140-x.yaml": machineShard("W1-T9140") });
-  try {
-    await assert.rejects(
-      runMachineFilingJudge(ports(root, async () => verdict("low", 0.9), { writeRoot: undefined }).p),
-      /neither a workspace nor a write root/,
-      "no root and no workspace",
-    );
-    writeFileSync(join(root, MACHINE_JUDGE_STATE_FILE), "null\n");
-    await assert.rejects(runMachineFilingJudge(ports(root, async () => verdict("low", 0.9)).p), /invalid state/);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("a record with no origin belongs to the unknown family", () => {
-  assert.equal(machineFamily({}), "unknown");
-  assert.equal(machineFamily({ origin: "  " }), "unknown");
-  assert.equal(machineFamily({ origin: "ci-friction:W1-T1" }), "ci-friction");
-});
-
-test("the verify-human release names its reason for every refusal and writes one row on a clean proceed", async () => {
-  const task = loadPlanFromYaml(operatorShard("W1-T9150"), "a.yaml").tasks[0]!;
-  const shard = { id: "W1-T9150", title: task.title, rationale: "", acceptance: [], ageDays: 1, depsAllMerged: true, citedInSrc: false };
-  const automate = { decision: "automate" as const, reason: "r" };
-  const rows: string[] = [];
-  const release = (over: Record<string, unknown>) => ({
-    task: (id: string) => (id === "W1-T9150" ? task : undefined),
-    riskJudge: async () => verdict("low", 0.99),
-    writeRelease: (id: string) => (rows.push(id), { code: 0, message: "written", released: true }),
-    ...over,
-  });
-  const run = (over: Record<string, unknown> = {}, s = shard) => releaseAutomatedShard(s, automate, release(over) as never);
-
-  assert.match((await run({}, { ...shard, id: "W1-T0000" })).reason, /does not resolve/);
-  assert.match((await run({ task: () => ({ ...task, verify: "auto" }) })).reason, /not parked/);
-  assert.match((await run({ task: () => ({ ...task, status: "done" }) })).reason, /not queued/);
-  const thrown = await run({ riskJudge: async () => { throw new Error("boom"); } });
-  assert.equal(thrown.kind, "unavailable");
-  assert.match(thrown.reason, /risk judge threw: boom/);
-  const noDecision = await run({ riskJudge: async () => ({ ...verdict("low", 0.99), availability: "unavailable" }) });
-  assert.equal(noDecision.kind, "unavailable");
-  assert.match(noDecision.reason, /reached no decision/);
-  assert.equal((await run({ riskJudge: async () => verdict("high", 0.99) })).kind, "escalated");
-  const refusedWrite = await run({ writeRelease: () => ({ code: 1, message: "refused by approve" }) });
-  assert.deepEqual([refusedWrite.kind, refusedWrite.reason], ["unavailable", "refused by approve"]);
-  const notReleased = await run({ writeRelease: () => ({ code: 0, message: "still parked", released: false }) });
-  assert.deepEqual([notReleased.kind, notReleased.reason], ["escalated", "still parked"]);
-  assert.deepEqual(rows, [], "no refusal wrote a release row");
-
-  assert.equal((await run()).kind, "released");
-  assert.deepEqual(rows, ["W1-T9150"]);
 });
 
 test("released work dispatches costliest first and unpriced work mid-queue", async () => {

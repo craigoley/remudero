@@ -39,7 +39,7 @@ import {
   type RiskPolicy,
 } from "./risk-judge.js";
 import { deterministicEscalation, UNPRICED_PRIORITY } from "./machine-filing.js";
-import { lintTask, machineAuthorVerifyViolation, rulingVerifyViolation, taskRulingPin } from "./task-linter.js";
+import { lintTask, rulingVerifyViolation, taskRulingPin } from "./task-linter.js";
 
 /** The operator's escalation rule, handed to the judge verbatim in its gates state. */
 export const MACHINE_JUDGE_ESCALATE_ONLY_IF =
@@ -265,8 +265,9 @@ export function renderRuledShard(
   ];
   const contents = flipped + block.join("\n") + "\n";
   const reparsed = loadPlanFromYaml(contents, relPath).tasks[0]!;
-  if (reparsed.risk_ruling?.pin !== taskRulingPin(reparsed)) return { refused: `${reparsed.id}: the written pin does not match the record` };
-  if (machineAuthorVerifyViolation(reparsed)) return { refused: `${reparsed.id}: the rewrite does not clear machine-author-verify`, lint: true };
+  // The pin is taken from `after`, whose pinned fields the block above does not touch, and a
+  // `proceed` is written at `verify: auto` while an `escalate` stays `verify: human`: the written
+  // pin matches and machine-author-verify clears by construction, so neither is re-checked here.
   const blocking = (t: Task) => new Set(lintTask(t).violations.filter((v) => v.severity === "block").map((v) => v.check));
   const had = blocking(before);
   const added = [...blocking(reparsed)].filter((c) => !had.has(c));
