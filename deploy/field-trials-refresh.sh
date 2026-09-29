@@ -39,11 +39,17 @@ test -n "$APP_ID" && test -n "$INSTALLATION_ID" && test -n "$KEY_PATH" || {
 }
 
 CASE_MOUNT=()
-CASE_ARG=()
+CASE_ARG=(--case-files /home/node/Remudero/state/field-trials/case-files-latest.json)
 if [[ -n "${RMD_FIELD_TRIALS_CASE_FILES:-}" ]]; then
   test -r "$RMD_FIELD_TRIALS_CASE_FILES" || { echo "field-trials-refresh: case-file snapshot unreadable" >&2; exit 2; }
   CASE_MOUNT=(--mount "type=bind,src=$RMD_FIELD_TRIALS_CASE_FILES,dst=/field-trials/cases.json,readonly")
   CASE_ARG=(--case-files /field-trials/cases.json)
+else
+  docker run --rm --network host --volumes-from remudero-daemon \
+    --env "GH_APP_ID=$APP_ID" --env "GH_APP_INSTALLATION_ID=$INSTALLATION_ID" \
+    --env "GH_APP_PRIVATE_KEY_PATH=$KEY_PATH" \
+    --workdir /app --entrypoint /usr/local/bin/node "$IMAGE" \
+    --import tsx scripts/private-field-trials-case-files.mjs
 fi
 
 docker run --rm --network host --volumes-from remudero-daemon \
