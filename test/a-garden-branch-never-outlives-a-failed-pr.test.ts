@@ -16,7 +16,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gardenCheckout, retractGardenBranch } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
-function originWithClone() {
+function gardenFixture() {
   const seed = gitRepo({ kind: "garden-leak-seed" });
   writeFileSync(join(seed.dir, "README.md"), "seed\n");
   seed.git("add", "README.md");
@@ -52,7 +52,7 @@ function checkout(cloneDir: string, fetcher: (args: string[]) => unknown, log: (
 }
 
 test("a garden land refused by the live-write guard pushes no branch to origin", () => {
-  const f = originWithClone();
+  const f = gardenFixture();
   const ws = checkout(f.clone.dir, () => ({ html_url: "https://github.com/acme/remudero/pull/1", number: 1 }));
   try {
     assert.throws(() => ws.land({ paths: ["change.txt"], title: "chore: t", body: "b" }), LiveWriteBlockedError);
@@ -64,7 +64,7 @@ test("a garden land refused by the live-write guard pushes no branch to origin",
 });
 
 test("a garden PR create that throws retracts its pushed branch", () => {
-  const f = originWithClone();
+  const f = gardenFixture();
   const steps: string[] = [];
   const ws = checkout(
     f.clone.dir,
@@ -85,7 +85,7 @@ test("a garden PR create that throws retracts its pushed branch", () => {
 });
 
 test("a garden branch whose PR did open server-side is kept", () => {
-  const f = originWithClone();
+  const f = gardenFixture();
   const ws = checkout(f.clone.dir, (args) => {
     if (args.includes("POST") || args.some((a) => a === "--method")) throw new Error("HTTP 502");
     return [{ html_url: "https://github.com/acme/remudero/pull/9", number: 9 }];
