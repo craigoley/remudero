@@ -10,6 +10,7 @@ import { fixedClock } from "../src/lib/clock.js";
 import {
   SELECTOR_SHADOW_MIN_FAILURES,
   SELECTOR_SHADOW_MIN_RUNS,
+  SELECTOR_SHADOW_RECENT_WINDOW_MS,
   SELECTOR_SHADOW_SHARDS,
   parseSelectorShadowLines,
   readCoverageShardLogsAsync,
@@ -179,20 +180,22 @@ test("W1-T4439: a missed failure files a task naming the missing edge", () => {
   assert.equal(landed.length, 1, "the same observed edge files once across passes");
 });
 
-test("selector-shadow reads the newest PR runs and filters pending runs locally", () => {
+test("W1-T4764: the selector lists runs in a dated recent window", () => {
   const calls: string[][] = [];
+  const now = Date.parse("2026-09-29T10:00:00.000Z");
   const runs = readSelectorShadowRuns("acme", "remudero", 2, {
+    clock: fixedClock(now),
     readJson: (args) => {
       calls.push(args);
       return { workflow_runs: [
-        { id: 41, head_sha: "pending", status: "in_progress" },
-        { id: 42, head_sha: "abc123", status: "completed", pull_requests: [{ number: 7, base: { sha: "def456" } }] },
+        { id: 41, head_sha: "pending", status: "in_progress", created_at: new Date(now).toISOString() },
+        { id: 42, head_sha: "abc123", status: "completed", created_at: new Date(now).toISOString(), pull_requests: [{ number: 7, base: { sha: "def456" } }] },
       ] };
     },
     readLog: (args) => (calls.push(args), "coverage-shard\tAFFECTED-SUITES-SHADOW: {}"),
   });
   assert.deepEqual(calls, [
-    ["api", "repos/acme/remudero/actions/workflows/ci.yml/runs?event=pull_request&per_page=100"],
+    ["api", `repos/acme/remudero/actions/workflows/ci.yml/runs?event=pull_request&per_page=100&created=${encodeURIComponent(`>=${new Date(now - SELECTOR_SHADOW_RECENT_WINDOW_MS).toISOString()}`)}`],
     ["run", "view", "42", "--repo", "acme/remudero", "--log"],
   ]);
   assert.deepEqual(runs, [{ id: 42, headSha: "abc123", baseSha: "def456", prNumber: 7,
@@ -209,6 +212,20 @@ test("selector-shadow reads the newest PR runs and filters pending runs locally"
   assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({}), readLog: () => "" }), /no workflow_runs list/);
   assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({ workflow_runs: [{ head_sha: "abc123", status: "completed" }] }), readLog: () => "" }), /no id or head SHA/);
   assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({ workflow_runs: [{ id: 42, head_sha: "abc123" }] }), readLog: () => "" }), /no status/);
+});
+
+test("W1-T4764: a stale or undated run response cannot produce a ready verdict", () => {
+  const now = Date.parse("2026-09-29T10:00:00.000Z");
+  let logReads = 0;
+  for (const created_at of ["2026-08-20T00:00:00.000Z", undefined]) {
+    assert.throws(() => readSelectorShadowRuns("acme", "remudero", 60, {
+      clock: fixedClock(now),
+      readJson: () => ({ workflow_runs: Array.from({ length: 60 }, (_, id) =>
+        ({ id, head_sha: `head-${id}`, status: "completed", created_at })) }),
+      readLog: () => { logReads++; return ""; },
+    }), /missing or stale creation date/);
+  }
+  assert.equal(logReads, 0, "no old run log is read or scored");
 });
 
 test("the scheduled selector-shadow log read yields the daemon loop and does not overlap ticks", async () => {
@@ -251,7 +268,7 @@ test("the async selector-shadow reader keeps run logs sequential while other tim
   const reading = readSelectorShadowRunsAsync("acme", "remudero", 2, {
     readJson: async (args) => {
       calls.push(args);
-      return { workflow_runs: [{ id: 42, head_sha: "abc123", status: "completed" }, { id: 43, head_sha: "def456", status: "completed" }] };
+      return { workflow_runs: [{ id: 42, head_sha: "abc123", status: "completed", created_at: new Date().toISOString() }, { id: 43, head_sha: "def456", status: "completed", created_at: new Date().toISOString() }] };
     },
     readLog: async (args) => {
       calls.push(args);
@@ -273,7 +290,7 @@ test("the async selector-shadow reader keeps run logs sequential while other tim
 test("selector-shadow resumes a bounded log window across ticks and daemon restarts", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-cache-`));
   const cachePath = join(root, "logs.json");
-  const headers = [1, 2, 3].map((id) => ({ id, head_sha: `head-${id}`, status: "completed" }));
+  const headers = [1, 2, 3].map((id) => ({ id, head_sha: `head-${id}`, status: "completed", created_at: new Date(1_000).toISOString() }));
   const record: SelectorShadowRecord = { fullRun: true, floorSize: 20, narrowSize: 10, failures: [] };
   const fetched: number[] = [];
   const io = {
@@ -301,7 +318,7 @@ test("selector-shadow resumes a bounded log window across ticks and daemon resta
 
   await readSelectorShadowRunsAsync("acme", "remudero", 3, io);
   assert.deepEqual(fetched, [1, 2, 3], "a new reader invocation reuses completed runs");
-  headers[1] = { id: 2, head_sha: "replaced-head", status: "completed" };
+  headers[1] = { id: 2, head_sha: "replaced-head", status: "completed", created_at: new Date(1_000).toISOString() };
   await readSelectorShadowRunsAsync("acme", "remudero", 3, io);
   assert.deepEqual(fetched, [1, 2, 3, 2], "a run ID with a different head cannot reuse evidence");
 });
@@ -316,7 +333,7 @@ test("selector-shadow re-reads an old aggregate cache and remembers explicit pla
   let fetched = 0;
   const io = {
     cachePath, clock: fixedClock(1_000),
-    readJson: async () => ({ workflow_runs: [{ id: 42, head_sha: "head-42", status: "completed" }] }),
+    readJson: async () => ({ workflow_runs: [{ id: 42, head_sha: "head-42", status: "completed", created_at: new Date(1_000).toISOString() }] }),
     readLog: async () => { fetched++; return skipLog; },
   };
   const first = await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
@@ -334,7 +351,7 @@ test("selector-shadow reports a corrupt cache and rebuilds it from run evidence"
   const record: SelectorShadowRecord = { fullRun: true, floorSize: 20, narrowSize: 10, failures: [] };
   const rows = await readSelectorShadowRunsAsync("acme", "remudero", 1, {
     cachePath,
-    readJson: async () => ({ workflow_runs: [{ id: 1, head_sha: "head-1", status: "completed" }] }),
+    readJson: async () => ({ workflow_runs: [{ id: 1, head_sha: "head-1", status: "completed", created_at: new Date().toISOString() }] }),
     readLog: async () => run(1, record).log,
     warn: (message) => { warnings.push(message); },
   });
@@ -350,7 +367,7 @@ test("selector-shadow names both cache write failures and re-reads on the next p
   const record: SelectorShadowRecord = { fullRun: true, floorSize: 20, narrowSize: 10, failures: [] };
   const io = {
     cachePath: join(root, "logs.json"),
-    readJson: async () => ({ workflow_runs: [{ id: 1, head_sha: "head-1", status: "completed" }] }),
+    readJson: async () => ({ workflow_runs: [{ id: 1, head_sha: "head-1", status: "completed", created_at: new Date().toISOString() }] }),
     readLog: async () => { logReads++; return run(1, record).log; },
     writeCache: () => { throw new Error("disk unavailable"); },
     warn: (message: string) => { warnings.push(message); },
@@ -371,7 +388,7 @@ test("selector-shadow keeps scanning after an unreadable log without treating it
   const io = {
     cachePath,
     clock: fixedClock(1_000),
-    readJson: async () => ({ workflow_runs: [1, 2].map((id) => ({ id, head_sha: `head-${id}`, status: "completed" })) }),
+    readJson: async () => ({ workflow_runs: [1, 2].map((id) => ({ id, head_sha: `head-${id}`, status: "completed", created_at: new Date(1_000).toISOString() })) }),
     readLog: async (args: string[]) => {
       const id = Number(args[2]);
       fetched.push(id);
@@ -446,7 +463,7 @@ test("a self-hosting daemon keeps timers alive while selector-shadow reads a run
     const jobs = Array.from({ length: SELECTOR_SHADOW_SHARDS }, (_, i) =>
       ({ id: i + 101, name: `coverage-shard (${i + 1}/8)`, status: "completed" }));
     const shim = ghShim([
-      { when: "actions/workflows/ci.yml/runs", stdout: JSON.stringify({ workflow_runs: [{ id: 42, head_sha: "abc123", status: "completed" }] }) },
+      { when: "actions/workflows/ci.yml/runs", stdout: JSON.stringify({ workflow_runs: [{ id: 42, head_sha: "abc123", status: "completed", created_at: new Date().toISOString() }] }) },
       { when: "actions/runs/42/jobs", stdout: JSON.stringify({ total_count: jobs.length, jobs }) },
       { when: "actions/jobs/101/logs", stdout: "unparseable log", delaySeconds: 0.5, doneFile: done },
       ...jobs.slice(1).map((job, index) => ({
