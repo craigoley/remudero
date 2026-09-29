@@ -138,7 +138,26 @@ test("private Field Trials counts assignment class, risk, lane and effective sta
     github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
   assert.deepEqual(snapshot.assignmentTelemetry, [{ source: "core", selectedModel: "claude-sonnet-5-5", assignments: 1,
     taskClass: 1, risk: 1, workLane: 1, harnessPinned: 1, promptPinned: 0, toolPinned: 0,
-    scorerPinned: 0, environmentPinned: 0 }]);
+    scorerPinned: 0, environmentPinned: 0, attemptReceipts: 0, nonStarterAssignments: 1,
+    costMissingAssignments: 1, apiCostEstimateUsd: 0, subscriptionNotionalUsd: 0 }]);
+});
+
+test("private Field Trials joins terminal cost by assignment and separates API estimates from subscription notional cost", () => {
+  const assignment = (id: string) => ({ step: "worker.assignment", ts: T(10), task_id: `W1-${id}`,
+    worker_assignment: { id, selected: { model: "claude-sonnet-5-5" } } });
+  const rows = [assignment("api"), assignment("subscription"), assignment("without-attempt"),
+    { step: "worker.activity", ts: T(10, 1), selection_assignment_id: "api", total_cost_usd: 900 },
+    { step: "worker.attempt", ts: T(10, 2), selection_assignment_id: "api", total_cost_usd: 0.25, billing_mode: "api" },
+    { step: "worker.attempt", ts: T(10, 3), selection_assignment_id: "subscription", total_cost_usd: 0.75,
+      billing_mode: "subscription" }];
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(11),
+    sources: [{ label: "core", repo: "acme/core", ledger: flowReadOf(rows) }],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
+  assert.deepEqual(snapshot.assignmentTelemetry.map(({ assignments, attemptReceipts, nonStarterAssignments,
+    costMissingAssignments, apiCostEstimateUsd, subscriptionNotionalUsd }) => ({ assignments, attemptReceipts,
+    nonStarterAssignments, costMissingAssignments, apiCostEstimateUsd, subscriptionNotionalUsd })),
+  [{ assignments: 3, attemptReceipts: 2, nonStarterAssignments: 1, costMissingAssignments: 1,
+    apiCostEstimateUsd: 0.25, subscriptionNotionalUsd: 0.75 }]);
 });
 
 test("field trials join three repo ledger and GitHub histories with explicit missingness", async () => {

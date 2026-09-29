@@ -94,6 +94,8 @@ export interface FlowRow {
   risk: string | null;
   workLane: string | null;
   stackPinned: { harness: boolean; prompt: boolean; tool: boolean; scorer: boolean; environment: boolean } | null;
+  costUsd: number | null;
+  billingMode: "api" | "subscription" | null;
   success: boolean | null;
   prRepo: string | null;
   prNumber: number | null;
@@ -130,6 +132,10 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     workLane: lane?.state === "observed" ? text(lane.value) : text(row.worker_rung),
     stackPinned: assignment ? { harness: pinned("harnessRevision"), prompt: pinned("promptRevision"),
       tool: pinned("toolRevision"), scorer: pinned("scorerRevision"), environment: pinned("environmentRevision") } : null,
+    costUsd: typeof row.total_cost_usd === "number" && Number.isFinite(row.total_cost_usd) && row.total_cost_usd >= 0
+      ? row.total_cost_usd : typeof row.cost_usd === "number" && Number.isFinite(row.cost_usd) && row.cost_usd >= 0
+        ? row.cost_usd : null,
+    billingMode: row.billing_mode === "api" || row.billing_mode === "subscription" ? row.billing_mode : null,
     success: typeof row.success === "boolean" ? row.success : null,
     prRepo: url?.[1] ?? null, prNumber: url ? Number(url[2]) : Number.isSafeInteger(row.pr_number) ? row.pr_number as number : null,
     headSha: text(row.head_sha), verdict: text(row.verdict), action: text(row.action),
@@ -378,7 +384,8 @@ export interface FieldTrialsFlowSnapshot {
   /** Private assignment metadata coverage by source and selected model; absent revisions stay absent. */
   assignmentTelemetry: { source: string; selectedModel: string; assignments: number; taskClass: number; risk: number;
     workLane: number; harnessPinned: number; promptPinned: number; toolPinned: number; scorerPinned: number;
-    environmentPinned: number }[];
+    environmentPinned: number; attemptReceipts: number; nonStarterAssignments: number; costMissingAssignments: number;
+    apiCostEstimateUsd: number; subscriptionNotionalUsd: number }[];
   provenance: { sources: { label: string; repo: string; ledger: Omit<FieldTrialsLedgerRead, "rows"> & { rows: number };
     github: { pulls: GithubCursor | null; commits: GithubCursor | null; deployments: GithubCursor | null;
       prs: number; commitsKnown: number; deploymentsKnown: number } }[];
@@ -642,13 +649,20 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
       mergedByNumber: new Map(pulls.filter((pull) => pull.mergedAt !== null).map((pull) => [pull.number, pull])),
       revertedAt: new Map(pulls.filter((pull) => pull.revertsPr !== null && pull.mergedAt !== null).map((pull) => [pull.revertsPr!, pull.mergedAt!])) };
     const rowsByTask = new Map<string, FlowRow[]>();
+    const attemptByAssignment = new Map<string, FlowRow>();
+    for (const row of ledgerRows) {
+      if (row.step !== "worker.attempt" || row.assignmentId === null) continue;
+      const prior = attemptByAssignment.get(row.assignmentId);
+      if (prior === undefined || (row.ts ?? "") >= (prior.ts ?? "")) attemptByAssignment.set(row.assignmentId, row);
+    }
     for (const row of ledgerRows) {
       if (row.step === "worker.assignment") {
         const selectedModel = row.selectedModel ?? "unknown";
         const key = JSON.stringify([source.label, selectedModel]);
         const counts = assignmentTelemetry.get(key) ?? { source: source.label, selectedModel, assignments: 0,
           taskClass: 0, risk: 0, workLane: 0, harnessPinned: 0, promptPinned: 0, toolPinned: 0,
-          scorerPinned: 0, environmentPinned: 0 };
+          scorerPinned: 0, environmentPinned: 0, attemptReceipts: 0, nonStarterAssignments: 0,
+          costMissingAssignments: 0, apiCostEstimateUsd: 0, subscriptionNotionalUsd: 0 };
         counts.assignments += 1;
         counts.taskClass += Number(row.taskClass !== null);
         counts.risk += Number(row.risk !== null);
@@ -658,6 +672,13 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
         counts.toolPinned += Number(row.stackPinned?.tool === true);
         counts.scorerPinned += Number(row.stackPinned?.scorer === true);
         counts.environmentPinned += Number(row.stackPinned?.environment === true);
+        const attempt = row.assignmentId === null ? undefined : attemptByAssignment.get(row.assignmentId);
+        if (attempt === undefined) counts.nonStarterAssignments += 1;
+        else counts.attemptReceipts += 1;
+        if (attempt?.costUsd === null || attempt?.costUsd === undefined || attempt.billingMode === null)
+          counts.costMissingAssignments += 1;
+        else if (attempt.billingMode === "api") counts.apiCostEstimateUsd += attempt.costUsd;
+        else counts.subscriptionNotionalUsd += attempt.costUsd;
         assignmentTelemetry.set(key, counts);
       }
       for (const key of [row.taskId, row.runId, row.assignmentId, row.host, row.headSha]) if (key !== null) privateKeys.add(key);
