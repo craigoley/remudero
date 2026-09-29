@@ -39,14 +39,15 @@ import {
   type RiskPolicy,
 } from "./risk-judge.js";
 import { deterministicEscalation } from "./machine-filing.js";
-import { lintTask, machineAuthorVerifyViolation, taskRulingPin } from "./task-linter.js";
+import { lintTask, machineAuthorVerifyViolation, rulingVerifyViolation, taskRulingPin } from "./task-linter.js";
 
 /** The operator's escalation rule, handed to the judge verbatim in its gates state. */
 export const MACHINE_JUDGE_ESCALATE_ONLY_IF =
   "Classify HIGH only when this task is really risky or broken: what it will DO touches secrets, " +
   "credentials, auth or permissions; deletes data, branches or history (even when the deletion is " +
   "the fix); changes merge, deploy, infrastructure or review policy; or takes an irreversible " +
-  "action; or its finding cannot be verified from what is shown. Everything else is LOW and flows " +
+  "action; or it asks for a decision only the operator can make (his priorities, budget, preference " +
+  "or policy); or its finding cannot be verified from what is shown. Everything else is LOW and flows " +
   "— its PR still passes CI and review.";
 
 export const MACHINE_JUDGE_STATE_FILE = "machine-filing-judge.json";
@@ -55,6 +56,32 @@ export const MACHINE_JUDGE_STATE_FILE = "machine-filing-judge.json";
 export function machineFamily(task: Pick<Task, "origin">): string {
   const origin = task.origin?.trim() ?? "";
   return origin ? origin.split(":")[0]! : "unknown";
+}
+
+/** The family whose record sets a record's bar: a machine filer's, or one shared by operator records. */
+export function judgementFamily(task: Pick<Task, "origin" | "author_class">): string {
+  return task.author_class === "machine" ? machineFamily(task) : "operator";
+}
+
+/** A record the linter treats as a ruling (it declares DECISIONS.md): it stays with the operator. */
+export function isRulingShaped(task: Task): boolean {
+  return rulingVerifyViolation({ ...task, verify: "auto" }) !== undefined;
+}
+
+/** Operator releases (`rmd approve`) awaiting their pinned ruling, kept where ledger rotation cannot
+ *  shed them. The judge pins each as an operator ruling, with no model asked. */
+export const OPERATOR_RELEASES_FILE = "operator-releases.json";
+
+export function readOperatorReleases(stateDir: string): Set<string> {
+  const raw = readFileIfExists(join(stateDir, OPERATOR_RELEASES_FILE));
+  return new Set(Object.keys(raw === undefined ? {} : ((JSON.parse(raw) as { releases?: Record<string, string> }).releases ?? {})));
+}
+
+export function recordOperatorRelease(stateDir: string, taskId: string, atIso: string): void {
+  const path = join(stateDir, OPERATOR_RELEASES_FILE);
+  const raw = readFileIfExists(path);
+  const releases = raw === undefined ? {} : ((JSON.parse(raw) as { releases?: Record<string, string> }).releases ?? {});
+  writeAtomic(path, JSON.stringify({ releases: { ...releases, [taskId]: releases[taskId] ?? atIso } }) + "\n");
 }
 
 export interface FamilyTrackRecord {
@@ -81,7 +108,8 @@ export function familyTrackRecord(
   let merged = 0;
   let declined = 0;
   for (const t of plan.tasks) {
-    if (t.author_class !== "machine" || machineFamily(t) !== family) continue;
+    // Only records a judge or filer is answerable for: every machine record, and operator records a ruling released.
+    if (judgementFamily(t) !== family || (t.author_class !== "machine" && t.risk_ruling === undefined)) continue;
     if (isMerged(t.id)) merged += 1;
     else if (t.retirement === "closed" || t.retirement === "retired") declined += 1;
   }
@@ -96,11 +124,17 @@ export function earnedConfidenceBar(base: number, mean: number): number {
   return 1 - (1 - base) * 2 * mean;
 }
 
-/** An unjudged or stale machine record this pass should rule on. */
-export function needsMachineJudgement(task: Task): boolean {
-  if (task.author_class !== "machine" || task.status !== "queued" || task.retirement !== undefined) return false;
-  if (!shardRelPath(task)) return false;
-  return task.risk_ruling === undefined || task.risk_ruling.pin !== taskRulingPin(task);
+/**
+ * A record this pass should rule on: an unjudged or stale machine record; an operator `verify: human`
+ * record that is not ruling-shaped (operator ruling 2026-09-29); or one the operator released with
+ * `rmd approve`, whose release becomes a pinned ruling.
+ */
+export function needsMachineJudgement(task: Task, operatorReleases: ReadonlySet<string> = new Set()): boolean {
+  if (task.status !== "queued" || task.retirement !== undefined || !shardRelPath(task)) return false;
+  if (operatorReleases.has(task.id)) return task.verify === "human";
+  const unjudged = task.risk_ruling === undefined || task.risk_ruling.pin !== taskRulingPin(task);
+  if (task.author_class === "machine") return unjudged;
+  return task.verify === "human" && !isRulingShaped(task) && unjudged;
 }
 
 /** `plan/tasks.d/<file>` for a record that lives in a shard; the monolith is never rewritten here. */
@@ -120,7 +154,7 @@ export function machineJudgeInput(task: Task, record: FamilyTrackRecord): RiskJu
     ...base,
     // Stated first, in the operator's words: the judge's generic framing leans LOW on a defect title.
     change: { ...base.change, description: `OPERATOR ESCALATION RULE: ${MACHINE_JUDGE_ESCALATE_ONLY_IF}\n\n${base.change.description}` },
-    gatesState: { ...base.gatesState, author_class: "machine", escalate_only_if: MACHINE_JUDGE_ESCALATE_ONLY_IF },
+    gatesState: { ...base.gatesState, author_class: task.author_class ?? "operator", escalate_only_if: MACHINE_JUDGE_ESCALATE_ONLY_IF },
     planContext: {
       ...base.planContext,
       author_family: record.family,
@@ -132,7 +166,7 @@ export function machineJudgeInput(task: Task, record: FamilyTrackRecord): RiskJu
 }
 
 export type MachineJudgement =
-  | { kind: "ruled"; task: Task; ruling: FilingRiskRuling; bar: number; record: FamilyTrackRecord }
+  | { kind: "ruled"; task: Task; ruling: FilingRiskRuling; bar: number; record: FamilyTrackRecord; byOperator?: true }
   | { kind: "unavailable"; task: Task; reason: string };
 
 /** Ask the judge about ONE record. Never throws: an error or a verdict-less answer is `unavailable`. */
@@ -259,6 +293,8 @@ export interface MachineJudgePorts {
   /** Land the rewrites as one plan-only PR (the daemon). Absent, `writeRoot` is written in place. */
   openWorkspace?: () => GardenCheckout;
   writeRoot?: string;
+  /** Task ids the operator released with `rmd approve` ({@link readOperatorReleases}). */
+  operatorReleases?: () => ReadonlySet<string>;
   prState?: (prUrl: string) => PrState;
   stageProposal: (proposal: Proposal) => void;
   log: (step: string, extra?: Record<string, unknown>) => void;
@@ -294,7 +330,7 @@ export function machineJudgeProposal(ruled: Extract<MachineJudgement, { kind: "r
   return {
     id: `machine-judge:${task.id}`,
     summary:
-      `${task.id} was filed by the ${record.family} gardener and the risk judge escalated it, so it ` +
+      `${task.id} ${task.author_class === "machine" ? `was filed by the ${record.family} gardener` : "is your verify: human record"} and the risk judge escalated it, so it ` +
       `stays parked for you:\n  ${ruling.reasons.join("\n  ")}\n\n${task.title}\n\n` +
       `Family record: ${record.merged} merged, ${record.declined} declined. Release it with ` +
       `\`rmd approve ${task.id}\`, or edit the record and the judge will rule again.`,
@@ -327,16 +363,24 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   const plan = ports.plan();
   const isMerged = ports.isMerged ?? ((id: string) => ["merged", "done"].includes(plan.byId.get(id)?.status ?? ""));
   const excluded = new Set(ports.excludeFamilies ?? []);
+  const released = ports.operatorReleases?.() ?? new Set<string>();
   const due = plan.tasks.filter(
-    (t) => needsMachineJudgement(t) && !excluded.has(machineFamily(t)) && state.declined?.[t.id] !== taskRulingPin(t),
+    (t) =>
+      needsMachineJudgement(t, released) &&
+      (released.has(t.id) || (!excluded.has(judgementFamily(t)) && state.declined?.[t.id] !== taskRulingPin(t))),
   );
   const policy = ports.riskPolicy?.() ?? DEFAULT_RISK_POLICY;
   const records = new Map<string, FamilyTrackRecord>();
   const ruled: Extract<MachineJudgement, { kind: "ruled" }>[] = [];
   for (const task of due.slice(0, ports.limit ?? due.length)) {
-    const family = machineFamily(task);
+    const family = judgementFamily(task);
     if (!records.has(family)) records.set(family, familyTrackRecord(plan, family, isMerged, ports.gardenRecord?.(family)));
-    const judged = await judgeMachineShard(task, records.get(family)!, { riskJudge: ports.riskJudge, policy, clock: ports.clock });
+    const judged: MachineJudgement = released.has(task.id)
+      ? {
+          kind: "ruled", task, bar: 0, record: records.get(family)!, byOperator: true,
+          ruling: { verdict: "operator", action: "proceed", confidence: 1, reasons: ["released by the operator with rmd approve"], judgedAt: ports.clock.iso() },
+        }
+      : await judgeMachineShard(task, records.get(family)!, { riskJudge: ports.riskJudge, policy, clock: ports.clock });
     if (judged.kind === "unavailable") {
       report.unavailable.push(task.id);
       ports.log("machine_judge.unavailable", { task_id: task.id, reason: judged.reason });
@@ -371,13 +415,15 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       let out = text === undefined
         ? { refused: `${relPath} is absent from the landing tree` }
         : renderRuledShard(text, relPath, judgedPin, r.ruling);
-      if (text !== undefined && "refused" in out && out.lint) {
+      if (text !== undefined && "refused" in out && out.lint && !r.byOperator) {
         // A proceed the record cannot honour is BROKEN, which is the operator's to see: park it,
         // pinned, with the reason, rather than re-asking the judge every pass.
         r.ruling = { ...r.ruling, action: "escalate", reasons: [...r.ruling.reasons, `the judge said proceed, but ${out.refused}`] };
         out = renderRuledShard(text, relPath, judgedPin, r.ruling);
       }
       if ("refused" in out) {
+        // Settled by the record's pin, so an unchanged record is not re-judged every pass.
+        (state.declined ??= {})[r.task.id] = taskRulingPin(r.task);
         report.refused.push(r.task.id);
         ports.log("machine_judge.refused", { task_id: r.task.id, reason: out.refused });
         continue;

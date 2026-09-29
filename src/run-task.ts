@@ -163,7 +163,7 @@ import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { startCiFrictionGardener, readCiFrictionLedgerRecords, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, selectorShadowFlakeLedger, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
-import { gardenFamilyRecord, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
+import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener, startEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
@@ -44003,6 +44003,7 @@ export function productionMachineFilingJudgePorts(opts: {
     },
     riskPolicy: () => readRiskPolicy(policyPath(opts.repoRoot)),
     gardenRecord: (family) => gardenFamilyRecord(opts.stateDir, family),
+    operatorReleases: () => readOperatorReleases(opts.stateDir),
     openWorkspace: () => gardenCheckout({ name: "machine-judge", repoDir: opts.repoRoot, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, fetcher, clock: opts.clock }),
     prState: (prUrl) => gardenPrState(opts.owner, opts.repo, prUrl, fetcher),
     stageProposal: (proposal) => void stageInboxProposalOnce(join(opts.stateDir, "inbox-proposals.json"), proposal),
@@ -44163,8 +44164,9 @@ export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock):
   const nowMs = clock.now();
   const out: ShardUnderJudgement[] = [];
   for (const task of plan.tasks) {
-    // Machine-filed records are the machine-filing judge's: it routes AND releases them, pinned.
-    if (task.verify !== "human" || task.status !== "queued" || task.author_class === "machine") continue;
+    // The machine-filing judge routes AND releases every machine record and every operator record that
+    // is not ruling-shaped (operator ruling 2026-09-29); only rulings stay on this operator-facing sweep.
+    if (task.verify !== "human" || task.status !== "queued" || task.author_class === "machine" || !isRulingShaped(task)) continue;
     const deps = task.depends_on ?? [];
     out.push({
       id: task.id,
@@ -44485,6 +44487,9 @@ export function approveParkedTask(
     /** A MACHINE-written release carries who decided it and why (Law 5: the author class rides
      *  the record). Absent — the operator's own `rmd approve` — the row is byte-identical to before. */
     provenance?: Record<string, unknown>;
+    /** The operator's own release, kept where rotation cannot shed it until the machine-filing
+     *  judge pins it on the record (operator ruling 2026-09-29). */
+    recordDurableRelease?: (taskId: string) => void;
   },
 ): { code: number; message: string; released?: boolean } {
   const task = deps.plan.byId.get(taskId);
@@ -44500,6 +44505,7 @@ export function approveParkedTask(
   }
   const already = releasedTaskIds(deps.ledgerLines ?? readLedgerRawLines(deps.ledgerPath));
   if (already.has(taskId)) {
+    if (!deps.provenance) deps.recordDurableRelease?.(taskId);
     return { code: 0, released: true, message: `rmd approve: ${taskId} is already released — no second row written` };
   }
   const riskPolicy = deps.riskPolicy ?? DEFAULT_RISK_POLICY;
@@ -44521,6 +44527,7 @@ export function approveParkedTask(
     released: "verify-human",
     ...(deps.provenance ?? {}),
   });
+  if (!deps.provenance) deps.recordDurableRelease?.(taskId);
   return { code: 0, released: true, message: `rmd approve: ${taskId} RELEASED — a verify:human task is now dispatch-eligible` };
 }
 
@@ -44588,6 +44595,7 @@ export async function approveCommand(
       riskPolicy: readRiskPolicy(policyPath(repoRoot)),
       stageProposal: (proposal) =>
         void stageInboxProposalOnce(join(config.root, "state", "inbox-proposals.json"), proposal),
+      recordDurableRelease: (taskId) => recordOperatorRelease(join(config.root, "state"), taskId, (deps.clock ?? systemClock).iso()),
     });
     console.log(outcome.message);
     // CHAINED ONLY ON SUCCESS: guidance attached to a refused release would describe a state the
