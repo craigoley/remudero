@@ -24306,6 +24306,20 @@ export function defaultMergeEvidenceLog(cwd: string): { dump: string; ref: strin
   return { dump, ref };
 }
 
+export function grepPatternMatches(cwd: string, pattern: string, path: string): boolean {
+  return spawnSync("grep", ["-arq", "--", pattern, path], { cwd, stdio: "ignore", timeout: 10_000 }).status === 0;
+}
+
+const RESOLVED_FULLY_CAVEAT = "resolves is not passes — a test file that exists can still fail; this list is where to LOOK, not a verdict";
+
+function printResolvedFully(sections: ReadonlyArray<[string, readonly string[] | undefined]>, note: string): void {
+  console.log(`\n  queued task(s) whose every executable proof already resolves at this checkout, so probably built (${note}):`);
+  for (const [label, ids] of sections) {
+    console.log(`    ${label.padEnd(26)} ${String(ids?.length ?? 0).padStart(3)} task(s): ${ids?.join(", ") || "(none)"}`);
+  }
+  console.log(`  ${RESOLVED_FULLY_CAVEAT}`);
+}
+
 /** {@link proofQueueAuditCommand}'s only I/O beyond the plan/checkout it is pointed at —
  *  injectable so a test can supply a fixture merge-evidence dump without a real git history or
  *  network, the same DI shape `LintPlanStatusDeps.readMergeEvidenceLog` already uses. */
@@ -24344,6 +24358,7 @@ export interface CreditedProofVisibilityDeps {
   pathExists?: (repoRelPath: string) => boolean;
   resolveNameFilteredCandidates?: (rawName: string) => NameFilterResolution;
   symbolFoundAt?: (symbol: string, path: string) => boolean;
+  grepMatches?: (pattern: string, path: string) => boolean;
   /** Overrides the real git-log read entirely — see {@link defaultCreditedAmendmentEvidence}. */
   amendedSinceCredit?: (taskId: string, shardPath: string, creditedAtIso: string) => { amended: boolean; followUpFiled: boolean } | undefined;
   cwd?: string;
@@ -24495,6 +24510,7 @@ export function creditedProofVisibility(
     resolveNameFilteredCandidates: deps.resolveNameFilteredCandidates ?? ((rawName) => resolveNameFilteredCandidates(cwd, rawName)),
     pathExists: deps.pathExists ?? ((rel) => existsSync(join(cwd, rel))),
     creditedIds,
+    grepMatches: deps.grepMatches ?? ((pattern, path) => grepPatternMatches(cwd, pattern, path)),
     symbolFoundAt:
       deps.symbolFoundAt ??
       ((symbol, path) => {
@@ -24786,6 +24802,13 @@ export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAud
         `  ↷ ${r.taskId} criterion ${r.criterionIndex + 1} [relocated to ${r.relocatedTo}] proof: "${r.proof.slice(0, 90)}"`,
       );
     }
+    printResolvedFully(
+      [
+        ["resolved-fully-credited", result.proof.resolvedFullyCredited],
+        ["resolved-fully-uncredited", result.proof.resolvedFullyUncredited],
+      ],
+      "credited: a merge is credited, the reconcile lane has not flipped it; uncredited: built by other means or a proof that does not discriminate",
+    );
     console.log(
       `\n  amendment signal: ${result.amendment.measurable} credited task(s) measurable via their own shard file, ` +
         `${result.amendment.unmeasurable} unmeasurable (declared inline in plan/tasks.yaml, W1-T2280 note ix) — ` +
@@ -24820,6 +24843,7 @@ export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAud
   const report = proofQueueAudit(population, {
     resolveNameFilteredCandidates: (rawName) => resolveNameFilteredCandidates(repoRoot, rawName),
     pathExists: (rel) => existsSync(join(repoRoot, rel)),
+    grepMatches: (pattern, path) => grepPatternMatches(repoRoot, pattern, path),
   });
 
   const offendingTaskCount = new Set(report.offenders.map((o) => o.taskId)).size;
@@ -24834,6 +24858,7 @@ export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAud
   for (const o of report.offenders) {
     console.log(`  ✗ ${o.taskId} criterion ${o.criterionIndex + 1} [${o.cause}] proof: "${o.proof.slice(0, 90)}"`);
   }
+  printResolvedFully([["resolved-fully", report.resolvedFully]], "merge credit is not consulted here");
   console.log(
     "\nrmd proof-queue-audit is a REPORT, not a gate — no dispatch, CI job or arm decision may consult this " +
       "verdict (lib/proof-queue-audit.ts). Exits 0 unconditionally, regardless of the count above.",
