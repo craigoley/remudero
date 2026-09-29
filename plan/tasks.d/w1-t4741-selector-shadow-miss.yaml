@@ -5,12 +5,19 @@
   type: implement
   verify: human
   risk: high
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "selector-shadow:dd84574547220069318287200ba2977d285e0774:narrow:test/deps-interface-census.test.ts"
   files: [src/lib/affected-suites.ts]
-  note: "W1-T4439 observed narrow miss on coverage run 36503850915 at dd84574547220069318287200ba2977d285e0774: dd84574547220069318287200ba2977d285e0774 -> test/deps-interface-census.test.ts. The changed paths are candidate missing edges, not guessed import edges. Inspect the exact head and teach the selector the missing dependency before W1-T4406 narrows CI."
+  note: |
+    Selector-shadow audit, 2026-09-29: a real miss (narrow selection, run 36503850915): the
+    red coverage shard's retry ALSO failed on test/deps-interface-census.test.ts. It is one of five
+    whole-tree census or ratchet suites the selector cannot reach by import edge; the five are
+    folded into W1-T4787, which now carries the one cause. Withdrawn as a duplicate of it.
+
+    W1-T4439 observed narrow miss on coverage run 36503850915 at dd84574547220069318287200ba2977d285e0774: dd84574547220069318287200ba2977d285e0774 -> test/deps-interface-census.test.ts. The changed paths are candidate missing edges, not guessed import edges. Inspect the exact head and teach the selector the missing dependency before W1-T4406 narrows CI.
   acceptance:
     - claim: "the narrow selector includes test/deps-interface-census.test.ts when this edge is exercised"
       proof: "grep: test/deps-interface-census\\.test\\.ts in src/lib/affected-suites.ts"

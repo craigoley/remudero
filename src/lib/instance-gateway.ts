@@ -34,6 +34,7 @@ import { buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operat
 import { inboxThreadStorePath } from "./panel-graph.js";
 import {
   buildControlStatusRoute,
+  buildAssistantControlRoute,
   buildPauseRoute,
   buildResumeRoute,
   buildStopRoute,
@@ -68,6 +69,8 @@ export interface InstanceGatewayOptions {
   registryPath?: string;
   stateBase?: string;
   coreInstance?: string;
+  /** Shared host-side action admission, wired by serve.ts from the core control root. */
+  assistantClaimRoot?: string;
   readText?: (path: string) => string;
   loadPlan?: (planPath: string) => Plan;
   /** The GitHub gateway for one instance's `owner/name`; serve.ts defaults it to a batched gateway. */
@@ -164,6 +167,7 @@ export function instanceRouteSet(
     buildPauseRoute(panel),
     buildResumeRoute(panel),
     buildStopRoute(panel),
+    ...(opts.assistantClaimRoot ? [buildAssistantControlRoute({ ...panel, claimRoot: opts.assistantClaimRoot, instance: root.instance, repository })] : []),
   ];
 }
 

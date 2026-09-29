@@ -519,6 +519,27 @@ export function applyConfigEdits(root: string, edits: ConfigEdit[]): string[] {
 
 export const reverseEdits = (edits: ConfigEdit[]): ConfigEdit[] => edits.map((e) => ({ path: e.path, from: e.to, to: e.from }));
 
+/** Check every rollback line in memory before writing any file. A line already at its baseline is
+ * safe to leave alone; a missing or ambiguous line refuses the whole rollback PR. */
+function applyExactConfigRollback(root: string, edits: ConfigEdit[]): string[] {
+  const staged = new Map<string, string>();
+  const changed = new Set<string>();
+  for (const edit of edits) {
+    const raw = staged.get(edit.path) ?? readFileIfExists(join(root, edit.path));
+    if (raw === undefined) throw new Error(`config gardener: rollback source unreadable: ${edit.path}`);
+    const lines = raw.split("\n");
+    const from = lines.flatMap((line, i) => line === edit.from ? [i] : []);
+    const to = lines.flatMap((line, i) => line === edit.to ? [i] : []);
+    if (from.length === 0 && to.length === 1) continue;
+    if (from.length !== 1 || to.length !== 0) throw new Error(`config gardener: rollback line changed or ambiguous: ${edit.path}`);
+    lines[from[0]!] = edit.to;
+    staged.set(edit.path, lines.join("\n"));
+    changed.add(edit.path);
+  }
+  for (const path of changed) writeAtomic(join(root, path), staged.get(path)!);
+  return [...changed].sort();
+}
+
 function acceptance(edits: ConfigEdit[]): string[] {
   return ["## Acceptance", ...edits.flatMap((e) => [`- claim: ${e.path} carries the canary's value`, `  proof: grep: ${e.to.trim()} in ${e.path}`])];
 }
@@ -605,18 +626,26 @@ export function tendConfigCanaries(deps: GardenerDeps, runs: () => RunSummary[])
   let measured: RunSummary[] | undefined;
   for (const [i, c] of canaries.entries()) {
     if (!isPromotionActive(c.promotion.state)) continue;
-    let exposed = c.promotion.state !== "shadow";
+    // A pre-exposure refusal can be persisted if the shadow snapshot predates a later clock
+    // reading. Its PR may already have merged, so the edits must be reconciled before release.
+    const refusedBeforeExposure = c.exposedAt === undefined &&
+      (c.promotion.state === "approved" || c.promotion.state === "regressed" || c.promotion.state === "unmeasurable");
+    let exposed = c.promotion.state !== "shadow" && !refusedBeforeExposure;
     let step: CanaryStep;
     let excludedCount: number | undefined;
-    if (!exposed) {
+    if (c.promotion.state === "shadow" || refusedBeforeExposure) {
       const pr: PrState = deps.prState?.(c.prUrl) ?? "unknown";
       if (pr === "closed") step = { state: "rolled_back", verdict: "rolled_back", reason: "its PR was closed unmerged; nothing was exposed" };
       else if (pr !== "merged") continue;
       else {
         exposed = true;
-        c.exposedAt = nowIso;
-        const entry = enterCanary(c.promotion, c.shadowMetrics, c.shadowObservations.map((o) => ({ ...o, observedAt: c.promotion.observationWindow.start })), nowIso);
-        step = entry.verdict === "advanced" ? entry : { state: "rolled_back", verdict: "rolled_back", reason: `its shadow guard refused exposure: ${entry.reason ?? entry.state}` };
+        if (refusedBeforeExposure) {
+          step = { state: "rolled_back", verdict: "rolled_back", reason: `its merged PR carried a pre-exposure ${c.promotion.state} shadow refusal` };
+        } else {
+          c.exposedAt = nowIso;
+          const entry = enterCanary(c.promotion, c.shadowMetrics, c.shadowObservations.map((o) => ({ ...o, observedAt: c.promotion.observationWindow.start })), nowIso);
+          step = entry.verdict === "advanced" ? entry : { state: "rolled_back", verdict: "rolled_back", reason: `its shadow guard refused exposure: ${entry.reason ?? entry.state}` };
+        }
       }
     } else {
       measured ??= runs();
@@ -643,13 +672,15 @@ function rollBack(deps: GardenerDeps, c: ConfigCanary): string | undefined {
   const ws = deps.openWorkspace();
   try {
     const edits = reverseEdits(c.edits);
-    const paths = applyConfigEdits(ws.root, edits);
+    const paths = applyExactConfigRollback(ws.root, edits);
     if (paths.length === 0) {
       deps.log(`${CONFIG_GARDEN_NAME}.rollback_nothing_to_revert`, { scope: c.promotion.scope.policyScope, pr_url: c.prUrl });
       return undefined;
     }
     const body = [`The config gardener (W1-T4113) rolls back its \`${c.actionClass}\` canary from ${c.prUrl}: ${c.reason ?? "a cohort guardrail breach"}.`, "", ...acceptance(edits)].join("\n");
-    return ws.land({ paths, title: `revert(config): the config gardener rolls back its ${c.actionClass} canary`, body });
+    const prUrl = ws.land({ paths, title: `revert(config): the config gardener rolls back its ${c.actionClass} canary`, body });
+    if (!prUrl) throw new Error(`config gardener: rollback PR was not opened for ${c.prUrl}`);
+    return prUrl;
   } finally {
     ws.dispose();
   }
@@ -664,7 +695,9 @@ export function runConfigGarden(spec: ConfigGardenSpec, deps: GardenerDeps, sour
   const pass = runGarden(spec, deps);
   const action = pass.plan?.actions[0];
   if (pass.prUrl && action) {
-    const nowIso = (deps.clock ?? systemClock).iso();
+    // The action's shadow evidence was measured by the inventory. Starting the window from a
+    // later clock reading made that very evidence predate it by milliseconds (PR #7141).
+    const nowIso = action.shadowObservations[0]?.observedAt ?? (deps.clock ?? systemClock).iso();
     const promotion = configPromotion(action, nowIso);
     const shadow = enterCanary(promotion, action.shadowMetrics, action.shadowObservations, nowIso);
     const canary: ConfigCanary = {

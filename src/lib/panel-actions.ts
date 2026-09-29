@@ -15,8 +15,10 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { createHash, randomUUID } from "node:crypto";
 import { ghExec } from "./github-transport.js";
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   consumeOptionLink,
   escalationLinkUsedPath,
@@ -353,6 +355,12 @@ export function buildResumeRoute(deps: PanelActionDeps): Route {
 
 /** POST /v1/control/stop — the hard kill, write-scoped. `requestStop` writes the flag file
  *  synchronously, so the next `drain.ts` tick observes it before picking up any new task. */
+export function armStop(deps: Pick<PanelActionDeps, "root" | "ledgerPath">, reason: string | undefined, origin: string, extra: Record<string, unknown> = {}): { info: FleetControlInfo; row: PanelLedgerRow } {
+  const info = requestStop(deps.root, reason);
+  const row = appendPanelLedger(deps.ledgerPath, "panel.stop_requested", PANEL_TASK_ID, origin, { reason: info.reason ?? null, ...extra });
+  return { info, row };
+}
+
 export function buildStopRoute(deps: PanelActionDeps): Route {
   return {
     method: "POST",
@@ -361,10 +369,135 @@ export function buildStopRoute(deps: PanelActionDeps): Route {
     // W1-T404: MIDDLE — reversible (resume clears it) but disruptive; the hard kill.
     tier: "middle",
     handler: jsonAction(validateOptionalReason, (input, req, res) => {
-      const info = requestStop(deps.root, input.reason);
-      const origin = bearerTokenId(req);
-      ledgerPanelAction(deps, "panel.stop_requested", PANEL_TASK_ID, origin, { reason: info.reason ?? null });
+      const { info } = armStop(deps, input.reason, bearerTokenId(req));
       sendJson(res, 200, { stopped: true, reason: info.reason ?? null });
+    }),
+  };
+}
+
+// ── POST /v1/control/assistant-action ───────────────────────────────────────
+
+/** Shared claim root and exact target for the existing panel control helpers (W1-T4763). */
+export interface AssistantControlOptions extends Pick<PanelActionDeps, "root" | "ledgerPath"> {
+  claimRoot: string;
+  instance: string;
+  repository?: string;
+  afterClaim?: () => void;
+  afterEffect?: () => void;
+}
+
+type AssistantControlAction = "pause" | "resume" | "stop";
+interface AssistantControlInput {
+  actionId: string;
+  instance: string;
+  action: AssistantControlAction;
+  reason?: string;
+}
+
+function validateAssistantControl(body: unknown): AssistantControlInput | { error: string } {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.actionId !== "string" || !/^[A-Za-z0-9._:-]{8,128}$/.test(body.actionId)) return { error: "actionId must be an 8-128 character stable identifier" };
+  if (typeof body.instance !== "string" || !body.instance || body.instance.length > 128) return { error: "instance is required" };
+  if (body.action !== "pause" && body.action !== "resume" && body.action !== "stop") return { error: "action must be pause, resume, or stop" };
+  if (body.reason !== undefined && (typeof body.reason !== "string" || body.reason.length > 200)) return { error: "reason must be at most 200 characters" };
+  if (Object.keys(body).some((key) => !["actionId", "instance", "action", "reason"].includes(key))) return { error: "unknown assistant-control field" };
+  return { actionId: body.actionId, instance: body.instance, action: body.action, ...(body.reason !== undefined ? { reason: body.reason } : {}) };
+}
+
+function syncDirectory(path: string): void {
+  const fd = openSync(path, "r");
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+
+function writeExclusive(path: string, body: string): void {
+  const fd = openSync(path, "wx", 0o600);
+  try { writeFileSync(fd, body); fsyncSync(fd); } finally { closeSync(fd); }
+}
+
+function assistantControlPaths(deps: AssistantControlOptions, actionId: string) {
+  const dir = join(deps.claimRoot, "state", "assistant-control-actions");
+  const key = createHash("sha256").update(actionId).digest("hex");
+  return { dir, claim: join(dir, `${key}.claim.json`), receipt: join(dir, `${key}.receipt.json`) };
+}
+
+/** Return the real side effect and ledger row, never an inferred token outcome. */
+function assistantControlReceipt(input: AssistantControlInput, deps: AssistantControlOptions, origin: string) {
+  const tag = { assistant_action_id: input.actionId, assistant_instance: deps.instance };
+  if (input.action === "pause") {
+    const { info, row } = armPause(deps, input.reason, origin, tag);
+    return { row, result: { paused: true, reason: info.reason ?? null } };
+  }
+  if (input.action === "resume") {
+    const { result, row } = armResume(deps, origin, tag);
+    return { row, result };
+  }
+  const { info, row } = armStop(deps, input.reason, origin, tag);
+  return { row, result: { stopped: true, reason: info.reason ?? null } };
+}
+
+export function buildAssistantControlRoute(deps: AssistantControlOptions): Route {
+  return {
+    method: "POST", path: "/v1/control/assistant-action", scope: "write", tier: "middle",
+    handler: jsonAction(validateAssistantControl, (input, req, res) => {
+      // Middle-tier infrastructure grants cannot impersonate a named console operator.
+      const operator = verifiedActor(req);
+      if (!operator) {
+        sendJson(res, 403, { error: "verified_operator_required" });
+        return;
+      }
+      if (input.instance !== deps.instance) {
+        sendJson(res, 409, { error: "target_mismatch", detail: "instance does not match this route" });
+        return;
+      }
+      const paths = assistantControlPaths(deps, input.actionId);
+      const fingerprint = createHash("sha256").update(JSON.stringify({ instance: input.instance, repository: deps.repository ?? null, action: input.action, reason: input.reason ?? null })).digest("hex");
+      let admitted = false;
+      try {
+        mkdirSync(paths.dir, { recursive: true });
+        writeExclusive(paths.claim, JSON.stringify({ fingerprint }));
+        syncDirectory(paths.dir);
+        admitted = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+          sendJson(res, 503, { status: "unknown", actionId: input.actionId, detail: "durable admission unavailable; no retry dispatched" });
+          return;
+        }
+      }
+      if (!admitted) {
+        let claim: unknown;
+        try { claim = JSON.parse(readFileSync(paths.claim, "utf8")); } catch {
+          sendJson(res, 202, { status: "unknown", actionId: input.actionId, detail: "claim exists but its outcome is not readable" });
+          return;
+        }
+        if (!isRecord(claim) || claim.fingerprint !== fingerprint) {
+          sendJson(res, 409, { error: "action_id_conflict", actionId: input.actionId });
+          return;
+        }
+        try {
+          const receipt = JSON.parse(readFileSync(paths.receipt, "utf8")) as unknown;
+          if (isRecord(receipt) && receipt.status === "completed" && receipt.actionId === input.actionId && receipt.instance === deps.instance) {
+            sendJson(res, 200, receipt);
+            return;
+          }
+        } catch { /* A missing or unreadable receipt is unknown, never an invitation to retry. */ }
+        sendJson(res, 202, { status: "unknown", actionId: input.actionId, detail: "admission exists without a durable completion receipt" });
+        return;
+      }
+      try {
+        deps.afterClaim?.();
+        const { row, result } = assistantControlReceipt(input, deps, operator);
+        deps.afterEffect?.();
+        const receipt = { status: "completed", actionId: input.actionId, instance: deps.instance,
+          ...(deps.repository ? { repository: deps.repository } : {}), action: input.action,
+          evidenceRef: `ledger:${row.step}@${row.ts}#${row.run_id}`, result };
+        const temp = `${paths.receipt}.${randomUUID()}.tmp`;
+        writeExclusive(temp, JSON.stringify(receipt));
+        renameSync(temp, paths.receipt);
+        syncDirectory(paths.dir);
+        sendJson(res, 200, receipt);
+      } catch {
+        sendJson(res, 503, { status: "unknown", actionId: input.actionId, detail: "admitted action has no durable completion receipt; manual reconciliation required" });
+      }
     }),
   };
 }
