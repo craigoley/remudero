@@ -22,6 +22,12 @@ function evaluate(candidate: FollowUpCandidate, extra: Parameters<typeof evaluat
   return evaluateFollowUpPolicy(candidate, { now: "2026-09-21T12:00:00.000Z", ...extra });
 }
 
+test("the injected evaluation clock keeps the fixture deadline pending", () => {
+  const result = evaluate(base);
+  assert.equal(result.at, "2026-09-21T12:00:00.000Z");
+  assert.equal(result.state, "eligible", "expiring-fixture: exempt -- evaluate pins now to 2026-09-21; no wall-clock read");
+});
+
 test("stale and unavailable evidence suppresses instead of producing a healthy reminder", () => {
   assert.equal(evaluate({ ...base, freshness: "stale" }).state, "suppressed");
   assert.equal(evaluate({ ...base, freshness: "unavailable" }).state, "suppressed");
