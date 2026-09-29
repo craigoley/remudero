@@ -115,6 +115,7 @@ import type { GithubPostureFinding } from "./github-posture.js";
 // convert them into a `Clock` at the read site instead of forcing every caller to change; the
 // headroom sampler is internal-only, so it is migrated onto `Clock` outright, no adapter needed.
 import { clockFromDateFn, clockFromIsoFn, type Clock } from "../lib/clock.js";
+import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
 
 /** W1-T3978: the implement producer's exact refusal, carried as runtime metadata without widening
@@ -2401,6 +2402,14 @@ export async function runDaemon(
   // consulted, and still excludes the task, every tick (P29(ii)).
   const circuitEscalated = new Set<string>();
   const pauseHoldGovernorStates = new Map<string, PauseHoldGovernorState>();
+  // W1-T4685: this run's own repeated-observation tracker — never a module-level singleton, so two
+  // unrelated `runDaemon` calls in the same test process never share rows. Alongside (never instead
+  // of) the existing per-tick `daemon.pause` row: readers already keyed on that step's cadence for
+  // liveness (fleet-liveness.ts's `HEARTBEAT_STEPS`) and for pause-duration counting keep working
+  // unchanged, while a reader that wants "how many identical ticks" can read this row's `count`
+  // instead of counting `daemon.pause` lines (design (iii)).
+  const gateObservations = createGateObservationState();
+  const GATE_OBSERVATION_HEARTBEAT_MS = 5 * 60_000;
   // W1-T4025: lifetime pressure is a sensor. Keep one task per tick for the asynchronous judge;
   // no judge/proposal failure can change eligibility or hold a healthy sibling lane.
   const lifetimePressureTasks = new Map<string, Task>();
@@ -2883,6 +2892,14 @@ export async function runDaemon(
     if (paused) {
       ticks++;
       log("daemon.pause", { tick: ticks, detail: paused, poll_interval_ms: pollIntervalMs });
+      // W1-T4685: the SAME observation, tracked as one row instead of one line per tick — see
+      // `gateObservations`'s own comment above for why this sits BESIDE the line above it, not in
+      // place of it.
+      observeGate(
+        gateObservations,
+        { lane: "daemon", gate: "pause", condition: { detail: paused }, heartbeatMs: GATE_OBSERVATION_HEARTBEAT_MS, clock: daemonClock },
+        log,
+      );
       // W1-T4429 (ii): govern a structured hold's tier; (iii): reviews keep flowing beside the sleep.
       const pauseHold = deps.checkPauseHold?.();
       if (pauseHold) {
