@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -123,4 +124,18 @@ test("the pre-push verdict has no opinion on a filing or an unresolved task", ()
   assert.match(trailer.lines[0], /W1-T9 resolves no acceptance criteria/);
   const clean = proofResolveVerdict({ diff: BUILD_DIFF, headRef: "run-W1-T9-1790000000000", headMessage: "", resolveCriteria: () => ONE, refusalsFor: () => [] });
   assert.match(clean.lines[0], /OK -- 1 W1-T9 criteria/);
+});
+
+test("the precheck script runs for real and never blocks on a head it cannot read", () => {
+  const run = (base: string) =>
+    spawnSync(process.execPath, ["--import", "tsx", "scripts/proof-resolve-precheck.mjs", "--base", base, "--head-ref", "run-NOSUCH-T0-1"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    });
+  const clean = run("HEAD");
+  assert.equal(clean.status, 0, clean.stderr);
+  assert.match(clean.stdout, /^proof-resolve-precheck: SKIP/);
+  const unreadable = run("refs/heads/no-such-base-ref-for-this-fixture");
+  assert.equal(unreadable.status, 2, "an unreadable head is exit 2, which the hook never counts as a refusal");
+  assert.match(unreadable.stderr, /could not read this head/);
 });

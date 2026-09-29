@@ -1910,14 +1910,10 @@ export interface CertainHeadRefusal {
 }
 
 /** True when every line of the candidate files that carries `label` is a comment line: node --test can match no title
- *  there. Unreadable counts as NOT comment-only, so a read failure never manufactures a refusal. */
+ *  there. A read failure THROWS — the precheck reports it as unreadable (exit 2), never as a refusal. */
 function titleOnlyInComments(cwd: string, files: readonly string[], label: string): boolean {
-  try {
-    const lines = files.flatMap((f) => readFileSync(join(cwd, f), "utf8").split("\n").filter((l) => l.includes(label)));
-    return lines.length > 0 && lines.every((l) => /^\s*(\/\/|\/\*|\*)/.test(l));
-  } catch {
-    return false; // deliberate: see the doc — an unread file is never evidence of a refusal
-  }
+  const lines = files.flatMap((f) => readFileSync(join(cwd, f), "utf8").split("\n").filter((l) => l.includes(label)));
+  return lines.length > 0 && lines.every((l) => /^\s*(\/\/|\/\*|\*)/.test(l));
 }
 
 /**
