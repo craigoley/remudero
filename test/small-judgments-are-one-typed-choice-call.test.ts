@@ -58,7 +58,7 @@ const MOUNT: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBu
 
 // ── W1-T4672 acceptance criterion 1 ────────────────────────────────────────────────────
 
-test('W1-T4672: the typed judgment returns a distribution over the fixed options and rejects anything else', async () => {
+test("W1-T4672: the typed judgment returns a distribution over the fixed options and rejects anything else", async () => {
   // A clean response over a two-option set returns a full distribution.
   const clean = parseTypedJudgmentResponse('TYPED_JUDGMENT: {"low": 0.9, "high": 0.1}', ["low", "high"] as const);
   assert.deepEqual(clean, { kind: "distribution", distribution: { low: 0.9, high: 0.1 } });
@@ -143,7 +143,7 @@ test('W1-T4672: the typed judgment returns a distribution over the fixed options
 
 // ── W1-T4672 acceptance criterion 2 ────────────────────────────────────────────────────
 
-test('W1-T4672: the typed judgment runs in shadow beside the session judge', async () => {
+test("W1-T4672: the typed judgment runs in shadow beside the session judge", async () => {
   const input = baseInput();
   const sessionVerdict: RiskJudgeVerdict = { verdict: "low", confidence: 0.95, reasons: ["routine, well-trodden change"] };
 
