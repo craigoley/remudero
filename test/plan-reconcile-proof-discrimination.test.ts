@@ -19,7 +19,7 @@ function git(args: string[]): string {
   return execFileSync("git", args, { encoding: "utf8", env: gitEnv });
 }
 
-test("W1-T4753 plan reconciliation proves YAML status field instead of prose", () => {
+test("W1-T4753 criterion 1: plan reconciliation proves YAML status field instead of prose", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-plan-proof-"));
   const origin = join(dir, "origin.git");
   const seed = join(dir, "seed");
