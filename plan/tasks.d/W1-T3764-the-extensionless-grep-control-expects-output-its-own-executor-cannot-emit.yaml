@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   risk: low
-  budget_usd: 3.00
+  budget_usd: 15.50
   files: [test/a-proof-can-name-an-extensionless-file.test.ts]
   origin: oper#squeeze-session-2026-09-18
   plan_refs: ["W1-T3653"]

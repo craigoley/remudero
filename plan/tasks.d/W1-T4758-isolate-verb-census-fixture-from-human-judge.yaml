@@ -14,7 +14,7 @@
   files:
     - test/the-verb-census-reaches-a-reader.test.ts
     - test/verb-census-fixture-isolation.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: both local `rmd preflight --ci-parity` attempts reached the unchanged

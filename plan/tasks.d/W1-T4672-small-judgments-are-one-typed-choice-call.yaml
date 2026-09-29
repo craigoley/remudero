@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-learn-1790600000"
   plan_refs: [W1-T4628, W1-T424]
   files: [src/lib/typed-judgment.ts, src/lib/risk-judge.ts, test/small-judgments-are-one-typed-choice-call.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: the risk judge spawns a worker session with tools and a turn cap (src/lib/risk-judge.ts ~1022-1038) and its
