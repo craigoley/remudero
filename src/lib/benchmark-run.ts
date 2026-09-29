@@ -1,6 +1,7 @@
 /** Private, metadata-only receipts. The enclosing ledger row owns run/assignment IDs; this
  * envelope deliberately contains neither IDs nor content, and grants no publication rights. */
 import { loadConfig } from "./config.js";
+import { deriveTaskClass } from "./task-class.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, relative } from "node:path";
@@ -143,6 +144,7 @@ export type TaskShapeRecon = "ran" | "reused" | "degraded" | "masked";
 export interface TaskShapeTask {
   id?: string;
   repo?: string;
+  risk?: string;
   files?: readonly string[];
   acceptance?: readonly { proof?: string }[];
   depends_on?: readonly string[];
@@ -300,7 +302,8 @@ export function dispatchTaskShape(input: Omit<TaskShapeInput, "ledgerRows" | "le
 
 /** The fix rung's block: its task record is in hand and its dispatch's run.start is already ledgered. */
 export function fixLaneBenchmarkWork(task: TaskShapeTask, ledgerPath: string): BenchmarkWorkInput {
-  return { shape: dispatchTaskShape({ task, ledgerPath, lane: "fix", runStartWritten: true,
+  return { taskClass: deriveTaskClass({ files: task.files ? [...task.files] : undefined }), risk: task.risk,
+    shape: dispatchTaskShape({ task, ledgerPath, lane: "fix", runStartWritten: true,
     reconUnavailableReason: "fix-lane-does-not-observe-recon" }) };
 }
 

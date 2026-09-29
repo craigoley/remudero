@@ -16,6 +16,8 @@ export interface RoutingExperiment {
   effort: string;
   /** provider -> arm label. */
   arms: Partial<Record<WorkerProviderId, string>>;
+  /** Concrete Claude treatment. An alias changing models starts another experiment epoch. */
+  claudeModel: RegExp;
   codexModel: RegExp;
   startedOn: string;
   revisitOn: string;
@@ -29,13 +31,30 @@ export const ROUTING_EXPERIMENTS: readonly RoutingExperiment[] = [
     capability: "balanced",
     effort: "high",
     arms: { claude: "sonnet", codex: "sol" },
+    claudeModel: /^claude-sonnet-5$/,
     codexModel: /^gpt-6-sol$/,
     startedOn: "2026-09-24",
     revisitOn: "2026-10-08",
     // W1-T3570's admission bar for a cash lane, reused so both trials read against one standard.
     minTasksPerArm: 20,
   },
+  {
+    id: "sol-vs-sonnet55",
+    capability: "balanced",
+    effort: "high",
+    arms: { claude: "sonnet", codex: "sol" },
+    claudeModel: /^claude-sonnet-5-5$/,
+    codexModel: /^gpt-6-sol$/,
+    startedOn: "2026-09-29",
+    revisitOn: "2026-10-13",
+    minTasksPerArm: 20,
+  },
 ];
+
+/** A generic lane label cannot be the randomization unit for independent work. */
+export function experimentTaskIdentity(taskId: string | undefined): string | undefined {
+  return taskId && /^(?:W\d+-T\d+|PR-\d+|RETRO-\d+|T\d+)$/.test(taskId) ? taskId : undefined;
+}
 
 export interface ExperimentCandidate {
   provider: WorkerProviderId;
@@ -52,7 +71,8 @@ export function routingExperimentFor(
     return (Object.keys(experiment.arms) as WorkerProviderId[]).every((provider) => {
       const entry = input.considered.find((candidate) => candidate.provider === provider);
       if (entry === undefined || !entry.eligible) return false;
-      return provider !== "codex" || experiment.codexModel.test(entry.model ?? "");
+      return provider === "claude" ? experiment.claudeModel.test(entry.model ?? "")
+        : provider !== "codex" || experiment.codexModel.test(entry.model ?? "");
     });
   })?.id;
 }
@@ -122,7 +142,9 @@ export interface ExperimentArmReport {
   meanFixDispatches: number | null;
   medianWorkerMinutes: number | null;
   meanTokens: number | null;
+  meanCashCostUsd: number | null;
   meanNotionalCostUsd: number | null;
+  costMissingAssignments: number;
 }
 
 export interface ExperimentReport {
@@ -131,6 +153,7 @@ export interface ExperimentReport {
   revisitOn: string;
   revisitDue: boolean;
   assignments: number;
+  excludedAssignments: { genericUnit: number; changedTreatment: number };
   /** Tasks whose tagged assignments landed in BOTH arms; counted under their first arm. */
   mixedTasks: number;
   /** W1-T4617: tasks served an arm other than the one they were assigned at least once. */
@@ -155,6 +178,7 @@ function median(values: number[]): number | null {
 function tokenTotal(value: unknown): number | undefined {
   if (!value || typeof value !== "object") return undefined;
   const tokens = value as Row;
+  if (num(tokens.input) === undefined && num(tokens.output) === undefined) return undefined;
   return (num(tokens.input) ?? 0) + (num(tokens.output) ?? 0);
 }
 
@@ -164,7 +188,8 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
   const armsSeen = new Map<string, Set<string>>();
   const crossed = new Set<string>();
   const assignmentTask = new Map<string, string>();
-  const receipts = new Map<string, { minutes?: number; tokens?: number; cost?: number }>();
+  const receipts = new Map<string, { minutes?: number; tokens?: number; cost?: number; billingMode?: "api" | "subscription" }>();
+  const excludedAssignments = { genericUnit: 0, changedTreatment: 0 };
   const merges: Array<{ task: string; ts: string }> = [];
   const fixes: Array<{ task: string; ts: string }> = [];
   for (const row of rows) {
@@ -176,6 +201,14 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       const routing = assignment?.routing as Row | undefined;
       const decision = routing?.decision as Row | undefined;
       if (decision?.ab !== experiment.id) continue;
+      if (experimentTaskIdentity(task) === undefined) { excludedAssignments.genericUnit += 1; continue; }
+      const considered = Array.isArray(decision.considered) ? decision.considered as Row[] : [];
+      const claudeCandidate = considered.find((candidate) => candidate.provider === "claude");
+      const candidateModel = str(claudeCandidate?.model);
+      if (candidateModel !== undefined && !experiment.claudeModel.test(candidateModel)) {
+        excludedAssignments.changedTreatment += 1;
+        continue;
+      }
       const provider = str((assignment?.selected as Row | undefined)?.provider) as WorkerProviderId | undefined;
       const itt = routing?.experiment as Row | undefined;
       // A row carrying its intention-to-treat record counts under its ASSIGNED arm; an older row, its served one.
@@ -195,12 +228,16 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       fixes.push({ task, ts });
     }
     const receiptId = str(row.selection_assignment_id);
-    if (receiptId && !receipts.has(receiptId)) {
+    if (receiptId && (step === "worker.attempt" || step === "verdict" || step?.endsWith(".done"))) {
+      const prior = receipts.get(receiptId) ?? {};
       const duration = num(row.worker_duration_ms);
       receipts.set(receiptId, {
+        ...prior,
         ...(duration !== undefined ? { minutes: duration / 60_000 } : {}),
         ...(tokenTotal(row.tokens) !== undefined ? { tokens: tokenTotal(row.tokens) } : {}),
-        ...(num(row.cost_usd) !== undefined ? { cost: num(row.cost_usd) } : {}),
+        ...(num(row.total_cost_usd) !== undefined ? { cost: num(row.total_cost_usd) }
+          : num(row.cost_usd) !== undefined ? { cost: num(row.cost_usd) } : {}),
+        ...(row.billing_mode === "api" || row.billing_mode === "subscription" ? { billingMode: row.billing_mode } : {}),
       });
     }
   }
@@ -209,9 +246,10 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
     const since = new Map(tasks.map(([task, first]) => [task, first.ts]));
     const merged = new Set(merges.filter((merge) => since.has(merge.task) && merge.ts >= since.get(merge.task)!).map((merge) => merge.task));
     const fixCounts = tasks.map(([task, first]) => fixes.filter((fix) => fix.task === task && fix.ts >= first.ts).length);
-    const armReceipts = [...assignmentTask.entries()]
+    const armAssignments = [...assignmentTask.entries()]
       .filter(([, task]) => since.has(task))
-      .map(([id]) => receipts.get(id))
+      .map(([id]) => receipts.get(id));
+    const armReceipts = armAssignments
       .filter((receipt): receipt is NonNullable<typeof receipt> => receipt !== undefined);
     return {
       arm,
@@ -222,7 +260,9 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       meanFixDispatches: mean(fixCounts),
       medianWorkerMinutes: median(armReceipts.flatMap((receipt) => (receipt.minutes === undefined ? [] : [receipt.minutes]))),
       meanTokens: mean(armReceipts.flatMap((receipt) => (receipt.tokens === undefined ? [] : [receipt.tokens]))),
-      meanNotionalCostUsd: mean(armReceipts.flatMap((receipt) => (receipt.cost === undefined ? [] : [receipt.cost]))),
+      meanCashCostUsd: mean(armReceipts.flatMap((receipt) => (receipt.cost === undefined || receipt.billingMode !== "api" ? [] : [receipt.cost]))),
+      meanNotionalCostUsd: mean(armReceipts.flatMap((receipt) => (receipt.cost === undefined || receipt.billingMode !== "subscription" ? [] : [receipt.cost]))),
+      costMissingAssignments: armAssignments.filter((receipt) => receipt?.cost === undefined || receipt.billingMode === undefined).length,
     };
   });
   return {
@@ -231,6 +271,7 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
     revisitOn: experiment.revisitOn,
     revisitDue: today >= experiment.revisitOn,
     assignments: assignmentTask.size,
+    excludedAssignments,
     mixedTasks: [...armsSeen.values()].filter((seen) => seen.size > 1).length,
     crossoverTasks: crossed.size,
     sufficient: arms.every((arm) => arm.tasks >= experiment.minTasksPerArm),
@@ -264,12 +305,13 @@ export async function routingAbCommand(rest: string[], opts: RoutingAbCommandOpt
   print(`state dir: ${stateDir} (${rows.length} ledger rows read)`);
   for (const report of reports) {
     const status = report.sufficient ? "measured" : "insufficient sample";
-    print(`${report.id}: ${status}; ${report.assignments} assignments, ${report.mixedTasks} tasks in both arms, ${report.crossoverTasks} crossover tasks; revisit ${report.revisitOn}${report.revisitDue ? " (DUE)" : ""}`);
+    print(`${report.id}: ${status}; ${report.assignments} assignments, ${report.mixedTasks} tasks in both arms, ${report.crossoverTasks} crossover tasks; ${report.excludedAssignments.genericUnit} generic units and ${report.excludedAssignments.changedTreatment} changed treatments excluded; revisit ${report.revisitOn}${report.revisitDue ? " (DUE)" : ""}`);
     for (const arm of report.arms) {
       print(
         `  ${arm.arm} (${arm.provider}): ${arm.tasks} tasks, ${arm.merged} merged (${fmt(arm.mergeRate, 100, "%")}), ` +
           `${fmt(arm.meanFixDispatches)} fix dispatches/task, ${fmt(arm.medianWorkerMinutes)} min median, ` +
-          `${fmt(arm.meanTokens, 1, "", 0)} tokens, $${fmt(arm.meanNotionalCostUsd, 1, "", 2)} notional`,
+          `${fmt(arm.meanTokens, 1, "", 0)} tokens, $${fmt(arm.meanCashCostUsd, 1, "", 2)} cash, ` +
+          `$${fmt(arm.meanNotionalCostUsd, 1, "", 2)} notional (${arm.costMissingAssignments} cost missing)`,
       );
     }
   }
