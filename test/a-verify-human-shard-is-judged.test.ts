@@ -540,6 +540,9 @@ const PARKED_PLAN = `- id: W1-T9001
   depends_on: []
   type: implement
   verify: human
+  # Ruling-shaped (it declares DECISIONS.md): since the operator ruling of 2026-09-29 only rulings
+  # stay on this sweep; every other verify: human record goes to the machine-filing judge.
+  files: [DECISIONS.md]
   status: queued
   rationale: "A preference about how the operator's repo presents itself."
   acceptance:

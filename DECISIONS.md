@@ -3240,6 +3240,18 @@ itself. This ruling ratifies `src/lib/machine-filing-judge.ts` as the judge that
   policy; an irreversible action; or a finding it cannot verify from what it is shown. Everything else
   flows — its PR still passes CI and review. A `proceed` the record cannot honour at `verify: auto`
   (it would fail the linter) is escalated as broken, with the lint reason.
+- **A DETERMINISTIC BACKSTOP RUNS BEFORE THE MODEL, AND ONLY ESCALATES.** It sends a record straight to a
+  person, with no model asked, when the record touches secrets, auth, tokens or permissions; deletes
+  data, branches, archives or ledgers, or takes any other irreversible action; or changes merge,
+  deploy or branch-protection policy (`deterministicEscalation`, machine-filing.ts). It reads the
+  declared paths plus the title, prompt and acceptance claims, never the note, and it can never
+  release anything. **Why this guardrail earns its place: irreversibility.** Everywhere else a wrong
+  release costs one closed PR. Here it costs a deleted branch, a truncated ledger or a widened grant,
+  and no review gate can undo those. The model is also least reliable exactly there. On the
+  2026-09-29 probes, haiku released "delete every merged branch" twice, and sonnet released a
+  ledger-archive truncation once. `test/fixtures/machine-judge-probes.json` holds the regression
+  eval. With the backstop and the live sonnet judge, all 6 risky probes escalate and all 4 benign
+  probes proceed, and the benign 4 are the only model calls.
 - **EARNED AUTONOMY, NO FIXED BAR.** Each filer family's record — its merged tasks as credit, the ones
   a person retired `closed`/`retired` as debit, plus its gardener's Beta credit beyond the Beta(3,1)
   prior — is shown to the judge and sets the confidence a `low` verdict needs:
@@ -3255,8 +3267,7 @@ itself. This ruling ratifies `src/lib/machine-filing-judge.ts` as the judge that
   task ids carry a release row across the rotations, 76 in the live ledger, so releases silently lapsed
   and those tasks parked again. No judge releases a machine-authored record by a ledger row from here on:
   its pinned `risk_ruling` lives in git, cannot be rotated away, and editing the record changes its pin,
-  which re-opens the question. (An operator's own `rmd approve` still writes the ledger row, and is still
-  exposed to the same rotation; that is a separate defect, not changed here.)
+  which re-opens the question. (An operator's own `rmd approve` is made durable the same way; see below.)
 - **THE VERIFY-HUMAN SWEEP HANDS MACHINE RECORDS TO THIS JUDGE.** W1-T3188's judge now routes and
   releases only operator-authored `verify: human` records, through its existing arm; machine-authored
   ones are routed (inbox on escalate) and released (pinned ruling) here.
@@ -3268,8 +3279,17 @@ itself. This ruling ratifies `src/lib/machine-filing-judge.ts` as the judge that
   W1-T4014's visibility deliverable stands; its "release is never automatic" criterion no longer does and
   should be amended to "nothing releases a machine proposal except a person or this ratified judge".
 
-**NOT DECIDED HERE:** whether this judge may also release OPERATOR-authored `verify: human` records by
-pinned ruling. They stay on the verify-human sweep's existing path.
+**OPERATOR `verify: human` RECORDS TOO (operator answer, 2026-09-29: "YES … EXCEPT ruling-shaped records").**
+The same judge, the same backstop and the same pinned ruling apply to every operator-authored `verify:
+human` record, except a ruling-shaped one (the linter's `rulingVerifyViolation` trigger: it declares
+DECISIONS.md). Ruling-shaped records stay on the W1-T3188 sweep, whose release arm now refuses them.
+The judge's rule gains one escalation clause for these records: it asks for a decision only the
+operator can make (his priorities, budget, preference or policy).
+
+**`rmd approve` IS DURABLE.** The operator's release still writes its `ratify.approved` row, which
+takes effect at once. It is also kept in `state/operator-releases.json`, which rotation does not touch,
+and the judge's next pass pins it on the record as an `operator` ruling. That pass asks no model and
+runs no backstop, because the operator's bit is the decision.
 
 Rollback: remove the `machine-judge` garden from the daemon's gardens and revert the filers to the
 literal header; records already pinned stay valid, and reverting any one to `verify: human` parks it.

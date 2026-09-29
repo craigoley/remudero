@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -17,12 +18,13 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
  * own W1-T4112 note). Each pass proposes ONE class of change as ONE pull request, every value read
  * from scripts/test-tier-manifest.mjs's OWN functions or the fleet's OWN ledger, never a guess:
  *
- *   - ADOPT-DURATIONS: a material proposal (`proposalIsMaterial`) that moves a file to a
- *     different shard — every changed row lands together, judged by SHARD SKEW.
+ *   - ADOPT-DURATIONS: rows a rolling median of CI runs settles outside the measured noise band
+ *     ({@link settleDurationRows}), landed when they move a shard or give a first value, and at
+ *     most about once a day — judged by SHARD SKEW.
  *   - RETIER-FLAKER: a file the ledger's `test.flake_retry` rows show retried at least
  *     {@link RETIER_THRESHOLD} times, forced to the slow tier — judged by RETRY COUNT.
- *   - SHRINK-BASELINE: the same proposal, read only when NOT material, for a row measured lower
- *     than committed — a one-way baseline shrunk downward — judged by BASELINE SIZE.
+ *   - SHRINK-BASELINE: the same settled rows, read only when NOT material, for a row measured
+ *     lower than committed — a one-way baseline shrunk downward — judged by BASELINE SIZE.
  *
  * All three are `review` classes (gardener.ts): judged by whether their PR merges, never a
  * synthetic pass/fail this module invents.
@@ -67,12 +69,13 @@ export interface TestManifestProbe {
   listTestFiles: (root: string) => string[];
   proposalIsMaterial: (committed: TestManifest, proposed: TestManifest, shardCount?: number) => boolean;
   balanceFilesByDuration: (files: string[], manifest: TestManifest, shardCount: number) => string[][];
+  tierFiles: (files: string[], manifest: TestManifest) => { fast: string[]; slow: string[] };
   summarizeShardBalance: (
     files: string[],
     manifest: TestManifest,
     shardCount: number,
     balanced: string[][],
-  ) => { shardSpreadMs: number; selectedMeanDurationMs: number };
+  ) => { shardSpreadMs: number; selectedMeanDurationMs: number; slowestShardDurationMs: number };
 }
 
 export async function loadTestManifestProbe(root: string): Promise<TestManifestProbe> {
@@ -89,62 +92,140 @@ export function testManifestProposalPath(stateDir: string): string {
 
 const rowTarget = (probe: TestManifestProbe, file: string): string => `${probe.DEFAULT_MANIFEST_RELATIVE_PATH}#${file}`;
 
-/** Every row in `proposed` that names a file on disk and differs from `committed` — the file's
- *  prior value paired with its proposed one, sorted for a deterministic pass. */
-function changedRows(committed: TestManifest, proposed: TestManifest, knownFiles: ReadonlySet<string>): Array<{ file: string; from: number | undefined; to: number }> {
-  const out: Array<{ file: string; from: number | undefined; to: number }> = [];
-  for (const file of Object.keys(proposed.files ?? {})) {
-    if (!knownFiles.has(file)) continue;
-    const to = proposed.files[file];
-    const from = committed.files[file];
-    if (typeof to === "number" && to !== from) out.push({ file, from, to });
+/** How many CI proposals the rolling median reads. Odd, so the median is a real observation; about
+ *  half a day of main pushes (15 on 2026-09-29); and the chance a correct committed row sits outside
+ *  all seven observations by run-to-run noise alone is 2 x 0.5^7, under 2%. */
+export const DURATION_WINDOW_RUNS = 7;
+
+/** Roughly one duration adoption a day: a manifest commit younger than this holds the next one back
+ *  unless it is urgent. On 2026-09-29 five adopt-durations PRs merged in three hours, each
+ *  rewriting about 2,100 rows of run-to-run noise on a known conflict hotspot. */
+export const DURATION_ADOPTION_CADENCE_MS = 24 * 3_600_000;
+
+export type SettledRowKind = "first" | "tier" | "drift";
+export interface SettledRow { file: string; from: number | undefined; to: number; kind: SettledRowKind }
+
+const median = (xs: number[]): number => {
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
+};
+
+/** Two significant figures: a stored duration claims no more precision than its noise allows. */
+export function roundDurationMs(ms: number): number {
+  if (!(ms > 0)) return 0;
+  const step = 10 ** Math.max(0, Math.floor(Math.log10(ms)) - 1);
+  return Math.round(ms / step) * step;
+}
+
+/**
+ * The rows a window of CI proposals says really moved, and the fleet-wide noise band they were
+ * judged against. The band is the median, over every file observed at least three times, of that
+ * file's robust spread (1.4826 x MAD of log duration), so it is measured, never chosen. A row moves:
+ *   - FIRST: a placeholder (absent or 0) takes the median of its observations;
+ *   - otherwise only once the window is full, EVERY observation lies on one side of the committed
+ *     value (its own envelope) and the median sits outside the band — hysteresis, so a row adopted
+ *     at its median stays put until the evidence moves as a whole;
+ *   - a TIER move additionally needs the whole envelope past the slow threshold, so a file near
+ *     the boundary never flips back and forth. A row pinned at exactly the threshold is
+ *     retier-flaker's lever and is left alone.
+ */
+export function settleDurationRows(
+  committed: TestManifest,
+  observations: Array<Record<string, number>>,
+  knownFiles: ReadonlySet<string>,
+): { rows: SettledRow[]; bandLog: number; full: boolean } {
+  const full = observations.length >= DURATION_WINDOW_RUNS;
+  const byFile = new Map<string, number[]>();
+  for (const run of observations) {
+    for (const [file, ms] of Object.entries(run)) {
+      if (!knownFiles.has(file) || !(ms > 0)) continue;
+      byFile.set(file, [...(byFile.get(file) ?? []), ms]);
+    }
   }
-  return out.sort((a, b) => a.file.localeCompare(b.file));
+  const spreads: number[] = [];
+  for (const obs of byFile.values()) {
+    if (obs.length < 3) continue;
+    const logs = obs.map(Math.log);
+    const m = median(logs);
+    spreads.push(1.4826 * median(logs.map((l) => Math.abs(l - m))));
+  }
+  const bandLog = spreads.length > 0 ? median(spreads) : 0;
+  const threshold = committed.thresholdMs;
+  const rows: SettledRow[] = [];
+  for (const [file, obs] of byFile) {
+    const from = committed.files[file];
+    const to = roundDurationMs(median(obs));
+    if (!(typeof from === "number" && from > 0)) {
+      rows.push({ file, from, to, kind: "first" });
+      continue;
+    }
+    if (!full || from === threshold) continue;
+    const lo = Math.min(...obs);
+    const hi = Math.max(...obs);
+    if (from >= lo && from <= hi) continue;
+    if (Math.abs(Math.log(to / from)) <= bandLog) continue;
+    const slowBefore = from >= threshold;
+    const slowAfter = to >= threshold;
+    if (slowBefore !== slowAfter && (slowAfter ? lo < threshold : hi >= threshold)) continue;
+    rows.push({ file, from, to, kind: slowBefore !== slowAfter ? "tier" : "drift" });
+  }
+  return { rows: rows.sort((a, b) => a.file.localeCompare(b.file)), bandLog, full };
 }
 
-/** ADOPT-DURATIONS: every changed row, bundled as one PR, only when the whole proposal is
- *  material — {@link import("../../scripts/test-tier-manifest.mjs").proposalIsMaterial}'s own
- *  definition, so this gardener never opens a PR over sub-shard-boundary noise. */
-export function adoptDurationsCandidates(
-  probe: TestManifestProbe,
-  committed: TestManifest,
-  proposed: TestManifest,
-  testFiles: string[],
-  shardCount: number,
-): TestGardenAction[] {
-  if (!probe.proposalIsMaterial(committed, proposed, shardCount)) return [];
-  const before = probe.summarizeShardBalance(testFiles, committed, shardCount, probe.balanceFilesByDuration(testFiles, committed, shardCount));
-  const after = probe.summarizeShardBalance(testFiles, proposed, shardCount, probe.balanceFilesByDuration(testFiles, proposed, shardCount));
-  return changedRows(committed, proposed, new Set(testFiles)).map(({ file, from, to }) => ({
-    class: "adopt-durations",
-    target: rowTarget(probe, file),
-    file: probe.DEFAULT_MANIFEST_RELATIVE_PATH,
-    edit: { kind: "row", key: file, to },
-    reason: `Adopting narrows the slowest shard's skew from ${before.shardSpreadMs}ms to ${after.shardSpreadMs}ms (was ${from ?? 0}ms, measured ${to}ms).`,
-  }));
+/** The fast lane's slowest shard — the wall time a pull request waits on — when `assign` picks the
+ *  tiers and shards and `weigh` says what each file really costs. */
+function fastLaneSlowestMs(probe: TestManifestProbe, assign: TestManifest, weigh: TestManifest, testFiles: string[]): number {
+  const { fast } = probe.tierFiles(testFiles, assign);
+  const shards = Math.max(1, Math.min(probe.DEFAULT_CI_SHARD_COUNT, fast.length || 1));
+  return probe.summarizeShardBalance(fast, weigh, shards, probe.balanceFilesByDuration(fast, assign, shards)).slowestShardDurationMs;
 }
 
-/** SHRINK-BASELINE: a downward-only correction to a row the proposal measures lower than
- *  committed, read only on a pass where ADOPT-DURATIONS does not already claim every changed row —
- *  a one-way baseline that would otherwise sit stale-high forever, since nothing else in this repo
- *  re-captures it downward once it clears the shard-materiality bar. */
-export function shrinkBaselineCandidates(
+/**
+ * ADOPT-DURATIONS and SHRINK-BASELINE, both from {@link settleDurationRows}, never from one run's
+ * numbers. The settled rows are ADOPTED when they change a shard assignment or give a file its first
+ * real value (`proposalIsMaterial`); otherwise their downward half SHRINKS the baseline. Either is
+ * held while `recent` (a manifest commit inside {@link DURATION_ADOPTION_CADENCE_MS}) unless it is
+ * URGENT: judged by the settled durations, landing it shortens the fast lane's slowest shard by more
+ * than the measured noise band.
+ */
+export function durationCandidates(
   probe: TestManifestProbe,
   committed: TestManifest,
-  proposed: TestManifest,
+  observations: Array<Record<string, number>>,
   testFiles: string[],
   shardCount: number,
+  recent: boolean,
 ): TestGardenAction[] {
-  if (probe.proposalIsMaterial(committed, proposed, shardCount)) return [];
+  const { rows, bandLog, full } = settleDurationRows(committed, observations, new Set(testFiles));
+  if (rows.length === 0) return [];
+  const settled: TestManifest = { thresholdMs: committed.thresholdMs, files: { ...committed.files } };
+  for (const r of rows) settled.files[r.file] = r.to;
+  if (recent) {
+    const saved = Math.log(fastLaneSlowestMs(probe, committed, settled, testFiles) / fastLaneSlowestMs(probe, settled, settled, testFiles));
+    if (!(full && saved > bandLog)) return [];
+  }
+  const runs = `the median of ${observations.length} CI run(s)`;
+  if (probe.proposalIsMaterial(committed, settled, shardCount)) {
+    const before = probe.summarizeShardBalance(testFiles, committed, shardCount, probe.balanceFilesByDuration(testFiles, committed, shardCount));
+    const after = probe.summarizeShardBalance(testFiles, settled, shardCount, probe.balanceFilesByDuration(testFiles, settled, shardCount));
+    return rows.map(({ file, from, to, kind }) => ({
+      class: "adopt-durations",
+      target: rowTarget(probe, file),
+      file: probe.DEFAULT_MANIFEST_RELATIVE_PATH,
+      edit: { kind: "row", key: file, to },
+      reason: `Adopting narrows the slowest shard's skew from ${before.shardSpreadMs}ms to ${after.shardSpreadMs}ms (${kind}: was ${from ?? 0}ms, ${runs} ${to}ms).`,
+    }));
+  }
   const totalBefore = Object.values(committed.files ?? {}).reduce((sum, ms) => sum + ms, 0);
-  return changedRows(committed, proposed, new Set(testFiles))
-    .filter(({ from, to }) => typeof from === "number" && from > 0 && to < from)
+  return rows
+    .filter(({ from, to }) => typeof from === "number" && to < from)
     .map(({ file, from, to }) => ({
       class: "shrink-baseline",
       target: rowTarget(probe, file),
       file: probe.DEFAULT_MANIFEST_RELATIVE_PATH,
       edit: { kind: "row", key: file, to },
-      reason: `Recorded ${from}ms; freshly measured ${to}ms — shrinking the manifest's total baseline size from ${totalBefore}ms.`,
+      reason: `Recorded ${from}ms; ${runs} measured ${to}ms — shrinking the manifest's total baseline size from ${totalBefore}ms.`,
     }));
 }
 
@@ -178,7 +259,37 @@ export function retierFlakerCandidates(stateDir: string, probe: TestManifestProb
   return out.sort((a, b) => a.target.localeCompare(b.target));
 }
 
-export function testGardenInventory(repoRoot: string, stateDir: string, probe: TestManifestProbe): TestGardenInventory {
+/** The CI proposals the gardener has collected, oldest first, capped at {@link DURATION_WINDOW_RUNS};
+ *  `absent` names the runs known to have published none, so neither is downloaded twice. */
+export interface TestProposalHistory {
+  runs: Array<{ runId: number; files: Record<string, number> }>;
+  absent: number[];
+}
+
+export function testManifestProposalHistoryPath(stateDir: string): string {
+  return join(stateDir, "test-tier-manifest-proposal.history.json");
+}
+
+export function readTestProposalHistory(stateDir: string): TestProposalHistory {
+  const text = readFileIfExists(testManifestProposalHistoryPath(stateDir));
+  if (text === undefined) return { runs: [], absent: [] };
+  const parsed = JSON.parse(text) as Partial<TestProposalHistory>;
+  return { runs: parsed.runs ?? [], absent: parsed.absent ?? [] };
+}
+
+/** When the manifest last changed on the checkout's own history — an adoption, a retier or a
+ *  person's edit alike, so the conflict hotspot gets a quiet day whoever moved it. */
+export function manifestLastCommitMs(repoRoot: string, relPath: string): number | undefined {
+  const out = execFileSync("git", ["-C", repoRoot, "log", "-1", "--format=%ct", "--", relPath], { encoding: "utf8" }).trim();
+  return out === "" ? undefined : Number(out) * 1000;
+}
+
+export function testGardenInventory(
+  repoRoot: string,
+  stateDir: string,
+  probe: TestManifestProbe,
+  opts: { clock?: Clock; manifestChangedAtMs?: () => number | undefined } = {},
+): TestGardenInventory {
   const manifestPath = join(repoRoot, probe.DEFAULT_MANIFEST_RELATIVE_PATH);
   const committed = probe.loadManifest(manifestPath);
   const testFiles = probe.listTestFiles(repoRoot);
@@ -188,16 +299,18 @@ export function testGardenInventory(repoRoot: string, stateDir: string, probe: T
   // matrix must not hand `balanceFilesByDuration`/`summarizeShardBalance` more shards than there
   // are files to fill them, which those two functions do not clamp for themselves.
   const shardCount = Math.max(1, Math.min(probe.DEFAULT_CI_SHARD_COUNT, testFiles.length || 1));
-  const durationCandidates = existsSync(proposalPath)
-    ? (() => {
-        const proposed = probe.loadManifest(proposalPath);
-        return [
-          ...adoptDurationsCandidates(probe, committed, proposed, testFiles, shardCount),
-          ...shrinkBaselineCandidates(probe, committed, proposed, testFiles, shardCount),
-        ];
-      })()
-    : [];
-  return { candidates: [...durationCandidates, ...retierFlakerCandidates(stateDir, probe, committed, testFiles)] };
+  const history = readTestProposalHistory(stateDir).runs.map((r) => r.files);
+  const observations = history.length > 0 ? history : existsSync(proposalPath) ? [probe.loadManifest(proposalPath).files] : [];
+  const changedAt = observations.length > 0
+    ? (opts.manifestChangedAtMs ?? (() => manifestLastCommitMs(repoRoot, probe.DEFAULT_MANIFEST_RELATIVE_PATH)))()
+    : undefined;
+  const recent = changedAt !== undefined && (opts.clock ?? systemClock).now() - changedAt < DURATION_ADOPTION_CADENCE_MS;
+  return {
+    candidates: [
+      ...durationCandidates(probe, committed, observations, testFiles, shardCount, recent),
+      ...retierFlakerCandidates(stateDir, probe, committed, testFiles),
+    ],
+  };
 }
 
 /** Modification times of the manifest and proposal, and the ledger's hour bucket, so an unchanged pass costs a
@@ -259,7 +372,8 @@ export type TestProposalFeed =
  * The adoption half W1-T4112 left for a follow-up: CI's flake-retry-aggregate job builds
  * `test-tier-manifest-proposal` on every main push and keeps it seven days, and nothing ever
  * fetched it, so ADOPT-DURATIONS and SHRINK-BASELINE had no input and the gardener never acted.
- * This copies the newest successful main run's proposal into {@link testManifestProposalPath}.
+ * This copies the newest successful main run's proposal into {@link testManifestProposalPath}, and
+ * keeps every successful run inside the rolling window in {@link testManifestProposalHistoryPath}.
  * `gh run download` unpacks the artifact itself, so no zip is parsed here.
  */
 export async function refreshTestManifestProposalAsync(
@@ -273,26 +387,62 @@ export async function refreshTestManifestProposalAsync(
   const runs = await readJson(["api", `repos/${owner}/${repo}/actions/workflows/ci.yml/runs?event=push&branch=main&per_page=10`,
     "--jq", "[.workflow_runs[] | {id, status, conclusion}]"]);
   if (!Array.isArray(runs)) throw new Error("test gardener: GitHub returned no main-run list");
-  const run = (runs as Array<{ id?: unknown; status?: unknown; conclusion?: unknown }>)
-    .find((r) => r.status === "completed" && r.conclusion === "success" && typeof r.id === "number");
-  if (!run) return { status: "absent", reason: "no successful main run among the newest ten" };
-  const runId = run.id as number;
+  const successful = (runs as Array<{ id?: unknown; status?: unknown; conclusion?: unknown }>)
+    .filter((r) => r.status === "completed" && r.conclusion === "success" && typeof r.id === "number")
+    .map((r) => r.id as number);
+  if (successful.length === 0) return { status: "absent", reason: "no successful main run among the newest ten" };
+  const history = readTestProposalHistory(stateDir);
+  const remember = (runId: number, proposal: { files: Record<string, number> } | undefined) => {
+    if (!proposal) history.absent = [...history.absent.filter((id) => successful.includes(id)), runId];
+    else history.runs = [...history.runs, { runId, files: proposal.files }].sort((a, b) => a.runId - b.runId).slice(-DURATION_WINDOW_RUNS);
+    writeAtomic(testManifestProposalHistoryPath(stateDir), JSON.stringify(history) + "\n");
+  };
+  const runId = successful[0]!;
   const sourcePath = testManifestProposalSourcePath(stateDir);
   const source = readFileIfExists(sourcePath);
+  let feed: TestProposalFeed;
   if (source !== undefined && (JSON.parse(source) as { runId?: number }).runId === runId) {
-    return existsSync(testManifestProposalPath(stateDir)) ? { status: "unchanged", runId } : { status: "absent", reason: `run ${runId} published no proposal`, runId };
+    feed = existsSync(testManifestProposalPath(stateDir)) ? { status: "unchanged", runId } : { status: "absent", reason: `run ${runId} published no proposal`, runId };
+  } else {
+    const fetched = await fetchRunProposalAsync(owner, repo, stateDir, runId, download);
+    remember(runId, fetched?.proposal);
+    if (!fetched) {
+      writeAtomic(sourcePath, JSON.stringify({ runId, artifact: "absent" }) + "\n");
+      feed = { status: "absent", reason: `run ${runId} published no proposal`, runId };
+    } else {
+      writeAtomic(testManifestProposalPath(stateDir), fetched.text);
+      writeAtomic(sourcePath, JSON.stringify({ runId }) + "\n");
+      feed = { status: "fresh", runId };
+    }
   }
+  // The rolling median needs a window, not the newest run: backfill every successful run inside it.
+  for (const older of successful) {
+    if (history.runs.some((r) => r.runId === older) || history.absent.includes(older)) continue;
+    if (history.runs.length >= DURATION_WINDOW_RUNS && older < history.runs[0]!.runId) break;
+    remember(older, (await fetchRunProposalAsync(owner, repo, stateDir, older, download))?.proposal);
+  }
+  return feed;
+}
+
+/** One run's proposal, or undefined when that run uploaded none (ci.yml `if-no-files-found: ignore`).
+ *  The download step unpacks the artifact itself, so no zip is parsed here. */
+async function fetchRunProposalAsync(
+  owner: string,
+  repo: string,
+  stateDir: string,
+  runId: number,
+  download: (args: string[]) => Promise<string>,
+): Promise<{ text: string; proposal: { thresholdMs: number; files: Record<string, number> } } | undefined> {
   const dir = join(stateDir, "test-tier-manifest-proposal.download");
   rmSync(dir, { recursive: true, force: true });
   try {
     await download(["run", "download", String(runId), "--repo", `${owner}/${repo}`, "--name", TEST_MANIFEST_PROPOSAL_ARTIFACT, "--dir", dir]);
   } catch (error) {
     const detail = `${String((error as Error).message)} ${String((error as { stderr?: string }).stderr ?? "")}`;
-    // A main run with no duration evidence uploads no proposal (ci.yml `if-no-files-found: ignore`).
-    // That run is recorded so it is not asked again; every other failure is the caller's to log.
+    // A run with no duration evidence uploads no proposal; the caller records it so it is not asked
+    // again. Every other failure is the caller's to log.
     if (!/no valid artifacts found|no artifact matches/i.test(detail)) throw error;
-    writeAtomic(sourcePath, JSON.stringify({ runId, artifact: "absent" }) + "\n");
-    return { status: "absent", reason: `run ${runId} published no proposal`, runId };
+    return undefined;
   }
   const text = readFileSync(join(dir, "test-tier-manifest.next.json"), "utf8");
   const proposal = JSON.parse(text) as { thresholdMs?: unknown; files?: unknown };
@@ -300,10 +450,8 @@ export async function refreshTestManifestProposalAsync(
       Object.values(proposal.files).some((ms) => typeof ms !== "number")) {
     throw new Error(`test gardener: run ${runId}'s manifest proposal is not a {thresholdMs, files} manifest`);
   }
-  writeAtomic(testManifestProposalPath(stateDir), text);
-  writeAtomic(sourcePath, JSON.stringify({ runId }) + "\n");
   rmSync(dir, { recursive: true, force: true });
-  return { status: "fresh", runId };
+  return { text, proposal: proposal as { thresholdMs: number; files: Record<string, number> } };
 }
 
 export const TEST_MANIFEST_PROPOSAL_ARTIFACT = "test-tier-manifest-proposal";
@@ -366,10 +514,10 @@ export function testGardenSpec(deps: GardenerDeps, probe: TestManifestProbe): Ga
     review: {
       "adopt-durations": "adopting a fresh measurement over the committed one is judged by shard skew — a judgement call on which run's evidence to trust.",
       "retier-flaker": "moving a file to the slow tier is judged by retry count — a judgement call on whether it is truly flaky.",
-      "shrink-baseline": "shrinking a committed duration downward is judged by the manifest's total baseline size — a judgement call on trusting one fresh measurement.",
+      "shrink-baseline": "shrinking a committed duration downward is judged by the manifest's total baseline size — a judgement call on trusting a rolling median.",
     },
     cheapFingerprint: () => testGardenCheapFingerprint(deps.repoRoot, deps.stateDir, probe, deps.clock),
-    inventory: () => testGardenInventory(deps.repoRoot, deps.stateDir, probe),
+    inventory: () => testGardenInventory(deps.repoRoot, deps.stateDir, probe, { clock: deps.clock }),
     fingerprint: (inv) => inv.candidates.map((a) => a.target).join(","),
     candidates: (inv) => inv.candidates,
     scorecard: (inv, plan) => ({ candidates: inv.candidates.length, proposed: plan.actions.length }),

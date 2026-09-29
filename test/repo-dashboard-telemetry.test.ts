@@ -8,7 +8,7 @@ import { createService } from "../src/lib/service.js";
 import {
   buildRepoDashboardRoute,
   computeRepoTelemetryOffThread,
-  postRepoTelemetryWorkerResponse,
+  serveRepoTelemetry,
   projectRepoTelemetry,
   REPO_TELEMETRY_CACHE_TTL_MS,
   REPO_TELEMETRY_MIN_AGE_MS,
@@ -108,10 +108,10 @@ test("seven-day tokens and cost sum the repository's worker rows in the window",
     start("r1", "alpha"),
     start("b1", "beta"),
     worker("r1", "2026-09-21T00:00:00.000Z", 1.5, { input: 10, output: 20, cacheRead: 30, cacheCreation: 40 }),
-    worker("r1", "2026-09-22T00:00:00.000Z", 0.25, { input: 1, output: 2 }),
-    { ...worker("r1", "2026-09-22T00:00:00.000Z", 9, { input: 5 }), tokens: undefined },
+    { ...worker("r1", "2026-09-22T00:00:00.000Z", 0.25, { input: 1, output: 2 }), billing_mode: "api" },
+    { ...worker("r1", "2026-09-22T00:00:01.000Z", 9, { input: 5 }), tokens: undefined },
     // a row that names its repo directly, with no run.start
-    { ...worker("z9", "2026-09-22T00:00:00.000Z", 0.25, { input: 100 }), repo: "acme/alpha" },
+    { ...worker("z9", "2026-09-22T00:00:00.000Z", 0.5, { input: 100 }), repo: "acme/alpha", billing_mode: "api" },
     // out of window, another repo, a verdict restating cost, and a cost.anomaly restatement
     worker("r1", "2026-09-10T00:00:00.000Z", 100, { input: 1000 }),
     worker("b1", "2026-09-22T00:00:00.000Z", 100, { input: 1000 }),
@@ -120,8 +120,10 @@ test("seven-day tokens and cost sum the repository's worker rows in the window",
     { ...worker("r1", "2026-09-22T00:00:00.000Z", 100, { input: 1000 }), billing_mode: undefined },
   ];
   const t = projectRepoTelemetry(ALPHA, { ledger, nowMs: NOW_MS });
-  assert.equal(t.tokens7d, 100 + 3 + 100);
-  assert.equal(t.cost_7d, 1.5 + 0.25 + 9 + 0.25);
+  assert.equal(t.tokens7d, 70 + 3 + 100);
+  assert.equal(t.cache_read_tokens7d, 30);
+  assert.equal(t.cash_usd_7d, 0.75);
+  assert.deepEqual(t.subscription, { calls7d: 2, tokens7d: 70, windows: [] });
   assert.deepEqual(t.modelsused, ["provider-m"]);
 });
 
@@ -131,17 +133,20 @@ test("modelsused contains only complete provider-served model receipts for the r
     { ...worker("r1", "2026-09-21T00:00:00.000Z", 1, {}), model: "requested-but-not-served", served_model: "gpt-6-luna" },
     { ...worker("r1", "2026-09-22T00:00:00.000Z", 1, {}), served_model: "claude-sonnet" },
     { ...worker("r1", "2026-09-22T01:00:00.000Z", 1, {}), served_model: "gpt-6-luna" },
-    { ...worker("b1", "2026-09-22T00:00:00.000Z", 1, {}), served_model: null },
-    { ...worker("r1", "2026-09-01T00:00:00.000Z", 1, {}), served_model: null },
+    { ...worker("b1", "2026-09-22T00:00:00.000Z", 1, {}), served_model: "beta-model" },
+    { ...worker("r1", "2026-09-01T00:00:00.000Z", 1, {}), served_model: "old-model" },
+    { ...worker("r1", "2026-09-22T02:00:00.000Z", 1, {}), served_model: null },
   ];
-  assert.deepEqual(projectRepoTelemetry(ALPHA, { ledger, nowMs: NOW_MS }).modelsused, ["claude-sonnet", "gpt-6-luna"]);
-  assert.equal(projectRepoTelemetry(ALPHA, { ledger: [...ledger, { ...worker("r1", "2026-09-22T02:00:00.000Z", 1, {}), served_model: null }], nowMs: NOW_MS }).modelsused, null,
-    "a silent provider makes the full set unknown; a requested model is not a substitute");
+  assert.deepEqual(projectRepoTelemetry(ALPHA, { ledger, nowMs: NOW_MS }).modelsused, ["claude-sonnet", "gpt-6-luna"],
+    "a requested model is not a substitute, and a silent provider no longer blanks the set");
 });
 
 test("a telemetry field with no source stays null rather than zero", () => {
   const unknown = projectRepoTelemetry(ALPHA, { nowMs: NOW_MS });
-  assert.deepEqual(unknown, { queuedtasks: null, errorrate: null, last_run: null, tokens7d: null, modelsused: null, cost_7d: null });
+  assert.deepEqual(unknown, {
+    queuedtasks: null, queued: null, errorrate: null, runs7d: null, last_run: null,
+    tokens7d: null, cache_read_tokens7d: null, cash_usd_7d: null, subscription: null, modelsused: null,
+  });
   const noPlan = projectRepoTelemetry(ALPHA, { ledger: [], nowMs: NOW_MS });
   assert.equal(noPlan.queuedtasks, null);
   assert.equal(noPlan.errorrate, null);
@@ -186,8 +191,14 @@ test("GET /v1/repos fills telemetry from the real ledger and plan files and keep
   const [body, concurrent] = await Promise.all([readDashboard(route), readDashboard(route)]);
   assert.deepEqual(concurrent, body, "a concurrent read shares the one off-thread pass");
   const [alpha] = body.repos;
-  assert.deepEqual(alpha.health, { status: "unknown", queuedtasks: 1, errorrate: 0, last_run: "2026-09-21T01:00:00.000Z", alerts: null });
-  assert.deepEqual(alpha.telemetry, { tokens7d: 7, modelsused: ["provider-m"], cost_7d: 2 });
+  assert.deepEqual(alpha.health, {
+    status: "verified", condition: "healthy", reasons: [], queuedtasks: 1, queued: 1, errorrate: 0,
+    runs7d: { succeeded: 1, failed: 0, superseded: 0 }, last_run: "2026-09-21T01:00:00.000Z", alerts: null,
+  });
+  assert.deepEqual(alpha.telemetry, {
+    measurementClass: "observed", tokens7d: 7, cache_read_tokens7d: 0, cash_usd_7d: 0, cost_7d: 0,
+    subscription: { calls7d: 1, tokens7d: 7, windows: [] }, modelsused: ["provider-m"],
+  });
   assert.equal(alpha.connected_at, null);
   assert.equal(alpha.active, null);
   assert.deepEqual(alpha.settings, { proofpolicy: null, workerpoolsize: null, alertthreshold: null });
@@ -211,7 +222,8 @@ test("a registry-only core repository receives its own ledger telemetry", async 
   const core = body.repos.find((repo) => repo.id === "craigoley/remudero");
   assert.ok(core);
   assert.equal(core.source, "instance-registry");
-  assert.deepEqual(core.telemetry, { tokens7d: 11, modelsused: ["provider-m"], cost_7d: 3 });
+  assert.equal(core.telemetry.tokens7d, 11);
+  assert.deepEqual(core.telemetry.modelsused, ["provider-m"]);
   assert.equal(core.health.queuedtasks, 1);
   assert.equal(body.repos.find((repo) => repo.id === "acme/alpha")?.source, "managed-repos");
 });
@@ -219,7 +231,9 @@ test("a registry-only core repository receives its own ledger telemetry", async 
 test("GET /v1/repos leaves ledger fields null for an absent ledger", async () => {
   const root = fixtureRoot();
   const missing = await readDashboard(buildRepoDashboardRoute({ root, ledgerPath: join(root, "state", "ledger.ndjson"), clock: fixedClock(NOW_MS) }));
-  assert.deepEqual(missing.repos[0].telemetry, { tokens7d: null, modelsused: null, cost_7d: null });
+  assert.equal(missing.repos[0].telemetry.tokens7d, null);
+  assert.equal(missing.repos[0].telemetry.modelsused, null);
+  assert.equal(missing.repos[0].telemetry.cost_7d, null);
   assert.equal(missing.repos[0].health.queuedtasks, null);
 });
 
@@ -347,12 +361,18 @@ test("the repo telemetry worker body posts its computed outcome", () => {
   const ledgerPath = join(fixtureRoot(), "ledger.ndjson");
   writeFileSync(ledgerPath, JSON.stringify(start("r1", "alpha")) + "\n");
   const posted: unknown[] = [];
-  postRepoTelemetryWorkerResponse({ postMessage: (v) => posted.push(v) }, REQ(ledgerPath, "/nonexistent/tasks.yaml"));
+  let onMessage: ((msg: { id: number; req: RepoTelemetryRequest }) => void) | undefined;
+  serveRepoTelemetry({ on: (_event, run) => (onMessage = run), postMessage: (v: unknown) => posted.push(v) });
+  onMessage?.({ id: 7, req: REQ(ledgerPath, "/nonexistent/tasks.yaml") });
   assert.equal(posted.length, 1);
-  const outcome = posted[0] as { ok: boolean; reason?: string };
+  const { id, outcome } = posted[0] as { id: number; outcome: { ok: boolean; reason?: string } };
+  assert.equal(id, 7);
   assert.equal(outcome.ok, false);
   assert.match(outcome.reason ?? "", /^plan read failed: cannot read plan file/);
-  postRepoTelemetryWorkerResponse(null, REQ("/nonexistent/ledger.ndjson", "/nonexistent/tasks.yaml"));
+  const throwing = { ...REQ("/nonexistent/ledger.ndjson", "/nonexistent/tasks.yaml"), get repos(): never { throw new Error("fixture repos"); } };
+  onMessage?.({ id: 8, req: throwing });
+  assert.match((posted[1] as { outcome: { reason: string } }).outcome.reason, /^repo telemetry failed: /);
+  serveRepoTelemetry(null);
 });
 
 test("an off-thread repo telemetry pass reports a dead worker as unavailable", async () => {

@@ -303,3 +303,30 @@ test("an invalidated buffer whose refresh misses the budget is served as stale",
   assert.equal(res.json().staleness.status, "stale");
   assert.equal(res.headers["x-rmd-cache-state"], "stale");
 });
+
+test("a repos snapshot a minute old is served fresh while its refresh runs", async () => {
+  const clock = manualClock();
+  const deferred: Array<() => void> = [];
+  const route = countingRoute("/v1/repos", () => ({ repos: [] }));
+  const cache = createConsoleSnapshotCache(route, { budgetMs: 750, fallbackBody, clock, setTimer: () => {}, defer: (run) => void deferred.push(run) });
+  await read(cache.handler, reqOf("/v1/repos"));
+  clock.advance(CONSOLE_SNAPSHOT_VIEWER_IDLE_MS + 1_000);
+  const res = await read(cache.handler, reqOf("/v1/repos"));
+  assert.equal(route.calls, 1, "the reader is answered from the buffer, not from the budget race");
+  const { staleness } = res.json();
+  assert.equal(staleness.stale, false, "a minute-old seven-day projection is within its freshness bound");
+  assert.equal(staleness.status, "fresh");
+  assert.equal(staleness.refreshing, true, "refreshing is reported apart from stale");
+  assert.equal(deferred.length, 1, "the refresh runs after the response, off the request path");
+});
+
+test("a snapshot past its freshness bound is stale even while its refresh runs", async () => {
+  const clock = manualClock();
+  const route = countingRoute("/v1/repos", () => ({ repos: [] }));
+  const cache = createConsoleSnapshotCache(route, { budgetMs: 750, fallbackBody, clock, setTimer: () => {}, defer: () => {}, freshForMs: 5_000 });
+  await read(cache.handler, reqOf("/v1/repos"));
+  clock.advance(20_000);
+  const { staleness } = (await read(cache.handler, reqOf("/v1/repos"))).json();
+  assert.equal(staleness.stale, true);
+  assert.equal(staleness.refreshing, true);
+});

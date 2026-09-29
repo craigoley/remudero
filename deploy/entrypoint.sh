@@ -527,7 +527,7 @@ if [ "${1:-}" = "./bin/rmd" ] && [ "${2:-}" = "daemon" ]; then
 fi
 
 idle_starved_wait() {
-  local repo_arg="" arg previous="" owner="" repo="" slug="" checkout="" base_sha="" origin_url="" probe_rc=0 i marker since
+  local repo_arg="" arg previous="" owner="" repo="" slug="" checkout="" base_sha="" origin_url="" probe_rc=0 probe_mode="" i marker since
   local pulse_started=0 remaining=0 cohort_rc=0
   for arg in "$@"; do
     if [ "$previous" = "--repo" ]; then repo_arg="$arg"; break; fi
@@ -554,7 +554,7 @@ idle_starved_wait() {
   [ -f "$marker" ] || return 2
   IFS= read -r since < "$marker" || return 2
   [[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.000Z$ ]] || return 2
-  log "idle_starved: $slug at $base_sha; probing every 1800s with no Node worker"
+  log "idle_starved: $slug at $base_sha; probing the PR board every 300s and full state every 1800s with no model worker"
   while :; do
     i=0
     while [ "$i" -lt 6 ]; do
@@ -583,19 +583,21 @@ idle_starved_wait() {
       if [ -n "$signal_forwarded" ]; then return 0; fi
       [ "$probe_rc" -eq 0 ] || return 2
       i=$((i + 1))
+      probe_mode=pr-board
+      if [ "$i" -eq 6 ]; then probe_mode=full; fi
+      probe_rc=0
+      bash "$TREE/deploy/idle-starved-probe.sh" "$slug" "$checkout" "$base_sha" "$CONFIG_ROOT/state" "$since" "$marker" "$TREE" "$probe_mode" &
+      child_pid=$!
+      wait "$child_pid" || probe_rc=$?
+      child_pid=""
+      if [ -n "$signal_forwarded" ]; then return 0; fi
+      if [ "$probe_rc" -ne 0 ]; then
+        log "idle_starved: wake ($slug $probe_mode probe exit $probe_rc); resuming full daemon"
+        if [ "$probe_rc" -eq 10 ]; then return 1; fi
+        return 3
+      fi
+      if [ "$probe_mode" = full ]; then log "idle_starved: $slug remains empty"; fi
     done
-    probe_rc=0
-    bash "$TREE/deploy/idle-starved-probe.sh" "$slug" "$checkout" "$base_sha" "$CONFIG_ROOT/state" "$since" "$marker" "$TREE" &
-    child_pid=$!
-    wait "$child_pid" || probe_rc=$?
-    child_pid=""
-    if [ -n "$signal_forwarded" ]; then return 0; fi
-    if [ "$probe_rc" -ne 0 ]; then
-      log "idle_starved: wake ($slug probe exit $probe_rc); resuming full daemon"
-      if [ "$probe_rc" -eq 10 ]; then return 1; fi
-      return 3
-    fi
-    log "idle_starved: $slug remains empty"
   done
 }
 

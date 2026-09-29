@@ -1,0 +1,41 @@
+- id: W1-T4811
+  title: "A RENAME-ONLY PULL REQUEST TAKES THE FAST LANE — build the 2026-09-22 operator ruling recorded in W1-T2982: a PR whose entire diff is renames under plan/tasks.d/ with no content change merges on the plan lint alone, and a rename that edits one byte of anything is refused the lane, proven by fault injection"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ruling 2026-09-22 in W1-T2982; split out 2026-09-29 because W1-T2982 is a record task whose files: and criteria cover only its own shard"
+  note: "reservation hand-off: plan-rename-fast-lane-1790710441000 -> plan-rename-fast-lane-1790710441000"
+  plan_refs: [W1-T2982]
+  files: [src/lib/review.ts, .github/workflows/ci.yml, test/a-rename-only-pull-request-takes-the-fast-lane.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T2982 recorded why a task-id renumber has no home (#4298 carried four id moves because main was unloadable
+    and every open PR inherited the repair) and carries the operator's 2026-09-22 ruling: a rename of
+    plan/tasks.d/*.yaml rides ALONE in its own PR, and that PR gets a fast lane so the rule does not turn a plan
+    outage into a freeze on every open branch. The ruling was never built: W1-T2982's files: list holds only its
+    own shard and its acceptance greps its own text, so its worker refused on 2026-09-23 ("I can't make the
+    implementation within the task record's declared scope") and the task was dispatched until its circuit
+    breaker tripped at 1,584 dispatches.
+  design: |
+    Read W1-T2982's OPERATOR RULING 2026-09-22 paragraphs; they are the specification.
+    (i) A rename-only predicate beside review.ts's detectInstrumentEntanglement: true exactly when every changed
+    path is a pure rename (git's R100 similarity) between two plan/tasks.d/*.yaml paths, with no other path.
+    (ii) ci.yml: when the predicate holds for the PR's diff against its base, the full check matrix
+    short-circuits to success and the plan lint still runs, so required checks report without the 23-check
+    latency. Any path failing the predicate runs the full matrix as today.
+    (iii) The predicate is proved a real discriminator by fault injection: the same rename plus a one-byte edit
+    to the renamed file, or to any other file, is refused.
+  acceptance:
+    - claim: "a pure rename under plan/tasks.d takes the fast lane"
+      proof: 'grep: test("W1-T4811: a pure rename under plan/tasks.d takes the fast lane" in test/a-rename-only-pull-request-takes-the-fast-lane.test.ts'
+    - claim: "a rename that also edits one byte is refused the fast lane"
+      proof: 'grep: test("W1-T4811: a rename that also edits one byte is refused the fast lane" in test/a-rename-only-pull-request-takes-the-fast-lane.test.ts'
+  falsifier: |
+    Make the predicate key on path names alone and the one-byte-edit test admits a content change.

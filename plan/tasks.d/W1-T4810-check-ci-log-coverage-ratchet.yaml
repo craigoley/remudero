@@ -1,0 +1,27 @@
+- id: W1-T4810
+  title: "THE CI FRICTION GARDENER'S COSTLIEST UNTRACKED CAUSE — check:ci-log:coverage-ratchet cost 1880.7 PR minute(s) across 453 round(s) on 288 pull request(s), and nothing tracks it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:coverage-ratchet"
+  files:
+    - docs/ci-friction-remedies.md
+  acceptance:
+    - claim: "the check:ci-log:coverage-ratchet cause of PR friction has a recorded remedy"
+      proof: "grep: ci-friction:check:ci-log:coverage-ratchet in docs/ci-friction-remedies.md"
+  note: "Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. check:ci-log:coverage-ratchet priced at 1880.7 PR minute(s) across 453 round(s) on 288 pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in docs/ci-friction-remedies.md naming \"ci-friction:check:ci-log:coverage-ratchet\" once it lands."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The declared files list contains only docs/ci-friction-remedies.md, a documentation file. Nothing in the description points to secrets, auth, deletion, or merge/deploy/review policy changes."
+      - "The acceptance criterion is a single grep for the string ci-friction:check:ci-log:coverage-ratchet in that doc. It can be checked mechanically (verify: auto), so the finding is verifiable from what is shown."
+      - "The task is type implement and matches the ci-friction family's purpose of recording a remedy for a friction cause. The family has no track record yet (0 merged, 0 declined; Beta mean 0.75), which is neutral rather than a warning. The change is reversible and still goes through CI and review."
+    judged_at: "2026-09-29T19:54:32.238Z"
+    pin: "2de5d5a767cd9da305251b93bde7918bc6b054c98e9c2d6e0d46670f3be4cffd"

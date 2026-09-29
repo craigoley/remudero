@@ -319,75 +319,166 @@ components:
             W1-T163: this token's marker value BEFORE this request advanced it -- the timestamp
             `recap` was computed as-of. Absent alongside `recap` for the same two reasons.
 
+    RepoRunOutcomes:
+      type: object
+      description: >
+        Trailing seven-day run outcomes from the de-duplicated ledger. `succeeded` counts tasks that
+        took merge credit (`verdict.merged`, or a `verdict` of merged, already_satisfied or
+        awaiting_merge). `failed` counts runs whose verdict is blocked_ci, blocked_review, no_pr,
+        blocked_budget, error_max_budget_usd, blocked_illformed or failed. `superseded` counts such a
+        failure whose task later took merge credit; it is in neither term of `errorrate`. Held,
+        transient and re-queued verdicts (blocked_transient, blocked_containment, handed_off, ...)
+        are in no count.
+      required: [succeeded, failed, superseded]
+      properties:
+        succeeded: { type: integer }
+        failed: { type: integer }
+        superseded: { type: integer }
+
     RepoDashboardHealth:
       type: object
       description: >
-        The health projection for one managed repository. The current daemon has no per-repo
-        health source, so every measurement is explicitly unknown rather than rendered as zero or
-        healthy.
-      required:
-        - status
-        - queuedtasks
-        - errorrate
-        - last_run
-        - alerts
+        One repository's health. `status` is the MEASUREMENT state (`verified` = computed from a
+        present ledger, `unknown` = no ledger); `condition` is the OPERATIONAL state, derived in this
+        order: `unknown` (no ledger), `paused` (instance PAUSE or STOP flag), `down` (no `daemon.*`
+        heartbeat within 30 min), `degraded` (an open incident, or more failed than succeeded runs),
+        `idle` (no finished run in 7 days), else `healthy`. `reasons` names each signal that set it.
+      required: [status, condition, reasons, queuedtasks, queued, errorrate, runs7d, last_run, alerts]
       properties:
         status:
           type: string
-          enum:
-            - unknown
+          enum: [verified, unknown]
+        condition:
+          type: string
+          enum: [healthy, degraded, down, paused, idle, unknown]
+        reasons:
+          type: array
+          items: { type: string }
         queuedtasks:
           type: [integer, "null"]
+          description: Open plan tasks for the repository (not merged, done, retired or merge-credited).
+        queued:
+          type: [integer, "null"]
+          description: The subset of `queuedtasks` whose plan status is `queued`.
         errorrate:
           type: [number, "null"]
+          description: failed / (succeeded + failed) over `runs7d`; null when both are zero or there is no ledger.
+        runs7d:
+          oneOf:
+            - $ref: "#/components/schemas/RepoRunOutcomes"
+            - type: "null"
         last_run:
           type: [string, "null"]
+          description: The newest verdict or merge-credit timestamp in the window.
         alerts:
           type: [array, "null"]
+          description: >
+            The operating instance's open incidents (incident-lifecycle.json records not `verified`,
+            last seen in 7 days), newest first, at most 12. An empty array is a measured quiet fleet;
+            null means this instance does not operate the repository or its incident store was
+            unreadable (then `reasons` says which).
           items:
             type: string
+
+    RepoSubscriptionWindow:
+      type: object
+      description: One provider usage window as the router last read it on a worker assignment. Account-wide, not per repository.
+      required: [provider, window, percent_used, resets_at, observed_at]
+      properties:
+        provider: { type: string }
+        window: { type: [string, "null"] }
+        percent_used: { type: [number, "null"] }
+        resets_at: { type: [string, "null"] }
+        observed_at: { type: string }
+
+    RepoSubscriptionUsage:
+      type: object
+      description: Subscription-billed calls are usage against provider windows, never dollars.
+      required: [calls7d, tokens7d, windows]
+      properties:
+        calls7d: { type: integer }
+        tokens7d: { type: number }
+        windows:
+          type: array
+          items:
+            $ref: "#/components/schemas/RepoSubscriptionWindow"
 
     RepoDashboardTelemetry:
       type: object
       description: >
-        Trailing seven-day per-repository worker telemetry from the ledger. Models are the distinct
-        provider-reported served models, never requested or routed model assignments. A null
-        modelsused means the ledger was unavailable or at least one worker row in the window did
-        not report its served model; an empty array means no worker rows ran in the window.
-      required:
-        - tokens7d
-        - modelsused
-        - cost_7d
+        Trailing seven-day worker telemetry from the de-duplicated ledger; each call counts once (its
+        `worker.attempt` receipt when the run wrote one, else the lane's own step row). `tokens7d` is
+        input + output + cache-creation tokens; cache reads are `cache_read_tokens7d`. `cash_usd_7d`
+        sums only `billing_mode: api` calls, and `cost_7d` is the same figure. `modelsused` is the
+        provider-served models plus the canonical selected model of each assignment; a bare alias is
+        never reported. Null fields mean there is no ledger.
+      required: [measurementClass, tokens7d, cache_read_tokens7d, cash_usd_7d, cost_7d, subscription, modelsused]
       properties:
+        measurementClass:
+          type: string
+          enum: [observed, not-collected]
         tokens7d:
           type: [number, "null"]
+        cache_read_tokens7d:
+          type: [number, "null"]
+        cash_usd_7d:
+          type: [number, "null"]
+        cost_7d:
+          type: [number, "null"]
+        subscription:
+          oneOf:
+            - $ref: "#/components/schemas/RepoSubscriptionUsage"
+            - type: "null"
         modelsused:
           type: [array, "null"]
           items:
             type: string
-        cost_7d:
-          type: [number, "null"]
 
     RepoDashboardSettings:
       type: object
-      description: Per-repository settings, unavailable until durable settings persistence exists.
+      description: >
+        NOT COMPUTED: no config key holds a per-repository proof policy, worker pool size or alert
+        threshold. Every field is always null; see `not_computed.settings`.
       required:
         - proofpolicy
         - workerpoolsize
         - alertthreshold
       properties:
         proofpolicy:
-          type: [string, "null"]
+          type: "null"
         workerpoolsize:
-          type: [integer, "null"]
+          type: "null"
         alertthreshold:
-          type: [number, "null"]
+          type: "null"
+
+    RepoAction:
+      type: object
+      description: >
+        One repository action. `path` is relative to the operating instance's `/v1/i/<instance>/`
+        prefix: `toggleonoff` is POST control/pause or control/resume (write scope, chosen from the
+        current flag), `viewlogs` is GET recent. `configure` and `test_run` are never available.
+      required: [id, available]
+      properties:
+        id:
+          type: string
+          enum: [toggleonoff, viewlogs, configure, test_run]
+        available: { type: boolean }
+        method:
+          type: string
+          enum: [GET, POST]
+        path: { type: string }
+        scope:
+          type: string
+          enum: [read, write]
+        reason: { type: string }
 
     RepoDashboardEntry:
       type: object
       description: >
-        One repository from the validated `.remudero/managed-repos.json` set. Managed membership
-        is not evidence of OAuth connection, activation, health, telemetry, or settings.
+        One repository from the instance registry or the validated `.remudero/managed-repos.json`
+        set. The row whose instance serves this route is the OPERATING repository: it alone carries
+        `active`, `alerts`, pause and heartbeat signals, and it also owns every ledger row that names
+        no repository (that instance's gardeners, sweeps and fix lanes).
       required:
         - id
         - reponame
@@ -399,10 +490,12 @@ components:
         - health
         - telemetry
         - settings
+        - actions
+        - not_computed
       properties:
         id:
           type: string
-          description: Canonical `owner/repo` identity from the managed-repo set.
+          description: Canonical `owner/repo` identity.
         reponame:
           type: string
           description: Repository name from the canonical identity.
@@ -410,27 +503,42 @@ components:
           type: string
           description: Deterministic GitHub URL for the canonical identity; no GitHub read is implied.
         connected_at:
-          type: [string, "null"]
+          type: "null"
+          description: NOT COMPUTED; see `not_computed.connected_at`.
         active:
           type: [boolean, "null"]
+          description: False when the operating instance is paused or stopped; null for any other row.
         managed:
           type: boolean
         source:
           type: string
           enum:
             - managed-repos
+            - instance-registry
         health:
           $ref: "#/components/schemas/RepoDashboardHealth"
         telemetry:
           $ref: "#/components/schemas/RepoDashboardTelemetry"
         settings:
           $ref: "#/components/schemas/RepoDashboardSettings"
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RepoAction"
+        not_computed:
+          type: object
+          description: Why each never-computed field is null, so a consumer removes it instead of showing it as missing.
+          required: [connected_at, settings]
+          properties:
+            connected_at: { type: string }
+            settings: { type: string }
 
     RepoDashboardResult:
       type: object
       description: >
-        GET /v1/repos's read-only managed-repo portfolio. An empty `repos` array is a measured
-        empty managed set; it is not an unavailable response.
+        GET /v1/repos's portfolio, or GET /v1/repos/summary's single operating repository. An empty
+        `repos` array is a measured empty set; it is not an unavailable response. A cached read also
+        carries `staleness`.
       required:
         - generated_at
         - source
@@ -442,6 +550,16 @@ components:
           type: string
           enum:
             - managed-repos
+            - instance-registry
+            - instance-registry+managed-repos
+        registry:
+          type: object
+          required: [state]
+          properties:
+            state:
+              type: string
+              enum: [verified, unavailable]
+            reason: { type: string }
         repos:
           type: array
           items:
@@ -8451,17 +8569,41 @@ paths:
 
   /v1/repos:
     get:
-      summary: The read-only managed-repo portfolio for the console dashboard.
+      summary: The repository portfolio for the console dashboard.
       description: >
-        Reads and validates `.remudero/managed-repos.json` (src/lib/managed-repos.ts). The
-        endpoint reports repository identity only; OAuth connection, activation, health,
-        telemetry, settings, logs, and test-run state remain explicitly unknown until they have
-        durable daemon sources.
+        Registry instances plus the validated `.remudero/managed-repos.json` set, each with the
+        seven-day ledger projection described on RepoDashboardEntry.
       security:
         - bearerRead: []
       responses:
         "200":
-          description: The validated managed-repo portfolio, including an honest empty result.
+          description: The portfolio, including an honest empty result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RepoDashboardResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/repos/summary:
+    get:
+      summary: The operating repository's portfolio card, a few KB.
+      description: >
+        The same projection as GET /v1/repos restricted to the one repository this instance
+        operates (mounted per instance at `/v1/i/<instance>/repos/summary`). It carries everything
+        a portfolio card needs -- queue, run outcomes, error rate, alerts, active, spend, models and
+        actions -- so a card needs neither the whole portfolio nor `/status`. Computed off the
+        event loop from an incremental ledger index and persisted with serve's console snapshots,
+        so a restart answers from the last snapshot (marked stale) while the index rebuilds.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: One operating repository, or an empty `repos` array when none is resolved.
           content:
             application/json:
               schema:
