@@ -20,6 +20,7 @@
     - test/the-slow-tier-runs-on-main.test.ts
     - test/workflow-single-suite-run.test.ts
     - test/workflow-playwright-install.test.ts
+    - test/workflow-job-timeouts.test.ts
     - test/a-slow-tier-suite-is-never-re-measured.test.ts
     - test/the-full-suite-runs-in-the-merge-queue.test.ts
     - test/the-test-shards-are-sized-by-wall-time.test.ts
