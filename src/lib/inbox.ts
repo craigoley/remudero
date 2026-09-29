@@ -1177,6 +1177,16 @@ export function classifyProposal(
         `operator actually decides in; this row stays in the registry as a record, never deleted`,
     };
   }
+  const humanTaskId = /^verify-human:([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
+  const humanTask = humanTaskId ? ctx.plan.byId.get(humanTaskId) : undefined;
+  if (humanTask?.status === "blocked" && humanTask.retirement) {
+    return {
+      proposalId: proposal.id,
+      state: "retired",
+      reasons: [],
+      retiredReason: `${proposal.id}'s task ${humanTaskId} was explicitly ${humanTask.retirement} in the plan; its prior operator ask remains in history`,
+    };
+  }
   const mergedTaskReferent = taskReferentMerged(proposal, ctx);
   if (mergedTaskReferent !== undefined) {
     return {

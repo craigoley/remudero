@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -54,6 +54,30 @@ test("W1-T4742: why-me evidence names the task and source fact", () => {
   assert.ok(row?.sourceFacts.some((fact) => fact.source === "judge" && fact.detail.includes("needs_operator")));
 });
 
+test("an alphanumeric task id still joins its plan and judge evidence", () => {
+  const result = buildAttentionCensus(input({
+    views: [view("verify-human:W1-T12e", "decision")],
+    classifications: [{ proposalId: "verify-human:W1-T12e", state: "not_ready", reasons: [] }],
+    taskFacts: new Map([["W1-T12e", { verify: "human", repo: "remudero", title: "Commissioning drill" }]]),
+    judgeByTask: new Map([["W1-T12e", { decision: "needs_operator", reason: "Choose a safe drill window." }]]),
+  }));
+  assert.equal(result.items[0]?.taskId, "W1-T12e");
+  assert.ok(result.items[0]?.sourceFacts.some((fact) => fact.source === "plan" && fact.detail.includes("Commissioning drill")));
+  assert.ok(result.items[0]?.sourceFacts.some((fact) => fact.source === "judge" && fact.detail.includes("safe drill window")));
+});
+
+test("a plan-closed W1-T1041 has a source-qualified history item instead of an operator decision", () => {
+  const result = buildAttentionCensus(input({
+    views: [view("verify-human:W1-T1041", "history")],
+    classifications: [{ proposalId: "verify-human:W1-T1041", state: "retired", reasons: [], retiredReason: "explicitly closed in the plan" }],
+    taskFacts: new Map([["W1-T1041", { verify: "human", repo: "remudero", title: "The duplicate CI harness", status: "blocked", retirement: "closed" }]]),
+  }));
+  assert.equal(result.counts.decision, 0);
+  assert.equal(result.counts.history, 1);
+  assert.equal(result.items[0]?.attention, "history");
+  assert.ok(result.items[0]?.sourceFacts.some((fact) => fact.source === "plan-lifecycle" && fact.detail.includes("retirement closed")));
+});
+
 test("W1-T4742: missing evidence is partial rather than a healthy zero", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-attention-census-"));
   mkdirSync(join(root, "plan"), { recursive: true });
@@ -98,6 +122,55 @@ test("W1-T4742: missing evidence is partial rather than a healthy zero", async (
       "a missing release ledger can make a pending decision stale, so one observed ask is not one verified ask");
   } finally {
     server.close();
+  }
+});
+
+test("the served inbox stops asking about a positively closed W1-T1041 without deleting its history", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-attention-closed-"));
+  mkdirSync(join(root, "plan"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(root, "plan", "tasks.yaml");
+  writeFileSync(planPath, `
+- id: W1-T1041
+  title: "The duplicate CI harness was resolved by W1-T3207"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  status: blocked
+  retirement: closed
+  attempts: 0
+  files: [test/workflow-single-suite-run.test.ts]
+  acceptance:
+    - claim: "single suite"
+      proof: "unit test: single suite"
+`);
+  writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({
+    proposals: [{ id: "verify-human:W1-T1041", summary: "Choose a CI harness", evidenceAnchors: [] }],
+  }));
+  writeFileSync(join(root, "state", "ledger.ndjson"), "");
+  const deps: PanelGraphDeps = {
+    root, inboxRoot: root, planPath, ledgerPath: join(root, "state", "ledger.ndjson"),
+    github: { prView: () => null }, statusGithub: fakeGitHub(),
+    ratify: { approve: () => undefined, reframe: () => undefined }, inboxMainSha: () => "a".repeat(40),
+  };
+  const server = createService({ tokens: { read: "read-token", write: "write-token" }, routes: buildPanelGraphRoutes(deps) });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/inbox/attention-census`, {
+      headers: { authorization: "Bearer read-token" },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { counts: { decision: number; history: number }; items: Array<{ attention: string; retiredReason?: string; sourceFacts: Array<{ source: string; detail: string }> }> };
+    assert.equal(body.counts.decision, 0);
+    assert.equal(body.counts.history, 1);
+    assert.equal(body.items[0]?.attention, "history");
+    assert.match(body.items[0]?.retiredReason ?? "", /explicitly closed in the plan/);
+    assert.ok(body.items[0]?.sourceFacts.some((fact) => fact.source === "plan-lifecycle" && fact.detail.includes("retirement closed")));
+  } finally {
+    server.close();
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
