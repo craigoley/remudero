@@ -326,3 +326,12 @@ test("the tripwire runs the touched files first and reports an exhausted budget 
   const jobTimeoutS = Number(doc.jobs["main-tripwire"]!["timeout-minutes"]) * 60;
   assert.ok(budget > 0 && budget < jobTimeoutS - 120, "the budget ends well inside the job timeout, leaving room for setup");
 });
+
+test("the tripwire installs Chromium the way the ci job does, before any suite runs", () => {
+  const steps = loadWorkflow().jobs["main-tripwire"]!.steps ?? [];
+  const install = steps.findIndex((s) => s.run?.trim() === "npx playwright install chromium");
+  const firstRun = steps.findIndex((s) => s.run?.includes("run_list tripwire-touched.txt"));
+  assert.ok(install >= 0, "a touched browser suite (e.g. workflow-playwright-install) failed here on 2026-09-29 for want of Chromium");
+  assert.ok(install < firstRun, "Chromium is installed before the touched files run");
+  assert.ok(!steps[install]!.run!.includes("--with-deps"), "the same no-apt install ci.yml uses");
+});

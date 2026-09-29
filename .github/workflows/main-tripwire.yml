@@ -57,6 +57,8 @@ jobs:
           cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
+      - name: Install Chromium (the ci job's own no-apt install; a touched browser suite needs it)
+        run: npx playwright install chromium
       - name: Determine this merge's own pushed range
         id: range
         run: |
