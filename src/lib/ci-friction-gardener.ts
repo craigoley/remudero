@@ -252,6 +252,7 @@ export function ciFrictionShardYaml(price: CiFrictionCausePrice, taskId: string)
     title: `THE CI FRICTION GARDENER'S COSTLIEST UNTRACKED CAUSE — ${key} cost ${price.minutes} PR minute(s) across ${price.rounds} round(s) on ${price.prs} pull request(s), and nothing tracks it`,
     origin,
     files: [CI_FRICTION_REMEDIES_FILE],
+    cost: price.minutes,
     acceptance: [{ claim: `the ${key} cause of PR friction has a recorded remedy`, proof: `grep: ${origin} in ${CI_FRICTION_REMEDIES_FILE}` }],
     note: `Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. ${key} priced at ${price.minutes} PR minute(s) across ${price.rounds} round(s) on ${price.prs} pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in ${CI_FRICTION_REMEDIES_FILE} naming "${origin}" once it lands.`,
   }).text;

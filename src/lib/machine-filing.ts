@@ -38,13 +38,27 @@ export function machineShardRisk(files: readonly string[]): TaskRisk {
   return files.some((f) => SENSITIVE_SURFACE.test(f)) ? "high" : "low";
 }
 
+/** Where released work with no measured cost dispatches (operator direction 2026-09-29). */
+export const UNPRICED_PRIORITY = 50;
+
+/**
+ * Dispatch priority from the cost a filer measured (lower dispatches sooner): 90 − 12·ln(1 + cost),
+ * bounded to 1..90, so priority falls smoothly as cost grows and no cost is ever cut off. `cost` is
+ * PR-minutes where the filer prices them, or occurrences where it counts them, one unit each; an
+ * occurrence therefore ranks no higher than a minute. 27 units sits at {@link UNPRICED_PRIORITY}.
+ */
+export function costPriority(cost: number): number {
+  return Math.min(90, Math.max(1, Math.round(90 - 12 * Math.log(1 + Math.max(0, cost)))));
+}
+
 /** The header lines every machine filer renders, in the order the shard files already use. */
-export function machineShardHeaderLines(files: readonly string[]): string[] {
+export function machineShardHeaderLines(files: readonly string[], cost?: number): string[] {
   const risk = machineShardRisk(files);
   return [
     "  verify: human",
     `  risk: ${risk}`,
     ...(risk === "high" ? ["  band_meaning: blast-radius"] : []),
+    ...(cost === undefined ? [] : [`  priority: ${costPriority(cost)}`]),
     "  status: queued",
     "  attempts: 0",
     "  author_class: machine",
@@ -60,6 +74,8 @@ export interface MachineShardSpec {
   files: readonly string[];
   acceptance: readonly { claim: string; proof: string }[];
   note?: string;
+  /** The finding's measured cost (PR-minutes or occurrences), which sets its dispatch priority. */
+  cost?: number;
 }
 
 /**
@@ -74,7 +90,7 @@ export function renderMachineShard(spec: MachineShardSpec): { text: string; refu
     "  repo: remudero",
     "  depends_on: []",
     "  type: implement",
-    ...machineShardHeaderLines(spec.files),
+    ...machineShardHeaderLines(spec.files, spec.cost),
     `  origin: ${q(spec.origin)}`,
     "  files:",
     ...spec.files.map((f) => `    - ${f}`),

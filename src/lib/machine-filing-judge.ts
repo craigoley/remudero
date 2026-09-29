@@ -38,7 +38,7 @@ import {
   type RiskJudgeVerdict,
   type RiskPolicy,
 } from "./risk-judge.js";
-import { deterministicEscalation } from "./machine-filing.js";
+import { deterministicEscalation, UNPRICED_PRIORITY } from "./machine-filing.js";
 import { lintTask, machineAuthorVerifyViolation, rulingVerifyViolation, taskRulingPin } from "./task-linter.js";
 
 /** The operator's escalation rule, handed to the judge verbatim in its gates state. */
@@ -241,6 +241,11 @@ export function renderRuledShard(
   const verifyAt = lines.findIndex((l) => /^ {2}verify:\s*\S+\s*$/.test(l));
   if (verifyAt < 0) return { refused: `${relPath} has no verify: line` };
   lines[verifyAt] = `  verify: ${verify}`;
+  // Released machine work with no measured cost dispatches mid-queue, never last (2026-09-29).
+  const released = loadPlanFromYaml(text, relPath).tasks[0]!;
+  if (ruling.action === "proceed" && released.author_class === "machine" && released.priority === undefined) {
+    lines.splice(verifyAt + 1, 0, `  priority: ${UNPRICED_PRIORITY}`);
+  }
   const flipped = lines.join("\n") + "\n";
   const before = loadPlanFromYaml(text, relPath).tasks[0]!;
   const after = loadPlanFromYaml(flipped, relPath).tasks[0]!;
