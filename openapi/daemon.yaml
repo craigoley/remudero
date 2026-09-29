@@ -6720,6 +6720,7 @@ components:
         - headline
         - snippet
         - waitingOn
+        - attention
         - lastActivity
         - messageCount
         - unread
@@ -6737,10 +6738,19 @@ components:
           description: The latest message's first sentence, at most 160 characters.
         waitingOn:
           type: string
-          description: "`daemon` when the operator wrote last, otherwise `operator`."
+          description: "Last-speaker direction only; use attention for an actionable count."
           enum:
             - operator
             - daemon
+        attention:
+          type: string
+          description: Current operator attention from proposal state and an explicit thread question.
+          enum:
+            - decision
+            - reply
+            - in_progress
+            - history
+            - awaiting_daemon
         lastActivity:
           type:
             - integer
@@ -6775,6 +6785,7 @@ components:
         - headline
         - snippet
         - waitingOn
+        - attention
         - lastActivity
         - messageCount
         - unread
@@ -6794,6 +6805,14 @@ components:
           enum:
             - operator
             - daemon
+        attention:
+          type: string
+          enum:
+            - decision
+            - reply
+            - in_progress
+            - history
+            - awaiting_daemon
         lastActivity:
           type:
             - integer

@@ -741,6 +741,9 @@ export interface ReadinessContext {
   /** W1-T2604: the reason a `panel.proposal_declined` ledger line records. ⚠ NEVER inferred from the proposal's own
    *  prose — a keyword rule would let a worker retire its own proposal by phrasing. */
   isDeclined?: (proposalId: string) => string | undefined;
+  /** A verified task-scoped verify-human release receipt. Absent means no opinion: a missing
+   * ledger read never retires an operator ask by assumption. */
+  isReleasedHumanTask?: (taskId: string) => boolean;
   /** W1-T3518: does the LAST adoption scan show this proposal's finding is GONE — adopted, retired, or
    *  fixed by a scanner correction? Optional, and absent means NO OPINION, never "gone": a caller that
    *  cannot read the scan's own record must not retire the backlog by forgetting to supply this. */
@@ -1184,6 +1187,18 @@ export function classifyProposal(
         `${proposal.id}'s task ${mergedTaskReferent} has merged, so this proposal is about finished ` +
         `work and can never render READY again; it stays in the registry as a record of the finding, ` +
         `never deleted`,
+    };
+  }
+  // A release moves this parked task to the fleet BEFORE it merges. The old operator proposal
+  // is now history, not a second request for the same decision. Never apply this to a different
+  // proposal kind or to an id the current plan does not hold.
+  const releasedTaskId = /^verify-human:([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
+  if (releasedTaskId && ctx.plan.byId.has(releasedTaskId) && ctx.isReleasedHumanTask?.(releasedTaskId) === true) {
+    return {
+      proposalId: proposal.id,
+      state: "retired",
+      reasons: [],
+      retiredReason: `${proposal.id}'s task ${releasedTaskId} was released to the fleet; its prior operator ask remains in history`,
     };
   }
   const referentUnverified = referent.kind === "unreadable" ? { referentUnverified: true as const } : {};

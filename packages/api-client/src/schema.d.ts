@@ -2494,8 +2494,10 @@ export interface components {
       headline: string;
       /** The latest message's first sentence, at most 160 characters. */
       snippet: string;
-      /** `daemon` when the operator wrote last, otherwise `operator`. */
+      /** Last-speaker direction only; use attention for an actionable count. */
       waitingOn: "operator" | "daemon";
+      /** Current operator attention from proposal state and an explicit thread question. */
+      attention: "decision" | "reply" | "in_progress" | "history" | "awaiting_daemon";
       /** The latest message's epoch milliseconds; null when only the derived opening message exists. */
       lastActivity: number | null;
       /** Messages including the derived opening message. */
@@ -2514,6 +2516,7 @@ export interface components {
       headline: string;
       snippet: string;
       waitingOn: "operator" | "daemon";
+      attention: "decision" | "reply" | "in_progress" | "history" | "awaiting_daemon";
       lastActivity: number | null;
       messageCount: number;
       unread: boolean;

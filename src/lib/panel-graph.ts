@@ -1519,6 +1519,7 @@ function prepareInboxPass(
   // still looks READY (a drifted write) — re-derived from the ledger on every pass,
   // never trusted from the registry's own state.
   const verdicts = ledgerProposalVerdicts(ledgerLines);
+  const releasedHumanTasks = releasedHumanTaskIds(ledgerLines);
   // W1-T3518: the last adoption scan's own output. Same posture as the ledger read — read
   // ONCE per pass here, re-derived every pass that recomputes.
   const adoptionLatest = readAdoptionLatest(adoptionPath);
@@ -1535,6 +1536,7 @@ function prepareInboxPass(
       openProposalIds: { has: (id) => id !== proposal.id && allIds.has(id) },
       isRatified: verdicts.isRatified,
       isDeclined: verdicts.isDeclined,
+      isReleasedHumanTask: (taskId) => releasedHumanTasks.has(taskId),
       // W1-T3518: the record is read ONCE per pass above and this predicate closes over it.
       // An absent or unparseable record reads as undefined, so NO proposal retires — the
       // direction a missing measurement must always fail.
@@ -1575,7 +1577,19 @@ function projectionDigest(projection: Map<string, StatusProjection>): string {
   return parts.join("|");
 }
 
-/** Only what classifyProposal reads off the ledger: which ids are ratified, and which declined with what reason. */
+/** Exact task-scoped release receipts, not a verdict inferred from proposal prose. */
+function releasedHumanTaskIds(lines: LedgerLines): Set<string> {
+  const out = new Set<string>();
+  for (const row of lines) {
+    if (row.step === "ratify.approved" && row.released === "verify-human" && typeof row.task_id === "string" && row.task_id) {
+      out.add(row.task_id);
+    }
+  }
+  return out;
+}
+
+/** Every release is already a `ratify.approved` row, so this existing digest also invalidates
+ * the inbox memo when one lands; no second scan or release-specific fingerprint is needed. */
 function ledgerVerdictDigest(lines: LedgerLines): string {
   const { ratified, declined } = ledgerProposalVerdicts(lines);
   return JSON.stringify([[...ratified].sort(), [...declined].sort((x, y) => (x[0] < y[0] ? -1 : 1))]);

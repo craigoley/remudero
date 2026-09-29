@@ -4,7 +4,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { buildDecisionSummarySpawnArgs } from "./feedback.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { declinedReasonInLedger, parseProposalRegistry } from "./inbox.js";
-import { inboxOwner } from "./inbox-owner.js";
+import { inboxKind, inboxOwner } from "./inbox-owner.js";
 import { machineTokens, plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
 import {
   appendThreadMessage,
@@ -69,6 +69,8 @@ export interface ThreadSummaryView {
   headline: string;
   snippet: string;
   waitingOn: "operator" | "daemon";
+  /** Actionability, not just who wrote last. A console badge counts decision/reply only. */
+  attention: "decision" | "reply" | "in_progress" | "history" | "awaiting_daemon";
   lastActivity: number | null;
   messageCount: number;
   unread: boolean;
@@ -137,12 +139,24 @@ function detailFor(item: InboxThreadItem, stored: ThreadMessage[], marks: ReadMa
     headline: item.plain.headline,
     snippet: last.text.split(/(?<=[.!?])\s/)[0]!.slice(0, 160),
     waitingOn: last.from === "operator" ? "daemon" : "operator",
+    attention: attentionFor(item, last),
     lastActivity: last.ts,
     messageCount: messages.length,
     unread: last.from === "daemon" && (marks[threadId] ?? -1) < last.seq,
     details: item.summary,
     messages,
   };
+}
+
+function attentionFor(item: InboxThreadItem, last: ThreadMessageView): ThreadSummaryView["attention"] {
+  if (last.from === "operator") return "awaiting_daemon";
+  if (last.extra?.question === true) return "reply";
+  if (item.state === "declined") return "history";
+  const kind = inboxKind(item.proposalId);
+  // These kinds carry an explicit human judgement even before an Architect has a draft. A
+  // generic not-ready proposal, by contrast, is the fleet's next step, not the operator's.
+  if (kind === "verify-human" || kind === "ruling" || item.state === "ready") return "decision";
+  return "in_progress";
 }
 
 /** Every operator item's thread, waiting-on-you first, then most recent activity. A declined item
