@@ -11,7 +11,9 @@ import { test } from "node:test";
 import { appendLedger } from "../src/lib/ledger.js";
 import { awayFilePath, presenceMode, setPresenceMode } from "../src/lib/escalate.js";
 import {
+  classifyLedgerLine,
   COLD_START_LEASE_MS,
+  COMMENT_ORIGIN_RE,
   inferPresenceFromActivity,
   inferOperatorPresence,
   learnLeaseMs,
@@ -126,6 +128,18 @@ test("replyLatenciesMs: pairs an escalation's opened/answered ledger lines by ta
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("COMMENT_ORIGIN_RE: matches a GitHub-comment-shaped origin, rejects any other origin", () => {
+  assert.equal(COMMENT_ORIGIN_RE.test("issue#701:comment:9701"), true, "the comment-shaped origin matches");
+  assert.equal(COMMENT_ORIGIN_RE.test("console-approve"), false, "a plain console/API origin does not match");
+});
+
+test("classifyLedgerLine: a GitHub-comment-shaped origin reads owner_comment, any other origin reads console_write", () => {
+  const answered = { step: "panel.escalation_replied", origin: "issue#701:comment:9701" };
+  const consoleAnswered = { step: "panel.escalation_replied", origin: "console-approve" };
+  assert.equal(classifyLedgerLine(answered), "owner_comment", "the comment-shaped origin matches COMMENT_ORIGIN_RE");
+  assert.equal(classifyLedgerLine(consoleAnswered), "console_write", "a non-comment origin on the SAME step reads console_write instead");
 });
 
 test("inferOperatorPresence: an injected operator-commit reader counts as activity too", () => {

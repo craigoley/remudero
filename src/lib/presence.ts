@@ -1,5 +1,7 @@
 import { join } from "node:path";
 import { readLedgerLines } from "./status.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
+import { systemClock } from "./clock.js";
 
 /**
  * OPERATOR PRESENCE, INFERRED FROM ACTIVITY (W1-T4674) ──────────────────────────────────────
@@ -47,10 +49,14 @@ const STEP_ESCALATION_REPLIED = "panel.escalation_replied";
 const STEP_ISSUE_OPENED = "escalation.issue_opened";
 
 /** A GitHub-comment-origin answer looks like `issue#701:comment:9701` (W1-T2696/an-operator-reply
- *  fix rung) — anything else answering through the SAME two steps is a console/API write instead. */
-const COMMENT_ORIGIN_RE = /:comment:/;
+ *  fix rung) — anything else answering through the SAME two steps is a console/API write instead.
+ *  Exported (not just used through {@link classifyLedgerLine}) so both arms — a comment-shaped
+ *  origin, and any other — are independently drivable and assertable in tests. */
+export const COMMENT_ORIGIN_RE = /:comment:/;
 
-function classifyLedgerLine(line: Record<string, unknown>): ActivitySource | null {
+/** Exported so both regex arms are independently drivable and assertable — see
+ *  test/presence-is-inferred-from-activity.test.ts's classification coverage. */
+export function classifyLedgerLine(line: Record<string, unknown>): ActivitySource | null {
   const step = line.step;
   if (typeof step !== "string") return null;
   if (step === STEP_ANSWERED_BY_LINK) return "answer_click";
@@ -65,7 +71,7 @@ function classifyLedgerLine(line: Record<string, unknown>): ActivitySource | nul
 }
 
 function ledgerPathAt(root: string): string {
-  return join(root, "state", "ledger.ndjson");
+  return join(root, "state", LEDGER_FILENAME);
 }
 
 function ledgerActivity(root: string): ActivityEvent[] {
@@ -140,7 +146,12 @@ export function inferPresenceFromActivity(events: readonly ActivityEvent[], now:
  *  reads the ledger's own activity trail across three of the four sources, folds in operator
  *  commits from `commits` (an injectable {@link OperatorCommitReader}), learns the lease from the
  *  same ledger's reply latencies, and infers attended/away from the result. */
-export function inferOperatorPresence(root: string, now: Date = new Date(), commits: OperatorCommitReader = NO_OPERATOR_COMMITS): "attended" | "away" {
+export function inferOperatorPresence(
+  root: string,
+  // W1-T2897: read through the Clock port (src/lib/clock.ts), never a bare `new Date()`.
+  now: Date = systemClock.date(),
+  commits: OperatorCommitReader = NO_OPERATOR_COMMITS,
+): "attended" | "away" {
   const events = ledgerActivity(root);
   for (const at of commits.recentOperatorCommitsAt()) events.push({ source: "operator_commit", at });
   return inferPresenceFromActivity(events, now, learnLeaseMs(replyLatenciesMs(root)));
