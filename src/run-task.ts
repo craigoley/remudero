@@ -30807,6 +30807,7 @@ export function readRunBranchClosedPrsOutput(owner: string, repo: string, fetch:
   }
   return lines.join("\n");
 }
+
 /**
  * The post-drain rundown PUSH (W1-T141/W1-T144), extracted from drainCommand so the glue —
  * build the classified rundown, print it, and push it through the SAME digest channel
@@ -30869,7 +30870,13 @@ export function openSiblingObservation(
   onOpenSiblingBuild: (task: Task, sibling: OpenSiblingBuild) => void;
 } {
   return {
-    openSiblingBuildFor: (id) => projection()?.get(id)?.openSiblingBuild,
+    openSiblingBuildFor: (id) => {
+      const sibling = projection()?.get(id)?.openSiblingBuild;
+      // Path overlap alone can name another task's run as this task's build. #7431 belonged to
+      // W1-T4571 and touched W1-T3116's declared src/run-task.ts while W1-T3116 was dispatched.
+      const owner = taskIdFromRunBranch(sibling?.headRefName);
+      return owner !== undefined && owner !== id ? undefined : sibling;
+    },
     onOpenSiblingBuild: (task, sibling) => {
       log("dispatch.open_sibling_build", {
         lane,
