@@ -413,8 +413,7 @@ export function readNamedInSource(
 /**
  * Design (iii): the persisted (branch name -> tip sha) cache after one classification pass. ONLY
  * `"merged"` is ever written — the one PR state GitHub cannot take back (`foldPrState`'s own doc).
- * `"open"`/`"closed"`/`"none"` are never cached: a closed PR can be reopened and a `"none"` can gain
- * one, so caching either would let a stale read stand in for a fact that can still change. A
+ * `"open"`/`"closed"` are never cached (a reopen is unseen); `"none"` has {@link nextNoPrHeadCache}. A
  * branch whose tip sha this pass could not resolve (deleted mid-run, or never fetched locally) is
  * dropped rather than cached under `"unknown"` — the manifest sha is exactly what makes a later
  * cache hit's identity check (design (iv): a new tip sha misses the cache) meaningful at all.
@@ -429,6 +428,19 @@ export function nextMergedHeadCache(
     const sha = tipShaByName.get(f.name);
     if (!sha || sha === "unknown") continue;
     next[f.name] = sha;
+  }
+  return next;
+}
+
+/** Heads proven to have NO PR, by tip sha: a PR opened later is the newest, so the bulk walk's first page outranks this. */
+export function nextNoPrHeadCache(
+  facts: readonly { readonly name: string; readonly prState: string }[],
+  tipShaByName: ReadonlyMap<string, string>,
+): Record<string, string> {
+  const next: Record<string, string> = {};
+  for (const f of facts) {
+    const sha = tipShaByName.get(f.name);
+    if (f.prState === "none" && sha && sha !== "unknown") next[f.name] = sha;
   }
   return next;
 }
@@ -472,6 +484,7 @@ export interface AutomaticBranchReapState {
    *  the one PR state GitHub cannot take back. Never "open"/"closed"/"none": see
    *  {@link nextMergedHeadCache}'s own doc for why only this one verdict is safe to persist. */
   mergedHeadShas?: Record<string, string>;
+  noPrHeadShas?: Record<string, string>;
 }
 
 /** `<config.root>/state/<this>` — ONE cadence-and-cache file per repository (design (i)), so a
@@ -493,12 +506,14 @@ export function readAutomaticBranchReapState(path: string): AutomaticBranchReapS
     const state: AutomaticBranchReapState = {};
     if (typeof raw.lastRunAtMs === "number" && Number.isFinite(raw.lastRunAtMs)) state.lastRunAtMs = raw.lastRunAtMs;
     if (typeof raw.lastBranchFingerprint === "string") state.lastBranchFingerprint = raw.lastBranchFingerprint;
-    if (raw.mergedHeadShas && typeof raw.mergedHeadShas === "object") {
+    for (const key of ["mergedHeadShas", "noPrHeadShas"] as const) {
+      const cache = raw[key];
+      if (!cache || typeof cache !== "object") continue;
       const shas: Record<string, string> = {};
-      for (const [name, sha] of Object.entries(raw.mergedHeadShas)) {
+      for (const [name, sha] of Object.entries(cache)) {
         if (typeof sha === "string") shas[name] = sha;
       }
-      state.mergedHeadShas = shas;
+      state[key] = shas;
     }
     return state;
   } catch {
