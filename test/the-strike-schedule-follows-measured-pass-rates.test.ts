@@ -98,6 +98,35 @@ test("W1-T4671: measureStrikePassRates reduces rows per shape and strike positio
   assert.equal(b1.passRate, 1);
 });
 
+test("W1-T4671: a trusted strike-2 measurement is actually incorporated, not just strike-1", () => {
+  // W1-T4671 follow-up (round 2): no prior case in this file gave BOTH strike positions enough
+  // rows to be trusted, so a regression that dropped rate2 on the floor (e.g. `positions` always
+  // resolving to `[rate1.passRate]`) could not have been caught here. This is the falsifier: strike
+  // 1 passes almost always (95%), which — considered ALONE — makes a longer schedule the
+  // cost-minimizing answer (a near-certain first strike makes the eventual opus cost rare either
+  // way, so the tie-break favors trying more cheap strikes). But strike 2 almost never passes once
+  // strike 1 has already failed (10%), which correctly reverses that conclusion: extending past the
+  // default no longer pays, because the extra cheap strike it would buy is a strike that rarely
+  // clears. If rate2 were silently ignored, this shape would wrongly earn a longer schedule instead.
+  const shape = taskShapeKey(RISKY_SHAPE_TASK);
+  const rows = [
+    ...rowsForShape(shape, 1, { n: 20, passN: 19 }),
+    ...rowsForShape(shape, 2, { n: 20, passN: 2 }),
+  ];
+  const rates = measureStrikePassRates(rows);
+  assert.equal(rates.get(`${shape}::2`)?.rows, 20, "strike 2 has enough rows to be trusted");
+  const schedule = strikeScheduleFor({ task: RISKY_SHAPE_TASK, rates });
+  assert.ok(
+    schedule.cheapStrikeBudget <= DEFAULT_CHEAP_STRIKE_BUDGET,
+    `expected the poor strike-2 rate to hold the schedule at or below default, got ${schedule.cheapStrikeBudget}`,
+  );
+  assert.doesNotMatch(
+    schedule.reason,
+    /earns-another-cheap-strike/,
+    "a 95% strike-1 rate ALONE would extend the schedule; the trusted 10% strike-2 rate must override that",
+  );
+});
+
 test("W1-T4671: expectedWindowsForSchedule reuses the last measured position past the evidence", () => {
   // A single measured position (strike 1 only) at a high pass rate: a 3-strike schedule should
   // reuse that same rate for strikes 2 and 3, and cost less than a 1-strike schedule that pays
