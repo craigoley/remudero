@@ -20,8 +20,8 @@
     action: proceed
     confidence: 0.9
     reasons:
-      - "The declared files list contains only docs/ci-friction-remedies.md, a documentation file. Nothing in the description points to secrets, auth, deletion, or merge/deploy/review policy changes."
-      - "The acceptance criterion is a single grep for the string ci-friction:check:ci-log:coverage-ratchet in that doc. It can be checked mechanically (verify: auto), so the finding is verifiable from what is shown."
-      - "The task is type implement and matches the ci-friction family's purpose of recording a remedy for a friction cause. The family has no track record yet (0 merged, 0 declined; Beta mean 0.75), which is neutral rather than a warning. The change is reversible and still goes through CI and review."
-    judged_at: "2026-09-29T19:54:32.238Z"
+      - "The declared files list names only docs/ci-friction-remedies.md, a documentation file. Nothing in the description or files touches secrets, auth, merge or deploy policy, or deletion."
+      - "The single acceptance criterion is a grep check for a remedy entry in that doc. It can be verified automatically (verify: auto) and is reversible."
+      - "The gates state is clean: filingTime is true and the author is a machine-class member of the ci-friction family. That family has no merged or declined tasks yet (Beta mean 0.80), so there is no negative track record. The change still goes through CI and review."
+    judged_at: "2026-09-29T20:17:35.861Z"
     pin: "2de5d5a767cd9da305251b93bde7918bc6b054c98e9c2d6e0d46670f3be4cffd"
