@@ -6848,6 +6848,9 @@ components:
             liveLedger:
               $ref: "#/components/schemas/InboxAttentionCensusSourceState"
             archiveLedger:
+              description: >
+                Partial even when all retained rotations are readable: the available corpus does not
+                prove there were no earlier release receipts before its oldest file.
               $ref: "#/components/schemas/InboxAttentionCensusSourceState"
             githubProjection:
               $ref: "#/components/schemas/InboxAttentionCensusSourceState"

@@ -2539,6 +2539,7 @@ export interface components {
         plan: InboxAttentionCensusSourceState;
         registry: InboxAttentionCensusSourceState;
         liveLedger: InboxAttentionCensusSourceState;
+        /** Partial even when all retained rotations are readable: the available corpus does not prove there were no earlier release receipts before its oldest file. */
         archiveLedger: InboxAttentionCensusSourceState;
         githubProjection: InboxAttentionCensusSourceState;
       };

@@ -139,9 +139,10 @@ test("W1-T4742: archived release evidence flags an active ask without silently a
     assert.equal((await fetch(url)).status, 401, "census must stay behind read auth");
     const response = await fetch(url, { headers: { authorization: "Bearer read-token" } });
     assert.equal(response.status, 200);
-    const body = await response.json() as { state: string; discrepancy?: string; counts: { decision: number }; verifiedCounts: { decision: number }; items: Array<{ sourceFacts: Array<{ source: string }> }> };
+    const body = await response.json() as { state: string; discrepancy?: string; sources: { archiveLedger: string }; counts: { decision: number }; verifiedCounts: { decision: number }; items: Array<{ sourceFacts: Array<{ source: string }> }> };
     assert.equal(body.state, "partial");
     assert.equal(body.discrepancy, "active_human_ask_has_release_receipt");
+    assert.equal(body.sources.archiveLedger, "partial", "a retained archive is not proof of complete historical coverage");
     assert.equal(body.counts.decision, 1);
     assert.equal(body.verifiedCounts.decision, 0);
     assert.ok(body.items[0]?.sourceFacts.some((fact) => fact.source === "ledger"));

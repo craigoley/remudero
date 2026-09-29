@@ -1875,7 +1875,9 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
         mergedTaskIds: new Set([...classified.projection].filter(([, value]) => value.merged).map(([id]) => id)),
         sources: {
           plan: "observed", registry: registryParse.kind === "fault" ? "partial" : sourceState(registryStamp), liveLedger: sourceState(liveStamp),
-          archiveLedger: ledger.archiveCount === 0 ? "unavailable" : ledger.ok && ledger.unread.length === 0 && (ledger.unclassified?.length ?? 0) === 0 && ledger.torn === 0 ? "observed" : "partial",
+          // Reading every retained rotation proves positive receipts, never absence before the oldest
+          // retained file. Until a durable continuity index exists, history cannot certify a zero.
+          archiveLedger: ledger.archiveCount === 0 ? "unavailable" : "partial",
           githubProjection: projectionPartial ? "partial" : "observed",
         },
       });
