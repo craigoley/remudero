@@ -3,25 +3,22 @@
  * (.remudero/mounts.yaml's `step_up` mount, operator ruling 2026-09-22: "try Luna and Sonnet for
  * most tasks") is the SAME fixed length for every task shape today. Speculative decoding sizes
  * its draft length from the verifier's MEASURED acceptance rate
- * (https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/specdec_bench) — this module is
- * the same rule applied to rmd's own draft-then-verify shape: the cheap (sonnet) lane is the
+ * (https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/specdec_bench) — this module
+ * applies the same rule to rmd's own draft-then-verify shape: the cheap (sonnet) lane is the
  * draft, the step-up (opus) mount is the verifier of last resort.
  *
  * Two phases, kept as separate as {@link import("./parallel-attempts.js")} keeps its own two:
- *
  *   (i) OFFLINE MEASUREMENT — {@link measureStrikePassRates} reduces per-attempt ledger-union
- *       rows (the caller's job to read — see the module-level INVARIANT below) to, per task
- *       shape and strike position, how often that shape's sonnet strike passed.
+ *       rows (the caller's job to read — see the INVARIANT below) to, per shape and strike
+ *       position, how often that shape's sonnet strike passed.
  *   (ii) SCHEDULING — {@link strikeScheduleFor} decides how many cheap strikes THIS shape gets
- *       before stepping up, by comparing the EXPECTED WINDOW COST (a window is one dispatched
- *       attempt, cheap or opus) of a few candidate schedule lengths and picking whichever is
- *       cheapest given the shape's measured pass rate — never a fixed number (design (iii): "the
- *       schedule is recomputed from data each retro").
+ *       before stepping up, comparing the EXPECTED WINDOW COST of a few candidate schedule
+ *       lengths and picking whichever is cheapest given the measured pass rate — never a fixed
+ *       number (design (iii): recomputed from data each retro).
  *
  * INVARIANT: this module never reads the ledger union itself. It is handed rows already reduced
- * from evidence, exactly the posture {@link import("./parallel-attempts.js").measureShapeGains}
- * holds — a live per-shape measurement source is a separate concern from what the schedule DOES
- * with one once it exists. A shape with no measured rows (or too few to trust) always gets
+ * from evidence, the same posture {@link import("./parallel-attempts.js").measureShapeGains}
+ * holds. A shape with no measured rows (or too few to trust) always gets
  * {@link DEFAULT_CHEAP_STRIKE_BUDGET} — cheap-first stays the default for any shape without
  * evidence (design (ii)), the operator's cheap-first ruling this module must keep.
  */
