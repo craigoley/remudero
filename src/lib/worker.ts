@@ -24,7 +24,7 @@ import { homedir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { createSdkMcpServer, query, tool, type Options, type PermissionMode, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, query, tool, type Options, type PermissionMode, type SDKUserMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { detectUsageLimitRefusal } from "./classify.js";
 import {
@@ -2669,11 +2669,16 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       capability: requestedCapability,
     });
 
+    // Captured in its own binding, never re-invoked, so a mid-run answer can reach THIS session's `streamInput`
+    // (W1-T4673). `runQuery(...)` does not spawn yet -- the CLI process spawn is lazy, on the first pull -- so hoisting
+    // it out of the thunk below is free.
+    const liveQuery = runQuery({ prompt: args.prompt, options });
+    const unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
     try {
       const result = await withWorkerGroupTeardown(
         pidRef,
         () =>
-          collectWorkerResult(runQuery({ prompt: args.prompt, options }), {
+          collectWorkerResult(liveQuery, {
             childEnvKeys: Object.keys(childEnv).sort(),
             stderrChunks,
             // Logged verbatim as CONFIGURED inputs, never a read-back: effort is absent from the SDK envelope, and model here
@@ -2721,6 +2726,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       throw err;
     } finally {
       stopWatchdog?.();
+      // Unconditional: no exit path may leave a handle for a later answer to steer into a dead session (W1-T4673).
+      unregisterRunningWorker?.();
     }
   } finally {
     // Reap THIS spawn's per-spawn home on every exit path, including a thrown error or a transport failure — the withTempDir
@@ -3595,6 +3602,73 @@ export function appendQuestionAnswer(repoRoot: string, entry: QuestionAnswerEntr
   } catch {
     return false;
   }
+}
+
+// ── Mid-run operator answer delivery (W1-T4673) ─────────────────────────────
+// Before this, an answer for task X reached X only at the start of its NEXT fix round ({@link appendQuestionAnswer}'s
+// store is read at the pre-run boundary, never mid-run). Buzz's "mention it to steer it" reaches a running agent
+// directly (https://github.com/block/buzz). The SDK's `Query.streamInput(stream)` already supports this; the missing
+// piece was a way to reach the live `Query` for a task id from outside spawnWorker's own call stack.
+
+/** The one `Query` method mid-run delivery needs, kept narrow so a test double never shapes the SDK's whole
+ * control-request surface. */
+interface RunningWorkerHandle {
+  streamInput: (stream: AsyncIterable<SDKUserMessage>) => Promise<void>;
+}
+
+/** One entry per task id with an OPEN SDK session; presence here IS the run window (no start/end pair to go stale).
+ * {@link spawnWorker} adds it after opening the session and removes it unconditionally on every exit path. */
+const runningWorkers = new Map<string, RunningWorkerHandle>();
+
+/** Register `taskId`'s live session; returns the matching unregister, identity-checked so a slow-to-unwind earlier
+ * spawn can never evict a later one's still-live registration. */
+function registerRunningWorker(taskId: string, handle: RunningWorkerHandle): () => void {
+  runningWorkers.set(taskId, handle);
+  return () => {
+    if (runningWorkers.get(taskId) === handle) runningWorkers.delete(taskId);
+  };
+}
+
+/** TEST-ONLY: drop every registered handle, so one test's leftover can never pass a later test's "is anything
+ * running" check. */
+export function __resetRunningWorkersForTest(): void {
+  runningWorkers.clear();
+}
+
+/** `"delivered"` — queued onto the live session. `"no-running-worker"` — the caller's existing fix-round path is the
+ * only route left, unchanged (design iii's `rotate` answer also stays on that path: a fresh-context restart is not a
+ * session to steer). */
+export type OperatorAnswerDeliveryOutcome = "delivered" | "no-running-worker";
+
+/** Deliver an answer to task `taskId`'s running worker, if any, via `Query.streamInput` rather than the next fix round
+ * (design ii). `priority: "next"` is the SDK's own "next turn boundary" — never mid-tool-call. Returns the routing
+ * decision synchronously; delivery is fire-and-forget, and a failure is ledgered, never thrown ({@link
+ * appendQuestionAnswer}'s own contract). */
+export function deliverOperatorAnswerToRunningWorker(
+  taskId: string,
+  answerText: string,
+  opts: { ledger?: (event: string, extra?: Record<string, unknown>) => void } = {},
+): OperatorAnswerDeliveryOutcome {
+  const handle = runningWorkers.get(taskId);
+  if (!handle) return "no-running-worker";
+  const ledger = opts.ledger ?? ((message, extra) => console.error(message, extra));
+  const sdkMessage: SDKUserMessage = {
+    type: "user",
+    message: { role: "user", content: answerText },
+    parent_tool_use_id: null,
+    priority: "next",
+  };
+  handle
+    .streamInput(
+      (async function* (): AsyncGenerator<SDKUserMessage> {
+        yield sdkMessage;
+      })(),
+    )
+    .catch((err: unknown) => {
+      ledger("worker.steer_failed", { task: taskId, reason: err instanceof Error ? err.message : String(err) });
+    });
+  ledger("worker.steered", { task: taskId, chars: answerText.length });
+  return "delivered";
 }
 
 // ── Worktree lifecycle (under config.root/worktrees) ──────────────────────
