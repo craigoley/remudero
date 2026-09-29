@@ -1,0 +1,51 @@
+- id: W1-T4771
+  title: "THE /v1/status BOARD REFRESH SHELLS gh SYNCHRONOUSLY ON SERVE'S EVENT LOOP — board.get reaches ghExecFile (execFileSync) and paceGhEntry's blocking sleep whenever a GitHub read is due, freezing every console route for 1-7 s; serve the board from GitHub facts fetched off the loop"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-29 serve-stall profile (live CPU sampling of remudero-serve); the dominant cause was fixed unfiled in #7790"
+  plan_refs: ["W1-T4454", "W1-T4051", "W1-T154", "W1-T155"]
+  files:
+    - src/lib/board.ts
+    - src/lib/status.ts
+    - src/lib/github-transport.ts
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-29 on remudero-serve. We sent SIGUSR1, then took an inspector CPU sampling profile over 11 minutes
+    in two windows while probing /v1/status every 0.5 s. About 24% of all stalled time (loop blocked longer than 1 s)
+    was the /v1/status snapshot refresh. The call chain was console-snapshot-cache refresh, then the board's get, then
+    computeBoardSnapshot, which reached ghExecFile (execFileSync) through three paths: deriveReviewState/reviewState,
+    readPrQueueIndex (listOpenHeadBranches, fetchBoardPrsRest, readTruncated), and projectPlan's resolveEscalation
+    (issueByUrl, fetchAllIssues). Before each read, paceGhEntry ran wait/defaultBlockingSleepSync, a synchronous
+    sleep on the loop. One stall lasted 6.6 s (70% ghExecFile, 11-18% blocking sleep) and another 1.2 s. Every
+    console route stalls behind them, and the console aborts at 5 s. The snapshot cache's duty divisor then spaces
+    refreshes at 10x the compute time, so a 6.6 s refresh recurs about every minute while a viewer is present.
+    #6988/#6993/#7023-#7025 removed other synchronous gh/git calls from serve's loop. This path remains.
+    W1-T155 shares board.ts and status.ts for the board's status taxonomy. This task changes only where the
+    board's GitHub facts are fetched, not what the board projects.
+  design: |
+    (1) In serve, the board's GitHub facts (open PRs, review state, truncation, escalation issues) come from the
+    viewer-gated background refresh (gatePrewarmOnClients / W1-T154), which runs gh through the async transport
+    (execFile, never execFileSync). board.get and computeBoardSnapshot read only the in-memory facts it last
+    wrote. A due or stale fact is served as stale, with its age, and is never fetched inline.
+    (2) paceGhEntry's blocking sleep never runs on serve's thread. Serve paces with an awaited timer, or refuses
+    with a reason the caller can see. The CLI keeps its synchronous path.
+    (3) The daemon and rmd CLI behaviour is unchanged. serve.ts gets zero net comment lines.
+  acceptance:
+    - claim: "a due board GitHub read never runs a synchronous gh child on serve's loop"
+      proof: "unit test: a due board github read on serve spawns no synchronous gh child"
+    - claim: "serve's gh pacing never sleeps synchronously"
+      proof: "unit test: serve gh pacing waits without a blocking sleep"
+    - claim: "a stale board fact is served with its age instead of fetched inline"
+      proof: "unit test: a stale board github fact is served stale with its age"
+  falsifier: |
+    CLOSE IF a CPU profile of remudero-serve on main, with the console open for 10 minutes, shows no ghExecFile or
+    defaultBlockingSleepSync frame under console-snapshot-cache or board.get.
