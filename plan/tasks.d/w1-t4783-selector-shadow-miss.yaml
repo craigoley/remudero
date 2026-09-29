@@ -1,0 +1,16 @@
+- id: W1-T4783
+  title: "REPAIR THE NARROW SELECTOR EDGE 6af8b1d64460b371507e186fde321a27d8a7327c -> test/serve-browser-teardown.test.ts — a real coverage shard failure was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow:6af8b1d64460b371507e186fde321a27d8a7327c:narrow:test/serve-browser-teardown.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: "W1-T4439 observed narrow miss on coverage run 36562226649 at 6af8b1d64460b371507e186fde321a27d8a7327c: 6af8b1d64460b371507e186fde321a27d8a7327c -> test/serve-browser-teardown.test.ts. The changed paths are candidate missing edges, not guessed import edges. Inspect the exact head and teach the selector the missing dependency before W1-T4406 narrows CI."
+  acceptance:
+    - claim: "the narrow selector includes test/serve-browser-teardown.test.ts when this edge is exercised"
+      proof: "grep: test/serve-browser-teardown\\.test\\.ts in src/lib/affected-suites.ts"
