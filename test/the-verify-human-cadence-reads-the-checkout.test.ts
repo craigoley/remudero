@@ -54,6 +54,8 @@ function fleetShape(): { stateRoot: string; checkout: string } {
       "  repo: remudero",
       "  type: implement",
       "  verify: human",
+      // Ruling-shaped, so it stays on this sweep after the operator ruling of 2026-09-29.
+      "  files: [DECISIONS.md]",
       "  status: queued",
       "  depends_on: []",
       "",

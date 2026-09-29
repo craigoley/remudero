@@ -44240,7 +44240,7 @@ export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock):
  * a transcript. `undefined` when there is nothing to say, never "", so a shard with no evidence
  * reads differently from one whose evidence was withheld.
  */
-function shardEvidence(task: Task): string | undefined {
+export function shardEvidence(task: Task): string | undefined {
   const rec = task as unknown as Record<string, unknown>;
   const parts: string[] = [];
 

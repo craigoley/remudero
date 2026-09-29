@@ -137,11 +137,12 @@ export function needsMachineJudgement(task: Task, operatorReleases: ReadonlySet<
   return task.verify === "human" && !isRulingShaped(task) && unjudged;
 }
 
-/** `plan/tasks.d/<file>` for a record that lives in a shard; the monolith is never rewritten here. */
+/** `<plan dir>/tasks.d/<file>` for a record that lives in a shard; the monolith is never rewritten here.
+ *  The plan directory's name is read off the record's own path, as plan.ts reads shards from
+ *  `<planDir>/tasks.d`, so a layout that relocates the plan is not assumed away (repo-layout.ts). */
 export function shardRelPath(task: Pick<Task, "sourcePath">): string | undefined {
-  const p = task.sourcePath?.replaceAll("\\", "/");
-  if (!p || !/(^|\/)plan\/tasks\.d\/[^/]+\.ya?ml$/.test(p)) return undefined;
-  return `plan/tasks.d/${basename(p)}`;
+  const m = /(?:^|\/)([^/]+)\/tasks\.d\/([^/]+\.ya?ml)$/.exec(task.sourcePath?.replaceAll("\\", "/") ?? "");
+  return m ? `${m[1]}/tasks.d/${m[2]}` : undefined;
 }
 
 /** The judge's input: the record as {@link buildFilingRiskJudgeInput} renders it, plus the
