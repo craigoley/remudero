@@ -190,8 +190,25 @@ test("the daemon's own producer hook attaches an adoptionReport when called for 
     // authenticated `gh` on the host drives the plan-reconcile rung to a real landing push.
     const hooks = buildMeasurementCadenceDaemonHooks({
       config: { root } as Config,
+      policy: { values: { measurementCadence: { escalate: false } } } as never,
       now: () => new Date("2026-08-25T12:00:00Z"),
       creditedMergedIds: () => new Set(),
+      verifyHumanCadenceResult: async () => ({
+        parked: 0,
+        judged: 0,
+        needsOperator: [],
+        automated: [],
+        backlog: [],
+        judgeFailed: [],
+        skipped: [],
+        stateChanged: [],
+        ageBandReasks: [],
+        status: "clear",
+      }),
+      successorWatch: async () => ({}) as never,
+      adoptionShipDateFor: () => "fixture-date",
+      adoptionShipDateForAsync: async () => "fixture-date",
+      proofDebtInput: () => undefined,
       planReconcileLand: () => {
         throw new Error("an adoption-report fixture must never reach the plan-reconcile landing bridge");
       },

@@ -1,0 +1,44 @@
+- id: W1-T4758
+  title: "Isolate the verb-census daemon fixture from unrelated human verification"
+  repo: remudero
+  depends_on: [W1-T4757]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 2.00
+  risk: high
+  band_meaning: span
+  origin: "local preflight stalled in test/the-verb-census-reaches-a-reader.test.ts on 2026-09-29"
+  plan_refs: [W1-T2485, W1-T4757]
+  files:
+    - test/the-verb-census-reaches-a-reader.test.ts
+    - test/verb-census-fixture-isolation.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: both local `rmd preflight --ci-parity` attempts reached the unchanged
+    verb-census reader test and then produced no test summary. A direct 30-second,
+    single-test reproduction timed out at the unmocked measurement-cadence daemon
+    hook. That fixture pins the GitHub credit and landing leaves, but still invokes
+    the live human-verification, adoption ship-date, proof-debt, and successor-watch
+    work. W1-T4757 adds narrow injection seams for those independent leaves while
+    retaining the real measurement-cadence producer. The verb-census fixture should
+    use those seams too, so preflight can reach a verdict on its actual claim.
+  design: |
+    Move the existing unmocked verb-census daemon-hook test into its own focused
+    fixture suite and inject deterministic
+    human-verification, adoption ship-date, proof-debt, and successor-watch results
+    through W1-T4757's seam. Keep the actual daemon hook and verb census real.
+    Assert that human verification uses the injected result, and that the report
+    still carries a refused verb census for the fixture's empty ledger archive.
+    Do not replace the producer or weaken the census assertion.
+  acceptance:
+    - claim: "the daemon fixture reaches a real verb census without invoking unrelated human verification"
+      proof: 'grep: W1-T4758: verb census daemon fixture isolates unrelated human verification in test/verb-census-fixture-isolation.test.ts'
+  falsifier: |
+    Remove the human-verification injection: the fixture must again time out or
+    invoke its rejecting sentinel. Remove the real verb-census producer: the
+    assertion that its refused corpus outcome is attached must fail.
+  note: |
+    W1-T4758 was reserved on origin by plan-verb-census-fixture-1790667600000.

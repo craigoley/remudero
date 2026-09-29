@@ -27374,6 +27374,14 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
   /** W1-T3970: keep the production credit read injectable so offline cadence fixtures do not
    * accidentally shell out to the live GitHub projection. */
   creditedMergedIds?: () => ReadonlySet<string>;
+  /** The adoption producer fixture bypasses the unrelated live human judge. Production uses the
+   * same default verifier with the same checkout, config, run id and clock as before. */
+  verifyHumanCadenceResult?: typeof defaultVerifyHumanCadenceResult;
+  /** Adoption scans stay real in the fixture; only their historical git-date leaves are pinned. */
+  adoptionShipDateFor?: MeasurementCadenceReportOpts["shipDateFor"];
+  adoptionShipDateForAsync?: MeasurementCadenceReportOpts["shipDateForAsync"];
+  /** The adoption fixture does not run the independent proof-debt audit. */
+  proofDebtInput?: () => MeasurementCadenceReportOpts["proofDebt"];
   successorWatch?: (opts: SuccessorWatchOptions) => Promise<SuccessorWatchReading>;
   /** Keep the production escalation path injectable so cadence fixtures never create GitHub issues. */
   successorEscalate?: typeof tryEscalate;
@@ -27415,7 +27423,9 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
       // `repoRoot`, NOT `root` (which is `config.root`, the state volume) — see this function's own
       // parameter doc. The sibling `coverageImprovement` below already passes `repoRoot`.
-      const verifyHuman = await defaultVerifyHumanCadenceResult(repoRoot, configFor(), verifyHumanRunId, cadenceClock);
+      const verifyHuman = await (deps.verifyHumanCadenceResult ?? defaultVerifyHumanCadenceResult)(
+        repoRoot, configFor(), verifyHumanRunId, cadenceClock,
+      );
       const successorRunId = `MODEL-SUCCESSOR-CADENCE-${cadenceClock.now()}`;
       const successorLedgerPath = ledgerPathFor(configFor());
       const successorWatch = deps.successorWatch ?? ((opts: SuccessorWatchOptions) => watchSuccessorModels(opts));
@@ -27462,11 +27472,13 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         // checkout, same as the git log join two lines above — never a drained target's (this
         // hook is SELF-TARGET ONLY, per this function's own doc).
         checkoutDir: repoRoot,
+        shipDateFor: deps.adoptionShipDateFor,
+        shipDateForAsync: deps.adoptionShipDateForAsync,
         // W1-T2641: the proof-debt producer's ONE production supplier — see
         // `defaultProofDebtCadenceInput`'s own doc for the population, the fail-open direction,
         // and why this call is lazy here rather than hoisted to hook construction. Called only
         // on a tick this function's own caller (daemon.ts) already decided `fire: true` for.
-        proofDebt: defaultProofDebtCadenceInput(repoRoot),
+        proofDebt: deps.proofDebtInput ? deps.proofDebtInput() : defaultProofDebtCadenceInput(repoRoot),
         ...planReconcileOption,
         coverageImprovement: {
           root: repoRoot,
