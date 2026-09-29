@@ -35,7 +35,7 @@
     Do not replace the producer or weaken the census assertion.
   acceptance:
     - claim: "the daemon fixture reaches a real verb census without invoking unrelated human verification"
-      proof: 'unit test: test/verb-census-fixture-isolation.test.ts'
+      proof: 'grep: W1-T4758: verb census daemon fixture isolates unrelated human verification in test/verb-census-fixture-isolation.test.ts'
   falsifier: |
     Remove the human-verification injection: the fixture must again time out or
     invoke its rejecting sentinel. Remove the real verb-census producer: the

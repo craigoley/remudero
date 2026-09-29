@@ -16,6 +16,7 @@
     - .github/workflows/ci-gate.yml
     - src/lib/ci-parity.ts
     - src/lib/gate-posture.ts
+    - scripts/workflow-guard-mutation-baseline.json
     - test/slow-tier-shard-contract.test.ts
     - test/preflight-ci-parity.test.ts
     - test/the-slow-tier-runs-on-main.test.ts
@@ -68,3 +69,6 @@
     W1-T4756 was reserved on origin by plan-slow-tier-1790653000000 before filing.
     Scope amended after PR #7757's workflow mutation check found six old job-shape
     tests failing before mutation; those tests must describe the new required verdict.
+    Scope amended again after the source coverage shard found three exemptions still
+    keyed to the removed test-slow job; the renamed guards are covered and their
+    stale exemptions must be removed rather than carried forward.
