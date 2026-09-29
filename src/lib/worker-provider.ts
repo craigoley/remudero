@@ -587,7 +587,7 @@ export function selectionPropensity(input: {
 /**
  * W1-T4670: allocate the live window's model-upgrade budget across `candidates` — the tasks
  * currently queued — spending it where predicted gain per window share is largest
- * ({@link allocateUpgrades}, upgrade-allocation.ts). ADDITIVE ONLY: `.remudero/mounts.yaml`'s
+ * ({@link allocateUpgrades}, upgrade-allocation.ts). ADDITIVE ONLY: the configured mounts table's
  * fixed per-role tier and {@link selectWorkerProvider}'s own auction stay the live spawn path
  * exactly as they are today; this exposes the AutoQuantize-style decision to a future caller
  * without acting on it. Design point (ii) gates actually spending on it behind the offline

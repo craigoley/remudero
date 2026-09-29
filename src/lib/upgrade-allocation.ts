@@ -2,7 +2,7 @@
  * lib/upgrade-allocation.ts — spend the live window's model-upgrade budget where predicted gain
  * per window share is largest (W1-T4670), borrowing NVIDIA Model-Optimizer's AutoQuantize: score
  * each candidate's sensitivity to the expensive option and solve a constrained assignment under a
- * budget. Answers a question neither existing mechanism does: `.remudero/mounts.yaml` fixes tier
+ * budget. Answers a question neither existing mechanism does: the mounts table fixes tier
  * BY ROLE (a static rule) and `selectWorkerProvider` (worker-provider.ts) auctions WHICH
  * SUBSCRIPTION serves a spawn (never whether THIS spawn deserves the expensive tier).
  *
