@@ -11,6 +11,7 @@ import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync } fro
 import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { lintTask } from "./task-linter.js";
+import { machineShardHeaderLines } from "./machine-filing.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import type { LedgerRecord } from "./retro.js";
 
@@ -253,13 +254,8 @@ export function ciFrictionShardYaml(price: CiFrictionCausePrice, taskId: string)
     "  repo: remudero",
     "  depends_on: []",
     "  type: implement",
-    // PARKED: isDispatchEligible refuses `verify !== "auto"`, so this waits for a person.
-    "  verify: human",
-    "  risk: low",
-    "  status: queued",
-    "  attempts: 0",
-    // LAW 5: the author class rides the record.
-    "  author_class: machine",
+    // Unjudged until the machine-filing judge rules (operator ruling 2026-09-29); LAW 5's mark rides it.
+    ...machineShardHeaderLines([CI_FRICTION_REMEDIES_FILE]),
     `  origin: ${q(origin)}`,
     "  files:",
     `    - ${CI_FRICTION_REMEDIES_FILE}`,

@@ -3156,3 +3156,57 @@ closed: W1-T4568 stays parked (`verify: human` holds it from dispatch) with thre
 cold first read over 5 s, or the corpus past 5 GB / 10M rows). If it is built, node:sqlite remains the
 recommended store (in-process, no new dependency). Rollback: release W1-T4568 for build.
 
+
+## 2026-09-29 — OPERATOR RULING: an LLM judge in the middle of machine-filed work; the operator RATIFIES it to release
+
+*Operator-authored, recorded at the operator's instruction on 2026-09-29:*
+
+> "Why are they verifying human risk high? They shouldn't be. There should be an LLM judge in the
+> middle deciding what needs that level of escalation and what can be automated. Fix the CI friction
+> gardener so it doesn't make those mistakes or make the rules lighter so that these can flow
+> through… Think deeply and do research to get it right. Innovate as you go."
+
+And on the reviewer: "it's both. Fix the workers and make the judge less strict unless things are
+really risky or broken and require that."
+
+**THIS IS LAW 5's "A JUDGE THE OPERATOR RATIFIED".** `machineAuthorVerifyViolation` (W1-T2977) already
+lets a machine-authored record sit at `verify: auto` when it carries a `proceed` `risk_ruling` pinned to
+itself. This ruling ratifies `src/lib/machine-filing-judge.ts` as the judge that writes those rulings.
+
+- **FILERS NO LONGER CHOOSE `verify:` OR `risk:`.** Every machine filer (ci-friction, selector-shadow,
+  the CI-learning rung, and the feedback landing that carries its drafts) renders the one header in
+  `src/lib/machine-filing.ts`. `verify: human` there means UNJUDGED. `risk:` is read from what the
+  record touches: `high` (with `band_meaning: blast-radius`) only for secrets, auth, permissions, CI,
+  deploy, settings or the operator's own policy and rulings; otherwise `low`.
+- **THE JUDGE RULES, ON THE RECORD.** A daemon pass asks the risk judge about every unjudged or stale
+  machine record and pins the answer as `risk_ruling`. `proceed` → `verify: auto`, dispatchable.
+  `escalate` → stays `verify: human`, pinned, and its reasons are staged in the inbox. The rulings land
+  as one plan-only PR per pass through the ordinary review and merge gates; closing it declines them
+  and the judge does not re-ask until a record changes.
+- **ESCALATE ONLY WHAT IS REALLY RISKY OR BROKEN.** The judge is told: touching secrets, credentials,
+  auth or permissions; deleting data, branches or history; merge, deploy, infrastructure or review
+  policy; an irreversible action; or a finding it cannot verify from what it is shown. Everything else
+  flows — its PR still passes CI and review. A `proceed` the record cannot honour at `verify: auto`
+  (it would fail the linter) is escalated as broken, with the lint reason.
+- **EARNED AUTONOMY, NO FIXED BAR.** Each filer family's record — its merged tasks as credit, the ones
+  a person retired `closed`/`retired` as debit, plus its gardener's Beta credit beyond the Beta(3,1)
+  prior — is shown to the judge and sets the confidence a `low` verdict needs:
+  `1 − (1 − policy threshold) × 2 × mean`. An even record keeps `plan/policy.yaml`'s threshold; a family
+  that keeps helping needs less, one that keeps failing approaches certainty, and both recover as the
+  outcomes move. A `withdrawn` duplicate is neither credit nor debit.
+- **FAIL SAFE.** A judge that throws, times out or returns no verdict writes nothing: the record stays
+  parked, a `machine_judge.unavailable` row names the reason, and the next pass asks again. An outage is
+  never an escalation and never a release.
+- **ON THE RECORD, NOT THE LEDGER.** The verify-human release (2026-09-22) writes `ratify.approved` rows,
+  and the dispatcher reads releases from the LIVE ledger, which compaction prunes. Measured 2026-09-29:
+  151 task ids carry a release row across the rotations, 76 in the live ledger. A pinned ruling lives in
+  git and cannot lapse; editing the record changes its pin, which re-opens the question.
+- **THE VERIFY-HUMAN SWEEP HANDS MACHINE RECORDS TO THIS JUDGE.** W1-T3188's judge now routes and
+  releases only operator-authored `verify: human` records, through its existing arm; machine-authored
+  ones are routed (inbox on escalate) and released (pinned ruling) here.
+
+**NOT DECIDED HERE:** whether this judge may also release OPERATOR-authored `verify: human` records by
+pinned ruling. They stay on the verify-human sweep's existing path.
+
+Rollback: remove the `machine-judge` garden from the daemon's gardens and revert the filers to the
+literal header; records already pinned stay valid, and reverting any one to `verify: human` parks it.

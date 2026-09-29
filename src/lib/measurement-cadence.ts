@@ -67,6 +67,7 @@ import {
 } from "./coverage-improvement.js";
 import { handRunCensus, type HandRunCensusCadenceOpts, type HandRunCensusCadenceResult } from "./hand-run-census.js";
 import { lintTask } from "./task-linter.js";
+import { machineShardHeaderLines } from "./machine-filing.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import {
   judgeVerifyHumanShard,
@@ -3091,7 +3092,7 @@ export interface CiLearningShardDraft {
   action?: CiLearningAction;
   /** LAW 5: the author class rides the record. */
   author_class: "machine";
-  /** So `isDispatchEligible` refuses it and it PARKS for an operator. */
+  /** Unjudged: parked until the machine-filing judge rules on it (operator ruling 2026-09-29). */
   verify: "human";
   /** {@link CI_LEARNING_REMEDY_SURFACE}. */
   remedySurface: string;
@@ -3281,13 +3282,8 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string)
     "  repo: remudero",
     "  depends_on: []",
     "  type: implement",
-    // PARKED: isDispatchEligible refuses `verify !== "auto"`, so this record waits for a person.
-    "  verify: human",
-    "  risk: low",
-    "  status: queued",
-    "  attempts: 0",
-    // LAW 5: the author class rides the record.
-    "  author_class: machine",
+    // Unjudged until the machine-filing judge rules (operator ruling 2026-09-29); LAW 5's mark rides it.
+    ...machineShardHeaderLines([CI_LEARNING_LESSONS_FILE]),
     `  origin: ${q(draft.findingId)}`,
     // W1-T3052 — THE WATERMARK, so the lesson can later be judged on its OUTCOME. The origin names
     // only the cluster's FIRST pull request; efficacy needs the HIGHEST, because "did this gate
