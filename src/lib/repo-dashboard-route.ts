@@ -64,7 +64,7 @@ export interface RepoDashboardEntry {
 
 export interface RepoDashboardResult {
   generated_at: string;
-  source: "managed-repos" | "instance-registry+managed-repos";
+  source: "managed-repos" | "instance-registry" | "instance-registry+managed-repos";
   /** Absent only for standalone route callers that did not configure a registry read. */
   registry?: { state: "verified" } | { state: "unavailable"; reason: string };
   repos: RepoDashboardEntry[];
@@ -320,6 +320,8 @@ async function statStamp(path: string): Promise<string> {
 export function buildRepoDashboardRoute(deps: {
   /** Repository root containing the managed-repos state file. */
   root: string;
+  /** A validated gateway registry identity limits an instance route to its own ledger and plan. */
+  instanceRepository?: ManagedRepo;
   /** The same repo-tracked registry path served by GET /v1/registry; optional for standalone callers. */
   repoRegistryPath?: string;
   /** Injectable clock for a stable generated_at and telemetry window in route tests. */
@@ -365,9 +367,11 @@ export function buildRepoDashboardRoute(deps: {
     path: "/v1/repos",
     scope: "read",
     handler: async (_req, res) => {
-      const managed = loadManagedRepos(deps.root);
+      const managed = deps.instanceRepository ? [] : loadManagedRepos(deps.root);
       let registry: { state: "verified"; repos: ManagedRepo[] } | { state: "unavailable"; reason: string } | undefined;
-      if (deps.repoRegistryPath) {
+      if (deps.instanceRepository) {
+        registry = { state: "verified", repos: [deps.instanceRepository] };
+      } else if (deps.repoRegistryPath) {
         try {
           const parsed = parseInstanceRegistry(await readFile(deps.repoRegistryPath, "utf8"));
           registry = {
@@ -398,7 +402,7 @@ export function buildRepoDashboardRoute(deps: {
       const telemetry = measured?.outcome.ok ? measured.outcome.telemetry : repos.map(() => UNKNOWN);
       const body: RepoDashboardResult = {
         generated_at: measured ? fixedClock(measured.atMs).iso() : clock.iso(),
-        source: registry?.state === "verified" ? "instance-registry+managed-repos" : "managed-repos",
+        source: deps.instanceRepository ? "instance-registry" : registry?.state === "verified" ? "instance-registry+managed-repos" : "managed-repos",
         ...(registry ? { registry: registry.state === "verified" ? { state: "verified" as const } : registry } : {}),
         repos: identities.map((identity, i) => toDashboardEntry(identity.repo, telemetry[i], identity.source)),
       };
