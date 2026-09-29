@@ -42,7 +42,6 @@ import {
   isDispatchBreakerTripped,
   dispatchesWithoutNewOwnedPr,
   DEFAULT_MAX_TASK_DISPATCHES,
-  readLedgerUnionBounded,
   readLedgerUnionMemoized,
   type GhFailureReason,
   type GitHub,
@@ -56,6 +55,7 @@ import {
   FEEDBACK_STATUSES,
   feedbackEntryRepoPath,
   findFeedbackBySubmissionKey,
+  listFeedback,
   readFeedbackEntry,
   recentFeedbackFewShot,
   setFeedbackStatus,
@@ -335,7 +335,8 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
 }
 
 /** The 400 refusal for a `replyTo` that cannot be answered, else undefined. Status is read from fetched origin/main,
- *  which feedback landing writes to; the daemon's checkout lags it and is the fallback only when that read fails. */
+ *  which feedback landing writes to; the daemon's checkout lags it and is the fallback only when that read fails.
+ *  Main still says `grilling` until a reply's landing merges, so an answering entry already in the checkout refuses too. */
 function replyRefusal(root: string, replyTo: string): { refused: string } | undefined {
   let target: FeedbackEntry;
   let source = "origin/main";
@@ -350,8 +351,14 @@ function replyRefusal(root: string, replyTo: string): { refused: string } | unde
       return { refused: `replyTo names no known feedback entry "${replyTo}"` };
     }
   }
-  if (target.status === "grilling") return undefined;
-  return { refused: `feedback#${replyTo} is not parked at grilling (status: ${target.status}, read from ${source}) — nothing to answer` };
+  if (target.status !== "grilling") {
+    return { refused: `feedback#${replyTo} is not parked at grilling (status: ${target.status}, read from ${source}) — nothing to answer` };
+  }
+  const answering = listFeedback(root).find((e) => e.reply_to === replyTo);
+  if (!answering) return undefined;
+  return {
+    refused: `feedback#${replyTo} is parked at grilling (status: grilling, read from ${source}) but the checkout already holds feedback#${answering.id} answering it — nothing to answer`,
+  };
 }
 
 /**
@@ -862,6 +869,8 @@ export interface OperatorActivityProjectionInput {
   plan: Plan;
   projection: ReadonlyMap<string, StatusProjection>;
   ledgerLines: ReadonlyArray<Record<string, unknown>> & { present?: boolean; torn?: number };
+  /** The rows the workstream frontier reads, as `/v1/plan/view` does; defaults to `ledgerLines`. */
+  frontierLedgerLines?: ReadonlyArray<Record<string, unknown>>;
   githubReadFailed?: boolean;
   githubFailureReason?: string;
   now?: () => number;
@@ -1064,7 +1073,7 @@ export function buildOperatorActivityProjection(input: OperatorActivityProjectio
   }
   const activities = activityRows(input.ledgerLines, observedAt);
   const freshness: OperatorActivityFreshness = input.githubReadFailed ? "unknown" : "verified";
-  const workstreams = workstreamRows(input.plan, input.projection, input.ledgerLines, observedAt, input.githubReadFailed === true, input.githubFailureReason);
+  const workstreams = workstreamRows(input.plan, input.projection, input.frontierLedgerLines ?? input.ledgerLines, observedAt, input.githubReadFailed === true, input.githubFailureReason);
   const artifacts = artifactRows(input.plan, input.projection, workstreams, observedAt, freshness);
   const shownWorkstreams = workstreams.slice(0, OPERATOR_ACTIVITY_PLAN_KIND_MAX_ITEMS);
   const shownArtifacts = artifacts.slice(0, OPERATOR_ACTIVITY_PLAN_KIND_MAX_ITEMS);
@@ -1115,16 +1124,19 @@ export function buildOperatorActivityRoute(deps: PanelGraphDeps, readPlanSnapsho
       }
       try {
         const plan = readPanelPlan(deps, readPlanSnapshot);
-        const observedLedger = readLedgerUnionBounded(deps.ledgerPath);
+        // Activities come from the memoized union, so no refresh re-parses every rotation on serve's loop.
+        // ledger-read-intent: live — the frontier and projection read what /v1/plan/view reads.
+        const liveLedger = readLedgerLines(deps.ledgerPath);
         const projection = projectPlan(plan, {
           ledgerPath: deps.ledgerPath,
           github: deps.statusGithub,
-          readLedger: () => observedLedger,
+          readLedger: () => liveLedger,
         });
         sendJson(res, 200, buildOperatorActivityProjection({
           plan,
           projection,
-          ledgerLines: observedLedger,
+          ledgerLines: candidates,
+          frontierLedgerLines: liveLedger,
           githubReadFailed: deps.statusGithub.readFailed?.() === true,
           githubFailureReason: deps.statusGithub.readFailureReason?.(),
         }));

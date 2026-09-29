@@ -1,13 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { basename, join, relative } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
 import { startGarden } from "./gardener.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { gateFireRatesPath, type GateFireRateReport } from "./gate-fire-rate.js";
-import { ledgerLivePath } from "./ledger-union.js";
+import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { lintTask } from "./task-linter.js";
@@ -39,6 +39,20 @@ import type { LedgerRecord } from "./retro.js";
 // ── Pricing: rounds → causes, never fire count ──────────────────────────────────────────────
 
 export type CiFrictionCauseKind = "check" | "main_merge" | "conflict" | "fix_refusal";
+
+/** A failed history read is a failed garden pass, never a measured zero-friction corpus. */
+export function readCiFrictionLedgerRecords(stateDir: string): LedgerRecord[] {
+  const read = readLedgerUnionRecordsSync(stateDir, { requireArchives: true, refuseIncomplete: true });
+  if (!read.ok) {
+    const reason = read.archiveCount === 0
+      ? "no ledger rotations"
+      : read.unread.length > 0
+        ? `unread ledger file(s): ${read.unread.map((path) => basename(path)).join(", ")}`
+        : "incomplete ledger union";
+    throw new Error(`ci-friction ledger union unreadable: ${reason}`);
+  }
+  return read.rows as LedgerRecord[];
+}
 
 export interface CiFrictionCause {
   kind: CiFrictionCauseKind;
@@ -327,9 +341,20 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
     cheapFingerprint: () => {
       const head = execFileSync("git", ["-C", deps.repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
       const live = ledgerLivePath(deps.stateDir);
-      const size = existsSync(live) ? statSync(live).size : 0;
       const report = gateFireRatesPath(deps.stateDir);
-      return `${head}:${size}:${existsSync(report) ? statSync(report).size : 0}`;
+      const fileStamp = (path: string): string => {
+        if (!existsSync(path)) return "absent";
+        const stat = statSync(path);
+        return `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.mode}`;
+      };
+      // Rotations can change independently of the live ledger. Include their metadata so a
+      // changed or unreadable archive cannot be skipped by the garden's cheap-pass cache.
+      const archives = ledgerRotationEntries(readdirSync(deps.stateDir), deps.stateDir)
+        .map((entry) => {
+          const stat = statSync(entry.path);
+          return `${basename(entry.path)}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.mode}`;
+        }).join("|");
+      return `${head}:${fileStamp(live)}:${fileStamp(report)}:${archives}`;
     },
     inventory: () => {
       const rounds = ciFrictionRoundsFromLedger(sources.ledgerRecords());

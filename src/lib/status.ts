@@ -1299,9 +1299,26 @@ export function seedCountFromCircuitBreak(
 const INFRASTRUCTURE_REFUSAL_VERDICTS: ReadonlySet<string> = new Set([
   "blocked_containment",
   "blocked_isolation",
+  "blocked_toolchain",
   "blocked_transient",
   "task_already_merged",
 ]);
+
+/** A THROWN run's `failed` verdict (run-task.ts `endThrownRun`) at one of these stages is a deferral the harness
+ *  refused before any worker ran — 10 lock-contention refusals tripped W1-T4684's breaker on 2026-09-29. */
+const INFRASTRUCTURE_THROWN_STAGES: ReadonlySet<string> = new Set([
+  "managed_checkout.refresh",
+  "worktree.node_modules",
+  "preflight.containment",
+  "preflight.isolation",
+]);
+
+function infrastructureRefusal(line: Record<string, unknown>): string | undefined {
+  if (typeof line.verdict !== "string") return undefined;
+  if (INFRASTRUCTURE_REFUSAL_VERDICTS.has(line.verdict)) return line.verdict;
+  if (line.verdict === "failed" && typeof line.stage === "string" && INFRASTRUCTURE_THROWN_STAGES.has(line.stage)) return line.stage;
+  return undefined;
+}
 
 /** Options shared by {@link orphanedRunIds} and every counter built on it — never widened for
  *  anything else, so a caller cannot smuggle unrelated behavior through this bag. */
@@ -1415,11 +1432,10 @@ function dispatchStreakTally(
     if (
       line.task_id === taskId &&
       line.step === "verdict" &&
-      typeof line.verdict === "string" &&
-      INFRASTRUCTURE_REFUSAL_VERDICTS.has(line.verdict) &&
+      infrastructureRefusal(line) !== undefined &&
       typeof line.run_id === "string"
     ) {
-      refusalByRunId.set(line.run_id, line.verdict);
+      refusalByRunId.set(line.run_id, infrastructureRefusal(line)!);
     }
   }
   const orphanRunIds = orphanedRunIds(lines, taskId, index, opts);
@@ -1729,8 +1745,8 @@ export function evaluateDispatchBreakerDetailed(
   const hasNewOwnedPr = lastPrOpened(lines, taskId, index) !== undefined;
   const base = { freshCount, excludedDispatches, excludedByReason, maxDispatches, priorCount, hasNewOwnedPr };
 
-  if (priorCount !== undefined && freshCount < priorCount && !hasNewOwnedPr) {
-    // count regressed with nothing in the ledger to explain it
+  if (priorCount !== undefined && freshCount + excludedDispatches < priorCount && !hasNewOwnedPr) {
+    // count regressed with nothing in the ledger to explain it — runs now excluded as infrastructure DO explain it
     return { ...base, state: "indeterminate", ledgerState: "indeterminate" };
   }
 
