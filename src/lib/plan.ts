@@ -127,8 +127,6 @@ export interface Task {
   /** Decorative/initial-state only — real merge state is derived from GitHub (`deriveStatus` in
    *  lib/status.ts) and never written back here; see CLAUDE.md on why this is not a completion signal. */
   status: TaskStatus;
-  /** Temporary, task-scoped admission hold. Unlike status:blocked this is not a retirement;
-   *  a prior ratify.approved row cannot override it. */
   dispatch_hold?: boolean;
   attempts: number;
   /** Explicit PR number for a task executed by hand before it had a ledger entry (precedence
