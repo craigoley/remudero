@@ -83,6 +83,9 @@ export {
   escalateStarvation,
   escalateStarvationCleared,
 };
+// W1-T4678: the cheap-lane read BEFORE `escalateCircuitBreak` above — see stall-verifier.ts's
+// own doc for why this reads the evidence rather than paging straight from a tripped breaker.
+import { stallShardFingerprint, verifyStalledTask } from "./lib/stall-verifier.js";
 // Compatibility re-export target: lib/arm-auto-merge" (W1-T2887) — the auto-merge arm cluster
 // (armAutoMerge/armAutoMergeDetailed/attemptArm/armAutoMergeAtOpen/disarmAutoMerge/
 // armIfVerdictPermits/realArmDeps and their classifiers) moved to src/lib/arm-auto-merge.ts;
@@ -30378,6 +30381,44 @@ export function breakerDetailDep(
 }
 
 /**
+ * W1-T4678: the cheap-lane read BEFORE `escalateCircuitBreak` fires. Both dispatch lanes below
+ * (`drainCommand`/`daemonCommand`) share this ONE wiring rather than duplicating the
+ * evidence-gathering: reads the SAME breaker detail `breakerDetailDep` above logs and the SAME
+ * projection `isOpenPr`/`isCreditIndeterminate` already read (never a second GitHub call), hands
+ * it to `verifyStalledTask` (stall-verifier.ts). The plan calls for an offline replay before
+ * activating dispositions, so every tripped breaker still follows the established backstop
+ * escalation path. A provisional `requeue` verdict must not silently leave the breaker tripped.
+ */
+export function onCircuitBreakWithVerifier(
+  gate: Pick<ReturnType<typeof breakerGateFor>, "detailFor">,
+  projFor: (taskId: string) => { prState?: string; merged?: boolean } | undefined,
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+): (task: Task) => void {
+  return (task) => {
+    const detail = gate.detailFor(task.id);
+    const proj = projFor(task.id);
+    // Cheapest-projection read: the SAME snapshot `isOpenPr`/`isCreditIndeterminate` already
+    // consult at this call site, never a fresh GitHub round trip of this module's own.
+    const prStates: string[] = [];
+    if (proj?.merged) prStates.push("merged");
+    else if (proj?.prState === "OPEN") prStates.push("open");
+    else if (proj?.prState === "CLOSED") prStates.push("closed_unmerged");
+    verifyStalledTask(
+      task.id,
+      {
+        freshCount: detail.freshCount,
+        excludedByReason: detail.excludedByReason,
+        hasNewOwnedPr: detail.hasNewOwnedPr,
+        prStates,
+        shardHash: stallShardFingerprint(task),
+      },
+      { repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId },
+    );
+    escalateCircuitBreak(task, { owner: ctx.owner, repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, issues: ctx.issues });
+  };
+}
+
+/**
  * W1-T317: THE DAILY COST CEILING'S caller — {@link checkCostGovernor} (sweep.ts) is a pure
  * predicate that was built, tested, and never invoked from any dispatch path; this supplies that
  * call site for `drainCommand`'s and `daemonCommand`'s `DrainDeps`/`DaemonDeps.checkCostGovernor`
@@ -31266,7 +31307,8 @@ async function drainCommand(
         // W1-T314: the row records WHAT THE BREAKER SAW, from the same memoised
         // evaluation the predicate above answered from — never a second call.
         breakerDetail: breakerDetailDep(breakerGate),
-        onCircuitBreak: (t) => escalateCircuitBreak(t, { owner, repo, ledgerPath, runId }),
+        // W1-T4678: reads the evidence before paging — see onCircuitBreakWithVerifier's own doc.
+        onCircuitBreak: onCircuitBreakWithVerifier(breakerGate, (id) => lastProj?.get(id), { owner, repo, ledgerPath, runId }),
         // W1-T4025: repeated attributable lifetime pressure is a sensor, not a refusal wall. The
         // drain flushes one bounded batch after the pass and routes it through the existing judge;
         // a judge/proposal failure is logged and does not hold this or a sibling task.
@@ -33249,7 +33291,13 @@ export async function daemonCommand(
         // W1-T314: the row records WHAT THE BREAKER SAW, from the same memoised
         // evaluation the predicate above answered from — never a second call.
         breakerDetail: breakerDetailDep(breakerGate),
-        onCircuitBreak: (t) => escalateCircuitBreak(t, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        // W1-T4678: reads the evidence before paging — see onCircuitBreakWithVerifier's own doc.
+        onCircuitBreak: onCircuitBreakWithVerifier(breakerGate, (id) => lastProj?.get(id), {
+          owner: target.owner,
+          repo: target.repo,
+          ledgerPath,
+          runId,
+        }),
         // W1-T4025: repeated attributable lifetime pressure is a sensor, not a refusal wall. The
         // daemon flushes one bounded batch after the pass and routes it through the existing judge;
         // a judge/proposal failure is logged and does not hold this or a sibling task.
