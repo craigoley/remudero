@@ -18482,6 +18482,7 @@ interface ReviewCommandDeps {
    * avoid the live `resolveOwnerRepo()` read. Production callers never set this; explicit target
    * reviews validate the managed clone before target data is read. */
   enforceReviewSubjectCheckout?: boolean;
+  resolveOwnerRepo?: typeof resolveOwnerRepo;
 }
 
 type ReviewSubjectFailureReason =
@@ -18874,7 +18875,20 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // W1-T12d). Without it, resolveOwnerRepo() pins to repoRoot's origin (the main repo) and
   // `gh pr view` resolves the PR in the CWD — so a sandbox PR could never be gated. The lib
   // layer (runReview / postReviewStatus) already takes owner+repo; only the CLI was pinned.
-  const { owner, repo } = resolveReviewTarget(resolveOwnerRepo(), rest);
+  let defaults: { owner: string; repo: string } | undefined;
+  let defaultsFailure = "";
+  try {
+    defaults = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
+  } catch (e) {
+    const reason = String((e as Error)?.message ?? e).split("\n")[0]!;
+    defaultsFailure = reason;
+  }
+  if (!defaults && !(flagValue(rest, "--repo") ?? "").includes("/")) {
+    console.error(`rmd review: no origin remote resolvable here (${defaultsFailure}) — pass --repo <owner>/<repo>`);
+    return 1;
+  }
+  const selfTarget = defaults ?? { owner: "", repo: "" };
+  const { owner, repo } = resolveReviewTarget(selfTarget, rest);
   // W1-T265's REST transport, applied to this read — see reviewViewArgs for the 87 measured
   // failures this closes. The REST arm returns a raw pull row and is normalised by that task's
   // own `mapRestPr`; the `gh pr view` arm (a bare branch name, which REST cannot address) already
@@ -18910,7 +18924,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   const reviewSubject = resolveReviewSubjectCheckout({
     config,
     rest,
-    self: resolveOwnerRepo(),
+    self: selfTarget,
     target: { owner, repo },
   });
   const subjectCheckout = reviewSubject.ok || reviewSubjectFallbackAllowed(deps)
