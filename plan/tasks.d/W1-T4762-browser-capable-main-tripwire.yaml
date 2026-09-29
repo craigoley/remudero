@@ -1,5 +1,5 @@
 - id: W1-T4762
-  title: "The merged-tree tripwire runs a real Chromium test without installing Chromium and marks main red"
+  title: "Withdraw conditional Chromium install after #7772 fixed the red tripwire"
   repo: remudero
   depends_on: []
   type: implement
@@ -7,18 +7,21 @@
   principles: {tdd: strict}
   budget_usd: 12.00
   risk: high
-  origin: "2026-09-29 main-tripwire failure on merge #7757; full CI passed but browser launch failed"
+  origin: "2026-09-29 tripwire failure on #7757, subsequently fixed by #7772; optimize without reopening that failure"
   plan_refs: [W1-T1027, W1-T4472]
-  files: [.github/workflows/main-tripwire.yml, scripts/tripwire-browser-requirement.mjs, test/main-tripwire-browser-requirement.test.ts]
-  status: queued
+  files: [.github/workflows/main-tripwire.yml, scripts/tripwire-browser-requirement.mjs, src/lib/review.ts, test/main-tripwire-browser-requirement.test.ts]
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   rationale: |
-    The per-merge tripwire selects test/workflow-playwright-install.test.ts when a CI change
-    touches it. That suite launches Chromium, but the tripwire intentionally has no browser
-    install step. Main ad1054d1a therefore has a failed tripwire even though every required
-    CI shard passed. A red main-health signal must mean a code failure, not missing test setup.
+    The per-merge tripwire selected a Chromium-launching suite and turned main red while full
+    CI passed. PR #7772 already repaired the missing browser setup with an unconditional
+    Chromium install; its merged main-tripwire check passed. This task now removes that cost
+    from ordinary merges while preserving the repaired browser-test path. The selected-suite
+    detector is itself a gate instrument and must receive the same review protection.
   design: |
-    After selecting touched and affected test files, detect whether any selected file requires
+    Replace #7772's unconditional install after selecting touched and affected test files;
+    detect whether any selected file requires
     Playwright Chromium. Install only the pinned Chromium browser before the test step when it
     does; do not invoke apt or --with-deps, and keep the tripwire's bounded budget. Detection
     should derive from selected test source rather than a hand-maintained list of three names,
@@ -34,3 +37,10 @@
     Select the touched W1-T1027 browser suite on a clean runner: the conditional install must
     run and chromium.launch must succeed. Select an ordinary unit suite: no browser download.
     An unreadable selected test file must not answer that no browser is needed.
+  note: |
+    Operator follow-up audit, 2026-09-29: #7772 merged before this task was filed and its
+    main-tripwire check passed with the real Chromium-launching suite. The unconditional browser
+    install took nine seconds in that run. Conditional static-import detection would save that
+    time on ordinary merges but could miss a future browser suite using an indirect helper and
+    recreate false-red main health. The original root cause is already fixed; this optional
+    optimization is withdrawn, not claimed as built or satisfied. No implementation PR was pushed.
