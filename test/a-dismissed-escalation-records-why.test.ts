@@ -227,6 +227,25 @@ test("W1-T4677: mark-handled with disposition snoozed_until but no snoozedUntil 
   });
 });
 
+test("W1-T4677: snoozedUntil cannot accompany an acted disposition", async () => {
+  const root = tmpRoot();
+  const issues = fakeIssueCloser();
+  const deps = depsFor(root, issues);
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/escalation/mark-handled", {
+      taskId: "W1-T5",
+      issueUrl: "https://github.com/craigoley/remudero/issues/5",
+      class: "BLOCKED",
+      disposition: "acted",
+      snoozedUntil: "2026-10-05T00:00:00.000Z",
+    });
+    assert.equal(res.status, 400);
+    assert.match(JSON.stringify(await res.json()), /snoozedUntil is only valid/);
+  });
+  assert.deepEqual(issues.closed, [], "an invalid disposition pairing cannot close the issue");
+  assert.equal(readLedgerLines(deps.ledgerPath).length, 0);
+});
+
 // ── (2) escalation-precision.ts's pure arithmetic ───────────────────────────────────────────────
 
 test("W1-T4677: escalationClassPrecision counts acted-on rows over every disposed row for that class", () => {
