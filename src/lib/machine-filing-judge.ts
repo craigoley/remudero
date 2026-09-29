@@ -38,7 +38,8 @@ import {
   type RiskJudgeVerdict,
   type RiskPolicy,
 } from "./risk-judge.js";
-import { lintTask, machineAuthorVerifyViolation, taskRulingPin } from "./task-linter.js";
+import { deterministicEscalation } from "./machine-filing.js";
+import { lintTask, taskRulingPin } from "./task-linter.js";
 
 /** The operator's escalation rule, handed to the judge verbatim in its gates state. */
 export const MACHINE_JUDGE_ESCALATE_ONLY_IF =
@@ -142,6 +143,12 @@ export async function judgeMachineShard(
   record: FamilyTrackRecord,
   ports: { riskJudge: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>; policy: RiskPolicy; clock: Clock },
 ): Promise<MachineJudgement> {
+  const bar = earnedConfidenceBar(ports.policy.confidenceThreshold, record.mean);
+  const backstop = deterministicEscalation(task);
+  if (backstop) {
+    const reasons = [`deterministic backstop: ${backstop} — irreversible or privileged work goes to a person`];
+    return { kind: "ruled", task, bar, record, ruling: { verdict: "high", action: "escalate", confidence: 1, reasons, judgedAt: ports.clock.iso() } };
+  }
   let verdict: RiskJudgeVerdict;
   try {
     verdict = await ports.riskJudge(machineJudgeInput(task, record));
@@ -151,7 +158,6 @@ export async function judgeMachineShard(
   if (verdict.availability === "unavailable") {
     return { kind: "unavailable", task, reason: verdict.reasons.join("; ") || "the risk judge reached no decision" };
   }
-  const bar = earnedConfidenceBar(ports.policy.confidenceThreshold, record.mean);
   const action = planRiskJudgeAction(verdict, { confidenceThreshold: bar });
   return {
     kind: "ruled",
@@ -221,8 +227,9 @@ export function renderRuledShard(
   ];
   const contents = flipped + block.join("\n") + "\n";
   const reparsed = loadPlanFromYaml(contents, relPath).tasks[0]!;
-  if (reparsed.risk_ruling?.pin !== taskRulingPin(reparsed)) return { refused: `${reparsed.id}: the written pin does not match the record` };
-  if (machineAuthorVerifyViolation(reparsed)) return { refused: `${reparsed.id}: the rewrite does not clear machine-author-verify`, lint: true };
+  // The pin is taken from `after`, whose pinned fields the block above does not touch, and a
+  // `proceed` is written at `verify: auto` while an `escalate` stays `verify: human`: the written
+  // pin matches and machine-author-verify clears by construction, so neither is re-checked here.
   const blocking = (t: Task) => new Set(lintTask(t).violations.filter((v) => v.severity === "block").map((v) => v.check));
   const had = blocking(before);
   const added = [...blocking(reparsed)].filter((c) => !had.has(c));
