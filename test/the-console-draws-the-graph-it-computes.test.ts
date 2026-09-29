@@ -107,6 +107,7 @@ function panelGraphDeps(root: string): PanelGraphDeps {
 }
 
 test("W1-T2489: buildPanelGraphRoutes retains the existing routes alongside the operator-activity projection and inbox writes -- W1-T2489 itself added no new computation or second graph model", () => {
+  // W1-T4742: the read-only attention census is another view of this same graph, not a second model.
   const routes = buildPanelGraphRoutes(panelGraphDeps(tmpRoot()));
   const shape = routes.map((r) => `${r.method} ${r.path}`).sort();
   assert.deepEqual(shape, [
@@ -114,6 +115,7 @@ test("W1-T2489: buildPanelGraphRoutes retains the existing routes alongside the 
     "GET /v1/drain/preview",
     "GET /v1/feedback",
     "GET /v1/inbox",
+    "GET /v1/inbox/attention-census",
     "GET /v1/inbox/thread",
     "GET /v1/inbox/threads",
     "GET /v1/operator-activity",
@@ -149,4 +151,3 @@ test("W1-T2489: buildPanelGraphRoutes retains the existing routes alongside the 
 
 
 // ── (8) removing the fallback makes the empty-graph case render nothing ─────────────────────────
-
