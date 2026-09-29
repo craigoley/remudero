@@ -281,7 +281,8 @@
   cited: "2026-07-15"
 - id: proc-environ-is-an-exec-time-snapshot
   subsystem: containment
-  lifecycle: active
+  # knowledge gardener: retire proc-environ-is-an-exec-time-snapshot
+  lifecycle: superseded
   files: [ src/lib/worker.ts, src/lib/worker-provider.ts, src/lib/env.ts, src/lib/containment.ts ]
   fact: >-
     /proc/<pid>/environ is the environment block copied onto the process stack at
