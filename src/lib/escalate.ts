@@ -19,6 +19,7 @@ import type { Mount, Mounts } from "./mounts.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { benchmarkNonDispatchSpawn, withReceiptIdentity } from "./benchmark-run.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
+import { inferOperatorPresence } from "./presence.js";
 import type { WriteTier } from "./service.js";
 
 /**
@@ -425,6 +426,11 @@ export const FLEET_NOTICE_LABEL = "fleet-notice";
 // TRAP: reading this from any dispatch decision would resurrect the presence×risk matrix round iii
 // killed. FALSIFIER: test/away-mode-delivery.test.ts.
 // Why: the round-iii ratification that killed the dispatch matrix (P34) — docs/forensics/escalate.md.
+//
+// W1-T4674: the flag is still the OVERRIDE, but with no flag set, presenceMode() no longer
+// assumes attended — it infers from the operator's own recent activity (src/lib/presence.ts),
+// so an operator who forgot to flip the flag still reads away once they've gone quiet long enough.
+// FALSIFIER: test/presence-is-inferred-from-activity.test.ts.
 
 export type PresenceMode = "attended" | "away";
 
@@ -435,10 +441,15 @@ export function awayFilePath(root: string): string {
   return join(root, "state", "AWAY");
 }
 
-/** The operator's CURRENT presence mode. Default (no flag file, or a fresh root) is
- *  `"attended"` — away-mode routing is opt-in, never assumed. */
+/** The operator's CURRENT presence mode. The manual flag OVERRIDES outright when set (W1-T4674
+ *  design clause iii); with no flag file, presence is INFERRED from the operator's own recent
+ *  activity ({@link inferOperatorPresence}, src/lib/presence.ts) rather than assumed attended —
+ *  the operator can forget to set the flag, but inference cannot forget for them. A cold root
+ *  with no activity history at all still reads attended, the same safe default as before this
+ *  task (presence.ts's own `inferPresenceFromActivity` documents why). */
 export function presenceMode(root: string): PresenceMode {
-  return existsSync(awayFilePath(root)) ? "away" : "attended";
+  if (existsSync(awayFilePath(root))) return "away";
+  return inferOperatorPresence(root);
 }
 
 /** `rmd away on|off` — the operator sets the mode explicitly (MASTER-PLAN §7B/§4). `"away"` writes
