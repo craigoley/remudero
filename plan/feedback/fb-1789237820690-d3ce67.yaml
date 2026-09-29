@@ -11,11 +11,10 @@ raw: "Repair local CI-parity coverage scratch isolation: src/lib/ci-parity.ts
   worker homes inside a git work tree; hosted CI parity must remain unchanged."
 attachments: []
 origin: cli
-status: rejected
+status: new
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
-answered_by: null
