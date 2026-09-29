@@ -44,8 +44,8 @@ function assigned(id: string, provider: string, model: string): Record<string, u
 
 async function served(mountsRoot: string | undefined): Promise<UsageProjection> {
   const snapshot = deriveAnalyticsSnapshot([
-    assigned("a1", "claude", "claude-sonnet-5"),
-    assigned("a2", "claude", "claude-sonnet-5"),
+    assigned("a1", "claude", "claude-sonnet-5-5"),
+    assigned("a2", "claude", "claude-sonnet-5-5"),
     assigned("a3", "claude", "sonnet"),
     assigned("a4", "codex", "gpt-5.6-luna"),
   ], NOW);
@@ -59,9 +59,9 @@ async function served(mountsRoot: string | undefined): Promise<UsageProjection> 
 test("the usage-v1 route counts a claude alias under its concrete model", async () => {
   const usage = await served(process.cwd());
   const byModel = usage.routing.aggregates.last24h.byModel.map((row) => [row.provider, row.model, row.count]);
-  assert.deepEqual(byModel, [["claude", "claude-sonnet-5", 3], ["codex", "gpt-5.6-luna", 1]]);
+  assert.deepEqual(byModel, [["claude", "claude-sonnet-5-5", 3], ["codex", "gpt-5.6-luna", 1]]);
   assert.equal(usage.routing.aggregates.last24h.byModel[0]!.sharePercent, 75);
-  assert.deepEqual(usage.routing.aggregates.last7d.rows.map((row) => [row.model, row.count]), [["claude-sonnet-5", 3], ["gpt-5.6-luna", 1]]);
+  assert.deepEqual(usage.routing.aggregates.last7d.rows.map((row) => [row.model, row.count]), [["claude-sonnet-5-5", 3], ["gpt-5.6-luna", 1]]);
   assert.equal(usage.routing.recent.some((entry) => entry.selected.model === "sonnet"), true, "each run keeps the model it recorded");
 });
 
@@ -70,7 +70,7 @@ test("the usage-v1 route leaves models as recorded when no mounts table is reada
   try {
     for (const usage of [await served(undefined), await served(empty)]) {
       assert.deepEqual(usage.routing.aggregates.last24h.byModel.map((row) => [row.model, row.count]), [
-        ["claude-sonnet-5", 2],
+        ["claude-sonnet-5-5", 2],
         ["sonnet", 1],
         ["gpt-5.6-luna", 1],
       ]);
@@ -83,10 +83,10 @@ test("the usage-v1 route leaves models as recorded when no mounts table is reada
 
 test("claude model aliases resolve each bare alias to its capability's first candidate", () => {
   const aliases = claudeModelAliases(loadMounts(mountsPath(process.cwd())));
-  assert.equal(aliases.get("sonnet"), "claude-sonnet-5");
+  assert.equal(aliases.get("sonnet"), "claude-sonnet-5-5");
   assert.equal(aliases.get("opus"), "claude-opus-5-5");
   assert.equal(aliases.get("haiku"), "claude-haiku-4-5-20251001");
-  assert.equal(aliases.has("claude-sonnet-5"), false, "a concrete id is not an alias");
+  assert.equal(aliases.has("claude-sonnet-5-5"), false, "a concrete id is not an alias");
   assert.equal(aliases.has("gpt-5.6-terra"), false, "another vendor's deployment is not a claude alias");
   assert.equal(claudeModelAliases({ capabilities: { ladder: {}, claude: { sonnet: "balanced" }, codex: {} } } as never).size, 0, "no candidate list means no alias target");
 });
