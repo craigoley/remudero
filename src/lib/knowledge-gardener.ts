@@ -8,7 +8,7 @@ import { buildKnowledgeInventory, danglingWhyPointers, inventoryTotals, type Kno
 import { resolveCanonicalRuleId, slugifyRuleId, type MergedRuleGroup } from "./doctrine-lifecycle.js";
 import { GUARD_RETIREMENT_ZERO_STREAK } from "./retro-closure.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
-import { buildSkillEffectivenessReport, loadInjectableSkills, stageSkillLifecycleProposal } from "./skill-workshop.js";
+import { buildSkillEffectivenessReport, loadInjectableSkills, stageSkillLifecycleProposal, type InjectableSkill } from "./skill-workshop.js";
 import { updateProposalRegistry, type Proposal } from "./inbox.js";
 import {
   gardenStatePath,
@@ -61,7 +61,15 @@ export { gardenPrState, type GardenerDeps, type PendingVerdict, type PrState } f
 // candidate detection and, where it lands no PR (skill-lifecycle, guard-retirement propose through
 // the existing ratification inbox instead), never competes for the shared `merge`/`retire`/
 // `refresh` metric either.
-export type GardenActionClass = "merge" | "retire" | "refresh" | "rule-merge" | "skill-lifecycle" | "guard-retirement" | "repair-reference";
+export type GardenActionClass =
+  | "merge"
+  | "retire"
+  | "refresh"
+  | "rule-merge"
+  | "skill-lifecycle"
+  | "guard-retirement"
+  | "repair-reference"
+  | "stale-citation";
 export const GARDEN_ACTION_CLASSES: readonly GardenActionClass[] = [
   "merge",
   "retire",
@@ -70,6 +78,9 @@ export const GARDEN_ACTION_CLASSES: readonly GardenActionClass[] = [
   "skill-lifecycle",
   "guard-retirement",
   "repair-reference",
+  // W1-T4682: APPENDED last, same reason the comment above gives — every earlier class's Beta
+  // draw must stay byte-identical to before.
+  "stale-citation",
 ];
 
 export interface GardenAction {
@@ -80,8 +91,11 @@ export interface GardenAction {
   into?: string;
   /** For a repair-reference: the corrected path the dangling pointer is rewritten to. */
   to?: string;
-  /** For a rule-merge/repair-reference: the repo-relative path carrying the entry/pointer. */
+  /** For a rule-merge/repair-reference/stale-citation: the repo-relative path carrying the
+   *  entry/pointer/citation. */
   at?: string;
+  /** For a stale-citation: the exact `<kind>#<id>` token found stale, e.g. `learnings#foo`. */
+  citedId?: string;
   reason: string;
 }
 
@@ -416,6 +430,126 @@ export function applyRepairReferenceActions(root: string, actions: GardenAction[
   return changed.sort();
 }
 
+// ── W1-T4682: STALE-CITATION — a retracted or retired fact still lives in what cites it ────────
+//
+// An approved skill's own `## Evidence` (skill-workshop.ts's `renderSkillDraft`) and a doctrine
+// body cite the learning, run and PR ids they rest on with the SAME `[src: <kind>#<id>]` token
+// provenance.ts's CONTEXT linter already enforces on a rendered prompt (its `citation`/`CITATION`).
+// Nothing before this class ever read that token back OUT of an artifact once it was written, so a
+// learning superseded/quarantined/contested after a skill cited it, or a run/PR the fleet later
+// reverted, kept being repeated as if it still held — Hindsight's retractions.py closes the same
+// gap for its own corpus. This class only FLAGS: there is no single correct replacement text for a
+// stale citation, so it stages a reviewed proposal into the SAME ratification inbox
+// SKILL-LIFECYCLE/GUARD-RETIREMENT already use, never a silent rewrite.
+
+/** The three evidence kinds an approved skill or doctrine body cites itself with. */
+export type CitationKind = "learnings" | "run" | "PR";
+
+export interface Citation {
+  kind: CitationKind;
+  id: string;
+}
+
+// Exported (never a bare module-local) so a test can drive both arms directly off the real
+// pattern — negative-reachability-ratchet.test.ts's fixture-less bar, the same reason
+// skill-workshop.ts's `READ_WRAPPER_RE` is exported.
+export const CITATION_TOKEN_RE = /\[src:\s*(learnings|run|pr)#([\w.-]+)\]/gi;
+
+/** Every `[src: …]` citation an artifact's OWN text carries — provenance.ts's `CITATION` token,
+ *  read here off the artifact a worker actually reads rather than the prompt it was offered in. */
+export function evidenceCitations(text: string): Citation[] {
+  const out: Citation[] = [];
+  for (const m of text.matchAll(CITATION_TOKEN_RE)) {
+    const lower = m[1]!.toLowerCase();
+    out.push({ kind: (lower === "pr" ? "PR" : lower) as CitationKind, id: m[2]! });
+  }
+  return out;
+}
+
+/** Lifecycle values a `learnings#` citation is stale under — every OTHER value (`active`, or a
+ *  lifecycle no learning ever carries) reads as still live. */
+const STALE_LEARNING_LIFECYCLES = new Set(["superseded", "quarantined", "contested"]);
+
+/** Why a cited id no longer holds, or `undefined` when it is still live (including an id this
+ *  function has no evidence about — an UNKNOWN id is never flagged, only a KNOWN-stale one is). */
+export function citationStatus(
+  c: Citation,
+  learningLifecycle: ReadonlyMap<string, string>,
+  revertedRunIds: ReadonlySet<string>,
+  revertedPrNumbers: ReadonlySet<number>,
+): string | undefined {
+  if (c.kind === "learnings") {
+    const lifecycle = learningLifecycle.get(c.id);
+    return lifecycle && STALE_LEARNING_LIFECYCLES.has(lifecycle) ? lifecycle : undefined;
+  }
+  if (c.kind === "run") return revertedRunIds.has(c.id) ? "reverted" : undefined;
+  const n = Number(c.id);
+  return Number.isInteger(n) && revertedPrNumbers.has(n) ? "reverted" : undefined;
+}
+
+/** Every approved skill's or doctrine rule's OWN citation whose id {@link citationStatus} finds
+ *  stale — one action per (artifact, citation) pair, so a skill citing three dead ids gets three
+ *  proposals, not one that silently drops the other two. `revertedRunIds`/`revertedPrNumbers`
+ *  default to empty: nothing here mines git for a revert on its own (a future producer's job); an
+ *  empty set only ever means fewer proposals, never a false one. */
+export function staleCitationCandidates(opts: {
+  items: KnowledgeItem[];
+  approvedSkills: readonly InjectableSkill[];
+  revertedRunIds?: ReadonlySet<string>;
+  revertedPrNumbers?: ReadonlySet<number>;
+}): GardenAction[] {
+  const learningLifecycle = new Map(
+    opts.items.filter((i) => i.kind === "learning").map((i) => [bare(i.id), i.lifecycle ?? "active"] as const),
+  );
+  const revertedRunIds = opts.revertedRunIds ?? new Set<string>();
+  const revertedPrNumbers = opts.revertedPrNumbers ?? new Set<number>();
+  const artifacts = [
+    ...opts.approvedSkills.map((s) => ({ name: s.name, at: `.claude/skills/${s.name}/SKILL.md`, text: s.body })),
+    ...opts.items.filter((i) => i.kind === "doctrine").map((i) => ({ name: doctrineHeadline(i.text) ?? i.id, at: i.path, text: i.text })),
+  ].sort((a, b) => (a.at === b.at ? (a.name < b.name ? -1 : 1) : a.at < b.at ? -1 : 1));
+  const actions: GardenAction[] = [];
+  for (const artifact of artifacts) {
+    for (const c of evidenceCitations(artifact.text)) {
+      const status = citationStatus(c, learningLifecycle, revertedRunIds, revertedPrNumbers);
+      if (!status) continue;
+      actions.push({
+        class: "stale-citation",
+        target: artifact.name,
+        at: artifact.at,
+        citedId: `${c.kind}#${c.id}`,
+        reason: `Cites ${c.kind}#${c.id}, now ${status}.`,
+      });
+    }
+  }
+  return actions;
+}
+
+export function staleCitationProposalId(action: GardenAction): string {
+  return `stale-citation:${action.at}:${action.citedId}`;
+}
+
+/** Stage one stale citation as a reviewed inbox proposal — {@link stageGuardRetirementProposal}'s
+ *  own idempotency shape: an unchanged status is left alone, a changed one refreshes the
+ *  proposal's own evidence, and nothing here ever edits the citing artifact itself. */
+export function stageStaleCitationProposal(registryPath: string, action: GardenAction): void {
+  const id = staleCitationProposalId(action);
+  const proposal: Proposal = {
+    id,
+    summary:
+      `'${action.target}' (${action.at}) cites ${action.citedId}: ${action.reason} Approving this proposal is a ` +
+      `record that a person reviewed the citation; the artifact's own text is a separate, hand-reviewed edit.`,
+    evidenceAnchors: [],
+  };
+  updateProposalRegistry(registryPath, (current) => {
+    const idx = current.findIndex((p) => p.id === id);
+    if (idx === -1) return [...current, proposal];
+    if (current[idx]!.summary === proposal.summary) return null; // already staged with the same status
+    const next = [...current];
+    next[idx] = { ...current[idx]!, ...proposal };
+    return next;
+  });
+}
+
 /** `state/last-retro.json`'s own shape (`run-task.ts`'s `retro` command writes it; see
  *  `guard_zero_streak: guardZeroStreakRecord(...)`, W1-T2875) — read here, never re-derived, so
  *  GUARD-RETIREMENT proposes only what the retro pipeline already measured. */
@@ -509,9 +643,12 @@ export function planGardenPass(opts: {
   switchedOff?: (c: GardenActionClass) => boolean;
   skillUsage?: SkillUsage;
   approvedSkillNames?: string[];
+  approvedSkills?: InjectableSkill[];
   guardZeroStreak?: Record<string, number>;
   root?: string;
   testPins?: Record<string, string>;
+  revertedRunIds?: ReadonlySet<string>;
+  revertedPrNumbers?: ReadonlySet<number>;
 }): GardenPlan {
   return planGarden({ classes: GARDEN_ACTION_CLASSES, state: toGeneric(opts.state), rng: opts.rng, switchedOff: opts.switchedOff, candidates: () => candidateActions(opts).actions });
 }
@@ -522,9 +659,12 @@ function candidateActions(opts: {
   rng: () => number;
   skillUsage?: SkillUsage;
   approvedSkillNames?: string[];
+  approvedSkills?: InjectableSkill[];
   guardZeroStreak?: Record<string, number>;
   root?: string;
   testPins?: Record<string, string>;
+  revertedRunIds?: ReadonlySet<string>;
+  revertedPrNumbers?: ReadonlySet<number>;
 }): { actions: GardenAction[]; kept: GardenAction[] } {
   const actions: GardenAction[] = duplicateLearningPairs(opts.items).map(([newer, older]) => ({
     class: "merge" as const,
@@ -552,6 +692,14 @@ function candidateActions(opts: {
   if (opts.root) actions.push(...repairReferenceCandidates(opts.root));
   actions.push(...guardRetirementCandidates(opts.guardZeroStreak ?? {}));
   actions.push(...skillLifecycleCandidates(opts.skillUsage ?? {}, opts.approvedSkillNames ?? [], opts.rng));
+  actions.push(
+    ...staleCitationCandidates({
+      items: opts.items,
+      approvedSkills: opts.approvedSkills ?? [],
+      revertedRunIds: opts.revertedRunIds,
+      revertedPrNumbers: opts.revertedPrNumbers,
+    }),
+  );
   return withoutTestPinned(actions, opts.testPins ?? {});
 }
 
@@ -717,6 +865,9 @@ interface KnowledgeInventory {
   usage: LearningUsage;
   skillUsage: SkillUsage;
   approvedSkillNames: string[];
+  /** W1-T4682: the approved skills' own bodies, so STALE-CITATION can read the `[src: …]` tokens
+   *  they carry without re-reading `.claude/skills/` a second time. */
+  approvedSkills: InjectableSkill[];
   guardZeroStreak: Record<string, number>;
   testPins: Record<string, string>;
 }
@@ -737,12 +888,14 @@ export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): Garden
     inventory: () => {
       const items = buildKnowledgeInventory(deps.repoRoot, { memoryDirs: deps.memoryDirs });
       const learningIds = items.filter((i) => i.kind === "learning").map((i) => bare(i.id));
+      const approvedSkills = loadInjectableSkills(approvedSkillsDir);
       return {
         items,
         testPins: testPinnedLearnings(deps.repoRoot, learningIds),
         usage: readLearningUsage(`${deps.stateDir}/learnings-usage.json`),
         skillUsage: readSkillUsage(skillUsagePath(deps.stateDir)),
-        approvedSkillNames: loadInjectableSkills(approvedSkillsDir).map((s) => s.name),
+        approvedSkillNames: approvedSkills.map((s) => s.name),
+        approvedSkills,
         guardZeroStreak: readGuardZeroStreak(deps.stateDir),
       };
     },
@@ -763,10 +916,13 @@ export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): Garden
       const repaired = applyRepairReferenceActions(ws.root, plan.actions);
       const refreshed = plan.acting.includes("refresh") ? ws.refreshAssertions() : [];
       // Neither of these touches the workspace: both stage a proposal into the daemon's OWN state
-      // dir, outside the checkout this pass would otherwise land as a PR.
+      // dir, outside the checkout this pass would otherwise land as a PR. STALE-CITATION (W1-T4682)
+      // is the same shape — there is no single correct rewrite for a stale citation, so it stages
+      // a proposal too, rather than editing the citing skill or doctrine body itself.
       for (const a of plan.actions) {
         if (a.class === "skill-lifecycle") stageSkillLifecycleForAction(deps.stateDir, deps.repoRoot, a);
         if (a.class === "guard-retirement") stageGuardRetirementProposal(inboxPath, a);
+        if (a.class === "stale-citation") stageStaleCitationProposal(inboxPath, a);
       }
       const changed = [...new Set([...applied.paths, ...ruleMerged, ...repaired, ...refreshed])];
       if (changed.length === 0) return undefined;
