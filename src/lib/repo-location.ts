@@ -30,6 +30,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveOwnerRepoAt } from "./owner-repo.js";
 
 // W1-T2922: keep the layout API surfaced from repo-location for the review proof, while
 // pure library callers import repo-layout.js directly so they do not evaluate repoRoot at import.
@@ -84,10 +85,5 @@ export const repoRoot = resolveRepoRoot(process.argv.slice(2), process.cwd());
 
 /** Owner + repo, parsed from THIS repo's origin url — no hardcoded slug in the tree. */
 export function resolveOwnerRepo(): { owner: string; repo: string } {
-  const url = execFileSync("git", ["-C", repoRoot, "config", "--get", "remote.origin.url"], {
-    encoding: "utf8",
-  }).trim();
-  const m = url.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/);
-  if (!m) throw new Error(`could not parse owner/repo from origin url`);
-  return { owner: m[1], repo: m[2] };
+  return resolveOwnerRepoAt(repoRoot);
 }
