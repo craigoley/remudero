@@ -122,6 +122,12 @@
       "grepHint": "Base-ref contract"
     },
     {
+      "path": "docs/ci-friction-remedies.md",
+      "title": "CI friction remedies",
+      "summary": "This file is the ledger of remedies for the causes the ci-friction gardener (W1-T4435, `src/lib/ci-friction-gardener.ts`) prices. The gardener files one parked…",
+      "grepHint": "CI friction remedies"
+    },
+    {
       "path": "docs/cli-reference.md",
       "title": "rmd CLI reference",
       "summary": "Every `rmd <command>` this binary dispatches, rendered from the same `COMMANDS` registry `rmd --help` and `rmd <cmd> --help` render from (W1-T47) -- this file…",

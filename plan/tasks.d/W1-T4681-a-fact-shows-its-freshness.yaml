@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-memory-1790600000"
   plan_refs: []
   files: [src/lib/learnings.ts, test/a-fact-shows-its-freshness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: 20 of 85 learnings carry an assertion; the GitOrigin + lineSha256 drift check exists (src/lib/learnings.ts
