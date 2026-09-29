@@ -1,0 +1,41 @@
+- id: W1-T4786
+  title: "A CONFIG CANARY'S SHADOW EVIDENCE PREDATES ITS LATER START TIME — preserve the measured timestamp and recover a merged pre-exposure refusal"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  origin: "operator request 2026-09-29: repair self-improvement paths; observed PR #7141 canary unmeasurable"
+  files: [src/lib/config-gardener.ts, test/worker-config-tends-itself.test.ts]
+  rationale: |
+    Config candidates verify shadow evidence at inventory.nowIso, but runConfigGarden makes
+    their promotion window start at a later clock.iso() after landing the PR. The live gap
+    for PR #7141 was 24.864 seconds: observedAt 06:00:20.104Z versus window start
+    06:00:44.968Z. That makes the unchanged observation predate the window, so enterCanary
+    stores unmeasurable. The live canary for merged PR #7141 has no exposedAt;
+    stepCanary keeps returning waiting and the config scope stays held until its 21-day expiry.
+    The existing canary suite and rollback path make this a Rule 19 span.
+  design: |
+    Anchor the new promotion window to the verified shadow snapshot timestamp, preserving the
+    evidence's actual observedAt. For an older canary already refused before exposure, read
+    its PR state: open or unreadable stays pending; closed unmerged debits without rollback;
+    merged triggers an exact-edits rollback PR and debits only after the rollback is safely
+    published or the edits are proven already reverted. A partial or unreadable rollback
+    leaves the pending record in place with a named failure for repair. Never turn missing
+    measurements into a successful canary or discard a merged side effect silently.
+  acceptance:
+    - claim: "shadow evidence remains valid when the wall clock advances before a canary is recorded"
+      proof: 'grep: test("W1-T4786: shadow snapshot survives clock advancement before landing" in test/worker-config-tends-itself.test.ts'
+    - claim: "a merged pre-exposure refusal opens an exact rollback and releases its pending class"
+      proof: 'grep: test("W1-T4786: merged unmeasurable shadow rolls back and releases pending" in test/worker-config-tends-itself.test.ts'
+    - claim: "a refusal whose PR status is unknown does not assume exposure"
+      proof: 'grep: test("W1-T4786: unknown pre-exposure PR waits without rollback" in test/worker-config-tends-itself.test.ts'
+    - claim: "a partial rollback cannot settle the canary"
+      proof: 'grep: test("W1-T4786: partial rollback refuses before any file changes" in test/worker-config-tends-itself.test.ts'
+  falsifier: |
+    Restore the later clock timestamp and the clock-advancement test fails. Restore the
+    pre-exposure waiting path and the merged-refusal test fails. Remove the exact rollback
+    guard and the partial-rollback test fails.
