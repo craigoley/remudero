@@ -39,12 +39,12 @@ function runs(job: string): string {
 }
 
 test("W1-T3302: the slow harness writes evidence, uploads it, and the proposal collector reads it", () => {
-  const slow = WORKFLOW.jobs["test-slow"];
-  assert.match(runs("test-slow"), /RMD_TEST_DURATION_OUTPUT="\$\{RUNNER_TEMP\}\/test-duration\/slow\.json"/);
-  assert.match(runs("test-slow"), /npm run --silent test:slow -- --base "origin\/\$\{GITHUB_BASE_REF\}"/);
+  const slow = WORKFLOW.jobs["test-slow-shard"];
+  assert.match(runs("test-slow-shard"), /RMD_TEST_DURATION_OUTPUT="\$\{RUNNER_TEMP\}\/test-duration\/slow\.json"/);
+  assert.match(runs("test-slow-shard"), /npm run --silent test:slow -- --shard \$\{\{ matrix\.shard \}\}\/2 --base "origin\/\$\{GITHUB_BASE_REF\}"/);
   const upload = slow.steps?.find((step) => step.name === "Upload slow-tier duration evidence (structured Node test events, W1-T3302)");
   assert.match(upload?.uses ?? "", /^actions\/upload-artifact@[0-9a-f]{40}$/);
-  assert.equal(upload?.with?.name, "test-duration-slow");
+  assert.equal(upload?.with?.name, "test-duration-slow-${{ matrix.shard }}");
   assert.equal(upload?.with?.path, "${{ runner.temp }}/test-duration");
   const download = WORKFLOW.jobs["flake-retry-aggregate"].steps?.find(
     (step) => step.name === "Download every duration evidence artifact (best-effort)",

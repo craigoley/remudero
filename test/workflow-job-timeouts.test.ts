@@ -87,12 +87,12 @@ test("W1-T1009: the Playwright-carrying jobs are bounded inside the heavy band",
   // drifting.
   assert.deepEqual(
     [...playwrightJobs].sort(),
-    // W1-T2904 added the third: `test-slow` runs the manifest's >=5000ms tier, and 9 of those 106
+    // W1-T2904 added the third: `test-slow-shard` runs the manifest's >=5000ms tier, and 9 of those 106
     // files are the Playwright-driven serve.* suites, so it needs the install step and is banded
     // heavy with the other two. This list is the deliberate reconsideration the comment above asks
     // for, not a silent drift.
-    ["ci", "coverage-ratchet", "test-slow"].sort(),
-    "expected exactly `ci`, `coverage-ratchet` and `test-slow` to carry a `playwright install` step — " +
+    ["ci", "coverage-ratchet", "test-slow-shard"].sort(),
+    "expected exactly `ci`, `coverage-ratchet` and `test-slow-shard` to carry a `playwright install` step — " +
       "if this changed, the heavy/light timeout banding needs to change with it",
   );
 

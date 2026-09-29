@@ -141,6 +141,8 @@ jobs:
         "squash-trailer-gate",
         "gate-monotonic",
         "flake-retry-aggregate",
+        "test-slow-shard (1/2)",
+        "test-slow-shard (2/2)",
         "ci-shard (1/8)",
         "ci-shard (2/8)",
         "ci-shard (3/8)",

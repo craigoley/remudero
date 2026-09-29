@@ -98,8 +98,8 @@ test("W1-T4436: every shard consumer derives one shard count", () => {
   assert.ok(!ciYamlText.includes("--shard 1/4"), "test-slow's plan-reading probe must also read 8, not 4");
   assert.ok(ciYamlText.includes("--shard 1/8"), "test-slow's plan-reading probe must read the canonical 8");
 
-  // test-slow (not itself a matrix job) derives the same count for its own probe shard.
-  const testSlowStep = stepNamed(doc.jobs["test-slow"], "Establish whether the exact plan-reading matrix owns this diff (W1-T3191)");
+  // The slow matrix still probes the canonical fast-matrix shard count for plan-reading.
+  const testSlowStep = stepNamed(doc.jobs["test-slow-shard"], "Establish whether the exact plan-reading matrix owns this diff (W1-T3191)");
   assert.match(testSlowStep.run!, /--shard 1\/8\b/);
 
   // ci-gate.yml's own registry (test/every-pr-check-is-required-or-advisory.test.ts's own

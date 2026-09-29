@@ -23,7 +23,7 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 type Step = { name?: string; id?: string; run?: string };
 type CiDoc = { on: Record<string, unknown>; jobs: Record<string, { if?: string; steps?: Step[] }> };
 const doc = parseYaml(readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8")) as CiDoc;
-const job = doc.jobs["test-slow"]!;
+const job = doc.jobs["test-slow-shard"]!;
 const steps = job.steps!;
 const TIER_CHECK = steps.find((s) => s.run?.includes("test:tier:check"))!.run!;
 const PLAN_READING = steps.find((s) => s.id === "plan-reading")!.run!;
@@ -67,7 +67,8 @@ function runJob(event: "push" | "pull_request", diffClass = "SOURCE"): { calls: 
     if (eq > 0) outputs[line.slice(0, eq)] = line.slice(eq + 1);
   }
   bash(
-    RUN_SLOW.replaceAll("${{ steps.plan-reading.outputs.established }}", outputs.established ?? "")
+    RUN_SLOW.replaceAll("${{ matrix.shard }}", "1")
+      .replaceAll("${{ steps.plan-reading.outputs.established }}", outputs.established ?? "")
       .replaceAll("${{ steps.plan-reading.outputs.class }}", outputs.class ?? ""),
   );
   return { calls: existsSync(log) ? readFileSync(log, "utf8") : "", out, outputs };
@@ -75,12 +76,12 @@ function runJob(event: "push" | "pull_request", diffClass = "SOURCE"): { calls: 
 
 test("W1-T4396: the push lane runs the slow tier", () => {
   assert.ok("push" in doc.on, "ci.yml must still trigger on a push to main");
-  assert.equal(job.if, undefined, "test-slow must not carry the PR-only job guard, or no push ever runs it");
+  assert.equal(job.if, undefined, "test-slow-shard must not carry a PR-only job guard, or no push ever runs it");
   const push = runJob("push");
   assert.deepEqual(push.outputs, { class: "PUSH", established: "false" });
   assert.equal(
     push.calls.trim(),
-    "node scripts/test-with-retry.mjs node scripts/test-tier-manifest.mjs --run slow --base HEAD",
+    "node scripts/test-with-retry.mjs node scripts/test-tier-manifest.mjs --run slow --shard 1/2 --base HEAD",
     "a push runs exactly the slow tier, once, behind the failed-file retry — and no PR-only tier check",
   );
   assert.match(push.out, /W1-T4396: push to main — running the slow tier/);
@@ -99,6 +100,30 @@ test("W1-T4396: a source pull request still leaves the slow tier to coverage-rat
   // A test-only pull request (not SOURCE, not established) still runs the PR form of the tier.
   const testOnly = runJob("pull_request", "TEST_ONLY");
   assert.equal(testOnly.outputs.class, "TEST_ONLY");
-  assert.match(testOnly.calls, /^npm run --silent test:slow -- --base origin\/main$/m);
+  assert.match(testOnly.calls, /^npm run --silent test:slow -- --shard 1\/2 --base origin\/main$/m);
   assert.doesNotMatch(testOnly.calls, /test-with-retry/);
+});
+
+test("W1-T4756: a plan-reading pull request whose candidate enumeration succeeds establishes the exact matrix", () => {
+  // scripts/workflow-guard-mutation-baseline.json recorded this step's `--list-plan-reading-suites`
+  // fail-closed guard (`if ! node ... --list-plan-reading-suites ...; then established=false; exit
+  // 0; fi`) as UNCOVERED under this job's OLD name, `test-slow`, with its own reason: "drives the
+  // classifier, not this step's shell, so nothing distinguishes it today." W1-T4756 renamed the job
+  // to `test-slow-shard` (splitting it into a balanced two-shard matrix), which moves the guard's
+  // job-qualified key and — since origin/main still carries the pre-split job name — makes the
+  // caused-vs-inherited merge-base split (scripts/workflow-guard-mutation-ratchet.mjs) unable to
+  // recognize it as the SAME, already-accepted gap: an always-fail-closed mutant on this line would
+  // read as a brand-new, uncovered guard rather than an inherited one, and BLOCK the `ci` job's
+  // "Workflow guard mutation" step (it runs whenever ci.yml is in the diff, which this PR's own
+  // ci.yml change guarantees). Rather than carry the gap forward under a new key, this closes it: a
+  // PLAN_ONLY diff whose enumeration genuinely succeeds must reach the following `--select-
+  // candidates` check and establish the matrix — something an unconditionally fail-closed mutant of
+  // this guard could never do, regardless of what the real command returned.
+  const pr = runJob("pull_request", "PLAN_ONLY");
+  assert.equal(pr.outputs.class, "PLAN_ONLY");
+  assert.equal(
+    pr.outputs.established,
+    "true",
+    "a successful --list-plan-reading-suites enumeration must not be treated as a failure",
+  );
 });
