@@ -2509,6 +2509,59 @@ export interface components {
     InboxThreadsResult: {
       threads: (InboxThreadSummary)[];
     };
+    InboxAttentionCensusSourceState: "observed" | "partial" | "unavailable";
+    InboxAttentionCensusFact: {
+      source: string;
+      detail: string;
+    };
+    InboxAttentionCensusItem: {
+      threadId: string;
+      proposalId: string;
+      taskId?: string;
+      kind: string;
+      /** Last-speaker direction, not proof of actionability. */
+      waitingOn: "operator" | "daemon";
+      attention: "decision" | "reply" | "in_progress" | "history" | "awaiting_daemon";
+      /** Current source classification or unavailable. */
+      classification: string;
+      whyMe: string;
+      sourceFacts: (InboxAttentionCensusFact)[];
+      retiredReason?: string;
+    };
+    /** Read-only core-daemon census. Snapshot counts may overcount actionability when a release source is missing; verifiedCounts are conservative lower bounds. No proposal is changed. */
+    InboxAttentionCensusResult: {
+      scope: "core";
+      state: "complete" | "partial";
+      countSemantics: "observed_snapshot_not_verified";
+      /** Deterministic SHA-256 of the source-qualified response before this field. */
+      snapshotKey: string;
+      sources: {
+        plan: InboxAttentionCensusSourceState;
+        registry: InboxAttentionCensusSourceState;
+        liveLedger: InboxAttentionCensusSourceState;
+        archiveLedger: InboxAttentionCensusSourceState;
+        githubProjection: InboxAttentionCensusSourceState;
+      };
+      /** Observed current thread population, not a verified actionable count when partial. */
+      counts: {
+        decision: number;
+        reply: number;
+        in_progress: number;
+        history: number;
+        awaiting_daemon: number;
+      };
+      /** Conservative lower bounds; zero when any needed source is partial. */
+      verifiedCounts: {
+        decision: number;
+        reply: number;
+        in_progress: number;
+        history: number;
+        awaiting_daemon: number;
+      };
+      kinds: Record<string, number>;
+      items: (InboxAttentionCensusItem)[];
+      discrepancy?: "active_human_ask_has_release_receipt";
+    };
     /** GET /v1/inbox/thread's body (src/lib/inbox-responder.ts's `ThreadDetailView`, which extends `ThreadSummaryView`; flattened here because this generator's subset has no allOf). */
     InboxThreadDetail: {
       threadId: string;
@@ -4020,6 +4073,16 @@ export interface paths {
     get: {
       responses: {
           "200": InboxThreadsResult;
+          "401": Error;
+          "403": Error;
+          "500": InboxRefusal;
+        };
+    };
+  };
+  "/v1/inbox/attention-census": {
+    get: {
+      responses: {
+          "200": InboxAttentionCensusResult;
           "401": Error;
           "403": Error;
           "500": InboxRefusal;

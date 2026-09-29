@@ -6774,6 +6774,125 @@ components:
           items:
             $ref: "#/components/schemas/InboxThreadSummary"
 
+    InboxAttentionCensusSourceState:
+      type: string
+      enum: [observed, partial, unavailable]
+
+    InboxAttentionCensusFact:
+      type: object
+      required: [source, detail]
+      properties:
+        source:
+          type: string
+        detail:
+          type: string
+
+    InboxAttentionCensusItem:
+      type: object
+      required: [threadId, proposalId, kind, waitingOn, attention, classification, whyMe, sourceFacts]
+      properties:
+        threadId:
+          type: string
+        proposalId:
+          type: string
+        taskId:
+          type: string
+        kind:
+          type: string
+        waitingOn:
+          type: string
+          enum: [operator, daemon]
+          description: Last-speaker direction, not proof of actionability.
+        attention:
+          type: string
+          enum: [decision, reply, in_progress, history, awaiting_daemon]
+        classification:
+          type: string
+          description: Current source classification or unavailable.
+        whyMe:
+          type: string
+        sourceFacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxAttentionCensusFact"
+        retiredReason:
+          type: string
+
+    InboxAttentionCensusResult:
+      type: object
+      description: >
+        Read-only core-daemon census. Snapshot counts may overcount actionability when a release
+        source is missing; verifiedCounts are conservative lower bounds. No proposal is changed.
+      required: [scope, state, countSemantics, snapshotKey, sources, counts, verifiedCounts, kinds, items]
+      properties:
+        scope:
+          type: string
+          enum: [core]
+        state:
+          type: string
+          enum: [complete, partial]
+        countSemantics:
+          type: string
+          enum: [observed_snapshot_not_verified]
+        snapshotKey:
+          type: string
+          description: Deterministic SHA-256 of the source-qualified response before this field.
+        sources:
+          type: object
+          required: [plan, registry, liveLedger, archiveLedger, githubProjection]
+          properties:
+            plan:
+              $ref: "#/components/schemas/InboxAttentionCensusSourceState"
+            registry:
+              $ref: "#/components/schemas/InboxAttentionCensusSourceState"
+            liveLedger:
+              $ref: "#/components/schemas/InboxAttentionCensusSourceState"
+            archiveLedger:
+              $ref: "#/components/schemas/InboxAttentionCensusSourceState"
+            githubProjection:
+              $ref: "#/components/schemas/InboxAttentionCensusSourceState"
+        counts:
+          type: object
+          description: Observed current thread population, not a verified actionable count when partial.
+          required: [decision, reply, in_progress, history, awaiting_daemon]
+          properties:
+            decision:
+              type: integer
+            reply:
+              type: integer
+            in_progress:
+              type: integer
+            history:
+              type: integer
+            awaiting_daemon:
+              type: integer
+        verifiedCounts:
+          type: object
+          description: Conservative lower bounds; zero when any needed source is partial.
+          required: [decision, reply, in_progress, history, awaiting_daemon]
+          properties:
+            decision:
+              type: integer
+            reply:
+              type: integer
+            in_progress:
+              type: integer
+            history:
+              type: integer
+            awaiting_daemon:
+              type: integer
+        kinds:
+          type: object
+          additionalProperties:
+            type: integer
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxAttentionCensusItem"
+        discrepancy:
+          type: string
+          enum: [active_human_ask_has_release_receipt]
+
     InboxThreadDetail:
       type: object
       description: >
@@ -11545,6 +11664,34 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "500":
           description: "`thread_store_unreadable` -- the thread store could not be read."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+
+  /v1/inbox/attention-census:
+    get:
+      summary: Source-qualified core operator-attention census.
+      description: >
+        W1-T4742 read-only count of current operator-owned threads by actionability, with why-me
+        facts and source coverage. It does not aggregate connected repositories and never offers
+        an action. Partial source coverage leaves snapshot counts unverified and verified counts
+        conservative, never a claimed healthy zero.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Source-qualified census, possibly partial.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxAttentionCensusResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Thread store or plan could not be read.
           content:
             application/json:
               schema:
