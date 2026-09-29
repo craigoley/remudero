@@ -116,7 +116,7 @@ test("the dry run issues NO delete call of any kind", () => {
     if (args[0] === "grep" && args.includes("-o")) {
       return DECLARED_BRANCH_GUARDS.map((n) => `src/run-task.ts:1:${n}`).join("\n");
     }
-    if (args[0] === "grep") throw new Error("exit 1: no match");
+    if (args[0] === "grep") throw Object.assign(new Error("exit 1: no match"), { status: 1 });
     if (cmd === "gh") return "[]";
     return "";
   };
@@ -197,7 +197,7 @@ test("a FAILED PR read makes every branch read OPEN — never 'no PR' (W1-T119)"
     if (args[0] === "grep" && args.includes("-o")) {
       return DECLARED_BRANCH_GUARDS.map((n) => `src/run-task.ts:1:${n}`).join("\n");
     }
-    if (args[0] === "grep") throw new Error("exit 1");
+    if (args[0] === "grep") throw Object.assign(new Error("exit 1"), { status: 1 });
     if (args[0] === "rev-parse") return "b2b2b2\n";
     return "";
   };
@@ -218,7 +218,7 @@ test("the dry run LEDGERS its answer, so a report nobody read is still on disk",
     if (args[0] === "for-each-ref") return args.includes("--merged=origin/main") ? "origin/main\norigin/gone-to-main\n" : "origin/main\ta1\t1\norigin/gone-to-main\tb2b2b2\t1\n";
     if (args[0] === "merge-base") return "";
     if (args[0] === "rev-parse") return "b2b2b2\n";
-    if (args[0] === "grep") throw new Error("exit 1");
+    if (args[0] === "grep") throw Object.assign(new Error("exit 1"), { status: 1 });
     if (cmd === "gh") return "";
     return "";
   };
@@ -250,7 +250,7 @@ test("slug-task enrichment reports an unreadable config when it cannot resolve t
     if (args[0] === "grep" && args.includes("-o")) {
       return DECLARED_BRANCH_GUARDS.map((name) => `src/run-task.ts:1:${name}`).join("\n");
     }
-    if (args[0] === "grep") throw new Error("exit 1: no source match");
+    if (args[0] === "grep") throw Object.assign(new Error("exit 1: no source match"), { status: 1 });
     if (cmd === "gh") return "[]";
     return "";
   };
@@ -280,7 +280,7 @@ test("slug-task enrichment reports a plan read failure and keeps scanning", () =
     if (args[0] === "grep" && args.includes("-o")) {
       return DECLARED_BRANCH_GUARDS.map((name) => `src/run-task.ts:1:${name}`).join("\n");
     }
-    if (args[0] === "grep") throw new Error("exit 1: no source match");
+    if (args[0] === "grep") throw Object.assign(new Error("exit 1: no source match"), { status: 1 });
     if (cmd === "gh") return "[]";
     return "";
   };
@@ -311,7 +311,7 @@ test("a failed prune push is reported with every branch still on origin", () => 
     if (args[0] === "grep" && args.includes("-o")) {
       return DECLARED_BRANCH_GUARDS.map((name) => `src/run-task.ts:1:${name}`).join("\n");
     }
-    if (args[0] === "grep") throw new Error("exit 1: no source match");
+    if (args[0] === "grep") throw Object.assign(new Error("exit 1: no source match"), { status: 1 });
     if (cmd === "gh") return "[]";
     if (args[0] === "push") throw new Error("remote rejected");
     return "";

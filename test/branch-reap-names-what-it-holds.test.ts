@@ -23,11 +23,11 @@ function runReaper() {
       throw new Error("not an ancestor");
     }
     if (args[0] === "rev-parse") return "deadbeef\n";
-    if (args[0] === "grep" && args.includes("-F")) throw new Error("no source match");
+    if (args[0] === "grep" && args.includes("-F")) throw Object.assign(new Error("no source match"), { status: 1 });
     if (args[0] === "grep" && args.includes("-o")) {
       return DECLARED_BRANCH_GUARDS.map((name) => `src/run-task.ts:1:${name}`).join("\n");
     }
-    if (args[0] === "grep") throw new Error("no source match");
+    if (args[0] === "grep") throw Object.assign(new Error("no source match"), { status: 1 });
     if (cmd === "gh") {
       const endpoint = args[1] ?? "";
       if (endpoint.includes("closed-unmerged")) return "closed\tfalse\n";
