@@ -21,8 +21,8 @@
  * the landing identity predicate, so the reaper guards that family by calling the owner module
  * rather than retyping the branch pattern here.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { isLandingRef } from "./feedback-landing.js";
 
 /**
@@ -385,17 +385,23 @@ export function tipInMainFor(
 export function readNamedInSource(
   exec: (cmd: string, args: string[]) => string,
   names: readonly string[],
+  root?: string,
+  onFailure?: (why: string) => void,
 ): Set<string> {
   const found = new Set<string>();
   if (names.length === 0) return found;
+  const roots = ["src/", "scripts/", "deploy/", ".github/"].filter((p) => root === undefined || existsSync(join(root, p)));
+  if (roots.length === 0) return found;
   const args = ["grep", "-n", "-o", "-F"];
   for (const name of names) args.push("-e", name);
-  args.push("--", "src/", "scripts/", "deploy/", ".github/");
+  args.push("--", ...roots);
   let raw: string;
   try {
     raw = exec("git", args);
-  } catch {
-    return found; // git grep exits 1 on no match anywhere — a real "nothing named", not a failure
+  } catch (err) {
+    if ((err as { status?: unknown }).status === 1) return found; // git grep exits 1 on no match anywhere — a real "nothing named", not a failure
+    onFailure?.(String((err as Error)?.message ?? err));
+    return new Set(names);
   }
   const hits = parseBranchCitationHits(raw);
   for (const name of names) {

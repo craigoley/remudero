@@ -1,0 +1,16 @@
+- id: W1-T4744
+  title: "REPAIR THE NARROW SELECTOR EDGE src/run-task.ts, test/pr-owner-reads-the-live-claim.test.ts -> test/cold-status-reads-return-within-the-client-budget.test.ts — a real coverage shard failure was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow:67dc6757b52292131221e8ca81c2f022a9895514:narrow:test/cold-status-reads-return-within-the-client-budget.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: "W1-T4439 observed narrow miss on coverage run 36515336563 for PR #7717 at 67dc6757b52292131221e8ca81c2f022a9895514: src/run-task.ts, test/pr-owner-reads-the-live-claim.test.ts -> test/cold-status-reads-return-within-the-client-budget.test.ts. The changed paths are candidate missing edges, not guessed import edges. Inspect the exact head and teach the selector the missing dependency before W1-T4406 narrows CI."
+  acceptance:
+    - claim: "the narrow selector includes test/cold-status-reads-return-within-the-client-budget.test.ts when this edge is exercised"
+      proof: "grep: test/cold-status-reads-return-within-the-client-budget\\.test\\.ts in src/lib/affected-suites.ts"
