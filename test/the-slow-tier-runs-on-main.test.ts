@@ -103,3 +103,27 @@ test("W1-T4396: a source pull request still leaves the slow tier to coverage-rat
   assert.match(testOnly.calls, /^npm run --silent test:slow -- --shard 1\/2 --base origin\/main$/m);
   assert.doesNotMatch(testOnly.calls, /test-with-retry/);
 });
+
+test("W1-T4756: a plan-reading pull request whose candidate enumeration succeeds establishes the exact matrix", () => {
+  // scripts/workflow-guard-mutation-baseline.json recorded this step's `--list-plan-reading-suites`
+  // fail-closed guard (`if ! node ... --list-plan-reading-suites ...; then established=false; exit
+  // 0; fi`) as UNCOVERED under this job's OLD name, `test-slow`, with its own reason: "drives the
+  // classifier, not this step's shell, so nothing distinguishes it today." W1-T4756 renamed the job
+  // to `test-slow-shard` (splitting it into a balanced two-shard matrix), which moves the guard's
+  // job-qualified key and — since origin/main still carries the pre-split job name — makes the
+  // caused-vs-inherited merge-base split (scripts/workflow-guard-mutation-ratchet.mjs) unable to
+  // recognize it as the SAME, already-accepted gap: an always-fail-closed mutant on this line would
+  // read as a brand-new, uncovered guard rather than an inherited one, and BLOCK the `ci` job's
+  // "Workflow guard mutation" step (it runs whenever ci.yml is in the diff, which this PR's own
+  // ci.yml change guarantees). Rather than carry the gap forward under a new key, this closes it: a
+  // PLAN_ONLY diff whose enumeration genuinely succeeds must reach the following `--select-
+  // candidates` check and establish the matrix — something an unconditionally fail-closed mutant of
+  // this guard could never do, regardless of what the real command returned.
+  const pr = runJob("pull_request", "PLAN_ONLY");
+  assert.equal(pr.outputs.class, "PLAN_ONLY");
+  assert.equal(
+    pr.outputs.established,
+    "true",
+    "a successful --list-plan-reading-suites enumeration must not be treated as a failure",
+  );
+});
