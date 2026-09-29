@@ -1433,13 +1433,30 @@ interface DispatchStreakTally {
   excludedByReason: Record<string, number>;
 }
 
+/** `taskId`'s rows in timestamp order. A rotation union is live-first, then newest-first
+ *  ({@link readLedgerUnionBounded}), and the streak resets on the first forward-progress row it walks,
+ *  so walking a union in input order counted archived dispatches AFTER a live reset (measured
+ *  2026-09-29: six released tasks still read circuit-broken). Already-ordered rows, and rows missing a
+ *  `ts`, keep input order; the sort is stable. */
+function taskRowsInTimeOrder(rows: ReadonlyArray<Record<string, unknown>>, taskId: string): ReadonlyArray<Record<string, unknown>> {
+  const own = rows.filter((line) => line.task_id === taskId);
+  if (!own.every((line) => typeof line.ts === "string")) return own;
+  let ordered = true;
+  for (let i = 1; i < own.length && ordered; i++) ordered = (own[i - 1]!.ts as string) <= (own[i]!.ts as string);
+  if (ordered) return own;
+  return own
+    .map((line, i) => ({ line, i }))
+    .sort((a, b) => ((a.line.ts as string) < (b.line.ts as string) ? -1 : (a.line.ts as string) > (b.line.ts as string) ? 1 : a.i - b.i))
+    .map(({ line }) => line);
+}
+
 function dispatchStreakTally(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
   index?: LedgerIndex,
   opts: OrphanDetectionOpts = {},
 ): DispatchStreakTally {
-  const rows = indexedTaskRows(lines, taskId, index);
+  const rows = taskRowsInTimeOrder(indexedTaskRows(lines, taskId, index), taskId);
   // A run's terminal verdict follows its start, so collect exclusions before counting starts.
   const refusalByRunId = new Map<string, string>();
   for (const line of rows) {
