@@ -17,7 +17,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import { ghExec } from "./github-transport.js";
-import { accessSync, closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { access, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   consumeOptionLink,
@@ -428,16 +429,20 @@ function assistantActorHash(actor: string): string {
   return createHash("sha256").update(actor).digest("hex");
 }
 
-function assistantClaimStoreState(root: string): "writable_unverified" | "uninitialized" | "unavailable" {
+async function assistantClaimStoreState(root: string): Promise<"writable_unverified" | "uninitialized" | "unavailable"> {
   try {
-    if (!statSync(root).isDirectory()) return "unavailable";
-  } catch { return "unavailable"; }
+    if (!(await stat(root)).isDirectory()) return "unavailable";
+  } catch {
+    // A missing or unreadable claim root is unavailable, not an empty claim store.
+    return "unavailable";
+  }
   const dir = join(root, "state", "assistant-control-actions");
   try {
-    if (!statSync(dir).isDirectory()) return "unavailable";
-    accessSync(dir, constants.R_OK | constants.W_OK);
+    if (!(await stat(dir)).isDirectory()) return "unavailable";
+    await access(dir, constants.R_OK | constants.W_OK);
     return "writable_unverified";
   } catch (error) {
+    // An unused store can be initialized by POST; any other stat/access failure is unavailable.
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? "uninitialized" : "unavailable";
   }
 }
@@ -447,14 +452,14 @@ function assistantClaimStoreState(root: string): "writable_unverified" | "uninit
 export function buildAssistantControlCapabilityRoute(deps: AssistantControlOptions): Route {
   return {
     method: "GET", path: "/v1/control/assistant-action/status", scope: "read",
-    handler: (req, res) => {
+    handler: async (req, res) => {
       if (!verifiedActor(req)) return sendJson(res, 403, { error: "verified_operator_required" });
       sendJson(res, 200, {
         contract: ASSISTANT_CONTROL_CONTRACT_VERSION,
         bootSha: deps.bootSha ?? "unknown",
         instance: deps.instance,
         repository: deps.repository ?? "unknown",
-        admission: assistantClaimStoreState(deps.claimRoot),
+        admission: await assistantClaimStoreState(deps.claimRoot),
         claimStore: "shared_root_configured_topology_unverified",
       });
     },
@@ -466,16 +471,16 @@ export function buildAssistantControlCapabilityRoute(deps: AssistantControlOptio
 export function buildAssistantControlReceiptRoute(deps: AssistantControlOptions): Route {
   return {
     method: "GET", path: "/v1/control/assistant-action/receipt", scope: "read",
-    handler: (req, res) => {
+    handler: async (req, res) => {
       const actor = verifiedActor(req);
       if (!actor) return sendJson(res, 403, { error: "verified_operator_required" });
       const actionId = new URL(req.url ?? "", "http://localhost").searchParams.get("actionId");
       if (!actionId || !/^[A-Za-z0-9._:-]{8,128}$/.test(actionId)) return sendJson(res, 400, { error: "invalid_action_id" });
-      if (assistantClaimStoreState(deps.claimRoot) === "unavailable") return sendJson(res, 503, { status: "unavailable", actionId, detail: "claim store is unavailable" });
+      if (await assistantClaimStoreState(deps.claimRoot) === "unavailable") return sendJson(res, 503, { status: "unavailable", actionId, detail: "claim store is unavailable" });
       const paths = assistantControlPaths(deps, actionId);
       let claim: unknown;
       try {
-        claim = JSON.parse(readFileSync(paths.claim, "utf8"));
+        claim = JSON.parse(await readFile(paths.claim, "utf8"));
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return sendJson(res, 404, { status: "not_found", actionId });
         return sendJson(res, 503, { status: "unavailable", actionId, detail: "claim is unreadable" });
@@ -488,7 +493,7 @@ export function buildAssistantControlReceiptRoute(deps: AssistantControlOptions)
       }
       let receipt: unknown;
       try {
-        receipt = JSON.parse(readFileSync(paths.receipt, "utf8"));
+        receipt = JSON.parse(await readFile(paths.receipt, "utf8"));
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return sendJson(res, 202, { status: "claimed_unknown", actionId });
         return sendJson(res, 503, { status: "unavailable", actionId, detail: "receipt is unreadable" });
