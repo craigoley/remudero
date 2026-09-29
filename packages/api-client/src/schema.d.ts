@@ -205,6 +205,31 @@ export interface components {
       stopped: boolean;
       reason?: string | null;
     };
+    /** A stable, exact-target assistant control request; retries MUST reuse the same actionId and payload. */
+    AssistantControlRequest: {
+      actionId: string;
+      instance: string;
+      action: "pause" | "resume" | "stop";
+      reason?: string;
+    };
+    /** The first durable completion receipt; exact retries return this same object without re-dispatch. */
+    AssistantControlReceipt: {
+      status: "completed";
+      actionId: string;
+      instance: string;
+      /** Server-owned registry identity when this is a non-core instance. */
+      repository?: string;
+      action: "pause" | "resume" | "stop";
+      /** The reused panel-action ledger row. */
+      evidenceRef: string;
+      result: (PauseResult) | (ResumeResult) | (StopResult);
+    };
+    /** A durable claim exists, but the side-effect outcome is not certified; retry never dispatches again. */
+    AssistantControlUnknown: {
+      status: "unknown";
+      actionId: string;
+      detail: string;
+    };
     /** POST /v1/questions/answer's body -- an operator's answer to a QUESTION-contract entry (worker.ts's plan/questions.ndjson), addressed by the task it was raised on (v0 routing has no path params, src/lib/service.ts). */
     AnswerQuestionRequest: {
       taskId: string;
@@ -3092,6 +3117,19 @@ export interface paths {
         };
     };
   };
+  "/v1/control/assistant-action": {
+    post: {
+      responses: {
+          "200": AssistantControlReceipt;
+          "202": AssistantControlUnknown;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": undefined;
+          "503": AssistantControlUnknown;
+        };
+    };
+  };
   "/v1/questions/answer": {
     post: {
       responses: {
@@ -3281,6 +3319,19 @@ export interface paths {
           "401": Error;
           "403": Error;
           "409": ContextExportResult;
+        };
+    };
+  };
+  "/v1/i/{instance}/control/assistant-action": {
+    post: {
+      responses: {
+          "200": AssistantControlReceipt;
+          "202": AssistantControlUnknown;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": undefined;
+          "503": AssistantControlUnknown;
         };
     };
   };
