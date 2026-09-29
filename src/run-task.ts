@@ -43994,7 +43994,10 @@ export function productionMachineFilingJudgePorts(opts: {
     stateDir: opts.stateDir,
     plan: () => loadPlan(resolveRepoLayout(opts.repoRoot).planMonolith),
     riskJudge: (input) => {
-      judge ??= realRiskJudge({ mount: resolveRiskJudgeMount(loadMounts(mountsPath(opts.repoRoot))), cwd: opts.repoRoot, settingsFile: join(opts.repoRoot, "settings", "worker.json"), spawn: opts.spawn ?? ledgeredNonDispatchSpawn("risk-judge") });
+      if (!judge) {
+        const mounts = loadMounts(mountsPath(opts.repoRoot));
+        judge = realRiskJudge({ mount: mounts.machine_filing_judge ?? resolveRiskJudgeMount(mounts), cwd: opts.repoRoot, settingsFile: join(opts.repoRoot, "settings", "worker.json"), spawn: opts.spawn ?? ledgeredNonDispatchSpawn("risk-judge") });
+      }
       return judge(input);
     },
     riskPolicy: () => readRiskPolicy(policyPath(opts.repoRoot)),

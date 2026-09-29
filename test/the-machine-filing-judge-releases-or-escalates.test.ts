@@ -214,6 +214,8 @@ test("earned autonomy lowers the bar for a family that helps and raises it for o
     assert.deepEqual(report.escalated, ["W1-T9011"], "and escalates the family that has failed");
     assert.match(String(seen[0]!.planContext.family_track_record), /2 merged/);
     assert.match(String(seen[0]!.gatesState.escalate_only_if), /secrets/);
+    assert.match(seen[0]!.change.description, /^OPERATOR ESCALATION RULE:/);
+    assert.match(seen[0]!.change.description, /verify: auto/, "judged as it would dispatch and not as parked");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -304,6 +306,7 @@ test("the production machine judge lands one plan PR and waits on it before aski
   const calls: string[][] = [];
   let prOpen = true;
   let spawned = 0;
+  let spawnedModel: string | undefined;
   try {
     const p = productionMachineFilingJudgePorts({
       repoRoot: local.dir,
@@ -313,8 +316,9 @@ test("the production machine judge lands one plan PR and waits on it before aski
       repo: "remudero",
       log: () => {},
       clock: CLOCK,
-      spawn: (async () => {
+      spawn: (async (args: { model?: string }) => {
         spawned += 1;
+        spawnedModel = args.model;
         return { text: "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.9\nRISK_REASON: a docs remedy", costUsd: 0, numTurns: 1 };
       }) as never,
       fetcher: ((args: string[]) => {
@@ -329,6 +333,7 @@ test("the production machine judge lands one plan PR and waits on it before aski
 
     const first = await withLiveWritesAllowed(() => runMachineFilingJudge(p));
     assert.equal(spawned, 1, "the real judge construction ran once over this checkout's mounts");
+    assert.equal(spawnedModel, "sonnet", "the machine judge runs on its own named mount");
     assert.equal(first.prUrl, "https://github.com/acme/remudero/pull/7");
     const landed = origin.git("show", `machine-judge-garden-${CLOCK.now()}:plan/tasks.d/W1-T9060-x.yaml`);
     assert.match(landed, /^ {2}verify: auto$/m);

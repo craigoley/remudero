@@ -42,10 +42,11 @@ import { lintTask, machineAuthorVerifyViolation, taskRulingPin } from "./task-li
 
 /** The operator's escalation rule, handed to the judge verbatim in its gates state. */
 export const MACHINE_JUDGE_ESCALATE_ONLY_IF =
-  "Classify HIGH only when this task is really risky or broken: it touches secrets, credentials, " +
-  "auth or permissions; it deletes data, branches or history; it changes merge, deploy, " +
-  "infrastructure or review policy; it takes an irreversible action; or its finding cannot be " +
-  "verified from what is shown. Everything else is LOW and flows — its PR still passes CI and review.";
+  "Classify HIGH only when this task is really risky or broken: what it will DO touches secrets, " +
+  "credentials, auth or permissions; deletes data, branches or history (even when the deletion is " +
+  "the fix); changes merge, deploy, infrastructure or review policy; or takes an irreversible " +
+  "action; or its finding cannot be verified from what is shown. Everything else is LOW and flows " +
+  "— its PR still passes CI and review.";
 
 export const MACHINE_JUDGE_STATE_FILE = "machine-filing-judge.json";
 
@@ -111,9 +112,13 @@ export function shardRelPath(task: Pick<Task, "sourcePath">): string | undefined
 /** The judge's input: the record as {@link buildFilingRiskJudgeInput} renders it, plus the
  *  operator's escalation rule and the family's record as evidence. */
 export function machineJudgeInput(task: Task, record: FamilyTrackRecord): RiskJudgeInput {
-  const base = buildFilingRiskJudgeInput(task);
+  // Judged AS IT WOULD DISPATCH: shown `verify: human`, the judge counted on a person who, on
+  // proceed, is never asked (measured 2026-09-29: "verify: human is set, giving a human checkpoint").
+  const base = buildFilingRiskJudgeInput({ ...task, verify: "auto" });
   return {
     ...base,
+    // Stated first, in the operator's words: the judge's generic framing leans LOW on a defect title.
+    change: { ...base.change, description: `OPERATOR ESCALATION RULE: ${MACHINE_JUDGE_ESCALATE_ONLY_IF}\n\n${base.change.description}` },
     gatesState: { ...base.gatesState, author_class: "machine", escalate_only_if: MACHINE_JUDGE_ESCALATE_ONLY_IF },
     planContext: {
       ...base.planContext,
