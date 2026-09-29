@@ -29,8 +29,11 @@ import { spawnWorker, type SpawnWorkerArgs } from "./worker.js";
 /** Empty by construction — everything the call needs is baked into the prompt. */
 export const TYPED_JUDGMENT_TOOLS: readonly string[] = [];
 
-/** One stateless call per question — Jev's fan-out answers a batch of dependent questions
- *  in a single call; this module answers one typed-choice question per call. */
+/** PRIMARY CONTROL (W1-T1266): every typed-judgment call runs at exactly this cap, always —
+ *  not a backstop that only fires once something else has failed. One stateless call per
+ *  question is the whole design (Jev's fan-out answers a batch of dependent questions in a
+ *  single call; this module answers one typed-choice question per call), so there is no
+ *  healthy multi-turn path this could ever need to raise. */
 export const TYPED_JUDGMENT_MAX_TURNS = 1;
 
 /** How far a distribution's sum may drift from 1 and still be accepted — floating-point
