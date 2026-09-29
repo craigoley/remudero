@@ -2505,6 +2505,8 @@ export const FOUNDRY_CLAUDE_PRICES: Readonly<Record<string, OpenWeightPrice>> = 
     reservationInputUsdPerMillion: 4, readAt: "2026-09-29",
   },
 };
+/** Both Foundry Claude deployments charge $0.20/MTok for a cache read. */
+const FOUNDRY_CLAUDE_CACHE_READ_USD_PER_MILLION = 0.2;
 
 /** PRIMARY CONTROL: Opus and Sonnet share one UTC-day Foundry Claude limit. */
 export const FOUNDRY_CLAUDE_DAILY_CAP_USD = { normal: 5, squeezed: 10 } as const;
@@ -3701,7 +3703,7 @@ function foundryClaudeUsageUsd(deployment: string, usage: {
   const price = FOUNDRY_CLAUDE_PRICES[deployment];
   if (price === undefined) throw new OpenWeightUnpricedDeploymentError(deployment);
   return (usage.input_tokens * price.inputUsdPerMillion +
-    (usage.cache_read_input_tokens ?? 0) * price.inputUsdPerMillion * 0.1 +
+    (usage.cache_read_input_tokens ?? 0) * FOUNDRY_CLAUDE_CACHE_READ_USD_PER_MILLION +
     (usage.cache_creation_input_tokens ?? 0) * (price.reservationInputUsdPerMillion ?? price.inputUsdPerMillion) +
     usage.output_tokens * price.outputUsdPerMillion) / 1_000_000;
 }
