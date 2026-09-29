@@ -11,7 +11,9 @@
   files: [plan/tasks.d/W1-T3529-run-review-evidence-target.yaml]
   origin: "feedback#fb-1789312874382-b6f4b1"
   plan_refs: ["§5C"]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4550 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     Flagged non-blocking by the CI-green review of PR #5416 (TRIAGE-fb-1789312874382-b6f4b1): all four
@@ -61,8 +63,6 @@
       proof: "grep: unit test: W1-T3529: every pre-existing judgeReview evidence field remains in the runReview call in plan/tasks.d/W1-T3529-run-review-evidence-target.yaml"
     - claim: "criterion 4's proof names its own test exactly — 'runReview does not re-derive the target from a bare repo name'"
       proof: "grep: unit test: W1-T3529: runReview does not re-derive the target from a bare repo name in plan/tasks.d/W1-T3529-run-review-evidence-target.yaml"
-    - claim: "the rewrite is proof-only — the original claim text for the fourth criterion is untouched, confirming this amendment did not re-litigate what any criterion asserts"
-      proof: "grep: a target is never re-derived from a bare repo name lacking its owner in plan/tasks.d/W1-T3529-run-review-evidence-target.yaml"
   note: |
     Filed from the non-blocking shared-proof warning on W1-T3529 (TRIAGE-fb-1789312874382-b6f4b1, run
     DAEMON-1789314256085, PR https://github.com/craigoley/remudero/pull/5416). Both the target shard and the
@@ -71,3 +71,6 @@
     titles, not reconstructed from the criteria's claim prose. depends_on W1-T3529 so this proof-only
     amendment sequences after (or alongside, if already merged) the task whose plan entry it edits, per this
     repo's file-overlap discipline for concurrent plan edits to the same shard.
+    AMENDED 2026-09-29 (operator ruling): the former fifth criterion, a `grep:` on unchanged claim text, could not
+    fail at the merge base (proof-discrimination executed_stale) and was dropped; the proof-only invariant is
+    checked by the reviewer's diff check.
