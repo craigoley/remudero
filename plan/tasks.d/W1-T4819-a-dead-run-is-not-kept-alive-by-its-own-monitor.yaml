@@ -1,0 +1,34 @@
+- id: W1-T4819
+  title: "A DEAD RUN IS KEPT ALIVE BY ITS OWN MONITOR — run.running_long rows written about a run count as the run's own activity, so a run killed mid-flight never reads as an orphan and keeps costing its task breaker budget; the monitor also wrote 104,134 rows in four days, many identical per sweep"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-29: go with all of those follow ups (dead runs look alive)"
+  note: "reservation hand-off: plan-followups-1790712493000 -> plan-followups-1790712493000"
+  plan_refs: [W1-T3523]
+  files: [src/lib/status.ts, src/lib/cost-anomaly.ts, test/a-dead-run-is-not-kept-alive-by-its-own-monitor.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-29 (rmd ledger-grep, fleet host): run.running_long rows by day were 09-25 52,166, 09-26 23,423,
+    09-27 13,454, 09-28 15,091, 09-29 0. W1-T4559's and W1-T3116's last runs started 29-44 hours earlier and never
+    ended; each sweep wrote two to four identical-elapsed rows for them seconds apart. orphanedRunIds treats a run with
+    any second row as alive (`rowCountByRunId > 1`), so these observer rows made killed runs count as real no-PR
+    attempts. Why emission stopped on 09-29 is not established; re-derive it before designing the throttle.
+  design: |
+    (i) orphanedRunIds counts only rows the run itself produced: observer steps (run.running_long and any other row
+    written ABOUT a run by a monitor) are not evidence of life.
+    (ii) cost-anomaly writes run.running_long once per run per threshold crossing, not once per sweep.
+  acceptance:
+    - claim: "a run whose only later rows are running_long is an orphan"
+      proof: 'grep: test("W1-T4819: a run whose only later rows are running_long is an orphan" in test/a-dead-run-is-not-kept-alive-by-its-own-monitor.test.ts'
+    - claim: "a long run is reported once per threshold crossing"
+      proof: 'grep: test("W1-T4819: a long run is reported once per threshold crossing" in test/a-dead-run-is-not-kept-alive-by-its-own-monitor.test.ts'
+  falsifier: |
+    Count every row again and the first test reads the dead run as alive.
