@@ -431,13 +431,14 @@ function assistantActorHash(actor: string): string {
 function assistantClaimStoreState(root: string): "writable_unverified" | "uninitialized" | "unavailable" {
   try {
     if (!statSync(root).isDirectory()) return "unavailable";
-  } catch { return "unavailable"; }
+  } catch { /* An unstatable root is reported as unavailable, distinct from an absent store dir. */ return "unavailable"; }
   const dir = join(root, "state", "assistant-control-actions");
   try {
     if (!statSync(dir).isDirectory()) return "unavailable";
     accessSync(dir, constants.R_OK | constants.W_OK);
     return "writable_unverified";
   } catch (error) {
+    // ENOENT means the store was never initialised; any other failure is unavailable, not absent.
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? "uninitialized" : "unavailable";
   }
 }
