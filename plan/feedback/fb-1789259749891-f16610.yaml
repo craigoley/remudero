@@ -10,8 +10,24 @@ attachments:
 origin: issue
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/7859
+summary:
+  headline: Repair cross-repo test runner for Vitest compatibility
+  what_happened: "PR #8's Vitest unit tests are incorrectly executed as unmatched
+    Node tests and fail. Issue #5314 identifies the underlying cross-repo
+    proof-runner defect."
+  decision: "Prioritize issue #5314 repair to restore correct Vitest test
+    recognition and execution."
+  options:
+    - label: "Fix #5314 as priority"
+      consequence: Restores proper test execution, maintains PORTAL-T1 safety gates,
+        requires engineering time.
+    - label: "Merge PR #8 with test gates disabled"
+      consequence: Unblocks PR quickly, risks shipping untested code, leaves
+        cross-repo runner broken.
+    - label: Convert tests to Node format
+      consequence: Tests execute immediately, skips root cause, creates technical debt
+        for future Vitest usage.
 expansion: null
 submission_key: null
 thread_id: null
