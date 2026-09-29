@@ -104,7 +104,7 @@ async function get(url: string, path: string): Promise<{ status: number; body: R
   return { status: res.status, body: (await res.json()) as Record<string, unknown> };
 }
 
-async function getWarmRepos(url: string, path: string): ReturnType<typeof get> {
+async function getWarmList(url: string, path: string): ReturnType<typeof get> {
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const result = await get(url, path);
     assert.equal(result.status, 200);
@@ -171,14 +171,14 @@ test("a repository projection reads the selected instance's ledger and plan, not
     served_model: "site-served-model", tokens: { input: 13, output: 0, cacheRead: 0, cacheCreation: 0 },
   }) + "\n");
   await withServer(deps, async (url) => {
-    const scoped = await getWarmRepos(url, "/v1/i/site/repos");
+    const scoped = await getWarmList(url, "/v1/i/site/repos");
     assert.equal(scoped.status, 200);
     const rows = scoped.body.repos as Array<{ id: string; source: string; health: { queuedtasks: number | null }; telemetry: { tokens7d: number | null; modelsused: string[] | null } }>;
     assert.deepEqual(rows.map((row) => row.id), ["craigoley/remudero-site"]);
     assert.equal(rows[0]?.source, "instance-registry");
     assert.equal(rows[0]?.health.queuedtasks, 1, "the site plan owns its task count");
     assert.deepEqual(rows[0]?.telemetry, { tokens7d: 13, modelsused: ["site-served-model"], cost_7d: 1.25 });
-    const core = await getWarmRepos(url, "/v1/repos");
+    const core = await getWarmList(url, "/v1/repos");
     const coreSite = (core.body.repos as Array<{ id: string; telemetry: { tokens7d: number | null } }>).find((row) => row.id === "craigoley/remudero-site");
     assert.equal(coreSite?.telemetry.tokens7d, 0, "the unscoped core route never reads site worker costs");
     assert.equal((await fetch(`${url}/v1/i/site/repos`)).status, 401, "scoped telemetry still requires the read bearer");
