@@ -96,3 +96,18 @@ test("an existing stale orphan is named in the exclusion detail", () => {
   assert.equal(detail.excludedDispatches, 1);
   assert.deepEqual(detail.excludedByReason, { orphaned_run: 1 });
 });
+
+test("a run the harness refused before any worker ran never trips the breaker, whatever verdict it wrote", () => {
+  const thrown = (runId: string, stage: string) => [
+    { task_id: TASK, run_id: runId, step: "run.start" },
+    { task_id: TASK, run_id: runId, step: "verdict", verdict: "failed", stage },
+  ];
+  const lockRefusals = Array.from({ length: 10 }, (_, i) => thrown(`lock-${i}`, "managed_checkout.refresh")).flat();
+  const detail = evaluateDispatchBreakerDetailed(ledgerWith(lockRefusals), TASK, createDispatchBreakerCache());
+  assert.equal(isDispatchBreakerTripped(lockRefusals, TASK), false, "W1-T4684's ten lock refusals");
+  assert.deepEqual(detail.excludedByReason, { "managed_checkout.refresh": 10 });
+  const toolchain = Array.from({ length: 5 }, (_, i) => run(`toolchain-${i}`, "blocked_toolchain")).flat();
+  assert.equal(isDispatchBreakerTripped(toolchain, TASK), false);
+  const realFailures = Array.from({ length: 5 }, (_, i) => thrown(`add-${i}`, "worktree.add")).flat();
+  assert.equal(isDispatchBreakerTripped(realFailures, TASK), true, "a failed worktree add still counts");
+});
