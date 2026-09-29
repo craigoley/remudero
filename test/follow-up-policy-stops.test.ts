@@ -23,6 +23,7 @@ const candidate: FollowUpCandidate = {
   workstream: "repo/workstream",
   reason: "The owner has not answered the next-step question.",
   freshness: "verified",
+  // expiring-fixture: exempt -- fixedClock pins policy evaluation to 2026-09-21.
   deadline: "2026-09-22T00:00:00.000Z",
   quietHours: { timezone: "UTC", start: "22:00", end: "07:00" },
   deduplicationKey: "repo/workstream:question",

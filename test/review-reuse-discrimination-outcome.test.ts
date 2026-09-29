@@ -248,6 +248,7 @@ function adapterFixture(options: AdapterFixtureOptions = {}) {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
+    // expiring-fixture: exempt -- direct postReview adapterFixture bypasses stale-days disposition.
     lastActivityAt: "2026-09-22T00:00:00Z",
     headSha: head,
     autoMergeArmed: false,
@@ -425,6 +426,7 @@ test("W1-T3901 run-task adapter posts proof-only discrimination and records effe
       checksState: "green",
       unmetCriteria: [],
       priorStrikes: 0,
+      // expiring-fixture: exempt -- direct postReview run-task adapter fixture bypasses stale-days disposition.
       lastActivityAt: "2026-09-22T00:00:00Z",
       headSha: head,
       autoMergeArmed: false,

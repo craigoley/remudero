@@ -9,6 +9,7 @@ const base: FollowUpCandidate = {
   workstream: "repo/workstream",
   reason: "The thread needs an owner decision.",
   freshness: "verified",
+  // expiring-fixture: exempt -- evaluate pins now to 2026-09-21; no wall-clock read.
   deadline: "2026-09-22T00:00:00.000Z",
   deduplicationKey: "repo/workstream:decision",
   maxAttempts: 2,
