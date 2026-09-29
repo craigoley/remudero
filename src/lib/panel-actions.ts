@@ -41,6 +41,12 @@ import {
   formatExhaustionReport,
   type InterpretReplyDeps,
 } from "./reply-interpreter.js";
+import {
+  ESCALATION_DISPOSITIONS,
+  escalationClassPrecision,
+  escalationClassTier,
+  type EscalationDisposition,
+} from "./escalation-precision.js";
 
 /** Non-task-scoped panel actions (pause/resume/stop/quiet-hours) ledger under this sentinel — mirrors run-task.ts's drainCommand, which ledgers its own fleet-wide lines as `task_id: "DRAIN"`. */
 export const PANEL_TASK_ID = "PANEL";
@@ -469,19 +475,43 @@ export function buildApproveManualRoute(deps: PanelActionDeps): Route {
 interface MarkEscalationHandledInput {
   taskId: string;
   issueUrl: string;
+  /** The escalation's own class (escalate.ts's `EscalationClass`) — the key escalation-precision.ts groups by. */
+  class: string;
+  /** W1-T4677: required — closing the DISMISSING AN ESCALATION RECORDS NOTHING gap (see escalation-precision.ts). */
+  disposition: EscalationDisposition;
+  /** Required exactly when `disposition` is `"snoozed_until"`. */
+  snoozedUntil?: string;
 }
 
 function validateMarkEscalationHandled(body: unknown): { error: string } | MarkEscalationHandledInput {
   if (!isRecord(body)) return { error: "body must be a JSON object" };
   if (typeof body.taskId !== "string" || !body.taskId.trim()) return { error: "taskId is required" };
   if (typeof body.issueUrl !== "string" || !body.issueUrl.trim()) return { error: "issueUrl is required" };
-  return { taskId: body.taskId, issueUrl: body.issueUrl };
+  if (typeof body.class !== "string" || !body.class.trim()) return { error: "class is required" };
+  if (typeof body.disposition !== "string" || !(ESCALATION_DISPOSITIONS as readonly string[]).includes(body.disposition)) {
+    return { error: `disposition must be one of ${ESCALATION_DISPOSITIONS.join(", ")}` };
+  }
+  if (body.disposition === "snoozed_until") {
+    if (typeof body.snoozedUntil !== "string" || !body.snoozedUntil.trim()) {
+      return { error: 'snoozedUntil is required when disposition is "snoozed_until"' };
+    }
+  } else if (body.snoozedUntil !== undefined) {
+    return { error: 'snoozedUntil is only valid when disposition is "snoozed_until"' };
+  }
+  return {
+    taskId: body.taskId,
+    issueUrl: body.issueUrl,
+    class: body.class,
+    disposition: body.disposition as EscalationDisposition,
+    snoozedUntil: body.snoozedUntil as string | undefined,
+  };
 }
 
-/** POST /v1/escalation/mark-handled (W1-T182) — the NEEDS ME affordance for an ESCALATION of any
- *  class, distinct from `/v1/manual/approve`'s check-off: closing the issue never resolves the
- *  underlying block, so this is named "mark handled", never "approve" or "resolve". A separate
- *  route, never a relabel, so `/v1/manual/approve`'s existing callers stay untouched. */
+/** POST /v1/escalation/mark-handled (W1-T182; `class`/`disposition` required since W1-T4677) — the
+ *  NEEDS ME affordance for an ESCALATION of any class, distinct from `/v1/manual/approve`'s
+ *  check-off: closing the issue never resolves the underlying block, so this is named "mark
+ *  handled", never "approve" or "resolve". The response also names the class's current acted-on
+ *  precision and signal tier (escalation-precision.ts), recomputed off the ledger row just written. */
 export function buildEscalationMarkHandledRoute(deps: PanelActionDeps): Route {
   return {
     method: "POST",
@@ -492,8 +522,23 @@ export function buildEscalationMarkHandledRoute(deps: PanelActionDeps): Route {
     handler: jsonAction(validateMarkEscalationHandled, (input, req, res) => {
       deps.issues.close(input.issueUrl);
       const origin = bearerTokenId(req);
-      ledgerPanelAction(deps, "panel.escalation_marked_handled", input.taskId, origin, { issue_url: input.issueUrl });
-      sendJson(res, 200, { ok: true, taskId: input.taskId, issueUrl: input.issueUrl });
+      ledgerPanelAction(deps, "panel.escalation_marked_handled", input.taskId, origin, {
+        issue_url: input.issueUrl,
+        class: input.class,
+        disposition: input.disposition,
+        ...(input.snoozedUntil !== undefined ? { snoozed_until: input.snoozedUntil } : {}),
+      });
+      const precision = escalationClassPrecision(readLedgerLines(deps.ledgerPath), input.class);
+      const tier = escalationClassTier(input.class, precision);
+      sendJson(res, 200, {
+        ok: true,
+        taskId: input.taskId,
+        issueUrl: input.issueUrl,
+        class: input.class,
+        disposition: input.disposition,
+        precision: precision.precision,
+        tier,
+      });
     }),
   };
 }
