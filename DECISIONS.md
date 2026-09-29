@@ -3240,6 +3240,18 @@ itself. This ruling ratifies `src/lib/machine-filing-judge.ts` as the judge that
   policy; an irreversible action; or a finding it cannot verify from what it is shown. Everything else
   flows — its PR still passes CI and review. A `proceed` the record cannot honour at `verify: auto`
   (it would fail the linter) is escalated as broken, with the lint reason.
+- **A DETERMINISTIC BACKSTOP RUNS BEFORE THE MODEL, AND ONLY ESCALATES.** It sends a record straight to a
+  person, with no model asked, when the record touches secrets, auth, tokens or permissions; deletes
+  data, branches, archives or ledgers, or takes any other irreversible action; or changes merge,
+  deploy or branch-protection policy (`deterministicEscalation`, machine-filing.ts). It reads the
+  declared paths plus the title, prompt and acceptance claims, never the note, and it can never
+  release anything. **Why this guardrail earns its place: irreversibility.** Everywhere else a wrong
+  release costs one closed PR. Here it costs a deleted branch, a truncated ledger or a widened grant,
+  and no review gate can undo those. The model is also least reliable exactly there. On the
+  2026-09-29 probes, haiku released "delete every merged branch" twice, and sonnet released a
+  ledger-archive truncation once. `test/fixtures/machine-judge-probes.json` holds the regression
+  eval. With the backstop and the live sonnet judge, all 6 risky probes escalate and all 4 benign
+  probes proceed, and the benign 4 are the only model calls.
 - **EARNED AUTONOMY, NO FIXED BAR.** Each filer family's record — its merged tasks as credit, the ones
   a person retired `closed`/`retired` as debit, plus its gardener's Beta credit beyond the Beta(3,1)
   prior — is shown to the judge and sets the confidence a `low` verdict needs:

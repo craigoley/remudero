@@ -15,6 +15,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { GARDEN_LEDGER_BUCKET_MS, gardenStatePath, readGardenState, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
 import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
 import {
+  DURATION_ADOPTION_CADENCE_MS,
+  DURATION_WINDOW_RUNS,
   RETIER_THRESHOLD,
   TEST_GARDEN_BODY_ROWS,
   TEST_GARDEN_CLASSES,
@@ -25,6 +27,7 @@ import {
   testGardenCheapFingerprint,
   testGardenInventory,
   testGardenSpec,
+  testManifestProposalHistoryPath,
   testManifestProposalPath,
 } from "../src/lib/test-gardener.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
@@ -107,6 +110,9 @@ const deps = (root: string, landed: Landed[], prState?: () => "open" | "merged" 
   openWorkspace: checkout(root, landed),
   log: () => {},
   seed: 1,
+  // The fixture's manifest was committed moments ago; a clock two cadence windows later lets a
+  // duration adoption through the once-a-day hold.
+  clock: fixedClock(Date.now() + 2 * DURATION_ADOPTION_CADENCE_MS),
   ...(prState ? { prState } : {}),
 });
 const off = (root: string, ...classes: string[]) => classes.forEach((c) => writeFileSync(join(root, "state", `TEST_OFF-${c}`), ""));
@@ -137,16 +143,21 @@ test("W1-T4112: a material duration proposal is adopted and judged by shard skew
 test("W1-T4112: a non-material proposal shrinks a stale row downward instead", async () => {
   const probe = await probesPromise;
   const root = seededMeasuredPair();
-  // A tiny downward nudge to the lighter, already well-separated file: no shard reassignment, so
-  // ADOPT-DURATIONS (materiality-gated) sees nothing, and SHRINK-BASELINE claims the row instead.
-  writeProposal(root, { "test/a.test.ts": 1000, "test/b.test.ts": 5 });
+  // A settled downward move of the lighter, already well-separated file: every one of a full
+  // window of runs measures it below its committed 10ms, with no shard reassignment, so
+  // ADOPT-DURATIONS (materiality-gated) sees nothing and SHRINK-BASELINE claims the row instead.
+  const b = [5, 5, 4, 6, 5, 5, 5].slice(0, DURATION_WINDOW_RUNS);
+  writeFileSync(testManifestProposalHistoryPath(join(root, "state")), JSON.stringify({
+    runs: b.map((ms, i) => ({ runId: i + 1, files: { "test/a.test.ts": 1000, "test/b.test.ts": ms } })),
+    absent: [],
+  }));
   off(root, "retier-flaker", "adopt-durations");
   const landed: Landed[] = [];
   const pass = runGarden(testGardenSpec(deps(root, landed), probe), deps(root, landed));
   assert.deepEqual(pass.plan?.acting, ["shrink-baseline"]);
   assert.deepEqual(pass.plan!.actions.map((a) => a.target), ["scripts/test-tier-manifest.json#test/b.test.ts"]);
   assert.equal(pass.plan!.actions[0]!.edit.to, 5);
-  assert.match(pass.plan!.actions[0]!.reason, /Recorded 10ms; freshly measured 5ms — shrinking the manifest's total baseline size from \d+ms/);
+  assert.match(pass.plan!.actions[0]!.reason, /Recorded 10ms; the median of 7 CI run\(s\) measured 5ms — shrinking the manifest's total baseline size from \d+ms/);
   assert.equal(JSON.parse(readFileSync(join(root, "scripts/test-tier-manifest.json"), "utf8")).files["test/b.test.ts"], 5);
 });
 

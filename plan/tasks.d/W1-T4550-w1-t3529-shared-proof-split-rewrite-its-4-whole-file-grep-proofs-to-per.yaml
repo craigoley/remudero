@@ -11,7 +11,9 @@
   files: [plan/tasks.d/W1-T3529-run-review-evidence-target.yaml]
   origin: "feedback#fb-1789312874382-b6f4b1"
   plan_refs: ["§5C"]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4550 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     Flagged non-blocking by the CI-green review of PR #5416 (TRIAGE-fb-1789312874382-b6f4b1): all four
