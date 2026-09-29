@@ -30,13 +30,13 @@
     the fix lands as an operational follow-up.
   acceptance:
     - claim: "a direct-path Vitest proof under a registered target's tests/unit/ resolves to that target's Vitest suite, not a node test/** run"
-      proof: "unit test: test/portal-vitest-proof-runner.test.ts"
+      proof: "unit test: portal vitest proof runner: a direct-path proof resolves to the registered vitest suite"
     - claim: "a name-filtered Vitest proof for the same target executes under Vitest and a zero-match or all-skipped result is classified no-match, never pass"
-      proof: "unit test: test/portal-vitest-proof-runner.test.ts"
+      proof: "unit test: portal vitest proof runner: a name-filtered proof runs under vitest and zero-match is no-match"
     - claim: "an ambiguous path or title across registered roots is refused with an explicit explainer"
-      proof: "unit test: test/portal-vitest-proof-runner.test.ts"
+      proof: "unit test: portal vitest proof runner: an ambiguous path or title across registered roots is refused"
     - claim: "existing craigoley/remudero node --test argv is byte-identical after the change"
-      proof: "unit test: test/portal-vitest-proof-runner.test.ts"
+      proof: "unit test: portal vitest proof runner: the remudero node test argv is byte-identical"
   falsifier: |
     CLOSE IF a direct-path tests/unit/*.test.ts proof for the portal target already resolves to Vitest
     with a passing reproduction test. DO NOT weaken PORTAL-T1 acceptance or the zero-match guard.
