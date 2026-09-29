@@ -47028,10 +47028,6 @@ async function releaseCommand(rest: string[]): Promise<number> {
     return 2;
   }
   const reason = flagValue(rest, "--reason");
-  if (!taskId) {
-    console.error(`rmd release: <task-id> is required — usage: ${commandSyntax("release")}\n` + USAGE);
-    return 2;
-  }
   if (!reason) {
     console.error(`rmd release: --reason <text> is required — usage: ${commandSyntax("release")}\n` + USAGE);
     return 2;

@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import {
   createDispatchBreakerCache,
   dispatchesWithoutNewOwnedPr,
   evaluateDispatchBreakerDetailed,
   readLedgerLines,
 } from "../src/lib/status.js";
-import { COMMANDS } from "../src/run-task.js";
+import { COMMANDS, main } from "../src/run-task.js";
+import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
 
 // ── W1-T4691: A HALTED TASK CAN NEVER BE RELEASED — the dispatch circuit breaker's trip
@@ -102,4 +108,154 @@ test("W1-T4691: `rmd release` is registered, requires --reason, and names the le
   assert.match(spec!.syntax, /<task-id>/);
   assert.match(spec!.syntax, /--reason/);
   assert.match(spec!.detail, /dispatch\.breaker_released/);
+});
+
+// ── The command itself, driven through the real `main()` — every arm `rmd release` has: argument
+// refusals, the unknown-task refusal, the append, and the best-effort issue close (its success,
+// its failure that must never block the release, and the already-released no-op). ──────────────
+
+/** A throwaway HOME + `config.json` whose `root` holds this test's own ledger. */
+function instance(seed: Array<Record<string, unknown>>): { home: string; ledgerPath: string } {
+  const home = mkdtempSync(join(tmpdir(), "rmd-t4691-"));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  writeFileSync(ledgerPath, seed.map((l) => JSON.stringify(l)).join("\n") + (seed.length ? "\n" : ""));
+  return { home, ledgerPath };
+}
+
+class ProcessExitCalled extends Error {
+  constructor(public code: number | undefined) {
+    super(`process.exit(${code})`);
+  }
+}
+
+interface ReleaseRun {
+  code: number | undefined;
+  out: string;
+  err: string;
+  ghCalls: string[];
+  rows: Array<Record<string, unknown>>;
+}
+
+async function runRelease(
+  t: import("node:test").TestContext,
+  args: string[],
+  seed: Array<Record<string, unknown>>,
+  ghRoutes: GhShimRoute[] = [],
+): Promise<ReleaseRun> {
+  const { home, ledgerPath } = instance(seed);
+  const shim = ghShim([...ghRoutes, { when: "", stderr: "t4691 test: unexpected gh call", exit: 1 }], { kind: "t4691-gh" });
+  const out: string[] = [];
+  const err: string[] = [];
+  t.mock.method(process, "exit", ((code?: number): never => {
+    throw new ProcessExitCalled(code);
+  }) as typeof process.exit);
+  t.mock.method(console, "log", (...a: unknown[]) => out.push(a.join(" ")));
+  t.mock.method(console, "error", (...a: unknown[]) => err.push(a.join(" ")));
+  t.mock.method(console, "warn", () => {});
+  const saved = { argv: process.argv, home: process.env.HOME, path: process.env.PATH, guard: process.env[SELF_SYNC_GUARD_ENV] };
+  process.argv = ["node", "run-task.js", "release", ...args];
+  process.env.HOME = home;
+  process.env.PATH = `${shim.dir}:${saved.path}`;
+  process.env[SELF_SYNC_GUARD_ENV] = "1";
+  try {
+    let caught: unknown;
+    await withLiveWritesAllowed(() =>
+      main().catch((e) => {
+        caught = e;
+      }),
+    );
+    assert.ok(caught instanceof ProcessExitCalled, `main() must reach process.exit, not some other throw: ${String(caught)}`);
+    return {
+      code: (caught as ProcessExitCalled).code,
+      out: out.join("\n"),
+      err: err.join("\n"),
+      ghCalls: shim.calls(),
+      rows: readLedgerLines(ledgerPath) as Array<Record<string, unknown>>,
+    };
+  } finally {
+    process.argv = saved.argv;
+    process.env.HOME = saved.home;
+    process.env.PATH = saved.path;
+    if (saved.guard === undefined) delete process.env[SELF_SYNC_GUARD_ENV];
+    else process.env[SELF_SYNC_GUARD_ENV] = saved.guard;
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+const REAL_TASK = "W1-T143"; // a real plan/tasks.yaml id (repo: remudero)
+const ISSUE_URL = "https://github.com/craigoley/remudero/issues/4242";
+const released = (rows: Array<Record<string, unknown>>) => rows.filter((r) => r.step === "dispatch.breaker_released");
+const escalated = (): Record<string, unknown> => ({
+  step: "dispatch.circuit_broken.escalated",
+  task_id: REAL_TASK,
+  repo: "remudero",
+  issue_url: ISSUE_URL,
+});
+
+test("W1-T4691: `rmd release` refuses a missing --reason before writing anything", async (t) => {
+  const noReason = await runRelease(t, [REAL_TASK], []);
+  assert.equal(noReason.code, 2);
+  assert.match(noReason.err, /--reason <text> is required/);
+  assert.equal(released(noReason.rows).length, 0, "a refused release writes no row");
+});
+
+test("W1-T4691: `rmd release` refuses an unknown flag", async (t) => {
+  const r = await runRelease(t, [REAL_TASK, "--reason", "x", "--bogus"], []);
+  assert.equal(r.code, 2);
+  assert.match(r.err, /rmd release: unexpected argument '--bogus'/);
+  assert.equal(released(r.rows).length, 0);
+});
+
+test("W1-T4691: `rmd release` with no task id prints the usage and exits 2", async (t) => {
+  const r = await runRelease(t, [], []);
+  assert.equal(r.code, 2);
+  assert.match(r.err, /rmd release <task-id> --reason <text>/);
+  assert.equal(released(r.rows).length, 0);
+});
+
+test("W1-T4691: `rmd release` refuses a task the plan does not name", async (t) => {
+  const r = await runRelease(t, ["W1-NOT-A-TASK", "--reason", "x"], []);
+  assert.equal(r.code, 2);
+  assert.match(r.err, /unknown task 'W1-NOT-A-TASK'/);
+  assert.equal(released(r.rows).length, 0);
+});
+
+test("W1-T4691: `rmd release` appends one attributable row naming the count it releases and touches no issue when none was raised", async (t) => {
+  const r = await runRelease(t, [REAL_TASK, "--reason", "the block is fixed"], [{ step: "dispatch.circuit_broken", task: REAL_TASK, freshCount: 5 }]);
+  assert.equal(r.code, 0);
+  const rows = released(r.rows);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].task_id, REAL_TASK);
+  assert.equal(rows[0].reason, "the block is fixed");
+  assert.equal(typeof rows[0].released_count, "number");
+  assert.equal(typeof rows[0].actor, "string");
+  assert.match(r.out, /circuit breaker released/);
+  assert.deepEqual(r.ghCalls, [], "no escalation was raised, so no issue is touched");
+});
+
+test("W1-T4691: `rmd release` closes the open circuit-breaker escalation with a pointer to the release row", async (t) => {
+  const r = await runRelease(t, [REAL_TASK, "--reason", "the block is fixed"], [escalated()], [{ when: "issue close", stdout: "" }]);
+  assert.equal(r.code, 0);
+  assert.equal(released(r.rows).length, 1);
+  assert.equal(r.ghCalls.filter((c) => c.includes("issue close") && c.includes(ISSUE_URL)).length, 1);
+  assert.match(r.out, /closed https:\/\/github\.com\/craigoley\/remudero\/issues\/4242/);
+});
+
+test("W1-T4691: a failed issue close is reported but never blocks the release row", async (t) => {
+  const r = await runRelease(t, [REAL_TASK, "--reason", "the block is fixed"], [escalated()], [{ when: "issue close", stderr: "boom", exit: 1 }]);
+  assert.equal(r.code, 0, "the ledger row is what dispatch reads — a close failure must not fail the verb");
+  assert.equal(released(r.rows).length, 1, "the release row lands regardless");
+  assert.match(r.err, /could not close .*4242/);
+});
+
+test("W1-T4691: an escalation an earlier release already retired is not closed a second time", async (t) => {
+  const priorRelease = { step: "dispatch.breaker_released", task_id: REAL_TASK, task: REAL_TASK, repo: "remudero", reason: "earlier", released_count: 5, actor: "operator" };
+  const r = await runRelease(t, [REAL_TASK, "--reason", "again"], [escalated(), priorRelease]);
+  assert.equal(r.code, 0);
+  assert.equal(released(r.rows).length, 2, "the second release is appended too");
+  assert.deepEqual(r.ghCalls, [], "the earlier release already retired the escalation issue");
 });
