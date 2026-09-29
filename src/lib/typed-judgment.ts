@@ -89,7 +89,7 @@ export function parseTypedJudgmentResponse<TOption extends string>(
   text: string,
   options: readonly TOption[],
 ): TypedJudgmentResult<TOption> {
-  const match = text.match(/TYPED_JUDGMENT:\s*(\{.*\})\s*$/m);
+  const match = text.match(/TYPED_JUDGMENT:[ \t]*([^\r\n]+)$/m);
   if (!match) {
     return { kind: "rejected", reason: "no TYPED_JUDGMENT line found", raw: text };
   }

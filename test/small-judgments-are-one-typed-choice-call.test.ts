@@ -90,6 +90,14 @@ test("W1-T4672: the typed judgment returns a distribution over the fixed options
   // Unparseable/malformed JSON and a response with no TYPED_JUDGMENT line at all: rejected.
   assert.equal(parseTypedJudgmentResponse('TYPED_JUDGMENT: {not json}', ["low", "high"] as const).kind, "rejected");
   assert.equal(parseTypedJudgmentResponse('no machine-readable line here', ["low", "high"] as const).kind, "rejected");
+  for (const payload of ["null", "[]", "42", '"low"']) {
+    const raw = `TYPED_JUDGMENT: ${payload}`;
+    assert.deepEqual(parseTypedJudgmentResponse(raw, ["low", "high"] as const), {
+      kind: "rejected",
+      reason: "TYPED_JUDGMENT payload was not an object",
+      raw,
+    });
+  }
 
   // Tool-less, single-turn, BY CONSTRUCTION — Jev's model, never a multi-turn session.
   assert.deepEqual(TYPED_JUDGMENT_TOOLS, []);
