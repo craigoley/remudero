@@ -11,7 +11,10 @@ TAG='# remudero-field-trials-refresh'
 LINE="17 4 * * * $DEST >> $LOG 2>&1 $TAG"
 
 if [[ "$MODE" == --check ]]; then
-  test -x "$DEST" && cmp -s "$SOURCE" "$DEST" || { echo "field-trials refresh script not installed at $DEST"; exit 1; }
+  if [[ ! -x "$DEST" ]] || ! cmp -s "$SOURCE" "$DEST"; then
+    echo "field-trials refresh script not installed at $DEST"
+    exit 1
+  fi
   crontab -l 2>/dev/null | grep -Fx -- "$LINE" >/dev/null || { echo "field-trials daily cron absent or drifted"; exit 1; }
   echo "field-trials daily cron and script current"
   exit 0
