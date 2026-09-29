@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   risk: high
-  budget_usd: 30.00
+  budget_usd: 15.50
   files: [src/lib/ci-failure-corpus.ts]
   origin: oper#fleet-health-2026-09-22
   plan_refs: ["W1-T2957", "W1-T4014"]
