@@ -1271,7 +1271,9 @@ export type InterphaseReviewClockScope = "drain" | "pause";
  *  the light pass, so it adds no action that pass does not already take — which, with nothing in
  *  flight, includes a fix (W1-T1211); a `scope` closes that lane. A wake
  *  observed during an active pass stays pending. W1-T4732 permits one review-only follow-up
- *  beside a slow pass, while further wakes coalesce until a slot opens. Forensics: docs/forensics/daemon.md.
+ *  beside a slow pass on the UNSCOPED clock only, while further wakes coalesce until a slot
+ *  opens; a `scope`d clock (drain/pause) keeps its pre-existing width of exactly one pass, since
+ *  every pass it runs is already review-only. Forensics: docs/forensics/daemon.md.
  *  W1-T4053: `scope: "drain"` runs it beside a freshness drain, ledgering `during_drain: true`; W1-T4429:
  *  `"pause"` beside a PAUSE's sleep (`during_pause: true`) — a pause stops NEW work, never verdicts. */
 export function startInterphaseReviewClock(
@@ -1322,9 +1324,18 @@ export function startInterphaseReviewClock(
           if (!active) break;
           if (!eventWakePending && elapsedMs < pollIntervalMs) continue;
           // W1-T4732: a long reviewer must not hold a newly green head out of the next
-          // pass. Keep at most two passes alive; only the first may take the ordinary light
-          // actions. When both slots are occupied, retain the wake/time debt for a later tick.
-          if (activePasses.size >= 2) continue;
+          // pass. The ORDINARY interphase clock (`scope === undefined`) keeps at most two
+          // passes alive — only the first may take the ordinary light actions, and the second
+          // is a bounded review-only follow-up beside it. A `scope`d clock (freshness drain,
+          // operator pause) stays at its pre-existing width of exactly one: every pass it runs
+          // is already review-only, so a second one overlapping the first would review the SAME
+          // set of open PRs twice rather than reach a newly green head sooner — the freshness
+          // drain's own falsifier (test/a-freshness-drain-keeps-reviewing.test.ts, "the stale
+          // exit awaits an in-flight light pass") requires no second pass admitted behind the
+          // first still in flight. When the clock's slots are full, retain the wake/time debt
+          // for a later tick.
+          const maxActivePasses = scope === undefined ? 2 : 1;
+          if (activePasses.size >= maxActivePasses) continue;
 
           const halt = deps.checkStop?.() ?? (scope === "pause" ? undefined : deps.checkPause?.());
           if (halt) continue;
