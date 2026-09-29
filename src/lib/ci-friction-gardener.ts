@@ -4,7 +4,7 @@ import { basename, join, relative } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
-import { startGarden } from "./gardener.js";
+import { gardenLedgerBucket, startGarden } from "./gardener.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { gateFireRatesPath, type GateFireRateReport } from "./gate-fire-rate.js";
 import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -347,6 +347,13 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
         const stat = statSync(path);
         return `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.mode}`;
       };
+      // A live append is expected every second; inode and mode change only when the source is
+      // replaced or its access posture changes. The hourly bucket bounds ordinary full reads.
+      const liveAccessStamp = (): string => {
+        if (!existsSync(live)) return "absent";
+        const stat = statSync(live);
+        return `${stat.ino}:${stat.mode}`;
+      };
       // Rotations can change independently of the live ledger. Include their metadata so a
       // changed or unreadable archive cannot be skipped by the garden's cheap-pass cache.
       const archives = ledgerRotationEntries(readdirSync(deps.stateDir), deps.stateDir)
@@ -354,7 +361,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
           const stat = statSync(entry.path);
           return `${basename(entry.path)}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.mode}`;
         }).join("|");
-      return `${head}:${fileStamp(live)}:${fileStamp(report)}:${archives}`;
+      return `${head}:${gardenLedgerBucket(clock)}:${liveAccessStamp()}:${fileStamp(report)}:${archives}`;
     },
     inventory: () => {
       const rounds = ciFrictionRoundsFromLedger(sources.ledgerRecords());
