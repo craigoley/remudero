@@ -11,7 +11,7 @@
   files: [deploy/host-update.sh, test/the-state-snapshot-actually-runs-on-this-host.test.ts]
   origin: oper#gap-sweep-2026-09-16
   plan_refs: ["W1-T234"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-16 on the live host and in the tree:

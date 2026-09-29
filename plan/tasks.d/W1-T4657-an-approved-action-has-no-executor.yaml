@@ -14,7 +14,7 @@
     - src/lib/action-executor.ts
     - src/lib/operator-agent.ts
     - test/an-approved-action-has-an-executor.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

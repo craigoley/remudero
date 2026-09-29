@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-28: recommended follow-ups 1-6 and 8 — automated flow, no stuck PRs, no false alarms"
   plan_refs: [W1-T316]
   files: [src/lib/status.ts, test/the-breaker-counts-only-runs-that-could-have-opened-a-pr.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-28: open breaker issues #7556 (W1-T4627), #7410 (W1-T4480), #7377 (W1-T4559), #7351 (W1-T4266), #7269

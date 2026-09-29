@@ -13,7 +13,7 @@
   files:
     - src/lib/task-case-file.ts
     - test/heartbeat-rows-do-not-exhaust-the-case-file.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -22,7 +22,7 @@
     - test/panel-actions.test.ts
     - test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts
     - test/serve-write-tier-wiring.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: /v1/escalation/mark-handled closes the issue and records only issue_url (src/lib/panel-actions.ts ~446-475).

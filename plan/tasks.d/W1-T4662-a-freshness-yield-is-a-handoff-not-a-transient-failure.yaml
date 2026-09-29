@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-28: recommended follow-ups 1-6 and 8 — automated flow, no stuck PRs, no false alarms"
   plan_refs: [W1-T4466]
   files: [src/run-task.ts, src/lib/daemon.ts, test/a-freshness-yield-is-a-handoff-not-a-transient-failure.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-28 (read-only RECON over the ledger union, 383 archives): a run that reaches the CI-wait boundary and

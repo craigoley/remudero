@@ -14,7 +14,7 @@
     - src/run-task.ts
     - src/lib/benchmark-run.ts
     - test/an-orphaned-assignment-gets-its-receipt.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

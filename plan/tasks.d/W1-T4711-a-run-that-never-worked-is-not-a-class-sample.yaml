@@ -15,7 +15,7 @@
     - src/lib/config-gardener.ts
     - scripts/mount-headroom-sweep.mjs
     - test/a-run-that-never-worked-is-not-a-class-sample.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

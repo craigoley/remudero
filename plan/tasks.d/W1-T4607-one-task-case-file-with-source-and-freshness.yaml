@@ -17,7 +17,7 @@
     - test/task-case-file.test.ts
     - test/report-commands-case-file.test.ts
     - docs/cli-reference.md
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Paperclip separates dependency, ownership, status and live execution; Buzz keeps branch,

@@ -14,7 +14,7 @@
     - src/lib/benchmark-verified-outcome.ts
     - src/lib/benchmark-aa.ts
     - test/a-run-that-ended-without-a-pr-is-not-missing-data.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

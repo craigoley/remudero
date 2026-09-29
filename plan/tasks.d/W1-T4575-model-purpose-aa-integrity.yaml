@@ -17,7 +17,7 @@
     - test/benchmark-aa.test.ts
     - test/benchmark-aa-wiring.test.ts
     - docs/research/model-evidence-program.md
-  status: queued
+  status: merged
   rationale: |
     The public site can explain current routing judgment and audit external benchmark claims,
     but cannot yet say which model is more effective for a task. The live Sol/Sonnet arm is

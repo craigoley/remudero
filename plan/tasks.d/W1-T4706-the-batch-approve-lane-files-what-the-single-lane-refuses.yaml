@@ -14,7 +14,7 @@
     - src/run-task.ts
     - src/lib/inbox.ts
     - test/the-batch-approve-lane-files-what-the-single-lane-refuses.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

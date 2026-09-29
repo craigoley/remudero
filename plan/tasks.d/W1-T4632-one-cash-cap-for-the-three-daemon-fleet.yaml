@@ -20,7 +20,7 @@
     - test/foundry-opus-cash-emergency.test.ts
     - docs/model-routing.md
     - docs/operator-guide.md
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Read-only live audit on 2026-09-27: the shared host config sets dailyCapUsd: 25 and

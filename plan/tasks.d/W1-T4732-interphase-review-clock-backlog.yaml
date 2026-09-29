@@ -6,7 +6,7 @@
   verify: auto
   risk: high
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   author_class: human
   origin: "operator repair 2026-09-28: PR #7672 review held the interphase light pass while #7681 and #7682 became green"

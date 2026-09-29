@@ -14,7 +14,7 @@
     - src/lib/judge-calibration.ts
     - src/lib/analytics-route.ts
     - test/judge-verdicts-are-corrected-by-a-human-sample.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

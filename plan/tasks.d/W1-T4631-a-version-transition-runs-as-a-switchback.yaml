@@ -14,7 +14,7 @@
     - src/lib/version-switchback.ts
     - src/lib/worker-provider.ts
     - test/a-version-transition-runs-as-a-switchback.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

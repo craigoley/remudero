@@ -14,7 +14,7 @@
     - src/lib/cost-anomaly.ts
     - src/lib/sweep.ts
     - test/a-running-long-run-is-reported-once.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

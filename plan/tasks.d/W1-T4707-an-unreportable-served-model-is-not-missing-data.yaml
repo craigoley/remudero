@@ -13,7 +13,7 @@
   files:
     - src/lib/benchmark-aa.ts
     - test/an-unreportable-served-model-is-not-missing-data.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -16,7 +16,7 @@
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
     - test/an-operator-labels-a-judge-verdict.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

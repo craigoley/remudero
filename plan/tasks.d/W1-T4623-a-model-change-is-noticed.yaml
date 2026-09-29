@@ -14,7 +14,7 @@
     - src/lib/model-drift.ts
     - src/lib/benchmark-cohort.ts
     - test/a-model-change-is-noticed.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
