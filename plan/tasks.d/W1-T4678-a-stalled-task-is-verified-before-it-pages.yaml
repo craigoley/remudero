@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-operator-1790600000"
   plan_refs: [W1-T4660, W1-T2487]
   files: [src/lib/stall-verifier.ts, src/lib/ledger.ts, test/a-stalled-task-is-verified-before-it-pages.test.ts, test/ledger-rotation.test.ts, src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: a circuit-broken task escalates straight to the operator (src/lib/escalation-catalogue.ts); W1-T2487 found 26

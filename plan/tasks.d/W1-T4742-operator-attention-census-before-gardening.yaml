@@ -11,7 +11,7 @@
   origin: "2026-09-28 operator report of 74 mobile Inbox items and core issue #7708"
   plan_refs: [W1-T4086, W1-T4088, W1-T4738]
   files: [src/lib/inbox-responder.ts, src/lib/panel-graph.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/operator-attention-census.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T4738 makes last-speaker direction distinct from verified attention and retires an exact

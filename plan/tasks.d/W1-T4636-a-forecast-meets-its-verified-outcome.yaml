@@ -14,7 +14,7 @@
     - src/lib/self-forecast.ts
     - src/lib/benchmark-cohort.ts
     - test/a-forecast-meets-its-verified-outcome.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -13,7 +13,7 @@
   files:
     - src/lib/benchmark-verified-outcome.ts
     - test/a-prless-run-beside-a-later-pr-is-an-ending.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

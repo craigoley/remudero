@@ -14,7 +14,7 @@
     - src/lib/shadow-judge.ts
     - src/run-task.ts
     - test/a-shadow-judge-measures-agreement.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

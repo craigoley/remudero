@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-learn-1790600000"
   plan_refs: [W1-T4619, W1-T4450, W1-T4617]
   files: [src/lib/prompt-evolution.ts, src/lib/experiment-promotion.ts, test/the-fix-prompt-is-optimized-against-its-own-graders.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-28: no prompt variant is generated anywhere (grep GEPA/DSPy/MIPRO: no hits); experiment-promotion.ts

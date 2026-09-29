@@ -15,7 +15,7 @@
     - src/lib/worker.ts
     - src/lib/routing-experiments.ts
     - test/a-routing-choice-logs-its-probability.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

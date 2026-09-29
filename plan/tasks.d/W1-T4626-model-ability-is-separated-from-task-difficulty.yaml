@@ -14,7 +14,7 @@
     - src/lib/ability-map.ts
     - src/lib/analytics-route.ts
     - test/model-ability-is-separated-from-task-difficulty.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

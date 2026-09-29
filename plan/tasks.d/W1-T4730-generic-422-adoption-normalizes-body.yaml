@@ -6,7 +6,7 @@
   verify: auto
   risk: high
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   author_class: human
   origin: "operator repair 2026-09-28: W1-T4669 run failed after worker opened PR #7677"

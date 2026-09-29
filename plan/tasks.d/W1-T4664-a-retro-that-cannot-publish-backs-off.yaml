@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-28: recommended follow-ups 1-6 and 8 — automated flow, no stuck PRs, no false alarms"
   plan_refs: [W1-T4466]
   files: [src/lib/retro.ts, src/lib/daemon.ts, test/a-retro-that-cannot-publish-backs-off.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-28: 39 retro_triggered rows 2026-09-25..28; 24 of 37 daemon.retro_subprocess.terminal rows end "prepublish

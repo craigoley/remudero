@@ -14,7 +14,7 @@
     - src/lib/intent-planner.ts
     - src/lib/operator-agent.ts
     - test/a-goal-becomes-steps-the-fleet-can-run.test.ts
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

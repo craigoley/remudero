@@ -15,7 +15,7 @@
     - src/lib/inbox.ts
     - src/run-task.ts
     - test/a-ratified-draft-lands-as-malformed-shards.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

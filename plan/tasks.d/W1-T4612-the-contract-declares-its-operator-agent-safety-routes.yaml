@@ -14,7 +14,7 @@
     - openapi/daemon.yaml
     - scripts/openapi-route-baseline.json
     - packages/api-client/src/schema.d.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

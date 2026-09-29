@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-learn-1790600000"
   plan_refs: [W1-T4625]
   files: [src/lib/experiment-promotion.ts, test/a-self-improvement-promotes-only-across-seeds-and-orders.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: arXiv 2608.18066 (Aug 2026) — across self-improving agents, run-to-run variance rose in 71% of cases and a

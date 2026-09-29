@@ -13,7 +13,7 @@
   files:
     - src/lib/cost-anomaly.ts
     - test/a-run-that-never-worked-skews-no-median.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

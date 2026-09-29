@@ -21,7 +21,7 @@
     - test/one-gateway-serves-every-instance.test.ts
     - test/instance-scoped-operator-answer.test.ts
     - test/every-served-route-is-in-the-contract.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T4555 mounted POST /v1/operator-agent/ask for the core serve route. The console

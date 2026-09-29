@@ -13,7 +13,7 @@
   files:
     - src/run-task.ts
     - test/a-census-refused-push-kills-a-finished-build.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
