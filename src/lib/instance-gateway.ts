@@ -35,6 +35,8 @@ import { inboxThreadStorePath } from "./panel-graph.js";
 import {
   buildControlStatusRoute,
   buildAssistantControlRoute,
+  buildAssistantControlCapabilityRoute,
+  buildAssistantControlReceiptRoute,
   buildPauseRoute,
   buildResumeRoute,
   buildStopRoute,
@@ -43,7 +45,7 @@ import {
   type IssueCloser,
 } from "./panel-actions.js";
 import { loadPlan, type Plan } from "./plan.js";
-import { buildRepoDashboardRoute } from "./repo-dashboard-route.js";
+import { buildRepoDashboardRoutes } from "./repo-dashboard-route.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { Route } from "./service.js";
 import type { GitHub } from "./status.js";
@@ -72,6 +74,7 @@ export interface InstanceGatewayOptions {
   coreInstance?: string;
   /** Shared host-side action admission, wired by serve.ts from the core control root. */
   assistantClaimRoot?: string;
+  assistantBootSha?: string;
   readText?: (path: string) => string;
   loadPlan?: (planPath: string) => Plan;
   /** The GitHub gateway for one instance's `owner/name`; serve.ts defaults it to a batched gateway. */
@@ -81,7 +84,7 @@ export interface InstanceGatewayOptions {
   controlStatus?: Omit<ControlStatusDeps, "root" | "ledgerPath">;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** Applied to each instance's raw read routes — serve.ts's per-route read cache and projection. */
-  bound?: (routes: Route[], board: BoardDeps) => Route[];
+  bound?: (routes: Route[], board: BoardDeps, instance?: string) => Route[];
   /** W1-T4418 liveness seams: the row reader, the `gh` runner behind its escalation, the clock, the timer. */
   readLastRows?: ReadLastRows;
   gh?: (args: string[]) => string;
@@ -158,10 +161,16 @@ export function instanceRouteSet(
   const [owner, name] = repository.split("/");
   const reads = [
     buildStatusRoute(board), buildRecentRoute(board), buildTaskCardRoute(board),
-    buildRepoDashboardRoute({ root: root.root, ledgerPath: root.ledgerPath, planPath: root.planPath, instanceRepository: { owner, repo: name } }),
+    ...buildRepoDashboardRoutes({
+      root: root.root, ledgerPath: root.ledgerPath, planPath: root.planPath, instanceRepository: { owner, repo: name },
+      controlRoot: root.root, incidentsDir: join(root.root, "state"),
+    }),
   ];
+  const assistantControl = opts.assistantClaimRoot
+    ? { ...panel, claimRoot: opts.assistantClaimRoot, instance: root.instance, repository, bootSha: opts.assistantBootSha }
+    : undefined;
   return [
-    ...(opts.bound ? opts.bound(reads, board) : reads),
+    ...(opts.bound ? opts.bound(reads, board, root.instance) : reads),
     buildOperatorAgentAnswerRoute(() => ({
       repository,
       instance: root.instance,
@@ -172,7 +181,7 @@ export function instanceRouteSet(
     buildPauseRoute(panel),
     buildResumeRoute(panel),
     buildStopRoute(panel),
-    ...(opts.assistantClaimRoot ? [buildAssistantControlRoute({ ...panel, claimRoot: opts.assistantClaimRoot, instance: root.instance, repository })] : []),
+    ...(assistantControl ? [buildAssistantControlRoute(assistantControl), buildAssistantControlCapabilityRoute(assistantControl), buildAssistantControlReceiptRoute(assistantControl)] : []),
   ];
 }
 

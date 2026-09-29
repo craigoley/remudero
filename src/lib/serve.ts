@@ -101,6 +101,8 @@ import {
   buildMergeHoldRoute,
   buildPauseRoute,
   buildAssistantControlRoute,
+  buildAssistantControlCapabilityRoute,
+  buildAssistantControlReceiptRoute,
   buildPrActionRoute,
   buildQuietHoursRoute,
   buildResumeRoute,
@@ -115,7 +117,7 @@ import {
 import { buildPanelGraphRoutes, inboxThreadStorePath, OPERATOR_ACTIVITY_CONTRACT_VERSION, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
 import { buildPanelSkillsRoutes } from "./panel-skills.js";
 import { buildPanelSkillRunRoutes } from "./panel-skill-run.js";
-import { buildRepoDashboardRoute } from "./repo-dashboard-route.js";
+import { buildRepoDashboardRoutes } from "./repo-dashboard-route.js";
 import { buildTaskCardRoute } from "./task-card.js";
 import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operator-notes.js";
 import { buildRecordJudgeLabelRoute, fileJudgeLabelStore } from "./judge-calibration.js";
@@ -326,6 +328,8 @@ export interface ServeDeps {
   issues: IssueCloser;
   /** Fleet-control flag-file root — MUST equal the `config.root` `rmd daemon`/`rmd drain` check (see module header). */
   fleetControlRoot: string;
+  /** Core repository resolved from the serving checkout, for assistant-action target binding. */
+  assistantRepository?: string;
   /** `plan/questions.ndjson` root — MUST equal the `repoRoot` `appendQuestion` writes into (see module header). */
   questionsRoot: string;
   tokens: ServiceTokens;
@@ -653,7 +657,7 @@ export const CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE: readonly string[] = [
 export const CONSOLE_STATUS_FULL_TASK_THRESHOLD = 500; // PRIMARY CONTROL
 export const CONSOLE_STATUS_RENDERED_TASK_LIMIT = 120; // BACKSTOP
 export const CONSOLE_STATUS_RESPONSE_SIZE_RATCHET_BYTES = 96_000;
-const CONSOLE_CACHED_READ_PATHS = new Set(["/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health", "/v1/repos", "/v1/feedback", "/v1/operator-activity"]);
+const CONSOLE_CACHED_READ_PATHS = new Set(["/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health", "/v1/repos", "/v1/repos/summary", "/v1/feedback", "/v1/operator-activity"]);
 const BLOCKING_REQUEST_PATH_SYMBOLS = [
   "readFileSync",
   "writeFileSync",
@@ -2655,11 +2659,16 @@ function assembleServeRoutes(
     for (const event of outcome.events) appendLedger(deps.ledgerPath, ciIncidentEventLedgerLine(event, nowMs));
   };
   const readLadder = (nowMs: number): RepairLadderState => (deps.repairLadder?.read ?? readRepairLadderState)(deps.fleetControlRoot, nowMs);
+  const assistantControl = { ...fleetControlDeps, claimRoot: deps.fleetControlRoot,
+    instance: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, bootSha: consoleSha };
   const rawRoutes = [
     withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen), modelApprovals), readLadder),
-    buildRepoDashboardRoute({
+    ...buildRepoDashboardRoutes({
       root: deps.questionsRoot,
       repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
+      ownInstance: deps.instances?.coreInstance ?? CORE_INSTANCE,
+      controlRoot: deps.fleetControlRoot,
+      incidentsDir: deps.incidents?.stateDir ?? dirname(deps.ledgerPath),
       ledgerPath: deps.ledgerPath,
       planPath: deps.panelGraph.planPath,
     }),
@@ -2683,7 +2692,9 @@ function assembleServeRoutes(
     buildPauseRoute(fleetControlDeps),
     buildResumeRoute(fleetControlDeps),
     buildStopRoute(fleetControlDeps),
-    buildAssistantControlRoute({ ...fleetControlDeps, claimRoot: deps.fleetControlRoot, instance: deps.instances?.coreInstance ?? CORE_INSTANCE }),
+    buildAssistantControlRoute(assistantControl),
+    buildAssistantControlCapabilityRoute(assistantControl),
+    buildAssistantControlReceiptRoute(assistantControl),
     buildQuietHoursRoute(fleetControlDeps),
     buildAnswerQuestionRoute(questionDeps),
     buildApproveManualRoute(fleetControlDeps),
@@ -2849,9 +2860,12 @@ function assembleServeRoutes(
       issues: deps.issues,
       controlStatus: deps.controlStatus,
       log: deps.log,
-      bound: (reads, board) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), { ...deps, board, consoleSnapshots: undefined }),
+      bound: (reads, board, instance) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), {
+        ...deps, board, consoleSnapshots: deps.consoleSnapshots && instance ? { dir: join(deps.consoleSnapshots.dir, "instances", instance) } : undefined,
+      }),
       ...deps.instances,
       assistantClaimRoot: deps.fleetControlRoot,
+      assistantBootSha: consoleSha,
       onAnalyticsCache: (cache) => instanceAnalyticsCaches.push(cache),
     }),
   );

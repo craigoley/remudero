@@ -17,13 +17,18 @@ import { fileURLToPath } from "node:url";
 import { fixedClock } from "../src/lib/clock.js";
 import { runnableCandidates } from "../src/lib/drain.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { deterministicEscalation, machineShardHeaderLines, machineShardRisk, renderMachineShard } from "../src/lib/machine-filing.js";
+import { costPriority, deterministicEscalation, machineShardHeaderLines, machineShardRisk, renderMachineShard, UNPRICED_PRIORITY } from "../src/lib/machine-filing.js";
+import { ciFrictionShardYaml } from "../src/lib/ci-friction-gardener.js";
+import { ciLearningShardYaml } from "../src/lib/measurement-cadence.js";
 import {
   earnedConfidenceBar,
   familyTrackRecord,
   gardenFamilyRecord,
+  isRulingShaped,
   judgeMachineShard,
   MACHINE_JUDGE_STATE_FILE,
+  readOperatorReleases,
+  recordOperatorRelease,
   machineFamily,
   needsMachineJudgement,
   renderRuledShard,
@@ -40,7 +45,8 @@ import type { RiskJudgeInput, RiskJudgeVerdict } from "../src/lib/risk-judge.js"
 import { selectorShadowMissTask } from "../src/lib/selector-shadow-gardener.js";
 import { machineAuthorVerifyViolation, taskRulingPin } from "../src/lib/task-linter.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { daemonCommand, parkedVerifyHumanShards, productionMachineFilingJudgePorts } from "../src/run-task.js";
+import { approveCommand, daemonCommand, parkedVerifyHumanShards, productionMachineFilingJudgePorts } from "../src/run-task.js";
+import { releaseAutomatedShard } from "../src/lib/verify-human-release.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const CLOCK = fixedClock(1790700000000);
@@ -276,12 +282,15 @@ test("the filers write an honest risk and leave verify to the judge", () => {
   assert.match(yaml, /^ {2}verify: human$/m);
 });
 
-test("the verify-human sweep hands machine-filed shards to the machine-filing judge", () => {
+test("the verify-human sweep keeps only ruling-shaped records and hands the rest to the machine-filing judge", () => {
   const operator = machineShard("W1-T9050").replace("  author_class: machine\n", "");
-  const root = planDir({ "W1-T9050-x.yaml": operator, "W1-T9051-x.yaml": machineShard("W1-T9051") });
+  const ruling = machineShard("W1-T9052", { files: ["DECISIONS.md"] }).replace("  author_class: machine\n", "");
+  const root = planDir({ "W1-T9050-x.yaml": operator, "W1-T9051-x.yaml": machineShard("W1-T9051"), "W1-T9052-x.yaml": ruling });
   try {
-    const ids = parkedVerifyHumanShards(readPlan(root), root, CLOCK).map((s) => s.id);
-    assert.deepEqual(ids, ["W1-T9050"]);
+    const plan = readPlan(root);
+    assert.deepEqual(parkedVerifyHumanShards(plan, root, CLOCK).map((s) => s.id), ["W1-T9052"]);
+    assert.ok(needsMachineJudgement(plan.byId.get("W1-T9050")!), "an operator verify: human record is the judge's");
+    assert.equal(needsMachineJudgement(plan.byId.get("W1-T9052")!), false, "a ruling-shaped record stays with the operator");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -330,6 +339,7 @@ test("the production machine judge lands one plan PR and waits on it before aski
       }) as never,
     });
     assert.equal(p.gardenRecord?.("ci-friction"), undefined);
+    assert.equal(p.operatorReleases?.().size, 0);
     p.stageProposal({ id: "machine-judge:probe", summary: "probe", evidenceAnchors: [] });
     assert.match(readFileSync(join(stateDir, "inbox-proposals.json"), "utf8"), /machine-judge:probe/);
 
@@ -519,6 +529,171 @@ test("the backstop reads what a record will do and never its note", () => {
   assert.match(String(deterministicEscalation({ title: "force-push the rebased branch" })), /irreversible/);
   assert.match(String(deterministicEscalation({ title: "x", prompt: "disable the review gate for docs PRs" })), /policy/);
   assert.equal(deterministicEscalation({ title: "record the lesson", acceptance: [{ claim: "a learnings entry exists" }] }), undefined);
+});
+
+const operatorShard = (id: string, over: { title?: string; files?: string[] } = {}) =>
+  machineShard(id, { ...over, origin: `operator-request#${id}` }).replace("  author_class: machine\n", "");
+
+test("an operator verify human record is released by a proceed ruling and stays parked on an escalation", async () => {
+  const root = planDir({
+    "W1-T9100-x.yaml": operatorShard("W1-T9100"),
+    "W1-T9101-x.yaml": operatorShard("W1-T9101", { title: "purge every archive in state" }),
+  });
+  try {
+    const seen: RiskJudgeInput[] = [];
+    const { p, proposals } = ports(root, async (input) => (seen.push(input), verdict("low", 0.9)));
+    const report = await runMachineFilingJudge(p);
+    assert.deepEqual(report.proceeded, ["W1-T9100"]);
+    assert.deepEqual(report.escalated, ["W1-T9101"], "the backstop holds for operator records too");
+    const released = readPlan(root).byId.get("W1-T9100")!;
+    assert.equal(released.verify, "auto");
+    assert.equal(released.risk_ruling?.pin, taskRulingPin(released));
+    assert.equal(seen[0]!.gatesState.author_class, "operator");
+    assert.match(proposals[0]!.summary, /is your verify: human record/);
+    assert.deepEqual(dispatchable(readPlan(root)), ["W1-T9100"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rmd approve becomes a pinned operator ruling that no ledger rotation can shed", async () => {
+  const root = planDir({
+    "W1-T9110-x.yaml": operatorShard("W1-T9110"),
+    "W1-T9111-x.yaml": machineShard("W1-T9111", { title: "prune the stale backups" }),
+  });
+  const state = join(root, "state");
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(root, "plan", "tasks.yaml"), readFileSync(join(root, "plan", "tasks.d", "W1-T9110-x.yaml"), "utf8"));
+  rmSync(join(root, "plan", "tasks.d", "W1-T9110-x.yaml"));
+  try {
+    assert.equal(await approveCommand(["W1-T9110"], { config: { root } as never, clock: CLOCK }), 0);
+    assert.deepEqual([...readOperatorReleases(state)], ["W1-T9110"], "the operator's bit is kept outside the ledger");
+    // Monolith records are never rewritten, so file the shard where the judge can pin it.
+    writeFileSync(join(root, "plan", "tasks.d", "W1-T9110-x.yaml"), readFileSync(join(root, "plan", "tasks.yaml"), "utf8"));
+    writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
+    const escalated = await runMachineFilingJudge(ports(root, async () => verdict("high", 0.9, "needs him")).p);
+    assert.deepEqual(escalated.escalated.sort(), ["W1-T9110", "W1-T9111"], "the judge and the backstop parked both");
+
+    recordOperatorRelease(state, "W1-T9111", CLOCK.iso());
+    let asked = 0;
+    const report = await runMachineFilingJudge(
+      ports(root, async () => (asked++, verdict("high", 0.99)), { operatorReleases: () => readOperatorReleases(state) }).p,
+    );
+    assert.equal(asked, 0, "an operator release asks no model and no backstop");
+    assert.deepEqual(report.proceeded.sort(), ["W1-T9110", "W1-T9111"]);
+    const plan = readPlan(root);
+    for (const id of ["W1-T9110", "W1-T9111"]) {
+      assert.equal(plan.byId.get(id)!.risk_ruling?.verdict, "operator");
+      assert.equal(plan.byId.get(id)!.verify, "auto");
+    }
+    assert.deepEqual(dispatchable(plan).sort(), ["W1-T9110", "W1-T9111"], "released with an empty ledger");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a record the rewrite refuses is settled until it changes and not re-judged every pass", async () => {
+  const text = machineShard("W1-T9120").replace("  verify: human\n", "  verify: human # parked\n");
+  const root = planDir({ "W1-T9120-x.yaml": text });
+  try {
+    let asked = 0;
+    const counting = async () => (asked++, verdict("low", 0.9));
+    const first = await runMachineFilingJudge(ports(root, counting).p);
+    assert.deepEqual(first.refused, ["W1-T9120"]);
+    await runMachineFilingJudge(ports(root, counting).p);
+    assert.equal(asked, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a corrupt judge state file is refused loudly and a pass with no landing tree throws", async () => {
+  const root = planDir({ "W1-T9140-x.yaml": machineShard("W1-T9140") });
+  try {
+    writeFileSync(join(root, MACHINE_JUDGE_STATE_FILE), "null\n");
+    await assert.rejects(runMachineFilingJudge(ports(root, async () => verdict("low", 0.9)).p), /invalid state/);
+    rmSync(join(root, MACHINE_JUDGE_STATE_FILE));
+    await assert.rejects(
+      runMachineFilingJudge(ports(root, async () => verdict("low", 0.9), { writeRoot: undefined }).p),
+      /neither a workspace nor a write root/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a record with no origin belongs to the unknown family", () => {
+  const task = loadPlanFromYaml(machineShard("W1-T9141").replace(/ {2}origin:.*\n/, ""), "a.yaml").tasks[0]!;
+  assert.equal(machineFamily(task), "unknown");
+});
+
+test("the verify-human release names the reason it releases nothing, and releases only on a clean proceed", async () => {
+  const shard = { id: "W1-T9150", title: "t", rationale: "", acceptance: [], ageDays: 1, depsAllMerged: true, citedInSrc: false };
+  const automate = { decision: "automate" as const, reason: "mechanical" };
+  const task = loadPlanFromYaml(operatorShard("W1-T9150"), "a.yaml").tasks[0]!;
+  const written: string[] = [];
+  const base = {
+    task: () => task,
+    riskJudge: async () => verdict("low", 0.99),
+    writeRelease: (id: string) => (written.push(id), { code: 0, message: "ok", released: true }),
+  };
+  const run = (over: Partial<Parameters<typeof releaseAutomatedShard>[2]>) => releaseAutomatedShard(shard, automate, { ...base, ...over });
+
+  const missing = await run({ task: () => undefined });
+  assert.deepEqual([missing.kind, (missing as { reason: string }).reason], ["unavailable", "W1-T9150 does not resolve to a plan record"]);
+  assert.match((await run({ task: () => ({ ...task, verify: "auto" }) }) as { reason: string }).reason, /not parked/);
+  assert.match((await run({ task: () => ({ ...task, status: "merged" }) }) as { reason: string }).reason, /not queued/);
+  const threw = await run({ riskJudge: async () => { throw new Error("spawn timed out"); } });
+  assert.match((threw as { reason: string }).reason, /the risk judge threw: spawn timed out/);
+  const blank = await run({ riskJudge: async () => ({ verdict: "high", availability: "unavailable", confidence: 0, reasons: [] }) });
+  assert.equal(blank.kind, "unavailable");
+  assert.equal((await run({ riskJudge: async () => verdict("high", 0.95, "it changes merge policy") })).kind, "escalated");
+  assert.equal(written.length, 0, "none of the refusals above wrote a release row");
+
+  const refused = await run({ writeRelease: () => ({ code: 1, message: "refused by approve" }) });
+  assert.deepEqual([refused.kind, (refused as { reason: string }).reason], ["unavailable", "refused by approve"]);
+  const notReleased = await run({ writeRelease: () => ({ code: 0, message: "already released", released: false }) });
+  assert.deepEqual([notReleased.kind, (notReleased as { reason: string }).reason], ["escalated", "already released"]);
+  assert.equal((await run({})).kind, "released");
+  assert.deepEqual(written, ["W1-T9150"]);
+});
+
+test("the verify-human release refuses a ruling-shaped record", async () => {
+  const task = loadPlanFromYaml(operatorShard("W1-T9130", { files: ["DECISIONS.md"] }), "a.yaml").tasks[0]!;
+  assert.ok(isRulingShaped(task));
+  const out = await releaseAutomatedShard(
+    { id: "W1-T9130", title: task.title, rationale: "", acceptance: [], ageDays: 1, depsAllMerged: true, citedInSrc: false },
+    { decision: "automate", reason: "r" },
+    { task: () => task, riskJudge: async () => verdict("low", 0.99), writeRelease: () => ({ code: 0, message: "x", released: true }) },
+  );
+  assert.equal(out.kind, "escalated");
+});
+
+test("released work dispatches costliest first and unpriced work mid-queue", async () => {
+  assert.ok(costPriority(465) < costPriority(81) && costPriority(81) < costPriority(15), "more cost dispatches sooner");
+  assert.equal(costPriority(0), 90);
+  assert.equal(costPriority(1e9), 1);
+  assert.equal(costPriority(27), UNPRICED_PRIORITY);
+  const friction = ciFrictionShardYaml({ cause: { kind: "check", name: "reviewer-unmet" }, minutes: 465.7, rounds: 40, prs: 30 } as never, "W1-T9200");
+  assert.match(friction, new RegExp(`^ {2}priority: ${costPriority(465.7)}$`, "m"), "ci-friction prices its PR minutes");
+  const lesson = ciLearningShardYaml({ findingId: "ci-learning:1:ci-gate", title: "t", gate: "ci-gate", pr: 1, prs: Array.from({ length: 36 }, (_, i) => i + 1), repairFiles: [], dominantRepairFiles: [], author_class: "machine", verify: "human", remedySurface: "learnings/*.yaml" }, "W1-T9201");
+  assert.match(lesson, new RegExp(`^ {2}priority: ${costPriority(36)}$`, "m"), "the CI-learning rung prices its occurrences");
+
+  const root = planDir({
+    "W1-T9200-x.yaml": friction,
+    "W1-T9202-x.yaml": machineShard("W1-T9202"),
+    "W1-T9203-x.yaml": operatorShard("W1-T9203"),
+  });
+  try {
+    await runMachineFilingJudge(ports(root, async () => verdict("low", 0.95)).p);
+    const plan = readPlan(root);
+    assert.equal(plan.byId.get("W1-T9202")!.priority, UNPRICED_PRIORITY, "a machine release with no cost goes mid-queue");
+    assert.equal(plan.byId.get("W1-T9203")!.priority, undefined, "an operator record's priority is his");
+    assert.equal(plan.byId.get("W1-T9202")!.risk_ruling?.pin, taskRulingPin(plan.byId.get("W1-T9202")!), "priority is inside the pin");
+    assert.deepEqual(dispatchable(plan), ["W1-T9200", "W1-T9202", "W1-T9203"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("shardRelPath names a shard by its plan directory and refuses the monolith, a nested path and a non-yaml file", () => {

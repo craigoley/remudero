@@ -221,10 +221,11 @@ capabilities:
     frontier: claude
   # Frontier starts on Claude Opus or Codex Sol subscriptions. The loader still refuses a cash pin.
   # Operator amendment 2026-09-24: when BOTH subscriptions block, a bounded cash-tool frontier
-  # task may divert to Foundry Opus 5.5 if its daemon key and endpoint are present. That adapter
-  # shares dailyCapUsd with cheap cash and has an additional $10 squeeze-day Opus limit; absent
-  # credentials or an unsupported tool surface still holds the task. There is no ordinary cash
-  # diversion for frontier work. See the follow-up ruling in DECISIONS.md.
+  # task may divert to Foundry Opus 5.5 if its daemon key and endpoint are present. W1-T4785 adds
+  # Foundry Sonnet 5.5 for a balanced task blocked on both subscriptions, with Luna as its fallback.
+  # Opus and Sonnet share dailyCapUsd with cheap cash and one $5 normal / $10 squeeze-day Foundry
+  # Claude subcap. Absent credentials or an unsupported frontier tool surface still holds frontier;
+  # there is no ordinary cash diversion for frontier work. See DECISIONS.md.
   subscription_only: [frontier]
   # W1-T3546: a pay-per-token deployment is selected by explicit mount affinity, never capacity.
   # The data shape mirrors `codex`: capability -> effort -> ordered deployment identifiers.

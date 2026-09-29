@@ -2498,8 +2498,30 @@ export const FOUNDRY_OPUS_PRICE: OpenWeightPrice = {
   reservationInputUsdPerMillion: 8, readAt: "2026-09-24",
 };
 
-/** PRIMARY CONTROL: the UTC-day Opus limit inside the shared cash allowance. */
-export const FOUNDRY_OPUS_DAILY_CAP_USD = { normal: 5, squeezed: 10 } as const;
+/**
+ * Foundry Sonnet 5.5, through the SAME /anthropic adapter as Opus (W1-T4785). List price
+ * $2 input / $10 output per million, read 2026-09-29. A cache write is reserved at 2x input, the
+ * same discipline as the Opus row, so a later cache_control cannot undercount.
+ */
+export const FOUNDRY_SONNET_PRICE: OpenWeightPrice = {
+  inputUsdPerMillion: 2, outputUsdPerMillion: 10,
+  reservationInputUsdPerMillion: 4, readAt: "2026-09-29",
+};
+
+/** The deployment -> price table the Foundry Claude adapter serves. A deployment absent from it is
+ *  not a Foundry Claude deployment, and the adapter refuses it. */
+export const FOUNDRY_CLAUDE_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
+  "claude-opus-5-5": FOUNDRY_OPUS_PRICE,
+  "claude-sonnet-5-5": FOUNDRY_SONNET_PRICE,
+};
+
+export function isFoundryClaudeDeployment(deployment: string): boolean {
+  return Object.hasOwn(FOUNDRY_CLAUDE_PRICES, deployment);
+}
+
+/** PRIMARY CONTROL: the UTC-day FOUNDRY CLAUDE limit inside the shared cash allowance. ONE cap over
+ *  every Foundry Claude deployment (Opus and Sonnet), so a second deployment cannot double it. */
+export const FOUNDRY_CLAUDE_DAILY_CAP_USD = { normal: 5, squeezed: 10 } as const;
 
 /**
  * Per-deployment request TEMPERATURE, because a deployment may REFUSE a value rather than clamp it.
@@ -2677,7 +2699,7 @@ export class OpenWeightUnpricedDeploymentError extends RmdError {
  *  settlement — resolves through here, so none of them can quietly disagree about what a
  *  deployment costs. An absent row FAILS CLOSED; it never falls back to another row. */
 export function openWeightPriceFor(deployment: string): OpenWeightPrice {
-  const row = deployment === "claude-opus-5-5" ? FOUNDRY_OPUS_PRICE : OPENWEIGHT_PRICES[deployment];
+  const row = isFoundryClaudeDeployment(deployment) ? FOUNDRY_CLAUDE_PRICES[deployment] : OPENWEIGHT_PRICES[deployment];
   if (row === undefined) throw new OpenWeightUnpricedDeploymentError(deployment);
   return row;
 }
@@ -2962,13 +2984,14 @@ export function reserveOpenWeightBudget(
     if (committedUsd + wantUsd > capUsd) {
       throw new OpenWeightAllowanceExhaustedError({ committedUsd, capUsd, wantUsd, utcDay });
     }
-    if (input.deployment === "claude-opus-5-5") {
-      const opusCapUsd = input.squeezed ? FOUNDRY_OPUS_DAILY_CAP_USD.squeezed : FOUNDRY_OPUS_DAILY_CAP_USD.normal;
-      const opusCommittedUsd = openWeightCommittedUsd({
-        utcDay, reservations: Object.fromEntries(Object.entries(state.reservations).filter(([, row]) => row.deployment === "claude-opus-5-5")),
+    if (isFoundryClaudeDeployment(input.deployment)) {
+      const claudeCapUsd = input.squeezed ? FOUNDRY_CLAUDE_DAILY_CAP_USD.squeezed : FOUNDRY_CLAUDE_DAILY_CAP_USD.normal;
+      const claudeCommittedUsd = openWeightCommittedUsd({
+        utcDay,
+        reservations: Object.fromEntries(Object.entries(state.reservations).filter(([, row]) => row.deployment !== undefined && isFoundryClaudeDeployment(row.deployment))),
       });
-      if (opusCommittedUsd + wantUsd > opusCapUsd) {
-        throw new OpenWeightAllowanceExhaustedError({ committedUsd: opusCommittedUsd, capUsd: opusCapUsd, wantUsd, utcDay });
+      if (claudeCommittedUsd + wantUsd > claudeCapUsd) {
+        throw new OpenWeightAllowanceExhaustedError({ committedUsd: claudeCommittedUsd, capUsd: claudeCapUsd, wantUsd, utcDay });
       }
     }
     return {
@@ -3675,34 +3698,45 @@ function openWeightResult(input: {
   };
 }
 
-function foundryOpusEndpoint(env: NodeJS.ProcessEnv): string {
+function foundryClaudeEndpoint(env: NodeJS.ProcessEnv, label: string): string {
   const raw = env[FOUNDRY_CLAUDE_ENDPOINT_ENV];
-  if (!raw) throw new Error(`cash Opus requires ${FOUNDRY_CLAUDE_ENDPOINT_ENV}`);
+  if (!raw) throw new Error(`cash ${label} requires ${FOUNDRY_CLAUDE_ENDPOINT_ENV}`);
   const url = new URL(raw);
   if (url.protocol !== "https:" || url.pathname.replace(/\/$/, "") !== "/anthropic" || url.search || url.hash) {
-    throw new Error("cash Opus requires an HTTPS Foundry /anthropic base endpoint");
+    throw new Error(`cash ${label} requires an HTTPS Foundry /anthropic base endpoint`);
   }
   return new URL("v1/messages", `${url.toString().replace(/\/$/, "")}/`).toString();
 }
 
-function foundryOpusUsageUsd(usage: {
+/** Cache-read USD per million, per Foundry Claude deployment. Opus's is 0.05x its input rate;
+ *  Sonnet's is the more conservative 0.1x, so an unmeasured ratio can only over-charge. */
+const FOUNDRY_CLAUDE_CACHE_READ_USD_PER_MILLION: Readonly<Record<string, number>> = {
+  "claude-opus-5-5": 0.2,
+  "claude-sonnet-5-5": 0.2,
+};
+
+function foundryClaudeUsageUsd(deployment: string, usage: {
   input_tokens: number; output_tokens: number;
   cache_read_input_tokens?: number; cache_creation_input_tokens?: number;
 }): number {
+  const price = openWeightPriceFor(deployment);
   // Price cache writes at the dearer 1h rate so a later cache_control cannot undercount.
-  return (usage.input_tokens * 4 + (usage.cache_read_input_tokens ?? 0) * 0.2 +
-    (usage.cache_creation_input_tokens ?? 0) * 8 + usage.output_tokens * 20) / 1_000_000;
+  return (usage.input_tokens * price.inputUsdPerMillion +
+    (usage.cache_read_input_tokens ?? 0) * (FOUNDRY_CLAUDE_CACHE_READ_USD_PER_MILLION[deployment] ?? price.inputUsdPerMillion) +
+    (usage.cache_creation_input_tokens ?? 0) * (price.reservationInputUsdPerMillion ?? price.inputUsdPerMillion) +
+    usage.output_tokens * price.outputUsdPerMillion) / 1_000_000;
 }
 
 function validFoundryTokenCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-export async function spawnFoundryOpusWorker(
+export async function spawnFoundryClaudeWorker(
   args: OpenWeightSpawnArgs,
   config: Config,
   selection: Pick<OpenWeightModelSelection, "model" | "effort">,
 ): Promise<OpenWeightWorkerResult> {
+  const label = selection.model === "claude-sonnet-5-5" ? "Sonnet" : "Opus";
   const clock = args.clock ?? systemClock;
   const startedAt = clock.now();
   let turns = 0;
@@ -3717,20 +3751,20 @@ export async function spawnFoundryOpusWorker(
   let sessionId = "";
   const servedModels: Array<string | undefined> = [];
   let pending: { requestId: string; reservedUsd: number } | undefined;
-  const requestPrefix = `${args.runId ?? args.taskId ?? "foundry-opus"}-${startedAt}-${randomUUID()}`;
+  const requestPrefix = `${args.runId ?? args.taskId ?? "foundry-claude"}-${startedAt}-${randomUUID()}`;
   try {
-    if (selection.model !== "claude-opus-5-5" || args.cashSqueezed !== true) {
-      throw new Error("cash Opus requires an actual blocked-subscription squeeze");
+    if (!isFoundryClaudeDeployment(selection.model) || args.cashSqueezed !== true) {
+      throw new Error(`cash ${label} requires an actual blocked-subscription squeeze`);
     }
     if (args.capabilityGrant) {
       const verification = verifyCapabilityGrant(args.capabilityGrant.store, args.capabilityGrant.request);
       if (!verification.ok) throw new CapabilityGrantRefusedError(verification.reason, verification.code, args.capabilityGrant.request.grantId);
     }
-    if (args.responseFormat !== undefined) throw new Error("cash Opus structured output is not declared by the Foundry adapter");
+    if (args.responseFormat !== undefined) throw new Error(`cash ${label} structured output is not declared by the Foundry adapter`);
     const env = args.env ?? process.env;
     const key = env[FOUNDRY_CLAUDE_API_KEY_ENV];
-    if (!key) throw new Error(`cash Opus requires ${FOUNDRY_CLAUDE_API_KEY_ENV}`);
-    const endpoint = foundryOpusEndpoint(env);
+    if (!key) throw new Error(`cash ${label} requires ${FOUNDRY_CLAUDE_API_KEY_ENV}`);
+    const endpoint = foundryClaudeEndpoint(env, label);
     const tools = openWeightTools(args.tools, false).map((row) => {
       const fn = row.function as { name: string; description: string; parameters: Record<string, unknown> };
       return { name: fn.name, description: fn.description, input_schema: fn.parameters };
@@ -3738,7 +3772,7 @@ export async function spawnFoundryOpusWorker(
     const declaredNames = new Set(tools.map((tool) => tool.name));
     const checkEnv = openWeightCheckEnv(args.workerHome, env);
     const maxTurns = args.maxTurns ?? 1;
-    if (!Number.isInteger(maxTurns) || maxTurns <= 0) throw new Error("cash Opus maxTurns must be a positive integer");
+    if (!Number.isInteger(maxTurns) || maxTurns <= 0) throw new Error(`cash ${label} maxTurns must be a positive integer`);
     const messages: Array<{ role: string; content: unknown }> = [{ role: "user", content: args.prompt }];
     for (;;) {
       turns += 1;
@@ -3771,7 +3805,7 @@ export async function spawnFoundryOpusWorker(
         clearTimeout(deadline);
       }
       if (response.status === 404) throw new OpenWeightDeploymentNotFoundError(selection.model);
-      if (!response.ok) throw new Error(`cash Opus request failed with HTTP ${response.status}`);
+      if (!response.ok) throw new Error(`cash ${label} request failed with HTTP ${response.status}`);
       const payload = await response.json() as {
         id?: unknown; model?: unknown; stop_reason?: unknown; content?: Array<Record<string, unknown>>;
         usage?: { input_tokens?: unknown; output_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown };
@@ -3791,8 +3825,8 @@ export async function spawnFoundryOpusWorker(
           cache_read_input_tokens: typeof usage.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : 0,
           cache_creation_input_tokens: typeof usage.cache_creation_input_tokens === "number" ? usage.cache_creation_input_tokens : 0,
         };
-        const actualUsd = foundryOpusUsageUsd(measured);
-        if (actualUsd > reservation.reservedUsd) throw new Error("cash Opus usage exceeded its conservative reservation");
+        const actualUsd = foundryClaudeUsageUsd(selection.model, measured);
+        if (actualUsd > reservation.reservedUsd) throw new Error(`cash ${label} usage exceeded its conservative reservation`);
         settleOpenWeightBudget(config, { requestId, actualUsd, atIso: clock.iso() });
         promptTokens += measured.input_tokens;
         completionTokens += measured.output_tokens;
@@ -3802,35 +3836,35 @@ export async function spawnFoundryOpusWorker(
         budgetSettledUsd += actualUsd;
       }
       pending = undefined;
-      if (!Array.isArray(payload.content)) throw new Error("cash Opus response has no content blocks");
+      if (!Array.isArray(payload.content)) throw new Error(`cash ${label} response has no content blocks`);
       if (payload.stop_reason === "max_tokens") throw new OpenWeightTruncatedReplyError("max_tokens", completionTokens);
-      if (payload.stop_reason === "refusal") throw new Error("cash Opus refused the request");
+      if (payload.stop_reason === "refusal") throw new Error(`cash ${label} refused the request`);
       text = payload.content.filter((block) => block.type === "text" && typeof block.text === "string")
         .map((block) => block.text as string).join("\n");
       const calls = payload.content.filter((block) => block.type === "tool_use");
       if (calls.length === 0) {
-        if (payload.stop_reason !== "end_turn") throw new Error(`cash Opus ended without a complete turn (${String(payload.stop_reason)})`);
+        if (payload.stop_reason !== "end_turn") throw new Error(`cash ${label} ended without a complete turn (${String(payload.stop_reason)})`);
         return reconcileBoundedProviderAttempt(openWeightResult({
           model: selection.model, effort: selection.effort, servedModels, startedAt, clock, text, sessionId, turns,
           promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens,
           actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd,
         }), args.externalEffect);
       }
-      if (payload.stop_reason !== "tool_use") throw new Error(`cash Opus returned a tool call with stop_reason=${String(payload.stop_reason)}`);
-      if (turns >= maxTurns) throw new Error(`cash Opus tool loop exceeded maxTurns=${maxTurns}`);
+      if (payload.stop_reason !== "tool_use") throw new Error(`cash ${label} returned a tool call with stop_reason=${String(payload.stop_reason)}`);
+      if (turns >= maxTurns) throw new Error(`cash ${label} tool loop exceeded maxTurns=${maxTurns}`);
       messages.push({ role: "assistant", content: payload.content });
       const results: Array<Record<string, unknown>> = [];
       for (const call of calls) {
         if (typeof call.id !== "string" || typeof call.name !== "string" || !declaredNames.has(call.name) ||
             !call.input || typeof call.input !== "object" || Array.isArray(call.input)) {
-          throw new Error("cash Opus requested an undeclared or malformed tool");
+          throw new Error(`cash ${label} requested an undeclared or malformed tool`);
         }
         let result: unknown;
         try {
           result = await executeOpenWeightTool(call.name, call.input as Record<string, unknown>, args.cwd, checkEnv, args.workerHome, args.runCheck);
         } catch (error) {
           // A failed tool invalidates this chain; never turn its error into success.
-          throw new Error(`cash Opus tool ${call.name} failed: ${error instanceof Error ? error.message : String(error)}`);
+          throw new Error(`cash ${label} tool ${call.name} failed: ${error instanceof Error ? error.message : String(error)}`);
         }
         results.push({ type: "tool_result", tool_use_id: call.id, content: JSON.stringify(result) });
       }
@@ -3876,7 +3910,7 @@ export async function spawnOpenWeightWorker(
   config: Config,
   selection: Pick<OpenWeightModelSelection, "model" | "effort">,
 ): Promise<OpenWeightWorkerResult> {
-  if (selection.model === "claude-opus-5-5") return spawnFoundryOpusWorker(args, config, selection);
+  if (isFoundryClaudeDeployment(selection.model)) return spawnFoundryClaudeWorker(args, config, selection);
   const clock = args.clock ?? systemClock;
   const startedAt = clock.now();
   let promptTokens = 0;

@@ -213,7 +213,7 @@ function routingPolicy(): EffectiveProviderRoutingPolicy {
 }
 
 test("stable arm: an experiment task keeps one arm across retries and fix rungs", () => {
-  const capacities = [capacity("claude", 40), capacity("codex", 40, "gpt-6-sol")];
+  const capacities = [capacity("claude", 40, "claude-sonnet-5"), capacity("codex", 40, "gpt-6-sol")];
   const armsPerTask = new Map<string, Set<string>>();
   const servedPerTask = new Map<string, Set<string>>();
   for (let index = 0; index < 40; index += 1) {
@@ -273,7 +273,7 @@ test("crossover: a decision serving another arm than the task was assigned is re
 
   const codex = capacity("codex", 40, "gpt-6-sol");
   const row = record(
-    { provider: "codex", model: "gpt-6-sol", capacity: codex, capacities: [capacity("claude", 40), codex], capability: "balanced" },
+    { provider: "codex", model: "gpt-6-sol", capacity: codex, capacities: [capacity("claude", 40, "claude-sonnet-5"), codex], capability: "balanced" },
     { taskId, model: "sonnet", effort: "high" },
   );
   assert.equal(row.routing.experiment?.crossover, true);
@@ -360,7 +360,7 @@ test("stable arm through the real spawn: a retry and a fix rung of one task reus
         await spawnExperiment(root, taskId, `run-${taskId}-2`, "fix rung 1"),
       ];
       for (const row of rows) {
-        assert.equal(row.routing.decision?.ab, "sol-vs-sonnet");
+        assert.equal(row.routing.decision?.ab, "sol-vs-sonnet55");
         assert.equal(row.routing.propensity?.draw?.key?.unit, "task");
         assert.equal(row.routing.propensity?.selectedProbability, 0.5, "equal headroom, equal weights");
       }

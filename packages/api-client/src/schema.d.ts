@@ -96,46 +96,100 @@ export interface components {
       /** W1-T163: this token's marker value BEFORE this request advanced it -- the timestamp `recap` was computed as-of. Absent alongside `recap` for the same two reasons. */
       sinceCheckpoint?: string;
     };
-    /** The health projection for one managed repository. The current daemon has no per-repo health source, so every measurement is explicitly unknown rather than rendered as zero or healthy. */
+    /** Trailing seven-day run outcomes from the de-duplicated ledger. `succeeded` counts tasks that took merge credit (`verdict.merged`, or a `verdict` of merged, already_satisfied or awaiting_merge). `failed` counts runs whose verdict is blocked_ci, blocked_review, no_pr, blocked_budget, error_max_budget_usd, blocked_illformed or failed. `superseded` counts such a failure whose task later took merge credit; it is in neither term of `errorrate`. Held, transient and re-queued verdicts (blocked_transient, blocked_containment, handed_off, ...) are in no count. */
+    RepoRunOutcomes: {
+      succeeded: number;
+      failed: number;
+      superseded: number;
+    };
+    /** One repository's health. `status` is the MEASUREMENT state (`verified` = computed from a present ledger, `unknown` = no ledger); `condition` is the OPERATIONAL state, derived in this order: `unknown` (no ledger), `paused` (instance PAUSE or STOP flag), `down` (no `daemon.*` heartbeat within 30 min), `degraded` (an open incident, or more failed than succeeded runs), `idle` (no finished run in 7 days), else `healthy`. `reasons` names each signal that set it. */
     RepoDashboardHealth: {
-      status: "unknown";
+      status: "verified" | "unknown";
+      condition: "healthy" | "degraded" | "down" | "paused" | "idle" | "unknown";
+      reasons: (string)[];
+      /** Open plan tasks for the repository (not merged, done, retired or merge-credited). */
       queuedtasks: number | null;
+      /** The subset of `queuedtasks` whose plan status is `queued`. */
+      queued: number | null;
+      /** failed / (succeeded + failed) over `runs7d`; null when both are zero or there is no ledger. */
       errorrate: number | null;
+      runs7d: (RepoRunOutcomes) | (null);
+      /** The newest verdict or merge-credit timestamp in the window. */
       last_run: string | null;
+      /** The operating instance's open incidents (incident-lifecycle.json records not `verified`, last seen in 7 days), newest first, at most 12. An empty array is a measured quiet fleet; null means this instance does not operate the repository or its incident store was unreadable (then `reasons` says which). */
       alerts: (string)[] | null;
     };
-    /** Trailing seven-day per-repository worker telemetry from the ledger. Models are the distinct provider-reported served models, never requested or routed model assignments. A null modelsused means the ledger was unavailable or at least one worker row in the window did not report its served model; an empty array means no worker rows ran in the window. */
+    /** One provider usage window as the router last read it on a worker assignment. Account-wide, not per repository. */
+    RepoSubscriptionWindow: {
+      provider: string;
+      window: string | null;
+      percent_used: number | null;
+      resets_at: string | null;
+      observed_at: string;
+    };
+    /** Subscription-billed calls are usage against provider windows, never dollars. */
+    RepoSubscriptionUsage: {
+      calls7d: number;
+      tokens7d: number;
+      windows: (RepoSubscriptionWindow)[];
+    };
+    /** Trailing seven-day worker telemetry from the de-duplicated ledger; each call counts once (its `worker.attempt` receipt when the run wrote one, else the lane's own step row). `tokens7d` is input + output + cache-creation tokens; cache reads are `cache_read_tokens7d`. `cash_usd_7d` sums only `billing_mode: api` calls, and `cost_7d` is the same figure. `modelsused` is the provider-served models plus the canonical selected model of each assignment; a bare alias is never reported. Null fields mean there is no ledger. */
     RepoDashboardTelemetry: {
+      measurementClass: "observed" | "not-collected";
       tokens7d: number | null;
-      modelsused: (string)[] | null;
+      cache_read_tokens7d: number | null;
+      cash_usd_7d: number | null;
       cost_7d: number | null;
+      subscription: (RepoSubscriptionUsage) | (null);
+      modelsused: (string)[] | null;
     };
-    /** Per-repository settings, unavailable until durable settings persistence exists. */
+    /** NOT COMPUTED: no config key holds a per-repository proof policy, worker pool size or alert threshold. Every field is always null; see `not_computed.settings`. */
     RepoDashboardSettings: {
-      proofpolicy: string | null;
-      workerpoolsize: number | null;
-      alertthreshold: number | null;
+      proofpolicy: null;
+      workerpoolsize: null;
+      alertthreshold: null;
     };
-    /** One repository from the validated `.remudero/managed-repos.json` set. Managed membership is not evidence of OAuth connection, activation, health, telemetry, or settings. */
+    /** One repository action. `path` is relative to the operating instance's `/v1/i/<instance>/` prefix: `toggleonoff` is POST control/pause or control/resume (write scope, chosen from the current flag), `viewlogs` is GET recent. `configure` and `test_run` are never available. */
+    RepoAction: {
+      id: "toggleonoff" | "viewlogs" | "configure" | "test_run";
+      available: boolean;
+      method?: "GET" | "POST";
+      path?: string;
+      scope?: "read" | "write";
+      reason?: string;
+    };
+    /** One repository from the instance registry or the validated `.remudero/managed-repos.json` set. The row whose instance serves this route is the OPERATING repository: it alone carries `active`, `alerts`, pause and heartbeat signals, and it also owns every ledger row that names no repository (that instance's gardeners, sweeps and fix lanes). */
     RepoDashboardEntry: {
-      /** Canonical `owner/repo` identity from the managed-repo set. */
+      /** Canonical `owner/repo` identity. */
       id: string;
       /** Repository name from the canonical identity. */
       reponame: string;
       /** Deterministic GitHub URL for the canonical identity; no GitHub read is implied. */
       repourl: string;
-      connected_at: string | null;
+      /** NOT COMPUTED; see `not_computed.connected_at`. */
+      connected_at: null;
+      /** False when the operating instance is paused or stopped; null for any other row. */
       active: boolean | null;
       managed: boolean;
-      source: "managed-repos";
+      source: "managed-repos" | "instance-registry";
       health: RepoDashboardHealth;
       telemetry: RepoDashboardTelemetry;
       settings: RepoDashboardSettings;
+      actions: (RepoAction)[];
+      /** Why each never-computed field is null, so a consumer removes it instead of showing it as missing. */
+      not_computed: {
+        connected_at: string;
+        settings: string;
+      };
     };
-    /** GET /v1/repos's read-only managed-repo portfolio. An empty `repos` array is a measured empty managed set; it is not an unavailable response. */
+    /** GET /v1/repos's portfolio, or GET /v1/repos/summary's single operating repository. An empty `repos` array is a measured empty set; it is not an unavailable response. A cached read also carries `staleness`. */
     RepoDashboardResult: {
       generated_at: string;
-      source: "managed-repos";
+      source: "managed-repos" | "instance-registry" | "instance-registry+managed-repos";
+      registry?: {
+        state: "verified" | "unavailable";
+        reason?: string;
+      };
       repos: (RepoDashboardEntry)[];
     };
     /** GET /v1/registry's 503 body (src/lib/serve.ts's `buildRegistryRoute`): the repo registry could not be read, or src/lib/instance-registry.ts's `parseInstanceRegistry` refused it. Path-free on purpose -- an fs error embeds the absolute path, so only a code is echoed. A dedicated refusal rather than a member of the shared Error enum, which a consumer switches over exhaustively (packages/daemon-client-smoke). */
@@ -217,7 +271,7 @@ export interface components {
       status: "completed";
       actionId: string;
       instance: string;
-      /** Server-owned registry identity when this is a non-core instance. */
+      /** Server-owned repository identity, including core when configured. */
       repository?: string;
       action: "pause" | "resume" | "stop";
       /** The reused panel-action ledger row. */
@@ -229,6 +283,21 @@ export interface components {
       status: "unknown";
       actionId: string;
       detail: string;
+    };
+    /** Read-only served contract. Writable filesystem metadata cannot prove cross-process or cross-host sharing. */
+    AssistantControlCapability: {
+      contract: "assistant-control-v2";
+      bootSha: string;
+      instance: string;
+      repository: string;
+      admission: "writable_unverified" | "uninitialized" | "unavailable";
+      claimStore: "shared_root_configured_topology_unverified";
+    };
+    /** Nonterminal read-only lookup; completed actions return AssistantControlReceipt instead. */
+    AssistantControlLookup: {
+      status: "claimed_unknown" | "not_found" | "conflict" | "unavailable";
+      actionId: string;
+      detail?: string;
     };
     /** POST /v1/questions/answer's body -- an operator's answer to a QUESTION-contract entry (worker.ts's plan/questions.ndjson), addressed by the task it was raised on (v0 routing has no path params, src/lib/service.ts). */
     AnswerQuestionRequest: {
@@ -3065,6 +3134,16 @@ export interface paths {
         };
     };
   };
+  "/v1/repos/summary": {
+    get: {
+      responses: {
+          "200": RepoDashboardResult;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
   "/v1/registry": {
     get: {
       responses: {
@@ -3127,6 +3206,29 @@ export interface paths {
           "403": Error;
           "409": undefined;
           "503": AssistantControlUnknown;
+        };
+    };
+  };
+  "/v1/control/assistant-action/status": {
+    get: {
+      responses: {
+          "200": AssistantControlCapability;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/control/assistant-action/receipt": {
+    get: {
+      responses: {
+          "200": AssistantControlReceipt;
+          "202": AssistantControlLookup;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": AssistantControlLookup;
+          "409": AssistantControlLookup;
+          "503": AssistantControlLookup;
         };
     };
   };
@@ -3332,6 +3434,29 @@ export interface paths {
           "403": Error;
           "409": undefined;
           "503": AssistantControlUnknown;
+        };
+    };
+  };
+  "/v1/i/{instance}/control/assistant-action/status": {
+    get: {
+      responses: {
+          "200": AssistantControlCapability;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/i/{instance}/control/assistant-action/receipt": {
+    get: {
+      responses: {
+          "200": AssistantControlReceipt;
+          "202": AssistantControlLookup;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": AssistantControlLookup;
+          "409": AssistantControlLookup;
+          "503": AssistantControlLookup;
         };
     };
   };
