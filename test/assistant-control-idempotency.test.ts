@@ -341,3 +341,30 @@ test("assistant-action lookup keeps interrupted, corrupt, and cross-actor or tar
   assert.equal((await get(interrupted.base, "/v1/control/assistant-action/receipt?actionId=control-read-04")).status, 503);
   assert.equal(rows(ledger(shared)).filter((row) => row.step === "panel.stop_requested").length, 0);
 });
+
+test("assistant-action lookup reports 503 for a claim or receipt that parses but lacks identity", async (t) => {
+  const shared = root();
+  t.after(() => rmSync(shared, { recursive: true, force: true }));
+  const deps = { root: shared, ledgerPath: ledger(shared), claimRoot: shared, instance: "core", repository: "craigoley/remudero" };
+  const server = await listen(controlRoutes(deps));
+  t.after(() => close(server.server));
+  const dir = join(shared, "state", "assistant-control-actions");
+  mkdirSync(dir, { recursive: true });
+
+  // A claim that is valid JSON but carries no actor/instance/fingerprint identity.
+  const bareId = "control-read-05";
+  const bareKey = createHash("sha256").update(bareId).digest("hex");
+  writeFileSync(join(dir, `${bareKey}.claim.json`), "{}");
+  const bare = await get(server.base, `/v1/control/assistant-action/receipt?actionId=${bareId}`);
+  assert.equal(bare.status, 503);
+  assert.deepEqual(await bare.json(), { status: "unavailable", actionId: bareId, detail: "claim identity is incomplete" });
+
+  // A real claim whose receipt file parses but is not a completed receipt for this action.
+  const input = { actionId: "control-read-06", instance: "core", action: "pause" };
+  assert.equal((await post(server.base, "/v1/control/assistant-action", input)).status, 200);
+  const key = createHash("sha256").update(input.actionId).digest("hex");
+  writeFileSync(join(dir, `${key}.receipt.json`), "{}");
+  const partial = await get(server.base, `/v1/control/assistant-action/receipt?actionId=${input.actionId}`);
+  assert.equal(partial.status, 503);
+  assert.deepEqual(await partial.json(), { status: "unavailable", actionId: input.actionId, detail: "receipt identity is incomplete" });
+});
