@@ -15,7 +15,9 @@
     - test/follow-up-policy-stale.test.ts
     - test/follow-up-policy-stops.test.ts
     - test/review-reuse-discrimination-outcome.test.ts
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4739 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     OBSERVED: main CI's ci-shard 1/8 failed on four 2026-09-22 literals that enter the seven-day
