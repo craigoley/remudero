@@ -11,6 +11,7 @@ import {
   SELECTOR_SHADOW_MIN_FAILURES,
   SELECTOR_SHADOW_MIN_RUNS,
   SELECTOR_SHADOW_RECENT_WINDOW_MS,
+  SELECTOR_SHADOW_RUN_FIELDS,
   SELECTOR_SHADOW_SHARDS,
   parseSelectorShadowLines,
   readCoverageShardLogsAsync,
@@ -18,6 +19,8 @@ import {
   readSelectorShadowRuns,
   readSelectorShadowRunsAsync,
   runSelectorShadowGardener,
+  selectorShadowFlakeLedger,
+  selectorShadowRecoveredFlakes,
   selectorShadowReport,
   startSelectorShadowGardener,
   type SelectorShadowRecord,
@@ -132,11 +135,13 @@ test("selector-shadow reads all eight coverage job logs instead of a partial run
   }), /job log unavailable/);
 });
 
-test("W1-T4439: a missed failure files a task naming the missing edge", () => {
+test("W1-T4439: a missed failure files a task naming the missing edge", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-`));
   mkdirSync(join(root, "test"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
   writeFileSync(join(root, "test", "a.test.ts"), "");
+  mkdirSync(join(root, "plan"), { recursive: true });
+  writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
   const observed = run(42, { fullRun: false, floorSize: 1, narrowSize: 0, failures: [
     { file: "test/a.test.ts", floor: "selected", narrow: "missed" },
   ] }, { headSha: "abc123", baseSha: "def456" });
@@ -158,14 +163,14 @@ test("W1-T4439: a missed failure files a task naming the missing edge", () => {
     assert.equal(branch, "selector-shadow-garden-test");
     return "W1-T9001";
   });
-  const report = pass();
+  const report = await pass();
   assert.equal(report.verdict, "misses");
   assert.equal(landed.length, 1);
   assert.deepEqual(landed[0]!.paths, ["plan/tasks.d/w1-t9001-selector-shadow-miss.yaml"]);
   const task = readFileSync(join(root, landed[0]!.paths[0]!), "utf8");
   assert.match(task, /scripts\/clock-signature-ratchet\.mjs -> test\/a\.test\.ts/);
   assert.match(task, /at abc123/);
-  assert.match(task, /origin: "selector-shadow:abc123:narrow:test\/a\.test\.ts"/);
+  assert.match(task, /origin: "selector-shadow-miss:test\/a\.test\.ts"/);
   assert.match(task, /verify: human/);
   const filed = parseYaml(task) as Array<{ acceptance: Array<{ proof: string }> }>;
   assert.equal(filed[0]!.acceptance[0]!.proof, "grep: test/a\\.test\\.ts in src/lib/affected-suites.ts");
@@ -176,11 +181,11 @@ test("W1-T4439: a missed failure files a task naming the missing edge", () => {
   assert.match(execFileSync("grep", ["-arn", "--", proof, join(root, landed[0]!.paths[0]!)], { encoding: "utf8" }), /origin:/);
   assert.ok(events.includes("selector-shadow.report"));
   assert.ok(events.includes("selector-shadow.miss_filed"));
-  pass();
+  await pass();
   assert.equal(landed.length, 1, "the same observed edge files once across passes");
 });
 
-test("W1-T4764: the selector lists runs in a dated recent window", () => {
+test("W1-T4764: the selector lists runs in a dated recent window", async () => {
   const calls: string[][] = [];
   const now = Date.parse("2026-09-29T10:00:00.000Z");
   const runs = readSelectorShadowRuns("acme", "remudero", 2, {
@@ -195,19 +200,20 @@ test("W1-T4764: the selector lists runs in a dated recent window", () => {
     readLog: (args) => (calls.push(args), "coverage-shard\tAFFECTED-SUITES-SHADOW: {}"),
   });
   assert.deepEqual(calls, [
-    ["api", `repos/acme/remudero/actions/workflows/ci.yml/runs?event=pull_request&per_page=100&created=${encodeURIComponent(`>=${new Date(now - SELECTOR_SHADOW_RECENT_WINDOW_MS).toISOString()}`)}`],
+    ["api", `repos/acme/remudero/actions/workflows/ci.yml/runs?event=pull_request&per_page=100&created=${encodeURIComponent(`>=${new Date(now - SELECTOR_SHADOW_RECENT_WINDOW_MS).toISOString()}`)}`,
+      "--jq", SELECTOR_SHADOW_RUN_FIELDS],
     ["run", "view", "42", "--repo", "acme/remudero", "--log"],
   ]);
   assert.deepEqual(runs, [{ id: 42, headSha: "abc123", baseSha: "def456", prNumber: 7,
     log: "coverage-shard\tAFFECTED-SUITES-SHADOW: {}" }]);
   const miss = { runId: 42, headSha: "abc123", baseSha: "def456", selection: "narrow" as const,
     file: "test/a.test.ts" };
-  assert.deepEqual(readSelectorShadowChangedPaths("acme", "remudero", miss, (args) => {
+  assert.deepEqual(await readSelectorShadowChangedPaths("acme", "remudero", miss, (args) => {
     assert.deepEqual(args, ["api", "repos/acme/remudero/compare/def456...abc123"]);
     return { files: [{ filename: "scripts/clock-signature-ratchet.mjs" }] };
   }), ["scripts/clock-signature-ratchet.mjs"]);
-  assert.throws(() => readSelectorShadowChangedPaths("acme", "remudero", miss, () => ({ files: null })), /incomplete comparison/);
-  assert.throws(() => readSelectorShadowChangedPaths("acme", "remudero", miss, () => null), /no comparison object for abc123/);
+  await assert.rejects(readSelectorShadowChangedPaths("acme", "remudero", miss, () => ({ files: null })), /incomplete comparison/);
+  await assert.rejects(readSelectorShadowChangedPaths("acme", "remudero", miss, () => null), /no comparison object for abc123/);
   assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => null, readLog: () => "" }), /no workflow-runs object/);
   assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({}), readLog: () => "" }), /no workflow_runs list/);
   assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({ workflow_runs: [{ head_sha: "abc123", status: "completed" }] }), readLog: () => "" }), /no id or head SHA/);
@@ -277,10 +283,10 @@ test("the async selector-shadow reader keeps run logs sequential while other tim
     },
   });
   await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(calls.map((args) => args[2]), [undefined, "42"], "later logs wait for the first bounded read");
+  assert.deepEqual(calls.map((args) => args[2]), ["--jq", "42"], "later logs wait for the first bounded read");
   releaseFirst!();
   const runs = await reading;
-  assert.deepEqual(calls.map((args) => args[2]), [undefined, "42", "43"]);
+  assert.deepEqual(calls.map((args) => args[2]), ["--jq", "42", "43"]);
   assert.deepEqual(runs.map((run) => [run.id, run.headSha, run.log]), [
     [42, "abc123", "log for 42"],
     [43, "def456", "log for 43"],
@@ -498,4 +504,128 @@ test("a self-hosting daemon keeps timers alive while selector-shadow reads a run
     if (oldFloor === undefined) delete process.env.RMD_GH_TRANSPORT_FLOOR;
     else process.env.RMD_GH_TRANSPORT_FLOOR = oldFloor;
   }
+});
+
+function shardedLog(shards: Array<{ conclusion: string; lines: string[] }>): string {
+  return shards.flatMap((shard, i) => [
+    `coverage-shard (${i + 1}/8)\tSELECTOR-SHADOW-JOB: conclusion=${shard.conclusion}`,
+    ...shard.lines.map((line) => `coverage-shard (${i + 1}/8)\t${line}`),
+  ]).join("\n");
+}
+
+const shadowLine = (failures: SelectorShadowRecord["failures"]) =>
+  `2026-09-29T11:09:56.9991966Z AFFECTED-SUITES-SHADOW: ${JSON.stringify({ fullRun: false, floorSize: 80, narrowSize: 20, failures })}`;
+
+test("a failure inside a coverage job that concluded success is a recovered flake and never a selector miss", async () => {
+  const flakyShard = [
+    "2026-09-29T11:03:03.2408502Z \u001b[36;1m# step prints FLAKE-RETRY-RECOVERED and flake-retry-aggregate counts it.\u001b[0m",
+    "2026-09-29T11:04:00.0000000Z     FLAKE-RETRY-FILES: retrying 1 failed file(s) — test/nested-output.test.ts",
+    "2026-09-29T11:09:51.6870408Z FLAKE-RETRY-FILES: retrying 1 failed file(s) uninstrumented — test/flaky.test.ts",
+    "2026-09-29T11:09:55.0665865Z FLAKE-RETRY-RECOVERED: a flake, not a pass — coverage figures are pass one's — some test",
+    shadowLine([{ file: "test/flaky.test.ts", floor: "selected", narrow: "missed" }]),
+  ];
+  const brokenShard = [
+    "2026-09-29T11:09:51.0000000Z FLAKE-RETRY-FILES: retrying 1 failed file(s) uninstrumented — test/broken.test.ts",
+    shadowLine([{ file: "test/broken.test.ts", floor: "selected", narrow: "missed" }]),
+  ];
+  const jobs = Array.from({ length: SELECTOR_SHADOW_SHARDS }, (_, i) =>
+    ({ id: i + 101, name: `coverage-shard (${i + 1}/8)`, status: "completed", conclusion: i === 1 ? "failure" : "success" }));
+  const log = await readCoverageShardLogsAsync("acme", "remudero", 42, {
+    readJson: async () => ({ total_count: jobs.length, jobs }),
+    readText: async (args) => {
+      const shard = Number(/jobs\/(\d+)\/logs/.exec(args[1]!)![1]) - 100;
+      const lines = shard === 1 ? flakyShard : shard === 2 ? brokenShard : [shadowLine([])];
+      return ["unrelated line", ...lines].join("\n");
+    },
+  });
+  assert.match(log, /^coverage-shard \(1\/8\)\tSELECTOR-SHADOW-JOB: conclusion=success$/m);
+  assert.doesNotMatch(log, /unrelated line|nested-output|# step prints/, "only anchored evidence lines are kept");
+  const report = selectorShadowReport([{ id: 42, headSha: "abc", log }], 100);
+  assert.deepEqual(report.misses.map((m) => m.file), ["test/broken.test.ts"], "only the failure its retry did not recover is a miss");
+  assert.equal(report.recovered, 1);
+  assert.equal(report.narrow.failures, 1);
+  assert.equal(report.runsComplete, 1);
+  assert.deepEqual(selectorShadowRecoveredFlakes(log), [{ shard: 1, file: "test/flaky.test.ts" }]);
+  assert.deepEqual(selectorShadowRecoveredFlakes(shardedLog([{ conclusion: "failure", lines: flakyShard }])), [],
+    "a shard that failed anyway is not proof its retried files recovered");
+});
+
+test("a cancelled workflow run is dropped before it can hold the evidence window incomplete", async () => {
+  const read: string[] = [];
+  const runs = await readSelectorShadowRunsAsync("acme", "remudero", 2, {
+    readJson: async () => ({ workflow_runs: [
+      { id: 1, head_sha: "superseded", status: "completed", conclusion: "cancelled", created_at: new Date().toISOString() },
+      { id: 2, head_sha: "kept", status: "completed", conclusion: "success", created_at: new Date().toISOString() },
+    ] }),
+    readLog: async (args) => { read.push(args[2]!); return ""; },
+  });
+  assert.deepEqual(runs.map((r) => r.id), [2]);
+  assert.deepEqual(read, ["2"], "no log of a cancelled run is fetched");
+});
+
+test("a retry-recovered file is ledgered once as flake evidence for the test gardener", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-flakes-`));
+  const log = shardedLog(Array.from({ length: SELECTOR_SHADOW_SHARDS }, (_, i) => i === 0
+    ? { conclusion: "success", lines: [
+      "2026-09-29T11:09:51Z FLAKE-RETRY-FILES: retrying 2 failed file(s) uninstrumented — test/a.test.ts, test/b.test.ts",
+      "2026-09-29T11:09:55Z FLAKE-RETRY-RECOVERED: a flake, not a pass — x",
+      shadowLine([{ file: "test/a.test.ts", floor: "selected", narrow: "selected" }]),
+    ] }
+    : { conclusion: "success", lines: [shadowLine([])] }));
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const io = {
+    cachePath: join(root, "logs.json"),
+    clock: fixedClock(1_000),
+    readJson: async () => ({ workflow_runs: [{ id: 7, head_sha: "h", status: "completed", conclusion: "success", created_at: new Date(1_000).toISOString() }] }),
+    readLog: async () => log,
+    onFlakes: selectorShadowFlakeLedger((step, extra) => { rows.push({ step, extra }); }),
+  };
+  await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
+  await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
+  assert.deepEqual(rows, [
+    { step: "test.flake_retry", extra: { file: "test/a.test.ts", headline: "recovered on retry", ci_run_id: 7, shard: 1, source: "selector-shadow" } },
+    { step: "test.flake_retry", extra: { file: "test/b.test.ts", headline: "recovered on retry", ci_run_id: 7, shard: 1, source: "selector-shadow" } },
+  ], "a cached complete run is never reported twice");
+});
+
+test("a later miss of the same suite is ledgered as evidence for its task and never filed again", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-dedupe-`));
+  mkdirSync(join(root, "test"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
+  const shard = (id: string, origin: string, retired = false) => writeFileSync(join(root, "plan", "tasks.d", `${id.toLowerCase()}-x.yaml`), [
+    `- id: ${id}`, "  title: \"t\"", "  repo: remudero", "  depends_on: []", "  type: implement",
+    `  status: ${retired ? "blocked" : "queued"}`, ...(retired ? ["  retirement: withdrawn"] : []),
+    `  origin: ${JSON.stringify(origin)}`, "  files: [src/lib/affected-suites.ts]", "",
+  ].join("\n"));
+  shard("W1-T4715", "selector-shadow:old:narrow:test/known.test.ts");
+  shard("W1-T4716", "selector-shadow:old:narrow:test/retired.test.ts", true);
+  shard("W1-T4717", "selector-shadow:old:floor:test/both.test.ts", true);
+  shard("W1-T4718", "selector-shadow-miss:test/both.test.ts");
+  const missed = (id: number, file: string) => run(id, { fullRun: false, floorSize: 1, narrowSize: 0,
+    failures: [{ file, floor: "selected", narrow: "missed" }] }, { headSha: `head-${id}` });
+  const landed: string[] = [];
+  const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const deps = {
+    stateDir: join(root, "state"),
+    repoRoot: root,
+    openWorkspace: () => ({ root, branch: "b", land: (opts: { paths: string[] }) => (landed.push(...opts.paths), "https://github.com/acme/remudero/pull/1"), dispose: () => {} }),
+    log: (step: string, extra?: Record<string, unknown>) => { events.push({ step, extra }); },
+  };
+  let minted = 0;
+  const runs = [missed(1, "test/known.test.ts"), missed(2, "test/new.test.ts"), missed(3, "test/new.test.ts"),
+    missed(4, "test/retired.test.ts"), missed(5, "test/both.test.ts")];
+  await runSelectorShadowGardener(deps, () => runs, async () => [], () => `W1-T900${++minted}`);
+  assert.deepEqual(landed, ["plan/tasks.d/w1-t9001-selector-shadow-miss.yaml"], "one shard for the one suite with no task");
+  const evidence = events.filter((e) => e.step === "selector-shadow.miss_evidence").map((e) => [e.extra?.file, e.extra?.task_id, e.extra?.task_retired ?? false]);
+  assert.deepEqual(evidence, [
+    ["test/known.test.ts", "W1-T4715", false],
+    ["test/new.test.ts", "W1-T9001", false],
+    ["test/retired.test.ts", "W1-T4716", true],
+    ["test/both.test.ts", "W1-T4718", false],
+  ]);
+  await runSelectorShadowGardener(deps, () => [...runs, missed(6, "test/new.test.ts")], async () => [], () => `W1-T900${++minted}`);
+  assert.equal(landed.length, 1, "a new observation of a filed suite never files again");
+  assert.equal(events.filter((e) => e.step === "selector-shadow.miss_evidence").length, 5, "only the unseen observation adds evidence");
 });

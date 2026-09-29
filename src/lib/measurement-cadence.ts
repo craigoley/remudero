@@ -3040,6 +3040,18 @@ export function ciLearningShardId(finding: Pick<CiFailurePair, "pr" | "gate">): 
   return `ci-learning:${finding.pr}:${finding.gate}`;
 }
 
+/**
+ * The gate a {@link ciLearningShardId} names, or undefined for any other origin.
+ *
+ * The id carries the window's FIRST pull request, and that pull request changes every window. So
+ * keying idempotency on the whole id re-filed one gate's lesson under a new number each time.
+ * MEASURED 2026-09-29 over plan/tasks.d: 49 machine-filed lessons covered 9 gates, and 39 of them
+ * were withdrawn by hand as duplicates.
+ */
+export function ciLearningGateOf(findingId: string): string | undefined {
+  return /^ci-learning:\d+:(.+)$/.exec(findingId)?.[1];
+}
+
 /** THE SURFACE A REMEDY MUST NAME. `spawnWorker` passes `settingSources: []` (src/lib/worker.ts),
  *  so a DISPATCHED WORKER NEVER READS CLAUDE.md — measured, not assumed. Workers are reached by
  *  matched `learnings/*.yaml` in `renderImplementPrompt`, so a remedy naming CLAUDE.md would fix
@@ -3139,10 +3151,15 @@ export function mintCiLearningShards(
   const unreadableShas = [...corpus.unreadableShas];
   const blind = corpus.status === "unreadable";
   const already = new Set(alreadyFiledFindingIds);
+  const heldGates = new Set(alreadyFiledFindingIds.map(ciLearningGateOf).filter((g): g is string => g !== undefined));
 
   const ordered = corpus.pairs
     .filter((p) => p.state === "repaired")
     .filter((p) => !already.has(ciLearningShardId(p)))
+    // A lesson is its GATE, so a gate the plan already holds a lesson for is never re-filed under
+    // the window's newer first pull request. Its recurrence is still reported, by
+    // `judgeCiLessonEfficacy`, against the lesson already filed.
+    .filter((p) => !heldGates.has(p.gate))
     .sort((a, b) => (a.pr !== b.pr ? a.pr - b.pr : a.gate.localeCompare(b.gate)));
 
   /*

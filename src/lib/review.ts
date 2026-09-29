@@ -249,7 +249,7 @@ export async function claimReviewDecision(opts: {
  * `exec-error` threw or timed out; `runner-absent` names an unavailable checkout-local tool; `runtime-broken` the only
  * `not ok` names the FILE ITSELF (W1-T1077); `incomplete-run` results then no `# duration_ms` summary (W1-T2740);
  * `no-exec-context` no PR-head checkout; `forward-reference` absent at head but declared by this diff's own shard — see {@link
- * shardDeclaredFilesInDiff}. */
+ * shardDeclaredFilesInDiff} — or, on a filing head, any target the diff does not change ({@link FILING_FORWARD_ADVISORY}). */
 export type ProofSkipReason =
   | "no-dialect"
   | "dialect-parse-error"
@@ -2291,6 +2291,43 @@ export interface ProofExecContext {
    *  call-site grep has no equivalent tell — the CONSUMER file exists in both worlds and only the CALL is missing.
    *  Without this flag the carve-out would excuse a build PR that shipped the module unwired (W1-T2732 counted four). */
   planOnlyDiff?: boolean;
+  /** Every path THIS diff changes, from the same walk `planOnlyDiff` reads — see {@link filingHeadForwardTarget}. */
+  diffFiles?: ReadonlySet<string>;
+}
+
+/**
+ * RELAXATION (2026-09-29 operator ruling: refuse only what is risky or broken) — THE FILING-HEAD FORWARD REFERENCE.
+ * CLASS RELAXED: on a plan-only head, a proof naming something ABSENT that the diff does not change — a bare test title
+ * no test matches, a missing test file, or a `grep:` target outside the diff with no match. W1-T456/W1-T2737/W1-T4003
+ * excused only a target the diff's own shard DECLARED; an undeclared one still graded `executed_fail`, a hard override.
+ * WHY IT IS SAFE: absence in a file this diff does not touch cannot be caused by it, and no fix round on a filing can
+ * make the proof pass; the same proof executes for real on the build PR. Still refused: a test that RAN and failed
+ * (it may read the plan this diff edits — CI judges that too), and any proof about a file the diff changes. MEASURED 2026-09-15..29: 7 reviewer-unmet fix rounds on six filing
+ * PRs (#6055 #6303 #6477 #6478 #6503 #7149) were this class.
+ * MEASURABLE: the reason carries {@link FILING_FORWARD_ADVISORY}, countable on `review.posted` rows.
+ */
+export const FILING_FORWARD_ADVISORY = "ADVISORY filing-head forward reference";
+
+function filingHeadForwardTarget(
+  whitelisted: WhitelistedProof,
+  execCtx: ProofExecContext,
+  outcome: "fail" | "no-match",
+): string | undefined {
+  if (execCtx.planOnlyDiff !== true || execCtx.diffFiles === undefined) return undefined;
+  // A test that RAN and failed may read the plan this diff edits, so only ABSENCE is excused for a test proof.
+  if (whitelisted.kind === "test" && whitelisted.nameFiltered) return outcome === "no-match" ? "a test title" : undefined;
+  const target = whitelisted.kind === "test" ? whitelisted.label : dialectGrepTargetPath(whitelisted);
+  if (target === undefined || execCtx.diffFiles.has(target)) return undefined;
+  if (whitelisted.kind === "test" && existsSync(join(execCtx.cwd, target))) return undefined;
+  return target;
+}
+
+function filingForwardReason(reason: string, whitelisted: WhitelistedProof, target: string): string {
+  return (
+    `${reason} — NOTE: ${FILING_FORWARD_ADVISORY}: proof (${whitelisted.kind}: ${whitelisted.label}) names ` +
+    `${target}, which this plan-only diff does not change, so a filing cannot build it; not graded a failure, ` +
+    `keyword floor applied — it executes for real on the build PR`
+  );
 }
 
 /** Materialise, into a throwaway directory, ONLY the base-revision blobs a review's `grep:` proofs name. (R-11) THE
@@ -2571,7 +2608,7 @@ export function judgeCriterion(
         !existsSync(join(execCtx.cwd, whitelisted.label));
       // The same forward-reference judgement for the dialect `callSiteViolations` mandates (W1-T2737). Computed here
       // beside its `unit test:` sibling so the two read together, but CONSUMED only in the post-execution failure
-      // branch below. `planOnlyDiff` is the filing-scope half; an UNDECLARED path yields `undefined` and keeps blocking.
+      // branch below. `planOnlyDiff` is the filing-scope half; an UNDECLARED path falls to `filingTarget` below.
       const grepTarget = dialectGrepTargetPath(whitelisted);
       const grepForwardReferenceTarget =
         filingScopeHead && grepTarget !== undefined && execCtx.forwardReferenceFiles?.has(grepTarget) === true
@@ -2588,6 +2625,7 @@ export function judgeCriterion(
         const exec = execCtx.exec ?? execWhitelistedProof;
         try {
           const outcome = exec(whitelisted, execCtx.cwd);
+          const filingTarget = outcome === "pass" ? undefined : filingHeadForwardTarget(whitelisted, execCtx, outcome);
           if (outcome === "pass") {
             if (
               whitelisted.kind === "grep" &&
@@ -2677,6 +2715,10 @@ export function judgeCriterion(
                 `${reason} — NOTE: proof greps ${grepForwardReferenceTarget}, declared in this diff's own ` +
                 `plan shard \`files:\` while this diff changes no source — a forward reference to wiring ` +
                 `not yet built, not a failure; keyword floor applied`;
+            } else if (filingTarget !== undefined) {
+              proofExec = "not_yet_built";
+              proofSkip = "forward-reference";
+              reason = filingForwardReason(reason, whitelisted, filingTarget);
             } else if (looksLikeProseDescription(whitelisted.label)) {
               // A prose paraphrase, not a bare name: NOT a failing test. Degrade to `not_executable`, the keyword
               // floor standing as computed, and ANNOTATE why, so an author sees "names no matching test" rather than
@@ -2704,6 +2746,10 @@ export function judgeCriterion(
               `${reason} — NOTE: proof greps ${grepForwardReferenceTarget}, declared in this diff's own ` +
               `plan shard \`files:\` while this diff changes no source — a forward reference to wiring ` +
               `not yet built, not a failure; keyword floor applied`;
+          } else if (filingTarget !== undefined) {
+            proofExec = "not_yet_built";
+            proofSkip = "forward-reference";
+            reason = filingForwardReason(reason, whitelisted, filingTarget);
           } else {
             proofExec = "executed_fail";
             met = false;
@@ -3732,6 +3778,7 @@ export function judgeReview(
         // W1-T2737: the SAME `planOnly` computed above — one derivation, so the reviewer's
         // scope judgement and the forward-reference carve-out can never disagree.
         planOnlyDiff: planOnly,
+        diffFiles: new Set(diffFiles),
       }
     : undefined;
   const verdicts = criteria.map((c, i) =>

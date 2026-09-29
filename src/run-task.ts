@@ -162,7 +162,7 @@ import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "
 import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { startCiFrictionGardener, readCiFrictionLedgerRecords, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
-import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
+import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, selectorShadowFlakeLedger, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener, startEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
@@ -33714,6 +33714,7 @@ export async function daemonCommand(
                   () => readSelectorShadowRunsAsync(self.owner, self.repo, undefined, {
                     cachePath: join(config.root, "state", "selector-shadow-log-cache.json"),
                     warn: (message) => log("selector-shadow.cache_failed", { message }),
+                    onFlakes: selectorShadowFlakeLedger(log),
                   }),
                   (miss) => readSelectorShadowChangedPaths(self.owner, self.repo, miss),
                   ciLearningTaskIdMinter(repoRoot),

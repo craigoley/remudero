@@ -5,12 +5,19 @@
   type: implement
   verify: human
   risk: high
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "selector-shadow:f4cf1b1bcce9173311e8a19173d2cad1f4860e6d:narrow:test/fast-gate-admits-the-census-class.test.ts"
   files: [src/lib/affected-suites.ts]
-  note: "W1-T4439 observed narrow miss on coverage run 36495528731 for PR #7686 at f4cf1b1bcce9173311e8a19173d2cad1f4860e6d: src/lib/escalation-precision.ts, src/lib/panel-actions.ts, test/a-dismissed-escalation-records-why.test.ts -> test/fast-gate-admits-the-census-class.test.ts. The changed paths are candidate missing edges, not guessed import edges. Inspect the exact head and teach the selector the missing dependency before W1-T4406 narrows CI."
+  note: |
+    Selector-shadow audit, 2026-09-29: a real miss (narrow selection, run 36495528731): the
+    red coverage shard's retry ALSO failed on test/fast-gate-admits-the-census-class.test.ts. It is one of five
+    whole-tree census or ratchet suites the selector cannot reach by import edge; the five are
+    folded into W1-T4787, which now carries the one cause. Withdrawn as a duplicate of it.
+
+    W1-T4439 observed narrow miss on coverage run 36495528731 for PR #7686 at f4cf1b1bcce9173311e8a19173d2cad1f4860e6d: src/lib/escalation-precision.ts, src/lib/panel-actions.ts, test/a-dismissed-escalation-records-why.test.ts -> test/fast-gate-admits-the-census-class.test.ts. The changed paths are candidate missing edges, not guessed import edges. Inspect the exact head and teach the selector the missing dependency before W1-T4406 narrows CI.
   acceptance:
     - claim: "the narrow selector includes test/fast-gate-admits-the-census-class.test.ts when this edge is exercised"
       proof: "grep: test/fast-gate-admits-the-census-class\\.test\\.ts in src/lib/affected-suites.ts"

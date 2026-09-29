@@ -120,13 +120,14 @@ capabilities:
     claude-opus-4-7: frontier
     claude-opus-4-6: frontier
     claude-opus-4-5-20251101: frontier
+    claude-sonnet-5-5: balanced
     claude-sonnet-5: balanced
     claude-sonnet-4-6: balanced
     claude-sonnet-4-5-20250929: balanced
     claude-haiku-4-5-20251001: economy
   claude_candidates:
     economy:  [claude-haiku-4-5-20251001]
-    balanced: [claude-sonnet-5, claude-sonnet-4-6, claude-sonnet-4-5-20250929]
+    balanced: [claude-sonnet-5-5, claude-sonnet-5, claude-sonnet-4-6, claude-sonnet-4-5-20250929]
     frontier: [claude-opus-5-5, claude-opus-5, claude-opus-4-8, claude-opus-4-7, claude-opus-4-6, claude-opus-4-5-20251101]
   # gpt-5.5 IS BEING DECOMMISSIONED (operator notice, 2026-09-14), so it is demoted to a TRAILING
   # fallback in every row it appears in rather than deleted: while it still answers it remains a

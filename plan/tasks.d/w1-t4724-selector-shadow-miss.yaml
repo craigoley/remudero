@@ -5,12 +5,19 @@
   type: implement
   verify: human
   risk: high
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "selector-shadow:cfcef8ae68a0f71a8256fc8aaaf7fb2bed5f53cc:narrow:test/codex-reviewer-production-wiring.test.ts"
   files: [src/lib/affected-suites.ts]
-  note: "W1-T4439 observed narrow miss on coverage run 36442305217 at cfcef8ae68a0f71a8256fc8aaaf7fb2bed5f53cc: cfcef8ae68a0f71a8256fc8aaaf7fb2bed5f53cc -> test/codex-reviewer-production-wiring.test.ts. The changed paths are candidate missing edges, not guessed import edges. Inspect the exact head and teach the selector the missing dependency before W1-T4406 narrows CI."
+  note: |
+    Selector-shadow audit, 2026-09-29: not a selector miss. On run 36442305217 test/codex-reviewer-production-wiring.test.ts
+    failed its first pass and test-with-retry.mjs's retry recovered it (every coverage job in the run concluded success).
+    The shadow record counted the first pass. Nothing is missing from the selector; the
+    gardener now scores a failure inside a success-concluded job as recovered. Withdrawn.
+
+    W1-T4439 observed narrow miss on coverage run 36442305217 at cfcef8ae68a0f71a8256fc8aaaf7fb2bed5f53cc: cfcef8ae68a0f71a8256fc8aaaf7fb2bed5f53cc -> test/codex-reviewer-production-wiring.test.ts. The changed paths are candidate missing edges, not guessed import edges. Inspect the exact head and teach the selector the missing dependency before W1-T4406 narrows CI.
   acceptance:
     - claim: "the narrow selector includes test/codex-reviewer-production-wiring.test.ts when this edge is exercised"
       proof: "grep: test/codex-reviewer-production-wiring\\.test\\.ts in src/lib/affected-suites.ts"
