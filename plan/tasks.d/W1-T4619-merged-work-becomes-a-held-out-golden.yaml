@@ -14,7 +14,7 @@
     - src/lib/golden-corpus.ts
     - src/lib/replay-harness.ts
     - test/merged-work-becomes-a-held-out-golden.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

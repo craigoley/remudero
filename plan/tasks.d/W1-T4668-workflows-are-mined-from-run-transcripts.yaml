@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-learn-1790600000"
   plan_refs: [W1-T2766, W1-T4338]
   files: [src/lib/workflow-mining.ts, src/lib/skill-workshop.ts, test/workflows-are-mined-from-run-transcripts.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-28: mineProceduralCandidates (src/lib/retro.ts) groups runs by fixed ledger signals ('no LLM, no I/O');

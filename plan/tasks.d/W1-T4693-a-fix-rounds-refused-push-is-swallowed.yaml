@@ -14,7 +14,7 @@
     - src/run-task.ts
     - src/lib/sweep.ts
     - test/a-fix-rounds-refused-push-is-not-swallowed.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

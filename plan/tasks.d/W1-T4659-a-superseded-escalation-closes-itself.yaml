@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-28: recommended follow-ups 1-6 and 8 — automated flow, no stuck PRs, no false alarms"
   plan_refs: [W1-T195, W1-T104, W1-T345]
   files: [src/lib/escalate.ts, test/a-superseded-escalation-closes-itself.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-28: needs-human issues #7565, #7571, #7572 and #7573 (plus earlier ones) are all open for W1-T3721 / PR #7561,

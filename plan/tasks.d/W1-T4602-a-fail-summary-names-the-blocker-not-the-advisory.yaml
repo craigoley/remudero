@@ -12,7 +12,7 @@
   files:
     - src/lib/review.ts
     - test/a-fail-summary-names-the-blocker-not-the-advisory.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -93,7 +93,7 @@
   band_meaning: blast-radius
   origin: human
   files: [src/lib/worker-provider.ts, src/lib/sweep.ts, src/lib/serve.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> throughput

@@ -20,7 +20,7 @@
     - test/intent-plan-preview.test.ts
     - test/intent-plan-confirmation.test.ts
     - test/intent-plan-undo.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T2499 proves that RMD can ask bounded clarification questions, but it intentionally fences that

@@ -10,7 +10,7 @@
   files: [src/run-task.ts]
   origin: oper#squeeze-session-2026-09-17
   plan_refs: ["W1-T3726", "W1-T3692", "W1-T3696"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED by running `cashCanServeToolSurface` over every declared tool surface in the tree

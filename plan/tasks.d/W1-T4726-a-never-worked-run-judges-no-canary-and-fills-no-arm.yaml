@@ -14,7 +14,7 @@
     - src/lib/config-gardener.ts
     - scripts/mount-headroom-sweep.mjs
     - test/a-never-worked-run-judges-no-canary-and-fills-no-arm.test.ts
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

@@ -13,7 +13,7 @@
   files:
     - src/lib/evidence-coverage-gardener.ts
     - test/a-chronic-evidence-gap-is-still-a-gap.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

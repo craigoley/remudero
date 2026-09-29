@@ -11,7 +11,7 @@
   origin: "operator report 2026-09-28: phone inbox showed 74 waiting-on-you threads, including W1-T216"
   plan_refs: [W1-T4086, W1-T4088, W1-T3932]
   files: [src/lib/inbox.ts, src/lib/panel-graph.ts, src/lib/inbox-responder.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/a-released-human-ask-leaves-the-inbox.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     On current main, a verify-human judge can release a parked task by writing a task-scoped

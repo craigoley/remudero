@@ -14,7 +14,7 @@
     - src/lib/serve.ts
     - src/lib/eval-card.ts
     - test/an-eval-card-is-served-for-a-real-trial.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

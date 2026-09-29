@@ -84,7 +84,7 @@
   # Splitting leaves an emitter asking a question no verb answers.
   origin: human
   files: [src/lib/plan-pr-emitter.ts, src/lib/body-repair.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     Depends in spirit on W1-T3687 (#5844), which adds `rmd check-acceptance --base` -- the base

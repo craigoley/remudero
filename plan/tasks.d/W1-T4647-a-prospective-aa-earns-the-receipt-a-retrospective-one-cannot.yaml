@@ -15,7 +15,7 @@
     - src/lib/paired-trial.ts
     - src/run-task.ts
     - test/a-prospective-aa-earns-a-clean-receipt.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

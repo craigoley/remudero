@@ -13,7 +13,7 @@
   files:
     - src/lib/ledger-union.ts
     - test/a-union-read-honours-its-step-filter.test.ts
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

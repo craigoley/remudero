@@ -16,7 +16,7 @@
     - src/lib/task-case-file.ts
     - test/benchmark-verified-outcome.test.ts
     - docs/model-routing.md
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     benchmark-cohort-v1 joins worker assignments, attempts and ledger terminals, but its

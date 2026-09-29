@@ -18,7 +18,7 @@
     - test/field-trials-flow.test.ts
     - test/field-trials-github.test.ts
     - docs/research/model-evidence-program.md
-  status: queued
+  status: merged
   rationale: |
     Public core PR activity can already be plotted with source links, but GitHub merges are not
     worker successes, deployed changes, or proof of correctness. The three owned repos have

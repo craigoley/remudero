@@ -15,7 +15,7 @@
     - src/run-task.ts
     - test/benchmark-paid-pilot.test.ts
     - docs/research/model-evidence-program.md
-  status: queued
+  status: merged
   rationale: |
     The operator approved a distinct $100-total, seven-day paid benchmark pilot across all
     three opted-in repos. The cash-simple operational trial and its corrected per-call accounting
