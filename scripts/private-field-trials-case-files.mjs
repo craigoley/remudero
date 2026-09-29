@@ -14,6 +14,9 @@ const stateDir = process.env.RMD_FIELD_TRIALS_CORE_LEDGER ?? "/home/node/Remuder
 const out = process.env.RMD_FIELD_TRIALS_CASE_OUT ?? join(stateDir, "field-trials", "case-files-latest.json");
 const maxCases = Number(process.env.RMD_FIELD_TRIALS_MAX_CASES ?? "200");
 if (!Number.isSafeInteger(maxCases) || maxCases < 1 || maxCases > 200) throw new Error("field-trials case-file bound must be 1..200");
+const maxPrSearches = Number(process.env.RMD_FIELD_TRIALS_PR_SEARCH_MAX ?? "25");
+if (!Number.isSafeInteger(maxPrSearches) || maxPrSearches < 0 || maxPrSearches > 25)
+  throw new Error("field-trials exact PR search bound must be 0..25");
 
 const read = await readFieldTrialsLedger(stateDir);
 if (read.state === "unavailable") throw new Error(`field-trials case-file ledger unavailable: ${read.reason}`);
@@ -37,12 +40,35 @@ for (const row of read.rows) {
   const prior = latestPr.get(row.taskId);
   if (!prior || (row.ts ?? "") > prior.ts) latestPr.set(row.taskId, { number: row.prNumber, ts: row.ts ?? "" });
 }
-const withPr = taskIds.filter((id) => latestPr.has(id));
-const selected = withPr.slice(0, maxCases);
+const withoutLedgerPr = taskIds.filter((id) => !latestPr.has(id));
 if (process.env.GH_APP_ID && process.env.GH_APP_INSTALLATION_ID && process.env.GH_APP_PRIVATE_KEY_PATH) {
   const token = await refreshInstallationToken({ env: process.env });
   if (!token.ok) console.error(`field-trials case-files: GitHub App token unavailable (${token.reason}); exact PR reads may be unavailable`);
 }
+const creditsTask = (pr, taskId) => String(pr.body ?? "").split(/\r?\n/).includes(`Remudero-Task: ${taskId}`)
+  || new RegExp(`^run-${taskId}-\\d+$`).test(String(pr.headRefName ?? ""));
+let searches = 0;
+let searchMatched = 0;
+let searchAmbiguous = 0;
+let searchUnreadable = 0;
+for (const taskId of withoutLedgerPr.slice(0, maxPrSearches)) {
+  searches += 1;
+  try {
+    const candidates = JSON.parse(await ghTextAsync(["pr", "list", "--repo", "craigoley/remudero",
+      "--state", "all", "--search", taskId, "--limit", "20", "--json", "number,body,headRefName,updatedAt"]));
+    if (!Array.isArray(candidates)) throw new Error("PR search returned no list");
+    const credited = candidates.filter((pr) => creditsTask(pr, taskId));
+    if (credited.length > 1) { searchAmbiguous += 1; continue; }
+    if (credited.length === 1 && Number.isSafeInteger(credited[0].number)) {
+      latestPr.set(taskId, { number: credited[0].number, ts: credited[0].updatedAt ?? "" });
+      searchMatched += 1;
+    }
+  } catch {
+    searchUnreadable += 1;
+  }
+}
+const withPr = taskIds.filter((id) => latestPr.has(id));
+const selected = withPr.slice(0, maxCases);
 let files = [];
 if (selected.length > 0) {
   const projection = new Map();
@@ -57,8 +83,7 @@ if (selected.length > 0) {
     } catch {
       prRead.set(number, { state: "unavailable", reason: "github-exact-pr-read-failed" });
     }
-    const credited = raw && (String(raw.body ?? "").split(/\r?\n/).some((line) => line === `Remudero-Task: ${taskId}`)
-      || new RegExp(`^run-${taskId}-\\d+$`).test(String(raw.headRefName ?? "")));
+    const credited = raw && creditsTask(raw, taskId);
     const source = credited ? String(raw.body ?? "").split(/\r?\n/).includes(`Remudero-Task: ${taskId}`)
       ? "trailer" : "head-branch" : "none";
     projection.set(taskId, { taskId, status: raw?.state === "MERGED" && credited ? "merged"
@@ -79,6 +104,9 @@ const temporary = `${out}.${process.pid}.tmp`;
 writeFileSync(temporary, JSON.stringify(files), { mode: 0o600 });
 renameSync(temporary, out);
 console.log(JSON.stringify({ event: "field_trials.case_files", asOf: files[0]?.asOf ?? null,
-  selected: selected.length, candidates: taskIds.length, withoutLedgerPr: taskIds.length - withPr.length,
+  selected: selected.length, candidates: taskIds.length, withoutLedgerPr: withoutLedgerPr.length,
+  withoutPrAfterSearch: taskIds.length - withPr.length,
+  prSearches: searches, prSearchMatched: searchMatched, prSearchAmbiguous: searchAmbiguous,
+  prSearchUnreadable: searchUnreadable, prSearchDeferred: Math.max(0, withoutLedgerPr.length - searches),
   overBound: Math.max(0, withPr.length - selected.length),
   outsidePlan, ledger: read.state, path: out }));
