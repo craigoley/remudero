@@ -19,7 +19,7 @@
 import { adoptionFindingGone, adoptionLatestPath, readAdoptionLatest } from "./measurement-cadence.js";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { basename, dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -54,6 +54,7 @@ import {
   captureFeedback,
   expandFeedbackDraft,
   FEEDBACK_STATUSES,
+  feedbackEntryRepoPath,
   findFeedbackBySubmissionKey,
   readFeedbackEntry,
   recentFeedbackFewShot,
@@ -331,6 +332,26 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
   };
 }
 
+/** The 400 refusal for a `replyTo` that cannot be answered, else undefined. Status is read from fetched origin/main,
+ *  which feedback landing writes to; the daemon's checkout lags it and is the fallback only when that read fails. */
+function replyRefusal(root: string, replyTo: string): { refused: string } | undefined {
+  let target: FeedbackEntry;
+  let source = "origin/main";
+  try {
+    const blob = execFileSync("git", ["-C", root, "show", `origin/main:${feedbackEntryRepoPath(replyTo)}`], { encoding: "utf8", stdio: "pipe" });
+    target = parseYaml(blob) as FeedbackEntry;
+  } catch {
+    source = "the checkout (origin/main unreadable)";
+    try {
+      target = readFeedbackEntry(root, replyTo);
+    } catch {
+      return { refused: `replyTo names no known feedback entry "${replyTo}"` };
+    }
+  }
+  if (target.status === "grilling") return undefined;
+  return { refused: `feedback#${replyTo} is not parked at grilling (status: ${target.status}, read from ${source}) — nothing to answer` };
+}
+
 /**
  * POST /v1/feedback — write-scoped. Captures an entry with `origin: ui` always. Ledgers
  * `panel.feedback_submitted`. `replyTo` must name an entry parked `grilling` (404/400
@@ -355,18 +376,9 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
         }
       }
       if (input.replyTo !== undefined) {
-        let target: FeedbackEntry;
-        try {
-          target = readFeedbackEntry(deps.root, input.replyTo);
-        } catch {
-          sendJson(res, 400, { error: "invalid_request", detail: `replyTo names no known feedback entry "${input.replyTo}"` });
-          return;
-        }
-        if (target.status !== "grilling") {
-          sendJson(res, 400, {
-            error: "invalid_request",
-            detail: `feedback#${input.replyTo} is not parked at grilling (status: ${target.status}) — nothing to answer`,
-          });
+        const refusal = replyRefusal(deps.root, input.replyTo);
+        if (refusal) {
+          sendJson(res, 400, { error: "invalid_request", detail: refusal.refused });
           return;
         }
       }
@@ -429,18 +441,9 @@ export function buildPreviewFeedbackRoute(deps: PanelGraphDeps): Route {
     tier: "low",
     handler: jsonAction(validatePreviewFeedback, async (input, _req, res) => {
       if (input.replyTo !== undefined) {
-        let target: FeedbackEntry;
-        try {
-          target = readFeedbackEntry(deps.root, input.replyTo);
-        } catch {
-          sendJson(res, 400, { error: "invalid_request", detail: `replyTo names no known feedback entry "${input.replyTo}"` });
-          return;
-        }
-        if (target.status !== "grilling") {
-          sendJson(res, 400, {
-            error: "invalid_request",
-            detail: `feedback#${input.replyTo} is not parked at grilling (status: ${target.status}) — nothing to answer`,
-          });
+        const refusal = replyRefusal(deps.root, input.replyTo);
+        if (refusal) {
+          sendJson(res, 400, { error: "invalid_request", detail: refusal.refused });
           return;
         }
       }
