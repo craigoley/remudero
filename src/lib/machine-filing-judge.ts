@@ -21,7 +21,7 @@
  * more, one that keeps failing less, and either recovers as its outcomes move.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 import type { Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
@@ -102,11 +102,13 @@ export function needsMachineJudgement(task: Task): boolean {
   return task.risk_ruling === undefined || task.risk_ruling.pin !== taskRulingPin(task);
 }
 
-/** `plan/tasks.d/<file>` for a record that lives in a shard; the monolith is never rewritten here. */
+/** `<planDir>/tasks.d/<file>` for a record that lives in a shard, taken from the record's own
+ *  `sourcePath` tail rather than re-spelled here (a house-layout literal in a new file trips the
+ *  W1-T3701 ratchet); the monolith is never rewritten here. */
 export function shardRelPath(task: Pick<Task, "sourcePath">): string | undefined {
   const p = task.sourcePath?.replaceAll("\\", "/");
-  if (!p || !/(^|\/)plan\/tasks\.d\/[^/]+\.ya?ml$/.test(p)) return undefined;
-  return `plan/tasks.d/${basename(p)}`;
+  const m = p === undefined ? null : /(?:^|\/)([^/]+\/tasks\.d\/[^/]+\.ya?ml)$/.exec(p);
+  return m?.[1];
 }
 
 /** The judge's input: the record as {@link buildFilingRiskJudgeInput} renders it, plus the
