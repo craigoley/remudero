@@ -35,6 +35,8 @@ import { inboxThreadStorePath } from "./panel-graph.js";
 import {
   buildControlStatusRoute,
   buildAssistantControlRoute,
+  buildAssistantControlCapabilityRoute,
+  buildAssistantControlReceiptRoute,
   buildPauseRoute,
   buildResumeRoute,
   buildStopRoute,
@@ -72,6 +74,7 @@ export interface InstanceGatewayOptions {
   coreInstance?: string;
   /** Shared host-side action admission, wired by serve.ts from the core control root. */
   assistantClaimRoot?: string;
+  assistantBootSha?: string;
   readText?: (path: string) => string;
   loadPlan?: (planPath: string) => Plan;
   /** The GitHub gateway for one instance's `owner/name`; serve.ts defaults it to a batched gateway. */
@@ -163,6 +166,9 @@ export function instanceRouteSet(
       controlRoot: root.root, incidentsDir: join(root.root, "state"),
     }),
   ];
+  const assistantControl = opts.assistantClaimRoot
+    ? { ...panel, claimRoot: opts.assistantClaimRoot, instance: root.instance, repository, bootSha: opts.assistantBootSha }
+    : undefined;
   return [
     ...(opts.bound ? opts.bound(reads, board, root.instance) : reads),
     buildOperatorAgentAnswerRoute(() => ({
@@ -175,7 +181,7 @@ export function instanceRouteSet(
     buildPauseRoute(panel),
     buildResumeRoute(panel),
     buildStopRoute(panel),
-    ...(opts.assistantClaimRoot ? [buildAssistantControlRoute({ ...panel, claimRoot: opts.assistantClaimRoot, instance: root.instance, repository })] : []),
+    ...(assistantControl ? [buildAssistantControlRoute(assistantControl), buildAssistantControlCapabilityRoute(assistantControl), buildAssistantControlReceiptRoute(assistantControl)] : []),
   ];
 }
 

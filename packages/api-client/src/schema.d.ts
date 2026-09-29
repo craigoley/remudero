@@ -271,7 +271,7 @@ export interface components {
       status: "completed";
       actionId: string;
       instance: string;
-      /** Server-owned registry identity when this is a non-core instance. */
+      /** Server-owned repository identity, including core when configured. */
       repository?: string;
       action: "pause" | "resume" | "stop";
       /** The reused panel-action ledger row. */
@@ -283,6 +283,21 @@ export interface components {
       status: "unknown";
       actionId: string;
       detail: string;
+    };
+    /** Read-only served contract. Writable filesystem metadata cannot prove cross-process or cross-host sharing. */
+    AssistantControlCapability: {
+      contract: "assistant-control-v2";
+      bootSha: string;
+      instance: string;
+      repository: string;
+      admission: "writable_unverified" | "uninitialized" | "unavailable";
+      claimStore: "shared_root_configured_topology_unverified";
+    };
+    /** Nonterminal read-only lookup; completed actions return AssistantControlReceipt instead. */
+    AssistantControlLookup: {
+      status: "claimed_unknown" | "not_found" | "conflict" | "unavailable";
+      actionId: string;
+      detail?: string;
     };
     /** POST /v1/questions/answer's body -- an operator's answer to a QUESTION-contract entry (worker.ts's plan/questions.ndjson), addressed by the task it was raised on (v0 routing has no path params, src/lib/service.ts). */
     AnswerQuestionRequest: {
@@ -3194,6 +3209,29 @@ export interface paths {
         };
     };
   };
+  "/v1/control/assistant-action/status": {
+    get: {
+      responses: {
+          "200": AssistantControlCapability;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/control/assistant-action/receipt": {
+    get: {
+      responses: {
+          "200": AssistantControlReceipt;
+          "202": AssistantControlLookup;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": AssistantControlLookup;
+          "409": AssistantControlLookup;
+          "503": AssistantControlLookup;
+        };
+    };
+  };
   "/v1/questions/answer": {
     post: {
       responses: {
@@ -3396,6 +3434,29 @@ export interface paths {
           "403": Error;
           "409": undefined;
           "503": AssistantControlUnknown;
+        };
+    };
+  };
+  "/v1/i/{instance}/control/assistant-action/status": {
+    get: {
+      responses: {
+          "200": AssistantControlCapability;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/i/{instance}/control/assistant-action/receipt": {
+    get: {
+      responses: {
+          "200": AssistantControlReceipt;
+          "202": AssistantControlLookup;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": AssistantControlLookup;
+          "409": AssistantControlLookup;
+          "503": AssistantControlLookup;
         };
     };
   };

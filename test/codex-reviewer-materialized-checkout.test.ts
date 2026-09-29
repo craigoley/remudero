@@ -132,16 +132,16 @@ async function review(
   } as never);
 }
 
-function sampledReviewReport(headSha: string): string {
+function reviewReportForSample(headSha: string, sampled: boolean): string {
   const prUrl = "https://github.com/acme/remudero/pull/2868";
   const diff = "diff --git a/src/example.ts b/src/example.ts\n+export const fixed = true;\n";
   const acceptance = [{ claim: "the fixed source is present", proof: "grep: fixed in src/example.ts" }];
   for (let i = 0; i < 1000; i += 1) {
     const report = `the fixed source is present (${i})`;
     const digest = reviewDecisionDigest({ headSha, diff, report, body: report, acceptance, declaredFiles: ["src/example.ts"] });
-    if (shadowJudgeSampled(`review:${prUrl}:${headSha}:${digest}`)) return report;
+    if (shadowJudgeSampled(`review:${prUrl}:${headSha}:${digest}`) === sampled) return report;
   }
-  throw new Error("could not seed a sampled review decision");
+  throw new Error(`could not seed a ${sampled ? "sampled" : "non-sampled"} review decision`);
 }
 
 test("W1-T2868: the Claude semantic reviewer receives a disposable exact-head checkout without changing its source", async () => {
@@ -181,7 +181,7 @@ test("a sampled semantic review invokes one bounded second reviewer and records 
     const calls: SpawnWorkerArgs[] = [];
     const verdict = await review(fixture, {
       headCheckoutDir: fixture.sourceDir,
-      report: sampledReviewReport(fixture.headSha),
+      report: reviewReportForSample(fixture.headSha, true),
       logs,
       spawn: async (args) => {
         calls.push(args);
@@ -207,6 +207,7 @@ test("a source checkout named by a directory BELOW its work-tree top level still
     // checkout: `rev-parse HEAD` ascends to the enclosing repository, `git clone <dir>` does not.
     const verdict = await review(fixture, {
       headCheckoutDir: join(fixture.sourceDir, "src"),
+      report: reviewReportForSample(fixture.headSha, false),
       logs,
       spawn: async (args) => {
         spawns += 1;

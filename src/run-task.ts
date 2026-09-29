@@ -35106,6 +35106,7 @@ export async function serveCommand(
     // differ: fleet-control flag files must match what `rmd daemon`/`rmd drain` check
     // (config.root); plan/questions.ndjson must match where `appendQuestion` writes (repoRoot).
     fleetControlRoot: config.root,
+    assistantRepository: `${self.owner}/${self.repo}`,
     questionsRoot: repoRoot,
     tokens,
     // W1-T371/W1-T398: additive tailnet-identity auth, opt-in via config.serve.identityCapability

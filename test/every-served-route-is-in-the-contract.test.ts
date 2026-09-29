@@ -68,7 +68,10 @@ function servedPaths(): string[] {
     const instanceControl = routes.filter((path) => path === "/v1/i/site/control/assistant-action")
       .map((path) => path.replace("/site/", "/{instance}/"));
     assert.equal(instanceControl.length, 1, "the dynamic assistant control must be mounted for a registered instance");
-    return [...stable, ...instanceAsk, ...instanceControl, buildStatusStream(board).path];
+    const instanceControlReads = routes.filter((path) => path === "/v1/i/site/control/assistant-action/status" || path === "/v1/i/site/control/assistant-action/receipt")
+      .map((path) => path.replace("/site/", "/{instance}/"));
+    assert.equal(instanceControlReads.length, 2, "both dynamic assistant control reads must be mounted for a registered instance");
+    return [...stable, ...instanceAsk, ...instanceControl, ...instanceControlReads, buildStatusStream(board).path];
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
