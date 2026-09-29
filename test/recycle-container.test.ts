@@ -214,6 +214,12 @@ function writeStubs(dir: string): void {
     '          hung-fixrung)  echo "  363439    8970 /usr/local/bin/claude --output-format stream-json --settings /home/node/Remudero/tmp/sweep-fix-settings-W1-T446-1787173796831.json" ;;',
     '          busy-fixrung)  echo "  363439     600 /usr/local/bin/claude --output-format stream-json --settings /home/node/Remudero/tmp/sweep-fix-settings-W1-T446-1787173796831.json" ;;',
     '          busy-codex-fixrung) echo "  363440     600 /usr/local/bin/codex exec --json --ignore-user-config --sandbox workspace-write -C /home/node/Remudero/worktrees/sweep-W1-T446-1787173796831 -" ;;',
+    '          live-retro) echo "  363441    8970 /usr/local/bin/node --max-old-space-size=1792 --import tsx /home/node/Remudero/remudero/src/run-task.ts retro" ;;',
+    '          retro-then-exits)',
+    '            if [ ! -f "$STUB_REC/retro-seen" ]; then',
+    '              touch "$STUB_REC/retro-seen"',
+    '              echo "  363441     600 /usr/local/bin/node --max-old-space-size=1792 --import tsx /home/node/Remudero/remudero/src/run-task.ts retro"',
+    '            fi ;;',
     '          hung-plus-dispatch)',
     '            echo "  363439    8970 /usr/local/bin/claude --output-format stream-json --settings /home/node/Remudero/tmp/sweep-fix-settings-W1-T446-1787173796831.json"',
     '            echo "  501122     600 /usr/local/bin/claude --output-format stream-json --settings /home/node/Remudero/tmp/run-settings-W1-T999-1787173796831.json" ;;',
@@ -584,6 +590,25 @@ test("a lane-less Codex worker under the age bound blocks the recycle exactly li
   assert.match(run.stderr, /0 lane-holding and 1 lane-less worker\(s\) still in flight/);
   assert.equal(run.calls.filter(isRm).length, 0, "the container must not be removed under a live Codex worker");
   assert.ok(!existsSync(join(state, "state", "PAUSE")), "the pause must not survive the refusal");
+});
+
+test("W1-T4766: a live retro blocks container removal even without an inflight lock", () => {
+  const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
+  const run = runRecycle("live-retro", { stateDir: state });
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /0 lane-holding and 1 lane-less worker\(s\) still in flight/);
+  assert.match(run.stderr, /run-task\.ts retro/, "the blocking process is named");
+  assert.equal(run.calls.filter(isStop).length, 0);
+  assert.equal(run.calls.filter(isRm).length, 0);
+  assert.ok(!existsSync(join(state, "state", "PAUSE")), "a refused recycle releases its pause");
+});
+
+test("W1-T4766: recycle proceeds after that retro exits", () => {
+  const run = runRecycle("retro-then-exits");
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /1 lane-less worker\(s\) still in flight/);
+  assert.equal(run.calls.filter(isRm).length, 1);
+  assert.equal(run.calls.filter(isRun).length, 1);
 });
 
 test("W1-T1046: a hung fix-rung worker alone is passed, printed before clearing, and ledgered", () => {

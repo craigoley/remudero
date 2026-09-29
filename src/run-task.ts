@@ -161,7 +161,7 @@ import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
-import { startCiFrictionGardener, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
+import { startCiFrictionGardener, readCiFrictionLedgerRecords, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener, startEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
@@ -814,7 +814,6 @@ import {
   shippedSince,
   stampCitationsAndCommit,
   type GitLogCommit,
-  type LedgerRecord,
   type MastMapping,
   type PlanStateTruthResolver,
   type RetroTriggerDecision,
@@ -2390,6 +2389,7 @@ import {
   DECLARED_BRANCH_GUARDS,
   declaredGuardsBlockSpan,
   nextMergedHeadCache,
+  nextNoPrHeadCache,
   parseBranchCitationHits,
   planReverseBranchDrift,
   pruneDeletableBranches,
@@ -21072,6 +21072,9 @@ export function reapBranchesCommand(
      *  ({@link nextMergedHeadCache}) — never written by this function itself, which takes every
      *  other effect as an injected read too. Omitted ⇒ no caller wants the update. */
     onMergedHeadCacheUpdate?: (next: Readonly<Record<string, string>>) => void;
+    /** Heads proven to have no PR at this tip sha ({@link nextNoPrHeadCache}); same contract as above. */
+    noPrHeadShaCache?: ReadonlyMap<string, string>;
+    onNoPrHeadCacheUpdate?: (next: Readonly<Record<string, string>>) => void;
   } = {},
 ): number {
   const print = opts.quiet ? (..._args: unknown[]) => {} : console.log;
@@ -21183,6 +21186,7 @@ export function reapBranchesCommand(
     // falls straight through to the per-head read exactly as before this cache existed.
     const cachedMerged =
       tipSha !== undefined && mergedHeadCache?.get(name) === tipSha ? ("merged" as const) : undefined;
+    const cachedNone = tipSha !== undefined && opts.noPrHeadShaCache?.get(name) === tipSha ? ("none" as const) : undefined;
     // W1-T119: a FAILED PR read is not "no PR". If the fetch broke, every branch reads OPEN — the
     // conservative direction, since an open PR is never deletable, so the run can only under-reap.
     // W1-T2246: a bulk `"none"` is NOT "no PR" either — the bulk walk above is a bounded,
@@ -21191,7 +21195,7 @@ export function reapBranchesCommand(
     // head's own history directly rather than trusting how far the bulk walk got.
     const state: BranchFacts["prState"] = prReadFailed
       ? "open"
-      : (prState.get(name) ?? cachedMerged ?? perHeadPrState(exec, owner, repo, name));
+      : (prState.get(name) ?? cachedMerged ?? cachedNone ?? perHeadPrState(exec, owner, repo, name));
     const tipInMain = tipInMainFor(name, remoteTips, tipInMainMembership);
     const namedInSource = namedInSourceSet.has(name);
     const namedTaskId = namedTaskByBranch.get(name);
@@ -21210,11 +21214,11 @@ export function reapBranchesCommand(
   // W1-T4476 design (iii): report this pass's own confirmed-merged verdicts back to the caller
   // that wants them persisted (the automatic rung), computed from `facts` and the same tip map
   // above — never written to disk by this function itself.
-  if (opts.onMergedHeadCacheUpdate) {
-    const tipShaByName = new Map<string, string>();
-    for (const [name, tip] of remoteTips) tipShaByName.set(name, tip.sha);
-    opts.onMergedHeadCacheUpdate(nextMergedHeadCache(facts, tipShaByName));
-  }
+  const tipShaByName = new Map<string, string>();
+  for (const [name, tip] of remoteTips) tipShaByName.set(name, tip.sha);
+  opts.onMergedHeadCacheUpdate?.(nextMergedHeadCache(facts, tipShaByName));
+  // A failed bulk walk reads every head "open", so it proves no "none" and must not clear the cache.
+  if (!prReadFailed) opts.onNoPrHeadCacheUpdate?.(nextNoPrHeadCache(facts, tipShaByName));
 
   const plan = planBranchReap(facts, DECLARED_BRANCH_GUARDS);
   const keptReversibleClose = keepReversiblyClosedHeads(plan, () => {
@@ -24306,6 +24310,20 @@ export function defaultMergeEvidenceLog(cwd: string): { dump: string; ref: strin
   return { dump, ref };
 }
 
+export function grepPatternMatches(cwd: string, pattern: string, path: string): boolean {
+  return spawnSync("grep", ["-arq", "--", pattern, path], { cwd, stdio: "ignore", timeout: 10_000 }).status === 0;
+}
+
+const RESOLVED_FULLY_CAVEAT = "resolves is not passes — a test file that exists can still fail; this list is where to LOOK, not a verdict";
+
+function printResolvedFully(sections: ReadonlyArray<[string, readonly string[] | undefined]>, note: string): void {
+  console.log(`\n  queued task(s) whose every executable proof already resolves at this checkout, so probably built (${note}):`);
+  for (const [label, ids] of sections) {
+    console.log(`    ${label.padEnd(26)} ${String(ids?.length ?? 0).padStart(3)} task(s): ${ids?.join(", ") || "(none)"}`);
+  }
+  console.log(`  ${RESOLVED_FULLY_CAVEAT}`);
+}
+
 /** {@link proofQueueAuditCommand}'s only I/O beyond the plan/checkout it is pointed at —
  *  injectable so a test can supply a fixture merge-evidence dump without a real git history or
  *  network, the same DI shape `LintPlanStatusDeps.readMergeEvidenceLog` already uses. */
@@ -24344,6 +24362,7 @@ export interface CreditedProofVisibilityDeps {
   pathExists?: (repoRelPath: string) => boolean;
   resolveNameFilteredCandidates?: (rawName: string) => NameFilterResolution;
   symbolFoundAt?: (symbol: string, path: string) => boolean;
+  grepMatches?: (pattern: string, path: string) => boolean;
   /** Overrides the real git-log read entirely — see {@link defaultCreditedAmendmentEvidence}. */
   amendedSinceCredit?: (taskId: string, shardPath: string, creditedAtIso: string) => { amended: boolean; followUpFiled: boolean } | undefined;
   cwd?: string;
@@ -24495,6 +24514,7 @@ export function creditedProofVisibility(
     resolveNameFilteredCandidates: deps.resolveNameFilteredCandidates ?? ((rawName) => resolveNameFilteredCandidates(cwd, rawName)),
     pathExists: deps.pathExists ?? ((rel) => existsSync(join(cwd, rel))),
     creditedIds,
+    grepMatches: deps.grepMatches ?? ((pattern, path) => grepPatternMatches(cwd, pattern, path)),
     symbolFoundAt:
       deps.symbolFoundAt ??
       ((symbol, path) => {
@@ -24786,6 +24806,13 @@ export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAud
         `  ↷ ${r.taskId} criterion ${r.criterionIndex + 1} [relocated to ${r.relocatedTo}] proof: "${r.proof.slice(0, 90)}"`,
       );
     }
+    printResolvedFully(
+      [
+        ["resolved-fully-credited", result.proof.resolvedFullyCredited],
+        ["resolved-fully-uncredited", result.proof.resolvedFullyUncredited],
+      ],
+      "credited: a merge is credited, the reconcile lane has not flipped it; uncredited: built by other means or a proof that does not discriminate",
+    );
     console.log(
       `\n  amendment signal: ${result.amendment.measurable} credited task(s) measurable via their own shard file, ` +
         `${result.amendment.unmeasurable} unmeasurable (declared inline in plan/tasks.yaml, W1-T2280 note ix) — ` +
@@ -24820,6 +24847,7 @@ export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAud
   const report = proofQueueAudit(population, {
     resolveNameFilteredCandidates: (rawName) => resolveNameFilteredCandidates(repoRoot, rawName),
     pathExists: (rel) => existsSync(join(repoRoot, rel)),
+    grepMatches: (pattern, path) => grepPatternMatches(repoRoot, pattern, path),
   });
 
   const offendingTaskCount = new Set(report.offenders.map((o) => o.taskId)).size;
@@ -24834,6 +24862,7 @@ export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAud
   for (const o of report.offenders) {
     console.log(`  ✗ ${o.taskId} criterion ${o.criterionIndex + 1} [${o.cause}] proof: "${o.proof.slice(0, 90)}"`);
   }
+  printResolvedFully([["resolved-fully", report.resolvedFully]], "merge credit is not consulted here");
   console.log(
     "\nrmd proof-queue-audit is a REPORT, not a gate — no dispatch, CI job or arm decision may consult this " +
       "verdict (lib/proof-queue-audit.ts). Exits 0 unconditionally, regardless of the count above.",
@@ -33663,10 +33692,7 @@ export async function daemonCommand(
                     log,
                   };
                   const sources: CiFrictionGardenSources = {
-                    ledgerRecords: () => {
-                      const read = readLedgerUnionRecordsSync(stateDir, { requireArchives: true, refuseIncomplete: true });
-                      return read.ok ? (read.rows as LedgerRecord[]) : [];
-                    },
+                    ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
                     gateFireRates: () => readGateFireRateReport(stateDir),
                     planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
                     mintTaskId: ciLearningTaskIdMinter(repoRoot),
@@ -39977,6 +40003,10 @@ export function runAutomaticBranchReapRung(
       mergedHeadShaCache: state.mergedHeadShas ? new Map(Object.entries(state.mergedHeadShas)) : undefined,
       onMergedHeadCacheUpdate: (next) => {
         state.mergedHeadShas = next;
+      },
+      noPrHeadShaCache: state.noPrHeadShas ? new Map(Object.entries(state.noPrHeadShas)) : undefined,
+      onNoPrHeadCacheUpdate: (next) => {
+        state.noPrHeadShas = next;
       },
     });
   } catch (e) {

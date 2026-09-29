@@ -1,0 +1,27 @@
+- id: W1-T4774
+  title: "EVERY SWEEP RE-RUNS A FULL `git log --name-only` FOR ESCALATION RECONCILE — buildEscalationReconcileCandidates calls readMergedPathsByPr and readMergeSubjectsByPr synchronously on each pass, even when origin/main has not moved, 5% of daemon loop time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  origin: "oper#core-daemon-loop-profile-2026-09-29"
+  files: [src/run-task.ts, test/escalation-reconcile-reuses-its-merge-log-scan.test.ts]
+  rationale: |
+    A live CPU profile of remudero-daemon on 2026-09-29 put
+    sweepEscalationReconcile > buildEscalationReconcileCandidates > readMergedPathsByPr at 64 s, and
+    readMergeSubjectsByPr at 15.5 s, out of 25 minutes. Both are execFileSync git log scans over
+    origin/main. Their answer is a pure function of origin/main's sha, yet they run again on every
+    sweep. buildCreditCandidates > readMergedPathsByPr added another 34 s.
+  design: |
+    Memoize both scans keyed by the resolved origin/main sha (one rev-parse). A moved main
+    recomputes. Credit semantics do not change.
+  acceptance:
+    - claim: "an unmoved main reuses the merged paths scan"
+      proof: 'grep: test("W1-T4774: an unmoved main reuses the merged paths scan" in test/escalation-reconcile-reuses-its-merge-log-scan.test.ts'
+    - claim: "a moved main rescans the merged paths"
+      proof: 'grep: test("W1-T4774: a moved main rescans the merged paths" in test/escalation-reconcile-reuses-its-merge-log-scan.test.ts'
+  falsifier: |
+    Drop the sha-keyed memo and the unmoved-main test counts two git log calls.

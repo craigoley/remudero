@@ -6,17 +6,19 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { gardenStatePath, readGardenState, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
+import { GARDEN_LEDGER_BUCKET_MS, gardenStatePath, readGardenState, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
+import { fixedClock } from "../src/lib/clock.js";
 import {
   RETIER_THRESHOLD,
   TEST_GARDEN_CLASSES,
   loadTestManifestProbe,
+  testGardenCheapFingerprint,
   testGardenInventory,
   testGardenSpec,
   testManifestProposalPath,
@@ -279,4 +281,19 @@ test("W1-T4112: a self-hosting daemon wires the test gardener", async () => {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
   }
+});
+
+test("a live ledger append leaves the test gardener cheap fingerprint unchanged within the hour", async () => {
+  const probe = await probesPromise;
+  const root = seededSuite();
+  const stateDir = join(root, "state");
+  const livePath = join(stateDir, "ledger.ndjson");
+  writeFileSync(livePath, '{"step":"daemon.alive"}\n');
+  const hourMs = Date.UTC(2026, 8, 29, 11, 0, 0);
+  const before = testGardenCheapFingerprint(root, stateDir, probe, fixedClock(hourMs));
+  appendFileSync(livePath, '{"step":"daemon.alive","n":2}\n');
+  const later = new Date(hourMs + 120_000);
+  utimesSync(livePath, later, later);
+  assert.equal(testGardenCheapFingerprint(root, stateDir, probe, fixedClock(hourMs + 120_000)), before, "a ledger that only grew must not force a full union read");
+  assert.notEqual(testGardenCheapFingerprint(root, stateDir, probe, fixedClock(hourMs + GARDEN_LEDGER_BUCKET_MS)), before, "the next hour re-reads");
 });

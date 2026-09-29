@@ -69,10 +69,34 @@ export interface TranscriptWorkflow {
 /** Count of `fix.dispatch` ledger lines per `run_id` — mirrors `fixDispatchCountByRun` (retro.ts)
  *  exactly, duplicated rather than imported for the same no-cycle reason the header names. */
 function fixDispatchCounts(records: readonly TranscriptLedgerRow[]): Map<string, number> {
+  return fixDispatchCountsAttributed(records);
+}
+
+/** Fix rounds per implementing run. Since 2026-08-13 the sweep dispatches fix rounds under its OWN run id
+ *  (`DAEMON-…`: 2,023 rows, against 35 task-run-keyed ones last seen 2026-09-13), so keying by `run_id` alone
+ *  credited every merged run with zero fixes. A row whose `run_id` is not a started run is attributed to the
+ *  latest run of its `task_id` that started at or before it. */
+export function fixDispatchCountsAttributed(records: readonly TranscriptLedgerRow[]): Map<string, number> {
+  const starts = new Map<string, Array<{ runId: string; ts: string }>>();
+  const started = new Set<string>();
+  for (const r of records) {
+    if (r.step !== "run.start" || !r.run_id || typeof r.task_id !== "string" || typeof r.ts !== "string") continue;
+    started.add(r.run_id);
+    const list = starts.get(r.task_id) ?? [];
+    list.push({ runId: r.run_id, ts: r.ts });
+    starts.set(r.task_id, list);
+  }
+  for (const list of starts.values()) list.sort((a, b) => a.ts.localeCompare(b.ts));
   const out = new Map<string, number>();
   for (const r of records) {
     if (r.step !== "fix.dispatch" || !r.run_id) continue;
-    out.set(r.run_id, (out.get(r.run_id) ?? 0) + 1);
+    let runId: string | undefined = started.has(r.run_id) ? r.run_id : undefined;
+    if (!runId && typeof r.task_id === "string" && typeof r.ts === "string") {
+      const ts = r.ts;
+      runId = (starts.get(r.task_id) ?? []).filter((s) => s.ts <= ts).at(-1)?.runId;
+    }
+    const key = runId ?? r.run_id;
+    out.set(key, (out.get(key) ?? 0) + 1);
   }
   return out;
 }

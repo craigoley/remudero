@@ -4,11 +4,11 @@
  * drafts a parked task for the costliest cause nothing already tracks.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runGarden, type GardenCheckout } from "../src/lib/gardener.js";
+import { GARDEN_LEDGER_BUCKET_MS, gardenStatePath, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
 import {
   CI_FRICTION_GARDEN_CLASSES,
   CI_FRICTION_GARDEN_LOG,
@@ -18,6 +18,7 @@ import {
   ciFrictionOrigin,
   ciFrictionRecordVerdict,
   ciFrictionRoundsFromLedger,
+  readCiFrictionLedgerRecords,
   ciFrictionShardYaml,
   costliestUntrackedCause,
   priceCiFrictionCauses,
@@ -27,6 +28,7 @@ import {
   type CiFrictionGardenSources,
 } from "../src/lib/ci-friction-gardener.js";
 import type { GardenerDeps } from "../src/lib/gardener.js";
+import { clockFromMillisFn } from "../src/lib/clock.js";
 import { gateFireRatesPath, type GateFireRateReport } from "../src/lib/gate-fire-rate.js";
 import type { LedgerRecord } from "../src/lib/retro.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -240,4 +242,82 @@ test("W1-T4435: the gardener preserves an existing trend log while appending a n
   const appendedLog = readFileSync(join(root, CI_FRICTION_GARDEN_LOG), "utf8");
   assert.ok(appendedLog.startsWith(priorLog), "the previous trend receipt must be retained");
   assert.equal(appendedLog.trim().split("\n").filter((line) => line.startsWith("| 2026-")).length, 1);
+});
+
+test("W1-T4767: an unreadable ledger fails the garden pass without a zero scorecard", () => {
+  const root = gitRepo({ kind: "w1t4767-unreadable-garden" }).dir;
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const archive = join(stateDir, "ledger.2026-01-01T00-00-00-000Z.ndjson");
+  writeFileSync(archive, "");
+  const events: string[] = [];
+  const deps: GardenerDeps = {
+    stateDir, repoRoot: root,
+    openWorkspace: () => { throw new Error("no action should be filed"); },
+    log: (step) => { events.push(step); },
+  };
+  const sources: CiFrictionGardenSources = {
+    ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
+    planOrigins: () => [],
+    mintTaskId: () => { throw new Error("no task should be minted"); },
+  };
+  const spec = ciFrictionGardenSpec(deps, sources);
+  assert.deepEqual(runGarden(spec, deps).scorecard?.causes, 0);
+  const statePath = gardenStatePath(stateDir, "ci-friction");
+  const previous = readFileSync(statePath, "utf8");
+  writeFileSync(join(stateDir, "ledger.2026-01-02T00-00-00-000Z.ndjson.gz"), "invalid gzip");
+  assert.throws(() => runGarden(spec, deps), /ci-friction ledger union unreadable: unread ledger file/);
+  assert.equal(readFileSync(statePath, "utf8"), previous, "failed evidence leaves the prior pass receipt intact");
+  assert.deepEqual(events, ["ci-friction.scorecard"], "a failed read emits no clean scorecard or task");
+});
+
+test("W1-T4767: a readable empty ledger remains a valid measured input", () => {
+  const root = gitRepo({ kind: "w1t4767-empty-ledger" }).dir;
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  assert.throws(() => readCiFrictionLedgerRecords(stateDir), /no ledger rotations/);
+  writeFileSync(join(stateDir, "ledger.2026-01-01T00-00-00-000Z.ndjson"), "");
+  assert.deepEqual(readCiFrictionLedgerRecords(stateDir), []);
+});
+
+test("a growing live ledger does not re-read the ci-friction union within the hour", () => {
+  const root = gitRepo({ kind: "ci-friction-ledger-bucket" }).dir;
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const livePath = join(stateDir, "ledger.ndjson");
+  writeFileSync(livePath, '{"step":"daemon.alive"}\n');
+  let nowMs = Date.UTC(2026, 8, 29, 11, 0, 0);
+  let reads = 0;
+  const deps: GardenerDeps = {
+    stateDir,
+    repoRoot: root,
+    openWorkspace: () => assert.fail("nothing to land"),
+    log: () => {},
+    seed: 1,
+    clock: clockFromMillisFn(() => nowMs),
+  };
+  const sources: CiFrictionGardenSources = {
+    ledgerRecords: () => (reads++, []),
+    planOrigins: () => [],
+    mintTaskId: () => assert.fail("nothing to mint"),
+  };
+  const spec = ciFrictionGardenSpec(deps, sources);
+
+  runGarden(spec, deps);
+  assert.equal(reads, 1, "the first pass reads the union");
+  for (let minute = 1; minute <= 3; minute++) {
+    writeFileSync(livePath, readFileSync(livePath, "utf8") + `{"step":"daemon.alive","n":${minute}}\n`);
+    nowMs += 60_000;
+    runGarden(spec, deps);
+  }
+  assert.equal(reads, 1, "a live ledger that only grew must not re-read the whole union every poll");
+
+  renameSync(livePath, join(stateDir, "previous-live.txt"));
+  writeFileSync(livePath, '{"step":"daemon.alive"}\n');
+  runGarden(spec, deps);
+  assert.equal(reads, 2, "replacing the live file is a new evidence source even within the hour");
+
+  nowMs += GARDEN_LEDGER_BUCKET_MS;
+  runGarden(spec, deps);
+  assert.equal(reads, 3, "the next hour's pass still reads the union");
 });
