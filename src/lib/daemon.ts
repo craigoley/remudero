@@ -1270,8 +1270,8 @@ export type InterphaseReviewClockScope = "drain" | "pause";
  *  reconciliation await returns and before a phase ticker or an idle wait takes over. It owns only
  *  the light pass, so it adds no action that pass does not already take — which, with nothing in
  *  flight, includes a fix (W1-T1211); a `scope` closes that lane. A wake
- *  observed during an active pass stays pending and makes the next wait resolve immediately, which
- *  serializes one coalesced follow-up instead of overlapping passes (W1-T2852). Forensics: docs/forensics/daemon.md.
+ *  observed during an active pass stays pending. W1-T4732 permits one review-only follow-up
+ *  beside a slow pass, while further wakes coalesce until a slot opens. Forensics: docs/forensics/daemon.md.
  *  W1-T4053: `scope: "drain"` runs it beside a freshness drain, ledgering `during_drain: true`; W1-T4429:
  *  `"pause"` beside a PAUSE's sleep (`during_pause: true`) — a pause stops NEW work, never verdicts. */
 export function startInterphaseReviewClock(
@@ -1285,6 +1285,7 @@ export function startInterphaseReviewClock(
   let eventWakePending = false;
   let elapsedMs = 0;
   let passes = 0;
+  const activePasses = new Set<Promise<void>>();
   const phase = scope === "drain" ? "freshness_drain" : scope === "pause" ? "pause" : "interphase";
   const scopeTag: Record<string, boolean> =
     scope === "drain" ? { during_drain: true } : scope === "pause" ? { during_pause: true } : {};
@@ -1320,22 +1321,31 @@ export function startInterphaseReviewClock(
           }
           if (!active) break;
           if (!eventWakePending && elapsedMs < pollIntervalMs) continue;
+          // W1-T4732: a long reviewer must not hold a newly green head out of the next
+          // pass. Keep at most two passes alive; only the first may take the ordinary light
+          // actions. When both slots are occupied, retain the wake/time debt for a later tick.
+          if (activePasses.size >= 2) continue;
 
           const halt = deps.checkStop?.() ?? (scope === "pause" ? undefined : deps.checkPause?.());
           if (halt) continue;
 
+          const reviewOnly = scope !== undefined || activePasses.size > 0;
           const trigger = eventWakePending ? "github-event" : "interval";
           eventWakePending = false;
           elapsedMs = 0;
           lastPassAtMs = interphaseClock.now();
           passes += 1;
-          try {
-            await (scope ? deps.sweepLight!({ reviewOnly: true }) : deps.sweepLight!());
-            if (scope) log("daemon.review_clock.pass", { trigger, ...scopeTag });
-            if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger, ...scopeTag });
-          } catch (e) {
-            log("daemon.sweep_light.failed", { phase, ...scopeTag, error: String((e as Error)?.message ?? e) });
-          }
+          const pass = (async () => {
+            try {
+              await (reviewOnly ? deps.sweepLight!({ reviewOnly: true }) : deps.sweepLight!());
+              if (reviewOnly) log("daemon.review_clock.pass", { trigger, ...scopeTag, review_only: true });
+              if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger, ...scopeTag });
+            } catch (e) {
+              log("daemon.sweep_light.failed", { phase, ...scopeTag, error: String((e as Error)?.message ?? e) });
+            }
+          })();
+          activePasses.add(pass);
+          void pass.finally(() => activePasses.delete(pass));
         }
       })()
     : undefined;
@@ -1344,6 +1354,7 @@ export function startInterphaseReviewClock(
     stop: async () => {
       active = false;
       if (runner) await runner;
+      if (activePasses.size > 0) await Promise.all(activePasses);
       return { eventWakeSeen, passes };
     },
   };
