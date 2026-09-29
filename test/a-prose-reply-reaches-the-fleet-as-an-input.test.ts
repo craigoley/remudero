@@ -196,7 +196,7 @@ test("a reply naming a thread that only a torn/unreadable store carries is refus
 
 // ── 5: the existing dismiss route keeps its current behaviour exactly ────────────────────────
 
-test("POST /v1/escalation/mark-handled is untouched by this task -- still closes the issue and ledgers exactly as before", async () => {
+test("POST /v1/escalation/mark-handled still closes the issue without filing feedback", async () => {
   const root = tmpRoot();
   const path = threadStorePath();
   const issues = fakeIssueCloser();
@@ -206,10 +206,12 @@ test("POST /v1/escalation/mark-handled is untouched by this task -- still closes
     const res = await post(base, "/v1/escalation/mark-handled", WRITE_TOKEN, {
       taskId: "W1-T9101",
       issueUrl: "https://github.com/craigoley/remudero/issues/9101",
+      class: "MANUAL",
+      disposition: "acted",
     });
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { ok: boolean; taskId: string; issueUrl: string };
-    assert.deepEqual(body, { ok: true, taskId: "W1-T9101", issueUrl: "https://github.com/craigoley/remudero/issues/9101" });
+    const body = (await res.json()) as { ok: boolean; taskId: string; issueUrl: string; class: string; disposition: string; precision: number; tier: string };
+    assert.deepEqual(body, { ok: true, taskId: "W1-T9101", issueUrl: "https://github.com/craigoley/remudero/issues/9101", class: "MANUAL", disposition: "acted", precision: 1, tier: "issue" });
   });
   assert.deepEqual(issues.closed, ["https://github.com/craigoley/remudero/issues/9101"]);
   // A dismiss files no feedback -- it never did, and this task must not change that.

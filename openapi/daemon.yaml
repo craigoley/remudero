@@ -779,15 +779,28 @@ components:
         from ApproveManualRequest's MANUAL-queue check-off: "approve" has no defined verb for an
         escalation. Closes the named `needs-human`-labeled GitHub issue (src/lib/escalate.ts);
         the name is deliberately "mark handled", not "approve" or "resolve" -- closing the issue
-        does not, by itself, imply the underlying block is fixed.
+        does not, by itself, imply the underlying block is fixed. W1-T4677 requires a class and
+        disposition so each class's acted-on precision can be measured; snoozedUntil is required
+        only for snoozed_until.
       required:
         - taskId
         - issueUrl
+        - class
+        - disposition
       properties:
         taskId:
           type: string
         issueUrl:
           type: string
+        class:
+          type: string
+          description: Escalation class used to group acted-on precision.
+        disposition:
+          type: string
+          enum: [acted, false_positive, duplicate, snoozed_until]
+        snoozedUntil:
+          type: string
+          description: Required exactly when disposition is snoozed_until.
 
     MarkEscalationHandledResult:
       type: object
@@ -795,6 +808,10 @@ components:
         - ok
         - taskId
         - issueUrl
+        - class
+        - disposition
+        - precision
+        - tier
       properties:
         ok:
           type: boolean
@@ -802,6 +819,16 @@ components:
           type: string
         issueUrl:
           type: string
+        class:
+          type: string
+        disposition:
+          type: string
+          enum: [acted, false_positive, duplicate, snoozed_until]
+        precision:
+          type: [number, "null"]
+        tier:
+          type: string
+          enum: [issue, digest, board]
 
     # ── W3-T6 (MASTER-PLAN §7B) -- the plan->task->PR graph + interactive plan adjustment:
     # submit feedback, answer grills, accept/reject a proposal. Built over the SAME feedback

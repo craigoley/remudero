@@ -243,15 +243,24 @@ export interface components {
       /** Names the switched-off action and the marker file that switched it off. */
       detail: string;
     };
-    /** POST /v1/escalation/mark-handled's body (W1-T182) -- the NEEDS ME affordance an ESCALATION row (any class: BLOCKED/MANUAL/HARD_STOP/GRILL) actually supports, distinct from ApproveManualRequest's MANUAL-queue check-off: "approve" has no defined verb for an escalation. Closes the named `needs-human`-labeled GitHub issue (src/lib/escalate.ts); the name is deliberately "mark handled", not "approve" or "resolve" -- closing the issue does not, by itself, imply the underlying block is fixed. */
+    /** POST /v1/escalation/mark-handled's body (W1-T182) -- the NEEDS ME affordance an ESCALATION row (any class: BLOCKED/MANUAL/HARD_STOP/GRILL) actually supports, distinct from ApproveManualRequest's MANUAL-queue check-off: "approve" has no defined verb for an escalation. Closes the named `needs-human`-labeled GitHub issue (src/lib/escalate.ts); the name is deliberately "mark handled", not "approve" or "resolve" -- closing the issue does not, by itself, imply the underlying block is fixed. W1-T4677 requires a class and disposition so each class's acted-on precision can be measured; snoozedUntil is required only for snoozed_until. */
     MarkEscalationHandledRequest: {
       taskId: string;
       issueUrl: string;
+      /** Escalation class used to group acted-on precision. */
+      class: string;
+      disposition: "acted" | "false_positive" | "duplicate" | "snoozed_until";
+      /** Required exactly when disposition is snoozed_until. */
+      snoozedUntil?: string;
     };
     MarkEscalationHandledResult: {
       ok: boolean;
       taskId: string;
       issueUrl: string;
+      class: string;
+      disposition: "acted" | "false_positive" | "duplicate" | "snoozed_until";
+      precision: number | null;
+      tier: "issue" | "digest" | "board";
     };
     /** One `plan/feedback/<id>.yaml` entry (src/lib/feedback.ts's `FeedbackEntry` -- the §7B schema shape: capture -> triage -> gate). */
     FeedbackEntry: {
