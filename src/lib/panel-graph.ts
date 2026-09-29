@@ -42,7 +42,6 @@ import {
   isDispatchBreakerTripped,
   dispatchesWithoutNewOwnedPr,
   DEFAULT_MAX_TASK_DISPATCHES,
-  readLedgerUnionBounded,
   readLedgerUnionMemoized,
   type GhFailureReason,
   type GitHub,
@@ -862,6 +861,8 @@ export interface OperatorActivityProjectionInput {
   plan: Plan;
   projection: ReadonlyMap<string, StatusProjection>;
   ledgerLines: ReadonlyArray<Record<string, unknown>> & { present?: boolean; torn?: number };
+  /** The rows the workstream frontier reads, as `/v1/plan/view` does; defaults to `ledgerLines`. */
+  frontierLedgerLines?: ReadonlyArray<Record<string, unknown>>;
   githubReadFailed?: boolean;
   githubFailureReason?: string;
   now?: () => number;
@@ -1064,7 +1065,7 @@ export function buildOperatorActivityProjection(input: OperatorActivityProjectio
   }
   const activities = activityRows(input.ledgerLines, observedAt);
   const freshness: OperatorActivityFreshness = input.githubReadFailed ? "unknown" : "verified";
-  const workstreams = workstreamRows(input.plan, input.projection, input.ledgerLines, observedAt, input.githubReadFailed === true, input.githubFailureReason);
+  const workstreams = workstreamRows(input.plan, input.projection, input.frontierLedgerLines ?? input.ledgerLines, observedAt, input.githubReadFailed === true, input.githubFailureReason);
   const artifacts = artifactRows(input.plan, input.projection, workstreams, observedAt, freshness);
   const shownWorkstreams = workstreams.slice(0, OPERATOR_ACTIVITY_PLAN_KIND_MAX_ITEMS);
   const shownArtifacts = artifacts.slice(0, OPERATOR_ACTIVITY_PLAN_KIND_MAX_ITEMS);
@@ -1115,16 +1116,19 @@ export function buildOperatorActivityRoute(deps: PanelGraphDeps, readPlanSnapsho
       }
       try {
         const plan = readPanelPlan(deps, readPlanSnapshot);
-        const observedLedger = readLedgerUnionBounded(deps.ledgerPath);
+        // Activities come from the memoized union, so no refresh re-parses every rotation on serve's loop.
+        // ledger-read-intent: live — the frontier and projection read what /v1/plan/view reads.
+        const liveLedger = readLedgerLines(deps.ledgerPath);
         const projection = projectPlan(plan, {
           ledgerPath: deps.ledgerPath,
           github: deps.statusGithub,
-          readLedger: () => observedLedger,
+          readLedger: () => liveLedger,
         });
         sendJson(res, 200, buildOperatorActivityProjection({
           plan,
           projection,
-          ledgerLines: observedLedger,
+          ledgerLines: candidates,
+          frontierLedgerLines: liveLedger,
           githubReadFailed: deps.statusGithub.readFailed?.() === true,
           githubFailureReason: deps.statusGithub.readFailureReason?.(),
         }));
