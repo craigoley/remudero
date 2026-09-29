@@ -57,4 +57,4 @@ docker run --rm --network host --volumes-from remudero-daemon \
   --source core=craigoley/remudero --source site=craigoley/remudero-site --source console=craigoley/remudero-console \
   --ledger core=/home/node/Remudero/state --ledger site=/field-trials/site --ledger console=/field-trials/console \
   --out-dir /home/node/Remudero/state/field-trials --max-pages "$MAX_PAGES" \
-  "${CASE_ARG[@]}" --json
+  "${CASE_ARG[@]}"
