@@ -38,6 +38,7 @@ import {
   type RiskJudgeVerdict,
   type RiskPolicy,
 } from "./risk-judge.js";
+import { deterministicEscalation } from "./machine-filing.js";
 import { lintTask, machineAuthorVerifyViolation, taskRulingPin } from "./task-linter.js";
 
 /** The operator's escalation rule, handed to the judge verbatim in its gates state. */
@@ -140,6 +141,12 @@ export async function judgeMachineShard(
   record: FamilyTrackRecord,
   ports: { riskJudge: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>; policy: RiskPolicy; clock: Clock },
 ): Promise<MachineJudgement> {
+  const bar = earnedConfidenceBar(ports.policy.confidenceThreshold, record.mean);
+  const backstop = deterministicEscalation(task);
+  if (backstop) {
+    const reasons = [`deterministic backstop: ${backstop} — irreversible or privileged work goes to a person`];
+    return { kind: "ruled", task, bar, record, ruling: { verdict: "high", action: "escalate", confidence: 1, reasons, judgedAt: ports.clock.iso() } };
+  }
   let verdict: RiskJudgeVerdict;
   try {
     verdict = await ports.riskJudge(machineJudgeInput(task, record));
@@ -149,7 +156,6 @@ export async function judgeMachineShard(
   if (verdict.availability === "unavailable") {
     return { kind: "unavailable", task, reason: verdict.reasons.join("; ") || "the risk judge reached no decision" };
   }
-  const bar = earnedConfidenceBar(ports.policy.confidenceThreshold, record.mean);
   const action = planRiskJudgeAction(verdict, { confidenceThreshold: bar });
   return {
     kind: "ruled",

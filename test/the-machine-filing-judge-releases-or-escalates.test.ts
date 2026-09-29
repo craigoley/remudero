@@ -17,11 +17,12 @@ import { fileURLToPath } from "node:url";
 import { fixedClock } from "../src/lib/clock.js";
 import { runnableCandidates } from "../src/lib/drain.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { machineShardHeaderLines, machineShardRisk, renderMachineShard } from "../src/lib/machine-filing.js";
+import { deterministicEscalation, machineShardHeaderLines, machineShardRisk, renderMachineShard } from "../src/lib/machine-filing.js";
 import {
   earnedConfidenceBar,
   familyTrackRecord,
   gardenFamilyRecord,
+  judgeMachineShard,
   MACHINE_JUDGE_STATE_FILE,
   machineFamily,
   needsMachineJudgement,
@@ -145,11 +146,11 @@ test("a stale pin re-judges the machine shard after its record is edited", async
     assert.equal(asked, 0, "the control: a freshly pinned record is not asked again");
 
     const path = join(root, "plan", "tasks.d", "W1-T9003-x.yaml");
-    writeFileSync(path, readFileSync(path, "utf8").replace("record the remedy for W1-T9003", "delete every branch"));
+    writeFileSync(path, readFileSync(path, "utf8").replace("record the remedy for W1-T9003", "rewrite the lint rule for W1-T9003"));
     const edited = readPlan(root).byId.get("W1-T9003")!;
     assert.ok(needsMachineJudgement(edited), "the edit made the pin stale");
     assert.ok(machineAuthorVerifyViolation(edited), "and the linter refuses the stale ruling");
-    const again = await runMachineFilingJudge(ports(root, async () => (asked++, verdict("high", 0.95, "it deletes branches"))).p);
+    const again = await runMachineFilingJudge(ports(root, async () => (asked++, verdict("high", 0.95, "it rewrites a lint rule"))).p);
     assert.equal(asked, 1);
     assert.deepEqual(again.escalated, ["W1-T9003"]);
     const rejudged = readPlan(root).byId.get("W1-T9003")!;
@@ -475,4 +476,33 @@ test("the shared filing path renders a whole machine record and names a lint ref
   assert.deepEqual([task.verify, task.risk, task.author_class, task.origin], ["human", "low", "machine", "ci-friction:check:x"]);
   assert.match(String(renderMachineShard({ ...spec, acceptance: [{ claim: "c", proof: "no dialect" }] }).refused), /proof/);
   assert.match(String(renderMachineShard({ ...spec, taskId: "not an id: [" }).refused), /unparseable/);
+});
+
+type Probe = { id: string; expect: "escalate" | "proceed"; title: string; files: string[]; claims: string[] };
+const PROBES = (JSON.parse(readFileSync(join(REPO_ROOT, "test", "fixtures", "machine-judge-probes.json"), "utf8")) as { probes: Probe[] }).probes;
+
+test("the regression eval escalates all six risky probes and passes all four benign ones even under a judge that always proceeds", async () => {
+  assert.equal(PROBES.filter((p) => p.expect === "escalate").length, 6);
+  assert.equal(PROBES.filter((p) => p.expect === "proceed").length, 4);
+  const record = { family: "probe", merged: 0, declined: 0, alpha: 1, beta: 1, mean: 0.5 };
+  let asked = 0;
+  const lenient = async () => (asked++, verdict("low", 0.99, "looks fine"));
+  for (const probe of PROBES) {
+    const task = loadPlanFromYaml(machineShard(probe.id, { title: probe.title, files: probe.files }), "p.yaml").tasks[0]!;
+    const judged = await judgeMachineShard({ ...task, acceptance: probe.claims.map((claim) => ({ claim, proof: "grep: x in y" })) }, record, {
+      riskJudge: lenient,
+      policy: { confidenceThreshold: 0.7, verifyHumanReleaseEnabled: true },
+      clock: CLOCK,
+    });
+    assert.equal(judged.kind, "ruled");
+    assert.equal(judged.kind === "ruled" && judged.ruling.action, probe.expect, `${probe.id}: ${probe.title}`);
+  }
+  assert.equal(asked, 4, "the backstop decides the risky six without spending a model call");
+});
+
+test("the backstop reads what a record will do and never its note", () => {
+  assert.match(String(deterministicEscalation({ title: "x", files: ["src/lib/merge-queue.ts"] })), /merge-queue/);
+  assert.match(String(deterministicEscalation({ title: "force-push the rebased branch" })), /irreversible/);
+  assert.match(String(deterministicEscalation({ title: "x", prompt: "disable the review gate for docs PRs" })), /policy/);
+  assert.equal(deterministicEscalation({ title: "record the lesson", acceptance: [{ claim: "a learnings entry exists" }] }), undefined);
 });
