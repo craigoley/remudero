@@ -12,15 +12,14 @@ import { readLedgerLines } from "./status.js";
  * the credit" although all 7 of its proofs fail on main. This module is the cheap-lane read
  * BEFORE that page: it looks at the same evidence a human would (breaker counts, refusal
  * reasons, PR state, whether the task's own shard changed since the last read) and decides
- * which of four dispositions applies, so the escalation that DOES fire (when one does) already
- * carries a diagnosis instead of a bare "dispatch halted".
+ * which provisional disposition fits. It writes that diagnosis to the ledger before the
+ * existing backstop page; the issue text itself is unchanged in this offline-first stage.
  *
  * WHAT THIS CANNOT DO (design (ii)): decide whether the task dispatches. The breaker's own gate
  * (`nextRunnable`/`isCircuitTripped`) is untouched by this module and stays tripped regardless
- * of the verdict below — `amend`/`retire`/`requeue` change what the NEXT human or rung sees,
- * never whether THIS run's dispatch proceeds. That is also why this module never calls
- * `escalateCircuitBreak` itself: the caller decides, per the verdict, whether the backstop page
- * still fires.
+ * of the verdict below — `amend`/`retire`/`requeue` are provisional observations for the
+ * offline replay, never changes to whether THIS run's dispatch or backstop page proceeds. This
+ * module never calls `escalateCircuitBreak` itself; the caller retains that notification.
  */
 
 /** The dedup ledger step — mirrors `escalateCircuitBreak`'s own `dispatch.circuit_broken.escalated`
@@ -40,7 +39,7 @@ export interface StallEvidence {
   /** `DispatchBreakerDetail.excludedByReason` — the refusal/exclusion reasons the breaker's own
    *  ledger scan already classified (includes `orphaned_run` for a stale start with no later row). */
   excludedByReason: Readonly<Record<string, number>>;
-  /** `DispatchBreakerDetail.hasNewOwnedPr` — a `pr.opened` line exists for this task. */
+  /** `DispatchBreakerDetail.hasNewOwnedPr` — a `pr.opened` line exists for this task, possibly before the current streak. */
   hasNewOwnedPr: boolean;
   /** PR state(s) observed for this task since the breaker tripped, cheapest-projection read —
    *  `"open"`, `"merged"`, `"closed_unmerged"`, or empty when nothing is known. */
@@ -51,8 +50,8 @@ export interface StallEvidence {
   shardHash: string;
 }
 
-/** The four outcomes design (i) names. `escalate` is the only one that still pages a human — the
- *  other three are dispositions the caller can act on (or log) without opening an issue. */
+/** The four provisional outcomes design (i) names. None changes the dispatch gate or its
+ *  existing backstop page in the offline-first stage. */
 export type StallVerdict =
   | { kind: "amend"; reason: string }
   | { kind: "retire"; reason: string }
@@ -62,9 +61,8 @@ export type StallVerdict =
 export interface StallVerifierResult {
   fingerprint: string;
   verdict: StallVerdict;
-  /** True when THIS fingerprint was already verified (a prior `STALL_VERIFIED_STEP` ledger line
-   *  matched) — the verdict is still returned (pure re-derivation of the same evidence), but no
-   *  second ledger line was written; design (ii)'s "never verified twice". */
+  /** True when a prior complete `STALL_VERIFIED_STEP` row supplied this fingerprint's verdict.
+   *  No second decision or ledger write is made for unchanged evidence. */
   alreadyVerified: boolean;
 }
 
@@ -109,16 +107,13 @@ export function stallShardFingerprint(task: Pick<Task, "acceptance" | "files" | 
  * circuit-break, not merely the ones that already justify a human's attention.
  */
 export function decideStallVerdict(evidence: StallEvidence): StallVerdict {
-  // A PR for this task actually merged (or the breaker's own scan already saw a fresh owned PR)
-  // despite the breaker reading tripped: the credit/ownership assert missed it — the W1-T3116
-  // shape this task's rationale names, but inverted (there the credit read was RIGHT and the
-  // recommendation was wrong; here a wrong credit read is exactly what "amend" is for).
-  if (evidence.hasNewOwnedPr || evidence.prStates.includes("merged")) {
+  // A merged PR in the projection may mean the credit read missed progress. `hasNewOwnedPr`
+  // merely means SOME pr.opened row exists, possibly before the current failed streak; it
+  // cannot substantiate this diagnosis on its own.
+  if (evidence.prStates.includes("merged")) {
     return {
       kind: "amend",
-      reason:
-        "a PR for this task appears to have merged (or the breaker's own ledger scan already saw " +
-        "a fresh owned PR) — amend the credit/ownership read before treating this as a stall",
+      reason: "a PR for this task appears merged in the projection — inspect its credit before treating this as a stall",
     };
   }
 
@@ -127,22 +122,22 @@ export function decideStallVerdict(evidence: StallEvidence): StallVerdict {
     excludedTotal > 0 && Object.keys(evidence.excludedByReason).every((reason) => reason === "orphaned_run");
   // Every excluded dispatch was an orphaned run (a worker that died mid-attempt, never a
   // terminal verdict) and nothing genuinely fresh remains: this is infrastructure noise, not a
-  // real stall — clear it and let the next pass try again, with a note saying why.
+  // real stall. This is a recommendation for review; the breaker remains tripped.
   if (onlyOrphaned && evidence.freshCount <= 0) {
     return {
       kind: "requeue",
-      note: `${excludedTotal} excluded dispatch(es) were all orphaned runs (no completed attempt) — requeued for a fresh try, not escalated`,
+      note: `${excludedTotal} excluded dispatch(es) were all orphaned runs (no completed attempt) — inspect for a fresh try`,
     };
   }
 
-  // Every attempt opened and closed a PR unmerged, and none is open now, and the breaker's own
-  // scan excluded nothing (so no orphaned/indeterminate noise is muddying the read): the work was
-  // attempted, judged, and abandoned by every dispatch — nothing left for a human to unblock.
+  // A closed unmerged PR is observed, none is open now, and the breaker's own scan excluded
+  // nothing. This projection does not prove EVERY attempt was abandoned; retire is a candidate
+  // for the offline replay to inspect.
   const prStateSet = new Set(evidence.prStates);
   if (prStateSet.has("closed_unmerged") && !prStateSet.has("open") && excludedTotal === 0 && evidence.freshCount > 0) {
     return {
       kind: "retire",
-      reason: "every dispatch opened and closed a PR unmerged with no owned PR since — the task reads abandoned, not blocked",
+      reason: "a PR is observed closed unmerged and none open — inspect all attempts before retiring the task",
     };
   }
 
@@ -156,43 +151,57 @@ export function decideStallVerdict(evidence: StallEvidence): StallVerdict {
   };
 }
 
+/** Read a prior verdict only when the row has every field needed for its kind. An incomplete
+ *  marker is not proof that verification finished, so the caller recomputes and records it. */
+function storedStallVerdict(row: Record<string, unknown>): StallVerdict | undefined {
+  switch (row.disposition) {
+    case "amend":
+    case "retire":
+      return typeof row.reason === "string" ? { kind: row.disposition, reason: row.reason } : undefined;
+    case "requeue":
+      return typeof row.note === "string" ? { kind: "requeue", note: row.note } : undefined;
+    case "escalate":
+      return typeof row.owner === "string" && typeof row.reason === "string"
+        ? { kind: "escalate", owner: row.owner, reason: row.reason }
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
 /**
  * The whole verb: fingerprint the evidence, skip a re-verify iff THIS exact fingerprint was
  * already logged for THIS task (repo-scoped, `matchesRepoScopedTask` — the same cross-repo dedup
  * discipline `escalateCircuitBreak` itself uses), otherwise decide and ledger the verdict.
  *
  * NEVER calls `escalateCircuitBreak` or any other escalation — design (ii): this cannot approve
- * or bypass a gate, including the escalation gate. The caller reads `.verdict.kind` and decides
- * whether the backstop page still fires (today: only on `"escalate"`).
+ * or bypass a gate. The caller keeps the existing backstop page for every verdict during the
+ * offline-first stage; the ledger row supports later comparison with operator resolutions.
  */
 export function verifyStalledTask(
   taskId: string,
   evidence: StallEvidence,
   ctx: { repo: string; ledgerPath: string; runId: string },
-  deps: {
-    readLedgerLines?: (path: string) => ReturnType<typeof readLedgerLines>;
-    appendLedger?: typeof appendLedger;
-  } = {},
 ): StallVerifierResult {
-  const readLines = deps.readLedgerLines ?? readLedgerLines;
-  const append = deps.appendLedger ?? appendLedger;
   const fingerprint = fingerprintStallEvidence(evidence);
-  const alreadyVerified = readLines(ctx.ledgerPath).some(
-    (l) => l.step === STALL_VERIFIED_STEP && l.fingerprint === fingerprint && matchesRepoScopedTask(l, ctx.repo, taskId),
-  );
-  const verdict = decideStallVerdict(evidence);
-  if (!alreadyVerified) {
-    append(ctx.ledgerPath, {
-      run_id: ctx.runId,
-      task_id: taskId,
-      repo: ctx.repo,
-      step: STALL_VERIFIED_STEP,
-      fingerprint,
-      disposition: verdict.kind,
-      ...(verdict.kind === "amend" || verdict.kind === "retire" ? { reason: verdict.reason } : {}),
-      ...(verdict.kind === "requeue" ? { note: verdict.note } : {}),
-      ...(verdict.kind === "escalate" ? { owner: verdict.owner, reason: verdict.reason } : {}),
-    });
+  const rows = readLedgerLines(ctx.ledgerPath);
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i];
+    if (row.step !== STALL_VERIFIED_STEP || row.fingerprint !== fingerprint || !matchesRepoScopedTask(row, ctx.repo, taskId)) continue;
+    const priorVerdict = storedStallVerdict(row);
+    if (priorVerdict) return { fingerprint, verdict: priorVerdict, alreadyVerified: true };
   }
-  return { fingerprint, verdict, alreadyVerified };
+  const verdict = decideStallVerdict(evidence);
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: taskId,
+    repo: ctx.repo,
+    step: STALL_VERIFIED_STEP,
+    fingerprint,
+    disposition: verdict.kind,
+    ...(verdict.kind === "amend" || verdict.kind === "retire" ? { reason: verdict.reason } : {}),
+    ...(verdict.kind === "requeue" ? { note: verdict.note } : {}),
+    ...(verdict.kind === "escalate" ? { owner: verdict.owner, reason: verdict.reason } : {}),
+  });
+  return { fingerprint, verdict, alreadyVerified: false };
 }

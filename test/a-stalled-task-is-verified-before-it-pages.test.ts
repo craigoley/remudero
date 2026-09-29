@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { appendLedger } from "../src/lib/ledger.js";
+import { onCircuitBreakWithVerifier } from "../src/run-task.js";
+import type { Task } from "../src/lib/plan.js";
 import {
   decideStallVerdict,
   fingerprintStallEvidence,
@@ -45,7 +48,7 @@ test("W1-T4678: the verifier returns one of its four outcomes from the evidence"
   const cases: Array<{ name: string; evidence: StallEvidence; kind: "amend" | "retire" | "requeue" | "escalate" }> = [
     {
       name: "a merged PR the breaker's own scan missed",
-      evidence: { ...baseEvidence, hasNewOwnedPr: true },
+      evidence: { ...baseEvidence, prStates: ["merged"] },
       kind: "amend",
     },
     {
@@ -54,7 +57,7 @@ test("W1-T4678: the verifier returns one of its four outcomes from the evidence"
       kind: "requeue",
     },
     {
-      name: "every attempt opened and closed a PR unmerged, nothing excluded",
+      name: "a closed unmerged PR with no open PR observed, nothing excluded",
       evidence: { ...baseEvidence, freshCount: 2, prStates: ["closed_unmerged"] },
       kind: "retire",
     },
@@ -72,6 +75,24 @@ test("W1-T4678: the verifier returns one of its four outcomes from the evidence"
   }
   // All four of design (i)'s outcomes are reachable from evidence alone, not just three of them.
   assert.deepEqual([...seen].sort(), ["amend", "escalate", "requeue", "retire"]);
+
+  assert.equal(
+    decideStallVerdict({ ...baseEvidence, hasNewOwnedPr: true }).kind,
+    "escalate",
+    "an old pr.opened row does not prove a merge or missed credit",
+  );
+
+  withLedger("all-verdicts", (ledgerPath) => {
+    for (const [index, c] of cases.entries()) {
+      const taskId = `W1-VERDICT-${index}`;
+      const first = verifyStalledTask(taskId, c.evidence, ctx(ledgerPath));
+      const second = verifyStalledTask(taskId, c.evidence, ctx(ledgerPath));
+      assert.equal(first.alreadyVerified, false, `${c.name}: first decision is new`);
+      assert.equal(second.alreadyVerified, true, `${c.name}: unchanged decision is reused`);
+      assert.deepEqual(second.verdict, first.verdict, `${c.name}: the saved verdict survives reuse`);
+    }
+    assert.equal(readLedgerLines(ledgerPath).filter((row) => row.step === STALL_VERIFIED_STEP).length, 4);
+  });
 
   // escalate is the only outcome that names an owner — the "escalate with a named owner and the
   // reason" half of design (i).
@@ -117,6 +138,24 @@ test("W1-T4678: a different task with the same evidence is verified independentl
   });
 });
 
+test("W1-T4678: an incomplete marker cannot certify an unperformed verification", () => {
+  withLedger("incomplete-marker", (ledgerPath) => {
+    appendLedger(ledgerPath, {
+      run_id: "aborted",
+      task_id: "W1-INCOMPLETE",
+      repo: "r",
+      step: STALL_VERIFIED_STEP,
+      fingerprint: fingerprintStallEvidence(baseEvidence),
+      disposition: "escalate",
+    });
+    const result = verifyStalledTask("W1-INCOMPLETE", baseEvidence, ctx(ledgerPath));
+    assert.equal(result.alreadyVerified, false);
+    assert.equal(result.verdict.kind, "escalate");
+    assert.equal(verifyStalledTask("W1-INCOMPLETE", baseEvidence, ctx(ledgerPath)).alreadyVerified, true);
+    assert.equal(readLedgerLines(ledgerPath).filter((row) => row.step === STALL_VERIFIED_STEP).length, 2);
+  });
+});
+
 test("W1-T4678: the fingerprint is a pure function of the evidence, order-independent", () => {
   const a: StallEvidence = { ...baseEvidence, excludedByReason: { failed: 1, orphaned_run: 2 } };
   const b: StallEvidence = { ...baseEvidence, excludedByReason: { orphaned_run: 2, failed: 1 } };
@@ -127,4 +166,48 @@ test("W1-T4678: the shard fingerprint changes when the task's own acceptance pro
   const before = stallShardFingerprint({ acceptance: [{ claim: "x", proof: "y" }], files: ["a.ts"] } as never);
   const after = stallShardFingerprint({ acceptance: [{ claim: "x", proof: "z" }], files: ["a.ts"] } as never);
   assert.notEqual(before, after);
+});
+
+test("W1-T4678: provisional amend and retire verdicts keep the circuit-breaker page", () => {
+  withLedger("offline-backstop", (ledgerPath) => {
+    const pages: string[] = [];
+    const issues = {
+      create: (title: string) => {
+        pages.push(title);
+        return `https://github.com/acme/widgets/issues/${pages.length}`;
+      },
+    };
+    const detail = {
+      state: "tripped" as const,
+      ledgerState: "tripped" as const,
+      freshCount: 3,
+      excludedDispatches: 0,
+      excludedByReason: {},
+      maxDispatches: 3,
+      hasNewOwnedPr: true,
+    };
+    const gate = { detailFor: () => detail };
+    const task = (id: string): Task => ({
+      id,
+      title: "offline verifier fixture",
+      repo: "acme/widgets",
+      depends_on: [],
+      type: "implement",
+      verify: "auto",
+      risk: "medium",
+      status: "blocked",
+      attempts: 3,
+    });
+    const ctx = { owner: "acme", repo: "widgets", ledgerPath, runId: "offline-replay", issues };
+    onCircuitBreakWithVerifier(gate, () => ({ merged: true }), ctx)(task("W1-AMEND"));
+    onCircuitBreakWithVerifier(gate, () => ({ prState: "CLOSED" }), ctx)(task("W1-RETIRE"));
+
+    assert.equal(pages.length, 2, "provisional diagnoses must not silently suppress the backstop");
+    const rows = readLedgerLines(ledgerPath);
+    assert.deepEqual(
+      rows.filter((row) => row.step === STALL_VERIFIED_STEP).map((row) => row.disposition),
+      ["amend", "retire"],
+    );
+    assert.equal(rows.filter((row) => row.step === "dispatch.circuit_broken.escalated").length, 2);
+  });
 });

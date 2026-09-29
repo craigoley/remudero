@@ -30385,15 +30385,14 @@ export function breakerDetailDep(
  * (`drainCommand`/`daemonCommand`) share this ONE wiring rather than duplicating the
  * evidence-gathering: reads the SAME breaker detail `breakerDetailDep` above logs and the SAME
  * projection `isOpenPr`/`isCreditIndeterminate` already read (never a second GitHub call), hands
- * it to `verifyStalledTask` (stall-verifier.ts), and only escalates on that verifier's
- * `"escalate"` disposition — `"amend"`/`"retire"`/`"requeue"` are ledgered by `verifyStalledTask`
- * itself and never reach `escalateCircuitBreak`. See stall-verifier.ts's own doc for why this
- * cannot change whether the breaker stays tripped (design (ii)): only which page, if any, fires.
+ * it to `verifyStalledTask` (stall-verifier.ts). The plan calls for an offline replay before
+ * activating dispositions, so every tripped breaker still follows the established backstop
+ * escalation path. A provisional `requeue` verdict must not silently leave the breaker tripped.
  */
 export function onCircuitBreakWithVerifier(
   gate: Pick<ReturnType<typeof breakerGateFor>, "detailFor">,
   projFor: (taskId: string) => { prState?: string; merged?: boolean } | undefined,
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string },
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
 ): (task: Task) => void {
   return (task) => {
     const detail = gate.detailFor(task.id);
@@ -30404,7 +30403,7 @@ export function onCircuitBreakWithVerifier(
     if (proj?.merged) prStates.push("merged");
     else if (proj?.prState === "OPEN") prStates.push("open");
     else if (proj?.prState === "CLOSED") prStates.push("closed_unmerged");
-    const { verdict } = verifyStalledTask(
+    verifyStalledTask(
       task.id,
       {
         freshCount: detail.freshCount,
@@ -30415,11 +30414,7 @@ export function onCircuitBreakWithVerifier(
       },
       { repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId },
     );
-    // ONLY "escalate" still pages — the gate itself (whether the task dispatches) is untouched
-    // either way; see this function's own doc and stall-verifier.ts's design (ii).
-    if (verdict.kind === "escalate") {
-      escalateCircuitBreak(task, { owner: ctx.owner, repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId });
-    }
+    escalateCircuitBreak(task, { owner: ctx.owner, repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, issues: ctx.issues });
   };
 }
 
