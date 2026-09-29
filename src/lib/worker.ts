@@ -134,6 +134,7 @@ import {
   spawnOpenWeightWorker,
   FOUNDRY_CLAUDE_API_KEY_ENV,
   FOUNDRY_CLAUDE_ENDPOINT_ENV,
+  foundryClaudeEndpoint,
   type CodexCapacityDeps,
   type CodexModelTier,
   type ProviderCapacity,
@@ -384,6 +385,7 @@ export type RoutingRule =
   | "preference-bypassed"
   | "cash-fallback"
   | "cash-opus-fallback"
+  | "cash-sonnet-fallback"
   | "overflow-fallback"
   | "cash-trial";
 
@@ -965,9 +967,11 @@ export interface SpawnWorkerArgs {
   cashSqueezed?: boolean;
   /** Only the blocked-subscription frontier fallback may select paid Foundry Opus. */
   cashOpusEmergency?: boolean;
+  /** Only the blocked-subscription balanced fallback may select paid Foundry Sonnet. */
+  cashSonnetEmergency?: boolean;
   /** Set only by the two blocked-auction fallbacks, so the retried spawn records the rule and the
    *  subscription readings that sent it there rather than claiming plain mount affinity. */
-  routingFallback?: { rule: "cash-fallback" | "cash-opus-fallback" | "overflow-fallback"; capacities: ProviderCapacity[] };
+  routingFallback?: { rule: "cash-fallback" | "cash-opus-fallback" | "cash-sonnet-fallback" | "overflow-fallback"; capacities: ProviderCapacity[] };
   /** The cash-simple trial's decision for this run; the cash arm also restricts the cash ladder. */
   routingTrial?: { id: string; arm: string; reason: string; models?: readonly string[] };
   /** Reasoning effort (mount-resolved, §9): 'low'|'medium'|'high'|'xhigh'|'max'. */
@@ -2181,6 +2185,30 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         const divertTools = args.cashTools ?? args.tools;
         const refusal = cashFallbackRefusal(config, divertTools);
         if (refusal === undefined) {
+          if (requestedCapability === "balanced" && capacities.some((row) => row.provider === "claude") &&
+              capacities.some((row) => row.provider === "codex")) {
+            const env = args.env ?? process.env;
+            let foundryRefusal: string | undefined;
+            try {
+              if (!env[FOUNDRY_CLAUDE_API_KEY_ENV]) throw new Error("Foundry Claude daemon key is absent");
+              foundryClaudeEndpoint(env, "cash Sonnet");
+              assertModelAllowed("claude-sonnet-5-5", config);
+            } catch (reason) {
+              foundryRefusal = reason instanceof Error ? reason.message : String(reason);
+            }
+            if (foundryRefusal === undefined) {
+              console.error(JSON.stringify({ event: "worker.provider.cash_sonnet_fallback", reason: "both subscriptions blocked", requested_model: args.model }));
+              return await spawnWorker({
+                ...args,
+                mountProvider: "cash",
+                cashSqueezed: true,
+                cashSonnetEmergency: true,
+                routingFallback: { rule: "cash-sonnet-fallback", capacities },
+                ...(divertTools === undefined ? {} : { tools: [...divertTools] }),
+              });
+            }
+            console.error(JSON.stringify({ event: "worker.provider.cash_sonnet_fallback_refused", reason: foundryRefusal }));
+          }
           console.error(JSON.stringify({
             event: "worker.provider.cash_fallback",
             reason: "no subscription had readable headroom",
@@ -2389,6 +2417,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     if (subscriptionOnly && !(args.cashOpusEmergency === true && args.cashSqueezed === true && args.routingFallback?.rule === "cash-opus-fallback")) {
       throw new SubscriptionOnlyRefusedError(args.model!);
     }
+    if (args.cashSonnetEmergency === true && !(args.cashSqueezed === true && args.routingFallback?.rule === "cash-sonnet-fallback")) {
+      throw new Error("cash Sonnet requires the balanced blocked-subscription route");
+    }
     const runOpenWeight = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
     if (args.providerRouting?.spawnOpenWeight === undefined) {
       assertLiveSpawnAllowed(`spawnOpenWeightWorker for task ${args.taskId ?? "<no taskId>"}`);
@@ -2404,6 +2435,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // make the gate stricter.
     const openWeight: OpenWeightModelSelection = args.cashOpusEmergency === true
       ? { model: "claude-opus-5-5", effort: args.effort ?? "medium", capability: "frontier", alternatives: [] }
+      : args.cashSonnetEmergency === true
+        ? { model: "claude-sonnet-5-5", effort: args.effort ?? "medium", capability: "balanced", alternatives: [] }
       : selectOpenWeightModel(
       capabilities,
       args.model,
@@ -2449,6 +2482,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         },
       );
       result.selectionAssignmentId = selectionAssignmentId;
+      if (args.cashSonnetEmergency === true && result.budgetRefused === true && result.budgetReservedUsd === 0) {
+        console.error(JSON.stringify({ event: "worker.provider.cash_sonnet_fallback_refused", reason: "Foundry Claude cap exhausted before transport" }));
+        return await spawnWorker({
+          ...args,
+          cashSonnetEmergency: false,
+          routingFallback: { rule: "cash-fallback", capacities: args.routingFallback!.capacities },
+        });
+      }
       return result;
     } finally {
       reapWorkerHome(workerHomeRoot, workerHome);
