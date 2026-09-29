@@ -5,14 +5,19 @@
 // with auto-merge ARMED, at real model spend. These tests lock the four outward boundaries
 // shut under the test runner, and lock them OPEN everywhere else so the daemon is unaffected.
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { ghExec, ghExecFile, ghJson } from "../src/lib/github-transport.js";
+import { gitRepo } from "./helpers/git-repo.js";
+import { ghRefusalCount } from "./setup/tmp-hygiene.js";
 import {
   assertLiveWriteAllowed,
   isTestRunner,
   LiveWriteBlockedError,
   LIVE_WRITE_OVERRIDE_ENV,
+  LIVE_WRITE_SENTINEL_TOKEN,
   liveWritesExempt,
   withLiveWritesAllowed,
   type LiveWriteBoundary,
@@ -202,4 +207,72 @@ test("the opt-out NESTS without an inner section re-arming the guard for the out
     assertLiveWriteAllowed("git-push", "outer still exempt", TEST_RUN);
   });
   assert.equal(liveWritesExempt(), false);
+});
+
+// ── W1-T4805: process-level containment (test/setup/no-live-remote.ts) ─────────────────────────
+// The per-call fence above can fire AFTER an effect it does not know about. These canaries prove
+// the suite's own process cannot reach live GitHub at all: dead push URLs, a sentinel token the
+// transport refuses, no App key. They rely on the shared `--import tmp-hygiene.ts` setup only.
+
+const GITHUB_PUSH_URLS = [
+  "https://github.com/craigoley/remudero.git",
+  "git@github.com:craigoley/remudero.git",
+  "ssh://git@github.com/craigoley/remudero.git",
+];
+
+test("W1-T4805: a real push to github from the suite fails on the dead rewrite", () => {
+  const repo = gitRepo({ kind: "canary-push" });
+  // every github.com push URL form resolves to the dead path, before any network is involved
+  for (const url of GITHUB_PUSH_URLS) {
+    repo.addRemote("canary", url);
+    const pushUrl = repo.git("remote", "get-url", "--push", "canary");
+    assert.match(pushUrl, /W1-T4805-live-github-push-blocked/, `${url} must rewrite to the dead path`);
+    repo.git("remote", "remove", "canary");
+  }
+  // and a real `git push` fails loudly, naming the dead rewrite
+  repo.addRemote("origin", GITHUB_PUSH_URLS[0]!);
+  const pushed = spawnSync("git", ["-C", repo.dir, "push", "origin", "HEAD:refs/heads/w1-t4805-canary"], {
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  assert.notEqual(pushed.status, 0, "a push to github.com must fail under the suite");
+  assert.match(pushed.stderr, /W1-T4805-live-github-push-blocked/, "the failure must name the dead rewrite");
+  // a LOCAL bare fixture remote is a plain path: the rewrite must not touch it
+  const bare = gitRepo({ bare: true, kind: "canary-bare" });
+  repo.addRemote("local", bare.dir);
+  repo.git("push", "local", "HEAD:refs/heads/main");
+  assert.equal(bare.git("rev-parse", "main"), repo.git("rev-parse", "HEAD"));
+});
+
+test("W1-T4805: the transport refuses the sentinel token before gh runs", () => {
+  assert.equal(process.env.GH_TOKEN, LIVE_WRITE_SENTINEL_TOKEN, "the shared setup must install the sentinel");
+  assert.equal(process.env.GITHUB_TOKEN, LIVE_WRITE_SENTINEL_TOKEN);
+  const before = ghRefusalCount();
+  const refused = (fn: () => unknown): void =>
+    assert.throws(fn, (e: unknown) => {
+      assert.ok(e instanceof LiveWriteBlockedError, "must be LiveWriteBlockedError, never the CLI's own 401");
+      assert.equal(e.boundary, "gh-transport");
+      assert.match(e.message, /W1-T4805/);
+      assert.match(e.message, /gh pr create 1/, "the refusal must name the command");
+      return true;
+    });
+  refused(() => ghExec(["pr", "create", "1", "--fill"], { encoding: "utf8" }));
+  refused(() => ghExecFile("gh", ["pr", "create", "1"], { encoding: "utf8" }));
+  refused(() => ghJson(["pr", "create", "1"]));
+  // the shared refusing stub `gh` on PATH was never spawned: the transport's refusal came first
+  assert.equal(ghRefusalCount(), before, "gh must not have been spawned");
+});
+
+test("W1-T4805: a spawned child inherits the sentinel and no app key", () => {
+  const probe =
+    "const e = process.env; console.log(JSON.stringify({ t: e.GH_TOKEN, g: e.GITHUB_TOKEN, k: e.GH_APP_PRIVATE_KEY_PATH ?? null," +
+    " id: e.GH_APP_ID ?? null, inst: e.GH_APP_INSTALLATION_ID ?? null, cfg: e.GH_CONFIG_DIR ?? null }));";
+  const out = JSON.parse(execFileSync(process.execPath, ["-e", probe], { encoding: "utf8" })) as Record<string, string | null>;
+  assert.equal(out.t, LIVE_WRITE_SENTINEL_TOKEN);
+  assert.equal(out.g, LIVE_WRITE_SENTINEL_TOKEN);
+  assert.equal(out.k, null);
+  assert.equal(out.id, null);
+  assert.equal(out.inst, null);
+  assert.ok(out.cfg !== null && out.cfg.includes("rmd-test-gh-config-"), "GH_CONFIG_DIR must be the empty per-process dir");
+  assert.deepEqual(readdirSync(out.cfg), [], "the gh config dir must be empty — no keyring login reachable");
 });

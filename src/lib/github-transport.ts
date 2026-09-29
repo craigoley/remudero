@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { clockFromMillisFn, systemClock } from "./clock.js";
 import { RmdError } from "./errors.js";
 import { refreshInstallationToken } from "./github-app.js";
+import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
 
 /** PRIMARY CONTROL: every GitHub CLI invocation gets a wall-clock ceiling unless a caller narrows it. */
 export const DEFAULT_GH_CALL_TIMEOUT_MS = 60_000;
@@ -93,6 +94,22 @@ export function ghOptionsWithDefaultTimeout<T extends object>(
   };
 }
 
+/**
+ * W1-T4805: refuse to spawn the real CLI while its effective token is the test-runner sentinel
+ * ({@link LIVE_WRITE_SENTINEL_TOKEN}). Throws {@link LiveWriteBlockedError} naming the command, so
+ * the refusal never degrades into the CLI's own 401. `env` is the env the child will receive.
+ */
+export function refuseSentinelGhToken(args: readonly string[], env: NodeJS.ProcessEnv | undefined): void {
+  const e = env ?? process.env;
+  if (e.GH_TOKEN !== LIVE_WRITE_SENTINEL_TOKEN && e.GITHUB_TOKEN !== LIVE_WRITE_SENTINEL_TOKEN) return;
+  throw new LiveWriteBlockedError(
+    "gh-transport",
+    `\`gh ${args.slice(0, 4).join(" ")}\` carries the test-runner sentinel token (W1-T4805: the suite ` +
+      `cannot reach live GitHub, read or write; use a PATH-stubbed gh or an injected gateway, and set ` +
+      `GH_TOKEN in that call's own env if the stub needs one)`,
+  );
+}
+
 export function ghExec(args: string[], opts: ExecFileSyncOptionsWithStringEncoding): string;
 export function ghExec(args: string[], opts?: ExecFileSyncOptions): Buffer;
 export function ghExec(args: string[], opts: ExecFileSyncOptions = {}): string | Buffer {
@@ -104,6 +121,7 @@ export function ghExec(args: string[], opts: ExecFileSyncOptions = {}): string |
 export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptionsWithStringEncoding): string;
 export function ghExecFile(file: string, args: string[], opts?: ExecFileSyncOptions): Buffer;
 export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptions = {}): string | Buffer {
+  refuseSentinelGhToken(args, opts.env);
   return execFileSync(file, args, ghOptionsWithDefaultTimeout(opts)) as string | Buffer;
 }
 
@@ -118,7 +136,10 @@ export function ghJson(
 ): unknown {
   // W1-T3297: an injected `exec` reaches no network, so pacing it would spend a shared window
   // on a call that never touched the limiter.
-  if (exec === execFileSync) applyGhReadCadence(args);
+  if (exec === execFileSync) {
+    refuseSentinelGhToken(args, undefined);
+    applyGhReadCadence(args);
+  }
   const isApiCall = args[0] === "api";
   const execArgs = isApiCall ? [...args, "-i"] : args;
   const out = exec("gh", execArgs, {
@@ -219,6 +240,7 @@ export async function ghJsonAsync(args: string[], execAsync: typeof execFileAsyn
       // Keep the async poll path behind the same transport floor as ghJson/ghExec. The daemon and
       // review handlers enforce RMD_GH_TRANSPORT_FLOOR for their lifetime, but without this call the
       // CI/review wait loops bypassed that boundary entirely and could emit a rapid read burst.
+      refuseSentinelGhToken(args, undefined);
       applyGhReadCadence(args);
       const { stdout } = await withGhKillEscalation(
         execAsync("gh", args, {
@@ -272,6 +294,7 @@ export async function ghTextAsync(
   const existing = asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
+    refuseSentinelGhToken(args, undefined);
     applyGhReadCadence(args);
     return read();
   })();

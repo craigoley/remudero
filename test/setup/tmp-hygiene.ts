@@ -27,6 +27,9 @@ import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+// W1-T4805: FIRST import — process-level containment against live GitHub writes (dead push URLs, a
+// sentinel token, no App key). Every runner invocation already `--import`s this file, so it rides along.
+import { appendGitConfigEnv } from "./no-live-remote.js";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
 
 /**
@@ -111,11 +114,10 @@ if (process.env.NODE_V8_COVERAGE !== undefined) {
  * test/git-fixture-gc-hygiene.test.ts guards that residue so a future fixture regressing into
  * that shape fails a named test instead of silently reintroducing the race.
  */
-process.env.GIT_CONFIG_COUNT = "2";
-process.env.GIT_CONFIG_KEY_0 = "gc.auto";
-process.env.GIT_CONFIG_VALUE_0 = "0";
-process.env.GIT_CONFIG_KEY_1 = "receive.autogc";
-process.env.GIT_CONFIG_VALUE_1 = "false";
+// Appended (W1-T4805) rather than assigned, so the dead-push-URL entries no-live-remote.ts installed
+// before this line survive; the gc entries land after them.
+appendGitConfigEnv("gc.auto", "0");
+appendGitConfigEnv("receive.autogc", "false");
 
 const created: Array<string | Buffer> = [];
 const originalMkdtempSync = fs.mkdtempSync;

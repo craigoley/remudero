@@ -63,6 +63,14 @@
 export const LIVE_WRITE_OVERRIDE_ENV = "RMD_ALLOW_LIVE_WRITES";
 
 /**
+ * W1-T4805: the value test/setup/no-live-remote.ts puts in `GH_TOKEN`/`GITHUB_TOKEN` for the
+ * whole test process. It is not a credential; src/lib/github-transport.ts refuses to spawn the
+ * gh CLI while it is the token, so a call that reaches the transport under the suite is refused
+ * by name instead of by the CLI's own 401, which reads like an outage.
+ */
+export const LIVE_WRITE_SENTINEL_TOKEN = "rmd-test-runner-sentinel-W1-T4805-no-live-github";
+
+/**
  * True when this process is the node test runner. Presence-tested (see the module
  * header): any non-empty `NODE_TEST_CONTEXT` counts.
  */
@@ -83,7 +91,7 @@ export function isTestRunner(env: NodeJS.ProcessEnv = process.env): boolean {
  *  verdict was posted against the old one), so it belongs behind this boundary exactly like
  *  the merge and push writes beside it. Reusing one of those four would have mislabelled the
  *  refusal in the error a blocked test reads. */
-export type LiveWriteBoundary = "git-push" | "gh-pr-create" | "gh-pr-merge" | "gh-issue-create" | "gh-pr-update-branch";
+export type LiveWriteBoundary = "gh-transport" | "git-push" | "gh-pr-create" | "gh-pr-merge" | "gh-issue-create" | "gh-pr-update-branch";
 
 /** Thrown at a boundary rather than returning silently: a swallowed refusal would
  * read as "the effect did not happen for some other reason", which is the same
