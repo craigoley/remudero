@@ -1,0 +1,40 @@
+- id: W1-T4768
+  title: "Retire only exact verify-human Inbox asks proven released in retained ledger archives"
+  repo: remudero
+  depends_on: [W1-T4742]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  origin: "operator Inbox gardener issue #7708 after read-only attention census merged"
+  plan_refs: [W1-T4738, W1-T4742]
+  files: [src/lib/inbox-responder.ts, src/lib/panel-graph.ts, test/archive-release-inbox-reconciliation.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T4768 is the remotely reserved replacement after W1-T4765 was found held by a
+    different filing branch; the contested reservation was not deleted or handed off.
+    W1-T4738 retires an exact verify-human ask when its ratify.approved release is in the
+    live ledger. W1-T4742's census can see positive release rows in retained archives and
+    flag contradictions, but classification still reads only the live file. Rotation can
+    therefore resurrect an ask even after a durable release was recorded.
+  design: |
+    Reuse the bounded, memoized archive union to feed positive task-scoped release evidence
+    into Inbox classification, not just the read-only census. Retire only the matching
+    verify-human:<task> ask; preserve thread, registry and ledger history. Never infer a
+    release from missing rows, age, proposal wording, auto-merge preference, or incomplete
+    archive continuity. A failed archive read preserves the ask with partial source health.
+    Keep W1-T216's unreleased security ruling visible. Report an exact source receipt or
+    discrepancy when reconciliation changes an active ask, and make repeated reads stable
+    without a model call or repeated full archive scan. A broader gardener still needs an
+    authenticated precision audit before other classes of ask can be retired.
+  acceptance:
+    - claim: "an archived release retires only its exact verify-human ask without erasing history"
+      proof: 'grep: test("W1-T4768: archived positive release retires exact ask" in test/archive-release-inbox-reconciliation.test.ts'
+    - claim: "missing or unreadable archive evidence leaves security asks visible"
+      proof: 'grep: test("W1-T4768: archive gap preserves unproven ask" in test/archive-release-inbox-reconciliation.test.ts'
+  falsifier: |
+    Rotate one task's release out of the live file but retain it in an archive. That task's
+    verify-human ask retires, while an unreleased security task and a different ruling
+    stay visible. Make the archive unreadable: no new retirement is claimed.

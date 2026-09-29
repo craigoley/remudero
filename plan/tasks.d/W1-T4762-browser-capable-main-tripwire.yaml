@@ -1,0 +1,36 @@
+- id: W1-T4762
+  title: "The merged-tree tripwire runs a real Chromium test without installing Chromium and marks main red"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  origin: "2026-09-29 main-tripwire failure on merge #7757; full CI passed but browser launch failed"
+  plan_refs: [W1-T1027, W1-T4472]
+  files: [.github/workflows/main-tripwire.yml, scripts/tripwire-browser-requirement.mjs, test/main-tripwire-browser-requirement.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    The per-merge tripwire selects test/workflow-playwright-install.test.ts when a CI change
+    touches it. That suite launches Chromium, but the tripwire intentionally has no browser
+    install step. Main ad1054d1a therefore has a failed tripwire even though every required
+    CI shard passed. A red main-health signal must mean a code failure, not missing test setup.
+  design: |
+    After selecting touched and affected test files, detect whether any selected file requires
+    Playwright Chromium. Install only the pinned Chromium browser before the test step when it
+    does; do not invoke apt or --with-deps, and keep the tripwire's bounded budget. Detection
+    should derive from selected test source rather than a hand-maintained list of three names,
+    fail closed on unreadable candidates, and have a positive control for every current
+    browser-launching test. Keep browser tests in the tripwire, not skipped or downgraded to
+    green. Do not alter the required full CI coverage behavior.
+  acceptance:
+    - claim: "a selected browser test requests Chromium before the tripwire runs it"
+      proof: 'grep: test("W1-T4762: selected Playwright suite requires Chromium" in test/main-tripwire-browser-requirement.test.ts'
+    - claim: "ordinary selected tests avoid the extra browser install and unreadable paths refuse"
+      proof: 'grep: test("W1-T4762: ordinary suites avoid install and missing suites refuse" in test/main-tripwire-browser-requirement.test.ts'
+  falsifier: |
+    Select the touched W1-T1027 browser suite on a clean runner: the conditional install must
+    run and chromium.launch must succeed. Select an ordinary unit suite: no browser download.
+    An unreadable selected test file must not answer that no browser is needed.
