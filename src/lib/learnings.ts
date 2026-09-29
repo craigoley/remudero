@@ -842,7 +842,10 @@ function defaultChurnCommitReader(repoDir: string, files: string[], sinceIso: st
       ["-C", repoDir, "log", "--oneline", `--since=${sinceIso}`, "--", ...files],
       { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     );
-  } catch {
+  } catch (error) {
+    // Absence and failure genuinely coincide here: an unreadable repo/path means unknowable
+    // churn, and `renderFreshnessNote` already treats 0 as "no note" — never a fabricated claim.
+    void error;
     return 0;
   }
   return output.split("\n").filter((line) => line.trim().length > 0).length;
