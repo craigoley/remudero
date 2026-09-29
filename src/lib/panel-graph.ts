@@ -1931,7 +1931,7 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
         views: listThreadViews(operatorThreadItems(deps, readPlanSnapshot, classified), threads,
           readReadMarks(readMarksPath(join(deps.inboxRoot, "state")))),
         classifications: classified.classifications,
-        taskFacts: new Map(plan.tasks.map((task) => [task.id, { verify: task.verify, repo: task.repo, title: task.title }])),
+        taskFacts: new Map(plan.tasks.map((task) => [task.id, { verify: task.verify, repo: task.repo, title: task.title, status: task.status, retirement: task.retirement }])),
         releasedTaskIds, releaseReceipts, judgeByTask,
         mergedTaskIds: new Set([...classified.projection].filter(([, value]) => value.merged).map(([id]) => id)),
         sources: {
