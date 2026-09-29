@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { startInterphaseReviewClock, type DaemonDeps } from "../src/lib/daemon.js";
+import { readLedgerLines } from "../src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, runSweepLightPass, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 
 const NOW = Date.parse("2026-09-28T22:00:00Z");
@@ -175,5 +176,38 @@ test("W1-T4732: overlapping light passes respect review width and drain on stop"
     old.resolve();
     middle.resolve();
     await Promise.all([first, second]);
+  }
+});
+
+test("W1-T4732: plan-filing losers name the local and overlapping admission limits", async () => {
+  const held = deferred();
+  const posted: number[] = [];
+  const deps = reviewDeps(async (pr) => {
+    posted.push(pr.prNumber);
+    if (pr.prNumber === 1) await held.promise;
+  });
+  const filing = (number: number): OpenPrView => ({ ...reviewPr(number), isPlanFiling: true });
+  const policy = { ...DEFAULT_SWEEP_POLICY, planFilingAdmissionBound: 1 };
+  const first = runSweepLightPass([filing(1), filing(2)], deps, policy);
+  try {
+    await eventually(() => posted.includes(1), "the first plan filing did not start review");
+    await eventually(
+      () => readLedgerLines(deps.ledgerPath).some((row) => row.step === "sweep.disposed" && row.pr_number === 2),
+      "the same-pass plan filing did not stand down",
+    );
+    await runSweepLightPass([filing(3)], deps, policy);
+    const disposed = readLedgerLines(deps.ledgerPath).filter((row) => row.step === "sweep.disposed");
+    assert.equal(
+      disposed.find((row) => row.pr_number === 2)?.stand_down_reason,
+      "not admitted this pass: at most 1 plan-filing post-review admissions per light pass",
+    );
+    assert.equal(
+      disposed.find((row) => row.pr_number === 3)?.stand_down_reason,
+      "not admitted this pass: at most 0 plan-filing post-review admissions available across light passes",
+    );
+    assert.deepEqual(posted, [1], "neither loser starts a review while the plan-filing slot is held");
+  } finally {
+    held.resolve();
+    await first;
   }
 });
