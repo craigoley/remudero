@@ -270,6 +270,18 @@ function adapterFixture(options: AdapterFixtureOptions = {}) {
   };
 }
 
+test("W1-T4739 direct adapter review path is independent of stale-days disposition", async () => {
+  const fixture = adapterFixture();
+  try {
+    fixture.pr.lastActivityAt = "2026-08-01T00:00:00Z";
+    await withLiveWritesAllowed(() => fixture.effects.postReview!(fixture.pr, { kind: "discriminate-only", judgedHeadSha: fixture.priorHead }));
+    const posted = readLedgerLines(fixture.ledgerPath).filter((line) => line.step === "review.posted").at(-1);
+    assert.equal(posted?.effective_review_mode, "proof-only-discrimination", "expiring-fixture: exempt -- direct postReview adapterFixture bypasses stale-days disposition");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("W1-T3901 adapter falls back when the PR-head or merge-base worktree is unavailable", async () => {
   for (const [label, overrides] of [
     ["head", { materialize: () => ({ worktreePath: undefined, failure: { errorClass: "other", message: "head unavailable" } }) }],
@@ -435,6 +447,7 @@ test("W1-T3901 run-task adapter posts proof-only discrimination and records effe
       currentMergeBaseSha: "base-current",
     } as OpenPrView & Partial<ReviewReuseInputs>;
 
+    pr.lastActivityAt = "2026-08-01T00:00:00Z";
     await withLiveWritesAllowed(() =>
       effects.postReview!(pr, { kind: "discriminate-only", judgedHeadSha: priorHead }),
     );
@@ -442,7 +455,7 @@ test("W1-T3901 run-task adapter posts proof-only discrimination and records effe
     assert.equal(calls.includes("fallback-review"), false);
     assert.deepEqual(calls.filter((call) => call.startsWith("cleanup:")), ["cleanup:/base", "cleanup:/head"]);
     const posted = readLedgerLines(ledgerPath).filter((line) => line.step === "review.posted").at(-1);
-    assert.equal(posted?.effective_review_mode, "proof-only-discrimination");
+    assert.equal(posted?.effective_review_mode, "proof-only-discrimination", "expiring-fixture: exempt -- direct postReview run-task adapter fixture bypasses stale-days disposition");
     assert.equal(posted?.requested_review_mode, "discriminate-only");
     assert.equal(posted?.review_discriminated, true);
   } finally {

@@ -38,6 +38,7 @@ test("snooze, reject, revoke, quiet hours, and attempts are durable stop control
   try {
     const ledgerPath = join(root, "state", "ledger.ndjson");
     const deps = { ledgerPath, now: fixedClock(Date.parse("2026-09-21T11:00:00.000Z")) };
+    assert.equal(evaluateFollowUpPolicy(candidate, { now: deps.now.now() }).state, "eligible", "expiring-fixture: exempt -- fixedClock pins policy evaluation to 2026-09-21");
     appendFollowUpCandidate(deps, candidate);
     const initial = readFollowUpHistory(ledgerPath, deps.now.now());
     const snoozed = applyFollowUpControl(initial[0]!, "snooze", { until: "2026-09-21T13:00:00.000Z", at: deps.now.now() });
