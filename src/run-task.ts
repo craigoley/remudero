@@ -1395,6 +1395,7 @@ import {
   isFleetOwnedRunBranch,
   cancelledRequiredCheckNames,
   withoutDownstreamGateFailure,
+  earlyRedEvidenceRollup,
   checksStateFromRollup,
   checksPendingSinceFromRollup,
   CI_GATE_CHECK_NAME,
@@ -36907,10 +36908,7 @@ export function buildOpenPrViews(
     const reviewVerdictPostedAt = reviewVerdictPostedAtFromRollup(pr.statusCheckRollup);
     const checksState = checksStateFromRollup(pr.statusCheckRollup, requiredContexts);
     const redRequiredChecks = redQualityGateNames(pr.statusCheckRollup, ciGateRequired);
-    const redRequiredSet = new Set(redRequiredChecks);
-    const earlyRedRollup = pr.statusCheckRollup?.filter(
-      (check) => redRequiredSet.has(check.name ?? check.context ?? ""),
-    );
+    const earlyRedRollup = earlyRedEvidenceRollup(pr.statusCheckRollup, redRequiredChecks);
     const ciFailures = checksState === "red"
       ? (deps.fetchCiFailureEvidence ?? fetchCiFailures)(owner, repo, pr.statusCheckRollup)
       : redRequiredChecks.length > 0
