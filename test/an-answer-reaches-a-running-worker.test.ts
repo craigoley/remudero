@@ -22,6 +22,20 @@ import {
   type SpawnWorkerArgs,
 } from "../src/lib/worker.js";
 
+/** Bounds a promise so a defect that would otherwise wait FOREVER (a callback deep inside `spawnWorker`'s own
+ * control flow — `started()` — never firing because some earlier step threw or a different code path was taken)
+ * fails in `ms`, not at this repo's own coverage-shard `timeout-minutes` ceiling. `node --test` sets no per-test
+ * timeout of its own, so an unbounded `await` on a signal the code under test might never send is exactly the
+ * "SHARD HANG" shape .github/workflows/ci.yml's coverage-ratchet job calls out by name: a real defect here would
+ * otherwise cost a whole job's ceiling instead of a normal, fast, diagnosable test failure. */
+function withHangGuard<T>(label: string, promise: Promise<T>, ms = 10_000): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} did not settle within ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
 function spawnArgs(dir: string, extra: Record<string, unknown> = {}) {
   const settingsFile = join(dir, "worker.json");
   writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
@@ -94,7 +108,12 @@ test("W1-T4673: an answer that lands during a run is delivered at the next turn 
     queryFn,
   } as Parameters<typeof spawnWorker>[0]);
 
-  await startedPromise; // the fake session is open; spawnWorker has registered it as "running" by now
+  // Guarded: if spawnWorker ever settles (resolves OR rejects) without pulling the fixture's generator first, plain
+  // `await startedPromise` would hang forever with nothing left pending to notice — the exact "SHARD HANG" shape.
+  await withHangGuard(
+    "the fixture's generator pull (spawnWorker must register the running session before continuing)",
+    Promise.race([startedPromise, spawnPromise]),
+  ); // the fake session is open; spawnWorker has registered it as "running" by now
 
   const outcome = deliverOperatorAnswerToRunningWorker("W1-T4673-fixture", "use the b) option");
   assert.equal(
@@ -104,7 +123,7 @@ test("W1-T4673: an answer that lands during a run is delivered at the next turn 
   );
 
   release();
-  const result = await spawnPromise;
+  const result = await withHangGuard("spawnWorker's own completion after being released", spawnPromise);
   assert.equal(result.isError, false, "the fixture's own worker must still complete cleanly after being steered");
 
   assert.equal(streamInputCalls.length, 1, "the SDK's own streamInput must have been called exactly once");
