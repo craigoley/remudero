@@ -32,8 +32,10 @@ import type { LedgerRecord } from "./retro.js";
  * ONE class, `draft` (a `review` class, gardener.ts): the costliest cause with no queued task
  * already tracking it (`origin: ci-friction:<cause>`) is filed as a parked, `verify: human`,
  * `author_class: machine` task, same idempotency shape as measurement-cadence.ts's CI-learning
- * rung, judged by whether its PR merges. The SAME pass appends a row to
- * {@link CI_FRICTION_GARDEN_LOG} so the trend reads as the total moving (design point (iii)).
+ * rung, judged by whether its PR merges. Every pass whose pricing moved appends a row to the
+ * trend log in the STATE dir ({@link ciFrictionGardenLogPath}), so the trend reads as the total
+ * moving (design point (iii)) — never in the filing PR, whose shard must travel alone (Rule 15
+ * refused all eight 2026-09-25 filings that carried a docs/ log beside the shard).
  */
 
 // ── Pricing: rounds → causes, never fire count ──────────────────────────────────────────────
@@ -69,11 +71,24 @@ export interface CiFrictionRound {
   pr: number;
   cause: CiFrictionCause;
   minutes: number;
+  /** When the round ended — the recency weight's clock. Absent, the round counts in full. */
+  at?: string;
+}
+
+/** A round this old counts half; one twice as old a quarter. A smooth fade, never a cutoff date,
+ *  so the ranking follows the fleet's CURRENT load and a fixed cause visibly falls. */
+export const CI_FRICTION_HALF_LIFE_MS = 7 * 24 * 3_600_000;
+
+/** The recency weight of a round ending at `at`, seen from `nowMs`. */
+export function ciFrictionRecencyWeight(at: string | undefined, nowMs: number, halfLifeMs = CI_FRICTION_HALF_LIFE_MS): number {
+  const t = at === undefined ? NaN : Date.parse(at);
+  return Number.isFinite(t) ? 0.5 ** (Math.max(0, nowMs - t) / halfLifeMs) : 1;
 }
 
 export interface CiFrictionCausePrice {
   cause: CiFrictionCause;
-  /** PR minutes lost to this cause — the ONLY field this module ranks by. */
+  /** PR minutes lost to this cause, recency-weighted when a clock is given — the ONLY field this
+   *  module ranks by. */
   minutes: number;
   /** How often it fired — reported for context; ranking by this instead of minutes is the
    *  falsifier: a frequent one-minute check must never outrank a rare 25-minute one. */
@@ -85,12 +100,13 @@ export interface CiFrictionCausePrice {
 export function priceCiFrictionCauses(
   ledgerRounds: readonly CiFrictionRound[],
   gateFireRates?: GateFireRateReport,
+  nowMs?: number,
 ): CiFrictionCausePrice[] {
   const rows = new Map<string, { cause: CiFrictionCause; minutes: number; rounds: number; prSet: Set<number>; prs: number }>();
   for (const r of ledgerRounds) {
     const key = ciFrictionCauseKey(r.cause);
     const row = rows.get(key) ?? { cause: r.cause, minutes: 0, rounds: 0, prSet: new Set<number>(), prs: 0 };
-    row.minutes += r.minutes;
+    row.minutes += nowMs === undefined ? r.minutes : r.minutes * ciFrictionRecencyWeight(r.at, nowMs);
     row.rounds += 1;
     row.prSet.add(r.pr);
     rows.set(key, row);
@@ -152,16 +168,36 @@ interface RoundBoundary {
   ts: string;
   round?: number;
   cause: CiFrictionCause;
+  /** The round's own worker minutes (`elapsed_ms`, W1-T1219), when the row carries them. */
+  elapsed?: number;
+  /** The pull request the round's head belongs to, for a run that logged no `pr.opened`. */
+  pr?: number;
+}
+
+/** `head_sha -> pull request`, from any row naming both (the sweep's `sweep.disposed`). The daemon
+ *  sweep's fix rounds share one `DAEMON-*` run id across many PRs and log no `pr.opened`, so the
+ *  head they repaired is the only thing that ties a round to its PR. */
+export function headPrIndex(records: readonly LedgerRecord[]): Map<string, number> {
+  const index = new Map<string, number>();
+  for (const r of records) {
+    if (typeof r.head_sha !== "string" || index.has(r.head_sha)) continue;
+    const pr = typeof r.pr_number === "number" ? r.pr_number : prNumberFromUrl(r.pr_url);
+    if (pr !== undefined) index.set(r.head_sha, pr);
+  }
+  return index;
 }
 
 /**
- * Every `fix.dispatch` / `fix.base_refreshed` round, attributed to a cause and priced by the
- * wall-clock minutes since the run's previous round (or its `pr.opened`, for the first). A round
+ * Every `fix.dispatch` / `fix.base_refreshed` round, attributed to a cause and priced by its own
+ * worker minutes (`elapsed_ms`, dispatch to the round's end) when the row carries them, else the
+ * wall-clock minutes since the run's previous round (or its `pr.opened`, for the first). A sweep
+ * round (a `DAEMON-*` run, no `pr.opened`) is tied to its PR by the head it repaired. A round
  * whose own `fix.commit_refused` fired is priced as `fix_refusal` instead of whatever triggered it
  * — the harness bought no progress that round, which is the waste design point (iv) asks for.
  */
 export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): CiFrictionRound[] {
   const prByRun = runPrIndex(records);
+  const prByHead = headPrIndex(records);
   const refusedRounds = new Map<string, Set<number>>();
   for (const r of records) {
     if (r.step === "fix.commit_refused" && typeof r.run_id === "string" && typeof r.round === "number") {
@@ -183,7 +219,8 @@ export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): Ci
       const refused = round !== undefined && refusedRounds.get(r.run_id)?.has(round);
       const cause: CiFrictionCause = refused ? { kind: "fix_refusal", name: "commit_refused" } : causeFromDispatchMode(r.mode);
       const list = byRun.get(r.run_id) ?? [];
-      list.push({ ts: r.ts, round, cause });
+      const elapsed = typeof r.elapsed_ms === "number" && r.elapsed_ms > 0 ? r.elapsed_ms / 60_000 : undefined;
+      list.push({ ts: r.ts, round, cause, elapsed, pr: typeof r.head_sha === "string" ? prByHead.get(r.head_sha) : undefined });
       byRun.set(r.run_id, list);
     } else if (r.step === "fix.base_refreshed") {
       const files = Array.isArray(r.matching_base_files) ? (r.matching_base_files as unknown[]).filter((f): f is string => typeof f === "string") : [];
@@ -194,13 +231,14 @@ export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): Ci
   }
   const rounds: CiFrictionRound[] = [];
   for (const [runId, list] of byRun) {
-    const pr = prByRun.get(runId);
-    if (pr === undefined) continue;
+    const runPr = prByRun.get(runId);
     const sorted = [...list].sort((a, b) => a.ts.localeCompare(b.ts));
     let prevTs = opens.get(runId) ?? sorted[0]?.ts;
     for (const boundary of sorted) {
-      const minutes = minutesBetween(prevTs, boundary.ts);
-      if (minutes !== undefined) rounds.push({ pr, cause: boundary.cause, minutes });
+      const pr = runPr ?? boundary.pr;
+      // A gap between two rows of a shared sweep run spans OTHER PRs' work, so it prices nothing.
+      const minutes = boundary.elapsed ?? (runPr !== undefined ? minutesBetween(prevTs, boundary.ts) : undefined);
+      if (pr !== undefined && minutes !== undefined) rounds.push({ pr, cause: boundary.cause, minutes, at: boundary.ts });
       prevTs = boundary.ts;
     }
   }
@@ -238,7 +276,11 @@ export function costliestUntrackedCause(priced: readonly CiFrictionCausePrice[],
 /** Where a person records that a drafted cause's remedy landed — a task's acceptance proof points
  *  here, and the file need not exist yet at filing time (an absent path is simply no match). */
 export const CI_FRICTION_REMEDIES_FILE = "docs/ci-friction-remedies.md";
-export const CI_FRICTION_GARDEN_LOG = "docs/ci-friction-garden-log.md";
+export const CI_FRICTION_GARDEN_LOG = "ci-friction-garden-log.md";
+/** The trend log lives beside the gardener's own state: it needs no PR, so it cannot ride one. */
+export function ciFrictionGardenLogPath(stateDir: string): string {
+  return join(stateDir, CI_FRICTION_GARDEN_LOG);
+}
 const CI_FRICTION_SLUG_MAX = 72;
 
 /** Render ONE draft as a single-element YAML task list — the shard file's whole contents. */
@@ -289,6 +331,18 @@ export function ciFrictionTrendRow(atIso: string, priced: readonly CiFrictionCau
   const total = Math.round(priced.reduce((s, p) => s + p.minutes, 0) * 10) / 10;
   const top = priced[0];
   return `| ${atIso} | ${total} | ${top ? `${ciFrictionCauseKey(top.cause)} (${top.minutes}m)` : "none"} |`;
+}
+
+/** Append this pass's trend row unless the log's last row already reads the same total and top. */
+export function appendCiFrictionTrendRow(logPath: string, atIso: string, priced: readonly CiFrictionCausePrice[]): void {
+  const row = ciFrictionTrendRow(atIso, priced);
+  const prior = existsSync(logPath)
+    ? readFileSync(logPath, "utf8")
+    : "# CI friction garden log\n\nEach row is one pass of the ci-friction gardener (W1-T4435) whose pricing moved: the total\nPR minutes it priced across every cause, and the costliest one.\n\n| pass | total PR minutes | costliest cause |\n| --- | --- | --- |\n";
+  const sansTime = (line: string) => line.split("|").slice(2).join("|");
+  const last = prior.trimEnd().split("\n").at(-1) ?? "";
+  if (sansTime(last) === sansTime(row)) return;
+  writeAtomic(logPath, prior.replace(/\n*$/, "\n") + row + "\n");
 }
 
 // ── The gardener spec ────────────────────────────────────────────────────────────────────────
@@ -365,18 +419,24 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
     },
     inventory: () => {
       const rounds = ciFrictionRoundsFromLedger(sources.ledgerRecords());
-      const priced = priceCiFrictionCauses(rounds, sources.gateFireRates?.());
+      const priced = priceCiFrictionCauses(rounds, sources.gateFireRates?.(), clock.now());
       return { priced, untracked: costliestUntrackedCause(priced, sources.planOrigins()) };
     },
+    // The plan's own `origin:` lines decide whether the costliest cause is filed — never a recorded
+    // fingerprint alone, which a pass that drew no action or failed to land could have left behind.
+    unfinished: (inv) => inv.untracked !== undefined,
     fingerprint: (inv) => `${inv.priced.map((p) => `${ciFrictionCauseKey(p.cause)}:${p.minutes}`).join(",")}|${inv.untracked ? ciFrictionCauseKey(inv.untracked.cause) : ""}`,
     candidates: (inv) => draftCandidates(inv),
-    scorecard: (inv) => ({
+    scorecard: (inv) => {
+      appendCiFrictionTrendRow(ciFrictionGardenLogPath(deps.stateDir), clock.iso(), inv.priced);
+      return {
       causes: inv.priced.length,
       total_minutes: Math.round(inv.priced.reduce((s, p) => s + p.minutes, 0) * 10) / 10,
       untracked: inv.untracked ? ciFrictionCauseKey(inv.untracked.cause) : null,
       priced: inv.priced,
-    }),
-    apply: (ws, plan, scorecard) => {
+      };
+    },
+    apply: (ws, plan) => {
       const action = plan.actions[0];
       if (!action) return undefined;
       if (!ws.branch) throw new Error("ci-friction gardener: filing workspace has no branch for task-id reservation");
@@ -391,26 +451,19 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       mkdirSync(shardDir, { recursive: true });
       writeFileSync(shardPath, contents);
 
-      const priced = (scorecard.priced as CiFrictionCausePrice[] | undefined) ?? [action.price];
-      const row = ciFrictionTrendRow(clock.iso(), priced);
-      const logPath = join(ws.root, CI_FRICTION_GARDEN_LOG);
-      const prior = existsSync(logPath)
-        ? readFileSync(logPath, "utf8")
-        : "# CI friction garden log\n\nEach row is one weekly pass of the ci-friction gardener (W1-T4435): the total\nPR minutes it priced across every cause, and the costliest one.\n\n| pass | total PR minutes | costliest cause |\n| --- | --- | --- |\n";
-      writeAtomic(logPath, prior.replace(/\n*$/, "\n") + row + "\n");
-
       const body = [
         "The ci-friction gardener (W1-T4435) prices CI-round causes in PR minutes, ranked by minutes lost — never fire count.",
         "",
         `- **draft** \`${action.target}\`: ${action.reason}`,
         "",
+        `The shard's one criterion is carried, once its remedy lands, by \`grep: ${action.origin} in ${CI_FRICTION_REMEDIES_FILE}\`.`,
+        "",
         "## Acceptance",
-        `- claim: this pass is recorded in the ci-friction garden log`,
-        `  proof: grep: ${row} in ${CI_FRICTION_GARDEN_LOG}`,
         `- claim: the costliest untracked cause is filed as a parked task`,
         `  proof: grep: ${action.origin} in ${relPath}`,
       ].join("\n");
-      return { paths: [relPath, CI_FRICTION_GARDEN_LOG], title: `chore(plan): the ci-friction gardener drafts a fix for ${action.target}`, body };
+      // PLAN-ONLY: the shard alone, so Standing rule 15's filing exemption applies.
+      return { paths: [relPath], title: `chore(plan): the ci-friction gardener drafts a fix for ${action.target}`, body };
     },
   };
 }

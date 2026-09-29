@@ -5,12 +5,19 @@
   type: implement
   verify: human
   risk: high
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "selector-shadow:5e47295a0e2c12cb724d12534234dd5b52e705ad:narrow:test/codex-reviewer-materialized-checkout.test.ts"
   files: [src/lib/affected-suites.ts]
-  note: "W1-T4439 observed narrow miss on coverage run 36541379013 for PR #7762 at 5e47295a0e2c12cb724d12534234dd5b52e705ad: scripts/comment-load-baseline.json, src/lib/knowledge-dedup.ts, test/new-evidence-strengthens-the-fact-it-matches.test.ts -> test/codex-reviewer-materialized-checkout.test.ts. The changed paths are candidate missing edges, not guessed import edges. Inspect the exact head and teach the selector the missing dependency before W1-T4406 narrows CI."
+  note: |
+    Selector-shadow audit, 2026-09-29: not a selector miss. On run 36541379013 test/codex-reviewer-materialized-checkout.test.ts
+    failed its first pass and test-with-retry.mjs's retry recovered it (every coverage job in the run concluded success).
+    The shadow record counted the first pass. Nothing is missing from the selector; the
+    gardener now scores a failure inside a success-concluded job as recovered. Withdrawn.
+
+    W1-T4439 observed narrow miss on coverage run 36541379013 for PR #7762 at 5e47295a0e2c12cb724d12534234dd5b52e705ad: scripts/comment-load-baseline.json, src/lib/knowledge-dedup.ts, test/new-evidence-strengthens-the-fact-it-matches.test.ts -> test/codex-reviewer-materialized-checkout.test.ts. The changed paths are candidate missing edges, not guessed import edges. Inspect the exact head and teach the selector the missing dependency before W1-T4406 narrows CI.
   acceptance:
     - claim: "the narrow selector includes test/codex-reviewer-materialized-checkout.test.ts when this edge is exercised"
       proof: "grep: test/codex-reviewer-materialized-checkout\\.test\\.ts in src/lib/affected-suites.ts"

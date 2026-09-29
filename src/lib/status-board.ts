@@ -194,7 +194,7 @@ export interface LatchRow {
   ageMs?: number;
   consequence: string;
   /** Why this latch's RECORD is worth showing while its INSTRUCTION no longer applies. Today `DEPLOY_FAILED` and only
-   *  it: nothing unlinks the marker, so the alert is permanent and its advice named a head origin/main had passed. Why:
+   *  it: a healthy deploy now unlinks the marker, but until one runs its advice can name a head origin/main passed. Why:
    *  the measured stale latch and #1639's shape — docs/forensics/status-board.md */
   superseded?: string;
 }

@@ -4,7 +4,7 @@ raw: >-
   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
   `daemon`, field `cost`.
 
-  Coverage: 17/34 joined worker calls (50.0%) in the trailing 7-day window;
+  Coverage: 17/38 joined worker calls (44.7%) in the trailing 7-day window;
   below the field's 90.0% floor — a chronic gap no baseline excuses.
 
   First seen: 2026-09-28T05:55:37.084Z.

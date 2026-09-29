@@ -249,7 +249,7 @@ export async function claimReviewDecision(opts: {
  * `exec-error` threw or timed out; `runner-absent` names an unavailable checkout-local tool; `runtime-broken` the only
  * `not ok` names the FILE ITSELF (W1-T1077); `incomplete-run` results then no `# duration_ms` summary (W1-T2740);
  * `no-exec-context` no PR-head checkout; `forward-reference` absent at head but declared by this diff's own shard — see {@link
- * shardDeclaredFilesInDiff}. */
+ * shardDeclaredFilesInDiff} — or, on a filing head, any target the diff does not change ({@link FILING_FORWARD_ADVISORY}). */
 export type ProofSkipReason =
   | "no-dialect"
   | "dialect-parse-error"
@@ -259,7 +259,8 @@ export type ProofSkipReason =
   | "incomplete-run"
   | "runner-absent"
   | "no-exec-context"
-  | "forward-reference";
+  | "forward-reference"
+  | "proof-form";
 
 /** Observed outcome of executing a criterion's proof against the PR head (W1-T65, ratifies P15), recorded per
  * criterion on {@link CriterionVerdict} and on the `review.posted` ledger line so an OBSERVED verdict reads apart from
@@ -1902,6 +1903,64 @@ export function resolveNameFilteredCandidates(cwd: string, rawName: string): Nam
   return { status: "absent" };
 }
 
+/** One proof the reviewer is CERTAIN to grade `executed_fail` on a build head — see {@link certainHeadRefusals}. */
+export interface CertainHeadRefusal {
+  claim: string;
+  proof: string;
+  why: string;
+}
+
+/** True when every line of the candidate files that carries `label` is a comment line: node --test can match no title
+ *  there. A read failure THROWS — the precheck reports it as unreadable (exit 2), never as a refusal. */
+function titleOnlyInComments(cwd: string, files: readonly string[], label: string): boolean {
+  const lines = files.flatMap((f) => readFileSync(join(cwd, f), "utf8").split("\n").filter((l) => l.includes(label)));
+  return lines.length > 0 && lines.every((l) => /^\s*(\/\/|\/\*|\*)/.test(l));
+}
+
+/**
+ * THE WORKER'S PRE-PUSH MIRROR OF THE REVIEWER'S HARD REFUSALS (2026-09-29). MEASURED 2026-09-15..29: of 40
+ * reviewer-unmet fix rounds, 14 (131 fix-worker minutes) were a BUILD head whose `unit test:` title matched no test —
+ * the test was named differently, never written, or carried the title only in a comment — and 4 more were a `grep:`
+ * proof with no match at head. Every one was knowable offline before the push, by the reviewer's OWN functions.
+ *
+ * CERTAIN ONLY, never a guess: a bare title {@link resolveNameFilteredCandidates} reports `absent` (or finds only in
+ * comments), a missing pure-path test file, and a dialect `grep:` the reviewer's executor answers `fail`. Everything the
+ * reviewer would merely degrade — prose titles, exec errors, an interpolated title — is skipped. Holdout criteria are
+ * never read, so a worker never learns one. Spawns no test runner (hooks/pre-push, W1-T3225).
+ */
+export function certainHeadRefusals(
+  criteria: readonly AcceptanceCriterion[],
+  cwd: string,
+  exec: ProofExecutor = execWhitelistedProof,
+): CertainHeadRefusal[] {
+  const refusals: CertainHeadRefusal[] = [];
+  for (const c of visibleCriteria([...criteria])) {
+    const proof = (c.proof ?? "").trim();
+    const w = c.satisfied_by ? null : parseWhitelistedProof(proof);
+    if (!w) continue;
+    let why: string | undefined;
+    if (w.kind === "test" && w.nameFiltered && w.runner !== "vitest") {
+      if (looksLikeProseDescription(w.label)) continue;
+      const resolution = resolveNameFilteredCandidates(cwd, w.label);
+      if (resolution.status === "absent") {
+        why = `no file under test/ contains the title "${w.label}"`;
+      } else if (resolution.status === "resolved" && titleOnlyInComments(cwd, resolution.files, w.label)) {
+        why = `"${w.label}" appears under test/ only in comments (${resolution.files.join(", ")}), never as a test name`;
+      }
+    } else if (w.kind === "test" && !w.nameFiltered && w.runner !== "vitest") {
+      if (!existsSync(join(cwd, w.label))) why = `the test file ${w.label} does not exist`;
+    } else if (w.kind === "grep" && dialectGrepTargetPath(w) !== undefined) {
+      try {
+        if (exec(w, cwd) !== "pass") why = `grep finds no match: the reviewer runs grep -arn -- '${w.args[2]}' ${w.args[3]}`;
+      } catch {
+        continue; // deliberate: an exec error is an environment gap the reviewer degrades, never a certain refusal
+      }
+    }
+    if (why) refusals.push({ claim: c.claim, proof, why });
+  }
+  return refusals;
+}
+
 /** W1-T227's command builder: swap the full {@link TEST_GLOB} in a compiled `baseArgs` for the candidates {@link
  *  resolveNameFilteredCandidates} found. ZERO candidates returns `baseArgs` verbatim, reached ONLY for an
  *  `unresolvable` resolution, where the slower run is honest. TRAP: an earlier comment claimed zero candidates changes
@@ -2291,6 +2350,43 @@ export interface ProofExecContext {
    *  call-site grep has no equivalent tell — the CONSUMER file exists in both worlds and only the CALL is missing.
    *  Without this flag the carve-out would excuse a build PR that shipped the module unwired (W1-T2732 counted four). */
   planOnlyDiff?: boolean;
+  /** Every path THIS diff changes, from the same walk `planOnlyDiff` reads — see {@link filingHeadForwardTarget}. */
+  diffFiles?: ReadonlySet<string>;
+}
+
+/**
+ * RELAXATION (2026-09-29 operator ruling: refuse only what is risky or broken) — THE FILING-HEAD FORWARD REFERENCE.
+ * CLASS RELAXED: on a plan-only head, a proof naming something ABSENT that the diff does not change — a bare test title
+ * no test matches, a missing test file, or a `grep:` target outside the diff with no match. W1-T456/W1-T2737/W1-T4003
+ * excused only a target the diff's own shard DECLARED; an undeclared one still graded `executed_fail`, a hard override.
+ * WHY IT IS SAFE: absence in a file this diff does not touch cannot be caused by it, and no fix round on a filing can
+ * make the proof pass; the same proof executes for real on the build PR. Still refused: a test that RAN and failed
+ * (it may read the plan this diff edits — CI judges that too), and any proof about a file the diff changes. MEASURED 2026-09-15..29: 7 reviewer-unmet fix rounds on six filing
+ * PRs (#6055 #6303 #6477 #6478 #6503 #7149) were this class.
+ * MEASURABLE: the reason carries {@link FILING_FORWARD_ADVISORY}, countable on `review.posted` rows.
+ */
+export const FILING_FORWARD_ADVISORY = "ADVISORY filing-head forward reference";
+
+function filingHeadForwardTarget(
+  whitelisted: WhitelistedProof,
+  execCtx: ProofExecContext,
+  outcome: "fail" | "no-match",
+): string | undefined {
+  if (execCtx.planOnlyDiff !== true || execCtx.diffFiles === undefined) return undefined;
+  // A test that RAN and failed may read the plan this diff edits, so only ABSENCE is excused for a test proof.
+  if (whitelisted.kind === "test" && whitelisted.nameFiltered) return outcome === "no-match" ? "a test title" : undefined;
+  const target = whitelisted.kind === "test" ? whitelisted.label : dialectGrepTargetPath(whitelisted);
+  if (target === undefined || execCtx.diffFiles.has(target)) return undefined;
+  if (whitelisted.kind === "test" && existsSync(join(execCtx.cwd, target))) return undefined;
+  return target;
+}
+
+function filingForwardReason(reason: string, whitelisted: WhitelistedProof, target: string): string {
+  return (
+    `${reason} — NOTE: ${FILING_FORWARD_ADVISORY}: proof (${whitelisted.kind}: ${whitelisted.label}) names ` +
+    `${target}, which this plan-only diff does not change, so a filing cannot build it; not graded a failure, ` +
+    `keyword floor applied — it executes for real on the build PR`
+  );
 }
 
 /** Materialise, into a throwaway directory, ONLY the base-revision blobs a review's `grep:` proofs name. (R-11) THE
@@ -2428,6 +2524,59 @@ export function preexistingProofHits(
 }
 
 /** Verdict one criterion against its proof, given the report + optional semantic. */
+/**
+ * RELAXATION (2026-09-29 operator ruling: refuse only what is risky or broken) — THE PROOF-FORM CORRECTION.
+ * CLASS RELAXED: a dialect `grep:` proof that failed at head only because of how it was WRITTEN — a backslash escape
+ * copied from YAML (`\"`, `\.`), markdown backticks, or text a YAML block scalar wrapped onto two lines (CLAUDE.md's
+ * proof doctrine names all three). Its `executed_fail` override is withdrawn and the keyword floor decides.
+ * WHY IT IS SAFE: it applies only when the literal text IS in the target at head, is ABSENT from the merge-base (so it
+ * still discriminates), and is not merely the proof's own declaration line (W1-T3208). A missing change reads absent at
+ * head and keeps failing. MEASURED 2026-09-15..29: #5917 #5918 #6055 #6169 #6578 #7226 — six rounds, ~66 fix-worker
+ * minutes — were this class. MEASURABLE: the reason carries {@link PROOF_FORM_ADVISORY}.
+ */
+export const PROOF_FORM_ADVISORY = "ADVISORY proof-form corrected";
+const PROOF_FORM_MIN_NEEDLE = 8;
+
+function proofFormText(s: string): string {
+  return s.replace(/[\\`]/g, "").replace(/\s+/g, " ").trim();
+}
+
+/** A target file's text, or `undefined` when it is absent, unreadable, or resolves outside `root` (R-18). */
+function readTargetInside(root: string, target: string): string | undefined {
+  try {
+    const realRoot = realpathSync(root);
+    const real = realpathSync(join(realRoot, target));
+    if (!real.startsWith(realRoot + pathSep) || !statSync(real).isFile()) return undefined;
+    return readFileSync(real, "utf8");
+  } catch {
+    return undefined; // deliberate: absent and unreadable both mean "no literal here", never a manufactured match
+  }
+}
+
+function literalPresent(text: string, pattern: string, target: string): boolean {
+  const self = proofFormText(`${pattern} in ${target}`);
+  const kept = text.split("\n").filter((line) => !proofFormText(line).includes(self));
+  return proofFormText(kept.join("\n")).includes(proofFormText(pattern));
+}
+
+/** Why a failed dialect grep is a proof-form error rather than a missing change, or `undefined`. */
+export function proofFormCorrection(proof: string, execCtx: ProofExecContext): string | undefined {
+  const w = parseWhitelistedProof(proof, execCtx.target);
+  const target = w ? dialectGrepTargetPath(w) : undefined;
+  if (!w || target === undefined || execCtx.baseCwd === undefined || execCtx.baseUnreadablePaths?.has(target)) return undefined;
+  const pattern = w.args[2];
+  if (proofFormText(pattern).length < PROOF_FORM_MIN_NEEDLE) return undefined;
+  const head = readTargetInside(execCtx.cwd, target);
+  if (head === undefined || !literalPresent(head, pattern, target)) return undefined;
+  const base = execCtx.addedTestFiles?.has(target) ? undefined : readTargetInside(execCtx.baseCwd, target);
+  if (base !== undefined && literalPresent(base, pattern, target)) return undefined;
+  return (
+    `grep (${w.label}) matched nothing as written, but its text IS in ${target} at head and absent at the merge-base ` +
+    "once backslash escapes, backticks and line wraps are ignored — a proof-form error, not a missing change; " +
+    "write the pattern as one literal line"
+  );
+}
+
 export function judgeCriterion(
   criterion: AcceptanceCriterion,
   reportTokens: Set<string>,
@@ -2531,6 +2680,10 @@ export function judgeCriterion(
     }
   }
 
+  // The keyword floor's own verdict, kept for {@link proofFormCorrection}: it withdraws an override, never a floor.
+  const keywordMet = met;
+  const keywordReason = reason;
+
   // WHITELISTED PROOF EXECUTION (W1-T65, lifting W1-T3F's observation into the FLOOR): given a PR-head checkout and an
   // executable proof, RUN it and let the OBSERVED result override the keyword floor in BOTH directions —
   // `executed_pass` means MET even if the report never claimed it (kills #100), `executed_fail` means UNMET even if
@@ -2571,7 +2724,7 @@ export function judgeCriterion(
         !existsSync(join(execCtx.cwd, whitelisted.label));
       // The same forward-reference judgement for the dialect `callSiteViolations` mandates (W1-T2737). Computed here
       // beside its `unit test:` sibling so the two read together, but CONSUMED only in the post-execution failure
-      // branch below. `planOnlyDiff` is the filing-scope half; an UNDECLARED path yields `undefined` and keeps blocking.
+      // branch below. `planOnlyDiff` is the filing-scope half; an UNDECLARED path falls to `filingTarget` below.
       const grepTarget = dialectGrepTargetPath(whitelisted);
       const grepForwardReferenceTarget =
         filingScopeHead && grepTarget !== undefined && execCtx.forwardReferenceFiles?.has(grepTarget) === true
@@ -2588,6 +2741,7 @@ export function judgeCriterion(
         const exec = execCtx.exec ?? execWhitelistedProof;
         try {
           const outcome = exec(whitelisted, execCtx.cwd);
+          const filingTarget = outcome === "pass" ? undefined : filingHeadForwardTarget(whitelisted, execCtx, outcome);
           if (outcome === "pass") {
             if (
               whitelisted.kind === "grep" &&
@@ -2677,6 +2831,10 @@ export function judgeCriterion(
                 `${reason} — NOTE: proof greps ${grepForwardReferenceTarget}, declared in this diff's own ` +
                 `plan shard \`files:\` while this diff changes no source — a forward reference to wiring ` +
                 `not yet built, not a failure; keyword floor applied`;
+            } else if (filingTarget !== undefined) {
+              proofExec = "not_yet_built";
+              proofSkip = "forward-reference";
+              reason = filingForwardReason(reason, whitelisted, filingTarget);
             } else if (looksLikeProseDescription(whitelisted.label)) {
               // A prose paraphrase, not a bare name: NOT a failing test. Degrade to `not_executable`, the keyword
               // floor standing as computed, and ANNOTATE why, so an author sees "names no matching test" rather than
@@ -2704,6 +2862,10 @@ export function judgeCriterion(
               `${reason} — NOTE: proof greps ${grepForwardReferenceTarget}, declared in this diff's own ` +
               `plan shard \`files:\` while this diff changes no source — a forward reference to wiring ` +
               `not yet built, not a failure; keyword floor applied`;
+          } else if (filingTarget !== undefined) {
+            proofExec = "not_yet_built";
+            proofSkip = "forward-reference";
+            reason = filingForwardReason(reason, whitelisted, filingTarget);
           } else {
             proofExec = "executed_fail";
             met = false;
@@ -2756,6 +2918,14 @@ export function judgeCriterion(
     }
   } else {
     proofSkip = "no-exec-context";
+  }
+
+  const proofForm = proofExec === "executed_fail" && execCtx ? proofFormCorrection(criterion.proof, execCtx) : undefined;
+  if (proofForm !== undefined) {
+    proofExec = "not_executable";
+    proofSkip = "proof-form";
+    met = keywordMet;
+    reason = `${keywordReason} — NOTE: ${PROOF_FORM_ADVISORY}: ${proofForm}; keyword floor applied`;
   }
 
   // W1-T178 (verdict stability): capture the DETERMINISTIC floor's own verdict — keyword coverage, overridden by
@@ -3732,6 +3902,7 @@ export function judgeReview(
         // W1-T2737: the SAME `planOnly` computed above — one derivation, so the reviewer's
         // scope judgement and the forward-reference carve-out can never disagree.
         planOnlyDiff: planOnly,
+        diffFiles: new Set(diffFiles),
       }
     : undefined;
   const verdicts = criteria.map((c, i) =>
@@ -6319,6 +6490,7 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // script that job's `run:` step calls).
   "^scripts/acceptance-author-gate\\.mjs$",
   "^scripts/ci-gate-from-contract\\.mjs$",
+  "^scripts/merge-queue-review-attest\\.mjs$",
   // W1-T3386: the proof-discrimination gate compares acceptance proofs against the PR head and merge base, and a
   // change to it changes which stale proofs CI refuses.
   "^scripts/proof-discrimination-gate\\.mjs$",
