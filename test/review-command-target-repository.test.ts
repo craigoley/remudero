@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { test } from "node:test";
 
 import type { Config } from "../src/lib/config.js";
@@ -333,4 +333,82 @@ test("target policy stays controller-owned", async () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+const OUTSIDE_CHECKOUT = (): { owner: string; repo: string } => {
+  throw new Error("fatal: not a git repository (or any of the parent directories): .git");
+};
+
+function runCliOutsideCheckout(rest: string[]): { status: number | null; stderr: string } {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-review-outside-cli-"));
+  try {
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 1\n");
+    chmodSync(join(bin, "gh"), 0o755);
+    const r = spawnSync(
+      process.execPath,
+      ["--import", "tsx", join(REPO_ROOT, "src", "run-task.ts"), "review", "8", ...rest, "--repo-root", dir],
+      { cwd: REPO_ROOT, encoding: "utf8", timeout: 120_000, env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}` } },
+    );
+    return { status: r.status, stderr: r.stderr };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("W1-T4204: review with --repo runs outside a git checkout", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-review-outside-repo-"));
+  try {
+    const target = initTargetRepo(root);
+    let reviewedClaims: string[] = [];
+
+    const code = await reviewCommand("8", ["--repo", "acme/portal"], {
+      enforceReviewSubjectCheckout: true,
+      resolveOwnerRepo: OUTSIDE_CHECKOUT,
+      fetchView: () => restPull("Remudero-Task: W1-TARGET", target.head),
+      loadConfig: () => ({ root, installRoot: REPO_ROOT }) as Config,
+      fetchHead: () => {},
+      postReviewPending: async () => ({ posted: true }) as never,
+      materialize: () => ({ worktreePath: undefined, failure: { errorClass: "test", message: "skip worktree" } }) as never,
+      runReview: (async (args: Parameters<typeof runReview>[0]) => {
+        reviewedClaims = (args.task.acceptance ?? []).map((c) => c.claim);
+        return verdict(target.head);
+      }) as never,
+    });
+
+    assert.equal(code, 0);
+    assert.deepEqual(reviewedClaims, ["target-only criteria"]);
+    assert.doesNotMatch(runCliOutsideCheckout(["--repo", "acme/portal"]).stderr, /remote\.origin\.url/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4204: review without --repo outside a checkout names --repo in its refusal", async () => {
+  const errors: string[] = [];
+  const realError = console.error;
+  console.error = (...a: unknown[]) => {
+    errors.push(a.join(" "));
+  };
+  try {
+    for (const rest of [[], ["--repo", "portal"]]) {
+      errors.length = 0;
+      const code = await reviewCommand("8", rest, {
+        resolveOwnerRepo: OUTSIDE_CHECKOUT,
+        fetchView: () => {
+          throw new Error("no PR read may happen before the default repository resolves");
+        },
+      });
+      assert.equal(code, 1);
+      assert.match(errors.join("\n"), /--repo <owner>\/<repo>/);
+      assert.doesNotMatch(errors.join("\n"), /^fatal:/m);
+    }
+  } finally {
+    console.error = realError;
+  }
+  const cli = runCliOutsideCheckout([]);
+  assert.equal(cli.status, 1);
+  assert.match(cli.stderr, /pass --repo <owner>\/<repo>/);
+  assert.doesNotMatch(cli.stderr, /RUN-TASK ERROR/);
 });
