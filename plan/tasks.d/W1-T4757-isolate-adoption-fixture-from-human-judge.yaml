@@ -1,0 +1,40 @@
+- id: W1-T4757
+  title: "Keep the adoption producer fixture from running the live human-verification judge"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "PR #7735 coverage shard 2 timeout and base-tree adoption fixture reproduction on 2026-09-29"
+  files:
+    - src/run-task.ts
+    - test/adoption-report-has-a-producer.test.ts
+    - test/measurement-cadence-verify-human-fixture.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: PR #7735's coverage shard 2 twice reached its 39-minute limit without a test
+    summary. A per-file timeout reproduced test/adoption-report-has-a-producer.test.ts
+    exceeding five minutes, and a 30-second run on the base checkout also timed out. The
+    fixture calls buildMeasurementCadenceDaemonHooks with a temporary state root but leaves
+    the verification cadence real. Tracing showed the run entered verifyHumanCadence and did
+    not return before the timeout. The fixture's purpose is to prove the adoptionReport is
+    attached by the daemon hook, not to judge parked operator tasks or call a provider.
+  design: |
+    Add a narrow optional dependency for the hook's verify-human cadence call. Production
+    defaults to defaultVerifyHumanCadenceResult with the same checkout, config, run id and
+    clock; the adoption fixture injects a deterministic completed result. Keep the adoption
+    report producer itself real. Add a focused test proving the injected result reaches the
+    hook and the default binding remains present. Do not suppress verification in production.
+  acceptance:
+    - claim: "the adoption fixture executes the producer without invoking human verification"
+      proof: 'unit test: test/measurement-cadence-verify-human-fixture.test.ts'
+  falsifier: |
+    Remove the injected cadence dependency or stop forwarding it from the hook: the new
+    fixture must fail while the production default still calls the real verifier.
+  note: |
+    W1-T4757 was reserved on origin by plan-verify-human-fixture-1790666000000 before filing.
