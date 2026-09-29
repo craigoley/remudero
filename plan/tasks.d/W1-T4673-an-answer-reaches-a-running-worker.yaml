@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-operator-1790600000"
   plan_refs: [W1-T4471, W1-T164]
   files: [src/lib/worker.ts, test/an-answer-reaches-a-running-worker.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: worker.ts has no streaming input or interrupt; operator notes are injected only before a run (W1-T164) and
