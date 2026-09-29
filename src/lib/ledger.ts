@@ -493,6 +493,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "dispatch.circuit_broken",
   "dispatch.circuit_broken.escalated",
   "dispatch.circuit_broken.verified", // W1-T4678 dedup survives rotation.
+  // W1-T4691: `rmd release`'s row — `seedCountFromCircuitBreak` and `dispatchStreakTally` (status.ts)
+  // both read it as forward progress, resetting a halted task's breaker. Rotated away, a released
+  // task's next restart would seed straight back from the still-live `dispatch.circuit_broken` row above.
+  "dispatch.breaker_released",
   // W1-T2910: `status.ts`'s projection reads this row to derive an independent-failure block and
   // clears it on a later dispatch (src/lib/status.ts, the `line.step === "dispatch.blocked_independent"`
   // arm). Rotated away, a block that was recorded stops being visible and the subtree is re-dispatched

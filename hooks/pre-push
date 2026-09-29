@@ -197,6 +197,22 @@ else
 fi
 # W1-T3388 — END head-identity admission
 
+# BEGIN proof-resolve precheck (2026-09-29) — the reviewer's certain proof refusals, asked before the push.
+# MEASURED 2026-09-15..29: 14 of 40 reviewer-unmet fix rounds were a `unit test:` title no test carried. The script
+# reuses the reviewer's own resolver, spawns no test runner, blocks only on a title miss, and reports a grep miss.
+if [ -f scripts/proof-resolve-precheck.mjs ]; then
+  node --import tsx scripts/proof-resolve-precheck.mjs --base origin/main --head-ref "${head_ref:-}"
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "pre-push: proof-resolve-precheck could not read this head — not blocking on an unreadable check" >&2
+  elif [ "$rc" -ne 0 ]; then
+    fail=1
+  fi
+else
+  echo "pre-push: scripts/proof-resolve-precheck.mjs absent — skipped, NOT passed" >&2
+fi
+# END proof-resolve precheck
+
 if [ "$fail" -ne 0 ]; then
   echo "" >&2
   echo "pre-push REFUSED. These are checks CI runs on this diff; fixing them here costs one" >&2

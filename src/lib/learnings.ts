@@ -46,7 +46,7 @@ const AUTONOMY_SRC = "learnings#standing-rule-8";
  * INVARIANT: this equals scripts/knowledge-budget-baseline.json's `capChars` — raise it there.
  * FALSIFIER: test/knowledge-budget-derivation.test.ts's drift test.
  */
-export const DEFAULT_KNOWLEDGE_BUDGET_CHARS = 15185;
+export const DEFAULT_KNOWLEDGE_BUDGET_CHARS = 8148;
 
 // Why: contradiction detection narrows recency-overwrite rather than replacing it — docs/forensics/learnings.md#lifecycle (W1-T88/P14).
 /**
@@ -828,6 +828,55 @@ export function attestLearningOrigin(
   const span = `${lines.slice(entry.origin.startLine - 1, entry.origin.endLine).join("\n")}\n`;
   const actual = createHash("sha256").update(Buffer.from(span, "utf8")).digest("hex");
   return { status: actual === entry.origin.lineSha256 ? "match" : "mismatch" };
+}
+
+export type ChurnCommitReader = (repoDir: string, files: string[], sinceIso: string) => number; // W1-T4681: commits on `files` since `sinceIso`
+
+function defaultChurnCommitReader(repoDir: string, files: string[], sinceIso: string): number {
+  let output: string;
+  try {
+    output = execFileSync(
+      "git",
+      ["-C", repoDir, "log", "--oneline", `--since=${sinceIso}`, "--", ...files],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+  } catch (error) {
+    void error; // absence and failure coincide: unreadable repo means unknowable churn, and 0 already means "no note"
+    return 0;
+  }
+  return output.split("\n").filter((line) => line.trim().length > 0).length;
+}
+
+export function computeEntryChurn(
+  entry: LearningEntry,
+  repoDir: string,
+  readChurnCommits: ChurnCommitReader = defaultChurnCommitReader,
+): number {
+  if (!entry.cited || entry.files.length === 0) return 0;
+  return readChurnCommits(repoDir, entry.files, entry.cited);
+}
+
+export function computeCorpusChurn(
+  entries: LearningEntry[],
+  repoDir: string,
+  readChurnCommits: ChurnCommitReader = defaultChurnCommitReader,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const entry of entries) out[entry.id] = computeEntryChurn(entry, repoDir, readChurnCommits);
+  return out;
+}
+
+export const VERIFY_FIRST_NOTE = "verify first: files changed since this fact was earned";
+
+export function renderFreshnessNote(entryId: string, corpusChurn: Record<string, number>): string {
+  const churn = corpusChurn[entryId] ?? 0;
+  if (churn <= 0) return "";
+  const otherChurned = Object.entries(corpusChurn)
+    .filter(([id]) => id !== entryId)
+    .map(([, n]) => n)
+    .filter((n) => n > 0);
+  const outranks = otherChurned.filter((n) => n < churn).length;
+  return ` (${VERIFY_FIRST_NOTE} — ${churn} commit${churn === 1 ? "" : "s"} since earned, higher churn than ${outranks}/${otherChurned.length} other changed facts)`;
 }
 
 /** The reason prefix {@link loadGlobalArtifact} emits for a missing artifact (W1-T1251). Exported
@@ -2025,9 +2074,10 @@ export function assessLexicalShadowLabels(report: LexicalShadowReport, review: L
   return counts;
 }
 
-/** One entry as a provenance-tagged CONTEXT bullet. */
-function renderLearningLine(entry: LearningEntry): string {
-  return `- ${entry.fact} ${citation(`learnings#${entry.id}`)}`;
+/** One entry as a provenance-tagged CONTEXT bullet; `corpusChurn` (W1-T4681) adds a verify-first note ranked vs. peers, never a threshold. */
+function renderLearningLine(entry: LearningEntry, corpusChurn?: Record<string, number>): string {
+  const freshness = corpusChurn ? renderFreshnessNote(entry.id, corpusChurn) : "";
+  return `- ${entry.fact}${freshness} ${citation(`learnings#${entry.id}`)}`;
 }
 
 /** Render only the two mandatory doctrine lines (Tier 0, MASTER-PLAN §8A); always non-empty.
@@ -2044,8 +2094,8 @@ export function renderDoctrinePreamble(): string {
 /** Render only the task-matched facts (Tier 1, W1-T19/W1-T33), with no doctrine lines. VOLATILE:
  *  the corpus grows every retro, so callers place this LAST in a rendered prompt (cache-aware
  *  ordering, W1-T35), never ahead of {@link renderDoctrinePreamble}. "" when nothing matched. */
-export function renderMatchedLearnings(selected: LearningEntry[]): string {
-  return selected.map(renderLearningLine).join("\n");
+export function renderMatchedLearnings(selected: LearningEntry[], corpusChurn?: Record<string, number>): string {
+  return selected.map((entry) => renderLearningLine(entry, corpusChurn)).join("\n");
 }
 
 /**

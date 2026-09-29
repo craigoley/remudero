@@ -10,7 +10,7 @@
   origin: "operator Inbox gardener issue #7708 after read-only attention census merged"
   plan_refs: [W1-T4738, W1-T4742]
   files: [src/lib/inbox-responder.ts, src/lib/panel-graph.ts, test/archive-release-inbox-reconciliation.test.ts, test/operator-attention-census.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T4768 is the remotely reserved replacement after W1-T4765 was found held by a
