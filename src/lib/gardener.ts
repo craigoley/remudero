@@ -202,6 +202,16 @@ export function gardenPrState(owner: string, repo: string, prUrl: string, fetch:
   }
 }
 
+/** How long a ledger-reading gardener's cheap fingerprint holds. The live ledger grows every second, so
+ *  a fingerprint over its size or mtime never matched, and each poll re-read the whole union on the
+ *  event loop — 2026-09-29 profile: 57 s of every 300 s in the ci-friction and test gardeners. */
+export const GARDEN_LEDGER_BUCKET_MS = 3_600_000;
+
+/** The ledger half of a cheap fingerprint: an hour bucket, never the live file's size or mtime. */
+export function gardenLedgerBucket(clock: Clock): number {
+  return Math.floor(clock.now() / GARDEN_LEDGER_BUCKET_MS);
+}
+
 /** One pass of the gardener `spec` describes. Returns what it did. */
 export function runGarden<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,

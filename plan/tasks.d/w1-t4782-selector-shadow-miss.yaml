@@ -1,0 +1,16 @@
+- id: W1-T4782
+  title: "REPAIR THE NARROW SELECTOR EDGE 6137c9b16a5b0dd36c5320bf3cffa327bc381113 -> test/codex-reviewer-production-wiring.test.ts — a real coverage shard failure was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow:6137c9b16a5b0dd36c5320bf3cffa327bc381113:narrow:test/codex-reviewer-production-wiring.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: "W1-T4439 observed narrow miss on coverage run 36559280399 at 6137c9b16a5b0dd36c5320bf3cffa327bc381113: 6137c9b16a5b0dd36c5320bf3cffa327bc381113 -> test/codex-reviewer-production-wiring.test.ts. The changed paths are candidate missing edges, not guessed import edges. Inspect the exact head and teach the selector the missing dependency before W1-T4406 narrows CI."
+  acceptance:
+    - claim: "the narrow selector includes test/codex-reviewer-production-wiring.test.ts when this edge is exercised"
+      proof: "grep: test/codex-reviewer-production-wiring\\.test\\.ts in src/lib/affected-suites.ts"

@@ -2389,6 +2389,7 @@ import {
   DECLARED_BRANCH_GUARDS,
   declaredGuardsBlockSpan,
   nextMergedHeadCache,
+  nextNoPrHeadCache,
   parseBranchCitationHits,
   planReverseBranchDrift,
   pruneDeletableBranches,
@@ -21071,6 +21072,9 @@ export function reapBranchesCommand(
      *  ({@link nextMergedHeadCache}) — never written by this function itself, which takes every
      *  other effect as an injected read too. Omitted ⇒ no caller wants the update. */
     onMergedHeadCacheUpdate?: (next: Readonly<Record<string, string>>) => void;
+    /** Heads proven to have no PR at this tip sha ({@link nextNoPrHeadCache}); same contract as above. */
+    noPrHeadShaCache?: ReadonlyMap<string, string>;
+    onNoPrHeadCacheUpdate?: (next: Readonly<Record<string, string>>) => void;
   } = {},
 ): number {
   const print = opts.quiet ? (..._args: unknown[]) => {} : console.log;
@@ -21182,6 +21186,7 @@ export function reapBranchesCommand(
     // falls straight through to the per-head read exactly as before this cache existed.
     const cachedMerged =
       tipSha !== undefined && mergedHeadCache?.get(name) === tipSha ? ("merged" as const) : undefined;
+    const cachedNone = tipSha !== undefined && opts.noPrHeadShaCache?.get(name) === tipSha ? ("none" as const) : undefined;
     // W1-T119: a FAILED PR read is not "no PR". If the fetch broke, every branch reads OPEN — the
     // conservative direction, since an open PR is never deletable, so the run can only under-reap.
     // W1-T2246: a bulk `"none"` is NOT "no PR" either — the bulk walk above is a bounded,
@@ -21190,7 +21195,7 @@ export function reapBranchesCommand(
     // head's own history directly rather than trusting how far the bulk walk got.
     const state: BranchFacts["prState"] = prReadFailed
       ? "open"
-      : (prState.get(name) ?? cachedMerged ?? perHeadPrState(exec, owner, repo, name));
+      : (prState.get(name) ?? cachedMerged ?? cachedNone ?? perHeadPrState(exec, owner, repo, name));
     const tipInMain = tipInMainFor(name, remoteTips, tipInMainMembership);
     const namedInSource = namedInSourceSet.has(name);
     const namedTaskId = namedTaskByBranch.get(name);
@@ -21209,11 +21214,11 @@ export function reapBranchesCommand(
   // W1-T4476 design (iii): report this pass's own confirmed-merged verdicts back to the caller
   // that wants them persisted (the automatic rung), computed from `facts` and the same tip map
   // above — never written to disk by this function itself.
-  if (opts.onMergedHeadCacheUpdate) {
-    const tipShaByName = new Map<string, string>();
-    for (const [name, tip] of remoteTips) tipShaByName.set(name, tip.sha);
-    opts.onMergedHeadCacheUpdate(nextMergedHeadCache(facts, tipShaByName));
-  }
+  const tipShaByName = new Map<string, string>();
+  for (const [name, tip] of remoteTips) tipShaByName.set(name, tip.sha);
+  opts.onMergedHeadCacheUpdate?.(nextMergedHeadCache(facts, tipShaByName));
+  // A failed bulk walk reads every head "open", so it proves no "none" and must not clear the cache.
+  if (!prReadFailed) opts.onNoPrHeadCacheUpdate?.(nextNoPrHeadCache(facts, tipShaByName));
 
   const plan = planBranchReap(facts, DECLARED_BRANCH_GUARDS);
   const keptReversibleClose = keepReversiblyClosedHeads(plan, () => {
@@ -39998,6 +40003,10 @@ export function runAutomaticBranchReapRung(
       mergedHeadShaCache: state.mergedHeadShas ? new Map(Object.entries(state.mergedHeadShas)) : undefined,
       onMergedHeadCacheUpdate: (next) => {
         state.mergedHeadShas = next;
+      },
+      noPrHeadShaCache: state.noPrHeadShas ? new Map(Object.entries(state.noPrHeadShas)) : undefined,
+      onNoPrHeadCacheUpdate: (next) => {
+        state.noPrHeadShas = next;
       },
     });
   } catch (e) {
