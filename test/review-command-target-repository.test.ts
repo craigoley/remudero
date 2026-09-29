@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { test } from "node:test";
 
 import type { Config } from "../src/lib/config.js";
 import { postReviewStatusGuarded } from "../src/lib/review.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import {
   buildBaseProofDir,
   resolveReviewSubjectCheckout,
@@ -339,21 +340,19 @@ const OUTSIDE_CHECKOUT = (): { owner: string; repo: string } => {
   throw new Error("fatal: not a git repository (or any of the parent directories): .git");
 };
 
-function runCliOutsideCheckout(rest: string[]): { status: number | null; stderr: string } {
+function runCliWithoutOrigin(rest: string[]): { status: number | null; stderr: string } {
   const dir = mkdtempSync(join(tmpdir(), "rmd-review-outside-cli-"));
+  const shim = ghShim([{ when: "", exit: 1 }], { kind: "review-outside" });
   try {
-    const bin = join(dir, "bin");
-    mkdirSync(bin);
-    writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 1\n");
-    chmodSync(join(bin, "gh"), 0o755);
     const r = spawnSync(
       process.execPath,
       ["--import", "tsx", join(REPO_ROOT, "src", "run-task.ts"), "review", "8", ...rest, "--repo-root", dir],
-      { cwd: REPO_ROOT, encoding: "utf8", timeout: 120_000, env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}` } },
+      { cwd: REPO_ROOT, encoding: "utf8", timeout: 120_000, env: { ...process.env, PATH: `${shim.dir}${delimiter}${process.env.PATH}` } },
     );
     return { status: r.status, stderr: r.stderr };
   } finally {
     rmSync(dir, { recursive: true, force: true });
+    rmSync(shim.dir, { recursive: true, force: true });
   }
 }
 
@@ -379,7 +378,7 @@ test("W1-T4204: review with --repo runs outside a git checkout", async () => {
 
     assert.equal(code, 0);
     assert.deepEqual(reviewedClaims, ["target-only criteria"]);
-    assert.doesNotMatch(runCliOutsideCheckout(["--repo", "acme/portal"]).stderr, /remote\.origin\.url/);
+    assert.doesNotMatch(runCliWithoutOrigin(["--repo", "acme/portal"]).stderr, /remote\.origin\.url/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -407,7 +406,7 @@ test("W1-T4204: review without --repo outside a checkout names --repo in its ref
   } finally {
     console.error = realError;
   }
-  const cli = runCliOutsideCheckout([]);
+  const cli = runCliWithoutOrigin([]);
   assert.equal(cli.status, 1);
   assert.match(cli.stderr, /pass --repo <owner>\/<repo>/);
   assert.doesNotMatch(cli.stderr, /RUN-TASK ERROR/);
