@@ -1,4 +1,5 @@
 import type { Mount } from "./mounts.js";
+import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import { spawnWorker, type SpawnWorkerArgs } from "./worker.js";
 
 /**
@@ -179,7 +180,7 @@ export async function runTypedJudgment<TOption extends string>(opts: {
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): Promise<TypedJudgmentResult<TOption>> {
-  const spawn = opts.spawn ?? spawnWorker;
+  const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("typed-judgment");
   const result = await spawn(buildTypedJudgmentSpawnArgs(opts));
   return parseTypedJudgmentResponse(result.text, opts.options);
 }
