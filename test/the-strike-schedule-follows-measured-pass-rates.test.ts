@@ -147,6 +147,38 @@ test("W1-T4671: a shape at the exact break-even pass rate keeps the default sche
   assert.match(schedule.reason, /keeps-default-two-strike-schedule/);
 });
 
+test("W1-T4671: an UNDER-trusted strike-2 measurement is ignored, not just a MISSING one", () => {
+  // W1-T4671 follow-up: the round-2 falsifier above only proves rate2 is USED when
+  // trusted (rows >= MIN_ROWS_FOR_SIGNAL); every other case in this file that skips rate2 does so
+  // because rate2 is ABSENT entirely (no strike-2 rows at all), so `rate2 && rate2.rows >=
+  // MIN_ROWS_FOR_SIGNAL` and a regression that dropped the `.rows >= MIN_ROWS_FOR_SIGNAL` half
+  // (i.e. `rate2 ? [...] : [rate1.passRate]`, trusting ANY rate2 that merely EXISTS) would pass
+  // every existing case in this file. This is the falsifier for THAT specific half: rate2 has real
+  // rows, but fewer than MIN_ROWS_FOR_SIGNAL, so it must be held to the SAME "not enough evidence"
+  // bar rate1's own check enforces below the early-return, and the schedule must resolve exactly
+  // as it would if rate2 were absent.
+  const shape = taskShapeKey(RISKY_SHAPE_TASK);
+  const rows = [
+    ...rowsForShape(shape, 1, { n: 20, passN: 19 }), // 95%, trusted -- same premise as the round-2 case above
+    ...rowsForShape(shape, 2, { n: MIN_ROWS_FOR_SIGNAL - 1, passN: 1 }), // under-trusted, and a POOR rate if wrongly used
+  ];
+  const rates = measureStrikePassRates(rows);
+  const rate2 = rates.get(`${shape}::2`);
+  assert.ok(rate2 && rate2.rows < MIN_ROWS_FOR_SIGNAL, "premise: strike 2 has real rows but not enough to be trusted");
+  const schedule = strikeScheduleFor({ task: RISKY_SHAPE_TASK, rates });
+  // With rate2 correctly excluded, this is IDENTICAL to a strike-1-only 95% pass rate: it earns a
+  // longer-than-default schedule, same direction as the "usually pass" case above. If the
+  // under-trusted rate2 were wrongly incorporated, its poor rate would instead hold the schedule
+  // at or below default -- the same wrong-direction failure the round-2 test guards against for a
+  // dropped rate2 entirely.
+  assert.ok(
+    schedule.cheapStrikeBudget > DEFAULT_CHEAP_STRIKE_BUDGET,
+    `expected the under-trusted strike-2 rate to be ignored (longer-than-default schedule), got ${schedule.cheapStrikeBudget}`,
+  );
+  assert.match(schedule.reason, /earns-another-cheap-strike/);
+  assert.match(schedule.reason, /measured-strike-1-pass-rate-0\.950/, "the reason cites ONLY the trusted strike-1 rate");
+});
+
 test("W1-T4671: expectedWindowsForSchedule reuses the last measured position past the evidence", () => {
   // A single measured position (strike 1 only) at a high pass rate: a 3-strike schedule should
   // reuse that same rate for strikes 2 and 3, and cost less than a 1-strike schedule that pays
