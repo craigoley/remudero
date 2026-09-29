@@ -92,7 +92,14 @@ function assignment(task: string, id: string, provider: "claude" | "codex", ts: 
     run_id: `run-${task}`,
     task_id: task,
     step: "worker.assignment",
-    worker_assignment: { id, selected: { provider }, routing: { decision: ab ? { rule: "headroom-auction", ab } : { rule: "headroom-auction" } } },
+    worker_assignment: {
+      id,
+      selected: { provider, model: provider === "claude" ? "claude-sonnet-5" : "gpt-6-sol" },
+      routing: { decision: ab ? { rule: "headroom-auction", ab, considered: [
+        { provider: "claude", model: "claude-sonnet-5", eligible: true },
+        { provider: "codex", model: "gpt-6-sol", eligible: true },
+      ] } : { rule: "headroom-auction" } },
+    },
   };
 }
 
@@ -150,7 +157,7 @@ test("rmd routing-ab prints each arm and refuses an unknown flag", async () => {
   const readRows = async () => ROWS;
   assert.equal(await routingAbCommand([], { stateDir: "/state", readRows, today: "2026-10-09", print: (line) => lines.push(line) }), 0);
   assert.match(lines[0]!, /\/state \(16 ledger rows read\)/);
-  assert.match(lines[1]!, /^sol-vs-sonnet: insufficient sample; 5 assignments, 1 tasks in both arms, 0 crossover tasks; 0 generic units and 0 changed treatments excluded; revisit 2026-10-08 \(DUE\)$/);
+  assert.match(lines[1]!, /^sol-vs-sonnet: insufficient sample; 5 assignments, 1 tasks in both arms, 0 crossover tasks; 0 generic units, 0 changed treatments and 0 unverified treatments excluded; revisit 2026-10-08 \(DUE\)$/);
   assert.match(lines[2]!, /sonnet \(claude\): 2 tasks, 1 merged \(50\.0%\), 1\.0 fix dispatches\/task, 15\.0 min median, 2400 tokens, \$n\/a cash, \$5\.00 notional \(0 cost missing, 1 without attempt receipt\)/);
   const json: string[] = [];
   assert.equal(await routingAbCommand(["--json"], { stateDir: "/state", readRows, today: "2026-09-25", print: (line) => json.push(line) }), 0);
