@@ -41,10 +41,10 @@ test('W1-T4681: a fact whose files changed since it was earned carries a verify-
   const readChurnCommits: ChurnCommitReader = (_repoDir, files) =>
     files.includes("src/lib/x.ts") ? 3 : 0;
 
-  const churn = computeEntryChurn(touched, "/repo", { readChurnCommits });
+  const churn = computeEntryChurn(touched, "/repo", readChurnCommits);
   assert.equal(churn, 3);
 
-  const corpusChurn = computeCorpusChurn([touched], "/repo", { readChurnCommits });
+  const corpusChurn = computeCorpusChurn([touched], "/repo", readChurnCommits);
   assert.equal(corpusChurn["touched"], 3);
 
   const note = renderFreshnessNote("touched", corpusChurn);
@@ -59,10 +59,10 @@ test('W1-T4681: a fact untouched since it was earned carries none', () => {
   const untouched = entry("untouched");
   const readChurnCommits: ChurnCommitReader = () => 0;
 
-  const churn = computeEntryChurn(untouched, "/repo", { readChurnCommits });
+  const churn = computeEntryChurn(untouched, "/repo", readChurnCommits);
   assert.equal(churn, 0);
 
-  const corpusChurn = computeCorpusChurn([untouched], "/repo", { readChurnCommits });
+  const corpusChurn = computeCorpusChurn([untouched], "/repo", readChurnCommits);
   const note = renderFreshnessNote("untouched", corpusChurn);
   assert.equal(note, "");
 
@@ -92,6 +92,6 @@ test("W1-T4681: churn is ranked against the rest of the corpus, never a fixed cu
 test("W1-T4681: an entry with no cited date has unknowable churn, not zero-guessed danger", () => {
   const neverCited = entry("never-cited", { cited: undefined });
   const readChurnCommits: ChurnCommitReader = () => 7; // would be "high" if consulted at all
-  const churn = computeEntryChurn(neverCited, "/repo", { readChurnCommits });
+  const churn = computeEntryChurn(neverCited, "/repo", readChurnCommits);
   assert.equal(churn, 0);
 });

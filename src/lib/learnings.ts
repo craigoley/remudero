@@ -830,8 +830,7 @@ export function attestLearningOrigin(
   return { status: actual === entry.origin.lineSha256 ? "match" : "mismatch" };
 }
 
-/** W1-T4681: instead of a fixed cutoff, commits on a fact's files: since its cited (earned) date, ranked vs. the corpus (never drops/down-weights, only annotates). Injectable reader; its argv never invokes a shell. */
-export type ChurnCommitReader = (repoDir: string, files: string[], sinceIso: string) => number;
+export type ChurnCommitReader = (repoDir: string, files: string[], sinceIso: string) => number; // W1-T4681: commits on `files` since `sinceIso`
 
 function defaultChurnCommitReader(repoDir: string, files: string[], sinceIso: string): number {
   if (files.length === 0) return 0;
@@ -843,39 +842,33 @@ function defaultChurnCommitReader(repoDir: string, files: string[], sinceIso: st
       { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (error) {
-    // Absence and failure genuinely coincide here: an unreadable repo/path means unknowable
-    // churn, and `renderFreshnessNote` already treats 0 as "no note" — never a fabricated claim.
-    void error;
+    void error; // absence and failure coincide: unreadable repo means unknowable churn, and 0 already means "no note"
     return 0;
   }
   return output.split("\n").filter((line) => line.trim().length > 0).length;
 }
 
-/** Commits touching `entry.files` since `entry.cited`; 0 (never guessed) with neither. */
 export function computeEntryChurn(
   entry: LearningEntry,
   repoDir: string,
-  deps: { readChurnCommits?: ChurnCommitReader } = {},
+  readChurnCommits: ChurnCommitReader = defaultChurnCommitReader,
 ): number {
   if (!entry.cited || entry.files.length === 0) return 0;
-  return (deps.readChurnCommits ?? defaultChurnCommitReader)(repoDir, entry.files, entry.cited);
+  return readChurnCommits(repoDir, entry.files, entry.cited);
 }
 
-/** Churn for a whole corpus, keyed by id, for ranking one entry against the rest. */
 export function computeCorpusChurn(
   entries: LearningEntry[],
   repoDir: string,
-  deps: { readChurnCommits?: ChurnCommitReader } = {},
+  readChurnCommits: ChurnCommitReader = defaultChurnCommitReader,
 ): Record<string, number> {
   const out: Record<string, number> = {};
-  for (const entry of entries) out[entry.id] = computeEntryChurn(entry, repoDir, deps);
+  for (const entry of entries) out[entry.id] = computeEntryChurn(entry, repoDir, readChurnCommits);
   return out;
 }
 
-/** Note text {@link renderFreshnessNote} appends. */
 export const VERIFY_FIRST_NOTE = "verify first: files changed since this fact was earned";
 
-/** No note when untouched; touched always gets one, ranked vs. peers (no threshold). */
 export function renderFreshnessNote(entryId: string, corpusChurn: Record<string, number>): string {
   const churn = corpusChurn[entryId] ?? 0;
   if (churn <= 0) return "";
@@ -2082,7 +2075,7 @@ export function assessLexicalShadowLabels(report: LexicalShadowReport, review: L
   return counts;
 }
 
-/** One entry as a provenance-tagged CONTEXT bullet; `corpusChurn` (W1-T4681) adds a note. */
+/** One entry as a provenance-tagged CONTEXT bullet; `corpusChurn` (W1-T4681) adds a verify-first note ranked vs. peers, never a threshold. */
 function renderLearningLine(entry: LearningEntry, corpusChurn?: Record<string, number>): string {
   const freshness = corpusChurn ? renderFreshnessNote(entry.id, corpusChurn) : "";
   return `- ${entry.fact}${freshness} ${citation(`learnings#${entry.id}`)}`;
@@ -2101,7 +2094,7 @@ export function renderDoctrinePreamble(): string {
 
 /** Render only the task-matched facts (Tier 1, W1-T19/W1-T33), with no doctrine lines. VOLATILE:
  *  the corpus grows every retro, so callers place this LAST in a rendered prompt (cache-aware
- *  ordering, W1-T35), never ahead of {@link renderDoctrinePreamble}. "" empty; `corpusChurn` (W1-T4681) optional. */
+ *  ordering, W1-T35), never ahead of {@link renderDoctrinePreamble}. "" when nothing matched. */
 export function renderMatchedLearnings(selected: LearningEntry[], corpusChurn?: Record<string, number>): string {
   return selected.map((entry) => renderLearningLine(entry, corpusChurn)).join("\n");
 }
