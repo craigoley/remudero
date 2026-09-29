@@ -26,6 +26,18 @@ for dir in "$CORE" "$SITE" "$CONSOLE"; do
   fi
 done
 
+# The Docker process has its own umask. Tighten the exact private output tree before either
+# container writes, including snapshots produced by an older image with 755/644 defaults.
+PRIVATE_OUT="$CORE/state/field-trials"
+mkdir -p "$PRIVATE_OUT"
+harden_private_output() {
+  find "$PRIVATE_OUT" -type d -exec chmod 700 {} +
+  find "$PRIVATE_OUT" -type f -exec chmod 600 {} +
+}
+harden_private_output
+# Also cover a failed or old image that writes a broad-mode temporary file before exiting.
+trap harden_private_output EXIT
+
 LOCK="$CORE/state/field-trials-refresh.lock"
 exec 9>"$LOCK"
 if ! flock -n 9; then echo "field-trials-refresh: another pass is active"; exit 0; fi

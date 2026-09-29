@@ -5,9 +5,9 @@
  * never the live ledger or the network.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import {
@@ -461,10 +461,16 @@ test("field trials replay late evidence without blocking work", async () => {
     assert.equal(await fieldTrialsCommand([...args, "--ledger", `core=${ledger.dir}`], buildFieldTrialsFlowSnapshot,
       { nowIso: T(20), fetch, print: (line) => printed.push(line), resolveConfig: () => ({ root }) }), 0);
     const manifestPath = join(out, "field-trials-release-manifest.json");
+    assert.equal(statSync(out).mode & 0o777, 0o700, "the private output directory is owner-only");
+    for (const path of [manifestPath, join(out, "field-trials-github-v1.json"), join(out, "field-trials-flow-v1.json")]) {
+      assert.equal(statSync(path).mode & 0o777, 0o600, `${path} remains private under a 022 umask`);
+    }
     const good = parseReleaseManifest(JSON.parse(readFileSync(manifestPath, "utf8")));
     assert.equal(good.lastRefresh!.state, "released");
     const releaseFile = join(out, good.releases[0]!.file);
     assert.ok(existsSync(releaseFile));
+    assert.equal(statSync(dirname(releaseFile)).mode & 0o777, 0o700);
+    assert.equal(statSync(releaseFile).mode & 0o777, 0o600);
     assert.match(printed[1]!, /release: released; last known good [0-9a-f]{16} as of 2026-09-20/);
     const snapshotBefore = readFileSync(join(out, "field-trials-flow-v1.json"), "utf8");
 
