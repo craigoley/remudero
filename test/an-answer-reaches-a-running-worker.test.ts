@@ -151,13 +151,20 @@ test("W1-T4673: a rejected mid-run answer is reported as a steering failure", as
 
   try {
     await withHangGuard("failed-steer worker start", startedPromise);
+    let settled!: () => void;
+    // Deterministic, not timing-based: `onSteerSettled` fires from inside the SAME `.catch(...).finally(...)`
+    // chain deliverOperatorAnswerToRunningWorker's own steer_failed ledger call lives in, so awaiting it (rather
+    // than guessing at a tick count with a bare `setImmediate`) proves that exact line ran before this test reads
+    // `rows`.
+    const settledPromise = new Promise<void>((resolve) => (settled = resolve));
     assert.equal(
       deliverOperatorAnswerToRunningWorker("W1-T4673-steer-failure", "answer", {
         ledger: (event, fields) => rows.push({ event, fields }),
+        onSteerSettled: () => settled(),
       }),
       "delivered",
     );
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await withHangGuard("failed-steer settle notification", settledPromise);
     assert.equal(streamInputCalls.length, 1, "the rejected SDK call must actually have been attempted");
     assert.ok(
       rows.some((row) => row.event === "worker.steer_failed" && row.fields?.reason === "stream closed"),

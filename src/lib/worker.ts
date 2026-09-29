@@ -3647,7 +3647,10 @@ export type OperatorAnswerDeliveryOutcome = "delivered" | "no-running-worker";
 export function deliverOperatorAnswerToRunningWorker(
   taskId: string,
   answerText: string,
-  opts: { ledger?: (event: string, extra?: Record<string, unknown>) => void } = {},
+  opts: {
+    ledger?: (event: string, extra?: Record<string, unknown>) => void;
+    onSteerSettled?: () => void; // TEST-ONLY: fires once the streamInput call above settles, so a test can await that instead of guessing a tick count.
+  } = {},
 ): OperatorAnswerDeliveryOutcome {
   const handle = runningWorkers.get(taskId);
   if (!handle) return "no-running-worker";
@@ -3666,7 +3669,8 @@ export function deliverOperatorAnswerToRunningWorker(
     )
     .catch((err: unknown) => {
       ledger("worker.steer_failed", { task: taskId, reason: err instanceof Error ? err.message : String(err) });
-    });
+    })
+    .finally(() => opts.onSteerSettled?.());
   ledger("worker.steered", { task: taskId, chars: answerText.length });
   return "delivered";
 }
