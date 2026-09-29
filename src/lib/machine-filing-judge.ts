@@ -21,13 +21,14 @@
  * more, one that keeps failing less, and either recovers as its outcomes move.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 import type { Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { GardenCheckout, PrState } from "./gardener.js";
 import type { Proposal } from "./inbox.js";
 import { loadPlanFromYaml, type Plan, type Task } from "./plan.js";
+import { resolveRepoLayout } from "./repo-layout.js";
 import {
   buildFilingRiskJudgeInput,
   DEFAULT_RISK_POLICY,
@@ -103,11 +104,21 @@ export function needsMachineJudgement(task: Task): boolean {
   return task.risk_ruling === undefined || task.risk_ruling.pin !== taskRulingPin(task);
 }
 
-/** `plan/tasks.d/<file>` for a record that lives in a shard; the monolith is never rewritten here. */
-export function shardRelPath(task: Pick<Task, "sourcePath">): string | undefined {
+/** The house plan directory, resolved through the layout module (repo-layout.ts) rather than
+ *  spelled inline here: `resolveRepoLayout` against an empty root with no override file returns the
+ *  house default as a root-relative path. */
+const HOUSE_PLAN_DIR = resolveRepoLayout("", () => undefined).planDir;
+
+/** `<planDir>/tasks.d/<file>` for a record that lives in a shard; the monolith is never rewritten
+ *  here. `planDir` is the plan directory relative to the tree root and defaults to the house one. */
+export function shardRelPath(task: Pick<Task, "sourcePath">, planDir: string = HOUSE_PLAN_DIR): string | undefined {
   const p = task.sourcePath?.replaceAll("\\", "/");
-  if (!p || !/(^|\/)plan\/tasks\.d\/[^/]+\.ya?ml$/.test(p)) return undefined;
-  return `plan/tasks.d/${basename(p)}`;
+  if (!p) return undefined;
+  const shardDir = `${planDir}/tasks.d/`;
+  const at = `/${p}`.lastIndexOf(`/${shardDir}`);
+  if (at < 0) return undefined;
+  const file = `/${p}`.slice(at + 1 + shardDir.length);
+  return /^[^/]+\.ya?ml$/.test(file) ? `${shardDir}${file}` : undefined;
 }
 
 /** The judge's input: the record as {@link buildFilingRiskJudgeInput} renders it, plus the

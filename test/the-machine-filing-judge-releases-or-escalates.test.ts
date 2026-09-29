@@ -28,6 +28,7 @@ import {
   needsMachineJudgement,
   renderRuledShard,
   runMachineFilingJudge,
+  shardRelPath,
   startMachineFilingJudge,
   type MachineJudgePorts,
 } from "../src/lib/machine-filing-judge.js";
@@ -518,4 +519,15 @@ test("the backstop reads what a record will do and never its note", () => {
   assert.match(String(deterministicEscalation({ title: "force-push the rebased branch" })), /irreversible/);
   assert.match(String(deterministicEscalation({ title: "x", prompt: "disable the review gate for docs PRs" })), /policy/);
   assert.equal(deterministicEscalation({ title: "record the lesson", acceptance: [{ claim: "a learnings entry exists" }] }), undefined);
+});
+
+test("shardRelPath names a shard by its plan directory and refuses the monolith, a nested path and a non-yaml file", () => {
+  assert.equal(shardRelPath({ sourcePath: "/repo/plan/tasks.d/W1-T1-x.yaml" }), "plan/tasks.d/W1-T1-x.yaml");
+  assert.equal(shardRelPath({ sourcePath: "plan\\tasks.d\\W1-T1-x.yml" }), "plan/tasks.d/W1-T1-x.yml", "a windows-style label is normalised");
+  assert.equal(shardRelPath({ sourcePath: "/repo/docs/tasks.d/W1-T1-x.yaml", }, "docs"), "docs/tasks.d/W1-T1-x.yaml", "a relocated plan dir is honoured");
+  assert.equal(shardRelPath({ sourcePath: "/repo/docs/tasks.d/W1-T1-x.yaml" }), undefined, "the house plan dir does not match another dir");
+  assert.equal(shardRelPath({ sourcePath: "/repo/plan/tasks.yaml" }), undefined, "the monolith is never a shard");
+  assert.equal(shardRelPath({ sourcePath: "/repo/plan/tasks.d/sub/W1-T1-x.yaml" }), undefined, "a nested path is not a shard");
+  assert.equal(shardRelPath({ sourcePath: "/repo/plan/tasks.d/notes.txt" }), undefined, "a non-yaml file is not a shard");
+  assert.equal(shardRelPath({}), undefined, "a record with no source is not a shard");
 });
