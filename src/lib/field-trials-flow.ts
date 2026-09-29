@@ -621,7 +621,11 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
     const rowsByTask = new Map<string, FlowRow[]>();
     for (const row of ledgerRows) {
       for (const key of [row.taskId, row.runId, row.assignmentId, row.host, row.headSha]) if (key !== null) privateKeys.add(key);
-      if (row.taskId !== null) rowsByTask.set(row.taskId, [...(rowsByTask.get(row.taskId) ?? []), row]);
+      if (row.taskId !== null) {
+        const taskRows = rowsByTask.get(row.taskId);
+        if (taskRows) taskRows.push(row);
+        else rowsByTask.set(row.taskId, [row]);
+      }
     }
     const ledgerTasksOfPr = new Map<number, Set<string>>();
     for (const row of ledgerRows) {
