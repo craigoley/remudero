@@ -1,0 +1,38 @@
+- id: W1-T4784
+  title: "A PULL REQUEST THE MERGE QUEUE KEEPS EJECTING IS RE-ENQUEUED FOREVER — when a group goes red or times out GitHub removes the PR and disables its auto-merge, and the sweep's next arm pass re-arms it through attemptQueueArm, so a PR that breaks only on its group commit burns a full ci.yml run plus rebuilds of every group behind it on every pass; cap re-entry per head sha and escalate"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  band_meaning: blast-radius
+  status: queued
+  attempts: 0
+  origin: "operator-approved merge-queue prerequisites 2026-09-29 (merge-queue plan item C); rehearsed on craigoley/remudero-sandbox"
+  files: [src/lib/arm-auto-merge.ts, test/a-pr-the-merge-queue-keeps-ejecting-is-not-re-enqueued-forever.test.ts]
+  rationale: |
+    OBSERVED on craigoley/remudero-sandbox 2026-09-29: a PR whose change passes on its own head but
+    fails on the merge_group commit is removed from the queue and its auto-merge disabled, while its
+    head still carries remudero-review=success and a green ci-gate. attemptQueueArm (W1-T4405) treats
+    that PR as armable again on the next sweep pass, and nothing records how many times the queue
+    already refused this head sha. With max_entries_to_build 4 each re-entry costs one full ci.yml
+    run on the group commit plus a rebuild of up to three groups queued behind it, and a flaky
+    group-only failure turns into an unbounded loop. No task or code path covers this: the source
+    has no reader of removed_from_merge_queue and no queue-ejected outcome.
+  design: |
+    (i) Before re-arming on a merge-queue branch, attemptQueueArm reads how many times the queue has
+    removed this PR at its CURRENT head sha (the PR timeline's removed_from_merge_queue events, via
+    an optional field on the existing ArmDeps; never a new *Deps type). (ii) At or above a small cap
+    it does NOT arm and returns a distinct outcome naming the ejections, and the sweep escalates it
+    instead of reading it as armed. (iii) A new head sha resets the count, so a real fix re-enters.
+    (iv) An unreadable timeline is a third, visible outcome, never collapsed into armed.
+  acceptance:
+    - claim: "a PR the queue ejected at its current head up to the cap is not re-armed"
+      proof: 'grep: test("W1-T4784: a PR ejected at its head up to the cap is not re-armed" in test/a-pr-the-merge-queue-keeps-ejecting-is-not-re-enqueued-forever.test.ts'
+    - claim: "a new head sha re-enters the queue"
+      proof: 'grep: test("W1-T4784: a new head sha re-enters the queue" in test/a-pr-the-merge-queue-keeps-ejecting-is-not-re-enqueued-forever.test.ts'
+    - claim: "an unreadable ejection history is reported, not read as armed"
+      proof: 'grep: test("W1-T4784: an unreadable ejection history is not read as armed" in test/a-pr-the-merge-queue-keeps-ejecting-is-not-re-enqueued-forever.test.ts'
+  falsifier: |
+    Remove the ejection read from attemptQueueArm and the first test sees armAuto called for a PR
+    the queue already ejected at the cap.

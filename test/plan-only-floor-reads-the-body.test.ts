@@ -82,9 +82,10 @@ test("(ii) a body that carries the claim's keywords meets the same criterion", (
 test("(iii) an executed_fail still OVERRIDES a body that covers every claim keyword", () => {
   const executable = {
     claim: "the recycle supervisor observes readiness before acting on a confirmation",
-    // NOT a file this diff's shard declares, so W1-T456's `not_yet_built` forward-reference
-    // carve-out cannot swallow the failure and the executed outcome is what is under test.
-    proof: "grep: supervisor in src/lib/untouched-by-this-shard.ts",
+    // A file this diff CHANGES (its own shard), so neither W1-T456's declared-path carve-out nor the
+    // 2026-09-29 filing-head advisory (a target the diff does not change) can swallow the failure,
+    // and the executed outcome is what is under test.
+    proof: "grep: supervisor in plan/tasks.d/W1-T999-example.yaml",
   };
   const verdict = judgeReview([executable], { planLint: CLEAN_PLAN_LINT,
     diff: planShardDiff(),

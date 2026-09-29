@@ -9,7 +9,7 @@
   risk: high
   origin: "operator Inbox gardener issue #7708 after read-only attention census merged"
   plan_refs: [W1-T4738, W1-T4742]
-  files: [src/lib/inbox-responder.ts, src/lib/panel-graph.ts, test/archive-release-inbox-reconciliation.test.ts]
+  files: [src/lib/inbox-responder.ts, src/lib/panel-graph.ts, test/archive-release-inbox-reconciliation.test.ts, test/operator-attention-census.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -18,7 +18,8 @@
     W1-T4738 retires an exact verify-human ask when its ratify.approved release is in the
     live ledger. W1-T4742's census can see positive release rows in retained archives and
     flag contradictions, but classification still reads only the live file. Rotation can
-    therefore resurrect an ask even after a durable release was recorded.
+    therefore resurrect an ask even after a durable release was recorded. The existing census
+    regression asserts that pre-reconciliation discrepancy and must change with the classifier.
   design: |
     Reuse the bounded, memoized archive union to feed positive task-scoped release evidence
     into Inbox classification, not just the read-only census. Retire only the matching

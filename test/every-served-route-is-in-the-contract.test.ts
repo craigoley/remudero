@@ -60,13 +60,15 @@ function servedPaths(): string[] {
     } as unknown as ServeDeps;
     const routes = buildServeRoutes(deps).map((route) => route.path);
     const stable = routes.filter((path) => path.startsWith("/v1/") && !path.startsWith("/v1/i/"));
-    // The instance family is registry-conditional. The pre-existing status/control family is
-    // outside this static census; the newly declared answer route is positive-controlled here
-    // against a real registry row and normalized to the OpenAPI path parameter.
+    // The instance family is registry-conditional. Positive-control each newly declared route
+    // against the real registry row before normalizing to the OpenAPI path parameter.
     const instanceAsk = routes.filter((path) => path === "/v1/i/site/operator-agent/ask")
       .map((path) => path.replace("/site/", "/{instance}/"));
     assert.equal(instanceAsk.length, 1, "the dynamic answer route must be mounted for a registered instance");
-    return [...stable, ...instanceAsk, buildStatusStream(board).path];
+    const instanceControl = routes.filter((path) => path === "/v1/i/site/control/assistant-action")
+      .map((path) => path.replace("/site/", "/{instance}/"));
+    assert.equal(instanceControl.length, 1, "the dynamic assistant control must be mounted for a registered instance");
+    return [...stable, ...instanceAsk, ...instanceControl, buildStatusStream(board).path];
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

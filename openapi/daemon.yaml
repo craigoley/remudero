@@ -647,6 +647,43 @@ components:
             - string
             - "null"
 
+    AssistantControlRequest:
+      type: object
+      description: A stable, exact-target assistant control request; retries MUST reuse the same actionId and payload.
+      additionalProperties: false
+      required: [actionId, instance, action]
+      properties:
+        actionId: { type: string, minLength: 8, maxLength: 128 }
+        instance: { type: string, minLength: 1, maxLength: 128 }
+        action: { type: string, enum: [pause, resume, stop] }
+        reason: { type: string, maxLength: 200 }
+
+    AssistantControlReceipt:
+      type: object
+      description: The first durable completion receipt; exact retries return this same object without re-dispatch.
+      required: [status, actionId, instance, action, evidenceRef, result]
+      properties:
+        status: { type: string, enum: [completed] }
+        actionId: { type: string }
+        instance: { type: string }
+        repository: { type: string, description: "Server-owned registry identity when this is a non-core instance." }
+        action: { type: string, enum: [pause, resume, stop] }
+        evidenceRef: { type: string, description: "The reused panel-action ledger row." }
+        result:
+          oneOf:
+            - $ref: "#/components/schemas/PauseResult"
+            - $ref: "#/components/schemas/ResumeResult"
+            - $ref: "#/components/schemas/StopResult"
+
+    AssistantControlUnknown:
+      type: object
+      description: A durable claim exists, but the side-effect outcome is not certified; retry never dispatches again.
+      required: [status, actionId, detail]
+      properties:
+        status: { type: string, enum: [unknown] }
+        actionId: { type: string }
+        detail: { type: string }
+
     AnswerQuestionRequest:
       type: object
       description: >
@@ -8574,6 +8611,46 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/control/assistant-action:
+    post:
+      summary: Execute a reviewed assistant pause/resume/stop once per durable action ID on the core instance.
+      description: >
+        MIDDLE-tier write. The host-shared claim store binds actionId to the exact instance,
+        action and reason before dispatch. Same-key retries return the first receipt or explicit
+        unknown; changed payload refuses. A 503 may mean a post-claim interruption and must
+        never be interpreted as a failed side effect safe to retry with a new ID.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssistantControlRequest"
+      responses:
+        "200":
+          description: The first durable completion receipt, including on exact replay.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantControlReceipt"
+        "202":
+          description: Claimed but outcome unknown or in progress; no replay is dispatched.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantControlUnknown"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { description: "The action ID binds another payload or this route does not own the instance." }
+        "503":
+          description: Durable admission or completion unavailable; the outcome must be reconciled before any new action ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantControlUnknown"
+
   /v1/questions/answer:
     post:
       summary: Answer a QUESTION-contract entry (MASTER-PLAN §2), attributed to the panel's bearer.
@@ -9155,6 +9232,51 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ContextExportResult"
+
+  /v1/i/{instance}/control/assistant-action:
+    post:
+      summary: Execute a reviewed assistant control once on this registered daemon instance.
+      description: >
+        MIDDLE-tier write. The instance in the JSON body must match this route parameter.
+        Every mounted instance shares the core host's durable action-ID claim store, so an ID
+        cannot be retargeted across repositories or daemon roots. An unresolved claim is
+        unknown, never silently retried.
+      security:
+        - bearerWrite: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssistantControlRequest"
+      responses:
+        "200":
+          description: The first durable completion receipt, including on exact replay.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantControlReceipt"
+        "202":
+          description: Claimed but outcome unknown or in progress; no replay is dispatched.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantControlUnknown"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { description: "The action ID binds another payload or this route does not own the instance." }
+        "503":
+          description: Durable admission or completion unavailable; the outcome must be reconciled before any new action ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantControlUnknown"
 
   /v1/i/{instance}/operator-agent/ask:
     post:
