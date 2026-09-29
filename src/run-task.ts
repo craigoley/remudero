@@ -159,7 +159,7 @@ import { startGarden, type GardenCheckout, type GardenerDeps } from "./lib/garde
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "./lib/config-gardener.js";
-import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
+import { loadTestManifestProbe, refreshTestManifestProposalAsync, startTestGarden, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { startCiFrictionGardener, readCiFrictionLedgerRecords, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, selectorShadowFlakeLedger, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
@@ -33627,7 +33627,7 @@ export async function daemonCommand(
                   let stopped = false;
                   loadTestManifestProbe(repoRoot).then(
                     (probe) => {
-                      if (!stopped) garden = startGarden(testGardenSpec(testGarden, probe), testGarden, intervalMs);
+                      if (!stopped) garden = startTestGarden(testGardenSpec(testGarden, probe), testGarden, () => refreshTestManifestProposalAsync(self.owner, self.repo, testGarden.stateDir), intervalMs);
                     },
                     (e: unknown) => log("test.gardener_failed", { error: String((e as Error)?.message ?? e) }),
                   );
