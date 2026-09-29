@@ -5,7 +5,9 @@
   type: implement
   verify: human
   risk: low
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # machine-filing judge backlog 2026-09-29: duplicate of W1-T3829 — same gate lesson, and this record targets learnings/ci-gate-lessons.yaml, which loadLearningsCorpus never indexed (W1-T3906 moved the rung to learnings/ci.yaml).
   attempts: 0
   author_class: machine
   origin: "ci-learning:5318:coverage-shard (4/4)"

@@ -159,7 +159,7 @@ import { startGarden, type GardenCheckout, type GardenerDeps } from "./lib/garde
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "./lib/config-gardener.js";
-import { loadTestManifestProbe, testGardenSpec } from "./lib/test-gardener.js";
+import { loadTestManifestProbe, refreshTestManifestProposalAsync, startTestGarden, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, startCiFrictionGardener, readCiFrictionLedgerRecords, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, selectorShadowFlakeLedger, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
@@ -867,6 +867,7 @@ import {
   LEDGER_COST_TAG_INFRA,
   DECISION_RELEVANT_LEDGER_STEPS,
   markDaemonProcessActor,
+  matchesRepoScopedTask,
   MAX_RETAINED_LINES_PER_STEP,
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
@@ -1339,9 +1340,11 @@ import { validateWorkerSettingsFile } from "./lib/settings.js";
 import {
   buildBatchedGithub,
   buildCommitTrailerIndex,
+  buildLedgerIndex,
   classifyGhFailure,
   createDispatchBreakerCache,
   deriveStatus,
+  dispatchesWithoutNewOwnedPr,
   evaluateDispatchBreakerCorroboratedDetailed,
   type DispatchBreakerDetail,
   ghGateway,
@@ -33629,7 +33632,7 @@ export async function daemonCommand(
                   let stopped = false;
                   loadTestManifestProbe(repoRoot).then(
                     (probe) => {
-                      if (!stopped) garden = startGarden(testGardenSpec(testGarden, probe), testGarden, intervalMs);
+                      if (!stopped) garden = startTestGarden(testGardenSpec(testGarden, probe), testGarden, () => refreshTestManifestProposalAsync(self.owner, self.repo, testGarden.stateDir), intervalMs);
                     },
                     (e: unknown) => log("test.gardener_failed", { error: String((e as Error)?.message ?? e) }),
                   );
@@ -47008,6 +47011,104 @@ async function correctCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
+/**
+ * W1-T4691 — THE SANCTIONED RELEASE FOR A HALTED TASK. `dispatch.circuit_broken`'s trip deliberately
+ * survives a rotation and a daemon restart (W1-T2425), and the ONLY reset the breaker itself
+ * understands is a new owned `pr.opened` — which a task the breaker refuses to dispatch can never
+ * produce. Reading the archive to manufacture a reset was tried and rejected (it broke three
+ * W1-T2425 invariants — see this task's rationale); the sanctioned alternative is an EXPLICIT,
+ * ATTRIBUTABLE operator row, never an inference. Appends `dispatch.breaker_released`, which
+ * `seedCountFromCircuitBreak`/`dispatchStreakTally` (status.ts) read exactly like a `pr.opened` reset,
+ * so the task is dispatchable on the daemon's next tick. Best-effort closes the task's open
+ * circuit-breaker needs-human issue (`dispatch.circuit_broken.escalated`'s `issue_url`, if one
+ * exists and has not already gone terminal) with a pointer to the release row — a close failure is
+ * reported but never blocks the release itself, since the ledger row is what dispatch reads.
+ */
+async function releaseCommand(rest: string[]): Promise<number> {
+  const taskId = rest[0];
+  const badArg = unknownArgError("release", rest.slice(1), ["--reason"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const reason = flagValue(rest, "--reason");
+  if (!reason) {
+    console.error(`rmd release: --reason <text> is required — usage: ${commandSyntax("release")}\n` + USAGE);
+    return 2;
+  }
+
+  const planPath = join(repoRoot, "plan", "tasks.yaml");
+  const plan = loadPlan(planPath);
+  const task = plan.byId.get(taskId);
+  if (!task) {
+    console.error(`rmd release: unknown task '${taskId}' (not found in ${planPath})`);
+    return 2;
+  }
+
+  const config = loadConfig();
+  const ledgerPath = ledgerPathFor(config);
+  const lines = readLedgerLines(ledgerPath);
+  const index = buildLedgerIndex(lines);
+  // The count this release resets — read BEFORE the row below is appended, so it names what the
+  // operator is releasing rather than the post-release (already zero) value.
+  const releasedCount = dispatchesWithoutNewOwnedPr(lines, taskId, index);
+  const runId = `RELEASE-${taskId}-${systemClock.now()}`;
+  const actor = process.env.USER ?? "operator";
+
+  appendLedger(ledgerPath, {
+    run_id: runId,
+    task_id: taskId,
+    task: taskId,
+    repo: task.repo,
+    step: "dispatch.breaker_released",
+    reason,
+    released_count: releasedCount,
+    actor,
+  });
+
+  // Best-effort: close the open circuit-breaker escalation, if this task raised one and no earlier
+  // `rmd release` already retired it. Never throws past this point — the ledger row above is the
+  // sanctioned reset and must land whether or not the issue can be closed.
+  let lastEscalationIndex = -1;
+  let issueUrl: string | undefined;
+  let priorReleaseAfterEscalation = false;
+  lines.forEach((l, i) => {
+    if (l.step === "dispatch.circuit_broken.escalated" && matchesRepoScopedTask(l, task.repo, taskId)) {
+      lastEscalationIndex = i;
+      issueUrl = typeof l.issue_url === "string" ? l.issue_url : undefined;
+      priorReleaseAfterEscalation = false;
+    } else if (
+      lastEscalationIndex >= 0 &&
+      i > lastEscalationIndex &&
+      l.step === "dispatch.breaker_released" &&
+      matchesRepoScopedTask(l, task.repo, taskId)
+    ) {
+      priorReleaseAfterEscalation = true;
+    }
+  });
+  if (issueUrl && !priorReleaseAfterEscalation) {
+    const { owner } = resolveOwnerRepo();
+    const issues = ghIssueGateway(owner, task.repo);
+    try {
+      issues.closeWithComment?.(
+        issueUrl,
+        `Released by operator (\`rmd release ${taskId}\`): ${reason}\n\n` +
+          `Recorded as \`dispatch.breaker_released\` (run ${runId}) — the task is dispatchable on the next ` +
+          `tick. This did not diagnose or fix the underlying block; it authorizes another attempt.`,
+      );
+      console.log(`### rmd release — closed ${issueUrl} (the circuit-breaker escalation this release resets).`);
+    } catch (e) {
+      console.error(`rmd release: could not close ${issueUrl}: ${(e as Error)?.message ?? e} — release row still written.`);
+    }
+  }
+
+  console.log(
+    `### rmd release — ${taskId}: circuit breaker released (was ${releasedCount} dispatch(es) with no new ` +
+      `owned PR). Reason: ${reason}. Dispatchable on the next tick; append-only, no ledger rewrite.`,
+  );
+  return 0;
+}
+
 // traceCommand moved to src/lib/report-commands.ts (W1-T2888) — imported/re-exported below.
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
@@ -47430,6 +47531,12 @@ const COMMANDS: readonly CommandSpec[] = [
     syntax: "rmd correct <task-id> --pr <n> [--reason <text>]",
     summary: "Sanctioned operator-correction writer: name a task's true merged PR.",
     detail: "sanctioned operator-correction writer (P9/W1-T75): appends a correction.provenance ledger line naming the task's TRUE merged PR, SUPREME over every deriveStatus rung; prints derived status before/after",
+  },
+  {
+    name: "release",
+    syntax: "rmd release <task-id> --reason <text>",
+    summary: "Release a halted task's dispatch circuit breaker; dispatchable next tick.",
+    detail: "W1-T4691: the sanctioned release for a task the dispatch circuit breaker has halted with no new owned PR since — a trip the breaker's own W1-T2425 restart guard deliberately never clears on its own. Appends an explicit, attributable dispatch.breaker_released ledger row (never an inference, never an archive read) that dispatchesWithoutNewOwnedPr/seedCountFromCircuitBreak read exactly like a new pr.opened, so the task is dispatchable on the daemon's next tick; best-effort closes the task's open circuit-breaker needs-human issue with a pointer to the row.",
   },
   {
     name: "escalate",
@@ -48250,6 +48357,17 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
         return 2;
       }
       return await correctCommand(rest);
+    },
+  ],
+  [
+    "release",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await releaseCommand(rest);
     },
   ],
   ["escalate", async (rest) => await escalateCommand(rest)],
