@@ -122,6 +122,18 @@ test("a task without a resolvable merged commit is excluded by name", () => {
   assert.deepEqual(report.excluded.map((entry) => entry.taskId), ["W1-T9999"]);
 });
 
+test("a reverse patch that no longer applies is excluded rather than graded", () => {
+  const { repo, item } = mergedFixture("W1-T9038");
+  writeFileSync(join(repo.dir, "feature.txt"), "fixed with later edits\n");
+  repo.git("add", "feature.txt");
+  repo.git("commit", "-m", "feat: edit the feature again");
+  const report = mineSyntheticTasksFromGoldenCorpus([item], {
+    repoDir: repo.dir, mainRef: "HEAD", execProof: () => "pass",
+  });
+  assert.deepEqual(report.kept, []);
+  assert.match(report.excluded[0]!.reason, /candidate could not be measured/);
+});
+
 test("the pilot derives admitted merged history and reports its keep rate with corpus exclusions", () => {
   const { repo, item } = mergedFixture("W1-T9037");
   const review = {
