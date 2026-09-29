@@ -1902,6 +1902,68 @@ export function resolveNameFilteredCandidates(cwd: string, rawName: string): Nam
   return { status: "absent" };
 }
 
+/** One proof the reviewer is CERTAIN to grade `executed_fail` on a build head — see {@link certainHeadRefusals}. */
+export interface CertainHeadRefusal {
+  claim: string;
+  proof: string;
+  why: string;
+}
+
+/** True when every line of the candidate files that carries `label` is a comment line: node --test can match no title
+ *  there. Unreadable counts as NOT comment-only, so a read failure never manufactures a refusal. */
+function titleOnlyInComments(cwd: string, files: readonly string[], label: string): boolean {
+  try {
+    const lines = files.flatMap((f) => readFileSync(join(cwd, f), "utf8").split("\n").filter((l) => l.includes(label)));
+    return lines.length > 0 && lines.every((l) => /^\s*(\/\/|\/\*|\*)/.test(l));
+  } catch {
+    return false; // deliberate: see the doc — an unread file is never evidence of a refusal
+  }
+}
+
+/**
+ * THE WORKER'S PRE-PUSH MIRROR OF THE REVIEWER'S HARD REFUSALS (2026-09-29). MEASURED 2026-09-15..29: of 40
+ * reviewer-unmet fix rounds, 14 (131 fix-worker minutes) were a BUILD head whose `unit test:` title matched no test —
+ * the test was named differently, never written, or carried the title only in a comment — and 4 more were a `grep:`
+ * proof with no match at head. Every one was knowable offline before the push, by the reviewer's OWN functions.
+ *
+ * CERTAIN ONLY, never a guess: a bare title {@link resolveNameFilteredCandidates} reports `absent` (or finds only in
+ * comments), a missing pure-path test file, and a dialect `grep:` the reviewer's executor answers `fail`. Everything the
+ * reviewer would merely degrade — prose titles, exec errors, an interpolated title — is skipped. Holdout criteria are
+ * never read, so a worker never learns one. Spawns no test runner (hooks/pre-push, W1-T3225).
+ */
+export function certainHeadRefusals(
+  criteria: readonly AcceptanceCriterion[],
+  cwd: string,
+  exec: ProofExecutor = execWhitelistedProof,
+): CertainHeadRefusal[] {
+  const refusals: CertainHeadRefusal[] = [];
+  for (const c of visibleCriteria([...criteria])) {
+    const proof = (c.proof ?? "").trim();
+    const w = c.satisfied_by ? null : parseWhitelistedProof(proof);
+    if (!w) continue;
+    let why: string | undefined;
+    if (w.kind === "test" && w.nameFiltered && w.runner !== "vitest") {
+      if (looksLikeProseDescription(w.label)) continue;
+      const resolution = resolveNameFilteredCandidates(cwd, w.label);
+      if (resolution.status === "absent") {
+        why = `no file under test/ contains the title "${w.label}"`;
+      } else if (resolution.status === "resolved" && titleOnlyInComments(cwd, resolution.files, w.label)) {
+        why = `"${w.label}" appears under test/ only in comments (${resolution.files.join(", ")}), never as a test name`;
+      }
+    } else if (w.kind === "test" && !w.nameFiltered && w.runner !== "vitest") {
+      if (!existsSync(join(cwd, w.label))) why = `the test file ${w.label} does not exist`;
+    } else if (w.kind === "grep" && dialectGrepTargetPath(w) !== undefined) {
+      try {
+        if (exec(w, cwd) !== "pass") why = `grep finds no match: the reviewer runs grep -arn -- '${w.args[2]}' ${w.args[3]}`;
+      } catch {
+        continue; // deliberate: an exec error is an environment gap the reviewer degrades, never a certain refusal
+      }
+    }
+    if (why) refusals.push({ claim: c.claim, proof, why });
+  }
+  return refusals;
+}
+
 /** W1-T227's command builder: swap the full {@link TEST_GLOB} in a compiled `baseArgs` for the candidates {@link
  *  resolveNameFilteredCandidates} found. ZERO candidates returns `baseArgs` verbatim, reached ONLY for an
  *  `unresolvable` resolution, where the slower run is honest. TRAP: an earlier comment claimed zero candidates changes
