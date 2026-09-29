@@ -5,13 +5,14 @@
 // action undoes it — MANUAL and HARD_STOP never auto-default, no matter how long they sit.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
   applyDefaultAnswer,
   classifyAsk,
+  defaultAnswerWindowMs,
   shouldApplyDefault,
   undoDefaultAnswer,
   DEFAULT_ANSWER_APPLIED_STEP,
@@ -20,6 +21,7 @@ import {
   type Escalation,
   type EscalationClass,
 } from "../src/lib/escalate.js";
+import { COLD_START_LEASE_MS } from "../src/lib/presence.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-default-answer-")), "ledger.ndjson");
@@ -153,4 +155,30 @@ test("W1-T4675: a single action undoes an applied default, ledgered", () => {
   assert.equal(lines[1].task_id, "W1-TX");
   assert.equal(lines[1].option, "retry");
   assert.equal(lines[1].undoes_applied_at_ms, nowMs);
+});
+
+test("W1-T4675: the window is learned from presence.ts's own reply latencies, not a fixed number", () => {
+  // A cold root with no ledger at all: no observed reply latency yet, so the window falls back
+  // to presence.ts's own COLD_START_LEASE_MS — the exact number `learnLeaseMs` documents for
+  // this case, read straight from its export rather than re-derived here.
+  const coldRoot = mkdtempSync(join(tmpdir(), "rmd-default-window-cold-"));
+  assert.equal(defaultAnswerWindowMs(coldRoot), COLD_START_LEASE_MS);
+
+  // A root whose ledger records one real reply latency: the window must move OFF the cold-start
+  // number and track presence.ts's learned formula (3x the median latency), proving this reads
+  // real ledger data rather than always returning the cold-start constant.
+  const learnedRoot = mkdtempSync(join(tmpdir(), "rmd-default-window-learned-"));
+  mkdirSync(join(learnedRoot, "state"), { recursive: true });
+  const opened = Date.parse("2026-01-01T00:00:00.000Z");
+  const latencyMs = 4 * 60 * 1000; // 4 minutes: 3x lands at 12 minutes, inside [5m, 24h] unclamped
+  const answered = opened + latencyMs;
+  const ledgerLines = [
+    { task_id: "W1-TY", step: "escalation.issue_opened", ts: new Date(opened).toISOString() },
+    { task_id: "W1-TY", step: "escalation.answered_by_link", ts: new Date(answered).toISOString() },
+  ];
+  writeFileSync(join(learnedRoot, "state", "ledger.ndjson"), ledgerLines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+  const learnedWindowMs = defaultAnswerWindowMs(learnedRoot);
+  assert.equal(learnedWindowMs, 3 * latencyMs);
+  assert.notEqual(learnedWindowMs, COLD_START_LEASE_MS, "a real reply latency must move the window off the cold-start default");
 });
