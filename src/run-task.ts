@@ -161,7 +161,7 @@ import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, startTestGarden, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
-import { startCiFrictionGardener, readCiFrictionLedgerRecords, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
+import { ciFailureSignature, startCiFrictionGardener, readCiFrictionLedgerRecords, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, selectorShadowFlakeLedger, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
 import { gardenFamilyRecord, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener, startEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
@@ -11118,6 +11118,8 @@ export async function runFixRung(opts: {
         head_sha: priorHeadSha,
         // W1-T1219: the spawn's own elapsed milliseconds — see spawnFixWorkerBounded's own doc.
         elapsed_ms: spawnElapsedMs,
+        // The ci-friction gardener prices a ci-log round against each check and failing test.
+        ci_failures: (currentCiFailures ?? []).map((f) => ({ check: f.name, signature: ciFailureSignature(f.logTail) ?? null })),
       });
       deps.say(
         currentMergeConflict !== undefined
@@ -32301,6 +32303,38 @@ export function loadDaemonPlan(
   return plan;
 }
 
+/** A garden branch whose PR create threw is deleted from origin, unless a PR does sit on it (the
+ *  create succeeded server-side but returned nothing) or that cannot be read — then it is kept. */
+export function retractGardenBranch(o: {
+  branch: string;
+  git: (...args: string[]) => string;
+  name: string;
+  owner: string;
+  repo: string;
+  fetcher: GhApiFetcher;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}): "deleted" | "kept_pr_exists" | "kept_unreadable" | "kept_delete_failed" {
+  let existing: ReturnType<typeof probeExistingPlanPr>;
+  try {
+    existing = probeExistingPlanPr(o.fetcher, o.owner, o.repo, o.branch);
+  } catch (e) {
+    o.log(`${o.name}.garden_branch_kept`, { branch: o.branch, reason: `pr probe failed: ${String((e as Error)?.message ?? e)}` });
+    return "kept_unreadable";
+  }
+  if (existing) {
+    o.log(`${o.name}.garden_branch_kept`, { branch: o.branch, reason: `a pr is on it: ${existing.prUrl}` });
+    return "kept_pr_exists";
+  }
+  try {
+    o.git("push", "-q", "origin", "--delete", o.branch);
+  } catch (e) {
+    o.log(`${o.name}.garden_branch_kept`, { branch: o.branch, reason: `delete failed: ${String((e as Error)?.message ?? e)}` });
+    return "kept_delete_failed";
+  }
+  o.log(`${o.name}.garden_branch_retracted`, { branch: o.branch });
+  return "deleted";
+}
+
 /** A fresh worktree of origin/main a gardener changes and lands as one PR on its own branch. Every
  *  garden PR opens READY FOR REVIEW — never a draft (operator ruling, 2026-09-24: a draft sits like a
  *  stuck PR) — so the sweep reviews and arms it like any other fleet PR (`GARDEN_BRANCH_RE`). */
@@ -32330,10 +32364,18 @@ export function gardenCheckout(opts: {
         git("add", "--", "docs/docs-index.json");
       }
       git("commit", "-q", "-m", `${title}\n\nTended by the ${opts.name} gardener.`);
-      git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
+      // Both guards run BEFORE the push: a push that lands and a PR that is then refused leaves a
+      // branch with no PR — 103 test-run plan-garden-* heads on origin by 2026-09-29.
+      assertLiveWriteAllowed("git-push", `pushing the ${opts.name} garden branch ${branch}`);
       assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${opts.owner}/${opts.repo}`);
+      git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
       const fetcher = opts.fetcher ?? ghJson;
-      return createPlanPrRest(fetcher, opts.owner, opts.repo, { title, body, head: branch, base: "main" }).prUrl;
+      try {
+        return createPlanPrRest(fetcher, opts.owner, opts.repo, { title, body, head: branch, base: "main" }).prUrl;
+      } catch (e) {
+        retractGardenBranch({ branch, git, name: opts.name, owner: opts.owner, repo: opts.repo, fetcher, log: opts.log });
+        throw e;
+      }
     },
     dispose: () => worktreeRemove(opts.repoDir, root),
   };

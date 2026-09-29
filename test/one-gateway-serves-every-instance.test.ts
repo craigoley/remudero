@@ -149,6 +149,29 @@ test("each registered instance is served under its own prefix from its own state
   });
 });
 
+test("a repository projection reads the selected instance's ledger and plan, not core's", async (t) => {
+  const { deps, stateBase } = fleet(t);
+  const siteLedger = join(stateBase, "site", "state", "ledger.ndjson");
+  writeFileSync(siteLedger, readFileSync(siteLedger, "utf8") + JSON.stringify({
+    ts: new Date().toISOString(), step: "worker.finished", run_id: "site-worker",
+    repo: "craigoley/remudero-site", billing_mode: "api", total_cost_usd: 1.25,
+    served_model: "site-served-model", tokens: { input: 13, output: 0, cacheRead: 0, cacheCreation: 0 },
+  }) + "\n");
+  await withServer(deps, async (url) => {
+    const scoped = await get(url, "/v1/i/site/repos");
+    assert.equal(scoped.status, 200);
+    const rows = scoped.body.repos as Array<{ id: string; source: string; health: { queuedtasks: number | null }; telemetry: { tokens7d: number | null; modelsused: string[] | null } }>;
+    assert.deepEqual(rows.map((row) => row.id), ["craigoley/remudero-site"]);
+    assert.equal(rows[0]?.source, "instance-registry");
+    assert.equal(rows[0]?.health.queuedtasks, 1, "the site plan owns its task count");
+    assert.deepEqual(rows[0]?.telemetry, { tokens7d: 13, modelsused: ["site-served-model"], cost_7d: 1.25 });
+    const core = await get(url, "/v1/repos");
+    const coreSite = (core.body.repos as Array<{ id: string; telemetry: { tokens7d: number | null } }>).find((row) => row.id === "craigoley/remudero-site");
+    assert.equal(coreSite?.telemetry.tokens7d, 0, "the unscoped core route never reads site worker costs");
+    assert.equal((await fetch(`${url}/v1/i/site/repos`)).status, 401, "scoped telemetry still requires the read bearer");
+  });
+});
+
 test("an instance's routes never return another instance's tasks", async (t) => {
   const { deps } = fleet(t);
   await withServer(deps, async (url) => {
@@ -214,6 +237,7 @@ test("an instance whose state is unreadable answers unavailable with the reason"
     assert.equal(absent.body.error, "instance_unavailable");
     assert.equal(absent.body.instance, "console");
     assert.match(String(absent.body.reason), /plan .*remudero-console.*unreadable/);
+    assert.equal((await get(url, "/v1/i/console/repos")).status, 503, "a missing instance cannot fall back to core's repository projection");
     assert.equal((await post(url, "/v1/i/console/control/pause")).status, 503, "a control on an unavailable instance writes nothing");
 
     // A state directory that disappears after startup is noticed per request.

@@ -91,3 +91,37 @@ export function renderMachineShard(spec: MachineShardSpec): { text: string; refu
     return { text, refused: `unparseable: ${(e as Error).message}` };
   }
 }
+
+// ── The deterministic backstop (operator ruling 2026-09-29, DECISIONS.md) ─────────────────────
+// Irreversible work escalates before any model reads it. Measured 2026-09-29: sonnet released a
+// ledger-archive deletion and haiku released "delete every merged branch". A wrong release there
+// cannot be undone by closing a PR, so no confidence score may carry it past a person.
+
+const MERGE_POLICY_PATH = /(^|\/)[^/]*(auto-?merge|merge-queue|branch-protection|rulesets?)[^/]*$/i;
+const BACKSTOP_TEXT: readonly [string, RegExp][] = [
+  ["deletes data, branches, archives or ledgers",
+    /\b(delet\w*|remov\w*|truncat\w*|purg\w*|prun\w*|drop\w*|wipe\w*|eras\w*|reap\w*|overwrit\w*)\b[^.;\n]{0,80}?\b(branch(es)?|archives?|ledgers?|data|history|rows?|databases?|backups?|proposals?|tags?|refs?|state|records?)\b/i],
+  ["takes an irreversible action", /\b(force[- ]push\w*|rewrite (git )?history|reset --hard|irreversibl\w*|permanently)\b/i],
+  ["touches secrets, auth, tokens or permissions",
+    /\b(secrets?|credentials?|api[ _-]?keys?|passwords?|private keys?|tokens?|permissions?|oauth|auth|authenticat\w*|authoriz\w*)\b/i],
+  ["changes merge, deploy or branch-protection policy",
+    /\b(auto-?merge|branch[- ]protection|merge[- ]queue|required (status )?checks?|rulesets?|(merge|deploy(ment)?|review) policy|(bypass\w*|disabl\w*)\b[^.;\n]{0,40}\b(reviews?|gates?|checks?))\b/i],
+];
+
+/** Why a record must go to a person whatever a judge would say, or undefined. Reads what the record
+ *  will DO — title, prompt, acceptance claims and declared paths — never its narrative note. */
+export function deterministicEscalation(task: {
+  title: string;
+  prompt?: string;
+  files?: readonly string[];
+  acceptance?: readonly { claim?: string }[];
+}): string | undefined {
+  const path = (task.files ?? []).find((f) => SENSITIVE_SURFACE.test(f) || MERGE_POLICY_PATH.test(f));
+  if (path) return `it declares ${path}, a secrets, auth, CI, deploy, merge-policy or ruling path`;
+  const text = [task.title, task.prompt ?? "", ...(task.acceptance ?? []).map((c) => c.claim ?? "")].join("\n");
+  for (const [why, re] of BACKSTOP_TEXT) {
+    const hit = re.exec(text);
+    if (hit) return `it ${why} ("${hit[0].trim()}")`;
+  }
+  return undefined;
+}

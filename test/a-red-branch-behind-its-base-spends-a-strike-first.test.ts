@@ -446,3 +446,17 @@ test("W1-T2671: a refresh that remains red falls through to a real strike on the
   ]);
   assert.ok(events.includes("fix.dispatch"));
 });
+
+test("a ci-log fix dispatch records each red check and the failing test file its log names", async () => {
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  await runFixRung({
+    ...baseOpts(),
+    deps: {
+      ...deps([], ["green"]),
+      readRedBaseRefreshFacts: async () => ({ behindBy: 0, baseChangedFiles: [] }),
+      log: (step: string, extra?: Record<string, unknown>) => void rows.push({ step, extra }),
+    },
+  });
+  const dispatch = rows.find((r) => r.step === "fix.dispatch");
+  assert.deepEqual(dispatch?.extra?.ci_failures, [{ check: "ci", signature: "test/sweep-gateway-warm.test.ts" }]);
+});
