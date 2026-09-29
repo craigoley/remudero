@@ -1,0 +1,41 @@
+- id: W1-T4753
+  title: "Plan reconciler acceptance proves the YAML status field, not prose that mentions it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 5.00
+  risk: medium
+  band_meaning: span
+  origin: "PR #7741 proof-discrimination failure on 2026-09-29"
+  plan_refs: [W1-T3970, W1-T3992]
+  files:
+    - src/lib/feedback-landing.ts
+    - test/plan-reconcile-proof-discrimination.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: the plan reconciliation bridge generated `grep: status: merged in <shard>`.
+    PR #7741 changed a real YAML status from queued to merged, but its W1-T3677 shard
+    already mentioned `status: merged` in rationale on the merge base. The proof therefore
+    passed at both head and base and blocked the automated merge. Editing the PR body to
+    anchor the YAML field restarted proof-discrimination; the generator still emits the
+    defective proof for the next reconciliation PR.
+    W1-T3992 touched the same landing module for review ordering; this task corrects only
+    the plan-reconcile family's generated proof, without changing review flow.
+  design: |
+    Generate a grep proof anchored to the two-space-indented YAML status field, on one
+    physical line. Keep the per-shard proof and the existing landing flow. In a hermetic
+    landing test, put the phrase `status: merged` in base prose while the actual field is
+    queued, then show the generated proof matches only the reconciled field at the head.
+  acceptance:
+    - claim: "plan reconciliation distinguishes a YAML status change from prose on the base"
+      proof: 'unit test: test/plan-reconcile-proof-discrimination.test.ts'
+  falsifier: |
+    Restore the unanchored proof and rerun the focused test: it must fail because the
+    base prose satisfies the generated pattern. With the anchored proof restored, the
+    focused test and proof-discrimination must pass.
+  note: |
+    W1-T4753 was reserved on origin by plan-reconcile-proof-1790650000000 before filing.
