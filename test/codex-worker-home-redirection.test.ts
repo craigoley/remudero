@@ -226,11 +226,13 @@ test("W1-T2800: the Claude spawn contract is unchanged, and Codex home cleanup w
   const childEnv = source.indexOf("const childEnv = buildWorkerEnv(args.env ?? {}, process.env");
   const markers = source.indexOf("Object.assign(childEnv, workerMarkerEnv(args.runId, args.taskId, workerInstallationScope(config.root)))");
   const options = source.indexOf("const options: Options = {");
-  const query = source.indexOf("collectWorkerResult(runQuery({ prompt: args.prompt, options })");
+  const query = source.indexOf("const liveQuery = runQuery({ prompt: args.prompt, options });");
+  const collect = source.indexOf("collectWorkerResult(liveQuery, {", query);
   assert.ok(childEnv > 0, "Claude must still build its child env through buildWorkerEnv");
   assert.ok(markers > childEnv, "Claude marker env is still added after buildWorkerEnv");
   assert.ok(options > markers, "Claude query options must be built from the marked child env");
   assert.ok(query > options, "Claude still sends the original prompt and options to the SDK query");
+  assert.ok(collect > query, "the SDK result collector consumes that same live query");
 
   const optionsBlock = source.slice(options, source.indexOf("if (args.resumeSessionId)", options));
   assert.match(optionsBlock, /cwd: args\.cwd/);
