@@ -170,6 +170,32 @@ test("extractUpgradeReplayRow reads a ledger-shaped row only when every field it
   assert.equal(extractUpgradeReplayRow({ task_id: "W1-T1", upgrade_gain: { state: "estimated", value: 0.2 } }), undefined);
   assert.equal(extractUpgradeReplayRow({ task_id: "W1-T1", window_share_percent: 4 }), undefined);
   assert.equal(extractUpgradeReplayRow({ task_id: "W1-T1", window_share_percent: 4, step: "routing.propensity" }), undefined);
+
+  // An "unavailable" gain is a legitimate, non-fabricated reading — not the same as a missing
+  // field — so a row carrying one still extracts, keeping its named reason intact.
+  const unavailableGain = extractUpgradeReplayRow({
+    task_id: "W1-T2",
+    window_share_percent: 4,
+    outcome: "not-merged",
+    upgrade_gain: { state: "unavailable", reason: "no-observations" },
+  });
+  assert.deepEqual(unavailableGain, {
+    taskId: "W1-T2",
+    windowSharePercent: 4,
+    merged: false,
+    gain: { state: "unavailable", reason: "no-observations" },
+  });
+
+  // A malformed `upgrade_gain` — an object shaped like neither reading — is dropped, same as a
+  // missing field: never guessed at.
+  assert.equal(
+    extractUpgradeReplayRow({ task_id: "W1-T3", window_share_percent: 4, upgrade_gain: { state: "estimated", value: "not-a-number" } }),
+    undefined,
+  );
+  assert.equal(
+    extractUpgradeReplayRow({ task_id: "W1-T3", window_share_percent: 4, upgrade_gain: { state: "mystery" } }),
+    undefined,
+  );
 });
 
 test("resolveUpgradeAllocationReplay refuses honestly when a readable ledger union carries none of the fields this replay reads", () => {
