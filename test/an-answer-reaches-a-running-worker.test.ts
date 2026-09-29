@@ -67,6 +67,7 @@ function spawnArgs(dir: string, extra: Record<string, unknown> = {}) {
 function midRunQueryFn(
   streamInputCalls: unknown[][],
   started: () => void,
+  streamInputError?: Error,
 ): { queryFn: SpawnWorkerArgs["queryFn"]; release: () => void } {
   let release!: () => void;
   const gate = new Promise<void>((r) => (release = r));
@@ -88,6 +89,7 @@ function midRunQueryFn(
       const collected: unknown[] = [];
       for await (const message of stream) collected.push(message);
       streamInputCalls.push(collected);
+      if (streamInputError) throw streamInputError;
     };
     return gen;
   }) as unknown as SpawnWorkerArgs["queryFn"];
@@ -131,6 +133,40 @@ test("W1-T4673: an answer that lands during a run is delivered at the next turn 
   assert.equal(message.type, "user", "the delivered message must be a real SDK user-role message");
   assert.equal(message.message.content, "use the b) option", "the answer's own text must reach the running session verbatim");
   assert.equal(message.priority, "next", "delivered at the NEXT turn boundary — never mid-tool-call, never replacing a live turn");
+});
+
+test("W1-T4673: a rejected mid-run answer is reported as a steering failure", async () => {
+  __resetRunningWorkersForTest();
+  const dir = mkdtempSync(join(tmpdir(), "rmd-answer-steer-failure-"));
+  const streamInputCalls: unknown[][] = [];
+  let started!: () => void;
+  const startedPromise = new Promise<void>((resolve) => (started = resolve));
+  const { queryFn, release } = midRunQueryFn(streamInputCalls, () => started(), new Error("stream closed"));
+  const rows: Array<{ event: string; fields?: Record<string, unknown> }> = [];
+  const spawnPromise = spawnWorker({
+    ...spawnArgs(dir),
+    taskId: "W1-T4673-steer-failure",
+    queryFn,
+  } as Parameters<typeof spawnWorker>[0]);
+
+  try {
+    await withHangGuard("failed-steer worker start", startedPromise);
+    assert.equal(
+      deliverOperatorAnswerToRunningWorker("W1-T4673-steer-failure", "answer", {
+        ledger: (event, fields) => rows.push({ event, fields }),
+      }),
+      "delivered",
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(streamInputCalls.length, 1, "the rejected SDK call must actually have been attempted");
+    assert.ok(
+      rows.some((row) => row.event === "worker.steer_failed" && row.fields?.reason === "stream closed"),
+      "a rejected streamInput must be visible to the caller's ledger",
+    );
+  } finally {
+    release();
+    await withHangGuard("failed-steer worker completion", spawnPromise);
+  }
 });
 
 test("W1-T4673: an answer with no running worker still waits for the fix round", () => {
