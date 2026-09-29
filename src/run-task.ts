@@ -18881,7 +18881,8 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   try {
     defaults = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
   } catch (e) {
-    defaultsFailure = asOwnerRepoUnresolvable(e, repoRoot);
+    const reason = asOwnerRepoUnresolvable(e, repoRoot);
+    defaultsFailure = reason;
   }
   if (defaultsFailure && !(flagValue(rest, "--repo") ?? "").includes("/")) {
     console.error(`rmd review: ${defaultsFailure.message}`);

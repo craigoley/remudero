@@ -6,15 +6,16 @@
  * root-parameterised reader a test can drive, cannot live there without every importer paying that.
  */
 import { execFileSync } from "node:child_process";
+import { RmdError } from "./errors.js";
 
 export const OWNER_REPO_REMEDY = "run inside a git checkout, or pass --repo <owner>/<repo> where the command accepts it";
 
-export class OwnerRepoUnresolvableError extends Error {
+export class OwnerRepoUnresolvableError extends RmdError {
   readonly checkoutRoot: string;
   readonly reason: string;
 
   constructor(checkoutRoot: string, reason: string) {
-    super(`no origin remote resolvable at ${checkoutRoot} (${reason}) — ${OWNER_REPO_REMEDY}`);
+    super("git", 1, `no origin remote resolvable at ${checkoutRoot} (${reason}) — ${OWNER_REPO_REMEDY}`, { checkoutRoot, reason });
     this.name = "OwnerRepoUnresolvableError";
     this.checkoutRoot = checkoutRoot;
     this.reason = reason;
@@ -37,6 +38,7 @@ function gitFailureReason(e: unknown, root: string): string {
     execFileSync("git", ["-C", root, "rev-parse", "--git-dir"], { stdio: "ignore" });
     return "remote.origin.url is not set";
   } catch {
+    // git itself says `root` is no work tree at all, so that is the reason, not an unset key.
     return "not inside a git work tree";
   }
 }
