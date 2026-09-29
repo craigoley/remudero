@@ -1,0 +1,16 @@
+- id: W1-T4761
+  title: "REPAIR THE NARROW SELECTOR EDGE src/lib/knowledge-gardener.ts, test/a-retracted-fact-is-pulled-from-what-cites-it.test.ts -> test/codex-capacity-singleflight.test.ts — a real coverage shard failure was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow:9a6e586c58883111365d3ab3fecab3edba537f8e:narrow:test/codex-capacity-singleflight.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: "W1-T4439 observed narrow miss on coverage run 36553073017 for PR #7771 at 9a6e586c58883111365d3ab3fecab3edba537f8e: src/lib/knowledge-gardener.ts, test/a-retracted-fact-is-pulled-from-what-cites-it.test.ts -> test/codex-capacity-singleflight.test.ts. The changed paths are candidate missing edges, not guessed import edges. Inspect the exact head and teach the selector the missing dependency before W1-T4406 narrows CI."
+  acceptance:
+    - claim: "the narrow selector includes test/codex-capacity-singleflight.test.ts when this edge is exercised"
+      proof: "grep: test/codex-capacity-singleflight\\.test\\.ts in src/lib/affected-suites.ts"

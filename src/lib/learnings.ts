@@ -9,6 +9,7 @@ import { bm25Rank } from "./learning-lexical.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { citation } from "./provenance.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { buildStandingBrief, type StandingBrief } from "./standing-briefs.js";
 import { EXTERNAL_SOURCE_CLASSES, type ExternalSourceClass } from "./untrusted-envelope.js";
 
 /**
@@ -604,6 +605,27 @@ export function loadLearningsCorpus(dir: string): LocalLearningEntry[] {
     entries.push(...parseLearningsDoc(raw, path, seen));
   }
   return entries;
+}
+
+/** One {@link StandingBrief} per shard in `dir` (W1-T4680); `previous` lets an untouched shard keep its prior brief object. */
+export function buildShardStandingBriefs(
+  dir: string,
+  previous: Readonly<Record<string, StandingBrief>> = {},
+): Record<string, StandingBrief> {
+  let filenames: string[];
+  try {
+    filenames = readdirSync(dir)
+      .filter((f) => f.endsWith(".yaml"))
+      .sort();
+  } catch {
+    return {}; // no corpus directory yet
+  }
+  const briefs: Record<string, StandingBrief> = {};
+  for (const filename of filenames) {
+    const entries = loadLearnings(join(dir, filename));
+    briefs[filename] = buildStandingBrief(entries, filename, previous[filename]);
+  }
+  return briefs;
 }
 
 /** The per-entry char weight budget accounting counts: the rendered injectable line's length

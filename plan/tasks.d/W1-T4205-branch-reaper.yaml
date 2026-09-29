@@ -28,3 +28,22 @@
       proof: 'grep: test("W1-T4205: a git-grep error keeps the branch held" in test/branch-reaper.test.ts'
     - claim: "a repo without deploy/ still finds a name under src/"
       proof: 'grep: test("W1-T4205: a repo without deploy/ still finds a name under src/" in test/branch-reaper.test.ts'
+  note: |
+    AMENDED 2026-09-29, RECORD ONLY — no criterion, proof, `files:` or `risk:` changes.
+
+    WHERE THE FIX ACTUALLY LANDED. #7720 fixed `readNamedInSource` in src/lib/branch-reaper.ts
+    (W1-T4476 had moved the scan there from src/run-task.ts); src/run-task.ts gained only the
+    caller wiring. It also changed the fakes in test/branch-reap-batched-facts.test.ts,
+    test/branch-reap-names-what-it-holds.test.ts and test/branch-reaper-dry-run.test.ts so that
+    "git grep exit 1" is an error carrying status 1, as real execFileSync throws it.
+
+    WHY `files:` IS LEFT AS FILED. Declaring src/lib/branch-reaper.ts beside src/run-task.ts makes
+    this record span two source modules at `risk: low`, which `rmd lint-plan` refuses under Rule 19
+    ("raise to risk:high or decompose"). Truthfully re-banding a merged record would misstate how
+    it was gated and reviewed, so the drift is recorded here instead. The fleet's declared-scope
+    rubric already names these paths when it reads a diff like #7720's.
+
+    REPRODUCIBLE, at the merged commit 38efa9045: with src/lib/branch-reaper.ts restored to its
+    merge-base version and everything else as merged, 3 of 30 tests in the four reaper suites
+    fail (the three W1-T4205 tests); with the three fake-bearing suites restored, 5 fail; as
+    merged, 0 fail.
