@@ -4,6 +4,7 @@
   depends_on: []
   type: implement
   verify: auto
+  priority: 58
   risk: low
   status: queued
   attempts: 0
@@ -19,11 +20,10 @@
   risk_ruling:
     verdict: "low"
     action: proceed
-    confidence: 0.85
+    confidence: 0.9
     reasons:
-      - "FILES TOUCHED is limited to learnings/ci.yaml, a data/documentation file, not secrets, credentials, merge/deploy/infra policy, or auth."
-      - "Acceptance criterion is a grep-verifiable line (ci-learning:6062:coverage-ratchet) in learnings/ci.yaml, so the finding is verifiable from what is shown."
-      - "No deletion of data/branches/history is described; the task adds a matched learnings entry."
-      - "family_track_record shows 0 declined for this family, giving no negative signal to escalate on."
-    judged_at: "2026-09-29T13:27:22.362Z"
-    pin: "8c7aebabb21fa9e32e1149cf91f6aa6bfac0fe87f7ebd974562789c501df0e07"
+      - "Change is a single-file addition to learnings/ci.yaml, verified by a grep acceptance check on a specific key (ci-learning:6062:coverage-ratchet); no secrets, auth, deploy, merge/review policy, or data-deletion involved."
+      - "Author_class is machine, and the change does not request any operator-only decision (priority, budget, or policy)."
+      - "family_track_record shows no prior merged/declined ci-learning tasks to indicate drift risk, and the acceptance criterion is directly verifiable from the grep target shown."
+    judged_at: "2026-09-29T14:14:46.129Z"
+    pin: "70dfaf649bccbe11e8c714766a1b260b9ddd1dd2cced863851b4ac08a0b4d5e9"

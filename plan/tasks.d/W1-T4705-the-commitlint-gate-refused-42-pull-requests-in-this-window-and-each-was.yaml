@@ -4,6 +4,7 @@
   depends_on: []
   type: implement
   verify: auto
+  priority: 45
   risk: low
   status: queued
   attempts: 0
@@ -21,8 +22,8 @@
     action: proceed
     confidence: 0.85
     reasons:
-      - "Change is scoped to a single declared file, learnings/ci.yaml, a data/prose file, not code touching secrets, credentials, auth, permissions, merge/deploy/infra/review policy, or deletion of data/branches/history."
-      - "Acceptance criterion is a grep check against learnings/ci.yaml, verifiable from what is shown."
-      - "Family track record shows 0 merged/0 declined, offering no adverse signal, and gates state contains no concerning flags beyond the standard escalation rule."
-    judged_at: "2026-09-29T13:27:29.890Z"
-    pin: "4b5a91aa4830ea365c502df66f17d697800a277119e74c3497c3bac160859288"
+      - "change is confined to learnings/ci.yaml, a data file adding a matched learnings entry, not touching secrets, auth, merge/deploy policy, or history."
+      - "acceptance criterion is a grep-verifiable string check, so the finding is verifiable from what is shown."
+      - "task type is \"implement\" with verify: auto, consistent with routine machine-authored learnings maintenance rather than an operator-only decision."
+    judged_at: "2026-09-29T14:14:57.066Z"
+    pin: "5bcc9494e297eada0c5439684dcee8655fbf8643845465c598a2e04b5ac051e2"

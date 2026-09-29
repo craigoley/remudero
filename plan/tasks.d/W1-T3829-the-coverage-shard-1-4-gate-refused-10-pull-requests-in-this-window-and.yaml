@@ -4,6 +4,7 @@
   depends_on: []
   type: implement
   verify: auto
+  priority: 61
   risk: low
   status: queued
   attempts: 0
@@ -21,9 +22,8 @@
     action: proceed
     confidence: 0.9
     reasons:
-      - "Single file touched (learnings/ci.yaml), a data/documentation file, not secrets/credentials/auth/permissions/merge/deploy/infra/review policy."
-      - "No deletion of data, branches, or history is described; acceptance criterion is an additive grep-matched entry."
-      - "Finding is verifiable via the stated grep check (ci-learning:6062:coverage-shard (1/4) in learnings/ci.yaml)."
-      - "Family track record shows 0 declined, no prior failure pattern to weigh against."
-    judged_at: "2026-09-29T13:27:25.948Z"
-    pin: "6473ebc3165ea9b57bce9cad0a670141312f0ceb67920aa0d2454238f365a654"
+      - "Single-file change to learnings/ci.yaml adding a matched learnings entry, no secrets/auth/deploy/merge-policy surface touched."
+      - "Verify:auto with a concrete grep-checkable acceptance criterion; no operator-only decision requested."
+      - "family_track_record shows 0 declined for this family, no signal of repeated failure to judge more strictly against."
+    judged_at: "2026-09-29T14:14:51.106Z"
+    pin: "771f4996961d6cc4ee4f5a1dc9e54a3595c14dccd25ff278ee4d8490d0f8c28b"
