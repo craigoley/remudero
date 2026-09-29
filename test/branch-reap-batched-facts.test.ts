@@ -68,7 +68,7 @@ function batchExec(names: readonly string[], calls: string[][], headAnswer = "")
     if (args[0] === "for-each-ref") return args.includes("--merged=origin/main")
       ? "origin/main\n"
       : names.map((name) => `origin/${name}\ttip-${name}\t1`).join("\n");
-    if (args[0] === "grep" && args.includes("-F")) throw new Error("no source match");
+    if (args[0] === "grep" && args.includes("-F")) throw Object.assign(new Error("no source match"), { status: 1 });
     if (args[0] === "grep" && args.includes("-E")) return "";
     return "";
   };

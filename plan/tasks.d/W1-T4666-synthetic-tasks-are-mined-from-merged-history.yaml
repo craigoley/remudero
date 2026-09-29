@@ -13,7 +13,9 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-learn-1790600000"
   plan_refs: [W1-T4619, W1-T4626, W1-T4627]
   files: [src/lib/synthetic-tasks.ts, test/synthetic-tasks-are-mined-from-merged-history.test.ts, src/lib/golden-corpus.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4666 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     OBSERVED 2026-09-28: golden-corpus.ts admits only real merged tasks whose proofs discriminate base from head; nothing

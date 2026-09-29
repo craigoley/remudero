@@ -28,6 +28,7 @@ import { appendLedger } from "./ledger.js";
 import { resolveLedgerUnion } from "./ledger-union.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
+import { planParallelAttempts, type ShapeGain, type TaskShape } from "./parallel-attempts.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, createPlanPrRest, probeExistingPlanPr } from "./plan-pr-emitter.js";
 import {
   DEFAULT_RISK,
@@ -2437,6 +2438,21 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           log,
         );
         if (synthetic) log("sweep.fix.synthetic_task", { pr_number: pr.prNumber, task_id: task.id });
+        // W1-T4667: the parallel-attempts DECISION for this repair round — never an effect. No
+        // spawn, push or worktree happens here; `planParallelAttempts` only says whether this
+        // task's shape has a measured any-of-k gain (design (i)) that pays for running sealed
+        // side attempts in parallel instead of the ordinary single one (design (ii)). `gains` is
+        // an EMPTY map for now: no live per-shape measurement is wired yet, so every shape plans
+        // k=1 — the SAME "no evidence yet" posture paired-trial.ts (W1-T4625) holds inert by
+        // default until a protocol activates one. This ledgers the decision point so a later
+        // measurement source (and the sealed spawn/select/push it would drive) has somewhere to
+        // plug in, without changing today's dispatch.
+        log("sweep.fix.parallel_attempts_plan", {
+          pr_number: pr.prNumber,
+          task_id: task.id,
+          prior_strikes: pr.priorStrikes,
+          ...planParallelAttempts({ task, priorStrikes: pr.priorStrikes, gains: new Map<TaskShape, ShapeGain>() }),
+        });
         if (!realBranch || !fixHeadAcceptable(realBranch, task.id, synthetic)) {
           // The guard above is UNCHANGED — this decides nothing, it only explains the decline
           // that already happened. `reason` matches the field `sweep.fix.not_open` already uses
