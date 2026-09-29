@@ -33690,6 +33690,7 @@ export async function daemonCommand(
                     openWorkspace: () => gardenCheckout({ name: "ci-friction", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
                     prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
                     log,
+                    escalate: raiseDuplicate,
                   };
                   const sources: CiFrictionGardenSources = {
                     ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),

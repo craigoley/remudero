@@ -32,8 +32,10 @@ import type { LedgerRecord } from "./retro.js";
  * ONE class, `draft` (a `review` class, gardener.ts): the costliest cause with no queued task
  * already tracking it (`origin: ci-friction:<cause>`) is filed as a parked, `verify: human`,
  * `author_class: machine` task, same idempotency shape as measurement-cadence.ts's CI-learning
- * rung, judged by whether its PR merges. The SAME pass appends a row to
- * {@link CI_FRICTION_GARDEN_LOG} so the trend reads as the total moving (design point (iii)).
+ * rung, judged by whether its PR merges. Every pass whose pricing moved appends a row to the
+ * trend log in the STATE dir ({@link ciFrictionGardenLogPath}), so the trend reads as the total
+ * moving (design point (iii)) — never in the filing PR, whose shard must travel alone (Rule 15
+ * refused all eight 2026-09-25 filings that carried a docs/ log beside the shard).
  */
 
 // ── Pricing: rounds → causes, never fire count ──────────────────────────────────────────────
@@ -238,7 +240,11 @@ export function costliestUntrackedCause(priced: readonly CiFrictionCausePrice[],
 /** Where a person records that a drafted cause's remedy landed — a task's acceptance proof points
  *  here, and the file need not exist yet at filing time (an absent path is simply no match). */
 export const CI_FRICTION_REMEDIES_FILE = "docs/ci-friction-remedies.md";
-export const CI_FRICTION_GARDEN_LOG = "docs/ci-friction-garden-log.md";
+export const CI_FRICTION_GARDEN_LOG = "ci-friction-garden-log.md";
+/** The trend log lives beside the gardener's own state: it needs no PR, so it cannot ride one. */
+export function ciFrictionGardenLogPath(stateDir: string): string {
+  return join(stateDir, CI_FRICTION_GARDEN_LOG);
+}
 const CI_FRICTION_SLUG_MAX = 72;
 
 /** Render ONE draft as a single-element YAML task list — the shard file's whole contents. */
@@ -289,6 +295,18 @@ export function ciFrictionTrendRow(atIso: string, priced: readonly CiFrictionCau
   const total = Math.round(priced.reduce((s, p) => s + p.minutes, 0) * 10) / 10;
   const top = priced[0];
   return `| ${atIso} | ${total} | ${top ? `${ciFrictionCauseKey(top.cause)} (${top.minutes}m)` : "none"} |`;
+}
+
+/** Append this pass's trend row unless the log's last row already reads the same total and top. */
+export function appendCiFrictionTrendRow(logPath: string, atIso: string, priced: readonly CiFrictionCausePrice[]): void {
+  const row = ciFrictionTrendRow(atIso, priced);
+  const prior = existsSync(logPath)
+    ? readFileSync(logPath, "utf8")
+    : "# CI friction garden log\n\nEach row is one pass of the ci-friction gardener (W1-T4435) whose pricing moved: the total\nPR minutes it priced across every cause, and the costliest one.\n\n| pass | total PR minutes | costliest cause |\n| --- | --- | --- |\n";
+  const sansTime = (line: string) => line.split("|").slice(2).join("|");
+  const last = prior.trimEnd().split("\n").at(-1) ?? "";
+  if (sansTime(last) === sansTime(row)) return;
+  writeAtomic(logPath, prior.replace(/\n*$/, "\n") + row + "\n");
 }
 
 // ── The gardener spec ────────────────────────────────────────────────────────────────────────
@@ -368,15 +386,21 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       const priced = priceCiFrictionCauses(rounds, sources.gateFireRates?.());
       return { priced, untracked: costliestUntrackedCause(priced, sources.planOrigins()) };
     },
+    // The plan's own `origin:` lines decide whether the costliest cause is filed — never a recorded
+    // fingerprint alone, which a pass that drew no action or failed to land could have left behind.
+    unfinished: (inv) => inv.untracked !== undefined,
     fingerprint: (inv) => `${inv.priced.map((p) => `${ciFrictionCauseKey(p.cause)}:${p.minutes}`).join(",")}|${inv.untracked ? ciFrictionCauseKey(inv.untracked.cause) : ""}`,
     candidates: (inv) => draftCandidates(inv),
-    scorecard: (inv) => ({
+    scorecard: (inv) => {
+      appendCiFrictionTrendRow(ciFrictionGardenLogPath(deps.stateDir), clock.iso(), inv.priced);
+      return {
       causes: inv.priced.length,
       total_minutes: Math.round(inv.priced.reduce((s, p) => s + p.minutes, 0) * 10) / 10,
       untracked: inv.untracked ? ciFrictionCauseKey(inv.untracked.cause) : null,
       priced: inv.priced,
-    }),
-    apply: (ws, plan, scorecard) => {
+      };
+    },
+    apply: (ws, plan) => {
       const action = plan.actions[0];
       if (!action) return undefined;
       if (!ws.branch) throw new Error("ci-friction gardener: filing workspace has no branch for task-id reservation");
@@ -391,26 +415,19 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       mkdirSync(shardDir, { recursive: true });
       writeFileSync(shardPath, contents);
 
-      const priced = (scorecard.priced as CiFrictionCausePrice[] | undefined) ?? [action.price];
-      const row = ciFrictionTrendRow(clock.iso(), priced);
-      const logPath = join(ws.root, CI_FRICTION_GARDEN_LOG);
-      const prior = existsSync(logPath)
-        ? readFileSync(logPath, "utf8")
-        : "# CI friction garden log\n\nEach row is one weekly pass of the ci-friction gardener (W1-T4435): the total\nPR minutes it priced across every cause, and the costliest one.\n\n| pass | total PR minutes | costliest cause |\n| --- | --- | --- |\n";
-      writeAtomic(logPath, prior.replace(/\n*$/, "\n") + row + "\n");
-
       const body = [
         "The ci-friction gardener (W1-T4435) prices CI-round causes in PR minutes, ranked by minutes lost — never fire count.",
         "",
         `- **draft** \`${action.target}\`: ${action.reason}`,
         "",
+        `The shard's one criterion is carried, once its remedy lands, by \`grep: ${action.origin} in ${CI_FRICTION_REMEDIES_FILE}\`.`,
+        "",
         "## Acceptance",
-        `- claim: this pass is recorded in the ci-friction garden log`,
-        `  proof: grep: ${row} in ${CI_FRICTION_GARDEN_LOG}`,
         `- claim: the costliest untracked cause is filed as a parked task`,
         `  proof: grep: ${action.origin} in ${relPath}`,
       ].join("\n");
-      return { paths: [relPath, CI_FRICTION_GARDEN_LOG], title: `chore(plan): the ci-friction gardener drafts a fix for ${action.target}`, body };
+      // PLAN-ONLY: the shard alone, so Standing rule 15's filing exemption applies.
+      return { paths: [relPath], title: `chore(plan): the ci-friction gardener drafts a fix for ${action.target}`, body };
     },
   };
 }
