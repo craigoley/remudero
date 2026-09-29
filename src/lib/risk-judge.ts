@@ -4,6 +4,7 @@ import type { Mount, Mounts } from "./mounts.js";
 import { MountsError } from "./mounts.js";
 import { capStderrExcerpt, REPORT_EXCERPT_CAP, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
+import { argmaxTypedJudgmentOption, runTypedJudgment, type TypedJudgmentResult } from "./typed-judgment.js";
 
 /**
  * Risk judge — P34 clause (b), MASTER-PLAN §4B/§9, W1-T248. A lightweight judge on the
@@ -913,6 +914,12 @@ export interface RiskJudgeOrchestratorDeps extends RiskJudgeDeps {
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** The collector {@link realRiskJudge} records this judgment's spawns into (W1-T2383). */
   spend?: RiskJudgeSpendCollector;
+  /** W1-T4672: run the typed-choice call ({@link typedRiskJudgment}) IN SHADOW beside the
+   *  session judge. Advisory only — its result is ledgered (`risk_judge.typed_shadow`) and
+   *  NEVER read by {@link planRiskJudgeAction} or allowed to change `action`; a rejection or
+   *  a thrown error is ledgered exactly like a disagreement, never thrown onward. Omitted
+   *  (the default) runs today's behavior unchanged, with no typed call at all. */
+  typedJudge?: (input: RiskJudgeInput) => Promise<TypedJudgmentResult<RiskJudgeVerdictLabel>>;
 }
 
 export interface RiskJudgeResult {
@@ -965,6 +972,13 @@ export async function runRiskJudge(
         }),
   });
 
+  // W1-T4672: the typed-choice call runs IN SHADOW here — after the session judge's own
+  // decision is final and ledgered, never before it, so a typed-shadow failure (rejection
+  // or thrown error, both caught inside the helper) can never delay or alter `action`.
+  if (deps.typedJudge) {
+    await runTypedRiskJudgmentShadow(deps.typedJudge, input, verdict, log);
+  }
+
   if (action.kind === "escalate") {
     const url = await deps.escalate(verdict, action);
     // W1-T970: rides onto this row for the sweep's priorActionsFromLedger; omitted when absent.
@@ -976,6 +990,42 @@ export async function runRiskJudge(
     return { verdict, action, escalationUrl: url };
   }
   return { verdict, action };
+}
+
+/** W1-T4672: run {@link typedRiskJudgment} in shadow and ledger `risk_judge.typed_shadow`.
+ *  A rejection ({@link TypedJudgmentRejected}) or a thrown error are BOTH ledgered rather
+ *  than thrown onward — this call must never affect the session judge's own action. */
+async function runTypedRiskJudgmentShadow(
+  typedJudge: (input: RiskJudgeInput) => Promise<TypedJudgmentResult<RiskJudgeVerdictLabel>>,
+  input: RiskJudgeInput,
+  verdict: RiskJudgeVerdict,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<void> {
+  try {
+    const typed = await typedJudge(input);
+    if (typed.kind === "rejected") {
+      log("risk_judge.typed_shadow", {
+        kind: "rejected",
+        reason: typed.reason,
+        session_verdict: verdict.verdict,
+      });
+      return;
+    }
+    const argmax = argmaxTypedJudgmentOption(typed.distribution);
+    log("risk_judge.typed_shadow", {
+      kind: "distribution",
+      distribution: typed.distribution,
+      argmax: argmax ?? null,
+      session_verdict: verdict.verdict,
+      agreement: argmax === undefined ? null : argmax === verdict.verdict,
+    });
+  } catch (error) {
+    log("risk_judge.typed_shadow", {
+      kind: "unavailable",
+      reason: error instanceof Error ? error.message : String(error),
+      session_verdict: verdict.verdict,
+    });
+  }
 }
 
 // ── Mount resolution: the cheapest configured tier (haiku-class, W1-T5) ──
@@ -1049,6 +1099,38 @@ export async function spawnRiskJudgeWorker(opts: {
 }): Promise<WorkerResult> {
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge");
   return spawn(buildRiskJudgeSpawnArgs(opts));
+}
+
+// ── W1-T4672: the typed-choice shadow — one tool-less call, a distribution, never a
+// self-reported scalar confidence ───────────────────────────────────────────────────
+
+/** The risk judge's fixed option set, reused verbatim as the typed-choice question's
+ *  option set — the SAME two labels {@link RiskJudgeVerdictLabel} already names, never a
+ *  second vocabulary the two judges could drift apart on. */
+export const RISK_JUDGE_TYPED_OPTIONS: readonly RiskJudgeVerdictLabel[] = ["low", "high"];
+
+/** Run ONE tool-less, single-turn typed-choice call (W1-T4672, Jev's model) over the same
+ *  {@link RiskJudgeInput} the session judge ({@link buildRiskJudgePrompt}) is shown, asking
+ *  for a probability DISTRIBUTION over {@link RISK_JUDGE_TYPED_OPTIONS} rather than a
+ *  self-reported scalar confidence. Anything outside that fixed set is REJECTED by {@link
+ *  parseTypedJudgmentResponse}, never coerced into a guess. Advisory only — see {@link
+ *  runRiskJudge}'s `typedJudge` dep, which runs this IN SHADOW beside the session judge and
+ *  never lets its result affect the deterministic action. */
+export async function typedRiskJudgment(opts: {
+  input: RiskJudgeInput;
+  mount: Mount;
+  cwd: string;
+  settingsFile: string;
+  spawn?: typeof spawnWorker;
+}): Promise<TypedJudgmentResult<RiskJudgeVerdictLabel>> {
+  return runTypedJudgment({
+    question: buildRiskJudgePrompt(opts.input),
+    options: RISK_JUDGE_TYPED_OPTIONS,
+    mount: opts.mount,
+    cwd: opts.cwd,
+    settingsFile: opts.settingsFile,
+    spawn: opts.spawn,
+  });
 }
 
 /** BACKSTOP (W1-T1266): the healthy path — any parsed verdict, adverse or not — returns

@@ -13,7 +13,9 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-learn-1790600000"
   plan_refs: [W1-T4618]
   files: [src/lib/strike-schedule.ts, test/the-strike-schedule-follows-measured-pass-rates.test.ts, src/lib/sweep.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4671 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     OBSERVED: the strike ladder is fixed in .remudero/mounts.yaml (two implement strikes, then diagnose, then opus).
