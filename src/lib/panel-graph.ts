@@ -56,6 +56,7 @@ import {
   FEEDBACK_STATUSES,
   feedbackEntryRepoPath,
   findFeedbackBySubmissionKey,
+  listFeedback,
   readFeedbackEntry,
   recentFeedbackFewShot,
   setFeedbackStatus,
@@ -335,7 +336,8 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
 }
 
 /** The 400 refusal for a `replyTo` that cannot be answered, else undefined. Status is read from fetched origin/main,
- *  which feedback landing writes to; the daemon's checkout lags it and is the fallback only when that read fails. */
+ *  which feedback landing writes to; the daemon's checkout lags it and is the fallback only when that read fails.
+ *  Main still says `grilling` until a reply's landing merges, so an answering entry already in the checkout refuses too. */
 function replyRefusal(root: string, replyTo: string): { refused: string } | undefined {
   let target: FeedbackEntry;
   let source = "origin/main";
@@ -350,8 +352,14 @@ function replyRefusal(root: string, replyTo: string): { refused: string } | unde
       return { refused: `replyTo names no known feedback entry "${replyTo}"` };
     }
   }
-  if (target.status === "grilling") return undefined;
-  return { refused: `feedback#${replyTo} is not parked at grilling (status: ${target.status}, read from ${source}) — nothing to answer` };
+  if (target.status !== "grilling") {
+    return { refused: `feedback#${replyTo} is not parked at grilling (status: ${target.status}, read from ${source}) — nothing to answer` };
+  }
+  const answering = listFeedback(root).find((e) => e.reply_to === replyTo);
+  if (!answering) return undefined;
+  return {
+    refused: `feedback#${replyTo} is parked at grilling (status: grilling, read from ${source}) but the checkout already holds feedback#${answering.id} answering it — nothing to answer`,
+  };
 }
 
 /**
