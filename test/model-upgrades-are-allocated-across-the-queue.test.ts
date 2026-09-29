@@ -232,6 +232,28 @@ test("resolveUpgradeAllocationReplay runs the real replay once the ledger carrie
   assert.equal(resolved.result.candidatePolicy.decisions.find((d) => d.taskId === "W1-A")!.upgraded, true);
 });
 
+test("resolveUpgradeAllocationReplay drops each unusable row and replays only the rest — a real archive is never uniformly shaped", () => {
+  const resolved = resolveUpgradeAllocationReplay("/fake/state", { budgetPercent: 10 }, () => ({
+    ok: true,
+    lines: [
+      // Usable.
+      { task_id: "W1-A", window_share_percent: 5, outcome: "merged", upgrade_gain: { state: "estimated", value: 0.2 } },
+      // Today's real shape (W1-T4617/W1-T4618/W1-T4626 rows) — no upgrade fields at all.
+      { task_id: "W1-B", step: "routing.propensity" },
+      // Usable.
+      { task_id: "W1-C", window_share_percent: 3, outcome: "not-merged", upgrade_gain: { state: "unavailable", reason: "no-observations" } },
+    ],
+  }));
+  assert.equal(resolved.ok, true);
+  if (!resolved.ok) return;
+  // Only the two usable rows reach the replay; the unusable middle row is dropped, not guessed at.
+  assert.equal(resolved.result.rows, 2);
+  assert.deepEqual(
+    resolved.result.candidatePolicy.decisions.map((d) => d.taskId).sort(),
+    ["W1-A", "W1-C"],
+  );
+});
+
 // ── W1-T4670: the new module is called from src/lib/worker-provider.ts ─────────────────────────
 
 test("queuedUpgradeAllocation (worker-provider.ts) calls allocateUpgrades and is additive: an empty queue upgrades nothing", () => {
