@@ -43,7 +43,7 @@ function taskRows(task: string, day: number, repo: string, prNumber: number, opt
 }
 
 function flowReadOf(rows: Record<string, unknown>[]): FieldTrialsLedgerRead {
-  return { state: "observed", reason: null, forms: { gzip: 0, plain: 0, live: 1 }, malformedRows: 0, duplicateRows: 0, unreadSources: 0,
+  return { state: "observed", reason: null, forms: { gzip: 0, plain: 0, live: 1 }, malformedRows: 0, duplicateRows: 0, futureRows: 0, unreadSources: 0,
     newestTs: null, rows: rows.map((value, index) => projectFlowRow(value, `fp-${index}-${JSON.stringify(value).length}`)) };
 }
 
@@ -531,12 +531,14 @@ test("field trials ledger reader counts every form and never calls an unreadable
     assert.equal((await readFieldTrialsLedger(join(root, "empty"))).reason, "ledger-source-missing");
     const dir = join(root, "state");
     writeLedger([row("run.start", "T1-reader", "r", T(2)), row("noise.step", null, null, T(3)),
-      row("anything", "T1-reader", "r", T(4), { actor: "operator" })], { dir });
+      row("anything", "T1-reader", "r", T(4), { actor: "operator" }),
+      row("worker.assignment", "T1-future", "r", T(8))], { dir });
     writeFileSync(join(dir, "ledger.2026-09-01T00-00-00-000Z.ndjson.gz"), gzipSync("not a ledger line\n").subarray(0, 12));
-    const read = await readFieldTrialsLedger(dir);
+    const read = await readFieldTrialsLedger(dir, Date.parse(T(4)));
     assert.deepEqual([read.state, read.reason, read.unreadSources, read.forms.gzip], ["observed-partial", "ledger-source-unreadable", 1, 1]);
     assert.deepEqual(read.rows.map((item) => item.step), ["run.start", "anything"], "an operator's own row is kept as a human touch");
     assert.equal(read.newestTs, T(4));
+    assert.equal(read.futureRows, 1, "a future-dated assignment cannot advance the watermark or enter an observed cohort");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

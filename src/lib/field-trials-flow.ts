@@ -142,18 +142,19 @@ export interface FieldTrialsLedgerRead {
   forms: { gzip: number; plain: number; live: number };
   malformedRows: number;
   duplicateRows: number;
+  futureRows: number;
   unreadSources: number;
   newestTs: string | null;
   rows: FlowRow[];
 }
 
 export function unavailableLedger(reason: string): FieldTrialsLedgerRead {
-  return { state: "unavailable", reason, forms: { gzip: 0, plain: 0, live: 0 }, malformedRows: 0, duplicateRows: 0,
+  return { state: "unavailable", reason, forms: { gzip: 0, plain: 0, live: 0 }, malformedRows: 0, duplicateRows: 0, futureRows: 0,
     unreadSources: 0, newestTs: null, rows: [] };
 }
 
 /** The audited three-form union: every form counted, exact replayed lines counted as duplicates once. */
-export async function readFieldTrialsLedger(stateDir: string): Promise<FieldTrialsLedgerRead> {
+export async function readFieldTrialsLedger(stateDir: string, nowMs = systemClock.now()): Promise<FieldTrialsLedgerRead> {
   let names: string[];
   try { names = readdirSync(stateDir); }
   catch {
@@ -169,6 +170,7 @@ export async function readFieldTrialsLedger(stateDir: string): Promise<FieldTria
   const rows: FlowRow[] = [];
   let malformedRows = 0;
   let duplicateRows = 0;
+  let futureRows = 0;
   let unreadSources = 0;
   let newestTs: string | null = null;
   for await (const row of openLedgerUnion(stateDir, {
@@ -181,13 +183,16 @@ export async function readFieldTrialsLedger(stateDir: string): Promise<FieldTria
       if (seen.has(fingerprint)) { duplicateRows += 1; return; }
       seen.add(fingerprint);
       const ts = iso(accepted.ts);
+      // A stray clock-forward row cannot create a future cohort or advance the source watermark.
+      if (ts !== null && Date.parse(ts) > nowMs + 5 * 60_000) { futureRows += 1; return; }
       if (ts !== null && (newestTs === null || ts > newestTs)) newestTs = ts;
       if (flowRelevant(accepted)) rows.push(projectFlowRow(accepted, fingerprint));
     },
   })) void row;
-  const partial = unreadSources > 0 ? "ledger-source-unreadable" : malformedRows > 0 ? "ledger-source-malformed" : null;
+  const partial = unreadSources > 0 ? "ledger-source-unreadable" : malformedRows > 0 ? "ledger-source-malformed"
+    : futureRows > 0 ? "ledger-source-future-dated" : null;
   return { state: partial ? "observed-partial" : "observed", reason: partial, forms, malformedRows, duplicateRows,
-    unreadSources, newestTs, rows };
+    futureRows, unreadSources, newestTs, rows };
 }
 
 export interface FieldTrialsSource {
@@ -768,7 +773,8 @@ export interface FieldTrialsRelease {
   causalClaims: "none";
   followUpWindowDays: number;
   sources: { source: string; rights: string; receiptHash: string; publicSourceUrl: string | null;
-    ledger: { state: string; reason: string | null; forms: Record<string, number>; malformedRows: number; unreadSources: number };
+    ledger: { state: string; reason: string | null; forms: Record<string, number>; malformedRows: number;
+      futureRows: number; unreadSources: number };
     github: Record<string, { state: string; reason: string | null; asOf: string | null; pagesRead: number } | null> }[];
   withheld: { reason: string; sources: number }[];
   links: { prs: number; matched: number; ambiguous: number; unmatched: number; ledgerPrNotInGithub: number } | null;
@@ -922,7 +928,8 @@ export function buildFieldTrialsRelease(snapshot: FieldTrialsFlowSnapshot, conse
       : { state: value.state, reason: value.reason, asOf: value.asOf, pagesRead: value.pagesRead };
     sources.push({ source: pseudonym(source.label), rights: grant.rights, receiptHash, publicSourceUrl: grant.publicSourceUrl ?? null,
       ledger: { state: source.ledger.state, reason: source.ledger.reason, forms: source.ledger.forms,
-        malformedRows: source.ledger.malformedRows, unreadSources: source.ledger.unreadSources },
+        malformedRows: source.ledger.malformedRows, futureRows: source.ledger.futureRows,
+        unreadSources: source.ledger.unreadSources },
       github: { pulls: cursor(source.github.pulls), commits: cursor(source.github.commits), deployments: cursor(source.github.deployments) } });
   }
   if (included.size === 0) return { state: "withheld", reason: "no-aggregate-consent" };
