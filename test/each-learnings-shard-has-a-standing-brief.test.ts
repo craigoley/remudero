@@ -118,3 +118,13 @@ test("W1-T4680: buildShardStandingBriefs builds one brief per learnings shard on
   assert.equal(rebuilt["alpha.yaml"], briefs["alpha.yaml"]);
   assert.equal(rebuilt["beta.yaml"], briefs["beta.yaml"]);
 });
+
+test("W1-T4680: buildShardStandingBriefs returns no briefs when the corpus directory does not exist yet", () => {
+  const missingDir = join(tmpdir(), `${RMD_TMP_PREFIX}standing-briefs-missing-${Date.now()}`);
+
+  assert.deepEqual(buildShardStandingBriefs(missingDir), {});
+
+  // A `previous` map is accepted but ignored: still nothing to refresh against a missing shard dir.
+  const stalePrevious = buildStandingBrief([entry({ id: "stale" })], "alpha.yaml");
+  assert.deepEqual(buildShardStandingBriefs(missingDir, { "alpha.yaml": stalePrevious }), {});
+});
