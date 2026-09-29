@@ -136,3 +136,71 @@ test("a reopened pull request head survives a cached verdict", () => {
   assert.ok(calls.some(([cmd, ...args]) => cmd === "gh" && args.join(" ").includes("head=")), "reopened PR is read again");
   assert.equal(nextCache?.reopened, undefined, "an open PR never enters the immutable merged cache");
 });
+
+test("a cached no-pull-request verdict skips the per-head pull request read", () => {
+  const calls: string[][] = [];
+  let nextNone: Readonly<Record<string, string>> | undefined;
+  reapBranchesCommand([], {
+    exec: batchExec(["main", "old"], calls),
+    noPrHeadShaCache: new Map([["old", "tip-old"]]),
+    onNoPrHeadCacheUpdate: (next) => { nextNone = next; },
+    quiet: true,
+  });
+  const perHead = calls.filter(([cmd, ...args]) => cmd === "gh" && args.join(" ").includes("head="));
+  assert.equal(perHead.some((c) => c.join(" ").includes("old")), false, "a proven no-PR head at the same tip is not re-read");
+  assert.ok(calls.some(([cmd, ...args]) => cmd === "gh" && args.join(" ").includes("state=all&per_page=100&page=1")), "the control: the bulk walk still ran");
+  assert.equal(nextNone?.old, "tip-old");
+});
+
+test("a moved tip re-reads a cached no-pull-request head", () => {
+  const calls: string[][] = [];
+  let nextNone: Readonly<Record<string, string>> | undefined;
+  reapBranchesCommand([], {
+    exec: batchExec(["main", "old"], calls),
+    noPrHeadShaCache: new Map([["old", "tip-before-push"]]),
+    onNoPrHeadCacheUpdate: (next) => { nextNone = next; },
+    quiet: true,
+  });
+  assert.ok(calls.some(([cmd, ...args]) => cmd === "gh" && args.join(" ").includes("head=") && args.join(" ").includes("old")));
+  assert.equal(nextNone?.old, "tip-old", "the fresh per-head none is cached at the new tip");
+});
+
+test("a head that gains a pull request outranks a cached no-pull-request verdict", () => {
+  const calls: string[][] = [];
+  const base = batchExec(["main", "old"], calls);
+  let nextNone: Readonly<Record<string, string>> | undefined;
+  reapBranchesCommand([], {
+    exec: (cmd, args) => (cmd === "gh" && args.join(" ").includes("page=1") ? (calls.push([cmd, ...args]), "old\topen\tfalse") : base(cmd, args)),
+    noPrHeadShaCache: new Map([["old", "tip-old"]]),
+    onNoPrHeadCacheUpdate: (next) => { nextNone = next; },
+    quiet: true,
+  });
+  assert.deepEqual(nextNone, {}, "the bulk walk's open PR drops the stale no-PR entry");
+});
+
+test("a failed bulk pull request walk keeps the no-pull-request cache", () => {
+  const calls: string[][] = [];
+  const base = batchExec(["main", "old"], calls);
+  let updated = false;
+  reapBranchesCommand([], {
+    exec: (cmd, args) => {
+      if (cmd === "gh") throw new Error("gh unavailable");
+      return base(cmd, args);
+    },
+    noPrHeadShaCache: new Map([["old", "tip-old"]]),
+    onNoPrHeadCacheUpdate: () => { updated = true; },
+    quiet: true,
+  });
+  assert.equal(updated, false, "every head read open, which proves nothing about none");
+});
+
+test("a persisted no-pull-request cache keeps only string shas", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reap-none-cache-`));
+  try {
+    const path = join(root, "branch-reap-state.json");
+    writeFileSync(path, JSON.stringify({ noPrHeadShas: { none: "tip-none", malformed: 7 } }));
+    assert.deepEqual(readAutomaticBranchReapState(path), { noPrHeadShas: { none: "tip-none" } });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
