@@ -141,6 +141,97 @@ test("W1-T4110: a pass with nothing to land opens no PR, and an unchanged corpus
   assert.equal(readGardenState(gardenStatePath(dir, "demo"), ["a", "b"]).lastCheap, "touched");
 });
 
+test("W1-T4780: a merged review PR is judged with unchanged fingerprints", () => {
+  const dir = stateDir();
+  const inv: Inv = { version: 1, metrics: { a: { trials: 0, successes: 0 }, b: { trials: 0, successes: 0 } } };
+  const path = gardenStatePath(dir, "demo");
+  writeFileSync(path, JSON.stringify({
+    ...readGardenState(path, ["a", "b"]),
+    lastCheap: "v1",
+    lastPass: { fingerprint: "f1" },
+    pending: { prUrl: "https://github.com/acme/demo/pull/1", actionClass: "b", baseline: { trials: 0, successes: 0 } },
+  }));
+  let reads = 0;
+  const landed: Array<{ title: string; body: string }> = [];
+  const rows: string[] = [];
+  const result = runGarden(spec(inv, {
+    review: { b: "reviewed by the PR outcome" },
+    inventory: () => { reads++; return inv; },
+  }), { stateDir: dir, repoRoot: dir, openWorkspace: checkout(landed), prState: () => "merged", log: (step) => rows.push(step) });
+  assert.equal(result.ran, false);
+  assert.equal(reads, 0, "the terminal review verdict needs no inventory");
+  assert.deepEqual(landed, [], "unchanged inputs do not open another PR");
+  assert.deepEqual(rows, ["demo.gardener_judged"]);
+  const saved = readGardenState(path, ["a", "b"]);
+  assert.equal(saved.pending, undefined);
+  assert.deepEqual(saved.classes.b, { alpha: 4, beta: 1 });
+});
+
+test("W1-T4780: a merged metric PR progresses with unchanged action fingerprint", () => {
+  const dir = stateDir();
+  const inv: Inv = { version: 1, metrics: { a: { trials: 100, successes: 40 }, b: { trials: 0, successes: 0 } } };
+  const path = gardenStatePath(dir, "demo");
+  writeFileSync(path, JSON.stringify({
+    ...readGardenState(path, ["a", "b"]),
+    lastCheap: "v1",
+    lastPass: { fingerprint: "stable" },
+    pending: { prUrl: "https://github.com/acme/demo/pull/1", actionClass: "a", baseline: { trials: 100, successes: 40 } },
+  }));
+  let reads = 0;
+  const landed: Array<{ title: string; body: string }> = [];
+  const s = spec(inv, { fingerprint: () => "stable", inventory: () => { reads++; return inv; } });
+  const deps = { stateDir: dir, repoRoot: dir, openWorkspace: checkout(landed), prState: () => "merged" as const, log: () => {} };
+  assert.equal(runGarden(s, deps).ran, false);
+  assert.deepEqual(readGardenState(path, ["a", "b"]).pending?.atMerge, { trials: 100, successes: 40 });
+  assert.equal(reads, 1, "a merge establishes its baseline despite unchanged inputs");
+  inv.metrics.a = { trials: 200, successes: 90 };
+  inv.version = 2;
+  assert.equal(runGarden(s, deps).ran, false);
+  const saved = readGardenState(path, ["a", "b"]);
+  assert.equal(saved.pending, undefined, "later evidence settles the metric even when action candidates are unchanged");
+  assert.deepEqual(saved.classes.a, { alpha: 4, beta: 1 });
+  assert.equal(reads, 2);
+  assert.deepEqual(landed, []);
+});
+
+test("W1-T4780: an open pending PR skips unchanged inventory", () => {
+  const dir = stateDir();
+  const inv: Inv = { version: 1, metrics: { a: { trials: 0, successes: 0 }, b: { trials: 0, successes: 0 } } };
+  const path = gardenStatePath(dir, "demo");
+  writeFileSync(path, JSON.stringify({
+    ...readGardenState(path, ["a", "b"]),
+    lastCheap: "v1",
+    lastPass: { fingerprint: "f1" },
+    pending: { prUrl: "https://github.com/acme/demo/pull/1", actionClass: "a", baseline: { trials: 0, successes: 0 } },
+  }));
+  let checked = 0;
+  const result = runGarden(spec(inv, { inventory: () => { throw new Error("unchanged inventory must not run"); } }), {
+    stateDir: dir, repoRoot: dir, openWorkspace: checkout([]), prState: () => { checked++; return "open"; }, log: () => {},
+  });
+  assert.equal(result.ran, false);
+  assert.equal(checked, 1, "each pass still checks the pending PR status");
+  assert.ok(readGardenState(path, ["a", "b"]).pending);
+});
+
+test("W1-T4780: a closed metric PR is debited without a corpus read", () => {
+  const dir = stateDir();
+  const inv: Inv = { version: 1, metrics: { a: { trials: 0, successes: 0 }, b: { trials: 0, successes: 0 } } };
+  const path = gardenStatePath(dir, "demo");
+  writeFileSync(path, JSON.stringify({
+    ...readGardenState(path, ["a", "b"]),
+    lastCheap: "v1",
+    lastPass: { fingerprint: "f1" },
+    pending: { prUrl: "https://github.com/acme/demo/pull/1", actionClass: "a", baseline: { trials: 0, successes: 0 } },
+  }));
+  const result = runGarden(spec(inv, { inventory: () => { throw new Error("closed PR needs no corpus"); } }), {
+    stateDir: dir, repoRoot: dir, openWorkspace: checkout([]), prState: () => "closed", log: () => {},
+  });
+  assert.equal(result.ran, false);
+  const saved = readGardenState(path, ["a", "b"]);
+  assert.equal(saved.pending, undefined);
+  assert.deepEqual(saved.classes.a, { alpha: 3, beta: 2 });
+});
+
 test("W1-T4110: a failing pass is logged under the spec's name and the timer keeps going", async () => {
   const dir = stateDir();
   const inv: Inv = { version: 1, metrics: { a: { trials: 0, successes: 0 }, b: { trials: 0, successes: 0 } } };
