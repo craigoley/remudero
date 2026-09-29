@@ -830,6 +830,60 @@ export function attestLearningOrigin(
   return { status: actual === entry.origin.lineSha256 ? "match" : "mismatch" };
 }
 
+/** W1-T4681: instead of a fixed cutoff, commits on a fact's files: since its cited (earned) date, ranked vs. the corpus (never drops/down-weights, only annotates). Injectable reader; its argv never invokes a shell. */
+export type ChurnCommitReader = (repoDir: string, files: string[], sinceIso: string) => number;
+
+function defaultChurnCommitReader(repoDir: string, files: string[], sinceIso: string): number {
+  if (files.length === 0) return 0;
+  let output: string;
+  try {
+    output = execFileSync(
+      "git",
+      ["-C", repoDir, "log", "--oneline", `--since=${sinceIso}`, "--", ...files],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+  } catch {
+    return 0;
+  }
+  return output.split("\n").filter((line) => line.trim().length > 0).length;
+}
+
+/** Commits touching `entry.files` since `entry.cited`; 0 (never guessed) with neither. */
+export function computeEntryChurn(
+  entry: LearningEntry,
+  repoDir: string,
+  deps: { readChurnCommits?: ChurnCommitReader } = {},
+): number {
+  if (!entry.cited || entry.files.length === 0) return 0;
+  return (deps.readChurnCommits ?? defaultChurnCommitReader)(repoDir, entry.files, entry.cited);
+}
+
+/** Churn for a whole corpus, keyed by id, for ranking one entry against the rest. */
+export function computeCorpusChurn(
+  entries: LearningEntry[],
+  repoDir: string,
+  deps: { readChurnCommits?: ChurnCommitReader } = {},
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const entry of entries) out[entry.id] = computeEntryChurn(entry, repoDir, deps);
+  return out;
+}
+
+/** Note text {@link renderFreshnessNote} appends. */
+export const VERIFY_FIRST_NOTE = "verify first: files changed since this fact was earned";
+
+/** No note when untouched; touched always gets one, ranked vs. peers (no threshold). */
+export function renderFreshnessNote(entryId: string, corpusChurn: Record<string, number>): string {
+  const churn = corpusChurn[entryId] ?? 0;
+  if (churn <= 0) return "";
+  const otherChurned = Object.entries(corpusChurn)
+    .filter(([id]) => id !== entryId)
+    .map(([, n]) => n)
+    .filter((n) => n > 0);
+  const outranks = otherChurned.filter((n) => n < churn).length;
+  return ` (${VERIFY_FIRST_NOTE} — ${churn} commit${churn === 1 ? "" : "s"} since earned, higher churn than ${outranks}/${otherChurned.length} other changed facts)`;
+}
+
 /** The reason prefix {@link loadGlobalArtifact} emits for a missing artifact (W1-T1251). Exported
  *  so a caller classifies by the SAME literal this module returns, not a second driftable regex.
  *  Matched with `startsWith`, so a short test fixture and the real path-suffixed message agree. */
@@ -2025,9 +2079,10 @@ export function assessLexicalShadowLabels(report: LexicalShadowReport, review: L
   return counts;
 }
 
-/** One entry as a provenance-tagged CONTEXT bullet. */
-function renderLearningLine(entry: LearningEntry): string {
-  return `- ${entry.fact} ${citation(`learnings#${entry.id}`)}`;
+/** One entry as a provenance-tagged CONTEXT bullet; `corpusChurn` (W1-T4681) adds a note. */
+function renderLearningLine(entry: LearningEntry, corpusChurn?: Record<string, number>): string {
+  const freshness = corpusChurn ? renderFreshnessNote(entry.id, corpusChurn) : "";
+  return `- ${entry.fact}${freshness} ${citation(`learnings#${entry.id}`)}`;
 }
 
 /** Render only the two mandatory doctrine lines (Tier 0, MASTER-PLAN §8A); always non-empty.
@@ -2043,9 +2098,9 @@ export function renderDoctrinePreamble(): string {
 
 /** Render only the task-matched facts (Tier 1, W1-T19/W1-T33), with no doctrine lines. VOLATILE:
  *  the corpus grows every retro, so callers place this LAST in a rendered prompt (cache-aware
- *  ordering, W1-T35), never ahead of {@link renderDoctrinePreamble}. "" when nothing matched. */
-export function renderMatchedLearnings(selected: LearningEntry[]): string {
-  return selected.map(renderLearningLine).join("\n");
+ *  ordering, W1-T35), never ahead of {@link renderDoctrinePreamble}. "" empty; `corpusChurn` (W1-T4681) optional. */
+export function renderMatchedLearnings(selected: LearningEntry[], corpusChurn?: Record<string, number>): string {
+  return selected.map((entry) => renderLearningLine(entry, corpusChurn)).join("\n");
 }
 
 /**
