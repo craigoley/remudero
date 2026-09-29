@@ -259,7 +259,8 @@ export type ProofSkipReason =
   | "incomplete-run"
   | "runner-absent"
   | "no-exec-context"
-  | "forward-reference";
+  | "forward-reference"
+  | "proof-form";
 
 /** Observed outcome of executing a criterion's proof against the PR head (W1-T65, ratifies P15), recorded per
  * criterion on {@link CriterionVerdict} and on the `review.posted` ledger line so an OBSERVED verdict reads apart from
@@ -2465,6 +2466,59 @@ export function preexistingProofHits(
 }
 
 /** Verdict one criterion against its proof, given the report + optional semantic. */
+/**
+ * RELAXATION (2026-09-29 operator ruling: refuse only what is risky or broken) — THE PROOF-FORM CORRECTION.
+ * CLASS RELAXED: a dialect `grep:` proof that failed at head only because of how it was WRITTEN — a backslash escape
+ * copied from YAML (`\"`, `\.`), markdown backticks, or text a YAML block scalar wrapped onto two lines (CLAUDE.md's
+ * proof doctrine names all three). Its `executed_fail` override is withdrawn and the keyword floor decides.
+ * WHY IT IS SAFE: it applies only when the literal text IS in the target at head, is ABSENT from the merge-base (so it
+ * still discriminates), and is not merely the proof's own declaration line (W1-T3208). A missing change reads absent at
+ * head and keeps failing. MEASURED 2026-09-15..29: #5917 #5918 #6055 #6169 #6578 #7226 — six rounds, ~66 fix-worker
+ * minutes — were this class. MEASURABLE: the reason carries {@link PROOF_FORM_ADVISORY}.
+ */
+export const PROOF_FORM_ADVISORY = "ADVISORY proof-form corrected";
+const PROOF_FORM_MIN_NEEDLE = 8;
+
+function proofFormText(s: string): string {
+  return s.replace(/[\\`]/g, "").replace(/\s+/g, " ").trim();
+}
+
+/** A target file's text, or `undefined` when it is absent, unreadable, or resolves outside `root` (R-18). */
+function readTargetInside(root: string, target: string): string | undefined {
+  try {
+    const realRoot = realpathSync(root);
+    const real = realpathSync(join(realRoot, target));
+    if (!real.startsWith(realRoot + pathSep) || !statSync(real).isFile()) return undefined;
+    return readFileSync(real, "utf8");
+  } catch {
+    return undefined; // deliberate: absent and unreadable both mean "no literal here", never a manufactured match
+  }
+}
+
+function literalPresent(text: string, pattern: string, target: string): boolean {
+  const self = proofFormText(`${pattern} in ${target}`);
+  const kept = text.split("\n").filter((line) => !proofFormText(line).includes(self));
+  return proofFormText(kept.join("\n")).includes(proofFormText(pattern));
+}
+
+/** Why a failed dialect grep is a proof-form error rather than a missing change, or `undefined`. */
+export function proofFormCorrection(proof: string, execCtx: ProofExecContext): string | undefined {
+  const w = parseWhitelistedProof(proof, execCtx.target);
+  const target = w ? dialectGrepTargetPath(w) : undefined;
+  if (!w || target === undefined || execCtx.baseCwd === undefined || execCtx.baseUnreadablePaths?.has(target)) return undefined;
+  const pattern = w.args[2];
+  if (proofFormText(pattern).length < PROOF_FORM_MIN_NEEDLE) return undefined;
+  const head = readTargetInside(execCtx.cwd, target);
+  if (head === undefined || !literalPresent(head, pattern, target)) return undefined;
+  const base = execCtx.addedTestFiles?.has(target) ? undefined : readTargetInside(execCtx.baseCwd, target);
+  if (base !== undefined && literalPresent(base, pattern, target)) return undefined;
+  return (
+    `grep (${w.label}) matched nothing as written, but its text IS in ${target} at head and absent at the merge-base ` +
+    "once backslash escapes, backticks and line wraps are ignored — a proof-form error, not a missing change; " +
+    "write the pattern as one literal line"
+  );
+}
+
 export function judgeCriterion(
   criterion: AcceptanceCriterion,
   reportTokens: Set<string>,
@@ -2567,6 +2621,10 @@ export function judgeCriterion(
       reason = `proof substantiated in report (matched ${covered.length}/${kws.length} ${floorKeywords} keywords)`;
     }
   }
+
+  // The keyword floor's own verdict, kept for {@link proofFormCorrection}: it withdraws an override, never a floor.
+  const keywordMet = met;
+  const keywordReason = reason;
 
   // WHITELISTED PROOF EXECUTION (W1-T65, lifting W1-T3F's observation into the FLOOR): given a PR-head checkout and an
   // executable proof, RUN it and let the OBSERVED result override the keyword floor in BOTH directions —
@@ -2802,6 +2860,14 @@ export function judgeCriterion(
     }
   } else {
     proofSkip = "no-exec-context";
+  }
+
+  const proofForm = proofExec === "executed_fail" && execCtx ? proofFormCorrection(criterion.proof, execCtx) : undefined;
+  if (proofForm !== undefined) {
+    proofExec = "not_executable";
+    proofSkip = "proof-form";
+    met = keywordMet;
+    reason = `${keywordReason} — NOTE: ${PROOF_FORM_ADVISORY}: ${proofForm}; keyword floor applied`;
   }
 
   // W1-T178 (verdict stability): capture the DETERMINISTIC floor's own verdict — keyword coverage, overridden by
