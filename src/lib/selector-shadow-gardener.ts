@@ -446,7 +446,7 @@ export function selectorShadowReport(runs: readonly SelectorShadowRun[], fullSui
       if (record.narrowSize !== undefined) narrowSizes.push(record.narrowSize);
       // The shard exits non-zero on any failure its retry did not recover (ci.yml's TEST_EXIT), so a
       // failure inside a job that concluded `success` was a flake no selection could have hidden.
-      // 28 of the first 35 filed "misses" were exactly this (2026-09-29 audit).
+      // 25 of the first 35 filed "misses" were exactly this (2026-09-29 audit).
       if (jobs.get(shards[index]!)?.conclusion === "success") {
         recovered += record.failures.length;
         continue;
