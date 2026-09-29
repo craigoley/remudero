@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-learn-1790600000"
   plan_refs: [W1-T4617, W1-T4618, W1-T4626]
   files: [src/lib/upgrade-allocation.ts, test/model-upgrades-are-allocated-across-the-queue.test.ts, src/lib/worker-provider.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: provider choice is per spawn, weighted by squared remaining headroom (src/lib/worker-provider.ts ~480-500);

@@ -11,7 +11,7 @@
   origin: "console issue #1816: a reusable prepared token dispatches each confirmed action again"
   plan_refs: [W1-T4228, W1-T4657]
   files: [src/lib/panel-actions.ts, src/lib/instance-gateway.ts, src/lib/serve.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/assistant-control-idempotency.test.ts, test/route-wiring.test.ts, test/every-served-route-is-in-the-contract.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The console's five-minute prepared token protects target review but not replay. Its
