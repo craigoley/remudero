@@ -177,7 +177,16 @@ test("a repository projection reads the selected instance's ledger and plan, not
     assert.deepEqual(rows.map((row) => row.id), ["craigoley/remudero-site"]);
     assert.equal(rows[0]?.source, "instance-registry");
     assert.equal(rows[0]?.health.queuedtasks, 1, "the site plan owns its task count");
-    assert.deepEqual(rows[0]?.telemetry, { tokens7d: 13, modelsused: ["site-served-model"], cost_7d: 1.25 });
+    assert.deepEqual(rows[0]?.telemetry, {
+      measurementClass: "observed", tokens7d: 13, cache_read_tokens7d: 0, cash_usd_7d: 1.25, cost_7d: 1.25,
+      subscription: { calls7d: 0, tokens7d: 0, windows: [] }, modelsused: ["site-served-model"],
+    });
+    const summary = await getWarmList(url, "/v1/i/site/repos/summary");
+    assert.equal(summary.status, 200);
+    const card = (summary.body.repos as Array<{ id: string; active: boolean | null; actions: Array<{ id: string; path?: string }> }>)[0];
+    assert.equal(card?.id, "craigoley/remudero-site");
+    assert.equal(card?.active, true, "the site card reads the site's own fleet-control root");
+    assert.equal(card?.actions[0]?.path, "control/pause");
     const core = await getWarmList(url, "/v1/repos");
     const coreSite = (core.body.repos as Array<{ id: string; telemetry: { tokens7d: number | null } }>).find((row) => row.id === "craigoley/remudero-site");
     assert.equal(coreSite?.telemetry.tokens7d, 0, "the unscoped core route never reads site worker costs");

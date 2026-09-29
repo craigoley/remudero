@@ -1,0 +1,36 @@
+- id: W1-T4820
+  title: "THE STATUS BOARD READS A THIRD OF ITS LEDGER TWICE OR MORE — every rotation re-archives the live file's retained rows, and the board's union read does not dedupe: 1,042,796 rows of which 676,741 distinct. Read each row once without breaking the board's one-second read bound"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-29: go with all of those follow ups (general union dedupe)"
+  note: "reservation hand-off: plan-followups-1790712493000 -> plan-followups-1790712493000"
+  plan_refs: [W1-T2898]
+  files: [src/lib/status.ts, src/lib/ledger-union.ts, src/lib/ledger.ts, test/the-status-board-reads-each-ledger-row-once.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-29 on the fleet corpus: readLedgerUnionBounded (dedupe: false since W1-T2898, #4552) returned
+    1,042,796 rows, 676,741 distinct; W1-T2982's 32 real run.start rows appeared 1,584 times. The dispatch-streak
+    counts were fixed narrowly (#7920); every other board derivation still sees the replays. Two general fixes were
+    measured and rejected: full-line dedupe in the reader is correct and halves retained heap (688 to 352 MB) but took
+    this Mac's bounded read from about 665 ms to 958 ms against its 1,000 ms bound; the per-step window
+    (dedupeWindowPerStep: 200) missed 170,711 replays in the board's newest-first order (102,676 sweep.disposed).
+  design: |
+    Choose on measurement, recorded in the PR: (a) producer-side — rotateLedger stops re-archiving rows an earlier
+    rotation already holds, so archives are disjoint and no reader needs dedupe going forward (existing archives age
+    out of the board window); or (b) reader-side — dedupe on raw lines before parsing, so a replay costs a hash
+    rather than a parse. Either must keep the real-corpus bounded read under its bound.
+  acceptance:
+    - claim: "the board's union returns a re-archived row once"
+      proof: 'grep: test("W1-T4820: the board union returns a re-archived row once" in test/the-status-board-reads-each-ledger-row-once.test.ts'
+    - claim: "the dedupe keeps the bounded read inside its bound"
+      proof: 'grep: test("W1-T4820: the dedupe keeps the bounded read inside its bound" in test/the-status-board-reads-each-ledger-row-once.test.ts'
+  falsifier: |
+    Restore dedupe: false and the first test counts the replays.
