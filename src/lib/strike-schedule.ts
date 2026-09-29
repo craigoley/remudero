@@ -1,6 +1,6 @@
 /**
  * lib/strike-schedule.ts — W1-T4671: the "two sonnet strikes, then opus" ladder
- * (.remudero/mounts.yaml's `step_up` mount, operator ruling 2026-09-22: "try Luna and Sonnet for
+ * (the mounts table's `step_up` row, operator ruling 2026-09-22: "try Luna and Sonnet for
  * most tasks") is the SAME fixed length for every task shape today. Speculative decoding sizes
  * its draft length from the verifier's MEASURED acceptance rate
  * (https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/specdec_bench) — this module
@@ -78,7 +78,7 @@ export function measureStrikePassRates(rows: readonly StrikePassRow[]): Map<stri
   return out;
 }
 
-/** The fixed ladder's own length today (.remudero/mounts.yaml: two implement strikes, then
+/** The fixed ladder's own length today (the mounts table: two implement strikes, then
  *  diagnose, then the step-up opus mount) — the schedule EVERY shape without trusted evidence
  *  keeps, so a shape with no measurement yet is never guessed into a shorter or longer one. */
 export const DEFAULT_CHEAP_STRIKE_BUDGET = 2;
@@ -91,7 +91,7 @@ export const CANDIDATE_CHEAP_STRIKE_BUDGETS = [1, 2, 3] as const;
 
 /** How many windows a step-up (opus) attempt costs relative to one cheap window — the "verify is
  *  pricier than draft" half of speculative decoding's cost ratio. Opus runs at the fleet's
- *  highest effort/context tier (.remudero/mounts.yaml `step_up`) against every other worker row's
+ *  highest effort/context tier (the mounts table's `step_up` row) against every other worker row's
  *  sonnet ceiling, so it is modelled as costing MORE than one cheap window, never the same. This
  *  is the number that makes "step up sooner when cheap rarely passes, extend when it usually
  *  passes" the cost-minimizing answer rather than an arbitrary threshold on the raw pass rate. */
