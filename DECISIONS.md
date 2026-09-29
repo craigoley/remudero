@@ -3197,13 +3197,24 @@ itself. This ruling ratifies `src/lib/machine-filing-judge.ts` as the judge that
 - **FAIL SAFE.** A judge that throws, times out or returns no verdict writes nothing: the record stays
   parked, a `machine_judge.unavailable` row names the reason, and the next pass asks again. An outage is
   never an escalation and never a release.
-- **ON THE RECORD, NOT THE LEDGER.** The verify-human release (2026-09-22) writes `ratify.approved` rows,
-  and the dispatcher reads releases from the LIVE ledger, which compaction prunes. Measured 2026-09-29:
-  151 task ids carry a release row across the rotations, 76 in the live ledger. A pinned ruling lives in
-  git and cannot lapse; editing the record changes its pin, which re-opens the question.
+- **ON THE RECORD, NOT THE LEDGER — THE PINNED RULING IS THE ONLY RELEASE A MACHINE RECORD GETS.** The
+  verify-human release (2026-09-22) writes `ratify.approved` rows, and the dispatcher reads releases from
+  the LIVE ledger, which rotation caps at 200 rows per step and sheds by age. Measured 2026-09-29: 151
+  task ids carry a release row across the rotations, 76 in the live ledger, so releases silently lapsed
+  and those tasks parked again. No judge releases a machine-authored record by a ledger row from here on:
+  its pinned `risk_ruling` lives in git, cannot be rotated away, and editing the record changes its pin,
+  which re-opens the question. (An operator's own `rmd approve` still writes the ledger row, and is still
+  exposed to the same rotation; that is a separate defect, not changed here.)
 - **THE VERIFY-HUMAN SWEEP HANDS MACHINE RECORDS TO THIS JUDGE.** W1-T3188's judge now routes and
   releases only operator-authored `verify: human` records, through its existing arm; machine-authored
   ones are routed (inbox on escalate) and released (pinned ruling) here.
+
+- **SUPERSEDES W1-T4014's "must NOT auto-release".** W1-T4014 (2026-09-22) set as a non-negotiable design
+  constraint that "a rung that released its own proposals would be a machine ruling on guidance" and
+  that "nothing in the path releases a proposal without a person". That constraint predates this ruling
+  and is replaced by it: a release by the judge the operator ratified here IS the release Law 5 allows.
+  W1-T4014's visibility deliverable stands; its "release is never automatic" criterion no longer does and
+  should be amended to "nothing releases a machine proposal except a person or this ratified judge".
 
 **NOT DECIDED HERE:** whether this judge may also release OPERATOR-authored `verify: human` records by
 pinned ruling. They stay on the verify-human sweep's existing path.

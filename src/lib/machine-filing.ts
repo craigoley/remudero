@@ -10,10 +10,12 @@
  * person": machine-filing-judge.ts rules on every such record and releases it to `verify: auto`
  * on proceed. `risk:` is read from what the finding touches, not from which gardener filed it.
  *
- * A LEAF, importing types only: feedback-landing.ts and measurement-cadence.ts sit on the
- * task-linter import chain, and the judge module imports task-linter.
+ * {@link renderMachineShard} renders a whole record from a filer's finding, for a filer that has no
+ * field order of its own to keep; the others render {@link machineShardHeaderLines} in place.
+ * feedback-landing.ts never imports this module: task-linter's import chain reaches it.
  */
-import type { TaskRisk } from "./plan.js";
+import { loadPlanFromYaml, type TaskRisk } from "./plan.js";
+import { lintTask } from "./task-linter.js";
 
 /** Paths whose change is dangerous whoever makes it: secrets and credentials, auth and permissions,
  *  CI and deploy machinery, the worker settings, and the operator's own policy and rulings. */
@@ -47,4 +49,45 @@ export function machineShardHeaderLines(files: readonly string[]): string[] {
     "  attempts: 0",
     "  author_class: machine",
   ];
+}
+
+/** What a filer knows about ONE finding, enough to render its record. */
+export interface MachineShardSpec {
+  taskId: string;
+  title: string;
+  /** `<family>:<key>` — the family is what the judge's track record is kept by. */
+  origin: string;
+  files: readonly string[];
+  acceptance: readonly { claim: string; proof: string }[];
+  note?: string;
+}
+
+/**
+ * Render a finding as a single-record shard with the shared header, then parse it back and lint it.
+ * `refused` names every blocking lint check; a filer never writes a refused record.
+ */
+export function renderMachineShard(spec: MachineShardSpec): { text: string; refused?: string } {
+  const q = (v: string): string => JSON.stringify(v);
+  const text = [
+    `- id: ${spec.taskId}`,
+    `  title: ${q(spec.title)}`,
+    "  repo: remudero",
+    "  depends_on: []",
+    "  type: implement",
+    ...machineShardHeaderLines(spec.files),
+    `  origin: ${q(spec.origin)}`,
+    "  files:",
+    ...spec.files.map((f) => `    - ${f}`),
+    "  acceptance:",
+    ...spec.acceptance.flatMap((c) => [`    - claim: ${q(c.claim)}`, `      proof: ${q(c.proof)}`]),
+    ...(spec.note === undefined ? [] : [`  note: ${q(spec.note)}`]),
+    "",
+  ].join("\n");
+  try {
+    const lint = lintTask(loadPlanFromYaml(text, `${spec.taskId}.yaml`).tasks[0]!);
+    const blocks = lint.violations.filter((v) => v.severity === "block").map((v) => v.check);
+    return blocks.length === 0 ? { text } : { text, refused: blocks.join(", ") };
+  } catch (e) {
+    return { text, refused: `unparseable: ${(e as Error).message}` };
+  }
 }

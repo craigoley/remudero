@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { fixedClock } from "../src/lib/clock.js";
 import { runnableCandidates } from "../src/lib/drain.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { machineShardHeaderLines, machineShardRisk } from "../src/lib/machine-filing.js";
+import { machineShardHeaderLines, machineShardRisk, renderMachineShard } from "../src/lib/machine-filing.js";
 import {
   earnedConfidenceBar,
   familyTrackRecord,
@@ -32,7 +32,8 @@ import {
 } from "../src/lib/machine-filing-judge.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import type { Proposal } from "../src/lib/inbox.js";
-import { loadPlan, loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
+import { rotateLedger } from "../src/lib/ledger.js";
+import { loadPlan, loadPlanFromYaml, RELEASE_LEDGER_STEP, releasedTaskIds, type Plan } from "../src/lib/plan.js";
 import type { RiskJudgeInput, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
 import { selectorShadowMissTask } from "../src/lib/selector-shadow-gardener.js";
 import { machineAuthorVerifyViolation, taskRulingPin } from "../src/lib/task-linter.js";
@@ -427,4 +428,46 @@ test("a self-hosting daemon wires the machine judge as its ninth garden", async 
     else process.env.HOME = oldHome;
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("a pinned release survives ledger rotation and compaction where a ledger release row is shed", async () => {
+  const root = planDir({ "W1-T9090-x.yaml": machineShard("W1-T9090") });
+  const ledger = join(root, "ledger.ndjson");
+  try {
+    const row = (id: string, i: number) =>
+      JSON.stringify({ ts: new Date(1790000000000 + i * 1000).toISOString(), run_id: `R${i}`, task_id: id, step: RELEASE_LEDGER_STEP, released: "verify-human" });
+    const lines = [row("W1-T9090", 0), ...Array.from({ length: 220 }, (_, i) => row(`W1-T8${String(i).padStart(3, "0")}`, i + 1))];
+    writeFileSync(ledger, lines.join("\n") + "\n");
+    assert.ok(releasedTaskIds(readFileSync(ledger, "utf8").split("\n")).has("W1-T9090"), "the control: released by a ledger row");
+    assert.equal(rotateLedger(ledger, { ceilingBytes: 1, smoothingWindowMs: 0 }).rotated, true);
+    const survivors = releasedTaskIds(readFileSync(ledger, "utf8").split("\n"));
+    assert.equal(survivors.has("W1-T9090"), false, "rotation shed the ledger release");
+    assert.deepEqual(runnableCandidates(readPlan(root), () => false, 50, { releasedIds: survivors }).map((t) => t.id), []);
+
+    await runMachineFilingJudge(ports(root, async () => verdict("low", 0.9)).p);
+    assert.deepEqual(
+      runnableCandidates(readPlan(root), () => false, 50, { releasedIds: survivors }).map((t) => t.id),
+      ["W1-T9090"],
+      "the pinned ruling releases with no ledger row at all",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the shared filing path renders a whole machine record and names a lint refusal", () => {
+  const spec = {
+    taskId: "W1-T9095",
+    title: "record the remedy for W1-T9095",
+    origin: "ci-friction:check:x",
+    files: ["docs/ci-friction-remedies.md"],
+    acceptance: [{ claim: "the remedy is recorded", proof: "grep: ci-friction:check:x in docs/ci-friction-remedies.md" }],
+    note: "priced at 12 PR minutes",
+  };
+  const ok = renderMachineShard(spec);
+  assert.equal(ok.refused, undefined);
+  const task = loadPlanFromYaml(ok.text, "a.yaml").tasks[0]!;
+  assert.deepEqual([task.verify, task.risk, task.author_class, task.origin], ["human", "low", "machine", "ci-friction:check:x"]);
+  assert.match(String(renderMachineShard({ ...spec, acceptance: [{ claim: "c", proof: "no dialect" }] }).refused), /proof/);
+  assert.match(String(renderMachineShard({ ...spec, taskId: "not an id: [" }).refused), /unparseable/);
 });
