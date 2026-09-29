@@ -1839,7 +1839,7 @@ export function buildGather(opts: {
     failedReviewFeedback,
     failedReviewCandidates: mineFailedReviewReasonCandidatesFromFeedback(failedReviewFeedback),
     // Drafted from the SAME candidates above, never re-mined (W1-T2766).
-    skillDrafts: proceduralCandidates.map((c) => renderSkillDraft(c)).filter((d): d is SkillDraft => d !== undefined),
+    skillDrafts: proceduralCandidates.map((c) => renderSkillDraft(c, { runs: merged, records })).filter((d): d is SkillDraft => d !== undefined),
     learningsNow: learningsCount(opts.learningsMd),
     learningsAtMarker: opts.learningsAtMarker ?? 0,
     ...(githubUnavailable ? { githubUnavailable } : {}),
