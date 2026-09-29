@@ -12,7 +12,16 @@
   origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-operator-1790600000"
   plan_refs: [W1-T4659]
-  files: [src/lib/panel-actions.ts, src/lib/escalation-precision.ts, test/a-dismissed-escalation-records-why.test.ts, test/route-wiring.test.ts]
+  files:
+    - src/lib/panel-actions.ts
+    - src/lib/escalation-precision.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/a-dismissed-escalation-records-why.test.ts
+    - test/route-wiring.test.ts
+    - test/panel-actions.test.ts
+    - test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts
+    - test/serve-write-tier-wiring.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -24,7 +33,8 @@
     (i) mark-handled requires a disposition; closing an issue on GitHub without one records 'unrecorded'.
     (ii) escalation-precision.ts computes acted-on precision per class over the ledger.
     (iii) A class whose precision is low moves to a board signal (tiered: issue -> digest line -> board), recomputed each
-    retro; MANUAL and HARD_STOP never demote.
+    retro; MANUAL and HARD_STOP never demote. Update the route's existing callers and published API schema for the
+    required request fields and expanded response.
   acceptance:
     - claim: "mark-handled records the disposition"
       proof: 'grep: test("W1-T4677: mark-handled records the disposition" in test/a-dismissed-escalation-records-why.test.ts'
