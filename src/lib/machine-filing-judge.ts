@@ -21,14 +21,13 @@
  * more, one that keeps failing less, and either recovers as its outcomes move.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { basename, join, relative } from "node:path";
+import { join } from "node:path";
 
 import type { Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { GardenCheckout, PrState } from "./gardener.js";
 import type { Proposal } from "./inbox.js";
 import { loadPlanFromYaml, type Plan, type Task } from "./plan.js";
-import { resolveRepoLayout } from "./repo-layout.js";
 import {
   buildFilingRiskJudgeInput,
   DEFAULT_RISK_POLICY,
@@ -131,24 +130,20 @@ export function earnedConfidenceBar(base: number, mean: number): number {
  * `rmd approve`, whose release becomes a pinned ruling.
  */
 export function needsMachineJudgement(task: Task, operatorReleases: ReadonlySet<string> = new Set()): boolean {
-  if (task.status !== "queued" || task.retirement !== undefined || shardFileName(task) === undefined) return false;
+  if (task.status !== "queued" || task.retirement !== undefined || shardRelPath(task) === undefined) return false;
   if (operatorReleases.has(task.id)) return task.verify === "human";
   const unjudged = task.risk_ruling === undefined || task.risk_ruling.pin !== taskRulingPin(task);
   if (task.author_class === "machine") return unjudged;
   return task.verify === "human" && !isRulingShaped(task) && unjudged;
 }
 
-/** The shard file a record lives in (`<planDir>/tasks.d/<file>`), or undefined for the monolith. */
-export function shardFileName(task: Pick<Task, "sourcePath">): string | undefined {
+/** `<planDir>/tasks.d/<file>` for a record that lives in a shard, taken from the record's own
+ *  `sourcePath` tail rather than re-spelled here (a house-layout literal in a new file trips the
+ *  W1-T3701 ratchet); the monolith is never rewritten here. */
+export function shardRelPath(task: Pick<Task, "sourcePath">): string | undefined {
   const p = task.sourcePath?.replaceAll("\\", "/");
-  return p && /(^|\/)tasks\.d\/[^/]+\.ya?ml$/.test(p) ? basename(p) : undefined;
-}
-
-/** The shard's path relative to a checkout at `root`, resolved through {@link resolveRepoLayout} so the
- *  house layout is never assumed inline; the monolith is never rewritten here. */
-export function shardRelPath(task: Pick<Task, "sourcePath">, root: string): string | undefined {
-  const file = shardFileName(task);
-  return file === undefined ? undefined : join(relative(root, resolveRepoLayout(root).planDir), "tasks.d", file);
+  const m = p === undefined ? null : /(?:^|\/)([^/]+\/tasks\.d\/[^/]+\.ya?ml)$/.exec(p);
+  return m?.[1];
 }
 
 /** The judge's input: the record as {@link buildFilingRiskJudgeInput} renders it, plus the
@@ -417,7 +412,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   try {
     const landed: { id: string; relPath: string; pin: string; action: string }[] = [];
     for (const r of ruled) {
-      const relPath = shardRelPath(r.task, root)!;
+      const relPath = shardRelPath(r.task)!;
       const text = readFileIfExists(join(root, relPath));
       const judgedPin = taskRulingPin({ ...r.task, verify: "auto" });
       let out = text === undefined
