@@ -127,6 +127,26 @@ test("W1-T4671: a trusted strike-2 measurement is actually incorporated, not jus
   );
 });
 
+test("W1-T4671: a shape at the exact break-even pass rate keeps the default schedule (a tie never overrides it)", () => {
+  // W1-T4671 round-3 follow-up: no prior case in this file ever landed on the THIRD arm of
+  // strikeScheduleFor's direction ternary ("keeps-default-two-strike-schedule") or exercised the
+  // strict `cost < bestCost` comparison's tie-break behaviour — every existing case picked a
+  // budget strictly cheaper or strictly pricier than the default. At OPUS_WINDOW_COST_MULTIPLIER=2
+  // and a measured 50% strike-1 pass rate (reused for every later position, single-position
+  // evidence), hand computation of expectedWindowsForSchedule gives EXACTLY 2.0 for budgets 1, 2,
+  // AND 3 -- a genuine three-way tie, not an approximation. Since the comparison loop only
+  // replaces `best` on a STRICT improvement (`cost < bestCost`), and `best` starts at
+  // DEFAULT_CHEAP_STRIKE_BUDGET, a tie must leave the schedule at the default: this is the
+  // falsifier for a regression that used `<=` instead and let a later, no-better candidate win.
+  const shape = taskShapeKey(RISKY_SHAPE_TASK);
+  const rows = rowsForShape(shape, 1, { n: 20, passN: 10 });
+  const rates = measureStrikePassRates(rows);
+  assert.equal(rates.get(`${shape}::1`)?.passRate, 0.5, "exactly the break-even rate for OPUS_WINDOW_COST_MULTIPLIER=2");
+  const schedule = strikeScheduleFor({ task: RISKY_SHAPE_TASK, rates });
+  assert.equal(schedule.cheapStrikeBudget, DEFAULT_CHEAP_STRIKE_BUDGET, "a tie must keep the default, never wander to a no-better candidate");
+  assert.match(schedule.reason, /keeps-default-two-strike-schedule/);
+});
+
 test("W1-T4671: expectedWindowsForSchedule reuses the last measured position past the evidence", () => {
   // A single measured position (strike 1 only) at a high pass rate: a 3-strike schedule should
   // reuse that same rate for strikes 2 and 3, and cost less than a 1-strike schedule that pays
