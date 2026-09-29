@@ -383,7 +383,6 @@ export interface AssistantControlOptions extends Pick<PanelActionDeps, "root" | 
   claimRoot: string;
   instance: string;
   repository?: string;
-  /** The serve process's captured boot revision, not a checkout reread on each request. */
   bootSha?: string;
   afterClaim?: () => void;
   afterEffect?: () => void;
@@ -442,13 +441,11 @@ async function assistantClaimStoreState(root: string): Promise<"writable_unverif
     await access(dir, constants.R_OK | constants.W_OK);
     return "writable_unverified";
   } catch (error) {
-    // An unused store can be initialized by POST; any other stat/access failure is unavailable.
+    // An unused store can be initialized by POST; other failures are unavailable.
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? "uninitialized" : "unavailable";
   }
 }
 
-/** A read-only capability probe. A configured shared path is not proof that every writer has
- * mounted the same filesystem, so the response deliberately never advertises admission as healthy. */
 export function buildAssistantControlCapabilityRoute(deps: AssistantControlOptions): Route {
   return {
     method: "GET", path: "/v1/control/assistant-action/status", scope: "read",
@@ -466,8 +463,6 @@ export function buildAssistantControlCapabilityRoute(deps: AssistantControlOptio
   };
 }
 
-/** Resolve an exact action without dispatching or recreating it. This is intentionally stricter
- * than the old POST replay contract: legacy claims without actor/target binding remain unavailable. */
 export function buildAssistantControlReceiptRoute(deps: AssistantControlOptions): Route {
   return {
     method: "GET", path: "/v1/control/assistant-action/receipt", scope: "read",
@@ -506,7 +501,6 @@ export function buildAssistantControlReceiptRoute(deps: AssistantControlOptions)
   };
 }
 
-/** Return the real side effect and ledger row, never an inferred token outcome. */
 function assistantControlReceipt(input: AssistantControlInput, deps: AssistantControlOptions, origin: string) {
   const tag = { assistant_action_id: input.actionId, assistant_instance: deps.instance };
   if (input.action === "pause") {
