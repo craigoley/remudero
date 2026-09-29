@@ -145,6 +145,7 @@ export interface ExperimentArmReport {
   meanCashCostUsd: number | null;
   meanNotionalCostUsd: number | null;
   costMissingAssignments: number;
+  nonStarterAssignments: number;
 }
 
 export interface ExperimentReport {
@@ -188,7 +189,7 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
   const armsSeen = new Map<string, Set<string>>();
   const crossed = new Set<string>();
   const assignmentTask = new Map<string, string>();
-  const receipts = new Map<string, { minutes?: number; tokens?: number; cost?: number; billingMode?: "api" | "subscription" }>();
+  const receipts = new Map<string, { minutes?: number; tokens?: number; cost?: number; billingMode?: "api" | "subscription"; attempted?: true }>();
   const excludedAssignments = { genericUnit: 0, changedTreatment: 0 };
   const merges: Array<{ task: string; ts: string }> = [];
   const fixes: Array<{ task: string; ts: string }> = [];
@@ -233,6 +234,7 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       const duration = num(row.worker_duration_ms);
       receipts.set(receiptId, {
         ...prior,
+        ...(step === "worker.attempt" ? { attempted: true as const } : {}),
         ...(duration !== undefined ? { minutes: duration / 60_000 } : {}),
         ...(tokenTotal(row.tokens) !== undefined ? { tokens: tokenTotal(row.tokens) } : {}),
         ...(num(row.total_cost_usd) !== undefined ? { cost: num(row.total_cost_usd) }
@@ -263,6 +265,7 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       meanCashCostUsd: mean(armReceipts.flatMap((receipt) => (receipt.cost === undefined || receipt.billingMode !== "api" ? [] : [receipt.cost]))),
       meanNotionalCostUsd: mean(armReceipts.flatMap((receipt) => (receipt.cost === undefined || receipt.billingMode !== "subscription" ? [] : [receipt.cost]))),
       costMissingAssignments: armAssignments.filter((receipt) => receipt?.cost === undefined || receipt.billingMode === undefined).length,
+      nonStarterAssignments: armAssignments.filter((receipt) => receipt?.attempted !== true).length,
     };
   });
   return {
@@ -311,7 +314,8 @@ export async function routingAbCommand(rest: string[], opts: RoutingAbCommandOpt
         `  ${arm.arm} (${arm.provider}): ${arm.tasks} tasks, ${arm.merged} merged (${fmt(arm.mergeRate, 100, "%")}), ` +
           `${fmt(arm.meanFixDispatches)} fix dispatches/task, ${fmt(arm.medianWorkerMinutes)} min median, ` +
           `${fmt(arm.meanTokens, 1, "", 0)} tokens, $${fmt(arm.meanCashCostUsd, 1, "", 2)} cash, ` +
-          `$${fmt(arm.meanNotionalCostUsd, 1, "", 2)} notional (${arm.costMissingAssignments} cost missing)`,
+          `$${fmt(arm.meanNotionalCostUsd, 1, "", 2)} notional (${arm.costMissingAssignments} cost missing, ` +
+          `${arm.nonStarterAssignments} without attempt receipt)`,
       );
     }
   }
