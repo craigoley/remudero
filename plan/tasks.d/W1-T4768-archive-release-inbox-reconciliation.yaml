@@ -13,6 +13,8 @@
   status: queued
   attempts: 0
   rationale: |
+    W1-T4768 is the remotely reserved replacement after W1-T4765 was found held by a
+    different filing branch; the contested reservation was not deleted or handed off.
     W1-T4738 retires an exact verify-human ask when its ratify.approved release is in the
     live ledger. W1-T4742's census can see positive release rows in retained archives and
     flag contradictions, but classification still reads only the live file. Rotation can
