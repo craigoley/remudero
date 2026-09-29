@@ -5,7 +5,9 @@
   type: implement
   verify: human
   risk: high
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # plan gardener: merge W1-T4734 into W1-T4733 — Its title and files repeat an older queued task.
   attempts: 0
   author_class: machine
   origin: "selector-shadow:e51da56e7bd10b2f729da27432f4b75aff565fb0:narrow:test/fast-gate-admits-the-census-class.test.ts"
