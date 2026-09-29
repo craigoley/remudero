@@ -9,7 +9,7 @@
   risk: low
   origin: "feedback#fb-1790036783486-fcf82d"
   plan_refs: []
-  files: [src/run-task.ts, test/branch-reaper.test.ts]
+  files: [src/lib/branch-reaper.ts, src/run-task.ts, test/branch-reaper.test.ts, test/branch-reap-batched-facts.test.ts, test/branch-reap-names-what-it-holds.test.ts, test/branch-reaper-dry-run.test.ts]
   status: merged
   attempts: 0
   rationale: |
