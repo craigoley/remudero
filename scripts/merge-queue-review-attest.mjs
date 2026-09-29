@@ -102,6 +102,9 @@ export async function main({ env = process.env, fetchImpl = fetch, log = console
   return ok ? 0 : 1;
 }
 
+// diff-cov: process-boundary — direct CLI dispatch only translates main()'s tested return into a
+// process exit code; every decision main() itself makes is exercised directly in
+// test/merge-queue-review-attest.test.ts via its injectable env/fetchImpl/log seams.
 if (isMainModule(import.meta.url)) {
   process.exitCode = await main();
 }
