@@ -21116,7 +21116,9 @@ export function reapBranchesCommand(
   // per-branch semantics they preserve (including the "name inside a longer name's match" case).
   const remoteTips = readRemoteBranchTips(exec);
   const tipInMainMembership = readTipInMainMembership(exec);
-  const namedInSourceSet = readNamedInSource(exec, names);
+  const namedInSourceSet = readNamedInSource(exec, names, checkoutRoot, (why) =>
+    printError(`rmd reap-branches: the source-reference scan FAILED (${why}) — every branch is held as named in source`),
+  );
   const mergedHeadCache = opts.mergedHeadShaCache;
 
   const facts: BranchFacts[] = names.map((name) => {
