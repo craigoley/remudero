@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { RELEASE_LEDGER_STEP, assertRunnable, releasedTaskIds } from "../src/lib/plan.js";
+import { RELEASE_LEDGER_STEP, assertRunnable, parseTasksFromYaml, releasedTaskIds } from "../src/lib/plan.js";
 import { nextRunnable, resolveReleasedIds, runDrain } from "../src/lib/drain.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -163,6 +163,31 @@ test("W1-T3216: assertRunnable admits the released task and still refuses the un
     /verify:human/,
     "the wall still stands for everything the operator did not name",
   );
+});
+
+test("W1-T216: a task-scoped hold outranks a daemon judge release at selection and direct admission", () => {
+  const yaml = `- id: W1-T216
+  title: Controlled security drill
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  status: queued
+  dispatch_hold: true
+`;
+  const [held] = parseTasksFromYaml(yaml, "hold-fixture");
+  assert.equal(held?.dispatch_hold, true, "the hold must survive YAML loading");
+  assert.throws(() => parseTasksFromYaml(yaml.replace("dispatch_hold: true", 'dispatch_hold: "true"'), "bad-hold"), /dispatch_hold must be a boolean/);
+  const released = resolveReleasedIds({ readLedgerLines: () => [
+    row({ step: RELEASE_LEDGER_STEP, task_id: "W1-T216", actor: "daemon", released_by: "verify-human-judge" }),
+    row({ step: RELEASE_LEDGER_STEP, task_id: "W1-T2222" }),
+  ] });
+  assert.equal(released.has("W1-T216"), true, "positive control: the prior judge row still reaches the selector");
+  const plan = planOf([held as never, parked("W1-T2222")]);
+  assert.equal(nextRunnable(plan, NEVER_MERGED, { releasedIds: released } as never)?.id, "W1-T2222", "unrelated released work still flows");
+  assert.throws(() => assertRunnable(plan, held!, NEVER_MERGED, released), /task-scoped dispatch hold/);
+  const unheld = { ...held!, dispatch_hold: false };
+  assert.doesNotThrow(() => assertRunnable(planOf([unheld]), unheld, NEVER_MERGED, released), "removing only the hold restores ordinary release admission");
 });
 
 test("W1-T3216: with NO reader wired the released set is EMPTY — a door added, never a wall removed", () => {
