@@ -31,15 +31,15 @@ import { parkedVerifyHumanShards, shardEvidence } from "../src/run-task.js";
 
 const clock = { now: () => Date.UTC(2026, 8, 22), date: () => new Date(Date.UTC(2026, 8, 22)), iso: () => "2026-09-22T00:00:00.000Z" };
 
-// `files: [DECISIONS.md]` makes the record ruling-shaped: since the operator ruling of 2026-09-29 only
-// rulings stay on this operator-facing sweep (every other verify: human record goes to the machine judge).
-function planWith(extra: string, rulingShaped = true): string {
+/** `ruling: true` declares DECISIONS.md, the only shape that still reaches the operator-facing sweep
+ *  (operator ruling 2026-09-29: every other verify: human record goes to the machine-filing judge). */
+function planWith(extra: string, ruling = true): string {
   const root = mkdtempSync(join(tmpdir(), "rmd-ev-"));
   mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
   writeFileSync(
     join(root, "plan", "tasks.yaml"),
     ["- id: W1-T9100", '  title: "THE ci-gate GATE REFUSED 36 PULL REQUESTS IN THIS WINDOW"', "  repo: remudero",
-     "  type: implement", "  verify: human", ...(rulingShaped ? ["  files: [DECISIONS.md]"] : []), "  status: queued", "  depends_on: []", extra, ""].join("\n"),
+     "  type: implement", "  verify: human", ...(ruling ? ["  files: [DECISIONS.md]"] : []), "  status: queued", "  depends_on: []", extra, ""].join("\n"),
     "utf8",
   );
   return root;
@@ -75,10 +75,9 @@ test("evidence is BOUNDED — a giant note is summarised, not pasted", () => {
 
 test("ABSENT STAYS ABSENT — a shard carrying no evidence reports none", () => {
   // Re-creating the defect in reverse would be just as bad: a shard with nothing to show must not
-  // be dressed up as one that has evidence.
+  // be dressed up as one that has evidence. A ruling-shaped record always declares DECISIONS.md, so
+  // the sweep can no longer surface an evidence-free shard; the projection is asserted directly.
   const root = planWith("  priority: 1", false);
-  // Read through `shardEvidence` itself: a bare record is no longer ruling-shaped, so it never reaches
-  // `parkedVerifyHumanShards` (operator ruling 2026-09-29), and the declared ruling file would be evidence.
   const task = loadPlan(join(root, "plan", "tasks.yaml")).byId.get("W1-T9100")!;
   assert.equal(shardEvidence(task), undefined, "no evidence must read as undefined, never an empty string");
 });
@@ -95,8 +94,8 @@ test("ABSENT STAYS ABSENT — a shard carrying no evidence reports none", () => 
  */
 test("absence is DISTINGUISHABLE from withheld evidence — none reads undefined, a corpus reads through", () => {
   const bare = planWith("  priority: 1", false);
-  const none = { evidence: shardEvidence(loadPlan(join(bare, "plan", "tasks.yaml")).byId.get("W1-T9100")!) };
-  assert.equal(none.evidence, undefined, "no evidence must read as undefined, never an empty string");
+  const none = shardEvidence(loadPlan(join(bare, "plan", "tasks.yaml")).byId.get("W1-T9100")!);
+  assert.equal(none, undefined, "no evidence must read as undefined, never an empty string");
 
   const carrying = planWith('  ci_learning_prs: [5289, 5318, 5321]\n  origin: "ci-learning:5289:ci-gate"');
   const [some] = parkedVerifyHumanShards(loadPlan(join(carrying, "plan", "tasks.yaml")), carrying, clock);

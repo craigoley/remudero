@@ -33,6 +33,7 @@ import {
   needsMachineJudgement,
   renderRuledShard,
   runMachineFilingJudge,
+  shardRelPath,
   startMachineFilingJudge,
   type MachineJudgePorts,
 } from "../src/lib/machine-filing-judge.js";
@@ -693,4 +694,16 @@ test("released work dispatches costliest first and unpriced work mid-queue", asy
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("shardRelPath names a shard by its plan directory and refuses the monolith, a nested path and a non-yaml file", () => {
+  assert.equal(shardRelPath({ sourcePath: "/repo/plan/tasks.d/W1-T1-x.yaml" }), "plan/tasks.d/W1-T1-x.yaml");
+  assert.equal(shardRelPath({ sourcePath: "plan\\tasks.d\\W1-T1-x.yml" }), "plan/tasks.d/W1-T1-x.yml", "a windows-style label is normalised");
+  assert.equal(shardRelPath({ sourcePath: "/repo/docs/tasks.d/W1-T1-x.yaml" }), "docs/tasks.d/W1-T1-x.yaml", "a relocated plan dir is named by the record's own path");
+  assert.equal(shardRelPath({ sourcePath: "docs/tasks.d/W1-T1-x.yaml" }), "docs/tasks.d/W1-T1-x.yaml", "a root-relative label keeps its plan dir");
+  assert.equal(shardRelPath({ sourcePath: "tasks.d/W1-T1-x.yaml" }), undefined, "a shard dir with no plan dir above it is not a shard");
+  assert.equal(shardRelPath({ sourcePath: "/repo/plan/tasks.yaml" }), undefined, "the monolith is never a shard");
+  assert.equal(shardRelPath({ sourcePath: "/repo/plan/tasks.d/sub/W1-T1-x.yaml" }), undefined, "a nested path is not a shard");
+  assert.equal(shardRelPath({ sourcePath: "/repo/plan/tasks.d/notes.txt" }), undefined, "a non-yaml file is not a shard");
+  assert.equal(shardRelPath({}), undefined, "a record with no source is not a shard");
 });

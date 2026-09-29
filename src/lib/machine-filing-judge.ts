@@ -130,19 +130,20 @@ export function earnedConfidenceBar(base: number, mean: number): number {
  * `rmd approve`, whose release becomes a pinned ruling.
  */
 export function needsMachineJudgement(task: Task, operatorReleases: ReadonlySet<string> = new Set()): boolean {
-  if (task.status !== "queued" || task.retirement !== undefined || !shardRelPath(task)) return false;
+  if (task.status !== "queued" || task.retirement !== undefined || shardRelPath(task) === undefined) return false;
   if (operatorReleases.has(task.id)) return task.verify === "human";
   const unjudged = task.risk_ruling === undefined || task.risk_ruling.pin !== taskRulingPin(task);
   if (task.author_class === "machine") return unjudged;
   return task.verify === "human" && !isRulingShaped(task) && unjudged;
 }
 
-/** `<plan dir>/tasks.d/<file>` for a record that lives in a shard; the monolith is never rewritten here.
- *  The plan directory's name is read off the record's own path, as plan.ts reads shards from
- *  `<planDir>/tasks.d`, so a layout that relocates the plan is not assumed away (repo-layout.ts). */
+/** `<planDir>/tasks.d/<file>` for a record that lives in a shard, taken from the record's own
+ *  `sourcePath` tail rather than re-spelled here (a house-layout literal in a new file trips the
+ *  W1-T3701 ratchet); the monolith is never rewritten here. */
 export function shardRelPath(task: Pick<Task, "sourcePath">): string | undefined {
-  const m = /(?:^|\/)([^/]+)\/tasks\.d\/([^/]+\.ya?ml)$/.exec(task.sourcePath?.replaceAll("\\", "/") ?? "");
-  return m ? `${m[1]}/tasks.d/${m[2]}` : undefined;
+  const p = task.sourcePath?.replaceAll("\\", "/");
+  const m = p === undefined ? null : /(?:^|\/)([^/]+\/tasks\.d\/[^/]+\.ya?ml)$/.exec(p);
+  return m?.[1];
 }
 
 /** The judge's input: the record as {@link buildFilingRiskJudgeInput} renders it, plus the
