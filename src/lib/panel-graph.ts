@@ -88,7 +88,7 @@ import {
   type Policy,
 } from "./policy.js";
 import { buildActionResultsRoute } from "./action-results.js";
-import { createLedgerRotationMemo, readLedgerUnionRecordsSync, rotationStampIso } from "./ledger-union.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, rotationStampIso } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
 import { fleetLaneDecisions, readFleetLaneStore, writeClassificationSnapshot, type FleetLaneDecision } from "./fleet-lane.js";
@@ -96,6 +96,7 @@ import { inboxOwner } from "./inbox-owner.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
 import {
   listThreadViews,
+  buildAttentionCensus,
   markThreadRead,
   readMarksPath,
   readReadMarks,
@@ -115,6 +116,7 @@ import {
   parseDraftCache,
   parseDraftInFlightCache,
   parseProposalRegistry,
+  parseProposalRegistryResult,
   applyProposalVerdict,
   type ProposalVerdictKind,
   pruneRatifiedProposals,
@@ -1419,10 +1421,12 @@ export function draftedTaskSummaries(fragmentYaml: string, proposalId: string): 
 /** What every /v1/inbox* route reads off one classification pass. Shared, never copied, by the memo below:
  *  callers treat every array and object in it as READ-ONLY. */
 export interface ClassifiedInbox {
+  plan: Plan;
   registryPath: string;
   proposals: Proposal[];
   classifications: InboxClassification[];
   ledgerLines: LedgerLines;
+  projection: Map<string, StatusProjection>;
 }
 
 function statStamp(path: string): string | undefined {
@@ -1563,7 +1567,7 @@ function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: strin
   const ledgerLines = readLedgerLines(deps.ledgerPath);
   const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
   const pass = prepareInboxPass(deps, plan, projection, ledgerLines, anchorGrepFor(deps, sha));
-  return { registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines };
+  return { plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines, projection };
 }
 
 /** The plan's change stamp when it is read off disk: tasks.yaml plus every entry of its shard directory. */
@@ -1663,7 +1667,7 @@ export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?
   const reused = reusableResult(state, fp);
   if (reused !== undefined) return reused;
   const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha));
-  const result = { registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines: fp.ledgerLines };
+  const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines: fp.ledgerLines, projection: fp.projection };
   state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result };
   return result;
 }
@@ -1698,7 +1702,7 @@ export async function classifyAllProposalsSliced(
       if (i > 0) await yieldNow();
       for (const proposal of pass.proposals.slice(i, i + INBOX_CLASSIFY_SLICE)) classifications.push(pass.classifyOne(proposal));
     }
-    const result = { registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines };
+    const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines, projection: fp.projection };
     state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result };
     return result;
   };
@@ -1813,8 +1817,8 @@ const CLASSIFICATION_TO_THREAD_STATE: Partial<Record<string, InboxThreadItem["st
 
 /** Every operator-owned item with its plain message and state, off the SAME classification
  *  `GET /v1/inbox` renders. */
-function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): InboxThreadItem[] {
-  const { proposals, classifications } = classifyAllProposalsMemo(deps, readPlanSnapshot);
+function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan, classified = classifyAllProposalsMemo(deps, readPlanSnapshot)): InboxThreadItem[] {
+  const { proposals, classifications } = classified;
   const plainStore = readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
   const items: InboxThreadItem[] = [];
   for (const c of classifications) {
@@ -1824,6 +1828,65 @@ function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan
     items.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), state });
   }
   return items;
+}
+
+/** Archive releases and judge receipts are memoized across requests; never reparse all rotations
+ * synchronously on the serve thread or mistake an unreadable archive for proof of absence. */
+const attentionLedgerMemos = new WeakMap<PanelGraphDeps, ReturnType<typeof createLedgerRotationMemo>>();
+function attentionLedgerMemo(deps: PanelGraphDeps) {
+  let memo = attentionLedgerMemos.get(deps);
+  if (!memo) {
+    memo = createLedgerRotationMemo((rows) => rows.filter((row) => row.step === "ratify.approved" || row.step === "verify_human.judged"));
+    attentionLedgerMemos.set(deps, memo);
+  }
+  return memo;
+}
+
+/** GET /v1/inbox/attention-census — read-only, core-scoped, source-qualified. */
+export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
+  return {
+    method: "GET", path: "/v1/inbox/attention-census", scope: "read",
+    handler: async (_req, res) => {
+      const threads = readThreadsOr500(deps, res);
+      if (!threads) return;
+      const classified = await classifyAllProposalsSliced(deps, readPlanSnapshot);
+      const plan = classified.plan;
+      const ledger = await readLedgerUnionRecordsMemoized(dirname(deps.ledgerPath), attentionLedgerMemo(deps), {
+        step: ["ratify.approved", "verify_human.judged"],
+      });
+      const releasedTaskIds = new Set<string>();
+      const judgeByTask = new Map<string, { decision: string; reason: string }>();
+      for (const row of ledger.rows) {
+        if (typeof row.task_id !== "string") continue;
+        if (row.step === "ratify.approved" && row.released === "verify-human") releasedTaskIds.add(row.task_id);
+        if (row.step === "verify_human.judged" && typeof row.judge_decision === "string" && typeof row.judge_reason === "string") {
+          judgeByTask.set(row.task_id, { decision: row.judge_decision, reason: row.judge_reason });
+        }
+      }
+      const registryStamp = statStamp(classified.registryPath);
+      const registryParse = parseProposalRegistryResult(readFileIfExists(classified.registryPath));
+      const liveStamp = statStamp(deps.ledgerPath);
+      const projectionPartial = [...classified.projection.values()].some((value) => value.indeterminate)
+        || classified.classifications.some((value) => value.referentUnverified);
+      const sourceState = (stamp: string | undefined) => stamp === undefined || stamp.startsWith("unreadable:") ? "unavailable" as const : "observed" as const;
+      const census = buildAttentionCensus({
+        views: listThreadViews(operatorThreadItems(deps, readPlanSnapshot, classified), threads,
+          readReadMarks(readMarksPath(join(deps.inboxRoot, "state")))),
+        classifications: classified.classifications,
+        taskFacts: new Map(plan.tasks.map((task) => [task.id, { verify: task.verify, repo: task.repo, title: task.title }])),
+        releasedTaskIds, judgeByTask,
+        mergedTaskIds: new Set([...classified.projection].filter(([, value]) => value.merged).map(([id]) => id)),
+        sources: {
+          plan: "observed", registry: registryParse.kind === "fault" ? "partial" : sourceState(registryStamp), liveLedger: sourceState(liveStamp),
+          // Reading every retained rotation proves positive receipts, never absence before the oldest
+          // retained file. Until a durable continuity index exists, history cannot certify a zero.
+          archiveLedger: ledger.archiveCount === 0 ? "unavailable" : "partial",
+          githubProjection: projectionPartial ? "partial" : "observed",
+        },
+      });
+      sendJson(res, 200, census);
+    },
+  };
 }
 
 /** The thread store every inbox thread route and the daemon's responder share. */
@@ -2359,6 +2422,7 @@ export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: ()
     buildPlanViewRoute(deps, readPlanSnapshot),
     buildInboxRoute(deps, readPlanSnapshot),
     buildInboxThreadsRoute(deps, readPlanSnapshot),
+    buildInboxAttentionCensusRoute(deps, readPlanSnapshot),
     buildInboxThreadRoute(deps, readPlanSnapshot),
   ];
 }
