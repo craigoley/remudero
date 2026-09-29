@@ -27,6 +27,8 @@ import { criterionFieldTampered, planOnlyDiff } from "../src/lib/review.js";
 import {
   appendCiFrictionTrendRow,
   CI_FRICTION_GARDEN_CLASSES,
+  CI_FRICTION_HALF_LIFE_MS,
+  ciFrictionRecencyWeight,
   CI_FRICTION_REMEDIES_FILE,
   ciFrictionGardenLogPath,
   ciFrictionCauseKey,
@@ -176,6 +178,8 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
     openWorkspace: () => ({ root, branch: "ci-friction-garden-test", land: (opts) => (landed.push(opts), "https://github.com/acme/remudero/pull/99"), dispose: () => {} }),
     log: () => {},
     seed: 1,
+    // The pass runs just after its own rounds, so recency weighting leaves them whole.
+    clock: clockFromMillisFn(() => Date.parse("2026-09-24T01:30:00.000Z")),
   };
   const sources: CiFrictionGardenSources = {
     ledgerRecords: () => [
@@ -480,4 +484,38 @@ test("a self-hosting daemon wires the ci-friction gardener with its escalation p
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
   }
+});
+
+test("a sweep fix round with no pr.opened is priced by its own worker minutes and tied to its PR by head", () => {
+  const records: LedgerRecord[] = [
+    { step: "sweep.disposed", run_id: "DAEMON-1", pr_number: 7816, head_sha: "aaa", ts: "2026-09-29T13:21:15.000Z" },
+    { step: "sweep.disposed", run_id: "DAEMON-1", pr_url: "https://github.com/acme/remudero/pull/7830", head_sha: "bbb", ts: "2026-09-29T13:22:00.000Z" },
+    { step: "fix.dispatch", run_id: "DAEMON-1", round: "resume", mode: "reviewer-unmet", head_sha: "aaa", elapsed_ms: 870_000, ts: "2026-09-29T13:36:01.000Z" },
+    { step: "fix.dispatch", run_id: "DAEMON-1", round: "resume", mode: "ci-log", head_sha: "bbb", elapsed_ms: 300_000, ts: "2026-09-29T13:40:00.000Z" },
+    // A body-only repair spawns no worker and names no elapsed time: counted nowhere rather than
+    // priced by a gap that spans other PRs' rounds on the shared sweep run.
+    { step: "fix.dispatch", run_id: "DAEMON-1", round: "resume", mode: "body-repair", head_sha: "bbb", ts: "2026-09-29T15:00:00.000Z" },
+  ];
+  assert.deepEqual(ciFrictionRoundsFromLedger(records), [
+    { pr: 7816, cause: { kind: "check", name: "reviewer-unmet" }, minutes: 14.5, at: "2026-09-29T13:36:01.000Z" },
+    { pr: 7830, cause: { kind: "check", name: "ci-log" }, minutes: 5, at: "2026-09-29T13:40:00.000Z" },
+  ]);
+});
+
+test("an old friction round fades by its half-life so a cause that stops recurring falls in the ranking", () => {
+  const now = Date.parse("2026-09-29T00:00:00.000Z");
+  const day = 24 * 3_600_000;
+  const at = (daysAgo: number) => new Date(now - daysAgo * day).toISOString();
+  const rounds = [
+    { pr: 1, cause: { kind: "check" as const, name: "reviewer-unmet" }, minutes: 400, at: at(30) },
+    { pr: 2, cause: { kind: "check" as const, name: "ci-log" }, minutes: 60, at: at(1) },
+  ];
+  assert.equal(priceCiFrictionCauses(rounds)[0]!.cause.name, "reviewer-unmet", "all-time pricing ranks stale history first");
+  const recent = priceCiFrictionCauses(rounds, undefined, now);
+  assert.equal(recent[0]!.cause.name, "ci-log", "the current load outranks a month-old burst");
+  assert.equal(ciFrictionRecencyWeight(at(7), now), 0.5);
+  assert.equal(ciFrictionRecencyWeight(undefined, now), 1);
+  // Two half-lives with no new rounds: the cause's price is a quarter of what it was.
+  const later = priceCiFrictionCauses(rounds, undefined, now + 2 * CI_FRICTION_HALF_LIFE_MS);
+  assert.equal(later.find((p) => p.cause.name === "ci-log")!.minutes, Math.round(recent.find((p) => p.cause.name === "ci-log")!.minutes / 4 * 10) / 10);
 });
