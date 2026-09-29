@@ -147,7 +147,7 @@ export function judgeGardenPending<C extends string>(state: GardenState<C>, now:
   return { state, verdict: "waiting" };
 }
 
-/** A class a person reviews is judged by that person: a merged PR credits it, a closed one debits it. */
+/** A terminal PR verdict: reviewed merges earn credit; closing any pending PR earns a debit. */
 export function judgeGardenDecision<C extends string>(state: GardenState<C>, prState: PrState): { state: GardenState<C>; verdict: PendingVerdict } {
   const pending = state.pending;
   if (!pending) return { state, verdict: "none" };
@@ -218,22 +218,38 @@ export function runGarden<C extends string, I, A extends GardenAction<C>, W exte
   deps: GardenerDeps<W>,
 ): { ran: boolean; plan?: GardenPlan<C, A>; prUrl?: string; scorecard?: Record<string, unknown> } {
   const statePath = gardenStatePath(deps.stateDir, spec.name);
+  let state = readGardenState(statePath, spec.classes);
   const cheap = spec.cheapFingerprint();
-  if (readGardenState(statePath, spec.classes).lastCheap === cheap) return { ran: false };
+  const pendingBefore = state.pending;
+  const prState = pendingBefore ? deps.prState?.(pendingBefore.prUrl) ?? "unknown" : undefined;
+  // Closing any PR is a debit, and a reviewed class credits its merge; neither needs a corpus read.
+  if (pendingBefore && (prState === "closed" || (spec.review?.[pendingBefore.actionClass] && prState === "merged"))) {
+    const judged = judgeGardenDecision(state, prState);
+    state = judged.state;
+    deps.log(`${spec.name}.gardener_judged`, { verdict: judged.verdict, classes: state.classes });
+    if (state.lastCheap === cheap) {
+      writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
+      return { ran: false };
+    }
+  }
+  // A metric class needs one inventory at merge to pin its baseline. Later observations follow
+  // the cheap input cadence even when the action fingerprint stays the same. An open or unreadable
+  // PR need not force an expensive read.
+  const terminalMetric = state.pending && !spec.review?.[state.pending.actionClass] &&
+    prState === "merged" && !state.pending.atMerge;
+  if (state.lastCheap === cheap && !terminalMetric) return { ran: false };
   const inventory = spec.inventory();
   const fingerprint = spec.fingerprint(inventory);
-  let state = readGardenState(statePath, spec.classes);
+  if (state.pending) {
+    const judged = spec.review?.[state.pending.actionClass]
+      ? judgeGardenDecision(state, prState ?? "unknown")
+      : judgeGardenPending(state, metricOf(spec, inventory, state.pending.actionClass), prState ?? "unknown");
+    state = judged.state;
+    if (judged.verdict === "credit" || judged.verdict === "debit") deps.log(`${spec.name}.gardener_judged`, { verdict: judged.verdict, classes: state.classes });
+  }
   if (state.lastPass?.fingerprint === fingerprint) {
     writeAtomic(statePath, JSON.stringify({ ...state, lastCheap: cheap }, null, 2) + "\n");
     return { ran: false };
-  }
-  if (state.pending) {
-    const prState = deps.prState?.(state.pending.prUrl) ?? "unknown";
-    const judged = spec.review?.[state.pending.actionClass]
-      ? judgeGardenDecision(state, prState)
-      : judgeGardenPending(state, metricOf(spec, inventory, state.pending.actionClass), prState);
-    state = judged.state;
-    if (judged.verdict === "credit" || judged.verdict === "debit") deps.log(`${spec.name}.gardener_judged`, { verdict: judged.verdict, classes: state.classes });
   }
   const clock = deps.clock ?? systemClock;
   const rng = seededRandom(deps.seed ?? clock.now());

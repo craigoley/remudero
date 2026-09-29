@@ -3129,6 +3129,24 @@ $25 squeeze-day cash ceiling.
 **Sources read 2026-09-24:** Microsoft Azure GPT-6 launch pricing;
 Microsoft Foundry Claude Messages API and deployment guidance; Anthropic Opus 5.5 price sheet.
 
+## 2026-09-29 — OPERATOR RULING: a balanced subscription squeeze runs on Foundry Sonnet 5.5
+
+**Operator-authored direction:** Switch the cash lanes to Sonnet 5.5, as a **balanced squeeze
+emergency**. When both subscriptions block a balanced (`sonnet`) task, it runs on Foundry Claude
+Sonnet 5.5. Routine cash stays on the measured gpt-5-nano, gpt-oss-120b and Luna rows.
+
+- This mirrors the 2026-09-24 Foundry Opus emergency for frontier. Sonnet uses the same
+  `/anthropic/v1/messages` adapter, endpoint and daemon key.
+- Opus and Sonnet reservations share one Foundry Claude cap: $5 per UTC day ordinarily and $10
+  on a squeeze, still inside the shared cash `dailyCapUsd`.
+- A refusal before transport (cap exhausted, absent credentials, unsupported tool surface) falls
+  through to the existing Luna cash fallback, so the ruling never holds a task that runs today.
+- The subscription router's `sonnet` alias leads with `claude-sonnet-5-5` separately (#7819).
+- The deployment exists: `claude-sonnet-5-5` (GlobalStandard, version 2) on synthwatch-foundry
+  answered a 200 through the daemon's own endpoint and key on 2026-09-29.
+- Anthropic lists Sonnet 5.5 at $2 input and $10 output per million tokens.
+- Built by W1-T4785.
+
 ## 2026-09-26 — W1-T4583: the in-repo contract-coverage ratchet is RETIRED; the contract is checked where it is served and where it is consumed
 
 *Operator direction record: carried out under the operator's 2026-09-26 instruction to "file items that need filed, fix items that need fixed, build items that need built" for the old-console follow-up audit that named this ratchet as measuring nothing.*
