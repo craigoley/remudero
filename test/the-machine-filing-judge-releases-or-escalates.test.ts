@@ -591,6 +591,57 @@ test("a record the rewrite refuses is settled until it changes and not re-judged
   }
 });
 
+test("a corrupt judge state file is refused loudly and a pass with no landing tree throws", async () => {
+  const root = planDir({ "W1-T9140-x.yaml": machineShard("W1-T9140") });
+  try {
+    writeFileSync(join(root, MACHINE_JUDGE_STATE_FILE), "null\n");
+    await assert.rejects(runMachineFilingJudge(ports(root, async () => verdict("low", 0.9)).p), /invalid state/);
+    rmSync(join(root, MACHINE_JUDGE_STATE_FILE));
+    await assert.rejects(
+      runMachineFilingJudge(ports(root, async () => verdict("low", 0.9), { writeRoot: undefined }).p),
+      /neither a workspace nor a write root/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a record with no origin belongs to the unknown family", () => {
+  const task = loadPlanFromYaml(machineShard("W1-T9141").replace(/ {2}origin:.*\n/, ""), "a.yaml").tasks[0]!;
+  assert.equal(machineFamily(task), "unknown");
+});
+
+test("the verify-human release names the reason it releases nothing, and releases only on a clean proceed", async () => {
+  const shard = { id: "W1-T9150", title: "t", rationale: "", acceptance: [], ageDays: 1, depsAllMerged: true, citedInSrc: false };
+  const automate = { decision: "automate" as const, reason: "mechanical" };
+  const task = loadPlanFromYaml(operatorShard("W1-T9150"), "a.yaml").tasks[0]!;
+  const written: string[] = [];
+  const base = {
+    task: () => task,
+    riskJudge: async () => verdict("low", 0.99),
+    writeRelease: (id: string) => (written.push(id), { code: 0, message: "ok", released: true }),
+  };
+  const run = (over: Partial<Parameters<typeof releaseAutomatedShard>[2]>) => releaseAutomatedShard(shard, automate, { ...base, ...over });
+
+  const missing = await run({ task: () => undefined });
+  assert.deepEqual([missing.kind, (missing as { reason: string }).reason], ["unavailable", "W1-T9150 does not resolve to a plan record"]);
+  assert.match((await run({ task: () => ({ ...task, verify: "auto" }) }) as { reason: string }).reason, /not parked/);
+  assert.match((await run({ task: () => ({ ...task, status: "merged" }) }) as { reason: string }).reason, /not queued/);
+  const threw = await run({ riskJudge: async () => { throw new Error("spawn timed out"); } });
+  assert.match((threw as { reason: string }).reason, /the risk judge threw: spawn timed out/);
+  const blank = await run({ riskJudge: async () => ({ verdict: "high", availability: "unavailable", confidence: 0, reasons: [] }) });
+  assert.equal(blank.kind, "unavailable");
+  assert.equal((await run({ riskJudge: async () => verdict("high", 0.95, "it changes merge policy") })).kind, "escalated");
+  assert.equal(written.length, 0, "none of the refusals above wrote a release row");
+
+  const refused = await run({ writeRelease: () => ({ code: 1, message: "refused by approve" }) });
+  assert.deepEqual([refused.kind, (refused as { reason: string }).reason], ["unavailable", "refused by approve"]);
+  const notReleased = await run({ writeRelease: () => ({ code: 0, message: "already released", released: false }) });
+  assert.deepEqual([notReleased.kind, (notReleased as { reason: string }).reason], ["escalated", "already released"]);
+  assert.equal((await run({})).kind, "released");
+  assert.deepEqual(written, ["W1-T9150"]);
+});
+
 test("the verify-human release refuses a ruling-shaped record", async () => {
   const task = loadPlanFromYaml(operatorShard("W1-T9130", { files: ["DECISIONS.md"] }), "a.yaml").tasks[0]!;
   assert.ok(isRulingShaped(task));
