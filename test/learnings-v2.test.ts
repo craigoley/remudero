@@ -100,7 +100,8 @@ test("learnings-v2: the live corpus retains its baseline V1 artifact hash", () =
   // #7647 retired ledger-corpus-needs-the-resolver without changing its text or the hash algorithm.
   // PR #7910 retires two more entries. Lifecycle is part of the V1 hash, so these flips update the
   // baseline pin while the corpus remains at 83 entries.
-  assert.equal(computeArtifactHash(corpus), "faa2e3c5fafc6aa16ab8179682ef2300ce85edc195b87b2371ffdc642ffdfc0b");
+  // PRs #7976/#7977 retire bashrc-accident; pin the resulting V1 projection.
+  assert.equal(computeArtifactHash(corpus), "39037c4ba674a5664936cf4ab2cbf46114aa180a60bc179b6abccc993b286b94");
 });
 
 test("learnings-v2: a V1 or legacy artifact carrying origin is refused before trust", () => {
