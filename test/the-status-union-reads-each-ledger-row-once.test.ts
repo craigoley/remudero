@@ -25,8 +25,12 @@ test("a dispatch every rotation re-archived counts once", (t) => {
   for (const hoursAgo of [4, 3, 2]) writeFileSync(join(dir, rotationName(hoursAgo * 3_600_000)), rows.join("\n") + "\n");
   writeFileSync(join(dir, "ledger.ndjson"), rows.join("\n") + "\n");
   const lines = readLedgerUnionBounded(join(dir, "ledger.ndjson"));
-  assert.equal(lines.filter((l) => l.task_id === TASK && l.step === "run.start").length, 8, "the union must carry the replays or this proves nothing");
-  assert.equal(dispatchesWithoutNewOwnedPr(lines, TASK), 2);
+  // W1-T4820: the union itself now returns each row once, so the replays are rebuilt here to keep the
+  // streak's own guard (#7920) under test.
+  assert.equal(lines.filter((l) => l.task_id === TASK && l.step === "run.start").length, 2);
+  const replayed = [...lines, ...lines, ...lines, ...lines];
+  assert.equal(replayed.filter((l) => l.task_id === TASK && l.step === "run.start").length, 8, "the replays must be present or this proves nothing");
+  assert.equal(dispatchesWithoutNewOwnedPr(replayed, TASK), 2);
 });
 
 test("a lone run.start replayed across rotations is still an orphan", (t) => {
