@@ -1499,9 +1499,9 @@ export function parseWhitelistedProof(proof: string, target?: SuiteRegistryTarge
  *  completed but ZERO tests matched: NOT a failing test, so the caller degrades it to `not_executable`. */
 export type ProofResult = "pass" | "fail" | "no-match" | "cannot-load";
 export type ProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => "pass" | "fail" | "no-match";
-export class ProofCannotLoadError extends Error {
+export class ProofCannotLoadError extends RmdError {
   constructor(readonly loadError: string) {
-    super(`proof test files could not load after a toolchain refresh: ${loadError}`);
+    super("usage", GENERIC_EXIT_CODE, `proof test files could not load after a toolchain refresh: ${loadError}`, { loadError });
   }
 }
 export type BrowserPreflightRunner = (cwd: string) => void;
