@@ -76,6 +76,7 @@ export interface StackPrerequisiteCheck {
   state: "unstacked" | "ready" | "blocked" | "unreadable";
   parentNumbers: number[];
   pendingParentNumbers?: number[];
+  openParentNumbers?: number[];
   detail?: string;
 }
 
@@ -139,6 +140,7 @@ export function stackPrerequisiteFromRest(prUrl: string, fetch: GhApiFetcher = g
   }
 
   const pendingParentNumbers: number[] = [];
+  const openParentNumbers: number[] = [];
   for (const parentNumber of parentNumbers) {
     let parentState: string;
     try {
@@ -154,6 +156,7 @@ export function stackPrerequisiteFromRest(prUrl: string, fetch: GhApiFetcher = g
     if (parentState === "MERGED") continue;
     if (parentState === "OPEN" || parentState === "CLOSED") {
       pendingParentNumbers.push(parentNumber);
+      if (parentState === "OPEN") openParentNumbers.push(parentNumber);
       continue;
     }
     return {
@@ -167,6 +170,7 @@ export function stackPrerequisiteFromRest(prUrl: string, fetch: GhApiFetcher = g
         state: "blocked",
         parentNumbers,
         pendingParentNumbers,
+        openParentNumbers,
         detail: `declared parent(s) ${pendingParentNumbers.map((number) => `#${number}`).join(", ")} are not merged`,
       }
     : { state: "ready", parentNumbers };
