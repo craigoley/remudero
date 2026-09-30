@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, fstatSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -26,7 +26,7 @@ import {
   type ReadModelView,
   type ReadModelWorkerMessage,
 } from "../src/lib/read-model-worker.js";
-import { buildServeServer, readModelInstances, stopServeReadModel, type ServeDeps } from "../src/lib/serve.js";
+import { buildServeServer, readModelInstances, resolveConsoleSha, stopServeReadModel, type ServeDeps } from "../src/lib/serve.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
@@ -444,6 +444,22 @@ test("the switch file keeps its last good reading and a view switched off is not
   assert.equal(sink.messages.filter((m) => m.type === "body").length, 1, "one body, and an unchanged body is not re-posted");
 });
 
+test("a switch file rewritten while it is being read is refused rather than half-read", (t) => {
+  const stateDir = scratch(t, "rmw-switch-race");
+  const path = readModelSwitchesPath(stateDir);
+  mkdirSync(join(stateDir, "read-model"), { recursive: true });
+  writeFileSync(path, JSON.stringify({ projector: "on" }));
+  let calls = 0;
+  // The operator's rewrite lands between the reader's two looks at the open file.
+  const read = readReadModelSwitches(path, (fd) => {
+    if (++calls === 2) appendFileSync(path, "\n");
+    return fstatSync(fd, { bigint: true });
+  });
+  assert.equal(calls, 2);
+  assert.deepEqual(read, { ok: false, reason: "switch file changed while being read" });
+  assert.equal(readReadModelSwitches(path).ok, true, "the control: the same file read undisturbed parses");
+});
+
 test("the switch reader does not follow a symlink to a different file", (t) => {
   const root = scratch(t, "rmw-switch-symlink");
   const path = join(root, "switches.json");
@@ -576,6 +592,52 @@ test("rmd serve starts the read-model worker for every registry instance and sto
   t.after(() => core.close());
   assert.equal(Number(core.prepare("SELECT count(*) AS n FROM seen WHERE ts_ms <= ?").get(Date.parse(coreCorpus.newestTs))?.n), 3);
   assert.equal(stopServeReadModel(buildServeServer({ ...deps, readModel: undefined })), false, "no worker runs unless serve asks for one");
+});
+
+test("a serve that exits for a due restart stops the read-model worker and releases its lease first", async (t) => {
+  const root = scratch(t, "rmw-restart");
+  const stateDir = join(root, "state");
+  corpus(stateDir, 0, 0, 3);
+  const ledgerPath = join(stateDir, LIVE);
+  const github = { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
+  let recheck: () => void = () => {};
+  const exits: number[] = [];
+  const server = buildServeServer({
+    board: { plan: { tasks: [], byId: new Map() }, ledgerPath, github },
+    panelGraph: { root, planPath: join(root, "plan.yaml"), ledgerPath, github: { prView: () => null }, statusGithub: github, ratify: { approve: () => {}, reframe: () => {} } },
+    ledgerPath,
+    issues: { close: () => {} },
+    fleetControlRoot: root,
+    questionsRoot: root,
+    tokens: { read: "read-token", write: "write-token" },
+    consoleSha: resolveConsoleSha(),
+    githubAppRefresh: { start: () => ({ armed: false, stop() {} }) as never },
+    gatewayCheckout: async () => ({ state: { head: "a".repeat(40), behindBy: 2, dirty: false, checkedAt: new Date(T0).toISOString() }, restartDue: true }),
+    // The drain's backstop path: a hung client (an SSE stream) outlives the bound, so the drain ends
+    // with the server still open and its "close" handler has not stopped the worker.
+    staleExitSeams: {
+      scheduleRecheck: (run) => ((recheck = run), () => {}),
+      drain: () => Promise.resolve(),
+      exit: (code) => void exits.push(code, leases()),
+    },
+    readModel: { tickMs: 20 },
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => {
+    server.closeAllConnections();
+    if (server.listening) server.close();
+  });
+  const db = openProjectorReadModel(stateDir, "core");
+  t.after(() => db.close());
+  const leases = (): number => Number(db.prepare("SELECT count(*) AS n FROM lease").get()?.n);
+  const coreDb = join(stateDir, "read-model", "core.v1.sqlite");
+  const deadline = Date.now() + 30_000;
+  while (!(existsSync(coreDb) && tableCount(stateDir, "core", "seen") >= 3) && Date.now() < deadline) await sleep(20);
+  assert.equal(leases(), 1, "the control: the running worker holds the lease");
+  recheck();
+  const until = Date.now() + 10_000;
+  while (exits.length === 0 && Date.now() < until) await sleep(10);
+  assert.deepEqual(exits, [0, 0], "the due restart exited, and no lease was held at that instant");
 });
 
 /** The oracle's metric rows, which the ticker appends to core's ledger in `stateDir`. */
