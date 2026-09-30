@@ -50,8 +50,18 @@ export const REPO_IDENTITY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/;
 const REVISION_FIELDS = ["harnessRevision", "promptRevision", "toolRevision", "scorerRevision", "environmentRevision"] as const;
 const ARMS = ["paid", "control"] as const;
 const BILLING = { paid: "api", control: "subscription" } as const;
-const EVIDENCE_STEPS = ["worker.assignment", "worker.attempt", ...Object.values(PAIRED_TRIAL_STEPS)];
+export const REVIEWER_REPLAY_STEPS = { reserve: "reviewer_replay.reserve", receipt: "reviewer_replay.receipt" } as const;
+const EVIDENCE_STEPS = ["worker.assignment", "worker.attempt", ...Object.values(PAIRED_TRIAL_STEPS), ...Object.values(REVIEWER_REPLAY_STEPS)];
 const PROTOCOL_SUFFIX = ".protocol.json";
+
+export interface ReviewerReplayScope {
+  version: "paid-reviewer-replay-v1";
+  /** An explicit, sealed population: ordinary implementation tasks never authorize reviewer calls. */
+  cases: { id: string; corpusTaskId: string; repo: string; baseSha: string; bugHeadSha: string;
+    benignHeadSha: string; sealedManifestDigest: string }[];
+  /** Worst-case cash estimate held before EACH API-billed call, not a replacement for its receipt. */
+  cashReserveUsdPerCall: number;
+}
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -96,6 +106,34 @@ export interface PaidPilotRequest {
   protocolText: string;
   design: PaidPilotDesign;
   paired: PairedDesign | null;
+  reviewerReplay?: ReviewerReplayScope;
+}
+
+function parseReviewerReplay(value: unknown, population: readonly PaidPilotTask[], repos: ReadonlySet<unknown>): ReviewerReplayScope | string {
+  const raw = record(value);
+  if (raw?.version !== "paid-reviewer-replay-v1" || !Array.isArray(raw.cases) || raw.cases.length === 0)
+    return "reviewer-scope-invalid";
+  if (typeof raw.cashReserveUsdPerCall !== "number" || !Number.isFinite(raw.cashReserveUsdPerCall)
+    || raw.cashReserveUsdPerCall <= 0 || raw.cashReserveUsdPerCall > PAID_PILOT_CASH_CEILING_USD)
+    return "reviewer-reserve-invalid";
+  const tasks = new Map(population.map((task) => [task.taskId, task.repo]));
+  const seen = new Set<string>();
+  const cases: ReviewerReplayScope["cases"] = [];
+  for (const unknownCase of raw.cases) {
+    const entry = record(unknownCase);
+    const id = text(entry?.id);
+    const corpusTaskId = text(entry?.corpusTaskId);
+    const repo = text(entry?.repo);
+    const sha = (part: unknown): part is string => typeof part === "string" && /^[a-f0-9]{40,64}$/.test(part);
+    if (id === null || corpusTaskId === null || repo === null || seen.has(id) || !repos.has(repo)
+      || tasks.get(corpusTaskId) !== repo || sha(entry?.baseSha) !== true || sha(entry?.bugHeadSha) !== true
+      || sha(entry?.benignHeadSha) !== true || sha(entry?.sealedManifestDigest) !== true
+      || entry.bugHeadSha === entry.benignHeadSha) return "reviewer-case-invalid";
+    seen.add(id);
+    cases.push({ id, corpusTaskId, repo, baseSha: entry.baseSha, bugHeadSha: entry.bugHeadSha,
+      benignHeadSha: entry.benignHeadSha, sealedManifestDigest: entry.sealedManifestDigest });
+  }
+  return { version: "paid-reviewer-replay-v1", cases, cashReserveUsdPerCall: raw.cashReserveUsdPerCall };
 }
 
 function parseDesign(raw: Record<string, unknown>): { design: PaidPilotDesign; paired: PairedDesign | null } | string {
@@ -169,6 +207,10 @@ export function parsePaidPilotRequest(value: unknown): { ok: true; request: Paid
   if (protocolText === null) return refuse("protocol-text-missing");
   const design = parseDesign(raw);
   if (typeof design === "string") return refuse(design);
+  const reviewerReplay = raw.reviewerReplay === undefined ? undefined : parseReviewerReplay(raw.reviewerReplay, population, repoIds);
+  if (typeof reviewerReplay === "string") return refuse(reviewerReplay);
+  if (reviewerReplay !== undefined && (design.design !== "paired" || design.paired?.shadow !== true))
+    return refuse("reviewer-scope-needs-paired-shadow-design");
   return { ok: true, request: {
     version: PAID_PILOT_REQUEST_VERSION, pilotId: raw.pilotId,
     approval: { reference, approvedAt: text(record(raw.approval)?.approvedAt) },
@@ -176,6 +218,7 @@ export function parsePaidPilotRequest(value: unknown): { ok: true; request: Paid
     pseudonymSalt, assignmentSeed, arms: arms as Record<PaidPilotArm, ArmPin>,
     revisions: revisions as Record<RevisionField, string>, strataRevision, population,
     primaryOutcome: "verified-completion", maturityDays, protocolText, ...design,
+    ...(reviewerReplay === undefined ? {} : { reviewerReplay }),
   } };
 }
 
@@ -259,6 +302,7 @@ export interface PaidPilotProtocol {
   protocolText: string;
   protocolHash: string;
   digest: string;
+  reviewerReplay?: ReviewerReplayScope;
 }
 
 export interface PaidPilotReceipt {
@@ -292,7 +336,7 @@ export interface PaidPilotActivationInput {
   nowIso: string;
   /** Every pilot protocol already persisted; `expiresAt` null when it could not be read. A shadow protocol
    *  blocks only another shadow, so an operator can shadow a paired design before the live clock starts. */
-  existing: readonly { pilotId: string; expiresAt: string | null; shadow?: boolean }[];
+  existing: readonly { pilotId: string; expiresAt: string | null; shadow?: boolean; reviewer?: boolean }[];
 }
 
 export type PaidPilotActivation = { ok: true; protocol: PaidPilotProtocol; receipt: PaidPilotReceipt } | { ok: false; reason: string };
@@ -306,6 +350,9 @@ export function activateBenchmarkPaidPilot(input: PaidPilotActivationInput): Pai
   const shadow = request.paired?.shadow === true;
   if (input.existing.some((entry) => entry.expiresAt === null || ((entry.shadow === true) === shadow && Date.parse(entry.expiresAt) > nowMs)))
     return { ok: false, reason: "another-pilot-active" };
+  if (input.existing.some((entry) => entry.reviewer === true && Date.parse(entry.expiresAt ?? "") > nowMs)
+    || (request.reviewerReplay !== undefined && input.existing.some((entry) => Date.parse(entry.expiresAt ?? "") > nowMs)))
+    return { ok: false, reason: "reviewer-pilot-window-overlap" };
   const cited = citeAaReceipt(input.aaReport, nowMs);
   if (!cited.ok) return cited;
   const activatedAt = fixedClock(nowMs).iso();
@@ -329,6 +376,7 @@ export function activateBenchmarkPaidPilot(input: PaidPilotActivationInput): Pai
     paired: request.paired === null ? null : { ...request.paired, sampleMethod: PAIRED_SAMPLE_METHOD },
     uncertaintyMethod: request.design === "paired" ? PAIRED_UNCERTAINTY_METHOD : PAID_PILOT_UNCERTAINTY_METHOD, stoppingRule: PAID_PILOT_STOPPING_RULE,
     aaReceipt: cited.citation, protocolText: request.protocolText, protocolHash: hashProtocolText(request.protocolText),
+    ...(request.reviewerReplay === undefined ? {} : { reviewerReplay: request.reviewerReplay }),
   };
   const protocol: PaidPilotProtocol = { ...body, digest: sha256(JSON.stringify(body)) };
   const receipt: PaidPilotReceipt = {
@@ -389,6 +437,12 @@ function projectRow(row: Record<string, unknown>, protocol: PaidPilotProtocol): 
   const allocation = record(receipt?.allocation);
   const pins = REVISION_FIELDS.map((field) => record(record(receipt?.stack)?.[field]));
   const cost = row.total_cost_usd;
+  const reviewerRecord = record(row.reviewer_replay);
+  const reviewer = reviewerRecord?.pilot_id === protocol.pilotId && text(reviewerRecord.call_id) !== null
+    && text(reviewerRecord.case_id) !== null && (reviewerRecord.arm === "bug" || reviewerRecord.arm === "benign")
+    && reviewerRecord.protocol_digest === protocol.digest
+    ? { callId: String(reviewerRecord.call_id), caseId: String(reviewerRecord.case_id), arm: reviewerRecord.arm as "bug" | "benign" }
+    : null;
   return {
     ts: row.ts as string, step: row.step as string, taskId: row.task_id as string, runId: text(row.run_id),
     assignmentId: row.step === PAIRED_TRIAL_STEPS.spawn ? pairedRef : text(assignment?.id),
@@ -402,7 +456,7 @@ function projectRow(row: Record<string, unknown>, protocol: PaidPilotProtocol): 
     billingMode: row.billing_mode === "api" || row.billing_mode === "subscription" ? row.billing_mode : null,
     cost: cost === undefined || cost === null ? { state: "missing" }
       : typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? { state: "observed", usd: cost } : { state: "invalid" },
-    paired,
+    paired, reviewer,
   };
 }
 
@@ -439,6 +493,8 @@ export interface PaidPilotRow {
   cost: { state: "observed"; usd: number } | { state: "missing" } | { state: "invalid" };
   /** Present only on this pilot's paired-trial rows. */
   paired: PairedTrialRowFields | null;
+  /** Present only on an explicitly scoped reviewer reservation or receipt. */
+  reviewer?: { callId: string; caseId: string; arm: "bug" | "benign" } | null;
 }
 
 export interface PaidPilotEvidence {
@@ -490,6 +546,10 @@ export async function readPaidPilotEvidence(stateDir: string, protocol: PaidPilo
       if (fingerprints.has(fingerprint)) { duplicateRows += 1; return; }
       fingerprints.add(fingerprint);
       const projected = projectRow(accepted, protocol);
+      if ((accepted.step === REVIEWER_REPLAY_STEPS.reserve || accepted.step === REVIEWER_REPLAY_STEPS.receipt)
+        && projected.reviewer === null
+        && (record(accepted.reviewer_replay)?.pilot_id === protocol.pilotId
+          || record(accepted.reviewer_replay)?.pilot_id === undefined)) malformedRows += 1;
       if (newestTs === null || projected.ts > newestTs) newestTs = projected.ts;
       rows.push(projected);
     },
@@ -571,6 +631,35 @@ export function summarizePaidPilotSpend(rows: readonly PaidPilotRow[], protocol:
     else if (kind !== "notional-price-missing") spend.ambiguousReceipts += 1;
   }
   spend.ambiguousReceipts += index.unattributed.filter((row) => row.billingMode !== "subscription").length;
+  const reserves = new Map<string, PaidPilotRow>();
+  const receipts = new Map<string, PaidPilotRow>();
+  for (const row of rows) {
+    if (row.reviewer === null || row.reviewer === undefined) continue;
+    const target = row.step === REVIEWER_REPLAY_STEPS.reserve ? reserves
+      : row.step === REVIEWER_REPLAY_STEPS.receipt ? receipts : null;
+    if (target === null) continue;
+    if (target.has(row.reviewer.callId)) spend.ambiguousReceipts += 1;
+    else target.set(row.reviewer.callId, row);
+  }
+  for (const [callId, reserve] of reserves) {
+    const receipt = receipts.get(callId);
+    if (reserve.billingMode !== "api" || reserve.cost.state !== "observed") {
+      spend.ambiguousReceipts += 1;
+      continue;
+    }
+    if (receipt === undefined) {
+      spend.cashEstimateUsd += reserve.cost.usd;
+      spend.missingReceipts += 1;
+      continue;
+    }
+    if (receipt.reviewer?.caseId !== reserve.reviewer?.caseId || receipt.reviewer?.arm !== reserve.reviewer?.arm
+      || receipt.billingMode !== "api") { spend.ambiguousReceipts += 1; continue; }
+    if (receipt.cost.state !== "observed") { spend.missingReceipts += 1; continue; }
+    spend.cashEstimateUsd += receipt.cost.usd;
+    spend.cashReceipts += 1;
+  }
+  for (const callId of receipts.keys()) if (!reserves.has(callId)) spend.ambiguousReceipts += 1;
+  spend.cashEstimateUsd = Math.round(spend.cashEstimateUsd * 1e6) / 1e6;
   return spend;
 }
 
@@ -860,10 +949,12 @@ export function buildPaidPilotReport(input: PaidPilotReportInput): PaidPilotRepo
   const difference = ittDifference(paid, control);
   const decisive = !("unavailable" in difference) && (difference.low > 0 || difference.high < 0) && difference.pValue < 0.05;
   const exposedTotal = paid.exposedUnits + control.exposedUnits;
+  const cashComplete = evidence.malformedRows === 0 && spend.missingReceipts === 0 && spend.ambiguousReceipts === 0;
   return {
     ...reportFrame(protocol, nowIso, ""), state: evidence.state, unavailableReason: null, lastGoodAt: nowIso,
-    cash: { ceilingUsd: protocol.cash.ceilingUsd, spentEstimateUsd: spend.cashEstimateUsd,
-      remainingUsd: Math.max(0, protocol.cash.ceilingUsd - spend.cashEstimateUsd), source: "worker-result-estimate-not-invoice",
+    cash: { ceilingUsd: protocol.cash.ceilingUsd, spentEstimateUsd: cashComplete ? spend.cashEstimateUsd : null,
+      remainingUsd: cashComplete ? Math.max(0, protocol.cash.ceilingUsd - spend.cashEstimateUsd) : null,
+      source: "worker-result-estimate-not-invoice",
       invoice: "unavailable-no-invoice-receipt", subscriptionNotionalUsd: spend.notionalUsd },
     paidArm: { state: pause.reasons.length === 0 ? "admitting" : "paused", reasons: pause.reasons },
     sources: { forms: evidence.forms, unreadSources: [], malformedRows: evidence.malformedRows, duplicateRows: evidence.duplicateRows,
@@ -900,7 +991,7 @@ export function loadPaidPilotProtocol(stateDir: string, pilotId: string): { ok: 
   return { ok: true, protocol: protocol as unknown as PaidPilotProtocol };
 }
 
-function listPaidPilotProtocols(stateDir: string): { ok: true; entries: { pilotId: string; expiresAt: string | null; shadow: boolean;
+function listPaidPilotProtocols(stateDir: string): { ok: true; entries: { pilotId: string; expiresAt: string | null; shadow: boolean; reviewer: boolean;
   protocol: PaidPilotProtocol | null }[] } | { ok: false; reason: string } {
   let names: string[];
   try { names = readdirSync(stateDir); }
@@ -913,8 +1004,22 @@ function listPaidPilotProtocols(stateDir: string): { ok: true; entries: { pilotI
     const pilotId = name.slice(prefix.length, -PROTOCOL_SUFFIX.length);
     const loaded = loadPaidPilotProtocol(stateDir, pilotId);
     return { pilotId, expiresAt: loaded.ok && typeof loaded.protocol.expiresAt === "string" ? loaded.protocol.expiresAt : null,
-      shadow: loaded.ok && loaded.protocol.paired?.shadow === true, protocol: loaded.ok ? loaded.protocol : null };
+      shadow: loaded.ok && loaded.protocol.paired?.shadow === true, reviewer: loaded.ok && loaded.protocol.reviewerReplay !== undefined,
+      protocol: loaded.ok ? loaded.protocol : null };
   }) };
+}
+
+/** Unlike normal dispatch's fail-soft inventory, experimental reviewer spend refuses an unreadable competing protocol. */
+export function reviewerReplayExclusivityReason(stateDir: string, pilotId: string, nowIso: string): string | null {
+  const listed = listPaidPilotProtocols(stateDir);
+  if (!listed.ok) return listed.reason;
+  const nowMs = Date.parse(nowIso);
+  for (const entry of listed.entries) {
+    if (entry.pilotId === pilotId) continue;
+    if (entry.expiresAt === null) return "competing-pilot-unreadable";
+    if (Date.parse(entry.expiresAt) > nowMs) return "competing-pilot-active";
+  }
+  return null;
 }
 
 /** Every readable protocol whose window holds `nowIso`. An unreadable state dir proves no pilot active, so it answers none. */
