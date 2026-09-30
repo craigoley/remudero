@@ -56,6 +56,7 @@ function fixture(t: TestContext,
       scorerRevision: stack.scorer, environmentRevision: stack.environment },
     strataRevision: "strata-v1", population: pairs.map((pair) => ({ taskId: pair.corpusTaskId, repo: pair.repo,
       taskClass: "reviewer-held-out", risk: "low" })), primaryOutcome: "verified-completion", maturityDays: 14,
+    design: "paired", paired: { samplingRate: 1, maxPairs: pairs.length, shadow: true },
     protocolText: "Operator-approved paid implementation pilot plus explicit sealed reviewer A/A scope.",
     reviewerReplay: { version: "paid-reviewer-replay-v1", cashReserveUsdPerCall: reserveUsd,
       cases: pairs.map((pair) => ({ id: pair.id, corpusTaskId: pair.corpusTaskId, repo: pair.repo, baseSha: pair.baseSha,
@@ -219,5 +220,18 @@ test("a changed sealed head is excluded before any admission or reviewer call", 
     calls++; return scored(altered, blinded, 1);
   }));
   assert.deepEqual(result, { state: "refused", reason: "no-sealed-held-out-reviewer-pair" });
+  assert.equal(calls, 0);
+});
+
+test("a concurrent live pilot is refused before reviewer spend, without holding ordinary work", async (t) => {
+  const pair = caseFor("pair-exclusive", 1);
+  const { stateDir, protocol } = fixture(t, [pair], 2);
+  const competing = { ...protocol, pilotId: "competing-pilot", reviewerReplay: undefined };
+  writeFileSync(join(stateDir, "benchmark-paid-pilot-v1.competing-pilot.protocol.json"), JSON.stringify({ protocol: competing }));
+  let calls = 0;
+  const result = await replayPairedReviews(replayInput(stateDir, [pair], async (blinded) => {
+    calls++; return scored(pair, blinded, 1);
+  }));
+  assert.deepEqual(result, { state: "refused", reason: "competing-pilot-active" });
   assert.equal(calls, 0);
 });

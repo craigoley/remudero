@@ -29,6 +29,7 @@ import { mkdirSync, readFileSync, readdirSync, rmdirSync, writeFileSync } from "
 import { join } from "node:path";
 import { TRIAL_ID_RE } from "./benchmark-aa.js";
 import { loadPaidPilotProtocol, paidArmPauseReasons, readPaidPilotControls, readPaidPilotEvidence,
+  reviewerReplayExclusivityReason,
   REVIEWER_REPLAY_STEPS, PAID_PILOT_AA_RECEIPT_MAX_AGE_MS, PAID_PILOT_CASH_CEILING_USD,
   type PaidPilotProtocol, type ReviewerReplayScope } from "./benchmark-paid-pilot.js";
 import { systemClock } from "./clock.js";
@@ -238,6 +239,10 @@ export async function replayPairedReviews(input: PaidPairedReviewInput): Promise
     || scope.cashReserveUsdPerCall <= 0 || scope.cashReserveUsdPerCall > PAID_PILOT_CASH_CEILING_USD
     || protocol.cash.ceilingUsd !== PAID_PILOT_CASH_CEILING_USD)
     return { state: "refused", reason: "reviewer-cash-scope-invalid" };
+  if (protocol.design !== "paired" || protocol.paired?.shadow !== true)
+    return { state: "refused", reason: "reviewer-pilot-not-shadow-isolated" };
+  const exclusive = reviewerReplayExclusivityReason(input.stateDir, input.pilotId, systemClock.iso());
+  if (exclusive !== null) return { state: "refused", reason: exclusive };
   if (protocol.assignment.seed !== input.seed || protocol.repos.length !== 3 || !input.validatePair || !input.validateLabel || !input.score
     || input.stack.harness !== protocol.revisions.harnessRevision || input.stack.prompt !== protocol.revisions.promptRevision
     || input.stack.tool !== protocol.revisions.toolRevision || input.stack.scorer !== protocol.revisions.scorerRevision
@@ -268,6 +273,8 @@ export async function replayPairedReviews(input: PaidPairedReviewInput): Promise
         if (matches.length !== 1) return { allowed: false, reason: "reviewer-head-ambiguous" };
         const fresh = loadPaidPilotProtocol(input.stateDir, input.pilotId);
         if (!fresh.ok || fresh.protocol.digest !== protocol.digest) return { allowed: false, reason: "reviewer-protocol-changed" };
+        const exclusive = reviewerReplayExclusivityReason(input.stateDir, input.pilotId, systemClock.iso());
+        if (exclusive !== null) return { allowed: false, reason: exclusive };
         const controls = readPaidPilotControls(input.stateDir, input.pilotId);
         let evidence;
         try { evidence = await readPaidPilotEvidence(input.stateDir, protocol); }

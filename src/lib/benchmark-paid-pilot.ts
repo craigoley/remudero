@@ -209,6 +209,8 @@ export function parsePaidPilotRequest(value: unknown): { ok: true; request: Paid
   if (typeof design === "string") return refuse(design);
   const reviewerReplay = raw.reviewerReplay === undefined ? undefined : parseReviewerReplay(raw.reviewerReplay, population, repoIds);
   if (typeof reviewerReplay === "string") return refuse(reviewerReplay);
+  if (reviewerReplay !== undefined && (design.design !== "paired" || design.paired?.shadow !== true))
+    return refuse("reviewer-scope-needs-paired-shadow-design");
   return { ok: true, request: {
     version: PAID_PILOT_REQUEST_VERSION, pilotId: raw.pilotId,
     approval: { reference, approvedAt: text(record(raw.approval)?.approvedAt) },
@@ -334,7 +336,7 @@ export interface PaidPilotActivationInput {
   nowIso: string;
   /** Every pilot protocol already persisted; `expiresAt` null when it could not be read. A shadow protocol
    *  blocks only another shadow, so an operator can shadow a paired design before the live clock starts. */
-  existing: readonly { pilotId: string; expiresAt: string | null; shadow?: boolean }[];
+  existing: readonly { pilotId: string; expiresAt: string | null; shadow?: boolean; reviewer?: boolean }[];
 }
 
 export type PaidPilotActivation = { ok: true; protocol: PaidPilotProtocol; receipt: PaidPilotReceipt } | { ok: false; reason: string };
@@ -348,6 +350,9 @@ export function activateBenchmarkPaidPilot(input: PaidPilotActivationInput): Pai
   const shadow = request.paired?.shadow === true;
   if (input.existing.some((entry) => entry.expiresAt === null || ((entry.shadow === true) === shadow && Date.parse(entry.expiresAt) > nowMs)))
     return { ok: false, reason: "another-pilot-active" };
+  if (input.existing.some((entry) => entry.reviewer === true && Date.parse(entry.expiresAt ?? "") > nowMs)
+    || (request.reviewerReplay !== undefined && input.existing.some((entry) => Date.parse(entry.expiresAt ?? "") > nowMs)))
+    return { ok: false, reason: "reviewer-pilot-window-overlap" };
   const cited = citeAaReceipt(input.aaReport, nowMs);
   if (!cited.ok) return cited;
   const activatedAt = fixedClock(nowMs).iso();
@@ -986,7 +991,7 @@ export function loadPaidPilotProtocol(stateDir: string, pilotId: string): { ok: 
   return { ok: true, protocol: protocol as unknown as PaidPilotProtocol };
 }
 
-function listPaidPilotProtocols(stateDir: string): { ok: true; entries: { pilotId: string; expiresAt: string | null; shadow: boolean;
+function listPaidPilotProtocols(stateDir: string): { ok: true; entries: { pilotId: string; expiresAt: string | null; shadow: boolean; reviewer: boolean;
   protocol: PaidPilotProtocol | null }[] } | { ok: false; reason: string } {
   let names: string[];
   try { names = readdirSync(stateDir); }
@@ -999,8 +1004,22 @@ function listPaidPilotProtocols(stateDir: string): { ok: true; entries: { pilotI
     const pilotId = name.slice(prefix.length, -PROTOCOL_SUFFIX.length);
     const loaded = loadPaidPilotProtocol(stateDir, pilotId);
     return { pilotId, expiresAt: loaded.ok && typeof loaded.protocol.expiresAt === "string" ? loaded.protocol.expiresAt : null,
-      shadow: loaded.ok && loaded.protocol.paired?.shadow === true, protocol: loaded.ok ? loaded.protocol : null };
+      shadow: loaded.ok && loaded.protocol.paired?.shadow === true, reviewer: loaded.ok && loaded.protocol.reviewerReplay !== undefined,
+      protocol: loaded.ok ? loaded.protocol : null };
   }) };
+}
+
+/** Unlike normal dispatch's fail-soft inventory, experimental reviewer spend refuses an unreadable competing protocol. */
+export function reviewerReplayExclusivityReason(stateDir: string, pilotId: string, nowIso: string): string | null {
+  const listed = listPaidPilotProtocols(stateDir);
+  if (!listed.ok) return listed.reason;
+  const nowMs = Date.parse(nowIso);
+  for (const entry of listed.entries) {
+    if (entry.pilotId === pilotId) continue;
+    if (entry.expiresAt === null) return "competing-pilot-unreadable";
+    if (Date.parse(entry.expiresAt) > nowMs) return "competing-pilot-active";
+  }
+  return null;
 }
 
 /** Every readable protocol whose window holds `nowIso`. An unreadable state dir proves no pilot active, so it answers none. */
