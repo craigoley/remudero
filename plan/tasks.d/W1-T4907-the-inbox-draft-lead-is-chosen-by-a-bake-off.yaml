@@ -35,7 +35,11 @@
       proof: 'grep: test("W1-T4907: each candidate is measured on the same proposals" in test/the-inbox-draft-lead-is-chosen-by-a-bake-off.test.ts'
     - claim: "a fragment-contract error is counted, never scored as a draft"
       proof: 'grep: test("W1-T4907: a fragment-contract error is counted, never scored as a draft" in test/the-inbox-draft-lead-is-chosen-by-a-bake-off.test.ts'
-    - claim: "the CLI verb calls the bake-off"
-      proof: 'grep: runInboxBakeoff( in src/run-task.ts'
+    - claim: "the inbox-bakeoff CLI handler dispatches to the command"
+      proof: 'grep: inboxBakeoffCommand(rest) in src/run-task.ts'
+    - claim: "the command defaults to the production bake-off implementation"
+      proof: 'grep: replay: typeof runInboxBakeoff = runInboxBakeoff in src/run-task.ts'
+    - claim: "the command sends the sampled proposals through its replay seam"
+      proof: 'grep: await replay({ proposals, planText, spawnFor, log, runId }) in src/run-task.ts'
   falsifier: |
     Score a prose reply as a draft and the second test counts Luna's failures as output.
