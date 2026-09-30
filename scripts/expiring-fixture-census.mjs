@@ -292,6 +292,9 @@ export function assertFieldListComplete({ files, readFile, agedFields = AGED_FIE
  * on the next scan unless it is also added to AGED_FIELDS or waived with {@link EXEMPT_MARKER}.
  */
 export const KNOWN_UNCOVERED_CLOCK_FIELDS = Object.freeze([
+  // W1-T4820: generated at rotation-lock acquisition; this is live coordination state, not a
+  // hardcoded fixture timestamp for the census to age.
+  { field: "startedAt", source: "src/lib/ledger.ts" },
   { field: "ts", source: "src/lib/console-shell-client.ts" },
   { field: "ts", source: "src/run-task.ts" },
   { field: "lastPollIso", source: "src/lib/daemon.ts" },

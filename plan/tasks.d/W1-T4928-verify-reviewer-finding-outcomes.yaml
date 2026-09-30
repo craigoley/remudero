@@ -1,0 +1,57 @@
+- id: W1-T4928
+  title: "Verify reviewer finding outcomes from repair evidence, not resolved threads"
+  repo: remudero
+  depends_on: [W1-T4848, W1-T4849]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator-approved CodeRabbit and Field Trials follow-ups, 2026-09-30"
+  plan_refs: [W1-T424, W1-T4575, W1-T4619, W1-T4628, W1-T4848, W1-T4849]
+  files: [src/lib/review-finding-evidence.ts, src/lib/field-trials-flow.ts, test/review-finding-evidence.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-30: W1-T4848 emits exact-head review.finding receipts and
+    W1-T4849 folds them privately, but its verifiedFindingEvidence input has no
+    production producer. That is correct missingness, not a correctness result.
+    A resolved GitHub thread, merge, CI pass or agent edit does not authenticate
+    that the named mechanism was real. Without an independent label source the
+    public model-quality graphs cannot honestly advance beyond unknown.
+  design: |
+    Build a bounded, replayable evidence producer keyed to finding ID, PR URL and
+    exact reviewed head. A mechanism-specific case-file falsifier must fail on
+    that head and pass on the later repaired head; record both immutable heads,
+    scorer revision, execution outcome and source receipt. An operator label is
+    admitted only through a separately authenticated, attributable action that
+    names the finding, head and reason. GitHub conversation resolution and a
+    model-supplied statement are never label authority. Conflicting or stale
+    evidence stays visible and cannot silently choose a winner.
+
+    Wire the resulting trusted evidence into the W1-T4849 private fold. Include
+    unreadable sources, unmatchable IDs and failed verification in the
+    denominators; no unknown is zero. Store only bounded digests and necessary
+    provenance in the projection, keep raw mechanism and private paths out of
+    public releases, and repair late data on replay. Verification runs away
+    from the PR gate; a failed projection never pauses review, routing or merge.
+  acceptance:
+    - claim: "a resolved thread and merge leave a finding unknown while a mechanism-specific before/after falsifier confirms it"
+      proof: 'grep: test("W1-T4928: repair evidence labels the exact finding and head" in test/review-finding-evidence.test.ts'
+    - claim: "an unauthenticated human-like comment and stale-head receipt cannot become a positive label"
+      proof: 'grep: test("W1-T4928: untrusted and stale labels stay unknown" in test/review-finding-evidence.test.ts'
+    - claim: "the private Field Trials fold consumes produced evidence and the public release excludes finding identities"
+      proof: 'grep: test("W1-T4928: evidence reaches private flow only" in test/review-finding-evidence.test.ts'
+    - claim: "the Field Trials production path invokes the evidence producer"
+      proof: 'grep: deriveVerifiedReviewFindingEvidence( in src/lib/field-trials-flow.ts'
+  falsifier: |
+    Feed a resolved-but-wrong finding beside an exact-head falsifier repair.
+    Removing the independent verification changes the first test from one
+    confirmed and one unknown to two unknown; trusting resolution makes the
+    same test red. Remove the production join and the fourth proof fails.
+  note: |
+    Reservation refs/rmd-id/W1-T4928 held by branch
+    codex/reviewer-benchmark-followups-20260930. Private evidence only; no
+    model ranking or added human PR approval.
