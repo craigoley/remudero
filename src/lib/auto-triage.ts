@@ -142,8 +142,8 @@ export function decideTriageClaimRelease(i: {
  */
 export const TRIAGE_CLAIM_LIVENESS_WINDOW_MS = 2 * 60 * 60 * 1000;
 
-/** The second tier's ceiling: several windows. Past it an UNOBSERVABLE holder (one this ledger has
- *  never seen, or whose anchor does not parse) is released on age alone, and says so. */
+/** BACKSTOP: several windows. Past it an UNOBSERVABLE holder (one this ledger has never seen, or
+ *  whose anchor does not parse) is released on age alone, and says so. */
 export const TRIAGE_CLAIM_AGE_ONLY_CEILING_MS = 6 * TRIAGE_CLAIM_LIVENESS_WINDOW_MS;
 
 /** How far before the claim a row from the holder's host still proves this ledger can see it. */
