@@ -3,6 +3,7 @@
 // classifyWorktreeBase, MemInfo, WorktreeBaseRow, readNvmrcVersion) moved with doctorCommand to
 // src/lib/report-commands.ts (W1-T2888); it imports them from lib/doctor.js directly. The symbols
 // below have SECOND callers outside doctorCommand and stay imported here too.
+import { retryWhileLockBusy } from "./lib/lock-busy-retry.js";
 import {
   appendCaptureSurfaceFireHistory,
   judgeDiskHeadroom,
@@ -13665,6 +13666,10 @@ export class ManagedCheckoutRefreshRefusedError extends RmdError {
   }
 }
 
+export function isManagedCheckoutLockBusy(error: unknown): boolean {
+  return error instanceof ManagedCheckoutRefreshRefusedError && error.reason.startsWith("another dispatch holds ");
+}
+
 /** W1-T4356: W1-T4193's refusal, naming why the checkout whose install it would borrow was left behind. */
 class ManagedCheckoutNotRefreshedError extends WorktreeNodeModulesRefusedError {
   constructor(refused: WorktreeNodeModulesRefusedError, readonly notRefreshed: string) {
@@ -15596,8 +15601,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // W1-T4193 below. A refusal here is that same deferral, raised before a worktree exists.
   let checkoutRefresh: ManagedCheckoutRefresh;
   try {
-    checkoutRefresh = refreshManagedCheckout(
-      repoDir, join(config.root, "state", `managed-checkout-${task.repo}.lock`), log, opts.managedCheckoutInstall,
+    checkoutRefresh = await retryWhileLockBusy(
+      () => refreshManagedCheckout(repoDir, join(config.root, "state", `managed-checkout-${task.repo}.lock`), log, opts.managedCheckoutInstall),
+      isManagedCheckoutLockBusy,
+      { log },
     );
   } catch (e) {
     log("managed_checkout.refresh_refused", { reason: String((e as Error)?.message ?? e) });
