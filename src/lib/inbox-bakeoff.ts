@@ -1,3 +1,4 @@
+import { systemClock, type Clock } from "./clock.js";
 import { runDraftRung, type DraftSpawn, type Proposal } from "./inbox.js";
 
 /**
@@ -61,7 +62,7 @@ export interface InboxBakeoffDeps {
   spawnFor: (candidate: BakeoffCandidate) => DraftSpawn;
   /** Receives one `inbox.bakeoff` row per candidate — the only ledger writes this makes. */
   log: (step: string, extra?: Record<string, unknown>) => void;
-  now?: () => number;
+  clock?: Clock;
   runId?: string;
 }
 
@@ -112,7 +113,8 @@ export function scoreCandidate(candidate: BakeoffCandidate, proposals: number, c
 
 /** Replay the same proposals through every candidate, one candidate at a time, and log one row each. */
 export async function runInboxBakeoff(deps: InboxBakeoffDeps): Promise<BakeoffRow[]> {
-  const now = deps.now ?? Date.now;
+  const clock = deps.clock ?? systemClock;
+  const now = (): number => clock.now();
   const runId = deps.runId ?? `BAKEOFF-${now()}`;
   const rows: BakeoffRow[] = [];
   for (const candidate of deps.candidates ?? BAKEOFF_CANDIDATES) {
