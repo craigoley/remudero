@@ -4,6 +4,7 @@
 // src/lib/report-commands.ts (W1-T2888); it imports them from lib/doctor.js directly. The symbols
 // below have SECOND callers outside doctorCommand and stay imported here too.
 import { retryWhileLockBusy } from "./lib/lock-busy-retry.js";
+import { retryPollRead } from "./lib/poll-read-retry.js";
 import {
   appendCaptureSurfaceFireHistory,
   judgeDiskHeadroom,
@@ -5753,12 +5754,12 @@ export async function pollToGate(
   const { owner, repo, number } = pollRestTarget(prUrl, "pollToGate");
   const readings: (RollupEntry[] | undefined)[] = [];
   for (let i = 0; ; i++) {
-    const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
+    const row = (await retryPollRead(() => read(singlePrRestArgs(owner, repo, number)), { log, sleep })) as RestPullRow;
     const state = prStateFromRest(row);
     if (state === "MERGED") return { merged: true, reason: "checks green" };
     if (state === "CLOSED") return { merged: false, verdict: "blocked_ci", reason: "pr closed" };
     const sha = mapRestPr(row).headRefOid;
-    const roll = await restRollupFor(owner, repo, sha, read);
+    const roll = await retryPollRead(() => restRollupFor(owner, repo, sha, read), { log, sleep });
     const checks = rollupCheckSummary(roll);
     const red = roll.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
     if (red) {
@@ -6122,9 +6123,10 @@ async function waitForCiGreen(
   const readings: (RollupEntry[] | undefined)[] = [];
   let sha = "";
   for (let i = 0; ; i++) {
-    const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
-    sha = mapRestPr(row).headRefOid;
-    const roll = await restRollupFor(owner, repo, sha, read);
+    const row = (await retryPollRead(() => read(singlePrRestArgs(owner, repo, number)), { log, sleep })) as RestPullRow;
+    const headSha = mapRestPr(row).headRefOid;
+    sha = headSha;
+    const roll = await retryPollRead(() => restRollupFor(owner, repo, headSha, read), { log, sleep });
     const state = ciGateFromRollup(roll, requiredContexts);
     // W1-T2804: the sha this iteration RESOLVED and judged rides out with the verdict. It is the
     // already-resolved head, never a second read — a second read is a second chance to skew.
