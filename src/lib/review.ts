@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
@@ -18,6 +18,8 @@ import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { playwrightCacheRoot } from "./worker-home.js";
+import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
+import { ghIssueGateway, tryEscalate, type IssueGateway } from "./escalate.js";
 import {
   COMPANION_PATH_CLASSES,
   type CompanionPathClass,
@@ -1653,19 +1655,46 @@ function argsWithCheckoutRunner(whitelisted: WhitelistedProof, args: readonly st
   return runner === undefined ? args : [runner, ...args.slice(1)];
 }
 
-/** A load-error retry may reinstall only a reviewer-owned real directory. A shared symlink is
- * another checkout's install; touching it here would disrupt every concurrent worker. */
+/** Refresh a reviewer-owned checkout once after measured module-load failure. Worktrees link the
+ * canonical install: invoke the package manager at that real root only when its installed hash
+ * predates its own lockfile, never through the link (W1-T4933's freshness contract). */
 export function refreshProofToolchain(cwd: string, exec: typeof execFileSync = execFileSync): boolean {
   if (!reviewerOwnedCheckouts.has(resolve(cwd))) return false;
   const modules = join(cwd, "node_modules");
+  let installRoot = cwd;
+  let linked = false;
   try {
-    if (lstatSync(modules).isSymbolicLink()) return false;
-  } catch { /* A missing install can be created in this reviewer-owned checkout. */ }
-  if (!existsSync(join(cwd, "package-lock.json"))) return false;
+    if (lstatSync(modules).isSymbolicLink()) {
+      try {
+        installRoot = dirname(realpathSync(modules));
+      } catch (error) {
+        // A dangling or unreadable shared link cannot be refreshed from this checkout.
+        return false;
+      }
+      linked = true;
+    }
+  } catch (error) {
+    // Only a missing install can be created; an unreadable install is a separate failure.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+  }
+  if (!existsSync(join(installRoot, "package-lock.json"))) return false;
+  const installHash = hashInstallInputs(installRoot);
+  const marker = installHashMarkerPath(installRoot);
+  if (linked) {
+    try {
+      if (readFileSync(marker, "utf8").trim() === installHash) return false;
+    } catch (error) {
+      // A missing marker is evidence that the canonical install has not been freshness-checked.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+    }
+  }
   try {
-    exec("npm", ["ci"], { cwd, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
+    exec("npm", ["ci"], { cwd: installRoot, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
+    mkdirSync(join(installRoot, "node_modules"), { recursive: true });
+    writeFileSync(marker, installHash);
     return true;
-  } catch {
+  } catch (error) {
+    // A failed refresh still permits the one retry, which will report cannot-evaluate if loading fails again.
     return false;
   }
 }
@@ -1678,8 +1707,8 @@ function vitestNameFilterScope(w: WhitelistedProof, cwd: string): string[] {
   let entries: string[];
   try {
     entries = readdirSync(join(cwd, root), { recursive: true }) as string[];
-  } catch {
-    return [root];
+  } catch (error) {
+    throw new Error(`cannot inspect Vitest test root ${root}: ${String(error)}`);
   }
   const files = entries
     .filter((entry) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(entry) && !/(?:^|\/)e2e\//.test(entry))
@@ -1688,7 +1717,10 @@ function vitestNameFilterScope(w: WhitelistedProof, cwd: string): string[] {
   if (diffHits.length === 1) return diffHits;
   const titleHits = files.filter((file) => {
     try { return readFileSync(join(cwd, file), "utf8").includes(w.label); }
-    catch { return false; }
+    catch (error) {
+      // Keep an unreadable candidate in scope: its loader must reveal the error, not a guessed absence.
+      return true;
+    }
   });
   return titleHits.length > 0 ? titleHits : files;
 }
@@ -2312,7 +2344,7 @@ function hasFinalSummary(stdout: string): boolean {
   return /^# duration_ms\b/m.test(stdout);
 }
 
-const MODULE_LOAD_ERROR_RE = /Cannot find (?:package|module)|ERR_MODULE_NOT_FOUND/i;
+export const MODULE_LOAD_ERROR_RE = /Cannot find (?:package|module)|ERR_MODULE_NOT_FOUND/i;
 function recordLoadError(w: WhitelistedProof, output: string): void {
   w.loadError = output.split("\n").find((line) => MODULE_LOAD_ERROR_RE.test(line))?.trim().slice(0, 180) ?? "test files failed to load";
 }
@@ -8720,6 +8752,8 @@ export interface PostReviewStatusGuardedOpts {
     state: PostableReviewState;
     description?: string;
   }) => void | Promise<void>;
+  /** Injectable issue transport for the one cannot-evaluate escalation per head. */
+  issues?: IssueGateway;
   lockOpts?: AcquireReviewStatusLockOpts;
 }
 
@@ -8816,6 +8850,10 @@ export async function postReviewStatusGuarded(
     const replacingDegradedTerminal = opts.reopenedDegradedTerminal === true && priorDecision !== undefined &&
       isReopenableDegradedTerminal(priorDecision, true);
     if (!lifecycle.merged && !lifecycle.closed && priorDecision && !replacingDegradedTerminal) {
+      if (opts.state === "pending") {
+        return { posted: false, replayed: true, effectiveState: priorDecision.state,
+          reason: "cannot-evaluate hold cannot overwrite a terminal verdict for the same review decision" };
+      }
       if (priorDecision.state === opts.state) {
         return { posted: false, replayed: true, effectiveState: priorDecision.state, reason: "terminal verdict already exists for this review decision" };
       }
@@ -8903,6 +8941,29 @@ export async function postReviewStatusGuarded(
         posted: false,
         reason: `posting remudero-review failed and was not applied (see the review.post_failed ledger line): ${message}`,
       };
+    }
+    if (opts.state === "pending" && opts.description?.startsWith("remudero-review: cannot-evaluate") && opts.prUrl &&
+        !lines.some((line) => line.step === "review.cannot_evaluate_escalated" && line.task_id === opts.taskId && line.head_sha === opts.sha)) {
+      const issueUrl = tryEscalate({
+        class: "MANUAL",
+        taskId: opts.taskId,
+        runId: opts.runId,
+        headSha: opts.sha,
+        cause: "review",
+        summary: `PR ${opts.prUrl} proof runner cannot load test files`,
+        detail: `${opts.description}. The toolchain refresh and one retry did not resolve the load error.`,
+        options: [{ label: "Repair reviewer toolchain", detail: "Refresh the canonical install, then rerun this head's review." }],
+        recommendation: "Repair reviewer toolchain",
+        consequence: "The required review remains pending and the PR cannot merge.",
+      }, {
+        issues: opts.issues ?? ghIssueGateway(opts.owner, opts.repo),
+        ledgerPath: opts.ledgerPath,
+        runId: opts.runId,
+      });
+      if (issueUrl) appendLedger(opts.ledgerPath, {
+        run_id: opts.runId, task_id: opts.taskId, step: "review.cannot_evaluate_escalated",
+        pr_url: opts.prUrl, head_sha: opts.sha, issue_url: issueUrl,
+      });
     }
     return { posted: true };
   } finally {

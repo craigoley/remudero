@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
   execWhitelistedProof,
   judgeReview,
+  MODULE_LOAD_ERROR_RE,
   nameFilteredOutcome,
   parseWhitelistedProof,
+  postReviewStatusGuarded,
   ProofCannotLoadError,
   refreshProofToolchain,
   registerReviewerCheckout,
@@ -21,6 +23,8 @@ const nodeLoadFailure = `TAP version 13\nnot ok 1 - test/example.test.ts\n` +
   `  error: Cannot find module 'missing-dep'\n# tests 1\n# fail 1\n# duration_ms 12\n`;
 
 test("a name-filtered run whose files all fail to load is cannot-load", () => {
+  assert.equal(MODULE_LOAD_ERROR_RE.test(loadError), true);
+  assert.equal(MODULE_LOAD_ERROR_RE.test("AssertionError: expected true"), false);
   assert.equal(vitestNameFilteredOutcome(vitestLoadFailure), "cannot-load");
   assert.equal(nameFilteredOutcome(nodeLoadFailure), "cannot-load");
   assert.equal(vitestNameFilteredOutcome("TAP version 13\n1..1\nok 1 - tests/unit/example.test.ts # time=1ms {\n}\n"), "no-match");
@@ -114,7 +118,7 @@ test("a diff-named Vitest file wins over other title hits and bare search exclud
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("a refresh touches a reviewer-owned real install and refuses a linked one", () => {
+test("a refresh uses the real canonical root behind a linked install", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-proof-refresh-"));
   const linked = mkdtempSync(join(tmpdir(), "rmd-proof-linked-"));
   try {
@@ -128,9 +132,45 @@ test("a refresh touches a reviewer-owned real install and refuses a linked one",
     let attempts = 0;
     assert.equal(refreshProofToolchain(linked, (() => { attempts++; }) as never), false);
     assert.equal(attempts, 0);
+    writeFileSync(join(dir, "package-lock.json"), '{"name":"fixture","version":"1.0.1","lockfileVersion":3,"packages":{"":{"name":"fixture","version":"1.0.1"}}}\n');
+    assert.equal(refreshProofToolchain(linked, ((_command: string, _args: string[], options: { cwd: string }) => {
+      assert.equal(options.cwd, dir, "refresh the canonical checkout, never install through the symlink");
+      attempts++;
+    }) as never), true);
+    assert.equal(attempts, 1);
     assert.equal(refreshProofToolchain(dir, (() => { throw new Error("install failed"); }) as never), false);
   } finally {
     rmSync(linked, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("cannot-evaluate posts pending and escalates once for the same head", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-proof-escalate-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  writeFileSync(ledgerPath, "");
+  try {
+    const states: string[] = [];
+    let issues = 0;
+    const opts = {
+      owner: "craigoley", repo: "remudero-console", sha: "a".repeat(40),
+      state: "pending" as const,
+      description: `remudero-review: cannot-evaluate — ${loadError}`,
+      taskId: "CONSOLE-T1", prUrl: "https://github.com/craigoley/remudero-console/pull/1866",
+      ledgerPath, runId: "run-load-proof", evidence: "no_evidence" as const,
+      fetchLifecycle: () => ({ merged: false, closed: false }),
+      post: (status: { state: string }) => { states.push(status.state); },
+      issues: {
+        listOpen: () => [],
+        create: () => { issues++; return "https://github.com/craigoley/remudero-console/issues/1"; },
+      },
+    };
+    assert.equal((await postReviewStatusGuarded(opts)).posted, true);
+    assert.equal((await postReviewStatusGuarded(opts)).posted, true);
+    assert.deepEqual(states, ["pending", "pending"]);
+    assert.equal(issues, 1);
+    const ledger = readFileSync(ledgerPath, "utf8");
+    assert.equal(ledger.match(/"step":"review.cannot_evaluate_escalated"/g)?.length, 1);
+    assert.match(ledger, /cannot-evaluate|cannot_evaluate/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
