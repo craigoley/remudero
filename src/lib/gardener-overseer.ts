@@ -195,6 +195,9 @@ function groupEvents(rows: readonly Row[]): Map<string, GardenerEvent[]> {
     const c = classifyGardenerStep(row.step);
     const at = tsOf(row);
     if (!c || Number.isNaN(at)) continue;
+    // A scorecard written beside a failed filing is a measurement, not a healthy pass: counting it
+    // would hide the filing streak it sits next to.
+    if (c.kind === "pass" && row.filing_failed !== undefined) continue;
     const list = byName.get(c.name) ?? [];
     list.push({ at, kind: c.kind, row });
     byName.set(c.name, list);
