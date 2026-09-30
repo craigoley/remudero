@@ -178,3 +178,14 @@ questions }`.
   sources. Those are GET /v1/status's board and PR queue over the instance's live file only, plus a fresh
   host probe of that instance, computed in the worker (`createNowView`'s `legacy`).
 - Probe gauges come from the view whenever both probes read them, so two samples moments apart are not a diff.
+
+## Console latency: `POST /v1/console/telemetry` (Phase 2)
+
+The console's hops (stream relay, refetch, render) are measured into core's own ledger
+(`src/lib/console-telemetry.ts`). The browser beacons one record per applied view update to a console
+route, which forwards the batch (at most 50 records, 16 KiB) here with the ingest-only token or the write
+token. Each record becomes one `console.latency` row: `view`, `key`, `cause`, `emittedAt`, and the
+millisecond hops `transportMs`, `fetchMs`, `coreMs`, `applyMs`, `paintMs`, `totalMs`, plus
+`clockOffsetMs`. Rows are paced to about one a second after a burst of 60; the answer counts what was
+`dropped`, and a `console.latency_dropped` row (at most one a minute) carries the count. Schema:
+`ConsoleTelemetryRequest` in `openapi/daemon.yaml`.
