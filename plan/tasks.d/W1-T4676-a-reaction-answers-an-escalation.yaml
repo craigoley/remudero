@@ -10,10 +10,10 @@
   risk: high
   band_meaning: span
   origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
-  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-operator-1790600000"
+  note: "DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #7747 (`chore: wip reaction reads land an owner thumbs-up/down escalation answer`, trailer + head run-W1-T4676-1790660566487): src/lib/escalation-answers.ts; test/a-reaction-answers-an-escalation.test.ts. plan-reconcile refuses the `chore:` subject. Every acceptance criterion holds on main and is PRESERVED UNCHANGED: this record is marked done, not re-proved.\n\nreservation hand-off: plan-innovation-1790600000 -> plan-innovation-operator-1790600000"
   plan_refs: [W1-T4471]
   files: [src/lib/escalation-answers.ts, test/a-reaction-answers-an-escalation.test.ts]
-  status: queued
+  status: done
   attempts: 0
   rationale: |
     OBSERVED: only comment text is read (src/lib/escalation-answers.ts, first word picks an option label) and the fleet

@@ -10,7 +10,8 @@
   files: [src/run-task.ts, test/ci-learning-safe-landing.test.ts]
   origin: oper#squeeze-session-2026-09-18
   plan_refs: ["W1-T3542", "W1-T1055"]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   rationale: |
     OBSERVED at cd33f6fcd1ad689d4e627a9f64e8e3c3132d349f on 2026-09-18. The exact
@@ -32,6 +33,12 @@
     - claim: "a manual forced CI-learning run from main stages its exact durable shard and reaches the dedicated landing branch"
       proof: "unit test: W1-T3542 criterion 1: manual ci-learning uses the isolated landing queue too"
   note: |
+    CLOSED 2026-09-30 (operator ruling) — THE FIX IS ALREADY ON MAIN. #6033 `fix(ci-learning): reserve IDs for landing
+    branch` (head run-unfiled-1789777200000, no `Remudero-Task:` trailer) made ciLearningTaskIdMinter in src/run-task.ts
+    take the bridge's real landing branch as the reservation's filingBranch instead of the checkout's current branch, so
+    a manual `ciLearningCommand(["--force"])` from main stages its shard. The named control W1-T3542 criterion 1 in
+    test/ci-learning-safe-landing.test.ts runs and passes on main.
+
     reservation hand-off: chore/amend-W1-T3758-streaming-union -> plan/file-W1-T3765-ci-learning-landing-reservation
 
     Falsifier: retain the current-branch minter at the manual call site. The W1-T3542 control must

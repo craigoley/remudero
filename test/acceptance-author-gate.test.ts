@@ -16,10 +16,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -59,6 +60,18 @@ const mod = (await import(GATE_URL)) as {
     root?: string;
     git?: (args: string[]) => string;
   }) => string[] | undefined;
+  introducedShardTaskIds: (input?: {
+    baseSha?: string;
+    headSha?: string;
+    root?: string;
+    git?: (args: string[]) => string;
+  }) => string[];
+  resolveEffectiveBaseSha: (input?: {
+    baseSha?: string;
+    headSha?: string;
+    root?: string;
+    git?: (args: string[]) => string;
+  }) => string | undefined;
   rule15SplitAtRange: (input?: {
     baseSha?: string;
     headSha?: string;
@@ -69,13 +82,88 @@ const mod = (await import(GATE_URL)) as {
   readEventPayload: (eventPath: string) => { readable: boolean; body?: string; authorLogin?: string; reason?: string };
   evaluateCommitTrailerGate: (input: Pick<GateInput, "trailerCommits" | "changedPaths" | "taskFilesForId">) => GateVerdict;
   evaluateGate: (input: GateInput) => GateVerdict;
-  main: (argv: string[]) => void;
+  main: (argv: string[], opts?: { root?: string }) => void;
   resolveEventPath: (
     flagValue: string | undefined,
     env?: Record<string, string | undefined>,
   ) => { ok: boolean; eventPath?: string; message?: string };
 };
-const { EXEMPT_BOT_LOGINS, changedPathsAtRange, commitTaskTrailersAtRange, evaluateCommitTrailerGate, evaluateGate, main, planTaskFilesResolver, readEventPayload, resolveEventPath, rule15SplitAtRange } = mod;
+const { EXEMPT_BOT_LOGINS, changedPathsAtRange, commitTaskTrailersAtRange, evaluateCommitTrailerGate, evaluateGate, introducedShardTaskIds, main, planTaskFilesResolver, readEventPayload, resolveEffectiveBaseSha, resolveEventPath, rule15SplitAtRange } = mod;
+
+test("W1-T4898: a stale base sha does not charge newer main plan shards to the pull request", async () => {
+  const repo = gitRepo({ kind: "author-base" });
+  const root = repo.dir;
+  const git = repo.git;
+  try {
+    mkdirSync(join(root, "src"));
+    const payloadBase = git("rev-parse", "HEAD");
+
+    git("switch", "-qc", "topic");
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n");
+    git("add", ".");
+    git("commit", "-qm", "feature");
+
+    git("switch", "-q", "main");
+    mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
+    writeFileSync(join(root, "plan", "tasks.d", "W1-T9999.yaml"),
+      "- id: W1-T9999\n  acceptance:\n    - claim: main's criterion\n      proof: 'unit test: main proof'\n");
+    git("add", ".");
+    git("commit", "-qm", "newer main plan shard");
+    const currentMain = git("rev-parse", "HEAD");
+
+    git("switch", "-q", "topic");
+    git("merge", "--no-ff", "-qm", "bring main into topic", "main");
+    const headSha = git("rev-parse", "HEAD");
+    assert.equal(resolveEffectiveBaseSha({ baseSha: payloadBase, headSha, root }), payloadBase,
+      "a PR head checkout keeps the event base");
+    git("switch", "-q", "main");
+    git("merge", "--no-ff", "-qm", "synthetic pull request merge", "topic");
+
+    const effectiveBaseSha = resolveEffectiveBaseSha({ baseSha: payloadBase, headSha, root });
+    assert.equal(effectiveBaseSha, currentMain);
+    assert.deepEqual(changedPathsAtRange({ baseSha: payloadBase, headSha, root }), [
+      "plan/tasks.d/W1-T9999.yaml", "src/feature.ts",
+    ], "the stale payload base wrongly charges newer main's shard to the PR");
+    assert.deepEqual(changedPathsAtRange({ baseSha: effectiveBaseSha, headSha, root }), ["src/feature.ts"]);
+    assert.deepEqual(introducedShardTaskIds({ baseSha: payloadBase, headSha, root }), ["W1-T9999"]);
+    assert.deepEqual(introducedShardTaskIds({ baseSha: effectiveBaseSha, headSha, root }), []);
+    assert.equal(rule15SplitAtRange({ baseSha: payloadBase, headSha, root })?.refused, true);
+    assert.equal(rule15SplitAtRange({ baseSha: effectiveBaseSha, headSha, root })?.refused, false);
+    const eventPath = join(root, "event.json");
+    writeFileSync(eventPath, JSON.stringify({ pull_request: {
+      body: "## Acceptance\n\n- claim: a real feature\n  proof: unit test: a feature proof\n",
+      user: { login: "human" }, base: { sha: payloadBase }, head: { sha: headSha, ref: "topic" },
+    } }));
+    const gate = await withExitCode(() => main(["--event-path", eventPath], { root }));
+    assert.equal(gate.exitCode, 0, gate.err.join("\n"));
+    assert.match(gate.out.join("\n"), /acceptance-author-gate: OK/);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("W1-T4898: the merge first parent replaces the payload base only when its second parent is the payload head", () => {
+  const first = "a".repeat(40);
+  const head = "b".repeat(40);
+  const payloadBase = "c".repeat(40);
+  const calls: string[][] = [];
+  const resolved = resolveEffectiveBaseSha({ baseSha: payloadBase, headSha: head, git(args) {
+    calls.push(args);
+    return `${first}\n${head}\n`;
+  } });
+  assert.deepEqual(calls, [["rev-parse", "HEAD^1", "HEAD^2"]]);
+  assert.equal(resolved, first);
+  assert.equal(resolveEffectiveBaseSha({ baseSha: payloadBase, headSha: head, git: () => `${first}\n${"d".repeat(40)}\n` }), payloadBase);
+  assert.equal(resolveEffectiveBaseSha({ baseSha: payloadBase, headSha: head, git: () => `HEAD^1\n${head}\n` }), payloadBase);
+});
+
+test("W1-T4898: a checkout that is not the payload merge keeps the payload base sha", () => {
+  const baseSha = "a".repeat(40);
+  const headSha = "b".repeat(40);
+  assert.equal(resolveEffectiveBaseSha({ baseSha, root: "/missing", headSha, git: () => { throw new Error("no second parent"); } }), baseSha);
+  assert.equal(resolveEffectiveBaseSha({ baseSha, root: "/missing" }), baseSha);
+  assert.equal(resolveEffectiveBaseSha({ baseSha, headSha, git: () => { throw new Error("unavailable git"); } }), baseSha);
+});
 
 /** Byte-identical in shape to test/acceptance-block-diagnostics.test.ts's own WRAPPED fixture —
  *  a claim long enough that an author wrapped it onto a second line. `parseAcceptanceBlock`

@@ -65,9 +65,15 @@
   origin: human
   plan_refs: [W1-T3740, W1-T3737]
   files: [src/lib/ci-failure-corpus.ts]
-  status: queued
+  status: done
   attempts: 0
   note: |
+    DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #6281
+    (`chore: wip export MATRIX_SUFFIX_RE and fixture both its arms`, trailer + head run-W1-T3743-1789939560500):
+    MATRIX_SUFFIX_RE in src/lib/ci-failure-corpus.ts; test/could-we-have-caught-it-at-home.test.ts. plan-reconcile
+    refuses the `chore:` subject. Every acceptance criterion holds on main and is PRESERVED UNCHANGED: this record is
+    marked done, not re-proved.
+
     reservation hand-off: unknown -> file-t3741-43-the-last-three
 
     Found by W1-T3740 on its first run against the real registry — the scoreboard's first act was

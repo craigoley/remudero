@@ -36,9 +36,9 @@
   origin: oper#plan-review-triage-2026-08-11
   plan_refs: ["W1-T422", "W1-T418", "W1-T419", "W1-T420"]
   files: [plan/tasks.d/W1-T418-repeat-incident-rate-rule-efficacy.yaml, plan/tasks.d/W1-T419-learnings-citation-loop.yaml, plan/tasks.d/W1-T420-duplicate-closure-at-knowledge-intake.yaml]
-  status: queued
+  status: done
   attempts: 0
-  note: "verify:auto — three greps and a selector assertion. risk:low — plan-only, three lines,
+  note: "DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #1621 (`chore(plan): stamp learning-loop arc as priority field consumers (W1-T426)`, trailer + head run-W1-T426-1786535301007): `priority: 1` is on the W1-T418, W1-T419 and W1-T420 shards. Plan-only deliverable; plan-reconcile refuses the `chore(plan)` subject. Every acceptance criterion holds on main and is PRESERVED UNCHANGED: this record is marked done, not re-proved.\n\nverify:auto — three greps and a selector assertion. risk:low — plan-only, three lines,
     carve-out intact by construction. budget_usd 25 — the smallest lawful unit of wiring.
     PROOF NOTES: all three greps are forward references into EXISTING shard files (0 hits each at
     3b18d95, verified in the W1-T422 filing pass). depends_on W1-T422: a stamp before the

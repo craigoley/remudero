@@ -10,7 +10,7 @@
   origin: "followup#W1-T2481-1788113218856"
   plan_refs: ["§5C", "W1-T2481"]
   files: [plan/tasks.d/W1-T2481-a-scope-rule-fires-on-records-dispatch-can-never-reach.yaml]
-  status: queued
+  status: done
   attempts: 0
   rationale: |
     THE CITATION, VERBATIM. W1-T2481's rationale reads "Measured on #3305: applying the retirement
@@ -91,7 +91,7 @@
       proof: "grep: 13 failing in plan/tasks.d/W1-T2481-a-scope-rule-fires-on-records-dispatch-can-never-reach.yaml"
     - claim: "no acceptance criterion of the merged record is touched — the falsifier against repairing a citation by moving a goalpost"
       proof: "grep: a blocked task with no declared scope emits no declared-scope violation in plan/tasks.d/W1-T2481-a-scope-rule-fires-on-records-dispatch-can-never-reach.yaml"
-  note: "Filed from the follow-up harvest of run W1-T2481-1788113218856. The harvest's own words: recon
+  note: "DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #3896 (`chore(plan): re-anchor #3305 citation to immutable SHA with measurement status`, trailer + head run-W1-T2648-1788508326964): the W1-T2481 shard carries `CITATION RE-ANCHORED` and `MEASUREMENT STATUS:`. Plan-only deliverable; plan-reconcile refuses the `chore(plan)` subject. Every acceptance criterion holds on main and is PRESERVED UNCHANGED: this record is marked done, not re-proved.\n\nFiled from the follow-up harvest of run W1-T2481-1788113218856. The harvest's own words: recon
     did not verify #3305, so the number must not be cited as still-current until someone reads the PR.
     NOT NEAR THE FRONT, and deliberately so — the kick order is security-first (W1-T24 -> W1-T23 ->
     plan-health) and a provenance repair to a merged record's prose earns no place ahead of it.

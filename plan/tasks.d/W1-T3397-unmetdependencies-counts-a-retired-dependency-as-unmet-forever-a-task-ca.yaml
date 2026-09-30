@@ -11,7 +11,7 @@
   files: [src/lib/plan.ts, test/plan.test.ts, test/task-retirement-reason.test.ts]
   origin: "oper#w1-t3076-retirement-ruling-2026-09-09"
   plan_refs: ["W1-T3076", "W1-T1287", "W1-T3201", "W1-T3279"]
-  status: queued
+  status: done
   attempts: 0
   rationale: |
     VERIFIED AT SOURCE 2026-09-09. `unmetDependencies` (`src/lib/plan.ts:698-707`) is exactly:
@@ -90,6 +90,12 @@
     reading `src/lib/plan.ts:698-707` directly: zero hits; the filter reads exactly
     `!d || !isMerged(d)` with no retirement branch anywhere in the function.
   note: |
+    DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #5357
+    (`fix(plan): ignore retired dependency blockers (W1-T3397)`, trailer + head run-W1-T3397-1789293539623):
+    unmetDependencies in src/lib/plan.ts skips a dependency that carries a retirement; tests in test/plan.test.ts and
+    test/task-retirement-reason.test.ts. plan-reconcile refuses the `fix(plan)` subject. Every acceptance criterion
+    holds on main and is PRESERVED UNCHANGED: this record is marked done, not re-proved.
+
     Filed while routing verify-human:W1-T3076. The operator's decision entry ("## 2026-09-09 —
     OPERATOR DECISION: W1-T3076 chosen bound — (a) first, then (c); NOT (b)") already ruled and
     already found this bug in prose; this task is the build the ruling implies but the ruling itself
