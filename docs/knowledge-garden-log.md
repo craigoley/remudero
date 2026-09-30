@@ -52,3 +52,9 @@ Learnings used when offered: 12%. Dangling Why pointers: 0.
 - retire scan-both-quote-styles: Workers offered it have rarely used it, compared with other learnings.
 
 Learnings used when offered: 13%. Dangling Why pointers: 1.
+
+## Pass 2026-09-30T04:12:24.862Z
+
+- retire bashrc-accident: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 13%. Dangling Why pointers: 1.
