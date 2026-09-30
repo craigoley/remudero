@@ -1,0 +1,16 @@
+- id: W1-T4835
+  title: "RATIFICATION: PLACEHOLDER W1-T4835 for plan integration"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: "human"
+  risk: medium
+  status: queued
+  attempts: 0
+  origin: "architect"
+  files:
+    - master-plan.md
+    - plan/tasks.yaml
+  acceptance:
+    - claim: "W1-T4835 will be wired into the master plan once operator approves; scope kept minimal"
+      proof: "unit test: tests/plan/new-2-mapping_test.go"

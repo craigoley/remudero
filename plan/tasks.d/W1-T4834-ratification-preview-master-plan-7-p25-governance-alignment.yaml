@@ -1,0 +1,16 @@
+- id: W1-T4834
+  title: "RATIFICATION PREVIEW: MASTER-PLAN §7/P25 governance alignment"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: "human"
+  risk: low
+  status: queued
+  attempts: 0
+  origin: "architect"
+  files:
+    - master-plan.md
+    - plan/tasks.yaml
+  acceptance:
+    - claim: "The fragment previews alignment with MASTER-PLAN §7/P25 and introduces three NEW placeholders for ratification tasks"
+      proof: "unit test: tests/plan/new-1-alignment_test.go"

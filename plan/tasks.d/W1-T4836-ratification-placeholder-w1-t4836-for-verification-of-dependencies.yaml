@@ -1,0 +1,16 @@
+- id: W1-T4836
+  title: "RATIFICATION: PLACEHOLDER W1-T4836 for verification of dependencies"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: "human"
+  risk: low
+  status: queued
+  attempts: 0
+  origin: "architect"
+  files:
+    - master-plan.md
+    - plan/tasks.yaml
+  acceptance:
+    - claim: "W1-T4836 validates that the fragment's placeholders cover required dependencies and no external leaks"
+      proof: "unit test: tests/plan/new-3-dependency_validation_test.go"
