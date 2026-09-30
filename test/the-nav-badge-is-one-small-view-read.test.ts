@@ -71,6 +71,37 @@ test("a decided or rejected proposal leaves the agent badge", () => {
   assert.deepEqual(visibleOperatorAgentProposals(candidates, [], { enabled: false, confidenceThreshold: 0.9 }), []);
 });
 
+test("every evidence family the console engine reads becomes a candidate here too", () => {
+  const snapshot = busySnapshot();
+  snapshot.consoleV1 = {
+    ...snapshot.consoleV1,
+    metrics: [
+      { key: "runs.completed", class: "observed", value: 10 },
+      { key: "duration.p50.ms", class: "observed", value: 10 * 60_000 },
+      { key: "queue.pending", class: "observed", value: 7 },
+    ],
+    operatorAgent: {
+      ...snapshot.consoleV1.operatorAgent,
+      proof: { ...snapshot.consoleV1.operatorAgent.proof, status: "measured", denominator: 10, passRate: 0.5 },
+      outcomes: { ...snapshot.consoleV1.operatorAgent.outcomes, classes: [{ verdictClass: "Merged Clean", total: 10, revertedCount: 3, followupFixedCount: 0, revertRate: 0.3, followupFixRate: 0, lanes: "run-task", taskIds: [] }] },
+      decisions: { ...snapshot.consoleV1.operatorAgent.decisions, classes: [{ taskClass: "docs", approvedCount: 6, acceptedCount: 0, rejectedCount: 0, heldCount: 0, releasedCount: 0, approvalDenominator: 6, approvalRate: 1, taskIds: [], actorIds: [] }] },
+      capacity: { ...snapshot.consoleV1.operatorAgent.capacity, measurements: [{ repo: REPO, configuredCapacity: 2, admittedLanes: 2, activeWorkers: 2, queuedWork: 9, utilizationRatio: 1, windowStart: "2026-09-30T00:00:00.000Z", windowEnd: "2026-09-30T01:00:00.000Z", recommendation: "scale-up" }] },
+    },
+  } as unknown as AnalyticsSnapshot["consoleV1"];
+  const signals = operatorAgentCandidates(snapshot, { repository: REPO, instanceId: "core" }, [
+    history("operator-agent:x:y:fix:proof-failure-rate", { category: "fix", outcome: { summary: "s", helped: true, observedAt: "2026-09-29T02:00:00.000Z" } }),
+    history("operator-agent:x:y:scale:queue-pressure", { category: "scale", outcome: { summary: "s", helped: false, observedAt: "2026-09-29T02:00:00.000Z" } }),
+  ]).map((c) => `${c.category}:${c.signal}:${c.confidence}`);
+  assert.deepEqual(signals.sort(), [
+    "fix:proof-failure-rate:0.98",
+    "fix:revert-rate-merged-clean:0.98",
+    "optimize:approval-pattern-docs:0.98",
+    "scale:capacity-scale-up-craigoley-remudero:0.98",
+    "scale:queue-pressure:0.92",
+    "fix:worker-failure-rate-implement-sonnet:0.98",
+  ].sort());
+});
+
 function badgeView(snapshot: AnalyticsSnapshot, inboxRoot: string, memory: OperatorAgentMemorySource = readyMemory) {
   return navBadgeView({ analytics: () => snapshot, memory, ledgerPath: join(inboxRoot, "state", "ledger.ndjson"), inboxRoot, repository: REPO, instanceId: "core", clock: fixedClock(NOW) });
 }
