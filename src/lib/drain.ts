@@ -21,6 +21,7 @@ import {
   type ObservedScopeByTask,
 } from "./dispatch-overlap.js";
 import { taskIdFromRunBranch } from "./status.js";
+import { isRecordTask } from "./task-linter.js";
 import type { OpenSiblingBuild, StatusProjection } from "./status.js";
 import { measuredDispatchValue, type DispatchValueContext } from "./dispatch-value.js";
 
@@ -271,6 +272,9 @@ export interface NextRunnableOpts {
   /** W1-T4025: records repeated attributable work for an asynchronous judge/follow-up route. It
    * never changes eligibility; the old cap callback remains an observation compatibility seam. */
   onLifetimePressure?: (task: Task) => void;
+  /** W1-T4818: called for a `verify: auto` task whose every proof greps its own shard — a record
+   *  with nothing for a worker to build. Observation only; the decline itself is the chain's. */
+  onRecordTaskRouted?: (task: Task) => void;
   /** Called once per task declined by one of the formerly-silent conditions, with the first-match
    *  reason (see {@link tallyDispatchFilters}). Observation only: it changes no task's eligibility. */
   onFiltered?: (task: Task, reason: DispatchFilterReason) => void;
@@ -561,6 +565,14 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
     return false;
   }
   if (t.verify !== "auto" && opts.releasedIds?.has(t.id) !== true) {
+    opts.onFiltered?.(t, "verify-not-auto");
+    return false;
+  }
+  // W1-T4818: a record task (every proof greps its own shard) is never a worker's to build. It is
+  // declined under the existing "verify-not-auto" name, the judge path a `verify: human` record
+  // takes, so no new filter reason reaches the census tallies.
+  if (t.verify === "auto" && isRecordTask(t)) {
+    opts.onRecordTaskRouted?.(t);
     opts.onFiltered?.(t, "verify-not-auto");
     return false;
   }
@@ -1217,6 +1229,8 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   // tripped would be re-escalated on every tick, violating "exactly one escalation". This set bounds
   // the CALLBACK to the first observation; the predicate still excludes the task every tick.
   const circuitEscalated = new Set<string>();
+  // W1-T4818: one `dispatch.record_task_routed` line per record task per run, not one per pass.
+  const routedRecordTasks = new Set<string>();
   // W1-T4025: repeated attributable work is observed once per selection and handed to the
   // asynchronous judge after the current task settles. It never blocks the selected task.
   const lifetimePressureTasks = new Map<string, Task>();
@@ -1441,6 +1455,11 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
           deps.onCircuitBreak?.(t);
         }
       },
+      onRecordTaskRouted: (t) => {
+        if (routedRecordTasks.has(t.id)) return;
+        routedRecordTasks.add(t.id);
+        log("dispatch.record_task_routed", { task: t.id });
+      },
       isLifetimeCapExceeded: deps.isLifetimeCapExceeded,
       // LIFETIME DISPATCH CAP (W1-T316/W1-T271): a legible ledger line every tick, with the
       // caller's legacy observation hook fired at most once per task id per drain run.
@@ -1561,6 +1580,8 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   // Same escalation-dedup contract as the single-lane loop: bounds the CALLBACK to this drain's
   // first observation of each tripped id, across every pass.
   const circuitEscalated = new Set<string>();
+  // W1-T4818: one `dispatch.record_task_routed` line per record task per run, not one per pass.
+  const routedRecordTasks = new Set<string>();
   // Lifetime pressure is a sensor, not a terminal refusal. Keep one task per pass and hand the
   // bounded set to the adaptive router after the pass so a judge/proposal failure cannot block a
   // healthy sibling or leave a half-written escalation behind.
@@ -1786,6 +1807,11 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
           circuitEscalated.add(t.id);
           deps.onCircuitBreak?.(t);
         }
+      },
+      onRecordTaskRouted: (t) => {
+        if (routedRecordTasks.has(t.id)) return;
+        routedRecordTasks.add(t.id);
+        log("dispatch.record_task_routed", { task: t.id });
       },
       isLifetimeCapExceeded: deps.isLifetimeCapExceeded,
       onLifetimeCapExceeded: (t) => {
