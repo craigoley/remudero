@@ -2,9 +2,9 @@
 
 Each section is one pass of the knowledge gardener (W1-T4095): what it changed and how the knowledge base scored.
 
-## Pass 2026-09-25T20:17:12.931Z
+## Pass 2026-09-29T19:45:53.218Z
 
-- retire rerun-the-job-not-the-run: Workers offered it have rarely used it, compared with other learnings.
-- retire maxbudget-between-turns: Workers offered it have rarely used it, compared with other learnings.
+- retire proc-environ-is-an-exec-time-snapshot: Workers offered it have rarely used it, compared with other learnings.
+- retire scan-both-quote-styles: Workers offered it have rarely used it, compared with other learnings.
 
-Learnings used when offered: 12%. Dangling Why pointers: 0.
+Learnings used when offered: 13%. Dangling Why pointers: 1.
