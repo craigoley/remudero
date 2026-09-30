@@ -227,8 +227,11 @@ export interface ImpossibleCanaryCommandOptions {
   readonly nowMs?: number;
 }
 
-function defaultRunGrader(grader: string, model: string, assignment: CanaryAssignment): CanaryGrade {
-  const out = spawnSync(grader, [model, assignment.canaryId], {
+/** Run the external grader once; the spawn is injectable (last, defaulted to the real one) so tests record the call. */
+export function defaultRunGrader(
+  grader: string, model: string, assignment: CanaryAssignment, spawn: typeof spawnSync = spawnSync,
+): CanaryGrade {
+  const out = spawn(grader, [model, assignment.canaryId], {
     input: JSON.stringify(assignment), encoding: "utf8", timeout: 30 * 60 * 1000, maxBuffer: 1 << 22 });
   if (out.error !== undefined) return { error: `grader-spawn-failed: ${out.error.message.slice(0, 80)}` };
   if (out.status !== 0) return { error: `grader-exit-${String(out.status)}` };
