@@ -5267,6 +5267,16 @@ export function reviewerVerdictContract(count: number): string {
     `A bare category like "non-responsive" repeats what the token already said and`,
     `leaves them nothing to act on. One line; anything after a newline is dropped.`,
     `PASS lines are never annotated — the clause is read only on FAIL.`,
+    ``,
+    `OPTIONAL FINDING RECEIPTS (not used to decide the status): if you found a`,
+    `specific, evidenced issue, emit at most eight one-line JSON records:`,
+    `  REVIEW_FINDING {"criterion":1,"category":"wiring","severity":"medium","mechanism":"what fails and why","remedy":"specific fix or null","anchor":{"path":"src/example.ts","line":12,"kind":"changed"}}`,
+    `The anchor must name an exact line at this PR head. Use kind "dependency"`,
+    `only for an outside-diff line and add "changedProducer":{"path":"...","line":12}`,
+    `inside anchor to name the changed line it depends on. Do not invent paths.`,
+    `If you found no specific issue, emit REVIEW_FINDINGS: NONE instead.`,
+    `The orchestrator validates anchors; malformed or missing records do not`,
+    `change REVIEW_VERDICT or hold this PR. Do not include commands in records.`,
   ].join("\n");
 }
 

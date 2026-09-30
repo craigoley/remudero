@@ -1,0 +1,84 @@
+- id: W1-T4901
+  title: "THE PRE-PUSH HOOK NEVER LINTS A PLAN DIFF, SO A RECORD THAT CI WILL BLOCK IS ONLY FOUND AFTER THE PUSH — 14 of 55 single-shard test reds (25%) in a 120-PR sample were test/ci-parity.test.ts's real `lint-plan:fast` run refusing the PR's own shard (shared-proof x7, sizing x5, proof-* x5, machine-filing-admission x2); the 8-second offline lint is in `rmd preflight --fast`, not in hooks/pre-push"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: "research 2026-09-30: pre-push census gap, finding 9 (plan-lint reds)"
+  plan_refs: ["W1-T3225", "W1-T3730", "W1-T3814", "W1-T3843", "W1-T4399", "W1-T4656"]
+  files:
+    - hooks/pre-push
+    - scripts/lint-plan-precheck.mjs
+    - test/prepush-lints-a-plan-diff.test.ts
+  rationale: |
+    MEASURED 2026-09-30. Sample: 120 of the 551 branches whose ci.yml pull_request run failed 2026-09-16..30,
+    first failing run of each; 55 had exactly one red test shard and all 55 logs were read. 14 named
+    test/ci-parity.test.ts, whose "lint-plan:fast ... runs for real, unmocked, on this checkout" test fails when
+    the PR's own changed task fails the plan lint. By lint rule (a run can carry several): shared-proof 7,
+    sizing 5, proof-unit-test-* / proof-dialect / proof-resolvability / proof-scope 5, machine-filing-admission
+    2, call-site 1. By producer: approve-flow skill drafts 5, gardeners 2, triage 2, plan-create 1, worker build
+    1, hand sessions 3. Each of these PRs then also failed the lint-plan step of the commitlint job (W1-T4399),
+    so one bad shard cost one CI cycle twice over.
+    WHAT THE HOOK RUNS FOR A PLAN DIFF TODAY does not include the lint. rule15-precheck asks only whether a
+    criteria field rides with implementation. proof-resolve-precheck SKIPs a plan-only filing ("its proofs are
+    the build PR's"), so on a filing it checks nothing; on a build head it overlaps the lint only for one rule
+    (proof-unit-test-unresolvable). ci-control-plane-precheck and the tier check read other inputs. Nothing
+    overlaps shared-proof, sizing, proof-scope, call-site or machine-filing-admission.
+    lint-plan is a SCRIPT, not a test suite. test/the-hook-spawns-no-test-suite.test.ts bans the text `node --test`
+    in hooks/pre-push and TAP output on a push; scripts/lint-plan-offline.mjs prints neither, and its own header
+    says it exists "for latency-sensitive callers such as git hooks". Measured on an idle host: 6.7-9.6 s for
+    a plan-only diff (whole-plan load dominates; 0, 1, 2 and 5 changed tasks cost the same), 11 ms to decide
+    to skip a diff with no plan/ path. The hook takes about 6 s today.
+    REPRODUCED with a control, plan-only commit against origin/main: a shard with four identical proofs makes
+    `node --import tsx scripts/lint-plan-offline.mjs --base origin/main --merge-base` exit 1 with
+    "[shared-proof] criteria 1, 2, 3, 4 share the identical proof" — the CI text — and a machine-authored shard
+    naming a path that exists nowhere exits 1 with [machine-filing-admission].
+    TWO HAZARDS THE DESIGN MUST NOT INHERIT, both measured. (a) STALE LOCAL BASE: with origin/main 100 commits
+    behind the fork point, `lint-plan-offline.mjs --base origin/main --merge-base` on a branch that changed
+    NOTHING checks 96 tasks and exits 1 on tasks other PRs merged (W1-T4635, W1-T4793); 300 behind checks 235.
+    A refusal there is a bound firing on a healthy condition. Every commit squash-merged to main has a
+    subject ending `(#<n>)` (300 of 300 in the last 300), so a squash subject in merge-base..HEAD proves the
+    local ref is behind the fork point. (b) MACHINE-FILING-ADMISSION IS STATE-DEPENDENT: it reads
+    releasedIds and selectability from the checkout's plan, so a stale checkout can disagree with CI about a
+    judge release; it also fires on the gardeners' own filings.
+    HONEST LIMIT. 10 of the 14 came from machine producers (approve-flow, gardeners, triage, plan-create). Their
+    worktrees DO run this hook (worktreeAdd, src/lib/worker.ts, sets core.hooksPath=hooks on every worktree it
+    creates; gardenCheckout and the approve, plan-create and worker paths use it), so a refusal reaches them.
+    What each flow does with a refused push was NOT verified here, and the better cure for the shared-proof
+    cluster (7 of 14, six from machine emitters) is at the producer. This task is the backstop; W1-T3310
+    already classifies a gate refusal as blocked, not a daemon crash.
+  design: |
+    (i) scripts/lint-plan-precheck.mjs, a pure verdict over injected inputs plus a main() that wires git and the
+    lint. It diffs `git merge-base HEAD <base>`...HEAD and SKIPs (exit 0, named) when no path starts with plan/.
+    (ii) It SKIPs, naming the remedy `git fetch origin`, when any subject in merge-base..HEAD matches
+    `\(#[0-9]+\)$`: the local origin/main is behind the fork point and the lint would judge other PRs' tasks.
+    (iii) Otherwise it runs the SAME argv as CI's scope, the `lint-plan:fast` npm script
+    (`lint-plan-offline.mjs --base origin/main --merge-base`), read from package.json, never retyped. The
+    offline lint only OMITS network rules, so it cannot refuse what CI would not.
+    (iv) Two severities, like proof-resolve-precheck. Exit 1 (block) when any violation rule is not
+    machine-filing-admission. A finding made ONLY of machine-filing-admission is REPORTED and exits 0.
+    Exit 2 (could not run: spawn failure, a status other than 0 or 1) is never blocking.
+    (v) hooks/pre-push gains one block after the census precheck with the same absent-script skip line and
+    rc handling as its neighbours, and no `node --test`. The W1-T3225 test keeps passing.
+    (vi) Any numeric bound the script adds declares itself BACKSTOP or PRIMARY CONTROL (bound-kind census).
+  acceptance:
+    - claim: "a real git push of a plan-only diff whose changed shard fails the plan lint is refused by the hook, naming the lint rule and the remedy"
+      proof: "unit test: test/prepush-lints-a-plan-diff.test.ts"
+    - claim: "a diff that changes no plan file skips the lint, and a diff whose range holds a squash-merge subject abstains naming git fetch instead of refusing"
+      proof: 'grep: test("a diff that changes no plan file skips the lint" in test/prepush-lints-a-plan-diff.test.ts'
+    - claim: "a finding made only of machine-filing-admission is reported and does not block"
+      proof: 'grep: test("a machine-filing-admission finding alone is reported and does not block" in test/prepush-lints-a-plan-diff.test.ts'
+    - claim: "the precheck takes its lint argv from the lint-plan:fast npm script, never retyped, so it cannot drift from what preflight and CI's scope run"
+      proof: "grep: lint-plan:fast in scripts/lint-plan-precheck.mjs"
+  falsifier: |
+    Delete the hook block: the first proof goes red while the skip and report-only arms stay green, which is
+    what keeps them from being a vacuous pass. CLOSE the task if CI's lint-plan step stops using the
+    changed-task scope, or if the machine producers are changed to lint their record before writing it and the
+    ci-parity lint-plan reds fall to zero in a fresh sample.

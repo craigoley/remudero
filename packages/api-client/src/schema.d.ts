@@ -2413,12 +2413,45 @@ export interface components {
       policy?: ProviderRoutingPolicyStatus;
       preferenceBypass?: ProviderRoutingPreferenceBypass;
     };
+    /** One input a view was computed from (src/lib/views.ts's `ViewSource`). */
+    ViewSource: {
+      name: string;
+      /** The input's own as-of time; null when it has none yet. */
+      asOf: string | null;
+      state: "fresh" | "stale" | "unavailable";
+      reason?: string;
+    };
+    /** GET /v1/views/nav-badge (docs/views.md). The view envelope every /v1/views/<name> route answers: `version` is `data`'s schema version, `asOf` the oldest source's as-of, `stale` true when any source is stale or unavailable. A cold input makes its count absent with a `reason`, never a zero. */
+    NavBadgeView: {
+      view: "nav-badge";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        /** The operator-agent badge: proposals the console's engine would show (a port of its generateProposals and visibleProposals, src/lib/nav-badge-view.ts), with up to 20 of their ids for a parity check. */
+        agent: {
+          count?: number;
+          proposalIds: (string)[];
+          reason?: string;
+        };
+        /** Open inbox items by who must act, from the last GET /v1/inbox classification. */
+        inbox: {
+          ready?: number;
+          needsYou?: number;
+          fleet?: number;
+          reason?: string;
+        };
+      };
+    };
     /** One RECENT feed row minted from a ledger line (src/lib/board.ts's `RecentActivityEntry`). */
     RecentActivityEntry: {
       taskId: string;
       runId?: string;
       title: string;
-      verb: "merged" | "verdict" | "fix" | "escalated" | "spend" | "run-refused" | "run-started" | "worker";
+      /** `merged` is minted from a run's `verdict: merged` row or the sweep's `verdict.merged` credit, once per pull request. `started` is a `run.start` (detail: the run type), `review` a `review.posted` (detail: its state, verbatim), `automerge` an `automerge.armed`. A consumer must render an unknown verb, not drop it. */
+      verb: "merged" | "verdict" | "fix" | "escalated" | "spend" | "run-refused" | "run-started" | "worker" | "started" | "review" | "automerge";
       /** The originating ledger line's own `ts`. */
       ts: string;
       detail?: string;
@@ -2444,7 +2477,7 @@ export interface components {
       /** Present only when GitHub decoration was attempted and failed for this row. */
       githubUnavailable?: true;
     };
-    /** GET /v1/recent's body -- at most 20 entries, newest first. */
+    /** GET /v1/recent's body -- at most `limit` (default 20) entries, newest first. */
     RecentActivityResult: {
       entries: (RecentActivityEntry)[];
       staleness?: ConsoleResponseStaleness;
@@ -4158,11 +4191,22 @@ export interface paths {
         };
     };
   };
+  "/v1/views/nav-badge": {
+    get: {
+      responses: {
+          "200": NavBadgeView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
   "/v1/recent": {
     get: {
       responses: {
           "200": RecentActivityResult;
           "304": undefined;
+          "400": Error;
           "401": Error;
           "403": Error;
         };

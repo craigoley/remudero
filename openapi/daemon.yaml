@@ -6371,6 +6371,68 @@ components:
         preferenceBypass:
           $ref: "#/components/schemas/ProviderRoutingPreferenceBypass"
 
+    ViewSource:
+      type: object
+      description: One input a view was computed from (src/lib/views.ts's `ViewSource`).
+      required: [name, asOf, state]
+      properties:
+        name: {type: string}
+        asOf:
+          type: [string, "null"]
+          description: The input's own as-of time; null when it has none yet.
+        state:
+          type: string
+          enum: [fresh, stale, unavailable]
+        reason: {type: string}
+
+    NavBadgeView:
+      type: object
+      description: >
+        GET /v1/views/nav-badge (docs/views.md). The view envelope every /v1/views/<name> route
+        answers: `version` is `data`'s schema version, `asOf` the oldest source's as-of, `stale` true
+        when any source is stale or unavailable. A cold input makes its count absent with a
+        `reason`, never a zero.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [nav-badge]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [agent, inbox]
+          properties:
+            agent:
+              type: object
+              description: >
+                The operator-agent badge: proposals the console's engine would show (a port of its
+                generateProposals and visibleProposals, src/lib/nav-badge-view.ts), with up to 20
+                of their ids for a parity check.
+              required: [proposalIds]
+              properties:
+                count: {type: integer}
+                proposalIds:
+                  type: array
+                  items: {type: string}
+                reason: {type: string}
+            inbox:
+              type: object
+              description: Open inbox items by who must act, from the last GET /v1/inbox classification.
+              properties:
+                ready: {type: integer}
+                needsYou: {type: integer}
+                fleet: {type: integer}
+                reason: {type: string}
+
     RecentActivityEntry:
       type: object
       description: One RECENT feed row minted from a ledger line (src/lib/board.ts's `RecentActivityEntry`).
@@ -6384,7 +6446,12 @@ components:
           type: string
         verb:
           type: string
-          enum: [merged, verdict, fix, escalated, spend, run-refused, run-started, worker]
+          enum: [merged, verdict, fix, escalated, spend, run-refused, run-started, worker, started, review, automerge]
+          description: >
+            `merged` is minted from a run's `verdict: merged` row or the sweep's `verdict.merged`
+            credit, once per pull request. `started` is a `run.start` (detail: the run type),
+            `review` a `review.posted` (detail: its state, verbatim), `automerge` an
+            `automerge.armed`. A consumer must render an unknown verb, not drop it.
         ts:
           type: string
           description: The originating ledger line's own `ts`.
@@ -6437,7 +6504,7 @@ components:
 
     RecentActivityResult:
       type: object
-      description: GET /v1/recent's body -- at most 20 entries, newest first.
+      description: GET /v1/recent's body -- at most `limit` (default 20) entries, newest first.
       required: [entries]
       properties:
         entries:
@@ -11616,18 +11683,60 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /v1/views/nav-badge:
+    get:
+      summary: The console sidebar's counts in one small read -- the first /v1/views view.
+      description: >
+        src/lib/nav-badge-view.ts over serve's own caches (analytics snapshot, operator-agent
+        memory, the inbox classification). Replaces the console's ~12 upstream reads (~370 KB) per
+        page view. A weak ETag hashes the view's version, stale flag and data, so an unchanged view
+        answers If-None-Match with 304 even after a recompute. See docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NavBadgeView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /v1/recent:
     get:
-      summary: The RECENT activity feed -- the newest 20 ledger-derived entries.
+      summary: The RECENT activity feed -- the newest ledger-derived entries (20 by default).
       description: >
         src/lib/board.ts's `buildRecentRoute` / `computeRecentActivity`: classifies only ledger
         lines new since the last read, decorates each fresh entry with its PR title once, and
-        returns the newest 20, newest first. Served through the console read cache
+        returns the newest `limit` (default 20) of the last 200, newest first, optionally narrowed
+        to `verb`. Served through the console read cache
         (src/lib/serve.ts's `boundConsoleReadRoute`), so the body carries `staleness`, a weak
         `ETag` is set, and before any live snapshot exists the fallback body is
         `{entries: [], staleness}`.
       security:
         - bearerRead: []
+      parameters:
+        - name: verb
+          in: query
+          required: false
+          description: >
+            Comma-separated verbs (see RecentActivityEntry.verb) to keep, e.g. `merged` for a
+            merges panel that a busy hour of run starts would otherwise push out of the page.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Page size, 1 to 200. Default 20.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
       responses:
         "200":
           description: The feed.
@@ -11635,6 +11744,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RecentActivityResult"
+        "400":
+          description: An unknown `verb` or an out-of-range `limit`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "304":
           description: The request's `If-None-Match` matched the cached snapshot's ETag; no body.
         "401":

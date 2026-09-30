@@ -1,0 +1,57 @@
+- id: W1-T4900
+  title: "THE PRE-PUSH CENSUS PRECHECK DOES NOT COUNT THE *Deps SEAMS — a fleet worker's push (#7792) took the inline `deps: {` count from 112 to 114 against a frozen ceiling of 112 and the red appeared only in CI's coverage shard; count the three deps-interface ceilings in scripts/census-precheck.mjs, from the module the suite counts with"
+  repo: remudero
+  depends_on: ["W1-T4899"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 15.00
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: "research 2026-09-30: pre-push census gap (deps-interface census red in CI after the worker's own gates)"
+  plan_refs: ["W1-T3744", "W1-T3225", "W1-T4656", "W1-T4899"]
+  files:
+    - scripts/census-precheck.mjs
+    - scripts/deps-interface-census.mjs
+    - test/deps-interface-census.test.ts
+    - test/census-precheck-counts-the-deps-interface-ceilings.test.ts
+  rationale: |
+    MEASURED 2026-09-30 at origin/main fd24b4428 with a positive control. main carries 111 inline
+    `deps: {` seams against a ceiling of 112 in scripts/deps-interface-baseline.json. Adding a src
+    file with two of them makes `node --test test/deps-interface-census.test.ts` fail with "inline
+    seams grew from 112 to 113" while `node scripts/census-precheck.mjs --base origin/main` prints OK
+    and exits 0 on the same tree. A fleet worker is never asked to run `rmd preflight` (its
+    contract drops the --ci-parity obligation), and preflight's PREFLIGHT_CI_CHECKS already names
+    this suite for operator sessions since #7086; the worker's only local gate is hooks/pre-push,
+    whose census precheck does not count it. #7792 (branch run-W1-T4681-*) is the measured case.
+    The three counts are frozen ceilings (depsInterfaceCount, inlineSeamCount, aliasedSeamCount),
+    not merge-base-relative, so an already-full ceiling is met by the census-precheck `caused` split,
+    which refuses only when the base was under its own ceiling or this branch grows it further.
+    The counters are inside test/deps-interface-census.test.ts and cannot be imported without
+    running its tests. THE IDENTICAL-MEMBER-SET ASSERTION STAYS CI-ONLY: it compares whole
+    declaration bodies and is not a count; the precheck names it as not modelled.
+  design: |
+    (i) Move DEPS_DECLARATION, SEAM_DECLARATION, INLINE_SEAM and the two counters out of the test into
+    scripts/deps-interface-census.mjs, exported; the suite imports them and its assertions are unchanged.
+    (ii) scripts/census-precheck.mjs gains depsInterfaceViolations, run only when the diff changes a
+    src/**/*.ts file or scripts/deps-interface-baseline.json. Head counts read this tree's src; base
+    counts read each changed src file at the merge base (the fixture-copy arm's trick).
+    (iii) Refuse only growth this branch causes, via `caused`. The row is
+    `deps-interface: <inline|declarations|aliased> <n> > baseline <m> — reuse an existing seam
+    (Pick<PreflightFastDeps, "spawn"> is the counted-sibling remedy) instead of adding another *Deps shape`.
+    A ceiling raised in the same diff is refused as growth, like the clock arm's lowered row.
+    (iv) No test runner is spawned and hooks/pre-push is not edited.
+  acceptance:
+    - claim: "a branch that pushes an inline deps seam or a *Deps declaration past its ceiling is refused by the census precheck, naming which count and both numbers"
+      proof: "unit test: test/census-precheck-counts-the-deps-interface-ceilings.test.ts"
+    - claim: "a count at or under its ceiling, one main already exceeds, and a diff that changes no src file all report nothing"
+      proof: 'grep: test("a deps-interface count at or under its ceiling is not a finding" in test/census-precheck-counts-the-deps-interface-ceilings.test.ts'
+    - claim: "the suite and the precheck count through one module"
+      proof: "grep: deps-interface-census in test/deps-interface-census.test.ts"
+  falsifier: |
+    Remove the depsInterfaceViolations call from evaluateCensusPrecheck: the first proof goes red and
+    the second stays green. CLOSE the task if the ceilings in scripts/deps-interface-baseline.json
+    are retired, or if W1-T4899 lands a generic counter-registry that makes this a one-line row.
