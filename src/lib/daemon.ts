@@ -2405,6 +2405,9 @@ export async function runDaemon(
   // Per-task transient retry state, threaded across ticks for the same task id. Dropped once a task's
   // disposition is no longer a transient retry (W1-T46).
   const blockRetryStates = new Map<string, RetryState>();
+  // A worker's fresh projection can prove a merge after this daemon selected from an older one.
+  // Hold that id until this daemon's own projection catches up; a stale read must not re-dispatch it.
+  const pendingMergedCredit = new Set<string>();
   // A genuine blocker is a queue-subtree state, not a process-lifetime failure (W1-T3122). The task
   // itself is excluded below; because it remains unmerged, the existing dependency predicate keeps
   // every descendant behind `unmet-deps` while unrelated work continues. This is intentionally
@@ -2673,6 +2676,61 @@ export async function runDaemon(
     | { kind: "continue" }
     | { kind: "genuine_blocker"; detail: string; dependents: string[] }
   > => {
+    if (result.verdict === "task_already_merged") {
+      // This verdict is a positive merge observation by run-task, even though the run opened no PR.
+      // Refresh before the next selection and retain a local hold if the daemon's projection lags.
+      blockRetryStates.delete(task.id);
+      let creditVisible = false;
+      let refreshError: string | undefined;
+      try {
+        creditVisible = deps.refreshMerged(planForBatch)(task.id);
+      } catch (error) {
+        refreshError = String((error as Error)?.message ?? error);
+        log("daemon.merge_credit_refresh_failed", { task: task.id, error: refreshError });
+      }
+      if (creditVisible) {
+        pendingMergedCredit.delete(task.id);
+        merged.push(task.id);
+      } else {
+        pendingMergedCredit.add(task.id);
+      }
+      // The refusal row was written by this exact worker run. A prior merge observation is
+      // present only when the matching PR's merge is also in the live ledger; never invent lag.
+      let rawRows: readonly string[] = [];
+      let evidenceError: string | undefined;
+      try {
+        rawRows = deps.readLedgerLines?.() ?? [];
+      } catch (error) {
+        evidenceError = String((error as Error)?.message ?? error);
+        log("daemon.merge_credit_evidence_failed", { task: task.id, error: evidenceError });
+      }
+      const rows = rawRows.flatMap((raw) => {
+        try { return [JSON.parse(raw) as Record<string, unknown>]; }
+        catch (error) {
+          log("daemon.merge_credit_evidence_invalid", { task: task.id, error: String((error as Error)?.message ?? error) });
+          return [];
+        }
+      });
+      const refusal = rows.findLast((row) => row.step === "dispatch.refused_already_merged" &&
+        row.run_id === result.runId && row.task_id === task.id);
+      const prUrl = result.prUrl ?? (typeof refusal?.pr_url === "string" ? refusal.pr_url : undefined);
+      const owner = prUrl !== undefined ? rows.findLast((row) => row.task_id === task.id && row.pr_url === prUrl &&
+        row.step === "pr.opened") : undefined;
+      const merge = owner && rows.findLast((row) => row.step === "pr.merged" && row.run_id === owner.run_id);
+      const refusedAt = typeof refusal?.ts === "string" ? Date.parse(refusal.ts) : NaN;
+      const mergedAt = typeof merge?.ts === "string" ? Date.parse(merge.ts) : NaN;
+      log("daemon.merge_credit_correction", {
+        task: task.id,
+        run_id: result.runId,
+        pr_url: prUrl ?? null,
+        merge_observation_lag_ms: Number.isFinite(refusedAt) && Number.isFinite(mergedAt) && refusedAt >= mergedAt
+          ? refusedAt - mergedAt : null,
+        credit_visible: creditVisible,
+        ...(refreshError ? { refresh_error: refreshError } : {}),
+        ...(evidenceError ? { evidence_error: evidenceError } : {}),
+      });
+      return { kind: creditVisible ? "merged" : "continue" };
+    }
     // The verdict describes how THIS RUN ended, not whether the pull request is merged: a PR that
     // merges gate-side after the run stopped leaves the result unmerged even though the task is done.
     // The tick's already-resolved merged projection — never a second lookup — answers the question
@@ -2686,6 +2744,9 @@ export async function runDaemon(
       // non-merged verdict (W1-T46, superseding blunt stop-on-block).
       const state = blockRetryStates.get(task.id) ?? INITIAL_RETRY_STATE;
       const disposition = reasonAboutBlock(planForBatch, task.id, result.verdict, state);
+      if (disposition.kind === "already_merged") {
+        throw new Error("task_already_merged must take the merge-credit correction path");
+      }
 
       if (disposition.kind === "awaiting_merge") {
         blockRetryStates.delete(task.id);
@@ -2991,6 +3052,12 @@ export async function runDaemon(
     }
 
     const isMerged = deps.refreshMerged(planForBatch);
+    for (const taskId of pendingMergedCredit) {
+      if (!isMerged(taskId)) continue;
+      pendingMergedCredit.delete(taskId);
+      merged.push(taskId);
+      log("daemon.merge_credit_visible", { task: taskId });
+    }
 
     // Reconcile the daemon-lifetime parks from the SAME cached projection dispatch uses below. A
     // credited merge is conclusive. A confirmed absence of an open PR is conclusive only when both
@@ -3776,7 +3843,7 @@ export async function runDaemon(
         };
         const task = planForBatch.byId.get(kick.taskId);
         if (!task) { refuse("unknown task id"); continue; }
-        if (isMerged(kick.taskId)) { refuse("already merged — stale kick"); continue; }
+        if (isMerged(kick.taskId) || pendingMergedCredit.has(kick.taskId)) { refuse("already merged — stale kick"); continue; }
         try {
           // W1-T3216: a console kick for an operator-RELEASED verify:human task must be admitted
           // here too, or the release works from the drain and is refused from the console.
@@ -3823,6 +3890,7 @@ export async function runDaemon(
       // as `continued-this-pass`. Its descendants remain excluded independently by `unmet-deps`.
       excludeIds: new Set([
         ...parkedBlockers.keys(),
+        ...pendingMergedCredit,
         ...invalidatedAdmissionsThisRun,
         ...[...illformedAdmissionBlocksThisRun].flatMap(([taskId, fingerprint]) => {
           const currentTask = planForBatch.byId.get(taskId);
@@ -4408,7 +4476,7 @@ export async function runDaemon(
           const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, {
             ...dispatchOpts,
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
-            excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...passIds]),
+            excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds]),
           });
           const fits = partitionByFileOverlap([...inFlightTasks, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
           next = fits.dispatch.find((t) => !inFlightTasks.has(t));
