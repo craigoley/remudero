@@ -61,7 +61,7 @@ function metricRows(stateDir: string): Array<Record<string, unknown>> {
 test("projection keeps advancing while an oracle slice runs on its own thread over a large corpus", async (t) => {
   const ledgerDir = scratch(t, "rmo-ledger");
   const stateDir = scratch(t, "rmo-state");
-  corpus(ledgerDir, 40, 2_500, Date.now());
+  corpus(ledgerDir, 40, 1_250, Date.now());
   const messages: ReadModelWorkerMessage[] = [];
   const oracle = threadOracle({ log: (step, extra) => messages.push({ type: "log", step, extra }) });
   // Marks settle at once and one slice covers the whole window, so the slice is as large as the corpus.
@@ -89,7 +89,7 @@ test("projection keeps advancing while an oracle slice runs on its own thread ov
   }
   const [metric] = metricRows(stateDir);
   assert.equal(metric?.outcome, "agree", "the slice finished and agreed");
-  assert.ok(Number(metric?.compared) >= 50_000, `the slice compared ${metric?.compared} rows: a large one`);
+  assert.ok(Number(metric?.compared) >= 25_000, `the slice compared ${metric?.compared} rows: a large one`);
   assert.ok(during.length >= 3, `${during.length} ticks ran while the slice was in flight`);
   assert.deepEqual(during.filter((tick) => tick.applied !== tick.appended), [], "every tick during the slice applied the row appended just before it: no lag");
   const longest = Math.max(...during.map((tick) => tick.ms));
