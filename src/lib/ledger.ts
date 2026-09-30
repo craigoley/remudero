@@ -1051,6 +1051,7 @@ export function isRotationLockHolderStale(
 ): boolean {
   const myHost = (opts.hostname ?? hostname)();
   if (held.host !== myHost) {
+    // expiring-fixture: exempt -- a live lock holder's own start stamp, never a fixture literal
     const startedMs = Date.parse(held.startedAt);
     return !Number.isFinite(startedMs) || (opts.nowMs ?? systemClock.now()) - startedMs > LEDGER_ROTATION_SMOOTHING_WINDOW_MS;
   }
