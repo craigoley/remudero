@@ -960,8 +960,14 @@ export interface DeployDeps {
   resourcePolicyDrift?: () => ResourcePolicyDrift[] | undefined;
   /** The newest origin/main commit touching {@link IMAGE_BAKED_PATHS}. */
   newestBakedSha?: () => string | undefined;
-  /** Is an image tagged with that sha published? `undefined` = could not tell. Asked only on drift. */
+  /** Is an image CONTAINING that commit published (W1-T4809: tagged with it, or built from a
+   *  descendant of it)? `undefined` = could not tell. Asked only on drift. */
   imagePublished?: (sha: string) => boolean | undefined;
+  /** W1-T4809: is an acr-build run queued or in progress? `undefined` = could not tell, which
+   *  never licenses a dispatch. */
+  imageBuildInFlight?: () => boolean | undefined;
+  /** W1-T4809: dispatch `acr-build.yml` on main. Throws when it could not be dispatched. */
+  dispatchImageBuild?: () => void;
   /** state/DEPLOY_IMAGE_MANUAL present. */
   imageRecycleManual?: () => boolean;
   /** When the recorded deploy failure happened, from state/DEPLOY_FAILED. */
@@ -1183,6 +1189,21 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   const resourcePolicyDrift = opts.imageDriftOnly === true ? deps.resourcePolicyDrift?.() : undefined;
   const imageDrift = opts.imageDriftOnly === true && (imageBakedCommitsBehind ?? 0) > 0;
   const newestBakedSha = imageDrift ? deps.newestBakedSha?.() : undefined;
+  const imagePublished = newestBakedSha ? deps.imagePublished?.(newestBakedSha) : undefined;
+  // W1-T4809: the registry ANSWERED that no image contains the baked change. A push event can be
+  // lost (two merges seconds apart), so nothing may be building it — dispatch the build once, and
+  // only while no acr-build run is queued or in progress (else every tick would dispatch again).
+  if (newestBakedSha && imagePublished === false && deps.dispatchImageBuild && deps.imageBuildInFlight?.() === false) {
+    try {
+      deps.dispatchImageBuild();
+      deps.log("deploy.image_build_dispatched", { baked: short(newestBakedSha), workflow: IMAGE_BUILD_WORKFLOW });
+    } catch (err) {
+      deps.log("deploy.image_build_dispatch_failed", {
+        baked: short(newestBakedSha),
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
   const decision = decideDeployTrigger({
     markerPresent: markerWasPresent,
     autoMode,
@@ -1200,7 +1221,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     imageBakedCommitsBehind,
     resourcePolicyDrift,
     imageDriftOnly: opts.imageDriftOnly,
-    ...(newestBakedSha ? { newestBakedSha, imagePublished: deps.imagePublished?.(newestBakedSha) } : {}),
+    ...(newestBakedSha ? { newestBakedSha, imagePublished } : {}),
     imageRecycleManual: deps.imageRecycleManual?.(),
     lastFailedAtMs: deps.lastFailedAtMs?.(),
     nowMs: deps.now(),
@@ -1572,6 +1593,18 @@ export function buildDeployLogger(
  * watching the ledger for `daemon.boot` heartbeats newer than the kickstart instant: exactly
  * one is a clean boot, several means KeepAlive is restart-storming a broken daemon.
  */
+/** W1-T4809: the workflow that builds the image, dispatched when a baked change has no build. */
+export const IMAGE_BUILD_WORKFLOW = "acr-build.yml";
+/** Run statuses that mean a build is still going to land. */
+const IMAGE_BUILD_ACTIVE_STATUSES: readonly string[] = ["queued", "in_progress", "waiting", "pending", "requested"];
+/** How many of the newest `image/*` tags are checked for one that contains the baked change. */
+const IMAGE_TAG_SCAN_LIMIT = 10;
+
+/** `owner/name` of a github.com remote URL (https or ssh), else undefined. */
+export function githubSlugOf(remoteUrl: string): string | undefined {
+  return /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\s*$/.exec(remoteUrl.trim())?.[1];
+}
+
 export function realDeployDeps(o: RealDeployOpts): DeployDeps {
   const ledgerPath = deployLedgerPath(o.stateRoot);
   const exec = o.execFile ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
@@ -1818,7 +1851,8 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     imagePublished: (sha) => {
       const image = registryText === undefined ? undefined : imageRefFor(registryText, o.stateRoot);
       if (!image) return undefined;
-      const ref = `${image.replace(/:[^:/]+$/, "")}:${sha}`;
+      const repository = image.replace(/:[^:/]+$/, "");
+      const ref = `${repository}:${sha}`;
       const errorText = (error: unknown): string => {
         const e = error as { message?: unknown; stderr?: unknown } | null;
         return `${String(e?.message ?? error)}\n${String(e?.stderr ?? "")}`;
@@ -1829,13 +1863,38 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       const classify = (error: unknown): boolean | undefined =>
         !authFailure(error) && /no such manifest|manifest unknown|not found/i.test(errorText(error))
           ? false : undefined;
+      // W1-T4809: a build of a DESCENDANT of `sha` also carries the change. Its git tag
+      // (`image/<date>-<sha7>`, pushed only after a successful build) names the commit; the
+      // registry then confirms that commit's full-sha tag exists.
+      const containingImagePublished = (): boolean => {
+        try {
+          const tags = git(["tag", "--list", "image/*", "--sort=-creatordate"])
+            .split("\n").map((l) => l.trim()).filter(Boolean).slice(0, IMAGE_TAG_SCAN_LIMIT);
+          for (const tag of tags) {
+            try {
+              const built = git(["rev-list", "-n", "1", tag]).trim();
+              if (!/^[0-9a-f]{40}$/i.test(built)) continue;
+              git(["merge-base", "--is-ancestor", sha, built]); // exit 1 (not an ancestor) throws
+              exec("docker", ["manifest", "inspect", `${repository}:${built}`]);
+              log("deploy.image_published_by_descendant", { baked: sha.slice(0, 9), built: built.slice(0, 9), tag });
+              return true;
+            } catch (skip) {
+              void skip; // not an ancestor, unreadable tag, or that image is not in the registry — next
+            }
+          }
+        } catch (unlisted) {
+          void unlisted; // no tag list — nothing further to prove; the exact-tag answer stands
+        }
+        return false;
+      };
       try {
         exec("docker", ["manifest", "inspect", ref]);
         return true;
       } catch (err) {
         if (!authFailure(err)) {
           // Only a registry that answered "no such tag" is a no; network trouble stays unknown.
-          return classify(err);
+          const exact = classify(err);
+          return exact === false && containingImagePublished() ? true : exact;
         }
       }
       // ACR's Docker token can expire while the Azure CLI session is still valid. Refresh once,
@@ -1855,8 +1914,29 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       } catch (err) {
         const published = classify(err);
         log("deploy.image_auth_refresh", { outcome: published === false ? "absent" : "unknown", registry });
-        return published;
+        return published === false && containingImagePublished() ? true : published;
       }
+    },
+    // W1-T4809: the two seams that heal a build nobody started. The GitHub CLI reads/dispatches
+    // against this checkout's own origin; any failure is UNKNOWN (undefined, or a throw the tick
+    // logs), never a "no build running".
+    imageBuildInFlight: () => {
+      try {
+        const slug = githubSlugOf(git(["remote", "get-url", "origin"]));
+        if (!slug) return undefined;
+        const runs = JSON.parse(exec("gh", [
+          "run", "list", "-R", slug, "--workflow", IMAGE_BUILD_WORKFLOW, "--limit", "30", "--json", "status",
+        ])) as { status?: unknown }[];
+        if (!Array.isArray(runs)) return undefined;
+        return runs.some((r) => typeof r.status === "string" && IMAGE_BUILD_ACTIVE_STATUSES.includes(r.status));
+      } catch {
+        return undefined; // no CLI / no auth / no network — never a licence to dispatch
+      }
+    },
+    dispatchImageBuild: () => {
+      const slug = githubSlugOf(git(["remote", "get-url", "origin"]));
+      if (!slug) throw new Error("origin is not a github.com remote");
+      exec("gh", ["workflow", "run", IMAGE_BUILD_WORKFLOW, "-R", slug, "--ref", "main"]);
     },
     imageRecycleManual: () => existsSync(deployImageManualPath(o.stateRoot)),
     lastFailedAtMs: () => {
