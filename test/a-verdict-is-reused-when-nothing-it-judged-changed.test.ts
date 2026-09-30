@@ -119,6 +119,7 @@ function minimalDeps(): SweepDeps & { armed: OpenPrView[]; closed: OpenPrView[];
     // prior-actions fold still starts with every dedup set empty.
     ledgerPath: writeLedger().path,
     runId: "W1-T3704-REUSE",
+    now: () => NOW,
   };
 }
 
