@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,6 +8,8 @@ import { gzipSync } from "node:zlib";
 import type { Clock } from "../src/lib/clock.js";
 import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
 import { createLedgerProjector, openProjectorReadModel, readModelDigest } from "../src/lib/ledger-projector.js";
+import type { IssueGateway } from "../src/lib/escalate.js";
+import { ORACLE_AGREE_INTERVAL_MS, ORACLE_DEFAULT_WINDOW_MS, ORACLE_DRIFT_INTERVAL_MS, READ_MODEL_CONSISTENCY_STEP, READ_MODEL_SELF_HEALED_STEP } from "../src/lib/read-model-consistency.js";
 import { acquireLease, releaseLease } from "../src/lib/read-model-db.js";
 import {
   READ_MODEL_LEASE_RENEW_MS,
@@ -483,7 +485,7 @@ test("the worker branch ticks until a stop message and then signals its release"
     },
     close: () => void closed++,
   };
-  runReadModelWorker(port, { kind: "remudero-read-model", stateDir, instances: [{ name: "core", ledgerDir }], tickMs: 5, signal });
+  runReadModelWorker(port, { kind: "remudero-read-model", stateDir, instances: [{ name: "core", ledgerDir }], tickMs: 5, signal, escalationRepository: "craigoley/remudero" });
   const deadline = Date.now() + 10_000;
   while (!posted.some((m) => m.type === "state") && Date.now() < deadline) await sleep(5);
   assert.ok(posted.some((m) => m.type === "log" && m.step === "read_model.tick_failed" && m.extra.error === "port closed"), "a failing tick is logged and the loop goes on");
@@ -530,7 +532,7 @@ test("rmd serve starts the read-model worker for every registry instance and sto
   const stateDir = join(root, "state");
   const stateBase = join(root, "instances");
   mkdirSync(stateDir, { recursive: true });
-  corpus(stateDir, 0, 0, 3);
+  const coreCorpus = corpus(stateDir, 0, 0, 3);
   corpus(join(stateBase, "site", "state"), 0, 0, 2);
   mkdirSync(join(root, ".remudero"), { recursive: true });
   const row = (name: string, repo: string) => [`  ${name}:`, `    repo: ${repo}`, "    project: remudero", `    github_repo: craigoley/${repo}`, `    state_dir: /host/${name}-state`].join("\n");
@@ -568,6 +570,138 @@ test("rmd serve starts the read-model worker for every registry instance and sto
   await sleep(200);
   assert.equal(stopServeReadModel(server), true, "the SIGTERM path releases the worker's leases");
   assert.equal(tableCount(stateDir, "site", "seen"), 2, "the site instance was projected into its own DB under core's state");
-  assert.equal(tableCount(stateDir, "core", "seen"), 3);
+  // Core's DB also projects the oracle's metric rows, which the worker appends to core's own ledger.
+  const core = openProjectorReadModel(stateDir, "core");
+  t.after(() => core.close());
+  assert.equal(Number(core.prepare("SELECT count(*) AS n FROM seen WHERE ts_ms <= ?").get(Date.parse(coreCorpus.newestTs))?.n), 3);
   assert.equal(stopServeReadModel(buildServeServer({ ...deps, readModel: undefined })), false, "no worker runs unless serve asks for one");
+});
+
+/** The oracle's metric rows, which the ticker appends to core's ledger in `stateDir`. */
+function oracleRows(stateDir: string): Array<Record<string, unknown>> {
+  const path = join(stateDir, LIVE);
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>)
+    .filter((r) => r.step === READ_MODEL_CONSISTENCY_STEP || r.step === READ_MODEL_SELF_HEALED_STEP);
+}
+
+function checkFixture(t: TestCtx, extra: { escalation?: { issues: IssueGateway; ledgerPath: string; runId: string } } = {}) {
+  const ledgerDir = scratch(t, "rmw-check-ledger");
+  const stateDir = scratch(t, "rmw-check-state");
+  corpus(ledgerDir, 2, 50, 20);
+  const c = collect();
+  const { clock, advance } = steppedClock();
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: c.post, clock, holder: "serve-a", ...extra });
+  t.after(() => ticker.release());
+  return { ledgerDir, stateDir, c, clock, advance, ticker };
+}
+
+test("the worker runs the windowed consistency check when its schedule is due and only as the lease holder", (t) => {
+  const f = checkFixture(t);
+  f.ticker.tick();
+  assert.equal(oracleRows(f.stateDir).length, 0, "the catch-up tick that read every archive leaves the check for a later tick");
+  f.ticker.tick();
+  const [first] = oracleRows(f.stateDir);
+  assert.equal(first?.outcome, "agree", "the first idle tick runs the check, since no run is recorded");
+  const [t0, t1] = (first?.window as string[]).map((iso) => Date.parse(iso));
+  assert.equal(t1! - t0!, ORACLE_DEFAULT_WINDOW_MS, "serve checks the default 7-day window, never the full corpus");
+  f.advance(ORACLE_AGREE_INTERVAL_MS - 1_000);
+  f.ticker.tick();
+  assert.equal(oracleRows(f.stateDir).length, 1, "not due again inside the hour after an agreement");
+  f.advance(1_000);
+  f.ticker.tick();
+  assert.equal(oracleRows(f.stateDir).length, 2, "due again an hour after the agreement");
+
+  // Due again, but another serve took the lease: this one never runs the oracle on a file it does not own.
+  f.advance(ORACLE_AGREE_INTERVAL_MS);
+  const other = openProjectorReadModel(f.stateDir, "core", f.clock);
+  t.after(() => other.close());
+  assert.ok(acquireLease(other, { holder: "serve-b", clock: f.clock }).ok);
+  f.ticker.tick();
+  assert.equal(lastState(f.c.messages).instances[0]?.lease, "elsewhere");
+  assert.equal(oracleRows(f.stateDir).length, 2, "a tick without the lease runs no check");
+});
+
+test("the consistency check never runs while a rebuild holds another generation", (t) => {
+  const f = checkFixture(t);
+  f.ticker.tick();
+  // A CLI rebuild in flight: a new generation beside the live file, holding that file's lease.
+  const side = openProjectorReadModel(f.stateDir, "core", f.clock, String(T0));
+  t.after(() => side.close());
+  const got = acquireLease(side, { holder: "rebuild-4242-1", clock: f.clock });
+  assert.ok(got.ok);
+  f.ticker.tick();
+  assert.equal(oracleRows(f.stateDir).length, 0, "due, but a rebuild is in flight");
+  assert.match(String(f.c.logs("read_model.consistency_deferred")[0]?.reason), /rebuild-4242-1/);
+  f.ticker.tick();
+  assert.equal(f.c.logs("read_model.consistency_deferred").length, 1, "a deferral waits out its back-off instead of asking every tick");
+  releaseLease(side, got.lease);
+  // A generation file that will not open counts as one being created only while it is fresh.
+  const debris = join(f.stateDir, "read-model", "core.v1.g7.sqlite");
+  writeFileSync(debris, "not a database");
+  utimesSync(debris, (T0 + ORACLE_DRIFT_INTERVAL_MS) / 1000, (T0 + ORACLE_DRIFT_INTERVAL_MS) / 1000);
+  f.advance(ORACLE_DRIFT_INTERVAL_MS);
+  f.ticker.tick();
+  assert.match(String(f.c.logs("read_model.consistency_deferred")[1]?.reason), /core\.v1\.g7\.sqlite \(unreadable/);
+  f.advance(ORACLE_DRIFT_INTERVAL_MS);
+  f.ticker.tick();
+  assert.equal(oracleRows(f.stateDir)[0]?.outcome, "agree", "the check runs once the rebuild lets go and the debris is stale");
+});
+
+test("a rebuild that fences the worker during its check makes it reopen the file", (t) => {
+  const f = checkFixture(t);
+  f.ticker.tick();
+  // The rebuild's fence lands after this tick's lease renewal and projector pass, before the check writes.
+  const rebuild = openProjectorReadModel(f.stateDir, "core", f.clock);
+  t.after(() => rebuild.close());
+  rebuild.prepare("UPDATE lease SET holder = 'rebuild-1', expires_ms = ?").run(T0 + 60_000);
+  f.ticker.tick();
+  assert.match(String(f.c.logs("read_model.tick_failed")[0]?.error), /lease/);
+  assert.equal(f.c.logs("read_model.consistency_failed").length, 0, "a lost lease is the projector's reopen, not an oracle failure");
+  assert.equal(lastState(f.c.messages).instances[0]?.lease, "none");
+});
+
+test("a drift the worker's windowed check detects is healed and a recurrence escalates through the issue path", (t) => {
+  const titles: string[] = [];
+  const issues: IssueGateway = { create: (title) => (titles.push(title), `https://github.com/craigoley/remudero/issues/${9000 + titles.length}`) };
+  const f = checkFixture(t, { escalation: { issues, ledgerPath: join(scratch(t, "rmw-check-esc"), LIVE), runId: "read-model" } });
+  f.ticker.tick();
+  f.ticker.tick();
+  const tamper = openProjectorReadModel(f.stateDir, "core");
+  t.after(() => tamper.close());
+  const corrupt = () => tamper.exec("UPDATE fact SET body = body || ' ' WHERE seq = (SELECT min(seq) FROM fact)");
+  const original = String(tamper.prepare("SELECT body FROM fact ORDER BY seq LIMIT 1").get()?.body);
+  corrupt();
+  f.advance(ORACLE_AGREE_INTERVAL_MS);
+  f.ticker.tick();
+  const healed = oracleRows(f.stateDir);
+  assert.deepEqual(healed.map((r) => r.outcome ?? r.step), ["agree", "healed", READ_MODEL_SELF_HEALED_STEP]);
+  assert.equal(String(tamper.prepare("SELECT body FROM fact WHERE body LIKE ? ORDER BY seq LIMIT 1").get(original)?.body), original, "the corrupted fact was rebuilt from the ledger");
+  assert.equal(tamper.prepare("SELECT count(*) AS n FROM fact WHERE body LIKE '% '").get()?.n, 0);
+  assert.equal(titles.length, 0, "a first drift heals without asking anyone");
+  corrupt();
+  f.advance(ORACLE_DRIFT_INTERVAL_MS);
+  f.ticker.tick();
+  assert.equal(oracleRows(f.stateDir).at(-2)?.outcome, "escalated", "the same drift again within a day escalates");
+  assert.equal(titles.length, 1, "through the one escalation path");
+});
+
+test("a blind check is logged and waits out its back-off without failing the projector", (t) => {
+  const ledgerDir = scratch(t, "rmw-blind-ledger");
+  const stateDir = scratch(t, "rmw-blind-state");
+  mkdirSync(ledgerDir, { recursive: true });
+  writeFileSync(join(ledgerDir, LIVE), text(rows(4, T0 - 30 * 86_400_000)));
+  const c = collect();
+  const { clock, advance } = steppedClock();
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: c.post, clock });
+  t.after(() => ticker.release());
+  ticker.tick();
+  ticker.tick();
+  assert.match(String(c.logs("read_model.consistency_failed")[0]?.error), /oracle_blind/);
+  assert.equal(lastState(c.messages).instances[0]?.failures, 0, "an idle instance's blind oracle never backs its projector off");
+  ticker.tick();
+  assert.equal(c.logs("read_model.consistency_failed").length, 1, "not retried every tick");
+  advance(ORACLE_DRIFT_INTERVAL_MS);
+  ticker.tick();
+  assert.equal(c.logs("read_model.consistency_failed").length, 2, "retried after the back-off");
 });

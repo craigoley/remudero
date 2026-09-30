@@ -3030,7 +3030,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     clock: systemClock,
     write: (window) => deps.log?.("github.wake.summary", { ...wakeSummaryRow(wakeCounters, window) }),
   });
-  const readModel = deps.readModel && createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, ...deps.readModel });
+  const readModel = deps.readModel && createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, escalationRepository: deps.assistantRepository, ...deps.readModel });
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
     log: deps.log,

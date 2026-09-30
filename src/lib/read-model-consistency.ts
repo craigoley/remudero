@@ -288,8 +288,9 @@ export const ORACLE_DRIFT_INTERVAL_MS = 10 * 60_000;
 
 /**
  * WHERE THE ORACLE RUNS. Serve's read-model worker asks this after each tick, per instance, and
- * runs {@link runConsistencyCheck} with its lease and the DEFAULT window when it answers true: a
- * 30-day window cost 0.29 s on a copy of the core ledger, so a 7-day one fits in a worker tick. The
+ * runs {@link runConsistencyCheck} with its lease and the DEFAULT window when it answers true. On a
+ * copy of the host's core ledger a 7-day window (~670k rows) held that worker tick 5-9 s on a Mac
+ * and added ~660 MB RSS; a 1-day window took 0.5-1 s. It never touches serve's main thread. The
  * full corpus (10.1 s, 730 MB RSS on the same copy) runs only by hand, as the check inside
  * `rmd read-model rebuild --window-days <n>`. Due when no run is recorded, an hour after an
  * agreement, and ten minutes after any other outcome, so a drift is rechecked sooner.

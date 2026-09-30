@@ -13,17 +13,23 @@
  * where coverage is recorded.
  */
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, constants, fstatSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import { ghIssueGateway, type EscalateDeps } from "./escalate.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "./ledger-projector.js";
+import { ORACLE_DRIFT_INTERVAL_MS, consistencyCheckDue, runConsistencyCheck } from "./read-model-consistency.js";
 import {
   READ_MODEL_DIRNAME,
+  READ_MODEL_LEASE_TTL_MS,
   ReadModelError,
   acquireLease,
+  currentReadModelPath,
   openReadModel,
+  peekLease,
   releaseLease,
   withWriteTransaction,
   type ReadModelDb,
@@ -198,6 +204,9 @@ export interface ReadModelTickerOptions {
   tickMs?: number;
   /** Checked between instances and inside every projector transaction, so a stop lands mid-rebuild. */
   stopRequested?: () => boolean;
+  /** Where the consistency oracle's escalations go; without it drift is still healed and recorded. */
+  escalation?: EscalateDeps;
+  consistencyWindowMs?: number;
 }
 
 export interface ReadModelTicker {
@@ -222,6 +231,30 @@ interface Slot {
   ino?: string;
   renewedAt: number;
   backoffUntil: number;
+  /** A check that could not run (blind, deferred behind a rebuild) is not asked again before this. */
+  checkAfter: number;
+}
+
+/**
+ * `rmd read-model rebuild` projects into a new generation file beside the one the pointer names and
+ * holds that file's lease; after the flip it holds the old one's for a TTL. So any other file of
+ * this instance with a live lease names a rebuild in flight. An unreadable one counts only while it
+ * is younger than a lease TTL (one being created); an older one is debris the reaper owns.
+ */
+function rebuildHolder(stateDir: string, instance: string, now: number): string | undefined {
+  const current = currentReadModelPath(stateDir, instance, LEDGER_PROJECTOR_SCHEMA_VERSION);
+  const prefix = `${instance}.v${LEDGER_PROJECTOR_SCHEMA_VERSION}.`;
+  for (const name of readdirSync(dirname(current))) {
+    const path = join(dirname(current), name);
+    if (!name.startsWith(prefix) || !name.endsWith(".sqlite") || path === current) continue;
+    try {
+      const lease = peekLease(path);
+      if (lease && lease.expiresMs > now) return lease.holder;
+    } catch (error) {
+      if (now - statSync(path).mtimeMs < READ_MODEL_LEASE_TTL_MS) return `${name} (unreadable: ${(error as Error).message})`;
+    }
+  }
+  return undefined;
 }
 
 function fileIno(path: string): string | undefined {
@@ -246,6 +279,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     state: { instance: instance.name, generation: 0, lease: "none", failures: 0, newestTs: null },
     renewedAt: 0,
     backoffUntil: 0,
+    checkAfter: 0,
   }));
   const lastEtag = new Map<string, string>();
   let switches = DEFAULT_READ_MODEL_SWITCHES;
@@ -318,6 +352,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       delete slot.state.reason;
       if (result.unread.length > 0) slot.state.reason = `unread archives: ${result.unread.join("; ")}`;
       slot.backoffUntil = 0;
+      // A tick that read archives, restarted the live file or needed several chunks was catching up.
+      if (result.archivesRead === 0 && !result.liveRestarted && result.transactions <= 1 && result.unread.length === 0) checkSlot(slot, now);
     } catch (error) {
       if (error instanceof ReadModelStopRequested) return;
       if (error instanceof ReadModelError && error.reason === "lease_lost") {
@@ -330,6 +366,28 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       slot.backoffUntil = now + backoffMs;
       slot.state.reason = `tick failed: ${(error as Error).message}`;
       log("read_model.tick_failed", { instance: slot.instance.name, error: (error as Error).message, failures: slot.state.failures, backoffMs });
+    }
+  }
+
+  /** The consistency oracle's windowed run, on its own schedule, by the lease holder, never beside a rebuild. */
+  function checkSlot(slot: Slot, now: number): void {
+    const db = slot.db!;
+    if (now < slot.checkAfter || !consistencyCheckDue(db, now)) return;
+    const instance = slot.instance.name;
+    const rebuild = rebuildHolder(opts.stateDir, instance, now);
+    if (rebuild !== undefined) {
+      slot.checkAfter = now + ORACLE_DRIFT_INTERVAL_MS;
+      return log("read_model.consistency_deferred", { instance, reason: `a rebuild holds ${rebuild}`, retryInMs: ORACLE_DRIFT_INTERVAL_MS });
+    }
+    try {
+      runConsistencyCheck({
+        db, ledgerDir: slot.instance.ledgerDir, instance, metricLedgerPath: join(opts.stateDir, LEDGER_FILENAME), lease: slot.lease!, clock,
+        ...(opts.escalation ? { escalation: opts.escalation } : {}), ...(opts.consistencyWindowMs ? { windowMs: opts.consistencyWindowMs } : {}),
+      });
+    } catch (error) {
+      if (error instanceof ReadModelError && error.reason === "lease_lost") throw error;
+      slot.checkAfter = now + ORACLE_DRIFT_INTERVAL_MS;
+      log("read_model.consistency_failed", { instance, error: (error as Error).message, retryInMs: ORACLE_DRIFT_INTERVAL_MS });
     }
   }
 
@@ -402,6 +460,8 @@ export interface ReadModelWorkerData {
   tickMs: number;
   /** `[0]` is set by the main thread to ask for a stop; `[1]` by the worker once its leases are released. */
   signal: SharedArrayBuffer;
+  /** `owner/name` the oracle's escalations are filed on; the worker builds its own issue gateway. */
+  escalationRepository?: string;
 }
 
 /** The worker branch's body: tick on a timer until asked to stop, then release and signal. */
@@ -412,7 +472,11 @@ export function runReadModelWorker(
 ): void {
   const signal = new Int32Array(data.signal);
   const stopRequested = (): boolean => Atomics.load(signal, 0) === 1;
-  const ticker = createReadModelTicker({ stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, stopRequested, post: (m) => port.postMessage(m) });
+  const [owner, repo] = data.escalationRepository?.split("/") ?? [];
+  const escalation = owner && repo ? { issues: ghIssueGateway(owner, repo), ledgerPath: join(data.stateDir, LEDGER_FILENAME), runId: READ_MODEL_WORKER_KIND } : undefined;
+  const ticker = createReadModelTicker({
+    stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, stopRequested, post: (m) => port.postMessage(m), ...(escalation ? { escalation } : {}),
+  });
   let timer: NodeJS.Timeout | undefined;
   let finished = false;
   const finish = (): void => {
@@ -483,6 +547,7 @@ export interface ReadModelWorkerOptions {
   stopWaitMs?: number;
   workerUrl?: URL;
   log?: (step: string, extra?: Record<string, unknown>) => void;
+  escalationRepository?: string;
 }
 
 export function readModelBodyKey(view: string, key = ""): string {
@@ -519,7 +584,10 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
 
   const spawn = (): void => {
     const shared = new SharedArrayBuffer(8);
-    const data: ReadModelWorkerData = { kind: READ_MODEL_WORKER_KIND, stateDir: opts.stateDir, instances: [...opts.instances], tickMs: opts.tickMs ?? READ_MODEL_TICK_MS, signal: shared };
+    const data: ReadModelWorkerData = {
+      kind: READ_MODEL_WORKER_KIND, stateDir: opts.stateDir, instances: [...opts.instances], tickMs: opts.tickMs ?? READ_MODEL_TICK_MS, signal: shared,
+      ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}),
+    };
     const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv });
     signal = new Int32Array(shared);
     worker = spawned;
