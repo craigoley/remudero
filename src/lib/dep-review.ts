@@ -359,7 +359,7 @@ export function changedFilesInDiff(diff: string): string[] {
   return [...files];
 }
 
-const ACTION_SHA_PIN_CHANGE_RE = /^([+-])\s*uses:\s*([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+)@([a-f0-9]{40})\s+#\s*(v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)\s*$/i;
+export const ACTION_SHA_PIN_CHANGE_RE = /^([+-])\s*uses:\s*([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+)@([a-f0-9]{40})\s+#\s*(v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)\s*$/i;
 const ACTION_SHA_SUMMARY = String.raw`([a-f0-9]{40})\s+to\s+([a-f0-9]{40})`;
 
 interface ActionShaPinTransition {

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   DEP_REVIEW_ENGINE_REVISION,
+  ACTION_SHA_PIN_CHANGE_RE,
   DEPENDABOT_IGNORE_MAJOR_COMMAND,
   buildDepReviewEscalation,
   changedFilesInDiff,
@@ -275,6 +276,13 @@ test("decideDepReview: recorded #8020/#8021 action SHA refreshes arm as pin-only
     assert.deepEqual(r.redChecks, []);
     assert.match(r.reason, /pin-only GitHub Actions SHA refresh/);
   }
+});
+
+test("ACTION_SHA_PIN_CHANGE_RE matches a full-SHA action pin with a release annotation and refuses an unpinned ref", () => {
+  const pinned = `+ uses: google/osv-scanner-action/osv-scanner-action@${OSV_PIN_NEW_SHA} # v2.6.0`;
+  const unpinned = "+ uses: google/osv-scanner-action/osv-scanner-action@v2 # v2.6.0";
+  assert.equal(ACTION_SHA_PIN_CHANGE_RE.exec(pinned)?.[2], "google/osv-scanner-action/osv-scanner-action");
+  assert.equal(ACTION_SHA_PIN_CHANGE_RE.exec(unpinned), null);
 });
 
 test("a pin-only candidate with any non-pin edit, changed release annotation, or changed action identity still escalates", () => {
