@@ -30,6 +30,6 @@
     or if the implementation PR can pass proof-discrimination without changing W1-T3973's record.
     It must not edit source, tests, policy, status, or any other task record.
   files: [plan/tasks.d/W1-T3973-webhook-check-filter-enforcement-needs-a-ratified-contract.yaml]
-  status: queued
+  status: done
   attempts: 0
-  note: "reservation hand-off: codex/plan-satellite-alert-policy -> run-W1-T3981-1790026200000"
+  note: "DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #6461 (`chore(plan): repair stale webhook follow-up proof`, head run-W1-T3981-1790026200000): the W1-T3973 proof now names the head-identity test, and W1-T3973 is merged. Plan-only deliverable; plan-reconcile refuses the `chore(plan)` subject. Every acceptance criterion holds on main and is PRESERVED UNCHANGED: this record is marked done, not re-proved.\n\nreservation hand-off: codex/plan-satellite-alert-policy -> run-W1-T3981-1790026200000"

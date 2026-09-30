@@ -129,9 +129,16 @@
   origin: "recon#check-acceptance-cannot-fail-2026-08-21"
   plan_refs: ["W1-T952", "W1-T1060", "W1-T1081"]
   files: [src/run-task.ts, test/acceptance-block-diagnostics.test.ts]
-  status: queued
+  status: done
   attempts: 0
   note: |
+    DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #6666
+    (`chore: wip align test name ...`, trailer + head run-W1-T1097-1790119526831): checkAcceptanceCommand in src/run-
+    task.ts exits non-zero on a zero-criteria body; the five `W1-T1097:` tests in test/acceptance-block-
+    diagnostics.test.ts. plan-reconcile refuses the credit because the merge subject starts `chore:` (FILING_SUBJECT_RE,
+    src/lib/sweep.ts). Every acceptance criterion holds on main and is PRESERVED UNCHANGED: this record is marked done,
+    not re-proved.
+
     `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `lint-plan` reads two
     stems — `run-task` and `acceptance-block-diagnostics` — and refuses that at medium. The blast
     radius is one return value in a read-only verb that writes no ledger line and no state file.

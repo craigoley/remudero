@@ -52,7 +52,12 @@
     - test/the-plan-index-is-derived-not-committed.test.ts
     - test/the-ratified-baseline-ratchet-repair-has-a-production-executor.test.ts
     - test/worker-scratch.test.ts
-  status: queued
+  status: done
+  note: |
+    DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #7238
+    (`fix(plan): derive the plan index at read time`, trailer + head run-W1-T4432-1790362493866): src/lib/plan-index.ts;
+    test/the-plan-index-is-derived-not-committed.test.ts. plan-reconcile refuses the `fix(plan)` subject. Every
+    acceptance criterion holds on main and is PRESERVED UNCHANGED: this record is marked done, not re-proved.
   attempts: 0
   rationale: |
     MEASURED 2026-09-24 over the 150 most recent merged PRs: median open-to-merge 37 min (p75 82, p90 131). 77% of all PR time is spent before the final head's CI starts (repair and re-push rounds), 16% in that final CI, 7% waiting for review, ~0% waiting to merge. Only 62 of 150 merged on their first head. Runner queueing is not a factor (job start p50 3 s, p90 41 s).
