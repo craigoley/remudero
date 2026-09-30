@@ -6,7 +6,7 @@ import { gzipSync } from "node:zlib";
 import { fixedClock, type Clock } from "../src/lib/clock.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import { createLedgerProjector, openProjectorReadModel, readModelDigest } from "../src/lib/ledger-projector.js";
-import { realLedgerFs, type LedgerGrepFsDeps } from "../src/lib/ledger-union.js";
+import { readLedgerUnionRawLinesSync, realLedgerFs, type LedgerGrepFsDeps } from "../src/lib/ledger-union.js";
 import {
   ORACLE_AGREE_INTERVAL_MS,
   ORACLE_CLOSED_LAG_MS,
@@ -15,7 +15,10 @@ import {
   READ_MODEL_SELF_HEALED_STEP,
   ReadModelConsistencyError,
   consistencyCheckDue,
+  ORACLE_SLICE_MS,
+  advanceOracleSlice,
   factColumns,
+  nextOracleSlice,
   runConsistencyCheck,
   type ConsistencyCheckOptions,
 } from "../src/lib/read-model-consistency.js";
@@ -279,4 +282,31 @@ test("the oracle schedule is due first then hourly after agreement and sooner af
   f.db.exec("DELETE FROM fact WHERE seq = (SELECT min(seq) FROM fact)");
   check(f, {}, fixedClock(CHECK_AT + ORACLE_AGREE_INTERVAL_MS));
   assert.equal(consistencyCheckDue(f.db, CHECK_AT + ORACLE_AGREE_INTERVAL_MS + ORACLE_DRIFT_INTERVAL_MS), true, "after a heal the next check comes sooner");
+});
+
+test("the rolling slice cursor starts a new cycle when it is finished or unreadable", (t) => {
+  const f = projected(t);
+  const setCursor = (v: string) => f.db.prepare("INSERT INTO meta(k, v) VALUES('oracle_slice', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").run(v);
+  const first = nextOracleSlice(f.db, CHECK_AT, 2 * ORACLE_SLICE_MS);
+  assert.equal(first.startsCycle, true);
+  assert.deepEqual(first.window, { t0: CHECK_AT - ORACLE_CLOSED_LAG_MS - ORACLE_SLICE_MS, t1: CHECK_AT - ORACLE_CLOSED_LAG_MS });
+  advanceOracleSlice(f.db, f.lease, first.cursor);
+  const second = nextOracleSlice(f.db, CHECK_AT + 60_000, 2 * ORACLE_SLICE_MS);
+  assert.equal(second.startsCycle, false, "the cycle resumes from the stored cursor, whatever the clock says");
+  assert.deepEqual(second.window, { t0: first.window.t0 - ORACLE_SLICE_MS, t1: first.window.t0 });
+  advanceOracleSlice(f.db, f.lease, second.cursor);
+  assert.equal(nextOracleSlice(f.db, CHECK_AT, 2 * ORACLE_SLICE_MS).startsCycle, true, "a finished cycle starts another");
+  setCursor("{not json");
+  assert.equal(nextOracleSlice(f.db, CHECK_AT).startsCycle, true, "an unreadable cursor starts a cycle rather than stalling");
+});
+
+test("a slice window retains only its own rows from the union read", (t) => {
+  const f = projected(t);
+  const run = check(f, { window: { t0: T0 + 2_000, t1: T0 + 4_000 } });
+  assert.equal(run.outcome, "agree");
+  assert.equal(run.ledgerRows, 3, "rows at T0+2 s, +3 s and +4 s only");
+  const all = readLedgerUnionRawLinesSync(f.rowsDir, {}).rawLines.length;
+  const kept = readLedgerUnionRawLinesSync(f.rowsDir, { keep: (line) => line.includes('"W1-T3"') }).rawLines;
+  assert.ok(all > 1);
+  assert.deepEqual(kept, [f.lines[3]], "the union reader retains only the lines its caller keeps");
 });

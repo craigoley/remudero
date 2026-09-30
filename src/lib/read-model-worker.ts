@@ -21,7 +21,14 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghIssueGateway, type EscalateDeps } from "./escalate.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "./ledger-projector.js";
-import { ORACLE_DRIFT_INTERVAL_MS, consistencyCheckDue, runConsistencyCheck } from "./read-model-consistency.js";
+import {
+  ORACLE_DEFAULT_WINDOW_MS,
+  ORACLE_DRIFT_INTERVAL_MS,
+  advanceOracleSlice,
+  consistencyCheckDue,
+  nextOracleSlice,
+  runConsistencyCheck,
+} from "./read-model-consistency.js";
 import {
   READ_MODEL_DIRNAME,
   READ_MODEL_LEASE_TTL_MS,
@@ -51,6 +58,8 @@ export const READ_MODEL_MAX_BACKOFF_MS = 60_000;
 /** BACKSTOP: how long a stopping serve waits for the worker to release its leases. */
 export const READ_MODEL_STOP_WAIT_MS = 2_000;
 export const READ_MODEL_SWITCHES_FILE = "switches.json";
+/** The share of worker time the oracle's slices may take: the next slice waits cost / share. */
+export const READ_MODEL_CHECK_SHARE = 0.02;
 
 const VIEW_BODY_DDL = `CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL,
   generation INTEGER NOT NULL, etag TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(view, key)) WITHOUT ROWID;`;
@@ -207,6 +216,8 @@ export interface ReadModelTickerOptions {
   /** Where the consistency oracle's escalations go; without it drift is still healed and recorded. */
   escalation?: EscalateDeps;
   consistencyWindowMs?: number;
+  /** "off" leaves every tick to the projector: a suite that pins what each tick projects. */
+  oracle?: "on" | "off";
 }
 
 export interface ReadModelTicker {
@@ -233,6 +244,8 @@ interface Slot {
   backoffUntil: number;
   /** A check that could not run (blind, deferred behind a rebuild) is not asked again before this. */
   checkAfter: number;
+  /** Set by a caught-up projector tick when a slice is due; the NEXT tick runs it instead of projecting. */
+  checkPending: boolean;
 }
 
 /**
@@ -273,6 +286,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const views = opts.views ?? READ_MODEL_VIEWS;
   const tickMs = opts.tickMs ?? READ_MODEL_TICK_MS;
   const stopRequested = opts.stopRequested ?? (() => false);
+  const windowMs = opts.consistencyWindowMs ?? ORACLE_DEFAULT_WINDOW_MS;
   const switchesPath = readModelSwitchesPath(opts.stateDir);
   const slots: Slot[] = opts.instances.map((instance) => ({
     instance,
@@ -280,6 +294,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     renewedAt: 0,
     backoffUntil: 0,
     checkAfter: 0,
+    checkPending: false,
   }));
   const lastEtag = new Map<string, string>();
   let switches = DEFAULT_READ_MODEL_SWITCHES;
@@ -353,41 +368,58 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       if (result.unread.length > 0) slot.state.reason = `unread archives: ${result.unread.join("; ")}`;
       slot.backoffUntil = 0;
       // A tick that read archives, restarted the live file or needed several chunks was catching up.
-      if (result.archivesRead === 0 && !result.liveRestarted && result.transactions <= 1 && result.unread.length === 0) checkSlot(slot, now);
+      const caughtUp = result.archivesRead === 0 && !result.liveRestarted && result.transactions <= 1 && result.unread.length === 0;
+      slot.checkPending = opts.oracle !== "off" && caughtUp && now >= slot.checkAfter && (!nextOracleSlice(db, now, windowMs).startsCycle || consistencyCheckDue(db, now));
     } catch (error) {
-      if (error instanceof ReadModelStopRequested) return;
-      if (error instanceof ReadModelError && error.reason === "lease_lost") {
-        // Another writer fenced this one off, usually a rebuild about to swap the file: reopen by path.
-        closeSlot(slot);
-        slot.state.lease = "none";
-      }
-      slot.state.failures++;
-      const backoffMs = Math.min(tickMs * 2 ** slot.state.failures, READ_MODEL_MAX_BACKOFF_MS);
-      slot.backoffUntil = now + backoffMs;
-      slot.state.reason = `tick failed: ${(error as Error).message}`;
-      log("read_model.tick_failed", { instance: slot.instance.name, error: (error as Error).message, failures: slot.state.failures, backoffMs });
+      failSlot(slot, now, error);
     }
   }
 
-  /** The consistency oracle's windowed run, on its own schedule, by the lease holder, never beside a rebuild. */
-  function checkSlot(slot: Slot, now: number): void {
-    const db = slot.db!;
-    if (now < slot.checkAfter || !consistencyCheckDue(db, now)) return;
-    const instance = slot.instance.name;
-    const rebuild = rebuildHolder(opts.stateDir, instance, now);
-    if (rebuild !== undefined) {
-      slot.checkAfter = now + ORACLE_DRIFT_INTERVAL_MS;
-      return log("read_model.consistency_deferred", { instance, reason: `a rebuild holds ${rebuild}`, retryInMs: ORACLE_DRIFT_INTERVAL_MS });
+  function failSlot(slot: Slot, now: number, error: unknown): void {
+    if (error instanceof ReadModelStopRequested) return;
+    if (error instanceof ReadModelError && error.reason === "lease_lost") {
+      // Another writer fenced this one off, usually a rebuild about to swap the file: reopen by path.
+      closeSlot(slot);
+      slot.state.lease = "none";
     }
+    slot.state.failures++;
+    const backoffMs = Math.min(tickMs * 2 ** slot.state.failures, READ_MODEL_MAX_BACKOFF_MS);
+    slot.backoffUntil = now + backoffMs;
+    slot.state.reason = `tick failed: ${(error as Error).message}`;
+    log("read_model.tick_failed", { instance: slot.instance.name, error: (error as Error).message, failures: slot.state.failures, backoffMs });
+  }
+
+  /**
+   * One slice of the oracle's rolling cycle, as a tick of its own: the projector does not run in it.
+   * By the lease holder only, never beside a rebuild; the next is paced by what this one cost.
+   */
+  function checkSlot(slot: Slot, now: number): void {
+    slot.checkPending = false;
     try {
-      runConsistencyCheck({
-        db, ledgerDir: slot.instance.ledgerDir, instance, metricLedgerPath: join(opts.stateDir, LEDGER_FILENAME), lease: slot.lease!, clock,
-        ...(opts.escalation ? { escalation: opts.escalation } : {}), ...(opts.consistencyWindowMs ? { windowMs: opts.consistencyWindowMs } : {}),
-      });
+      if (!ensureLease(slot, now)) return;
+      const db = slot.db!;
+      const instance = slot.instance.name;
+      const rebuild = rebuildHolder(opts.stateDir, instance, now);
+      if (rebuild !== undefined) {
+        slot.checkAfter = now + ORACLE_DRIFT_INTERVAL_MS;
+        return log("read_model.consistency_deferred", { instance, reason: `a rebuild holds ${rebuild}`, retryInMs: ORACLE_DRIFT_INTERVAL_MS });
+      }
+      const { window, cursor } = nextOracleSlice(db, now, windowMs);
+      try {
+        runConsistencyCheck({
+          db, ledgerDir: slot.instance.ledgerDir, instance, metricLedgerPath: join(opts.stateDir, LEDGER_FILENAME), lease: slot.lease!, clock, window,
+          ...(opts.escalation ? { escalation: opts.escalation } : {}),
+        });
+      } catch (error) {
+        if (error instanceof ReadModelError && error.reason === "lease_lost") throw error;
+        slot.checkAfter = now + ORACLE_DRIFT_INTERVAL_MS;
+        log("read_model.consistency_failed", { instance, window: [window.t0, window.t1], error: (error as Error).message, retryInMs: ORACLE_DRIFT_INTERVAL_MS });
+      }
+      advanceOracleSlice(db, slot.lease!, cursor);
+      const finished = clock.now();
+      slot.checkAfter = Math.max(slot.checkAfter, finished + (finished - now) / READ_MODEL_CHECK_SHARE);
     } catch (error) {
-      if (error instanceof ReadModelError && error.reason === "lease_lost") throw error;
-      slot.checkAfter = now + ORACLE_DRIFT_INTERVAL_MS;
-      log("read_model.consistency_failed", { instance, error: (error as Error).message, retryInMs: ORACLE_DRIFT_INTERVAL_MS });
+      failSlot(slot, now, error);
     }
   }
 
@@ -427,7 +459,10 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     tick(): void {
       const now = clock.now();
       reloadSwitches(now);
-      if (switches.projector === "off") {
+      const due = switches.projector === "on" ? slots.find((slot) => slot.checkPending) : undefined;
+      if (due) {
+        checkSlot(due, now);
+      } else if (switches.projector === "off") {
         for (const slot of slots) slot.state.reason = "projector switched off";
       } else {
         for (const slot of slots) {
