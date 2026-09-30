@@ -189,6 +189,7 @@ import {
   type GithubEventWakeSemanticMode,
   type WakeCounters,
 } from "./github-event-wake.js";
+import { createGithubKeepWarm } from "./github-refresh-pacer.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
@@ -2986,18 +2987,20 @@ export function startIncidentInvariantsMonitor(
 
 /**
  * Build (but do not `.listen()`) the full `rmd serve` HTTP server — one call, every route wired.
- * `deps.board.github`'s background TTL refresh (W1-T154) runs ONLY while at least one console is
- * connected — see {@link gatePrewarmOnClients} for the zero-viewer burn that gate exists to stop.
- * It is also stopped unconditionally when the returned server `close`s, so a server torn down
- * with a viewer still attached leaves no timer behind.
+ * `deps.board.github`'s background refresh keeps its facts warm with no viewer, paced by quota
+ * headroom (github-refresh-pacer.ts; the 2026-09-30 ruling amending W1-T154). A gateway whose warm
+ * is not off-loop keeps {@link gatePrewarmOnClients}'s reader gate instead. Both stop when the
+ * returned server `close`s, so no timer outlives it.
  */
 function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
-  deps.board.github.serveOffLoop?.();
-  const prewarm = gatePrewarmOnClients(
-    buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS),
-    deps.board.github,
-    deps.boardGithubRefreshMs ?? DEFAULT_BOARD_PREWARM_MS,
-  );
+  const github = deps.board.github;
+  github.serveOffLoop?.();
+  const statusStream = buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS);
+  const refreshMs = deps.boardGithubRefreshMs ?? DEFAULT_BOARD_PREWARM_MS;
+  const keepWarm = github.warmsOffLoop?.()
+    ? createGithubKeepWarm({ refresh: () => github.warm?.(), telemetry: () => github.warmTelemetry?.(), targetFreshnessMs: refreshMs, log: deps.log })
+    : undefined;
+  const prewarm = keepWarm ? keepWarm.gate(statusStream) : gatePrewarmOnClients(statusStream, github, refreshMs);
   // W1-T500: resolved ONCE, here, and threaded to BOTH `buildServeRoutes` (the mounted
   // `POST /v1/confirm` route's issuing store, via `deps.confirmNonces` below) and `createService`
   // (the `enforceWriteTiers` HIGH-tier dispatch check's consuming store) -- the one shared
@@ -3040,6 +3043,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       analyticsCache.stop();
       liveAnalyticsCache.stop();
       stopWakeSummary();
+      prewarm.stop();
     },
     lastReadAt: () => lastReadAt,
     assessCheckout: deps.gatewayCheckout ?? (() => assessGatewayCheckout({ repoDir: serveRepoDir() })),
@@ -3120,6 +3124,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   }
   server.on("close", staleExit.stop);
   server.on("close", prewarm.stop);
+  if (keepWarm) server.once("listening", keepWarm.start);
   server.on("close", stopWakeSummary);
   server.once("listening", analyticsCache.start);
   server.on("close", analyticsCache.stop);
