@@ -154,6 +154,27 @@ test("runDrain releases an orphan run branch through the same shared predicate",
   assert.equal(lines.find((l) => l.step === "dispatch.run_branch_exception")?.extra.reason, "orphan-run-branch-no-pr");
 });
 
+test("the multi-lane drain releases an orphan run branch through the same shared predicate", async () => {
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  await runDrain(
+    orphanPlan(),
+    {
+      refreshMerged: () => () => false,
+      readPushedRunBranches: () => `${ORPHAN_SHA}\trefs/heads/${ORPHAN}`,
+      readOrphanRunBranchEvidence: () => evidence(),
+      runOne: async (id) => {
+        ran.push(id);
+        return ok(id);
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { laneCount: 2, max: 1 },
+  );
+  assert.deepEqual(ran, ["W1-T3720"]);
+  assert.equal(lines.find((l) => l.step === "dispatch.run_branch_exception")?.extra.reason, "orphan-run-branch-no-pr");
+});
+
 test("the orphan evidence reader returns the reaper no-PR cache with the clock and live locks", () => {
   const root = tmp("orphan-evidence");
   try {
