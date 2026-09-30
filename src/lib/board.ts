@@ -100,6 +100,9 @@ export interface BoardSnapshot {
   generated_at: string;
   /** True iff the GitHub read backing merge-state was unreachable this snapshot (fb-…c124f9). */
   github_unreachable: boolean;
+  /** How old the GitHub facts behind this snapshot were at `generated_at`, in ms (W1-T4771). Serve never fetches
+   *  inline, so a fact past its TTL is served stale and this says by how much. Absent when none is held yet. */
+  github_facts_age_ms?: number;
   /** Header counts, derived from the same `tasks` below — tally and rows can never disagree. */
   counts: CountSummary;
   /** GLANCE strip totals (W1-T159), from the same ledger lines this snapshot already read. */
@@ -247,6 +250,15 @@ function safeQueueTruncated(github: BoardDeps["github"]): boolean {
   } catch (error) {
     void error; // the separate failure-reason read preserves its own classified cause
     return true;
+  }
+}
+
+/** The gateway's oldest-held-fact age, guarded like {@link safeReadFailed}: an accessor that throws reads as unknown. */
+function safeFactsAgeMs(github: BoardDeps["github"]): number | undefined {
+  try {
+    return github.factsAgeMs?.();
+  } catch {
+    return undefined;
   }
 }
 
@@ -432,9 +444,11 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
   const generatedAt = new Date().toISOString();
   const { blockedPrs, blockedPrsUnverifiedReason, mergeHeld } = deriveBoardStatusSections(effectiveDeps, lines);
   const prQueue = derivePrQueue(effectiveDeps, lines, tasks, mergeHeld, generatedAt, options.lastGoodPrQueueAt, prQueueIndex);
+  const githubFactsAgeMs = safeFactsAgeMs(effectiveDeps.github);
   return {
     generated_at: generatedAt,
     github_unreachable,
+    ...(githubFactsAgeMs !== undefined ? { github_facts_age_ms: githubFactsAgeMs } : {}),
     counts: summarizeCounts(tasks, github_unreachable),
     spend: computeGlanceSpend(lines, now()),
     tasks,

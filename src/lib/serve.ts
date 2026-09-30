@@ -2883,7 +2883,7 @@ function assembleServeRoutes(
   routes.push(
     ...buildInstanceGatewayRoutes(routes, {
       registryPath: daemonInstanceRegistryPath(deps.questionsRoot),
-      github: (repo) => buildBatchedGithub(repo.split("/")[0], repo.split("/")[1], { ttlMs: DEFAULT_BOARD_POLL_TTL_MS, log: deps.log }),
+      github: (repo) => buildBatchedGithub(repo.split("/")[0], repo.split("/")[1], { ttlMs: DEFAULT_BOARD_POLL_TTL_MS, log: deps.log, offLoop: true }),
       issues: deps.issues,
       controlStatus: deps.controlStatus,
       log: deps.log,
@@ -2979,6 +2979,7 @@ export function startIncidentInvariantsMonitor(
  * with a viewer still attached leaves no timer behind.
  */
 function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
+  deps.board.github.serveOffLoop?.();
   const prewarm = gatePrewarmOnClients(
     buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS),
     deps.board.github,
