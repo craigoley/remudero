@@ -28,6 +28,7 @@ import { DEFAULT_MAX_PAGES, ghApiFetch, ingestFieldTrialsGithub, parseGithubStor
   type FieldTrialsGithubPass, type FieldTrialsGithubStore, type GithubCursor, type GithubPageFetch,
   type GithubPull, type GithubRepoStore } from "./field-trials-github.js";
 import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
+import { deriveReviewFindingOutcomes, type FindingOutcomeReport, type VerifiedFindingEvidence } from "./review-finding-outcomes.js";
 import type { TaskCaseFile } from "./task-case-file.js";
 
 export const FIELD_TRIALS_FLOW_VERSION = "field-trials-flow-v1" as const;
@@ -50,7 +51,7 @@ export const SAFE_LABEL_RE = /^[a-z][a-z0-9_-]{0,39}$/;
 export const SAFE_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 
 const DAY_MS = 86_400_000;
-const FLOW_STEPS = new Set(["run.start", "worker.assignment", "worker.attempt", "verdict", "pr.opened", "review.posted",
+const FLOW_STEPS = new Set(["run.start", "worker.assignment", "worker.attempt", "verdict", "pr.opened", "review.posted", "review.reviewer", "review.finding",
   "fix.dispatch", "escalation.issue_opened", "daemon.boot", "evidence_coverage.filed"]);
 const STAGES = ["eligible", "assigned", "worker", "pr", "review", "merge", "deployment", "verified"] as const;
 
@@ -102,6 +103,15 @@ export interface FlowRow {
   headSha: string | null;
   verdict: string | null;
   action: string | null;
+  reviewModel: string | null;
+  findingId: string | null;
+  findingCategory: string | null;
+  findingAnchorStatus: "verified" | "unsupported" | null;
+  findingCaptureState: "unavailable" | "zero" | "captured" | "partial" | null;
+  findingInvalidCount: number | null;
+  findingDroppedCount: number | null;
+  findingVerifiedCount: number | null;
+  findingUnverifiedCount: number | null;
 }
 
 function flowRelevant(row: Record<string, unknown>): boolean {
@@ -119,6 +129,8 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
   const risk = record(work?.risk);
   const lane = record(record(work?.shape)?.lane);
   const stack = record(benchmark?.stack);
+  const evaluator = record(row.evaluator_provenance);
+  const nonnegativeInteger = (value: unknown) => Number.isSafeInteger(value) && Number(value) >= 0 ? value as number : null;
   const pinned = (field: string) => record(stack?.[field])?.state === "observed";
   const url = PR_URL_RE.exec(String(row.pr_url ?? ""));
   return {
@@ -139,6 +151,13 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     success: typeof row.success === "boolean" ? row.success : null,
     prRepo: url?.[1] ?? null, prNumber: url ? Number(url[2]) : Number.isSafeInteger(row.pr_number) ? row.pr_number as number : null,
     headSha: text(row.head_sha), verdict: text(row.verdict), action: text(row.action),
+    reviewModel: text(evaluator?.servedModel) ?? text(evaluator?.requestedModel) ?? (row.step === "review.finding" ? text(row.served_model) : null),
+    findingId: text(row.finding_id), findingCategory: text(row.category),
+    findingAnchorStatus: row.capture_state === "verified" || row.capture_state === "unsupported" ? row.capture_state : null,
+    findingCaptureState: ["unavailable", "zero", "captured", "partial"].includes(String(row.finding_capture_state))
+      ? row.finding_capture_state as FlowRow["findingCaptureState"] : null,
+    findingInvalidCount: nonnegativeInteger(row.finding_invalid_count), findingDroppedCount: nonnegativeInteger(row.finding_dropped_count),
+    findingVerifiedCount: nonnegativeInteger(row.finding_verified_count), findingUnverifiedCount: nonnegativeInteger(row.finding_unverified_count),
   };
 }
 
@@ -386,6 +405,8 @@ export interface FieldTrialsFlowSnapshot {
     workLane: number; harnessPinned: number; promptPinned: number; toolPinned: number; scorerPinned: number;
     environmentPinned: number; attemptReceipts: number; nonStarterAssignments: number; costMissingAssignments: number;
     apiCostEstimateUsd: number; subscriptionNotionalUsd: number }[];
+  /** Private finding-quality evidence. Never copied into the public release. No trusted labels are inferred from GitHub workflow state. */
+  reviewFindingOutcomes: FindingOutcomeReport;
   provenance: { sources: { label: string; repo: string; ledger: Omit<FieldTrialsLedgerRead, "rows"> & { rows: number };
     github: { pulls: GithubCursor | null; commits: GithubCursor | null; deployments: GithubCursor | null;
       prs: number; commitsKnown: number; deploymentsKnown: number } }[];
@@ -415,6 +436,8 @@ export interface FieldTrialsFlowInput {
   githubPass?: FieldTrialsGithubPass;
   prior?: FieldTrialsFlowSnapshot;
   caseFiles?: readonly TaskCaseFile[];
+  /** Only an independently authenticated caller may supply this; the default ledger/GitHub path supplies none. */
+  verifiedFindingEvidence?: readonly VerifiedFindingEvidence[];
 }
 
 function stratum(value: string | null): string {
@@ -627,6 +650,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   const reasons: string[] = [];
   const privateKeys = new Set<string>();
   const assignmentTelemetry = new Map<string, FieldTrialsFlowSnapshot["assignmentTelemetry"][number]>();
+  const findingRows: FlowRow[] = [];
   const links: FieldTrialsFlowSnapshot["links"] = { prs: 0, matched: 0, ambiguous: 0, unmatched: 0,
     byPath: { trailer: 0, branch: 0, ledger: 0, multiplePaths: 0 }, ledgerPrNotInGithub: 0, githubOnlyTasks: 0,
     unmatchedPrs: [], ambiguousPrs: [] };
@@ -635,6 +659,10 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   for (const source of input.sources) {
     const store = storeOf(source.repo);
     const { rows: ledgerRows, ...ledger } = source.ledger;
+    // Only these three bounded schemas feed the private finding fold. Avoid a second copy
+    // of the entire fleet ledger and an unbounded spread-argument list on large rotations.
+    for (const row of ledgerRows) if (row.step === "review.posted" || row.step === "review.reviewer" || row.step === "review.finding")
+      findingRows.push(row);
     if (ledger.state !== "observed") reasons.push(`${source.label}:ledger:${ledger.reason}`);
     const pullsCursor = store?.cursors.pulls ?? null;
     if (pullsCursor?.state !== "complete") reasons.push(`${source.label}:github:${pullsCursor?.reason ?? pullsCursor?.state ?? "never-read"}`);
@@ -747,9 +775,12 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   };
   const githubFresh = (input.githubPass?.pagesRead ?? 0) > 0;
   const anyObserved = githubFresh || provenance.some((source) => source.ledger.state !== "unavailable");
+  const reviewFindingOutcomes = deriveReviewFindingOutcomes(findingRows, input.verifiedFindingEvidence);
+  for (const finding of reviewFindingOutcomes.findings) privateKeys.add(finding.findingId);
   return { version: FIELD_TRIALS_FLOW_VERSION, asOf: input.asOf,
     state: !anyObserved ? "unavailable" : reasons.length > 0 ? "observed-partial" : "observed", reasons,
     observational: true, causalClaims: "none", followUpWindowDays: FOLLOW_UP_WINDOW_DAYS,
+    reviewFindingOutcomes,
     assignmentTelemetry: [...assignmentTelemetry.values()].sort((a, b) => a.source.localeCompare(b.source)
       || a.selectedModel.localeCompare(b.selectedModel)),
     provenance: { sources: provenance, githubPass: input.githubPass ?? null }, links, families,
