@@ -2421,6 +2421,7 @@ import {
   decideAutomaticBranchReap,
   DECLARED_BRANCH_GUARDS,
   declaredGuardsBlockSpan,
+  DECLARED_BRANCH_GUARDS_FILE,
   nextMergedHeadCache,
   nextNoPrHeadCache,
   parseBranchCitationHits,
@@ -21360,8 +21361,8 @@ export function reapBranchesCommand(
   const readFile = opts.readFile ?? ((p: string) => readFileSync(p, "utf8"));
   let declarationBlock: { file: string; start: number; end: number } | undefined;
   try {
-    const span = declaredGuardsBlockSpan(readFile(join(checkoutRoot, "src/run-task.ts")));
-    if (span) declarationBlock = { file: "src/run-task.ts", ...span };
+    const span = declaredGuardsBlockSpan(readFile(join(checkoutRoot, DECLARED_BRANCH_GUARDS_FILE)));
+    if (span) declarationBlock = { file: DECLARED_BRANCH_GUARDS_FILE, ...span };
   } catch {
     // A repoRoot resolved to something unreadable (or an injected `readFile` standing in for
     // that failure in tests) is not fatal: the reverse orphan check simply excludes nothing,
