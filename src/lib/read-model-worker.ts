@@ -208,8 +208,19 @@ interface Slot {
   db?: ReadModelDb;
   lease?: ReadModelLease;
   projector?: LedgerProjector;
+  /** The inode `db` was opened on: `rmd read-model rebuild` renames a new file over the path. */
+  ino?: string;
   renewedAt: number;
   backoffUntil: number;
+}
+
+function fileIno(path: string): string | undefined {
+  try {
+    return String(statSync(path, { bigint: true }).ino);
+  } catch {
+    // deliberate: a path with no file reads as replaced, and the reopen that follows creates it.
+    return undefined;
+  }
 }
 
 /** The worker's per-tick work, runnable in any thread. Every instance fails and backs off alone. */
@@ -243,8 +254,26 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     switches = read.switches;
   }
 
+  /** Drops the connection, its projector and its lease; the next tick reopens the file by path. */
+  function closeSlot(slot: Slot): void {
+    slot.db?.close();
+    slot.db = undefined;
+    slot.projector = undefined;
+    slot.lease = undefined;
+    slot.ino = undefined;
+  }
+
   function ensureLease(slot: Slot, now: number): boolean {
-    slot.db ??= openProjectorReadModel(opts.stateDir, slot.instance.name, clock);
+    if (slot.db && fileIno(slot.db.path) !== slot.ino) {
+      // A rebuild swapped a new file in: this connection still reads the old inode, and a write
+      // through it could land in a WAL the new file now shares. Close it before opening the new one.
+      log("read_model.reopened", { instance: slot.instance.name, reason: "the file was replaced" });
+      closeSlot(slot);
+    }
+    if (!slot.db) {
+      slot.db = openProjectorReadModel(opts.stateDir, slot.instance.name, clock);
+      slot.ino = fileIno(slot.db.path);
+    }
     if (slot.lease && now - slot.renewedAt < READ_MODEL_LEASE_RENEW_MS) return true;
     const got = acquireLease(slot.db, { holder, clock });
     if (!got.ok) {
@@ -282,7 +311,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     } catch (error) {
       if (error instanceof ReadModelStopRequested) return;
       if (error instanceof ReadModelError && error.reason === "lease_lost") {
-        slot.lease = undefined;
+        // Another writer fenced this one off, usually a rebuild about to swap the file: reopen by path.
+        closeSlot(slot);
         slot.state.lease = "none";
       }
       slot.state.failures++;
@@ -348,9 +378,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         } catch (error) {
           log("read_model.release_failed", { instance: slot.instance.name, error: (error as Error).message });
         }
-        slot.db?.close();
-        slot.db = undefined;
-        slot.lease = undefined;
+        closeSlot(slot);
       }
       return released;
     },

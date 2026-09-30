@@ -12,7 +12,8 @@
     - test/a-body-repair-re-evaluates-the-gate-that-read-it.test.ts
   origin: "operator-session#board-wide-red-2026-09-10"
   plan_refs: ["W1-T1033", "W1-T4939"]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   rationale: |
     MEASURED 2026-09-10 on #4966, which was blocking nine other PRs at the time.
@@ -64,6 +65,7 @@
     DO NOT PROVE THIS WITH `rerun-failed-jobs`. It replays the old payload by construction; a test
     that uses it will pass while the real repair path stays broken.
   note: |
+    CLOSED 2026-09-30 (operator ruling): satisfied without editing ci.yml. The body-reading gates already run on `edited`: acceptance-author-gate.yml and proof-discrimination-gate.yml declare types [opened, synchronize, reopened, edited], and ci-gate.yml declares [edited]. A body repair re-runs them (#7946 unstuck that way on 2026-09-30), while ci.yml stays off `edited` so a body tweak never re-runs the full matrix.
     Rule 25 CHECKED: `.github/workflows/ci.yml` is not a measurement instrument, but it IS the file
     `isIntroducingCiYmlJob` inspects — a step-wired change here may interact with that predicate, and
     the implementer should measure rather than assume.

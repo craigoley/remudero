@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -7,8 +7,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import type { Clock } from "../src/lib/clock.js";
 import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
-import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { acquireLease } from "../src/lib/read-model-db.js";
+import { createLedgerProjector, openProjectorReadModel, readModelDigest } from "../src/lib/ledger-projector.js";
+import { acquireLease, releaseLease } from "../src/lib/read-model-db.js";
 import {
   READ_MODEL_LEASE_RENEW_MS,
   READ_MODEL_SWITCH_RECHECK_MS,
@@ -306,6 +306,82 @@ test("a lease held by another serve keeps this worker from writing and a stolen 
   other.exec("DROP TABLE lease");
   assert.equal(ticker.release(), 0, "a release that fails is counted out");
   assert.match(String(sink.logs("read_model.release_failed")[0]?.error), /no such table/);
+});
+
+/** What `rmd read-model rebuild` does (#8081): build a side file, take the live lease, checkpoint, rename over. */
+function rebuildAndSwap(stateDir: string, ledgerDir: string, clock: Clock, step: "fence" | "swap" | "both" = "both"): void {
+  const livePath = join(stateDir, "read-model", "core.v1.sqlite");
+  if (step !== "swap") {
+    const live = openProjectorReadModel(stateDir, "core", clock);
+    live.prepare("UPDATE lease SET holder = 'rebuild-cli', expires_ms = ?").run(clock.now() + 20_000);
+    live.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+    live.close();
+  }
+  if (step === "fence") return;
+  const sideRoot = join(stateDir, "read-model", `rebuild-core-${clock.now()}`);
+  const side = openProjectorReadModel(sideRoot, "core", clock);
+  const got = acquireLease(side, { holder: "rebuild-cli", clock });
+  assert.ok(got.ok);
+  createLedgerProjector({ ledgerDir, db: side, lease: got.lease, clock }).tick();
+  releaseLease(side, got.lease);
+  side.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  const sidePath = side.path;
+  side.close();
+  renameSync(sidePath, livePath);
+}
+
+function digestOf(stateDir: string): string {
+  const db = openProjectorReadModel(stateDir, "core");
+  try {
+    return readModelDigest(db);
+  } finally {
+    db.close();
+  }
+}
+
+test("after a CLI rebuild swaps the file the worker resumes against the new file with no lost or duplicate rows", (t) => {
+  const ledgerDir = scratch(t, "rmw-swap-ledger");
+  const stateDir = scratch(t, "rmw-swap-state");
+  corpus(ledgerDir, 1, 10, 4);
+  const { clock, advance } = steppedClock();
+  const sink = collect();
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock, holder: "worker", tickMs: 100, post: sink.post });
+  t.after(() => ticker.release());
+  ticker.tick();
+  assert.equal(tableCount(stateDir, "core", "seen"), 14);
+
+  // The worker is fenced off before the rename: its write rolls back, it closes, and it reopens the new file.
+  rebuildAndSwap(stateDir, ledgerDir, clock, "fence");
+  appendFileSync(join(ledgerDir, LIVE), text(rows(3, T0, "fenced")));
+  ticker.tick();
+  assert.match(String(sink.logs("read_model.tick_failed")[0]?.error), /lease_lost/);
+  rebuildAndSwap(stateDir, ledgerDir, clock, "swap");
+  appendFileSync(join(ledgerDir, LIVE), text(rows(2, T0 + 10, "after-swap")));
+  advance(200);
+  ticker.tick();
+  assert.equal(lastState(sink.messages).instances[0]?.lease, "held", "the worker took the new file's lease");
+  assert.equal(tableCount(stateDir, "core", "seen"), 19);
+
+  // An idle worker never writes, so the fence cannot tell it: the replaced inode does.
+  rebuildAndSwap(stateDir, ledgerDir, clock);
+  appendFileSync(join(ledgerDir, LIVE), text(rows(4, T0 + 20, "idle-swap")));
+  ticker.tick();
+  assert.equal(sink.logs("read_model.reopened").length, 1, "the rename was noticed by its inode");
+  assert.equal(lastState(sink.messages).instances[0]?.reason, undefined);
+  assert.equal(tableCount(stateDir, "core", "seen"), 23, "no row lost and none doubled");
+
+  // The design's full rollback deletes state/read-model/: the worker rebuilds from the ledger.
+  rmSync(join(stateDir, "read-model"), { recursive: true, force: true });
+  ticker.tick();
+  assert.equal(sink.logs("read_model.reopened").length, 2, "a deleted file reads as replaced");
+  assert.equal(tableCount(stateDir, "core", "seen"), 23, "and is rebuilt whole");
+
+  const clean = scratch(t, "rmw-swap-clean");
+  const fresh = createReadModelTicker({ stateDir: clean, instances: [{ name: "core", ledgerDir }], clock, post: () => {} });
+  fresh.tick();
+  fresh.release();
+  ticker.release();
+  assert.equal(digestOf(stateDir), digestOf(clean), "the resumed store digests equal to a clean rebuild");
 });
 
 test("a stop requested mid-rebuild rolls back the open transaction without a failure", (t) => {
