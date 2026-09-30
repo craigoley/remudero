@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { statusCommand } from "../src/lib/report-commands.js";
 import type { Config } from "../src/lib/config.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 async function hungGithubStatus(): Promise<{ elapsedMs: number; json: Record<string, any> }> {
   const root = mkdtempSync(join(tmpdir(), "rmd-status-json-deadline-"));
@@ -47,7 +48,7 @@ async function hungGithubStatus(): Promise<{ elapsedMs: number; json: Record<str
 
 test("W1-T4208: status json returns within its deadline when a read hangs", async () => {
   const result = await hungGithubStatus();
-  assert.ok(result.elapsedMs < 1_500, `hung gh held status for ${result.elapsedMs}ms`);
+  assertWallClockBound(result.elapsedMs, 1_500, `hung gh held status for ${result.elapsedMs}ms`);
 });
 
 test("W1-T4208: an unfinished read is reported as unavailable, not empty", async () => {
@@ -87,7 +88,7 @@ test("status JSON bounds Git remote reads on the same deadline and reports unkno
       out: (line) => lines.push(line),
     });
     assert.equal(rc, 0);
-    assert.ok(Date.now() - started < 1_500);
+    assertWallClockBound(Date.now() - started, 1_500, "a hung Git remote must not hold status");
     const json = JSON.parse(lines[0]);
     assert.equal(json.queueHead.status, "unavailable");
     assert.match(json.queueHead.unknownReason, /run-branch lookup unavailable/);
