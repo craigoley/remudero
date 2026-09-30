@@ -15,6 +15,7 @@ import {
   extractRefusal,
   insertRefusalAmendment,
   noPrVerdictRowsFromLedger,
+  readTaskShard,
   refusalAmendmentComment,
   type RefusalAmendmentIo,
   type RefusalCandidate,
@@ -296,6 +297,42 @@ test("W1-T4838: a light pass and a caller that never wires the effect do nothing
   assert.equal(called, 0);
   await runSweep([], sweepDeps(path, { draftRefusalAmendments: spy }));
   assert.equal(called, 1, "a full pass nominates the categorized refusal");
+});
+
+test("W1-T4838: readTaskShard finds a shard file, falls back to the monolith, and reports a miss", () => {
+  const sharded = mkdtempSync(join(tmpdir(), "rmd-refusal-shard-"));
+  mkdirSync(join(sharded, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(sharded, "plan", "tasks.d", `${TASK}-fixture.yaml`), SHARD);
+  assert.equal(readTaskShard(sharded, TASK)?.relPath, `plan/tasks.d/${TASK}-fixture.yaml`);
+
+  // No tasks.d directory at all: the monolith that carries the id is the shard.
+  const mono = mkdtempSync(join(tmpdir(), "rmd-refusal-mono-"));
+  mkdirSync(join(mono, "plan"), { recursive: true });
+  writeFileSync(join(mono, "plan", "tasks.yaml"), SHARD);
+  const found = readTaskShard(mono, TASK);
+  assert.equal(found?.relPath, "plan/tasks.yaml");
+  assert.equal(found?.text, SHARD);
+
+  // A monolith that does not carry the id, and a repo with neither, both miss.
+  assert.equal(readTaskShard(mono, "W1-T0000-OTHER"), undefined);
+  assert.equal(readTaskShard(mkdtempSync(join(tmpdir(), "rmd-refusal-none-")), TASK), undefined);
+});
+
+test("W1-T4838: a hold that cannot be written is logged and the amendment is still drafted", async () => {
+  const task = fixtureTask();
+  const path = freshLogFile();
+  appendLedger(path, verdictRow());
+  const f = effectsFixture(task);
+  // `state` is a FILE, so the hold record's directory cannot be created — the hold write throws.
+  writeFileSync(join(f.root, "state"), "not a directory");
+
+  await withLiveWritesAllowed(() =>
+    runSweep([], sweepDeps(path, { draftRefusalAmendments: f.effects.draftRefusalAmendments })),
+  );
+
+  assert.ok(f.logged.includes("sweep.refusal_amendment.hold_failed"), "the failed hold is logged, not swallowed");
+  assert.equal(f.ghCalls.filter((c) => c.includes("--method")).length, 1, "the amendment PR is still opened");
+  assert.equal(logRows(path).filter((r) => r.step === REFUSAL_AMENDMENT_STEP)[0]?.outcome, "drafted");
 });
 
 test("W1-T4838: a finished task is neither held nor amended, and the effect is on the recorded surface", async () => {
