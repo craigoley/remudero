@@ -1,0 +1,42 @@
+- id: W1-T5005
+  title: "AN UNPROVEN CONTAINMENT PROBE FAILS THE WHOLE RUN ON ONE MODEL TURN THAT NEVER ATTEMPTED THE WRITE — 7 of ~140 build runs (2026-09-28..30, 2 of 48 on 09-30) ended blocked_containment 'no OS-denial was observed … the write may never have been attempted', while the other probes that day proved containment on the same image and config"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 10.00
+  risk: medium
+  origin: "operator ask 2026-09-30: file and build what gives the fleet a leg up (throughput research)"
+  note: "reservation hand-off: plan-containment-probe-retry-1790810803000 -> plan-containment-probe-retry-1790810803000"
+  plan_refs: [W1-T2201, W1-T1281, W1-T4597, W1-T4660]
+  files: [src/lib/containment.ts, test/an-unproven-containment-probe-is-asked-once-more.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-28..30 (core ledger, live + rotations): 7 blocked_containment verdicts, every one with the
+    reason "no OS-denial was observed for the outside-cwd write — containment UNPROVEN (the write may never have been
+    attempted)". On 09-30, 46 of 48 containment.probe rows were contained=true on the same image and worker settings.
+    The probe is a model-driven spawn: when the model's turn never attempts the outside-cwd write, nothing about the
+    sandbox was observed, yet the run fails closed and the dispatch is spent. Standing rule 11 requires containment to
+    be proven per run; this task keeps that rule and keeps failing closed, and only asks the question a second time
+    before giving up.
+  design: |
+    In probeContainment (src/lib/containment.ts), when the first spawn's verdict is UNPROVEN in one of the states
+    `write-never-attempted`, `no-denial-observed` or `turns-exhausted` (UnprovenState), run the probe spawn ONE more
+    time with a fresh token. The second verdict is final.
+    - Never retry `outside-cwd write SUCCEEDED`: that is a real containment finding and still fails closed at once.
+    - The credential and transport arms keep their existing handling, unchanged.
+    - Meter both spawns' cost_usd. Ledger `containment.probe_retry` with the first verdict's state and reason.
+    - A second unproven verdict throws exactly the ContainmentError it throws today.
+    run-task.ts needs no change: it already consumes probeContainment's single result.
+  acceptance:
+    - claim: "an unproven first probe is asked once more and a contained second probe lets the run proceed"
+      proof: 'grep: test("W1-T5005: an unproven first probe is asked once more and a contained second probe passes" in test/an-unproven-containment-probe-is-asked-once-more.test.ts'
+    - claim: "an outside-cwd write that succeeded is never retried"
+      proof: 'grep: test("W1-T5005: an outside-cwd write that succeeded fails closed with no retry" in test/an-unproven-containment-probe-is-asked-once-more.test.ts'
+    - claim: "two unproven probes still fail closed"
+      proof: 'grep: test("W1-T5005: two unproven probes still fail closed" in test/an-unproven-containment-probe-is-asked-once-more.test.ts'
+  falsifier: |
+    Remove the second spawn and the first test sees ContainmentError on a probe that would have proven containment.
