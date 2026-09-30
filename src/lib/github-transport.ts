@@ -407,6 +407,32 @@ export function createGhCallPacer(
   };
 }
 
+/** Raised by {@link createNonBlockingGhCallPacer} in place of a synchronous sleep, so the caller sees why no call was made. */
+export class GhPaceWouldBlockError extends RmdError {
+  readonly waitMs: number;
+  constructor(waitMs: number) {
+    super(
+      "github",
+      1,
+      `gh call pacer refused to sleep ${waitMs}ms on this thread: a blocking sleep would freeze the event loop, so retry after the gap`,
+      { waitMs },
+    );
+    this.name = "GhPaceWouldBlockError";
+    this.waitMs = waitMs;
+  }
+}
+
+/** A pacer for a thread that must never block (serve's loop): the same gap and floor as {@link createGhCallPacer},
+ *  but a wait that would sleep throws {@link GhPaceWouldBlockError} instead. Never calls a blocking sleep. */
+export function createNonBlockingGhCallPacer(opts: Parameters<typeof createGhCallPacer>[0] = {}): GhCallPacer {
+  return createGhCallPacer({
+    ...opts,
+    sleepSync: (ms: number): void => {
+      if (ms > 0) throw new GhPaceWouldBlockError(ms);
+    },
+  });
+}
+
 function defaultBlockingSleepSync(ms: number): void {
   if (ms <= 0) return;
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);

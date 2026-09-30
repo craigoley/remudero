@@ -100,6 +100,11 @@ export interface BoardSnapshot {
   generated_at: string;
   /** True iff the GitHub read backing merge-state was unreachable this snapshot (fb-…c124f9). */
   github_unreachable: boolean;
+  /** How old the GitHub facts behind this snapshot were at `generated_at`, in ms (W1-T4771). Serve never fetches
+   *  inline, so a fact past its TTL is served stale and this says by how much. Absent when none is held yet. */
+  github_facts_age_ms?: number;
+  /** W1-T4771: `stale` once a held GitHub fact is past its TTL, whatever this snapshot's own age. Absent with the age. */
+  github_facts_status?: "fresh" | "stale";
   /** Header counts, derived from the same `tasks` below — tally and rows can never disagree. */
   counts: CountSummary;
   /** GLANCE strip totals (W1-T159), from the same ledger lines this snapshot already read. */
@@ -246,6 +251,25 @@ function safeQueueTruncated(github: BoardDeps["github"]): boolean {
     return github.readTruncated?.() ?? false;
   } catch (error) {
     void error; // the separate failure-reason read preserves its own classified cause
+    return true;
+  }
+}
+
+/** The gateway's oldest-held-fact age, guarded like {@link safeReadFailed}: an accessor that throws reads as unknown. */
+function safeFactsAgeMs(github: BoardDeps["github"]): number | undefined {
+  try {
+    return github.factsAgeMs?.();
+  } catch (error) {
+    void error; // an unreadable age is reported as absent; it never fails the snapshot it decorates
+    return undefined;
+  }
+}
+
+function safeFactsStale(github: BoardDeps["github"]): boolean {
+  try {
+    return github.factsStale?.() ?? false;
+  } catch (error) {
+    void error; // an unreadable verdict is reported as stale, so an unknown age is never labelled fresh
     return true;
   }
 }
@@ -432,9 +456,11 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
   const generatedAt = new Date().toISOString();
   const { blockedPrs, blockedPrsUnverifiedReason, mergeHeld } = deriveBoardStatusSections(effectiveDeps, lines);
   const prQueue = derivePrQueue(effectiveDeps, lines, tasks, mergeHeld, generatedAt, options.lastGoodPrQueueAt, prQueueIndex);
+  const githubFactsAgeMs = safeFactsAgeMs(effectiveDeps.github);
   return {
     generated_at: generatedAt,
     github_unreachable,
+    ...(githubFactsAgeMs !== undefined ? { github_facts_age_ms: githubFactsAgeMs, github_facts_status: safeFactsStale(effectiveDeps.github) ? "stale" : "fresh" } : {}),
     counts: summarizeCounts(tasks, github_unreachable),
     spend: computeGlanceSpend(lines, now()),
     tasks,
