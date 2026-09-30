@@ -20978,7 +20978,7 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
  * REF may be deleted, and merged/closed are statements about PAST pull requests on that name while
  * `open` is a statement about the ref RIGHT NOW. MEASURED on the live repo: `claude/resolve-p27-
  * findings-rnvu61` carries ten merged PRs and one open (#4392, filed hours earlier), and
- * `claude/remudero-planning-clarify-142opb` the same shape (#4391) — under merged-leads both folded
+ * #4391's `claude/remudero-planning-clarify-*` head the same shape — under merged-leads both folded
  * to `merged`, landed in `plan.deletable`, and a prune would have deleted the head of two live PRs.
  * A stale branch whose old PR was never closed now HOLDS instead, which is the safe direction for a
  * decision that removes a ref.
