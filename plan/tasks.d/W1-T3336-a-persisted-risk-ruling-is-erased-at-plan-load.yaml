@@ -13,7 +13,7 @@
     - test/a-persisted-risk-ruling-reaches-the-linter.test.ts
   origin: "codex-recon#risk-ruling-persistence-boundary-2026-09-10"
   plan_refs: ["W1-T2977", "W1-T3143", "W1-T3216"]
-  status: queued
+  status: done
   attempts: 0
   rationale: |
     OBSERVED 2026-09-10 at origin/main 98eaabf0. W1-T2977 added `Task.risk_ruling`,
@@ -76,6 +76,13 @@
     malformed present ruling is changed to load as `undefined`. In-memory Task literals do not
     count, because both predecessor tasks already proved that half while missing this seam.
   note: |
+    DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #4994
+    (`fix(plan): persist filing risk rulings`, trailer + head run-W1-T3336-1789052596486): loadPlanFromYaml in
+    src/lib/plan.ts now carries risk_ruling through validateRiskRulingShape; test/a-persisted-risk-ruling-reaches-the-
+    linter.test.ts. plan-reconcile refuses the credit because `fix(plan)` is in FILING_SUBJECT_RE although the diff is
+    src/. Every acceptance criterion holds on main and is PRESERVED UNCHANGED: this record is marked done, not re-
+    proved.
+
     W1-T3336 was reserved atomically on origin at `refs/rmd-id/W1-T3336`. The authenticated REST
     budget was exhausted, so the reservation command was invoked through its documented injected
     `openPrTexts` seam using the current unauthenticated REST list (11 open pull requests), while

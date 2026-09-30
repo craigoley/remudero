@@ -63,9 +63,9 @@
   origin: oper#id-allocator-unreachable-2026-08-15
   plan_refs: ["W1-T509"]
   files: [src/lib/task-id-reservation.ts, test/task-id-reservation.test.ts]
-  status: queued
+  status: done
   attempts: 0
-  note: "verify:auto — the fold is pure and its reader is injected, so every criterion is
+  note: "DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #1902 (`fix(task-id-reservation): advisory read now sees remote reservations`, trailer + head run-W1-T518-1786825983170, merge commit): firstUnreservedAtOrAbove in src/lib/task-id-reservation.ts takes readRemoteHeld and propagates “unknown”; test/task-id-reservation.test.ts. plan-reconcile cannot see a merge commit with no `(#N)` subject. Every acceptance criterion holds on main and is PRESERVED UNCHANGED: this record is marked done, not re-proved.\n\nverify:auto — the fold is pure and its reader is injected, so every criterion is
     decidable from fixtures with no network, no spawn and no remote. risk:medium is Rule 19's
     SPAN and it is honest: subsystemsOf folds a .test basename onto its source, so
     src/lib/task-id-reservation.ts and test/task-id-reservation.test.ts are ONE subsystem, and
