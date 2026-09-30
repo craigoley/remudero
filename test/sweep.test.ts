@@ -3395,6 +3395,19 @@ test("deriveDisposition: checks PENDING + review none still lands on the catch-a
   assert.equal(deriveDisposition(ungatedGreenPr({ checksState: "pending" }), DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
 });
 
+test("a fresh pending-CI head earns one early review, then waits while the same review is in flight", () => {
+  const checksPendingSince = new Date(NOW - 2 * 60_000).toISOString();
+  const fresh = ungatedGreenPr({ checksState: "pending", checksPendingSince, lastActivityAt: checksPendingSince });
+  const first = deriveDisposition(fresh, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(first.disposition, "post-review");
+  assert.match(first.reason, /alongside CI/);
+  assert.equal(deriveDisposition({ ...fresh, reviewState: "pending" }, DEFAULT_SWEEP_POLICY, NOW).disposition, "wait");
+  assert.equal(deriveDisposition({ ...fresh, priorReviewAttemptsForInput: 1 }, DEFAULT_SWEEP_POLICY, NOW).disposition, "wait");
+  assert.equal(deriveDisposition({ ...fresh, checksState: "red" }, DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-fixable");
+  const justOpened = { ...fresh, checksPendingSince: new Date(NOW - 30_000).toISOString() };
+  assert.equal(deriveDisposition(justOpened, DEFAULT_SWEEP_POLICY, NOW).disposition, "wait");
+});
+
 test("runSweep: the postReview dep is invoked once, and a POSTED verdict for the head dedups the next pass (W1-T254: outcome-keyed, not attempt-keyed)", async () => {
   const lp = ledgerPath();
   const calls: number[] = [];

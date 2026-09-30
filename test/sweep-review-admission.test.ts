@@ -119,6 +119,13 @@ test("W1-T2792: reviewLanes one preserves the original single semantic admission
   assert.deepEqual(selected.spawning.map((candidate) => candidate.prNumber), [10]);
 });
 
+test("a pending-CI head enters the same bounded review admission as a green head", () => {
+  const pending = postReviewPr({ prNumber: 11, checksState: "pending", checksPendingSince: new Date(NOW - 2 * 60_000).toISOString() });
+  const green = postReviewPr({ prNumber: 12, createdAt: "2026-07-17T11:59:00Z" });
+  const selected = selectReviewAdmissions([green, pending], { ...DEFAULT_SWEEP_POLICY, reviewLanes: 1 }, NOW);
+  assert.deepEqual(selected.spawning.map((candidate) => candidate.prNumber), [11]);
+});
+
 test("W1-T2792: one light pass reviews up to the configured semantic width", async () => {
   const lp = ledgerPath();
   const posted: number[] = [];
