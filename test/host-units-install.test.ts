@@ -480,8 +480,7 @@ test("W1-T3245: the watchdog tick evaluates a recycle and no second timer exists
 
     // The tick asks the SUPERVISOR, which owns the idle gate, health check and rollback and reaches
     // recycle-container.sh. It must never shortcut to docker or to a bare restart.
-    // W1-T4844: the tick names the rmd it chose (install checkout, else the daemon tree) via $DEPLOY_RMD.
-    assert.match(launcher, /(bin\/rmd|\$DEPLOY_RMD)" deploy-run --image-drift-only/);
+    assert.match(launcher, /bin\/rmd" deploy-run --image-drift-only/);
     assert.doesNotMatch(launcher, /docker pull/, "the launcher itself must never pull — that is the recycle's job");
 
     // NO SECOND RECONCILER. The whole point of folding is one loop over one subject.
