@@ -251,3 +251,18 @@ test("fact columns come from the parsed row and a torn line has none", () => {
   assert.equal(factColumns(row(T0, "worker.activity"), isRun), undefined);
   assert.equal(factColumns("[1]", isRun), undefined);
 });
+
+test("a row quarantined at ingest is not a missing fact once its window closes", (t) => {
+  const rowsDir = scratch(t, "oracle-rows");
+  const early = row(T0 + 600_000, "run.start", { task_id: "W1-T1" });
+  writeFileSync(join(rowsDir, LIVE), text([row(T0, "run.start", { task_id: "W1-T0" }), early]));
+  const clock = fixedClock(T0);
+  const db = openProjectorReadModel(scratch(t, "oracle-state"), "core", clock);
+  t.after(() => db.close());
+  const got = acquireLease(db, { clock });
+  if (!got.ok) throw new Error("lease");
+  assert.equal(createLedgerProjector({ ledgerDir: rowsDir, db, lease: got.lease, clock }).tick().quarantined, 1);
+  const run = check({ rowsDir, metricPath: join(scratch(t, "oracle-metric"), LIVE), db, lease: got.lease, lines: [] });
+  assert.equal(run.outcome, "agree");
+  assert.equal(run.ledgerRows, 2);
+});

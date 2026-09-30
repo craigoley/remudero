@@ -15,7 +15,7 @@
 import { createHash } from "node:crypto";
 import { readdirSync } from "node:fs";
 import { basename, join } from "node:path";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
 import { appendLedger } from "./ledger.js";
@@ -78,6 +78,10 @@ export interface WindowComparison {
   factCorrupt: number[];
   lines: Map<string, string>;
   ids: Map<string, IdentityKey>;
+}
+
+function isoAt(ms: number): string {
+  return fixedClock(ms).iso();
 }
 
 function keyOf(id: IdentityKey): string {
@@ -149,7 +153,7 @@ export function compareWindow(
       return out;
     },
   };
-  const union = readLedgerUnionRawLinesSync(ledgerDir, { since: new Date(window.t0).toISOString() }, probe);
+  const union = readLedgerUnionRawLinesSync(ledgerDir, { since: isoAt(window.t0) }, probe);
   const forms = (["gzip", "plain", "live"] as const).map((form): OracleFormRead => ({
     form,
     expected: expected.filter((p) => formOf(p) === form).length,
@@ -172,7 +176,7 @@ export function compareWindow(
     ids.set(key, { tsMs: id.tsMs, h: id.h });
   }
   if (lines.size === 0) {
-    throw new ReadModelConsistencyError(`the window ${new Date(window.t0).toISOString()}..${new Date(window.t1).toISOString()} read zero ledger rows`, { forms });
+    throw new ReadModelConsistencyError(`the window ${isoAt(window.t0)}..${isoAt(window.t1)} read zero ledger rows`, { forms });
   }
   const stored = new Set<string>();
   for (const row of db.prepare("SELECT ts_ms, h FROM seen WHERE ts_ms BETWEEN ? AND ?", { bigInts: true }).iterate(window.t0, window.t1)) {
@@ -366,7 +370,7 @@ function runOnce(opts: ConsistencyCheckOptions): ConsistencyRun {
   run.elapsedMs = clock.now() - started;
   const metric = metricBase(opts.instance);
   appendLedger(opts.metricLedgerPath, {
-    ...metric, step: READ_MODEL_CONSISTENCY_STEP, check: "ingestion", outcome, window: [new Date(window.t0).toISOString(), new Date(window.t1).toISOString()],
+    ...metric, step: READ_MODEL_CONSISTENCY_STEP, check: "ingestion", outcome, window: [isoAt(window.t0), isoAt(window.t1)],
     compared: c.ledgerRows, mismatches: run.mismatches, forms: c.forms, elapsed_ms: run.elapsedMs, sample: sample.map((s) => s.slice(0, 200)),
     ...(run.issueUrl ? { issue_url: run.issueUrl } : {}),
   });
