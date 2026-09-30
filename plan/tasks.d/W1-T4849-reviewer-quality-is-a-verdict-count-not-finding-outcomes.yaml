@@ -1,0 +1,65 @@
+- id: W1-T4849
+  title: "REVIEWER QUALITY STOPS AT THE VERDICT — join finding receipts to explicit fixes, disputes and later outcomes, then compare model-by-issue usefulness without mistaking a merge or resolved thread for correctness"
+  repo: remudero
+  depends_on: [W1-T4848]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator research request 2026-09-29: CodeRabbit inspiration and model field trials"
+  plan_refs: [W1-T4015, W1-T424, W1-T4575, W1-T4620, W1-T4628, W1-T4848]
+  files: [src/lib/review-finding-outcomes.ts, src/lib/field-trials-flow.ts, test/review-finding-outcomes.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at origin/main a2be69a28: review.posted can say which criterion failed,
+    W1-T424 joins aggregate verdicts to later reverts/fixes, and field trials can
+    compare model assignments. No current join labels one review finding as fixed,
+    contested, unverified or later shown wrong. This is a different unit from
+    W1-T4015's failure-class corpus and W1-T4628's verdict-level human sample.
+
+    CodeRabbit's own analytics emphasize comment acceptance and review iteration,
+    but an estimated "reviewer time saved" is not measured labor saved:
+    https://www.coderabbit.ai/blog/measuring-what-matters-in-the-age-of-ai-assisted-development .
+    Its recent model tests show why extra catches must be paired with comment load,
+    latency and cost: https://www.coderabbit.ai/blog/opus-5-5-model-review .
+  design: |
+    Pure, replayable fold from W1-T4848's head-scoped finding receipts and bounded
+    outcome evidence. Distinguish independently confirmed repair (the named
+    mechanism's falsifier fails before and passes on the later head), explicit
+    authenticated human acceptance/rejection with reason, later contradictory
+    evidence, superseded head, and unknown. GitHub "resolved", a green check,
+    agent edit, or merge alone is only workflow activity, never correctness.
+    Join by finding id and exact head; retain conflicting labels and provenance
+    instead of silently picking the newest. Include the count of unmatchable or
+    missing rows and extraction failures in every denominator.
+
+    Produce private, reviewable model x issue-category tables: verified useful
+    findings per reviewed PR, known-issue recall only on pre-labeled cases,
+    false-positive/dispute rate on labeled findings, author/fixer effort when
+    observed, time-to-action, and cash versus notional cost separately. Report
+    uncertainty and sample size; suppress a comparison when cohorts, labels or
+    cash receipts are insufficient. Field Trials may consume reviewed aggregates,
+    but this task publishes nothing, changes no routing, and adds no PR gate.
+    Feed recurrent, evidenced reviewer misses to the existing proposal/learning
+    path as candidates, not self-ratifying rules or a new needs-me flood.
+  acceptance:
+    - claim: "a finding gets a confirmed repair only from mechanism-specific before/after evidence or an explicit authenticated human label, not a resolved thread, merge or green CI"
+      proof: 'grep: test("W1-T4849: a resolved thread is not a correct finding" in test/review-finding-outcomes.test.ts'
+    - claim: "model-category comparisons include unknown and unmatchable counts, cash/notional separation and refuse unsupported winner claims"
+      proof: 'grep: test("W1-T4849: unsupported reviewer winners remain unknown" in test/review-finding-outcomes.test.ts'
+    - claim: "the field-trials projection consumes the outcome fold without publishing or changing review or routing"
+      proof: 'grep: test("W1-T4849: field trials reads finding outcomes without gating" in test/review-finding-outcomes.test.ts'
+    - claim: "the field-trials projection actually calls the finding-outcome fold"
+      proof: 'grep: deriveReviewFindingOutcomes( in src/lib/field-trials-flow.ts'
+  falsifier: |
+    Seed a resolved-but-invalid comment beside a test-backed repair: only the
+    latter may count as confirmed. Delete the evidence join and the first test
+    fails; remove the missingness count and the second test fails.
+  note: |
+    Reservation held at refs/rmd-id/W1-T4849 for branch
+    codex/coderabbit-review-evidence-20260929. This is sequenced behind the
+    finding receipt, not a second generator of human escalations.
