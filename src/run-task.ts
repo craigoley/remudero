@@ -6150,7 +6150,7 @@ async function waitForCiGreen(
       }
     }
     if (i === 0 || i % 5 === 0) log("ci.polling", { ci: String(ci?.conclusion ?? ci?.status ?? "pending") });
-    if (stall.stalled) {
+    if (stall.stalled && !rollupHasRunningCheck(roll)) {
       log("ci.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW, sha });
       return { state: "timeout", sha, ...boundedCiGateChecks(stall.pending) };
     }
