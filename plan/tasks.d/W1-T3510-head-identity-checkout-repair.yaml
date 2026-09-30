@@ -12,7 +12,8 @@
     - test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts
   origin: "operator-session#queue-supervision-2026-09-13"
   plan_refs: ["W1-T3388"]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   rationale: |
     OBSERVED on 2026-09-13: two plan-only amendment PRs used the required
@@ -56,6 +57,14 @@
     neutral branch and confirm it remains accepted; if it is refused, checkout
     selection is not sufficient and this task must not ship.
   note: |
+    CLOSED 2026-09-30 (operator ruling) — THE CHANGE THIS TASK ASKS FOR IS ALREADY ON MAIN, SO A BUILD HAS NOTHING TO
+    CHANGE. .github/workflows/head-identity-gate.yml pins the checkout to `ref: ${{ github.event.pull_request.head.sha
+    }}` since #5365 (head run-unfiled-1789297135702, no `Remudero-Task:` trailer), merged before this record was filed
+    in #5376. The title-matched test “W1-T3510 criterion 1: workflow pins checkout to the pull request head” in
+    test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts landed in #5528 under W1-T3566's trailer, and
+    W1-T3566 (which depends on this task) is merged. The only proof resolves at the merge base, so the task cannot pass
+    proof-discrimination.
+
     ID PROVENANCE: `rmd next-task-id --reserve` held refs/rmd-id/W1-T3510 on
     origin before this task was written. Its holder names this filing branch;
     both scope-time checks then found no active run branch and no merged PR

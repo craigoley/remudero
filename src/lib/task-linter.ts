@@ -58,6 +58,7 @@ export type LintCheck =
   | "proof-engine-divergence"
   | "proof-scope"
   | "proof-self-path"
+  | "record-task"
   | "proof-name-resolution"
   | "proof-unit-test-unresolvable"
   | "credited-test-path"
@@ -1381,6 +1382,33 @@ export function proofSelfPathViolations(task: Task, opts: LintOpts = {}): LintVi
     });
   });
   return violations;
+}
+
+/** W1-T4818: every proof is a `grep:` of the task's own shard — nothing to build. WARN ONLY (operator 2026-09-30). */
+export function isRecordTask(task: Task): boolean {
+  const ownPath = task.sourcePath;
+  const criteria = task.acceptance ?? [];
+  if (!ownPath || criteria.length === 0) return false;
+  return criteria.every((c) => {
+    if (c.satisfied_by) return false;
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    return whitelisted?.kind === "grep" && proofScopePath(whitelisted) === ownPath;
+  });
+}
+
+export function recordTaskViolations(task: Task): LintViolation[] {
+  if (!isRecordTask(task)) return [];
+  return [
+    {
+      check: "record-task",
+      severity: "warn",
+      message:
+        `task ${task.id}: every acceptance proof greps its OWN shard (${task.sourcePath}), so there is ` +
+        "nothing for a worker to build — the drain routes it to the judge and never dispatches it. " +
+        "Either file it as verify: human (a ruling or a record), or give it real proofs about the " +
+        "implementation it implies.",
+    },
+  ];
 }
 
 function proofTestPath(w: WhitelistedProof): string | undefined {
@@ -3568,6 +3596,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofGrepSafetyViolations(task, opts));
   violations.push(...proofScopeViolations(task, opts));
   violations.push(...proofSelfPathViolations(task, opts));
+  violations.push(...recordTaskViolations(task));
   violations.push(...proofNameResolutionViolations(task, opts));
   violations.push(...proofUnitTestUnresolvableViolations(task, opts));
   violations.push(...creditedTestPathViolations(task, opts));
