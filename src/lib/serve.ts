@@ -83,11 +83,14 @@ import {
 } from "./ci-incidents.js";
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
-import { buildReadModelViewRoutes } from "./views.js";
-import { navBadgeView, type NavBadgeScope } from "./nav-badge-view.js";
+import { buildReadModelViewRoutes, type ViewBodySource } from "./views.js";
+import { navBadgeView, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
+import { NOW_VIEW_NAME } from "./now-view.js";
+import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
+import { withViewShadow } from "./view-shadow.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
-import { buildInstanceGatewayRoutes, CORE_INSTANCE, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
+import { buildInstanceGatewayRoutes, CORE_INSTANCE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
 import { createReadModelWorker, READ_MODEL_VIEWS, type ReadModelInstance, type ReadModelWorkerHandle, type ReadModelWorkerOptions } from "./read-model-worker.js";
 import { buildOperatorAgentAnswer, buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
 import { buildOperatorAgentActionHandoffRoutes } from "./operator-agent-action-handoff.js";
@@ -2562,6 +2565,7 @@ export function readEvalCardInput(stateDir: string, trialId: string | undefined)
 interface ServeRoutesAssembly {
   routes: Route[];
   instanceAnalyticsCaches: AnalyticsSnapshotCache[];
+  navBadgeScopes: () => NavBadgeScope[];
   /** The first GitHub App token mint. Absent when App refresh is not configured. */
   githubAppReady?: Promise<void>;
 }
@@ -2575,6 +2579,9 @@ function assembleServeRoutes(
 ): ServeRoutesAssembly {
   const instanceAnalyticsCaches: AnalyticsSnapshotCache[] = [];
   const badgeScopes: NavBadgeScope[] = [];
+  const navBadgeScopes = (): NavBadgeScope[] => [
+    { instanceId: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, analytics: currentAnalyticsSnapshot, memory: operatorAgentMemory, ledgerPath: deps.ledgerPath },
+    ...badgeScopes];
   const modelApprovals = deps.modelApprovals ?? [];
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
@@ -2704,9 +2711,9 @@ function assembleServeRoutes(
       planPath: deps.panelGraph.planPath,
     }),
     buildRecentRoute(deps.board),
-    ...buildReadModelViewRoutes({ readModel, readModelViews: READ_MODEL_VIEWS.map((view) => view.name), legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: () => [
-      { instanceId: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, analytics: currentAnalyticsSnapshot, memory: operatorAgentMemory, ledgerPath: deps.ledgerPath },
-      ...badgeScopes] })] }),
+    ...buildReadModelViewRoutes(withViewShadow(readModel, { readModel: readModel && darkReadModelViews(readModel, ["nav-badge", "repositories", NOW_VIEW_NAME]),
+      readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"] },
+      legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes })] })),
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),
     buildAccountUsageRoute(accountUsageDeps),
@@ -2919,7 +2926,7 @@ function assembleServeRoutes(
   // tier sibling, as the runtime backstop for whatever the compiler cannot see. See
   // `assertRoutesScopeComplete`'s own doc.
   assertRoutesScopeComplete(routes);
-  return { routes, instanceAnalyticsCaches, githubAppReady: githubAppRefresh.ready };
+  return { routes, instanceAnalyticsCaches, navBadgeScopes, githubAppReady: githubAppRefresh.ready };
 }
 
 /** Every REST route `rmd serve` registers — board, panel actions, panel graph, and the shell. */
@@ -3118,6 +3125,12 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     serveReadModels.set(server, readModel);
     server.once("listening", readModel.start);
     server.on("close", readModel.stop);
+    server.once("listening", () => server.once("close", startNavBadgeSourcePublisher({
+      stateDir: dirname(deps.ledgerPath), inboxStateDir: join(deps.fleetControlRoot, "state"), scopes: routeAssembly.navBadgeScopes, every: deps.readModel?.every, log: deps.log,
+    })));
+    server.once("listening", () => server.once("close", startRepositoriesSourcePublisher({
+      stateDir: dirname(deps.ledgerPath), instances: () => repositoriesSources(deps), every: deps.readModel?.every, log: deps.log,
+    })));
   }
   server.on("close", staleExit.stop);
   server.on("close", prewarm.stop);
@@ -3144,6 +3157,31 @@ export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questio
     ...(deps.assistantRepository ? { repo: deps.assistantRepository } : {}), ...(deps.panelGraph?.planPath ? { planPath: deps.panelGraph.planPath } : {}) };
   const others = livenessInstances({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances });
   return [core, ...others.map((instance) => ({ name: instance.name, ledgerDir: instance.stateDir, repo: instance.repo }))];
+}
+
+export function repositoriesSources(deps: ServeDeps): RepositoriesSources["instances"] {
+  const core = deps.instances?.coreInstance ?? CORE_INSTANCE;
+  return [
+    { instanceId: core, options: {
+      root: deps.questionsRoot, repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot), ownInstance: core,
+      controlRoot: deps.fleetControlRoot, incidentsDir: deps.incidents?.stateDir ?? dirname(deps.ledgerPath), ledgerPath: deps.ledgerPath, planPath: deps.panelGraph.planPath,
+    } },
+    ...livenessInstances({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances }).map((instance) => {
+      const root = instanceStateRoot({ name: instance.name, repo: instance.repo, project: "", live: true }, dirname(dirname(instance.stateDir)));
+      const [owner, repo] = instance.repo.split("/");
+      return { instanceId: instance.name, options: {
+        root: root.root, ledgerPath: root.ledgerPath, planPath: root.planPath, instanceRepository: { owner, repo }, controlRoot: root.root, incidentsDir: join(root.root, "state"),
+      } };
+    }),
+  ];
+}
+
+export function darkReadModelViews(source: ViewBodySource, dark: readonly string[]): ViewBodySource {
+  return {
+    body: (view, key) => (dark.includes(view) && source.switches().views[view] !== "serve" ? undefined : source.body(view, key)),
+    judge: (sources, now) => source.judge(sources, now),
+    switches: () => source.switches(),
+  };
 }
 
 export function stopServeReadModel(server: Server): boolean {
