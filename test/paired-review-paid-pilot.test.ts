@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -127,6 +127,20 @@ test("W1-T4929: unavailable spend pauses the paid arm alone", async (t) => {
   assert.equal(result.report.winnerClaim, "unsupported");
 });
 
+test("a reviewer row with no call identity is malformed spend evidence, not free cash", async (t) => {
+  const pair = caseFor("pair-malformed-row", 1);
+  const { stateDir, protocol } = fixture(t, [pair], 2);
+  writeFileSync(join(stateDir, "ledger.ndjson"), `${JSON.stringify({
+    ts: new Date().toISOString(), run_id: "reviewer-malformed", task_id: pair.corpusTaskId,
+    step: "reviewer_replay.reserve", billing_mode: "api", total_cost_usd: 2,
+    reviewer_replay: { pilot_id: protocol.pilotId, case_id: pair.id, arm: "bug" },
+  })}\n`, { flag: "a" });
+  const evidence = await readPaidPilotEvidence(stateDir, protocol);
+  assert.equal(evidence.state, "observed-partial");
+  assert.equal(evidence.malformedRows, 1);
+  assert.ok(paidArmPauseReasons(protocol, evidence, new Date().toISOString()).reasons.includes("spend-source-malformed"));
+});
+
 test("W1-T4929: A/A failure withholds model comparison", async (t) => {
   const pair = caseFor("pair-one-group", 1);
   const { stateDir } = fixture(t, [pair], 2);
@@ -190,6 +204,26 @@ test("an unreceipted reviewer attempt holds later paid calls without a success-s
   const privateReport = buildPaidPilotReport({ protocol, evidence, nowIso: new Date().toISOString() });
   assert.equal(privateReport.cash.spentEstimateUsd, null, "a missing actual receipt is unknown, not a measured $0 or $2");
   assert.equal(privateReport.cash.remainingUsd, null);
+});
+
+test("a result ledger write failure withholds the private model table", async (t) => {
+  const pair = caseFor("pair-result-undurable", 1);
+  const { stateDir } = fixture(t, [pair], 2);
+  let calls = 0;
+  const result = await replayPairedReviews(replayInput(stateDir, [pair], async (input) => {
+    calls++;
+    if (calls === 2) {
+      renameSync(join(stateDir, "ledger.ndjson"), join(stateDir, "ledger.saved"));
+      mkdirSync(join(stateDir, "ledger.ndjson"));
+    }
+    return scored(pair, input, 1);
+  }));
+  assert.equal(calls, 2);
+  assert.equal(result.state, "evaluated");
+  if (result.state !== "evaluated") return;
+  assert.equal(result.reason, "reviewer-result-not-durable");
+  assert.deepEqual(result.report.byModel, []);
+  assert.equal(result.aaVerdict, null);
 });
 
 test("an operator pause or contested replay lock does not dispatch a paid reviewer", async (t) => {

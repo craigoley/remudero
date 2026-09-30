@@ -276,9 +276,8 @@ export async function replayPairedReviews(input: PaidPairedReviewInput): Promise
         const exclusive = reviewerReplayExclusivityReason(input.stateDir, input.pilotId, systemClock.iso());
         if (exclusive !== null) return { allowed: false, reason: exclusive };
         const controls = readPaidPilotControls(input.stateDir, input.pilotId);
-        let evidence;
-        try { evidence = await readPaidPilotEvidence(input.stateDir, protocol); }
-        catch { return { allowed: false, reason: "spend-source-read-failed" }; }
+        // The evaluator converts an unexpected read exception into an explicit admission failure.
+        const evidence = await readPaidPilotEvidence(input.stateDir, protocol);
         const pause = paidArmPauseReasons(protocol, evidence, systemClock.iso(), scope.cashReserveUsdPerCall);
         if (controls.state !== "observed" || controls.paused) pause.reasons.push(controls.reason ?? "operator-paused");
         if (pause.reasons.length > 0) return { allowed: false, reason: pause.reasons.join("+") };
@@ -343,9 +342,8 @@ export async function replayPairedReviews(input: PaidPairedReviewInput): Promise
         stackDigest: digest(input.stack), seedDigest: digest(input.seed), reportDigest: digest(retained),
         asOf: systemClock.iso(), verdict: aaVerdict };
       const path = join(input.stateDir, `${reviewerAaPrefix(protocol.pilotId)}${systemClock.now()}.${randomUUID()}.json`);
-      try { writeFileSync(path, JSON.stringify({ receipt, report: retained }), { flag: "wx", mode: 0o600 }); }
-      catch { return { state: "evaluated", report: retained, excludedPairIds, aaVerdict: null,
-        reason: "reviewer-aa-receipt-not-durable" }; }
+      // A missing receipt is a failed invocation, never an evaluated A/A result.
+      writeFileSync(path, JSON.stringify({ receipt, report: retained }), { flag: "wx", mode: 0o600 });
     }
     return { state: "evaluated", report: retained, excludedPairIds, aaVerdict };
   } finally { rmdirSync(lockPath); }
