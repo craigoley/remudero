@@ -1,0 +1,80 @@
+- id: W1-T4923
+  title: "A TEST CAN STILL APPEND TO THE LIVE LEDGER — five cli.invoked rows stamped 2027-10-14 reached the core fleet ledger on 2026-09-30, after W1-T4805 contained git, gh and the App key but not the filesystem; find the test that wrote them, fix it, and make the live ledger and state paths unreachable for the whole test process"
+  repo: remudero
+  depends_on: ["W1-T4805"]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-30 core-console architecture Phase 1 design pass (P1-DESIGN, FOUND-1); operator ruling 2026-09-30 (Q5)"
+  plan_refs: ["W1-T4805", "W1-T4100", "W1-T2346", "W1-T2347"]
+  files:
+    - test/setup/no-live-remote.ts
+    - src/lib/live-write-guard.ts
+    - src/lib/ledger.ts
+    - test/run-task.test.ts
+    - test/live-write-guard.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-30 by the Phase 1 design pass on a copy of the fleet host's core ledger: five
+    `cli.invoked` rows stamped 2027-10-14T21:23:34Z (host 8f3e86a35d09, actor operator, verbs
+    `onboard` and `alert-fix --bogus`) sit in the core archive
+    `ledger.2026-09-30T03-50-43-904Z.ndjson.gz`. The same future day already reached the live
+    ledger twice: src/lib/ledger.ts cites an archive NAMED 2027-10-14T21-24-52-494Z with a real
+    mtime of 2026-09-13 (W1-T4100), and a row stamped 2027-10-14 read on 2026-09-23. Any reader
+    that takes max(ts) is poisoned by such a row; the Phase 1 projector will quarantine rows more
+    than five minutes in the future, but that only contains the damage.
+    LEAD, NOT A CONCLUSION: test/run-task.test.ts has main() dispatch tests that set
+    `process.argv` to `onboard` and to `alert-fix --bogus` and call the in-process `main()`.
+    main() runs `logCliInvocation` (src/run-task.ts), which appends to
+    `ledgerPathFor(loadConfig())`, and loadConfig resolves the operator's REAL config under
+    `homedir()` unless a stateRoot override is passed. Inside a fleet container that is the live
+    core ledger. The 2027 clock source is not yet identified.
+    WHY W1-T4805 DID NOT STOP IT. W1-T4805 (#7942, merged 2026-09-30 01:15Z, before this archive
+    was written) made live REMOTE writes impossible at process level in test/setup/no-live-remote.ts:
+    dead push URLs, a sentinel gh token, no App key. Its scope named git, gh and the App key only.
+    Nothing in the test setup keeps a test off the live ledger or state directory. This is the
+    second known test that wrote live fleet state (the first: #6949, a test that paused the live
+    fleet).
+  design: |
+    (i) CENSUS FIRST. Reproduce: run the suspect main() tests (and every test that calls `main()`
+    or spawns `bin/rmd` without a root override) with a scratch HOME whose config names a scratch
+    root, and record which of them append to that root's ledger. Identify where the 2027-10-14
+    clock comes from. Name every writer found in the PR body.
+    (ii) Fix each writer found: it runs against a fixture root, the way the rest of the suite does.
+    (iii) Process-level containment, extending W1-T4805's no-live-remote.ts to the filesystem.
+    When `isTestRunner()` holds and `RMD_ALLOW_LIVE_WRITES` is not `1`, the setup makes the
+    operator's live config root unreachable to the test process and its children. Preferred shape:
+    resolve the live root WITHOUT creating a config (read the config file if it exists), export it
+    as a deny root, and have the ledger append path (src/lib/ledger.ts `appendLedger`) refuse any
+    path under it with `LiveWriteBlockedError` naming this task. A redirect of HOME/config to a
+    per-process temp root is acceptable instead if the census shows it breaks nothing; either
+    way, name the choice in the PR. Children inherit the containment.
+    (iv) A canary in test/live-write-guard.test.ts: from inside the suite, an in-process `main()`
+    call and a spawned child both leave the live ledger path untouched, and an append to a path
+    under the deny root throws before any byte is written.
+    Out of scope: the projector's future-row quarantine (Phase 1, hand-built), and rewriting the
+    five rows already in the archive (the ledger is append-only).
+  acceptance:
+    - claim: "the cli test harness cannot resolve or write the live ledger path"
+      proof: "unit test: the cli test harness never resolves the live ledger path"
+    - claim: "an append under the live state root from inside the suite is refused before any byte is written"
+      proof: "unit test: an append under the live state root from the suite is refused before writing"
+    - claim: "a child process spawned by a test inherits the filesystem containment"
+      proof: "unit test: a spawned child inherits the live ledger deny root"
+  falsifier: |
+    Remove the filesystem containment from no-live-remote.ts and run the canary with a scratch
+    HOME whose config points at a scratch root standing in for the live one: the in-process main()
+    call appends a cli.invoked row there and the first proof fails. Let appendLedger skip the
+    deny-root check: the second proof sees the row written. Apply the containment only in the
+    parent process: the child test sees no deny root.
+  note: |
+    Reserved from the operator checkout for branch file/phase1-fleet-tasks-1790777336775.
+    Scope-time checks 2026-09-30: no run-W1-T4923-* branch; no main commit names the id. No plan
+    record on origin/main or on any open head's added shards matches cli.invoked, 2027-10-14,
+    live ledger or live state. W1-T4805 is merged and scoped to git, gh and the App key, so this
+    task extends it rather than duplicating it.

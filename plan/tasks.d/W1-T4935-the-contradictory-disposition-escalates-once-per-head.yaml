@@ -1,0 +1,52 @@
+- id: W1-T4935
+  title: "THE SWEEP RE-ESCALATES THE SAME HEAD EVERY PASS — 'review failing with no actionable unmet criteria (contradictory) — escalating' was logged about every 90 s for hours on one console PR head; escalate once per head, then back off until the head or the review changes"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "coordinator measurement 2026-09-30 (console PR #1866); core-console architecture session"
+  plan_refs: ["W1-T78", "W1-T195", "W1-T3029", "W1-T4934"]
+  files:
+    - src/lib/sweep.ts
+    - test/the-contradictory-disposition-escalates-once-per-head.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 by the coordinator. While console PR #1866's review FAILed on proofs its
+    reviewer could not load (W1-T4934), the sweep routed it to `blocked-ambiguous` on every pass,
+    with the reason "review failing with no actionable unmet criteria (contradictory) —
+    escalating" (src/lib/sweep.ts). It logged that disposition about every 90 s for hours on one
+    unchanged head. `escalate()` appends to an already-open issue for the same key, and the
+    contradictory arm passes `headDedup: "independent"`. But the sweep still re-runs the
+    clarification rung, re-ledgers the disposition, and re-appends on every pass, which floods
+    the ledger and the issue with no new information.
+  design: |
+    (i) Key the contradictory escalation on (PR, head sha, review decision digest). The first
+    pass that sees the key escalates as today. Later passes with the same key do not
+    re-escalate or re-append. They record at most one backoff row per doubling interval, capped
+    at a few hours, and name the pass count and the first escalation.
+    (ii) A new head sha or a changed review decision resets the key, and escalation proceeds as
+    new.
+    (iii) Persist the key through the existing sweep state (no new state file if one already
+    carries per-PR sweep memory), so a daemon restart does not re-escalate an unchanged head.
+  acceptance:
+    - claim: "an unchanged head escalates once however many passes see it"
+      proof: "unit test: a contradictory review on an unchanged head escalates once across many passes"
+    - claim: "a new head or a changed review decision escalates again"
+      proof: "unit test: a new head sha re-arms the contradictory escalation"
+    - claim: "the backoff survives a daemon restart"
+      proof: "unit test: the contradictory escalation backoff survives a restart"
+  falsifier: |
+    Run 40 sweep passes over one unchanged contradictory PR on today's code: the escalation and
+    disposition rows repeat about 40 times, and the first proof fails. Key only on the PR: a new
+    head is never escalated, and the second proof fails.
+  note: |
+    Reserved from the operator checkout for branch file/review-toolchain-tasks-1790778861427.
+    Scope-time checks 2026-09-30: no run-W1-T4935-* branch; no main commit names the id. No plan
+    record on origin/main or on any open head's added shards covers repeated contradictory
+    escalation for one head.

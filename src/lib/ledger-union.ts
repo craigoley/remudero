@@ -205,6 +205,8 @@ function scanLedgerBuffer(
   start = 0,
   maxLines = Number.POSITIVE_INFINITY,
   onBad?: (line: string) => void,
+  /** A line this answers true for is never parsed: an exact replay costs a Set lookup, not a JSON.parse. */
+  skip?: (line: string) => boolean,
 ): { bad: number; next: number } {
   let bad = 0;
   let lines = 0;
@@ -214,7 +216,7 @@ function scanLedgerBuffer(
     if (end > start) {
       lines += 1;
       const line = buf.toString("utf8", start, end).trim();
-      if (line && (!pattern || pattern.test(line))) {
+      if (line && (!pattern || pattern.test(line)) && !skip?.(line)) {
         try {
           const parsed = parseObject(line);
           if (parsed !== undefined) onRow(parsed, line);
@@ -827,6 +829,62 @@ export function createLedgerRotationMemo(
   };
 }
 
+type LedgerSighting = string | Record<string, unknown>;
+
+/**
+ * W1-T4820 — EXACT REPLAY DEDUPE THAT COSTS LESS THAN THE PARSE IT SAVES. A replayed row is a byte
+ * copy, so it shares its original's `ts`; sightings are bucketed on that short key and compared as
+ * whole lines only inside a bucket. A parsed row is serialised only when its bucket is non-empty.
+ * MEASURED on a copy of the fleet host's seven-day window (1,087,846 archived lines, 725,963
+ * distinct): no dedupe 2.3–3.0 s, a Set of whole lines 2.9–4.5 s, this 2.0–2.2 s.
+ */
+function firstKey(row: Record<string, unknown>): string | undefined {
+  for (const key in row) return key;
+  return undefined;
+}
+
+function createLedgerLineSeen(): { has: (line: string) => boolean; add: (sighting: LedgerSighting) => boolean } {
+  const byTs = new Map<string, LedgerSighting[]>();
+  const untimed = new Set<string>();
+  const text = (bucket: LedgerSighting[], i: number): string => {
+    const entry = bucket[i];
+    if (typeof entry === "string") return entry;
+    const line = JSON.stringify(entry);
+    bucket[i] = line;
+    return line;
+  };
+  const tsOf = (sighting: LedgerSighting): string | undefined => {
+    // A parsed row keys like the line it serialises to: on `ts` only when `ts` is its first field.
+    if (typeof sighting !== "string") return firstKey(sighting) === "ts" && typeof sighting.ts === "string" ? sighting.ts : undefined;
+    if (!sighting.startsWith('{"ts":"')) return undefined;
+    const end = sighting.indexOf('"', 7);
+    return end > 7 ? sighting.slice(7, end) : undefined;
+  };
+  const find = (sighting: LedgerSighting): { bucket?: LedgerSighting[]; hit: boolean; line?: string; ts?: string } => {
+    const ts = tsOf(sighting);
+    if (ts === undefined) {
+      const line = typeof sighting === "string" ? sighting : JSON.stringify(sighting);
+      return { hit: untimed.has(line), line };
+    }
+    const bucket = byTs.get(ts);
+    if (bucket === undefined) return { hit: false, ts };
+    const line = typeof sighting === "string" ? sighting : JSON.stringify(sighting);
+    for (let i = 0; i < bucket.length; i++) if (text(bucket, i) === line) return { bucket, hit: true, line, ts };
+    return { bucket, hit: false, line, ts };
+  };
+  return {
+    has: (line) => find(line).hit,
+    add: (sighting) => {
+      const found = find(sighting);
+      if (found.hit) return false;
+      if (found.ts === undefined) untimed.add(found.line as string);
+      else if (found.bucket) found.bucket.push(sighting);
+      else byTs.set(found.ts, [sighting]);
+      return true;
+    },
+  };
+}
+
 export interface LedgerUnionRecordRead extends Omit<LedgerUnionRawRead, "rawLines"> {
   rows: Array<Record<string, unknown>>;
   torn: number;
@@ -842,19 +900,18 @@ export function readLedgerUnionRecordsSync(
   const livePath = ledgerLivePath(stateDir);
   const liveFileRead = opts.readLiveRecords !== undefined ? true : fsDeps.existsSync(livePath);
   const minimumTs = sinceMs(opts);
-  const seen = new Set<string>();
+  const seen = createLedgerLineSeen();
   const rows: Array<Record<string, unknown>> = [];
   const unread: string[] = [];
   const stepsSeen = new Set<string>();
   let torn = 0;
   let filesRead = 0;
 
-  const addRecord = (row: Record<string, unknown>, raw: string): void => {
+  // A buffer row arrives with its raw line; a live or memoized row arrives parsed, and is serialised only
+  // if another row shares its `ts`.
+  const addRecord = (row: Record<string, unknown>, raw?: string): void => {
     if (!recordMatchesFilters(row, opts, minimumTs)) return;
-    if (opts.dedupe !== false) {
-      if (seen.has(raw)) return;
-      seen.add(raw);
-    }
+    if (opts.dedupe !== false && !seen.add(raw ?? row)) return;
     opts.onRecord?.(row);
     rows.push(row);
     if (typeof row.step === "string") stepsSeen.add(row.step);
@@ -872,8 +929,10 @@ export function readLedgerUnionRecordsSync(
   // Four callers, ~13.7 GB against an 8 GB heap cap — the daemon's abort. The first row is the
   // tell: 323 retained lines still cost 585 MB, so the driver is the per-file whole-string plus
   // split array, NOT what is kept. Scanning holds one file's decompressed buffer at a time.
+  // W1-T4820: a replayed archive line is skipped BEFORE its parse, so dedupe makes the union cheaper, not dearer.
+  const skipSeen = opts.dedupe === false ? undefined : (line: string): boolean => seen.has(line);
   const scanBuffer = (buf: Buffer, onRow: (row: Record<string, unknown>, line: string) => void, onBad = opts.onTorn): number =>
-    scanLedgerBuffer(buf, opts.pattern, onRow, 0, Number.POSITIVE_INFINITY, onBad).bad;
+    scanLedgerBuffer(buf, opts.pattern, onRow, 0, Number.POSITIVE_INFINITY, onBad, skipSeen).bad;
   const addBuffer = (buf: Buffer): void => {
     torn += scanBuffer(buf, addRecord);
   };
@@ -881,9 +940,7 @@ export function readLedgerUnionRecordsSync(
   const readLive = (): boolean => {
     if (opts.readLiveRecords !== undefined) {
       filesRead += 1;
-      for (const row of opts.readLiveRecords(livePath)) {
-        addRecord(row, JSON.stringify(row));
-      }
+      for (const row of opts.readLiveRecords(livePath)) addRecord(row);
       return opts.satisfied?.(stepsSeen) ?? false;
     }
     if (!liveFileRead) return false;
@@ -915,7 +972,7 @@ export function readLedgerUnionRecordsSync(
         filesRead += 1;
         torn += read.torn;
         for (const line of read.tornLines) opts.onTorn?.(line);
-        for (const row of read.rows) addRecord(row, opts.dedupe === false ? "" : JSON.stringify(row));
+        for (const row of read.rows) addRecord(row);
         return opts.satisfied?.(stepsSeen) ?? false;
       }
       const buf = fsDeps.readFileSync(entry.path);
