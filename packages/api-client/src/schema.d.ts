@@ -154,6 +154,97 @@ export interface components {
       recap?: (RecapEvent)[];
       /** W1-T163: this token's marker value BEFORE this request advanced it -- the timestamp `recap` was computed as-of. Absent alongside `recap` for the same two reasons. */
       sinceCheckpoint?: string;
+      /** True iff the GitHub read backing merge state was unreachable this snapshot. */
+      github_unreachable?: boolean;
+      counts?: StatusCounts;
+      spend?: GlanceSpend;
+      /** PRs the sweep disposed into a non-progressing class (src/lib/status-board.ts's `BlockedPrBlocker`), re-derived against live merge state every render. */
+      blockedPrs?: (BlockedPrRow)[];
+      /** Set only when live GitHub state could not be checked; `blockedPrs` is then withheld (empty). */
+      blockedPrsUnverifiedReason?: string;
+      /** The standing operator merge holds (src/lib/status-board.ts's `MergeHeldRow`). */
+      mergeHeld?: (MergeHeldRow)[];
+      prQueue?: PrQueueSnapshot;
+      modelApprovals?: (ConsoleModelApproval)[];
+      taskProjection?: ConsoleStatusTaskProjection;
+      /** The provider repair ladder (src/lib/worker-provider.ts's `RepairLadderState`), spliced by src/lib/serve.ts's `withRepairLadder`. `running`, `unreadable` (with `reason`), or `stalled` (with the stall record's fields, which evolve with the ladder and are open here). */
+      repairLadder?: {
+        state: "running" | "stalled" | "unreadable";
+      };
+      staleness?: ConsoleResponseStaleness;
+    };
+    /** GET /v1/status's header counts (src/lib/board.ts's `CountSummary`), derived from the same `tasks`. */
+    StatusCounts: {
+      total: number;
+      running: number;
+      merged: number;
+      queued: number;
+      blocked: number;
+      /** False when merge state's GitHub read was unreachable -- render unknown, not 0 merged. */
+      merged_known: boolean;
+    };
+    /** The GLANCE strip totals (src/lib/glance.ts's `GlanceSpend`). */
+    GlanceSpend: {
+      mergedToday: number;
+      channel: "fleet";
+      spendTodayUsd: number;
+      spendWeekUsd: number;
+      /** Always null -- no ledger step records operator-session cost; null is unmeasured, never 0. */
+      sessionSpendUsd: null;
+    };
+    BlockedPrRow: {
+      kind: "blocked_pr";
+      taskId?: string;
+      prNumber: number;
+      prUrl?: string;
+      disposition: string;
+      reason: string;
+    };
+    /** An operator merge hold. `prNumber` and `taskId` are absent for a fleet-scoped hold. */
+    MergeHeldRow: {
+      prNumber?: number;
+      taskId?: string;
+      by: string;
+      reason: string;
+    };
+    /** Every current open PR (src/lib/board.ts's `PrQueueSnapshot`). An unreadable or partial index is `complete: false` with no rows and an `unavailableReason`, never stale rows. */
+    PrQueueSnapshot: {
+      complete: boolean;
+      rows: (PrQueueRow)[];
+      unavailableReason?: string;
+      /** The newest prior complete queue this route cache held; absent until observed. */
+      lastGoodAt?: string;
+    };
+    PrQueueRow: {
+      prNumber: number;
+      prUrl: string;
+      title: string;
+      headRefName?: string;
+      headSha?: string;
+      taskId?: string;
+      disposition: string;
+      reason: string;
+      reviewState: "success" | "failure" | "pending" | "none" | "unreadable" | "not-applicable";
+      queueClass: "actionable" | "active" | "ready-held" | "waiting" | "unknown";
+      held: boolean;
+      snapshotAt: string;
+      observedAt?: string;
+    };
+    ConsoleModelApproval: {
+      model: string;
+      approvedBy: string;
+      approvedAt: string;
+      expiresAt?: string;
+      expired: boolean;
+    };
+    /** How much of the plan `tasks` carries (src/lib/serve.ts's `ConsoleStatusTaskProjection`): a truncated list says so, so an omitted task never reads as "no worker". */
+    ConsoleStatusTaskProjection: {
+      complete: boolean;
+      total: number;
+      returned: number;
+      omitted: number;
+      limit: number;
+      reason: string;
     };
     /** Trailing seven-day run outcomes from the de-duplicated ledger. `succeeded` counts tasks that took merge credit (`verdict.merged`, or a `verdict` of merged, already_satisfied or awaiting_merge). `failed` counts runs whose verdict is blocked_ci, blocked_review, no_pr, blocked_budget, error_max_budget_usd, blocked_illformed or failed. `superseded` counts such a failure whose task later took merge credit; it is in neither term of `errorrate`. Held, transient and re-queued verdicts (blocked_transient, blocked_containment, handed_off, ...) are in no count. */
     RepoRunOutcomes: {

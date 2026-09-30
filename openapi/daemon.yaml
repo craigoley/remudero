@@ -399,6 +399,165 @@ components:
           description: >
             W1-T163: this token's marker value BEFORE this request advanced it -- the timestamp
             `recap` was computed as-of. Absent alongside `recap` for the same two reasons.
+        github_unreachable:
+          type: boolean
+          description: True iff the GitHub read backing merge state was unreachable this snapshot.
+        counts:
+          $ref: "#/components/schemas/StatusCounts"
+        spend:
+          $ref: "#/components/schemas/GlanceSpend"
+        blockedPrs:
+          type: array
+          description: >
+            PRs the sweep disposed into a non-progressing class (src/lib/status-board.ts's
+            `BlockedPrBlocker`), re-derived against live merge state every render.
+          items:
+            $ref: "#/components/schemas/BlockedPrRow"
+        blockedPrsUnverifiedReason:
+          type: string
+          description: Set only when live GitHub state could not be checked; `blockedPrs` is then withheld (empty).
+        mergeHeld:
+          type: array
+          description: The standing operator merge holds (src/lib/status-board.ts's `MergeHeldRow`).
+          items:
+            $ref: "#/components/schemas/MergeHeldRow"
+        prQueue:
+          $ref: "#/components/schemas/PrQueueSnapshot"
+        modelApprovals:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConsoleModelApproval"
+        taskProjection:
+          $ref: "#/components/schemas/ConsoleStatusTaskProjection"
+        repairLadder:
+          type: object
+          description: >
+            The provider repair ladder (src/lib/worker-provider.ts's `RepairLadderState`), spliced by
+            src/lib/serve.ts's `withRepairLadder`. `running`, `unreadable` (with `reason`), or
+            `stalled` (with the stall record's fields, which evolve with the ladder and are open here).
+          required: [state]
+          additionalProperties: true
+          properties:
+            state:
+              type: string
+              enum: [running, stalled, unreadable]
+        staleness:
+          $ref: "#/components/schemas/ConsoleResponseStaleness"
+
+    StatusCounts:
+      type: object
+      description: GET /v1/status's header counts (src/lib/board.ts's `CountSummary`), derived from the same `tasks`.
+      required: [total, running, merged, queued, blocked, merged_known]
+      properties:
+        total: {type: integer}
+        running: {type: integer}
+        merged: {type: integer}
+        queued: {type: integer}
+        blocked: {type: integer}
+        merged_known:
+          type: boolean
+          description: False when merge state's GitHub read was unreachable -- render unknown, not 0 merged.
+
+    GlanceSpend:
+      type: object
+      description: The GLANCE strip totals (src/lib/glance.ts's `GlanceSpend`).
+      required: [mergedToday, channel, spendTodayUsd, spendWeekUsd, sessionSpendUsd]
+      properties:
+        mergedToday: {type: integer}
+        channel:
+          type: string
+          enum: [fleet]
+        spendTodayUsd: {type: number}
+        spendWeekUsd: {type: number}
+        sessionSpendUsd:
+          type: "null"
+          description: Always null -- no ledger step records operator-session cost; null is unmeasured, never 0.
+
+    BlockedPrRow:
+      type: object
+      required: [kind, prNumber, disposition, reason]
+      properties:
+        kind:
+          type: string
+          enum: [blocked_pr]
+        taskId: {type: string}
+        prNumber: {type: integer}
+        prUrl: {type: string}
+        disposition: {type: string}
+        reason: {type: string}
+
+    MergeHeldRow:
+      type: object
+      description: An operator merge hold. `prNumber` and `taskId` are absent for a fleet-scoped hold.
+      required: [by, reason]
+      properties:
+        prNumber: {type: integer}
+        taskId: {type: string}
+        by: {type: string}
+        reason: {type: string}
+
+    PrQueueSnapshot:
+      type: object
+      description: >
+        Every current open PR (src/lib/board.ts's `PrQueueSnapshot`). An unreadable or partial index
+        is `complete: false` with no rows and an `unavailableReason`, never stale rows.
+      required: [complete, rows]
+      properties:
+        complete: {type: boolean}
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/PrQueueRow"
+        unavailableReason: {type: string}
+        lastGoodAt:
+          type: string
+          description: The newest prior complete queue this route cache held; absent until observed.
+
+    PrQueueRow:
+      type: object
+      required: [prNumber, prUrl, title, disposition, reason, reviewState, queueClass, held, snapshotAt]
+      properties:
+        prNumber: {type: integer}
+        prUrl: {type: string}
+        title: {type: string}
+        headRefName: {type: string}
+        headSha: {type: string}
+        taskId: {type: string}
+        disposition: {type: string}
+        reason: {type: string}
+        reviewState:
+          type: string
+          enum: [success, failure, pending, none, unreadable, not-applicable]
+        queueClass:
+          type: string
+          enum: [actionable, active, ready-held, waiting, unknown]
+        held: {type: boolean}
+        snapshotAt: {type: string}
+        observedAt: {type: string}
+
+    ConsoleModelApproval:
+      type: object
+      required: [model, approvedBy, approvedAt, expired]
+      properties:
+        model: {type: string}
+        approvedBy: {type: string}
+        approvedAt: {type: string}
+        expiresAt: {type: string}
+        expired: {type: boolean}
+
+    ConsoleStatusTaskProjection:
+      type: object
+      description: >
+        How much of the plan `tasks` carries (src/lib/serve.ts's `ConsoleStatusTaskProjection`): a
+        truncated list says so, so an omitted task never reads as "no worker".
+      required: [complete, total, returned, omitted, limit, reason]
+      properties:
+        complete: {type: boolean}
+        total: {type: integer}
+        returned: {type: integer}
+        omitted: {type: integer}
+        limit: {type: integer}
+        reason: {type: string}
 
     RepoRunOutcomes:
       type: object
