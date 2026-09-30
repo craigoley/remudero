@@ -11,7 +11,15 @@
   origin: "operator-follow-up#needs-me-stale-blocked-2026-09-21"
   plan_refs: [W1-T2392, W1-T3934]
   files: [plan/tasks.d/W1-T3938-uncredited-build-detection.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
+  note: |
+    CLOSED 2026-09-30 (operator ruling) — SUPERSEDED BY W1-T3939 (#6368 `fix(status): suppress stale build warnings for
+    blocked tasks`). The suppression this record describes is on main: src/lib/status.ts skips the uncredited-build
+    warning when `task.status === "blocked"`, with the tests “W1-T3939: blocked uncredited build is suppressed”,
+    “...queued uncredited build still warns” and “...warning remains report only” in test/uncredited-build-
+    detection.test.ts. This record declares only its own shard and both of its proofs name tests that predate it (#3108,
+    #6361), so it could never have been built or discriminated. The acceptance criteria are PRESERVED UNCHANGED.
   attempts: 0
   rationale: |
     OBSERVED on origin/main dfdec4eb: the live status board still reports uncredited-build

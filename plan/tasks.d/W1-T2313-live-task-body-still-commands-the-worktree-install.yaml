@@ -87,9 +87,16 @@
   origin: "feedback#fb-1785982194342-bb9d81"
   plan_refs: ["W1-T65", "W1-T2312", "W1-T2314", "W1-T384", "W1-T151"]
   files: [plan/tasks.yaml]
-  status: queued
+  status: done
   attempts: 0
   note: |
+    DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #2971
+    (`chore(plan): state symlink reality instead of install in W1-T65 design`, trailer + head
+    run-W1-T2313-1787756719600): the W1-T65 design in plan/tasks.yaml now says node_modules is a symlink and proofs run
+    with no install step. The deliverable is itself a plan edit, so plan-reconcile refuses the `chore(plan)` credit.
+    Dependents W1-T2312 and W1-T2314 are merged. Every acceptance criterion holds on main and is PRESERVED UNCHANGED:
+    this record is marked done, not re-proved.
+
     PROVENANCE IS W1-T2312'S, UNCHANGED — this is one third of a single filing from
     feedback#fb-1785982194342-bb9d81, split under `rule15-filing`, not a new finding.
 

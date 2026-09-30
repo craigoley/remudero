@@ -10,7 +10,7 @@
   files: [src/run-task.ts]
   origin: oper#squeeze-session-2026-09-18
   plan_refs: ["W1-T3758"]
-  status: queued
+  status: done
   attempts: 0
   rationale: |
     MEASURED 2026-09-18. `rmd plan-reconcile` found 331 shards whose credit projection says merged
@@ -59,6 +59,12 @@
     - claim: "a reconcile below the ceiling is unchanged"
       proof: "unit test: W1-T3761: an under-ceiling reconcile keeps today's instruction"
   note: |
+    DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #6280
+    (`fix(plan): avoid prescribing unreviewable reconcile PRs (W1-T3761)`, head run-W1-T3761-1789941000532):
+    PLAN_RECONCILE_REVIEW_FILE_CEILING in src/run-task.ts; test/plan-reconcile-diff-ceiling.test.ts. plan-reconcile
+    refuses the `fix(plan)` subject. Every acceptance criterion holds on main and is PRESERVED UNCHANGED: this record is
+    marked done, not re-proved.
+
     reservation hand-off: main -> plan/file-diff-ceiling-1789718578
 
     Minted on `main` from the operator checkout; recorded here because the filing branch is not

@@ -98,9 +98,15 @@
   origin: human
   plan_refs: [W1-T3639, W1-T3099]
   files: [src/lib/task-linter.ts, src/run-task.ts]
-  status: queued
+  status: done
   attempts: 0
   note: |
+    DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #5927
+    (`fix(plan): let a filing forward-reference the test its build will write`, trailer + head
+    run-W1-T3730-1789660500000): planOnlyFilingDiff in src/run-task.ts feeds the task-linter check. plan-reconcile
+    refuses the `fix(plan)` subject. Every acceptance criterion holds on main and is PRESERVED UNCHANGED: this record is
+    marked done, not re-proved.
+
     reservation hand-off: unknown -> file-t3730-a-filing-cannot-declare-its-own-test
 
     `files:` DELIBERATELY OMITS the test file this build will add
