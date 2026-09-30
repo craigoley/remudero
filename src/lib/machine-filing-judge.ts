@@ -27,7 +27,7 @@ import type { Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { GardenCheckout, PrState } from "./gardener.js";
 import type { Proposal } from "./inbox.js";
-import { loadPlanFromYaml, type Plan, type Task } from "./plan.js";
+import { parseTasksFromYaml, type Plan, type Task } from "./plan.js";
 import {
   buildFilingRiskJudgeInput,
   DEFAULT_RISK_POLICY,
@@ -226,31 +226,39 @@ function withoutRulingBlock(lines: string[]): string[] {
   return out;
 }
 
+/** ONE shard's record. A lone shard cannot resolve its `depends_on`, so the caller checks them against
+ *  the whole plan (2026-09-30: validating in isolation threw on every dependency and killed each pass). */
+const shardRecord = (text: string, relPath: string): Task => parseTasksFromYaml(text, relPath)[0]!;
+
 /**
  * Rewrite ONE shard's text with a ruling: `verify:` set by the action and the ruling appended,
  * pinned to the record AS REWRITTEN. Returns undefined, with the reason, when the text is not a
- * single record, names a different id, or the rewrite would not clear the linter it exists for.
+ * single record, names a different id, depends on a task `known` (the whole plan) lacks, or the
+ * rewrite would not clear the linter it exists for.
  */
 export function renderRuledShard(
   text: string,
   relPath: string,
   judgedPin: string,
   ruling: FilingRiskRuling,
+  known: { has: (id: string) => boolean } = new Set<string>(),
 ): { contents: string } | { refused: string; lint?: true } {
   if ((text.match(/^- id:/gm) ?? []).length !== 1) return { refused: `${relPath} does not hold exactly one record` };
+  const unknownDep = shardRecord(text, relPath).depends_on.find((d) => !known.has(d));
+  if (unknownDep !== undefined) return { refused: `${relPath}: depends_on unknown task '${unknownDep}'` };
   const verify = ruling.action === "proceed" ? "auto" : "human";
   const lines = withoutRulingBlock(text.replace(/\n+$/, "").split("\n"));
   const verifyAt = lines.findIndex((l) => /^ {2}verify:\s*\S+\s*$/.test(l));
   if (verifyAt < 0) return { refused: `${relPath} has no verify: line` };
   lines[verifyAt] = `  verify: ${verify}`;
   // Released machine work with no measured cost dispatches mid-queue, never last (2026-09-29).
-  const released = loadPlanFromYaml(text, relPath).tasks[0]!;
+  const released = shardRecord(text, relPath);
   if (ruling.action === "proceed" && released.author_class === "machine" && released.priority === undefined) {
     lines.splice(verifyAt + 1, 0, `  priority: ${UNPRICED_PRIORITY}`);
   }
   const flipped = lines.join("\n") + "\n";
-  const before = loadPlanFromYaml(text, relPath).tasks[0]!;
-  const after = loadPlanFromYaml(flipped, relPath).tasks[0]!;
+  const before = shardRecord(text, relPath);
+  const after = shardRecord(flipped, relPath);
   // The judge ruled on the record it read. If this checkout's copy differs, the ruling is not about it.
   if (taskRulingPin({ ...before, verify: "auto" }) !== judgedPin) return { refused: `${after.id} changed since it was judged` };
   const ruled = recordFilingRiskRuling(after, ruling, taskRulingPin);
@@ -265,7 +273,7 @@ export function renderRuledShard(
     `    pin: ${q(ruled.risk_ruling!.pin)}`,
   ];
   const contents = flipped + block.join("\n") + "\n";
-  const reparsed = loadPlanFromYaml(contents, relPath).tasks[0]!;
+  const reparsed = shardRecord(contents, relPath);
   // The pin is taken from `after`, whose pinned fields the block above does not touch, and a
   // `proceed` is written at `verify: auto` while an `escalate` stays `verify: human`: the written
   // pin matches and machine-author-verify clears by construction, so neither is re-checked here.
@@ -280,6 +288,9 @@ interface MachineJudgeState {
   pending?: { prUrl: string; ids: string[] };
   /** A record whose judge PR a person closed, by the pin it had: not re-asked until it changes. */
   declined?: Record<string, string>;
+  /** The judge's answer for a record not yet landed, by the pin it judged: reused with no model call
+   *  while the record is unchanged (2026-09-30: 1,152 calls re-ruled the same 19 records). */
+  rulings?: Record<string, { pin: string; ruling: FilingRiskRuling; bar: number }>;
 }
 
 function readState(path: string): MachineJudgeState {
@@ -316,6 +327,8 @@ export interface MachineJudgeReport {
   escalated: string[];
   unavailable: string[];
   refused: string[];
+  /** Records whose landing threw: ledgered and skipped, never aborting the rest of the pass. */
+  failed: string[];
   prUrl?: string;
 }
 
@@ -350,7 +363,7 @@ export function machineJudgeProposal(ruled: Extract<MachineJudgement, { kind: "r
 export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<MachineJudgeReport> {
   const statePath = join(ports.stateDir, MACHINE_JUDGE_STATE_FILE);
   const state = readState(statePath);
-  const report: MachineJudgeReport = { proceeded: [], escalated: [], unavailable: [], refused: [] };
+  const report: MachineJudgeReport = { proceeded: [], escalated: [], unavailable: [], refused: [], failed: [] };
   if (state.pending) {
     const pr = ports.prState?.(state.pending.prUrl) ?? "unknown";
     if (pr === "open" || pr === "unknown") {
@@ -378,23 +391,35 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       (released.has(t.id) || (!excluded.has(judgementFamily(t)) && state.declined?.[t.id] !== taskRulingPin(t))),
   );
   const policy = ports.riskPolicy?.() ?? DEFAULT_RISK_POLICY;
+  const dueIds = new Set(due.map((t) => t.id));
+  state.rulings = Object.fromEntries(
+    Object.entries(state.rulings ?? {}).filter(([id, c]) => dueIds.has(id) && c.pin === taskRulingPin(plan.byId.get(id)!)),
+  );
   const records = new Map<string, FamilyTrackRecord>();
   const ruled: Extract<MachineJudgement, { kind: "ruled" }>[] = [];
   for (const task of due.slice(0, ports.limit ?? due.length)) {
     const family = judgementFamily(task);
     if (!records.has(family)) records.set(family, familyTrackRecord(plan, family, isMerged, ports.gardenRecord?.(family)));
+    const cached = state.rulings[task.id];
     const judged: MachineJudgement = released.has(task.id)
       ? {
           kind: "ruled", task, bar: 0, record: records.get(family)!, byOperator: true,
           ruling: { verdict: "operator", action: "proceed", confidence: 1, reasons: ["released by the operator with rmd approve"], judgedAt: ports.clock.iso() },
         }
-      : await judgeMachineShard(task, records.get(family)!, { riskJudge: ports.riskJudge, policy, clock: ports.clock });
+      : cached !== undefined
+        ? { kind: "ruled", task, bar: cached.bar, record: records.get(family)!, ruling: cached.ruling }
+        : await judgeMachineShard(task, records.get(family)!, { riskJudge: ports.riskJudge, policy, clock: ports.clock });
     if (judged.kind === "unavailable") {
       report.unavailable.push(task.id);
       ports.log("machine_judge.unavailable", { task_id: task.id, reason: judged.reason });
       continue;
     }
     ruled.push(judged);
+    if (cached !== undefined) {
+      ports.log("machine_judge.reused", { task_id: task.id, action: judged.ruling.action, pin: cached.pin });
+      continue;
+    }
+    if (!judged.byOperator) state.rulings[task.id] = { pin: taskRulingPin(task), ruling: judged.ruling, bar: judged.bar };
     ports.log("machine_judge.ruled", {
       task_id: task.id,
       action: judged.ruling.action,
@@ -406,10 +431,9 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       reasons: judged.ruling.reasons,
     });
   }
-  if (ruled.length === 0) {
-    writeAtomic(statePath, JSON.stringify(state) + "\n");
-    return report;
-  }
+  // Persisted before landing, so a landing that throws never costs these rulings again.
+  writeAtomic(statePath, JSON.stringify(state) + "\n");
+  if (ruled.length === 0) return report;
 
   const ws = ports.writeRoot === undefined ? ports.openWorkspace?.() : undefined;
   const root = ports.writeRoot ?? ws?.root;
@@ -417,32 +441,38 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   try {
     const landed: { id: string; relPath: string; pin: string; action: string }[] = [];
     for (const r of ruled) {
-      const relPath = shardRelPath(r.task)!;
-      const text = readFileIfExists(join(root, relPath));
-      const judgedPin = taskRulingPin({ ...r.task, verify: "auto" });
-      let out = text === undefined
-        ? { refused: `${relPath} is absent from the landing tree` }
-        : renderRuledShard(text, relPath, judgedPin, r.ruling);
-      if (text !== undefined && "refused" in out && out.lint && !r.byOperator) {
-        // A proceed the record cannot honour is BROKEN, which is the operator's to see: park it,
-        // pinned, with the reason, rather than re-asking the judge every pass.
-        r.ruling = { ...r.ruling, action: "escalate", reasons: [...r.ruling.reasons, `the judge said proceed, but ${out.refused}`] };
-        out = renderRuledShard(text, relPath, judgedPin, r.ruling);
-      }
-      if ("refused" in out) {
-        // Settled by the record's pin, so an unchanged record is not re-judged every pass.
-        (state.declined ??= {})[r.task.id] = taskRulingPin(r.task);
-        report.refused.push(r.task.id);
-        ports.log("machine_judge.refused", { task_id: r.task.id, reason: out.refused });
-        continue;
-      }
-      writeAtomic(join(root, relPath), out.contents);
-      const pin = loadPlanFromYaml(out.contents, relPath).tasks[0]!.risk_ruling!.pin;
-      landed.push({ id: r.task.id, relPath, pin, action: r.ruling.action });
-      if (r.ruling.action === "proceed") report.proceeded.push(r.task.id);
-      else {
-        report.escalated.push(r.task.id);
-        ports.stageProposal(machineJudgeProposal(r));
+      try {
+        const relPath = shardRelPath(r.task)!;
+        const text = readFileIfExists(join(root, relPath));
+        const judgedPin = taskRulingPin({ ...r.task, verify: "auto" });
+        let out = text === undefined
+          ? { refused: `${relPath} is absent from the landing tree` }
+          : renderRuledShard(text, relPath, judgedPin, r.ruling, plan.byId);
+        if (text !== undefined && "refused" in out && out.lint && !r.byOperator) {
+          // A proceed the record cannot honour is BROKEN, which is the operator's to see: park it,
+          // pinned, with the reason, rather than re-asking the judge every pass.
+          r.ruling = { ...r.ruling, action: "escalate", reasons: [...r.ruling.reasons, `the judge said proceed, but ${out.refused}`] };
+          out = renderRuledShard(text, relPath, judgedPin, r.ruling, plan.byId);
+        }
+        if ("refused" in out) {
+          // Settled by the record's pin, so an unchanged record is not re-judged every pass.
+          (state.declined ??= {})[r.task.id] = taskRulingPin(r.task);
+          report.refused.push(r.task.id);
+          ports.log("machine_judge.refused", { task_id: r.task.id, reason: out.refused });
+          continue;
+        }
+        writeAtomic(join(root, relPath), out.contents);
+        const pin = shardRecord(out.contents, relPath).risk_ruling!.pin;
+        landed.push({ id: r.task.id, relPath, pin, action: r.ruling.action });
+        if (r.ruling.action === "proceed") report.proceeded.push(r.task.id);
+        else {
+          report.escalated.push(r.task.id);
+          ports.stageProposal(machineJudgeProposal(r));
+        }
+      } catch (e) {
+        // One bad record is ledgered and skipped; the rest of the pass still lands (2026-09-30).
+        report.failed.push(r.task.id);
+        ports.log("machine_judge.record_failed", { task_id: r.task.id, error: String((e as Error)?.message ?? e) });
       }
     }
     if (ws && landed.length > 0) {
