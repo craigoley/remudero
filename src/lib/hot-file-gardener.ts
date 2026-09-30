@@ -200,6 +200,10 @@ export const HOT_FILE_REMEDY_TEXT: Record<HotFileRemedy, string> = {
 };
 
 const SOURCE_EXT = /\.(?:[cm]?[jt]sx?)$/;
+// Each shape is its own regex, so no alternation mixes an anchored branch with an unanchored one.
+const LOG_WORD = /(?:^|[-_.])(?:log|logs|ledger|changelog|history)(?:[-_.]|$)/;
+const LOG_EXT = /\.(?:jsonl|ndjson|log)$/;
+const GENERATED_WORD = /index|manifest|census|inventory|generated|package-lock/;
 
 /**
  * The remedy that fits a file's shape, or `undefined` for a file this gardener must NEVER restructure:
@@ -209,8 +213,8 @@ const SOURCE_EXT = /\.(?:[cm]?[jt]sx?)$/;
 export function hotFileRemedy(path: string): HotFileRemedy | undefined {
   if (path.startsWith("plan/tasks.d/") || SOURCE_EXT.test(path)) return undefined;
   const name = basename(path).toLowerCase();
-  if (/(^|[-_.])(log|logs|ledger|changelog|history)([-_.]|$)|\.(jsonl|ndjson|log)$/.test(name)) return "append-only";
-  if (/index|manifest|census|inventory|generated|package-lock|\.lock$/.test(name)) return "generate-in-ci";
+  if (LOG_WORD.test(name) || LOG_EXT.test(name)) return "append-only";
+  if (GENERATED_WORD.test(name) || name.endsWith(".lock")) return "generate-in-ci";
   if (/baseline|ratchet|registry|map|ceiling|allowlist/.test(name)) return "split-per-entry";
   return "merge-driver";
 }
@@ -329,7 +333,8 @@ export function hotFileGardenSpec(
     cheapFingerprint: () => {
       const head = spawnSync("git", ["-C", deps.repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
       const live = ledgerLivePath(deps.stateDir);
-      const liveStamp = existsSync(live) ? `${statSync(live).ino}:${statSync(live).mode}` : "absent";
+      const liveStat = existsSync(live) ? statSync(live) : undefined;
+      const liveStamp = liveStat ? `${liveStat.ino}:${liveStat.mode}` : "absent";
       const archives = ledgerRotationEntries(readdirSync(deps.stateDir), deps.stateDir)
         .map((entry) => {
           const stat = statSync(entry.path);
