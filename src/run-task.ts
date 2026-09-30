@@ -767,6 +767,7 @@ import {
   ratificationPrBody,
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
+import { renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
 import {
   buildFeedbackDocket,
   feedbackDocketDue,
@@ -43059,6 +43060,92 @@ export async function draftProposalBatch(
   }
 }
 
+/** How many real proposals `rmd inbox-bakeoff` replays through every candidate unless `--sample` says otherwise. */
+const INBOX_BAKEOFF_DEFAULT_SAMPLE = 8;
+
+/**
+ * `rmd inbox-bakeoff [--sample <n>]` (W1-T4907) — replay a fixed sample of the real open inbox proposals (the first
+ * `n` by id, so two runs see the same ones) through each candidate lane on the PRODUCTION draft path, then print the
+ * ranking by lint-clean drafts per cash dollar. It spends real cash and subscription capacity, which is why it is a
+ * verb the operator runs and never a rung the daemon does. It writes `inbox.bakeoff` rows only; the production
+ * `inbox.drafted` rows, the draft cache and routing are untouched, so the table cannot move the lead by itself.
+ */
+export async function inboxBakeoffCommand(
+  rest: string[],
+  rawSpawn: typeof spawnWorker = spawnWorker,
+  replay: typeof runInboxBakeoff = runInboxBakeoff,
+  repoClone: (args: string[]) => void = (args) => { ghExec(args, { stdio: "inherit" }); },
+): Promise<number> {
+  const badArg = unknownArgError("inbox-bakeoff", rest, ["--sample"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const sampleRaw = flagValue(rest, "--sample");
+  const sample = sampleRaw === undefined ? INBOX_BAKEOFF_DEFAULT_SAMPLE : Number(sampleRaw);
+  if (!Number.isInteger(sample) || sample < 1) {
+    console.error(`inbox-bakeoff: --sample must be a positive integer, got ${sampleRaw}\n${USAGE}`);
+    return 2;
+  }
+  const config = loadConfig();
+  const registryPath = join(config.root, "state", "inbox-proposals.json");
+  const proposals = parseProposalRegistry(readFileIfExists(registryPath))
+    .sort((a, b) => a.id.localeCompare(b.id, "en", { numeric: true }))
+    .slice(0, sample);
+  if (proposals.length === 0) {
+    console.error("inbox-bakeoff: no open inbox proposals to replay");
+    return 1;
+  }
+  const { owner, repo } = resolveOwnerRepo();
+  const runId = `BAKEOFF-${Date.now()}`;
+  const ledgerPath = ledgerPathFor(config);
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "inbox-bakeoff", step, lane: "inbox-bakeoff", ...extra });
+
+  const settingsFile = renderWorkerSettings({
+    templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+    hooksDir: join(resolveInstallRoot(config), "hooks"),
+    outPath: join(config.root, "tmp", `inbox-bakeoff-settings-${runId}.json`),
+  });
+  validateWorkerSettingsFile(settingsFile);
+  const repoDir = join(config.root, "repos", repo);
+  if (!existsSync(repoDir)) {
+    mkdirSync(dirname(repoDir), { recursive: true });
+    repoClone(["repo", "clone", `${owner}/${repo}`, repoDir]);
+  }
+  const baseMount = loadMounts(mountsPath(repoRoot)).synthesis.inbox_draft;
+  const { branch, worktreePath } = createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
+  try {
+    const planText = readFileSync(join(worktreePath, "plan", "tasks.yaml"), "utf8");
+    const spawnFor = (candidate: BakeoffCandidate) => async (_proposal: Proposal, prompt: string) => {
+      const cash = candidate.billing === "cash";
+      // A cash candidate is pinned by restricting the cash ladder to its one deployment; the subscription candidate
+      // by giving the spawn a Claude mount. Neither writes a selection assignment — this is a measurement, not a route.
+      const args = buildInboxDraftSpawnArgs({
+        cwd: worktreePath,
+        settingsFile,
+        prompt,
+        config,
+        mount: cash ? baseMount : { ...baseMount, model: "sonnet", provider: "claude" },
+        disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
+      });
+      return await rawSpawn({
+        ...args,
+        onSelectionAssignment: undefined,
+        ...(cash ? { routingTrial: { id: "inbox-bakeoff", arm: "cash", reason: `bake-off candidate ${candidate.id}`, models: [candidate.model] } } : {}),
+        ...(candidate.tools ? {} : { tools: [] }),
+      });
+    };
+    const rows = await replay({ proposals, planText, spawnFor, log, runId });
+    console.log(`inbox-bakeoff: ${proposals.length} proposals (${proposals.map((p) => p.id).join(", ")}) on branch ${branch}\n`);
+    console.log(renderBakeoff(rows));
+    return 0;
+  } finally {
+    worktreeRemove(repoDir, worktreePath);
+    removeRunLock(worktreePath);
+  }
+}
+
 /**
  * The daemon's per-poll DRAFT rung (W1-T192, ratifies P25's autonomous half). Reachable from
  * the daemon's OWN `deps.sweep()` seam (daemon.ts:274) — wired into {@link buildSweepHook}
@@ -47777,6 +47864,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "the ratification inbox's deterministic core (MASTER-PLAN P25(i), W1-T110): tiers the ACTIVE-proposal registry (state/inbox-proposals.json) into READY (drafted tasks' deps merged, evidence anchors grep-true on main, draft lint-plan-clean, no open conflict — carries its drafted plan/tasks.yaml fragment + stamp), not-ready (each failing predicate named), or DEFERRED-WITH-TRIGGER (an unfired named trigger — never recommended); drafts missing/stale candidates via a bounded, read-only Architect worker and caches them state-side (never committed); --dry-run classifies against whatever is already cached and spawns no worker",
   },
   {
+    name: "inbox-bakeoff",
+    syntax: "rmd inbox-bakeoff [--sample <n>]",
+    summary: "Replay real inbox proposals through each draft candidate; rank by clean drafts per dollar.",
+    detail: "the inbox-draft lead is chosen from measurement (W1-T4907): replays a fixed sample (the first n open proposals by id, default 8) through cash gpt-5-nano, gpt-oss-120b, gpt-6-luna with and without tools, and subscription claude-sonnet-5-5 on the production draft path (prompt, fragment parser, plan lint, bounded relint); a reply missing the fragment contract is counted as a contract error, never scored as a draft; writes one inbox.bakeoff ledger row per candidate and prints the table ranked by lint-clean drafts per cash dollar with the subscription cost shown separately; SPENDS real cash and capacity, and never changes routing or the draft cache",
+  },
+  {
     name: "approve",
     syntax: "rmd approve <P##> [<P##> ...]",
     summary: "Ratify one or more READY proposals through the gate into a plan PR.",
@@ -48509,6 +48602,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["pr-owner", (rest) => prOwnerCommand(rest)],
   ["plan", async (rest) => await planCommand(rest)],
   ["inbox", async (rest) => await inboxCommand(rest)],
+  ["inbox-bakeoff", async (rest) => await inboxBakeoffCommand(rest)],
   [
     "approve",
     async (rest) => {

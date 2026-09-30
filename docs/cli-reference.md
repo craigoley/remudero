@@ -102,6 +102,7 @@ usage:
   rmd pr-owner <pr-number>   # Report whether the local ledger shows a fix lane owning one PR.
   rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
   rmd inbox [--dry-run]   # The ratification inbox's deterministic core: tier proposals READY/not-ready.
+  rmd inbox-bakeoff [--sample <n>]   # Replay real inbox proposals through each draft candidate; rank by clean drafts per dollar.
   rmd approve <P##> [<P##> ...]   # Ratify one or more READY proposals through the gate into a plan PR.
   rmd decline <proposalId> --reason "<text>"   # Decline an inbox proposal, recording why; reversible with rmd restore.
   rmd restore <proposalId> --reason "<text>"   # Take back a decline, so the proposal returns to the inbox.
@@ -991,6 +992,16 @@ rmd inbox [--dry-run]
 ```
 
 the ratification inbox's deterministic core (MASTER-PLAN P25(i), W1-T110): tiers the ACTIVE-proposal registry (state/inbox-proposals.json) into READY (drafted tasks' deps merged, evidence anchors grep-true on main, draft lint-plan-clean, no open conflict — carries its drafted plan/tasks.yaml fragment + stamp), not-ready (each failing predicate named), or DEFERRED-WITH-TRIGGER (an unfired named trigger — never recommended); drafts missing/stale candidates via a bounded, read-only Architect worker and caches them state-side (never committed); --dry-run classifies against whatever is already cached and spawns no worker
+
+### `rmd inbox-bakeoff`
+
+Replay real inbox proposals through each draft candidate; rank by clean drafts per dollar.
+
+```
+rmd inbox-bakeoff [--sample <n>]
+```
+
+the inbox-draft lead is chosen from measurement (W1-T4907): replays a fixed sample (the first n open proposals by id, default 8) through cash gpt-5-nano, gpt-oss-120b, gpt-6-luna with and without tools, and subscription claude-sonnet-5-5 on the production draft path (prompt, fragment parser, plan lint, bounded relint); a reply missing the fragment contract is counted as a contract error, never scored as a draft; writes one inbox.bakeoff ledger row per candidate and prints the table ranked by lint-clean drafts per cash dollar with the subscription cost shown separately; SPENDS real cash and capacity, and never changes routing or the draft cache
 
 ### `rmd approve`
 
