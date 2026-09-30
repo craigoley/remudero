@@ -54,7 +54,7 @@ export interface BakeoffRow {
   cleanPerDollar: number | null;
 }
 
-export interface InboxBakeoffDeps {
+export interface InboxBakeoffPorts {
   proposals: readonly Proposal[];
   planText: string;
   candidates?: readonly BakeoffCandidate[];
@@ -112,7 +112,7 @@ export function scoreCandidate(candidate: BakeoffCandidate, proposals: number, c
 }
 
 /** Replay the same proposals through every candidate, one candidate at a time, and log one row each. */
-export async function runInboxBakeoff(deps: InboxBakeoffDeps): Promise<BakeoffRow[]> {
+export async function runInboxBakeoff(deps: InboxBakeoffPorts): Promise<BakeoffRow[]> {
   const clock = deps.clock ?? systemClock;
   const now = (): number => clock.now();
   const runId = deps.runId ?? `BAKEOFF-${now()}`;
