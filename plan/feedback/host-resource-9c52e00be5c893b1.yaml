@@ -1,0 +1,19 @@
+id: host-resource-9c52e00be5c893b1
+ts: 2026-09-30T11:27:44.559Z
+raw: >-
+  host-resource:azure:root
+
+
+  Host azure, device root: 12.2 GB free, falling 1.2 GB/h (Theil-Sen over 4
+  samples across 0.3 h); projected full in 9.9 h.
+
+  That host's janitor runs about every 6.0 h; the latest pass reclaimed 497 MB.
+attachments: []
+origin: incident#9c52e00be5c893b1962c5ef58121b9144d4a800bdd95736f4390930e7e26eba5
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

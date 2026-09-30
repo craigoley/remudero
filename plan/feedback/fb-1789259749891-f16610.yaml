@@ -8,7 +8,7 @@ raw: "Prioritize and design the bounded cross-repo proof-runner repair from
 attachments:
   - https://github.com/craigoley/remudero/issues/5314
 origin: issue
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/7859
 summary:
