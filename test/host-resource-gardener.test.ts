@@ -6,9 +6,11 @@ import { test } from "node:test";
 
 import { fixedClock } from "../src/lib/clock.js";
 import type { Escalation } from "../src/lib/escalate.js";
+import type { GardenCheckout } from "../src/lib/gardener.js";
 import {
   consumerShardYaml,
   evaluateHost,
+  fileConsumerVia,
   incidentOrigin,
   isPersistentGrower,
   parseHeartbeatPayload,
@@ -17,6 +19,7 @@ import {
   runHostResourcePass,
   samplesPath,
   sampleFromPayload,
+  startHostResourceGardener,
   tierFor,
   type ConsumerFiling,
   type HostResourcePorts,
@@ -247,6 +250,77 @@ test("W1-T4804: a persistent consumer is attributed and filed once", () => {
     assert.equal(briefAttribution?.consumer, "worktrees", "it is attributed, being the grower");
     assert.equal(isPersistentGrower(briefAttribution), false, "but a 15 h burst across one or two passes is not persistent");
     assert.equal(isPersistentGrower(finding.attribution), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4804: a torn sample line and an unreadable state file are survived, not fatal", () => {
+  const dir = stateDir();
+  try {
+    const good = history({ count: 2, freeAt: () => 1000 });
+    writeFileSync(samplesPath(dir), JSON.stringify(good[0]) + "\n{\"host\":\"azure\",\"tsM\n" + JSON.stringify(good[1]) + "\n");
+    assert.equal(readSamples(dir).length, 2, "the torn line is dropped, both whole ones stay");
+
+    writeFileSync(join(dir, "host-resource-state.json"), "{ not json");
+    const p = ports(dir);
+    assert.equal(runHostResourcePass(p).ran, true, "an unreadable state file restarts the episodes");
+    assert.equal(JSON.parse(readFileSync(join(dir, "host-resource-state.json"), "utf8")).filed !== undefined, true, "and is rewritten whole");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4804: a filing lands the shard alone through a checkout, which is always disposed", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-resource-ws-`));
+  try {
+    const filing: ConsumerFiling = {
+      host: "azure",
+      device: "root",
+      consumer: "worktrees",
+      origin: "host-resource:azure:worktrees",
+      attribution: { consumer: "worktrees", growthKbPerHour: 0.8 * GB, share: 0.8, spanHours: 72, points: 144, janitorPasses: 12 },
+    };
+    const landed: Array<{ paths: string[]; title: string; body: string }> = [];
+    let disposed = 0;
+    const checkout = (branch: string | undefined) => (): GardenCheckout => ({
+      root,
+      ...(branch ? { branch } : {}),
+      land: (opts) => (landed.push(opts), "https://github.com/x/y/pull/11"),
+      dispose: () => void disposed++,
+    });
+    const url = fileConsumerVia(checkout("host-resource-garden-1"), (b) => (assert.equal(b, "host-resource-garden-1"), "W1-T9998"))(filing);
+    assert.equal(url, "https://github.com/x/y/pull/11");
+    assert.equal(disposed, 1);
+    assert.equal(landed.length, 1);
+    assert.equal(landed[0]!.paths.length, 1, "the filing PR carries the shard alone");
+    const relPath = landed[0]!.paths[0]!;
+    assert.match(relPath, /^plan\/tasks\.d\/W1-T9998-host-resource-azure-worktrees.*\.yaml$/);
+    assert.match(readFileSync(join(root, relPath), "utf8"), /origin: "host-resource:azure:worktrees"/);
+    assert.match(landed[0]!.body, new RegExp(`proof: grep: host-resource:azure:worktrees in ${relPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+
+    // A checkout with no branch cannot reserve a task id: it throws, and is still disposed.
+    assert.throws(() => fileConsumerVia(checkout(undefined), () => "W1-T9997")(filing), /no branch/);
+    assert.equal(disposed, 2);
+    assert.equal(landed.length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4804: a pass that throws is logged and the timer survives", () => {
+  const dir = stateDir();
+  try {
+    const p = ports(dir, {
+      readHeartbeats: () => {
+        throw new Error("fetch failed");
+      },
+    });
+    const handle = startHostResourceGardener(p, 60_000);
+    handle.stop();
+    const failed = p.rows.filter((r) => r.step === "host_resource.failed");
+    assert.equal(failed.length, 1);
+    assert.match(String(failed[0]!.extra?.["error"]), /fetch failed/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

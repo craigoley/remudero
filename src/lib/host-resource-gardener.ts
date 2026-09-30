@@ -552,6 +552,18 @@ export function landConsumerShard(ws: GardenCheckout, mintTaskId: (branch?: stri
   return ws.land({ paths: [relPath], title: `chore(plan): host ${f.host} ${f.consumer} keeps growing and no janitor rule reaps it`, body });
 }
 
+/** The production filer: a fresh checkout per filing, always disposed, the shard landed through it. */
+export function fileConsumerVia(openWorkspace: () => GardenCheckout, mintTaskId: (branch?: string) => string): (f: ConsumerFiling) => string | undefined {
+  return (f) => {
+    const ws = openWorkspace();
+    try {
+      return landConsumerShard(ws, mintTaskId, f);
+    } finally {
+      ws.dispose();
+    }
+  };
+}
+
 export interface PassResult {
   ran: boolean;
   appended: number;

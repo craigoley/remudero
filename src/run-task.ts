@@ -168,7 +168,7 @@ import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, selectorSh
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener, startEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins, startSreLane } from "./lib/sre-lane.js";
-import { gitHeartbeatSource, landConsumerShard, startHostResourceGardener } from "./lib/host-resource-gardener.js";
+import { fileConsumerVia, gitHeartbeatSource, startHostResourceGardener } from "./lib/host-resource-gardener.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
@@ -33652,14 +33652,7 @@ export async function daemonCommand(
                       openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot),
                       escalate: raiseDuplicate,
                       planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
-                      fileConsumer: (filing) => {
-                        const ws = gardenCheckout({ name: "host-resource", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log });
-                        try {
-                          return landConsumerShard(ws, mintTaskId, filing);
-                        } finally {
-                          ws.dispose();
-                        }
-                      },
+                      fileConsumer: fileConsumerVia(() => gardenCheckout({ name: "host-resource", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }), mintTaskId),
                     },
                     intervalMs,
                   );
