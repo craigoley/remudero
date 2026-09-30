@@ -24,6 +24,9 @@ RMD_SERVE_MEMORY_RESERVE_MIB="${RMD_SERVE_MEMORY_RESERVE_MIB:-1536}" # serve's m
 RMD_HOST_OVERHEAD_MIB="${RMD_HOST_OVERHEAD_MIB:-2048}"               # OS, cloudflared, the small daemons
 RMD_BUILD_SWAP_MIB="${RMD_BUILD_SWAP_MIB:-4096}"                     # a build container pages its OWN memory
 RMD_MIN_BUILD_CEILING_MIB="${RMD_MIN_BUILD_CEILING_MIB:-2048}"
+RMD_SERVE_MEMORY_LIMIT_MIB="${RMD_SERVE_MEMORY_LIMIT_MIB:-5120}"     # 0 = no hard limit; see resource_policy_serve_args
+RMD_SERVE_SWAP_MIB="${RMD_SERVE_SWAP_MIB:-1024}"
+RMD_SERVE_CPUS="${RMD_SERVE_CPUS:-}"                                 # empty = no CPU quota, weight only
 RMD_SERVE_CPU_SHARES="${RMD_SERVE_CPU_SHARES:-4096}"
 RMD_BUILD_CPU_SHARES="${RMD_BUILD_CPU_SHARES:-512}"
 
@@ -34,14 +37,31 @@ resource_policy_mem_total_mib() {
     "${RMD_MEMINFO_PATH:-/proc/meminfo}" 2>/dev/null
 }
 
-# serve gets protected memory (memory.low) and a high CPU weight, and NO hard memory limit: an
-# OOM-killed console backend is worse than a slow one.
+# serve gets protected memory (memory.low), a high CPU weight, and a hard memory ceiling that
+# bounds a leak rather than squeezing the working set. W1-T4102 left serve unlimited ("an
+# OOM-killed console backend is worse than a slow one"); the 2026-09-30 architecture ruling
+# (DECISIONS) reverses that: serve grew from 1.0-1.2 GiB to 2.2-3.6 GiB in a week with nothing
+# bounding it. 5 GiB is 1.4x the highest reading (3.64 GiB, page cache included, under a
+# 40-route probe) and 2x the highest process RSS (2.5 GB). At the ceiling the kernel first drops
+# serve's own page cache, then swaps up to RMD_SERVE_SWAP_MIB, and only then kills; the container
+# restarts itself. No CPU quota by default: the weight already wins contention, and a quota would
+# slow serve's cold reads on an idle host. RMD_SERVE_CPUS adds one without a code change.
 resource_policy_serve_args() {
   RESOURCE_POLICY_SERVE_ARGS=(
     "--memory-reservation=${RMD_SERVE_MEMORY_RESERVE_MIB}m"
     "--cpu-shares=${RMD_SERVE_CPU_SHARES}"
   )
   RESOURCE_POLICY_NOTE="serve: memory.low ${RMD_SERVE_MEMORY_RESERVE_MIB} MiB, cpu-shares ${RMD_SERVE_CPU_SHARES}"
+  if [ "${RMD_SERVE_MEMORY_LIMIT_MIB}" -gt "${RMD_SERVE_MEMORY_RESERVE_MIB}" ]; then
+    RESOURCE_POLICY_SERVE_ARGS+=("--memory=${RMD_SERVE_MEMORY_LIMIT_MIB}m" "--memory-swap=$((RMD_SERVE_MEMORY_LIMIT_MIB + RMD_SERVE_SWAP_MIB))m")
+    RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}, memory ceiling ${RMD_SERVE_MEMORY_LIMIT_MIB} MiB (+${RMD_SERVE_SWAP_MIB} MiB swap)"
+  else
+    RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}, NO memory ceiling — RMD_SERVE_MEMORY_LIMIT_MIB ${RMD_SERVE_MEMORY_LIMIT_MIB} is not above the ${RMD_SERVE_MEMORY_RESERVE_MIB} MiB reserve"
+  fi
+  if [ -n "${RMD_SERVE_CPUS}" ]; then
+    RESOURCE_POLICY_SERVE_ARGS+=("--cpus=${RMD_SERVE_CPUS}")
+    RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}, cpus ${RMD_SERVE_CPUS}"
+  fi
 }
 
 # A build daemon gets a low CPU weight and a memory ceiling that leaves serve's reserve and the

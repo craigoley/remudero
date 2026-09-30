@@ -1,0 +1,31 @@
+- id: W1-T4772
+  title: "REVIEW PROOF EXECUTION BLOCKS THE CORE DAEMON'S EVENT LOOP — judgeCriterion runs execWhitelistedProof, ensureDeps and grepFilesContaining through spawnSync inside the daemon, 11-18% of loop time; run them through async execFile"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  status: queued
+  attempts: 0
+  origin: "oper#core-daemon-loop-profile-2026-09-29"
+  files: [src/lib/review.ts, test/a-review-proof-run-keeps-the-daemon-loop-responsive.test.ts]
+  rationale: |
+    A live CPU profile of remudero-daemon on 2026-09-29 sampled 25 minutes (SIGUSR1 + CDP). The loop
+    was busy 1439 of 1511 s. Review proof execution was 159 s (11.1%):
+    judgeCriterion > execWhitelistedProof > spawnSync, including ensureDeps and
+    resolveNameFilteredCandidates > grepFilesContaining. The rest of the review lane added 98 s
+    (materializeReviewWorktree, checkReviewerCodeFreshness, postReviewStatus). One 5-minute chunk
+    held a single 66 s unit-test proof run. While a proof runs, no daemon timer fires: not the
+    heartbeat, not the interphase clock, not the phase ticker.
+  design: |
+    Run each proof child and the dep-priming step through async execFile/spawn with the same
+    timeout and argv. judgeCriterion awaits them. The verdict, the ledger rows and the proof dialect
+    do not change. The claim is measured with an interval probe during a proof that sleeps for a
+    bounded time. Use assertWallClockBound for the timing assertion.
+  acceptance:
+    - claim: "a timer keeps firing while a review proof child runs"
+      proof: 'grep: test("W1-T4772: a timer keeps firing while a review proof child runs" in test/a-review-proof-run-keeps-the-daemon-loop-responsive.test.ts'
+    - claim: "an async proof run returns the same verdict as the synchronous one"
+      proof: 'grep: test("W1-T4772: an async proof run returns the same verdict as the synchronous one" in test/a-review-proof-run-keeps-the-daemon-loop-responsive.test.ts'
+  falsifier: |
+    Restore the spawnSync call and the timer-probe test reads zero ticks during the proof.

@@ -23,6 +23,7 @@ const candidate: FollowUpCandidate = {
   workstream: "repo/workstream",
   reason: "The owner has not answered the next-step question.",
   freshness: "verified",
+  // expiring-fixture: exempt -- fixedClock pins policy evaluation to 2026-09-21.
   deadline: "2026-09-22T00:00:00.000Z",
   quietHours: { timezone: "UTC", start: "22:00", end: "07:00" },
   deduplicationKey: "repo/workstream:question",
@@ -37,6 +38,7 @@ test("snooze, reject, revoke, quiet hours, and attempts are durable stop control
   try {
     const ledgerPath = join(root, "state", "ledger.ndjson");
     const deps = { ledgerPath, now: fixedClock(Date.parse("2026-09-21T11:00:00.000Z")) };
+    assert.equal(evaluateFollowUpPolicy(candidate, { now: deps.now.now() }).state, "eligible", "expiring-fixture: exempt -- fixedClock pins policy evaluation to 2026-09-21");
     appendFollowUpCandidate(deps, candidate);
     const initial = readFollowUpHistory(ledgerPath, deps.now.now());
     const snoozed = applyFollowUpControl(initial[0]!, "snooze", { until: "2026-09-21T13:00:00.000Z", at: deps.now.now() });

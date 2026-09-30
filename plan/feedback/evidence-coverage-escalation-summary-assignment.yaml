@@ -1,0 +1,26 @@
+id: evidence-coverage-escalation-summary-assignment
+ts: 2026-09-29T12:03:29.664Z
+raw: >-
+  Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+  `escalation-summary`, field `assignment`.
+
+  Coverage: 2/532 terminal worker results (joined to an assignment, or carrying
+  no id or no match) (0.4%) in the trailing 7-day window; below the field's
+  80.0% floor — a chronic gap no baseline excuses.
+
+  First seen: 2026-09-28T05:55:37.084Z.
+
+
+  This follow-up never gates a PR or blocks work. Restore the field at the
+  lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+  reads), or record why this lane legitimately lacks it. The evidence-coverage
+  gardener updates this entry in place while the gap persists.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

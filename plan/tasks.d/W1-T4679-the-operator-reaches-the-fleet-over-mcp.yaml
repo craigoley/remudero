@@ -1,0 +1,33 @@
+- id: W1-T4679
+  title: "THE OPERATOR SHELLS OUT TO gh AND rmd TO READ FLEET STATE — expose the inbox, ledger-grep, the task case file and the answer route as an operator MCP server at the same write tier, so questions can be answered from inside a Claude Code or goose session"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-operator-1790600000"
+  plan_refs: [W1-T4607]
+  files: [src/lib/operator-mcp.ts, test/the-operator-reaches-the-fleet-over-mcp.test.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: the only MCP server is the worker-internal knowledge server (src/lib/worker.ts). Buzz exposes its whole
+    feature set over MCP and agents read the same feed humans do (https://github.com/block/buzz VISION.md).
+  design: |
+    (i) `rmd mcp` serves read tools (inbox, ledger-grep, case file) and one write tool (answer a question) behind the
+    existing write-scope token.
+    (ii) Every write lands through the same route the console uses, so no second authority exists.
+  acceptance:
+    - claim: "the operator MCP server exposes the inbox and ledger-grep read tools"
+      proof: 'grep: test("W1-T4679: the operator MCP server exposes the inbox and ledger-grep read tools" in test/the-operator-reaches-the-fleet-over-mcp.test.ts'
+    - claim: "its one write tool lands through the console's answer route"
+      proof: 'grep: test("W1-T4679: its one write tool lands through the console''s answer route" in test/the-operator-reaches-the-fleet-over-mcp.test.ts'
+    - claim: "the new module is called from src/run-task.ts"
+      proof: 'grep: createOperatorMcpServer( in src/run-task.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

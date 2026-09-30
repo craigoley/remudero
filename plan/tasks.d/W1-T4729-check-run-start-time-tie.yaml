@@ -1,0 +1,34 @@
+- id: W1-T4729
+  title: "SAME-SECOND CHECK RUNS LET AN OLDER FAILURE OUTVOTE A NEWER SUCCESS IN THE SWEEP AND CI GATE"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  priority: 1
+  status: merged
+  attempts: 0
+  author_class: human
+  origin: "operator repair 2026-09-28: PR #7673 false acceptance failure and escalation"
+  files: [.github/workflows/ci-gate.yml, src/lib/open-prs-rest.ts, src/lib/sweep.ts, test/check-run-timestamp-tie.test.ts]
+  note: "Use GitHub's numeric check-run id to break equal started_at ties. The REST rollup, sweep, and ci-gate must agree on the newest attempt. Do not treat a passing run as newer just because it passed, and do not push a fresh commit to clear a stale red check."
+  rationale: |
+    On PR #7673, acceptance-author-gate run 109142977824 failed against the old PR body
+    and run 109142982739 succeeded against the corrected body. Both reported started_at
+    2026-09-28T21:25:45Z and completed_at 2026-09-28T21:26:18Z. The sweep's
+    dedupeRollupByLatestAttempt keeps the last encountered entry on an equal timestamp,
+    so the older failure can win a REST response ordered newest first. It classified a
+    plan-only PR as red and opened needs-human issue #7676 while the new gate was green.
+    The ci-gate shell uses jq max_by(.started_at), which has the same tie ambiguity.
+    A later body edit produced a new successful run and gate without a new commit.
+  design: |
+    Carry the REST check-run id into the rollup and compare it after started_at when
+    both entries have ids. Keep existing ordering for status contexts without numeric
+    check-run ids. In ci-gate, include id in the projected check run and use it as the
+    secondary key. Exercise the exact same-second failure/success shape in both readers,
+    and the reverse shape to prove the rule does not simply prefer success.
+  acceptance:
+    - claim: "the REST sweep chooses the later check run id on an equal start timestamp"
+      proof: 'grep: test("W1-T4729: same-second REST check runs choose the later numeric id" in test/check-run-timestamp-tie.test.ts'
+    - claim: "the CI gate also chooses the later check run id"
+      proof: 'grep: test("W1-T4729: ci-gate tie chooses the later check run id" in test/check-run-timestamp-tie.test.ts'

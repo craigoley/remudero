@@ -102,8 +102,9 @@
   plan_refs: ["W1-T290", "W1-T267", "W1-T18"]
   files: [DECISIONS.md]
   status: blocked
+  retirement: retired
   attempts: 0
-  note: "verify:human — THIS IS A RULING, and it was verify:auto until the premise was refuted.
+  note: "RETIRED 2026-09-30 (operator ruling): its filing premise was refuted by both analyses recorded here (the /usage probe authenticates and fails only at parse), and the fleet records daemon.headroom rows today. verify:human — THIS IS A RULING, and it was verify:auto until the premise was refuted.
     `isDispatchEligible` (src/lib/drain.ts) declines at `verify !== \"auto\"` BEFORE the linter runs,
     so the task parks safely while a drain is running rather than sending a worker at a problem no
     change inside its old declared scope could solve.

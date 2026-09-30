@@ -1,0 +1,37 @@
+- id: W1-T4671
+  title: "THE 'TWO SONNET STRIKES, THEN OPUS' SCHEDULE IS THE SAME FOR EVERY TASK — set how many cheap attempts a task shape gets from that shape's measured cheap-lane pass rate (speculative decoding's acceptance-rate rule), keeping the operator's cheap-first ruling"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-learn-1790600000"
+  plan_refs: [W1-T4618]
+  files: [src/lib/strike-schedule.ts, test/the-strike-schedule-follows-measured-pass-rates.test.ts, src/lib/sweep.ts]
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4671 — Every acceptance proof now holds on main, and did not when it was filed.
+  attempts: 0
+  rationale: |
+    OBSERVED: the strike ladder is fixed in .remudero/mounts.yaml (two implement strikes, then diagnose, then opus).
+    Speculative decoding sizes the draft length from the verifier's measured acceptance rate
+    (https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/specdec_bench). rmd has the draft-then-verify shape already.
+  design: |
+    (i) From the ledger union, compute sonnet first- and second-strike pass rates per W1-T4618 task shape.
+    (ii) A shape whose expected window cost is lower going to opus sooner steps up sooner; a shape where cheap strikes usually
+    pass gets another cheap strike. Cheap first stays the default for any shape without evidence.
+    (iii) The schedule is recomputed from data each retro, never a fixed number.
+  acceptance:
+    - claim: "a shape whose cheap strikes rarely pass steps up sooner"
+      proof: 'grep: test("W1-T4671: a shape whose cheap strikes rarely pass steps up sooner" in test/the-strike-schedule-follows-measured-pass-rates.test.ts'
+    - claim: "a shape without evidence keeps the cheap-first schedule"
+      proof: 'grep: test("W1-T4671: a shape without evidence keeps the cheap-first schedule" in test/the-strike-schedule-follows-measured-pass-rates.test.ts'
+    - claim: "the new module is called from src/lib/sweep.ts"
+      proof: 'grep: strikeScheduleFor( in src/lib/sweep.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

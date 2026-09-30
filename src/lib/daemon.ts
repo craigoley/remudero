@@ -49,6 +49,8 @@ import {
   runBranchTaskIds,
   parsePushedRunRefs,
   stillBlockedByPushedRunBranch,
+  logPlanOnlyRunBranchException,
+  type OrphanRunBranchEvidence,
   type PushedRunRef,
   type PlanOnlyRunBranchReceipt,
   type OpenPrCheck,
@@ -115,7 +117,17 @@ import type { GithubPostureFinding } from "./github-posture.js";
 // convert them into a `Clock` at the read site instead of forcing every caller to change; the
 // headroom sampler is internal-only, so it is migrated onto `Clock` outright, no adapter needed.
 import { clockFromDateFn, clockFromIsoFn, type Clock } from "../lib/clock.js";
+import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
+import {
+  IDLE_LANE_SUMMARY_WINDOW_MS,
+  accountIdleLaneMinutes,
+  idleLaneCauseForStep,
+  newIdleLaneAccount,
+  rollIdleLaneWindow,
+  summarizeIdleLaneAccount,
+  type IdleLaneCause,
+} from "./idle-lane-accounting.js";
 
 /** W1-T3978: the implement producer's exact refusal, carried as runtime metadata without widening
  * the shared RunResult union used by every other dispatch lane. */
@@ -800,6 +812,8 @@ export interface DaemonDeps {
    *  for the same reason it is on `DrainDeps`: this module reads its world through deps, and the
    *  raw-output shape makes one sweep per tick the only form that type checks (W1-T916). */
   readPushedRunBranches?: () => string;
+  /** Same contract as `DrainDeps.readOrphanRunBranchEvidence`: read once per tick, absent releases nothing. */
+  readOrphanRunBranchEvidence?: () => OrphanRunBranchEvidence | undefined;
   /** The same {@link ObservedScopeByTask} `DrainDeps.observedByTask` takes, threaded to both the
    *  pack step and the partition call below so the two never disagree about a candidate's effective
    *  scope. Optional — omitted, both fall back to the empty union (W1-T2286). */
@@ -1270,8 +1284,8 @@ export type InterphaseReviewClockScope = "drain" | "pause";
  *  reconciliation await returns and before a phase ticker or an idle wait takes over. It owns only
  *  the light pass, so it adds no action that pass does not already take — which, with nothing in
  *  flight, includes a fix (W1-T1211); a `scope` closes that lane. A wake
- *  observed during an active pass stays pending and makes the next wait resolve immediately, which
- *  serializes one coalesced follow-up instead of overlapping passes (W1-T2852). Forensics: docs/forensics/daemon.md.
+ *  observed during an active pass stays pending. W1-T4732 permits one review-only follow-up
+ *  beside a slow pass, while further wakes coalesce until a slot opens. Forensics: docs/forensics/daemon.md.
  *  W1-T4053: `scope: "drain"` runs it beside a freshness drain, ledgering `during_drain: true`; W1-T4429:
  *  `"pause"` beside a PAUSE's sleep (`during_pause: true`) — a pause stops NEW work, never verdicts. */
 export function startInterphaseReviewClock(
@@ -1285,6 +1299,7 @@ export function startInterphaseReviewClock(
   let eventWakePending = false;
   let elapsedMs = 0;
   let passes = 0;
+  const activePasses = new Set<Promise<void>>();
   const phase = scope === "drain" ? "freshness_drain" : scope === "pause" ? "pause" : "interphase";
   const scopeTag: Record<string, boolean> =
     scope === "drain" ? { during_drain: true } : scope === "pause" ? { during_pause: true } : {};
@@ -1320,22 +1335,31 @@ export function startInterphaseReviewClock(
           }
           if (!active) break;
           if (!eventWakePending && elapsedMs < pollIntervalMs) continue;
+          // W1-T4732: a long reviewer must not hold a newly green head out of the next
+          // pass. Keep at most two passes alive; only the first may take the ordinary light
+          // actions. When both slots are occupied, retain the wake/time debt for a later tick.
+          if (activePasses.size >= 2) continue;
 
           const halt = deps.checkStop?.() ?? (scope === "pause" ? undefined : deps.checkPause?.());
           if (halt) continue;
 
+          const reviewOnly = scope !== undefined || activePasses.size > 0;
           const trigger = eventWakePending ? "github-event" : "interval";
           eventWakePending = false;
           elapsedMs = 0;
           lastPassAtMs = interphaseClock.now();
           passes += 1;
-          try {
-            await (scope ? deps.sweepLight!({ reviewOnly: true }) : deps.sweepLight!());
-            if (scope) log("daemon.review_clock.pass", { trigger, ...scopeTag });
-            if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger, ...scopeTag });
-          } catch (e) {
-            log("daemon.sweep_light.failed", { phase, ...scopeTag, error: String((e as Error)?.message ?? e) });
-          }
+          const pass = (async () => {
+            try {
+              await (reviewOnly ? deps.sweepLight!({ reviewOnly: true }) : deps.sweepLight!());
+              if (reviewOnly) log("daemon.review_clock.pass", { trigger, ...scopeTag, review_only: true });
+              if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger, ...scopeTag });
+            } catch (e) {
+              log("daemon.sweep_light.failed", { phase, ...scopeTag, error: String((e as Error)?.message ?? e) });
+            }
+          })();
+          activePasses.add(pass);
+          void pass.finally(() => activePasses.delete(pass));
         }
       })()
     : undefined;
@@ -1344,6 +1368,7 @@ export function startInterphaseReviewClock(
     stop: async () => {
       active = false;
       if (runner) await runner;
+      if (activePasses.size > 0) await Promise.all(activePasses);
       return { eventWakeSeen, passes };
     },
   };
@@ -1912,7 +1937,9 @@ export function reasonAboutApiWindow(
   maxHoldMs: number = DEFAULT_MAX_API_WINDOW_HOLD_MS,
 ): ApiWindowHoldDisposition {
   // A real verdict resets to the floor: this dispatch reached a decisive outcome, so whatever streak
-  // of ambiguous refusals preceded it is over, one way or another.
+  // of ambiguous refusals preceded it is over, one way or another. W1-T4662: `handed_off` (a
+  // healthy freshness yield leaving its PR open for the next daemon lifetime) is one such real
+  // verdict — it never advances or extends this streak, only a genuine, repeated API failure does.
   if (verdict !== "blocked_transient") return { state: INITIAL_API_WINDOW_HOLD_STATE, holdMs: 0 };
   const streak = taskId === state.lastTaskId ? state.streak : state.streak + 1;
   const nextState: ApiWindowHoldState = { streak, lastTaskId: taskId };
@@ -2284,7 +2311,35 @@ export async function runDaemon(
     state: sweepRetriggerState,
     liveness: sweepLiveness,
   };
-  const log = deps.log ?? (() => {});
+  const emitLog = deps.log ?? (() => {});
+  // W1-T4837: idle build-lane minute accounting. The daemon's own log stream is observed rather than a flag
+  // threaded through every decline, so a hold written by any layer names the cause of the tick it lands in.
+  const idleLaneClock = clockFromDateFn(deps.now);
+  let idleLaneAccount = newIdleLaneAccount(idleLaneClock.now());
+  let idleLaneTickCause: IdleLaneCause | undefined;
+  let idleLaneDispatchable = 0;
+  const log: typeof emitLog = (step, fields) => {
+    idleLaneTickCause = idleLaneCauseForStep(step) ?? idleLaneTickCause;
+    emitLog(step, fields);
+  };
+  // One sample per tick outcome: what the lanes are doing and why they are not doing more. `dispatchable`
+  // is refreshed only on ticks that ran selection; a tick that never reached selection (a pause) reuses the
+  // last known count rather than guessing. One `lane.idle_summary` row per window.
+  const sampleIdleLane = (busyLanes: number, selectionRan: boolean, dispatchable?: number): void => {
+    if (dispatchable !== undefined) idleLaneDispatchable = dispatchable;
+    const atMs = idleLaneClock.now();
+    idleLaneAccount = accountIdleLaneMinutes(idleLaneAccount, {
+      atMs,
+      busyLanes,
+      dispatchable: idleLaneDispatchable,
+      cause: idleLaneTickCause,
+      selectionRan,
+    });
+    if (atMs - idleLaneAccount.windowStartMs >= IDLE_LANE_SUMMARY_WINDOW_MS) {
+      emitLog("lane.idle_summary", { ...summarizeIdleLaneAccount(idleLaneAccount, atMs) });
+      idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
+    }
+  };
   // Shared by both governor call sites below, so the two cannot silently drift into different field
   // names for the same verdict (W1-T342).
   const logDispatchGovernorDefer = (verdict: DispatchGovernorVerdict, tick: number): void => {
@@ -2354,6 +2409,9 @@ export async function runDaemon(
   // Per-task transient retry state, threaded across ticks for the same task id. Dropped once a task's
   // disposition is no longer a transient retry (W1-T46).
   const blockRetryStates = new Map<string, RetryState>();
+  // A worker's fresh projection can prove a merge after this daemon selected from an older one.
+  // Hold that id until this daemon's own projection catches up; a stale read must not re-dispatch it.
+  const pendingMergedCredit = new Set<string>();
   // A genuine blocker is a queue-subtree state, not a process-lifetime failure (W1-T3122). The task
   // itself is excluded below; because it remains unmerged, the existing dependency predicate keeps
   // every descendant behind `unmet-deps` while unrelated work continues. This is intentionally
@@ -2388,6 +2446,14 @@ export async function runDaemon(
   // consulted, and still excludes the task, every tick (P29(ii)).
   const circuitEscalated = new Set<string>();
   const pauseHoldGovernorStates = new Map<string, PauseHoldGovernorState>();
+  // W1-T4685: this run's own repeated-observation tracker — never a module-level singleton, so two
+  // unrelated `runDaemon` calls in the same test process never share rows. Alongside (never instead
+  // of) the existing per-tick `daemon.pause` row: readers already keyed on that step's cadence for
+  // liveness (fleet-liveness.ts's `HEARTBEAT_STEPS`) and for pause-duration counting keep working
+  // unchanged, while a reader that wants "how many identical ticks" can read this row's `count`
+  // instead of counting `daemon.pause` lines (design (iii)).
+  const gateObservations = createGateObservationState();
+  const GATE_OBSERVATION_HEARTBEAT_MS = 5 * 60_000;
   // W1-T4025: lifetime pressure is a sensor. Keep one task per tick for the asynchronous judge;
   // no judge/proposal failure can change eligibility or hold a healthy sibling lane.
   const lifetimePressureTasks = new Map<string, Task>();
@@ -2614,6 +2680,61 @@ export async function runDaemon(
     | { kind: "continue" }
     | { kind: "genuine_blocker"; detail: string; dependents: string[] }
   > => {
+    if (result.verdict === "task_already_merged") {
+      // This verdict is a positive merge observation by run-task, even though the run opened no PR.
+      // Refresh before the next selection and retain a local hold if the daemon's projection lags.
+      blockRetryStates.delete(task.id);
+      let creditVisible = false;
+      let refreshError: string | undefined;
+      try {
+        creditVisible = deps.refreshMerged(planForBatch)(task.id);
+      } catch (error) {
+        refreshError = String((error as Error)?.message ?? error);
+        log("daemon.merge_credit_refresh_failed", { task: task.id, error: refreshError });
+      }
+      if (creditVisible) {
+        pendingMergedCredit.delete(task.id);
+        merged.push(task.id);
+      } else {
+        pendingMergedCredit.add(task.id);
+      }
+      // The refusal row was written by this exact worker run. A prior merge observation is
+      // present only when the matching PR's merge is also in the live ledger; never invent lag.
+      let rawRows: readonly string[] = [];
+      let evidenceError: string | undefined;
+      try {
+        rawRows = deps.readLedgerLines?.() ?? [];
+      } catch (error) {
+        evidenceError = String((error as Error)?.message ?? error);
+        log("daemon.merge_credit_evidence_failed", { task: task.id, error: evidenceError });
+      }
+      const rows = rawRows.flatMap((raw) => {
+        try { return [JSON.parse(raw) as Record<string, unknown>]; }
+        catch (error) {
+          log("daemon.merge_credit_evidence_invalid", { task: task.id, error: String((error as Error)?.message ?? error) });
+          return [];
+        }
+      });
+      const refusal = rows.findLast((row) => row.step === "dispatch.refused_already_merged" &&
+        row.run_id === result.runId && row.task_id === task.id);
+      const prUrl = result.prUrl ?? (typeof refusal?.pr_url === "string" ? refusal.pr_url : undefined);
+      const owner = prUrl !== undefined ? rows.findLast((row) => row.task_id === task.id && row.pr_url === prUrl &&
+        row.step === "pr.opened") : undefined;
+      const merge = owner && rows.findLast((row) => row.step === "pr.merged" && row.run_id === owner.run_id);
+      const refusedAt = typeof refusal?.ts === "string" ? Date.parse(refusal.ts) : NaN;
+      const mergedAt = typeof merge?.ts === "string" ? Date.parse(merge.ts) : NaN;
+      log("daemon.merge_credit_correction", {
+        task: task.id,
+        run_id: result.runId,
+        pr_url: prUrl ?? null,
+        merge_observation_lag_ms: Number.isFinite(refusedAt) && Number.isFinite(mergedAt) && refusedAt >= mergedAt
+          ? refusedAt - mergedAt : null,
+        credit_visible: creditVisible,
+        ...(refreshError ? { refresh_error: refreshError } : {}),
+        ...(evidenceError ? { evidence_error: evidenceError } : {}),
+      });
+      return { kind: creditVisible ? "merged" : "continue" };
+    }
     // The verdict describes how THIS RUN ended, not whether the pull request is merged: a PR that
     // merges gate-side after the run stopped leaves the result unmerged even though the task is done.
     // The tick's already-resolved merged projection — never a second lookup — answers the question
@@ -2627,6 +2748,9 @@ export async function runDaemon(
       // non-merged verdict (W1-T46, superseding blunt stop-on-block).
       const state = blockRetryStates.get(task.id) ?? INITIAL_RETRY_STATE;
       const disposition = reasonAboutBlock(planForBatch, task.id, result.verdict, state);
+      if (disposition.kind === "already_merged") {
+        throw new Error("task_already_merged must take the merge-credit correction path");
+      }
 
       if (disposition.kind === "awaiting_merge") {
         blockRetryStates.delete(task.id);
@@ -2788,6 +2912,7 @@ export async function runDaemon(
     // daemon stayed alive, and the freshness judges read a false FAIL. Placed as literally the first statement
     // of the loop body so no branch below can skip it (W1-T1274).
     log("daemon.tick", { poll_interval_ms: pollIntervalMs });
+    idleLaneTickCause = undefined;
 
     if (opts.max !== undefined && attempted.length >= opts.max) {
       return summary("max_reached", `${opts.max} task(s)`);
@@ -2870,6 +2995,15 @@ export async function runDaemon(
     if (paused) {
       ticks++;
       log("daemon.pause", { tick: ticks, detail: paused, poll_interval_ms: pollIntervalMs });
+      sampleIdleLane(0, false);
+      // W1-T4685: the SAME observation, tracked as one row instead of one line per tick — see
+      // `gateObservations`'s own comment above for why this sits BESIDE the line above it, not in
+      // place of it.
+      observeGate(
+        gateObservations,
+        { lane: "daemon", gate: "pause", condition: { detail: paused }, heartbeatMs: GATE_OBSERVATION_HEARTBEAT_MS, clock: daemonClock },
+        log,
+      );
       // W1-T4429 (ii): govern a structured hold's tier; (iii): reviews keep flowing beside the sleep.
       const pauseHold = deps.checkPauseHold?.();
       if (pauseHold) {
@@ -2922,6 +3056,12 @@ export async function runDaemon(
     }
 
     const isMerged = deps.refreshMerged(planForBatch);
+    for (const taskId of pendingMergedCredit) {
+      if (!isMerged(taskId)) continue;
+      pendingMergedCredit.delete(taskId);
+      merged.push(taskId);
+      log("daemon.merge_credit_visible", { task: taskId });
+    }
 
     // Reconcile the daemon-lifetime parks from the SAME cached projection dispatch uses below. A
     // credited merge is conclusive. A confirmed absence of an open PR is conclusive only when both
@@ -3270,6 +3410,8 @@ export async function runDaemon(
                     // The UNREADABLE count rides the row: a partial window must never read as a clean one (P48).
                     log("ci_learning_cadence.ran", {
                       status: result.status,
+                      window_complete: result.windowComplete ?? true,
+                      unreadable_prs: result.unreadablePrCount ?? 0,
                       drafts: result.draftCount,
                       excluded: result.excludedCount,
                       unreadable: result.unreadableCount,
@@ -3705,7 +3847,7 @@ export async function runDaemon(
         };
         const task = planForBatch.byId.get(kick.taskId);
         if (!task) { refuse("unknown task id"); continue; }
-        if (isMerged(kick.taskId)) { refuse("already merged — stale kick"); continue; }
+        if (isMerged(kick.taskId) || pendingMergedCredit.has(kick.taskId)) { refuse("already merged — stale kick"); continue; }
         try {
           // W1-T3216: a console kick for an operator-RELEASED verify:human task must be admitted
           // here too, or the release works from the drain and is refused from the console.
@@ -3745,6 +3887,7 @@ export async function runDaemon(
       // W1-T4002 — THIS TICK'S OWN full sweep already proved these, if it ran one; see
       // `SweepCycleOutcome.planOnlyRunBranchReceipts`'s doc for why no second GitHub read happens.
       const planOnlyReceiptsThisTick: readonly PlanOnlyRunBranchReceipt[] = sweepCycleOutcome?.planOnlyRunBranchReceipts ?? [];
+      const orphanEvidenceThisTick: OrphanRunBranchEvidence | undefined = deps.readOrphanRunBranchEvidence?.();
       const dispatchOpts: NextRunnableOpts = {
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
       isOpenPr: deps.isOpenPr,
@@ -3752,6 +3895,7 @@ export async function runDaemon(
       // as `continued-this-pass`. Its descendants remain excluded independently by `unmet-deps`.
       excludeIds: new Set([
         ...parkedBlockers.keys(),
+        ...pendingMergedCredit,
         ...invalidatedAdmissionsThisRun,
         ...[...illformedAdmissionBlocksThisRun].flatMap(([taskId, fingerprint]) => {
           const currentTask = planForBatch.byId.get(taskId);
@@ -3790,20 +3934,10 @@ export async function runDaemon(
                 undefined,
                 pushedRunRefs,
                 planOnlyReceiptsThisTick,
+                orphanEvidenceThisTick,
               );
               if (!stillBlocked && refsForTask.length > 0) {
-                for (const ref of refsForTask) {
-                  const receipt = planOnlyReceiptsThisTick.find((r) => r.ref === ref.ref && r.sha === ref.sha);
-                  if (receipt) {
-                    log("dispatch.run_branch_exception", {
-                      task: id,
-                      reason: "plan-filing-run-branch-exception",
-                      ref: ref.ref,
-                      sha: ref.sha,
-                      pr_number: receipt.prNumber,
-                    });
-                  }
-                }
+                logPlanOnlyRunBranchException(log, id, refsForTask, planOnlyReceiptsThisTick, orphanEvidenceThisTick);
               }
               return stillBlocked;
             },
@@ -4022,6 +4156,17 @@ export async function runDaemon(
       await flushLifetimePressure();
       ticks++;
       log("daemon.idle", { tick: ticks, poll_interval_ms: pollIntervalMs });
+      {
+        // Dispatchable = queued and unmerged, less what eligibility filtered for a reason other than "already
+        // merged" (which `isMerged` already removed). An estimate: it can only over-count, never hide work.
+        const filteredTally = idleReasons.snapshot();
+        const filtered = (Object.keys(filteredTally) as Array<keyof typeof filteredTally>).reduce(
+          (n, r) => (r === "already-merged" ? n : n + filteredTally[r].count),
+          0,
+        );
+        const queuedUnmerged = planForBatch.tasks.filter((t) => t.status === "queued" && !isMerged(t.id)).length;
+        sampleIdleLane(0, true, Math.max(0, queuedUnmerged - filtered));
+      }
       // Cadence: on change, not every tick. The idle row still fires every poll and is byte-compatible with
       // before. The reasons ride a separate step, emitted only when the picture actually changes — logging
       // the tally on all ~390 ticks would be 390 identical lines that bury the one that matters.
@@ -4159,6 +4304,7 @@ export async function runDaemon(
         poll_interval_ms: pollIntervalMs,
         recheck: true,
       });
+      sampleIdleLane(0, false);
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
     }
@@ -4178,6 +4324,7 @@ export async function runDaemon(
         poll_interval_ms: pollIntervalMs,
         recheck: true,
       });
+      sampleIdleLane(0, false);
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
     }
@@ -4253,6 +4400,7 @@ export async function runDaemon(
       await flushLifetimePressure();
       ticks++;
       logDispatchGovernorDefer(deferredVerdict!, ticks);
+      sampleIdleLane(0, true, dispatchSet.length);
       if (await stopInterphaseReviewClock()) continue;
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
@@ -4288,6 +4436,7 @@ export async function runDaemon(
         const interphaseWakeSeen = await stopInterphaseReviewClock();
         if (interphaseWakeSeen) log("daemon.dispatch.wake_deferred", { tasks: admitted.map((t) => t.id) });
     const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger, headroomSampler).stop;
+    sampleIdleLane(admitted.length, true, dispatchSet.length);
 
     // Concurrent dispatch: settle-all, never fail-fast, so a sibling lane's rejection can never abort another lane
     // in flight, and every lane's outcome is recorded before this tick decides anything (W1-T343). W1-T4416: a lane
@@ -4299,6 +4448,8 @@ export async function runDaemon(
     const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined => {
       inFlightTasks.delete(finished);
       if (outcome.status === "rejected") refillClosed ??= "a lane rejected";
+      // W1-T4662: `handed_off` (a healthy freshness yield) deliberately does NOT match here — only
+      // a genuine, repeated `blocked_transient` API failure closes this lane's refill.
       else if (outcome.value.verdict === "blocked_transient") refillClosed ??= "blocked_transient";
       const governed = refillClosed ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
       const stopped = deps.checkStop?.();
@@ -4320,7 +4471,7 @@ export async function runDaemon(
           const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, {
             ...dispatchOpts,
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
-            excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...passIds]),
+            excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds]),
           });
           const fits = partitionByFileOverlap([...inFlightTasks, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
           next = fits.dispatch.find((t) => !inFlightTasks.has(t));
@@ -4348,6 +4499,10 @@ export async function runDaemon(
     await stopTicker();
     await flushLifetimePressure();
     restartInterphaseReviewClock();
+    // Lanes are back to empty here; whatever holds them empty from now on is named by the next tick's sample,
+    // and an interval nothing names is reported as unknown rather than absorbed.
+    idleLaneTickCause = undefined;
+    sampleIdleLane(0, false);
 
     // Classify every lane's settlement before this tick decides anything, mirroring `runDrainLanes`.
     // A positively transient gh transport failure and a spawn-infra failure degrade into their bounded

@@ -82,6 +82,8 @@ export interface ConfigGardenAction extends GardenAction<ConfigGardenClass> {
   exposure: number;
   shadowMetrics: PromotionGuardMetric[];
   shadowObservations: GuardObservation[];
+  /** W1-T4711: `neverWorked` runs kept out of the class sample this action was derived from; absent when none. */
+  excludedCount?: number;
 }
 
 export interface ConfigCanary {
@@ -191,31 +193,52 @@ export function recalibratedBudget(costs: number[]): number {
 
 const settledImplement = (r: RunSummary) => r.type === "implement" && r.verdict !== "incomplete";
 
-/** Distinct settled tasks among `runs`, how many merged, and their summed cost. */
-export function cohortOutcome(runs: RunSummary[]): CohortOutcome {
+/** Settled implement costs per class, `neverWorked` runs skipped and counted per class (W1-T4711):
+ *  a $0 refusal is no sample of what the class costs. */
+export function settledClassCosts(runs: RunSummary[]): { byClass: Map<string, number[]>; excluded: Map<string, number> } {
+  const byClass = new Map<string, number[]>();
+  const excluded = new Map<string, number>();
+  for (const r of runs.filter(settledImplement)) {
+    const key = r.taskClass ?? "unknown";
+    if (r.neverWorked) excluded.set(key, (excluded.get(key) ?? 0) + 1);
+    else byClass.set(key, [...(byClass.get(key) ?? []), r.costUsd]);
+  }
+  return { byClass, excluded };
+}
+
+/** Distinct settled tasks among `runs`, how many merged, and their summed cost; a `neverWorked` run
+ *  is no canary outcome, only `excludedCount` (W1-T4726). */
+export function cohortOutcome(runs: RunSummary[]): CohortOutcome & { excludedCount?: number } {
   const tasks = new Map<string, boolean>();
   let costUsd = 0;
+  let excludedCount = 0;
   for (const r of runs) {
     if (r.verdict === "incomplete") continue;
+    if (r.neverWorked) { excludedCount++; continue; }
     tasks.set(r.taskId, (tasks.get(r.taskId) ?? false) || r.verdict === "merged");
     costUsd += r.costUsd;
   }
-  return { tasks: tasks.size, merged: [...tasks.values()].filter(Boolean).length, costUsd };
+  return { tasks: tasks.size, merged: [...tasks.values()].filter(Boolean).length, costUsd, ...(excludedCount > 0 ? { excludedCount } : {}) };
 }
 
-/** The canary cohort's runs and the rest's, per {@link ConfigCohort}, since `exposedAt`. */
-export function splitCohort(cohort: ConfigCohort, runs: RunSummary[], exposedAt: string, nowIso: string): { canary: RunSummary[]; rest: RunSummary[] } {
+/** The canary cohort's runs and the rest's, per {@link ConfigCohort}, since `exposedAt`; `neverWorked`
+ *  runs join neither side and are counted as `excludedCount` (W1-T4726). */
+export function splitCohort(cohort: ConfigCohort, runs: RunSummary[], exposedAt: string, nowIso: string): { canary: RunSummary[]; rest: RunSummary[]; excludedCount?: number } {
   const since = Date.parse(exposedAt);
   const at = (r: RunSummary) => Date.parse(r.startTs);
+  const inWindow = (canary: RunSummary[], rest: RunSummary[]) => {
+    const excludedCount = [...canary, ...rest].filter((r) => r.neverWorked).length;
+    return { canary: canary.filter((r) => !r.neverWorked), rest: rest.filter((r) => !r.neverWorked), ...(excludedCount > 0 ? { excludedCount } : {}) };
+  };
   if (cohort.kind === "tasks") {
     const ids = new Set(cohort.taskIds);
     const after = runs.filter((r) => settledImplement(r) && r.taskClass === cohort.taskClass && at(r) >= since);
-    return { canary: after.filter((r) => ids.has(r.taskId)), rest: after.filter((r) => !ids.has(r.taskId)) };
+    return inWindow(after.filter((r) => ids.has(r.taskId)), after.filter((r) => !ids.has(r.taskId)));
   }
   const inScope = (r: RunSummary) => cohort.kind === "all" ? r.type === "implement" : r.type === cohort.type && r.risk === cohort.risk && r.taskClass === cohort.taskClass;
   const before = since - Math.max(0, Date.parse(nowIso) - since);
   const scoped = runs.filter((r) => inScope(r) && r.verdict !== "incomplete");
-  return { canary: scoped.filter((r) => at(r) >= since), rest: scoped.filter((r) => at(r) >= before && at(r) < since) };
+  return inWindow(scoped.filter((r) => at(r) >= since), scoped.filter((r) => at(r) >= before && at(r) < since));
 }
 
 function population(cohort: ConfigCohort): string {
@@ -304,8 +327,7 @@ function shuffled<T>(items: T[], rng: () => number): T[] {
 /** The class whose queued budgets are furthest from its observed costs, as one canary over a random
  *  cohort of them. The cohort is at most half the mismatched shards, so the rest can judge it. */
 export function budgetCandidate(inv: ConfigInventory, rng: () => number): ConfigGardenAction | undefined {
-  const byClass = new Map<string, number[]>();
-  for (const r of inv.runs.filter(settledImplement)) byClass.set(r.taskClass ?? "unknown", [...(byClass.get(r.taskClass ?? "unknown") ?? []), r.costUsd]);
+  const { byClass, excluded } = settledClassCosts(inv.runs);
   let best: { taskClass: string; costs: number[]; budget: number; off: QueuedBudget[] } | undefined;
   for (const [taskClass, costs] of [...byClass].sort(([a], [b]) => a.localeCompare(b))) {
     if (costs.length < BUDGET_MIN_SAMPLES) continue;
@@ -320,11 +342,12 @@ export function budgetCandidate(inv: ConfigInventory, rng: () => number): Config
   const inClass = inv.queued.filter((q) => q.taskClass === best!.taskClass).length;
   const overrun = best.costs.filter((c) => c > best!.budget).length / best.costs.length;
   const cohortPop = population({ kind: "tasks", taskClass: best.taskClass, taskIds: [] });
+  const excludedCount = excluded.get(best.taskClass) ?? 0;
   return {
     class: "recalibrate-budget",
     target: best.taskClass,
     scope: `budget:${best.taskClass}`,
-    reason: `class ${best.taskClass}: p90 of ${best.costs.length} settled implement runs is $${usd(nearestRank(best.costs, 90))}; ${best.off.length} queued shard(s) declare a budget ${Math.round(BUDGET_MIN_CHANGE * 100)}%+ away from $${usd(best.budget)}.`,
+    reason: `class ${best.taskClass}: p90 of ${best.costs.length} settled implement runs is $${usd(nearestRank(best.costs, 90))}; ${best.off.length} queued shard(s) declare a budget ${Math.round(BUDGET_MIN_CHANGE * 100)}%+ away from $${usd(best.budget)}.${excludedCount > 0 ? ` ${excludedCount} never-worked run(s) excluded.` : ""}`,
     edits: cohort.map((q) => ({ path: q.shard, from: q.line, to: `  budget_usd: ${usd(best!.budget)}` })),
     cohort: { kind: "tasks", taskClass: best.taskClass, taskIds: cohort.map((q) => q.id) },
     candidate: `budget_usd ${usd(best.budget)} for ${cohort.length} queued ${best.taskClass} shard(s)`,
@@ -332,6 +355,7 @@ export function budgetCandidate(inv: ConfigInventory, rng: () => number): Config
     exposure: Math.min(1, cohort.length / Math.max(inClass, 1)),
     shadowMetrics: [{ metricName: "shadow_overrun_rate", unit: "fraction", direction: "max", abortThreshold: BUDGET_MAX_SHADOW_OVERRUN }],
     shadowObservations: [{ metricName: "shadow_overrun_rate", value: overrun, denominator: best.costs.length, freshness: "verified", comparisonPopulation: cohortPop, observedAt: inv.nowIso }],
+    ...(excludedCount > 0 ? { excludedCount } : {}),
   };
 }
 
@@ -495,6 +519,27 @@ export function applyConfigEdits(root: string, edits: ConfigEdit[]): string[] {
 
 export const reverseEdits = (edits: ConfigEdit[]): ConfigEdit[] => edits.map((e) => ({ path: e.path, from: e.to, to: e.from }));
 
+/** Check every rollback line in memory before writing any file. A line already at its baseline is
+ * safe to leave alone; a missing or ambiguous line refuses the whole rollback PR. */
+function applyExactConfigRollback(root: string, edits: ConfigEdit[]): string[] {
+  const staged = new Map<string, string>();
+  const changed = new Set<string>();
+  for (const edit of edits) {
+    const raw = staged.get(edit.path) ?? readFileIfExists(join(root, edit.path));
+    if (raw === undefined) throw new Error(`config gardener: rollback source unreadable: ${edit.path}`);
+    const lines = raw.split("\n");
+    const from = lines.flatMap((line, i) => line === edit.from ? [i] : []);
+    const to = lines.flatMap((line, i) => line === edit.to ? [i] : []);
+    if (from.length === 0 && to.length === 1) continue;
+    if (from.length !== 1 || to.length !== 0) throw new Error(`config gardener: rollback line changed or ambiguous: ${edit.path}`);
+    lines[from[0]!] = edit.to;
+    staged.set(edit.path, lines.join("\n"));
+    changed.add(edit.path);
+  }
+  for (const path of changed) writeAtomic(join(root, path), staged.get(path)!);
+  return [...changed].sort();
+}
+
 function acceptance(edits: ConfigEdit[]): string[] {
   return ["## Acceptance", ...edits.flatMap((e) => [`- claim: ${e.path} carries the canary's value`, `  proof: grep: ${e.to.trim()} in ${e.path}`])];
 }
@@ -581,21 +626,31 @@ export function tendConfigCanaries(deps: GardenerDeps, runs: () => RunSummary[])
   let measured: RunSummary[] | undefined;
   for (const [i, c] of canaries.entries()) {
     if (!isPromotionActive(c.promotion.state)) continue;
-    let exposed = c.promotion.state !== "shadow";
+    // A pre-exposure refusal can be persisted if the shadow snapshot predates a later clock
+    // reading. Its PR may already have merged, so the edits must be reconciled before release.
+    const refusedBeforeExposure = c.exposedAt === undefined &&
+      (c.promotion.state === "approved" || c.promotion.state === "regressed" || c.promotion.state === "unmeasurable");
+    let exposed = c.promotion.state !== "shadow" && !refusedBeforeExposure;
     let step: CanaryStep;
-    if (!exposed) {
+    let excludedCount: number | undefined;
+    if (c.promotion.state === "shadow" || refusedBeforeExposure) {
       const pr: PrState = deps.prState?.(c.prUrl) ?? "unknown";
       if (pr === "closed") step = { state: "rolled_back", verdict: "rolled_back", reason: "its PR was closed unmerged; nothing was exposed" };
       else if (pr !== "merged") continue;
       else {
         exposed = true;
-        c.exposedAt = nowIso;
-        const entry = enterCanary(c.promotion, c.shadowMetrics, c.shadowObservations.map((o) => ({ ...o, observedAt: c.promotion.observationWindow.start })), nowIso);
-        step = entry.verdict === "advanced" ? entry : { state: "rolled_back", verdict: "rolled_back", reason: `its shadow guard refused exposure: ${entry.reason ?? entry.state}` };
+        if (refusedBeforeExposure) {
+          step = { state: "rolled_back", verdict: "rolled_back", reason: `its merged PR carried a pre-exposure ${c.promotion.state} shadow refusal` };
+        } else {
+          c.exposedAt = nowIso;
+          const entry = enterCanary(c.promotion, c.shadowMetrics, c.shadowObservations.map((o) => ({ ...o, observedAt: c.promotion.observationWindow.start })), nowIso);
+          step = entry.verdict === "advanced" ? entry : { state: "rolled_back", verdict: "rolled_back", reason: `its shadow guard refused exposure: ${entry.reason ?? entry.state}` };
+        }
       }
     } else {
       measured ??= runs();
       const split = splitCohort(c.cohort, measured, c.exposedAt ?? c.promotion.observationWindow.start, nowIso);
+      excludedCount = split.excludedCount;
       step = stepCanary(c.promotion, cohortGuardObservations(cohortOutcome(split.canary), cohortOutcome(split.rest), c.promotion.comparisonPopulation, nowIso), nowIso);
     }
     c.promotion = { ...c.promotion, state: step.state };
@@ -604,7 +659,7 @@ export function tendConfigCanaries(deps: GardenerDeps, runs: () => RunSummary[])
     if (step.verdict === "rolled_back") settlePending(deps.stateDir, c.prUrl, "debit");
     if (step.verdict === "promoted") settlePending(deps.stateDir, c.prUrl, "credit");
     if (step.verdict === "expired") settlePending(deps.stateDir, c.prUrl, "release");
-    if (step.verdict !== "waiting") deps.log(`${CONFIG_GARDEN_NAME}.canary_${step.verdict}`, { scope: c.promotion.scope.policyScope, pr_url: c.prUrl, state: step.state, reason: step.reason ?? null, rollback_pr_url: c.rollbackPrUrl ?? null });
+    if (step.verdict !== "waiting") deps.log(`${CONFIG_GARDEN_NAME}.canary_${step.verdict}`, { scope: c.promotion.scope.policyScope, pr_url: c.prUrl, state: step.state, reason: step.reason ?? null, rollback_pr_url: c.rollbackPrUrl ?? null, ...(excludedCount ? { excluded_count: excludedCount } : {}) });
     canaries[i] = c;
     results.push({ canary: c, step });
   }
@@ -617,13 +672,15 @@ function rollBack(deps: GardenerDeps, c: ConfigCanary): string | undefined {
   const ws = deps.openWorkspace();
   try {
     const edits = reverseEdits(c.edits);
-    const paths = applyConfigEdits(ws.root, edits);
+    const paths = applyExactConfigRollback(ws.root, edits);
     if (paths.length === 0) {
       deps.log(`${CONFIG_GARDEN_NAME}.rollback_nothing_to_revert`, { scope: c.promotion.scope.policyScope, pr_url: c.prUrl });
       return undefined;
     }
     const body = [`The config gardener (W1-T4113) rolls back its \`${c.actionClass}\` canary from ${c.prUrl}: ${c.reason ?? "a cohort guardrail breach"}.`, "", ...acceptance(edits)].join("\n");
-    return ws.land({ paths, title: `revert(config): the config gardener rolls back its ${c.actionClass} canary`, body });
+    const prUrl = ws.land({ paths, title: `revert(config): the config gardener rolls back its ${c.actionClass} canary`, body });
+    if (!prUrl) throw new Error(`config gardener: rollback PR was not opened for ${c.prUrl}`);
+    return prUrl;
   } finally {
     ws.dispose();
   }
@@ -638,7 +695,9 @@ export function runConfigGarden(spec: ConfigGardenSpec, deps: GardenerDeps, sour
   const pass = runGarden(spec, deps);
   const action = pass.plan?.actions[0];
   if (pass.prUrl && action) {
-    const nowIso = (deps.clock ?? systemClock).iso();
+    // The action's shadow evidence was measured by the inventory. Starting the window from a
+    // later clock reading made that very evidence predate it by milliseconds (PR #7141).
+    const nowIso = action.shadowObservations[0]?.observedAt ?? (deps.clock ?? systemClock).iso();
     const promotion = configPromotion(action, nowIso);
     const shadow = enterCanary(promotion, action.shadowMetrics, action.shadowObservations, nowIso);
     const canary: ConfigCanary = {

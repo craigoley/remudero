@@ -1,0 +1,36 @@
+- id: W1-T4969
+  title: "THE CONFIG GARDENER'S INVENTORY BLOCKS THE CORE DAEMON LOOP — configInventory runs readLedgerUnionRecordsSync over 60 days, buildMountHeadroomSweep's full ledger corpus scan and loadPlan synchronously, about 11% of loop busy time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: "oper#core-daemon-loop-profile-2026-09-30"
+  files: [src/lib/config-gardener.ts, test/config-gardener-inventory-reads-the-ledger-off-the-loop.test.ts]
+  rationale: |
+    A live CPU profile of remudero-daemon on 2026-09-30 (SIGUSR1 + CDP, 1370 s over two daemon
+    processes, 815 s busy once the profiler's own exit hold is excluded) put the config gardener at
+    91 s, about 11% of busy time.
+    - configInventory > readLedgerUnionRecordsSync, a 60-day rotation window: 21 s.
+    - mountRecommendationSource > buildMountHeadroomSweep > scanLedgerCorpus > eachLine, the
+      whole ledger corpus: 34 s, plus the GC it drives.
+    - queuedBudgets > loadPlan > readMergedPlan > readFileSync over about 2,400 shards: up to 13 s
+      in one sample.
+    All of it runs on the daemon loop. The cheap fingerprint keys on the plan/tasks.d directory
+    mtime, so every merged shard re-runs the whole inventory (20 config.scorecard passes in the 23 h
+    from 09-29T20Z).
+  design: |
+    Build the inventory's two ledger reads off the loop, in a worker thread or a streamed async
+    read that yields between chunks, and reuse the mount headroom sweep until the ledger's newest
+    rotation changes. The inventory's fields and the garden's decisions do not change.
+  acceptance:
+    - claim: "a timer keeps firing while the config inventory reads the ledger"
+      proof: 'grep: test("W1-T4969: a timer keeps firing while the config inventory reads the ledger" in test/config-gardener-inventory-reads-the-ledger-off-the-loop.test.ts'
+    - claim: "an unchanged ledger reuses the mount headroom sweep"
+      proof: 'grep: test("W1-T4969: an unchanged ledger reuses the mount headroom sweep" in test/config-gardener-inventory-reads-the-ledger-off-the-loop.test.ts'
+  falsifier: |
+    Restore the synchronous readLedgerUnionRecordsSync call in configInventory and the timer-probe
+    test reads zero ticks during the inventory.

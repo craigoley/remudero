@@ -37,6 +37,7 @@ import {
   type AutomationPreflightFinding,
   type DelegationRiskTier,
 } from "./automation-action.js";
+import { EXECUTOR_EVIDENCE_CODE, SELF_REPORTED_CODE, resolveCatalogueCapability } from "./action-executor.js";
 import { fixedClock, type Clock } from "./clock.js";
 import { DELEGATION_PROFILE_MAX_COST_USD, delegationEligibility, findNonAuthoritativeSignal, type DelegationProfileState } from "./delegation-profile.js";
 import { DEFAULT_MAX_ROUNDS } from "./reply-interpreter.js";
@@ -266,8 +267,10 @@ function validateScope(value: unknown): IntentPlanScope | null {
   return scope;
 }
 
-function stepApprovalPolicy(risk: DelegationRiskTier, rollback: AutomationActionRollback): AutomationApprovalPolicy {
-  return delegationRequiresHumanGate(risk) || rollback.mode === "irreversible" ? "human" : "none";
+/** W1-T4658: a catalogue entry demanding human approval (a MEDIUM fleet pause) is never derived weaker. */
+function stepApprovalPolicy(capability: string, risk: DelegationRiskTier, rollback: AutomationActionRollback): AutomationApprovalPolicy {
+  const catalogue = resolveCatalogueCapability(capability);
+  return delegationRequiresHumanGate(risk) || rollback.mode === "irreversible" || (catalogue.ok && catalogue.entry.approval === "human") ? "human" : "none";
 }
 
 /** One step, validated by the automation-action-v1 validator itself over a probe envelope, so a
@@ -290,7 +293,7 @@ function validateStep(value: unknown, stepId: string): IntentPlanStep | string {
   });
   if (!probe.ok) return `${probe.code}: ${probe.reason}`;
   const { capability, summary, risk, preconditions, freshness, dryRun, rollback, receiptRef } = probe.action;
-  return { stepId, capability, summary, risk, preconditions, freshness, dryRun, rollback, receiptRef, estimatedCostUsd: cost, approvalPolicy: stepApprovalPolicy(risk, rollback) };
+  return { stepId, capability, summary, risk, preconditions, freshness, dryRun, rollback, receiptRef, estimatedCostUsd: cost, approvalPolicy: stepApprovalPolicy(capability, risk, rollback) };
 }
 
 function distinctMatches(goal: string, re: RegExp): string[] {
@@ -845,30 +848,60 @@ export type IntentPlanExecutionState =
   | "partially-rolled-back"
   | "unknown";
 
+/** W1-T4694: which completion a step's capability accepts as done. `executor` — the capability is
+ *  in action-executor.ts's catalogue, so only the executor's own receipt counts; `self-reported` —
+ *  no executor exists, so a caller's completion with evidence is all there is (today's rule). */
+export type IntentPlanEvidenceRule = typeof EXECUTOR_EVIDENCE_CODE | typeof SELF_REPORTED_CODE;
+/** The named reason a catalogue step's caller-posted completion left it awaiting a receipt. */
+export const SELF_REPORTED_COMPLETION_IGNORED = "self-reported-completion-ignored";
+
 export interface IntentPlanExecution {
   readonly state: IntentPlanExecutionState;
   readonly actions: ReadonlyArray<{
     readonly actionId: string;
-    readonly state: AutomationActionState | "missing";
+    readonly state: AutomationActionState | "missing" | "awaiting-receipt";
+    readonly evidenceRule: IntentPlanEvidenceRule;
     readonly evidenceRef?: string;
+    readonly reason?: typeof SELF_REPORTED_COMPLETION_IGNORED;
     readonly undo?: "withdrawn" | "rollback-requested" | "rolled-back";
   }>;
 }
 
+/** The catalogue's OWN resolver decides — never a second list. A ref naming a catalogue entry with
+ *  a bad target is still the executor's (it can only ever be refused there), so only `no-executor`
+ *  falls back to self-reported. */
+function evidenceRuleFor(capability: string): IntentPlanEvidenceRule {
+  const resolved = resolveCatalogueCapability(capability);
+  return resolved.ok || resolved.code !== "no-executor" ? EXECUTOR_EVIDENCE_CODE : SELF_REPORTED_CODE;
+}
+
 /**
  * What the linked actions' receipts say happened. `succeeded` needs EVERY action's completion
- * receipt (each names its evidence); a missing action reads `unknown`, never success.
+ * receipt (each names its evidence); a missing action reads `unknown`, never success. W1-T4694: a
+ * catalogue step's completion must be the EXECUTOR's (`code: "executor"`); a caller's claim for it,
+ * evidenceRef or not, leaves the step `awaiting-receipt` with {@link SELF_REPORTED_COMPLETION_IGNORED}.
  */
 export function intentPlanExecution(state: IntentPlanState, linked: readonly IntentPlanLinkedAction[]): IntentPlanExecution {
   const confirmation = state.events.find((event) => event.kind === "confirm");
   if (!confirmation) return { state: "not-requested", actions: [] };
   const undone = new Map(state.events.flatMap((event) => (event.kind === "undo" ? event.steps : [])).map((step) => [step.actionId, step.result]));
-  const actions = confirmation.actionIds.map((actionId) => {
+  const actions = confirmation.actionIds.map((actionId, index): IntentPlanExecution["actions"][number] => {
     const history = linked.find((item) => item.action.actionId === actionId);
-    const evidenceRef = history?.receipts.find((receipt) => receipt.kind === "completion" && receipt.outcome === "succeeded")?.evidenceRef;
+    const evidenceRule = evidenceRuleFor(history?.action.capability ?? state.plan.steps[index]?.capability ?? "");
+    const completions = history?.receipts.filter((receipt) => receipt.kind === "completion" && receipt.outcome === "succeeded") ?? [];
+    const counted = evidenceRule === EXECUTOR_EVIDENCE_CODE ? completions.filter((receipt) => receipt.code === EXECUTOR_EVIDENCE_CODE) : completions;
+    const evidenceRef = counted[0]?.evidenceRef;
+    const ignored = evidenceRule === EXECUTOR_EVIDENCE_CODE && history?.state === "succeeded" && counted.length === 0;
     const requested = undone.get(actionId);
     const undo = history?.state === "rolled_back" ? ("rolled-back" as const) : requested === "withdrawn" || requested === "rollback-requested" ? requested : undefined;
-    return { actionId, state: history?.state ?? ("missing" as const), ...(evidenceRef ? { evidenceRef } : {}), ...(undo ? { undo } : {}) };
+    return {
+      actionId,
+      state: ignored ? ("awaiting-receipt" as const) : history?.state ?? ("missing" as const),
+      evidenceRule,
+      ...(evidenceRef ? { evidenceRef } : {}),
+      ...(ignored ? { reason: SELF_REPORTED_COMPLETION_IGNORED } : {}),
+      ...(undo ? { undo } : {}),
+    };
   });
   const states = actions.map((action) => action.state);
   const any = (value: string): boolean => states.includes(value as AutomationActionState);
@@ -878,7 +911,7 @@ export function intentPlanExecution(state: IntentPlanState, linked: readonly Int
     : any("in-progress") ? "in-progress"
     : any("failed") ? "failed"
     : any("rejected") ? "refused"
-    : any("registered") || any("approved") ? "awaiting-receipt"
+    : any("registered") || any("approved") || any("awaiting-receipt") ? "awaiting-receipt"
     : every("succeeded") ? "succeeded"
     : every("rolled_back") ? "rolled-back"
     : settledOk ? "partially-rolled-back"

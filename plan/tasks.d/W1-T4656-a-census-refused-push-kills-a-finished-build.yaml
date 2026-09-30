@@ -1,0 +1,46 @@
+- id: W1-T4656
+  title: "A CENSUS-REFUSED PUSH KILLS A FINISHED BUILD — the pre-push census precheck refuses the orchestrator's fallback push, gitPushRunBranch throws, and the run dies on run.error instead of handing the refusal to the fix rung; 34 builds across 19 tasks since 2026-09-24"
+  repo: remudero
+  depends_on: ["W1-T3222", "W1-T4655"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-28: tracing the A/A's verdict-less runs"
+  plan_refs: ["W1-T3059", "W1-T3222", "W1-T4655"]
+  files:
+    - src/run-task.ts
+    - test/a-census-refused-push-kills-a-finished-build.test.ts
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-28 over the ledger union: since the pre-push census precheck was armed
+    (scripts/census-precheck.mjs, hooks/pre-push, #7015 on 2026-09-24), 34 runs across 19 tasks
+    ended in `run.error` whose message is the hook's own refusal — typically
+    `census-precheck: this branch grows 1 census count(s) CI will refuse: clock-signature:
+    src/run-task.ts dateNow 54 > baseline 53 — move it onto src/lib/clock.ts's Clock port`.
+    Repeat offenders: W1-T4559 x5, W1-T4480 x4, W1-T3116 x4, W1-T4627 x4 (the last on
+    2026-09-28 06:04Z), W1-T4113 x2, W1-T4457 x2. A traced run (W1-T4559-1790457021970):
+    implement.done success -> implement.harness_commit -> fallback_push.cause -> run.error ->
+    worktree.remove. The worker's finished build is reaped, no fix rung sees the refusal, and the
+    next dispatch rebuilds from scratch and trips the same census. The refusal text already names
+    the file, the census, the count and the remedy — exactly the input a fix rung takes.
+  design: |
+    Classify a pre-push census refusal from the orchestrator's push (the hook's `census-precheck:`
+    output, raised through gitPushRunBranch) as a repairable gate failure, not an exception: hand
+    the refusal text to the existing fix rung on the same worktree (bounded by the rung's own
+    attempt budget), then retry the push. If the rung cannot clear it, end with a terminal verdict
+    naming the census (W1-T4655's shape), and keep the branch evidence the way W1-T434 keeps an
+    overrun branch. Never bypass the hook (no --no-verify). The rung applies the remedy the refusal
+    itself names, preferring the code change: a baseline row is legitimate only where that census's
+    own message offers it (clock-signature does: "or record the row in" its baseline), and the
+    rung records WHICH remedy it took so a baseline bump is visible, never silent.
+  acceptance:
+    - claim: "a census refusal of the orchestrator's push reaches the fix rung with the refusal text and the push is retried, and a refusal the rung cannot clear ends with a terminal verdict naming the census instead of run.error"
+      proof: "unit test: test/a-census-refused-push-kills-a-finished-build.test.ts"
+  falsifier: |
+    A push that the hook refuses with a census-precheck message: the run must reach the fix rung,
+    never run.error; and the retried push must still go through the hook (no --no-verify).

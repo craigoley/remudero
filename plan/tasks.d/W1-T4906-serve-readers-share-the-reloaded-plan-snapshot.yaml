@@ -1,0 +1,63 @@
+- id: W1-T4906
+  title: "SERVE'S READERS DO NOT ALL SEE THE PLAN W1-T4481 RELOADS IN PLACE — /v1/trace, /v1/feedback and the inbox write routes still parse the working-tree plan, which no longer fast-forwards on a plan-only merge; the status-stream publisher pins the plan it started with; and the reload parses 2,615 tasks on serve's loop. Every serve reader reads the one reloaded snapshot, parsed off the loop"
+  repo: remudero
+  depends_on: ["W1-T4481"]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-30 core-console architecture Phase 0 (P0-LOOP review of #7982, W1-T4481)"
+  plan_refs: ["W1-T4481", "W1-T4463", "W1-T4454", "W1-T4455", "W1-T4771"]
+  files:
+    - src/lib/panel-graph.ts
+    - src/lib/console-projection-worker.ts
+    - src/lib/status-stream-publisher.ts
+    - src/lib/serve-plan-reload.ts
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30. W1-T4481 (#7982) swaps `deps.board.plan` in place on a plan-only advance.
+    Live on remudero-serve, `serve.plan_reloaded` fired at 06:51Z for #7984 (2,615 tasks, elapsedMs 5303) with no restart.
+    Replaying 09-29's 189 merges through the old and new restart rules gives 169 -> 86 restarts.
+    The catch: serve's working tree is now fast-forwarded only by a restart the entrypoint's sync_tree runs, so
+    it lags origin by every plan-only merge since the last restart-relevant one.
+    Readers that still parse that tree serve an OLDER plan than the board:
+    (a) panel-graph.ts buildTraceRoute calls `loadPlan(deps.planPath)` per GET /v1/trace.
+    (b) GET /v1/feedback hands `planPath` to console-projection-worker.ts, which calls `loadPlan(input.planPath)`.
+    (c) The inbox write routes call classifyAllProposals with its `loadPlan` default.
+    The inbox READ path already takes `readPlanSnapshot` (serve passes `() => deps.board.plan`), and so do
+    drain preview and operator-activity. A task filed by a plan-only merge therefore shows on /v1/status and
+    /v1/inbox but not on /v1/trace or /v1/feedback, and an approve can classify it against the older plan.
+    (d) status-stream-publisher.ts startPublisher builds `effectiveDeps = { ...deps, readLedger }`. That copies
+    the plan reference, so while any subscriber is attached the SSE stream never emits for a task filed after the
+    publisher started. Phase 2 of the architecture plan builds push on this stream.
+    (e) serve-plan-reload.ts reads blobs with async git, then runs mergePlanBlobsQuarantiningDuplicates over
+    2,615 tasks on serve's loop. The 5.3 s elapsed is not attributed between git and parse, so nobody knows how
+    long the loop is held.
+  design: |
+    (1) One plan source for serve: every serve reader of the plan takes the reloaded snapshot (the
+    `readPlanSnapshot` seam that already exists), never `deps.planPath` on the working tree. That covers trace,
+    feedback (pass the snapshot or its ref to the projection worker rather than a path) and the inbox write
+    routes. The CLI and daemon keep their path reads unchanged.
+    (2) The status-stream publisher reads the plan through the live board deps object on each tick, so a
+    reload is visible to it. When a reload adds a task, the publisher primes that task's projection rather than
+    emitting a spurious flip.
+    (3) reloadServePlan parses and validates off the loop (a worker thread, like console-projection-worker),
+    installs the result with one assignment as today, and ledgers the git and parse durations separately.
+    (4) Keep duplicate-id quarantine exactly as W1-T4481 has it. A failed reload keeps the old plan serving.
+    serve.ts gets zero net comment lines.
+  acceptance:
+    - claim: "trace and feedback read the plan serve reloaded rather than the working tree"
+      proof: "unit test: trace and feedback read the reloaded serve plan not the working tree"
+    - claim: "the status stream sees a task filed after the publisher started"
+      proof: "unit test: the status stream publisher derives a task filed after it started"
+    - claim: "a plan reload parses off serve's event loop"
+      proof: "unit test: a serve plan reload parses off the event loop"
+  falsifier: |
+    CLOSE IF, on main, a task filed by a plan-only merge appears on /v1/trace and /v1/feedback within one
+    reload of appearing on /v1/status, AND a CPU profile of remudero-serve across a reload shows no
+    mergePlanBlobsQuarantiningDuplicates frame on the main thread.

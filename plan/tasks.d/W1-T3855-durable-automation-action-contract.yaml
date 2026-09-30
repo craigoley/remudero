@@ -15,7 +15,7 @@
     - src/lib/operator-agent.ts
     - src/lib/serve.ts
     - openapi/daemon.yaml
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     RMD has durable proposals, decisions, experiments, and outcomes, but an automated flow still

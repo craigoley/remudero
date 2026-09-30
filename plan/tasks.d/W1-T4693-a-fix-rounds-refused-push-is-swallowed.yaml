@@ -1,0 +1,48 @@
+- id: W1-T4693
+  title: "A FIX ROUND'S REFUSED PUSH IS SWALLOWED — both fix-rung push deps run gitPushRunBranch with stdio ignore inside a catch that drops every error but a foreign head, so a pre-push census refusal of a fix round is silently discarded and the rung waits on CI for a head that never landed"
+  repo: remudero
+  depends_on: ["W1-T4656"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-28: found while building W1-T4656 (census-refused fallback push)"
+  plan_refs: ["W1-T2610", "W1-T3222", "W1-T4655", "W1-T4656"]
+  files:
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - test/a-fix-rounds-refused-push-is-not-swallowed.test.ts
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-09-28 at origin/main: the fix rung's `push` dependency is built twice, in runTaskBody
+    (src/run-task.ts, the `runFixRung({... push: (wt, _branch, expectedHeadSha) => { try {
+    gitPushRunBranch(wt, { stdio: "ignore", expectedHeadSha }) } catch (err) { if (err instanceof
+    LanePushForeignHeadError) throw err; } }`) and in the sweep's fix dispatch (src/lib/sweep.ts, the
+    same shape with `/* best-effort — the worker may already have pushed */`). `stdio: "ignore"`
+    discards the hook's own stderr, and the catch discards every other error. Since hooks/pre-push
+    runs scripts/census-precheck.mjs (#7015, 2026-09-24), a fix round whose commit grows a census is
+    refused at push; the round then proceeds to wait for CI and review on the PR's OLD head, spending
+    the strike on a head that never landed and reporting nothing. W1-T4656 routes the SAME refusal
+    on the pre-PR fallback push to the fix rung; this is the post-PR half, which W1-T4656's build
+    named as a separate defect.
+  design: |
+    Keep the one benign case benign and name everything else. Capture the push's stderr (pipe, not
+    ignore) at both sites through one shared helper. A push that had nothing new to send (the worker
+    already pushed this exact head: the remote ref already equals `expectedHeadSha`) stays a no-op.
+    A hook refusal whose text W1-T4656's `censusPushRefusal` parses becomes a named round outcome
+    (for example `fix.push_refused` with the censuses and the refusal text): the round does NOT wait
+    on CI, and the refusal text feeds the next strike's prompt exactly as W1-T4656 feeds its first
+    strike, under the rung's existing strike cap. Any other push failure is ledgered by class and
+    ends the round as a failed push, never silently. `LanePushForeignHeadError` keeps its existing
+    propagation. Never --no-verify.
+  acceptance:
+    - claim: "a fix round whose push the pre-push hook refuses with a census message records the refusal, does not wait on CI for the old head, and hands the refusal to the next strike, at both fix-rung push sites"
+      proof: "unit test: test/a-fix-rounds-refused-push-is-not-swallowed.test.ts"
+  falsifier: |
+    A fix round whose push the hook refuses: before this change the round reads as pushed and waits
+    on CI; after it, a `fix.push_refused` row names the census and the next strike's prompt carries
+    the refusal text.

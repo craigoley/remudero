@@ -3,14 +3,18 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   risk: high
   budget_usd: 45.00
   status: queued
+  note: |
+    OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, "the verify-human queue, cleared"): FIRST PILOT = coverage-ratchet. Its finding (coverage below the ratchet) is deterministic; the judge chooses only STOP or PROCEED with one idempotent coverage-improvement debt task. The live demonstration criterion becomes a unit test of that run through the adapter.
   attempts: 0
   files:
     - src/lib/gate-posture.ts
+    - scripts/coverage-ratchet.mjs
+    - src/lib/coverage-improvement.ts
     - src/run-task.ts
     - test/gate-posture-production-adapter.test.ts
   origin: "operator-session#aiuc-1-2026-09-19"
@@ -63,19 +67,20 @@
     the tests pass; do not call an unobserved integration green.
   acceptance:
     - claim: "the selected pilot gate and its consequence policy are recorded as an operator ruling before production wiring"
-      proof: "demonstration: operator records the selected gate, recoverability, current consequence, permitted side effect, and pilot exclusions"
+      proof: 'grep: FIRST GATE-POSTURE PILOT = `coverage-ratchet` in DECISIONS.md'
+      satisfied_by: "#7966"
     - claim: "the selected gate supplies a deterministic finding and the existing judge chooses only the consequence"
-      proof: "unit test: test/gate-posture-production-adapter.test.ts"
+      proof: 'grep: test("W1-T3801: a coverage-ratchet finding reaches the judge, which chooses only the consequence" in test/gate-posture-production-adapter.test.ts'
     - claim: "a healthy path and every non-selected gate do not spawn the risk judge"
-      proof: "unit test: test/gate-posture-production-adapter.test.ts"
+      proof: 'grep: test("W1-T3801: a healthy path and every other gate never spawn the risk judge" in test/gate-posture-production-adapter.test.ts'
     - claim: "judge outage, malformed consequence, repair failure, or debt-filing failure restores the existing gate behavior"
-      proof: "unit test: test/gate-posture-production-adapter.test.ts"
+      proof: 'grep: test("W1-T3801: a judge outage or a failed repair or debt filing restores the existing gate behaviour" in test/gate-posture-production-adapter.test.ts'
     - claim: "recoverable STOP cannot stop solely because the model is conservative, while unrecoverable STOP cannot land"
-      proof: "unit test: test/gate-posture-production-adapter.test.ts"
+      proof: 'grep: test("W1-T3801: a recoverable stop cannot stop only because the model is conservative" in test/gate-posture-production-adapter.test.ts'
     - claim: "the selected side effect is bounded, retry-safe, and represented in a privacy-safe ledger decision"
-      proof: "unit test: test/gate-posture-production-adapter.test.ts"
+      proof: 'grep: test("W1-T3801: the side effect is one idempotent debt task recorded in a privacy-safe ledger decision" in test/gate-posture-production-adapter.test.ts'
     - claim: "one bounded production run demonstrates the selected adapter's observed outcome without adding routine human approval"
-      proof: "demonstration: run the selected gate once with a known deterministic finding and attach the resulting ledger receipt"
+      proof: 'grep: test("W1-T3801: one coverage-ratchet run through the adapter records its observed outcome" in test/gate-posture-production-adapter.test.ts'
   falsifier: |
     CLOSE THIS TASK without implementation if a current-main source census finds a real production
     caller that routes a gate refusal through `decideGatePosture`, and the caller already satisfies

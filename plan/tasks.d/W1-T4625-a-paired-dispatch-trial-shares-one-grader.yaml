@@ -14,7 +14,7 @@
     - src/lib/paired-trial.ts
     - src/run-task.ts
     - test/a-paired-dispatch-trial-shares-one-grader.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

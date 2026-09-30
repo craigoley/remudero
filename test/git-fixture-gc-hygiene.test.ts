@@ -50,11 +50,13 @@ test("gc.auto and receive.autogc are already on process.env when this file loads
   // invocation sites (package.json's `test`/`test:ci`, three workflow steps, scripts/check.mjs,
   // scripts/host-parity.ts, and two in scripts/mutation-ratchet.mjs) — `node --test` loads
   // `--import` modules before any matched test file runs, in every child process it spawns.
-  assert.equal(process.env.GIT_CONFIG_COUNT, "2");
-  assert.equal(process.env.GIT_CONFIG_KEY_0, "gc.auto");
-  assert.equal(process.env.GIT_CONFIG_VALUE_0, "0");
-  assert.equal(process.env.GIT_CONFIG_KEY_1, "receive.autogc");
-  assert.equal(process.env.GIT_CONFIG_VALUE_1, "false");
+  // W1-T4805: test/setup/no-live-remote.ts installs its own entries in the same env config, so the
+  // gc pair is found by KEY rather than by a fixed index or a fixed count.
+  const count = Number(process.env.GIT_CONFIG_COUNT);
+  const entries = new Map<string, string | undefined>();
+  for (let i = 0; i < count; i++) entries.set(process.env[`GIT_CONFIG_KEY_${i}`] ?? "", process.env[`GIT_CONFIG_VALUE_${i}`]);
+  assert.equal(entries.get("gc.auto"), "0");
+  assert.equal(entries.get("receive.autogc"), "false");
 });
 
 // ── (1) A GIT THAT INHERITS process.env RUNS WITH AUTOMATIC GC DISABLED ─────────────────────────

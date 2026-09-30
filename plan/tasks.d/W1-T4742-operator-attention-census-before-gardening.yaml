@@ -1,0 +1,50 @@
+- id: W1-T4742
+  title: "Before retiring more operator Inbox items, publish a source-qualified attention census that says why each item needs a person and when evidence is incomplete"
+  repo: remudero
+  depends_on: [W1-T4738]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-28 operator report of 74 mobile Inbox items and core issue #7708"
+  plan_refs: [W1-T4086, W1-T4088, W1-T4738]
+  files: [src/lib/inbox-responder.ts, src/lib/panel-graph.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/operator-attention-census.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    W1-T4738 makes last-speaker direction distinct from verified attention and retires an exact
+    release-proven verify-human ask. The operator's observed 74 cannot be audited from this
+    session: there is no authenticated live feed or daemon SSH identity here. A gardener that
+    bulk-closes from a guessed count, age, or proposal wording would hide real security and
+    policy decisions. First make the source population and its evidence inspectable.
+  design: |
+    Add a read-only core-scoped attention census, using the same classified Inbox snapshot
+    that serves /v1/inbox/threads. Return a stable snapshot key, attention-state totals,
+    proposal-kind totals, and per-item thread/proposal/task references, current classification,
+    attention reason, and cited positive release/merge/judge facts when available. Identify
+    core scope explicitly; do not claim to aggregate other connected repositories.
+    Report source coverage for plan, proposal registry, live ledger, archived release evidence,
+    and GitHub projection. If any needed source is unreadable, stale, or incomplete, expose a
+    partial/unavailable census and lower-bound known counts; never turn missing rows into a
+    verified zero or infer that no release occurred. Reuse bounded/memoized reads rather than
+    synchronously reparsing every rotation on each request. Do not emit credentials, raw worker
+    output, or an action affordance. Keep the route under the existing read credential boundary.
+    This task observes; a separate #7708 follow-up may act only after positive-evidence
+    retirement rules and before/after precision auditing are proven.
+  acceptance:
+    - claim: "census separates verified decisions and replies from daemon-last in-progress history"
+      proof: 'grep: test("W1-T4742: census counts attention rather than the last speaker" in test/operator-attention-census.test.ts'
+    - claim: "each actionable item explains its current reason and exact referent"
+      proof: 'grep: test("W1-T4742: why-me evidence names the task and source fact" in test/operator-attention-census.test.ts'
+    - claim: "unreadable or incomplete evidence makes the census partial, not a false zero"
+      proof: 'grep: test("W1-T4742: missing evidence is partial rather than a healthy zero" in test/operator-attention-census.test.ts'
+    - claim: "the same source snapshot has one reproducible key without spending a model call"
+      proof: 'grep: test("W1-T4742: unchanged source facts keep one census key" in test/operator-attention-census.test.ts'
+  falsifier: |
+    Feed one actionable ruling, one in-progress daemon-last thread, and one release-proven
+    handoff. A last-speaker count returns two; the census must return one verified decision
+    and show why. Make the archive or projection unreadable: a healthy zero, silent omission,
+    or fabricated release absence fails. Repeat unchanged inputs: a new snapshot key or a
+    model invocation fails.

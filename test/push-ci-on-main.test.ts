@@ -221,7 +221,7 @@ test("W1-T1033: the pull request trigger is byte-for-byte unchanged", async () =
     // its job body carries no `if:` at all — see the next test) carry no gate; every other job
     // does. Either way nothing here narrows what a pull_request event registers.
     if (job.if === undefined) continue;
-    if (jobId === "ci-required" || jobId === "coverage-ratchet-required" || jobId === "flake-retry-aggregate") {
+    if (jobId === "ci-required" || jobId === "coverage-ratchet-required" || jobId === "test-slow" || jobId === "flake-retry-aggregate") {
       assert.equal(job.if, "${{ always() }}", `aggregator '${jobId}' must register even when its shards fail`);
     } else if (W1_T4399_SUPERSEDED_STUB_JOB_IDS.has(jobId)) {
       // W1-T4399: these 16 job keys stay registered — permanently `if: false` — only so

@@ -3694,6 +3694,7 @@
   depends_on: []
   type: implement
   verify: human
+  dispatch_hold: true
   principles: {tdd: strict}
   budget_usd: 80.00
   rationale: "RECON §8, honest-limits item 1, and the single most valuable unverified claim in the audit. The
@@ -3754,7 +3755,10 @@
     observing the hole has standalone value.
     The recon lists four further drills worth running (400-turn cliff, flock-stress the ledger, kill -9
     mid-run reclaim, simulated state loss). The last is covered by W1-T214's restore drill. The others are
-    not filed here - Rule 19 sizing, and each wants its own harness."
+    not filed here - Rule 19 sizing, and each wants its own harness.
+    TEMPORARY DISPATCH HOLD (2026-09-29): the daemon judge's 2026-09-27 release is not operator
+    consent to execute this credential-forgery drill. Await the operator's ruling on a disposable
+    sandbox plan before dispatch; this is not retirement."
 - id: W1-T212
   title: "coverage is aggregate-only so untested new code merges above the floor, and the review awareness surface omits every CI workflow and ratchet config it is supposed to police"
   repo: remudero
@@ -7668,6 +7672,7 @@
   risk: medium
   origin: architect
   status: blocked
+  retirement: retired
   attempts: 0
   note: "FALSIFIER RECORDED: the api-client contract (W3-T1a) means a NATIVE shell can be added later against a
     demonstrated need with ZERO console rework — retirement is reversible on evidence, not a permanent no. Superseded

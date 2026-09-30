@@ -9,6 +9,7 @@ const base: FollowUpCandidate = {
   workstream: "repo/workstream",
   reason: "The thread needs an owner decision.",
   freshness: "verified",
+  // expiring-fixture: exempt -- evaluate pins now to 2026-09-21; no wall-clock read.
   deadline: "2026-09-22T00:00:00.000Z",
   deduplicationKey: "repo/workstream:decision",
   maxAttempts: 2,
@@ -21,6 +22,12 @@ function evaluate(candidate: FollowUpCandidate, extra: Parameters<typeof evaluat
   return evaluateFollowUpPolicy(candidate, { now: "2026-09-21T12:00:00.000Z", ...extra });
 }
 
+test("the injected evaluation clock keeps the fixture deadline pending", () => {
+  const result = evaluate(base);
+  assert.equal(result.at, "2026-09-21T12:00:00.000Z");
+  assert.equal(result.state, "eligible", "expiring-fixture: exempt -- evaluate pins now to 2026-09-21; no wall-clock read");
+});
+
 test("stale and unavailable evidence suppresses instead of producing a healthy reminder", () => {
   assert.equal(evaluate({ ...base, freshness: "stale" }).state, "suppressed");
   assert.equal(evaluate({ ...base, freshness: "unavailable" }).state, "suppressed");
@@ -29,7 +36,7 @@ test("stale and unavailable evidence suppresses instead of producing a healthy r
 
 test("terminal source, expired deadline, and unavailable dependency are explicit refusals", () => {
   assert.equal(evaluate(base, { sourceTerminal: true }).state, "suppressed");
-  assert.equal(evaluate({ ...base, deadline: "2026-09-21T11:00:00.000Z" }).state, "expired");
+  assert.equal(evaluate({ ...base, deadline: "2026-09-21T11:00:00.000Z" }).state, "expired"); // expiring-fixture: exempt -- evaluate() pins now to 2026-09-21T12:00Z; this deadline is always one hour earlier, never compared with the wall clock
   assert.equal(evaluate({ ...base, dependency: "owner response" }, { dependencyAvailable: false }).state, "blocked");
 });
 

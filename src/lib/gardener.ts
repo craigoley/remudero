@@ -1,7 +1,8 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
+import type { Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { sampleBeta, seededRandom } from "./knowledge-value.js";
 
@@ -37,11 +38,69 @@ export interface ClassRecord {
 
 export interface GardenState<C extends string> {
   classes: Record<C, ClassRecord>;
-  lastPass?: { fingerprint: string };
+  /** `landed` names the PR that pass opened, so a spec's {@link GardenSpec.unfinished} cannot re-file it. */
+  lastPass?: { fingerprint: string; landed?: string };
   /** The cheap fingerprint of the last look, so an idle tick reads nothing more. */
   lastCheap?: string;
   /** The one class whose PR is awaiting its outcome. While it waits, no new PR is opened. */
   pending?: { prUrl: string; actionClass: C; baseline: Outcome; atMerge?: Outcome };
+  /** The current streak of passes whose filing threw, which defers the next attempt ({@link gardenFilingRetryAt}). */
+  filingFailures?: { count: number; lastAt: string; reason: string };
+  /** Ids of overseer effect verdicts already folded into `classes` (newest last), so a replay credits once. */
+  foldedEffects?: string[];
+}
+
+/** A verdict the gardener overseer (W1-T4802) reached about a class: what a merged change did to its
+ *  targeted cost (`effect`), or that the class kept re-proposing the same change (`churn`). */
+export interface GardenEffect {
+  id: string;
+  actionClass: string;
+  verdict: "credit" | "debit";
+  kind: "effect" | "churn";
+  at: string;
+}
+
+const GARDEN_FOLDED_EFFECTS_KEPT = 200;
+
+export function gardenEffectsPath(stateDir: string, name: string): string {
+  return join(stateDir, `${name}-gardener-effects.json`);
+}
+
+/** The pending overseer verdicts for one gardener; an absent or unreadable file holds none. */
+export function readGardenEffects(path: string): GardenEffect[] {
+  if (!existsSync(path)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { effects?: GardenEffect[] };
+    return Array.isArray(parsed?.effects) ? parsed.effects.filter((e) => typeof e?.id === "string" && typeof e.actionClass === "string") : [];
+  } catch (error) {
+    // deliberate: an unreadable effects file is dropped, not thrown into the pass; the overseer
+    // holds its own record of each verdict and writes the file afresh.
+    void error;
+    return [];
+  }
+}
+
+/** Write the overseer's pending verdicts for one gardener. The overseer never touches the gardener's
+ *  own state file — a concurrent pass would overwrite it — so this file is the one seam between them. */
+export function writeGardenEffects(path: string, effects: readonly GardenEffect[]): void {
+  writeAtomic(path, JSON.stringify({ effects }, null, 2) + "\n");
+}
+
+/** Credit or debit each class named by a verdict not folded before. Unknown classes are skipped. */
+export function foldGardenEffects<C extends string>(state: GardenState<C>, effects: readonly GardenEffect[]): { state: GardenState<C>; applied: GardenEffect[] } {
+  const seen = new Set(state.foldedEffects ?? []);
+  const applied: GardenEffect[] = [];
+  const classes = { ...state.classes };
+  for (const e of effects) {
+    if (seen.has(e.id)) continue;
+    seen.add(e.id);
+    const c = classes[e.actionClass as C];
+    if (!c) continue;
+    classes[e.actionClass as C] = e.verdict === "credit" ? { ...c, alpha: c.alpha + 1 } : { ...c, beta: c.beta + 1 };
+    applied.push(e);
+  }
+  const foldedEffects = [...seen].slice(-GARDEN_FOLDED_EFFECTS_KEPT);
+  return { state: { ...state, classes, foldedEffects }, applied };
 }
 
 export type PrState = "open" | "merged" | "closed" | "unknown";
@@ -62,6 +121,8 @@ export interface GardenPlan<C extends string, A extends GardenAction<C>> {
 /** A place to make a pass's changes and land them as one PR. */
 export interface GardenCheckout {
   root: string;
+  /** Landing branch, when a garden reserves a task id before filing its PR. */
+  branch?: string;
   /** Commit the paths and open the PR — always ready for review, never a draft. */
   land: (opts: { paths: string[]; title: string; body: string }) => string | undefined;
   dispose: () => void;
@@ -78,6 +139,8 @@ export interface GardenerDeps<W extends GardenCheckout = GardenCheckout> {
   prState?: (prUrl: string) => PrState;
   seed?: number;
   clock?: Clock;
+  /** Raises a failure streak to a person (escalate.ts); absent, the streak is ledgered only. */
+  escalate?: (escalation: Escalation) => string;
 }
 
 export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout> {
@@ -89,6 +152,9 @@ export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W ex
   cheapFingerprint: () => string;
   inventory: () => I;
   fingerprint: (inventory: I) => string;
+  /** True when the inventory itself shows the work is still undone (a ci-friction cause no plan task
+   *  tracks), so a matching fingerprint from a pass that landed nothing is not trusted as done. */
+  unfinished?: (inventory: I) => boolean;
   /** The evidence a class without `review` is judged on, read from the current inventory. */
   metric?: (inventory: I, actionClass: C) => Outcome;
   /** Every action any class could take now. Called after the class draws, with the same rng. */
@@ -145,7 +211,7 @@ export function judgeGardenPending<C extends string>(state: GardenState<C>, now:
   return { state, verdict: "waiting" };
 }
 
-/** A class a person reviews is judged by that person: a merged PR credits it, a closed one debits it. */
+/** A terminal PR verdict: reviewed merges earn credit; closing any pending PR earns a debit. */
 export function judgeGardenDecision<C extends string>(state: GardenState<C>, prState: PrState): { state: GardenState<C>; verdict: PendingVerdict } {
   const pending = state.pending;
   if (!pending) return { state, verdict: "none" };
@@ -200,28 +266,94 @@ export function gardenPrState(owner: string, repo: string, prUrl: string, fetch:
   }
 }
 
+/** How long a ledger-reading gardener's cheap fingerprint holds. The live ledger grows every second, so
+ *  a fingerprint over its size or mtime never matched, and each poll re-read the whole union on the
+ *  event loop — 2026-09-29 profile: 57 s of every 300 s in the ci-friction and test gardeners. */
+export const GARDEN_LEDGER_BUCKET_MS = 3_600_000;
+
+/** The ledger half of a cheap fingerprint: an hour bucket, never the live file's size or mtime. */
+export function gardenLedgerBucket(clock: Clock): number {
+  return Math.floor(clock.now() / GARDEN_LEDGER_BUCKET_MS);
+}
+
+/** A failed filing's first retry waits this long; each further consecutive failure doubles it. */
+export const GARDEN_FILING_RETRY_BASE_MS = 15 * 60_000;
+const GARDEN_FILING_RETRY_MAX_MS = 24 * 3_600_000;
+/** The consecutive failure that is raised to a person — earlier ones are retried quietly. */
+export const GARDEN_FILING_ESCALATE_AT = 3;
+
+/** When a gardener whose filings keep failing may try again; `undefined` when nothing failed. */
+export function gardenFilingRetryAt(failures: GardenState<string>["filingFailures"]): number | undefined {
+  if (!failures) return undefined;
+  const wait = Math.min(GARDEN_FILING_RETRY_BASE_MS * 2 ** (failures.count - 1), GARDEN_FILING_RETRY_MAX_MS);
+  return Date.parse(failures.lastAt) + wait;
+}
+
+function gardenFilingEscalation(name: string, failures: NonNullable<GardenState<string>["filingFailures"]>): Escalation {
+  return {
+    class: "BLOCKED",
+    taskId: `${name}-gardener`,
+    summary: `the ${name} gardener's filing has failed ${failures.count} times in a row`,
+    detail: `Each pass had work, but opening its PR threw, so nothing landed. Latest reason:\n\n${failures.reason}\n\nIt keeps retrying with a doubling wait; the ledger's \`${name}.garden_filing_failed\` rows carry each attempt.`,
+    options: [
+      { label: "fix-filing", detail: "repair what the latest reason names; the next retry then lands on its own" },
+      { label: "switch-off", detail: `touch state/${name.toUpperCase()}_OFF-<class> to stop the class` },
+    ],
+    recommendation: "fix-filing",
+    headDedup: "independent",
+  };
+}
+
 /** One pass of the gardener `spec` describes. Returns what it did. */
 export function runGarden<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
   deps: GardenerDeps<W>,
 ): { ran: boolean; plan?: GardenPlan<C, A>; prUrl?: string; scorecard?: Record<string, unknown> } {
   const statePath = gardenStatePath(deps.stateDir, spec.name);
+  let state = readGardenState(statePath, spec.classes);
+  // The overseer's verdicts reach the Beta record here, at the start of a pass, from a file it owns.
+  const effectsPath = gardenEffectsPath(deps.stateDir, spec.name);
+  const pendingEffects = readGardenEffects(effectsPath);
+  if (pendingEffects.length > 0) {
+    const folded = foldGardenEffects(state, pendingEffects);
+    state = folded.state;
+    writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
+    rmSync(effectsPath, { force: true });
+    if (folded.applied.length > 0) deps.log(`${spec.name}.gardener_effects_folded`, { verdicts: folded.applied.map((e) => `${e.kind}:${e.verdict}:${e.actionClass}`), classes: state.classes });
+  }
+  if ((gardenFilingRetryAt(state.filingFailures) ?? 0) > (deps.clock ?? systemClock).now()) return { ran: false };
   const cheap = spec.cheapFingerprint();
-  if (readGardenState(statePath, spec.classes).lastCheap === cheap) return { ran: false };
+  const pendingBefore = state.pending;
+  const prState = pendingBefore ? deps.prState?.(pendingBefore.prUrl) ?? "unknown" : undefined;
+  // Closing any PR is a debit, and a reviewed class credits its merge; neither needs a corpus read.
+  if (pendingBefore && (prState === "closed" || (spec.review?.[pendingBefore.actionClass] && prState === "merged"))) {
+    const judged = judgeGardenDecision(state, prState);
+    state = judged.state;
+    deps.log(`${spec.name}.gardener_judged`, { verdict: judged.verdict, classes: state.classes });
+    if (state.lastCheap === cheap) {
+      writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
+      return { ran: false };
+    }
+  }
+  // A metric class needs one inventory at merge to pin its baseline. Later observations follow
+  // the cheap input cadence even when the action fingerprint stays the same. An open or unreadable
+  // PR need not force an expensive read.
+  const terminalMetric = state.pending && !spec.review?.[state.pending.actionClass] &&
+    prState === "merged" && !state.pending.atMerge;
+  if (state.lastCheap === cheap && !terminalMetric) return { ran: false };
   const inventory = spec.inventory();
   const fingerprint = spec.fingerprint(inventory);
-  let state = readGardenState(statePath, spec.classes);
-  if (state.lastPass?.fingerprint === fingerprint) {
-    writeAtomic(statePath, JSON.stringify({ ...state, lastCheap: cheap }, null, 2) + "\n");
-    return { ran: false };
-  }
   if (state.pending) {
-    const prState = deps.prState?.(state.pending.prUrl) ?? "unknown";
     const judged = spec.review?.[state.pending.actionClass]
-      ? judgeGardenDecision(state, prState)
-      : judgeGardenPending(state, metricOf(spec, inventory, state.pending.actionClass), prState);
+      ? judgeGardenDecision(state, prState ?? "unknown")
+      : judgeGardenPending(state, metricOf(spec, inventory, state.pending.actionClass), prState ?? "unknown");
     state = judged.state;
     if (judged.verdict === "credit" || judged.verdict === "debit") deps.log(`${spec.name}.gardener_judged`, { verdict: judged.verdict, classes: state.classes });
+  }
+  const trusted = state.pending !== undefined || state.lastPass?.landed !== undefined || !spec.unfinished?.(inventory);
+  if (state.lastPass?.fingerprint === fingerprint && trusted) {
+    writeAtomic(statePath, JSON.stringify({ ...state, lastCheap: cheap }, null, 2) + "\n");
+    return { ran: false };
   }
   const clock = deps.clock ?? systemClock;
   const rng = seededRandom(deps.seed ?? clock.now());
@@ -238,22 +370,39 @@ export function runGarden<C extends string, I, A extends GardenAction<C>, W exte
   const acting = plan.acting[0];
   let prUrl: string | undefined;
   if (acting !== undefined && plan.actions.length > 0) {
-    const ws = deps.openWorkspace();
     try {
-      const landing = spec.apply(ws, plan, scorecard);
-      if (landing) {
-        const why = spec.review?.[acting];
-        prUrl = ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing);
+      const ws = deps.openWorkspace();
+      try {
+        const landing = spec.apply(ws, plan, scorecard);
+        if (landing) {
+          const why = spec.review?.[acting];
+          prUrl = ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing);
+        }
+      } finally {
+        ws.dispose();
       }
-    } finally {
-      ws.dispose();
+    } catch (e) {
+      // A failed filing is not a pass: no fingerprint is recorded, so the same work is retried once
+      // the doubling wait elapses, and a streak is raised to a person instead of going silent.
+      const reason = String((e as Error)?.message ?? e);
+      const failures = { count: (state.filingFailures?.count ?? 0) + 1, lastAt: clock.iso(), reason };
+      writeAtomic(statePath, JSON.stringify({ ...state, filingFailures: failures }, null, 2) + "\n");
+      deps.log(`${spec.name}.garden_filing_failed`, { attempt: failures.count, reason, retry_after_ms: gardenFilingRetryAt(failures)! - clock.now() });
+      if (failures.count === GARDEN_FILING_ESCALATE_AT && deps.escalate) {
+        deps.log(`${spec.name}.garden_filing_escalated`, { attempt: failures.count, issue_url: deps.escalate(gardenFilingEscalation(spec.name, failures)) });
+      }
+      // The measurement stands whether or not its PR opened: a filing that keeps failing must not
+      // also silence the scorecard (the ci-friction rows stopped for a day behind one bad title).
+      deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: null, awaiting: state.pending?.prUrl ?? null, filing_failed: failures.count });
+      return { ran: true, plan, scorecard };
     }
   }
   deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: prUrl ?? null, awaiting: state.pending?.prUrl ?? null });
   // Only a class whose changes landed as a PR is judged, and only on its own metric from this moment.
   const baseline = (c: C): Outcome => (spec.review?.[c] ? { trials: 0, successes: 0 } : metricOf(spec, inventory, c));
   const pending = prUrl && acting !== undefined ? { prUrl, actionClass: acting, baseline: baseline(acting) } : state.pending;
-  writeAtomic(statePath, JSON.stringify({ ...state, pending, lastCheap: cheap, lastPass: { fingerprint } }, null, 2) + "\n");
+  const lastPass = prUrl ? { fingerprint, landed: prUrl } : { fingerprint };
+  writeAtomic(statePath, JSON.stringify({ ...state, pending, lastCheap: cheap, lastPass, filingFailures: undefined }, null, 2) + "\n");
   return { ran: true, plan, prUrl, scorecard };
 }
 

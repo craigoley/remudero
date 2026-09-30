@@ -6,24 +6,34 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { gardenStatePath, readGardenState, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
+import { GARDEN_LEDGER_BUCKET_MS, gardenStatePath, readGardenState, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
+import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
 import {
+  DURATION_ADOPTION_CADENCE_MS,
+  DURATION_WINDOW_RUNS,
   RETIER_THRESHOLD,
+  TEST_GARDEN_BODY_ROWS,
   TEST_GARDEN_CLASSES,
+  TEST_GARDEN_PROOF_ROWS,
   loadTestManifestProbe,
+  refreshTestManifestProposalAsync,
+  startTestGarden,
+  testGardenCheapFingerprint,
   testGardenInventory,
   testGardenSpec,
+  testManifestProposalHistoryPath,
   testManifestProposalPath,
 } from "../src/lib/test-gardener.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { daemonCommand } from "../src/run-task.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -100,6 +110,9 @@ const deps = (root: string, landed: Landed[], prState?: () => "open" | "merged" 
   openWorkspace: checkout(root, landed),
   log: () => {},
   seed: 1,
+  // The fixture's manifest was committed moments ago; a clock two cadence windows later lets a
+  // duration adoption through the once-a-day hold.
+  clock: fixedClock(Date.now() + 2 * DURATION_ADOPTION_CADENCE_MS),
   ...(prState ? { prState } : {}),
 });
 const off = (root: string, ...classes: string[]) => classes.forEach((c) => writeFileSync(join(root, "state", `TEST_OFF-${c}`), ""));
@@ -130,16 +143,21 @@ test("W1-T4112: a material duration proposal is adopted and judged by shard skew
 test("W1-T4112: a non-material proposal shrinks a stale row downward instead", async () => {
   const probe = await probesPromise;
   const root = seededMeasuredPair();
-  // A tiny downward nudge to the lighter, already well-separated file: no shard reassignment, so
-  // ADOPT-DURATIONS (materiality-gated) sees nothing, and SHRINK-BASELINE claims the row instead.
-  writeProposal(root, { "test/a.test.ts": 1000, "test/b.test.ts": 5 });
+  // A settled downward move of the lighter, already well-separated file: every one of a full
+  // window of runs measures it below its committed 10ms, with no shard reassignment, so
+  // ADOPT-DURATIONS (materiality-gated) sees nothing and SHRINK-BASELINE claims the row instead.
+  const b = [5, 5, 4, 6, 5, 5, 5].slice(0, DURATION_WINDOW_RUNS);
+  writeFileSync(testManifestProposalHistoryPath(join(root, "state")), JSON.stringify({
+    runs: b.map((ms, i) => ({ runId: i + 1, files: { "test/a.test.ts": 1000, "test/b.test.ts": ms } })),
+    absent: [],
+  }));
   off(root, "retier-flaker", "adopt-durations");
   const landed: Landed[] = [];
   const pass = runGarden(testGardenSpec(deps(root, landed), probe), deps(root, landed));
   assert.deepEqual(pass.plan?.acting, ["shrink-baseline"]);
   assert.deepEqual(pass.plan!.actions.map((a) => a.target), ["scripts/test-tier-manifest.json#test/b.test.ts"]);
   assert.equal(pass.plan!.actions[0]!.edit.to, 5);
-  assert.match(pass.plan!.actions[0]!.reason, /Recorded 10ms; freshly measured 5ms — shrinking the manifest's total baseline size from \d+ms/);
+  assert.match(pass.plan!.actions[0]!.reason, /Recorded 10ms; the median of 7 CI run\(s\) measured 5ms — shrinking the manifest's total baseline size from \d+ms/);
   assert.equal(JSON.parse(readFileSync(join(root, "scripts/test-tier-manifest.json"), "utf8")).files["test/b.test.ts"], 5);
 });
 
@@ -256,7 +274,13 @@ test("W1-T4112: a self-hosting daemon wires the test gardener", async () => {
   const planPath = join(home, "tasks.yaml");
   writeFileSync(planPath, "[]\n");
   const oldHome = process.env.HOME;
+  const oldPath = process.env.PATH;
+  const oldFloor = process.env.RMD_GH_TRANSPORT_FLOOR;
   process.env.HOME = home;
+  // The wired garden reads CI's proposal first; this gh answers with no main runs, off the network.
+  const shim = ghShim([{ when: "actions/workflows/ci.yml/runs", stdout: "[]" }], { kind: "test-garden-proposal" });
+  process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+  process.env.RMD_GH_TRANSPORT_FLOOR = "advisory";
   let captured: DaemonDeps | undefined;
   try {
     await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
@@ -272,11 +296,161 @@ test("W1-T4112: a self-hosting daemon wires the test gardener", async () => {
     for (let waited = 0; !existsSync(stateFile) && waited < 20_000; waited += 100) await new Promise((r) => setTimeout(r, 100));
     garden.stop();
     assert.ok(readGardenState(stateFile, TEST_GARDEN_CLASSES).lastPass, "the wired garden ran a pass over this repo's real manifest");
+    assert.ok(shim.calls().some((call) => call.includes("event=push&branch=main")), "the wired garden asked CI for its proposal");
     // Stopped before its probe loads, it never starts.
     const early = start!(60_000);
     early.stop();
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    if (oldFloor === undefined) delete process.env.RMD_GH_TRANSPORT_FLOOR;
+    else process.env.RMD_GH_TRANSPORT_FLOOR = oldFloor;
   }
+});
+
+test("a live ledger append leaves the test gardener cheap fingerprint unchanged within the hour", async () => {
+  const probe = await probesPromise;
+  const root = seededSuite();
+  const stateDir = join(root, "state");
+  const livePath = join(stateDir, "ledger.ndjson");
+  writeFileSync(livePath, '{"step":"daemon.alive"}\n');
+  const hourMs = Date.UTC(2026, 8, 29, 11, 0, 0);
+  const before = testGardenCheapFingerprint(root, stateDir, probe, fixedClock(hourMs));
+  appendFileSync(livePath, '{"step":"daemon.alive","n":2}\n');
+  const later = new Date(hourMs + 120_000);
+  utimesSync(livePath, later, later);
+  assert.equal(testGardenCheapFingerprint(root, stateDir, probe, fixedClock(hourMs + 120_000)), before, "a ledger that only grew must not force a full union read");
+  assert.notEqual(testGardenCheapFingerprint(root, stateDir, probe, fixedClock(hourMs + GARDEN_LEDGER_BUCKET_MS)), before, "the next hour re-reads");
+});
+
+test("the newest successful main run's CI proposal is fed to the gardener and adopt-durations acts on it", async () => {
+  const probe = await probesPromise;
+  const root = seededSuite();
+  const stateDir = join(root, "state");
+  const proposal = JSON.stringify({ thresholdMs: 5000, files: { "test/a.test.ts": 100, "test/b.test.ts": 6000, "test/c.test.ts": 50, "test/d.test.ts": 50 } }, null, 2) + "\n";
+  let runs: unknown = [
+    { id: 9, status: "in_progress", conclusion: null },
+    { id: 8, status: "completed", conclusion: "failure" },
+    { id: 7, status: "completed", conclusion: "success" },
+  ];
+  const listCalls: string[][] = [];
+  const downloads: string[][] = [];
+  let artifact: "present" | "absent" | "broken" | "unreachable" = "present";
+  const io = {
+    readJson: async (args: string[]) => (listCalls.push(args), runs),
+    download: async (args: string[]) => {
+      downloads.push(args);
+      if (artifact === "absent") throw Object.assign(new Error("Command failed: gh run download"), { stderr: "no artifact matches any of the names or patterns provided" });
+      if (artifact === "unreachable") throw Object.assign(new Error("Command failed: gh run download"), { stderr: "HTTP 502" });
+      const dir = args[args.indexOf("--dir") + 1]!;
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "test-tier-manifest.next.json"), artifact === "broken" ? '{"files":{}}' : proposal);
+      return "";
+    },
+  };
+  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "fresh", runId: 7 });
+  assert.match(listCalls[0]![1]!, /ci\.yml\/runs\?event=push&branch=main/);
+  assert.deepEqual(downloads[0]!.slice(0, 6), ["run", "download", "7", "--repo", "acme/remudero", "--name"]);
+  assert.equal(readFileSync(testManifestProposalPath(stateDir), "utf8"), proposal);
+  assert.equal(existsSync(join(stateDir, "test-tier-manifest-proposal.download")), false, "the download directory is removed");
+  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "unchanged", runId: 7 });
+  assert.equal(downloads.length, 1, "an unchanged main run is never downloaded twice");
+
+  const landed: Landed[] = [];
+  off(root, "retier-flaker", "shrink-baseline");
+  const pass = runGarden(testGardenSpec(deps(root, landed), probe), deps(root, landed));
+  assert.deepEqual(pass.plan?.acting, ["adopt-durations"], "the fed proposal is what lets the class act");
+  assert.equal(landed.length, 1);
+
+  runs = [{ id: 10, status: "completed", conclusion: "success" }];
+  artifact = "absent";
+  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "absent", reason: "run 10 published no proposal", runId: 10 });
+  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "unchanged", runId: 10 },
+    "the proposal already held stays; the artifact-less run is not asked again");
+  assert.equal(downloads.length, 2);
+  rmSync(testManifestProposalPath(stateDir));
+  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "absent", reason: "run 10 published no proposal", runId: 10 });
+
+  runs = [{ id: 11, status: "completed", conclusion: "success" }];
+  artifact = "unreachable";
+  await assert.rejects(refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), /Command failed/, "a transport failure is the caller's to log");
+  artifact = "broken";
+  await assert.rejects(refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), /not a \{thresholdMs, files\} manifest/);
+  runs = [{ id: 12, status: "completed", conclusion: "cancelled" }];
+  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "absent", reason: "no successful main run among the newest ten" });
+  runs = { message: "Bad credentials" };
+  await assert.rejects(refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), /no main-run list/);
+});
+
+test("the test garden writes one pass row an hour saying why it did nothing", async () => {
+  const probe = await probesPromise;
+  const root = seededSuite();
+  let nowMs = Date.UTC(2026, 8, 29, 11, 0, 0);
+  const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const gardenDeps = { ...deps(root, []), clock: clockFromMillisFn(() => nowMs), log: (step: string, extra?: Record<string, unknown>) => { events.push({ step, extra }); } };
+  let refreshes = 0;
+  let failRefresh = false;
+  const garden = startTestGarden(testGardenSpec(gardenDeps, probe), gardenDeps, async () => {
+    refreshes++;
+    if (failRefresh) throw new Error("gh unavailable");
+    return { status: "absent", reason: "no successful main run among the newest ten" };
+  }, 5);
+  const passes = () => events.filter((e) => e.step === "test.pass");
+  const until = async (ok: () => boolean) => { for (let waited = 0; !ok() && waited < 5_000; waited += 5) await new Promise((r) => setTimeout(r, 5)); };
+  try {
+    await until(() => passes().length === 1);
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(passes().length, 1, "one row per hour, not per tick");
+    assert.equal(refreshes, 1, "the CI proposal is read once per hour");
+    assert.deepEqual(passes()[0]!.extra, { ran: true, feed: { status: "absent", reason: "no successful main run among the newest ten" }, pr_url: null, proposal_present: false });
+    failRefresh = true;
+    nowMs += GARDEN_LEDGER_BUCKET_MS;
+    await until(() => passes().length === 2);
+    assert.deepEqual(passes()[1]!.extra, { ran: false, feed: { status: "failed", error: "gh unavailable" }, pr_url: null, proposal_present: false },
+      "an unchanged garden still says it looked, and why nothing moved");
+    assert.ok(events.some((e) => e.step === "test.evidence_failed"));
+  } finally {
+    garden.stop();
+  }
+  const broken = { ...gardenDeps, stateDir: join(root, "missing", "\u0000") };
+  const failing = startTestGarden(testGardenSpec(broken, probe), broken, async () => ({ status: "absent", reason: "none" }), 60_000);
+  try {
+    await until(() => events.some((e) => e.step === "test.gardener_failed"));
+  } finally {
+    failing.stop();
+  }
+  assert.ok(events.some((e) => e.step === "test.gardener_failed"), "a failed pass is logged by name");
+});
+
+test("a first adoption of every measured row fits one PR body", async () => {
+  const probe = await probesPromise;
+  const repo = gitRepo({ kind: "w1t4112-wide" });
+  const root = repo.dir;
+  const files: Record<string, number> = {};
+  const measured: Record<string, number> = {};
+  mkdirSync(join(root, "test"), { recursive: true });
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  for (let i = 0; i < 60; i++) {
+    const file = `test/w${String(i).padStart(2, "0")}.test.ts`;
+    writeFileSync(join(root, file), "export {};\n");
+    files[file] = 0;
+    measured[file] = 100 + i * 10;
+  }
+  writeFileSync(join(root, "scripts", "test-tier-manifest.json"), JSON.stringify({ thresholdMs: 5000, files }, null, 2) + "\n");
+  repo.git("add", "-A");
+  repo.git("commit", "-q", "-m", "seed");
+  writeProposal(root, measured);
+  off(root, "retier-flaker", "shrink-baseline");
+  const landed: Landed[] = [];
+  runGarden(testGardenSpec(deps(root, landed), probe), deps(root, landed));
+  assert.equal(landed.length, 1);
+  const body = landed[0]!.body;
+  assert.equal((body.match(/^- \*\*adopt-durations\*\*/gm) ?? []).length, TEST_GARDEN_BODY_ROWS);
+  assert.match(body, new RegExp(`…and ${60 - TEST_GARDEN_BODY_ROWS} more row\\(s\\)`));
+  assert.equal((body.match(/^  proof: grep: /gm) ?? []).length, TEST_GARDEN_PROOF_ROWS);
+  assert.match(body, /proof: grep: "test\/w59\.test\.ts": 690 in scripts\/test-tier-manifest\.json/, "the largest measured row is proved first");
+  assert.equal(JSON.parse(readFileSync(join(root, "scripts", "test-tier-manifest.json"), "utf8")).files["test/w00.test.ts"], 100, "every row still lands");
 });

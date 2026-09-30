@@ -23,7 +23,7 @@ import { dirname, join } from "node:path";
 import { mock, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { EXCHANGE_TIMEOUT_MS, REFRESH_MARGIN_MS, refreshInstallationToken } from "../src/lib/github-app.js";
+import { EXCHANGE_TIMEOUT_MS, INSTALLATION_TOKEN_LIFETIME_MS, REFRESH_MARGIN_MS, refreshInstallationToken } from "../src/lib/github-app.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RECYCLE_SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
@@ -294,11 +294,10 @@ test("W1-T2311: nothing added paces, throttles, sleeps or backs off a call", () 
   assert.doesNotMatch(decisionRecord, /\bsleep\(/);
   assert.doesNotMatch(decisionRecord, /setTimeout|setInterval/);
 
-  // The retry cadence itself is unchanged — this task did not touch either constant.
-  assert.match(githubApp, /export const REFRESH_MARGIN_MS = 5 \* 60 \* 1000;/);
-  assert.match(githubApp, /export const EXCHANGE_TIMEOUT_MS = 20 \* 1000;/);
-  assert.equal(REFRESH_MARGIN_MS, 5 * 60 * 1000);
-  assert.equal(EXCHANGE_TIMEOUT_MS, 20 * 1000);
+  // Scheduled credential renewal is distinct from pacing each GitHub call. Its margin
+  // must leave room for an exchange while staying inside the token's lifetime.
+  assert.ok(REFRESH_MARGIN_MS > EXCHANGE_TIMEOUT_MS);
+  assert.ok(REFRESH_MARGIN_MS < INSTALLATION_TOKEN_LIFETIME_MS);
 
   const recycle = readFileSync(RECYCLE_SCRIPT, "utf8");
   const addedSection = sectionBetween(

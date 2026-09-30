@@ -194,7 +194,7 @@ export interface LatchRow {
   ageMs?: number;
   consequence: string;
   /** Why this latch's RECORD is worth showing while its INSTRUCTION no longer applies. Today `DEPLOY_FAILED` and only
-   *  it: nothing unlinks the marker, so the alert is permanent and its advice named a head origin/main had passed. Why:
+   *  it: a healthy deploy now unlinks the marker, but until one runs its advice can name a head origin/main passed. Why:
    *  the measured stale latch and #1639's shape — docs/forensics/status-board.md */
   superseded?: string;
 }
@@ -896,6 +896,8 @@ export interface CadenceMarkerDef {
    *  {@link CADENCE_DEFAULT_INTERVAL_MINUTES}, whose conservatism holds only for rungs faster than
    *  a day. Checked by {@link cadenceDefsMisjudgedByFallback}, not left to a comment. */
   intervalMinutes?: number;
+  /** The service that writes this marker, when its liveness is available on this board. */
+  writer?: ServiceName;
 }
 
 /** How many of a rung's OWN intervals may elapse before its marker reads stale.
@@ -929,14 +931,14 @@ export const CADENCE_MARKERS: readonly CadenceMarkerDef[] = [
   // lookback". Judged against the 1440-minute fallback it read stale for 96 of every 168 hours
   // while behaving exactly as designed — measured on the live board 2026-09-18.
   { name: "feedback-docket", file: "last-feedback-docket.json", intervalMinutes: SEVEN_DAYS_MINUTES },
-  { name: "last-seen", file: "last-seen.json" },
+  { name: "last-seen", file: "last-seen.json", writer: "serve" },
 ];
 
-/** THREE STATES, NEVER TWO. `fresh`, `stale` and `never` are three different operator actions:
+/** FOUR STATES. `fresh`, `stale`, `never` and `writer-stopped` are different operator actions:
  *  reporting a never-fired rung as stale sends someone hunting a regression in a rung with no
  *  history, and SKIPPING it — what the latch loop does with an absent file — reports a dead rung as
  *  nothing at all. */
-export type CadenceMarkerState = "fresh" | "stale" | "never";
+export type CadenceMarkerState = "fresh" | "stale" | "never" | "writer-stopped";
 
 export interface CadenceMarkerRow {
   name: string;
@@ -961,8 +963,14 @@ export interface CadenceSection {
  * Judge every cadence marker against its own rung's interval.
  *
  * PURE over injected reads: `readMarkerAgeMs` returns `undefined` for an absent or unparseable
- * marker, which is the `never` state and never a skip. `intervalMinutesFor` returns the rung's
- * declared `minIntervalMinutes`, or `undefined` to take {@link CADENCE_DEFAULT_INTERVAL_MINUTES}.
+ * marker, which is always the `never` state — a marker that has never been written says nothing
+ * about the writer's CURRENT liveness, so a stopped writer does not override it. `intervalMinutesFor`
+ * returns the rung's declared `minIntervalMinutes`, or `undefined` to take {@link
+ * CADENCE_DEFAULT_INTERVAL_MINUTES}. Only a marker that HAS aged past its budget is re-checked
+ * against its named writer: a positively-stopped writer turns that verdict from `stale` into
+ * `writer-stopped`, because a deliberately-down service is not a failing cadence. unsensed is not stopped
+ * — only a positive observation suppresses the verdict. A row that names no writer, or whose writer
+ * is not observed stopped, retains the original three-state judgment.
  */
 /**
  * The registry rows the fallback would MISJUDGE — every def that declares no interval of its own
@@ -994,11 +1002,15 @@ export function cadenceMarkerRows(
   markers: readonly CadenceMarkerDef[],
   readMarkerAgeMs: (def: CadenceMarkerDef) => number | undefined,
   intervalMinutesFor: (def: CadenceMarkerDef) => number | undefined,
+  writerStateFor?: (writer: ServiceName) => LivenessState,
 ): CadenceMarkerRow[] {
   return markers.map((def) => {
     const intervalMinutes = def.intervalMinutes ?? intervalMinutesFor(def) ?? CADENCE_DEFAULT_INTERVAL_MINUTES;
     const ageMs = readMarkerAgeMs(def);
     if (ageMs === undefined) {
+      // A marker that has NEVER been written is its own fact, independent of the writer's current
+      // liveness — a writer that is down right now says nothing about whether the rung ever fired
+      // in the past, so "never" stands even when {@link writerStateFor} reports it stopped.
       return {
         name: def.name,
         state: "never",
@@ -1009,6 +1021,21 @@ export function cadenceMarkerRows(
     const budgetMs = intervalMinutes * 60_000 * CADENCE_STALE_INTERVALS;
     if (ageMs <= budgetMs) {
       return { name: def.name, state: "fresh", ageMs, intervalMinutes, consequence: `advanced within ${CADENCE_STALE_INTERVALS} of its own intervals` };
+    }
+    // The marker HAS aged past its own budget. Before reading that as a failing cadence, check
+    // whether its named writer is positively observed stopped — a deliberately-down service left a
+    // marker that will not advance no matter how long it waits, which is not the same defect as a
+    // running writer that stopped advancing. Unsensed (the sensor itself could not be asked) is
+    // deliberately NOT treated as stopped here: an unknown liveness must not suppress a real stale
+    // reading.
+    if (def.writer && writerStateFor?.(def.writer) === "stopped") {
+      return {
+        name: def.name,
+        state: "writer-stopped",
+        ageMs,
+        intervalMinutes,
+        consequence: `writer is not running (${def.writer}) — no cadence is expected`,
+      };
     }
     return {
       name: def.name,
@@ -2188,6 +2215,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
         return cadenceMarkerAgeMs(path, nowMs);
       },
       (def) => (def.policyKey ? resolveCadenceIntervalMinutes(def.policyKey) : undefined),
+      (writer) => livenessState(services.find((service) => service.service === writer)!),
     ),
   };
 
@@ -2356,7 +2384,7 @@ function renderCadenceBlock(cadence: CadenceSection): string[] {
     out.push("no cadence markers tracked");
   } else {
     for (const r of cadence.rows) {
-      const age = r.state === "never" ? "never fired" : `${formatAgeMs(r.ageMs)} ago`;
+      const age = r.state === "never" ? "never fired" : r.state === "writer-stopped" ? "writer not running" : `${formatAgeMs(r.ageMs)} ago`;
       out.push(`${r.name}, ${r.state} (${age}) — ${r.consequence}`);
     }
   }

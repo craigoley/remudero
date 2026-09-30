@@ -3129,6 +3129,24 @@ $25 squeeze-day cash ceiling.
 **Sources read 2026-09-24:** Microsoft Azure GPT-6 launch pricing;
 Microsoft Foundry Claude Messages API and deployment guidance; Anthropic Opus 5.5 price sheet.
 
+## 2026-09-29 — OPERATOR RULING: a balanced subscription squeeze runs on Foundry Sonnet 5.5
+
+**Operator-authored direction:** Switch the cash lanes to Sonnet 5.5, as a **balanced squeeze
+emergency**. When both subscriptions block a balanced (`sonnet`) task, it runs on Foundry Claude
+Sonnet 5.5. Routine cash stays on the measured gpt-5-nano, gpt-oss-120b and Luna rows.
+
+- This mirrors the 2026-09-24 Foundry Opus emergency for frontier. Sonnet uses the same
+  `/anthropic/v1/messages` adapter, endpoint and daemon key.
+- Opus and Sonnet reservations share one Foundry Claude cap: $5 per UTC day ordinarily and $10
+  on a squeeze, still inside the shared cash `dailyCapUsd`.
+- A refusal before transport (cap exhausted, absent credentials, unsupported tool surface) falls
+  through to the existing Luna cash fallback, so the ruling never holds a task that runs today.
+- The subscription router's `sonnet` alias leads with `claude-sonnet-5-5` separately (#7819).
+- The deployment exists: `claude-sonnet-5-5` (GlobalStandard, version 2) on synthwatch-foundry
+  answered a 200 through the daemon's own endpoint and key on 2026-09-29.
+- Anthropic lists Sonnet 5.5 at $2 input and $10 output per million tokens.
+- Built by W1-T4785.
+
 ## 2026-09-26 — W1-T4583: the in-repo contract-coverage ratchet is RETIRED; the contract is checked where it is served and where it is consumed
 
 *Operator direction record: carried out under the operator's 2026-09-26 instruction to "file items that need filed, fix items that need fixed, build items that need built" for the old-console follow-up audit that named this ratchet as measuring nothing.*
@@ -3156,3 +3174,241 @@ closed: W1-T4568 stays parked (`verify: human` holds it from dispatch) with thre
 cold first read over 5 s, or the corpus past 5 GB / 10M rows). If it is built, node:sqlite remains the
 recommended store (in-process, no new dependency). Rollback: release W1-T4568 for build.
 
+
+## 2026-09-29 — OPERATOR DECISION: retire the outcome-only approved skill and the retro's learnings promotion pass
+
+*Operator direction record: the operator delegated these two calls to the coordinator's recommendation
+on 2026-09-29 ("proceed"). Recorded by hand; not a machine auto-choose resolution.*
+
+Both stages are retired for the same reason: a learning-loop stage whose output reaches no worker, or reaches
+one without effect, costs spend and attention and returns nothing. Measured over 2026-09-15..29 on the core
+ledger (all three rotation forms, deduplicated):
+
+- **SKILL `implement-clean-single-strike-8aa4458e` (approved in #7090) is RETIRED by #7837.** Its whole
+  procedure is "Resolve the task on the first attempt". That restates the signal the runs were mined on and
+  names no step. Measured:
+  - it was injected into 399 implement prompts;
+  - workers self-reported using it in 8 of 114 `skills.used` rows;
+  - among runs it was injected into, the merged share of implement runs was 36% (59/164) in the three days
+    before its approval and 37% (44/120) in the three days after.
+  All 18 staged `skill-draft:` proposals have the same outcome-only shape, and #7833 stops the workshop
+  staging that shape. Rollback: restore the SKILL.md from #7837's parent.
+- **THE RETRO'S LEARNINGS PROMOTION PASS (P32/W1-T1059/W1-T1249) is RETIRED by #7844.**
+  `selectPromotionCycleEntries` sorts by id and takes five, so every retro spawned a fresh judge for the
+  same entries: 352 `promotion.verdict` rows on 4 ids, 258 of them "promoted". The pass writes nothing, and
+  each daemon instance has its own `<root>/learnings-user` home, so no worker could read a promoted entry.
+  The learnings.ts pipeline (`promoteEntry`, `runPromotionPass`, scrub, taint) is kept. Rollback: revert
+  #7844.
+
+**REVISIT CONDITION — rebuild both when the transcript miner yields real multi-step procedures.**
+- That means `mineTranscriptWorkflows` (workflow-mining.ts) returns a workflow with two or more
+  distinguishing steps over a live retro window. Over 2026-09-21..29 it returned none.
+- A rebuilt skill release should ride the shared risk-judge release path, and retire itself on
+  `buildSkillEffectivenessReport`'s RETIRE-CANDIDATE.
+- A rebuilt promotion should judge each entry once per content, and write to a home that more than one
+  instance reads.
+
+
+## 2026-09-29 — OPERATOR RULING: an LLM judge in the middle of machine-filed work; the operator RATIFIES it to release
+
+*Operator-authored, recorded at the operator's instruction on 2026-09-29:*
+
+> "Why are they verifying human risk high? They shouldn't be. There should be an LLM judge in the
+> middle deciding what needs that level of escalation and what can be automated. Fix the CI friction
+> gardener so it doesn't make those mistakes or make the rules lighter so that these can flow
+> through… Think deeply and do research to get it right. Innovate as you go."
+
+And on the reviewer: "it's both. Fix the workers and make the judge less strict unless things are
+really risky or broken and require that."
+
+**THIS IS LAW 5's "A JUDGE THE OPERATOR RATIFIED".** `machineAuthorVerifyViolation` (W1-T2977) already
+lets a machine-authored record sit at `verify: auto` when it carries a `proceed` `risk_ruling` pinned to
+itself. This ruling ratifies `src/lib/machine-filing-judge.ts` as the judge that writes those rulings.
+
+- **FILERS NO LONGER CHOOSE `verify:` OR `risk:`.** Every machine filer (ci-friction, selector-shadow,
+  the CI-learning rung, and the feedback landing that carries its drafts) renders the one header in
+  `src/lib/machine-filing.ts`. `verify: human` there means UNJUDGED. `risk:` is read from what the
+  record touches: `high` (with `band_meaning: blast-radius`) only for secrets, auth, permissions, CI,
+  deploy, settings or the operator's own policy and rulings; otherwise `low`.
+- **THE JUDGE RULES, ON THE RECORD.** A daemon pass asks the risk judge about every unjudged or stale
+  machine record and pins the answer as `risk_ruling`. `proceed` → `verify: auto`, dispatchable.
+  `escalate` → stays `verify: human`, pinned, and its reasons are staged in the inbox. The rulings land
+  as one plan-only PR per pass through the ordinary review and merge gates; closing it declines them
+  and the judge does not re-ask until a record changes.
+- **ESCALATE ONLY WHAT IS REALLY RISKY OR BROKEN.** The judge is told: touching secrets, credentials,
+  auth or permissions; deleting data, branches or history; merge, deploy, infrastructure or review
+  policy; an irreversible action; or a finding it cannot verify from what it is shown. Everything else
+  flows — its PR still passes CI and review. A `proceed` the record cannot honour at `verify: auto`
+  (it would fail the linter) is escalated as broken, with the lint reason.
+- **A DETERMINISTIC BACKSTOP RUNS BEFORE THE MODEL, AND ONLY ESCALATES.** It sends a record straight to a
+  person, with no model asked, when the record touches secrets, auth, tokens or permissions; deletes
+  data, branches, archives or ledgers, or takes any other irreversible action; or changes merge,
+  deploy or branch-protection policy (`deterministicEscalation`, machine-filing.ts). It reads the
+  declared paths plus the title, prompt and acceptance claims, never the note, and it can never
+  release anything. **Why this guardrail earns its place: irreversibility.** Everywhere else a wrong
+  release costs one closed PR. Here it costs a deleted branch, a truncated ledger or a widened grant,
+  and no review gate can undo those. The model is also least reliable exactly there. On the
+  2026-09-29 probes, haiku released "delete every merged branch" twice, and sonnet released a
+  ledger-archive truncation once. `test/fixtures/machine-judge-probes.json` holds the regression
+  eval. With the backstop and the live sonnet judge, all 6 risky probes escalate and all 4 benign
+  probes proceed, and the benign 4 are the only model calls.
+- **EARNED AUTONOMY, NO FIXED BAR.** Each filer family's record — its merged tasks as credit, the ones
+  a person retired `closed`/`retired` as debit, plus its gardener's Beta credit beyond the Beta(3,1)
+  prior — is shown to the judge and sets the confidence a `low` verdict needs:
+  `1 − (1 − policy threshold) × 2 × mean`. An even record keeps `plan/policy.yaml`'s threshold; a family
+  that keeps helping needs less, one that keeps failing approaches certainty, and both recover as the
+  outcomes move. A `withdrawn` duplicate is neither credit nor debit.
+- **FAIL SAFE.** A judge that throws, times out or returns no verdict writes nothing: the record stays
+  parked, a `machine_judge.unavailable` row names the reason, and the next pass asks again. An outage is
+  never an escalation and never a release.
+- **ON THE RECORD, NOT THE LEDGER — THE PINNED RULING IS THE ONLY RELEASE A MACHINE RECORD GETS.** The
+  verify-human release (2026-09-22) writes `ratify.approved` rows, and the dispatcher reads releases from
+  the LIVE ledger, which rotation caps at 200 rows per step and sheds by age. Measured 2026-09-29: 151
+  task ids carry a release row across the rotations, 76 in the live ledger, so releases silently lapsed
+  and those tasks parked again. No judge releases a machine-authored record by a ledger row from here on:
+  its pinned `risk_ruling` lives in git, cannot be rotated away, and editing the record changes its pin,
+  which re-opens the question. (An operator's own `rmd approve` is made durable the same way; see below.)
+- **THE VERIFY-HUMAN SWEEP HANDS MACHINE RECORDS TO THIS JUDGE.** W1-T3188's judge now routes and
+  releases only operator-authored `verify: human` records, through its existing arm; machine-authored
+  ones are routed (inbox on escalate) and released (pinned ruling) here.
+
+- **SUPERSEDES W1-T4014's "must NOT auto-release".** W1-T4014 (2026-09-22) set as a non-negotiable design
+  constraint that "a rung that released its own proposals would be a machine ruling on guidance" and
+  that "nothing in the path releases a proposal without a person". That constraint predates this ruling
+  and is replaced by it: a release by the judge the operator ratified here IS the release Law 5 allows.
+  W1-T4014's visibility deliverable stands; its "release is never automatic" criterion no longer does and
+  should be amended to "nothing releases a machine proposal except a person or this ratified judge".
+
+**OPERATOR `verify: human` RECORDS TOO (operator answer, 2026-09-29: "YES … EXCEPT ruling-shaped records").**
+The same judge, the same backstop and the same pinned ruling apply to every operator-authored `verify:
+human` record, except a ruling-shaped one (the linter's `rulingVerifyViolation` trigger: it declares
+DECISIONS.md). Ruling-shaped records stay on the W1-T3188 sweep, whose release arm now refuses them.
+The judge's rule gains one escalation clause for these records: it asks for a decision only the
+operator can make (his priorities, budget, preference or policy).
+
+**RELEASED WORK DISPATCHES BY ITS MEASURED COST (operator answer, 2026-09-29).** A filer that prices its
+finding writes `priority: 90 − 12·ln(1 + cost)`, bounded to 1..90, so the most expensive released
+problems dispatch first (`costPriority`). The cost is PR-minutes for ci-friction (its recency-weighted
+pricing) and refused-PR occurrences for the CI-learning rung. A released machine record with no
+recorded cost gets the middle priority, 50, instead of sorting last. The priority sits inside the
+ruling's pin. An operator record's priority stays his.
+
+**`rmd approve` IS DURABLE.** The operator's release still writes its `ratify.approved` row, which
+takes effect at once. It is also kept in `state/operator-releases.json`, which rotation does not touch,
+and the judge's next pass pins it on the record as an `operator` ruling. That pass asks no model and
+runs no backstop, because the operator's bit is the decision.
+
+Rollback: remove the `machine-judge` garden from the daemon's gardens and revert the filers to the
+literal header; records already pinned stay valid, and reverting any one to `verify: human` parks it.
+
+## 2026-09-30 — OPERATOR RULINGS: the verify-human queue, cleared
+
+**Operator-authored direction:** each ruling below is the operator's own, given in chat on 2026-09-30 in answer to per-task recommendations. The operator session recorded them; it did not originate them. Every task was first re-checked against main and the fleet ledger, and each entry states the evidence.
+
+- **W1-T3570: STOP nano as the inbox-draft lead.** On the slim prompt, nano drafts were lint-clean 49/200 (25%), and only 48 of 199 proposals ever drafted clean. Claude lanes were 100%, and nano itself was 12/12 on the full prompt. The lead moves to cash `gpt-6-luna` (#7963), with nano and gpt-oss-120b as fallbacks. Report: `docs/recon/openweight-inbox-draft-trial.md` (#7965).
+- **W1-T2927: take route (a).** The host sweep pulls the `mutation-verdict-ledger` artifact that `ci.yml` already uploads, using its own read identity, and appends only `run_id`s it has not recorded. Route (b) is declined because it would put a write credential in a public repo's CI. Route (c) is declined because it turns typed data into prose.
+- **W1-T3801: FIRST GATE-POSTURE PILOT = `coverage-ratchet`.** It was the most frequent real first-head failure (3 of 7 in 50 PRs, 2026-09-29/30).
+  - The finding is deterministic: coverage fell below its ratchet.
+  - The judge chooses only the consequence: STOP, or PROCEED with one coverage-improvement debt task filed idempotently through `coverage-improvement.ts`.
+  - Excluded from the pilot: security, credentials, CI-red, merge-authority and tenant gates.
+  - A judge outage restores today's behaviour.
+- **W1-T4354: release the BM25 learnings lane as a randomized arm.** It uses a small seeded propensity and fills only the budget the glob/symbol/error match leaves empty. 743 of 2,599 tasks (29%) match zero learnings. The outcome fold (W1-T4241/W1-T4243), not hand labels, decides whether it stays.
+- **W1-T365: confirm the rule-13 amendment text.** A passing test does not prove wiring. Build the gate as an answerable refusal that reuses the existing `SHIPS-UNWIRED:` / `WIRED-AT:` markers, never an unanswerable block.
+- **W1-T926: drop the live launchd half.** The fleet restarts through `deploy/recycle-container.sh`, so launchd is obsolete here. Retarget the headless dirt-shape drill at the container instance checkout and launcher convergence, where an untracked file still silently blocks convergence.
+- **W1-T239: no destructive live drill.** Take each worker-home link's verdict from what the fleet already records per host: linked or absent. The keychain link is macOS-only and not needed on the Linux fleet. Sequence after W1-T4348, which changes the `.claude` link.
+- **W1-T4568: stays DEFERRED.** None of the 2026-09-27 release triggers has fired. The ~4 s cold board read comes from replayed ledger rows, which W1-T4820 fixes, not from the lack of a store. Re-measure the cold read after W1-T4820 merges; over 5 s fires the trigger, and node:sqlite remains the store.
+- **W1-T2259: approve as verify: auto.** Delete the orphan `scripts/shell-screenshot.mjs`, its two stale PNGs, and its allowlist and comment-load baseline entries.
+
+**Closed without a new ruling, on evidence:**
+- W1-T2615: already applied in `a0f56cae8`.
+- W1-T3102 and W1-T3103: ruled 2026-09-22 (#6561) and credited, but still read as queued.
+- W1-T3887: the site already pins core `2ccb1710c`, merged via site #119.
+- W1-T971: overtaken by W1-T2766, and one fact it would pin is now false.
+- W1-T433: the multi-instance design already runs on Azure (core, console, site); launchd on the mini is obsolete. Whether the fleet should drive wild-trails is a separate, open operator question.
+
+
+## 2026-09-30 — OPERATOR RULING: the core↔console read path becomes a materialized, pushed read model (W1-T4568 released)
+
+*Operator-authored direction, given in chat on 2026-09-30, answering the architecture review of the console's data path: "I like the plan that you've put together … We're going to proceed through with all phases." This SUPERSEDES the same day's earlier item "W1-T4568: stays DEFERRED" (#7966).*
+
+**Why the deferral no longer holds.** The 2026-09-27 release trigger "a cold first read over 5 s" has fired in production. The measurements from 2026-09-29/30 are in the tracker named under **Tracked in**:
+
+| Measurement | Value |
+|---|---|
+| `/v1/status` under a slow `gh` | 22.4 s, labelled `fresh` |
+| cold `/v1/operator-activity` prewarm | 40 s p50, 74 s max |
+| cold `/v1/repos` | 23.6 s, serving a 7.5 h-old snapshot |
+| requests over the console's 5 s timeout | 7.4% of 1,210 |
+| serve recycles | 142 in 25 h, each coming back cold |
+
+W1-T4820's duplicate rows cost real time, and they are fixed on the way (Phase 0). But they are not the whole cause. Serve recomputes views on request on ONE event loop. Its six cache layers are each polled and none is fed by writes. Keep-warm runs only while a route is being read. And every recycle starts cold.
+
+**The architecture.** The ledger stays authoritative and the read model is rebuildable, per W1-T3196 (2026-09-08).
+1. **A projector and read model.** A single projector, in a worker thread, tails every ledger rotation form. It dedupes by row identity at ingestion and maintains one `node:sqlite` (WAL) table per console view, persisted under the state dir. This is the store the 2026-09-27 entry already chose.
+2. **Views.** Core serves one precomputed `/v1/views/<page>` per page, versioned with an ETag, and the console renders it. The #1861 field-contract test covers every view.
+3. **Push.** The projector emits view-version changes on one SSE stream, and the console mounts the (generalized) CONSOLE-T70 live client on every page.
+4. **Warm handoff.** A new serve process takes over only once its read model is loaded.
+5. **Non-blocking reads.** `gh` and projection run off the request loop; heavy reads are paginated; GETs never write state; serve has a memory limit.
+
+**Rejected:**
+- Hosted Postgres: another service, and no gain at 125 MB.
+- An edge replica: it buys outage survival only, and the operator ruled that unnecessary.
+- More caches: they caused today's uncoordinated layers.
+
+**Phases:**
+- 0: quick wins, including W1-T4771, W1-T4481, W1-T4820, inbox pagination, a nav-badge view, the console fetch layer and a serve memory limit.
+- 1: the read model and the first views.
+- 2: push.
+- 3: warm handoff.
+- 4: migrate every page and retire the old caches.
+
+Each phase is measured against the 2026-09-29/30 baseline.
+
+**Rollback:** the read model is additive until Phase 4. Each view keeps its legacy route until its replacement has been measured.
+
+**Tracked in:** `~/Remudero/.session-scratch/arch-plan.md` (operator session).
+
+**Pending the operator:**
+- W1-T1258 (Law N vocabulary).
+- W1-T3332 (acceptance rewrite).
+- W1-T2635's five unclear records.
+- W1-T4532 (tag ruleset, by hand).
+
+## 2026-09-30 — OPERATOR RULING: Phase 1 read-model design choices
+
+*Operator-authored direction, given in chat on 2026-09-30: the operator approved the Phase 1 design with every recommendation. The design is `~/Remudero/.session-scratch/arch-phase1-design.md` (operator session), and its §6 lists the questions ruled here.*
+
+**Amends:**
+- The 2026-09-30 ruling above (#8010), which adopted the architecture but left open where the projector runs.
+- The 2026-09-27 W1-T4568 entry, whose recommended store was "written by the daemon, read by serve" (W1-T4568's design note). **That note is superseded:** the daemon does not write the read model.
+
+**Ruled:**
+- **Q1, board horizon.** The `now` view derives from the full fact history. It does not emulate the legacy board's live-file horizon, which rotation retention bounds. Where the two disagree during shadow because retention shed rows, the difference is classified `legacy_horizon`. It is not a view defect.
+- **Q2, the process.** The projector runs in a serve `worker_thread`, one per serve process. A SQLite writer lease with in-transaction fencing guards it, so two serve processes (Phase 3's overlap, or the daemon and serve containers on one mount) can never both commit. It runs in neither the daemon nor a new container. Measured: a full rebuild in the worker moves serve's main-loop lag p99 by under 1 ms, and the daemon loop lags 14.5 s at p50.
+- **Q3, GitHub facts for `now`.** During shadow, the worker reads the legacy gateway's persisted board snapshot, so there is no second fetcher against GitHub's secondary limit. At cutover the worker becomes the single fetcher, and `/v1/status` reads its snapshot.
+- **Q4, retention.** Phase 1 keeps every row identity (about 1.7 MB/day for core) and facts only for the steps a view declares. Pruning comes later and is tiered, with no hard ceiling.
+- **Q5, future-dated rows.** The projector quarantines a row stamped more than 5 minutes after ingest and counts it. The test that wrote five 2027-10-14 `cli.invoked` rows into the live core ledger is found and fixed as its own task, W1-T4923.
+- **Q6, Node 22's experimental `node:sqlite`.** Accepted behind one adapter module with its own contract test. The Node 24 upgrade is not a Phase 1 dependency.
+- **Risk 4 escalates.** In the documented rotation rename sliver, the projector can hold a row that the ledger lost. When the consistency oracle finds that `extra` drift, it opens a needs-human issue: this is a real, if rare, ledger loss. The read model keeps the row, and nothing "fixes" it silently.
+
+**Rollback:** the read model stays additive until Phase 4, per #8010, and a kill switch in `state/read-model/switches.json` turns off the projector or any view. Moving the writer elsewhere later is safe because the lease already fences writers.
+
+## 2026-09-30 — OPERATOR RULING: serve keeps GitHub facts warm with no viewer, paced by quota headroom (amends W1-T154)
+
+*Operator-authored direction, given in chat on 2026-09-30 as "go with your recommendations", answering whether serve should keep its GitHub facts fresh when no console is reading. The operator session recorded it; it did not originate it.*
+
+**Amends W1-T154's zero-viewer gate.** Today serve's board gateway refreshes only while a console is subscribed or has read within one refresh cycle (`gatePrewarmOnClients`, serve.ts). That gate was added after 2026-07-28, when an unwatched serve spent about 62% of the hourly GraphQL budget on a `gh pr list` every 15 s. **That gate is superseded:** serve now refreshes with no viewer. The gate's purpose still holds, because the refresh is paced by quota headroom rather than by a fixed timer.
+
+**Evidence:**
+- On a long-running serve the GitHub facts were **40 minutes stale**. The host ledger for SERVE-1790786816102 shows the gateway fetched at 16:47Z, and nobody read until a probe at 17:27:19Z. The walk that the read started landed at 17:27:30Z. Nothing failed, and neither pacing nor a refusal was involved: the gate had simply stopped refreshing.
+- The first read then got the stale facts. #8126 now labels that read stale (`x-rmd-stale-source`), but a label does not make the facts fresh.
+- Phase 2's push (#8010) must send fresh facts to a console that has not yet read. A refresh that depends on a reader cannot supply them.
+
+**Ruled:**
+- **Serve keeps its GitHub facts within a target freshness when no one is reading.** The target is the gateway's TTL.
+- **The cadence adapts to the quota that remains, with no hard thresholds.** The pace comes from the headroom in the core and GraphQL buckets, each weighted by what one refresh costs from it, and from the transport's secondary-limit signals. As headroom falls the refresh slows, and near exhaustion it pauses until the reset. Active readers speed it up.
+- **The refresh never runs on the request loop.** The walk runs in the gateway's off-loop worker (#7998, W1-T4771).
+- **Each refresh's quota cost is recorded, and a ledger rollup counts it.** There is no row per call.
+- **The pacer is one reusable module.** At the Phase 1 cutover (Q3 of the Phase 1 rulings above), the read-model worker becomes the single GitHub fetcher and takes over the refresh with this same pacer. Until then, the off-loop gateway runs it.
+
+**Rollback:** re-gate the refresh on a reader. The pacer keeps its readers-active input, so this is a change to one call site in serve.

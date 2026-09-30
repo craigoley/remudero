@@ -3,6 +3,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, relative } from "node:path";
+import { writeAtomic } from "./fs-race-safe.js";
 import { ruleEfficacyReport, escalateRepeatingRules, type RuleEfficacyReport } from "./rule-efficacy.js";
 import {
   mineVerdictRows,
@@ -66,6 +67,7 @@ import {
 } from "./coverage-improvement.js";
 import { handRunCensus, type HandRunCensusCadenceOpts, type HandRunCensusCadenceResult } from "./hand-run-census.js";
 import { lintTask } from "./task-linter.js";
+import { machineShardHeaderLines } from "./machine-filing.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import {
   judgeVerifyHumanShard,
@@ -242,6 +244,7 @@ export interface RuleEfficacyCadenceResult extends MeasurementCadenceVerbStatus 
 
 export interface VerdictCalibrationCadenceResult extends MeasurementCadenceVerbStatus {
   classes: { verdictClass: string; total: number; revertRate: number | null }[];
+  byLane?: { lane: string; verdictClass: string; total: number; revertRate: number | null; followupFixRate: number | null }[];
   totalVerdicts?: number;
   blockedCiCount?: number;
   blocked_ci_share?: number | null;
@@ -2369,7 +2372,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
   }
 
   const vReport = verdictCalibrationReport(rows, gitDump, { gitReadError });
-  const anyVerdictMeasurable = vReport.classes.some((c) => c.revertRate !== null);
+  const anyVerdictMeasurable = (vReport.byLane ?? []).some((c) => c.revertRate !== null);
   const blockedCiShare = blockedCiShareFromLedger(opts.stateDir, ledgerUnion);
 
   // ── W1-T3082: drift classification + escalation — see verdict-calibration.ts's own doc ───────
@@ -2405,8 +2408,9 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
         ? blockedCiShare.refusedReason
         : gitReadError
         ? `git history unavailable: ${gitReadError}`
-        : "every verdict class sits below the minimum population floor — nothing measurable this run",
+        : "every verdict class within each arm lane sits below the minimum population floor — nothing measurable this run",
     classes: vReport.classes.map((c) => ({ verdictClass: c.verdictClass, total: c.total, revertRate: c.revertRate })),
+    byLane: (vReport.byLane ?? []).map((c) => ({ lane: c.lane, verdictClass: c.verdictClass, total: c.total, revertRate: c.revertRate, followupFixRate: c.followupFixRate })),
     totalVerdicts: blockedCiShare.totalVerdicts,
     blockedCiCount: blockedCiShare.blockedCiCount,
     blocked_ci_share: blockedCiShare.blockedCiShare,
@@ -2892,6 +2896,19 @@ export function ciLearningCadenceMarkerPath(root: string): string {
   return join(root, "state", "last-ci-learning-cadence.json");
 }
 
+/** A crashed or failed corpus read must retry, but not on every daemon tick. */
+export const CI_LEARNING_ATTEMPT_RETRY_MS = 30 * 60 * 1000;
+
+export function ciLearningAttemptPath(root: string): string {
+  return join(root, "state", "last-ci-learning-attempt.json");
+}
+
+export function recordCiLearningAttempt(root: string, at: Date): void {
+  const path = ciLearningAttemptPath(root);
+  mkdirSync(dirname(path), { recursive: true });
+  writeAtomic(path, JSON.stringify({ at: at.toISOString() }) + "\n");
+}
+
 /** Reuses {@link decideMeasurementCadence} rather than a second decision function, so the
  *  disabled / corrupt-marker / interval / daily-cap arms stay one implementation. */
 export function ciLearningCadenceCheck(opts: {
@@ -2900,44 +2917,49 @@ export function ciLearningCadenceCheck(opts: {
   now?: Date;
 }): MeasurementCadenceDecision {
   const marker = readMeasurementCadenceMarker(ciLearningCadenceMarkerPath(opts.root));
-  return decideMeasurementCadence({
+  const now = opts.now ?? new Date();
+  const decision = decideMeasurementCadence({
     policy: { ...opts.policy, escalate: false },
     marker,
-    now: opts.now ?? new Date(),
+    now,
   });
+  if (!decision.fire) return decision;
+  try {
+    const raw = JSON.parse(readFileSync(ciLearningAttemptPath(opts.root), "utf8")) as { at?: unknown };
+    const atMs = typeof raw.at === "string" ? Date.parse(raw.at) : NaN;
+    const elapsedMs = now.getTime() - atMs;
+    if (Number.isFinite(elapsedMs) && elapsedMs >= 0 && elapsedMs < CI_LEARNING_ATTEMPT_RETRY_MS) {
+      return { fire: false, reason: `last CI-learning attempt ${Math.round(elapsedMs / 60_000)}m ago; retry after 30m` };
+    }
+  } catch {
+    // No attempt marker yet: the successful-fire marker above still owns the daily cap.
+  }
+  return decision;
 }
 
-/** Record a fire, reusing {@link recordMeasurementCadenceFire}'s rolling-24h window. */
+/** Record a completed run, reusing {@link recordMeasurementCadenceFire}'s rolling-24h window. */
 export function recordCiLearningCadenceFire(root: string, at: Date): void {
   const path = ciLearningCadenceMarkerPath(root);
   mkdirSync(dirname(path), { recursive: true });
   recordMeasurementCadenceFire(path, at, 24 * 60 * 60 * 1000);
 }
 
-/**
- * W1-T3324 — RETURN AN ALLOWANCE A FIRING NEVER SPENT. `recordCiLearningCadenceFire` writes the fire
- * BEFORE the run, which is right against a crash-loop re-running an expensive window and wrong
- * against a transient outage that did no work: MEASURED 2026-09-09, a `Bad credentials (HTTP 401)`
- * from the window read consumed the day's only allowance at `maxPerDay: 1` and produced nothing.
- *
- * DROPS THE NEWEST FIRE ONLY, never the file: an older fire in the same day still counts, so this
- * cannot be used to re-run past the cadence. Absent or unreadable marker is a no-op — a release that
- * created a marker would invent an allowance rather than return one.
- */
-export function releaseCiLearningCadenceFire(root: string): void {
-  const path = ciLearningCadenceMarkerPath(root);
-  try {
-    const raw = JSON.parse(readFileSync(path, "utf8")) as { fires?: unknown };
-    if (!Array.isArray(raw.fires) || raw.fires.length === 0) return;
-    writeFileSync(path, JSON.stringify({ fires: raw.fires.slice(0, -1) }, null, 2));
-  } catch {
-    // Unreadable or absent: nothing to return. Never creates the marker.
-  }
-}
-
 /** The window one scheduled firing reads. A NAMED default, not a literal at the call site: the arm
  *  hardcoded `1` where the CLI takes `--days N`, so a missed firing lost that day permanently. */
 export const CI_LEARNING_WINDOW_DAYS = 3;
+
+/** Revisit a small overlap on a healthy daily run; expand toward the three-day cap after a
+ * missed day. The first run keeps the full backfill. This bounds normal API work without losing
+ * the repair interval since the last completed success marker. */
+export function ciLearningLookbackDays(root: string, now: Date): number {
+  const marker = readMeasurementCadenceMarker(ciLearningCadenceMarkerPath(root));
+  if (marker.kind !== "ok" || marker.marker.fires.length === 0) return CI_LEARNING_WINDOW_DAYS;
+  const times = marker.marker.fires.map((fire) => Date.parse(fire)).filter(Number.isFinite);
+  if (times.length === 0) return CI_LEARNING_WINDOW_DAYS;
+  const elapsedDays = (now.getTime() - Math.max(...times)) / (24 * 60 * 60 * 1000);
+  if (!Number.isFinite(elapsedDays) || elapsedDays < 0) return CI_LEARNING_WINDOW_DAYS;
+  return Math.min(CI_LEARNING_WINDOW_DAYS, Math.max(1.25, elapsedDays + 0.25));
+}
 /** One scheduled CI-learning firing as the operator needs to read it — counts AND what they were
  *  about. The ledger row already carried counts; the causes and filed ids are what made a firing
  *  worth opening. */
@@ -3019,6 +3041,18 @@ export function ciLearningShardId(finding: Pick<CiFailurePair, "pr" | "gate">): 
   return `ci-learning:${finding.pr}:${finding.gate}`;
 }
 
+/**
+ * The gate a {@link ciLearningShardId} names, or undefined for any other origin.
+ *
+ * The id carries the window's FIRST pull request, and that pull request changes every window. So
+ * keying idempotency on the whole id re-filed one gate's lesson under a new number each time.
+ * MEASURED 2026-09-29 over plan/tasks.d: 49 machine-filed lessons covered 9 gates, and 39 of them
+ * were withdrawn by hand as duplicates.
+ */
+export function ciLearningGateOf(findingId: string): string | undefined {
+  return /^ci-learning:\d+:(.+)$/.exec(findingId)?.[1];
+}
+
 /** THE SURFACE A REMEDY MUST NAME. `spawnWorker` passes `settingSources: []` (src/lib/worker.ts),
  *  so a DISPATCHED WORKER NEVER READS CLAUDE.md — measured, not assumed. Workers are reached by
  *  matched `learnings/*.yaml` in `renderImplementPrompt`, so a remedy naming CLAUDE.md would fix
@@ -3070,7 +3104,7 @@ export interface CiLearningShardDraft {
   action?: CiLearningAction;
   /** LAW 5: the author class rides the record. */
   author_class: "machine";
-  /** So `isDispatchEligible` refuses it and it PARKS for an operator. */
+  /** Unjudged: parked until the machine-filing judge rules on it (operator ruling 2026-09-29). */
   verify: "human";
   /** {@link CI_LEARNING_REMEDY_SURFACE}. */
   remedySurface: string;
@@ -3094,6 +3128,8 @@ export interface CiLearningMintResult {
  *  `DigestCadenceRunResult`/`MeasurementCadenceRunResult` convention that the producer owns it. */
 export interface CiLearningCadenceRunResult {
   status: CiLearningMintResult["status"];
+  windowComplete?: boolean;
+  unreadablePrCount?: number;
   draftCount: number;
   excludedCount: number;
   /** Rollups that could not be read. Carried so a partial window never reads as a complete one. */
@@ -3116,10 +3152,15 @@ export function mintCiLearningShards(
   const unreadableShas = [...corpus.unreadableShas];
   const blind = corpus.status === "unreadable";
   const already = new Set(alreadyFiledFindingIds);
+  const heldGates = new Set(alreadyFiledFindingIds.map(ciLearningGateOf).filter((g): g is string => g !== undefined));
 
   const ordered = corpus.pairs
     .filter((p) => p.state === "repaired")
     .filter((p) => !already.has(ciLearningShardId(p)))
+    // A lesson is its GATE, so a gate the plan already holds a lesson for is never re-filed under
+    // the window's newer first pull request. Its recurrence is still reported, by
+    // `judgeCiLessonEfficacy`, against the lesson already filed.
+    .filter((p) => !heldGates.has(p.gate))
     .sort((a, b) => (a.pr !== b.pr ? a.pr - b.pr : a.gate.localeCompare(b.gate)));
 
   /*
@@ -3250,7 +3291,7 @@ const CI_LEARNING_SLUG_MAX = 72;
 
 /** Render ONE draft as a single-element YAML task list — the shard file's whole contents.
  *  `origin:` carries the finding id, so it is both Rule 17 provenance and the idempotency key. */
-export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string): string {
+export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string, population?: readonly number[]): string {
   const q = (v: string) => JSON.stringify(v); // YAML accepts JSON scalars, so this escapes correctly
   return [
     `- id: ${taskId}`,
@@ -3258,13 +3299,8 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string)
     "  repo: remudero",
     "  depends_on: []",
     "  type: implement",
-    // PARKED: isDispatchEligible refuses `verify !== "auto"`, so this record waits for a person.
-    "  verify: human",
-    "  risk: low",
-    "  status: queued",
-    "  attempts: 0",
-    // LAW 5: the author class rides the record.
-    "  author_class: machine",
+    // Unjudged until the machine-filing judge rules (operator ruling 2026-09-29); LAW 5's mark rides it.
+    ...machineShardHeaderLines([CI_LEARNING_LESSONS_FILE], draft.prs.length, population),
     `  origin: ${q(draft.findingId)}`,
     // W1-T3052 — THE WATERMARK, so the lesson can later be judged on its OUTCOME. The origin names
     // only the cluster's FIRST pull request; efficacy needs the HIGHEST, because "did this gate
@@ -3329,7 +3365,7 @@ export function fileCiLearningShards(
       continue;
     }
     const taskId = deps.mintTaskId();
-    const contents = ciLearningShardYaml(d, taskId);
+    const contents = ciLearningShardYaml(d, taskId, drafts.map((x) => x.prs.length));
 
     // VALIDATE BEFORE WRITING: a record this rung cannot get past the repo's own linter must never
     // reach the disk.

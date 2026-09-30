@@ -1,0 +1,36 @@
+- id: W1-T4780
+  title: "A GARDENER SKIPS ITS PENDING PR VERDICT WHEN THE INPUT FINGERPRINT STAYS THE SAME — observe terminal PR state and preserve metric judgement on every pass"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: merged
+  attempts: 0
+  origin: "operator request 2026-09-29: repair the self-improvement lifecycle"
+  files: [src/lib/gardener.ts, test/a-gardener-judges-its-own-actions.test.ts]
+  rationale: |
+    runGarden returns on an unchanged cheap fingerprint before reading a pending PR's status.
+    Even when the cheap input changes, it returns on an unchanged full fingerprint before
+    judging the PR. A merged or closed PR can therefore leave pending forever, blocking
+    another action and never updating the class's credit or debit. Hour-bucketing the
+    ledger-reading gardens makes the first bypass easier to hit. The shared framework and
+    test suite make this a Rule 19 span.
+  design: |
+    Check a pending PR's state on each pass without forcing a full inventory while it is
+    still open or its state is unreadable. Settle a terminal operator-review or closed
+    PR without needing input churn. For a merged metric-judged PR, read the inventory to
+    establish the at-merge baseline and then evaluate later observations, even when the
+    action fingerprint is unchanged. Save state durably before the no-change return.
+    Keep the existing rule against opening a duplicate PR from an unchanged corpus.
+  acceptance:
+    - claim: "a merged review PR is credited when both fingerprints are unchanged"
+      proof: 'grep: test("W1-T4780: a merged review PR is judged with unchanged fingerprints" in test/a-gardener-judges-its-own-actions.test.ts'
+    - claim: "a merged metric PR can establish and later judge outcome with unchanged action fingerprint"
+      proof: 'grep: test("W1-T4780: a merged metric PR progresses with unchanged action fingerprint" in test/a-gardener-judges-its-own-actions.test.ts'
+    - claim: "an open pending PR still avoids the expensive unchanged inventory"
+      proof: 'grep: test("W1-T4780: an open pending PR skips unchanged inventory" in test/a-gardener-judges-its-own-actions.test.ts'
+  falsifier: |
+    Restore either early return ahead of pending judgement and the corresponding
+    unchanged-fingerprint test fails.

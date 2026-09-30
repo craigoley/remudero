@@ -156,6 +156,23 @@ else
 fi
 # END census precheck
 
+# BEGIN lint-plan precheck (W1-T4901) — the plan lint CI runs on a changed shard, asked before the push.
+# MEASURED 2026-09-16..30: 14 of 55 single-shard test reds were the PR's own shard failing `lint-plan:fast`. The script
+# spawns that npm script's argv (offline, no test runner), abstains on a stale origin/main, and reports a
+# machine-filing-admission-only finding without blocking.
+if [ -f scripts/lint-plan-precheck.mjs ]; then
+  node scripts/lint-plan-precheck.mjs --base origin/main
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "pre-push: lint-plan-precheck could not run the lint — not blocking on an unreadable check" >&2
+  elif [ "$rc" -ne 0 ]; then
+    fail=1
+  fi
+else
+  echo "pre-push: scripts/lint-plan-precheck.mjs absent — skipped, NOT passed" >&2
+fi
+# END lint-plan precheck
+
 # W1-T3388 — BEGIN head-identity admission (ADVISORY)
 # MEASURED 2026-09-16: head-identity-gate is a REQUIRED check that no local route ran, so two PRs
 # opened within an hour (#5737, #5739) each burned a full CI round discovering it and then needed a
@@ -196,6 +213,22 @@ else
   echo "pre-push: scripts/head-identity-gate.mjs absent — skipped, NOT passed" >&2
 fi
 # W1-T3388 — END head-identity admission
+
+# BEGIN proof-resolve precheck (2026-09-29) — the reviewer's certain proof refusals, asked before the push.
+# MEASURED 2026-09-15..29: 14 of 40 reviewer-unmet fix rounds were a `unit test:` title no test carried. The script
+# reuses the reviewer's own resolver, spawns no test runner, blocks only on a title miss, and reports a grep miss.
+if [ -f scripts/proof-resolve-precheck.mjs ]; then
+  node --import tsx scripts/proof-resolve-precheck.mjs --base origin/main --head-ref "${head_ref:-}"
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "pre-push: proof-resolve-precheck could not read this head — not blocking on an unreadable check" >&2
+  elif [ "$rc" -ne 0 ]; then
+    fail=1
+  fi
+else
+  echo "pre-push: scripts/proof-resolve-precheck.mjs absent — skipped, NOT passed" >&2
+fi
+# END proof-resolve precheck
 
 if [ "$fail" -ne 0 ]; then
   echo "" >&2

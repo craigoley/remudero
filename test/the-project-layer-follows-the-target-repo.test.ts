@@ -304,13 +304,15 @@ test("MUTANT: the injection calls the named helper against the TARGET repo's own
   assert.doesNotMatch(call, /["']/, "the derivation must read from repoDir, never a hardcoded string");
 });
 
-test("MUTANT: the retro's promotion corpus resolution is untouched by this fix", () => {
+test("MUTANT: the retro's promotion corpus resolution stays retired", () => {
+  // The retro's promotion pass was RETIRED 2026-09-29 (DECISIONS.md), so its ORCHESTRATOR-checkout
+  // corpus resolution no longer exists. This pins the retirement instead of the old "untouched"
+  // claim: the deleted line must not return.
   const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  const call = "const promotionCorpusDir = projectLearningsHome(repoRoot);";
   assert.equal(
-    src.split(call).length - 1,
-    1,
-    "the promotion pass must still read the ORCHESTRATOR checkout's own corpus — a separate, deliberately unmoved decision",
+    src.includes("const promotionCorpusDir = projectLearningsHome(repoRoot);"),
+    false,
+    "the retired promotion pass's orchestrator-corpus resolution must not return without a new decision",
   );
 });
 

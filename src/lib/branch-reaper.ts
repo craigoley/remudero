@@ -21,9 +21,10 @@
  * the landing identity predicate, so the reaper guards that family by calling the owner module
  * rather than retyping the branch pattern here.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { isLandingRef } from "./feedback-landing.js";
+import type { Clock } from "./clock.js";
 
 /**
  * The declared guard list (W1-T447) — branches the fleet must never delete, DECLARED so the
@@ -60,6 +61,7 @@ export const DECLARED_BRANCH_GUARDS: readonly string[] = [
   // the drift alarm below reported them on the live repo, which is the alarm working as intended.
   "diag/drain-concurrency",
   "diag/drain-sequential-await",
+  "diag/resume-spawn-enoent",
 ];
 
 export function isDeclaredBranchGuard(name: string, declaredGuards: readonly string[] = DECLARED_BRANCH_GUARDS): boolean {
@@ -385,17 +387,23 @@ export function tipInMainFor(
 export function readNamedInSource(
   exec: (cmd: string, args: string[]) => string,
   names: readonly string[],
+  root?: string,
+  onFailure?: (why: string) => void,
 ): Set<string> {
   const found = new Set<string>();
   if (names.length === 0) return found;
+  const roots = ["src/", "scripts/", "deploy/", ".github/"].filter((p) => root === undefined || existsSync(join(root, p)));
+  if (roots.length === 0) return found;
   const args = ["grep", "-n", "-o", "-F"];
   for (const name of names) args.push("-e", name);
-  args.push("--", "src/", "scripts/", "deploy/", ".github/");
+  args.push("--", ...roots);
   let raw: string;
   try {
     raw = exec("git", args);
-  } catch {
-    return found; // git grep exits 1 on no match anywhere — a real "nothing named", not a failure
+  } catch (err) {
+    if ((err as { status?: unknown }).status === 1) return found; // git grep exits 1 on no match anywhere — a real "nothing named", not a failure
+    onFailure?.(String((err as Error)?.message ?? err));
+    return new Set(names);
   }
   const hits = parseBranchCitationHits(raw);
   for (const name of names) {
@@ -407,8 +415,7 @@ export function readNamedInSource(
 /**
  * Design (iii): the persisted (branch name -> tip sha) cache after one classification pass. ONLY
  * `"merged"` is ever written — the one PR state GitHub cannot take back (`foldPrState`'s own doc).
- * `"open"`/`"closed"`/`"none"` are never cached: a closed PR can be reopened and a `"none"` can gain
- * one, so caching either would let a stale read stand in for a fact that can still change. A
+ * `"open"`/`"closed"` are never cached (a reopen is unseen); `"none"` has {@link nextNoPrHeadCache}. A
  * branch whose tip sha this pass could not resolve (deleted mid-run, or never fetched locally) is
  * dropped rather than cached under `"unknown"` — the manifest sha is exactly what makes a later
  * cache hit's identity check (design (iv): a new tip sha misses the cache) meaningful at all.
@@ -423,6 +430,19 @@ export function nextMergedHeadCache(
     const sha = tipShaByName.get(f.name);
     if (!sha || sha === "unknown") continue;
     next[f.name] = sha;
+  }
+  return next;
+}
+
+/** Heads proven to have NO PR, by tip sha: a PR opened later is the newest, so the bulk walk's first page outranks this. */
+export function nextNoPrHeadCache(
+  facts: readonly { readonly name: string; readonly prState: string }[],
+  tipShaByName: ReadonlyMap<string, string>,
+): Record<string, string> {
+  const next: Record<string, string> = {};
+  for (const f of facts) {
+    const sha = tipShaByName.get(f.name);
+    if (f.prState === "none" && sha && sha !== "unknown") next[f.name] = sha;
   }
   return next;
 }
@@ -448,7 +468,7 @@ export interface BranchManifestEntry {
  * FOR A DELETE IT IS NOT, because "no PR yet" and "no PR ever" are the same observation. A worker
  * that has just cut `run-<taskId>-<epochMs>` from main and pushed it to claim the id has a tip that
  * IS main's tip, no PR, and therefore lands in `deletable` — indistinguishable from a year-dead
- * probe ref. `probe-ref-perm-16166` sat in the live deletable set on exactly this route. The
+ * probe ref. A `probe-ref-perm-*` ref sat in the live deletable set on exactly this route. The
  * distinction those two need is TIME, which is why {@link withholdActiveBranches} age-gates these
  * two reasons and leaves the PR-decisive ones alone: a merged or closed PR is proof about the work,
  * whatever the branch's age, and gating it would withhold branches that are genuinely finished.
@@ -466,6 +486,7 @@ export interface AutomaticBranchReapState {
    *  the one PR state GitHub cannot take back. Never "open"/"closed"/"none": see
    *  {@link nextMergedHeadCache}'s own doc for why only this one verdict is safe to persist. */
   mergedHeadShas?: Record<string, string>;
+  noPrHeadShas?: Record<string, string>;
 }
 
 /** `<config.root>/state/<this>` — ONE cadence-and-cache file per repository (design (i)), so a
@@ -487,17 +508,34 @@ export function readAutomaticBranchReapState(path: string): AutomaticBranchReapS
     const state: AutomaticBranchReapState = {};
     if (typeof raw.lastRunAtMs === "number" && Number.isFinite(raw.lastRunAtMs)) state.lastRunAtMs = raw.lastRunAtMs;
     if (typeof raw.lastBranchFingerprint === "string") state.lastBranchFingerprint = raw.lastBranchFingerprint;
-    if (raw.mergedHeadShas && typeof raw.mergedHeadShas === "object") {
+    for (const key of ["mergedHeadShas", "noPrHeadShas"] as const) {
+      const cache = raw[key];
+      if (!cache || typeof cache !== "object") continue;
       const shas: Record<string, string> = {};
-      for (const [name, sha] of Object.entries(raw.mergedHeadShas)) {
+      for (const [name, sha] of Object.entries(cache)) {
         if (typeof sha === "string") shas[name] = sha;
       }
-      state.mergedHeadShas = shas;
+      state[key] = shas;
     }
     return state;
   } catch {
     return {}; // absent, unreadable, or malformed — a first pass, NEVER a skip
   }
+}
+
+export function orphanRunBranchEvidenceReader(
+  statePath: string,
+  liveTaskIds: () => Iterable<string>,
+  clock: Pick<Clock, "now">,
+): () => { noPrHeadShas: Record<string, string>; nowMs: number; liveTaskIds: ReadonlySet<string> } | undefined {
+  return () => {
+    try {
+      const noPrHeadShas = readAutomaticBranchReapState(statePath).noPrHeadShas ?? {};
+      return { noPrHeadShas, nowMs: clock.now(), liveTaskIds: new Set(liveTaskIds()) };
+    } catch {
+      return undefined; // lock state unknown: release nothing, every pushed run ref keeps blocking
+    }
+  };
 }
 
 /** Best-effort write: a state file this process cannot persist costs the next restart a first

@@ -1,0 +1,36 @@
+- id: W1-T4684
+  title: "GOALS ARE FREE-TEXT ORIGIN STRINGS, SO NOBODY KNOWS WHETHER A GOAL MOVED — make goals records with a symptom, a measurement command, a baseline and a direction; tasks name their goal; when every task under a goal settles, the daemon re-runs the measurement and ledgers goal.moved or goal.unmoved, and unmoved goals go to the retro"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-memory-1790600000"
+  plan_refs: []
+  files: [src/lib/goals.ts, test/a-goal-is-re-measured-when-its-tasks-settle.test.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: origin: is free text (12 shards share 'operator ask 2026-09-24: get PRs through the process quicker');
+    there is no goal file and plan/claims.yaml checks facts, not outcomes. Memory rule 're-measure the symptom, not the
+    component'. Paperclip keeps goals as records with a parent, owner and status, and rolls spend up by goal
+    (https://github.com/paperclipai/paperclip/blob/master/doc/SPEC-implementation.md §7.4, §13.3).
+  design: |
+    (i) plan/goals.d/G-*.yaml: symptom, measurement command, baseline, direction; tasks gain an optional goal: field.
+    (ii) When all of a goal's tasks settle, re-run the measurement and ledger goal.moved / goal.unmoved with both values.
+    (iii) Unmoved goals are retro input; the console shows spend and movement per goal; a goal with poor spend-to-movement
+    drops in priority rather than stopping. First retrofit: PR-flow, CI redesign, model evidence.
+  acceptance:
+    - claim: "a goal is re-measured when its last task settles"
+      proof: 'grep: test("W1-T4684: a goal is re-measured when its last task settles" in test/a-goal-is-re-measured-when-its-tasks-settle.test.ts'
+    - claim: "an unmoved goal is handed to the retro"
+      proof: 'grep: test("W1-T4684: an unmoved goal is handed to the retro" in test/a-goal-is-re-measured-when-its-tasks-settle.test.ts'
+    - claim: "the new module is called from src/run-task.ts"
+      proof: 'grep: remeasureSettledGoals( in src/run-task.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

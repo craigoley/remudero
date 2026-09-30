@@ -15,8 +15,11 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { createHash, randomUUID } from "node:crypto";
 import { ghExec } from "./github-transport.js";
-import { existsSync } from "node:fs";
+import { closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { access, readFile, stat } from "node:fs/promises";
+import { join } from "node:path";
 import {
   consumeOptionLink,
   escalationLinkUsedPath,
@@ -26,9 +29,9 @@ import {
 import { verifiedActor, type Route } from "./service.js";
 import { appendLedger, RISK_OVERRIDE_RECORDED_STEP, RISK_OVERRIDE_REASON_CLASSES, RISK_OVERRIDE_DISPOSITIONS, type RiskOverrideReasonClass, type RiskOverrideDisposition } from "./ledger.js";
 import type { RiskJudgeVerdictLabel } from "./risk-judge.js";
-import { isPaused, isPrActionName, isPrActionSwitchedOff, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPrAction, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail } from "./fleet-control.js";
+import { isPaused, isPrActionName, isPrActionSwitchedOff, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPrAction, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail, type FleetControlInfo, type PrActionName, type PrActionRequest, type ResumeResult } from "./fleet-control.js";
 import { appendQuestionAnswer } from "./worker.js";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { hashToken } from "./last-seen.js";
 import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from "./status.js";
 import { deriveLastPoll } from "./daemon-health.js";
@@ -41,6 +44,12 @@ import {
   formatExhaustionReport,
   type InterpretReplyDeps,
 } from "./reply-interpreter.js";
+import {
+  ESCALATION_DISPOSITIONS,
+  escalationClassPrecision,
+  escalationClassTier,
+  type EscalationDisposition,
+} from "./escalation-precision.js";
 
 /** Non-task-scoped panel actions (pause/resume/stop/quiet-hours) ledger under this sentinel — mirrors run-task.ts's drainCommand, which ledgers its own fleet-wide lines as `task_id: "DRAIN"`. */
 export const PANEL_TASK_ID = "PANEL";
@@ -138,8 +147,19 @@ function validateOptionalReason(body: unknown): { error: string } | OptionalReas
 /** Ledger one panel action, keyed by `ledgerPath` alone (not the full `PanelActionDeps`) so
  *  panel-graph.ts's routes, which have no `issues` gateway, can ledger through the same
  *  primitive rather than re-deriving the `run_id` shape a second time. */
-export function appendPanelLedger(ledgerPath: string, step: string, taskId: string, origin: string, extra: Record<string, unknown> = {}): void {
-  appendLedger(ledgerPath, { run_id: `PANEL-${Date.now()}`, task_id: taskId, step, origin, ...extra });
+export function appendPanelLedger(ledgerPath: string, step: string, taskId: string, origin: string, extra: Record<string, unknown> = {}): PanelLedgerRow {
+  // W1-T4657: ts and run_id come from ONE clock read and are returned, so an executor can cite the row.
+  const ms = systemClock.now();
+  const row: PanelLedgerRow = { step, ts: fixedClock(ms).iso(), run_id: `PANEL-${ms}` };
+  appendLedger(ledgerPath, { ts: row.ts, run_id: row.run_id, task_id: taskId, step, origin, ...extra });
+  return row;
+}
+
+/** The identity of one appended panel ledger row: the system-of-record reference an executor cites. */
+export interface PanelLedgerRow {
+  readonly step: string;
+  readonly ts: string;
+  readonly run_id: string;
 }
 
 /** Ledger one panel action. Every route below funnels through this so the shape is uniform: step name, the caller's `origin`, plus whatever fields that action names. */
@@ -286,6 +306,13 @@ export function buildControlStatusRoute(deps: ControlStatusDeps): Route {
 
 // ── POST /v1/control/pause ──────────────────────────────────────────────────
 
+/** The pause route's whole side effect, shared with action-executor.ts (W1-T4657) so both run ONE path. */
+export function armPause(deps: Pick<PanelActionDeps, "root" | "ledgerPath">, reason: string | undefined, origin: string, extra: Record<string, unknown> = {}): { info: FleetControlInfo; row: PanelLedgerRow } {
+  const info = requestPause(deps.root, reason);
+  const row = appendPanelLedger(deps.ledgerPath, "panel.pause_requested", PANEL_TASK_ID, origin, { reason: info.reason ?? null, ...extra });
+  return { info, row };
+}
+
 /** POST /v1/control/pause — drain-and-hold, write-scoped. */
 export function buildPauseRoute(deps: PanelActionDeps): Route {
   return {
@@ -295,15 +322,20 @@ export function buildPauseRoute(deps: PanelActionDeps): Route {
     // W1-T404: MIDDLE — reversible (resume clears it) but disruptive.
     tier: "middle",
     handler: jsonAction(validateOptionalReason, (input, req, res) => {
-      const info = requestPause(deps.root, input.reason);
-      const origin = bearerTokenId(req);
-      ledgerPanelAction(deps, "panel.pause_requested", PANEL_TASK_ID, origin, { reason: info.reason ?? null });
+      const { info } = armPause(deps, input.reason, bearerTokenId(req));
       sendJson(res, 200, { paused: true, reason: info.reason ?? null });
     }),
   };
 }
 
 // ── POST /v1/control/resume ─────────────────────────────────────────────────
+
+/** The resume route's whole side effect, shared with action-executor.ts (W1-T4657). */
+export function armResume(deps: Pick<PanelActionDeps, "root" | "ledgerPath">, origin: string, extra: Record<string, unknown> = {}): { result: ResumeResult; row: PanelLedgerRow } {
+  const result = resumeFleet(deps.root);
+  const row = appendPanelLedger(deps.ledgerPath, "panel.resume_requested", PANEL_TASK_ID, origin, { ...result, ...extra });
+  return { result, row };
+}
 
 /** POST /v1/control/resume — clears BOTH STOP and PAUSE, write-scoped. No body required. */
 export function buildResumeRoute(deps: PanelActionDeps): Route {
@@ -314,9 +346,7 @@ export function buildResumeRoute(deps: PanelActionDeps): Route {
     // W1-T404: MIDDLE — reversible but disruptive (clears STOP + PAUSE).
     tier: "middle",
     handler: async (req, res) => {
-      const result = resumeFleet(deps.root);
-      const origin = bearerTokenId(req);
-      ledgerPanelAction(deps, "panel.resume_requested", PANEL_TASK_ID, origin, { ...result });
+      const { result } = armResume(deps, bearerTokenId(req));
       sendJson(res, 200, result);
     },
   };
@@ -326,6 +356,12 @@ export function buildResumeRoute(deps: PanelActionDeps): Route {
 
 /** POST /v1/control/stop — the hard kill, write-scoped. `requestStop` writes the flag file
  *  synchronously, so the next `drain.ts` tick observes it before picking up any new task. */
+export function armStop(deps: Pick<PanelActionDeps, "root" | "ledgerPath">, reason: string | undefined, origin: string, extra: Record<string, unknown> = {}): { info: FleetControlInfo; row: PanelLedgerRow } {
+  const info = requestStop(deps.root, reason);
+  const row = appendPanelLedger(deps.ledgerPath, "panel.stop_requested", PANEL_TASK_ID, origin, { reason: info.reason ?? null, ...extra });
+  return { info, row };
+}
+
 export function buildStopRoute(deps: PanelActionDeps): Route {
   return {
     method: "POST",
@@ -334,10 +370,215 @@ export function buildStopRoute(deps: PanelActionDeps): Route {
     // W1-T404: MIDDLE — reversible (resume clears it) but disruptive; the hard kill.
     tier: "middle",
     handler: jsonAction(validateOptionalReason, (input, req, res) => {
-      const info = requestStop(deps.root, input.reason);
-      const origin = bearerTokenId(req);
-      ledgerPanelAction(deps, "panel.stop_requested", PANEL_TASK_ID, origin, { reason: info.reason ?? null });
+      const { info } = armStop(deps, input.reason, bearerTokenId(req));
       sendJson(res, 200, { stopped: true, reason: info.reason ?? null });
+    }),
+  };
+}
+
+// ── POST /v1/control/assistant-action ───────────────────────────────────────
+
+/** Shared claim root and exact target for the existing panel control helpers (W1-T4763). */
+export interface AssistantControlOptions extends Pick<PanelActionDeps, "root" | "ledgerPath"> {
+  claimRoot: string;
+  instance: string;
+  repository?: string;
+  bootSha?: string;
+  afterClaim?: () => void;
+  afterEffect?: () => void;
+}
+
+type AssistantControlAction = "pause" | "resume" | "stop";
+interface AssistantControlInput {
+  actionId: string;
+  instance: string;
+  action: AssistantControlAction;
+  reason?: string;
+}
+
+function validateAssistantControl(body: unknown): AssistantControlInput | { error: string } {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.actionId !== "string" || !/^[A-Za-z0-9._:-]{8,128}$/.test(body.actionId)) return { error: "actionId must be an 8-128 character stable identifier" };
+  if (typeof body.instance !== "string" || !body.instance || body.instance.length > 128) return { error: "instance is required" };
+  if (body.action !== "pause" && body.action !== "resume" && body.action !== "stop") return { error: "action must be pause, resume, or stop" };
+  if (body.reason !== undefined && (typeof body.reason !== "string" || body.reason.length > 200)) return { error: "reason must be at most 200 characters" };
+  if (Object.keys(body).some((key) => !["actionId", "instance", "action", "reason"].includes(key))) return { error: "unknown assistant-control field" };
+  return { actionId: body.actionId, instance: body.instance, action: body.action, ...(body.reason !== undefined ? { reason: body.reason } : {}) };
+}
+
+function syncDirectory(path: string): void {
+  const fd = openSync(path, "r");
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+
+function writeExclusive(path: string, body: string): void {
+  const fd = openSync(path, "wx", 0o600);
+  try { writeFileSync(fd, body); fsyncSync(fd); } finally { closeSync(fd); }
+}
+
+function assistantControlPaths(deps: AssistantControlOptions, actionId: string) {
+  const dir = join(deps.claimRoot, "state", "assistant-control-actions");
+  const key = createHash("sha256").update(actionId).digest("hex");
+  return { dir, claim: join(dir, `${key}.claim.json`), receipt: join(dir, `${key}.receipt.json`) };
+}
+
+export const ASSISTANT_CONTROL_CONTRACT_VERSION = "assistant-control-v2";
+
+function assistantActorHash(actor: string): string {
+  return createHash("sha256").update(actor).digest("hex");
+}
+
+async function assistantClaimStoreState(root: string): Promise<"writable_unverified" | "uninitialized" | "unavailable"> {
+  try {
+    if (!(await stat(root)).isDirectory()) return "unavailable";
+  } catch {
+    // A missing or unreadable claim root is unavailable, not an empty claim store.
+    return "unavailable";
+  }
+  const dir = join(root, "state", "assistant-control-actions");
+  try {
+    if (!(await stat(dir)).isDirectory()) return "unavailable";
+    await access(dir, constants.R_OK | constants.W_OK);
+    return "writable_unverified";
+  } catch (error) {
+    // An unused store can be initialized by POST; other failures are unavailable.
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "uninitialized" : "unavailable";
+  }
+}
+
+export function buildAssistantControlCapabilityRoute(deps: AssistantControlOptions): Route {
+  return {
+    method: "GET", path: "/v1/control/assistant-action/status", scope: "read",
+    handler: async (req, res) => {
+      if (!verifiedActor(req)) return sendJson(res, 403, { error: "verified_operator_required" });
+      sendJson(res, 200, {
+        contract: ASSISTANT_CONTROL_CONTRACT_VERSION,
+        bootSha: deps.bootSha ?? "unknown",
+        instance: deps.instance,
+        repository: deps.repository ?? "unknown",
+        admission: await assistantClaimStoreState(deps.claimRoot),
+        claimStore: "shared_root_configured_topology_unverified",
+      });
+    },
+  };
+}
+
+export function buildAssistantControlReceiptRoute(deps: AssistantControlOptions): Route {
+  return {
+    method: "GET", path: "/v1/control/assistant-action/receipt", scope: "read",
+    handler: async (req, res) => {
+      const actor = verifiedActor(req);
+      if (!actor) return sendJson(res, 403, { error: "verified_operator_required" });
+      const actionId = new URL(req.url ?? "", "http://localhost").searchParams.get("actionId");
+      if (!actionId || !/^[A-Za-z0-9._:-]{8,128}$/.test(actionId)) return sendJson(res, 400, { error: "invalid_action_id" });
+      if (await assistantClaimStoreState(deps.claimRoot) === "unavailable") return sendJson(res, 503, { status: "unavailable", actionId, detail: "claim store is unavailable" });
+      const paths = assistantControlPaths(deps, actionId);
+      let claim: unknown;
+      try {
+        claim = JSON.parse(await readFile(paths.claim, "utf8"));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return sendJson(res, 404, { status: "not_found", actionId });
+        return sendJson(res, 503, { status: "unavailable", actionId, detail: "claim is unreadable" });
+      }
+      if (!isRecord(claim) || typeof claim.actorHash !== "string" || typeof claim.instance !== "string" || typeof claim.fingerprint !== "string") {
+        return sendJson(res, 503, { status: "unavailable", actionId, detail: "claim identity is incomplete" });
+      }
+      if (claim.actorHash !== assistantActorHash(actor) || claim.instance !== deps.instance || claim.repository !== (deps.repository ?? null)) {
+        return sendJson(res, 409, { status: "conflict", actionId });
+      }
+      let receipt: unknown;
+      try {
+        receipt = JSON.parse(await readFile(paths.receipt, "utf8"));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return sendJson(res, 202, { status: "claimed_unknown", actionId });
+        return sendJson(res, 503, { status: "unavailable", actionId, detail: "receipt is unreadable" });
+      }
+      if (!isRecord(receipt) || receipt.status !== "completed" || receipt.actionId !== actionId || receipt.instance !== deps.instance || receipt.repository !== (deps.repository ?? undefined)) {
+        return sendJson(res, 503, { status: "unavailable", actionId, detail: "receipt identity is incomplete" });
+      }
+      sendJson(res, 200, receipt);
+    },
+  };
+}
+
+function assistantControlReceipt(input: AssistantControlInput, deps: AssistantControlOptions, origin: string) {
+  const tag = { assistant_action_id: input.actionId, assistant_instance: deps.instance };
+  if (input.action === "pause") {
+    const { info, row } = armPause(deps, input.reason, origin, tag);
+    return { row, result: { paused: true, reason: info.reason ?? null } };
+  }
+  if (input.action === "resume") {
+    const { result, row } = armResume(deps, origin, tag);
+    return { row, result };
+  }
+  const { info, row } = armStop(deps, input.reason, origin, tag);
+  return { row, result: { stopped: true, reason: info.reason ?? null } };
+}
+
+export function buildAssistantControlRoute(deps: AssistantControlOptions): Route {
+  return {
+    method: "POST", path: "/v1/control/assistant-action", scope: "write", tier: "middle",
+    handler: jsonAction(validateAssistantControl, (input, req, res) => {
+      // Middle-tier infrastructure grants cannot impersonate a named console operator.
+      const operator = verifiedActor(req);
+      if (!operator) {
+        sendJson(res, 403, { error: "verified_operator_required" });
+        return;
+      }
+      if (input.instance !== deps.instance) {
+        sendJson(res, 409, { error: "target_mismatch", detail: "instance does not match this route" });
+        return;
+      }
+      const paths = assistantControlPaths(deps, input.actionId);
+      const actorHash = assistantActorHash(operator);
+      const fingerprint = createHash("sha256").update(JSON.stringify({ actorHash, instance: input.instance, repository: deps.repository ?? null, action: input.action, reason: input.reason ?? null })).digest("hex");
+      let admitted = false;
+      try {
+        mkdirSync(paths.dir, { recursive: true });
+        writeExclusive(paths.claim, JSON.stringify({ fingerprint, actorHash, instance: deps.instance, repository: deps.repository ?? null }));
+        syncDirectory(paths.dir);
+        admitted = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+          sendJson(res, 503, { status: "unknown", actionId: input.actionId, detail: "durable admission unavailable; no retry dispatched" });
+          return;
+        }
+      }
+      if (!admitted) {
+        let claim: unknown;
+        try { claim = JSON.parse(readFileSync(paths.claim, "utf8")); } catch {
+          sendJson(res, 202, { status: "unknown", actionId: input.actionId, detail: "claim exists but its outcome is not readable" });
+          return;
+        }
+        if (!isRecord(claim) || claim.fingerprint !== fingerprint) {
+          sendJson(res, 409, { error: "action_id_conflict", actionId: input.actionId });
+          return;
+        }
+        try {
+          const receipt = JSON.parse(readFileSync(paths.receipt, "utf8")) as unknown;
+          if (isRecord(receipt) && receipt.status === "completed" && receipt.actionId === input.actionId && receipt.instance === deps.instance) {
+            sendJson(res, 200, receipt);
+            return;
+          }
+        } catch { /* A missing or unreadable receipt is unknown, never an invitation to retry. */ }
+        sendJson(res, 202, { status: "unknown", actionId: input.actionId, detail: "admission exists without a durable completion receipt" });
+        return;
+      }
+      try {
+        deps.afterClaim?.();
+        const { row, result } = assistantControlReceipt(input, deps, operator);
+        deps.afterEffect?.();
+        const receipt = { status: "completed", actionId: input.actionId, instance: deps.instance,
+          ...(deps.repository ? { repository: deps.repository } : {}), action: input.action,
+          evidenceRef: `ledger:${row.step}@${row.ts}#${row.run_id}`, result };
+        const temp = `${paths.receipt}.${randomUUID()}.tmp`;
+        writeExclusive(temp, JSON.stringify(receipt));
+        renameSync(temp, paths.receipt);
+        syncDirectory(paths.dir);
+        sendJson(res, 200, receipt);
+      } catch {
+        sendJson(res, 503, { status: "unknown", actionId: input.actionId, detail: "admitted action has no durable completion receipt; manual reconciliation required" });
+      }
     }),
   };
 }
@@ -448,19 +689,43 @@ export function buildApproveManualRoute(deps: PanelActionDeps): Route {
 interface MarkEscalationHandledInput {
   taskId: string;
   issueUrl: string;
+  /** The escalation's own class (escalate.ts's `EscalationClass`) — the key escalation-precision.ts groups by. */
+  class: string;
+  /** W1-T4677: required — closing the DISMISSING AN ESCALATION RECORDS NOTHING gap (see escalation-precision.ts). */
+  disposition: EscalationDisposition;
+  /** Required exactly when `disposition` is `"snoozed_until"`. */
+  snoozedUntil?: string;
 }
 
 function validateMarkEscalationHandled(body: unknown): { error: string } | MarkEscalationHandledInput {
   if (!isRecord(body)) return { error: "body must be a JSON object" };
   if (typeof body.taskId !== "string" || !body.taskId.trim()) return { error: "taskId is required" };
   if (typeof body.issueUrl !== "string" || !body.issueUrl.trim()) return { error: "issueUrl is required" };
-  return { taskId: body.taskId, issueUrl: body.issueUrl };
+  if (typeof body.class !== "string" || !body.class.trim()) return { error: "class is required" };
+  if (typeof body.disposition !== "string" || !(ESCALATION_DISPOSITIONS as readonly string[]).includes(body.disposition)) {
+    return { error: `disposition must be one of ${ESCALATION_DISPOSITIONS.join(", ")}` };
+  }
+  if (body.disposition === "snoozed_until") {
+    if (typeof body.snoozedUntil !== "string" || !body.snoozedUntil.trim()) {
+      return { error: 'snoozedUntil is required when disposition is "snoozed_until"' };
+    }
+  } else if (body.snoozedUntil !== undefined) {
+    return { error: 'snoozedUntil is only valid when disposition is "snoozed_until"' };
+  }
+  return {
+    taskId: body.taskId,
+    issueUrl: body.issueUrl,
+    class: body.class,
+    disposition: body.disposition as EscalationDisposition,
+    snoozedUntil: body.snoozedUntil as string | undefined,
+  };
 }
 
-/** POST /v1/escalation/mark-handled (W1-T182) — the NEEDS ME affordance for an ESCALATION of any
- *  class, distinct from `/v1/manual/approve`'s check-off: closing the issue never resolves the
- *  underlying block, so this is named "mark handled", never "approve" or "resolve". A separate
- *  route, never a relabel, so `/v1/manual/approve`'s existing callers stay untouched. */
+/** POST /v1/escalation/mark-handled (W1-T182; `class`/`disposition` required since W1-T4677) — the
+ *  NEEDS ME affordance for an ESCALATION of any class, distinct from `/v1/manual/approve`'s
+ *  check-off: closing the issue never resolves the underlying block, so this is named "mark
+ *  handled", never "approve" or "resolve". The response also names the class's current acted-on
+ *  precision and signal tier (escalation-precision.ts), recomputed off the ledger row just written. */
 export function buildEscalationMarkHandledRoute(deps: PanelActionDeps): Route {
   return {
     method: "POST",
@@ -471,8 +736,23 @@ export function buildEscalationMarkHandledRoute(deps: PanelActionDeps): Route {
     handler: jsonAction(validateMarkEscalationHandled, (input, req, res) => {
       deps.issues.close(input.issueUrl);
       const origin = bearerTokenId(req);
-      ledgerPanelAction(deps, "panel.escalation_marked_handled", input.taskId, origin, { issue_url: input.issueUrl });
-      sendJson(res, 200, { ok: true, taskId: input.taskId, issueUrl: input.issueUrl });
+      ledgerPanelAction(deps, "panel.escalation_marked_handled", input.taskId, origin, {
+        issue_url: input.issueUrl,
+        class: input.class,
+        disposition: input.disposition,
+        ...(input.snoozedUntil !== undefined ? { snoozed_until: input.snoozedUntil } : {}),
+      });
+      const precision = escalationClassPrecision(readLedgerLines(deps.ledgerPath), input.class);
+      const tier = escalationClassTier(input.class, precision);
+      sendJson(res, 200, {
+        ok: true,
+        taskId: input.taskId,
+        issueUrl: input.issueUrl,
+        class: input.class,
+        disposition: input.disposition,
+        precision: precision.precision,
+        tier,
+      });
     }),
   };
 }
@@ -740,6 +1020,12 @@ function validateTaskId(body: unknown): { error: string } | TaskIdInput {
   return { taskId: body.taskId };
 }
 
+/** The kick route's whole side effect, shared with action-executor.ts (W1-T4657). */
+export function armKick(deps: Pick<PanelActionDeps, "root" | "ledgerPath">, taskId: string, origin: string, extra: Record<string, unknown> = {}): PanelLedgerRow {
+  requestKick(deps.root, taskId, origin);
+  return appendPanelLedger(deps.ledgerPath, "console.kick_requested", taskId, origin, { armed: true, ...extra });
+}
+
 /** POST /v1/drain/kick — the per-row "Run" button. Writes `KICK_REQUESTED-<taskId>`; the daemon
  *  dispatches that task by id through its normal `assertRunnable`-gated path at the next poll.
  *  Ledgers `console.kick_requested`; the dispatch/refusal outcome is the daemon's own line. */
@@ -751,9 +1037,7 @@ export function buildKickRoute(deps: Pick<PanelActionDeps, "root" | "ledgerPath"
     // W1-T404: HIGH — dispatches a task: real spend.
     tier: "high",
     handler: jsonAction(validateTaskId, (input, req, res) => {
-      const origin = bearerTokenId(req);
-      requestKick(deps.root, input.taskId, origin);
-      appendPanelLedger(deps.ledgerPath, "console.kick_requested", input.taskId, origin, { armed: true });
+      armKick(deps, input.taskId, bearerTokenId(req));
       sendJson(res, 200, { armed: true, taskId: input.taskId });
     }),
   };
@@ -806,6 +1090,35 @@ function validatePrAction(body: unknown): { error: string } | PrActionInput {
   return { action: body.action, prNumber: body.prNumber };
 }
 
+/** Why a switched-off PR action was refused, naming the marker that switched it off. */
+export function prActionSwitchedOffDetail(action: PrActionName): string {
+  return `console ${action} requests are switched off on this daemon (state/CONSOLE_PR_ACTION_OFF-${action})`;
+}
+
+/** The pr-actions route's whole side effect, switch-off refusal included, shared with action-executor.ts (W1-T4657). */
+export function armPrAction(
+  deps: Pick<PanelActionDeps, "root" | "ledgerPath">,
+  action: PrActionName,
+  prNumber: number,
+  origin: string,
+  operator?: string,
+  extra: Record<string, unknown> = {},
+): { switchedOff: true; row: PanelLedgerRow } | { switchedOff: false; request: PrActionRequest; row: PanelLedgerRow } {
+  if (isPrActionSwitchedOff(deps.root, action)) {
+    const row = appendPanelLedger(deps.ledgerPath, "console.pr_action_switched_off", `PR-${prNumber}`, origin, { action, pr_number: prNumber, ...extra });
+    return { switchedOff: true, row };
+  }
+  const request = requestPrAction(deps.root, action, prNumber, origin, operator);
+  const row = appendPanelLedger(deps.ledgerPath, "console.pr_action_requested", `PR-${prNumber}`, origin, {
+    action,
+    pr_number: prNumber,
+    requested_at: request.requestedAt,
+    ...(operator ? { operator } : {}),
+    ...extra,
+  });
+  return { switchedOff: false, request, row };
+}
+
 /**
  * POST /v1/pr-actions — record an operator's bounded repair or review request.
  *
@@ -827,26 +1140,12 @@ export function buildPrActionRoute(deps: Pick<PanelActionDeps, "root" | "ledgerP
     // at "low" by W1-T404, must be able to ask for a review or a fix; nothing else moves tier.
     tier: "low",
     handler: jsonAction(validatePrAction, (input, req, res) => {
-      const origin = bearerTokenId(req);
-      if (isPrActionSwitchedOff(deps.root, input.action)) {
-        appendPanelLedger(deps.ledgerPath, "console.pr_action_switched_off", `PR-${input.prNumber}`, origin, {
-          action: input.action,
-          pr_number: input.prNumber,
-        });
-        sendJson(res, 409, {
-          error: "switched_off",
-          detail: `console ${input.action} requests are switched off on this daemon (state/CONSOLE_PR_ACTION_OFF-${input.action})`,
-        });
+      const outcome = armPrAction(deps, input.action, input.prNumber, bearerTokenId(req), operatorDisplayName(req));
+      if (outcome.switchedOff) {
+        sendJson(res, 409, { error: "switched_off", detail: prActionSwitchedOffDetail(input.action) });
         return;
       }
-      const operator = operatorDisplayName(req);
-      const request = requestPrAction(deps.root, input.action, input.prNumber, origin, operator);
-      appendPanelLedger(deps.ledgerPath, "console.pr_action_requested", `PR-${input.prNumber}`, origin, {
-        action: input.action,
-        pr_number: input.prNumber,
-        requested_at: request.requestedAt,
-        ...(operator ? { operator } : {}),
-      });
+      const { request } = outcome;
       sendJson(res, 200, { armed: true, action: request.action, prNumber: request.prNumber, requestedAt: request.requestedAt });
     }),
   };

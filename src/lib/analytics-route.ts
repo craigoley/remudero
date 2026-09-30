@@ -47,7 +47,7 @@
  * once W1-T433's second cell exists — this shard deliberately does not build that consumer.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { isQueueDispatchRunStart, MAX_RETAINED_LINES_PER_STEP } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
@@ -1896,7 +1896,6 @@ export function writeAnalyticsCheckpoint(stateDir: string, checkpoint: Analytics
   const target = checkpointPath(stateDir);
   const temporary = `${target}.tmp-${process.pid}`;
   try {
-    mkdirSync(stateDir, { recursive: true });
     writeFileSync(temporary, JSON.stringify(checkpoint));
     renameSync(temporary, target);
   } catch {

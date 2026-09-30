@@ -6,6 +6,7 @@ import { dirname, join as joinPath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 
+// @source-text-subject — this suite tests a census whose subject is source-code text.
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a STATIC import of the .mjs is a TS7016 and
 // fails typecheck — the same reason test/a-source-file-cannot-outgrow-its-baseline.test.ts reaches
 // its script this way. A dynamic specifier is not statically resolved, so this loads the REAL
@@ -16,6 +17,7 @@ const {
   AGED_FIELDS,
   EXEMPT_MARKER,
   MARGIN_DAYS,
+  KNOWN_UNCOVERED_CLOCK_FIELDS,
   assertFieldListComplete,
   assertFieldsStillAged,
   censusExpiringFixtures,
@@ -30,6 +32,7 @@ const {
     AGED_FIELDS: ReadonlyArray<{ field: string; threshold: string; source: string; evidence: string[] }>;
     EXEMPT_MARKER: string;
     MARGIN_DAYS: number;
+    KNOWN_UNCOVERED_CLOCK_FIELDS: ReadonlyArray<{ field: string; source: string }>;
     assertFieldListComplete: (o: { files: string[]; readFile: (p: string) => string; agedFields?: ReadonlyArray<{ field: string }> }) => unknown;
     isBlocked: (o: { reported: Array<{ inherited?: boolean }>; populationDrop?: Array<unknown> }) => boolean;
     assertFieldsStillAged: (readFile?: (p: string) => string) => void;
@@ -110,6 +113,23 @@ test("W1-T3838: an unlisted clock-aged field fails the census", () => {
   assert.throws(
     () => assertFieldListComplete({ files: ["src/lib/operator-agent.ts"], readFile: () => reverseComparison, agedFields: [] }),
     /INCOMPLETE TABLE.*expiresAt/s,
+  );
+});
+
+test("W1-T4820: the generated ledger rotation-lock timestamp is accounted for", () => {
+  const source = readFileSync(joinPath(REPO_ROOT, "src/lib/ledger.ts"), "utf8");
+  const discovered = discoverClockAgedFields({ files: ["src/lib/ledger.ts"], readFile: () => source });
+
+  assert.ok(discovered.some((row) => row.field === "startedAt" && row.source === "src/lib/ledger.ts"));
+  assert.ok(
+    KNOWN_UNCOVERED_CLOCK_FIELDS.some((row) => row.field === "startedAt" && row.source === "src/lib/ledger.ts"),
+  );
+  assert.doesNotThrow(() =>
+    assertFieldListComplete({
+      files: ["src/lib/ledger.ts"],
+      readFile: () => source,
+      agedFields: [...AGED_FIELDS, ...KNOWN_UNCOVERED_CLOCK_FIELDS],
+    }),
   );
 });
 

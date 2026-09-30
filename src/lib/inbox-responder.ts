@@ -1,10 +1,12 @@
 import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 
 import { systemClock, type Clock } from "./clock.js";
 import { buildDecisionSummarySpawnArgs } from "./feedback.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { declinedReasonInLedger, parseProposalRegistry } from "./inbox.js";
-import { inboxOwner } from "./inbox-owner.js";
+import { inboxKind, inboxOwner } from "./inbox-owner.js";
+import type { InboxClassification } from "./inbox.js";
 import { machineTokens, plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
 import {
   appendThreadMessage,
@@ -47,7 +49,7 @@ export interface InboxThreadItem {
   proposalId: string;
   summary: string;
   plain: PlainInboxMessage;
-  state: "ready" | "drafting" | "notReady" | "declined";
+  state: "ready" | "drafting" | "notReady" | "declined" | "retired";
 }
 
 export interface ThreadMessageView {
@@ -69,6 +71,8 @@ export interface ThreadSummaryView {
   headline: string;
   snippet: string;
   waitingOn: "operator" | "daemon";
+  /** Actionability, not just who wrote last. A console badge counts decision/reply only. */
+  attention: "decision" | "reply" | "in_progress" | "history" | "awaiting_daemon";
   lastActivity: number | null;
   messageCount: number;
   unread: boolean;
@@ -80,11 +84,104 @@ export interface ThreadDetailView extends ThreadSummaryView {
   messages: ThreadMessageView[];
 }
 
+export type AttentionSourceState = "observed" | "partial" | "unavailable";
+
+export interface AttentionCensusInput {
+  views: ThreadSummaryView[];
+  classifications: InboxClassification[];
+  taskFacts: ReadonlyMap<string, { verify: string; repo: string; title: string; status?: string; retirement?: string; dispatchHold?: boolean; risk?: string }>;
+  releasedTaskIds: ReadonlySet<string>;
+  releaseReceipts?: ReadonlyMap<string, string>;
+  mergedTaskIds?: ReadonlySet<string>;
+  judgeByTask: ReadonlyMap<string, { decision: string; reason: string }>;
+  sources: {
+    plan: AttentionSourceState;
+    registry: AttentionSourceState;
+    liveLedger: AttentionSourceState;
+    archiveLedger: AttentionSourceState;
+    githubProjection: AttentionSourceState;
+  };
+}
+
+/** Source-qualified read model, never an approval or retirement instruction. Snapshot counts may
+ * overcount decisions when a missing ledger hides a release; only verifiedCounts are lower bounds. */
+export function buildAttentionCensus(input: AttentionCensusInput) {
+  const byId = new Map(input.classifications.map((c) => [c.proposalId, c]));
+  const visibleIds = new Set(input.views.map((view) => view.proposalId));
+  const terminalHistory: ThreadSummaryView[] = input.classifications.flatMap((c) => {
+    const taskId = /^verify-human:(W\d+-T[A-Za-z0-9]+)$/.exec(c.proposalId)?.[1];
+    if (!taskId || c.state !== "retired" || visibleIds.has(c.proposalId)) return [];
+    const task = input.taskFacts.get(taskId);
+    if (!input.releasedTaskIds.has(taskId) && !(task?.status === "blocked" && task.retirement)) return [];
+    return [{
+      threadId: inboxThreadId(c.proposalId), proposalId: c.proposalId,
+      headline: c.proposalId, snippet: c.retiredReason ?? "Closed in the plan or released to the fleet",
+      waitingOn: "daemon" as const, attention: "history" as const,
+      lastActivity: null, messageCount: 1, unread: false,
+    }];
+  });
+  const items = [...input.views, ...terminalHistory].map((view) => {
+    const classification = byId.get(view.proposalId);
+    const taskId = /^verify-human:(W\d+-T[A-Za-z0-9]+)$/.exec(view.proposalId)?.[1];
+    const task = taskId ? input.taskFacts.get(taskId) : undefined;
+    const judge = taskId ? input.judgeByTask.get(taskId) : undefined;
+    const released = taskId ? input.releasedTaskIds.has(taskId) : false;
+    const sourceFacts: Array<{ source: string; detail: string }> = [];
+    if (classification) sourceFacts.push({ source: "classification", detail: `${view.proposalId}: ${classification.state}${classification.reasons.length ? `; predicates: ${classification.reasons.map((reason) => reason.predicate).join(", ")}` : ""}` });
+    if (task) sourceFacts.push({ source: "plan", detail: `${taskId}: verify: ${task.verify}; repo: ${task.repo}; ${task.title}` });
+    if (task?.status === "blocked" && task.retirement) sourceFacts.push({ source: "plan-lifecycle", detail: `${taskId}: status blocked; retirement ${task.retirement}` });
+    if (task?.dispatchHold) sourceFacts.push({ source: "plan-lifecycle", detail: `${taskId}: dispatch_hold: true; a release receipt alone cannot make this task dispatchable` });
+    if (task?.risk === "high") sourceFacts.push({ source: "plan", detail: `${taskId}: risk: high in the filed task` });
+    if (judge) sourceFacts.push({ source: "judge", detail: `${judge.decision}: ${judge.reason.slice(0, 300)}` });
+    if (released) sourceFacts.push({ source: "ledger", detail: input.releaseReceipts?.get(taskId!) ?? `${taskId}: ratify.approved released verify-human` });
+    if (taskId && input.mergedTaskIds?.has(taskId)) sourceFacts.push({ source: "githubProjection", detail: `${taskId}: merged task credit observed` });
+    if (classification?.retiredReason) sourceFacts.push({ source: "classification", detail: classification.retiredReason });
+    const whyMe = view.attention === "decision"
+      ? taskId ? task?.dispatchHold
+        ? `${taskId} still has an explicit dispatch hold. A release receipt does not lift it; the operator must review the held task.`
+        : `${taskId} requires an operator decision${task ? ` (verify: ${task.verify})` : "; task evidence unavailable"}.`
+        : `Proposal ${view.proposalId} is ready for an operator decision.`
+      : view.attention === "reply" ? `Proposal ${view.proposalId} asks for an operator reply.`
+      : view.attention === "awaiting_daemon" ? "Your reply is delivered; waiting for the daemon."
+      : view.attention === "history" ? "Past operator item; no current decision requested."
+      : "The fleet is still working; no current operator decision is established.";
+    return {
+      threadId: view.threadId, proposalId: view.proposalId, ...(taskId ? { taskId } : {}),
+      kind: inboxKind(view.proposalId), waitingOn: view.waitingOn, attention: view.attention,
+      classification: classification?.state ?? "unavailable", whyMe, sourceFacts,
+      ...(classification?.retiredReason ? { retiredReason: classification.retiredReason } : {}),
+    };
+  }).sort((a, b) => a.proposalId.localeCompare(b.proposalId));
+  const counts = { decision: 0, reply: 0, in_progress: 0, history: 0, awaiting_daemon: 0 };
+  // A human-attention label is not proof that the proposal is prepared for approval. Keep the
+  // observed decision total, but expose that distinction before a UI calls it actionable.
+  const decisionReadiness = { ready: 0, needsPreparation: 0, unknown: 0 };
+  const kinds: Record<string, number> = {};
+  for (const item of items) {
+    counts[item.attention] += 1;
+    kinds[item.kind] = (kinds[item.kind] ?? 0) + 1;
+    if (item.attention === "decision") {
+      if (item.classification === "ready") decisionReadiness.ready += 1;
+      else if (item.classification === "not_ready" || item.classification === "drafting") decisionReadiness.needsPreparation += 1;
+      else decisionReadiness.unknown += 1;
+    }
+  }
+  const contradictoryRelease = items.some((item) => item.taskId && input.releasedTaskIds.has(item.taskId) && item.attention === "decision");
+  const missingReferent = items.some((item) => (item.taskId && !input.taskFacts.has(item.taskId)) || item.classification === "unavailable");
+  const state = Object.values(input.sources).every((source) => source === "observed") && !contradictoryRelease && !missingReferent ? "complete" : "partial";
+  const verifiedCounts = state === "complete" ? { ...counts } : { decision: 0, reply: 0, in_progress: 0, history: 0, awaiting_daemon: 0 };
+  const result = { scope: "core" as const, state, countSemantics: "observed_snapshot_not_verified" as const,
+    sources: input.sources, counts, decisionReadiness, verifiedCounts, kinds, items, ...(contradictoryRelease ? { discrepancy: "active_human_ask_has_release_receipt" } : {}) };
+  const snapshotKey = createHash("sha256").update(JSON.stringify(result)).digest("hex");
+  return { ...result, snapshotKey };
+}
+
 const ACTIONS_BY_STATE: Record<InboxThreadItem["state"], InboxThreadAction[]> = {
   ready: ["approve", "decline", "edit"],
   drafting: ["decline", "edit"],
   notReady: ["decline", "edit"],
   declined: ["restore"],
+  retired: [],
 };
 
 function openingMessage(item: InboxThreadItem): ThreadMessageView {
@@ -137,12 +234,25 @@ function detailFor(item: InboxThreadItem, stored: ThreadMessage[], marks: ReadMa
     headline: item.plain.headline,
     snippet: last.text.split(/(?<=[.!?])\s/)[0]!.slice(0, 160),
     waitingOn: last.from === "operator" ? "daemon" : "operator",
+    attention: attentionFor(item, last),
     lastActivity: last.ts,
     messageCount: messages.length,
     unread: last.from === "daemon" && (marks[threadId] ?? -1) < last.seq,
     details: item.summary,
     messages,
   };
+}
+
+function attentionFor(item: InboxThreadItem, last: ThreadMessageView): ThreadSummaryView["attention"] {
+  if (item.state === "retired") return "history";
+  if (last.from === "operator") return "awaiting_daemon";
+  if (last.extra?.question === true) return "reply";
+  if (item.state === "declined") return "history";
+  const kind = inboxKind(item.proposalId);
+  // These kinds carry an explicit human judgement even before an Architect has a draft. A
+  // generic not-ready proposal, by contrast, is the fleet's next step, not the operator's.
+  if (kind === "verify-human" || kind === "ruling" || item.state === "ready") return "decision";
+  return "in_progress";
 }
 
 /** Every operator item's thread, waiting-on-you first, then most recent activity. A declined item
@@ -153,7 +263,7 @@ export function listThreadViews(
   marks: ReadMarks,
 ): ThreadSummaryView[] {
   const views = items
-    .filter((item) => item.state !== "declined" || (threads.get(inboxThreadId(item.proposalId))?.length ?? 0) > 0)
+    .filter((item) => item.state !== "retired" && (item.state !== "declined" || (threads.get(inboxThreadId(item.proposalId))?.length ?? 0) > 0))
     .map((item) => {
       const { details: _details, messages: _messages, ...summary } = detailFor(item, threads.get(inboxThreadId(item.proposalId)) ?? [], marks);
       return summary;

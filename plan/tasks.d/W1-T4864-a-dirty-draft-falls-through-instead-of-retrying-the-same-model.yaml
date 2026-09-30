@@ -1,0 +1,34 @@
+- id: W1-T4864
+  title: "A LINT-DIRTY INBOX DRAFT RE-SYNTHESIZES ON THE SAME MODEL UNTIL ITS ATTEMPTS RUN OUT — nano spent 3,311 syntheses for 200 terminal drafts (16.6 each) and still left 76% of proposals dirty; a dirty draft should walk to the next ladder model, and the draft should be emitted as schema-checked data rendered to YAML"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: file, build and retire as you see fit (verify-human review follow-ups)"
+  note: "reservation hand-off: plan-systemic-0930-1790738140000 -> plan-systemic-0930-1790738140000"
+  plan_refs: [W1-T3570, W1-T3621]
+  files: [src/lib/inbox.ts, test/a-dirty-draft-falls-through-instead-of-retrying-the-same-model.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 (docs/recon/openweight-inbox-draft-trial.md, W1-T3570): cash gpt-5-nano, 09-16..09-30, 3,311
+    syntheses, 1,392 relints, 200 terminal drafts, 49 lint-clean; 46 dirty drafts were YAML that failed to parse. The
+    lane retries the same model until attempts are spent. #7963 moves the lead to gpt-6-luna, but any model's parse
+    failure still costs a full retry cycle on that model.
+  design: |
+    (i) After a dirty relint, the next synthesis walks to the next candidate in the lane's ladder rather than the
+    same model, recording inbox.draft_fellthrough {from, to, violations}. (ii) The draft is requested as structured
+    data (a JSON schema for the fragment's fields) and rendered to YAML by the harness, so a parse failure cannot
+    come from the model's formatting.
+  acceptance:
+    - claim: "a dirty draft falls through to the next ladder model"
+      proof: 'grep: test("W1-T4864: a dirty draft falls through to the next ladder model" in test/a-dirty-draft-falls-through-instead-of-retrying-the-same-model.test.ts'
+    - claim: "a schema-valid draft always renders to parseable YAML"
+      proof: 'grep: test("W1-T4864: a schema-valid draft always renders to parseable YAML" in test/a-dirty-draft-falls-through-instead-of-retrying-the-same-model.test.ts'
+  falsifier: |
+    Retry the same model after a dirty relint and the first test sees no fall-through.

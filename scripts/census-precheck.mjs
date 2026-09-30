@@ -37,6 +37,8 @@ import {
   listMeasuredFiles,
   readBaseline as readCommentBaseline,
 } from "./comment-load-ratchet.mjs";
+import { DEPS_INTERFACE_BASELINE, DEPS_INTERFACE_CEILING_KEYS, depsInterfaceCounts } from "./deps-interface-census.mjs";
+import { HOUSE_LITERALS, houseLiteralCounts, listHouseLayoutSrcFiles } from "./house-layout-census.mjs";
 import {
   FIXTURE_COPY_CENSUS_FILENAME,
   FIXTURE_COPY_SIGNATURES,
@@ -149,6 +151,58 @@ function fixtureCopyViolations({ changed, readHead, readBase, testFiles }) {
   );
 }
 
+/** Every src file's text on this tree, and the same population with each changed src file read at the merge
+ *  base instead — the unchanged files are identical on both sides, so only the diff is fetched from git. */
+function srcTextsOnBothSides({ scoped, readHead, readBase, srcFiles = [] }) {
+  const headTexts = new Map();
+  for (const path of srcFiles) {
+    const text = readHead(path);
+    if (text !== null) headTexts.set(path, text);
+  }
+  const baseTexts = new Map(headTexts);
+  for (const path of scoped) {
+    const text = readBase(path);
+    if (text === null) baseTexts.delete(path);
+    else baseTexts.set(path, text);
+  }
+  return { head: [...headTexts.values()], base: [...baseTexts.values()] };
+}
+
+function houseLayoutViolations(input) {
+  const scoped = input.changed.filter((p) => CLOCK_SCOPE_RE.test(p));
+  if (scoped.length === 0) return [];
+  const texts = srcTextsOnBothSides({ ...input, scoped });
+  const head = houseLiteralCounts(texts.head);
+  const base = houseLiteralCounts(texts.base);
+  return HOUSE_LITERALS.filter((literal) => caused(head[literal], base[literal], base[literal], base[literal])).map(
+    (literal) =>
+      `house-layout: ${literal} now in ${head[literal]} non-test src files, up from ${base[literal]} at the ` +
+      "merge base — resolve it through resolveRepoLayout (src/lib/repo-layout.ts)",
+  );
+}
+
+function depsInterfaceViolations(input) {
+  const scoped = input.changed.filter((p) => CLOCK_SCOPE_RE.test(p));
+  if (scoped.length === 0 && !input.changed.includes(DEPS_INTERFACE_BASELINE)) return [];
+  const headBaseline = parseOr(input.readHead(DEPS_INTERFACE_BASELINE), JSON.parse, {});
+  const baseBaseline = parseOr(input.readBase(DEPS_INTERFACE_BASELINE), JSON.parse, {});
+  const texts = srcTextsOnBothSides({ ...input, scoped });
+  const head = depsInterfaceCounts(texts.head);
+  const base = depsInterfaceCounts(texts.base);
+  const out = [];
+  for (const [count, key] of Object.entries(DEPS_INTERFACE_CEILING_KEYS)) {
+    // The lower of the two ceilings, so raising one in this diff never excuses the growth it rides in on.
+    const ceiling = Math.min(headBaseline[key] ?? Infinity, baseBaseline[key] ?? Infinity);
+    if (caused(head[count], ceiling, base[count], baseBaseline[key] ?? Infinity)) {
+      out.push(
+        `deps-interface: ${count} ${head[count]} > baseline ${ceiling} — reuse an existing seam ` +
+          '(Pick<PreflightFastDeps, "spawn"> is the counted-sibling remedy) instead of adding another *Deps shape',
+      );
+    }
+  }
+  return out;
+}
+
 /**
  * Every census violation this branch causes. Pure over its readers, so every arm is testable
  * without git: `readHead` and `readBase` return a repo-relative file's text on this tree and at
@@ -158,7 +212,13 @@ function fixtureCopyViolations({ changed, readHead, readBase, testFiles }) {
  *   measuredFiles: string[], testFiles: string[] }} input
  */
 export function evaluateCensusPrecheck(input) {
-  return [...clockViolations(input), ...commentLoadViolations(input), ...fixtureCopyViolations(input)];
+  return [
+    ...clockViolations(input),
+    ...commentLoadViolations(input),
+    ...fixtureCopyViolations(input),
+    ...houseLayoutViolations(input),
+    ...depsInterfaceViolations(input),
+  ];
 }
 
 function gitOut(root, args) {
@@ -193,6 +253,7 @@ export function main(argv) {
       },
       measuredFiles: listMeasuredFiles(root),
       testFiles: listFixtureCopyFiles(root),
+      srcFiles: listHouseLayoutSrcFiles(root),
     });
   } catch (e) {
     console.error(`census-precheck: could not measure — ${String(e.message ?? e)}`);

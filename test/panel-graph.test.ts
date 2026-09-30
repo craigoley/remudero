@@ -29,6 +29,7 @@ import {
   captureFeedback,
   feedbackDir,
   feedbackEntryPath,
+  listFeedback,
   readFeedbackEntry,
   setFeedbackStatus,
   validateFeedbackExpansion,
@@ -473,6 +474,106 @@ test("POST /v1/feedback with replyTo naming a NON-grilling entry -> 400 (nothing
   await withService(depsFor(root, planPath), async (base) => {
     const res = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "x", replyTo: notGrilling.id });
     assert.equal(res.status, 400);
+  });
+});
+
+// ── W1-T4202: the reply route reads the entry's status from fetched origin/main, not the checkout ──
+
+/** A git-repo root whose `origin/main` holds `plan/feedback/<id>.yaml` at `mainStatus` while the working
+ *  checkout's copy sits at `checkoutStatus` — the daemon-checkout-lags-main split the reply route must survive. */
+function splitFeedbackRoot(mainStatus: FeedbackEntry["status"], checkoutStatus: FeedbackEntry["status"]): { root: string; id: string } {
+  const root = gitTmpRoot();
+  const entry = captureFeedback(root, { raw: "does this want a CLI flag or a config default?", origin: "cli" });
+  setFeedbackStatus(root, entry.id, mainStatus);
+  commitAll(root);
+  execFileSync("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], { cwd: root, stdio: "pipe" });
+  setFeedbackStatus(root, entry.id, checkoutStatus);
+  return { root, id: entry.id };
+}
+
+test("W1-T4202: a grill reply is accepted when main has the entry at grilling and the checkout lags", async () => {
+  const { root, id } = splitFeedbackRoot("grilling", "new");
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "a config default, please", replyTo: id });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { entry: FeedbackEntry };
+    assert.match(body.entry.raw, new RegExp(`^\\[answer to feedback#${id}\\] a config default, please$`));
+  });
+  assert.equal(readFeedbackEntry(root, id).status, "answered");
+});
+
+test("W1-T4202: a reply to an entry not at grilling is still refused", async () => {
+  const ahead = splitFeedbackRoot("new", "grilling");
+  await withService(depsFor(ahead.root, emptyPlanPath(ahead.root)), async (base) => {
+    for (const path of ["/v1/feedback", "/v1/feedback/preview"]) {
+      const res = await post(base, path, WRITE_TOKEN, { text: "x", replyTo: ahead.id });
+      assert.equal(res.status, 400);
+      const detail = ((await res.json()) as { detail: string }).detail;
+      assert.match(detail, /not parked at grilling \(status: new, read from origin\/main\)/);
+    }
+  });
+  assert.equal(readFeedbackEntry(ahead.root, ahead.id).status, "grilling");
+
+  const noMain = tmpRoot();
+  const stale = captureFeedback(noMain, { raw: "already new", origin: "cli" });
+  await withService(depsFor(noMain, emptyPlanPath(noMain)), async (base) => {
+    const res = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "x", replyTo: stale.id });
+    assert.equal(res.status, 400);
+    assert.match(((await res.json()) as { detail: string }).detail, /status: new, read from the checkout \(origin\/main unreadable\)/);
+  });
+});
+
+// ── The answered-write lag: main still says `grilling` until the reply's landing merges, so a SECOND reply with a
+// DIFFERENT submissionKey must be refused on the answering entry the checkout already holds ─────────────────────
+
+const REPLY_LAG_REFUSAL = (answerId: string): RegExp =>
+  new RegExp(`is parked at grilling \\(status: grilling, read from origin/main\\) but the checkout already holds feedback#${answerId} answering it`);
+
+test("a second reply with a different submissionKey is refused while main still says grilling and the checkout says answered", async () => {
+  const { root, id } = splitFeedbackRoot("grilling", "grilling");
+  await withService(depsFor(root, emptyPlanPath(root)), async (base) => {
+    const first = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "a config default", replyTo: id, submissionKey: "key-a" });
+    assert.equal(first.status, 200);
+    const firstId = ((await first.json()) as { entry: FeedbackEntry }).entry.id;
+    assert.equal(readFeedbackEntry(root, id).status, "answered");
+
+    const repeat = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "a config default", replyTo: id, submissionKey: "key-a" });
+    assert.equal(repeat.status, 200);
+
+    const second = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "no, a CLI flag", replyTo: id, submissionKey: "key-b" });
+    assert.equal(second.status, 400);
+    assert.match(((await second.json()) as { detail: string }).detail, REPLY_LAG_REFUSAL(firstId));
+
+    const preview = await post(base, "/v1/feedback/preview", WRITE_TOKEN, { text: "no, a CLI flag", replyTo: id });
+    assert.equal(preview.status, 400);
+    assert.match(((await preview.json()) as { detail: string }).detail, REPLY_LAG_REFUSAL(firstId));
+
+    assert.deepEqual(listFeedback(root).filter((e) => e.reply_to === id).map((e) => e.id), [firstId]);
+    assert.equal(readFeedbackEntry(root, id).answered_by, firstId);
+  });
+});
+
+test("an answering entry already in the checkout refuses a reply even when the answered write has not reached the checkout", async () => {
+  const { root, id } = splitFeedbackRoot("grilling", "grilling");
+  const answer = captureFeedback(root, { raw: `[answer to feedback#${id}] a config default`, origin: "ui", replyTo: id });
+  assert.equal(readFeedbackEntry(root, id).status, "grilling");
+  await withService(depsFor(root, emptyPlanPath(root)), async (base) => {
+    for (const path of ["/v1/feedback", "/v1/feedback/preview"]) {
+      const res = await post(base, path, WRITE_TOKEN, { text: "no, a CLI flag", replyTo: id, ...(path === "/v1/feedback" ? { submissionKey: "key-b" } : {}) });
+      assert.equal(res.status, 400);
+      assert.match(((await res.json()) as { detail: string }).detail, REPLY_LAG_REFUSAL(answer.id));
+    }
+  });
+  assert.deepEqual(listFeedback(root).filter((e) => e.reply_to === id).map((e) => e.id), [answer.id]);
+});
+
+test("an answering entry for a different target does not block a reply to a grilling entry", async () => {
+  const { root, id } = splitFeedbackRoot("grilling", "new");
+  captureFeedback(root, { raw: "[answer to feedback#fb-elsewhere] x", origin: "ui", replyTo: "fb-elsewhere" });
+  await withService(depsFor(root, emptyPlanPath(root)), async (base) => {
+    const res = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "a config default", replyTo: id, submissionKey: "key-c" });
+    assert.equal(res.status, 200);
   });
 });
 

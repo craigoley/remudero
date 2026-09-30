@@ -122,6 +122,12 @@
       "grepHint": "Base-ref contract"
     },
     {
+      "path": "docs/ci-friction-remedies.md",
+      "title": "CI friction remedies",
+      "summary": "This file is the ledger of remedies for the causes the ci-friction gardener (W1-T4435, `src/lib/ci-friction-gardener.ts`) prices. The gardener files one parked…",
+      "grepHint": "CI friction remedies"
+    },
+    {
       "path": "docs/cli-reference.md",
       "title": "rmd CLI reference",
       "summary": "Every `rmd <command>` this binary dispatches, rendered from the same `COMMANDS` registry `rmd --help` and `rmd <cmd> --help` render from (W1-T47) -- this file…",
@@ -674,6 +680,12 @@
       "grepHint": "The acceptance-proof dialect"
     },
     {
+      "path": "docs/recon/openweight-inbox-draft-trial.md",
+      "title": "The openweight inbox-draft trial, measured (W1-T3570)",
+      "summary": "Measured 2026-09-30 from the fleet ledger union (`rmd ledger-grep inbox.dr`, deduplicated on",
+      "grepHint": "The openweight inbox-draft trial, measured (W1-T3570)"
+    },
+    {
       "path": "docs/recon/openweight-triage-websearch-authority.md",
       "title": "Openweight triage WebSearch authority",
       "summary": "Date: 2026-09-14",
@@ -756,6 +768,12 @@
       "title": "Troubleshooting",
       "summary": "Symptom → cause → fix for the operator-visible failures the fleet has already paid to",
       "grepHint": "Troubleshooting"
+    },
+    {
+      "path": "docs/views.md",
+      "title": "Console views: `GET /v1/views/<name>`",
+      "summary": "A view is one read per console surface, computed in core. The console renders it; it does not",
+      "grepHint": "Console views: `GET /v1/views/<name>`"
     }
   ]
 }

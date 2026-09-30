@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -351,6 +351,29 @@ test("unit test: saturated operator activity route includes workstreams and arti
     assert.equal(answer.body.truncated, true);
     assert.ok((answer.body.items as Array<{ kind: string }>).some((item) => item.kind === "workstream"));
     assert.ok((answer.body.items as Array<{ kind: string }>).some((item) => item.kind === "artifact"));
+  } finally {
+    rmSync(fx.dir, { recursive: true, force: true });
+  }
+});
+
+test("unit test: a warm operator activity refresh parses no ledger rotation", async () => {
+  const fx = activityCorpus();
+  try {
+    const rotations = readdirSync(fx.dir).filter((name) => /\.ndjson\.gz$/.test(name)).map((name) => join(fx.dir, name));
+    assert.equal(rotations.length, 1);
+    const writtenAt = new Date("2026-09-20T10:05:00.000Z");
+    for (const rotation of rotations) utimesSync(rotation, writtenAt, writtenAt);
+    const route = buildOperatorActivityRoute(routeDeps(fx.path), () => ({ tasks: [], byId: new Map() }) as unknown as Plan);
+    const warm = await served(route);
+    assert.equal(warm.status, 200);
+    assert.ok((warm.body.items as Array<{ taskId?: string }>).some((item) => item.taskId?.startsWith("gz-")));
+    for (const rotation of rotations) {
+      writeFileSync(rotation, Buffer.alloc(statSync(rotation).size, 0x21));
+      utimesSync(rotation, writtenAt, writtenAt);
+    }
+    const again = await served(route);
+    assert.equal(again.status, 200);
+    assert.deepEqual(again.body, warm.body);
   } finally {
     rmSync(fx.dir, { recursive: true, force: true });
   }

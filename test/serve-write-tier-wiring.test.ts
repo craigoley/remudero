@@ -112,7 +112,7 @@ test("the assembled serve table mounts the confirm-nonce route", async () => {
   // And over the REAL server, not merely present in the table: a write-scoped caller can reach it
   // and get back an actual, non-empty nonce -- "a client can obtain a nonce at all".
   await withServer(async (base) => {
-    const nonce = await confirm(base, bearerAuth, "POST", "/v1/escalation/mark-handled", JSON.stringify({ taskId: "t", issueUrl: "u" }));
+    const nonce = await confirm(base, bearerAuth, "POST", "/v1/escalation/mark-handled", JSON.stringify({ taskId: "t", issueUrl: "u", class: "MANUAL", disposition: "acted" }));
     assert.ok(nonce);
   });
 });
@@ -196,7 +196,7 @@ test("the bearer token remains low tier under enforcement", async () => {
     const low = await fetch(`${base}/v1/escalation/mark-handled`, {
       method: "POST",
       headers: { ...bearerAuth, "content-type": "application/json" },
-      body: JSON.stringify({ taskId: "W1-T3", issueUrl: "https://example.com/issue/3" }),
+      body: JSON.stringify({ taskId: "W1-T3", issueUrl: "https://example.com/issue/3", class: "MANUAL", disposition: "acted" }),
     });
     assert.equal(low.status, 200, "the bearer token must still reach a LOW-tier route");
 

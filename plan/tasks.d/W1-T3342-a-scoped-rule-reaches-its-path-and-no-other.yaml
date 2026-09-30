@@ -11,9 +11,15 @@
   files: [CLAUDE.md, learnings/architecture.yaml, test/a-scoped-rule-reaches-its-path-and-no-other.test.ts]
   origin: "operator-session#doctrine-modularization-2026-09-10"
   plan_refs: ["W1-T3323", "W1-T2507", "W1-T3341", "W1-T33", "W1-T38"]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   note: |
+    CLOSED UNBUILT 2026-09-29 (operator session): the task's own exit condition fired. Its record says to close
+    without implementation when the live index has no unpinned headline naming a single governing path; the
+    2026-09-27 worker found 60 headlines, 56 frozen by the doctrine fixture and 4 naming no concrete path, and
+    refused as premise-rotted. It was dispatched until its circuit breaker tripped instead of closing.
+
     DEFERRED FROM W1-T3323 DELIBERATELY, AND THIS IS THE DEVIATION BEING DECLARED. That shard's
     design (iii) said "SPLIT BY SCOPE WHERE SCOPE EXISTS", and the build did NOT do it. The reason
     is the same shard's design (ii) and its own falsifier: "This task MOVES bytes; it does not

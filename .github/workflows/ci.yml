@@ -41,6 +41,12 @@ on:
   # workflow that declares this trigger against it before the queue lets a PR land. No `types:`
   # filter, for the same INVARIANT 2 reason `pull_request` and `push` above carry none.
   merge_group:
+  # W1-T4817: a main commit GitHub fired no push event for (two fleet auto-merges landing seconds
+  # apart) is dispatched here, at main's head, by the sweep's `main.run_gap.dispatched` rung; it
+  # is also what lets an operator re-run `ci` on main by hand. A dispatch is neither
+  # `pull_request` nor `push`, so it takes the same shell-guarded lanes `merge_group` does.
+  # No `inputs:` — the sweep dispatches with none. `ci-gate.yml` still gains no trigger.
+  workflow_dispatch:
 
 permissions:
   actions: read
@@ -189,6 +195,26 @@ jobs:
           cat diff-class.log || true
           echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
           echo "W1-T2428 fast-lane: this diff classifies as ${CLASS}."
+          # W1-T4811 (operator ruling 2026-09-22, W1-T2982): a rename-only PR takes the fast lane. The verdict is
+          # src/lib/review.ts's isRenameOnlyDiff over `git diff --raw --no-abbrev -M` — blob ids, not path names, so a
+          # rename that also edits one byte is REFUSED. Fails closed: any error leaves rename_only=false (full matrix).
+          RENAME_ONLY="false"
+          if [ -n "${GITHUB_BASE_REF}" ]; then
+            git diff --raw --no-abbrev -M "origin/${GITHUB_BASE_REF}...HEAD" > rename-raw.txt 2>/dev/null || : > rename-raw.txt
+            RENAME_ONLY="$(node --import tsx -e '
+              import { readFileSync } from "node:fs";
+              const mod = await import((process.env.GITHUB_WORKSPACE || process.cwd()) + "/src/lib/review.ts");
+              const v = mod.isRenameOnlyDiff(readFileSync("rename-raw.txt", "utf8"));
+              console.error("W1-T4811 rename-only: " + v.renameOnly + " — " + v.reason);
+              console.log(v.renameOnly ? "true" : "false");
+            ' 2>rename-verdict.log)" || RENAME_ONLY="false"
+            case "$RENAME_ONLY" in
+              true) ;;
+              *) RENAME_ONLY="false" ;;
+            esac
+          fi
+          cat rename-verdict.log || true
+          echo "rename_only=${RENAME_ONLY}" >> "$GITHUB_OUTPUT"
           # W1-T4395: a diff under test/ only still runs its tests. test-only-run.txt holds "files" plus the
           # changed test files, or "full" (a helper, fixture or setup file changed), or nothing.
           : > test-only-run.txt
@@ -213,8 +239,18 @@ jobs:
         # identically to a complete one. The block below makes that legible without changing whether
         # the job is red; it needs `tee`, `set +e` and `PIPESTATUS` under Actions' `-eo pipefail`.
         # Why: measured on PR #3542 — docs/forensics/ci-yml.md.
+        env:
+          RENAME_ONLY: ${{ steps.classify.outputs.rename_only }}
         run: |
           CLASS="${{ steps.classify.outputs.class }}"
+          # W1-T4811: a rename-only pull request (every path an R100 rename between plan/tasks.d shards, blobs
+          # unchanged) merges on the plan lint alone; nothing it touches is reachable by a suite. The verdict is
+          # computed by the classify step from git's blob ids, so a one-byte edit never reaches this branch.
+          if [ "${RENAME_ONLY:-false}" = "true" ]; then
+            echo "W1-T4811 fast-lane: rename-only pull request — the test matrix is short-circuited to success; lint-plan still runs."
+            echo "- W1-T4811 fast-lane: rename-only pull request; shard ${{ matrix.shard }}/8 registered success without running a suite." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           # W1-T4395: the coverage lane skips a test-only diff, so the changed tests run here, through the
           # same candidate lane as a plan/docs diff; a helper or fixture change runs the full suite.
           TEST_ONLY_RUN="$(head -n 1 test-only-run.txt 2>/dev/null || true)"
@@ -609,7 +645,7 @@ jobs:
               ;;
           esac
 
-  test-slow:
+  test-slow-shard:
     # W1-T2904: the SLOW tier, split out of the `ci` matrix's file-count sharding, which cannot
     # balance a suite where one file (test/run-task.test.ts, ~58s alone) sits wherever its hash
     # happens to land while most files finish in well under a second. `npm run test:slow` reads
@@ -617,8 +653,12 @@ jobs:
     # heuristic) and runs exactly the files at or above its threshold. It is REQUIRED through
     # ci-gate before the fast shards may exclude those files. It registers on every pull_request
     # event (W1-T1033), so the required context is never silently absent.
-    name: test-slow
+    name: test-slow-shard (${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     # W1-T4396: no job-level if — the push lane runs the slow tier too. W1-T3207 skips it on a
     # SOURCE pull request, so without this the 107 slowest files ran on main nowhere at all. It is
     # its own job, so it never lengthens the fast shards' critical path.
@@ -707,19 +747,128 @@ jobs:
           if [ "${{ steps.plan-reading.outputs.class }}" = "PUSH" ]; then
             # W1-T4396: main's push lane. One bounded failed-file retry, as the fast shards get.
             echo "W1-T4396: push to main — running the slow tier."
-            node scripts/test-with-retry.mjs node scripts/test-tier-manifest.mjs --run slow --base HEAD
+            node scripts/test-with-retry.mjs node scripts/test-tier-manifest.mjs --run slow --shard ${{ matrix.shard }}/2 --base HEAD
           else
-            npm run --silent test:slow -- --base "origin/${GITHUB_BASE_REF}"
+            npm run --silent test:slow -- --shard ${{ matrix.shard }}/2 --base "origin/${GITHUB_BASE_REF}"
           fi
       - name: Upload slow-tier duration evidence (structured Node test events, W1-T3302)
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: test-duration-slow
+          name: test-duration-slow-${{ matrix.shard }}
           path: ${{ runner.temp }}/test-duration
           retention-days: 1
           if-no-files-found: ignore
 
+  test-slow:
+    # Stable required verdict. A matrix failure, cancellation, or skipped shard must never be
+    # reported as a successful slow tier. `always()` registers this check even after an upstream
+    # refusal, and the exact successful matrix result is the only accepted state.
+    name: test-slow
+    needs: [test-slow-shard]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Collapse both slow-tier shards into the stable required check
+        env:
+          SHARD_RESULT: ${{ needs.test-slow-shard.result }}
+          RUN_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_REPO_SLUG: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          print_unfinished_test_from_logs() {
+            if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GH_REPO_SLUG:-}" ]; then
+              echo "  Last started unfinished test: unavailable (workflow run id is not present)."
+              return 0
+            fi
+            LOG_FILE="$(mktemp)"
+            if ! gh run view "$GITHUB_RUN_ID" --repo "$GH_REPO_SLUG" --log > "$LOG_FILE" 2>/dev/null; then
+              echo "  Last started unfinished test: unavailable (could not read workflow logs)."
+              return 0
+            fi
+            node - "$LOG_FILE" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const text = readFileSync(process.argv[2], "utf8");
+          const active = new Map();
+          let order = 0;
+          for (const raw of text.split(/\r?\n/)) {
+            const parts = raw.split("\t");
+            const job = parts.length >= 3 ? parts[0] : "workflow log";
+            let line = parts.length >= 3 ? parts.slice(2).join("\t") : raw;
+            line = line.replace(/^\d{4}-\d\d-\d\dT\S+\s+/, "");
+            const started = line.match(/^\s*# Subtest: (.+?)\s*$/);
+            if (started) {
+              active.set(job, { job, name: started[1], order: ++order });
+              continue;
+            }
+            const finished = line.match(/^\s*(?:ok|not ok) \d+(?: - (.*?))?\s*$/);
+            if (!finished) continue;
+            const name = finished[1];
+            if (!name) {
+              active.delete(job);
+              continue;
+            }
+            for (const [key, value] of active.entries()) {
+              if (value.name === name) active.delete(key);
+            }
+          }
+          const newest = [...active.values()].sort((a, b) => b.order - a.order)[0];
+          if (newest) {
+            console.log(`  Last started unfinished test: ${newest.name} (${newest.job}).`);
+          } else {
+            console.log("  Last started unfinished test: unavailable (no started-without-finished TAP test found).");
+          }
+          NODE
+            rm -f "$LOG_FILE"
+          }
+
+          case "$SHARD_RESULT" in
+            success)
+            echo "test-slow: both slow-tier shards succeeded."
+              ;;
+            failure)
+              echo "test-slow: a test shard FAILED (matrix result: failure) — open the shard log; this is a real break until that log says otherwise."
+              exit 1
+              ;;
+            cancelled)
+              # W1-T3345: a newer push means this sha is not the one that merges (a non-result); an
+              # UNCHANGED head means a shard died at its ceiling: tests DID NOT run. Fails closed.
+              CURRENT_HEAD=""
+              if [ -n "${PR_NUMBER:-}" ]; then
+                CURRENT_HEAD="$(gh api "repos/${GH_REPO_SLUG}/pulls/${PR_NUMBER}" --jq .head.sha 2>/dev/null || true)"
+              fi
+              if [ -n "$CURRENT_HEAD" ] && [ -n "${RUN_HEAD_SHA:-}" ] && [ "$CURRENT_HEAD" != "$RUN_HEAD_SHA" ]; then
+                echo "test-slow: SUPERSEDED — this run measured ${RUN_HEAD_SHA}, the PR head is now ${CURRENT_HEAD}."
+                echo "  The newer head runs its own shards and is what merge gates on, so this cancelled"
+                echo "  run is a non-result rather than a failure. Not blocking."
+                exit 0
+              fi
+              if [ -z "$CURRENT_HEAD" ]; then
+                echo "::error::test-slow: the shard matrix was CANCELLED and the current PR head could not be"
+                echo "  read — refusing, because an unreadable answer is not permission to pass an"
+                echo "  unmeasured head. A cancellation is not by itself evidence of a test failure."
+                echo "  Open the shard log."
+                exit 1
+              fi
+              echo "::error::test-slow: SHARD HANG — the matrix was cancelled while the PR head"
+              echo "  (${RUN_HEAD_SHA}) was unchanged, so nothing superseded it: a shard was killed at its"
+              echo "  timeout-minutes ceiling. THE TESTS DID NOT RUN — this is NOT a failure of this"
+              echo "  diff, and re-running the same sha will hang again: a cancellation is not by itself"
+              echo "  evidence of a test failure."
+              print_unfinished_test_from_logs
+              exit 1
+              ;;
+            skipped)
+              echo "test-slow: the shard matrix never ran (matrix result: skipped) — nothing was measured, so nothing is certified. Open the workflow run to see which upstream job gated it."
+              exit 1
+              ;;
+            *)
+              echo "test-slow: unrecognised matrix result '${SHARD_RESULT}' — refusing. A required check must never pass a state it does not understand."
+              exit 1
+              ;;
+          esac
   commitlint:
     # W1-T4399 — ~17 one-minute gates (commitlint, leak-grep, learnings-budget-ratchet,
     # jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise,
@@ -964,20 +1113,32 @@ jobs:
             local check_name="$1"
             shift
             local conclusion="success"
+            local attempt=1 error
             for outcome in "$@"; do
               if [ "$outcome" != "success" ] && [ "$outcome" != "skipped" ]; then
                 conclusion="failure"
               fi
             done
-            gh api "repos/${GITHUB_REPOSITORY}/check-runs" \
-              -f "name=${check_name}" \
-              -f "head_sha=${HEAD_SHA}" \
-              -f "external_id=job:${POSTING_JOB_ID}" \
-              -f "status=completed" \
-              -f "conclusion=${conclusion}" \
-              -f "output[title]=${check_name}" \
-              -f "output[summary]=W1-T4399: reported by this job's ${check_name} step(s) (outcome(s): $*)" \
-              >/dev/null
+            while true; do
+              if error=$(gh api "repos/${GITHUB_REPOSITORY}/check-runs" \
+                -f "name=${check_name}" \
+                -f "head_sha=${HEAD_SHA}" \
+                -f "external_id=job:${POSTING_JOB_ID}" \
+                -f "status=completed" \
+                -f "conclusion=${conclusion}" \
+                -f "output[title]=${check_name}" \
+                -f "output[summary]=W1-T4399: reported by this job's ${check_name} step(s) (outcome(s): $*)" \
+                2>&1 >/dev/null); then
+                break
+              fi
+              if [ "$attempt" -ge 4 ] || ! [[ "$error" =~ HTTP\ (429|500|502|503|504) ]]; then
+                echo "check-run post failed for ${check_name} after ${attempt} attempt(s): ${error}" >&2
+                return 1
+              fi
+              echo "check-run post for ${check_name} hit a transient GitHub error; retrying attempt $((attempt + 1))/4" >&2
+              sleep "$((2 ** attempt))"
+              attempt=$((attempt + 1))
+            done
             echo "W1-T4399: reported ${check_name} = ${conclusion} (step outcome(s): $*)"
           }
           report "commitlint" "${OUTCOME_COMMITLINT}" "${OUTCOME_RULE_CHECKS}"
@@ -1275,7 +1436,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [coverage-ratchet]
     if: ${{ always() }}
-    timeout-minutes: 10
+    # PR #8080's eight shards passed, but merging their compact V8 reports ran past this job's
+    # former 10m cap and GitHub cancelled the required check. A prior merge took 7m; 20m bounds
+    # the measured tail while leaving room below ci-gate.yml's WAIT_CAP_SECONDS for the shard
+    # job AND this dependent aggregator. See test/workflow-job-timeouts.test.ts.
+    timeout-minutes: 20
     steps:
       - name: Require every coverage shard to produce an artifact
         env:
@@ -1774,7 +1939,7 @@ jobs:
     # exactly as W1-T4405's design note keeps `remudero-review` off the queue's own requirements.
     name: ci-gate
     runs-on: ubuntu-latest
-    needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow, commitlint, leak-grep, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
+    needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
     # `always()` must still aggregate a FAILED dependency, but alone it also survives normal
     # cancellation and keeps a superseded PR run's concurrency slot occupied (W1-T4604).
     # GitHub re-evaluates this job condition when cancelling: the second arm releases that run.

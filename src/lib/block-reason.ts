@@ -13,6 +13,9 @@
  *   `planRetry` machinery to BOUND how many times the daemon retries the
  *   whole task) -> retry, no strike, bounded by MAX_TRANSIENT_RETRIES.
  *
+ *   A freshness `handed_off` verdict carries an open PR and waits for its review, the same
+ *   disposition as `awaiting_merge`; neither is a failure or a retry attempt.
+ *
  *   Anything else is a real failure (a "strike"). The plan's DAG then decides
  *   between the remaining two buckets, via `transitiveDependents` (plan.ts) —
  *   never a criticality/importance heuristic invented here:
@@ -61,18 +64,12 @@ export { INITIAL_RETRY_STATE, type RetryState };
  * `classifyFailure`) — every other non-merged verdict is a real, deterministic
  * failure (a strike), fail-closed exactly as W1-T7's own classifier is.
  *
- * `task_already_merged` (W1-T319) is the ONE other exception, classified the SAME as
- * `blocked_transient` rather than falling into "strike": drain's eligibility filter and the
- * daemon's own console-kick loop both already exclude merged tasks upstream, so this verdict
- * only ever reaches here via the pick-then-merge RACE (a task merges between selection and
- * `runTask`'s own dispatch). That is not a real failure to strike against the task — the
- * task IS merged — and treating it as transient means the daemon retries (i.e. re-consults
- * `nextRunnable`) rather than halting to escalate for a human or spending a fix-rung strike
- * on work that already landed; the very next tick's eligibility filter naturally stops
- * re-selecting it.
+ * `task_already_merged` is a completed task, not a retryable failure. The dispatcher's
+ * projection observed merge credit after selection; its own older snapshot can lag behind.
  */
-export function verdictFailureClass(verdict: RunResult["verdict"]): FailureClass {
-  return verdict === "blocked_transient" || verdict === "task_already_merged" ? "transient" : "strike";
+export function verdictFailureClass(verdict: RunResult["verdict"]): FailureClass | "done" {
+  if (verdict === "task_already_merged") return "done";
+  return verdict === "blocked_transient" ? "transient" : "strike";
 }
 
 /**
@@ -97,6 +94,7 @@ export function verdictIsFixable(verdict: RunResult["verdict"]): boolean {
 
 export type BlockDisposition =
   | { kind: "awaiting_merge" }
+  | { kind: "already_merged" }
   | { kind: "retry_transient"; state: RetryState }
   | { kind: "independent_failure"; dependents: string[] }
   | { kind: "fixable_blocker"; dependents: string[]; state: RetryState }
@@ -116,8 +114,9 @@ export function reasonAboutBlock(
   verdict: RunResult["verdict"],
   state: RetryState = INITIAL_RETRY_STATE,
 ): BlockDisposition {
-  if (verdict === "awaiting_merge") return { kind: "awaiting_merge" };
+  if (verdict === "awaiting_merge" || verdict === "handed_off") return { kind: "awaiting_merge" };
   const cls = verdictFailureClass(verdict);
+  if (cls === "done") return { kind: "already_merged" };
   if (cls === "transient") {
     const action = planRetry(state, "transient");
     if (action.kind === "retry_transient") return { kind: "retry_transient", state: action.state };

@@ -1,0 +1,90 @@
+- id: W1-T4803
+  title: "MERGE CONFLICTS ARE THE SECOND-COSTLIEST FRICTION CAUSE AND NOTHING SAYS WHICH FILES CAUSE THEM — record the conflicted paths on every merge-conflict fix round, rank files by the PR minutes their conflicts cost, and file one restructuring task per hot file (generate it in CI, split it per entry, make it append-only, or give it a merge driver), measured before and after"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "operator direction 2026-09-29 (closing the self-improvement loop): a hot-file gardener"
+  plan_refs: [W1-T4435, W1-T4110, W1-T2539, W1-T2548]
+  files:
+    - src/lib/hot-file-gardener.ts
+    - src/run-task.ts
+    - test/hot-file-gardener.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-29: the ci-friction gardener prices `merge-conflict` at about 340
+    recency-weighted PR-minutes, its second-costliest cause (`priceCiFrictionCauses`, cause kind
+    `conflict`). Six of that session's PRs stranded in conflicts.
+    THE LEDGER CANNOT SAY WHICH FILES. `ciFrictionRoundsFromLedger` attributes a `fix.dispatch`
+    round with `mode: "merge-conflict"` to the single cause name `merge-conflict`. The row itself
+    (src/run-task.ts, the `deps.log("fix.dispatch", …)` in the fix rung) carries strike, round,
+    mode, head_sha and elapsed_ms, but not the paths, although `currentMergeConflict.files`
+    (`MergeConflictEvidence.files[].path`, src/lib/merge-state.ts) is in hand at that line.
+    CANDIDATES, by commits touching each file on origin/main from 09-22 to 09-29 (899 commits;
+    churn is a proxy for conflict exposure, not a conflict count, which is why (i) must exist):
+    scripts/test-tier-manifest.json 145 (the test gardener alone merged five ~2,100-row rewrites
+    of it on 09-29: #7856, #7864, #7876, #7878, #7884); scripts/comment-load-baseline.json 72;
+    plan/plan-index.json 16; docs/docs-index.json 3; the doctrine pre-migration fixture 2.
+    src/run-task.ts (186) and src/lib/serve.ts (42) are hot for a different reason (size), which
+    this gardener must price but may not restructure; see (iv).
+    PRECEDENT: W1-T2539 turned an exact-count ceiling into a bucketed one so two growing PRs write
+    the identical line, and W1-T2548 found every conflict this repo produces is a same-key value
+    change the conflict rung (`isPureConcurrentAddition`) cannot admit. Both were found by hand.
+  design: |
+    (i) src/run-task.ts: the merge-conflict `fix.dispatch` row gains `conflicted_files`, the
+    paths of `currentMergeConflict.files`, built by an exported helper in
+    src/lib/hot-file-gardener.ts so the shape is tested there.
+    (ii) src/lib/hot-file-gardener.ts, a `GardenSpec` over lib/gardener.ts. Inventory: the
+    ledger union's merge-conflict rounds, each priced as `ciFrictionRoundsFromLedger` prices it
+    and recency-weighted by `ciFrictionRecencyWeight`, with the round's minutes split across its
+    `conflicted_files`. Rounds recorded before (i) shipped carry no paths; for those, a local-git
+    backfill takes the files the PR changed that main also changed between the PR's open and
+    that round. Each backfilled attribution is marked `inferred`, never mixed silently with
+    recorded ones. Output: files ranked by conflict PR-minutes.
+    (iii) Action: for the costliest file with no open plan task whose `origin` is
+    `hot-file:<path>`, file ONE plan task through `renderMachineShard` (src/lib/machine-filing.ts)
+    with an id from `ciLearningTaskIdMinter`, landing ONLY the shard path (Rule 15: the
+    ci-friction gardener's 09-25 filing was refused eight times for mixing a shard with a log
+    file). The shard names the file, its measured conflict minutes and round count (the
+    "before"), and the remedy class that fits the file's shape: GENERATE-IN-CI for a file that
+    is derivable from the tree, SPLIT-PER-ENTRY for a keyed map many PRs each add one key to,
+    APPEND-ONLY for a log-shaped file, and MERGE-DRIVER (a .gitattributes driver) for a file
+    whose conflicts are mechanically resolvable. The spec's `classes` are those four remedies,
+    so each remedy earns its own Beta record.
+    (iv) A file the gardener must never restructure (source modules; anything under
+    plan/tasks.d) is priced and reported in the scorecard but never filed.
+    (v) BEFORE AND AFTER: the scorecard row carries each ranked file's conflict minutes, and a
+    filed file's minutes are the class's metric (`GardenSpec.metric`), so a merged restructuring
+    whose file stops conflicting credits its remedy and one that does not, debits it.
+    (vi) Wire it in src/run-task.ts's `gardens` list beside the ci-friction garden, with the same
+    `escalate` dep.
+  acceptance:
+    - claim: "a merge-conflict fix round records the conflicted paths"
+      proof: 'grep: test("W1-T4803: a merge-conflict fix round records its conflicted paths" in test/hot-file-gardener.test.ts'
+    - claim: "files are ranked by recency-weighted conflict minutes rather than by conflict count"
+      proof: 'grep: test("W1-T4803: files rank by conflict minutes rather than count" in test/hot-file-gardener.test.ts'
+    - claim: "a round recorded without paths is attributed from git history and marked inferred"
+      proof: 'grep: test("W1-T4803: a pathless round is backfilled from git and marked inferred" in test/hot-file-gardener.test.ts'
+    - claim: "the costliest untracked hot file becomes one plan-only restructuring task naming its remedy"
+      proof: 'grep: test("W1-T4803: the costliest untracked hot file is filed plan-only with its remedy" in test/hot-file-gardener.test.ts'
+    - claim: "a source module is priced but never filed for restructuring"
+      proof: 'grep: test("W1-T4803: a source module is priced but never filed" in test/hot-file-gardener.test.ts'
+    - claim: "the fix rung writes the conflicted paths"
+      proof: "grep: conflicted_files in src/run-task.ts"
+    - claim: "the daemon runs the hot-file gardener"
+      proof: "grep: hotFileGardenSpec( in src/run-task.ts"
+  falsifier: |
+    Rank by conflict count: a file in ten one-minute conflicts outranks one in two 40-minute
+    conflicts and the ranking test fails. Land the garden log beside the shard: the plan-only test
+    sees a second path. Drop the `inferred` mark: the backfill test fails.
+  note: |
+    Reserved from the operator checkout for branch file/three-new-gardeners-1790707389087.
+    Scope-time checks 2026-09-29: no run-W1-T4803-* branch; no merged PR carries its trailer.
+    No plan record on origin/main or on any of 213 origin heads ranks files by conflict cost,
+    records conflicted paths, or files merge-driver work.

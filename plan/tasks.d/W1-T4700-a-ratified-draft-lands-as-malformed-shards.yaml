@@ -1,0 +1,58 @@
+- id: W1-T4700
+  title: "A RATIFIED DRAFT LANDS AS MALFORMED SHARDS — the draft linter passes a task with an unknown repo, a verify object and no acceptance, and the approve path files more shards than the stamp and PR body name, so #7608 proposed five placeholder tasks for P25, which MASTER-PLAN records as closed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-28: PR #7608 (rmd approve verify-human-automate:W1-T4471), closed on operator instruction"
+  plan_refs: ["W1-T110", "W1-T111", "W1-T311", "W1-T3814", "W1-T4442"]
+  files:
+    - src/lib/task-linter.ts
+    - src/lib/inbox.ts
+    - src/run-task.ts
+    - test/a-ratified-draft-lands-as-malformed-shards.test.ts
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-28 on PR #7608, opened by `rmd approve` for verify-human-automate:W1-T4471 and
+    closed on the operator's instruction:
+    - It filed five shards, W1-T4695..W1-T4699, each shaped like
+      `repo: master-plan` (no such repo), `verify: {proof: "grep: ..."}` (an object, not auto/human),
+      no `acceptance`, no `rationale`/`design`. CI failed only on the citation-anchor census's
+      prose-unit floor; nothing refused the shape.
+    - MEASURED against origin/main: `lintDraftedFragment` (src/lib/inbox.ts) returns ZERO
+      violations for that shard, and `lintTask` (src/lib/task-linter.ts) returns zero violations
+      of ANY severity. Controls on `inboxDraftExampleFragmentYaml()` read zero too with the
+      acceptance removed, with `repo: master-plan`, and with `verify` as an object — so the draft
+      rung's self-lint and the approve path have no floor for a well-formed task.
+    - Its stamp named `-> NEW-1/NEW-2` and its body listed two shards plus MASTER-PLAN.md, but the
+      diff added five shards and no MASTER-PLAN.md change: `writeRatificationShards` (run-task.ts's
+      approve path) writes every task in the materialized fragment, and `stampLineViolations`'s
+      stamp-to-fragment match is not re-checked there.
+    - The ratified subject was invented: "Ratification skeleton for MASTER-PLAN §7/P25 open plan",
+      while MASTER-PLAN records P25 CLOSED and shipped (W1-T110/#368, T111/#373, #457).
+      `stampLineViolations`'s own doc already records the same hallucination (#6791, "P25
+      (MASTER-PLAN §7/P25) — RATIFIED"); the prefix check it added cannot see the label.
+  design: |
+    (i) Give the task linter a well-formedness floor that blocks on a NEW or changed shard (via the
+    existing introduced-diagnostic promotion, so no shard already on main newly fails): `verify`
+    must be `auto` or `human`; `repo` must name a repository the plan knows (the self repo or a
+    configured managed repo); a `verify: auto` implement task must carry at least one acceptance
+    criterion. Measure first how many shards on main would violate each rule and report it.
+    (ii) The approve path re-runs `lintDraftedFragment` WITH the stamp line on the materialized
+    fragment immediately before `writeRatificationShards`, and refuses (never writes) when the
+    stamp's `-> ids` and the fragment's tasks disagree or any blocking violation remains.
+    (iii) The ratify PR body lists exactly the files the commit changes, derived from the written
+    paths, never from the draft. (iv) Name, do not fix, the invented-label class: a stamp label that
+    cites a closed P-number is surfaced as a violation the operator sees in `rmd inbox`.
+  acceptance:
+    - claim: "a drafted shard with an unknown repo, a non-enum verify or no acceptance is refused by the draft linter, and the approve path refuses a fragment whose tasks disagree with its stamp instead of writing extra shards"
+      proof: "unit test: test/a-ratified-draft-lands-as-malformed-shards.test.ts"
+  falsifier: |
+    Feed the approve path #7608's own fragment shape (repo master-plan, verify object, no acceptance,
+    five tasks under a two-id stamp): it must refuse and write nothing.

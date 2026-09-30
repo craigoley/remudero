@@ -1,0 +1,76 @@
+- id: W1-T4909
+  title: "A SECOND RETRO STARTS WHILE THE FIRST RETRO'S PLAN-SYNC PR IS STILL OPEN, AND BOTH WRITE THE SAME ROUND — the retro advances its marker when it OPENS the PR, so nothing stops a later retro from branching off a main that lacks the sync; skip a retro while a run-RETRO pull request opened in the last day is open"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator-session#followups-2026-09-29-retro-duplicate-sync"
+  plan_refs: [W1-T2528, W1-T4664, W1-T160, W1-T3746]
+  files:
+    - src/lib/retro-open-pr-guard.ts
+    - src/run-task.ts
+    - test/retro-open-pr-guard.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-29. #7865 (head run-RETRO-1790692269243, opened 14:49) and #7872 (head
+    run-RETRO-1790694205979, opened 15:21) both carried "sync the r87 retro" with MASTER-PLAN v2.98.
+    #7872 merged 15:30; #7879 then moved the plan to v2.99. #7865 stayed open and DIRTY until the
+    operator closed it at 18:42: merging main conflicted in both files (8 hunks in MASTER-PLAN.md, 2 in
+    docs/ORIENTATION.md) and the only consistent resolution was main's side everywhere, an empty diff.
+    RE-VERIFIED on main 074249863 (2026-09-30), and THE BRIEF'S DIRECTION NEEDS NARROWING.
+    The brief proposed comparing the sync's round and plan version against origin/main before a retro
+    "opens or keeps" its PR. That would not have caught this pair: when #7872 was opened main was still
+    at v2.97, because #7865 had not merged. The two PRs are siblings, not a PR behind main.
+    THE MECHANISM, FROM THE CODE. src/run-task.ts `retroCommand` runs `saveMarker` and logs
+    `retro.marker.advanced` when the PR is OPENED, before the `waitForCiGreen` gate, so an open sync PR
+    has already consumed its window. `retroTriggerCheck` then sees a fresh marker and the attempt fence
+    resets ("reset to 1 the moment the marker moves", `nextRetroAttemptRecord`), so a later retro fires
+    normally. That retro branches off origin/main, which does not carry the unmerged sync, so its
+    Architect writes the same round and version into the same two files. The only open-PR read on the
+    retro path is `probeExistingPlanPr`, an EXACT-BRANCH probe, and every retro's branch is unique
+    (`run-RETRO-<epoch>`), so it cannot see a sibling. `grep -rn 'run-RETRO' src` finds only sweep.ts's
+    fix-rung synthetic-id fallback.
+    NOT PROVEN FROM THIS SESSION: the host ledger was not readable, so whether the 15:03 retro was the
+    daemon's automated trigger or an operator's `rmd retro` is unconfirmed. A guard inside
+    `retroCommand` covers both.
+  design: |
+    (i) src/lib/retro-open-pr-guard.ts (new, pure): `openRetroPrBlocking(rows, nowMs, maxAgeMs)` takes
+    the open-PR rows (number, html_url, head.ref, created_at) and returns the OLDEST row whose head.ref
+    starts with the retro lane's branch prefix and whose age is under `maxAgeMs`, else undefined. The
+    prefix is exported next to the function and used by the test; do not re-spell it as a second literal.
+    The age bound is a named constant (24 hours) so an abandoned red retro PR cannot wedge the lane
+    forever; past it the retro proceeds and logs that it ignored a stale PR.
+    (ii) src/run-task.ts `retroCommand`: after the `--dry-run` return and the integrity gate, before the
+    worktree and the Architect spawn (the expensive step), list open PRs once with the existing REST
+    fetcher (`ghJson`) and call the guard. A blocking row logs `retro.skipped_open_pr` (pr number, url,
+    age) and returns like the `retro.no_op` arm. A listing failure THROWS, as `probeExistingPlanPr` does:
+    an unreadable remote is not evidence that none is open. `--dry-run` stays free of GitHub reads.
+    (iii) Because the skip happens inside `retroCommand`, after the daemon hook's `recordRetroAttempt`,
+    the existing 6 h attempt fence still spaces the retries; the skip does not re-poll every tick.
+    (iv) NOT in this task, named so it is not assumed: closing an already-open retro PR that main has
+    since superseded (a sweep concern), and the marker advancing at open rather than at merge.
+  acceptance:
+    - claim: "an open retro pull request younger than the age bound blocks a second retro"
+      proof: 'grep: test("W1-T4909: an open retro pull request blocks a second retro" in test/retro-open-pr-guard.test.ts'
+    - claim: "an open retro pull request older than the age bound does not block"
+      proof: 'grep: test("W1-T4909: an abandoned retro pull request older than the age bound does not block" in test/retro-open-pr-guard.test.ts'
+    - claim: "a pull request from any other lane never blocks a retro"
+      proof: 'grep: test("W1-T4909: a pull request from another lane never blocks a retro" in test/retro-open-pr-guard.test.ts'
+    - claim: "when several retro pull requests are open the oldest is the one named"
+      proof: 'grep: test("W1-T4909: the oldest open retro pull request is the one named" in test/retro-open-pr-guard.test.ts'
+    - claim: "the retro asks the guard before it spawns the Architect"
+      proof: "grep: openRetroPrBlocking( in src/run-task.ts"
+  falsifier: |
+    Drop the age comparison and the abandoned-PR test fails. Match the prefix loosely (contains, not
+    starts-with) and the other-lane test fails on a head like `run-W1-T9-RETRO-x`. Return the newest row
+    instead of the oldest and the fourth test fails. With the guard absent the second retro on 2026-09-29
+    starts: that is the state today, and the wiring grep reads 0.
+  note: |
+    Filed from the operator checkout. Scope-time subject sweep 2026-09-30 at main 074249863 and the
+    open PR heads: no plan record or open PR names an open-retro guard.

@@ -14,7 +14,7 @@
     - src/lib/task-case-file.ts
     - src/run-task.ts
     - test/a-case-file-survives-an-unrelated-malformed-row.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

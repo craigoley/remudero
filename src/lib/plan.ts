@@ -127,6 +127,7 @@ export interface Task {
   /** Decorative/initial-state only — real merge state is derived from GitHub (`deriveStatus` in
    *  lib/status.ts) and never written back here; see CLAUDE.md on why this is not a completion signal. */
   status: TaskStatus;
+  dispatch_hold?: boolean;
   attempts: number;
   /** Explicit PR number for a task executed by hand before it had a ledger entry (precedence
    *  source (b) in `deriveStatus`). Never written by the machine. */
@@ -237,15 +238,17 @@ export interface MachineFilingAdmissionContext {
   pathExistsAtBase?: (repoRelPath: string) => boolean;
 }
 
-function isParkedCiLearningProposal(task: Task): boolean {
+function isParkedMachineProposal(task: Task): boolean {
   return (
     task.author_class === "machine" &&
     task.verify === "human" &&
     task.status !== "blocked" &&
     (task.depends_on ?? []).length === 0 &&
-    task.origin?.startsWith("ci-learning:") === true &&
     task.files?.length === 1 &&
-    task.files[0] === "learnings/ci.yaml"
+    ((task.origin?.startsWith("ci-learning:") === true && task.files[0] === "learnings/ci.yaml") ||
+      ((task.origin?.startsWith("selector-shadow:") === true || task.origin?.startsWith("selector-shadow-miss:") === true) &&
+        task.files[0] === "src/lib/affected-suites.ts") ||
+      (task.origin?.startsWith("ci-friction:") === true && task.files[0] === "docs/ci-friction-remedies.md"))
   );
 }
 
@@ -394,6 +397,9 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
     if (!TASK_STATUSES.includes(status)) {
       throw new PlanError(`task ${id}: invalid status '${status}' (must be ${TASK_STATUSES.join("|")}; status is decorative/initial-state only — real merge-state is derived from GitHub, never written back here)`);
     }
+    if (e.dispatch_hold !== undefined && typeof e.dispatch_hold !== "boolean") {
+      throw new PlanError(`task ${id}: dispatch_hold must be a boolean`);
+    }
     const retirement = e.retirement as RetirementReason | undefined;
     if (retirement !== undefined && !RETIREMENT_REASONS.includes(retirement)) {
       throw new PlanError(`task ${id}: invalid retirement '${String(retirement)}' (must be ${RETIREMENT_REASONS.join("|")})`);
@@ -421,6 +427,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
       band_meaning: bandMeaning,
       priority: typeof e.priority === "number" ? e.priority : undefined,
       status,
+      dispatch_hold: e.dispatch_hold as boolean | undefined,
       attempts: typeof e.attempts === "number" ? e.attempts : 0,
       principles: e.principles as Record<string, unknown> | undefined,
       budget_usd: e.budget_usd as number | undefined,
@@ -904,6 +911,9 @@ export function assertRunnable(
    *  empty means today's behaviour exactly — a `verify: human` task is refused. */
   releasedIds?: ReadonlySet<string>,
 ): void {
+  if (task.dispatch_hold === true) {
+    throw new TaskAdmissionError(`task ${task.id} is on a task-scoped dispatch hold${task.note ? `: ${task.note}` : ""}`);
+  }
   if (task.status === "blocked") {
     throw new TaskAdmissionError(`task ${task.id} is blocked${task.note ? `: ${task.note}` : ""}`);
   }
@@ -929,7 +939,7 @@ export function machineFilingAdmissionViolations(
       `task ${task.id} is not selectable by runnableCandidates under the current releasedIds: ` +
         `task ${task.id} is blocked${task.note ? `: ${task.note}` : ""}`,
     );
-  } else if (task.verify === "human" && !context.releasedIds.has(task.id) && !isParkedCiLearningProposal(task)) {
+  } else if (task.verify === "human" && !context.releasedIds.has(task.id) && !isParkedMachineProposal(task)) {
     reasons.push(
       `task ${task.id} is not selectable by runnableCandidates under the current releasedIds: ` +
         `task ${task.id} is verify:human — not auto-runnable by the proto-runner`,

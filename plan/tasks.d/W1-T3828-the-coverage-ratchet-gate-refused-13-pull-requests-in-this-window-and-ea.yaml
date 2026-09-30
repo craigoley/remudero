@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 3.4
   risk: low
   status: queued
   attempts: 0
@@ -16,3 +17,13 @@
     - claim: "the lane that trips the coverage-ratchet gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
       proof: "grep: ci-learning:6062:coverage-ratchet in learnings/ci.yaml"
   note: "Filed by the ci-learning rung from ci-learning:6062:coverage-ratchet. The coverage-ratchet gate went red on #6062 and was repaired; the repair touched scripts/comment-load-baseline.json, scripts/test-tier-manifest.json, docs/ORIENTATION.md, MASTER-PLAN.md, plan/plan-index.json, src/lib/operator-agent.ts, src/run-task.ts, test/a-staged-skill-reaches-the-worker-prompt.test.ts, test/analytics-route.test.ts, test/daemon-external-wait-freshness.test.ts, test/drain.test.ts, .github/workflows/pr-title-lint.yml, CODEOWNERS, docs/operator-guide.md, openapi/daemon.yaml, packages/api-client/src/client.ts, packages/api-client/src/schema.d.ts, plan/feedback/fb-1789845640231-c117a2.yaml, plan/tasks.d/W1-T3791-a-successful-gh-call-with-no-json-body-kills-the-daemon.yaml, plan/tasks.d/W1-T3792-a-write-capable-codex-resume-silently-loses-its-workspace-sandbox.yaml, plan/tasks.d/W1-T3793-an-external-ci-wait-holds-the-only-freshness-boundary.yaml, plan/tasks.d/W1-T3818-a-fixed-activity-stamp-in-a-retirement-fixture-is-now-reddening-main.yaml, plan/tasks.d/W1-T3819-retro-acceptance-repair-replaces-a-stale-proof-with-unexecutable-prose.yaml, plan/tasks.d/W1-T3820-an-unchanged-pre-dispatch-refusal-escalates-on-every-tick.yaml, plan/tasks.d/W1-T3821-a-github-comment-cap-prevents-an-otherwise-valid-escalation-close.yaml, plan/tasks.d/W1-T3822-a-dirty-abandoned-fix-worktree-blocks-its-pr-s-only-repair.yaml, scripts/clock-signature-baseline.json, src/lib/analytics-route.ts, src/lib/ci-parity.ts, src/lib/drain.ts, src/lib/operator-agent-proof.ts, src/lib/project-init.ts, src/lib/serve.ts, src/lib/skill-workshop.ts, src/lib/sweep.ts, test/a-prerequisite-is-not-a-supersession.test.ts, test/a-supersession-close-rechecks-the-winner.test.ts, test/an-analytics-request-returns-under-its-own-ceiling.test.ts, test/codeowners-maintainer.test.ts, test/fix-rung-report-provenance.test.ts, test/fixtures/risk-judge-dispositions/candidate-risk-close.yaml, test/fixtures/risk-judge-dispositions/candidate-risk-escalate.yaml, test/fixtures/risk-judge-dispositions/healthy-control.yaml, test/fixtures/risk-judge-dispositions/judge-unavailable.yaml, test/fixtures/risk-judge-dispositions/land-with-debt.yaml, test/fixtures/risk-judge-dispositions/README.md, test/fixtures/risk-judge-dispositions/recoverable-stop-is-downgraded.yaml, test/fixtures/risk-judge-dispositions/repair.yaml, test/fixtures/risk-judge-dispositions/unparseable-consequence.yaml, test/fixtures/risk-judge-dispositions/unrecoverable-stop.yaml, test/operator-agent-proof.test.ts, test/operator-agent.test.ts, test/owner-dispatch-threading.test.ts, test/project-init.test.ts, test/risk-judge-disposition-goldens.test.ts, test/route-wiring.test.ts, test/run-task.test.ts, test/title-edit-commitlint-workflow.test.ts. Recommended action: gate. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "Change is a single-file addition to learnings/ci.yaml, verified by a grep acceptance check on a specific key (ci-learning:6062:coverage-ratchet); no secrets, auth, deploy, merge/review policy, or data-deletion involved."
+      - "Author_class is machine, and the change does not request any operator-only decision (priority, budget, or policy)."
+      - "family_track_record shows no prior merged/declined ci-learning tasks to indicate drift risk, and the acceptance criterion is directly verifiable from the grep target shown."
+    judged_at: "2026-09-29T14:14:46.129Z"
+    pin: "cf15d74f2915ba8991b3e94b240434f22f9a416ba327a339b5d5252810887d46"

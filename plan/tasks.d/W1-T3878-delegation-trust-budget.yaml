@@ -20,7 +20,7 @@
     - test/delegation-profile-refusals.test.ts
     - test/delegation-profile-escalation.test.ts
     - test/delegation-profile-redaction.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Instinct makes delegation feel natural by accepting an outcome in an existing conversation and

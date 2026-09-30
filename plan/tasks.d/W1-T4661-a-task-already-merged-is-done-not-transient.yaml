@@ -1,0 +1,33 @@
+- id: W1-T4661
+  title: "A TASK WHOSE PR ALREADY MERGED IS DISPATCHED AGAIN AND RETRIED AS TRANSIENT — block-reason.ts assumes the next tick's eligibility filter stops re-selecting it, but eleven tasks were re-dispatched after merge (W1-T4639 merged 01:32, dispatched again 01:49); treat task_already_merged as terminal and refresh merge credit before the retry"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: recommended follow-ups 1-6 and 8 — automated flow, no stuck PRs, no false alarms"
+  plan_refs: [W1-T319]
+  files: [src/lib/block-reason.ts, src/lib/daemon.ts, test/a-task-already-merged-is-done-not-transient.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-28 (rmd ledger-grep daemon.block.transient_retry, 2026-09-24..28): 11 rows carry verdict
+    task_already_merged for 11 distinct tasks (W1-T4465, W1-T4097, W1-T4387, W1-T4113, W1-T4390, W1-T4612, W1-T4633, W1-T4620,
+    W1-T4639, W1-T4638, W1-T4646). W1-T4639's PR #7518 merged 01:32Z and the task was dispatched again 01:49Z; W1-T4638 (#7533,
+    03:59Z) and W1-T4646 (#7537, 03:57Z) re-dispatched 04:10Z. verdictFailureClass (src/lib/block-reason.ts) classes
+    task_already_merged as transient on the stated assumption that "the very next tick's eligibility filter naturally stops
+    re-selecting it"; the measured lag says otherwise, and each retry is another dispatch the breaker counts.
+  design: |
+    (i) task_already_merged is terminal: the daemon records the credit it observed and does not retry the task.
+    (ii) Before selecting the next task after such a verdict, the daemon refreshes its merged view (the same projection read
+    it already makes), so the stale credit that let the task be selected is corrected in the same tick.
+    (iii) Ledger the correction (which PR, how long after the merge), so any remaining selection lag is measurable.
+  acceptance:
+    - claim: "an already-merged verdict is terminal, not a transient retry"
+      proof: 'grep: test("W1-T4661: an already-merged verdict is terminal, not a transient retry" in test/a-task-already-merged-is-done-not-transient.test.ts'
+  falsifier: |
+    Class task_already_merged as transient again and the test sees a retry.

@@ -15,7 +15,7 @@
     - src/lib/benchmark-evidence.ts
     - src/lib/verify-human-judge.ts
     - test/a-failed-spawn-names-its-cause.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

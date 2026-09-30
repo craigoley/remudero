@@ -13,7 +13,7 @@
     - test/openweight-probe.test.ts
   origin: "operator-session#open-weight-resequence-2026-09-14"
   plan_refs: ["W1-T3545", "W1-T3567", "W1-T3569"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     RENUMBERED 2026-09-14: originally filed as W1-T3571, which task-id-existence found HELD

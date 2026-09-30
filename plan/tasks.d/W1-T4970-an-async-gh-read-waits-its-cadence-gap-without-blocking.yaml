@@ -1,0 +1,31 @@
+- id: W1-T4970
+  title: "AN ASYNC GH READ SLEEPS THE WHOLE DAEMON LOOP FOR ITS CADENCE GAP — ghJsonAsync calls applyGhReadCadence, whose shared read gap and lock wait use defaultBlockingSleepSync (Atomics.wait) on the event loop"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  priority: 3
+  status: queued
+  attempts: 0
+  origin: "oper#core-daemon-loop-profile-2026-09-30"
+  files: [src/lib/github-transport.ts, test/an-async-gh-read-waits-its-cadence-gap-without-blocking.test.ts]
+  rationale: |
+    A live CPU profile of remudero-daemon on 2026-09-30 put defaultBlockingSleepSync at 18 s of
+    815 s of busy loop time (2.2%). Some of it sits under ghJsonAsync (loadCiFailureWindowAsync,
+    readCiPrGraphql). An async reader was chosen precisely so it does not block, yet its cadence
+    gate sleeps the loop up to DEFAULT_GH_SHARED_READ_GAP_MS (1.5 s) whenever another process on
+    the host stamped the shared read window. Serve, console-daemon and site-daemon all do. The
+    sync readers (ghJson) pay the same sleep by design; the async path should not.
+  design: |
+    Give applyGhReadCadence an async twin for ghJsonAsync and ghTextAsync. It has the same lock,
+    stamp and decision, but it awaits a timer for the shared gap and the lock wait instead of
+    calling sleepSync. The sync path and the pacing arithmetic do not change.
+  acceptance:
+    - claim: "a timer fires while an async read waits out the shared read gap"
+      proof: 'grep: test("W1-T4970: a timer fires while an async read waits out the shared read gap" in test/an-async-gh-read-waits-its-cadence-gap-without-blocking.test.ts'
+    - claim: "the async read still stamps the shared window after its gap"
+      proof: 'grep: test("W1-T4970: the async read still stamps the shared window after its gap" in test/an-async-gh-read-waits-its-cadence-gap-without-blocking.test.ts'
+  falsifier: |
+    Route the async twin back through sleepSync and the timer-probe test counts zero ticks during
+    the gap.

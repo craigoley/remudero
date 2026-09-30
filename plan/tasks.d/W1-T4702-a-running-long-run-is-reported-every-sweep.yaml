@@ -1,0 +1,46 @@
+- id: W1-T4702
+  title: "A RUNNING-LONG RUN IS REPORTED EVERY SWEEP, NOT ONCE — the sentinel dedupes against the live ledger alone, whose rotation archives the run's earlier report, so 175 runs produced 50,678 run.running_long rows and about 27,000 matching incident events in three days"
+  repo: remudero
+  depends_on: ["W1-T4417"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-28: tracing phantom in-flight runs (W1-T4701) and the heartbeat flood W1-T4651 had to bound"
+  plan_refs: ["W1-T2558", "W1-T4417", "W1-T4651", "W1-T4701"]
+  files:
+    - src/lib/cost-anomaly.ts
+    - src/lib/sweep.ts
+    - test/a-running-long-run-is-reported-once.test.ts
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-28 over the ledger union (distinct rows): `run.running_long` rows numbered
+    23,423 on 2026-09-26, 13,454 on 09-27 and 13,801 on 09-28, across only 175 distinct runs;
+    27,255 `incident.event` rows naming running_long were written 09-27..28. One hung run alone has
+    315 reports. The sentinel's contract is "reported once while it still runs"
+    (`alreadyLedgeredRunningLongRunIds` in src/lib/cost-anomaly.ts: "one row per run id, ever"),
+    but its only caller (`recordRunningLong(ledgerLines, …)` in src/lib/sweep.ts) passes
+    `readLedger(deps.ledgerPath)` — the LIVE file. `rotateLedger` keeps only the newest
+    `MAX_RETAINED_LINES_PER_STEP` rows per step there and archives the rest, and running_long is
+    high-volume, so a run's earlier report is archived while its `run.start` (a low-volume step)
+    stays live; the next sweep finds the run in flight with no report and reports it again, with a
+    fresh incident event. This flood is also most of the heartbeat volume W1-T4651 had to bound in
+    the case file (W1-T4457: 2,283 running_long rows).
+  design: |
+    Make the "already reported" set independent of live-file rotation: read prior running_long
+    run ids from the bounded archive∪live union (the same `resolveLedgerUnion` step-filtered
+    reader the sweep already uses for review.posted, W1-T3471), failing CLOSED — when the union is
+    unreadable, report nothing new this pass rather than re-reporting. Apply the same fix to the
+    cost.anomaly twin (`alreadyLedgeredCostAnomalyRunIds`, W1-T2558) if it has the same exposure,
+    and say so. The incident event stays one per NEW finding. Record the measured before/after
+    rate in the PR body.
+  acceptance:
+    - claim: "a run whose earlier running_long row was rotated out of the live ledger is not reported again, and an unreadable union reports nothing new rather than re-reporting"
+      proof: "unit test: test/a-running-long-run-is-reported-once.test.ts"
+  falsifier: |
+    Rotate a run's running_long row into an archive while its run.start stays live: the next pass
+    must write no new running_long row and no new incident event for it.

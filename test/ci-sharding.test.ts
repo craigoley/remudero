@@ -57,7 +57,7 @@ test('the slow tier is required before duration sharding removes it from the fas
   assert.ok(required.includes('test-slow'), 'the slow files are no longer in ci shards, so test-slow must gate ci-gate');
   assert.ok(!advisory.includes('test-slow'), 'one check cannot be both required and advisory');
 
-  const slowRuns = runBodies('test-slow');
+  const slowRuns = runBodies('test-slow-shard');
   assert.match(
     slowRuns,
     /npm run --silent test:tier:check -- --base "origin\/\$\{GITHUB_BASE_REF\}"/,
@@ -128,7 +128,7 @@ test('shard aggregators are the only always() jobs and no step can disappear con
   // may not live inside `ci-required`: `scanner-gate-config` refuses `continue-on-error: true`
   // anywhere in a job ci-gate REQUIRES. It is bound by this invariant's no-conditional-step half
   // exactly like the other two.
-  const aggregators = new Set(['ci-required', 'coverage-ratchet-required', 'flake-retry-aggregate']);
+  const aggregators = new Set(['ci-required', 'coverage-ratchet-required', 'flake-retry-aggregate', 'test-slow']);
   for (const [jobId, job] of Object.entries(workflow.jobs)) {
     if (job.if === '${{ always() }}') assert.ok(aggregators.has(jobId), `unexpected always() job: ${jobId}`);
     if (!aggregators.has(jobId)) continue;

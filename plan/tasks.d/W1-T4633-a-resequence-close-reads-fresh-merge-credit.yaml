@@ -14,7 +14,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/a-resequence-close-reads-fresh-merge-credit.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

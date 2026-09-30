@@ -5,18 +5,146 @@
 // with auto-merge ARMED, at real model spend. These tests lock the four outward boundaries
 // shut under the test runner, and lock them OPEN everywhere else so the daemon is unaffected.
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { ghExec, ghExecFile, ghJson } from "../src/lib/github-transport.js";
+import { ghShim } from "./helpers/gh-shim.js";
+import { gitRepo } from "./helpers/git-repo.js";
+import { ghRefusalCount } from "./setup/tmp-hygiene.js";
+import { appendLedger } from "../src/lib/ledger.js";
+import { ledgerPathFor } from "../src/lib/ledger-path.js";
+import { buildWorkerEnv } from "../src/lib/env.js";
+import { main } from "../src/run-task.js";
 import {
+  assertLedgerPathNotLive,
   assertLiveWriteAllowed,
+  discoverLiveLedgerRoot,
   isTestRunner,
   LiveWriteBlockedError,
   LIVE_WRITE_OVERRIDE_ENV,
+  LIVE_LEDGER_DENY_ROOT_ENV,
+  LIVE_WRITE_SENTINEL_TOKEN,
   liveWritesExempt,
   withLiveWritesAllowed,
   type LiveWriteBoundary,
 } from "../src/lib/live-write-guard.js";
+
+test("the cli test harness never resolves the live ledger path", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-ledger-guard-home-"));
+  const root = join(home, "operator-root");
+  const configDir = join(home, ".config", "remudero");
+  mkdirSync(configDir, { recursive: true });
+  await writeFile(join(configDir, "config.json"), JSON.stringify({ root, claudeBin: "/bin/true" }));
+  assert.equal(discoverLiveLedgerRoot({ HOME: home }), root);
+  assert.ok(process.env[LIVE_LEDGER_DENY_ROOT_ENV], "the shared setup must export a deny root before tests load");
+  assert.notEqual(ledgerPathFor({ root: home } as never), ledgerPathFor({ root } as never));
+  const originalHome = process.env.HOME;
+  const originalDenyRoot = process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+  const originalArgv = process.argv;
+  // The scratch config stands in for a live config. main() must reach cli.invoked, but
+  // appendLedger must refuse it before creating even the state directory.
+  process.env.HOME = home;
+  process.env[LIVE_LEDGER_DENY_ROOT_ENV] = root;
+  process.argv = [process.execPath, "run-task.js", "--help"];
+  t.mock.method(process, "exit", ((code?: number): never => { throw new Error(`expected exit ${code}`); }) as typeof process.exit);
+  t.mock.method(console, "log", () => {});
+  try {
+    await assert.rejects(main(), /expected exit 0/);
+    assert.equal(existsSync(ledgerPathFor({ root } as never)), false);
+    assert.equal(existsSync(join(root, "state")), false);
+  } finally {
+    process.argv = originalArgv;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalDenyRoot === undefined) delete process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+    else process.env[LIVE_LEDGER_DENY_ROOT_ENV] = originalDenyRoot;
+  }
+});
+
+test("an append under the live state root from the suite is refused before writing", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-ledger-deny-"));
+  const alias = join(mkdtempSync(join(tmpdir(), "rmd-ledger-alias-")), "state-link");
+  mkdirSync(join(root, "state"));
+  symlinkSync(join(root, "state"), alias);
+  const finalAlias = join(mkdtempSync(join(tmpdir(), "rmd-ledger-final-alias-")), "ledger-link");
+  symlinkSync(join(root, "state", "ledger.ndjson"), finalAlias);
+  const previous = process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+  process.env[LIVE_LEDGER_DENY_ROOT_ENV] = root;
+  try {
+    for (const path of [join(root, "state", "ledger.ndjson"), join(alias, "ledger.ndjson"), finalAlias]) {
+      assert.throws(() => appendLedger(path, { run_id: "test", task_id: "TEST", step: "should-not-write" }),
+        (error: unknown) => error instanceof LiveWriteBlockedError && error.boundary === "ledger-append" && /W1-T4923/.test(error.message));
+    }
+    assert.equal(existsSync(join(root, "state", "ledger.ndjson")), false);
+    const fixture = join(mkdtempSync(join(tmpdir(), "rmd-ledger-allowed-")), "state", "ledger.ndjson");
+    appendLedger(fixture, { run_id: "test", task_id: "TEST", step: "fixture-write" });
+    assert.match(readFileSync(fixture, "utf8"), /fixture-write/);
+    assert.doesNotThrow(() => assertLedgerPathNotLive(join(root, "state", "ledger.ndjson"), {}),
+      "a real daemon process with no test marker must remain unaffected");
+  } finally {
+    if (previous === undefined) delete process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+    else process.env[LIVE_LEDGER_DENY_ROOT_ENV] = previous;
+  }
+});
+
+test("a spawned child inherits the live ledger deny root", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-ledger-child-deny-"));
+  const path = join(root, "state", "ledger.ndjson");
+  const moduleUrl = new URL("../src/lib/ledger.ts", import.meta.url).href;
+  const code = `import { appendLedger } from ${JSON.stringify(moduleUrl)}; appendLedger(${JSON.stringify(path)}, { run_id: "child", task_id: "TEST", step: "should-not-write" });`;
+  const previous = process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+  process.env[LIVE_LEDGER_DENY_ROOT_ENV] = root;
+  try {
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], {
+      cwd: process.cwd(), encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+    });
+    assert.notEqual(child.status, 0);
+    assert.match(child.stderr, /W1-T4923/);
+    assert.equal(existsSync(path), false);
+    const worker = buildWorkerEnv({ [LIVE_LEDGER_DENY_ROOT_ENV]: "/forged" }, {
+      HOME: "/fixture", [LIVE_LEDGER_DENY_ROOT_ENV]: root,
+    });
+    assert.equal(worker[LIVE_LEDGER_DENY_ROOT_ENV], root, "even an extra env cannot widen a test worker's ledger access");
+  } finally {
+    if (previous === undefined) delete process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+    else process.env[LIVE_LEDGER_DENY_ROOT_ENV] = previous;
+  }
+});
+
+test("W1-T4944: shifted clock cannot write the live-root stand-in", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-shifted-live-stand-in-"));
+  const livePath = join(root, "state", "ledger.ndjson");
+  const fixturePath = join(mkdtempSync(join(tmpdir(), "rmd-shifted-ledger-fixture-")), "state", "ledger.ndjson");
+  const ledgerUrl = new URL("../src/lib/ledger.ts", import.meta.url).href;
+  const clockUrl = new URL("../scripts/clock-shift.mjs", import.meta.url).href;
+  const code = `
+    import { statSync } from "node:fs";
+    import { appendLedger } from ${JSON.stringify(ledgerUrl)};
+    appendLedger(${JSON.stringify(fixturePath)}, { run_id: "clock", task_id: "TEST", step: "fixture-write" });
+    if (Date.now() - statSync(${JSON.stringify(fixturePath)}).mtimeMs < 399 * 86_400_000) throw new Error("clock was not shifted");
+    console.log("shift-active");
+    appendLedger(${JSON.stringify(livePath)}, { run_id: "clock", task_id: "TEST", step: "should-not-write" });
+  `;
+  const previous = process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+  process.env[LIVE_LEDGER_DENY_ROOT_ENV] = root;
+  try {
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--import", clockUrl, "--input-type=module", "-e", code], {
+      cwd: process.cwd(), encoding: "utf8", env: { ...process.env, FK_SHIFT_DAYS: "400", NODE_TEST_CONTEXT: undefined },
+    });
+    assert.notEqual(child.status, 0);
+    assert.match(child.stdout, /shift-active/);
+    assert.match(child.stderr, /W1-T4923/);
+    assert.match(readFileSync(fixturePath, "utf8"), /"step":"fixture-write"/);
+    assert.equal(existsSync(livePath), false);
+  } finally {
+    if (previous === undefined) delete process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+    else process.env[LIVE_LEDGER_DENY_ROOT_ENV] = previous;
+  }
+});
 
 /** The env a real daemon/operator process carries: no runner variable at all. */
 const REAL_RUN: NodeJS.ProcessEnv = { PATH: "/usr/bin", HOME: "/Users/x" };
@@ -202,4 +330,91 @@ test("the opt-out NESTS without an inner section re-arming the guard for the out
     assertLiveWriteAllowed("git-push", "outer still exempt", TEST_RUN);
   });
   assert.equal(liveWritesExempt(), false);
+});
+
+// ── W1-T4805: process-level containment (test/setup/no-live-remote.ts) ─────────────────────────
+// The per-call fence above can fire AFTER an effect it does not know about. These canaries prove
+// the suite's own process cannot reach live GitHub at all: dead push URLs, a sentinel token the
+// transport refuses, no App key. They rely on the shared `--import tmp-hygiene.ts` setup only.
+
+const GITHUB_PUSH_URLS = [
+  "https://github.com/craigoley/remudero.git",
+  "git@github.com:craigoley/remudero.git",
+  "ssh://git@github.com/craigoley/remudero.git",
+];
+
+test("W1-T4805: a real push to github from the suite fails on the dead rewrite", () => {
+  const repo = gitRepo({ kind: "canary-push" });
+  // every github.com push URL form resolves to the dead path, before any network is involved
+  for (const url of GITHUB_PUSH_URLS) {
+    repo.addRemote("canary", url);
+    const pushUrl = repo.git("remote", "get-url", "--push", "canary");
+    assert.match(pushUrl, /W1-T4805-live-github-push-blocked/, `${url} must rewrite to the dead path`);
+    repo.git("remote", "remove", "canary");
+  }
+  // and a real `git push` fails loudly, naming the dead rewrite
+  repo.addRemote("origin", GITHUB_PUSH_URLS[0]!);
+  const pushed = spawnSync("git", ["-C", repo.dir, "push", "origin", "HEAD:refs/heads/w1-t4805-canary"], {
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  assert.notEqual(pushed.status, 0, "a push to github.com must fail under the suite");
+  assert.match(pushed.stderr, /W1-T4805-live-github-push-blocked/, "the failure must name the dead rewrite");
+  // a LOCAL bare fixture remote is a plain path: the rewrite must not touch it
+  const bare = gitRepo({ bare: true, kind: "canary-bare" });
+  repo.addRemote("local", bare.dir);
+  repo.git("push", "local", "HEAD:refs/heads/main");
+  assert.equal(bare.git("rev-parse", "main"), repo.git("rev-parse", "HEAD"));
+});
+
+test("W1-T4805: the transport refuses the sentinel token before gh runs", () => {
+  assert.equal(process.env.GH_TOKEN, LIVE_WRITE_SENTINEL_TOKEN, "the shared setup must install the sentinel");
+  assert.equal(process.env.GITHUB_TOKEN, LIVE_WRITE_SENTINEL_TOKEN);
+  const before = ghRefusalCount();
+  const refused = (fn: () => unknown): void =>
+    assert.throws(fn, (e: unknown) => {
+      assert.ok(e instanceof LiveWriteBlockedError, "must be LiveWriteBlockedError, never the CLI's own 401");
+      assert.equal(e.boundary, "gh-transport");
+      assert.match(e.message, /W1-T4805/);
+      assert.match(e.message, /gh pr create 1/, "the refusal must name the command");
+      return true;
+    });
+  // PATH resolves no gh under the temp dir, so the only gh a spawn could reach is a real one
+  const originalPath = process.env.PATH;
+  process.env.PATH = "/nonexistent-w1-t4805";
+  try {
+    refused(() => ghExec(["pr", "create", "1", "--fill"], { encoding: "utf8" }));
+    refused(() => ghExecFile("gh", ["pr", "create", "1"], { encoding: "utf8" }));
+    refused(() => ghJson(["pr", "create", "1"]));
+  } finally {
+    process.env.PATH = originalPath;
+  }
+  // the shared refusing stub `gh` was never spawned: the transport's refusal came first
+  assert.equal(ghRefusalCount(), before, "gh must not have been spawned");
+});
+
+test("W1-T4805: a test's own PATH-stubbed gh still runs under the sentinel", () => {
+  const shim = ghShim([{ when: "pr view", stdout: "stubbed" }], { kind: "sentinel-own-stub" });
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${originalPath}`;
+  try {
+    assert.equal(ghExec(["pr", "view", "1"], { encoding: "utf8" }).trim(), "stubbed");
+  } finally {
+    process.env.PATH = originalPath;
+  }
+  assert.deepEqual(shim.calls(), ["pr view 1"]);
+});
+
+test("W1-T4805: a spawned child inherits the sentinel and no app key", () => {
+  const probe =
+    "const e = process.env; console.log(JSON.stringify({ t: e.GH_TOKEN, g: e.GITHUB_TOKEN, k: e.GH_APP_PRIVATE_KEY_PATH ?? null," +
+    " id: e.GH_APP_ID ?? null, inst: e.GH_APP_INSTALLATION_ID ?? null, cfg: e.GH_CONFIG_DIR ?? null }));";
+  const out = JSON.parse(execFileSync(process.execPath, ["-e", probe], { encoding: "utf8" })) as Record<string, string | null>;
+  assert.equal(out.t, LIVE_WRITE_SENTINEL_TOKEN);
+  assert.equal(out.g, LIVE_WRITE_SENTINEL_TOKEN);
+  assert.equal(out.k, null);
+  assert.equal(out.id, null);
+  assert.equal(out.inst, null);
+  assert.ok(out.cfg !== null && out.cfg.includes("rmd-test-gh-config-"), "GH_CONFIG_DIR must be the empty per-process dir");
+  assert.deepEqual(readdirSync(out.cfg), [], "the gh config dir must be empty — no keyring login reachable");
 });

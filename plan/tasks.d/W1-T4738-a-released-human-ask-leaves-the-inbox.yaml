@@ -1,0 +1,54 @@
+- id: W1-T4738
+  title: "A released verify-human task still appears to wait on the operator until it merges — retire its old inbox ask from the release receipt, and distinguish an actionable thread from a daemon-last conversation"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator report 2026-09-28: phone inbox showed 74 waiting-on-you threads, including W1-T216"
+  plan_refs: [W1-T4086, W1-T4088, W1-T3932]
+  files: [src/lib/inbox.ts, src/lib/panel-graph.ts, src/lib/inbox-responder.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/a-released-human-ask-leaves-the-inbox.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    On current main, a verify-human judge can release a parked task by writing a task-scoped
+    `ratify.approved` row with `released: verify-human`. The original `verify-human:<task>`
+    proposal remains operator-owned. Inbox classification retires that proposal only after the
+    task MERGES, so it continues to appear as an ask while the fleet is already allowed to do
+    the work. The thread list then sets `waitingOn: operator` whenever its latest message is
+    from the daemon, regardless of whether the proposal is ready, drafting or not ready.
+    The console counts every such thread as "waiting on you". This conflates conversation
+    direction with an actionable decision. The registry and thread history must remain intact.
+  design: |
+    (i) In inbox classification, a verified release receipt for the exact plan task retires
+    only `verify-human:<task>`; it does not retire `ruling`, other tasks, or a proposal on
+    unreadable/missing release evidence. Recompute the inbox memo when this release fact
+    changes. Keep the registry/history; no synthetic operator decline or deletion.
+    (ii) Thread summaries expose an explicit attention state derived from current proposal
+    classification and conversation direction. Keep `waitingOn` for conversational history,
+    but `notReady`, `drafting` and `declined` opening messages are not actionable merely
+    because the daemon spoke last. A later explicit question may require a reply. The console
+    can use attention instead of last-speaker as its badge count in a separate consumer change.
+    The existing classifier reads the live ledger file. This task must not present an absent
+    release row as proof of no release; a follow-up archive-union/durable-release-index audit
+    is tracked in core issue #7708 so rotation cannot silently resurrect historical asks.
+    (iii) Preserve a current, unreleased verify-human security or policy ask for operator
+    review; this task does not silently approve W1-T216 or reinterpret a general auto-merge
+    preference as consent to run a credential-forgery drill.
+  acceptance:
+    - claim: "a release receipt retires only its exact verify-human ask without erasing history"
+      proof: 'grep: test("W1-T4738: a release receipt retires only its exact verify-human ask without erasing history" in test/a-released-human-ask-leaves-the-inbox.test.ts'
+    - claim: "a newly appended release invalidates the inbox memo without a registry edit"
+      proof: 'grep: test("W1-T4738: release receipt invalidates the inbox memo" in test/a-released-human-ask-leaves-the-inbox.test.ts'
+    - claim: "an incomplete proposal is not an actionable decision just because the daemon spoke last"
+      proof: 'grep: test("W1-T4738: last speaker is not the attention state" in test/a-released-human-ask-leaves-the-inbox.test.ts'
+    - claim: "missing release evidence never hides a live operator ask"
+      proof: 'grep: test("W1-T4738: no release evidence keeps the ask visible" in test/a-released-human-ask-leaves-the-inbox.test.ts'
+  falsifier: |
+    Remove the release-aware classification and the formerly released proposal returns to
+    `/v1/inbox/threads`; keep classification but omit the memo fingerprint and a warm read
+    stays stale after the release row. Revert attention to last-speaker and a not-ready
+    opening message becomes an actionable decision again.

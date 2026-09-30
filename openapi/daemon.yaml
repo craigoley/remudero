@@ -73,6 +73,127 @@ components:
         exactly POST /v1/incidents/events and falls through to 401 on every other route.
 
   schemas:
+    OperatorAgentAnswer:
+      type: object
+      description: Bounded read-only answer-v1; missing evidence is explicit and citations are dated.
+      required: [version, repository, instance, lens, coverage, answer, citations, missingSources, generatedAt]
+      properties:
+        version: { type: string, enum: [answer-v1] }
+        repository: { type: [string, "null"] }
+        instance: { type: string }
+        lens: { type: string, enum: [current-repository] }
+        coverage: { type: string, enum: [verified, partial, unavailable, unsupported] }
+        answer: { type: string, maxLength: 700 }
+        generatedAt: { type: string, format: date-time }
+        citations:
+          type: array
+          maxItems: 4
+          items:
+            type: object
+            required: [sourceId, observedAt, freshness, label, value]
+            properties:
+              sourceId: { type: string }
+              observedAt: { type: string, format: date-time }
+              freshness: { type: string, enum: [verified, stale] }
+              label: { type: string }
+              value: { type: string }
+        missingSources:
+          type: array
+          items:
+            type: object
+            required: [sourceId, reason]
+            properties:
+              sourceId: { type: string }
+              reason: { type: string }
+    OperatorAgentActionHandoffPreview:
+      type: object
+      description: >
+        action-handoff-v1 preview (W1-T4559). Non-mutating; names the exact target, write tier,
+        consequence, expiry, and recovery verb. The confirmationId is single-use and bound to the
+        verified operator who prepared it.
+      required: [version, confirmationId, intentId, verb, capability, target, tier, consequence, recovery, preparedAt, expiresAt, mutated, confirmation]
+      properties:
+        version: { type: string, enum: [action-handoff-v1] }
+        confirmationId: { type: string }
+        intentId: { type: string }
+        verb: { type: string, enum: [fleet.pause, fleet.resume] }
+        capability: { type: string }
+        target:
+          type: object
+          required: [kind, instance, repository, state]
+          properties:
+            kind: { type: string, enum: [fleet-control] }
+            instance: { type: string }
+            repository: { type: string }
+            state:
+              type: object
+              required: [paused, stopped]
+              properties:
+                paused: { type: boolean }
+                stopped: { type: boolean }
+        tier: { type: string, enum: [low, middle] }
+        consequence:
+          type: object
+          required: [risk, reversible, summary]
+          properties:
+            risk: { type: string, enum: [low, medium] }
+            reversible: { type: boolean }
+            summary: { type: string }
+        recovery:
+          type: object
+          required: [verb, capability, plan]
+          properties:
+            verb: { type: string }
+            capability: { type: string }
+            plan: { type: string }
+        preparedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        mutated: { type: boolean }
+        confirmation: { type: string, enum: [explicit-operator-confirmation-required] }
+        existing: { type: boolean }
+
+    OperatorAgentActionHandoffReceipt:
+      type: object
+      description: >
+        The one attributable receipt for a claimed confirmation. `unresolved` means the external
+        outcome is not certified; it is never a success and never an invitation to retry.
+      required: [version, receiptId, confirmationId, intentId, verb, capability, instance, repository, actorHash, outcome, code, reason, at]
+      properties:
+        version: { type: string, enum: [action-handoff-v1] }
+        receiptId: { type: string }
+        confirmationId: { type: string }
+        intentId: { type: string }
+        verb: { type: string }
+        capability: { type: string }
+        instance: { type: string }
+        repository: { type: string }
+        actorHash: { type: string }
+        outcome: { type: string, enum: [succeeded, refused, unresolved] }
+        code: { type: string }
+        reason: { type: string }
+        at: { type: string, format: date-time }
+        automationReceiptId: { type: string }
+        evidenceRef: { type: string }
+
+    OperatorAgentActionHandoffRefusal:
+      type: object
+      description: A typed refusal; no target was written. A replay names the one stored receipt.
+      required: [version, outcome, code]
+      properties:
+        version: { type: string, enum: [action-handoff-v1] }
+        outcome: { type: string, enum: [refused, unresolved] }
+        code: { type: string }
+        detail: { type: string }
+        receipt: { $ref: "#/components/schemas/OperatorAgentActionHandoffReceipt" }
+
+    InstanceUnavailable:
+      type: object
+      required: [error, status, instance, reason]
+      properties:
+        error: { type: string, enum: [instance_unavailable] }
+        status: { type: string, enum: [unavailable] }
+        instance: { type: string }
+        reason: { type: string }
     Error:
       type: object
       description: >
@@ -278,76 +399,326 @@ components:
           description: >
             W1-T163: this token's marker value BEFORE this request advanced it -- the timestamp
             `recap` was computed as-of. Absent alongside `recap` for the same two reasons.
+        github_unreachable:
+          type: boolean
+          description: True iff the GitHub read backing merge state was unreachable this snapshot.
+        counts:
+          $ref: "#/components/schemas/StatusCounts"
+        spend:
+          $ref: "#/components/schemas/GlanceSpend"
+        blockedPrs:
+          type: array
+          description: >
+            PRs the sweep disposed into a non-progressing class (src/lib/status-board.ts's
+            `BlockedPrBlocker`), re-derived against live merge state every render.
+          items:
+            $ref: "#/components/schemas/BlockedPrRow"
+        blockedPrsUnverifiedReason:
+          type: string
+          description: Set only when live GitHub state could not be checked; `blockedPrs` is then withheld (empty).
+        mergeHeld:
+          type: array
+          description: The standing operator merge holds (src/lib/status-board.ts's `MergeHeldRow`).
+          items:
+            $ref: "#/components/schemas/MergeHeldRow"
+        prQueue:
+          $ref: "#/components/schemas/PrQueueSnapshot"
+        modelApprovals:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConsoleModelApproval"
+        taskProjection:
+          $ref: "#/components/schemas/ConsoleStatusTaskProjection"
+        repairLadder:
+          type: object
+          description: >
+            The provider repair ladder (src/lib/worker-provider.ts's `RepairLadderState`), spliced by
+            src/lib/serve.ts's `withRepairLadder`. `running`, `unreadable` (with `reason`), or
+            `stalled` (with the stall record's fields, which evolve with the ladder and are open here).
+          required: [state]
+          additionalProperties: true
+          properties:
+            state:
+              type: string
+              enum: [running, stalled, unreadable]
+        staleness:
+          $ref: "#/components/schemas/ConsoleResponseStaleness"
+
+    StatusCounts:
+      type: object
+      description: GET /v1/status's header counts (src/lib/board.ts's `CountSummary`), derived from the same `tasks`.
+      required: [total, running, merged, queued, blocked, merged_known]
+      properties:
+        total: {type: integer}
+        running: {type: integer}
+        merged: {type: integer}
+        queued: {type: integer}
+        blocked: {type: integer}
+        merged_known:
+          type: boolean
+          description: False when merge state's GitHub read was unreachable -- render unknown, not 0 merged.
+
+    GlanceSpend:
+      type: object
+      description: The GLANCE strip totals (src/lib/glance.ts's `GlanceSpend`).
+      required: [mergedToday, channel, spendTodayUsd, spendWeekUsd, sessionSpendUsd]
+      properties:
+        mergedToday: {type: integer}
+        channel:
+          type: string
+          enum: [fleet]
+        spendTodayUsd: {type: number}
+        spendWeekUsd: {type: number}
+        sessionSpendUsd:
+          type: "null"
+          description: Always null -- no ledger step records operator-session cost; null is unmeasured, never 0.
+
+    BlockedPrRow:
+      type: object
+      required: [kind, prNumber, disposition, reason]
+      properties:
+        kind:
+          type: string
+          enum: [blocked_pr]
+        taskId: {type: string}
+        prNumber: {type: integer}
+        prUrl: {type: string}
+        disposition: {type: string}
+        reason: {type: string}
+
+    MergeHeldRow:
+      type: object
+      description: An operator merge hold. `prNumber` and `taskId` are absent for a fleet-scoped hold.
+      required: [by, reason]
+      properties:
+        prNumber: {type: integer}
+        taskId: {type: string}
+        by: {type: string}
+        reason: {type: string}
+
+    PrQueueSnapshot:
+      type: object
+      description: >
+        Every current open PR (src/lib/board.ts's `PrQueueSnapshot`). An unreadable or partial index
+        is `complete: false` with no rows and an `unavailableReason`, never stale rows.
+      required: [complete, rows]
+      properties:
+        complete: {type: boolean}
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/PrQueueRow"
+        unavailableReason: {type: string}
+        lastGoodAt:
+          type: string
+          description: The newest prior complete queue this route cache held; absent until observed.
+
+    PrQueueRow:
+      type: object
+      required: [prNumber, prUrl, title, disposition, reason, reviewState, queueClass, held, snapshotAt]
+      properties:
+        prNumber: {type: integer}
+        prUrl: {type: string}
+        title: {type: string}
+        headRefName: {type: string}
+        headSha: {type: string}
+        taskId: {type: string}
+        disposition: {type: string}
+        reason: {type: string}
+        reviewState:
+          type: string
+          enum: [success, failure, pending, none, unreadable, not-applicable]
+        queueClass:
+          type: string
+          enum: [actionable, active, ready-held, waiting, unknown]
+        held: {type: boolean}
+        snapshotAt: {type: string}
+        observedAt: {type: string}
+
+    ConsoleModelApproval:
+      type: object
+      required: [model, approvedBy, approvedAt, expired]
+      properties:
+        model: {type: string}
+        approvedBy: {type: string}
+        approvedAt: {type: string}
+        expiresAt: {type: string}
+        expired: {type: boolean}
+
+    ConsoleStatusTaskProjection:
+      type: object
+      description: >
+        How much of the plan `tasks` carries (src/lib/serve.ts's `ConsoleStatusTaskProjection`): a
+        truncated list says so, so an omitted task never reads as "no worker".
+      required: [complete, total, returned, omitted, limit, reason]
+      properties:
+        complete: {type: boolean}
+        total: {type: integer}
+        returned: {type: integer}
+        omitted: {type: integer}
+        limit: {type: integer}
+        reason: {type: string}
+
+    RepoRunOutcomes:
+      type: object
+      description: >
+        Trailing seven-day run outcomes from the de-duplicated ledger. `succeeded` counts tasks that
+        took merge credit (`verdict.merged`, or a `verdict` of merged, already_satisfied or
+        awaiting_merge). `failed` counts runs whose verdict is blocked_ci, blocked_review, no_pr,
+        blocked_budget, error_max_budget_usd, blocked_illformed or failed. `superseded` counts such a
+        failure whose task later took merge credit; it is in neither term of `errorrate`. Held,
+        transient and re-queued verdicts (blocked_transient, blocked_containment, handed_off, ...)
+        are in no count.
+      required: [succeeded, failed, superseded]
+      properties:
+        succeeded: { type: integer }
+        failed: { type: integer }
+        superseded: { type: integer }
 
     RepoDashboardHealth:
       type: object
       description: >
-        The health projection for one managed repository. The current daemon has no per-repo
-        health source, so every measurement is explicitly unknown rather than rendered as zero or
-        healthy.
-      required:
-        - status
-        - queuedtasks
-        - errorrate
-        - last_run
-        - alerts
+        One repository's health. `status` is the MEASUREMENT state (`verified` = computed from a
+        present ledger, `unknown` = no ledger); `condition` is the OPERATIONAL state, derived in this
+        order: `unknown` (no ledger), `paused` (instance PAUSE or STOP flag), `down` (no `daemon.*`
+        heartbeat within 30 min), `degraded` (an open incident, or more failed than succeeded runs),
+        `idle` (no finished run in 7 days), else `healthy`. `reasons` names each signal that set it.
+      required: [status, condition, reasons, queuedtasks, queued, errorrate, runs7d, last_run, alerts]
       properties:
         status:
           type: string
-          enum:
-            - unknown
+          enum: [verified, unknown]
+        condition:
+          type: string
+          enum: [healthy, degraded, down, paused, idle, unknown]
+        reasons:
+          type: array
+          items: { type: string }
         queuedtasks:
           type: [integer, "null"]
+          description: Open plan tasks for the repository (not merged, done, retired or merge-credited).
+        queued:
+          type: [integer, "null"]
+          description: The subset of `queuedtasks` whose plan status is `queued`.
         errorrate:
           type: [number, "null"]
+          description: failed / (succeeded + failed) over `runs7d`; null when both are zero or there is no ledger.
+        runs7d:
+          oneOf:
+            - $ref: "#/components/schemas/RepoRunOutcomes"
+            - type: "null"
         last_run:
           type: [string, "null"]
+          description: The newest verdict or merge-credit timestamp in the window.
         alerts:
           type: [array, "null"]
+          description: >
+            The operating instance's open incidents (incident-lifecycle.json records not `verified`,
+            last seen in 7 days), newest first, at most 12. An empty array is a measured quiet fleet;
+            null means this instance does not operate the repository or its incident store was
+            unreadable (then `reasons` says which).
           items:
             type: string
+
+    RepoSubscriptionWindow:
+      type: object
+      description: One provider usage window as the router last read it on a worker assignment. Account-wide, not per repository.
+      required: [provider, window, percent_used, resets_at, observed_at]
+      properties:
+        provider: { type: string }
+        window: { type: [string, "null"] }
+        percent_used: { type: [number, "null"] }
+        resets_at: { type: [string, "null"] }
+        observed_at: { type: string }
+
+    RepoSubscriptionUsage:
+      type: object
+      description: Subscription-billed calls are usage against provider windows, never dollars.
+      required: [calls7d, tokens7d, windows]
+      properties:
+        calls7d: { type: integer }
+        tokens7d: { type: number }
+        windows:
+          type: array
+          items:
+            $ref: "#/components/schemas/RepoSubscriptionWindow"
 
     RepoDashboardTelemetry:
       type: object
       description: >
-        Trailing seven-day per-repository worker telemetry from the ledger. Models are the distinct
-        provider-reported served models, never requested or routed model assignments. A null
-        modelsused means the ledger was unavailable or at least one worker row in the window did
-        not report its served model; an empty array means no worker rows ran in the window.
-      required:
-        - tokens7d
-        - modelsused
-        - cost_7d
+        Trailing seven-day worker telemetry from the de-duplicated ledger; each call counts once (its
+        `worker.attempt` receipt when the run wrote one, else the lane's own step row). `tokens7d` is
+        input + output + cache-creation tokens; cache reads are `cache_read_tokens7d`. `cash_usd_7d`
+        sums only `billing_mode: api` calls, and `cost_7d` is the same figure. `modelsused` is the
+        provider-served models plus the canonical selected model of each assignment; a bare alias is
+        never reported. Null fields mean there is no ledger.
+      required: [measurementClass, tokens7d, cache_read_tokens7d, cash_usd_7d, cost_7d, subscription, modelsused]
       properties:
+        measurementClass:
+          type: string
+          enum: [observed, not-collected]
         tokens7d:
           type: [number, "null"]
+        cache_read_tokens7d:
+          type: [number, "null"]
+        cash_usd_7d:
+          type: [number, "null"]
+        cost_7d:
+          type: [number, "null"]
+        subscription:
+          oneOf:
+            - $ref: "#/components/schemas/RepoSubscriptionUsage"
+            - type: "null"
         modelsused:
           type: [array, "null"]
           items:
             type: string
-        cost_7d:
-          type: [number, "null"]
 
     RepoDashboardSettings:
       type: object
-      description: Per-repository settings, unavailable until durable settings persistence exists.
+      description: >
+        NOT COMPUTED: no config key holds a per-repository proof policy, worker pool size or alert
+        threshold. Every field is always null; see `not_computed.settings`.
       required:
         - proofpolicy
         - workerpoolsize
         - alertthreshold
       properties:
         proofpolicy:
-          type: [string, "null"]
+          type: "null"
         workerpoolsize:
-          type: [integer, "null"]
+          type: "null"
         alertthreshold:
-          type: [number, "null"]
+          type: "null"
+
+    RepoAction:
+      type: object
+      description: >
+        One repository action. `path` is relative to the operating instance's `/v1/i/<instance>/`
+        prefix: `toggleonoff` is POST control/pause or control/resume (write scope, chosen from the
+        current flag), `viewlogs` is GET recent. `configure` and `test_run` are never available.
+      required: [id, available]
+      properties:
+        id:
+          type: string
+          enum: [toggleonoff, viewlogs, configure, test_run]
+        available: { type: boolean }
+        method:
+          type: string
+          enum: [GET, POST]
+        path: { type: string }
+        scope:
+          type: string
+          enum: [read, write]
+        reason: { type: string }
 
     RepoDashboardEntry:
       type: object
       description: >
-        One repository from the validated `.remudero/managed-repos.json` set. Managed membership
-        is not evidence of OAuth connection, activation, health, telemetry, or settings.
+        One repository from the instance registry or the validated `.remudero/managed-repos.json`
+        set. The row whose instance serves this route is the OPERATING repository: it alone carries
+        `active`, `alerts`, pause and heartbeat signals, and it also owns every ledger row that names
+        no repository (that instance's gardeners, sweeps and fix lanes).
       required:
         - id
         - reponame
@@ -359,10 +730,12 @@ components:
         - health
         - telemetry
         - settings
+        - actions
+        - not_computed
       properties:
         id:
           type: string
-          description: Canonical `owner/repo` identity from the managed-repo set.
+          description: Canonical `owner/repo` identity.
         reponame:
           type: string
           description: Repository name from the canonical identity.
@@ -370,27 +743,42 @@ components:
           type: string
           description: Deterministic GitHub URL for the canonical identity; no GitHub read is implied.
         connected_at:
-          type: [string, "null"]
+          type: "null"
+          description: NOT COMPUTED; see `not_computed.connected_at`.
         active:
           type: [boolean, "null"]
+          description: False when the operating instance is paused or stopped; null for any other row.
         managed:
           type: boolean
         source:
           type: string
           enum:
             - managed-repos
+            - instance-registry
         health:
           $ref: "#/components/schemas/RepoDashboardHealth"
         telemetry:
           $ref: "#/components/schemas/RepoDashboardTelemetry"
         settings:
           $ref: "#/components/schemas/RepoDashboardSettings"
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RepoAction"
+        not_computed:
+          type: object
+          description: Why each never-computed field is null, so a consumer removes it instead of showing it as missing.
+          required: [connected_at, settings]
+          properties:
+            connected_at: { type: string }
+            settings: { type: string }
 
     RepoDashboardResult:
       type: object
       description: >
-        GET /v1/repos's read-only managed-repo portfolio. An empty `repos` array is a measured
-        empty managed set; it is not an unavailable response.
+        GET /v1/repos's portfolio, or GET /v1/repos/summary's single operating repository. An empty
+        `repos` array is a measured empty set; it is not an unavailable response. A cached read also
+        carries `staleness`.
       required:
         - generated_at
         - source
@@ -402,6 +790,16 @@ components:
           type: string
           enum:
             - managed-repos
+            - instance-registry
+            - instance-registry+managed-repos
+        registry:
+          type: object
+          required: [state]
+          properties:
+            state:
+              type: string
+              enum: [verified, unavailable]
+            reason: { type: string }
         repos:
           type: array
           items:
@@ -607,6 +1005,64 @@ components:
             - string
             - "null"
 
+    AssistantControlRequest:
+      type: object
+      description: A stable, exact-target assistant control request; retries MUST reuse the same actionId and payload.
+      additionalProperties: false
+      required: [actionId, instance, action]
+      properties:
+        actionId: { type: string, minLength: 8, maxLength: 128 }
+        instance: { type: string, minLength: 1, maxLength: 128 }
+        action: { type: string, enum: [pause, resume, stop] }
+        reason: { type: string, maxLength: 200 }
+
+    AssistantControlReceipt:
+      type: object
+      description: The first durable completion receipt; exact retries return this same object without re-dispatch.
+      required: [status, actionId, instance, action, evidenceRef, result]
+      properties:
+        status: { type: string, enum: [completed] }
+        actionId: { type: string }
+        instance: { type: string }
+        repository: { type: string, description: "Server-owned repository identity, including core when configured." }
+        action: { type: string, enum: [pause, resume, stop] }
+        evidenceRef: { type: string, description: "The reused panel-action ledger row." }
+        result:
+          oneOf:
+            - $ref: "#/components/schemas/PauseResult"
+            - $ref: "#/components/schemas/ResumeResult"
+            - $ref: "#/components/schemas/StopResult"
+
+    AssistantControlUnknown:
+      type: object
+      description: A durable claim exists, but the side-effect outcome is not certified; retry never dispatches again.
+      required: [status, actionId, detail]
+      properties:
+        status: { type: string, enum: [unknown] }
+        actionId: { type: string }
+        detail: { type: string }
+
+    AssistantControlCapability:
+      type: object
+      description: Read-only served contract. Writable filesystem metadata cannot prove cross-process or cross-host sharing.
+      required: [contract, bootSha, instance, repository, admission, claimStore]
+      properties:
+        contract: { type: string, enum: [assistant-control-v2] }
+        bootSha: { type: string }
+        instance: { type: string }
+        repository: { type: string }
+        admission: { type: string, enum: [writable_unverified, uninitialized, unavailable] }
+        claimStore: { type: string, enum: [shared_root_configured_topology_unverified] }
+
+    AssistantControlLookup:
+      type: object
+      description: Nonterminal read-only lookup; completed actions return AssistantControlReceipt instead.
+      required: [status, actionId]
+      properties:
+        status: { type: string, enum: [claimed_unknown, not_found, conflict, unavailable] }
+        actionId: { type: string }
+        detail: { type: string }
+
     AnswerQuestionRequest:
       type: object
       description: >
@@ -710,6 +1166,27 @@ components:
           type: string
           format: date-time
 
+    PrActionSwitchedOff:
+      type: object
+      description: >
+        POST /v1/pr-actions' 409 body (src/lib/panel-actions.ts's `buildPrActionRoute`): the
+        operator switched this action off on this daemon -- the marker
+        `state/CONSOLE_PR_ACTION_OFF-<action>` exists (src/lib/fleet-control.ts's
+        `isPrActionSwitchedOff`). Nothing was recorded but the `console.pr_action_switched_off`
+        ledger row. A dedicated refusal rather than a member of the shared Error enum, which a
+        consumer switches over exhaustively (packages/daemon-client-smoke).
+      required:
+        - error
+        - detail
+      properties:
+        error:
+          type: string
+          enum:
+            - switched_off
+        detail:
+          type: string
+          description: Names the switched-off action and the marker file that switched it off.
+
     MarkEscalationHandledRequest:
       type: object
       description: >
@@ -718,15 +1195,28 @@ components:
         from ApproveManualRequest's MANUAL-queue check-off: "approve" has no defined verb for an
         escalation. Closes the named `needs-human`-labeled GitHub issue (src/lib/escalate.ts);
         the name is deliberately "mark handled", not "approve" or "resolve" -- closing the issue
-        does not, by itself, imply the underlying block is fixed.
+        does not, by itself, imply the underlying block is fixed. W1-T4677 requires a class and
+        disposition so each class's acted-on precision can be measured; snoozedUntil is required
+        only for snoozed_until.
       required:
         - taskId
         - issueUrl
+        - class
+        - disposition
       properties:
         taskId:
           type: string
         issueUrl:
           type: string
+        class:
+          type: string
+          description: Escalation class used to group acted-on precision.
+        disposition:
+          type: string
+          enum: [acted, false_positive, duplicate, snoozed_until]
+        snoozedUntil:
+          type: string
+          description: Required exactly when disposition is snoozed_until.
 
     MarkEscalationHandledResult:
       type: object
@@ -734,6 +1224,10 @@ components:
         - ok
         - taskId
         - issueUrl
+        - class
+        - disposition
+        - precision
+        - tier
       properties:
         ok:
           type: boolean
@@ -741,6 +1235,16 @@ components:
           type: string
         issueUrl:
           type: string
+        class:
+          type: string
+        disposition:
+          type: string
+          enum: [acted, false_positive, duplicate, snoozed_until]
+        precision:
+          type: [number, "null"]
+        tier:
+          type: string
+          enum: [issue, digest, board]
 
     # ── W3-T6 (MASTER-PLAN §7B) -- the plan->task->PR graph + interactive plan adjustment:
     # submit feedback, answer grills, accept/reject a proposal. Built over the SAME feedback
@@ -931,7 +1435,11 @@ components:
 
     FeedbackInboxResult:
       type: object
-      description: GET /v1/feedback's body -- every captured feedback entry, oldest first.
+      description: >
+        GET /v1/feedback's body -- every captured feedback entry, oldest first. Served through the
+        console read cache (src/lib/serve.ts's `boundConsoleReadRoute`), so `rmd serve` also
+        splices in `staleness`; a cold or stalled cache answers `{entries: [], staleness}`. With
+        `?limit=` or `?cursor=`, `entries` is one page and `page` says where the next one starts.
       required:
         - entries
       properties:
@@ -939,6 +1447,88 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/FeedbackEntry"
+        page:
+          $ref: "#/components/schemas/ReadPage"
+        staleness:
+          $ref: "#/components/schemas/ConsoleResponseStaleness"
+
+    ReadPage:
+      type: object
+      description: >
+        One page of a list read (src/lib/read-page.ts). Pass `nextCursor` back as `?cursor=` for
+        the next page; its absence means this page is the last. The cursor names the last item
+        served and its position, so an item that leaves the list between two reads never restarts
+        the walk.
+      required: [total, limit]
+      properties:
+        section:
+          type: string
+          description: GET /v1/inbox only -- the lane this page is from.
+        total:
+          type: integer
+          description: Items in the whole list at the time of this read.
+        limit:
+          type: integer
+        nextCursor:
+          type: string
+
+    InboxCounts:
+      type: object
+      description: >
+        Every GET /v1/inbox lane's length, including the lanes a `?section=` read leaves out, so a
+        badge or a tab count needs no second read.
+      required: [ready, drafting, notReady, declined, fleet, needsYou]
+      properties:
+        ready: {type: integer}
+        drafting: {type: integer}
+        notReady: {type: integer}
+        declined: {type: integer}
+        fleet: {type: integer}
+        needsYou:
+          type: object
+          required: [ready, drafting, notReady, declined]
+          properties:
+            ready: {type: integer}
+            drafting: {type: integer}
+            notReady: {type: integer}
+            declined: {type: integer}
+
+    InboxSectionResult:
+      type: object
+      description: >
+        GET /v1/inbox?section=<name>'s body: that one lane under its own key, exactly as the whole
+        body carries it (`needsYou` an object of four lanes, every other section one page of an
+        array), plus `counts` and, for a list section, `page`.
+      required: [counts]
+      properties:
+        ready:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxReadyItem"
+        drafting:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxDraftingItem"
+        notReady:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxNotReadyItem"
+        declined:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxDeclinedItem"
+        fleet:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxFleetItem"
+        needsYou:
+          $ref: "#/components/schemas/InboxNeedsYou"
+        counts:
+          $ref: "#/components/schemas/InboxCounts"
+        page:
+          $ref: "#/components/schemas/ReadPage"
+        staleness:
+          $ref: "#/components/schemas/ConsoleResponseStaleness"
 
     SubmitFeedbackRequest:
       type: object
@@ -2606,6 +3196,9 @@ components:
           enum: [ready, refused, stale, unknown, expired, in-progress]
         code:
           type: string
+          description: >
+            A refusal's reason; on a completion, W1-T4657's evidence label -- `executor` when the
+            action-catalogue-v1 executor wrote it, `self-reported` when a caller posted it.
         reason:
           type: string
           maxLength: 321
@@ -2756,6 +3349,20 @@ components:
           $ref: "#/components/schemas/AutomationActionReceipt"
         preflight:
           $ref: "#/components/schemas/AutomationPreflightResult"
+        admission:
+          $ref: "#/components/schemas/AutomationActionReceipt"
+        executor:
+          type: object
+          description: W1-T4657 -- the catalogue executor's own ledger row, which the completion's evidenceRef cites.
+          required: [step, ts, run_id]
+          properties:
+            step:
+              type: string
+            ts:
+              type: string
+              format: date-time
+            run_id:
+              type: string
 
     # ── W1-T3878 -- delegation-profile-v1: the trust budget every delegation carries ──────────
     DelegationProfileScope:
@@ -6004,6 +6611,512 @@ components:
         preferenceBypass:
           $ref: "#/components/schemas/ProviderRoutingPreferenceBypass"
 
+    ViewSource:
+      type: object
+      description: One input a view was computed from (src/lib/views.ts's `ViewSource`).
+      required: [name, asOf, state]
+      properties:
+        name: {type: string}
+        asOf:
+          type: [string, "null"]
+          description: The input's own as-of time; null when it has none yet.
+        state:
+          type: string
+          enum: [fresh, stale, unavailable]
+        reason: {type: string}
+
+    ViewVersions:
+      type: object
+      description: >
+        GET /v1/views/versions and the `hello` event on GET /v1/views/events (docs/views.md): the
+        version of every served view body, which is its ETag, by view name and key. A view whose
+        switch is not `serve` has no versions and is listed in `disabled`.
+      required: [views, disabled]
+      properties:
+        views:
+          type: object
+          description: View name to (key to ETag). An unkeyed view has the empty key.
+          additionalProperties:
+            type: object
+            additionalProperties: {type: string}
+        disabled:
+          type: array
+          items: {type: string}
+
+    ViewHello:
+      type: object
+      description: >
+        The first event on every GET /v1/views/events connection (`event: hello`): ViewVersions
+        flattened (this generator's subset has no allOf) plus the process's `bootId` (each event id is
+        `<bootId>:<seq>`) and `serverNow`.
+      required: [bootId, serverNow, views, disabled]
+      properties:
+        bootId: {type: string}
+        serverNow: {type: string, format: date-time}
+        views:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: {type: string}
+        disabled:
+          type: array
+          items: {type: string}
+
+    ViewEvent:
+      type: object
+      description: A `view` event on GET /v1/views/events. The served body of (view, key) now has this ETag.
+      required: [view, key, etag, stale, emittedAt, asOf, cause]
+      properties:
+        view: {type: string}
+        key: {type: string}
+        etag: {type: string}
+        stale: {type: boolean}
+        emittedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        cause:
+          type: string
+          enum: [body, judge]
+          description: "`body`: the read-model worker posted a new body. `judge`: re-judging the sources flipped `stale`."
+
+    ViewHandover:
+      type: object
+      description: The last event on a GET /v1/views/events stream that serve ends (a drain, or a subscriber stalled too long).
+      required: [reason, retryMs]
+      properties:
+        reason: {type: string, description: "`recycle` on a drain, `slow_consumer` for a stalled subscriber."}
+        retryMs: {type: integer}
+
+    NavBadgeView:
+      type: object
+      description: >
+        GET /v1/views/nav-badge (docs/views.md). The view envelope every /v1/views/<name> route
+        answers: `version` is `data`'s schema version, `asOf` the oldest source's as-of, `stale` true
+        when any source is stale or unavailable. A cold input makes its count absent with a
+        `reason`, never a zero.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [nav-badge]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [agent, inbox]
+          properties:
+            agent:
+              type: object
+              description: >
+                The operator-agent badge: proposals the console's engine would show (a port of its
+                generateProposals and visibleProposals, src/lib/nav-badge-view.ts), with up to 20
+                of their ids for a parity check.
+              required: [proposalIds, instances]
+              properties:
+                count:
+                  type: integer
+                  description: Present only when every selected instance was counted.
+                atLeast:
+                  type: integer
+                  description: Present instead of `count` when only some instances were counted -- a floor, never a total.
+                proposalIds:
+                  type: array
+                  items: {type: string}
+                instances:
+                  type: array
+                  description: One entry per selected instance; `count` absent with a `reason` when it could not be counted.
+                  items:
+                    type: object
+                    required: [instanceId]
+                    properties:
+                      instanceId: {type: string}
+                      repository: {type: string}
+                      count: {type: integer}
+                      reason: {type: string}
+                reason: {type: string}
+            inbox:
+              type: object
+              description: Open inbox items by who must act, from the last GET /v1/inbox classification.
+              properties:
+                ready: {type: integer}
+                needsYou: {type: integer}
+                fleet: {type: integer}
+                reason: {type: string}
+
+    ReadModelStatusView:
+      type: object
+      description: >
+        GET /v1/views/read-model (docs/views.md): the Phase 1 read model's own status, one body per
+        serve, materialized by the read-model worker (src/lib/read-model-worker.ts). Each instance's
+        `ledger:<instance>` source is re-judged at request time, so a stalled projector reads stale.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [read-model]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [instances]
+          properties:
+            instances:
+              type: array
+              items:
+                type: object
+                required: [instance, generation, lease, quarantined]
+                properties:
+                  instance: {type: string}
+                  generation:
+                    type: integer
+                    description: The instance DB's committed projector transaction count.
+                  lease:
+                    type: string
+                    enum: [held, elsewhere, none]
+                  heldBy:
+                    type: string
+                    description: pid@host of another serve holding the writer lease.
+                  quarantined:
+                    type: integer
+                    description: Rows stamped more than five minutes past their ingest time.
+                  reason: {type: string}
+            shadow:
+              type: array
+              description: Each shadowed view's diff counters and cutover readiness (src/lib/view-shadow.ts); absent before the first sample.
+              items:
+                $ref: "#/components/schemas/ViewShadowReadiness"
+
+    ViewShadowReadiness:
+      type: object
+      description: >
+        One view's shadow comparator counters. `ready` needs zero `real` diffs sustained over a day of
+        measured traffic and at least 3 x requests-per-day samples (the rule of three).
+      required: [view, requests, firstRequestMs, samples, diffs, streakSamples, streakSinceMs, lastRealMs, requestsPerDay, requiredSamples, ready, reason]
+      properties:
+        view: {type: string}
+        requests: {type: integer}
+        firstRequestMs: {type: [integer, "null"]}
+        samples: {type: integer}
+        diffs:
+          type: object
+          required: [legacy_horizon, timing, dedupe, real]
+          properties:
+            legacy_horizon: {type: integer}
+            timing: {type: integer}
+            dedupe: {type: integer}
+            real: {type: integer}
+        streakSamples: {type: integer}
+        streakSinceMs: {type: [integer, "null"]}
+        lastRealMs: {type: [integer, "null"]}
+        requestsPerDay: {type: [integer, "null"]}
+        requiredSamples: {type: [integer, "null"]}
+        ready: {type: boolean}
+        reason: {type: string}
+
+    RepositoriesView:
+      type: object
+      description: >
+        GET /v1/views/repositories (docs/views.md, src/lib/repositories-view.ts): the repository
+        portfolio across every instance serve holds, in one body. Each instance's `summary` IS its
+        GET /v1/i/<instance>/repos/summary body, computed by the read-model worker from that
+        instance's projected `repo_row` table; `projects` precomputes the console's grouping and its
+        "worst is <repo>" line. Dark until state/read-model/switches.json sets `repositories` to `serve`.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [repositories]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          description: A `ledger:<instance>` and a `repositories:<instance>` source per instance.
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [instances, projects]
+          properties:
+            instances:
+              type: array
+              description: One entry per instance serve published, in its order; `summary` absent with a `reason` until its first recompute.
+              items:
+                type: object
+                required: [instanceId]
+                properties:
+                  instanceId: {type: string}
+                  summary:
+                    $ref: "#/components/schemas/RepoDashboardResult"
+                  reason:
+                    type: string
+                    description: Why `summary` is absent, or (beside a summary) why the last recompute failed and the summary shown is older.
+            projects:
+              type: array
+              description: >
+                Registry projects in first-seen order. A repository the registry names no project for
+                is its own project, named after the repository.
+              items:
+                $ref: "#/components/schemas/RepositoriesProject"
+            projectsReason:
+              type: string
+              description: Present when the registry could not be read, so every repository is its own project.
+            reason:
+              type: string
+              description: Present with empty arrays before serve has published the repository sources.
+
+    RepositoriesProject:
+      type: object
+      description: One project of the repositories view, with the repository whose state is worst.
+      required: [project, repos, worst]
+      properties:
+        project: {type: string}
+        repos:
+          type: array
+          description: References into `data.instances[].summary.repos` by `id`.
+          items:
+            type: object
+            required: [id, reponame, instanceId, state]
+            properties:
+              id:
+                type: string
+                description: Canonical owner/repo; the instance name when neither the registry nor serve names its repository.
+              reponame: {type: string}
+              instanceId: {type: string}
+              state:
+                $ref: "#/components/schemas/RepositoryState"
+        worst:
+          type: object
+          description: The FIRST repository holding the project's worst state (never an average).
+          required: [state, repoId, repoName]
+          properties:
+            state:
+              $ref: "#/components/schemas/RepositoryState"
+            repoId: {type: string}
+            repoName: {type: string}
+
+    RepositoryState:
+      type: string
+      description: >
+        How far a repository's figures can be trusted, worst first: `unavailable` (no summary),
+        `stale` (the last recompute failed; the summary shown is older), `unknown` (computed, no
+        ledger), `verified`. The console's RepoHealthStatus.
+      enum: [unavailable, stale, unknown, verified]
+
+    NowView:
+      type: object
+      description: >
+        GET /v1/views/now?instance=<id> (docs/views.md, src/lib/now-view.ts): everything the console's
+        /now renders for ONE instance. The board is the legacy derivation over the read model's full
+        fact history; `groups` precomputes the console's groupBoard; `actions` carries structured
+        strikes; `health` is the selected instance's own host probe. Dark until
+        state/read-model/switches.json sets `now` to `serve`.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [now]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          description: "`ledger:<i>`, `github:<i>` (the persisted open-PR snapshot), `plan:<i>` and `host-probe:<i>`."
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [instance, board, prQueue, actions, recent, health, questions]
+          properties:
+            instance: {type: string}
+            board:
+              type: object
+              required: [generated_at, counts, spendTodayUsd, taskProjection, tasks, groups]
+              properties:
+                generated_at: {type: string}
+                counts:
+                  type: object
+                  required: [running, queued, blocked]
+                  properties:
+                    running: {type: integer}
+                    queued: {type: integer}
+                    blocked: {type: integer}
+                spendTodayUsd: {type: number}
+                taskProjection:
+                  type: object
+                  description: "`tasks` carries every running, needs-you and blocked task and the newest `limit` queued ones; `groups` names them all."
+                  required: [complete, returned, limit, total]
+                  properties:
+                    complete: {type: boolean}
+                    returned: {type: integer}
+                    limit: {type: integer}
+                    total: {type: integer}
+                tasks:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/NowTask"
+                groups:
+                  type: object
+                  description: Task ids in the console's groupBoard order; each task is in exactly one group.
+                  required: [running, needsYou, blocked, queued]
+                  properties:
+                    running: {type: array, items: {type: string}}
+                    needsYou: {type: array, items: {type: string}}
+                    blocked: {type: array, items: {type: string}}
+                    queued: {type: array, items: {type: string}}
+            prQueue:
+              type: object
+              required: [complete, rows]
+              properties:
+                complete: {type: boolean}
+                unavailableReason: {type: string}
+                rows:
+                  type: array
+                  items:
+                    type: object
+                    required: [prNumber, prUrl, title, disposition, queueClass, held]
+                    properties:
+                      prNumber: {type: integer}
+                      prUrl: {type: string}
+                      title: {type: string}
+                      taskId: {type: string}
+                      disposition: {type: string}
+                      queueClass:
+                        type: string
+                        enum: [actionable, active, ready-held, waiting, unknown]
+                      held: {type: boolean}
+            actions:
+              type: array
+              description: Blocked PRs and merge holds, most urgent tone first.
+              items:
+                $ref: "#/components/schemas/NowAction"
+            recent:
+              type: object
+              required: [entries, mergedToday]
+              properties:
+                entries:
+                  type: array
+                  items:
+                    type: object
+                    required: [ts, verb, taskId, title]
+                    properties:
+                      ts: {type: string}
+                      verb:
+                        type: string
+                        description: A RecentActivityEntry verb; a consumer renders an unknown one.
+                      taskId: {type: string}
+                      title: {type: string}
+                      detail: {type: string}
+                      costUsd: {type: number}
+                      prUrl: {type: string}
+                mergedToday:
+                  type: object
+                  description: Exact merges today (UTC), one per task and pull request, over full history.
+                  required: [count, day]
+                  properties:
+                    count: {type: integer}
+                    day: {type: string}
+            health:
+              type: object
+              description: The selected instance's own host probe; a field it could not read is absent, named in `reasons`.
+              required: [sampledAt]
+              properties:
+                sampledAt: {type: string}
+                diskFreeBytes: {type: number}
+                rateLimitRemaining: {type: integer}
+                lastPollAgeMs: {type: number}
+                reasons:
+                  type: object
+                  additionalProperties: {type: string}
+            questions:
+              description: Open feedback questions; core only, so another instance carries a `reason` instead.
+              oneOf:
+                - type: object
+                  required: [count]
+                  properties:
+                    count: {type: integer}
+                - type: object
+                  required: [reason]
+                  properties:
+                    reason: {type: string}
+
+    NowTask:
+      type: object
+      description: One board row as /now renders it; other StatusProjection fields stay on GET /v1/status.
+      required: [taskId, title, status, risk]
+      properties:
+        taskId: {type: string}
+        title: {type: string}
+        status: {type: string}
+        risk: {type: string}
+        lastActivityAt: {type: string}
+        prUrl: {type: string}
+        prNumber: {type: integer}
+        phase: {type: string}
+        elapsedMs: {type: number}
+        startedAt: {type: string}
+        needsHuman: {type: boolean, enum: [true]}
+        verifyHumanPending: {type: boolean, enum: [true]}
+        escalation:
+          type: object
+          properties:
+            title: {type: string}
+            issueUrl: {type: string}
+            unverified: {type: boolean, enum: [true]}
+            openedAt: {type: string}
+        worker:
+          type: object
+          properties:
+            servedModel: {type: string}
+            requestedModel: {type: string}
+
+    NowAction:
+      type: object
+      description: >
+        The console's actionQueueFromStatus, precomputed. `strike` is parsed once from the sweep's
+        reason in every form it writes, replacing the console's regex; `sortAt` is the row's own time.
+      required: [kind, disposition, reason, tone]
+      properties:
+        kind:
+          type: string
+          enum: [blocked_pr, merge_held]
+        taskId: {type: string}
+        prNumber: {type: integer}
+        prUrl: {type: string}
+        disposition: {type: string}
+        reason: {type: string}
+        tone:
+          type: string
+          enum: [exhausted, held, blocked, unknown, repairing]
+        strike:
+          type: object
+          required: [n, of]
+          properties:
+            n: {type: integer}
+            of: {type: integer}
+        sortAt: {type: string}
+
     RecentActivityEntry:
       type: object
       description: One RECENT feed row minted from a ledger line (src/lib/board.ts's `RecentActivityEntry`).
@@ -6017,7 +7130,12 @@ components:
           type: string
         verb:
           type: string
-          enum: [merged, verdict, fix, escalated, spend, run-refused, run-started, worker]
+          enum: [merged, verdict, fix, escalated, spend, run-refused, run-started, worker, started, review, automerge]
+          description: >
+            `merged` is minted from a run's `verdict: merged` row or the sweep's `verdict.merged`
+            credit, once per pull request. `started` is a `run.start` (detail: the run type),
+            `review` a `review.posted` (detail: its state, verbatim), `automerge` an
+            `automerge.armed`. A consumer must render an unknown verb, not drop it.
         ts:
           type: string
           description: The originating ledger line's own `ts`.
@@ -6070,7 +7188,7 @@ components:
 
     RecentActivityResult:
       type: object
-      description: GET /v1/recent's body -- at most 20 entries, newest first.
+      description: GET /v1/recent's body -- at most `limit` (default 20) entries, newest first.
       required: [entries]
       properties:
         entries:
@@ -6488,6 +7606,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/InboxFleetItem"
+        counts:
+          $ref: "#/components/schemas/InboxCounts"
         staleness:
           $ref: "#/components/schemas/ConsoleResponseStaleness"
 
@@ -6610,6 +7730,7 @@ components:
         - headline
         - snippet
         - waitingOn
+        - attention
         - lastActivity
         - messageCount
         - unread
@@ -6627,10 +7748,19 @@ components:
           description: The latest message's first sentence, at most 160 characters.
         waitingOn:
           type: string
-          description: "`daemon` when the operator wrote last, otherwise `operator`."
+          description: "Last-speaker direction only; use attention for an actionable count."
           enum:
             - operator
             - daemon
+        attention:
+          type: string
+          description: Current operator attention from proposal state and an explicit thread question.
+          enum:
+            - decision
+            - reply
+            - in_progress
+            - history
+            - awaiting_daemon
         lastActivity:
           type:
             - integer
@@ -6654,6 +7784,145 @@ components:
           items:
             $ref: "#/components/schemas/InboxThreadSummary"
 
+    InboxAttentionCensusSourceState:
+      type: string
+      enum: [observed, partial, unavailable]
+
+    InboxAttentionCensusFact:
+      type: object
+      required: [source, detail]
+      properties:
+        source:
+          type: string
+        detail:
+          type: string
+
+    InboxAttentionCensusItem:
+      type: object
+      required: [threadId, proposalId, kind, waitingOn, attention, classification, whyMe, sourceFacts]
+      properties:
+        threadId:
+          type: string
+        proposalId:
+          type: string
+        taskId:
+          type: string
+        kind:
+          type: string
+        waitingOn:
+          type: string
+          enum: [operator, daemon]
+          description: Last-speaker direction, not proof of actionability.
+        attention:
+          type: string
+          enum: [decision, reply, in_progress, history, awaiting_daemon]
+        classification:
+          type: string
+          description: Current source classification or unavailable.
+        whyMe:
+          type: string
+        sourceFacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxAttentionCensusFact"
+        retiredReason:
+          type: string
+
+    InboxAttentionCensusResult:
+      type: object
+      description: >
+        Read-only core-daemon census. Snapshot counts may overcount actionability when a release
+        source is missing; verifiedCounts are conservative lower bounds. No proposal is changed.
+      required: [scope, state, countSemantics, snapshotKey, sources, counts, decisionReadiness, verifiedCounts, kinds, items]
+      properties:
+        scope:
+          type: string
+          enum: [core]
+        state:
+          type: string
+          enum: [complete, partial]
+        countSemantics:
+          type: string
+          enum: [observed_snapshot_not_verified]
+        snapshotKey:
+          type: string
+          description: Deterministic SHA-256 of the source-qualified response before this field.
+        sources:
+          type: object
+          required: [plan, registry, liveLedger, archiveLedger, githubProjection]
+          properties:
+            plan:
+              $ref: "#/components/schemas/InboxAttentionCensusSourceState"
+            registry:
+              $ref: "#/components/schemas/InboxAttentionCensusSourceState"
+            liveLedger:
+              $ref: "#/components/schemas/InboxAttentionCensusSourceState"
+            archiveLedger:
+              description: >
+                Partial even when all retained rotations are readable: the available corpus does not
+                prove there were no earlier release receipts before its oldest file.
+              $ref: "#/components/schemas/InboxAttentionCensusSourceState"
+            githubProjection:
+              $ref: "#/components/schemas/InboxAttentionCensusSourceState"
+        counts:
+          type: object
+          description: Observed current thread population, not a verified actionable count when partial.
+          required: [decision, reply, in_progress, history, awaiting_daemon]
+          properties:
+            decision:
+              type: integer
+            reply:
+              type: integer
+            in_progress:
+              type: integer
+            history:
+              type: integer
+            awaiting_daemon:
+              type: integer
+        decisionReadiness:
+          type: object
+          description: >
+            Classification of observed decision-labelled items. These categories sum to counts.decision;
+            ready does not imply that operator judgment is required, and needsPreparation is not a
+            dismissal instruction. All values are observational under partial source coverage.
+          required: [ready, needsPreparation, unknown]
+          properties:
+            ready:
+              type: integer
+              minimum: 0
+            needsPreparation:
+              type: integer
+              minimum: 0
+            unknown:
+              type: integer
+              minimum: 0
+        verifiedCounts:
+          type: object
+          description: Conservative lower bounds; zero when any needed source is partial.
+          required: [decision, reply, in_progress, history, awaiting_daemon]
+          properties:
+            decision:
+              type: integer
+            reply:
+              type: integer
+            in_progress:
+              type: integer
+            history:
+              type: integer
+            awaiting_daemon:
+              type: integer
+        kinds:
+          type: object
+          additionalProperties:
+            type: integer
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxAttentionCensusItem"
+        discrepancy:
+          type: string
+          enum: [active_human_ask_has_release_receipt]
+
     InboxThreadDetail:
       type: object
       description: >
@@ -6665,6 +7934,7 @@ components:
         - headline
         - snippet
         - waitingOn
+        - attention
         - lastActivity
         - messageCount
         - unread
@@ -6684,6 +7954,14 @@ components:
           enum:
             - operator
             - daemon
+        attention:
+          type: string
+          enum:
+            - decision
+            - reply
+            - in_progress
+            - history
+            - awaiting_daemon
         lastActivity:
           type:
             - integer
@@ -8163,17 +9441,41 @@ paths:
 
   /v1/repos:
     get:
-      summary: The read-only managed-repo portfolio for the console dashboard.
+      summary: The repository portfolio for the console dashboard.
       description: >
-        Reads and validates `.remudero/managed-repos.json` (src/lib/managed-repos.ts). The
-        endpoint reports repository identity only; OAuth connection, activation, health,
-        telemetry, settings, logs, and test-run state remain explicitly unknown until they have
-        durable daemon sources.
+        Registry instances plus the validated `.remudero/managed-repos.json` set, each with the
+        seven-day ledger projection described on RepoDashboardEntry.
       security:
         - bearerRead: []
       responses:
         "200":
-          description: The validated managed-repo portfolio, including an honest empty result.
+          description: The portfolio, including an honest empty result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RepoDashboardResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/repos/summary:
+    get:
+      summary: The operating repository's portfolio card, a few KB.
+      description: >
+        The same projection as GET /v1/repos restricted to the one repository this instance
+        operates (mounted per instance at `/v1/i/<instance>/repos/summary`). It carries everything
+        a portfolio card needs -- queue, run outcomes, error rate, alerts, active, spend, models and
+        actions -- so a card needs neither the whole portfolio nor `/status`. Computed off the
+        event loop from an incremental ledger index and persisted with serve's console snapshots,
+        so a restart answers from the last snapshot (marked stale) while the index rebuilds.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: One operating repository, or an empty `repos` array when none is resolved.
           content:
             application/json:
               schema:
@@ -8323,6 +9625,106 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/control/assistant-action:
+    post:
+      summary: Execute a reviewed assistant pause/resume/stop once per durable action ID on the core instance.
+      description: >
+        MIDDLE-tier write. The host-shared claim store binds actionId to the verified operator,
+        exact instance, repository, action and reason before dispatch. Same-key retries return the first receipt or explicit
+        unknown; changed payload refuses. A 503 may mean a post-claim interruption and must
+        never be interpreted as a failed side effect safe to retry with a new ID.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssistantControlRequest"
+      responses:
+        "200":
+          description: The first durable completion receipt, including on exact replay.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantControlReceipt"
+        "202":
+          description: Claimed but outcome unknown or in progress; no replay is dispatched.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantControlUnknown"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { description: "The action ID binds another operator, target, or payload, or this route does not own the instance." }
+        "503":
+          description: Durable admission or completion unavailable; the outcome must be reconciled before any new action ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantControlUnknown"
+
+  /v1/control/assistant-action/status:
+    get:
+      summary: Read the core assistant-control contract and served identity.
+      description: >
+        Requires a verified operator session. A configured claim root is not proof that
+        all writers share one atomic store; admission and topology remain unverified.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Contract version, boot SHA, target, and qualified admission status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlCapability" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/control/assistant-action/receipt:
+    get:
+      summary: Resolve one core assistant action without dispatching a side effect.
+      description: >
+        Requires the same verified operator and target as the original claim. An unreadable
+        claim or receipt is unavailable, never a successful or safely retryable action.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: actionId
+          in: query
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 128 }
+      responses:
+        "200":
+          description: Durable completion receipt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlReceipt" }
+        "202":
+          description: Claimed but outcome unknown.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlLookup" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No claim exists for this action ID.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlLookup" }
+        "409":
+          description: The action belongs to another operator or target.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlLookup" }
+        "503":
+          description: Claim or receipt unreadable or incomplete.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlLookup" }
+
   /v1/questions/answer:
     post:
       summary: Answer a QUESTION-contract entry (MASTER-PLAN §2), attributed to the panel's bearer.
@@ -8420,6 +9822,13 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: >
+            The requested action is switched off on this daemon; no request was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrActionSwitchedOff"
 
   /v1/escalation/mark-handled:
     post:
@@ -8467,9 +9876,30 @@ paths:
       summary: The feedback inbox -- every captured entry, oldest first.
       description: >
         `plan/feedback/` (MASTER-PLAN §7B, W1-T40), listed via src/lib/feedback.ts's
-        `listFeedback`. Optional `?status=` filters to one lifecycle status.
+        `listFeedback`. Optional `?status=` filters to one lifecycle status; `?limit=` and
+        `?cursor=` answer one page of the (filtered) list with a `page` envelope.
       security:
         - bearerRead: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Page size, 1 to 500. Default 100 once `cursor` is given alone.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - name: cursor
+          in: query
+          required: false
+          description: The previous page's `page.nextCursor`.
+          schema:
+            type: string
       responses:
         "200":
           description: The inbox.
@@ -8898,6 +10328,161 @@ paths:
               schema:
                 $ref: "#/components/schemas/ContextExportResult"
 
+  /v1/i/{instance}/control/assistant-action:
+    post:
+      summary: Execute a reviewed assistant control once on this registered daemon instance.
+      description: >
+        MIDDLE-tier write. The instance in the JSON body must match this route parameter.
+        Every mounted instance shares the core host's durable action-ID claim store, so an ID
+        cannot be retargeted across operators, repositories or daemon roots. An unresolved claim is
+        unknown, never silently retried.
+      security:
+        - bearerWrite: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssistantControlRequest"
+      responses:
+        "200":
+          description: The first durable completion receipt, including on exact replay.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantControlReceipt"
+        "202":
+          description: Claimed but outcome unknown or in progress; no replay is dispatched.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantControlUnknown"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { description: "The action ID binds another operator, target, or payload, or this route does not own the instance." }
+        "503":
+          description: Durable admission or completion unavailable; the outcome must be reconciled before any new action ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantControlUnknown"
+
+  /v1/i/{instance}/control/assistant-action/status:
+    get:
+      summary: Read this instance's assistant-control contract and served identity.
+      description: Requires a verified operator session; configured storage topology remains unverified.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Contract version, boot SHA, repository, instance, and qualified admission status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlCapability" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/i/{instance}/control/assistant-action/receipt:
+    get:
+      summary: Resolve one action of this instance without dispatching a side effect.
+      description: Requires the same verified operator and repository as the original claim.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+        - name: actionId
+          in: query
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 128 }
+      responses:
+        "200":
+          description: Durable completion receipt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlReceipt" }
+        "202":
+          description: Claimed but outcome unknown.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlLookup" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No claim exists for this action ID.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlLookup" }
+        "409":
+          description: The action belongs to another operator or target.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlLookup" }
+        "503":
+          description: Claim or receipt unreadable or incomplete.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlLookup" }
+
+  /v1/i/{instance}/operator-agent/ask:
+    post:
+      summary: Read-only answer-v1 for the selected registered instance's own repository.
+      description: >
+        Uses only the server-owned registry identity and that instance's independently refreshed
+        state-root ledger projection and inbox thread store. The request cannot select a different
+        repository or instance. A missing or unreadable evidence source is reported as unavailable;
+        this route never performs an action or writes an operator decision.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [question]
+              properties:
+                question: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        "200":
+          description: The answer-v1 envelope documented by the unprefixed core route below.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentAnswer"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: The registered instance's state or plan is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceUnavailable"
+
   /v1/operator-agent/ask:
     post:
       summary: Read-only, evidence-cited answer-v1 for this serving instance's repository.
@@ -8927,54 +10512,134 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required: [version, repository, instance, lens, coverage, answer, citations, missingSources, generatedAt]
-                properties:
-                  version:
-                    type: string
-                    enum: [answer-v1]
-                  repository:
-                    type: [string, "null"]
-                  instance:
-                    type: string
-                  lens:
-                    type: string
-                    enum: [current-repository]
-                  coverage:
-                    type: string
-                    enum: [verified, partial, unavailable, unsupported]
-                  answer:
-                    type: string
-                    maxLength: 700
-                  generatedAt:
-                    type: string
-                    format: date-time
-                  citations:
-                    type: array
-                    maxItems: 4
-                    items:
-                      type: object
-                      required: [sourceId, observedAt, freshness, label, value]
-                      properties:
-                        sourceId: { type: string }
-                        observedAt: { type: string, format: date-time }
-                        freshness: { type: string, enum: [verified, stale] }
-                        label: { type: string }
-                        value: { type: string }
-                  missingSources:
-                    type: array
-                    items:
-                      type: object
-                      required: [sourceId, reason]
-                      properties:
-                        sourceId: { type: string }
-                        reason: { type: string }
+                $ref: "#/components/schemas/OperatorAgentAnswer"
         "400":
           $ref: "#/components/responses/InvalidRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /v1/operator-agent/action-handoff/prepare:
+    post:
+      summary: Prepare an action-handoff-v1 preview for one allowlisted, reversible operator verb.
+      description: >
+        LOW-tier write that mutates no target (W1-T4559). Requires a verified operator session.
+        The verb must be in the v1 allowlist (fleet.pause, fleet.resume); high-tier, irreversible,
+        financial, destructive, and credential verbs are unavailable. instance and repository must
+        equal this serving instance's server-owned identity. Credential-shaped fields or values,
+        answer-v1 payloads, and unknown fields refuse. The verb's own catalogue policy runs as a dry
+        run. A repeated intentId from the same operator returns the first preview.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [intentId, verb, instance, repository]
+              properties:
+                intentId: { type: string, minLength: 8, maxLength: 128 }
+                verb: { type: string }
+                instance: { type: string }
+                repository: { type: string }
+      responses:
+        "200":
+          description: The first preview for a repeated intent.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffPreview" }
+        "201":
+          description: A new expiring preview with a single-use confirmation identity.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffPreview" }
+        "400":
+          description: Malformed, unknown verb, model-supplied authority, or an answer-v1 payload.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: No verified operator, or a verb excluded from v1.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
+        "409":
+          description: Cross-instance, cross-repository, intent conflict, or the verb policy refuses now.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
+        "503":
+          description: The handoff store or policy check is unavailable; nothing was prepared.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
+
+  /v1/operator-agent/action-handoff/execute:
+    post:
+      summary: Execute a prepared action-handoff-v1 action once, on explicit operator confirmation.
+      description: >
+        MIDDLE-tier write (W1-T4559). Requires the same verified operator who prepared it and
+        `confirm: true`. The confirmation is claimed once; the server then revalidates freshness,
+        instance and repository scope, target state, and verb policy before delegating to the
+        catalogued governed verb. Every claimed confirmation ends in one receipt; a replay returns
+        409 naming it. A 202 or 503 is unresolved and must be reconciled, never retried as new.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [confirmationId, confirm, verb, instance, repository]
+              properties:
+                confirmationId: { type: string }
+                confirm: { type: boolean, enum: [true] }
+                verb: { type: string }
+                instance: { type: string }
+                repository: { type: string }
+      responses:
+        "200":
+          description: The governed verb ran; the receipt cites its ledger evidence.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffReceipt" }
+        "202":
+          description: Unresolved; the external outcome is not certified.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffReceipt" }
+        "400":
+          description: Missing explicit confirmation, model-supplied authority, or an answer-v1 payload.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: No verified operator, or a different operator than the one who prepared it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
+        "404":
+          description: No prepared action has this confirmation identity.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
+        "409":
+          description: Refused after claim (stale, changed target or scope, policy) or a replay.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
+        "503":
+          description: Claim or receipt not durable; reconcile before any new intent.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
 
   /v1/operator-agent/proposals:
     get:
@@ -10061,7 +11726,11 @@ paths:
         refusal (`409`); a dry run appends a dry-run receipt (`200`); a ready action is admitted
         `in-progress` (`202`) -- never succeeded -- until POST /v1/operator-agent/actions/complete
         records its evidence. An active emergency stop covering the action's repo or instance
-        refuses it first (`423`).
+        refuses it first (`423`). W1-T4657 -- a capability in the `rmd.` namespace is run by the
+        action-catalogue-v1 executor instead: `200` `completed` with a completion receipt whose
+        evidenceRef names the executor's own ledger row, `200` `reused` for a repeat, `409` for a
+        refusal (`no-executor`, `tier-insufficient`, `switched-off`, ...). This route proves MIDDLE,
+        so a HIGH catalogue capability is refused here and runs only via /actions/execute-high.
       security:
         - bearerWrite: []
       requestBody:
@@ -10089,6 +11758,57 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Refused; the receipt names the preflight outcome and code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "423":
+          description: An active emergency stop covers this action; the refusal receipt names the stop.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmergencyStopAdmissionRefusal"
+
+  /v1/operator-agent/actions/execute-high:
+    post:
+      summary: W1-T4657 -- execute an action as /actions/execute does, proven HIGH (HIGH write tier).
+      description: >
+        Identical to POST /v1/operator-agent/actions/execute, but dispatched at the HIGH tier with a
+        confirm nonce, so a HIGH-tier catalogue capability (`rmd.task.kick:<taskId>`, which reuses
+        POST /v1/drain/kick's handler) can run. Its approval still comes from /actions/decision.
+      security:
+        - bearerWrite: []
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentActionObservationRequest"
+      responses:
+        "202":
+          description: A non-catalogue action admitted in-progress.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "200":
+          description: A catalogue action completed by its executor, a dry run, or the existing receipt for a duplicate idempotency key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentActionStepResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HighTierForbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -10330,8 +12050,11 @@ paths:
         scope; an explicit "at most $N" settles the ceiling) and refuses by name (`400`, `code`
         and `field`) a forbidden, credential-shaped, unknown, or authority-claiming field
         (approved, confirmed, permission, model confidence) -- a sentence is never authority.
-        Steps come only from a structured producer; a goal alone previews `unavailable`. Nothing
-        is registered, approved, or executed. An identical request under the same
+        A request with no steps is answered by W1-T4658's `planStepsForGoal`: deterministic
+        recognisers propose 0-4 steps from the executor catalogue only, each citing the board or
+        fleet-control evidence it was chosen on; an unmatched goal, or missing or stale evidence,
+        yields zero steps (previews `unavailable`) and a `goal-unresolved` question. A request
+        carrying producer steps is stored unchanged. Nothing is registered, approved, or executed. An identical request under the same
         idempotencyKey is `200` (`existing: true`); a different one is `409`.
       security:
         - bearerWrite: []
@@ -10667,18 +12390,218 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /v1/views/nav-badge:
+    get:
+      summary: The console sidebar's counts in one small read -- the first /v1/views view.
+      description: >
+        src/lib/nav-badge-view.ts over serve's own caches (analytics snapshot, operator-agent
+        memory, the inbox classification). Replaces the console's ~12 upstream reads (~370 KB) per
+        page view. A weak ETag hashes the view's version, stale flag and data, so an unchanged view
+        answers If-None-Match with 304 even after a recompute. The agent badge sums every daemon
+        instance serve holds (core and each registry instance); `?instances=` narrows it. See
+        docs/views.md.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: instances
+          in: query
+          required: false
+          description: Comma-separated registry instance names to count; default every instance.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NavBadgeView"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/views/read-model:
+    get:
+      summary: The Phase 1 read model's status, served from the read-model worker's in-memory body.
+      description: >
+        The first view served from the read model (P1-06). No request reads a file or SQLite. The
+        per-view switch in state/read-model/switches.json can set it `off`, which answers 404
+        `view_disabled`; before the worker's first body it answers 404 `view_not_ready`. A body
+        loaded at boot answers at once, stale until its instance ticks. Same ETag and 304 rules as
+        every view. See docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadModelStatusView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is switched off (`view_disabled`) or has no body yet (`view_not_ready`).
+
+  /v1/views/repositories:
+    get:
+      summary: The repository portfolio across every instance, served from the read model.
+      description: >
+        P1-08/P1-12. Each instance's GET /v1/i/<instance>/repos/summary body, computed by the
+        read-model worker, plus the portfolio grouped by registry project with each project's worst
+        repository. DARK: it answers 404 `view_disabled` until state/read-model/switches.json sets
+        `repositories` to `serve`, and `shadow` answers 404 `view_shadow`; the console then reads the
+        per-instance repos/summary routes as before. Same ETag and 304 rules as every view. See
+        docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RepositoriesView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is dark (`view_disabled`), shadowed with the console's legacy primary (`view_shadow`), or has no body yet (`view_not_ready`).
+
+  /v1/views/now:
+    get:
+      summary: Everything the console's /now renders for one instance, served from the read model.
+      description: >
+        P1-11/P1-12. One body per instance, keyed by `?instance=`. DARK: it answers 404
+        `view_disabled` until state/read-model/switches.json sets `now` to `serve` (the worker
+        materializes and compares it under `shadow`, which answers 404 `view_shadow`); the console then
+        reads GET /v1/status and /v1/recent as before. An instance serve does not project also
+        answers 404 `view_not_ready`. Same ETag and 304 rules as every view. See docs/views.md.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: instance
+          in: query
+          required: true
+          description: The registry instance name (core's is `core`).
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NowView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is dark (`view_disabled`), shadowed with the console's legacy primary (`view_shadow`), or not served yet for that instance (`view_not_ready`).
+
+  /v1/views/events:
+    get:
+      summary: SSE stream of view versions -- a `hello` map on connect, then one `view` event per changed ETag.
+      description: >
+        Arch plan Phase 2 (src/lib/view-events.ts). The stream carries versions, never bodies: the
+        version is the view's ETag, so the client refetches GET /v1/views/<name> with If-None-Match only
+        for what changed. Every connect starts with `hello` (components.schemas.ViewHello) and the
+        client diffs it against what it holds; Last-Event-ID is only logged. `view` events
+        (components.schemas.ViewEvent) come from a new worker body (`cause: body`) or from a 1 s re-judge
+        of each body's sources (`cause: judge`, a stalled projector). A `: hb` comment every 25 s. A
+        backed-up subscriber keeps only the latest event per view key, and one backed up for 60 s, like
+        every stream when serve drains, ends with `handover` (components.schemas.ViewHandover). Only views
+        switched `serve` emit. An open stream is not read attention for serve's recycle patience.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: views
+          in: query
+          required: false
+          description: Comma-separated view names to receive; default every view.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: >
+            An open text/event-stream connection (`cache-control: no-cache, no-transform`). Event framing
+            is outside this OpenAPI subset's response-body modeling -- see the schemas named above.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Serve runs no read-model worker (`read_model_absent`).
+
+  /v1/views/versions:
+    get:
+      summary: The version (ETag) of every served view body -- the events stream's fallback poll.
+      description: >
+        The same map as the events stream's `hello`, for a client whose stream is down. Its own weak
+        ETag hashes the map, so an unchanged fleet answers If-None-Match with 304. See docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The versions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ViewVersions"
+        "304":
+          description: The request's `If-None-Match` matched the versions ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /v1/recent:
     get:
-      summary: The RECENT activity feed -- the newest 20 ledger-derived entries.
+      summary: The RECENT activity feed -- the newest ledger-derived entries (20 by default).
       description: >
         src/lib/board.ts's `buildRecentRoute` / `computeRecentActivity`: classifies only ledger
         lines new since the last read, decorates each fresh entry with its PR title once, and
-        returns the newest 20, newest first. Served through the console read cache
+        returns the newest `limit` (default 20) of the last 200, newest first, optionally narrowed
+        to `verb`. Served through the console read cache
         (src/lib/serve.ts's `boundConsoleReadRoute`), so the body carries `staleness`, a weak
         `ETag` is set, and before any live snapshot exists the fallback body is
         `{entries: [], staleness}`.
       security:
         - bearerRead: []
+      parameters:
+        - name: verb
+          in: query
+          required: false
+          description: >
+            Comma-separated verbs (see RecentActivityEntry.verb) to keep, e.g. `merged` for a
+            merges panel that a busy hour of run starts would otherwise push out of the page.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Page size, 1 to 200. Default 20.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
       responses:
         "200":
           description: The feed.
@@ -10686,6 +12609,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RecentActivityResult"
+        "400":
+          description: An unknown `verb` or an out-of-range `limit`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "304":
           description: The request's `If-None-Match` matched the cached snapshot's ETag; no body.
         "401":
@@ -11287,16 +13216,46 @@ paths:
         Deferred-with-trigger, ratified and retired proposals are never returned. Served through
         the console's cached-read wrapper (src/lib/serve.ts's `boundConsoleReadRoute`): the body
         may be the previous snapshot while a recompute runs, says so in `staleness`, carries a
-        weak `etag`, and answers 304 to a matching `If-None-Match`.
+        weak `etag`, and answers 304 to a matching `If-None-Match`. A bare GET is the whole body
+        (1.99 MB on the fleet host, 2026-09-30); `?section=` answers one lane (InboxSectionResult),
+        and a list section pages by `limit` and `cursor`. Each distinct query is its own cache entry.
       security:
         - bearerRead: []
+      parameters:
+        - name: section
+          in: query
+          required: false
+          description: >
+            `needsYou` (the operator's four lanes, not paged), or one list lane: `ready`,
+            `drafting`, `notReady`, `declined`, `fleet`.
+          schema:
+            type: string
+            enum: [needsYou, ready, drafting, notReady, declined, fleet]
+        - name: limit
+          in: query
+          required: false
+          description: A list section's page size, 1 to 500. Default 100.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - name: cursor
+          in: query
+          required: false
+          description: The previous page's `page.nextCursor`.
+          schema:
+            type: string
       responses:
         "200":
-          description: The inbox, with the cache's staleness envelope.
+          description: The inbox, or one section of it, with the cache's staleness envelope.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/InboxResult"
+                anyOf:
+                  - $ref: "#/components/schemas/InboxResult"
+                  - $ref: "#/components/schemas/InboxSectionResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
         "304":
           description: The cached snapshot matches the request's `If-None-Match`; no body.
         "401":
@@ -11347,6 +13306,34 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "500":
           description: "`thread_store_unreadable` -- the thread store could not be read."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+
+  /v1/inbox/attention-census:
+    get:
+      summary: Source-qualified core operator-attention census.
+      description: >
+        W1-T4742 read-only count of current operator-owned threads by actionability, with why-me
+        facts and source coverage. It does not aggregate connected repositories and never offers
+        an action. Partial source coverage leaves snapshot counts unverified and verified counts
+        conservative, never a claimed healthy zero.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Source-qualified census, possibly partial.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxAttentionCensusResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Thread store or plan could not be read.
           content:
             application/json:
               schema:

@@ -372,7 +372,7 @@ test("acceptance 6: job-level conditions are only PR guards, stable-name aggrega
   const doc = parseYaml(ciYml) as { jobs: Record<string, { if?: string | boolean }> };
   for (const [jobId, job] of Object.entries(doc.jobs)) {
     if (job.if === undefined) continue;
-    if (jobId === "ci-required" || jobId === "coverage-ratchet-required" || jobId === "flake-retry-aggregate") {
+    if (jobId === "ci-required" || jobId === "coverage-ratchet-required" || jobId === "test-slow" || jobId === "flake-retry-aggregate") {
       assert.equal(job.if, "${{ always() }}", `aggregator '${jobId}' must run even when a shard fails`);
     } else if (W1_T4399_SUPERSEDED_STUB_JOB_IDS.has(jobId)) {
       assert.equal(job.if, false, `superseded stub '${jobId}' must be permanently skipped (if: false)`);
@@ -871,7 +871,7 @@ test("W1-T3512: five ci.yml jobs consult scripts/diff-class.mjs directly (three 
   const consulting = Object.entries(doc.jobs)
     .filter(([, job]) => (job.steps ?? []).some((s) => /diff-class\.mjs/.test(s.run ?? "")))
     .map(([id]) => id);
-  const expectedJobs = ["ci", "test-slow", "coverage-ratchet", MUTATION_RATCHET_OWN_JOB, "commitlint"];
+  const expectedJobs = ["ci", "test-slow-shard", "coverage-ratchet", MUTATION_RATCHET_OWN_JOB, "commitlint"];
   assert.equal(consulting.length, expectedJobs.length, `expected ${expectedJobs.length} jobs consulting diff-class.mjs, got ${consulting.length}: ${consulting.join(", ")}`);
   for (const jobId of expectedJobs) {
     assert.ok(consulting.includes(jobId), `expected ${jobId} among the jobs consulting diff-class.mjs`);

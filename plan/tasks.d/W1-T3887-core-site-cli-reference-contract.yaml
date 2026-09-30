@@ -31,6 +31,8 @@
       proof: "demonstration: operator verifies the core record names PORTAL-T19, declares no site paths, and records the reviewed site pin"
     - claim: "the core task retains the generated registry/reference contract in W1-T47 and W1-T48 while removing the withdrawn W12-T1 dependency"
       proof: "demonstration: operator verifies the W1-T47/W1-T48 dependency and confirms the retired W12-T1 dependency is absent"
-  status: queued
+  status: done
   attempts: 0
-  note: "PORTAL-T19 is the site implementation owner. This human task is coordination/provenance only; it is not an auto-dispatchable site implementation and must not be credited as one."
+  note: |
+    OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, "the verify-human queue, cleared"): DONE — the site already pins core 2ccb1710c, merged via site #119; the pin is recorded.
+    PORTAL-T19 is the site implementation owner. This human task is coordination/provenance only; it is not an auto-dispatchable site implementation and must not be credited as one.

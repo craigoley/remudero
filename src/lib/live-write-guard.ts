@@ -54,6 +54,9 @@
  * threaded to every call site, and a site missed there would have NO guard and fail
  * silently, so it is deliberately not attempted here.
  */
+import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /**
  * Deliberate opt-out for a whole PROCESS (e.g. a future integration run pointed at a
@@ -61,6 +64,72 @@
  * {@link withLiveWritesAllowed} and is what suites should use.
  */
 export const LIVE_WRITE_OVERRIDE_ENV = "RMD_ALLOW_LIVE_WRITES";
+
+/**
+ * W1-T4805: the value test/setup/no-live-remote.ts puts in `GH_TOKEN`/`GITHUB_TOKEN` for the
+ * whole test process. It is not a credential; src/lib/github-transport.ts refuses to spawn the
+ * gh CLI while it is the token, so a call that reaches the transport under the suite is refused
+ * by name instead of by the CLI's own 401, which reads like an outage.
+ */
+export const LIVE_WRITE_SENTINEL_TOKEN = "rmd-test-runner-sentinel-W1-T4805-no-live-github";
+
+export const LIVE_LEDGER_DENY_ROOT_ENV = "RMD_TEST_LIVE_DENY_ROOT";
+
+function isMissingPath(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException)?.code === "ENOENT";
+}
+
+export function discoverLiveLedgerRoot(env: NodeJS.ProcessEnv = process.env): string {
+  const home = env.HOME || homedir();
+  const config = join(home, ".config", "remudero", "config.json");
+  try {
+    const parsed = JSON.parse(readFileSync(config, "utf8")) as unknown;
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const root = (parsed as Record<string, unknown>).root;
+      if (typeof root === "string" && isAbsolute(root) && root.trim()) return resolve(root);
+    }
+  } catch (error) {
+    if (!isMissingPath(error)) throw error;
+    return resolve(home, "Remudero");
+  }
+  return resolve(home, "Remudero");
+}
+
+function canonicalCandidate(path: string, depth = 0): string {
+  const absolute = resolve(path);
+  if (depth > 8) throw new Error("W1-T4923: ledger path has too many symlink hops");
+  try { return realpathSync(absolute); }
+  catch (error) {
+    if (!isMissingPath(error)) throw error;
+    const linkInfo = lstatSync(absolute, { throwIfNoEntry: false });
+    if (linkInfo?.isSymbolicLink()) return canonicalCandidate(resolve(dirname(absolute), readlinkSync(absolute)), depth + 1);
+  }
+  let parent = dirname(absolute);
+  const missing: string[] = [];
+  while (true) {
+    try { return join(realpathSync(parent), ...missing.reverse(), basename(absolute)); }
+    catch (error) {
+      if (!isMissingPath(error)) throw error;
+      const next = dirname(parent);
+      if (next === parent) return absolute;
+      missing.push(basename(parent));
+      parent = next;
+    }
+  }
+}
+
+export function assertLedgerPathNotLive(path: string, env: NodeJS.ProcessEnv = process.env): void {
+  if (env[LIVE_WRITE_OVERRIDE_ENV] === "1") return;
+  const deny = env[LIVE_LEDGER_DENY_ROOT_ENV] ?? (isTestRunner(env) ? discoverLiveLedgerRoot(env) : undefined);
+  if (!deny) return;
+  const root = canonicalCandidate(join(deny, ".rmd-deny-probe"));
+  const canonicalRoot = dirname(root);
+  const candidate = canonicalCandidate(path);
+  const rel = relative(canonicalRoot, candidate);
+  if (rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))) {
+    throw new LiveWriteBlockedError("ledger-append", `W1-T4923: ${candidate} is inside the operator state root ${canonicalRoot}`);
+  }
+}
 
 /**
  * True when this process is the node test runner. Presence-tested (see the module
@@ -83,7 +152,7 @@ export function isTestRunner(env: NodeJS.ProcessEnv = process.env): boolean {
  *  verdict was posted against the old one), so it belongs behind this boundary exactly like
  *  the merge and push writes beside it. Reusing one of those four would have mislabelled the
  *  refusal in the error a blocked test reads. */
-export type LiveWriteBoundary = "git-push" | "gh-pr-create" | "gh-pr-merge" | "gh-issue-create" | "gh-pr-update-branch";
+export type LiveWriteBoundary = "gh-transport" | "git-push" | "gh-pr-create" | "gh-pr-merge" | "gh-issue-create" | "gh-pr-update-branch" | "ledger-append";
 
 /** Thrown at a boundary rather than returning silently: a swallowed refusal would
  * read as "the effect did not happen for some other reason", which is the same
@@ -95,7 +164,10 @@ export class LiveWriteBlockedError extends Error {
     public readonly detail: string,
   ) {
     super(
-      `live-write-guard: REFUSED ${boundary} under the node test runner — ${detail}. ` +
+      boundary === "ledger-append"
+        ? `live-write-guard: REFUSED ledger-append under test containment — ${detail}. ` +
+          `Use a scratch HOME/config root for this test; withLiveWritesAllowed does not exempt a live ledger path.`
+        : `live-write-guard: REFUSED ${boundary} under the node test runner — ${detail}. ` +
         `A test must never push, open a PR, merge, or file an issue against the live repo ` +
         `(recon-AQ: 6 branches, 5 PRs, 3 issues, one auto-merge armed). ` +
         `If this test drives the boundary DELIBERATELY against its own containment (a PATH-stubbed ` +

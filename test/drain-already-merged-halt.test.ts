@@ -109,6 +109,7 @@ const HALTS: Record<string, boolean> = {
   merged: false,
   already_satisfied: false,
   awaiting_merge: false,
+  handed_off: false,
   blocked_ci: false,
   no_pr: false,
   blocked_illformed: false,
@@ -140,7 +141,7 @@ test("the halt set is EXHAUSTIVE over RunResult's own verdict union — a new ve
   );
 });
 
-test("haltsDrain: exactly five non-merged verdicts continue the drain; every other one still stops it", () => {
+test("haltsDrain: open PR handoff and five existing non-merged verdicts continue the drain; every other one still stops it", () => {
   for (const [verdict, shouldHalt] of Object.entries(HALTS)) {
     const isMergedResult = verdict === "merged" || verdict === "already_satisfied";
     assert.equal(
@@ -155,6 +156,7 @@ test("haltsDrain: exactly five non-merged verdicts continue the drain; every oth
     "awaiting_merge",
     "blocked_ci",
     "blocked_illformed",
+    "handed_off",
     "no_pr",
     "task_already_merged",
   ]);

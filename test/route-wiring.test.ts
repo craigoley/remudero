@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { declaredConsoleRoutes } from "./helpers/declared-routes.js";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
+import { OPERATOR_SESSION_HEADER } from "../src/lib/service.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
 import { drainNowFilePath, kickFilePath, pauseFilePath, pendingPrActions, quietHoursFilePath, stopFilePath } from "../src/lib/fleet-control.js";
 import type { Plan } from "../src/lib/plan.js";
@@ -257,6 +259,14 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "W1-T3898: ledger-only intent-plan-v1 proposal (a non-operative preview); covered in test/intent-plan-envelope.test.ts and test/intent-plan-preview.test.ts",
   ],
   [
+    "POST /v1/operator-agent/action-handoff/prepare",
+    "W1-T4559: stores a non-mutating preview under the claim root; served-assembly wiring, allowlist, scope and model-authority refusals are covered in test/operator-agent-action-route.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/action-handoff/execute",
+    "W1-T4559: delegates to the catalogued pause/resume verb under fleetControlRoot; served-assembly wiring, confirmation, revalidation and replay are covered in test/operator-agent-action-route.test.ts",
+  ],
+  [
     "POST /v1/operator-agent/intent-plans/decision",
     "W1-T3898: ledger-only clarify/confirm/undo events plus the confirmation's linked automation actions; covered in test/intent-plan-clarification.test.ts, test/intent-plan-confirmation.test.ts and test/intent-plan-undo.test.ts",
   ],
@@ -275,6 +285,7 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
 ]);
 
 const COVERED: ReadonlySet<string> = new Set([
+  "POST /v1/control/assistant-action",
   "POST /v1/control/stop",
   "POST /v1/control/resume",
   "POST /v1/control/pause",
@@ -286,6 +297,7 @@ const COVERED: ReadonlySet<string> = new Set([
   "POST /v1/questions/answer",
   "POST /v1/policy/daily-cost-ceiling",
   "POST /v1/policy/daily-cost-ceiling/clear",
+  "POST /v1/operator-agent/actions/execute-high",
 ]);
 
 // ── Production-shaped assembly ───────────────────────────────────────────────
@@ -299,6 +311,7 @@ interface Harness {
   ledgerPath: string;
   /** Every issue URL the route asked the gateway to close. */
   closed: string[];
+  operatorSession?: string;
 }
 
 function fakeTraceGithub(): TraceGithub {
@@ -319,7 +332,7 @@ function planOf(): Plan {
  * difference is the whole instrument: a misrooted route writes into the other one and every
  * assertion below notices.
  */
-async function withProductionServer<T>(fn: (h: Harness) => Promise<T>): Promise<T> {
+async function withProductionServer<T>(fn: (h: Harness) => Promise<T>, operator = false): Promise<T> {
   const fleetRoot = mkdtempSync(join(tmpdir(), "rmd-wiring-fleet-"));
   const questionsRoot = mkdtempSync(join(tmpdir(), "rmd-wiring-questions-"));
   const ledgerRoot = mkdtempSync(join(tmpdir(), "rmd-wiring-ledger-"));
@@ -333,6 +346,15 @@ async function withProductionServer<T>(fn: (h: Harness) => Promise<T>): Promise<
 
   const closed: string[] = [];
   const issues: IssueCloser = { close: (url: string) => void closed.push(url) };
+  const issuer = "https://route-wiring.example";
+  const origin = "https://console.route-wiring.example";
+  const signer = operator ? generateKeyPairSync("rsa", { modulusLength: 2048 }) : undefined;
+  const jwk = signer ? { ...signer.publicKey.export({ format: "jwk" }), kid: "route-wiring", alg: "RS256", use: "sig" } : undefined;
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const now = Math.floor(Date.now() / 1000);
+  const header = encode({ alg: "RS256", typ: "JWT", kid: "route-wiring" });
+  const payload = encode({ iss: issuer, sub: "route-wiring-operator", azp: origin, iat: now, nbf: now, exp: now + 300, fva: [120, -1] });
+  const operatorSession = signer ? `${header}.${payload}.${sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), signer.privateKey).toString("base64url")}` : undefined;
 
   const deps: ServeDeps = {
     board: { plan: planOf(), ledgerPath, github: fakeGitHub() },
@@ -353,6 +375,10 @@ async function withProductionServer<T>(fn: (h: Harness) => Promise<T>): Promise<
     // HIGH, so the request must arrive the way the operator's does — over the tailnet, whose
     // grantor declares `writeTier: "high"`.
     identity: { trustedLocalAddress: "127.0.0.1", capability: TAILNET_CAP },
+    ...(operator ? {
+      operatorIdentity: { issuer, allowedOrigins: [origin], operatorUserIds: ["route-wiring-operator"] },
+      operatorIdentityIo: { fetchImpl: (async () => new Response(JSON.stringify({ keys: [jwk] }))) as typeof fetch },
+    } : {}),
     pollMs: 50,
     log: () => {},
   };
@@ -361,7 +387,7 @@ async function withProductionServer<T>(fn: (h: Harness) => Promise<T>): Promise<
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
   try {
-    return await fn({ base: `http://127.0.0.1:${port}`, fleetRoot, questionsRoot, ledgerPath, closed });
+    return await fn({ base: `http://127.0.0.1:${port}`, fleetRoot, questionsRoot, ledgerPath, closed, operatorSession });
   } finally {
     server.close();
   }
@@ -371,7 +397,15 @@ async function withProductionServer<T>(fn: (h: Harness) => Promise<T>): Promise<
 const TAILNET_CAP = "remudero:console";
 
 /** HIGH-tier routes also need the server-issued second factor — confirm, then replay with it. */
-const HIGH_TIER = new Set(["/v1/manual/approve", "/v1/drain/kick", "/v1/drain/run", "/v1/inbox/approve", "/v1/skills/run"]);
+const HIGH_TIER = new Set([
+  "/v1/manual/approve",
+  "/v1/drain/kick",
+  "/v1/drain/run",
+  "/v1/inbox/approve",
+  "/v1/skills/run",
+  "/v1/operator-agent/actions/decision",
+  "/v1/operator-agent/actions/execute-high",
+]);
 
 async function post(
   base: string,
@@ -442,6 +476,26 @@ test("every declared write route is either wiring-tested here or listed as expli
 
 // ── 1. STOP — the highest-consequence control ────────────────────────────────
 
+test("POST /v1/control/assistant-action binds a verified operator to the fleet root and ledger", async () => {
+  await withProductionServer(async (h) => {
+    const body = { actionId: "route-wiring-action-01", instance: "core", action: "pause", reason: "reviewed operator hold" };
+    assert.equal((await post(h.base, "/v1/control/assistant-action", body)).status, 403,
+      "a tailnet write grant without a verified operator cannot dispatch an assistant action");
+    const send = () => fetch(`${h.base}/v1/control/assistant-action`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json", [OPERATOR_SESSION_HEADER]: h.operatorSession! },
+      body: JSON.stringify(body),
+    });
+    const first = await send();
+    assert.equal(first.status, 200);
+    const receipt = await first.json();
+    assert.deepEqual(await (await send()).json(), receipt, "the same operator retry gets the stored receipt");
+    assert.ok(existsSync(pauseFilePath(h.fleetRoot)));
+    assert.ok(!existsSync(pauseFilePath(h.questionsRoot)));
+    assert.equal(ledgerSteps(h.ledgerPath).filter((row) => row.step === "panel.pause_requested" && row.assistant_action_id === body.actionId).length, 1);
+  }, true);
+});
+
 test("POST /v1/control/stop writes the stop flag under fleetControlRoot, not questionsRoot", async () => {
   await withProductionServer(async (h) => {
     const res = await post(h.base, "/v1/control/stop", { reason: "operator halted the fleet" });
@@ -503,7 +557,7 @@ test("POST /v1/quiet-hours writes the quiet-hours flag under fleetControlRoot, n
 test("POST /v1/escalation/mark-handled closes exactly the issue named, through the injected gateway", async () => {
   await withProductionServer(async (h) => {
     const issueUrl = "https://github.com/craigoley/remudero/issues/4242";
-    const res = await post(h.base, "/v1/escalation/mark-handled", { taskId: "W1-T100", issueUrl });
+    const res = await post(h.base, "/v1/escalation/mark-handled", { taskId: "W1-T100", issueUrl, class: "MANUAL", disposition: "acted" });
     assert.equal(res.status, 200);
 
     // RIGHT GATEWAY, RIGHT ARGUMENT. In production this reaches `gh issue close` (ghIssueCloser,
@@ -513,6 +567,8 @@ test("POST /v1/escalation/mark-handled closes exactly the issue named, through t
     const steps = ledgerSteps(h.ledgerPath).filter((s) => s.step === "panel.escalation_marked_handled");
     assert.equal(steps.length, 1);
     assert.equal(steps[0].issue_url, issueUrl);
+    assert.equal(steps[0].class, "MANUAL");
+    assert.equal(steps[0].disposition, "acted");
   });
 });
 
@@ -560,6 +616,40 @@ test("POST /v1/pr-actions writes one bounded request under fleetControlRoot, not
     );
     assert.deepEqual(pendingPrActions(h.questionsRoot), [], "the request must not be written under questionsRoot");
     assert.equal(ledgerSteps(h.ledgerPath).filter((step) => step.step === "console.pr_action_requested").length, 1);
+  });
+});
+
+test("W1-T4657: POST /v1/operator-agent/actions/execute-high runs an approved kick through the kick handler under fleetControlRoot", async () => {
+  await withProductionServer(async (h) => {
+    const action = {
+      version: "automation-action-v1",
+      actionId: "action:wiring-kick",
+      capability: "rmd.task.kick:W1-T4657",
+      summary: "Kick the wiring task.",
+      scope: { flowId: "flow:wiring", repo: "owner/repo" },
+      risk: "high",
+      preconditions: [{ id: "queue", source: "ledger:queue", description: "The queue read is current." }],
+      freshness: { maxAgeSeconds: 600 },
+      idempotencyKey: "idem:wiring-kick",
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      dryRun: false,
+      approval: { policy: "human" },
+      rollback: { mode: "irreversible", refusal: "a dispatched task cannot be un-dispatched" },
+      receiptRef: "ledger:panel.operator_agent_action_receipt",
+    };
+    assert.equal((await post(h.base, "/v1/operator-agent/actions", { action })).status, 201);
+    assert.equal((await post(h.base, "/v1/operator-agent/actions/decision", { actionId: action.actionId, decision: "approved" })).status, 200);
+    const observations = [{ preconditionId: "queue", state: "satisfied", source: "ledger:queue", observedAt: new Date(Date.now() - 1_000).toISOString() }];
+    const res = await post(h.base, "/v1/operator-agent/actions/execute-high", { actionId: action.actionId, observations });
+    const body = (await res.json()) as { disposition: string; receipt: { evidenceRef?: string } };
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.equal(body.disposition, "completed");
+    assert.ok(existsSync(kickFilePath(h.fleetRoot, "W1-T4657")), "the kick marker must land at the daemon's fleet-control root");
+    assert.ok(!existsSync(kickFilePath(h.questionsRoot, "W1-T4657")), "and never under questionsRoot");
+    const kick = ledgerSteps(h.ledgerPath).filter((row) => row.step === "console.kick_requested");
+    assert.equal(kick.length, 1);
+    assert.equal(body.receipt.evidenceRef, `ledger:console.kick_requested@${kick[0]!.ts}#${kick[0]!.run_id}`);
   });
 });
 

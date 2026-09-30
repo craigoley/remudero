@@ -67,8 +67,8 @@
       proof: "unit test: the author-time refusal executes against base, never a wording heuristic"
     - claim: "the refusal tells the author to keep the test and withdraw the criterion, never to delete the test"
       proof: "unit test: the remedy keeps the test and withdraws the criterion"
-    - claim: "a criterion that genuinely discriminates is written through untouched"
-      proof: "unit test: a discriminating criterion is written through untouched"
+    - claim: "the author-time base is resolved from the checkout whose PR body is being emitted"
+      proof: "unit test: the author-time base is resolved from the checkout whose PR body is being emitted"
     - claim: "a diff that can produce no discriminating criterion at all is reported as needing a human, not silently emptied"
       proof: "unit test: a body with no discriminating criterion asks for a human"
   falsifier: |
@@ -84,7 +84,7 @@
   # Splitting leaves an emitter asking a question no verb answers.
   origin: human
   files: [src/lib/plan-pr-emitter.ts, src/lib/body-repair.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     Depends in spirit on W1-T3687 (#5844), which adds `rmd check-acceptance --base` -- the base

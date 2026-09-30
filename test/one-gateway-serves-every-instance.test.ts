@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -104,6 +104,19 @@ async function get(url: string, path: string): Promise<{ status: number; body: R
   return { status: res.status, body: (await res.json()) as Record<string, unknown> };
 }
 
+async function getWarmList(url: string, path: string): ReturnType<typeof get> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const result = await get(url, path);
+    assert.equal(result.status, 200);
+    if (Array.isArray(result.body.repos)) return result;
+    const staleness = result.body.staleness as { status?: string; refreshing?: boolean } | undefined;
+    assert.deepEqual([staleness?.status, staleness?.refreshing], ["unavailable", true],
+      "only a cold, still-refreshing snapshot may delay the repository isolation assertion");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error(`${path} did not produce a repository snapshot within ten seconds`);
+}
+
 async function post(url: string, path: string): Promise<{ status: number; body: Record<string, unknown> }> {
   const res = await fetch(`${url}${path}`, {
     method: "POST",
@@ -149,6 +162,38 @@ test("each registered instance is served under its own prefix from its own state
   });
 });
 
+test("a repository projection reads the selected instance's ledger and plan, not core's", async (t) => {
+  const { deps, stateBase } = fleet(t);
+  const siteLedger = join(stateBase, "site", "state", "ledger.ndjson");
+  writeFileSync(siteLedger, readFileSync(siteLedger, "utf8") + JSON.stringify({
+    ts: new Date().toISOString(), step: "worker.finished", run_id: "site-worker",
+    repo: "craigoley/remudero-site", billing_mode: "api", total_cost_usd: 1.25,
+    served_model: "site-served-model", tokens: { input: 13, output: 0, cacheRead: 0, cacheCreation: 0 },
+  }) + "\n");
+  await withServer(deps, async (url) => {
+    const scoped = await getWarmList(url, "/v1/i/site/repos");
+    assert.equal(scoped.status, 200);
+    const rows = scoped.body.repos as Array<{ id: string; source: string; health: { queuedtasks: number | null }; telemetry: { tokens7d: number | null; modelsused: string[] | null } }>;
+    assert.deepEqual(rows.map((row) => row.id), ["craigoley/remudero-site"]);
+    assert.equal(rows[0]?.source, "instance-registry");
+    assert.equal(rows[0]?.health.queuedtasks, 1, "the site plan owns its task count");
+    assert.deepEqual(rows[0]?.telemetry, {
+      measurementClass: "observed", tokens7d: 13, cache_read_tokens7d: 0, cash_usd_7d: 1.25, cost_7d: 1.25,
+      subscription: { calls7d: 0, tokens7d: 0, windows: [] }, modelsused: ["site-served-model"],
+    });
+    const summary = await getWarmList(url, "/v1/i/site/repos/summary");
+    assert.equal(summary.status, 200);
+    const card = (summary.body.repos as Array<{ id: string; active: boolean | null; actions: Array<{ id: string; path?: string }> }>)[0];
+    assert.equal(card?.id, "craigoley/remudero-site");
+    assert.equal(card?.active, true, "the site card reads the site's own fleet-control root");
+    assert.equal(card?.actions[0]?.path, "control/pause");
+    const core = await getWarmList(url, "/v1/repos");
+    const coreSite = (core.body.repos as Array<{ id: string; telemetry: { tokens7d: number | null } }>).find((row) => row.id === "craigoley/remudero-site");
+    assert.equal(coreSite?.telemetry.tokens7d, 0, "the unscoped core route never reads site worker costs");
+    assert.equal((await fetch(`${url}/v1/i/site/repos`)).status, 401, "scoped telemetry still requires the read bearer");
+  });
+});
+
 test("an instance's routes never return another instance's tasks", async (t) => {
   const { deps } = fleet(t);
   await withServer(deps, async (url) => {
@@ -178,6 +223,33 @@ test("the unprefixed routes still answer for the core instance", async (t) => {
   assert.equal(instancePath("site", "/v1/i/core/status"), undefined, "a prefixed path is never prefixed twice");
 });
 
+test("the full serve lifecycle refreshes a non-core answer cache from that instance's ledger", async (t) => {
+  const { deps, stateBase } = fleet(t);
+  const ledger = join(stateBase, "site", "state", "ledger.ndjson");
+  const now = Date.now();
+  writeFileSync(ledger, readFileSync(ledger, "utf8") + JSON.stringify({
+    ts: new Date(now).toISOString(), step: "scheduler.capacity", repo: "craigoley/remudero-site",
+    configured_capacity: 3, admitted_lanes: 3, active_workers: 2, queued_work: 1,
+    window_start: new Date(now - 60_000).toISOString(), window_end: new Date(now).toISOString(),
+  }) + "\n");
+  await withServer(deps, async (url) => {
+    let answer: { status: number; body: { coverage: string; answer: string; repository: string } } | undefined;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const response = await fetch(`${url}/v1/i/site/operator-agent/ask`, {
+        method: "POST", headers: { authorization: `Bearer ${READ}`, "content-type": "application/json" },
+        body: JSON.stringify({ question: "What is worker capacity?" }),
+      });
+      answer = { status: response.status, body: await response.json() as { coverage: string; answer: string; repository: string } };
+      if (answer.body.coverage === "verified") break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(answer?.status, 200);
+    assert.equal(answer.body.coverage, "verified", "listening starts the site's independent cache refresh");
+    assert.equal(answer.body.repository, "craigoley/remudero-site");
+    assert.match(answer.body.answer, /2 of 3 workers/);
+  });
+});
+
 test("an instance whose state is unreadable answers unavailable with the reason", async (t) => {
   const { deps, stateBase } = fleet(t);
   await withServer(deps, async (url) => {
@@ -187,6 +259,7 @@ test("an instance whose state is unreadable answers unavailable with the reason"
     assert.equal(absent.body.error, "instance_unavailable");
     assert.equal(absent.body.instance, "console");
     assert.match(String(absent.body.reason), /plan .*remudero-console.*unreadable/);
+    assert.equal((await get(url, "/v1/i/console/repos")).status, 503, "a missing instance cannot fall back to core's repository projection");
     assert.equal((await post(url, "/v1/i/console/control/pause")).status, 503, "a control on an unavailable instance writes nothing");
 
     // A state directory that disappears after startup is noticed per request.

@@ -211,6 +211,18 @@ test("GOLDEN — KNOWLEDGE REPAIR: retargeting an existing operator-impact learn
   assert.equal(checkDrillCoverage(diff).pass, true);
 });
 
+test("GOLDEN — KNOWLEDGE RETIRE LEDGER: the observed ledger learning retirement keeps its text and arms with a golden replay", () => {
+  const { verdict, golden } = judgeCase("knowledge-retire-ledger");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+  const diff = readFileSync(join(FIXTURES_ROOT, "knowledge-retire-ledger", "diff.patch"), "utf8");
+  assert.match(diff, /knowledge gardener: retire ledger-corpus-needs-the-resolver/);
+  assert.match(diff, /^-  lifecycle: active$/m);
+  assert.match(diff, /^\+  lifecycle: superseded$/m);
+  assert.equal(checkTroubleshootingCoverage(diff).pass, true);
+  assert.equal(checkDrillCoverage(diff).pass, true);
+});
+
 test("GOLDEN — KNOWLEDGE RETIRE: the gardener's own retire pass (active to superseded, text kept) arms, and the coverage items do not read a retirement as an addition", () => {
   const { verdict, golden } = judgeCase("knowledge-retire");
   assert.equal(golden.violation, "none");

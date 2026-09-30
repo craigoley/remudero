@@ -1,0 +1,36 @@
+- id: W1-T4680
+  title: "34% OF TASKS OVERFLOW THE LEARNINGS BUDGET AND GET A FLAT LIST — keep one standing brief per learnings shard that cites its facts, is refreshed only when that shard changes, and edits in place by id so unchanged wording never drifts (Hindsight's mental models)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-memory-1790600000"
+  plan_refs: [W1-T4606]
+  files: [src/lib/standing-briefs.ts, test/each-learnings-shard-has-a-standing-brief.test.ts, src/lib/learnings.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED: learnings enter the prompt as flat lines under an 8,148-char budget (src/lib/learnings.ts ~41-49) and 34% of
+    tasks overflow it (src/lib/knowledge-outcome.ts ~7-8). Hindsight's mental models are stored answers refreshed only when
+    in-scope memories change, via id-addressed edit operations (hindsight-docs/docs/developer/mental-models.mdx,
+    engine/reflect/delta_ops.py).
+  design: |
+    (i) One brief per shard, every claim citing learnings#id; refreshed only when the shard's facts change, by edit
+    operations addressed by claim id.
+    (ii) Experiment: on overflowing tasks, arm B injects the brief plus the overflow; score both on clean_single_strike.
+    (iii) A brief that drops a cited fact fails its own check.
+  acceptance:
+    - claim: "a brief is refreshed only when its shard changes"
+      proof: 'grep: test("W1-T4680: a brief is refreshed only when its shard changes" in test/each-learnings-shard-has-a-standing-brief.test.ts'
+    - claim: "every claim in a brief cites a learning"
+      proof: 'grep: test("W1-T4680: every claim in a brief cites a learning" in test/each-learnings-shard-has-a-standing-brief.test.ts'
+    - claim: "the new module is called from src/lib/learnings.ts"
+      proof: 'grep: buildStandingBrief( in src/lib/learnings.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

@@ -1,0 +1,30 @@
+- id: W1-T4927
+  title: "THE KNOWLEDGE GARDENER OPENED TWO PRS FOR ONE RETIREMENT — passes 16 minutes apart each filed a PR retiring bashrc-accident (#7976, #7977); one merged and the other conflicted. A pass that finds its own open PR updates it instead of opening another"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 10.00
+  risk: low
+  origin: "operator ask 2026-09-30: file what needs filing (stuck gardener PRs)"
+  note: "reservation hand-off: plan-bakeoff-trigger-1790777606000 -> plan-bakeoff-trigger-1790777606000"
+  plan_refs: [W1-T4095]
+  files: [src/lib/knowledge-gardener.ts, test/the-knowledge-gardener-never-opens-a-second-pr-for-one-retirement.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-30: knowledge-garden passes at 04:12Z (#7976) and 04:28Z (#7977) both retired learning
+    bashrc-accident; #7977 merged and #7976 went dirty and was closed as superseded. Two open gardener PRs over the
+    same files also sat blocked together on the learnings-v2 pin until #8008.
+  design: |
+    Before opening a PR, the gardener looks for its own open knowledge-garden PR; if one exists it adds this pass's
+    changes to that branch (or skips an entry already retired there) instead of opening a second PR.
+  acceptance:
+    - claim: "a pass with an open gardener PR updates it instead of opening another"
+      proof: 'grep: test("W1-T4927: a pass with an open gardener PR updates it instead of opening another" in test/the-knowledge-gardener-never-opens-a-second-pr-for-one-retirement.test.ts'
+    - claim: "an entry already retired in the open PR is not retired again"
+      proof: 'grep: test("W1-T4927: an entry already retired in the open PR is not retired again" in test/the-knowledge-gardener-never-opens-a-second-pr-for-one-retirement.test.ts'
+  falsifier: |
+    Always open a new PR and the first test sees two PRs for one pass pair.

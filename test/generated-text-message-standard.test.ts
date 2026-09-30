@@ -8,11 +8,11 @@ import {
 } from "../src/lib/commit-message.js";
 import { OPERATOR_MESSAGE_PARTS } from "../src/lib/operator-message.js";
 import {
-  buildPlanPrBody,
   buildPlanPrCommitMessage,
   type PlanPrBodyOpts,
   type PlanPrCommitOpts,
 } from "../src/lib/plan-pr-emitter.js";
+import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
 
 // ── W1-T2807 ────────────────────────────────────────────────────────────────────────────────────
@@ -41,7 +41,7 @@ function commitOpts(overrides: Partial<PlanPrCommitOpts> = {}): PlanPrCommitOpts
 }
 
 function bodyOpts(overrides: Partial<PlanPrBodyOpts> = {}): PlanPrBodyOpts {
-  return { intro: "This files one shard.", criteria: CRITERIA, ...overrides };
+  return { intro: "This files one shard.", criteria: CRITERIA, baseRef: "fixture-base", proofCheck: () => 0, ...overrides };
 }
 
 // ── criterion 1: the standard names both surfaces ───────────────────────────────────────────────
@@ -83,7 +83,7 @@ test("the commit's narrative slots render as body paragraphs in the standard's o
 // ── criterion 3: the PR body's narrative half is projected the same way ──────────────────────────
 
 test("a PR body's narrative slots render inside the INTRO region — never below the Acceptance block, whose bullets must not be interrupted", () => {
-  const body = buildPlanPrBody(
+  const body = buildFixturePlanPrBody(
     bodyOpts({ whatToDo: "review the shard", consequence: "the id stays unbuilt", taskId: "W1-T2807" }),
   );
   const introEnd = body.indexOf("Acceptance:");
@@ -112,13 +112,13 @@ test("omitting the new narrative slots leaves both records BYTE-IDENTICAL — ev
     }),
   );
   assert.equal(
-    buildPlanPrBody({ intro: "i", criteria: CRITERIA, taskId: "W1-T1" }),
-    buildPlanPrBody({ intro: "i", criteria: CRITERIA, taskId: "W1-T1", speaker: undefined, whatToDo: undefined }),
+    buildFixturePlanPrBody({ intro: "i", criteria: CRITERIA, taskId: "W1-T1" }),
+    buildFixturePlanPrBody({ intro: "i", criteria: CRITERIA, taskId: "W1-T1", speaker: undefined, whatToDo: undefined }),
   );
 });
 
 test("the trailer, the subject citation and the Acceptance block parse exactly as they do today — through the REAL parsers, with the new slots filled", () => {
-  const body = buildPlanPrBody(
+  const body = buildFixturePlanPrBody(
     bodyOpts({
       intro: "Files W1-T2807 (W1-T2807).",
       whatToDo: "review the shard",

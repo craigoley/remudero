@@ -10,7 +10,7 @@
   files: [plan/tasks.d/W1-T2457-two-rule-namespaces-share-one-integer-range.yaml, plan/tasks.d/W1-T2282-docs-is-the-uncovered-knowledge-corpus.yaml]
   origin: "followup#W1-T2457-1788020906446"
   plan_refs: ["§8A", "W1-T2457", "W1-T2282", "W1-T1234"]
-  status: queued
+  status: done
   attempts: 0
   rationale: |
     THE FOLLOW-UP THIS RATIFIES ASKED A RESEARCH QUESTION THAT IS ALREADY ANSWERED, AND THE ANSWER
@@ -113,7 +113,7 @@
       proof: "grep: a colliding integer that carries no namespace word in plan/tasks.d/W1-T2457-two-rule-namespaces-share-one-integer-range.yaml"
     - claim: "W1-T2282's acceptance criteria survive the amendment for the same reason and on the same evidence"
       proof: "grep: the index excludes itself, so generating it does not create an entry in plan/tasks.d/W1-T2282-docs-is-the-uncovered-knowledge-corpus.yaml"
-  note: "FILED 2026-09-01 from the follow-up harvest of W1-T2457 (run W1-T2457-1788020906446). SPLIT
+  note: "DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #3614 (`docs: retire stale CLAUDE.md cap figures, cite enforcer instead`, trailer + head run-W1-T2611-1788344446986): the W1-T2457 and W1-T2282 shards carry the corrected citation. Plan-only deliverable; plan-reconcile refuses the `docs:` subject. Dependent W1-T2612 is merged. Every acceptance criterion holds on main and is PRESERVED UNCHANGED: this record is marked done, not re-proved.\n\nFILED 2026-09-01 from the follow-up harvest of W1-T2457 (run W1-T2457-1788020906446). SPLIT
     FROM A SINGLE DRAFT ON rule15-filing: the original declared both shards AND test/claude-md-cap-citations.test.ts
     at verify:auto, which is exactly the W1-T324 / W1-T369 shape the reviewer can only refuse. The two
     halves are W1-T2611 (this, plan-only) and W1-T2612 (the guard), with W1-T2612 depending on W1-T2611 so the

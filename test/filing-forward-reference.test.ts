@@ -151,12 +151,17 @@ test("acceptance 2 — judgeReview end-to-end: a filing PR whose OTHER criterion
     "+- id: W1-T999",
     "+  files: [test/filing-forward-reference.test.ts]",
   ].join("\n");
+  // 2026-09-29 RELAXATION (FILING_FORWARD_ADVISORY): an UNDECLARED target this plan-only diff does not change is now
+  // an advisory, not a failure — a filing cannot build it. The REAL failure a filing can still carry is a proof about
+  // a file the diff DOES change: its own shard, here, which does not say what the proof claims.
   const criteria = [
     { claim: "the forward-referenced test exists", proof: "unit test: test/filing-forward-reference.test.ts" },
-    { claim: "a real defect", proof: "unit test: test/some-other-genuinely-fabricated-name.test.ts" },
+    { claim: "an undeclared future test", proof: "unit test: test/some-other-genuinely-fabricated-name.test.ts" },
+    { claim: "a real defect in the filing itself", proof: "grep: status: done in plan/tasks.d/W1-T999-example.yaml" },
   ];
   const report =
-    "Filed W1-T999. unit test: test/filing-forward-reference.test.ts. unit test: test/some-other-genuinely-fabricated-name.test.ts";
+    "Filed W1-T999. unit test: test/filing-forward-reference.test.ts. unit test: test/some-other-genuinely-fabricated-name.test.ts. " +
+    "grep: status: done in plan/tasks.d/W1-T999-example.yaml";
   const verdict = judgeReview(criteria, { planLint: CLEAN_PLAN_LINT,
     diff,
     report,
@@ -164,7 +169,8 @@ test("acceptance 2 — judgeReview end-to-end: a filing PR whose OTHER criterion
     execProof: (whitelisted) => (whitelisted.label.includes("filing-forward-reference") ? "pass" : "fail"),
   });
   assert.equal(verdict.criteria[0].proof_exec, "not_yet_built", "the declared forward reference is exempted");
-  assert.equal(verdict.criteria[1].proof_exec, "executed_fail", "the undeclared, genuinely-fabricated proof still fails");
+  assert.equal(verdict.criteria[1].proof_exec, "not_yet_built", "an undeclared target outside the diff is advisory now");
+  assert.equal(verdict.criteria[2].proof_exec, "executed_fail", "a proof about the diff's OWN shard still fails");
   assert.equal(verdict.state, "failure", "one real failure still fails the whole review — never a blanket excuse");
 });
 

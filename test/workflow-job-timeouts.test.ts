@@ -87,12 +87,12 @@ test("W1-T1009: the Playwright-carrying jobs are bounded inside the heavy band",
   // drifting.
   assert.deepEqual(
     [...playwrightJobs].sort(),
-    // W1-T2904 added the third: `test-slow` runs the manifest's >=5000ms tier, and 9 of those 106
+    // W1-T2904 added the third: `test-slow-shard` runs the manifest's >=5000ms tier, and 9 of those 106
     // files are the Playwright-driven serve.* suites, so it needs the install step and is banded
     // heavy with the other two. This list is the deliberate reconsideration the comment above asks
     // for, not a silent drift.
-    ["ci", "coverage-ratchet", "test-slow"].sort(),
-    "expected exactly `ci`, `coverage-ratchet` and `test-slow` to carry a `playwright install` step — " +
+    ["ci", "coverage-ratchet", "test-slow-shard"].sort(),
+    "expected exactly `ci`, `coverage-ratchet` and `test-slow-shard` to carry a `playwright install` step — " +
       "if this changed, the heavy/light timeout banding needs to change with it",
   );
 
@@ -177,6 +177,18 @@ test("W1-T1009: the bound is strictly below ci-gate's own declared wait cap", as
       `job '${jobId}'s timeout-minutes (${timeoutMinutes}m) must stay strictly below ci-gate's WAIT_CAP_SECONDS`,
     );
   }
+});
+
+test("the coverage aggregator survives the observed ten-minute raw V8 merge and the gate waits for both jobs", async () => {
+  const jobs = await loadCiJobs();
+  const shardMinutes = jobs["coverage-ratchet"]?.["timeout-minutes"];
+  const aggregatorMinutes = jobs["coverage-ratchet-required"]?.["timeout-minutes"];
+  const waitCapSeconds = await loadWaitCapSeconds();
+  assert.ok(typeof shardMinutes === "number" && shardMinutes > 0, "coverage shards need a finite bound");
+  assert.ok(typeof aggregatorMinutes === "number" && aggregatorMinutes > 10,
+    "PR #8080's raw V8 merge was cancelled at the former 10-minute aggregator bound");
+  assert.ok((shardMinutes + aggregatorMinutes) * 60 < waitCapSeconds,
+    "ci-gate must outwait the coverage shard and its dependent aggregator, including scheduling room");
 });
 
 // ── acceptance 4: the coupling to ci-gate's cap is written down in ci.yml itself ────────────

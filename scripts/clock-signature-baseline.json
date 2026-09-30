@@ -276,7 +276,7 @@
   },
   "src/lib/panel-actions.ts": {
     "legacy": 2,
-    "dateNow": 1,
+    "dateNow": 0,
     "newDate": 1
   },
   "src/lib/panel-graph.ts": {

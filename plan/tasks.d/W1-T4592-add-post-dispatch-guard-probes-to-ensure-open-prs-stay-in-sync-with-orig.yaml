@@ -7,7 +7,11 @@
   verify:
     proof: "manual-check: verify origin/main not diverging before W1-T4081 dispatch"
   risk: low
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # operator 2026-09-28: withdrawn as malformed — repo `remudero/master-plan` names no repository, `verify` is an
+  # object rather than auto/human, and there is no acceptance; W1-T4700 now refuses this shape at filing. Refile
+  # well-formed if the idea is still wanted.
   attempts: 0
   origin: followup:W1-T4081-1790143034676
   rationale: |

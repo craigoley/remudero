@@ -15,7 +15,7 @@
     - src/lib/worker.ts
     - src/lib/benchmark-cohort.ts
     - test/an-assignment-records-its-task-shape.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
