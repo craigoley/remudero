@@ -503,6 +503,109 @@ for _kb in "$DISK_FREE_KB" "$ROOT_FS_FREE_KB"; do
   esac
 done
 
+# ── probe: swap, inodes, total size, the janitor's last result, consumer sizes (W1-T4804) ──────
+# WHY: every host resource this fleet loses (disk, swap, inodes) was seen only AFTER it ran out.
+# The gardener (src/lib/host-resource-gardener.ts) fits a trend over these beats, so each value is
+# a plain number or the literal `unknown` — NEVER an invented 0. `unknown` swap is not "no swap".
+# Numeric check shared by every field below: digits only, else unknown.
+num_or_unknown() { case "$1" in ''|*[!0-9]*) printf 'unknown' ;; *) printf '%s' "$1" ;; esac; }
+
+ROOT_FS_TOTAL_KB="$(num_or_unknown "$(df_field / 2)")"
+
+# Free inodes on `/`: the column is found by its HEADER (`IFree` on Linux, `ifree` on macOS) because
+# the column position differs between the two. A filesystem that reports no inode table (`-`) is
+# `unknown`.
+inodes_free() {
+  local out
+  out="$(df -Pi / 2>/dev/null | awk 'NR==1 {for (i=1;i<=NF;i++) if (tolower($i)=="ifree") c=i} NR==2 && c {print $c}')"
+  case "$out" in ''|*[!0-9]*) out="$(df -i / 2>/dev/null | awk 'NR==1 {for (i=1;i<=NF;i++) if (tolower($i)=="ifree") c=i} NR==2 && c {print $c}')" ;; esac
+  num_or_unknown "$out"
+}
+ROOT_FS_INODES_FREE="$(inodes_free)"
+
+# Swap. Linux reads /proc/meminfo; macOS reads `sysctl vm.swapusage` ("total = 7168.00M  used =
+# 5427.25M  free = ..."). Both seams are overridable (RMD_MEMINFO, RMD_SYSCTL) so the tests can
+# drive the unreadable case on any host.
+SWAP_USED_KB="unknown"; SWAP_TOTAL_KB="unknown"
+MEMINFO="${RMD_MEMINFO:-/proc/meminfo}"
+SYSCTL_BIN="${RMD_SYSCTL:-sysctl}"
+if [ -r "$MEMINFO" ]; then
+  _swap_total="$(awk '/^SwapTotal:/ {print $2}' "$MEMINFO" 2>/dev/null)"
+  _swap_free="$(awk '/^SwapFree:/ {print $2}' "$MEMINFO" 2>/dev/null)"
+  case "${_swap_total}${_swap_free}" in
+    ''|*[!0-9]*) : ;;
+    *)
+      if [ -n "$_swap_total" ] && [ -n "$_swap_free" ] && [ "$_swap_free" -le "$_swap_total" ]; then
+        SWAP_TOTAL_KB="$_swap_total"; SWAP_USED_KB="$((_swap_total - _swap_free))"
+      fi ;;
+  esac
+elif command -v "$SYSCTL_BIN" >/dev/null 2>&1; then
+  _swap_pair="$("$SYSCTL_BIN" -n vm.swapusage 2>/dev/null | awk '
+    function kb(v,   n, u) { n = v + 0; u = substr(v, length(v)); if (u == "G") return n * 1048576; if (u == "M") return n * 1024; if (u == "K") return n; return -1 }
+    { for (i = 1; i <= NF; i++) { if ($i == "total") t = $(i + 2); if ($i == "used") u2 = $(i + 2) } }
+    END { a = kb(t); b = kb(u2); if (t != "" && u2 != "" && a >= 0 && b >= 0) printf "%d %d", a, b }')"
+  if [ -n "$_swap_pair" ]; then SWAP_TOTAL_KB="${_swap_pair% *}"; SWAP_USED_KB="${_swap_pair#* }"; fi
+fi
+
+# The latest janitor result, from the newest of the logs named in RMD_JANITOR_LOGS (colon-separated
+# paths or globs; default: the Azure host's cron log and the Mac's per-account logs). Two shapes:
+#   rmd-host-cleanup: / 57% -> 57% (-4 MB reclaimed this pass)      (Azure; before/after are %)
+#   janitor (<user>): freed ~0 GB; free space 25 GB -> 10 GB         (Mac)
+# A line that matches neither publishes `unknown` — a pass that reclaimed nothing is `0GB`, and an
+# unparseable line is never that. The timestamp is the log file's mtime: each pass appends, so it
+# is the moment of the last pass.
+JANITOR_LOGS="${RMD_JANITOR_LOGS:-${HOME}/host-cleanup.log:/tmp/remudero-janitor-*.log}"
+JANITOR_LOG="none"; JANITOR_TS="unknown"; JANITOR_BEFORE="unknown"; JANITOR_AFTER="unknown"; JANITOR_FREED="unknown"
+_janitor_files="$(printf '%s\n' "$JANITOR_LOGS" | tr ':' '\n' | while IFS= read -r _pat; do for _f in $_pat; do [ -f "$_f" ] && printf '%s\n' "$_f"; done; done)"
+if [ -n "$_janitor_files" ]; then
+  _newest="$(printf '%s\n' "$_janitor_files" | while IFS= read -r _f; do printf '%s\t%s\n' "$(stat -c %Y "$_f" 2>/dev/null || stat -f %m "$_f" 2>/dev/null || printf 0)" "$_f"; done | sort -rn | head -n 1)"
+  _tab="$(printf '\t')"
+  _newest_file="${_newest#*"$_tab"}"; _newest_epoch="${_newest%%"$_tab"*}"
+  JANITOR_LOG="$_newest_file"
+  _jline="$(grep -E '(rmd-host-cleanup: |janitor \().*->' "$_newest_file" 2>/dev/null | grep -v 'WATCH' | tail -n 1)"
+  _jparsed="$(printf '%s\n' "$_jline" | sed -nE \
+    -e 's#.*rmd-host-cleanup: [^ ]+ ([0-9]+)% -> ([0-9]+)% [(][-+~]?([0-9.]+) ?([KMGT]?B) reclaimed.*#\1% \2% \3\4#p' \
+    -e 's#.*janitor [(][^)]*[)]: freed ~?([0-9.]+) ?([KMGT]?B); free space ([0-9.]+) ?([KMGT]?B) -> ([0-9.]+) ?([KMGT]?B).*#\3\4 \5\6 \1\2#p' | head -n 1)"
+  if [ -n "$_jparsed" ]; then
+    JANITOR_BEFORE="${_jparsed%% *}"; _jrest="${_jparsed#* }"; JANITOR_AFTER="${_jrest%% *}"; JANITOR_FREED="${_jrest#* }"
+    case "$_newest_epoch" in ''|*[!0-9]*|0) : ;; *)
+      JANITOR_TS="$(date -u -d "@${_newest_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "${_newest_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf 'unknown')" ;;
+    esac
+  fi
+fi
+
+# Sizes (`du -sk`) of the known consumers, every Nth beat only (RMD_CONSUMER_EVERY, default 6) —
+# `du` over a worktrees root is not free. A consumer that cannot be read is ABSENT from the payload,
+# never a 0. The gardener attributes a falling disk to whichever of these grows fastest.
+CONSUMER_EVERY="${RMD_CONSUMER_EVERY:-6}"
+case "$CONSUMER_EVERY" in ''|*[!0-9]*|0) CONSUMER_EVERY=6 ;; esac
+BEAT_N_FILE="${RMD_ROOT}/state/heartbeat-count.txt"
+BEAT_N=0
+if [ -r "$BEAT_N_FILE" ]; then BEAT_N="$(head -n 1 "$BEAT_N_FILE" 2>/dev/null)"; fi
+case "$BEAT_N" in ''|*[!0-9]*) BEAT_N=0 ;; esac
+CONSUMER_LINES=""
+consumer_kb() {
+  local name="$1" total=0 seen=0 p kb
+  shift
+  for p in "$@"; do
+    [ -e "$p" ] || continue
+    kb="$(du -sk "$p" 2>/dev/null | awk 'NR==1 {print $1}')"
+    case "$kb" in ''|*[!0-9]*) continue ;; esac
+    total=$((total + kb)); seen=1
+  done
+  if [ "$seen" = 1 ]; then CONSUMER_LINES="${CONSUMER_LINES}
+consumer_${name}_kb=${total}"; fi
+  return 0
+}
+if [ $((BEAT_N % CONSUMER_EVERY)) -eq 0 ]; then
+  consumer_kb worktrees "${RMD_ROOT}/worktrees"
+  consumer_kb state "${RMD_ROOT}/state"
+  if [ "$(uname -s 2>/dev/null)" = "Linux" ]; then consumer_kb docker /var/lib/docker; fi
+  consumer_kb scratch /tmp/claude* "${RMD_ROOT}/tmp"
+  consumer_kb transcripts "${HOME}/.claude/projects" "${HOME}/.codex"
+  consumer_kb npm_cache "${HOME}/.npm"
+fi
+
 LEDGER_BYTES="unknown"
 if [ -r "$LEDGER" ]; then
   LEDGER_BYTES="$(wc -c < "$LEDGER" 2>/dev/null | tr -d ' ')"
@@ -718,6 +821,15 @@ state_fs_free_kb=${DISK_FREE_KB}
 root_fs_device=${ROOT_FS_DEVICE}
 root_fs_free_kb=${ROOT_FS_FREE_KB}
 disk_min_free_kb=${DISK_MIN_FREE_KB}
+root_fs_total_kb=${ROOT_FS_TOTAL_KB}
+root_fs_inodes_free=${ROOT_FS_INODES_FREE}
+swap_used_kb=${SWAP_USED_KB}
+swap_total_kb=${SWAP_TOTAL_KB}
+janitor_log=${JANITOR_LOG}
+janitor_last_ts=${JANITOR_TS}
+janitor_last_before=${JANITOR_BEFORE}
+janitor_last_after=${JANITOR_AFTER}
+janitor_last_freed=${JANITOR_FREED}
 prev_beat_ts=${PREV_BEAT_TS:-none}
 since_prev_beat_s=${SINCE_PREV_S:-unknown}
 restart_source=${RESTART_SOURCE}
@@ -755,6 +867,12 @@ fi
 if [ -n "$IMAGE_BUILD_SHA" ]; then
   PAYLOAD="${PAYLOAD}
 image_build_sha=${IMAGE_BUILD_SHA}"
+fi
+
+# Consumer sizes are APPENDED, only when measured (every Nth beat): an absent `consumer_*_kb` means
+# "not measured this beat", which a reader must never coerce to 0.
+if [ -n "$CONSUMER_LINES" ]; then
+  PAYLOAD="${PAYLOAD}${CONSUMER_LINES}"
 fi
 
 # The subject line IS the phone-readable answer — it is what shows on the branch listing without
@@ -800,5 +918,7 @@ git -C "$INSTALL_DIR" push --force "$REMOTE" "${commit}:refs/heads/${BRANCH}" >/
 # Only after a CONFIRMED push, so `since_prev_beat_s` measures published beats rather than
 # attempts. Best-effort: a state file that cannot be written must not fail a beat that landed.
 mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null && printf '%s\n' "$NOW_ISO" > "$STATE_FILE" 2>/dev/null
+# The beat counter that paces the consumer-size probe; advanced only after a confirmed push too.
+printf '%s\n' "$((BEAT_N + 1))" > "$BEAT_N_FILE" 2>/dev/null
 
 printf 'fleet-heartbeat: published %s to %s/%s — %s\n' "${commit:0:7}" "$REMOTE" "$BRANCH" "$SUBJECT"

@@ -761,3 +761,23 @@ test("checkpoint writes fail closed when the state path is not a directory", () 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a checkpoint write cannot resurrect a vanished instance state directory", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-analytics-checkpoint-vanished-state-"));
+  const vanished = join(root, "state");
+  try {
+    mkdirSync(vanished);
+    rmSync(vanished, { recursive: true });
+    writeAnalyticsCheckpoint(vanished, {
+      version: 1,
+      source: { archives: [], live: null, lastArchive: null, liveOffset: 0 },
+      tail: [],
+      state: {} as never,
+      snapshot: snapshot(),
+    });
+    assert.throws(() => statSync(vanished), { code: "ENOENT" },
+      "a background checkpoint must not make a missing gateway mount look available");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

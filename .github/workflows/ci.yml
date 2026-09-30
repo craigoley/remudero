@@ -195,6 +195,26 @@ jobs:
           cat diff-class.log || true
           echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
           echo "W1-T2428 fast-lane: this diff classifies as ${CLASS}."
+          # W1-T4811 (operator ruling 2026-09-22, W1-T2982): a rename-only PR takes the fast lane. The verdict is
+          # src/lib/review.ts's isRenameOnlyDiff over `git diff --raw --no-abbrev -M` — blob ids, not path names, so a
+          # rename that also edits one byte is REFUSED. Fails closed: any error leaves rename_only=false (full matrix).
+          RENAME_ONLY="false"
+          if [ -n "${GITHUB_BASE_REF}" ]; then
+            git diff --raw --no-abbrev -M "origin/${GITHUB_BASE_REF}...HEAD" > rename-raw.txt 2>/dev/null || : > rename-raw.txt
+            RENAME_ONLY="$(node --import tsx -e '
+              import { readFileSync } from "node:fs";
+              const mod = await import((process.env.GITHUB_WORKSPACE || process.cwd()) + "/src/lib/review.ts");
+              const v = mod.isRenameOnlyDiff(readFileSync("rename-raw.txt", "utf8"));
+              console.error("W1-T4811 rename-only: " + v.renameOnly + " — " + v.reason);
+              console.log(v.renameOnly ? "true" : "false");
+            ' 2>rename-verdict.log)" || RENAME_ONLY="false"
+            case "$RENAME_ONLY" in
+              true) ;;
+              *) RENAME_ONLY="false" ;;
+            esac
+          fi
+          cat rename-verdict.log || true
+          echo "rename_only=${RENAME_ONLY}" >> "$GITHUB_OUTPUT"
           # W1-T4395: a diff under test/ only still runs its tests. test-only-run.txt holds "files" plus the
           # changed test files, or "full" (a helper, fixture or setup file changed), or nothing.
           : > test-only-run.txt
@@ -219,8 +239,18 @@ jobs:
         # identically to a complete one. The block below makes that legible without changing whether
         # the job is red; it needs `tee`, `set +e` and `PIPESTATUS` under Actions' `-eo pipefail`.
         # Why: measured on PR #3542 — docs/forensics/ci-yml.md.
+        env:
+          RENAME_ONLY: ${{ steps.classify.outputs.rename_only }}
         run: |
           CLASS="${{ steps.classify.outputs.class }}"
+          # W1-T4811: a rename-only pull request (every path an R100 rename between plan/tasks.d shards, blobs
+          # unchanged) merges on the plan lint alone; nothing it touches is reachable by a suite. The verdict is
+          # computed by the classify step from git's blob ids, so a one-byte edit never reaches this branch.
+          if [ "${RENAME_ONLY:-false}" = "true" ]; then
+            echo "W1-T4811 fast-lane: rename-only pull request — the test matrix is short-circuited to success; lint-plan still runs."
+            echo "- W1-T4811 fast-lane: rename-only pull request; shard ${{ matrix.shard }}/8 registered success without running a suite." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           # W1-T4395: the coverage lane skips a test-only diff, so the changed tests run here, through the
           # same candidate lane as a plan/docs diff; a helper or fixture change runs the full suite.
           TEST_ONLY_RUN="$(head -n 1 test-only-run.txt 2>/dev/null || true)"
