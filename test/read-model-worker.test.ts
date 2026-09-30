@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -452,6 +454,25 @@ test("the switch reader does not follow a symlink to a different file", (t) => {
   const result = readReadModelSwitches(path);
   assert.equal(result.ok, false);
   assert.match(String((result as { reason: string }).reason), /unreadable/);
+});
+
+test("the switch reader rejects a file changed during its descriptor read", (t) => {
+  const root = scratch(t, "rmw-switch-changed");
+  const path = join(root, "switches.json");
+  writeFileSync(path, JSON.stringify({ projector: "off" }));
+  const realReadFileSync = fs.readFileSync.bind(fs);
+  const readSpy = t.mock.method(fs, "readFileSync", (target: unknown, ...rest: unknown[]) => {
+    const body = realReadFileSync(target as string, ...(rest as []));
+    if (typeof target === "number") appendFileSync(path, "\n");
+    return body;
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.deepEqual(readReadModelSwitches(path), { ok: false, reason: "switch file changed while being read" });
+  } finally {
+    readSpy.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 test("the ledger source reads stale when its projector is behind or has not ticked", () => {
