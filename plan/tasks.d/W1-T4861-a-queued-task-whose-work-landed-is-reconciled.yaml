@@ -1,0 +1,32 @@
+- id: W1-T4861
+  title: "A TASK WHOSE WORK LANDED CAN SIT QUEUED FOR WEEKS — W1-T2615's change merged 2026-09-23 in a0f56cae8 and W1-T47/W1-T48's core CLI-reference contract shipped, yet all read `status: queued`, so every reader that trusts the field (the verify-human judge, the board, filers) sees open work that is done"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: file, build and retire as you see fit (verify-human review follow-ups)"
+  note: "reservation hand-off: plan-systemic-0930-1790738140000 -> plan-systemic-0930-1790738140000"
+  plan_refs: [W1-T2615, W1-T47, W1-T48, W1-T4860]
+  files: [src/lib/plan-gardener.ts, test/a-queued-task-whose-work-landed-is-reconciled.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-30 in the verify-human review: W1-T2615 had every acceptance grep passing on main since
+    a0f56cae8 (2026-09-23) and still read queued; W1-T47 and W1-T48 read queued in plan/tasks.yaml while the core
+    registry, docs/cli-reference.md and the site's pinned publication (site #119) exist. Each was found by hand.
+  design: |
+    The plan gardener already proposes retiring tasks whose proofs hold on main; extend it to propose `status: done`
+    with the landing commit for a queued task whose every acceptance proof now holds AND did not at filing, in the
+    ordinary reviewed plan PR (never a silent rewrite).
+  acceptance:
+    - claim: "a queued task whose proofs now hold is proposed done with its commit"
+      proof: 'grep: test("W1-T4861: a queued task whose proofs now hold is proposed done with its commit" in test/a-queued-task-whose-work-landed-is-reconciled.test.ts'
+    - claim: "a task whose proofs held at filing is not proposed done"
+      proof: 'grep: test("W1-T4861: a task whose proofs held at filing is not proposed done" in test/a-queued-task-whose-work-landed-is-reconciled.test.ts'
+  falsifier: |
+    Drop the held-at-filing check and the second test proposes a record task done.
