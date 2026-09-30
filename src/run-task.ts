@@ -27366,7 +27366,7 @@ export async function defaultVerifyHumanCadenceResult(
     const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
     const registryPath = join(config.root, "state", "inbox-proposals.json");
     const result = await verifyHumanCadence({
-      shards: parkedVerifyHumanShards(plan, repoRoot, clock),
+      shards: parkedVerifyHumanShards(plan, repoRoot, clock, readMergeCreditedTaskIds(ledgerPath).credited),
       priorVerdicts: priorVerifyHumanVerdicts(rows),
       priorAgeBandKeys: priorVerifyHumanAgeBandKeys(rows),
       judge: shadowedVerifyHumanJudge({
@@ -43744,7 +43744,7 @@ export async function routeAdaptiveLifetimePressure(
       rationale: "Repeated attributable dispatch pressure was observed; decide whether to automate, backlog, or ask the operator.",
       acceptance: (task.acceptance ?? []).map((criterion) => criterion.claim),
       ageDays: 0,
-      depsAllMerged: (task.depends_on ?? []).every((id) => deps.plan.byId.get(id)?.status === "merged"),
+      depsAllMerged: (task.depends_on ?? []).every((id) => planTaskLanded(deps.plan.byId.get(id))),
       citedInSrc: idCitedInSrc(task.id, deps.root),
       evidence,
       observationKey:
@@ -44033,7 +44033,7 @@ export async function verifyHumanSweepCommand(
   // status.ts's reader, which already parses and already skips an unreadable line — no second
   // JSON pass, and one bad line never hides the verdicts around it.
   const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
-  const shards = parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock);
+  const shards = parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock, readMergeCreditedTaskIds(ledgerPath).credited);
   const priorVerdicts = priorVerifyHumanVerdicts(rows);
 
   if (dryRun) {
@@ -44085,15 +44085,24 @@ export async function verifyHumanSweepCommand(
   return 0;
 }
 
+/** Has this plan task LANDED, by the credit `deriveStatus` honours rather than the decorative yaml `status:`?
+ *  `merged` or `done` status, an explicit `pr:` number (precedence source (b)), or a ledger merge credit. */
+export function planTaskLanded(task: Task | undefined, ledgerCredited?: ReadonlySet<string>): boolean {
+  if (!task) return false;
+  return task.status === "merged" || task.status === "done" || typeof task.pr === "number" || ledgerCredited?.has(task.id) === true;
+}
+
 /** The parked population, as {@link ShardUnderJudgement} — the ONE place plan records become
  *  judgeable input. Reads the plan and greps src/; writes nothing. */
-export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock): ShardUnderJudgement[] {
+export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, ledgerCredited?: ReadonlySet<string>): ShardUnderJudgement[] {
   const nowMs = clock.now();
   const out: ShardUnderJudgement[] = [];
   for (const task of plan.tasks) {
     // The machine-filing judge routes AND releases every machine record and every operator record that
     // is not ruling-shaped (operator ruling 2026-09-29); only rulings stay on this operator-facing sweep.
-    if (task.verify !== "human" || task.status !== "queued" || task.author_class === "machine" || !isRulingShaped(task)) continue;
+    // W1-T4860: "queued" and "landed" read the credit the dispatcher and board use, not the raw yaml `status:` —
+    // a ruling already executed and credited (`pr:`, `done`, ledger merge credit) is settled, never judged again.
+    if (task.verify !== "human" || task.status !== "queued" || planTaskLanded(task, ledgerCredited) || task.author_class === "machine" || !isRulingShaped(task)) continue;
     const deps = task.depends_on ?? [];
     out.push({
       id: task.id,
@@ -44101,7 +44110,7 @@ export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock):
       rationale: (task as { rationale?: string }).rationale ?? "",
       acceptance: (task.acceptance ?? []).map((c) => c.claim),
       ageDays: shardAgeDays(task.id, root, nowMs),
-      depsAllMerged: deps.every((d) => plan.byId.get(d)?.status === "merged"),
+      depsAllMerged: deps.every((d) => planTaskLanded(plan.byId.get(d), ledgerCredited)),
       citedInSrc: idCitedInSrc(task.id, root),
       ...(() => {
         const evidence = shardEvidence(task);
