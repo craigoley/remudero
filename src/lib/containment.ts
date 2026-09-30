@@ -1407,17 +1407,13 @@ export function hostClassOf(
 
 /**
  * LINT-ON-EDIT (W1-T4686). A worker's type error otherwise first appears in CI and costs a repair
- * round; SWE-agent measured +3.0 points for feeding lint errors back on the edit itself. This is
- * the decision core of a `PostToolUse` hook on Write/Edit/MultiEdit: given the hook's stdin JSON it
- * runs ONE bounded type-check and returns the errors that sit in the file just edited and were not
- * already present, in the hook-output shape Claude Code feeds back in the same turn.
- *
- * FAIL OPEN, deliberately: a timeout, a missing compiler or a non-TypeScript file yields `null`
- * (say nothing) rather than a refusal — unlike the PreToolUse deny floor this hook is advice, and
- * a slow check must never stall a worker. Error identity is `code + message`, never the position:
- * an unrelated insertion above an old error shifts its line and must not make it look new.
+ * round. This is the decision core of a `PostToolUse` hook on Write/Edit/MultiEdit: given the
+ * hook's stdin JSON it runs ONE bounded type-check and returns the errors in the file just edited
+ * that were not already present, in the hook-output shape Claude Code feeds back in the same turn.
+ * FAIL OPEN: a timeout, a missing compiler or a non-TypeScript file yields `null` — this hook is
+ * advice, and a slow check must never stall a worker. Error identity is `code + message`, never
+ * the position: an insertion above an old error shifts its line and must not make it look new.
  * The effect is UNMEASURED; the A/B through the routing experiment arms is a separate step.
- *
  * Kind: BACKSTOP — the timeout fires only when the compiler is already too slow; a healthy
  * incremental check finishes well inside it, and the hook then fails open.
  */
@@ -1488,11 +1484,7 @@ export interface EditTypeCheckInput {
   timeoutMs?: number;
 }
 
-/**
- * The new type errors in the edited file as a string for the worker, or `null` when there is
- * nothing to say (no error, only pre-existing errors, not a TypeScript file, or the check
- * timed out).
- */
+/** New type errors in the edited file for the worker, or `null` when there is nothing to say. */
 export function editTypeCheckFeedback(input: EditTypeCheckInput): string | null {
   const filePath = input.hookInput.tool_input?.file_path;
   const cwd = input.hookInput.cwd;
