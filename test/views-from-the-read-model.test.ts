@@ -17,7 +17,7 @@ import {
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { createService } from "../src/lib/service.js";
 import { makeTempDir } from "../src/lib/tmp.js";
-import { buildReadModelViewRoutes, viewEtag, viewKey, type ReadModelViewRoutesOptions, type ViewDefinition, type ViewSource } from "../src/lib/views.js";
+import { buildReadModelViewRoutes, buildViewRoutes, viewEtag, viewKey, type ReadModelViewRoutesOptions, type ViewDefinition, type ViewSource } from "../src/lib/views.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";
@@ -216,4 +216,17 @@ test("a view body is selected by its query sorted by parameter name", () => {
   assert.equal(viewKey(new URLSearchParams("instance=con sole")), "instance=con%20sole");
   assert.equal(viewKey(new URLSearchParams("a=2&a=1")), "a=2&a=1");
   assert.equal(viewKey(new URLSearchParams("")), "");
+});
+
+test("a legacy-only view route computes its body per request with no read model behind it", async (t) => {
+  let calls = 0;
+  const view: ViewDefinition<{ calls: number }> = { name: "legacy-only", version: 2, compute: () => ({ data: { calls: ++calls }, sources: [{ name: "s", asOf: null, state: "fresh" }] }) };
+  const server = createService({ tokens: { read: "r", write: "w" }, routes: buildViewRoutes([view], fixedClock(T0)) });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/views/legacy-only`;
+  const first = (await (await fetch(url, { headers: { authorization: "Bearer r" } })).json()) as { data: { calls: number }; generatedAt: string };
+  const second = (await (await fetch(url, { headers: { authorization: "Bearer r" } })).json()) as { data: { calls: number } };
+  assert.deepEqual([first.data.calls, second.data.calls], [1, 2], "each request runs the legacy computation");
+  assert.equal(first.generatedAt, new Date(T0).toISOString(), "the route renders with the clock it was given");
 });
