@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  statSync,
   writeFileSync,
   mkdirSync,
   rmSync,
@@ -945,6 +946,62 @@ test("W1-T3604: a dirty install root still refuses to converge units", () => {
       "a dirty install root must never be cleaned",
     );
     assert.ok(!existsSync(markerPath), "never installs from a dirty install root");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4770: the installer leaves exactly one cleanup crontab entry", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-"));
+  try {
+    // A fake crontab whose "table" is a file, so no test can touch a real crontab.
+    const table = join(root, "crontab.txt");
+    const fake = join(root, "fake-crontab");
+    writeFileSync(
+      fake,
+      `#!/usr/bin/env bash\ncase "$1" in\n  -l) [ -f "${table}" ] && cat "${table}" || { echo "no crontab" >&2; exit 1; } ;;\n  -) cat > "${table}" ;;\nesac\n`,
+    );
+    chmodSync(fake, 0o755);
+    const cleanup = join(root, "home", "rmd-host-cleanup.sh");
+    const env = { RMD_CLEANUP_PATH: cleanup, RMD_CRONTAB_CMD: fake };
+    const entries = () =>
+      readFileSync(table, "utf8").split("\n").filter((l) => l.includes(cleanup));
+
+    // CHECK first: read-only, names both artifacts missing
+    const before = run([], env, root);
+    assert.equal(before.status, 1);
+    assert.match(before.stdout, /MISSING .*rmd-host-cleanup\.sh/);
+    assert.match(before.stdout, /MISSING crontab entry/);
+    assert.equal(existsSync(cleanup), false, "check must not install the script");
+    assert.equal(existsSync(table), false, "check must not write the crontab");
+
+    // an unrelated entry and a hand-made, differently scheduled janitor line already exist
+    writeFileSync(table, `0 3 * * * /usr/local/bin/backup\n1 * * * * ${cleanup} >> /dev/null\n`);
+
+    const first = run(["--install"], env, root);
+    assert.equal(first.status, 0, first.stderr);
+    assert.equal(entries().length, 1, "the hand-made line is replaced, not joined");
+    assert.equal(entries()[0], `7 */6 * * * ${cleanup} >> ${join(root, "home", "host-cleanup.log")} 2>&1`);
+    assert.match(readFileSync(table, "utf8"), /backup/, "unrelated entries survive");
+
+    const second = run(["--install"], env, root);
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(entries().length, 1, "a second run must leave exactly one entry");
+    assert.equal(readFileSync(cleanup, "utf8"), readFileSync("deploy/rmd-host-cleanup.sh", "utf8"));
+    assert.ok((statSync(cleanup).mode & 0o111) !== 0, "the installed script is executable");
+
+    const after = run([], env, root);
+    assert.equal(after.status, 0, after.stdout);
+    assert.match(after.stdout, /ok      crontab entry/);
+
+    // drift is a finding: an edited script and an edited schedule each read as DRIFTED
+    writeFileSync(cleanup, "#!/bin/sh\nexit 0\n");
+    assert.match(run([], env, root).stdout, /DRIFTED .*rmd-host-cleanup\.sh/);
+    const rescued = run(["--install"], env, root);
+    assert.equal(rescued.status, 0, rescued.stderr);
+    assert.equal(readFileSync(`${cleanup}.pre-t4770`, "utf8"), "#!/bin/sh\nexit 0\n", "the replaced host copy is kept once");
+    writeFileSync(table, readFileSync(table, "utf8").replace("7 */6", "9 */2"));
+    assert.match(run([], env, root).stdout, /DRIFTED crontab entry/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
