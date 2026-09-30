@@ -1279,7 +1279,8 @@ components:
       description: >
         GET /v1/feedback's body -- every captured feedback entry, oldest first. Served through the
         console read cache (src/lib/serve.ts's `boundConsoleReadRoute`), so `rmd serve` also
-        splices in `staleness`; a cold or stalled cache answers `{entries: [], staleness}`.
+        splices in `staleness`; a cold or stalled cache answers `{entries: [], staleness}`. With
+        `?limit=` or `?cursor=`, `entries` is one page and `page` says where the next one starts.
       required:
         - entries
       properties:
@@ -1287,6 +1288,86 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/FeedbackEntry"
+        page:
+          $ref: "#/components/schemas/ReadPage"
+        staleness:
+          $ref: "#/components/schemas/ConsoleResponseStaleness"
+
+    ReadPage:
+      type: object
+      description: >
+        One page of a list read (src/lib/read-page.ts). Pass `nextCursor` back as `?cursor=` for
+        the next page; its absence means this page is the last. The cursor names the last item
+        served and its position, so an item that leaves the list between two reads never restarts
+        the walk.
+      required: [total, limit]
+      properties:
+        section:
+          type: string
+          description: GET /v1/inbox only -- the lane this page is from.
+        total:
+          type: integer
+          description: Items in the whole list at the time of this read.
+        limit:
+          type: integer
+        nextCursor:
+          type: string
+
+    InboxCounts:
+      type: object
+      description: >
+        Every GET /v1/inbox lane's length, including the lanes a `?section=` read leaves out, so a
+        badge or a tab count needs no second read.
+      required: [ready, drafting, notReady, declined, fleet, needsYou]
+      properties:
+        ready: {type: integer}
+        drafting: {type: integer}
+        notReady: {type: integer}
+        declined: {type: integer}
+        fleet: {type: integer}
+        needsYou:
+          type: object
+          required: [ready, drafting, notReady, declined]
+          properties:
+            ready: {type: integer}
+            drafting: {type: integer}
+            notReady: {type: integer}
+            declined: {type: integer}
+
+    InboxSectionResult:
+      type: object
+      description: >
+        GET /v1/inbox?section=<name>'s body: that one lane under its own key, exactly as the whole
+        body carries it (`needsYou` an object of four lanes, every other section one page of an
+        array), plus `counts` and, for a list section, `page`.
+      required: [counts]
+      properties:
+        ready:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxReadyItem"
+        drafting:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxDraftingItem"
+        notReady:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxNotReadyItem"
+        declined:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxDeclinedItem"
+        fleet:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxFleetItem"
+        needsYou:
+          $ref: "#/components/schemas/InboxNeedsYou"
+        counts:
+          $ref: "#/components/schemas/InboxCounts"
+        page:
+          $ref: "#/components/schemas/ReadPage"
         staleness:
           $ref: "#/components/schemas/ConsoleResponseStaleness"
 
@@ -6855,6 +6936,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/InboxFleetItem"
+        counts:
+          $ref: "#/components/schemas/InboxCounts"
         staleness:
           $ref: "#/components/schemas/ConsoleResponseStaleness"
 
@@ -9123,9 +9206,30 @@ paths:
       summary: The feedback inbox -- every captured entry, oldest first.
       description: >
         `plan/feedback/` (MASTER-PLAN §7B, W1-T40), listed via src/lib/feedback.ts's
-        `listFeedback`. Optional `?status=` filters to one lifecycle status.
+        `listFeedback`. Optional `?status=` filters to one lifecycle status; `?limit=` and
+        `?cursor=` answer one page of the (filtered) list with a `page` envelope.
       security:
         - bearerRead: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Page size, 1 to 500. Default 100 once `cursor` is given alone.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - name: cursor
+          in: query
+          required: false
+          description: The previous page's `page.nextCursor`.
+          schema:
+            type: string
       responses:
         "200":
           description: The inbox.
@@ -12236,16 +12340,46 @@ paths:
         Deferred-with-trigger, ratified and retired proposals are never returned. Served through
         the console's cached-read wrapper (src/lib/serve.ts's `boundConsoleReadRoute`): the body
         may be the previous snapshot while a recompute runs, says so in `staleness`, carries a
-        weak `etag`, and answers 304 to a matching `If-None-Match`.
+        weak `etag`, and answers 304 to a matching `If-None-Match`. A bare GET is the whole body
+        (1.99 MB on the fleet host, 2026-09-30); `?section=` answers one lane (InboxSectionResult),
+        and a list section pages by `limit` and `cursor`. Each distinct query is its own cache entry.
       security:
         - bearerRead: []
+      parameters:
+        - name: section
+          in: query
+          required: false
+          description: >
+            `needsYou` (the operator's four lanes, not paged), or one list lane: `ready`,
+            `drafting`, `notReady`, `declined`, `fleet`.
+          schema:
+            type: string
+            enum: [needsYou, ready, drafting, notReady, declined, fleet]
+        - name: limit
+          in: query
+          required: false
+          description: A list section's page size, 1 to 500. Default 100.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - name: cursor
+          in: query
+          required: false
+          description: The previous page's `page.nextCursor`.
+          schema:
+            type: string
       responses:
         "200":
-          description: The inbox, with the cache's staleness envelope.
+          description: The inbox, or one section of it, with the cache's staleness envelope.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/InboxResult"
+                anyOf:
+                  - $ref: "#/components/schemas/InboxResult"
+                  - $ref: "#/components/schemas/InboxSectionResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
         "304":
           description: The cached snapshot matches the request's `If-None-Match`; no body.
         "401":

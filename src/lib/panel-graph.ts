@@ -16,6 +16,7 @@
  * docs/forensics/panel-graph.md
  */
 
+import { readPage, readPageRequest, type ReadPageRequest } from "./read-page.js";
 import { adoptionFindingGone, adoptionLatestPath, readAdoptionLatest } from "./measurement-cadence.js";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -263,6 +264,13 @@ export function buildFeedbackInboxRoute(deps: PanelGraphDeps): Route {
         sendJson(res, 400, { error: "invalid_request", detail: `status must be one of ${FEEDBACK_STATUSES.join(", ")}` });
         return;
       }
+      // A bare GET is every entry, as before; `?limit=` or `?cursor=` answers one page with a `page` envelope.
+      const paged = url.searchParams.has("limit") || url.searchParams.has("cursor");
+      const pageRequest = paged ? readPageRequest(url.searchParams, 100, 500) : undefined;
+      if (pageRequest && "error" in pageRequest) {
+        sendJson(res, 400, { error: "invalid_request", detail: pageRequest.error });
+        return;
+      }
       // The entries and a fresh plan parse come off-thread when serve wired a worker (W1-T4454). Fail-soft:
       // an unreadable plan degrades to no discharge flags, never a 500 over a decoration.
       const input = { root: deps.root, planPath: deps.planPath };
@@ -275,7 +283,11 @@ export function buildFeedbackInboxRoute(deps: PanelGraphDeps): Route {
       const reconciled = reconcileFeedbackEntries(deps.root, listed, deps.statusGithub, deps.feedbackLand);
       const decorated = filedTasks ? decorateFeedbackDischargeByTasks(reconciled, new Map(filedTasks), deps.statusGithub) : reconciled;
       const entries = statusParam ? decorated.filter((e) => e.status === statusParam) : decorated;
-      sendJson(res, 200, { entries });
+      if (!pageRequest) sendJson(res, 200, { entries });
+      else {
+        const { items, page } = readPage(entries, (e) => e.id, pageRequest);
+        sendJson(res, 200, { entries: items, page });
+      }
     },
   };
 }
@@ -1756,7 +1768,12 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
     scope: "read",
     // W1-T4261: async so a recompute yields between slices; the console's cached-read wrapper serves the previous
     // body meanwhile. An unchanged input set answers from the memo with no recompute at all.
-    handler: async (_req, res) => {
+    handler: async (req, res) => {
+      const shape = inboxShapeOf(req.url);
+      if ("error" in shape) {
+        sendJson(res, 400, { error: "invalid_request", detail: shape.error });
+        return;
+      }
       const { registryPath, proposals, classifications, ledgerLines } = await classifyAllProposalsSliced(deps, readPlanSnapshot);
       // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
       const plainStore = readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
@@ -1826,9 +1843,42 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
         .filter((i) => !isOperator(i))
         // W1-T4089: each fleet finding's latest fleet-lane decision and its plain reason.
         .map((i) => ({ ...i, ...fleetDecisions.get(i.proposalId) }));
-      sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet });
+      const lanes = { ready, drafting, notReady, declined, fleet };
+      const counts = {
+        ready: ready.length,
+        drafting: drafting.length,
+        notReady: notReady.length,
+        declined: declined.length,
+        fleet: fleet.length,
+        needsYou: { ready: needsYou.ready.length, drafting: needsYou.drafting.length, notReady: needsYou.notReady.length, declined: needsYou.declined.length },
+      };
+      if (shape.section === undefined) sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet, counts });
+      else if (shape.section === "needsYou") sendJson(res, 200, { needsYou, counts });
+      else {
+        const { items, page } = readPage<{ proposalId: string }>(lanes[shape.section], (item) => item.proposalId, shape.page);
+        sendJson(res, 200, { [shape.section]: items, page: { section: shape.section, ...page }, counts });
+      }
     },
   };
+}
+
+/** GET /v1/inbox's sections. A bare GET is the whole body, as before; `?section=` answers one lane
+ *  under its own key, so a console parser reading `body.fleet` or `body.needsYou` works unchanged,
+ *  and a list lane pages by `?limit=` (default 100, at most 500) and `?cursor=`. */
+const INBOX_LIST_SECTIONS = ["ready", "drafting", "notReady", "declined", "fleet"] as const;
+
+function inboxShapeOf(
+  rawUrl: string | undefined,
+): { section?: undefined } | { section: "needsYou" } | { section: (typeof INBOX_LIST_SECTIONS)[number]; page: ReadPageRequest } | { error: string } {
+  const params = new URL(rawUrl ?? "/", "http://localhost").searchParams;
+  const section = params.get("section");
+  const paged = params.has("limit") || params.has("cursor");
+  if (section === null) return paged ? { error: "limit and cursor need a list section" } : {};
+  if (section === "needsYou") return paged ? { error: "needsYou is not paged" } : { section };
+  const listSection = INBOX_LIST_SECTIONS.find((s) => s === section);
+  if (listSection === undefined) return { error: `section must be one of needsYou, ${INBOX_LIST_SECTIONS.join(", ")}` };
+  const page = readPageRequest(params, 100, 500);
+  return "error" in page ? page : { section: listSection, page };
 }
 
 // ── W1-T4088: the inbox as threads ─────────────────────────────────────────────────────────────
