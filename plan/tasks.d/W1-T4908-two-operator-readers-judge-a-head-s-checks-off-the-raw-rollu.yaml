@@ -1,0 +1,67 @@
+# PROVISIONAL draft 3b (research 3, superseded reds). The id below is provisional and will be renumbered centrally.
+# depends_on names the provisional record 3a (PROVISIONAL-3a-pre-strike-guard.yaml, provisional id W1-T4902); renumber it with 3a.
+# Validated with `rmd lint-plan --base origin/main --merge-base` in a throwaway worktree: 0 failing, advisory warnings only.
+- id: W1-T4908
+  title: "TWO OPERATOR READERS JUDGE A HEAD'S CHECKS OFF THE RAW ROLLUP AND NOTHING NAMES A SUPERSEDED RED -- the SRE rerun runbook's failedCi and the task case file read every historical run of a check name, and rmd board drops a superseded red silently; one helper returns the latest attempt per name plus the superseded ones, and all three use it"
+  repo: remudero
+  depends_on: ["W1-T4902"]
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "research 2026-09-30 (superseded reds): sweep, pr-board, main-health and the poll loops already dedupe (W1-T457, W1-T4729); these two readers and the board's silence are what is left"
+  plan_refs: ["W1-T457", "W1-T3685", "W1-T4729", "W1-T4902"]
+  files:
+    - src/lib/sweep.ts
+    - src/lib/pr-board.ts
+    - src/lib/sre-runbooks.ts
+    - src/lib/report-commands.ts
+  status: merged
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30. Four readers judge a head's checks; every other fleet reader goes through
+    dedupeRollupByLatestAttempt. (1) sre-runbooks.ts daemonSreRunbookHost.failedCi filters the raw
+    PR-view statusCheckRollup for conclusion === "FAILURE" with no dedupe, and its
+    rerun-failed-ci-once runbook re-runs the JOB ids of whatever it finds, so a superseded failure
+    is re-run and its verify (jobIds.length === 0) can never pass while the old run is listed.
+    (2) report-commands.ts parseCasePrSnapshot flattens the raw rollup and task-case-file.ts `check()`
+    answers "duplicate-check-context" for any name that ran twice, so a re-run acceptance-author-gate
+    or ci-gate reads as an unresolved duplicate instead of its latest verdict. (3) pr-board.ts
+    namedChecksWhere dedupes correctly but discards what it dropped, so an operator cannot see WHY a
+    PR that a raw listing shows red is not in failingChecks. Population: of 200 recent PR final heads,
+    55 looked red on the raw check-run list; 25 of those (45%) had ONLY superseded reds, and all 14
+    red-looking MERGED heads were superseded-only. Multi-run names by check: head-identity-gate 21
+    heads, acceptance-author-gate 13, ci-gate 8, proof-discrimination 5, commitlint 4. Positive
+    control: #7793 d450e4820 lists acceptance-author-gate failure (id 109400074596) beside success
+    (id 109443317882) and ci-gate failure (109402357080) beside success (109443368244); the dedupe
+    keeps both successes. NOT MEASURED: whether GitHub's GraphQL statusCheckRollup, which these three
+    readers consume, already collapses a rerun (GraphQL is refused from a research session); the repo's
+    own tests assume it does not.
+  design: |
+    Add ONE pure export beside dedupeRollupByLatestAttempt in sweep.ts, classifyRollupSupersession(rollup),
+    returning { latest, superseded } where `latest` is exactly dedupeRollupByLatestAttempt's output and
+    `superseded` lists each dropped entry whose state is a REQUIRED_CHECK_FAIL conclusion, tagged with the
+    latest attempt that outranks it. A rerun whose latest attempt is queued or in progress is NOT hidden:
+    it stays in `latest` as pending and its earlier failure is listed under `superseded` with
+    pendingRerun: true, never presented as resolved. failedCi, parseCasePrSnapshot and summarizeRow read
+    `latest`; the board prints `superseded` as a trailing "superseded: <name>" note. Same-name concurrent
+    runs resolve by the existing (startedAt, checkRunId) order, unchanged. Matrix names such as
+    "coverage-shard (3/8)" are distinct keys, unchanged. The tests live in a new
+    test/superseded-reds-shared-reader.test.ts.
+  acceptance:
+    - claim: "an older failure with a later success of the same name is reported superseded, and the latest is the success"
+      proof: "unit test: an older failure outvoted by a later success is classified superseded"
+    - claim: "a later attempt still in progress does not hide the earlier failure"
+      proof: "unit test: a rerun in progress leaves the earlier failure listed as a pending rerun"
+    - claim: "the SRE failedCi reader ignores a superseded failure when choosing jobs to re-run"
+      proof: "unit test: the sre failedCi reader names no job for a superseded failure"
+    - claim: "the case file resolves a re-run check to its latest verdict instead of a duplicate context"
+      proof: "unit test: the case file resolves a re-run check to its latest verdict"
+    - claim: "the board names a superseded red instead of dropping it silently"
+      proof: "unit test: the board names a superseded red beside the failing checks"
+  falsifier: |
+    CLOSE IF GraphQL statusCheckRollup is shown to return one entry per check name (a captured live
+    response for a head with a re-run check), which would make readers (1) and (2) already correct.

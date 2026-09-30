@@ -171,7 +171,7 @@ test("W1-T1015: inverting the attribution fails the foreign-push control", async
   const mutantSourceForLoader = mutatedSrc.replace(
     /from "\.\/([^\"]+)\.js"/g,
     (_m, name: string) => `from "${join(process.cwd(), "src", name)}.js"`,
-  );
+  ).replace(/from "\.\.\/([^\"]+\.mjs)"/g, (_m, name: string) => `from "${join(process.cwd(), name)}"`);
   const mutantPath = writeMutantModule("run-task.ts", mutantSourceForLoader);
   const mutant = (await import(mutantPath)) as typeof import("../src/run-task.js");
   const ledger = [

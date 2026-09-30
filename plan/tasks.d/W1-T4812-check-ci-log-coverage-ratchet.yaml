@@ -1,0 +1,19 @@
+- id: W1-T4812
+  title: "THE CI FRICTION GARDENER'S COSTLIEST UNTRACKED CAUSE — check:ci-log:coverage-ratchet cost 1878.9 PR minute(s) across 453 round(s) on 288 pull request(s), and nothing tracks it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: blocked
+  retirement: withdrawn
+  # plan gardener: merge W1-T4812 into W1-T4810 — Its title and files repeat an older queued task.
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:coverage-ratchet"
+  files:
+    - docs/ci-friction-remedies.md
+  acceptance:
+    - claim: "the check:ci-log:coverage-ratchet cause of PR friction has a recorded remedy"
+      proof: "grep: ci-friction:check:ci-log:coverage-ratchet in docs/ci-friction-remedies.md"
+  note: "Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. check:ci-log:coverage-ratchet priced at 1878.9 PR minute(s) across 453 round(s) on 288 pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in docs/ci-friction-remedies.md naming \"ci-friction:check:ci-log:coverage-ratchet\" once it lands."

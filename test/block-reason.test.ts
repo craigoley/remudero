@@ -60,8 +60,8 @@ test("verdictFailureClass: every failure verdict classifies strike (fail-closed)
   for (const v of verdicts) assert.equal(verdictFailureClass(v), "strike", v);
 });
 
-test("verdictFailureClass: task_already_merged (W1-T319) ALSO classifies transient -- a pre-spawn merged refusal is never a strike", () => {
-  assert.equal(verdictFailureClass("task_already_merged"), "transient");
+test("verdictFailureClass: task_already_merged is done, not a retryable failure", () => {
+  assert.equal(verdictFailureClass("task_already_merged"), "done");
 });
 
 test("reasonAboutBlock: awaiting_merge is a non-failure disposition, not a strike or retry", () => {
@@ -69,7 +69,12 @@ test("reasonAboutBlock: awaiting_merge is a non-failure disposition, not a strik
   assert.deepEqual(disposition, { kind: "awaiting_merge" });
 });
 
-test("reasonAboutBlock: a task_already_merged verdict retries (no strike, no halt+escalate) -- it only ever reaches here via the pick-then-merge race, and the task IS merged", () => {
+test("reasonAboutBlock: a freshness hand-off waits on its PR without a strike or retry", () => {
+  const disposition = reasonAboutBlock(plan(), "A", "handed_off", INITIAL_RETRY_STATE);
+  assert.deepEqual(disposition, { kind: "awaiting_merge" });
+});
+
+test("reasonAboutBlock: a task_already_merged verdict is terminal despite a dependent", () => {
   const plan = loadPlanFromYaml([
     "- id: A",
     "  title: a",
@@ -84,7 +89,7 @@ test("reasonAboutBlock: a task_already_merged verdict retries (no strike, no hal
     "",
   ].join("\n"), "fixture");
   const disposition = reasonAboutBlock(plan, "A", "task_already_merged", INITIAL_RETRY_STATE);
-  assert.equal(disposition.kind, "retry_transient");
+  assert.equal(disposition.kind, "already_merged");
 });
 
 // ── acceptance #1: TRANSIENT retries, no strike ─────────────────────────────

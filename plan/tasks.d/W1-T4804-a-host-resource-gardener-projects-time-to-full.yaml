@@ -1,0 +1,102 @@
+- id: W1-T4804
+  title: "HOST DISK, SWAP AND INODES ARE SEEN ONLY AFTER THEY RUN OUT — the Mac hit ENOSPC on 2026-09-24 and each host's janitor logs its result to a file nobody reads; track per-host trends from the heartbeat and the janitor logs, project time-to-full, act and escalate in tiers before space runs out, and attribute the growth to its consumer"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "operator direction 2026-09-29 (closing the self-improvement loop): fold the host janitors into observable fleet health"
+  plan_refs: [W1-T4770, W1-T2767, W1-T3528, W1-T4385]
+  files:
+    - scripts/fleet-heartbeat.sh
+    - src/lib/host-resource-gardener.ts
+    - src/run-task.ts
+    - test/host-resource-gardener.test.ts
+    - test/fleet-heartbeat.test.ts
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-29 (read-only):
+    (1) The Azure host runs ~/rmd-host-cleanup.sh from cron every 6 h and logs to
+        ~/host-cleanup.log, e.g. `rmd-host-cleanup: / 57% -> 57% (-4 MB reclaimed this pass)`,
+        plus `WATCH:` lines naming large consumers (Codex's thread_history_1.sqlite at 2,398 MB).
+        W1-T4770 brings the script and its crontab into deploy/. Swap 855 MB used of 28 GB;
+        root inodes 10% used.
+    (2) The Mac mini runs /Users/Shared/remudero-mac-janitor.sh every 4 h from the crontab of
+        two accounts, each appending to /tmp/remudero-janitor-<user>.log a line like
+        `janitor (<user>): freed ~0 GB; free space 25 GB -> 10 GB`. Free space fell from 25 GB
+        to 10 GB within the log's life while each pass freed about 0. Swap: 5.3 GB used of 7 GB.
+        The Mac hit ENOSPC on 2026-09-24, which halted every tool.
+    (3) scripts/fleet-heartbeat.sh already publishes, per host, `root_fs_free_kb`,
+        `state_fs_free_kb` and `disk_min_free_kb` (W1-T2767) on the heartbeat-<host> branches,
+        readable off-host. Each branch is ONE force-pushed commit, so no history exists: a trend
+        cannot be read from it. It reports no swap, no inodes, no total size and no janitor
+        result. The heartbeat-mini tip is dated 2026-09-09, so the Mac's beat has been silent for
+        20 days, and the fleet-heartbeat-watch issue it should raise did not stop it.
+    (4) `readDiskFreeBytes` (daemon-health.ts) and the reclaim rungs (disk-artifact-reclaim.ts,
+        W1-T3528) act on the daemon's in-container view only; the heartbeat's own header records
+        that the container cannot see the host root that filled on 2026-09-02.
+    Nothing projects when a disk will fill, so every response so far came after it filled.
+  design: |
+    (i) scripts/fleet-heartbeat.sh, staying plain bash: publish `swap_used_kb`, `swap_total_kb`
+    (Linux /proc/meminfo; macOS `sysctl vm.swapusage`), `root_fs_total_kb`,
+    `root_fs_inodes_free`, and the latest janitor result, read from the log paths named in
+    `RMD_JANITOR_LOGS` (default: the two paths above): its timestamp, before, after and freed,
+    or `unknown` when the line does not parse (never 0). Every new field is `unknown` rather
+    than invented when unreadable, like the existing ones.
+    (ii) src/lib/host-resource-gardener.ts, its own-timer loop beside the other gardens. Each
+    pass it reads every `heartbeat-*` branch's latest payload (one `git fetch` of those refs;
+    no REST) and appends a sample to `state/host-resource-samples.ndjson` when `beat_ts` is new.
+    That gives one daemon a history of every host. Samples age out by time, not count.
+    (iii) Per host and device: a robust slope (Theil-Sen) of free space over a window scaled to
+    the series' own volatility, and a projected time-to-full. The same for swap and inodes. A
+    janitor pass that freed nothing while the slope stays negative is itself a finding.
+    (iv) Tiers, relative to that host's own janitor cadence and never a fixed floor: a
+    projection comfortably beyond the next few janitor passes records only;
+    `host_resource.projected` when the projection falls inside the next few passes, handing an
+    `incident#host-resource:<host>:<device>` to the SRE lane's existing path (sre-lane.ts,
+    `captureFeedback`) so its allowlisted runbooks meet it first; and an escalation through
+    escalate.ts (`headDedup: "independent"`, once per episode) when the projection falls inside
+    one janitor pass, or when the heartbeat itself has gone stale while the last samples were
+    falling.
+    (v) Attribution: the heartbeat reports sizes (`du -sk`, every Nth beat, cheap) of the known
+    consumers: the worktrees root, the state dir, the docker root on Linux, the session scratch
+    roots, the agent transcript dirs and the npm cache. The gardener attributes a fall to the
+    consumer whose growth explains the most of it. When one consumer keeps growing and no janitor
+    rule reaps it, the gardener files ONE plan task through `renderMachineShard`
+    (machine-filing.ts), plan-only, origin `host-resource:<host>:<consumer>`. The task is judged
+    by that consumer's growth rate afterwards.
+    (vi) Wire it in src/run-task.ts's `gardens` list. Off switch: `state/HOST_RESOURCE_OFF`.
+    COORDINATION WITH W1-T4770: that task owns deploy/rmd-host-cleanup.sh, its crontab entry and
+    the installer. This task never edits the janitor scripts or their schedules. It only reads
+    their log lines, through (i). Versioning the Mac janitor is the same gap on the other host and
+    is NOT in this task's scope.
+  acceptance:
+    - claim: "the heartbeat publishes swap, inode and janitor fields and writes unknown rather than zero when unreadable"
+      proof: 'grep: test("W1-T4804: the heartbeat publishes swap inode and janitor fields or unknown" in test/fleet-heartbeat.test.ts'
+    - claim: "each host's samples accumulate from its heartbeat branch only when the beat is new"
+      proof: 'grep: test("W1-T4804: a heartbeat sample is appended only for a new beat" in test/host-resource-gardener.test.ts'
+    - claim: "a falling series projects a time to full and an outlier sample does not move it"
+      proof: 'grep: test("W1-T4804: a falling series projects time to full robust to an outlier" in test/host-resource-gardener.test.ts'
+    - claim: "the response tier follows the projection relative to the host's own janitor cadence"
+      proof: 'grep: test("W1-T4804: the tier follows the projection relative to janitor cadence" in test/host-resource-gardener.test.ts'
+    - claim: "growth is attributed to the consumer that explains it and a persistent grower is filed once"
+      proof: 'grep: test("W1-T4804: a persistent consumer is attributed and filed once" in test/host-resource-gardener.test.ts'
+    - claim: "the daemon runs the host-resource gardener"
+      proof: "grep: startHostResourceGardener( in src/run-task.ts"
+  falsifier: |
+    Fit an ordinary least-squares line: the outlier sample moves the projection and that test
+    fails. Tier on a fixed free-GB floor: a slowly filling large disk escalates early and a fast
+    filling small one late, and the cadence test fails. Report an unreadable swap as 0: the
+    heartbeat test fails.
+  note: |
+    Reserved from the operator checkout for branch file/three-new-gardeners-1790707389087.
+    Scope-time checks 2026-09-29: no run-W1-T4804-* branch; no merged PR carries its trailer.
+    No plan record on origin/main or on any of 213 origin heads projects time-to-full or reads
+    the janitor logs. W1-T4770 (the Azure janitor into deploy/) is queued on main and is
+    referenced, not duplicated.
+    Separate item for the operator: the heartbeat-mini branch has not beaten since 2026-09-09.

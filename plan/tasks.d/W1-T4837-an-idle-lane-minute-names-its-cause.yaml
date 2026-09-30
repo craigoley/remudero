@@ -1,0 +1,37 @@
+- id: W1-T4837
+  title: "HALF THE DAY NO TASK IS BUILDING WHILE 225 WAIT — account for every idle build-lane minute by cause, so throughput work is chosen on evidence"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: go with all of these recommended follow ups (throughput, automated flow, self improvement)"
+  note: "reservation hand-off: plan-flow-improve-1790732974000 -> plan-flow-improve-1790732974000"
+  plan_refs: [W1-T4025]
+  files: [src/lib/idle-lane-accounting.ts, src/lib/daemon.ts, test/an-idle-lane-minute-names-its-cause.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 (fleet ledger union, deduplicated, 24 h to 01:40Z): 47 task runs started; mean build concurrency
+    0.60, max 2; 734 of 1,440 minutes had ZERO task builds running while 225 tasks sat queued. The visible holds do not
+    add up to it: dispatch.wip_deferred 35 ticks, daemon.pause 33 (recycles), dispatch.value.refused 63,
+    dispatch.lifetime_pressure 282 (advisory only: W1-T4809 and W1-T4817 were built while flagged). The newest
+    daemon.idle_reasons row listed every blocking category at zero. Nothing today says why a lane is empty.
+  design: |
+    (i) accountIdleLaneMinutes (new module) attributes each minute a lane is empty while a dispatchable task exists to
+    exactly one cause (wip limit, pause, value refusal, claim race, capacity/headroom, selection found nothing, unknown)
+    and the daemon writes one lane.idle_summary row per hour. "unknown" is itself reported, never folded into another.
+    (ii) The summary is readable by `rmd status` so the next throughput fix is chosen on the largest cause.
+  acceptance:
+    - claim: "an empty lane with a dispatchable task names one cause"
+      proof: 'grep: test("W1-T4837: an empty lane with a dispatchable task names one cause" in test/an-idle-lane-minute-names-its-cause.test.ts'
+    - claim: "minutes with no known cause are reported as unknown"
+      proof: 'grep: test("W1-T4837: minutes with no known cause are reported as unknown" in test/an-idle-lane-minute-names-its-cause.test.ts'
+    - claim: "the new module is called from its owner"
+      proof: 'grep: accountIdleLaneMinutes( in src/lib/daemon.ts'
+  falsifier: |
+    Fold unknown into another cause and the second test sees no unknown minutes.

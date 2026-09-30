@@ -1,0 +1,43 @@
+- id: W1-T4691
+  title: "A HALTED TASK CAN NEVER BE RELEASED — the circuit breaker resets only on a new owned PR, which a halted task cannot open, and W1-T2425 deliberately keeps a trip across compaction; six tasks halted by infrastructure refusals on 09-26/27 sit indeterminate forever. Give the operator a recorded release: `rmd release <task> --reason`, a ledger row the breaker reads as a reset"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-29: check in on everything from this thread — halted tasks never resume"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-release-halted-1790690000"
+  plan_refs: [W1-T2425, W1-T4660, W1-T206]
+  files: [src/lib/status.ts, src/run-task.ts, scripts/console-parity-ratchet.mjs, docs/cli-reference.md, docs/operator-guide.md, test/help-renders-a-summary-not-a-paragraph.test.ts, test/an-operator-can-release-a-halted-task.test.ts]
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4691 — Every acceptance proof now holds on main, and did not when it was filed.
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-29 (breaker evaluated with live code 5776a2f28 over the live ledger): W1-T4480, W1-T4559, W1-T4266,
+    W1-T4447, W1-T4407 and W1-T4481 read indeterminate with fresh=0, excluded=0 and a prior of 5-8. Their 09-26/27 runs
+    (blocked_containment / blocked_transient, which W1-T4660 now excludes) were compacted into archives while each task's
+    dispatch.circuit_broken row stayed live and seeds the prior (W1-T2425). W1-T2425's tests deliberately keep a trip across
+    that rotation and forbid the breaker from opening archives ("the breaker still reads the live file alone"), so the
+    only reset left is a new owned pr.opened — which a task the breaker will not dispatch can never produce. Their
+    needs-human issues (#7410, #7377, #7351, #7269, #7268, #7264) offer 'fix and resume' with no mechanism behind it.
+    A read of the archives was tried and rejected on 2026-09-29: it broke three W1-T2425 invariants.
+  design: |
+    (i) `rmd release <task-id> --reason "<text>"` appends one operator row, dispatch.breaker_released {task, reason,
+    released_count}, recording the count it releases.
+    (ii) The breaker treats that row exactly like forward progress: the streak and the seeded prior both reset at it,
+    so the task is dispatchable on the next tick. The row is explicit and attributable; nothing is inferred and no
+    archive is read (W1-T2425's invariants stand).
+    (iii) A release closes the task's circuit-breaker needs-human issue with a pointer to the row.
+    (iv) The console offers the same action on a halted task (console-parity).
+  acceptance:
+    - claim: "a released task is dispatchable on the next tick"
+      proof: 'grep: test("W1-T4691: a released task is dispatchable on the next tick" in test/an-operator-can-release-a-halted-task.test.ts'
+    - claim: "a release is a recorded operator row and never an inference"
+      proof: 'grep: test("W1-T4691: a release is a recorded operator row and never an inference" in test/an-operator-can-release-a-halted-task.test.ts'
+  falsifier: |
+    Ignore the release row and the first test finds the task still indeterminate.

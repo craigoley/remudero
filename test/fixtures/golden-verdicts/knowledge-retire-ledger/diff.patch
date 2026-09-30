@@ -1,0 +1,28 @@
+diff --git a/docs/knowledge-garden-log.md b/docs/knowledge-garden-log.md
+index 139503eda..eec1a345d 100644
+--- a/docs/knowledge-garden-log.md
++++ b/docs/knowledge-garden-log.md
+@@ -39,3 +39,9 @@ Learnings used when offered: 13%. Dangling Why pointers: 0.
+ - retire maxbudget-between-turns: Workers offered it have rarely used it, compared with other learnings.
+ 
+ Learnings used when offered: 12%. Dangling Why pointers: 0.
++
++## Pass 2026-09-28T19:01:48.637Z
++
++- retire ledger-corpus-needs-the-resolver: Workers offered it have rarely used it, compared with other learnings.
++
++Learnings used when offered: 12%. Dangling Why pointers: 0.
+diff --git a/learnings/architecture.yaml b/learnings/architecture.yaml
+index 787655fa2..93452e2c5 100644
+--- a/learnings/architecture.yaml
++++ b/learnings/architecture.yaml
+@@ -144,7 +144,8 @@
+ # ── Measurement traps observed 2026-08-23 (re-derived at 682c5d5a) ──
+ - id: ledger-corpus-needs-the-resolver
+   subsystem: ledger
+-  lifecycle: active
++  # knowledge gardener: retire ledger-corpus-needs-the-resolver
++  lifecycle: superseded
+   files: [ src/lib/ledger-union.ts, src/lib/ledger.ts, src/run-task.ts ]
+   fact: >-
+     A shell glob over state/ledger.*.ndjson.gz names ONE of two rotation forms

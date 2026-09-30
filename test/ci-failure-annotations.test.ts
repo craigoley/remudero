@@ -146,5 +146,5 @@ test("the DEFAULT annotation fetch really shells out — the seam's own implemen
   } finally {
     process.env.PATH = originalPath;
   }
-  assert.deepEqual(shim.calls(), ["api repos/no-such-owner-xyzzy/no-such-repo-xyzzy/check-runs/1/annotations --jq .[].message"], "the default really shelled out, once");
+  assert.deepEqual(shim.calls(), ["api repos/no-such-owner-xyzzy/no-such-repo-xyzzy/check-runs/1/annotations"], "the default really shelled out, once");
 });

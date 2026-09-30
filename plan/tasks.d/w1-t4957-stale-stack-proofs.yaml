@@ -1,0 +1,45 @@
+- id: W1-T4957
+  title: "A RED proof-discrimination CHECK NEVER REACHES THE PROOF-AMENDMENT LANE — the sweep routes it to a ci-log worker that can only edit code, so a stacked child whose parent merged its proofs stays red while the fix lane merges main into it (#8080/#8088, 2026-09-30)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: go with 1 (automate stale proofs on a stacked child PR, no new refusal rule)"
+  note: "reservation hand-off: plan-stale-stack-proofs-1790795466000 -> plan-stale-stack-proofs-1790795466000"
+  plan_refs: [W1-T3306, W1-T4581, W1-T4902]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-red-proof-discrimination-check-reaches-proof-amendment.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-30 (fleet ledger): #8104 merged the read-model worker and views tests at 18:16Z. #8080 and #8088
+    were stacked on it and carried the same tests as proofs, so both went red on proof-discrimination (executed_stale:
+    pass at head AND base). The sweep recorded `proof-discrimination failed on 39737b7 — ci-log fix, strike 1/2` for
+    #8088. repairPrMetadata found "no deterministic acceptance repair" and the red fell through to a ci-log worker,
+    which merged main into the branch twice (18:16Z, 18:49Z) and could never clear it. The existing
+    `proof-discrimination` fix mode (proof-amendment.ts, prompt-render.ts) is reached only from the capped-green
+    REVIEW route (W1-T3306, cappedProofDiscriminationFromLedger); a red proof-discrimination CHECK never reaches it.
+    W1-T4581/#8119 holds a stacked child only while its parent is OPEN — after the parent merges nothing handles it.
+    Both PRs were repaired by hand (body rescope + a fresh push). Shares sweep.ts/run-task.ts with W1-T4902, which
+    drops a superseded red check name before a strike; this task changes which fix MODE a proof red routes to.
+  design: |
+    No new refusal rule: this only reroutes an existing red to an existing lane.
+    1. When a PR's red required checks include proof-discrimination and its log names executed_stale proofs, build
+       the `proofDiscrimination` evidence from that log (the gate prints one proof/verdict/base block per proof) and
+       dispatch the existing proof-discrimination fix mode instead of ci-log. The strike cap is shared as today.
+    2. In that mode, when the PR's diff against origin/main is EMPTY (a parent or sibling already landed it), close
+       the PR as superseded with a comment naming the merged PR(s) whose commits contain its tests, and push nothing.
+       When the diff is non-empty, the amendment rewrites the Acceptance proofs to name only what the diff still
+       adds, then pushes a new event so the gate re-reads the body (a job re-run replays the old payload).
+  acceptance:
+    - claim: "a red proof-discrimination check with stale proofs routes to the proof-amendment fix mode, not ci-log"
+      proof: 'grep: test("W1-T4957: a red proof-discrimination check with stale proofs routes to proof amendment, not ci-log" in test/a-red-proof-discrimination-check-reaches-proof-amendment.test.ts'
+    - claim: "a stale-proof PR with nothing left against main is closed as superseded, naming the merged PR"
+      proof: 'grep: test("W1-T4957: a stale-proof PR with an empty diff against main is closed as superseded" in test/a-red-proof-discrimination-check-reaches-proof-amendment.test.ts'
+  falsifier: |
+    Remove the check-log evidence path and the first test sees fixMode "ci-log"; remove the empty-diff arm and the
+    second sees a worker dispatched instead of a close.

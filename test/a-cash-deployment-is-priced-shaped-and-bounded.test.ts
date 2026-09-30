@@ -5,6 +5,7 @@ import {
   OPENWEIGHT_AWAITING_READINESS,
   OPENWEIGHT_PRICES,
   OPENWEIGHT_TEMPERATURE,
+  selectOpenWeightModel,
 } from "../src/lib/worker-provider.js";
 import { loadMounts } from "../src/lib/mounts.js";
 
@@ -95,4 +96,14 @@ test("terra leads NOTHING — it is the escalation behind luna, never a lane's f
     }
   }
   assert.ok(frontierRows > 0, "the frontier band must exist, or this asserts nothing");
+});
+
+// W1-T3570 bake-off, 2026-09-30: 8 real proposals through the production prompt, lint and relint —
+// gpt-oss-120b 3/8 clean at $0.045, gpt-5-nano 1/8 at $0.051, gpt-6-luna 0/8 (fragment contract).
+test("the inbox-draft lane leads with gpt-oss-120b, the bake-off winner", () => {
+  const mounts = loadMounts(".remudero/mounts.yaml");
+  const lane = mounts.synthesis.inbox_draft;
+  const pick = selectOpenWeightModel(mounts.capabilities, lane.model, lane.effort, 32_000, { ready: () => true });
+  assert.equal(pick.model, "gpt-oss-120b");
+  assert.equal(pick.alternatives[0], "gpt-5-nano");
 });

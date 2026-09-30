@@ -1646,12 +1646,19 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
     ],
   },
   {
+    job: "test-slow-shard",
+    mirrored: false,
+    reason:
+      "W1-T4756 — two GitHub matrix runners split the slow-tier subset of the complete " +
+      "test/**/*.test.ts surface; the local ci entry already runs that full surface, so local " +
+      "parity does not repeat the slow subset",
+  },
+  {
     job: "test-slow",
     mirrored: false,
     reason:
-      "W1-T2904 — runs scripts/test-tier-manifest.json's slow-tier subset, already a SUBSET of the complete " +
-      "test/**/*.test.ts surface the 'ci' entry above runs locally via npm run test:ci; CI requires the split " +
-      "job, while a local dry run gains nothing by re-running part of the complete local surface",
+      "W1-T4756 — stable GitHub-only verdict over both slow-tier matrix shards; the ci entry " +
+      "above runs the complete test/**/*.test.ts surface locally",
   },
   {
     job: "flake-retry-aggregate",

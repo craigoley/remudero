@@ -14,7 +14,7 @@
     - src/lib/self-forecast.ts
     - src/run-task.ts
     - test/a-worker-forecasts-its-own-success.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

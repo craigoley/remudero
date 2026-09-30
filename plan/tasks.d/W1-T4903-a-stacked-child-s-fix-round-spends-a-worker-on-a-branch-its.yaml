@@ -1,0 +1,88 @@
+- id: W1-T4903
+  title: "A STACKED CHILD'S FIX ROUND SPENDS A WORKER ON A BRANCH ITS OPEN PARENT IS ABOUT TO CHANGE — on 2026-09-29 the four PRs of one declared stack each drew their own fix round for the SAME inherited repo-layout census failure and produced four different fixes to one function; hold a fix or conflict round while a declared `Stacked on` parent is still OPEN, and never once that parent is merged or closed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-29: #7830, #7851, #7855 and #7857 each edited shardRelPath in src/lib/machine-filing-judge.ts to clear the same test/repo-layout.test.ts census failure"
+  plan_refs: [W1-T4581, W1-T917, W1-T4803]
+  files:
+    - src/lib/arm-auto-merge.ts
+    - src/lib/sweep.ts
+    - test/stacked-child-fix-hold.test.ts
+  status: merged
+  attempts: 0
+  rationale: |
+    THE STACK WAS DECLARED, SO NO OVERLAP DETECTOR WOULD HAVE HELD IT. All four PR bodies open with
+    `Stacked on #<parent>`; each branch carried every predecessor commit (base `main`, first commit
+    c7ab6ed4 on all four), so a file-overlap pre-flight would have reported an overlap the authors
+    already knew about. What no gate did was stop the SPENDING: the sweep's fix rung reads each
+    child as an independent PR, so the census red that #7830 introduced was fixed once per level.
+    W1-T4581 gates the ARM of a stacked child on its parents (`stackPrerequisiteFromRest`,
+    src/lib/arm-auto-merge.ts) and withdraws an armed child, but consults the stack for ARMED PRs
+    only; a child that is red is fix-dispatched as if it were alone.
+    MEASURED 2026-09-30 (method: REST `pulls?state=closed` plus `pulls/{n}/files` and `/commits` over
+    the 3,253 PRs merged 2026-09-01..09-29; a pair is concurrent when their created..merged
+    intervals intersect; "code path" excludes generated, plan, docs and baseline files; "rare" is a
+    code path touched by at most 2% of that month's merged PRs). 20,564 concurrent pairs; 1,426
+    share a code path but 1,028 of those 1,426 include src/run-task.ts (already an accepted queue,
+    DECISIONS 2026-08-18 run-task ruling); 236 share a RARE code path. Positive control: all six pairs
+    of the #7830-#7857 stack are in the rare set. A PR that shared a rare code path with a sibling
+    that merged during its life carried a conflict-resolution-worded commit in 14 of 165 cases
+    (8.5%; 5.2% with 2026-09-29 excluded) against 69 of 2,198 (3.1%) with no shared code path, so
+    the excess is about nine incidents a month, and six of the fourteen were on 09-29. Fifteen PRs
+    declared a stack in the window and 7 of the 236 rare-overlap pairs were declared stacks. The population this rule acts on is small and its healthy case
+    (a green child) never reaches the fix rung at all.
+    THE FALSIFIER FOR THE HOLD ITSELF: a hold that never releases. The only way a child stays held
+    is a parent that stays OPEN; a parent that is merged or CLOSED unmerged releases it, because
+    `stackPrerequisiteFromRest` reports a closed-unmerged parent as pending and holding on that
+    would strand an orphaned child forever.
+  design: |
+    (i) src/lib/arm-auto-merge.ts: `StackPrerequisiteCheck` gains `openParentNumbers?: number[]`,
+    the subset of `pendingParentNumbers` whose live state read OPEN, set by
+    `stackPrerequisiteFromRest` from the state it already reads. A CLOSED parent stays in
+    `pendingParentNumbers` (the arm gate is unchanged) and is absent from `openParentNumbers`.
+    (ii) src/lib/sweep.ts: an exported pure `stackParentHoldReason(check)` returning a reason
+    only when `check.state === "blocked"` and `openParentNumbers` is non-empty, else undefined.
+    `unstacked`, `ready`, `unreadable` and closed-only-blocked all return undefined.
+    (iii) src/lib/sweep.ts, the fix rung: beside `workerHold` and BEFORE `claimFixDispatch`, and at
+    the conflicted-fix site, read `deps.stackPrerequisite(pr)` (the seam W1-T4581 added; a throw is
+    caught and treated as `unreadable`). A hold sets `acted = false`, `standDownReason` naming the
+    open parents, and `extraDisposedFields.stack_parent_hold` to their numbers; it claims no
+    dispatch key, spends no strike and no worker slot. An `unreadable` read does NOT hold and
+    records `extraDisposedFields.stack_parent_read = "unreadable"` so a read that failed is not
+    indistinguishable from an unstacked PR.
+    (iv) Out of scope by design: no PR is closed, no branch is written, no base is retargeted,
+    and the arm gate of W1-T4581 is untouched.
+  acceptance:
+    - claim: "a red stacked child is held, spends no strike and dispatches no worker while a declared parent is open"
+      proof: 'grep: test("a stacked child fix round is held while a declared parent is open" in test/stacked-child-fix-hold.test.ts'
+    - claim: "the same child dispatches normally once every declared parent reads merged"
+      proof: 'grep: test("a stacked child fix round proceeds once every declared parent is merged" in test/stacked-child-fix-hold.test.ts'
+    - claim: "a child whose parent was closed unmerged is not held forever"
+      proof: 'grep: test("a stacked child is not held by a parent closed without merging" in test/stacked-child-fix-hold.test.ts'
+    - claim: "an unstacked pull request, and a stack read that failed, dispatch as before and the failed read is recorded"
+      proof: 'grep: test("an unstacked pull request and an unreadable stack read dispatch as before" in test/stacked-child-fix-hold.test.ts'
+    - claim: "a merge-conflict round on a stacked child is held by the same open-parent rule"
+      proof: 'grep: test("a stacked child conflict round is held while a declared parent is open" in test/stacked-child-fix-hold.test.ts'
+    - claim: "the stack reader reports which pending parents are open"
+      proof: "grep: openParentNumbers in src/lib/arm-auto-merge.ts"
+    - claim: "the sweep fix rung consults the open-parent hold"
+      proof: "grep: stackParentHoldReason( in src/lib/sweep.ts"
+  falsifier: |
+    Hold on `pendingParentNumbers` instead of `openParentNumbers` and the closed-unmerged test
+    fails (the child is stranded). Drop the try/catch around the stack read and one unreadable
+    parent takes the whole sweep pass down. Hold after `claimFixDispatch` and the claim leaks, the
+    failure W1-T4004's ordering comment records.
+  note: |
+    DRAFT from research/1-stacked-pr-overlap.md, not yet reserved from the operator checkout.
+    Provisional id from `rmd next-task-id --offline`, a floor and not a guarantee. Rejected
+    alternatives, with evidence, are in that file: a generic dispatch-time file-overlap hold over
+    open PR heads fires on the healthy condition (1,028 of 1,426 concurrent shared-code pairs include
+    src/run-task.ts), and W1-T4803's `conflicted_files` is the measurement that decides whether a
+    restack arm is ever worth building.

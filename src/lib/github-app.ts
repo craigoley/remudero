@@ -45,10 +45,12 @@ export const GH_APP_PRIVATE_KEY_PATH_ENV = "GH_APP_PRIVATE_KEY_PATH";
 /** GitHub's own contract: an installation access token is valid for exactly one hour. */
 export const INSTALLATION_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
 
-/** How long before expiry to refresh — strictly inside the token's one-hour life, never at or
- *  past the edge. Five minutes leaves ample time for any single `gh`/`git` call, and doubles as
- *  the bounded retry cadence before the loop has a retained expiry to protect. */
-export const REFRESH_MARGIN_MS = 5 * 60 * 1000;
+/** Twenty minutes leaves room for the observed renewal delay on 2026-09-28 and several
+ *  bounded exchanges before the one-hour token expires. */
+export const REFRESH_MARGIN_MS = 20 * 60 * 1000;
+
+/** Retry a failed exchange independently of the earlier healthy refresh margin. */
+export const REFRESH_FAILURE_RETRY_MS = 2 * 60 * 1000;
 
 /** Slack so a failure retry is not scheduled exactly at the last bounded-exchange millisecond. */
 const REFRESH_FAILURE_RETRY_GUARD_MS = 1000;
@@ -420,10 +422,10 @@ export function nextRefreshDelayMs(expiresAtMs: number, now: number = Date.now()
 
 function nextFailedRefreshDelayMs(expiresAtMs: number | undefined, now: number): number {
   if (expiresAtMs === undefined) {
-    return REFRESH_MARGIN_MS;
+    return REFRESH_FAILURE_RETRY_MS;
   }
   const latestSafeStart = expiresAtMs - EXCHANGE_TIMEOUT_MS - REFRESH_FAILURE_RETRY_GUARD_MS;
-  return Math.max(0, Math.min(REFRESH_MARGIN_MS, latestSafeStart - now));
+  return Math.max(0, Math.min(REFRESH_FAILURE_RETRY_MS, latestSafeStart - now));
 }
 
 /**

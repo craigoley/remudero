@@ -10,7 +10,8 @@
   files: [src/lib/serve.ts, test/an-escalation-renders-once.test.ts]
   origin: "operator-session#console-ia-2026-09-08"
   plan_refs: ["W1-T3186", "W1-T3183", "W1-T153"]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     OBSERVED 2026-09-08 against the live console at `ec3c69d9a`, and provable from the source alone.
@@ -74,6 +75,26 @@
     DO NOT satisfy this by keeping both renders and merely hiding one with CSS. A hidden duplicate
     is still in the accessibility tree, still in the count, and still divergent.
   note: |
+    RETIRED 2026-09-29 — THE DEFECT NO LONGER EXISTS BECAUSE THE SURFACE IT DESCRIBES WAS DELETED.
+    #7313 (W1-T4563, 2026-09-26) retired the daemon's in-process console: `GET /` in
+    src/lib/serve.ts now answers a one-line JSON pointer to app.remudero.com, and the 4,108-line
+    client shell that rendered NEEDS ME and the Mailbox went with it. `buildMailboxThreads`,
+    `renderNeedsMe`, `mailboxState` and the localStorage Open/Resolve path have no occurrence under
+    src/ or apps/. `Mark handled` survives only as the server endpoint
+    POST /v1/escalation/mark-handled (src/lib/panel-actions.ts).
+
+    HOW THIS WAS FOUND, AND WHY NO BUILD FOLLOWED. A hand build of this task on 2026-09-29 read the
+    current source first and stopped: all four acceptance proofs name
+    test/an-escalation-renders-once.test.ts, which was never created, and writing them would have
+    meant inventing a renderer to test. The criteria are PRESERVED UNCHANGED — this record is
+    retired, not satisfied, and no proof was edited to fit.
+
+    NOT DECIDED HERE. Whether app.remudero.com (the separate remudero-console repository) still
+    renders one escalation in two places was not checked. If it does, that is a new filing against
+    that repository, not a reopening of this one.
+
+    RULING: operator (craigoley), 2026-09-29. Nothing depends on this task, so no edge is stranded.
+
     Rule 25 CHECKED: `src/lib/serve.ts` is ordinary src.
     THIS IS A CORRECTNESS DEFECT, NOT A TASTE ONE, which is why it is `verify: auto` while its
     parent ruling is `verify: human`. "One item renders once" and "a disposition persists" are both

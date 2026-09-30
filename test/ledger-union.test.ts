@@ -286,6 +286,29 @@ test("readLedgerUnionRecordsSync degrades to whatever rotations already supplied
   }
 });
 
+test("W1-T4767: a strict union read reports a live-file read failure", () => {
+  const dir = tmpStateDir();
+  try {
+    writeFileSync(join(dir, "ledger.2026-01-01T00-00-00-000Z.ndjson"), row("rotation") + "\n");
+    writeFileSync(join(dir, LEDGER_FILENAME), row("live") + "\n");
+    const fsDeps: LedgerGrepFsDeps = {
+      readdirSync: (d) => readdirSync(d),
+      existsSync: (p) => existsSync(p),
+      readFileSync: (p) => {
+        if (p.endsWith(LEDGER_FILENAME)) throw new Error("simulated unreadable live file");
+        return readFileSync(p);
+      },
+      gunzipSync: (buf) => gunzipSync(buf),
+    };
+    const result = readLedgerUnionRecordsSync(dir, { requireArchives: true, refuseIncomplete: true }, fsDeps);
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.unread, [join(dir, LEDGER_FILENAME)]);
+    assert.deepEqual(result.rows, [], "partial rotations are not a measured complete corpus");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a rotation window reads by the newest rotation's stamp and never guesses an unstamped archive old", () => {
   const dir = tmpStateDir();
   try {

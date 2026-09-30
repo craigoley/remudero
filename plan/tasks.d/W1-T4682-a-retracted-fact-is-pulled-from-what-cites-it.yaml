@@ -1,0 +1,33 @@
+- id: W1-T4682
+  title: "A REVERTED OR RETIRED FACT LIVES ON IN THE SKILLS AND DOCTRINE THAT CITE IT — every derived artifact records what it rests on (learning, run and PR ids) and the gardener stages a repair when any cited id is superseded, quarantined or reverted"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-memory-1790600000"
+  plan_refs: [W1-T4338]
+  files: [src/lib/knowledge-gardener.ts, test/a-retracted-fact-is-pulled-from-what-cites-it.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED: learnings have lifecycle states and reverted-PR recall (src/lib/learnings.ts ~1344), but skills, doctrine
+    evidence and narratives record no dependencies — only 5 files cite learnings#; skill-workshop.ts never checks for reverted
+    evidence runs. Hindsight's retractions.py flags documents citing a fact that no longer exists and quotes the dead text back
+    (engine/reflect/retractions.py).
+  design: |
+    (i) Approved skills and doctrine bodies list their cited learning / run / PR ids.
+    (ii) The gardener flags any cited id that is superseded, quarantined, contested or reverted and stages a repair proposal.
+    (iii) First: a one-off count of approved-skill evidence PRs later reverted.
+  acceptance:
+    - claim: "a skill citing a reverted run gets a repair proposal"
+      proof: 'grep: test("W1-T4682: a skill citing a reverted run gets a repair proposal" in test/a-retracted-fact-is-pulled-from-what-cites-it.test.ts'
+    - claim: "a skill whose citations are all live gets none"
+      proof: 'grep: test("W1-T4682: a skill whose citations are all live gets none" in test/a-retracted-fact-is-pulled-from-what-cites-it.test.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

@@ -185,8 +185,9 @@ export interface Mounts {
   judge: Mount;
   /** OPTIONAL (W1-T3614) — the escalation judge's own mount, so that zero-tool lane can carry a `provider`; absent = {@link resolveRiskJudgeMount}'s cell. NOT `judge`, which G-17 binds. */
   escalation_judge?: Mount;
-  /** OPTIONAL — same shape and reason as {@link Mounts.escalation_judge}, for the verify-human judge. */
+  /** OPTIONAL — same shape and reason as {@link Mounts.escalation_judge}, for the verify-human judge and (below) the machine-filing judge. */
   verify_human_judge?: Mount;
+  machine_filing_judge?: Mount;
   /** OPTIONAL — a task's last attempt after the worker tier failed it; must stay below the Architect. */
   step_up?: Mount;
   synthesis: Record<SynthesisRole, Mount>; // the three synthesis rungs' OWN mounts (W1-T2559) — never the Architect's; REQUIRED
@@ -619,6 +620,8 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     raw.escalation_judge === undefined ? undefined : parseMount(raw.escalation_judge, "escalation_judge", tiers, efforts);
   const verifyHumanJudge =
     raw.verify_human_judge === undefined ? undefined : parseMount(raw.verify_human_judge, "verify_human_judge", tiers, efforts);
+  const machineFilingJudge =
+    raw.machine_filing_judge === undefined ? undefined : parseMount(raw.machine_filing_judge, "machine_filing_judge", tiers, efforts);
   const stepUp = raw.step_up === undefined ? undefined : parseMount(raw.step_up, "step_up", tiers, efforts);
 
   // W1-T2559: synthesis rungs — each REQUIRED, validated like architect/judge, never a fallback.
@@ -644,7 +647,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     }
   }
 
-  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), ...(stepUp ? { step_up: stepUp } : {}), synthesis, routes };
+  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), ...(machineFilingJudge ? { machine_filing_judge: machineFilingJudge } : {}), ...(stepUp ? { step_up: stepUp } : {}), synthesis, routes };
   // G-17 FIRST: checking the step-up ahead of it MASKED the Tier Invariant's own message, so a
   // table violating G-17 reported the step-up's refusal instead. Both fire; only the order moved.
   enforceTierInvariant(mounts, opts.thinkingDefault);
@@ -675,6 +678,7 @@ function enforceSubscriptionOnly(m: Mounts): void {
     ["judge", m.judge],
     ["escalation_judge", m.escalation_judge],
     ["verify_human_judge", m.verify_human_judge],
+    ["machine_filing_judge", m.machine_filing_judge],
     ["step_up", m.step_up],
     ...Object.entries(m.synthesis).map(([role, mount]): [string, Mount] => [`synthesis.${role}`, mount]),
     ...Object.entries(m.routes).flatMap(([type, byRisk]) =>

@@ -50,7 +50,7 @@ const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "main-tripwire.yml
 type WorkflowJob = {
   name?: string;
   "timeout-minutes"?: number;
-  steps?: Array<{ name?: string; run?: string }>;
+  steps?: Array<{ name?: string; run?: string; env?: Record<string, string> }>;
 };
 
 type WorkflowDoc = {
@@ -178,8 +178,8 @@ test("W1-T4472: the selection step always includes every touched test file and f
   );
   assert.match(
     body,
-    /suites\.add\(f\)/,
-    "touched test files must be unioned into whatever the selector chose — always included",
+    /tripwire-touched\.txt/,
+    "touched test files must be written to their own list — always run, and run first",
   );
   assert.match(
     body,
@@ -200,8 +200,8 @@ const OWNER = "o";
 const REPO = "r";
 const SHA = "4472".padEnd(40, "0");
 
-type CheckRun = { name: string; status: "completed" | "in_progress"; conclusion?: "success" | "failure" };
-const done = (name: string, conclusion: "success" | "failure"): CheckRun => ({ name, status: "completed", conclusion });
+type CheckRun = { name: string; status: "completed" | "in_progress"; conclusion?: "success" | "failure" | "cancelled" | "timed_out" };
+const done = (name: string, conclusion: "success" | "failure" | "cancelled" | "timed_out"): CheckRun => ({ name, status: "completed", conclusion });
 const pending = (name: string): CheckRun => ({ name, status: "in_progress" });
 
 function fixture(checkRuns: CheckRun[], overrides: Partial<MainHealthRungDeps> = {}) {
@@ -305,4 +305,33 @@ test("withTripwireOverride: pure — never downgrades on a green or absent tripw
   const rollupAbsent: RollupCheckEntry[] = [{ name: "ci", status: "completed", conclusion: "in_progress" }];
   const baseAbsent = mainHealthFromRollup(SHA, rollupAbsent, new Set(["ci"]));
   assert.deepEqual(withTripwireOverride(baseAbsent, rollupAbsent), baseAbsent, "an absent tripwire must change nothing");
+});
+
+test("a tripwire cancelled at its job timeout is no evidence that main is red", async () => {
+  for (const conclusion of ["cancelled", "timed_out"] as const) {
+    const { created, observed } = await fixture([pending("ci"), pending("coverage-ratchet"), done(MAIN_TRIPWIRE_CHECK_NAME, conclusion)]).run();
+    assert.equal(observed?.state, "undetermined", `a ${conclusion} tripwire must leave main undetermined, not red`);
+    assert.equal(created.length, 0, `a ${conclusion} tripwire must not escalate a red main`);
+  }
+});
+
+test("the tripwire runs the touched files first and reports an exhausted budget as neutral, not a timeout", () => {
+  const doc = loadWorkflow();
+  const runStep = (doc.jobs["main-tripwire"]!.steps ?? []).find((s) => s.run?.includes("tripwire-suites.txt") && s.run?.includes("timeout"));
+  assert.ok(runStep?.run, "expected the run step to bound the selected suites with timeout");
+  const body = runStep!.run!;
+  assert.ok(body.indexOf("run_list tripwire-touched.txt") < body.indexOf("run_list tripwire-suites.txt"), "touched files run before the rest");
+  assert.match(body, /"\$CODE" -eq 124[\s\S]*?exit 0/, "an exhausted budget exits 0 with a notice, never a job timeout");
+  const budget = Number(runStep!.env?.TRIPWIRE_BUDGET_S);
+  const jobTimeoutS = Number(doc.jobs["main-tripwire"]!["timeout-minutes"]) * 60;
+  assert.ok(budget > 0 && budget < jobTimeoutS - 120, "the budget ends well inside the job timeout, leaving room for setup");
+});
+
+test("the tripwire installs Chromium the way the ci job does, before any suite runs", () => {
+  const steps = loadWorkflow().jobs["main-tripwire"]!.steps ?? [];
+  const install = steps.findIndex((s) => s.run?.trim() === "npx playwright install chromium");
+  const firstRun = steps.findIndex((s) => s.run?.includes("run_list tripwire-touched.txt"));
+  assert.ok(install >= 0, "a touched browser suite (e.g. workflow-playwright-install) failed here on 2026-09-29 for want of Chromium");
+  assert.ok(install < firstRun, "Chromium is installed before the touched files run");
+  assert.ok(!steps[install]!.run!.includes("--with-deps"), "the same no-apt install ci.yml uses");
 });

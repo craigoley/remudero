@@ -15,6 +15,9 @@
  * INVARIANT: an absent injected predicate means "no opinion", never a false offense.
  * INVARIANT: a `grep-path-absent` candidate whose symbol is found at another declared path is
  * RELOCATED, not reported as absent — see {@link ProofQueueAuditReport.relocated}.
+ * INVARIANT: {@link ProofQueueAuditReport.resolvedFully} is where to LOOK, never a verdict: an open task with
+ * at least one executable proof, all of which resolve here. Prose, `demonstration:`, `verify: human` and
+ * retired tasks never appear. A task made moot by a refactor is invisible: its proof file never existed.
  * FALSIFIER: test/proof-queue-audit.test.ts, test/credited-task-proof-visibility.test.ts.
  */
 // Why: full design history and the W1-T229/W1-T2280/W1-T2477 incidents — docs/forensics/proof-queue-audit.md#module-header.
@@ -37,17 +40,15 @@ export type ProofQueueAuditCause =
   | "grep-path-absent"
   | "credited-test-path-absent";
 
-/** Every cause this module knows how to name, in report order. Fixed at three entries: the
- *  default open+unmerged report must render byte-identically to before `credited-test-path-absent`
- *  existed (W1-T2280 note v). A credited-pass caller renders {@link CREDITED_PROOF_QUEUE_AUDIT_CAUSES}. */
+/** Every cause the default report renders, in order. Three entries so it stays byte-identical to before
+ *  `credited-test-path-absent` existed (W1-T2280 note v); the credited pass renders the four-entry list. */
 export const PROOF_QUEUE_AUDIT_CAUSES: readonly ProofQueueAuditCause[] = [
   "refused-parse",
   "name-filtered-zero-match",
   "grep-path-absent",
 ];
 
-/** All four causes, for a caller auditing the CREDITED population (W1-T2280) — never used by the
- *  default open+unmerged report. */
+/** All four causes, for the CREDITED population only (W1-T2280). */
 export const CREDITED_PROOF_QUEUE_AUDIT_CAUSES: readonly ProofQueueAuditCause[] = [
   ...PROOF_QUEUE_AUDIT_CAUSES,
   "credited-test-path-absent",
@@ -81,6 +82,13 @@ export interface ProofQueueAuditReport {
   /** A `grep-path-absent` candidate whose symbol was found at another path this task itself
    *  declared, so it lives here instead of `offenders`/`byCause` — never both (W1-T2280 note vii). */
   relocated: ProofQueueAuditOffender[];
+  /** Open task ids whose executable proofs ALL resolve here: probably already built, not proven. */
+  resolvedFully?: string[];
+  /** `resolvedFully` with a merge credit: the reconcile lane has not flipped it, or a filing-shaped subject blocks it.
+   *  Set only when `opts.creditedIds` is supplied. */
+  resolvedFullyCredited?: string[];
+  /** `resolvedFully` with NO merge credit: built by other means, or a proof that does not discriminate. */
+  resolvedFullyUncredited?: string[];
 }
 
 export interface ProofQueueAuditOpts {
@@ -98,12 +106,15 @@ export interface ProofQueueAuditOpts {
    *  to? Injected so this module stays pure (no fs, no exec). Absent ⇒ a `grep-path-absent`
    *  candidate is never checked for relocation and is reported as plain absence. */
   symbolFoundAt?: (symbol: string, path: string) => boolean;
+  /** Does the basic-regex `pattern` match a line of `path` at the checkout? `false` covers no match AND an
+   *  unreadable file: either way the task is not named. Absent ⇒ no `grep:` proof counts as resolved. */
+  grepMatches?: (pattern: string, path: string) => boolean;
 }
 
-/** Does this `grep:` criterion's symbol occur at some OTHER path the task itself declared in
- *  `files:`? Reuses {@link proofGrepTargets} (lib/status.ts) rather than re-deriving `task.files`
- *  filtering by hand. Returns the first declared path (other than `excludePath`) the predicate
- *  confirms, or `undefined` when none does. */
+const SETTLED_STATUSES = new Set<Task["status"]>(["blocked", "merged", "done"]);
+
+/** The first path, other than `excludePath`, among this task's own `files:` where the predicate finds
+ *  the `grep:` symbol ({@link proofGrepTargets}, lib/status.ts), or `undefined`. */
 function findRelocatedPath(
   task: Task,
   symbol: string,
@@ -117,18 +128,27 @@ function findRelocatedPath(
   return undefined;
 }
 
-/**
- * Resolve every criterion's proof in `tasks` through the reviewer's own parser and (when
- * supplied) resolver, and report every one that can never resolve for anyone — never a
- * forward reference, which stays legitimate by construction (see the module doc). Pure: the
- * only I/O this function performs is through the two injected predicates above.
- */
+/** Calls an injected predicate; a throw is ignorance (`undefined`), never an offense or a resolution. */
+function ask<A extends unknown[], R>(f: ((...a: A) => R) | undefined, ...a: A): R | undefined {
+  try {
+    return f?.(...a);
+  } catch {
+    // A throw and "no opinion" coincide for every reader here: neither offends nor resolves.
+    return undefined;
+  }
+}
+
+/** Reports every proof in `tasks` that can never resolve (never a forward reference, see the module
+ *  doc) and names the open tasks whose executable proofs all resolve. Pure; a throwing predicate is ignorance. */
 export function proofQueueAudit(tasks: readonly Task[], opts: ProofQueueAuditOpts = {}): ProofQueueAuditReport {
   const offenders: ProofQueueAuditOffender[] = [];
   const relocated: ProofQueueAuditOffender[] = [];
+  const resolvedFully: string[] = [];
   let criterionCount = 0;
   for (const task of tasks) {
     const credited = opts.creditedIds?.has(task.id) ?? false;
+    let executable = 0;
+    let resolved = 0;
     (task.acceptance ?? []).forEach((c, criterionIndex) => {
       if (c.satisfied_by) return; // Architect-only; no proof text to resolve
       const proof = c.proof ?? "";
@@ -138,29 +158,30 @@ export function proofQueueAudit(tasks: readonly Task[], opts: ProofQueueAuditOpt
       const claim = c.claim ?? "";
 
       if (!whitelisted) {
-        // A dialect-prefixed proof that still fails to parse is refused-parse; free prose never
-        // promised execution and is proof-dialect's shape check to own, not this module's.
-        // `demonstration:` is excluded — a legitimate, on-the-record non-execution (W1-T277).
+        // Dialect-prefixed but unparseable is refused-parse; free prose is proof-dialect's to own.
+        // `demonstration:` is a legitimate, on-the-record non-execution (W1-T277).
         if (isDialectPrefixed(trimmed) && !isDemonstrationProof(trimmed)) {
+          executable++;
           offenders.push({ taskId: task.id, criterionIndex, cause: "refused-parse", claim, proof });
         }
         return;
       }
+      executable++;
 
       if (whitelisted.kind === "test") {
-        // A literal path (nameFiltered unset) is the forward-reference shape — legitimate for a
-        // queued task's not-yet-written test. Checked only when the task is credited (W1-T2280),
-        // since a credited task has no forward left to reference.
+        // A literal path is the forward-reference shape; only a credited task has no forward left (W1-T2280).
         if (!whitelisted.nameFiltered) {
-          if (credited && opts.pathExists && !opts.pathExists(whitelisted.label)) {
+          const exists = ask(opts.pathExists, whitelisted.label);
+          if (exists) resolved++;
+          if (credited && exists === false) {
             offenders.push({ taskId: task.id, criterionIndex, cause: "credited-test-path-absent", claim, proof });
           }
           return;
         }
-        if (!opts.resolveNameFilteredCandidates) return; // no predicate, no opinion
-        const resolution = opts.resolveNameFilteredCandidates(whitelisted.label);
-        // Only `absent` is positive evidence of a title matching nothing; `unresolvable` means
-        // the lookup itself could not be trusted and is never read as an offense.
+        const resolution = ask(opts.resolveNameFilteredCandidates, whitelisted.label); // no predicate, no opinion
+        if (!resolution) return;
+        if (resolution.status === "resolved") resolved++;
+        // Only `absent` is evidence of a title matching nothing; `unresolvable` is never an offense.
         if (resolution.status === "absent" && (credited || zeroMatchTitleIsReportable(whitelisted.label))) {
           offenders.push({ taskId: task.id, criterionIndex, cause: "name-filtered-zero-match", claim, proof });
         }
@@ -168,13 +189,19 @@ export function proofQueueAudit(tasks: readonly Task[], opts: ProofQueueAuditOpt
       }
 
       // kind === "grep": args = [flags, "--", pattern, path] (parseDialectGrep, lib/review.ts).
-      if (!opts.pathExists) return; // no predicate, no opinion
       const path = whitelisted.args[1] === "--" ? whitelisted.args[3] : undefined;
       const pattern = whitelisted.args[1] === "--" ? whitelisted.args[2] : undefined;
-      if (path === undefined || opts.pathExists(path)) return;
+      if (path === undefined) return;
+      const exists = ask(opts.pathExists, path);
+      if (exists !== false) {
+        // A plan record quoting its own proof would match itself; a fenced grep carries its own flags.
+        const own = path.startsWith("plan/") || whitelisted.authorSelectedArgv === true;
+        if (exists && !own && pattern !== undefined && ask(opts.grepMatches, pattern, path)) resolved++;
+        return;
+      }
       const relocatedTo =
         opts.symbolFoundAt && pattern !== undefined
-          ? findRelocatedPath(task, pattern, path, opts.symbolFoundAt)
+          ? findRelocatedPath(task, pattern, path, (sym, at) => ask(opts.symbolFoundAt, sym, at) === true)
           : undefined;
       const offender: ProofQueueAuditOffender = { taskId: task.id, criterionIndex, cause: "grep-path-absent", claim, proof };
       if (relocatedTo !== undefined) {
@@ -183,6 +210,8 @@ export function proofQueueAudit(tasks: readonly Task[], opts: ProofQueueAuditOpt
         offenders.push(offender);
       }
     });
+    const open = !SETTLED_STATUSES.has(task.status) && task.verify !== "human" && !task.retirement;
+    if (open && executable > 0 && resolved === executable) resolvedFully.push(task.id);
   }
 
   const byCause: Record<ProofQueueAuditCause, string[]> = {
@@ -194,28 +223,31 @@ export function proofQueueAudit(tasks: readonly Task[], opts: ProofQueueAuditOpt
   for (const o of offenders) {
     if (!byCause[o.cause].includes(o.taskId)) byCause[o.cause].push(o.taskId);
   }
-  return { taskCount: tasks.length, criterionCount, offenders, byCause, relocated };
+  const report: ProofQueueAuditReport = { taskCount: tasks.length, criterionCount, offenders, byCause, relocated, resolvedFully };
+  const creditedIds = opts.creditedIds;
+  if (creditedIds) {
+    report.resolvedFullyCredited = resolvedFully.filter((id) => creditedIds.has(id));
+    report.resolvedFullyUncredited = resolvedFully.filter((id) => !creditedIds.has(id));
+  }
+  return report;
 }
 
 /** One credited task's shard-file coverage fact, as the caller (run-task.ts) resolved it —
  *  never derived here (this module stays pure). See {@link creditedAmendmentVisibility}. */
 export interface CreditedAmendmentFact {
   taskId: string;
-  /** The repo-relative `plan/tasks.d/<id>-<slug>.yaml` this credited task's record lives in, or
-   *  `undefined` when declared inline in the `plan/tasks.yaml` monolith — this signal is blind to
-   *  those (W1-T2280 note ix). */
+  /** This task's `plan/tasks.d/<id>-<slug>.yaml`, or `undefined` when inline in the monolith,
+   *  which this signal cannot see (W1-T2280 note ix). */
   shardPath: string | undefined;
 }
 
 export interface CreditedAmendmentReport {
   /** Credited tasks whose own shard file this signal COULD read. */
   measurable: number;
-  /** Credited tasks declared inline in the monolith — blind to these by construction (note ix);
-   *  printed alongside `measurable` so the coverage gap is visible rather than implied. */
+  /** Credited tasks inline in the monolith, unreadable by construction (note ix); printed beside `measurable`. */
   unmeasurable: number;
-  /** Task ids amended after their own earliest merge credit with no follow-up shard filed in
-   *  that same commit (W1-T2280 rationale (11)/(12)). Does not classify intent (note viii); it
-   *  only reports "changed after credit, nothing filed alongside". */
+  /** Task ids amended after their earliest merge credit with no follow-up shard in that commit
+   *  (W1-T2280 rationale (11)/(12)); intent is not classified (note viii). */
   flagged: string[];
 }
 

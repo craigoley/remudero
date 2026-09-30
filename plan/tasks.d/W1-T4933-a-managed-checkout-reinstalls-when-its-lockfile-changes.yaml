@@ -1,0 +1,70 @@
+- id: W1-T4933
+  title: "A MANAGED CHECKOUT'S CODE MOVES BUT ITS node_modules DOES NOT — the console daemon's repos/remudero-console sat at origin/main with a 2026-09-24 install after a 2026-09-27 lockfile change added @vercel/functions, so every test importing lib/upstream-snapshot.ts failed to load and the reviewer failed six proofs; reinstall every managed checkout (core, console, site) whenever its lockfile hash changes, staged and swapped atomically"
+  repo: remudero
+  depends_on: ["W1-T4356"]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "coordinator measurement 2026-09-30 (console PR #1866 review FAIL); core-console architecture session"
+  plan_refs: ["W1-T4356", "W1-T4193", "W1-T2777", "W1-T3041"]
+  files:
+    - src/lib/staged-install.ts
+    - test/staged-install.test.ts
+    - src/run-task.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 by the coordinator in the container remudero-console-daemon. The managed
+    checkout /home/node/Remudero/repos/remudero-console had its code at origin/main (f49bd57), but
+    its node_modules dated from 2026-09-24. package-lock.json had changed on 2026-09-27 (2bec61c),
+    adding `@vercel/functions`. Every test file importing lib/upstream-snapshot.ts failed with
+    "Cannot find package '@vercel/functions'", so the reviewer's name-filtered vitest runs
+    matched 0 tests, and console PR #1866 got remudero-review FAIL "unmet" on all six proofs.
+    The coordinator fixed it live with `npm ci` into a staging dir plus an atomic rename swap;
+    the proofs then passed.
+    WHY W1-T4356 DID NOT COVER IT. `refreshManagedCheckout` (src/run-task.ts) calls `install`
+    ONLY on its fast-forward arm. A checkout whose code is already current (it returns
+    `kind: "current"`), or whose code another path moved, never has its install compared with its
+    lockfile. The install it does run is `ensureInstallFresh`'s in-place `npm ci`, whose clear
+    phase empties node_modules while other workers and the reviewer may be linked to it.
+  design: |
+    (i) src/lib/staged-install.ts exports `stagedInstall(repoDir, deps)`. It compares
+    `hashInstallInputs` (src/lib/install-hash.ts) with the checkout's install-hash marker. On a
+    mismatch it copies the lockfile and package.json into a sibling staging dir, runs `npm ci`
+    there, verifies the result (a `require.resolve` of every direct dependency), then swaps it in
+    with atomic renames: node_modules becomes node_modules.old, then staging becomes
+    node_modules. It writes the marker only after the swap, and removes the old tree afterwards.
+    It never deletes the live tree in place. A matching hash is a no-op.
+    (ii) Wiring: `refreshManagedCheckout` runs `stagedInstall` on EVERY managed checkout it sees,
+    core, console and site, whether the checkout is `current` or just fast-forwarded. It replaces
+    the in-place default install there. The same refresh runs before the reviewer executes proofs
+    in a managed checkout. If that shares no path with the dispatch path, the PR names the
+    reviewer's call site and wires it too.
+    (iii) Ledger `managed_checkout.install_refreshed` (repo, before and after hash, elapsed) on a
+    swap. On a failed install, keep the old tree serving, ledger
+    `managed_checkout.install_failed`, and escalate once per lockfile hash through the existing
+    escalation path. Never leave a half-installed tree in place.
+  acceptance:
+    - claim: "a checkout whose code is current but whose install predates its lockfile is reinstalled"
+      proof: "unit test: a current checkout with a stale install is reinstalled on a lockfile change"
+    - claim: "the install is staged and swapped so the live tree is never emptied in place"
+      proof: "unit test: a staged install never empties the live node_modules while it runs"
+    - claim: "a failed install keeps the old tree and escalates once"
+      proof: "unit test: a failed staged install keeps the old tree and escalates once per lockfile hash"
+    - claim: "the managed checkout refresh calls the staged install"
+      proof: "grep: stagedInstall( in src/run-task.ts"
+  falsifier: |
+    Call the install only on the fast-forward arm, as today: the first proof's current-code
+    checkout keeps its stale tree. Install with `npm ci` in place: the second proof observes an
+    empty node_modules mid-install. Delete the old tree before the new one verifies: the third
+    proof finds no tree after a failed install.
+  note: |
+    Reserved from the operator checkout for branch file/review-toolchain-tasks-1790778861427.
+    Scope-time checks 2026-09-30: no run-W1-T4933-* branch; no main commit names the id. No plan
+    record on origin/main or on any open head's added shards covers reinstalling a managed
+    checkout on a lockfile change. W1-T2777 detects the mismatch at symlink time and W1-T4356
+    reinstalls only on a fast-forward, so neither covers this.

@@ -26,6 +26,8 @@ import {
   CI_LEARNING_MINT_CEILING,
   ciLearningCadenceCheck,
   ciLearningCadenceMarkerPath,
+  ciLearningLookbackDays,
+  recordCiLearningAttempt,
   ciLearningShardId,
   mintCiLearningShards,
   CI_LEARNING_DOMINANT_FILE_COUNT,
@@ -148,6 +150,29 @@ test("W1-T2959 the rung decides through the SHARED two-bound function: disabled,
   const capped = ciLearningCadenceCheck({ root, policy: ON, now: new Date("2026-09-06T18:00:00Z") });
   assert.equal(capped.fire, false);
   assert.notEqual(capped.reason, tooSoon.reason, "the two bounds must be distinguishable");
+});
+
+test("a failed or interrupted CI-learning attempt retries after thirty minutes without spending the daily fire", () => {
+  const root = tmpRoot();
+  const policy = { enabled: true, minIntervalMinutes: 1440, maxPerDay: 1 };
+  const started = new Date("2026-09-06T12:00:00Z");
+  recordCiLearningAttempt(root, started);
+  const tooSoon = ciLearningCadenceCheck({ root, policy, now: new Date("2026-09-06T12:29:00Z") });
+  assert.equal(tooSoon.fire, false);
+  assert.match(tooSoon.reason, /retry after 30m/);
+  assert.equal(ciLearningCadenceCheck({ root, policy, now: new Date("2026-09-06T12:30:00Z") }).fire, true);
+  recordCiLearningCadenceFire(root, new Date("2026-09-06T12:30:00Z"));
+  assert.equal(ciLearningCadenceCheck({ root, policy, now: new Date("2026-09-06T13:00:00Z") }).fire, false);
+});
+
+test("CI-learning backfills three days only on first or missed runs and uses a small overlap on healthy daily runs", () => {
+  const root = tmpRoot();
+  const first = new Date("2026-09-06T12:00:00Z");
+  assert.equal(ciLearningLookbackDays(root, first), 3);
+  recordCiLearningCadenceFire(root, first);
+  assert.equal(ciLearningLookbackDays(root, new Date("2026-09-07T12:00:00Z")), 1.25);
+  assert.equal(ciLearningLookbackDays(root, new Date("2026-09-08T12:00:00Z")), 2.25);
+  assert.equal(ciLearningLookbackDays(root, new Date("2026-09-10T12:00:00Z")), 3);
 });
 
 test("W1-T2959 a corrupt marker fails CLOSED rather than firing", () => {

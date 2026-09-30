@@ -73,9 +73,10 @@ const ghSays = (sha: string) => `#!/bin/sh\necho ${sha}\n`;
 const GH_FAILS = "#!/bin/sh\nexit 1\n";
 const CANCELLED = { SHARD_RESULT: "cancelled", RUN_HEAD_SHA: SHA_OLD, PR_NUMBER: "1", GH_REPO_SLUG: "o/r" };
 
-test("W1-T3345: both required aggregators are found, so this suite cannot pass over nothing", () => {
+test("W1-T3345: all three required aggregators are found, so this suite cannot pass over nothing", () => {
   const found = gates();
-  assert.equal(found.length, 2, `expected the ci and coverage-ratchet gates, got ${JSON.stringify(found.map((g) => g.jobName))}`);
+  assert.deepEqual(found.map((g) => g.jobName).sort(), ["ci-required", "coverage-ratchet-required", "test-slow"],
+    `expected the ci, coverage-ratchet, and slow-tier gates, got ${JSON.stringify(found.map((g) => g.jobName))}`);
 });
 
 test("W1-T3345: a shard matrix CANCELLED BY A NEWER PUSH does not block — the sha it measured is not the sha that merges", () => {

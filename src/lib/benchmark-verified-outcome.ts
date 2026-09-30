@@ -56,12 +56,12 @@ function runWroteAssignment(run: TaskCaseRun, assignmentId: string): boolean {
 
 /** W1-T4648: how each `RunResult` verdict reads once the PR read SUCCEEDED and found no PR. `true` = the run
  * ended without completing: every `blocked*`, `no_pr` and `failed` verdict. `false` = the verdict claims or
- * pends completion (`merged`, `already_satisfied`, `awaiting_merge`, `task_already_merged`) or a PR it could
+ * pends completion (`merged`, `already_satisfied`, `awaiting_merge`, `task_already_merged`, `handed_off`) or a PR it could
  * not attribute (`pr_attribution_failed`), which an empty projection contradicts rather than confirms, so
  * those stay `current-pr-unavailable`. A `Record` over the union: a new verdict will not compile until it
  * is classified here. An ending is an outcome, never a model-failure claim (W1-T4608). */
 const ENDS_WITHOUT_COMPLETION: Record<RunResult["verdict"], boolean> = {
-  merged: false, already_satisfied: false, awaiting_merge: false, task_already_merged: false,
+  merged: false, already_satisfied: false, awaiting_merge: false, task_already_merged: false, handed_off: false,
   pr_attribution_failed: false, no_pr: true, failed: true, blocked: true, blocked_ci: true, blocked_review: true,
   blocked_budget: true, blocked_containment: true, blocked_isolation: true, blocked_inflight: true,
   blocked_git_fetch: true, blocked_illformed: true, blocked_transient: true,
@@ -75,8 +75,16 @@ function withoutCurrentPr(file: TaskCaseFile, run: TaskCaseRun): { ended: boolea
   if (!readFoundNone || typeof run.prNumber === "number") return { ended: false, reason: "current-pr-unavailable" };
   if (typeof run.verdict !== "string") return { ended: false, reason: "run-without-terminal-verdict" };
   if (!Object.hasOwn(ENDS_WITHOUT_COMPLETION, run.verdict)) return { ended: false, reason: "run-verdict-unrecognized" };
-  return ENDS_WITHOUT_COMPLETION[run.verdict as RunResult["verdict"]]
-    ? { ended: true, reason: `ended-without-pr:${run.verdict}` } : { ended: false, reason: "current-pr-unavailable" };
+  const ending = prLessEnding(run);
+  return { ended: ending !== null, reason: ending ?? "current-pr-unavailable" };
+}
+
+/** W1-T4652: a run that opened no PR and ended is an ending beside ANOTHER run's PR too; the ending reason,
+ * or null when the run opened a PR, carries no verdict, or its verdict is not an ending. */
+function prLessEnding(run: TaskCaseRun): string | null {
+  if (typeof run.prNumber === "number" || typeof run.verdict !== "string") return null;
+  if (!Object.hasOwn(ENDS_WITHOUT_COMPLETION, run.verdict)) return null;
+  return ENDS_WITHOUT_COMPLETION[run.verdict as RunResult["verdict"]] ? `ended-without-pr:${run.verdict}` : null;
 }
 
 /** No worker-call result, ledger verdict, or closed PR can independently award completion. */
@@ -130,7 +138,11 @@ export function joinVerifiedTaskOutcomes(
           reason = without.reason;
           if (without.ended) disposition = "ended";
         }
-        else if (run.prNumber !== pr.number) reason = "run-pr-mismatch";
+        else if (run.prNumber !== pr.number) {
+          const ending = prLessEnding(run);
+          reason = ending ?? "run-pr-mismatch";
+          if (ending !== null) disposition = "ended";
+        }
         else if (pr.state === "OPEN") { disposition = "censored"; reason = "open-at-cutoff"; }
         else if (pr.state === "CLOSED") reason = "closed-unmerged-unadjudicated";
         else if (!pr.taskCredit || !merged || merged.prNumber !== pr.number) reason = "merge-credit-unavailable";

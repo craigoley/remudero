@@ -18,6 +18,7 @@
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -29,7 +30,7 @@ import {
   PROOF_QUEUE_AUDIT_CAUSES,
   type ProofQueueAuditOpts,
 } from "../src/lib/proof-queue-audit.js";
-import { proofQueueAuditCommand } from "../src/run-task.js";
+import { creditedProofVisibility, grepPatternMatches, proofQueueAuditCommand } from "../src/run-task.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -338,4 +339,293 @@ test("proofQueueAuditCommand is registered as `rmd proof-queue-audit` in the COM
   const source = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
   assert.match(source, /name:\s*"proof-queue-audit"/, "the verb must be a real, listed rmd command, not dormant code");
   assert.match(source, /proofQueueAudit\(/, "the caller must invoke the classifier directly");
+});
+
+// ── resolvedFully: queued tasks whose executable proofs ALL already resolve (probably built) ─────
+
+const FILE_PROOF = "unit test: test/built-thing.test.ts";
+const TITLE_PROOF = "unit test: built thing renders exactly once per escalation";
+const GREP_PROOF = "grep: ^export function builtThing in src/lib/built-thing.ts";
+
+/** Predicates that resolve exactly the three proofs above and nothing else. */
+function resolvingOpts(extra: Partial<ProofQueueAuditOpts> = {}): ProofQueueAuditOpts {
+  return {
+    resolveNameFilteredCandidates: fakeResolver(new Set(["built thing renders exactly once per escalation"])),
+    pathExists: (p) => p === "test/built-thing.test.ts" || p === "src/lib/built-thing.ts",
+    grepMatches: (pattern, path) => pattern === "^export function builtThing" && path === "src/lib/built-thing.ts",
+    ...extra,
+  };
+}
+
+function builtTask(id: string, overrides: Partial<Task> = {}): Task {
+  return fixtureTask({
+    id,
+    acceptance: [
+      { claim: "file", proof: FILE_PROOF },
+      { claim: "title", proof: TITLE_PROOF },
+      { claim: "grep", proof: GREP_PROOF },
+    ],
+    ...overrides,
+  });
+}
+
+test("resolvedFully: a queued task whose every executable proof resolves is named", () => {
+  const report = proofQueueAudit([builtTask("W9-BUILT")], resolvingOpts());
+  assert.deepEqual(report.resolvedFully, ["W9-BUILT"]);
+  assert.equal(report.offenders.length, 0, "resolving is not an offense");
+});
+
+test("resolvedFully: ONE unresolved proof keeps the task off the list, whichever shape it is", () => {
+  const forwardFile = builtTask("W9-FWD-FILE", {
+    acceptance: [
+      { claim: "a", proof: TITLE_PROOF },
+      { claim: "b", proof: "unit test: test/not-written-yet.test.ts" },
+    ],
+  });
+  const zeroTitle = builtTask("W9-ZERO-TITLE", {
+    acceptance: [
+      { claim: "a", proof: GREP_PROOF },
+      { claim: "b", proof: "unit test: a title that no test file carries at all" },
+    ],
+  });
+  const noMatchGrep = builtTask("W9-NO-MATCH", {
+    acceptance: [
+      { claim: "a", proof: FILE_PROOF },
+      { claim: "b", proof: "grep: ^export function notThereYet in src/lib/built-thing.ts" },
+    ],
+  });
+  const goneGrepPath = builtTask("W9-GONE-PATH", {
+    acceptance: [
+      { claim: "a", proof: FILE_PROOF },
+      { claim: "b", proof: "grep: ^export function builtThing in src/lib/gone.ts" },
+    ],
+  });
+  const refused = builtTask("W9-REFUSED", {
+    acceptance: [
+      { claim: "a", proof: FILE_PROOF },
+      { claim: "b", proof: "grep: no in-path clause here" },
+    ],
+  });
+  const report = proofQueueAudit([forwardFile, zeroTitle, noMatchGrep, goneGrepPath, refused], resolvingOpts());
+  assert.deepEqual(report.resolvedFully, []);
+});
+
+test("resolvedFully: prose, demonstration, human-verify, zero-proof and retired tasks never appear", () => {
+  const proseOnly = fixtureTask({ id: "W9-PROSE", acceptance: [{ claim: "a", proof: "trust me, it works" }] });
+  const demoOnly = fixtureTask({ id: "W9-DEMO", acceptance: [{ claim: "a", proof: "demonstration: shown live" }] });
+  const human = builtTask("W9-HUMAN", { verify: "human" });
+  const none = fixtureTask({ id: "W9-NONE" });
+  const satisfiedOnly = fixtureTask({ id: "W9-SAT", acceptance: [{ claim: "a", satisfied_by: "W9-BUILT" }] as Task["acceptance"] });
+  const blocked = builtTask("W9-BLOCKED", { status: "blocked" });
+  const merged = builtTask("W9-MERGED", { status: "merged" });
+  const done = builtTask("W9-DONE", { status: "done" });
+  const retired = builtTask("W9-RETIRED", { retirement: "retired" });
+  const report = proofQueueAudit(
+    [proseOnly, demoOnly, human, none, satisfiedOnly, blocked, merged, done, retired],
+    resolvingOpts(),
+  );
+  assert.deepEqual(report.resolvedFully, []);
+});
+
+test("resolvedFully: prose criteria beside resolving executable ones do not disqualify the task", () => {
+  const mixed = builtTask("W9-MIXED", {
+    acceptance: [
+      { claim: "a", proof: FILE_PROOF },
+      { claim: "b", proof: "demonstration: also shown live" },
+      { claim: "c", proof: "reads well to a human" },
+    ],
+  });
+  assert.deepEqual(proofQueueAudit([mixed], resolvingOpts()).resolvedFully, ["W9-MIXED"]);
+});
+
+test("resolvedFully: an absent predicate is no opinion, so nothing is named without the predicate it needs", () => {
+  const t = builtTask("W9-BUILT");
+  assert.deepEqual(proofQueueAudit([t]).resolvedFully, [], "no predicates at all");
+  assert.deepEqual(proofQueueAudit([t], resolvingOpts({ grepMatches: undefined })).resolvedFully, [], "no grepMatches");
+  assert.deepEqual(proofQueueAudit([t], resolvingOpts({ pathExists: undefined })).resolvedFully, [], "no pathExists");
+  assert.deepEqual(
+    proofQueueAudit([t], resolvingOpts({ resolveNameFilteredCandidates: undefined })).resolvedFully,
+    [],
+    "no resolver",
+  );
+  assert.deepEqual(
+    proofQueueAudit([t], resolvingOpts({ resolveNameFilteredCandidates: () => ({ status: "unresolvable", reason: "no corpus" }) }))
+      .resolvedFully,
+    [],
+    "an unresolvable lookup is ignorance, never resolution",
+  );
+});
+
+test("resolvedFully: a grep proof aimed at a plan record never resolves (the shard would match itself)", () => {
+  const self = fixtureTask({
+    id: "W9-SELF",
+    acceptance: [{ claim: "a", proof: "grep: ^status: queued in plan/tasks.d/W9-SELF-x.yaml" }],
+  });
+  const report = proofQueueAudit([self], { pathExists: () => true, grepMatches: () => true });
+  assert.deepEqual(report.resolvedFully, []);
+});
+
+test("resolvedFully: a legacy fenced grep with author-chosen flags never resolves (BRE cannot be assumed)", () => {
+  const fenced = fixtureTask({
+    id: "W9-FENCED",
+    acceptance: [{ claim: "a", proof: "`grep -rnE -- builtThing src/lib/built-thing.ts`" }],
+  });
+  const report = proofQueueAudit([fenced], { pathExists: () => true, grepMatches: () => true });
+  assert.deepEqual(report.resolvedFully, []);
+});
+
+test("resolvedFully: with creditedIds the list splits into credited and uncredited; without it the split is absent", () => {
+  const tasks = [builtTask("W9-CREDITED"), builtTask("W9-UNCREDITED")];
+  const split = proofQueueAudit(tasks, resolvingOpts({ creditedIds: new Set(["W9-CREDITED", "W9-OTHER"]) }));
+  assert.deepEqual(split.resolvedFully, ["W9-CREDITED", "W9-UNCREDITED"]);
+  assert.deepEqual(split.resolvedFullyCredited, ["W9-CREDITED"]);
+  assert.deepEqual(split.resolvedFullyUncredited, ["W9-UNCREDITED"]);
+  const plain = proofQueueAudit(tasks, resolvingOpts());
+  assert.equal(plain.resolvedFullyCredited, undefined);
+  assert.equal(plain.resolvedFullyUncredited, undefined);
+});
+
+test("resolvedFully: a hostile predicate never throws out of proofQueueAudit and never names the task", () => {
+  const boom = (): never => {
+    throw new Error("hostile predicate");
+  };
+  const t = builtTask("W9-BUILT");
+  for (const hostile of [
+    { grepMatches: boom },
+    { pathExists: boom },
+    { resolveNameFilteredCandidates: boom },
+  ] as Partial<ProofQueueAuditOpts>[]) {
+    const report = proofQueueAudit([t], resolvingOpts({ ...hostile, creditedIds: new Set(["W9-BUILT"]) }));
+    assert.deepEqual(report.resolvedFully, []);
+    assert.equal(report.offenders.length, 0, "a predicate that threw is ignorance, never an offense");
+  }
+});
+
+test("resolvedFully: the offender report is unchanged by the new field (offenders, byCause, counts)", () => {
+  const bad = fixtureTask({
+    id: "W9-BAD",
+    acceptance: [{ claim: "a", proof: "grep: ^export function x in src/lib/gone.ts" }],
+  });
+  const withNew = proofQueueAudit([bad, builtTask("W9-BUILT")], resolvingOpts());
+  assert.deepEqual(withNew.byCause["grep-path-absent"], ["W9-BAD"]);
+  assert.equal(withNew.criterionCount, 4);
+  assert.deepEqual(withNew.resolvedFully, ["W9-BUILT"]);
+});
+
+test("resolvedFully: a throwing symbolFoundAt on an absent grep path is a plain offender, never a throw", () => {
+  const gone = fixtureTask({
+    id: "W9-GONE",
+    files: ["src/lib/elsewhere.ts"],
+    acceptance: [{ claim: "a", proof: "grep: ^export function moved in src/lib/gone.ts" }],
+  });
+  const report = proofQueueAudit([gone], {
+    pathExists: () => false,
+    symbolFoundAt: () => {
+      throw new Error("hostile predicate");
+    },
+  });
+  assert.deepEqual(report.byCause["grep-path-absent"], ["W9-GONE"]);
+  assert.deepEqual(report.relocated, []);
+});
+
+// ── resolvedFully: the command's printed section and the real-grep seam ─────────────────────────
+
+test("proofQueueAuditCommand prints the resolved-fully section with its own caveat, and exits 0", async () => {
+  const dir = mkdtempSync(join(REPO_ROOT, "test", ".tmp-resolved-fully-"));
+  try {
+    mkdirSync(join(dir, "plan"), { recursive: true });
+    const tasksPath = join(dir, "plan", "tasks.yaml");
+    writeFileSync(
+      tasksPath,
+      [
+        "- id: W9-RF-BUILT",
+        '  title: "fixture"',
+        "  repo: remudero",
+        "  origin: architect",
+        "  depends_on: []",
+        "  type: implement",
+        "  verify: auto",
+        "  status: queued",
+        "  attempts: 0",
+        "  acceptance:",
+        '    - claim: "file"',
+        '      proof: "unit test: test/proof-queue-audit.test.ts"',
+        '    - claim: "symbol"',
+        '      proof: "grep: ^export function proofQueueAudit in src/lib/proof-queue-audit.ts"',
+        "- id: W9-RF-NOT-YET",
+        '  title: "fixture"',
+        "  repo: remudero",
+        "  origin: architect",
+        "  depends_on: []",
+        "  type: implement",
+        "  verify: auto",
+        "  status: queued",
+        "  attempts: 0",
+        "  acceptance:",
+        '    - claim: "file"',
+        '      proof: "unit test: test/proof-queue-audit.test.ts"',
+        '    - claim: "symbol"',
+        '      proof: "grep: ^export function notWrittenAnywhereYet in src/lib/proof-queue-audit.ts"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const { exitCode, stdout } = await runAuditCapturing(["--plan", tasksPath], {
+      readMergeEvidenceLog: () => ({ dump: "\x01", ref: "fixture-ref" }),
+    });
+    assert.equal(exitCode, 0);
+    assert.match(stdout, /resolved-fully\s+1 task\(s\): W9-RF-BUILT\n/);
+    assert.doesNotMatch(stdout, /resolved-fully[^\n]*W9-RF-NOT-YET/);
+    assert.match(
+      stdout,
+      /resolves is not passes — a test file that exists can still fail; this list is where to LOOK, not a verdict/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("proofQueueAuditCommand --credited prints the credited and uncredited resolved-fully lists apart", async () => {
+  const empty = { taskCount: 0, criterionCount: 0, offenders: [], relocated: [], byCause: { "refused-parse": [], "name-filtered-zero-match": [], "grep-path-absent": [], "credited-test-path-absent": [] } };
+  const { stdout } = await runAuditCapturing(["--credited"], {
+    creditedProofVisibility: () => ({
+      creditedCount: 2,
+      proof: { ...empty, resolvedFully: ["W9-RF-A", "W9-RF-B"], resolvedFullyCredited: ["W9-RF-A"], resolvedFullyUncredited: ["W9-RF-B"] },
+      amendment: { measurable: 0, unmeasurable: 0, flagged: [] },
+    }),
+  });
+  assert.match(stdout, /resolved-fully-credited\s+1 task\(s\): W9-RF-A\n/);
+  assert.match(stdout, /resolved-fully-uncredited\s+1 task\(s\): W9-RF-B\n/);
+  assert.match(stdout, /this list is where to LOOK, not a verdict/);
+});
+
+test("creditedProofVisibility's default grep seam names a credited task whose grep proof already matches", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "rmd-resolved-fully-"));
+  try {
+    mkdirSync(join(cwd, "src"), { recursive: true });
+    writeFileSync(join(cwd, "src", "thing.ts"), "export function alreadyBuilt() { return 1; }\n", "utf8");
+    const ledgerPath = join(cwd, "ledger.ndjson");
+    writeFileSync(ledgerPath, JSON.stringify({ task_id: "W9-RF-CRED", step: "verdict.merged", ts: "2026-01-02T00:00:00.000Z" }) + "\n", "utf8");
+    const mk = (id: string, symbol: string) =>
+      fixtureTask({ id, acceptance: [{ claim: "a", proof: `grep: ^export function ${symbol} in src/thing.ts` }] });
+    const tasks = [mk("W9-RF-CRED", "alreadyBuilt"), mk("W9-RF-OTHER", "neverBuilt")];
+    const plan = { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+    const result = creditedProofVisibility(join(cwd, "plan", "tasks.yaml"), plan, { ledgerPath, cwd });
+    assert.deepEqual(result.proof.resolvedFullyCredited, ["W9-RF-CRED"]);
+    assert.deepEqual(result.proof.resolvedFullyUncredited, []);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("grepPatternMatches: true on a match, false on no match, false on an absent file", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "rmd-grep-matches-"));
+  try {
+    writeFileSync(join(cwd, "a.txt"), "alpha\nbeta\n", "utf8");
+    assert.equal(grepPatternMatches(cwd, "^be", "a.txt"), true, "a basic-regex anchor matches");
+    assert.equal(grepPatternMatches(cwd, "^gamma", "a.txt"), false, "no match is false");
+    assert.equal(grepPatternMatches(cwd, "alpha", "missing.txt"), false, "an absent file is false, never a throw");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });

@@ -29,7 +29,8 @@ import {
   writeRatificationShards,
 } from "../src/lib/inbox.js";
 import type { Plan } from "../src/lib/plan.js";
-import { buildPlanPrBody, filingAcceptanceCriteria } from "../src/lib/plan-pr-emitter.js";
+import { filingAcceptanceCriteria } from "../src/lib/plan-pr-emitter.js";
+import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
 import { loadPlanIndex } from "../src/lib/plan-index.js";
 
@@ -183,7 +184,8 @@ test("an approved draft with a shared file-path proof files one title proof per 
 test("an approved draft below the sizing bar files at risk high with a declared span", () => {
   const fragment = [
     "- id: W1-T901", "  title: broad task", "  repo: remudero", "  type: implement",
-    "  origin: architect", "  risk: medium", "  files: [src/lib/inbox.ts, src/lib/plan.ts]", "",
+    "  origin: architect", "  risk: medium", "  files: [src/lib/inbox.ts, src/lib/plan.ts]",
+    "  acceptance:", '    - claim: "the broad task works"', '      proof: "unit test: the broad task works"', "",
   ].join("\n");
   const approval = approveThroughShardWriter(fragment);
   assert.equal(approval.run().ok, true);
@@ -625,7 +627,7 @@ test("integration: approveProposal commits without a plan-index artifact and ope
         "gate still reviews (ci + remudero-review); nothing auto-merges without it.",
       ].join("\n");
       const ids = filedTaskIds.length > 0 ? filedTaskIds : [id];
-      capturedBody = buildPlanPrBody({
+      capturedBody = buildFixturePlanPrBody({
         intro,
         criteria: filingAcceptanceCriteria(ids, ["plan/tasks.yaml", "MASTER-PLAN.md"]),
         // NO taskId — a ratification branch is a plan-FILING PR.
@@ -673,7 +675,7 @@ test("integration: two ratification PRs filed together share no file — two app
     const branch = `run-approve-${proposalId}`;
     const payload: RatificationPayload = {
       proposalId,
-      fragmentYaml: `- id: ${taskId}\n  title: ${title}\n  repo: remudero\n  type: implement\n  origin: architect\n  files: [src/lib/inbox.ts]\n`,
+      fragmentYaml: `- id: ${taskId}\n  title: ${title}\n  repo: remudero\n  type: implement\n  origin: architect\n  files: [src/lib/inbox.ts]\n  acceptance:\n    - claim: "${title} works"\n      proof: "unit test: ${title} works"\n`,
       stampLine: `- ${proposalId} (codeql) — RATIFIED 2026-09-23 -> ${taskId}.`,
     };
     const draft: DraftedCandidate = { ...payload, anchorFingerprint: "landed::MASTER-PLAN.md" };

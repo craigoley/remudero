@@ -212,6 +212,10 @@ test("a dispatch reads its own attempt and strike counts from the live ledger, n
       "the fix rung's run.start is already written");
     assert.deepEqual(fix.lane, { state: "observed", value: "fix" });
     assert.deepEqual(fix.recon, unavailable("fix-lane-does-not-observe-recon"));
+    const fixWork = fixLaneBenchmarkWork({ id: "T-L", files: ["docs/guide.md"], risk: "low" }, ledger);
+    const fixReceipt = benchmarkRunAssignmentReceipt(ASSIGNMENT, fixWork);
+    assert.deepEqual(fixReceipt.work.taskClass, { state: "observed", value: "docs" });
+    assert.deepEqual(fixReceipt.work.risk, { state: "observed", value: "low" });
 
     assert.deepEqual(dispatchTaskShape({ task: { id: "T-L" }, ledgerPath: join(root, "absent.ndjson") }).attemptNumber,
       { state: "observed", value: { count: 1, bucket: "1", basis: "live-ledger" } }, "no ledger yet is a first attempt");

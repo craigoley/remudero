@@ -1,0 +1,27 @@
+- id: W1-T4792
+  title: "REPAIR THE NARROW SELECTOR EDGE src/lib/skill-workshop.ts, test/skill-workshop.test.ts -> test/serve-browser-teardown.test.ts — a real coverage shard failure was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 2.5
+  risk: high
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow:3f1b01eeed56a21416b21c3eb1de6697b7f42b9c:narrow:test/serve-browser-teardown.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: "W1-T4439 observed narrow miss on coverage run 36572513781 for PR #7833 at 3f1b01eeed56a21416b21c3eb1de6697b7f42b9c: src/lib/skill-workshop.ts, test/skill-workshop.test.ts -> test/serve-browser-teardown.test.ts. The changed paths are candidate missing edges, not guessed import edges. Inspect the exact head and teach the selector the missing dependency before W1-T4406 narrows CI."
+  acceptance:
+    - claim: "the narrow selector includes test/serve-browser-teardown.test.ts when this edge is exercised"
+      proof: "grep: test/serve-browser-teardown\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The declared file is src/lib/affected-suites.ts, a test-selector mapping. The description doesn't show it touching secrets, auth, permissions, deploy or merge policy, or review policy."
+      - "The acceptance criterion is a grep check that the selector names test/serve-browser-teardown.test.ts. That makes the finding verifiable from what is shown, and the change looks additive and reversible."
+      - "The family has no track record (0 merged, 0 declined, Beta mean 0.50). That is neutral, not concerning. The change still has to pass CI and review."
+    judged_at: "2026-09-29T19:05:53.051Z"
+    pin: "ce61d560d1e41269d2cf7dd9bf01905fd5286f8c6fea84d9edf37d8f6b443c92"

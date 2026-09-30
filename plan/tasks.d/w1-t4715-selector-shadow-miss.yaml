@@ -1,0 +1,23 @@
+- id: W1-T4715
+  title: "REPAIR THE NARROW SELECTOR EDGE 547d9ac3047a0855ad9071a392a422e3c503220c -> test/serve-browser-teardown.test.ts — a real coverage shard failure was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  status: blocked
+  retirement: withdrawn
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow:547d9ac3047a0855ad9071a392a422e3c503220c:narrow:test/serve-browser-teardown.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: |
+    Selector-shadow audit, 2026-09-29: not a selector miss. On run 36464006681 test/serve-browser-teardown.test.ts
+    failed its first pass and test-with-retry.mjs's retry recovered it (every coverage job in the run concluded success).
+    The shadow record counted the first pass. Nothing is missing from the selector; the
+    gardener now scores a failure inside a success-concluded job as recovered. Withdrawn.
+
+    W1-T4439 observed narrow miss on coverage run 36464006681 at 547d9ac3047a0855ad9071a392a422e3c503220c: 547d9ac3047a0855ad9071a392a422e3c503220c -> test/serve-browser-teardown.test.ts. The changed paths are candidate missing edges, not guessed import edges. Inspect the exact head and teach the selector the missing dependency before W1-T4406 narrows CI.
+  acceptance:
+    - claim: "the narrow selector includes test/serve-browser-teardown.test.ts when this edge is exercised"
+      proof: "grep: test/serve-browser-teardown\\.test\\.ts in src/lib/affected-suites.ts"

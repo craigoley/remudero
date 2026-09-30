@@ -39,3 +39,22 @@ Learnings used when offered: 13%. Dangling Why pointers: 0.
 - retire maxbudget-between-turns: Workers offered it have rarely used it, compared with other learnings.
 
 Learnings used when offered: 12%. Dangling Why pointers: 0.
+
+## Pass 2026-09-28T19:01:48.637Z
+
+- retire ledger-corpus-needs-the-resolver: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 12%. Dangling Why pointers: 0.
+
+## Pass 2026-09-29T19:45:53.218Z
+
+- retire proc-environ-is-an-exec-time-snapshot: Workers offered it have rarely used it, compared with other learnings.
+- retire scan-both-quote-styles: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 13%. Dangling Why pointers: 1.
+
+## Pass 2026-09-30T04:27:57.745Z
+
+- retire bashrc-accident: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 13%. Dangling Why pointers: 1.

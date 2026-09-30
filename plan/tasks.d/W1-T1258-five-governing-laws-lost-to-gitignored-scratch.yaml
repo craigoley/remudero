@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   principles: {tdd: strict}
   budget_usd: 20.00
   risk: medium
@@ -171,11 +171,13 @@
     - claim: "the prevention half is parked with its own owner rather than folded into this ruling"
       proof: "grep: THE PREVENTION IS NOT THIS SHARD'S CONCERN in plan/tasks.d/W1-T1258-five-governing-laws-lost-to-gitignored-scratch.yaml"
   files: [plan/tasks.d/W1-T1258-five-governing-laws-lost-to-gitignored-scratch.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   origin: "operator-brief#five-governing-laws-lost-to-gitignored-scratch-2026-08-23"
   plan_refs: ["W1-T398", "W1-T383", "W1-T438", "W1-T439", "W1-T418", "W1-T1248", "W1-T1249", "W1-T1259", "W1-T1120", "W1-T1263", "P48"]
   note: |
+    CLOSED 2026-09-30 (operator direction: no new blocking rules): the record is complete (every acceptance phrase is in this shard, and the archive is tracked since #2623). No citation ratchet is added. The 2026-09-22 ruling stands as guidance, and existing Law N citations are left as they are.
     **RULE 19 SPAN, AND THE OTHER READING RECORDED BESIDE IT.** `risk: medium` is set from the SPAN:
     `files:` is a single file under `plan/`, one directory, no `src/`—`test/` crossing — the same
     shape `W1-T1120` carries at `medium` for the same reason, and that shard is the sanctioned

@@ -1064,11 +1064,13 @@ echo "recycle-container: PAUSE engaged — new dispatch halts, in-flight work is
 # cannot positively classify as hung is waited for and then REFUSED, exactly as before.
 worker_lines() {
   # `procps` is installed in the image (deploy/Dockerfile), so this is real ps, not the busybox
-  # applet. A failure here yields NO lines, which reads as "no lane-less worker" — deliberately the
+  # applet. Include the detached automated retro's node child: it has no dispatch lock, and
+  # stopping the container during its synthesis or preflight loses the entire pass. A failure
+  # here yields NO lines, which reads as "no lane-less worker" — deliberately the
   # conservative direction for the *kill* decision, and harmless for the *wait* decision because the
   # lock count below is independent of it.
   docker exec "${CONTAINER_NAME}" ps -eo pid,etimes,args --no-headers 2>/dev/null \
-    | grep -E -- 'claude --output-format|codex exec' || true
+    | grep -E -- 'claude --output-format|codex exec|node .*run-task[.]ts[[:space:]]+retro([[:space:]]|$)' || true
 }
 
 # ── W1-T2556: A LOCK NAMING A CONTAINER THAT NO LONGER EXISTS IS RECLAIMED, NOT WAITED ON ────────

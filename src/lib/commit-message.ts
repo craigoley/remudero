@@ -69,6 +69,25 @@ export function wrapBodyLines(text: string, max: number = CONVENTIONAL_LIMITS.bo
   return out;
 }
 
+export function fitConventionalTitle(
+  title: string,
+  max: number = CONVENTIONAL_LIMITS.headerMaxLength,
+): { header: string; trimmed: boolean } {
+  if (title.length <= max) return { header: title, trimmed: false };
+  const sep = title.indexOf(": ");
+  const prefix = sep > 0 ? title.slice(0, sep + 2) : "";
+  const subject = title.slice(prefix.length);
+  const budget = max - prefix.length - ELLIPSIS.length;
+  let cut = budget;
+  for (let i = budget; i > 0; i--) {
+    if (subject[i] === " " || subject[i] === "-") {
+      cut = i;
+      break;
+    }
+  }
+  return { header: `${prefix}${subject.slice(0, cut).replace(/[\s-]+$/, "")}${ELLIPSIS}`, trimmed: true };
+}
+
 /** One rule this module's checks enforce, named after the real commitlint rule id
  *  (`@commitlint/config-conventional`) so a failure reads the same here as in a CI log. */
 export interface CommitMessageViolation {

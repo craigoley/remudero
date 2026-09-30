@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: [W1-T3569]
   type: recon
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   risk: medium
   band_meaning: blast-radius
@@ -12,7 +12,7 @@
     - docs/recon/openweight-inbox-draft-trial.md
   origin: "operator-session#open-weight-resequence-2026-09-14"
   plan_refs: ["W1-T3545", "W1-T3569", "W1-T3558", "W1-T3094"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: chore/file-openweight-output-contract-1789389121907 -> chore/file-openweight-resequence-1789389121907
@@ -48,3 +48,15 @@
     acceptance proof must no longer resolve. A report with fewer than 20 terminal outcomes, a
     missing positive control, or a recommendation that is not one of widen/hold/stop is not a
     measured verdict and must remain unmerged.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The task is a recon that declares only one new file under docs/recon/, a report. The description shows no secrets, auth, deletion, or merge, deploy or review-policy change, and no irreversible action."
+      - "The acceptance criteria are grep-checkable (the \"terminal inbox-draft outcomes\" line and the \"Recommendation:\" line), so the finding can be verified from what is shown."
+      - "The report ends with a widen, hold or stop verdict. That is a recommendation in a doc, not a dispatch of a lane or WebSearch bridge, so it does not take a decision that only the operator can make."
+      - "The plan refs (W1-T3545, W1-T3569, W1-T3558, W1-T3094) and the operator author class fit the plan. The family track record is empty (0 merged, 0 declined), which is neutral and not concerning."
+      - "No bounded change view was supplied, so I can't compare the declared file list with the actual one. The declared scope is doc-only."
+    judged_at: "2026-09-30T21:42:01.796Z"
+    pin: "1e9c0f960f369f0e2986c10d278f5f7ff874fbb661a03d0227361a0bb8178cb4"

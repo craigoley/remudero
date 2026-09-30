@@ -24,7 +24,7 @@ import { homedir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { createSdkMcpServer, query, tool, type Options, type PermissionMode, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, query, tool, type Options, type PermissionMode, type SDKUserMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { detectUsageLimitRefusal } from "./classify.js";
 import {
@@ -66,6 +66,7 @@ import { loadMounts, mountsPath, resolveClaudeModelAlias, subscriptionOnlyModel,
 import {
   experimentDrawSeed,
   experimentIntentionToTreat,
+  experimentTaskIdentity,
   ROUTING_EXPERIMENTS,
   routingExperimentFor,
   type ExperimentIntentionToTreat,
@@ -384,6 +385,7 @@ export type RoutingRule =
   | "preference-bypassed"
   | "cash-fallback"
   | "cash-opus-fallback"
+  | "cash-sonnet-fallback"
   | "overflow-fallback"
   | "cash-trial";
 
@@ -965,9 +967,11 @@ export interface SpawnWorkerArgs {
   cashSqueezed?: boolean;
   /** Only the blocked-subscription frontier fallback may select paid Foundry Opus. */
   cashOpusEmergency?: boolean;
+  /** W1-T4785: only the blocked-subscription balanced fallback selects Foundry Sonnet, tried first. */
+  cashSonnetEmergency?: boolean;
   /** Set only by the two blocked-auction fallbacks, so the retried spawn records the rule and the
    *  subscription readings that sent it there rather than claiming plain mount affinity. */
-  routingFallback?: { rule: "cash-fallback" | "cash-opus-fallback" | "overflow-fallback"; capacities: ProviderCapacity[] };
+  routingFallback?: { rule: "cash-fallback" | "cash-opus-fallback" | "cash-sonnet-fallback" | "overflow-fallback"; capacities: ProviderCapacity[] };
   /** The cash-simple trial's decision for this run; the cash arm also restricts the cash ladder. */
   routingTrial?: { id: string; arm: string; reason: string; models?: readonly string[] };
   /** Reasoning effort (mount-resolved, §9): 'low'|'medium'|'high'|'xhigh'|'max'. */
@@ -1493,7 +1497,8 @@ export function workerSelectionAssignment(
   const model = input.model ?? selected?.model ?? args.model ?? DEFAULT_MODEL_LABEL;
   const recordedModel = input.provider === "claude" ? resolveClaudeModelAlias(model, input.capabilities) : model;
   const decision = routingDecision(args, recordedModel !== model ? { ...input, model: recordedModel } : input);
-  const experiment = decision.ab && args.taskId ? experimentIntentionToTreat(decision.ab, args.taskId, input.provider) : undefined;
+  const unit = experimentTaskIdentity(args.taskId);
+  const experiment = decision.ab && unit ? experimentIntentionToTreat(decision.ab, unit, input.provider) : undefined;
   return {
     version: 1,
     id: randomUUID(),
@@ -1569,7 +1574,7 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
     considered.push({ provider: input.provider, model: alternative, eligible: true, selected: false, reason: "ladder-alternative" });
   }
   const rule = routingRule(args, input);
-  const ab = rule === "headroom-auction"
+  const ab = rule === "headroom-auction" && experimentTaskIdentity(args.taskId) !== undefined
     ? routingExperimentFor({ capability: input.capability, effort: args.effort, considered })
     : undefined;
   return {
@@ -1618,7 +1623,8 @@ export function auctionDrawSeed(
   }));
   const id = policy.preference === "automatic" ? routingExperimentFor({ capability, effort: args.effort, considered }) : undefined;
   const experiment = ROUTING_EXPERIMENTS.find((candidate) => candidate.id === id);
-  if (experiment && args.taskId) return experimentDrawSeed(experiment, args.taskId);
+  const unit = experimentTaskIdentity(args.taskId);
+  if (experiment && unit) return experimentDrawSeed(experiment, unit);
   return { unit: "spawn", taskId: args.taskId ?? "no-task", attempt: args.runId ?? "no-run", point: spawnDecisionPoint(args) };
 }
 
@@ -1992,6 +1998,14 @@ export async function runOpenWeightWalkingLadder(
   throw lastRefusal;
 }
 
+/** True when a Foundry Sonnet attempt failed at zero cost, so the Luna ladder may still carry it. */
+function sonnetRefusedBeforeTransport(result: WorkerResult): boolean {
+  if (!result.isError) return false;
+  if ((result.budgetSettledUsd ?? 0) > 0) return false;
+  return result.budgetRefused === true || result.openWeightDeploymentAbsent !== undefined ||
+    (result.budgetReservedUsd ?? 0) === 0;
+}
+
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const releaseWorkerOccupancy = claimWorkerOccupancy();
   try {
@@ -2180,6 +2194,24 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         // serveable cash equivalent, and admit one whose equivalent was never declared.
         const divertTools = args.cashTools ?? args.tools;
         const refusal = cashFallbackRefusal(config, divertTools);
+        // W1-T4785: a squeezed BALANCED task tries Foundry Sonnet 5.5 first; Luna stays the fallback.
+        const sonnetEnv = args.env ?? process.env;
+        if (refusal === undefined && requestedCapability === "balanced" &&
+            sonnetEnv[FOUNDRY_CLAUDE_API_KEY_ENV] && sonnetEnv[FOUNDRY_CLAUDE_ENDPOINT_ENV]) {
+          console.error(JSON.stringify({
+            event: "worker.provider.cash_sonnet_fallback",
+            reason: "no subscription had readable headroom",
+            requested_model: args.model,
+          }));
+          return await spawnWorker({
+            ...args,
+            mountProvider: "cash" as WorkerProviderId,
+            cashSqueezed: true,
+            cashSonnetEmergency: true,
+            routingFallback: { rule: "cash-sonnet-fallback", capacities },
+            ...(divertTools === undefined ? {} : { tools: [...divertTools] }),
+          });
+        }
         if (refusal === undefined) {
           console.error(JSON.stringify({
             event: "worker.provider.cash_fallback",
@@ -2404,6 +2436,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // make the gate stricter.
     const openWeight: OpenWeightModelSelection = args.cashOpusEmergency === true
       ? { model: "claude-opus-5-5", effort: args.effort ?? "medium", capability: "frontier", alternatives: [] }
+      : args.cashSonnetEmergency === true
+      ? { model: "claude-sonnet-5-5", effort: args.effort ?? "medium", capability: "balanced", alternatives: [] }
       : selectOpenWeightModel(
       capabilities,
       args.model,
@@ -2449,6 +2483,21 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         },
       );
       result.selectionAssignmentId = selectionAssignmentId;
+      // W1-T4785: a Sonnet attempt refused before any money moved re-enters as plain cash-fallback so
+      // the Luna ladder carries it; a run that billed is returned as is, never charged twice.
+      if (args.cashSonnetEmergency === true && sonnetRefusedBeforeTransport(result)) {
+        console.error(JSON.stringify({
+          event: "worker.provider.cash_sonnet_fallback_refused",
+          reason: result.budgetRefused ? "foundry claude cap exhausted"
+            : result.openWeightDeploymentAbsent ? "deployment absent" : "refused before transport",
+          next: "cash-fallback",
+        }));
+        return await spawnWorker({
+          ...args,
+          cashSonnetEmergency: false,
+          routingFallback: { rule: "cash-fallback", capacities: args.routingFallback?.capacities ?? [] },
+        });
+      }
       return result;
     } finally {
       reapWorkerHome(workerHomeRoot, workerHome);
@@ -2669,11 +2718,16 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       capability: requestedCapability,
     });
 
+    let unregisterRunningWorker: (() => void) | undefined;
     try {
+      // A query factory can throw synchronously. Keep its creation inside this cleanup boundary
+      // so a provider refusal cannot leave the watchdog running after the caller catches it.
+      const liveQuery = runQuery({ prompt: args.prompt, options });
+      unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
       const result = await withWorkerGroupTeardown(
         pidRef,
         () =>
-          collectWorkerResult(runQuery({ prompt: args.prompt, options }), {
+          collectWorkerResult(liveQuery, {
             childEnvKeys: Object.keys(childEnv).sort(),
             stderrChunks,
             // Logged verbatim as CONFIGURED inputs, never a read-back: effort is absent from the SDK envelope, and model here
@@ -2721,6 +2775,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       throw err;
     } finally {
       stopWatchdog?.();
+      // Unconditional: no exit path may leave a handle for a later answer to steer into a dead session (W1-T4673).
+      unregisterRunningWorker?.();
     }
   } finally {
     // Reap THIS spawn's per-spawn home on every exit path, including a thrown error or a transport failure — the withTempDir
@@ -3595,6 +3651,77 @@ export function appendQuestionAnswer(repoRoot: string, entry: QuestionAnswerEntr
   } catch {
     return false;
   }
+}
+
+// ── Mid-run operator answer delivery (W1-T4673) ─────────────────────────────
+// Before this, an answer for task X reached X only at the start of its NEXT fix round ({@link appendQuestionAnswer}'s
+// store is read at the pre-run boundary, never mid-run). Buzz's "mention it to steer it" reaches a running agent
+// directly (https://github.com/block/buzz). The SDK's `Query.streamInput(stream)` already supports this; the missing
+// piece was a way to reach the live `Query` for a task id from outside spawnWorker's own call stack.
+
+/** The one `Query` method mid-run delivery needs, kept narrow so a test double never shapes the SDK's whole
+ * control-request surface. */
+interface RunningWorkerHandle {
+  streamInput: (stream: AsyncIterable<SDKUserMessage>) => Promise<void>;
+}
+
+/** One entry per task id with an OPEN SDK session; presence here IS the run window (no start/end pair to go stale).
+ * {@link spawnWorker} adds it after opening the session and removes it unconditionally on every exit path. */
+const runningWorkers = new Map<string, RunningWorkerHandle>();
+
+/** Register `taskId`'s live session; returns the matching unregister, identity-checked so a slow-to-unwind earlier
+ * spawn can never evict a later one's still-live registration. */
+function registerRunningWorker(taskId: string, handle: RunningWorkerHandle): () => void {
+  runningWorkers.set(taskId, handle);
+  return () => {
+    if (runningWorkers.get(taskId) === handle) runningWorkers.delete(taskId);
+  };
+}
+
+/** TEST-ONLY: drop every registered handle, so one test's leftover can never pass a later test's "is anything
+ * running" check. */
+export function __resetRunningWorkersForTest(): void {
+  runningWorkers.clear();
+}
+
+/** `"delivered"` — queued onto the live session. `"no-running-worker"` — the caller's existing fix-round path is the
+ * only route left, unchanged (design iii's `rotate` answer also stays on that path: a fresh-context restart is not a
+ * session to steer). */
+export type OperatorAnswerDeliveryOutcome = "delivered" | "no-running-worker";
+
+/** Deliver an answer to task `taskId`'s running worker, if any, via `Query.streamInput` rather than the next fix round
+ * (design ii). `priority: "next"` is the SDK's own "next turn boundary" — never mid-tool-call. Returns the routing
+ * decision synchronously; delivery is fire-and-forget, and a failure is ledgered, never thrown ({@link
+ * appendQuestionAnswer}'s own contract). */
+export function deliverOperatorAnswerToRunningWorker(
+  taskId: string,
+  answerText: string,
+  opts: {
+    ledger?: (event: string, extra?: Record<string, unknown>) => void;
+    onSteerSettled?: () => void; // TEST-ONLY: fires once the streamInput call above settles, so a test can await that instead of guessing a tick count.
+  } = {},
+): OperatorAnswerDeliveryOutcome {
+  const handle = runningWorkers.get(taskId);
+  if (!handle) return "no-running-worker";
+  const ledger = opts.ledger ?? ((message, extra) => console.error(message, extra));
+  const sdkMessage: SDKUserMessage = {
+    type: "user",
+    message: { role: "user", content: answerText },
+    parent_tool_use_id: null,
+    priority: "next",
+  };
+  handle
+    .streamInput(
+      (async function* (): AsyncGenerator<SDKUserMessage> {
+        yield sdkMessage;
+      })(),
+    )
+    .catch((err: unknown) => {
+      ledger("worker.steer_failed", { task: taskId, reason: err instanceof Error ? err.message : String(err) });
+    })
+    .finally(() => opts.onSteerSettled?.());
+  ledger("worker.steered", { task: taskId, chars: answerText.length });
+  return "delivered";
 }
 
 // ── Worktree lifecycle (under config.root/worktrees) ──────────────────────

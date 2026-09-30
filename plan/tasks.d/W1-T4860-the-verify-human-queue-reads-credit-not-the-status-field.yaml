@@ -1,0 +1,32 @@
+- id: W1-T4860
+  title: "THE VERIFY-HUMAN JUDGE RE-ASKS ABOUT TASKS ALREADY RULED — parkedVerifyHumanShards picks tasks by the shard's raw `status: queued` and checks deps with `status === 'merged'`, ignoring pr: credit and `done`, so W1-T3102 and W1-T3103 (ruled and credited 2026-09-22, #6561) were re-judged daily"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator ask 2026-09-30: file, build and retire as you see fit (verify-human review follow-ups)"
+  note: "reservation hand-off: plan-systemic-0930-1790738140000 -> plan-systemic-0930-1790738140000"
+  plan_refs: [W1-T3102, W1-T3103]
+  files: [src/run-task.ts, test/the-verify-human-queue-reads-credit-not-the-status-field.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-30: src/run-task.ts parkedVerifyHumanShards filters `task.status !== "queued"` and computes
+    depsAllMerged as `plan.byId.get(d)?.status === "merged"`. deriveStatus (src/lib/status.ts) credits `pr:` and
+    counts `done` as landed, and the queue consults neither. The judge re-ruled W1-T3102 and W1-T3103 on 09-28 and
+    09-29, six days after both were executed and credited; the operator then read them in the 18-item review.
+  design: |
+    The queue and its depsAllMerged read the same credited status the dispatcher and board use (deriveStatus or
+    the merge-credit projection), so a credited or done shard is never queued for judgement and a done dependency
+    counts as landed.
+  acceptance:
+    - claim: "a credited ruling shard is not judged again"
+      proof: 'grep: test("W1-T4860: a credited ruling shard is not judged again" in test/the-verify-human-queue-reads-credit-not-the-status-field.test.ts'
+    - claim: "a done dependency counts as landed"
+      proof: 'grep: test("W1-T4860: a done dependency counts as landed" in test/the-verify-human-queue-reads-credit-not-the-status-field.test.ts'
+  falsifier: |
+    Read the raw status again and the first test re-queues the credited shard.

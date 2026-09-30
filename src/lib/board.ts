@@ -100,6 +100,11 @@ export interface BoardSnapshot {
   generated_at: string;
   /** True iff the GitHub read backing merge-state was unreachable this snapshot (fb-…c124f9). */
   github_unreachable: boolean;
+  /** How old the GitHub facts behind this snapshot were at `generated_at`, in ms (W1-T4771). Serve never fetches
+   *  inline, so a fact past its TTL is served stale and this says by how much. Absent when none is held yet. */
+  github_facts_age_ms?: number;
+  /** W1-T4771: `stale` once a held GitHub fact is past its TTL, whatever this snapshot's own age. Absent with the age. */
+  github_facts_status?: "fresh" | "stale";
   /** Header counts, derived from the same `tasks` below — tally and rows can never disagree. */
   counts: CountSummary;
   /** GLANCE strip totals (W1-T159), from the same ledger lines this snapshot already read. */
@@ -248,6 +253,37 @@ function safeQueueTruncated(github: BoardDeps["github"]): boolean {
     void error; // the separate failure-reason read preserves its own classified cause
     return true;
   }
+}
+
+/** The gateway's oldest-held-fact age, guarded like {@link safeReadFailed}: an accessor that throws reads as unknown. */
+function safeFactsAgeMs(github: BoardDeps["github"]): number | undefined {
+  try {
+    return github.factsAgeMs?.();
+  } catch (error) {
+    void error; // an unreadable age is reported as absent; it never fails the snapshot it decorates
+    return undefined;
+  }
+}
+
+function safeFactsStale(github: BoardDeps["github"]): boolean {
+  try {
+    return github.factsStale?.() ?? false;
+  } catch (error) {
+    void error; // an unreadable verdict is reported as stale, so an unknown age is never labelled fresh
+    return true;
+  }
+}
+
+/** A memo hit re-reads the facts' age: the snapshot's own copy was true only when it was computed. */
+function withLiveGithubFacts(snapshot: BoardSnapshot, github: BoardDeps["github"]): BoardSnapshot {
+  const ageMs = safeFactsAgeMs(github);
+  return ageMs === undefined ? snapshot : { ...snapshot, github_facts_age_ms: ageMs, github_facts_status: safeFactsStale(github) ? "stale" : "fresh" };
+}
+
+/** The page is only as fresh as its stalest source; the console snapshot cache reads this header. */
+function staleSourceHeaders(snapshot: BoardSnapshot): Record<string, string> {
+  if (snapshot.github_facts_status !== "stale") return {};
+  return { [STALE_SOURCE_HEADER]: `github facts ${Math.round((snapshot.github_facts_age_ms ?? 0) / 1000)} s old` };
 }
 
 /** Read the live open half once — both a board-cache input and the immutable list every open-PR consumer uses. */
@@ -429,12 +465,14 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
   // "0 merged" as fact (fb-1784902052582-c124f9).
   const github_unreachable = safeReadFailed(effectiveDeps.github);
   const now = deps.now ?? Date.now;
-  const generatedAt = new Date().toISOString();
+  const generatedAt = new Date(now()).toISOString();
   const { blockedPrs, blockedPrsUnverifiedReason, mergeHeld } = deriveBoardStatusSections(effectiveDeps, lines);
   const prQueue = derivePrQueue(effectiveDeps, lines, tasks, mergeHeld, generatedAt, options.lastGoodPrQueueAt, prQueueIndex);
+  const githubFactsAgeMs = safeFactsAgeMs(effectiveDeps.github);
   return {
     generated_at: generatedAt,
     github_unreachable,
+    ...(githubFactsAgeMs !== undefined ? { github_facts_age_ms: githubFactsAgeMs, github_facts_status: safeFactsStale(effectiveDeps.github) ? "stale" : "fresh" } : {}),
     counts: summarizeCounts(tasks, github_unreachable),
     spend: computeGlanceSpend(lines, now()),
     tasks,
@@ -742,7 +780,7 @@ export function decisionKey(fp: DecisionFingerprint): string {
 }
 
 export function createBoardSnapshotCache(): BoardSnapshotCache {
-  let cached: { decisionKey: string; ghFailed: boolean; ghTruncated: boolean; prQueueIndexKey: string; snapshot: BoardSnapshot } | undefined;
+  let cached: { plan: Plan; decisionKey: string; ghFailed: boolean; ghTruncated: boolean; prQueueIndexKey: string; snapshot: BoardSnapshot } | undefined;
   let lastGoodPrQueueAt: string | undefined;
   // Folded across requests (W1-T2919), so a cache hit costs one pass over the lines appended
   // since the last one, never a re-walk of the whole ledger.
@@ -771,18 +809,19 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
       const ghTruncated = safeQueueTruncated(deps.github);
       if (
         cached &&
+        cached.plan === deps.plan &&
         cached.decisionKey === key &&
         cached.ghFailed === ghFailed &&
         cached.ghTruncated === ghTruncated &&
         cached.prQueueIndexKey === prQueueIndexKey
-      ) return cached.snapshot;
+      ) return withLiveGithubFacts(cached.snapshot, deps.github);
       // ── THE INCREMENTAL PASS ─────────────────────────────────────────────────────────────
       // Everything GitHub-visible about this pass, shared by every task's key: an index change, a
       // gateway that started or stopped failing, or a truncated read each re-derive the whole
       // plan, exactly as they do today.
       const gatewayKey = prQueueIndexKey + "|" + ghFailed + "|" + ghTruncated;
       taskFingerprints = foldTaskFingerprints(lines, taskFingerprints);
-      if (heldGatewayKey !== gatewayKey) {
+      if (heldGatewayKey !== gatewayKey || cached?.plan !== deps.plan) {
         // An index change, or a gateway that started or stopped failing, can move ANY task's
         // projection — so nothing is reused this pass. Identical to today's behaviour.
         projectionByTask.clear();
@@ -809,14 +848,14 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
         },
       );
       if (snapshot.prQueue.complete) lastGoodPrQueueAt = snapshot.generated_at;
-      cached = { decisionKey: key, ghFailed, ghTruncated, prQueueIndexKey, snapshot };
+      cached = { plan: deps.plan, decisionKey: key, ghFailed, ghTruncated, prQueueIndexKey, snapshot };
       return snapshot;
     },
   };
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+function sendJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", ...headers });
   res.end(JSON.stringify(body));
 }
 
@@ -836,6 +875,9 @@ export interface StatusResponse extends BoardSnapshot {
  *  param, so the request URL stays byte-identical to what every existing caller matches. */
 // Why: the query-param design this header replaced — docs/forensics/board.md#recap_ack_header
 export const RECAP_ACK_HEADER = "x-rmd-recap-ack";
+
+/** Names a source a cached page depends on that is stale, so the page's staleness says so too. */
+export const STALE_SOURCE_HEADER = "x-rmd-stale-source";
 
 /** Is this `GET /v1/status` an acknowledged view, or an automatic poll? Presence is the signal. */
 export function requestAcknowledgesRecap(headerValue: string | string[] | undefined): boolean {
@@ -860,7 +902,7 @@ export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Rou
     handler: (req, res) => {
       const snapshot = cache.get(deps);
       if (!lastSeen) {
-        sendJson(res, 200, snapshot);
+        sendJson(res, 200, snapshot, staleSourceHeaders(snapshot));
         return;
       }
       const tokenId = bearerTokenId(req);
@@ -874,7 +916,7 @@ export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Rou
       // what this response actually reflects. Gated on the ack flag: see this function's doc.
       if (requestAcknowledgesRecap(req.headers[RECAP_ACK_HEADER])) lastSeen.advance(tokenId, snapshot.generated_at);
       const body: StatusResponse = { ...snapshot, recap, sinceCheckpoint };
-      sendJson(res, 200, body);
+      sendJson(res, 200, body, staleSourceHeaders(snapshot));
     },
   };
 }
@@ -886,7 +928,23 @@ export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Rou
 // rungs. GitHub only decorates a row that already carries a PR link; a failed decoration marks
 // it `githubUnavailable` and never removes it (see {@link decoratePrTitle}).
 
-export type RecentActivityVerb = "merged" | "verdict" | "fix" | "escalated" | "spend" | "run-refused" | "run-started" | "worker";
+export type RecentActivityVerb =
+  | "merged"
+  | "verdict"
+  | "fix"
+  | "escalated"
+  | "spend"
+  | "run-refused"
+  | "run-started"
+  | "worker"
+  | "started"
+  | "review"
+  | "automerge";
+
+/** Every verb the feed can mint, so a `?verb=` filter can refuse a typo instead of answering empty. */
+export const RECENT_ACTIVITY_VERBS: readonly RecentActivityVerb[] = [
+  "merged", "verdict", "fix", "escalated", "spend", "run-refused", "run-started", "worker", "started", "review", "automerge",
+];
 
 /** The steps that record the daemon's resolution of an operator-initiated console action
  *  (W1-T266) — an allowlist, not a removal of the `!task` guard every other pseudo-id line
@@ -952,6 +1010,10 @@ interface RecentActivityState {
    *  `scannedLines`' line-level cursor — this is what makes even a full re-scan O(new bytes),
    *  not O(history). */
   ledgerTail: LedgerTailCache;
+  /** The array the default tail reader returned last time. {@link readLedgerTail} extends one
+   *  array in place and starts a new one only when the file shrank, so a different array means a
+   *  rotation rewrote the live file, even when the rewrite left it with more lines than were scanned. */
+  lastLines?: ReadonlyArray<Record<string, unknown>>;
 }
 
 /** Opaque handle a caller holds across requests, mirroring {@link BoardSnapshotCache} — never reconstructed per render. */
@@ -1009,6 +1071,10 @@ function boundedRecentTelemetryText(value: unknown): string | undefined {
   return text.length <= 160 ? text : `${text.slice(0, 159)}…`;
 }
 
+function recentPrNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
 function recentWorkerRole(value: unknown): RecentActivityEntry["workerRole"] {
   return value === "recon" || value === "implementer" || value === "reviewer" || value === "fixer" || value === "triage" || value === "retro" || value === "unknown"
     ? value
@@ -1033,6 +1099,16 @@ function classifyLine(
       const verdict = typeof line.verdict === "string" ? line.verdict : "unknown";
       return { taskId, title, ts, verb: verdict === "merged" ? "merged" : "verdict", detail: verdict, costUsd, prUrl, prNumber };
     }
+    // The sweep's merge credit: on the live fleet it is how nearly every merge is recorded, because
+    // the run's own `verdict` row closes as blocked_ci or awaiting review long before GitHub merges.
+    case "verdict.merged":
+      return { taskId, title, ts, verb: "merged", detail: "merged", prUrl, prNumber: prNumber ?? recentPrNumber(line.pr_number) };
+    case "run.start":
+      return { taskId, title, ts, verb: "started", detail: boundedRecentTelemetryText(line.type) ?? boundedRecentTelemetryText(line.lane) ?? "run" };
+    case "review.posted":
+      return { taskId, title, ts, verb: "review", detail: boundedRecentTelemetryText(line.state) ?? "posted", prUrl, prNumber };
+    case "automerge.armed":
+      return { taskId, title, ts, verb: "automerge", detail: "armed", prUrl, prNumber: prNumber ?? recentPrNumber(line.pr_number) };
     case "fix.dispatch":
       return { taskId, title, ts, verb: "fix", detail: `dispatched (strike ${String(line.strike ?? "?")})`, prUrl, prNumber };
     case "fix.done":
@@ -1104,7 +1180,9 @@ export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCach
   const lines = readLedger(deps.ledgerPath);
   // A shorter ledger than last scanned should never happen (append-only); degrade safely by
   // rescanning from scratch rather than slicing with a negative offset.
-  if (lines.length < state.scannedLines) {
+  const rewritten = deps.readLedger === undefined && state.lastLines !== undefined && lines !== state.lastLines;
+  state.lastLines = lines;
+  if (rewritten || lines.length < state.scannedLines) {
     state.scannedLines = 0;
     state.entries = [];
     state.prByRun = new Map();
@@ -1135,11 +1213,45 @@ export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCach
     const prUrl = typeof line.pr_url === "string" ? line.pr_url : runId ? state.prByRun.get(runId) : undefined;
     const entry = classifyLine(line, taskId, task?.title ?? taskId, ts, prUrl);
     if (!entry) continue;
+    // One merge, one row: a run's own `verdict: merged` and the sweep's `verdict.merged` credit
+    // both record the same merge, and the console counts merges off this feed. Keep the later
+    // timestamp when both rows exist: the sweep credit records when the merge actually happened.
+    if (entry.verb === "merged") {
+      const duplicateIndex = state.entries.findIndex((e) => e.verb === "merged" && e.taskId === entry.taskId && e.prUrl === entry.prUrl);
+      if (duplicateIndex >= 0) {
+        const previous = state.entries[duplicateIndex];
+        if (previous && Date.parse(entry.ts) > Date.parse(previous.ts)) {
+          state.entries[duplicateIndex] = decoratePrTitle(runId ? { ...entry, runId } : entry, deps);
+        }
+        continue;
+      }
+    }
     state.entries.push(decoratePrTitle(runId ? { ...entry, runId } : entry, deps));
     if (state.entries.length > RECENT_ACTIVITY_HISTORY_CAP) state.entries.shift();
   }
 
   return state.entries.slice(-max).reverse();
+}
+
+/** The feed's default page, and what `?limit=` may raise it to (the whole retained history). */
+const RECENT_DEFAULT_LIMIT = 20;
+
+/** `?verb=merged,review` narrows the feed to those verbs, and `?limit=` sizes it (1..200), so a
+ *  merges panel is not starved by a busy hour of run starts. Both are optional: a bare GET is the
+ *  newest 20 of every verb, as it always was. */
+function recentQuery(rawUrl: string | undefined): { verbs?: ReadonlySet<string>; limit: number } | { error: string } {
+  const params = new URL(rawUrl ?? "/", "http://localhost").searchParams;
+  const limitRaw = params.get("limit");
+  const limit = limitRaw === null ? RECENT_DEFAULT_LIMIT : Number(limitRaw);
+  if (!Number.isInteger(limit) || limit < 1 || limit > RECENT_ACTIVITY_HISTORY_CAP) {
+    return { error: `limit must be an integer from 1 to ${RECENT_ACTIVITY_HISTORY_CAP}` };
+  }
+  const verbRaw = params.get("verb");
+  if (verbRaw === null) return { limit };
+  const verbs = verbRaw.split(",").map((v) => v.trim()).filter(Boolean);
+  const unknown = verbs.filter((v) => !(RECENT_ACTIVITY_VERBS as readonly string[]).includes(v));
+  if (verbs.length === 0 || unknown.length > 0) return { error: `unknown verb: ${unknown.join(",") || "(empty)"}` };
+  return { verbs: new Set(verbs), limit };
 }
 
 /** GET /v1/recent — the RECENT section's data, read-scoped, one {@link RecentActivityCache} per route instance. */
@@ -1149,8 +1261,16 @@ export function buildRecentRoute(deps: BoardDeps): Route {
     method: "GET",
     path: "/v1/recent",
     scope: "read",
-    handler: (_req, res) => {
-      sendJson(res, 200, { entries: computeRecentActivity(deps, cache) });
+    handler: (req, res) => {
+      const query = recentQuery(req.url);
+      if ("error" in query) {
+        sendJson(res, 400, { error: "invalid_request", detail: query.error });
+        return;
+      }
+      const entries = computeRecentActivity(deps, cache, RECENT_ACTIVITY_HISTORY_CAP);
+      const verbs = query.verbs;
+      const matching = verbs ? entries.filter((e) => verbs.has(e.verb)) : entries;
+      sendJson(res, 200, { entries: matching.slice(0, query.limit) });
     },
   };
 }

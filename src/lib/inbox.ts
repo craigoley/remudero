@@ -21,10 +21,14 @@ import { MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "
 import { appendLedger } from "./ledger.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
-import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
+import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
+import { fileURLToPath } from "node:url";
+import { readInstanceRegistryText } from "./instance-mode.js";
+import { parseInstanceRegistry } from "./instance-registry.js";
+import { loadManagedRepos } from "./managed-repos.js";
 import { workerLedgerFields, type WorkerResult } from "./worker.js";
 import type { InterpretReplyResult } from "./reply-interpreter.js";
-import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument } from "yaml";
+import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
 import { RmdError } from "./errors.js";
 
 /**
@@ -737,6 +741,9 @@ export interface ReadinessContext {
   /** W1-T2604: the reason a `panel.proposal_declined` ledger line records. ⚠ NEVER inferred from the proposal's own
    *  prose — a keyword rule would let a worker retire its own proposal by phrasing. */
   isDeclined?: (proposalId: string) => string | undefined;
+  /** A verified task-scoped verify-human release receipt. Absent means no opinion: a missing
+   * ledger read never retires an operator ask by assumption. */
+  isReleasedHumanTask?: (taskId: string) => boolean;
   /** W1-T3518: does the LAST adoption scan show this proposal's finding is GONE — adopted, retired, or
    *  fixed by a scanner correction? Optional, and absent means NO OPINION, never "gone": a caller that
    *  cannot read the scan's own record must not retire the backlog by forgetting to supply this. */
@@ -1170,6 +1177,16 @@ export function classifyProposal(
         `operator actually decides in; this row stays in the registry as a record, never deleted`,
     };
   }
+  const humanTaskId = /^verify-human:([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
+  const humanTask = humanTaskId ? ctx.plan.byId.get(humanTaskId) : undefined;
+  if (humanTask?.status === "blocked" && humanTask.retirement) {
+    return {
+      proposalId: proposal.id,
+      state: "retired",
+      reasons: [],
+      retiredReason: `${proposal.id}'s task ${humanTaskId} was explicitly ${humanTask.retirement} in the plan; its prior operator ask remains in history`,
+    };
+  }
   const mergedTaskReferent = taskReferentMerged(proposal, ctx);
   if (mergedTaskReferent !== undefined) {
     return {
@@ -1180,6 +1197,18 @@ export function classifyProposal(
         `${proposal.id}'s task ${mergedTaskReferent} has merged, so this proposal is about finished ` +
         `work and can never render READY again; it stays in the registry as a record of the finding, ` +
         `never deleted`,
+    };
+  }
+  // A release moves this parked task to the fleet BEFORE it merges. The old operator proposal
+  // is now history, not a second request for the same decision. Never apply this to a different
+  // proposal kind or to an id the current plan does not hold.
+  const releasedTaskId = /^verify-human:([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
+  if (releasedTaskId && ctx.plan.byId.has(releasedTaskId) && ctx.isReleasedHumanTask?.(releasedTaskId) === true) {
+    return {
+      proposalId: proposal.id,
+      state: "retired",
+      reasons: [],
+      retiredReason: `${proposal.id}'s task ${releasedTaskId} was released to the fleet; its prior operator ask remains in history`,
     };
   }
   const referentUnverified = referent.kind === "unreadable" ? { referentUnverified: true as const } : {};
@@ -1445,6 +1474,12 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "(no ```yaml or ``` line before or after it); the harness parses the fragment as YAML",
     "verbatim, and a fence around it fails that parse.",
     "",
+    // W1-T4864: the structured route — the harness renders the YAML, so it cannot fail to parse.
+    "PREFERRED — emit the SAME tasks as DATA: a JSON array between `=== FRAGMENT JSON START ===` and",
+    "`=== FRAGMENT JSON END ===` (instead of the YAML FRAGMENT markers), then the STAMP line. The harness",
+    "validates it against this JSON schema and renders the YAML itself, so quoting and indentation cannot fail:",
+    JSON.stringify(INBOX_DRAFT_FRAGMENT_SCHEMA),
+    "",
     `Valid \`type:\` values (a closed enum — anything else is rejected): ${TASK_TYPES.join(", ")}.`,
     "`acceptance:` is a LIST of mappings, never a string and never a bare list of strings. Each",
     "item has a `claim:` (what becomes true) AND a `proof:` (how a reviewer checks it), both",
@@ -1556,13 +1591,113 @@ export function describeDraftParseFailure(text: string): DraftParseFailure {
  *  `null` when either marker is missing — a malformed draft is never silently treated as a candidate. The fragment
  *  runs through {@link stripMarkdownFence} first; a malformed fence throws, which {@link runDraftRung} isolates. */
 export function parseDraftedCandidate(text: string): ParsedDraft | null {
-  const fragments = [...text.matchAll(FRAGMENT_RE)];
   const stamps = [...text.matchAll(STAMP_RE)];
+  // W1-T4864: a STRUCTURED fragment wins over a YAML one — its YAML is the harness's, so it cannot fail to parse.
+  const structured = [...text.matchAll(new RegExp(FRAGMENT_JSON_RE, "g"))];
+  if (structured.length > 0 && stamps.length > 0) {
+    return {
+      fragmentYaml: fragmentJsonToYaml(structured[structured.length - 1][1]),
+      stampLine: stamps[stamps.length - 1][1].trim(),
+    };
+  }
+  const fragments = [...text.matchAll(FRAGMENT_RE)];
   if (fragments.length === 0 || stamps.length === 0) return null;
   return {
     fragmentYaml: stripMarkdownFence(fragments[fragments.length - 1][1].trim()),
     stampLine: stamps[stamps.length - 1][1].trim(),
   };
+}
+
+// ── W1-T4864: the draft as schema-checked DATA, rendered to YAML by the harness ────────────────
+//
+// 46 of the 200 terminal nano drafts were YAML that failed to PARSE — a formatting failure of the model's, not a
+// judgement failure. Asked for data instead, the model cannot mis-quote a `proof:` or mis-indent a list, and the
+// harness owns the one serializer, so a schema-valid draft is parseable by construction.
+
+/** The structured-fragment block. Not global, so `.test` is stateless; the parser matches with a global copy. */
+export const FRAGMENT_JSON_RE = /=== FRAGMENT JSON START ===\r?\n([\s\S]*?)\r?\n=== FRAGMENT JSON END ===/;
+
+/** The JSON schema the draft's structured form is requested against (and {@link validateDraftFragmentData} enforces). */
+export const INBOX_DRAFT_FRAGMENT_SCHEMA = {
+  type: "array",
+  minItems: 1,
+  items: {
+    type: "object",
+    required: ["id", "title", "repo", "depends_on", "type", "verify", "risk", "status", "attempts", "files", "acceptance", "origin"],
+    properties: {
+      id: { type: "string", minLength: 1 },
+      title: { type: "string", minLength: 1 },
+      repo: { type: "string", minLength: 1 },
+      depends_on: { type: "array", items: { type: "string" } },
+      type: { enum: [...TASK_TYPES] },
+      verify: { type: "string", minLength: 1 },
+      risk: { type: "string", minLength: 1 },
+      status: { type: "string", minLength: 1 },
+      attempts: { type: "integer", minimum: 0 },
+      files: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
+      acceptance: {
+        type: "array",
+        minItems: 1,
+        items: { type: "object", required: ["claim", "proof"], properties: { claim: { type: "string", minLength: 1 }, proof: { type: "string", minLength: 1 } } },
+      },
+      origin: { type: "string", minLength: 1 },
+    },
+  },
+} as const;
+
+const isNonEmptyString = (v: unknown): v is string => typeof v === "string" && v.length > 0;
+
+/** Every way `data` departs from {@link INBOX_DRAFT_FRAGMENT_SCHEMA}; empty means schema-valid. Extra fields are allowed. */
+export function validateDraftFragmentData(data: unknown): string[] {
+  if (!Array.isArray(data)) return ["the fragment must be a JSON array of task objects"];
+  if (data.length === 0) return ["the fragment must carry at least one task"];
+  const errors: string[] = [];
+  data.forEach((task, i) => {
+    const at = `task[${i}]`;
+    if (typeof task !== "object" || task === null || Array.isArray(task)) {
+      errors.push(`${at} must be an object`);
+      return;
+    }
+    const t = task as Record<string, unknown>;
+    for (const key of ["id", "title", "repo", "verify", "risk", "status", "origin"]) {
+      if (!isNonEmptyString(t[key])) errors.push(`${at}.${key} must be a non-empty string`);
+    }
+    if (!(TASK_TYPES as readonly unknown[]).includes(t.type)) errors.push(`${at}.type must be one of ${TASK_TYPES.join("|")}`);
+    if (!Number.isInteger(t.attempts) || (t.attempts as number) < 0) errors.push(`${at}.attempts must be a non-negative integer`);
+    if (!Array.isArray(t.depends_on) || !t.depends_on.every((d) => typeof d === "string")) errors.push(`${at}.depends_on must be an array of strings`);
+    if (!Array.isArray(t.files) || t.files.length === 0 || !t.files.every(isNonEmptyString)) errors.push(`${at}.files must be a non-empty array of non-empty strings`);
+    if (!Array.isArray(t.acceptance) || t.acceptance.length === 0) {
+      errors.push(`${at}.acceptance must be a non-empty array of {claim, proof}`);
+    } else {
+      t.acceptance.forEach((c, j) => {
+        const rec = typeof c === "object" && c !== null ? (c as Record<string, unknown>) : undefined;
+        if (!rec || !isNonEmptyString(rec.claim) || !isNonEmptyString(rec.proof)) errors.push(`${at}.acceptance[${j}] must carry a non-empty string claim and proof`);
+      });
+    }
+  });
+  return errors;
+}
+
+/** Render schema-valid fragment data to the YAML the plan parser reads. THROWS on data that is not schema-valid: the
+ *  guarantee is "valid in, parseable out", never a best-effort dump of something the schema refused. */
+export function renderDraftFragmentYaml(data: unknown): string {
+  const errors = validateDraftFragmentData(data);
+  if (errors.length > 0) throw new PlanError(`draft fragment data is not schema-valid: ${errors.join("; ")}`);
+  return stringifyYaml(data, { lineWidth: 0 }).trimEnd();
+}
+
+/** A structured block's text as fragment YAML. Data that is not schema-valid is NOT rendered: its raw text is returned
+ *  (JSON is itself YAML), so the ordinary lint reports the real problem and the relint prompt carries it back. */
+function fragmentJsonToYaml(raw: string): string {
+  const text = raw.trim();
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch (_err) {
+    // Deliberate: unparseable JSON is handed on as-is; `lintDraftedFragment` turns it into a `draft-parse` violation.
+    return text;
+  }
+  return validateDraftFragmentData(data).length === 0 ? renderDraftFragmentYaml(data) : text;
 }
 
 // ── The draft rung's INJECTABLE orchestration core (W1-T192) ─────────────────────────────
@@ -1573,10 +1708,25 @@ export function parseDraftedCandidate(text: string): ParsedDraft | null {
 
 /** One Architect worker call for one proposal's draft prompt; tests inject a fake. Returns the full {@link
  *  WorkerResult} so {@link runDraftRung} logs the same `workerLedgerFields` as every spawn. */
-export type DraftSpawn = (proposal: Proposal, prompt: string) => Promise<WorkerResult>;
+export type DraftSpawn = (proposal: Proposal, prompt: string, ctx?: DraftSpawnContext) => Promise<WorkerResult>;
+
+/**
+ * W1-T4864: what a redraft tells the spawn about the models that already failed THIS proposal's lint. A dirty
+ * draft is evidence about the MODEL, not about the dice: 3,311 syntheses bought 200 terminal drafts on one model
+ * because every relint re-rolled the same one. `avoidModels` names the ladder candidates whose draft came back dirty;
+ * a spawn that resolves a ladder (run-task.ts) walks to the next candidate that is not in it. Empty on the first call.
+ */
+export interface DraftSpawnContext {
+  /** 1-based synthesis attempt within this proposal's bounded self-lint. */
+  attempt: number;
+  /** The models whose draft for this proposal failed lint, in the order they were tried. */
+  avoidModels: readonly string[];
+}
 
 export interface DraftRungDeps {
   spawn: DraftSpawn;
+  /** One optional subscription attempt after cash could not produce a lint-clean fragment. Undefined means reserve blocked it. */
+  escalate?: (proposal: Proposal, prompt: string) => Promise<WorkerResult | undefined>;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -1595,9 +1745,30 @@ export type DraftRungOutcome =
 // impl-FU: re-exported from lib/relint.ts so triage, plan and inbox share ONE bound.
 export const MAX_DRAFT_LINT_ATTEMPTS = MAX_RELINT_ATTEMPTS;
 
+/** W1-T4700: the names a task's `repo:` may carry — every fleet-registry instance, the managed set, and `none`
+ *  (status.ts's no-repo sentinel). `undefined` on an unreadable registry, which leaves the repo rule silent. */
+export function knownPlanRepos(repoRoot: string): ReadonlySet<string> | undefined {
+  const text = readInstanceRegistryText(repoRoot);
+  if (text === undefined) return undefined;
+  try {
+    const names = parseInstanceRegistry(text).instances.map((i) => i.repo.slice(i.repo.indexOf("/") + 1));
+    return new Set(["none", ...names, ...loadManagedRepos(repoRoot).map((r) => r.repo)]);
+  } catch {
+    // Deliberate skip: a malformed registry or managed-repos file names no repos, so the rule refuses none.
+    return undefined;
+  }
+}
+
+const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+
 /** Lint a drafted fragment exactly as `rmd lint-plan` would. A fragment that does not parse is itself one block
  *  violation, so it drives a redraft rather than being cached as NOT-READY. */
-export function lintDraftedFragment(fragmentYaml: string, proposalId: string, stampLine?: string): DraftLintViolation[] {
+export function lintDraftedFragment(
+  fragmentYaml: string,
+  proposalId: string,
+  stampLine?: string,
+  knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(HARNESS_ROOT),
+): DraftLintViolation[] {
   let tasks;
   try {
     tasks = parseTasksFromYaml(fragmentYaml, `inbox draft ${proposalId}`);
@@ -1605,7 +1776,7 @@ export function lintDraftedFragment(fragmentYaml: string, proposalId: string, st
     return [{ check: "draft-parse", severity: "block", message: `fragment failed to parse — fix before re-emitting: ${String((e as Error)?.message ?? e)}` }];
   }
   const violations: DraftLintViolation[] = [];
-  for (const task of tasks) violations.push(...filingBlockers(lintTask(task).violations, undefined, true));
+  for (const task of tasks) violations.push(...filingBlockers(lintTask(task, { knownRepos }).violations, undefined, true));
   if (stampLine !== undefined) violations.push(...stampLineViolations(proposalId, stampLine, tasks.map((t) => t.id)));
   return violations;
 }
@@ -1632,6 +1803,11 @@ export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string,
   ].join("\n");
 }
 
+/** The model a draft's worker ran on: the routed deployment when the provider resolved one, else the configured model. */
+function draftWorkerModel(worker: WorkerResult): string | null {
+  return worker.routedModel ?? worker.model ?? null;
+}
+
 /** Draft EVERY proposal in `toDraft`. Independent proposals run concurrently up to {@link DAEMON_DRAFT_BATCH_CAP};
  *  one proposal's self-lint retries stay serial. NEVER THROWS — each spawn and parse is isolated in its OWN try/catch
  *  (W1-T192's fail-soft requirement), which is what makes this safe on an unattended poll. */
@@ -1644,9 +1820,26 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       // cc71f2 SELF-LINT: draft, lint, and on a blocking violation redraft with the failures in hand, bounded, so a
       // fired proposal reaches READY without an operator cleanup pass.
       let lastWorker: Awaited<ReturnType<DraftRungDeps["spawn"]>> | undefined;
+      // W1-T4864: a dirty relint walks the LADDER instead of re-rolling the same model.
+      const avoidModels: string[] = [];
+      let dirty: { from: string | null; violations: string[] } | undefined;
+      let cashAttempts = 0;
       for (let attempt = 1; attempt <= MAX_DRAFT_LINT_ATTEMPTS; attempt++) {
-        const worker = await deps.spawn(proposal, prompt);
+        cashAttempts = attempt;
+        const worker = await deps.spawn(proposal, prompt, { attempt, avoidModels: [...avoidModels] });
         lastWorker = worker;
+        if (dirty) {
+          // NAME THE FALL-THROUGH, with the model that actually answered — a spawn that ignored `avoidModels` shows up
+          // here as from === to, which is the record a retried-same-model regression must leave.
+          deps.log("inbox.draft_fellthrough", {
+            proposal_id: proposal.id,
+            attempt,
+            from: dirty.from,
+            to: draftWorkerModel(worker),
+            violations: dirty.violations,
+          });
+          dirty = undefined;
+        }
         deps.log("inbox.draft_synthesized", {
           proposal_id: proposal.id,
           attempt,
@@ -1661,7 +1854,43 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         if (violations.length === 0) break; // lint-clean — cache it
         if (attempt < MAX_DRAFT_LINT_ATTEMPTS) {
           deps.log("inbox.draft_relint", { proposal_id: proposal.id, attempt, violations: violations.map((v) => v.message) });
+          const from = draftWorkerModel(worker);
+          if (from !== null && !avoidModels.includes(from)) avoidModels.push(from);
+          dirty = { from, violations: violations.map((v) => v.message) };
           prompt = inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations);
+        }
+      }
+      if (lastWorker && !lastWorker.usageRefusal && (!parsed || violations.length > 0) && deps.escalate) {
+        const reason = parsed ? "dirty-lint" : "fragment-contract";
+        const escalationPrompt = parsed
+          ? inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)
+          : `${prompt}\n\nThe cash draft missed the fragment contract. Re-emit the complete fragment and STAMP using the literal markers in the prompt.`;
+        try {
+          const escalated = await deps.escalate(proposal, escalationPrompt);
+          if (escalated) {
+            deps.log("inbox.draft_escalated", {
+              proposal_id: proposal.id,
+              from: draftWorkerModel(lastWorker),
+              to: escalated.servedModel ?? draftWorkerModel(escalated),
+              reason,
+            });
+            deps.log("inbox.draft_synthesized", {
+              proposal_id: proposal.id,
+              attempt: cashAttempts + 1,
+              session_id: escalated.sessionId,
+              cost_usd: escalated.costUsd,
+              subtype: escalated.subtype,
+              ...workerLedgerFields(escalated),
+            });
+            const candidate = parseDraftedCandidate([escalated.text, escalated.blocks.join("\n")].join("\n"));
+            if (candidate) {
+              parsed = candidate;
+              violations = lintDraftedFragment(candidate.fragmentYaml, proposal.id, candidate.stampLine);
+            }
+          }
+        } catch (error) {
+          // A failed subscription attempt cannot discard the cash fragment already produced.
+          deps.log("inbox.draft_escalation_error", { proposal_id: proposal.id, error: String((error as Error)?.message ?? error) });
         }
       }
       if (!parsed) {
@@ -2439,8 +2668,8 @@ export interface RatifyGateway {
    *  plus its folded stamp as a NEW COMMIT on that already-pushed, still-open branch — never a new
    *  branch, never a new PR. Returns the SAME branch name it was given. Each approval keeps its own
    *  commit (design iii): this writes ONE more commit onto the shared branch, never squashes or amends
-   *  a prior approval's own. */
-  joinRatificationBranch?(branch: string, payload: RatificationPayload): string;
+   *  a prior approval's own. `prUrl` is that open PR, whose body W1-T4706 rebuilds over the whole branch. */
+  joinRatificationBranch?(branch: string, payload: RatificationPayload, prUrl: string): string;
 }
 
 export type ApproveResult =
@@ -2603,7 +2832,7 @@ export function approveProposal(
   } else if (resumeBranch !== undefined && gateway.completeRatificationBranch) {
     branch = gateway.completeRatificationBranch(resumeBranch, classification.proposalId);
   } else if (joined) {
-    branch = gateway.joinRatificationBranch!(joinable.branch, payload);
+    branch = gateway.joinRatificationBranch!(joinable.branch, payload, joinable.prUrl);
   } else if (skillFile && gateway.writeSkillFile) {
     branch = gateway.writeSkillFile(classification.proposalId, skillFile);
   } else {
@@ -2829,6 +3058,100 @@ export function writeRatificationShards(
   return shards.files.map((f) => f.relPath);
 }
 
+/** W1-T4700: `rmd approve` refused a materialized fragment that fails the draft linter WITH its stamp. */
+export class RatificationDraftRefusedError extends RmdError {
+  constructor(proposalId: string, violations: readonly string[]) {
+    super("plan", 1, `rmd approve: refusing to file ${proposalId} — ${violations.join("; ")}`, { proposalId, violations });
+    this.name = "RatificationDraftRefusedError";
+  }
+}
+
+/** Throws {@link RatificationDraftRefusedError} unless the fragment, as {@link writeRatificationShards} would repair
+ *  it, lints clean WITH its stamp. #7608 filed `repo: master-plan` shards with a `verify` object and no criteria. */
+export function assertRatificationDraftFileable(
+  fragmentYaml: string,
+  proposalId: string,
+  stampLine: string,
+  knownRepos: ReadonlySet<string> | undefined,
+): void {
+  const relinted = relintRatificationFragment(fragmentYaml, proposalId);
+  const linted = lintDraftedFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId, stampLine, knownRepos);
+  const violations = linted.map((v) => `[${v.check}] ${v.message}`);
+  if (!relinted.ok && violations.length === 0) violations.push(relinted.reason);
+  if (violations.length > 0) throw new RatificationDraftRefusedError(proposalId, violations);
+}
+
+/** Check, then write the shards and the stamp. Returns exactly the paths changed: MASTER-PLAN.md only when the
+ *  stamp replaced a bullet, which the PR body's Changed files once named regardless. */
+export function fileRatificationDraft(
+  worktreePath: string,
+  payload: { fragmentYaml: string; proposalId: string; stampLine: string },
+  fs: ShardWriteFs & { readFileSync: (path: string, enc: "utf8") => string },
+  joinPath: (...parts: string[]) => string,
+  knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(worktreePath),
+): string[] {
+  assertRatificationDraftFileable(payload.fragmentYaml, payload.proposalId, payload.stampLine, knownRepos);
+  const written = writeRatificationShards(worktreePath, payload.fragmentYaml, payload.proposalId, fs, joinPath);
+  const masterPlanPath = joinPath(worktreePath, "MASTER-PLAN.md");
+  const before = fs.readFileSync(masterPlanPath, "utf8");
+  const after = applyStampToMasterPlan(before, payload.proposalId, payload.stampLine);
+  if (after === before) return written;
+  fs.writeFileSync(masterPlanPath, after, "utf8");
+  return [...written, "MASTER-PLAN.md"];
+}
+
+/** The ratify PR body: the stamp, then Changed files and criteria over `writtenPaths` — never over the draft. */
+export function ratificationPrBody(
+  stampLine: string,
+  filedIds: readonly string[],
+  writtenPaths: readonly string[],
+  opts: Pick<PlanPrBodyOpts, "proofCwd" | "proofCheck" | "baseRef"> = {},
+): string {
+  const intro = [
+    stampLine,
+    "",
+    "The operator's one-bit approve initiated this PR (MASTER-PLAN P25 ii, W1-T111). The",
+    "gate still reviews (ci + remudero-review); nothing auto-merges without it.",
+  ].join("\n");
+  return buildPlanPrBody({ intro, criteria: filingAcceptanceCriteria([...filedIds], [...writtenPaths]), changedFiles: [...writtenPaths], ...opts });
+}
+
+/** W1-T4706: the batch lane files through the single lane's check. Every member's draft is checked before anything is
+ *  minted or written; each materialized member then goes through {@link fileRatificationDraft}. Returns the union of
+ *  paths written, MASTER-PLAN.md once and only when a stamp changed it. */
+export function fileRatificationBatch(
+  worktreePath: string,
+  payloads: readonly RatificationPayload[],
+  materialize: (payload: RatificationPayload) => RatificationPayload,
+  fs: ShardWriteFs & { readFileSync: (path: string, enc: "utf8") => string },
+  joinPath: (...parts: string[]) => string,
+  knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(worktreePath),
+): { writtenPaths: string[]; filedIds: string[] } {
+  for (const p of payloads) assertRatificationDraftFileable(p.fragmentYaml, p.proposalId, p.stampLine, knownRepos);
+  const written = new Set<string>();
+  const filedIds: string[] = [];
+  for (const payload of payloads) {
+    const filed = materialize(payload);
+    for (const path of fileRatificationDraft(worktreePath, filed, fs, joinPath, knownRepos)) written.add(path);
+    filedIds.push(...[...filed.fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]));
+  }
+  return { writtenPaths: [...written], filedIds };
+}
+
+/** W1-T4706: a joined ratify PR's body over every proposal on its branch — the stamps the current body names plus the
+ *  joining one, over the branch's written paths. #7608 kept its first approve's body: five shards under two. */
+export function joinedRatificationPrBody(
+  currentBody: string,
+  stampLine: string,
+  filedIds: readonly string[],
+  writtenPaths: readonly string[],
+  opts: Pick<PlanPrBodyOpts, "proofCwd" | "proofCheck" | "baseRef"> = {},
+): string {
+  const intro = currentBody.split(CHANGED_FILES_HEADING)[0];
+  const stamps = [...intro.split("\n").map((l) => l.trim()).filter((l) => /^- \S+ .*\bRATIFIED\b.*->/.test(l)), stampLine.trim()];
+  return ratificationPrBody([...new Set(stamps.filter(Boolean))].join("\n"), filedIds, writtenPaths, opts);
+}
+
 /** W1-T4338: write an approved skill draft's SKILL.md, verbatim, at its one path under `worktreePath`. Returns that
  *  repo-relative path. Refuses rather than guesses on a name {@link approvedSkillRelPath} rejects, and refuses to
  *  replace a skill already approved at that path — an approval adds a skill, it never silently rewrites one. */
@@ -3010,7 +3333,7 @@ export type BatchApproveResult =
  * before either gateway call. ONE gateway call each for the WHOLE set, and one ledger line per member, so a reader
  * sees the same one-line-per-proposal receipt either way. A batch of exactly ONE READY classification produces output
  * BYTE-IDENTICAL to {@link approveProposal}'s — test/ratify-batch.test.ts pins it. Both gateway
- * paths use {@link writeRatificationShards} after id materialization.
+ * paths use {@link fileRatificationDraft} after id materialization.
  */
 export function approveBatch(
   classifications: readonly InboxClassification[],

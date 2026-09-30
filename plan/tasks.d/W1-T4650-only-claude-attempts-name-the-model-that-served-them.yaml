@@ -14,7 +14,7 @@
     - src/lib/worker-provider.ts
     - src/lib/benchmark-run.ts
     - test/every-provider-names-its-served-model-or-why-not.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

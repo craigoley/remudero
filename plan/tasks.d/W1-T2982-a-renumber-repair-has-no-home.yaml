@@ -82,11 +82,17 @@
     - claim: "The shard parks the decision rather than picking a remedy, and names the family boundary against W1-T1014"
       proof: "grep: THIS SHARD PICKS NO REMEDY AND MUST NOT BE READ AS PROPOSING ONE in plan/tasks.d/W1-T2982-a-renumber-repair-has-no-home.yaml"
   files: [plan/tasks.d/W1-T2982-a-renumber-repair-has-no-home.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   origin: "oper#id-collision-churn-2026-09-06"
   plan_refs: ["W1-T1014", "W1-T297", "W1-T2676", "W1-T2685", "W1-T2710"]
   note: |
+    CLOSED 2026-09-29 (operator session): this record is complete, and every acceptance grep holds in this
+    shard. Its 2026-09-22 ruling (the rename-only fast lane) is built by W1-T4811, which carries real tests. Held
+    here, the ruling could not be built: files: named only this shard, so the 2026-09-23 worker refused and the
+    task was dispatched until its circuit breaker tripped.
+
     THIS SHARD PICKS NO REMEDY AND MUST NOT BE READ AS PROPOSING ONE. It records a gap and the one
     objection any filler of that gap has to answer. Widening rule 25 is listed as a candidate and
     argued AGAINST on its own premise, which is the opposite of proposing it.

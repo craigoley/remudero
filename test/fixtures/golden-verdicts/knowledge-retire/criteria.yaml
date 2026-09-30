@@ -1,9 +1,6 @@
-# The knowledge gardener's (W1-T4095) RETIRE pass from fleet PR #7245 (the operator kept the three
-# learnings a test requires active, so 2 items retire). Each proof executes
-# for real against the post-pass checkout/.
+# The knowledge gardener's (W1-T4095) RETIRE pass for bashrc-accident. Each proof executes for real
+# against the post-pass checkout/.
 - claim: this pass is recorded in the garden log
-  proof: "grep: ^## Pass 2026-09-25T20:17:12.931Z$ in docs/knowledge-garden-log.md"
-- claim: the gardener's retire of rerun-the-job-not-the-run is marked in its entry
-  proof: "grep: knowledge gardener: retire rerun-the-job-not-the-run$ in learnings/ci.yaml"
-- claim: the gardener's retire of maxbudget-between-turns is marked in its entry
-  proof: "grep: knowledge gardener: retire maxbudget-between-turns$ in learnings/platform.yaml"
+  proof: "grep: ^## Pass 2026-09-30T04:27:57.745Z$ in docs/knowledge-garden-log.md"
+- claim: the gardener's retire of bashrc-accident is marked in its entry
+  proof: "grep: knowledge gardener: retire bashrc-accident$ in learnings/platform.yaml"

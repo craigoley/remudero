@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { RELEASE_LEDGER_STEP, assertRunnable, releasedTaskIds } from "../src/lib/plan.js";
+import { RELEASE_LEDGER_STEP, assertRunnable, parseTasksFromYaml, releasedTaskIds } from "../src/lib/plan.js";
 import { nextRunnable, resolveReleasedIds, runDrain } from "../src/lib/drain.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -134,6 +134,31 @@ test("W1-T3216: an ALREADY-released task returns 0 and writes no second row — 
   assert.equal(written.length, 0);
 });
 
+test("the final release writer refuses held tasks and machine high-risk releases", () => {
+  const attempts: Array<{ task: ReturnType<typeof parked>; provenance: Record<string, unknown> }> = [
+    { task: parked("W1-T216", { dispatch_hold: true, risk: "high" }), provenance: { author_class: "machine", released_by: "verify-human-judge" } },
+    { task: parked("W1-T217", { risk: "high" }), provenance: { author_class: "machine", released_by: "verify-human-judge" } },
+    { task: parked("W1-T218", { risk: "high" }), provenance: { released_by: "verify-human-judge" } },
+  ];
+  for (const { task, provenance } of attempts) {
+    const written: unknown[] = [];
+    const out = approveParkedTask(task.id, {
+      plan: planOf([task]), ledgerPath: "/x", runId: "R", ledgerLines: [],
+      provenance,
+      append: (() => void written.push(1)) as never,
+    });
+    assert.equal(out.code, 2, task.id);
+    assert.equal(written.length, 0, "the refusal must write no release receipt");
+  }
+  const humanHighRisk: unknown[] = [];
+  const human = approveParkedTask("W1-T217", {
+    plan: planOf([parked("W1-T217", { risk: "high" })]), ledgerPath: "/x", runId: "R", ledgerLines: [],
+    append: (() => void humanHighRisk.push(1)) as never,
+  });
+  assert.equal(human.code, 0, "the plan risk does not erase the operator's authority");
+  assert.equal(humanHighRisk.length, 1);
+});
+
 test("W1-T3216: the branch is chosen by SHAPE, so a proposal id still reaches the proposal path", () => {
   assert.equal(namesATask("W1-T1041"), true);
   assert.equal(namesATask("W2-T3a"), true);
@@ -163,6 +188,31 @@ test("W1-T3216: assertRunnable admits the released task and still refuses the un
     /verify:human/,
     "the wall still stands for everything the operator did not name",
   );
+});
+
+test("W1-T216: a task-scoped hold outranks a daemon judge release at selection and direct admission", () => {
+  const yaml = `- id: W1-T216
+  title: Controlled security drill
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  status: queued
+  dispatch_hold: true
+`;
+  const [held] = parseTasksFromYaml(yaml, "hold-fixture");
+  assert.equal(held?.dispatch_hold, true, "the hold must survive YAML loading");
+  assert.throws(() => parseTasksFromYaml(yaml.replace("dispatch_hold: true", 'dispatch_hold: "true"'), "bad-hold"), /dispatch_hold must be a boolean/);
+  const released = resolveReleasedIds({ readLedgerLines: () => [
+    row({ step: RELEASE_LEDGER_STEP, task_id: "W1-T216", actor: "daemon", released_by: "verify-human-judge" }),
+    row({ step: RELEASE_LEDGER_STEP, task_id: "W1-T2222" }),
+  ] });
+  assert.equal(released.has("W1-T216"), true, "positive control: the prior judge row still reaches the selector");
+  const plan = planOf([held as never, parked("W1-T2222")]);
+  assert.equal(nextRunnable(plan, NEVER_MERGED, { releasedIds: released } as never)?.id, "W1-T2222", "unrelated released work still flows");
+  assert.throws(() => assertRunnable(plan, held!, NEVER_MERGED, released), /task-scoped dispatch hold/);
+  const unheld = { ...held!, dispatch_hold: false };
+  assert.doesNotThrow(() => assertRunnable(planOf([unheld]), unheld, NEVER_MERGED, released), "removing only the hold restores ordinary release admission");
 });
 
 test("W1-T3216: with NO reader wired the released set is EMPTY — a door added, never a wall removed", () => {

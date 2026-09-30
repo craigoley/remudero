@@ -1,22 +1,24 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-09-26T20:02:26.407Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-09-30T22:03:18.291Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-40 run(s) since the last retro marker. Verdicts: {"blocked_containment":5,"blocked_transient":10,"incomplete":25}.
+6 run(s) since the last retro marker. Verdicts: {"handed_off":1,"incomplete":4,"merged":1}.
 
 ### Shipped since marker
-- RETRO → https://github.com/craigoley/remudero/pull/7309 (gate-side merge; run ended incomplete)
+- RETRO → https://github.com/craigoley/remudero/pull/8118 (gate-side merge; run ended incomplete)
+- TRIAGE-fb-1789301944158-5ef7b8 → https://github.com/craigoley/remudero/pull/8151 (gate-side merge; run ended incomplete)
+- W1-T4916 → https://github.com/craigoley/remudero/pull/8153 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed failed)
 
 ## Next runnable task
 
-**W1-T3992** — FEEDBACK LANDING AUTO-MERGE MUST WAIT FOR THE SHARED REVIEW LANE — follow up the terminal W1-T3990 plan credit with the open-or-reuse implementation
+**W1-T3990** — FEEDBACK LANDING MUST POST remudero-review BEFORE ARMING AUTO-MERGE — landing PR creation currently arms GitHub auto-merge with the required review context absent, so a healthy data-only landing can sit blocked until an operator runs rmd review
 
-- risk: high · depends_on: W1-T3990
+- risk: high · depends_on: (none)
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 

@@ -39,6 +39,8 @@ function servedPaths(): string[] {
     mkdirSync(join(root, "state"), { recursive: true });
     mkdirSync(join(root, "plan"), { recursive: true });
     writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
+    const registryPath = join(root, "daemon-instances.yaml");
+    writeFileSync(registryPath, "instances:\n  site:\n    repo: remudero-site\n    github_repo: craigoley/remudero-site\n");
     const ledgerPath = join(root, "state", "ledger.ndjson");
     writeFileSync(ledgerPath, "");
     const github = {} as never;
@@ -54,9 +56,22 @@ function servedPaths(): string[] {
       pollMs: 60_000,
       githubAppRefresh: { start: () => ({ armed: false }) },
       daemonHealth: { exec: () => "{}" },
+      instances: { registryPath, stateBase: join(root, "instances") },
     } as unknown as ServeDeps;
     const routes = buildServeRoutes(deps).map((route) => route.path);
-    return [...routes, buildStatusStream(board).path].filter((path) => path.startsWith("/v1/"));
+    const stable = routes.filter((path) => path.startsWith("/v1/") && !path.startsWith("/v1/i/"));
+    // The instance family is registry-conditional. Positive-control each newly declared route
+    // against the real registry row before normalizing to the OpenAPI path parameter.
+    const instanceAsk = routes.filter((path) => path === "/v1/i/site/operator-agent/ask")
+      .map((path) => path.replace("/site/", "/{instance}/"));
+    assert.equal(instanceAsk.length, 1, "the dynamic answer route must be mounted for a registered instance");
+    const instanceControl = routes.filter((path) => path === "/v1/i/site/control/assistant-action")
+      .map((path) => path.replace("/site/", "/{instance}/"));
+    assert.equal(instanceControl.length, 1, "the dynamic assistant control must be mounted for a registered instance");
+    const instanceControlReads = routes.filter((path) => path === "/v1/i/site/control/assistant-action/status" || path === "/v1/i/site/control/assistant-action/receipt")
+      .map((path) => path.replace("/site/", "/{instance}/"));
+    assert.equal(instanceControlReads.length, 2, "both dynamic assistant control reads must be mounted for a registered instance");
+    return [...stable, ...instanceAsk, ...instanceControl, ...instanceControlReads, buildStatusStream(board).path];
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

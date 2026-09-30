@@ -12,7 +12,7 @@
 
 import { ghJson } from "./github-transport.js";
 import type { GhApiFetcher } from "./open-prs-rest.js";
-import { REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, dedupeRollupByLatestAttempt, type RollupCheckEntry } from "./sweep.js";
+import { REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, classifyRollupSupersession, type RollupCheckEntry } from "./sweep.js";
 
 /** The exact fields one `gh pr list` call needs to answer this verb — no more, since a wider
  *  projection is a cost this design has no use for and no proof requires. */
@@ -30,6 +30,7 @@ export interface PullRequestBoardEntry {
   headRefName: string;
   failingChecks: string[];
   pendingChecks: string[];
+  supersededChecks?: string[];
 }
 
 /** One repository's board — READ or UNAVAILABLE, never collapsed into each other (design ii). */
@@ -58,7 +59,7 @@ function gateState(entry: RollupCheckEntry): string {
  *  `checksStateFromRollup` applies before judging). Entries with no name are dropped — an
  *  unnamed check cannot be reported by name. */
 function namedChecksWhere(rollup: RollupCheckEntry[] | undefined, want: (state: string) => boolean): string[] {
-  return dedupeRollupByLatestAttempt(rollup ?? [])
+  return classifyRollupSupersession(rollup ?? []).latest
     .filter((c) => want(gateState(c)))
     .map(gateName)
     .filter((name) => name.length > 0);
@@ -73,8 +74,14 @@ interface RawPullRequestRow {
   statusCheckRollup?: RollupCheckEntry[];
 }
 
+function supersededNames(rollup: RollupCheckEntry[] | undefined, failing: readonly string[]): string[] {
+  const names = classifyRollupSupersession(rollup ?? []).superseded.map((s) => gateName(s.entry)).filter((n) => n.length > 0 && !failing.includes(n));
+  return [...new Set(names)];
+}
+
 function summarizeRow(row: RawPullRequestRow): PullRequestBoardEntry {
   const rollup = row.statusCheckRollup;
+  const failingChecks = namedChecksWhere(rollup, (s) => REQUIRED_CHECK_FAIL.has(s));
   return {
     number: row.number ?? 0,
     title: row.title ?? "",
@@ -82,10 +89,11 @@ function summarizeRow(row: RawPullRequestRow): PullRequestBoardEntry {
     headRefName: row.headRefName ?? "",
     // FAILING is the vetoing set REQUIRED_CHECK_FAIL names (sweep.ts, W1-T457) — the same red
     // vocabulary the fix rung itself gates on, so this board's "failing" agrees with the rung's.
-    failingChecks: namedChecksWhere(rollup, (s) => REQUIRED_CHECK_FAIL.has(s)),
+    failingChecks,
     // PENDING is everything that is neither a satisfying conclusion nor a vetoing one — a check
     // still queued or running, or a required context that has not registered on this head yet.
     pendingChecks: namedChecksWhere(rollup, (s) => !REQUIRED_CHECK_OK.has(s) && !REQUIRED_CHECK_FAIL.has(s)),
+    supersededChecks: supersededNames(rollup, failingChecks),
   };
 }
 

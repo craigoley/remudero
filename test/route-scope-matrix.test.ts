@@ -16,6 +16,7 @@ import {
 } from "../src/lib/serve.js";
 import { buildStatusStream } from "../src/lib/board.js";
 import { createService, type Method, type Route, type Scope } from "../src/lib/service.js";
+import { InvalidSecretFileError } from "../src/lib/fs-race-safe.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
 import type { Plan } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
@@ -303,17 +304,17 @@ test("resolveServiceTokens: a corrupt token store file throws at startup rather 
   assert.throws(() => resolveServiceTokens(root), /Unexpected|JSON/);
 });
 
-test("resolveServiceTokens: a well-formed file missing its keys parses fine (the OTHER fail-fatal path)", () => {
+test("resolveServiceTokens: a well-formed file missing its keys is refused at startup too (the OTHER fail-fatal path)", () => {
   const root = tmpRoot();
   mkdirSync(join(root, "state"), { recursive: true });
   writeFileSync(join(root, "state", "service-tokens.json"), "{}\n");
-  // JSON.parse succeeds on `{}` -- the corrupt-file throw above does NOT fire here -- so a caller
-  // gets tokens back rather than an exception at this layer. design (iii): the danger moves one
-  // layer down, into every per-request comparison against these `undefined` fields (see the
-  // subprocess-isolated proof below for why THAT is where this must be observed).
-  const tokens = resolveServiceTokens(root);
-  assert.equal(tokens.read, undefined);
-  assert.equal(tokens.write, undefined);
+  // JSON.parse succeeds on `{}`, so this used to hand back `undefined` tokens and move the danger
+  // one layer down, into every per-request comparison. It now fails closed HERE, naming the file
+  // to delete; the subprocess proof below still holds `createService` to refusing such a pair.
+  assert.throws(
+    () => resolveServiceTokens(root),
+    (err: unknown) => err instanceof InvalidSecretFileError && /no 64-hex "read" token/.test(err.message),
+  );
 });
 
 // design (iii): comparing a presented credential against an `undefined` stored token
@@ -349,7 +350,7 @@ test("createService: a malformed token store refuses an authenticated request wi
         "",
         'test("malformed token store never grants a 200", async () => {',
         "  const server = createService({",
-        "    // The exact shape resolveServiceTokens returns for a well-formed file with no keys.",
+        "    // The shape resolveServiceTokens once returned for a keyless file (it now refuses one).",
         "    tokens: { read: undefined, write: undefined },",
         "    routes: [",
         "      {",

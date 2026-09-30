@@ -7,7 +7,7 @@
   verify: auto
   principles: {tdd: strict}
   risk: medium
-  budget_usd: 25.00
+  budget_usd: 15.50
   files: [src/lib/skill-workshop.ts, test/skill-workshop-actionable-step-text.test.ts]
   origin: architect
   plan_refs: ["W1-T2766", "W1-T81", "W1-T92", "W1-T101", "skill-draft:25c3724cf6958acf"]

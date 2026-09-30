@@ -1,0 +1,30 @@
+- id: W1-T4773
+  title: "THE SWEEP'S OPEN-PR VIEWS READ GITHUB SYNCHRONOUSLY ON THE DAEMON LOOP — buildOpenPrViews' hydrateWorkflowRuns and hydrateMergeStateObservations, and fetchOpenPrsRest's rollupFor, each call ghJson through execFileSync, 14% of loop time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  status: merged
+  attempts: 0
+  origin: "oper#core-daemon-loop-profile-2026-09-29"
+  files: [src/run-task.ts, src/lib/open-prs-rest.ts, src/lib/github-transport.ts, test/open-pr-views-keep-the-daemon-loop-responsive.test.ts]
+  rationale: |
+    A live CPU profile of remudero-daemon on 2026-09-29 (25 min, loop busy 95%) put the open-PR view
+    build at 203 s (14.1%):
+    - buildOpenPrViews > hydrateWorkflowRuns > fetchWorkflowRunObservations > ghJson
+    - buildOpenPrViews > hydrateMergeStateObservations > ghJson
+    - fetchOpenPrsRest > rollupFor > ghJson
+    Every one of these is a synchronous gh child, one per open PR. The 2026-09-24 profile already
+    named "open-PR views (~96 s every 5 min)" as still open. Nothing in the plan carries it.
+  design: |
+    Hydrate views with the async gh transport (ghJsonAsync), with bounded concurrency. The views
+    and their field semantics do not change. Where a read's answer is keyed by head sha, reuse the
+    previous pass's answer for an unchanged head.
+  acceptance:
+    - claim: "a timer keeps firing while open PR views hydrate"
+      proof: 'grep: test("W1-T4773: a timer keeps firing while open PR views hydrate" in test/open-pr-views-keep-the-daemon-loop-responsive.test.ts'
+    - claim: "an unchanged head reuses its prior workflow run observation"
+      proof: 'grep: test("W1-T4773: an unchanged head reuses its prior workflow run observation" in test/open-pr-views-keep-the-daemon-loop-responsive.test.ts'
+  falsifier: |
+    Restore the synchronous ghJson in hydrateWorkflowRuns and the timer-probe test fails.

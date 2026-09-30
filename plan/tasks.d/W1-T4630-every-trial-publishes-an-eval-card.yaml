@@ -15,7 +15,7 @@
     - src/lib/analytics-route.ts
     - docs/research/model-evidence-program.md
     - test/every-trial-publishes-an-eval-card.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

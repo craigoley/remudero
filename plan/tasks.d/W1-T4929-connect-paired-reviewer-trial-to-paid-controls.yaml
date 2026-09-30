@@ -1,0 +1,60 @@
+- id: W1-T4929
+  title: "Connect paired reviewer replay to the approved pilot controls and prove A/A before model comparisons"
+  repo: remudero
+  depends_on: [W1-T4603, W1-T4647, W1-T4905]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator-approved CodeRabbit and Field Trials follow-ups, 2026-09-30"
+  plan_refs: [W1-T4575, W1-T4603, W1-T4619, W1-T4625, W1-T4647, W1-T4905]
+  files: [src/lib/paired-review-eval.ts, src/lib/replay-harness.ts, src/lib/benchmark-paid-pilot.ts, test/paired-review-paid-pilot.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-30: W1-T4905 adds a blinded evaluator and requires an
+    injected per-call admission, but no production adapter supplies the
+    authenticated twin labels, sealed reviewer checkout, independent scorer or
+    paid-pilot spend evidence. A boolean or a fake test callback cannot consume
+    the operator-approved $100/7-day envelope safely. The existing paid pilot
+    controls implementation work, not reviewer twin attempts.
+  design: |
+    Provide a real, explicit operator-invoked adapter over fresh held-out pairs:
+    sealed read-only reviewer checkouts, exact head/base and pinned stack, and
+    independent mechanism and benign-control verification. Use the existing
+    activated paid-pilot protocol, consent receipts, controls, three-repo
+    scope and audited three-form spend union. Re-read cash admission before
+    EACH API-billed call with a per-call reserve; a missing receipt or exhausted
+    budget pauses only this paid evaluation arm. Subscription notional remains
+    separate and never depletes the cash envelope. Do not silently treat a
+    different pilot population or protocol as authorization for reviewer work.
+
+    Run a prospective A/A integrity check first. Record sealed case provenance,
+    seed, assignment propensity, actual served model, token/time/cost receipts,
+    verdict and independently scored findings, and every missing or failed arm.
+    Publish no winner, page data or routing change from a test fixture, an A/A
+    failure or an incomplete cohort. The adapter does not post a review status,
+    alter PR routing, add human approvals, or compete with live fleet dispatch.
+    Activation and any real spend remain governed by the already approved
+    $100 total / 7-day protocol and its explicit operator command.
+  acceptance:
+    - claim: "no reviewer replay call occurs without fresh per-call paid-pilot admission and consent evidence"
+      proof: 'grep: test("W1-T4929: paid admission is rechecked before each reviewer call" in test/paired-review-paid-pilot.test.ts'
+    - claim: "an unreadable spend union pauses only paid evaluation, never ordinary PR review or merge"
+      proof: 'grep: test("W1-T4929: unavailable spend pauses the paid arm alone" in test/paired-review-paid-pilot.test.ts'
+    - claim: "the A/A and sealed-label checks precede any model-quality result"
+      proof: 'grep: test("W1-T4929: A/A failure withholds model comparison" in test/paired-review-paid-pilot.test.ts'
+    - claim: "the operator replay path uses the existing paid pilot admission on every call"
+      proof: 'grep: paidArmPauseReasons( in src/lib/replay-harness.ts'
+  falsifier: |
+    Exhaust the cash envelope between twin arms: the second paid call must not
+    run, the first remains accounted for, and ordinary PR review remains
+    unchanged. Remove the per-call admission and the first and fourth proofs
+    fail. An A/A allocation mismatch must withhold comparison, not just warn.
+  note: |
+    Reservation refs/rmd-id/W1-T4929 held by branch
+    codex/reviewer-benchmark-followups-20260930. This is a build task, not a
+    claim that the paid pilot is activated or that any score is publishable.

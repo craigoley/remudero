@@ -116,6 +116,42 @@ test("a run PR body that matches its plan is left alone", () => {
   assert.equal(r.logged.length, 0, "and nothing is ledgered — silence is the correct trace for a healthy body");
 });
 
+test("W1-T4730: an adopted PR prose Acceptance block is rewritten from the plan", () => {
+  const r = recorder();
+  // The worker had opened this PR already; a generic 422 kept the harness from reaching the
+  // normalizer until exact-head adoption. These bullets reproduce the body that CI refused.
+  const adoptedBody = [
+    "The worker implemented the plan's two checks.",
+    "",
+    "## Acceptance",
+    "- the checkout is refreshed: proven by",
+    "  `test(\"a borrowed managed checkout is fast-forwarded\", ...)` in a test file",
+    "- current checkouts stay current: proven by the same file",
+    "",
+    "## Test plan",
+    "The worker ran its focused suite.",
+    "",
+    `Remudero-Task: ${TASK_ID}`,
+    "",
+  ].join("\n");
+  assert.ok(parseAcceptanceBlock(adoptedBody).some((criterion) => !criterion.proof),
+    "the worker's prose block cannot satisfy the declared proof set");
+  const outcome = normalizeRunPrAcceptanceFromPlan(PR, TASK_ID, PLAN_CRITERIA, r.log, {
+    fetchBody: () => adoptedBody,
+    editBody: r.editBody,
+  });
+  assert.equal(outcome, "rewritten");
+  assert.equal(r.edits.length, 1);
+  const body = r.edits[0].body;
+  assert.deepEqual(new Set(parseAcceptanceBlock(body).map((criterion) => criterion.proof)),
+    new Set(PLAN_CRITERIA.map((criterion) => criterion.proof)));
+  assert.ok(body.includes("## Test plan\nThe worker ran its focused suite."), "surrounding worker prose survives");
+  assert.ok(!body.includes("proven by the same file"), "the unexecutable block is replaced");
+  assert.equal((body.match(/^Remudero-Task:/gm) ?? []).length, 1);
+  assert.ok(body.trim().endsWith(`Remudero-Task: ${TASK_ID}`));
+  assert.equal(r.logged[0]?.step, "pr.body_normalized");
+});
+
 test("a body with no Acceptance block at all (trailer-only shape) is untouched", () => {
   const r = recorder();
   const trailerOnly = `Nothing to see here.\n\nRemudero-Task: ${TASK_ID}\n`;

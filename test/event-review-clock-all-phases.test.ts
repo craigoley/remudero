@@ -165,7 +165,7 @@ test("the same review clock remains live while board review is unresolved", asyn
   }
 });
 
-test("wakes during an active pass coalesce to one non-overlapping follow-up", async () => {
+test("wakes during an active pass coalesce to one bounded review-only follow-up", async () => {
   const clock = new WakeClock();
   const digest = deferred<never>();
   const firstPass = deferred<void>();
@@ -174,6 +174,7 @@ test("wakes during an active pass coalesce to one non-overlapping follow-up", as
   let calls = 0;
   let inFlight = 0;
   let maxInFlight = 0;
+  const scopes: Array<boolean | undefined> = [];
   let daemon: Promise<unknown> | undefined;
   try {
     daemon = runDaemon(
@@ -185,8 +186,9 @@ test("wakes during an active pass coalesce to one non-overlapping follow-up", as
           digestStarted = true;
           return digest.promise;
         },
-        sweepLight: async () => {
+        sweepLight: async (scope) => {
           calls++;
+          scopes.push(scope?.reviewOnly);
           inFlight++;
           maxInFlight = Math.max(maxInFlight, inFlight);
           try {
@@ -203,11 +205,12 @@ test("wakes during an active pass coalesce to one non-overlapping follow-up", as
     await eventually(() => calls === 1 && inFlight === 1, "the first light pass did not start");
     clock.wake();
     clock.wake();
+    await eventually(() => calls === 2, "the review-only follow-up did not overlap the held pass");
     firstPass.resolve();
-    await eventually(() => calls === 2, "a wake during the first pass did not schedule one follow-up");
     await settle();
     assert.equal(calls, 2, "multiple wakes during one pass coalesce rather than creating a hot loop");
-    assert.equal(maxInFlight, 1, "two restricted passes must never overlap");
+    assert.equal(maxInFlight, 2, "the one review-only follow-up may overlap the held pass");
+    assert.deepEqual(scopes, [undefined, true], "only the original pass can take ordinary light actions");
   } finally {
     stopped = true;
     firstPass.resolve();

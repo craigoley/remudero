@@ -14,7 +14,7 @@
     - src/run-task.ts
     - src/lib/benchmark-run.ts
     - test/a-run-task-worker-call-joins-its-assignment.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

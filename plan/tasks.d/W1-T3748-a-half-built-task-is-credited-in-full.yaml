@@ -10,7 +10,7 @@
   files: [src/lib/task-linter.ts]
   origin: oper#squeeze-session-2026-09-17
   plan_refs: ["W1-T3746", "W1-T3747"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED, same session as W1-T3747 and a DIFFERENT defect — that one is about a proof naming a

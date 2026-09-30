@@ -37,8 +37,10 @@ export interface LedgerUnionResult {
 }
 
 export interface LedgerUnionOptions {
+  /** Record readers drop rows stamped earlier; the raw-line readers only skip rotations cut earlier. */
   since?: string;
   sinceTs?: string;
+  /** Exact match on the row's `step` field ({@link stepMatches}), honoured by EVERY union reader (W1-T4710). */
   step?: string | readonly string[];
 }
 
@@ -140,21 +142,37 @@ function rotationBeforeWindow(entry: LedgerCorpusEntry, minimumTs: number | unde
   return !Number.isNaN(stampMs) && stampMs < minimumTs;
 }
 
+function stepMatches(row: Record<string, unknown>, want: LedgerUnionOptions["step"]): boolean {
+  if (want === undefined) return true;
+  const step = row.step;
+  if (typeof step !== "string") return false;
+  return typeof want === "string" ? step === want : want.includes(step);
+}
+
 function recordMatchesFilters(row: Record<string, unknown>, opts: LedgerUnionOptions, minimumTs: number | undefined): boolean {
   if (minimumTs !== undefined) {
     const ts = row.ts;
     if (typeof ts !== "string" || Date.parse(ts) < minimumTs) return false;
   }
-  if (opts.step !== undefined) {
-    const step = row.step;
-    if (typeof step !== "string") return false;
-    if (typeof opts.step === "string") {
-      if (step !== opts.step) return false;
-    } else if (!opts.step.includes(step)) {
+  return stepMatches(row, opts.step);
+}
+
+/** W1-T4710 — the raw-line form of {@link stepMatches}: a substring pre-check on the JSON-encoded
+ *  step name rejects most lines unparsed, then the exact match decides. A torn line has no
+ *  verifiable step, so it never survives a step filter. */
+function rawLineStepFilter(want: LedgerUnionOptions["step"]): ((line: string) => boolean) | undefined {
+  if (want === undefined) return undefined;
+  const needles = (typeof want === "string" ? [want] : want).map((step) => JSON.stringify(step));
+  return (line) => {
+    if (!needles.some((needle) => line.includes(needle))) return false;
+    try {
+      const row = parseObject(line);
+      return row !== undefined && stepMatches(row, want);
+    } catch {
+      // deliberate: an unparseable line cannot prove its step, so a step-filtered read excludes it.
       return false;
     }
-  }
-  return true;
+  };
 }
 
 function parseObject(raw: string): Record<string, unknown> | undefined {
@@ -187,6 +205,8 @@ function scanLedgerBuffer(
   start = 0,
   maxLines = Number.POSITIVE_INFINITY,
   onBad?: (line: string) => void,
+  /** A line this answers true for is never parsed: an exact replay costs a Set lookup, not a JSON.parse. */
+  skip?: (line: string) => boolean,
 ): { bad: number; next: number } {
   let bad = 0;
   let lines = 0;
@@ -196,7 +216,7 @@ function scanLedgerBuffer(
     if (end > start) {
       lines += 1;
       const line = buf.toString("utf8", start, end).trim();
-      if (line && (!pattern || pattern.test(line))) {
+      if (line && (!pattern || pattern.test(line)) && !skip?.(line)) {
         try {
           const parsed = parseObject(line);
           if (parsed !== undefined) onRow(parsed, line);
@@ -533,6 +553,8 @@ export interface LedgerUnionRawReadOptions extends LedgerUnionOptions {
    *  window — a FLOOR that only ever adds files, so a host rotating once a week keeps its last month. */
   minRotations?: number;
   pattern?: RegExp;
+  /** Keeps only the lines it accepts, tested before dedupe, so a narrow caller retains only its own rows. */
+  keep?: (line: string) => boolean;
   dedupe?: boolean;
   requireArchives?: boolean;
   refuseIncomplete?: boolean;
@@ -582,6 +604,7 @@ export function readLedgerUnionRawLinesSync(
   const livePath = ledgerLivePath(stateDir);
   const liveFileRead = fsDeps.existsSync(livePath);
   const minimumTs = sinceMs(opts);
+  const stepFilter = rawLineStepFilter(opts.step);
   const seen = new Set<string>();
   const rawLines: string[] = [];
   const unread: string[] = [];
@@ -609,7 +632,7 @@ export function readLedgerUnionRawLinesSync(
       if (end === -1) end = buf.length;
       if (end > start) {
         const line = buf.toString("utf8", start, end).trim();
-        if (line && (!opts.pattern || opts.pattern.test(line))) {
+        if (line && (!opts.pattern || opts.pattern.test(line)) && (!stepFilter || stepFilter(line)) && (!opts.keep || opts.keep(line))) {
           if (opts.dedupe === false) {
             rawLines.push(line);
           } else if (!seen.has(line)) {
@@ -701,7 +724,8 @@ export interface LedgerRotationMemoPass {
 
 /** A rotation memo: `pass` answers one union read from it, and `load` fills what a pass found missing. */
 export interface LedgerRotationMemo {
-  pass: () => LedgerRotationMemoPass;
+  /** `parseMissing` parses an unmemoized rotation inline and keeps it, so a pass after a rotation costs that rotation, not the union. */
+  pass: (opts?: { parseMissing?: boolean }) => LedgerRotationMemoPass;
   load: (entries: readonly LedgerCorpusEntry[]) => Promise<void>;
   size: () => number;
 }
@@ -725,6 +749,8 @@ export function createLedgerRotationMemo(
     statKey?: (path: string) => string;
     readFile?: (path: string) => Promise<Buffer>;
     yieldTurn?: () => Promise<void>;
+    /** Only lines matching this are parsed by `load`; `reduce` must drop every row it would reject. */
+    pattern?: RegExp;
   } = {},
 ): LedgerRotationMemo {
   const statKey = io.statKey ?? ((path: string) => {
@@ -747,7 +773,7 @@ export function createLedgerRotationMemo(
       const tornLines: string[] = [];
       for (let at = 0; at < buf.length; ) {
         const slice: Array<Record<string, unknown>> = [];
-        const scanned = scanLedgerBuffer(buf, undefined, (row) => slice.push(row), at, LEDGER_ROTATION_LOAD_LINES_PER_TURN, (line) => tornLines.push(line));
+        const scanned = scanLedgerBuffer(buf, io.pattern, (row) => slice.push(row), at, LEDGER_ROTATION_LOAD_LINES_PER_TURN, (line) => tornLines.push(line));
         torn += scanned.bad;
         at = scanned.next;
         rows = reduce([...rows, ...slice]);
@@ -770,7 +796,7 @@ export function createLedgerRotationMemo(
         await pending;
       }
     },
-    pass: () => {
+    pass: (passOpts = {}) => {
       const touched = new Map<string, MemoEntry>();
       const missing: LedgerCorpusEntry[] = [];
       const rotationRecords: LedgerRotationHook = (entry, parse) => {
@@ -786,7 +812,7 @@ export function createLedgerRotationMemo(
           touched.set(entry.path, hit);
           return hit.read;
         }
-        if (hit?.key !== key) {
+        if (hit?.key !== key && !passOpts.parseMissing) {
           missing.push(entry);
           return { rows: [], torn: 0, tornLines: [] };
         }
@@ -808,6 +834,62 @@ export function createLedgerRotationMemo(
   };
 }
 
+type LedgerSighting = string | Record<string, unknown>;
+
+/**
+ * W1-T4820 — EXACT REPLAY DEDUPE THAT COSTS LESS THAN THE PARSE IT SAVES. A replayed row is a byte
+ * copy, so it shares its original's `ts`; sightings are bucketed on that short key and compared as
+ * whole lines only inside a bucket. A parsed row is serialised only when its bucket is non-empty.
+ * MEASURED on a copy of the fleet host's seven-day window (1,087,846 archived lines, 725,963
+ * distinct): no dedupe 2.3–3.0 s, a Set of whole lines 2.9–4.5 s, this 2.0–2.2 s.
+ */
+function firstKey(row: Record<string, unknown>): string | undefined {
+  for (const key in row) return key;
+  return undefined;
+}
+
+function createLedgerLineSeen(): { has: (line: string) => boolean; add: (sighting: LedgerSighting) => boolean } {
+  const byTs = new Map<string, LedgerSighting[]>();
+  const untimed = new Set<string>();
+  const text = (bucket: LedgerSighting[], i: number): string => {
+    const entry = bucket[i];
+    if (typeof entry === "string") return entry;
+    const line = JSON.stringify(entry);
+    bucket[i] = line;
+    return line;
+  };
+  const tsOf = (sighting: LedgerSighting): string | undefined => {
+    // A parsed row keys like the line it serialises to: on `ts` only when `ts` is its first field.
+    if (typeof sighting !== "string") return firstKey(sighting) === "ts" && typeof sighting.ts === "string" ? sighting.ts : undefined;
+    if (!sighting.startsWith('{"ts":"')) return undefined;
+    const end = sighting.indexOf('"', 7);
+    return end > 7 ? sighting.slice(7, end) : undefined;
+  };
+  const find = (sighting: LedgerSighting): { bucket?: LedgerSighting[]; hit: boolean; line?: string; ts?: string } => {
+    const ts = tsOf(sighting);
+    if (ts === undefined) {
+      const line = typeof sighting === "string" ? sighting : JSON.stringify(sighting);
+      return { hit: untimed.has(line), line };
+    }
+    const bucket = byTs.get(ts);
+    if (bucket === undefined) return { hit: false, ts };
+    const line = typeof sighting === "string" ? sighting : JSON.stringify(sighting);
+    for (let i = 0; i < bucket.length; i++) if (text(bucket, i) === line) return { bucket, hit: true, line, ts };
+    return { bucket, hit: false, line, ts };
+  };
+  return {
+    has: (line) => find(line).hit,
+    add: (sighting) => {
+      const found = find(sighting);
+      if (found.hit) return false;
+      if (found.ts === undefined) untimed.add(found.line as string);
+      else if (found.bucket) found.bucket.push(sighting);
+      else byTs.set(found.ts, [sighting]);
+      return true;
+    },
+  };
+}
+
 export interface LedgerUnionRecordRead extends Omit<LedgerUnionRawRead, "rawLines"> {
   rows: Array<Record<string, unknown>>;
   torn: number;
@@ -823,19 +905,18 @@ export function readLedgerUnionRecordsSync(
   const livePath = ledgerLivePath(stateDir);
   const liveFileRead = opts.readLiveRecords !== undefined ? true : fsDeps.existsSync(livePath);
   const minimumTs = sinceMs(opts);
-  const seen = new Set<string>();
+  const seen = createLedgerLineSeen();
   const rows: Array<Record<string, unknown>> = [];
   const unread: string[] = [];
   const stepsSeen = new Set<string>();
   let torn = 0;
   let filesRead = 0;
 
-  const addRecord = (row: Record<string, unknown>, raw: string): void => {
+  // A buffer row arrives with its raw line; a live or memoized row arrives parsed, and is serialised only
+  // if another row shares its `ts`.
+  const addRecord = (row: Record<string, unknown>, raw?: string): void => {
     if (!recordMatchesFilters(row, opts, minimumTs)) return;
-    if (opts.dedupe !== false) {
-      if (seen.has(raw)) return;
-      seen.add(raw);
-    }
+    if (opts.dedupe !== false && !seen.add(raw ?? row)) return;
     opts.onRecord?.(row);
     rows.push(row);
     if (typeof row.step === "string") stepsSeen.add(row.step);
@@ -853,8 +934,10 @@ export function readLedgerUnionRecordsSync(
   // Four callers, ~13.7 GB against an 8 GB heap cap — the daemon's abort. The first row is the
   // tell: 323 retained lines still cost 585 MB, so the driver is the per-file whole-string plus
   // split array, NOT what is kept. Scanning holds one file's decompressed buffer at a time.
+  // W1-T4820: a replayed archive line is skipped BEFORE its parse, so dedupe makes the union cheaper, not dearer.
+  const skipSeen = opts.dedupe === false ? undefined : (line: string): boolean => seen.has(line);
   const scanBuffer = (buf: Buffer, onRow: (row: Record<string, unknown>, line: string) => void, onBad = opts.onTorn): number =>
-    scanLedgerBuffer(buf, opts.pattern, onRow, 0, Number.POSITIVE_INFINITY, onBad).bad;
+    scanLedgerBuffer(buf, opts.pattern, onRow, 0, Number.POSITIVE_INFINITY, onBad, skipSeen).bad;
   const addBuffer = (buf: Buffer): void => {
     torn += scanBuffer(buf, addRecord);
   };
@@ -862,9 +945,7 @@ export function readLedgerUnionRecordsSync(
   const readLive = (): boolean => {
     if (opts.readLiveRecords !== undefined) {
       filesRead += 1;
-      for (const row of opts.readLiveRecords(livePath)) {
-        addRecord(row, JSON.stringify(row));
-      }
+      for (const row of opts.readLiveRecords(livePath)) addRecord(row);
       return opts.satisfied?.(stepsSeen) ?? false;
     }
     if (!liveFileRead) return false;
@@ -873,7 +954,9 @@ export function readLedgerUnionRecordsSync(
       addBuffer(fsDeps.readFileSync(livePath));
       return opts.satisfied?.(stepsSeen) ?? false;
     } catch {
-      // deliberate: an unreadable live file degrades to whatever rotations already supplied.
+      // Best-effort readers retain rotations; strict readers must not call a failed live read
+      // a complete corpus. The final `ok` decision below uses this same unread list.
+      if (opts.refuseIncomplete) unread.push(livePath);
       return false;
     }
   };
@@ -894,7 +977,7 @@ export function readLedgerUnionRecordsSync(
         filesRead += 1;
         torn += read.torn;
         for (const line of read.tornLines) opts.onTorn?.(line);
-        for (const row of read.rows) addRecord(row, opts.dedupe === false ? "" : JSON.stringify(row));
+        for (const row of read.rows) addRecord(row);
         return opts.satisfied?.(stepsSeen) ?? false;
       }
       const buf = fsDeps.readFileSync(entry.path);

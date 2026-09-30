@@ -34,6 +34,7 @@ import { isRatifiedInLedger } from "../src/lib/inbox.js";
 import { priorEscalatedAlertIds } from "../src/lib/ops.js";
 import { alreadyFiledForSignature } from "../src/lib/coverage-improvement.js";
 import { parseWhitelistedProof, narrowNameFilteredArgs } from "../src/lib/review.js";
+import { verifyStalledTask, type StallEvidence } from "../src/lib/stall-verifier.js";
 
 // ── W1-T209: "the ledger grows unbounded with no archival, and any rotation that hides a
 // decision-relevant line silently zeroes the dispatch breaker it also backs" (RECON R-9,
@@ -88,6 +89,7 @@ test("DECISION_RELEVANT_LEDGER_STEPS: derived from consumers, not hardcoded — 
     "../src/lib/ops.ts",
     "../src/lib/drain.ts",
     "../src/lib/review.ts",
+    "../src/lib/stall-verifier.ts",
   ];
 
   // VERIFIED non-deciding despite living in a deciding-reader file: status.ts's
@@ -691,6 +693,46 @@ test("FALSIFIER — escalation dedup: dropping the dispatch.circuit_broken.escal
     const rotFake = issuesCreatingFake();
     escalateCircuitBreak(task, { owner: "acme", repo: "widgets", ledgerPath: rotatedPath, runId: "run-rot", issues: rotFake.issues });
     assert.equal(rotFake.calls, 0, "the REAL rotation retains the dedup line — no duplicate escalation");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4678: the verified fingerprint survives ledger rotation", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "verified.ndjson");
+    const evidence: StallEvidence = {
+      freshCount: 3,
+      excludedByReason: {},
+      hasNewOwnedPr: false,
+      prStates: [],
+      shardHash: "unchanged-shard",
+    };
+    const ctx = { repo: "acme/widgets", ledgerPath, runId: "first" };
+    const first = verifyStalledTask("W1-T4678", evidence, ctx);
+    assert.equal(first.alreadyVerified, false);
+    const original = readFileSync(ledgerPath, "utf8");
+
+    // Positive falsifier: losing the marker really does make an unchanged fingerprint
+    // look unverified. This is the behavior the real rotation must prevent.
+    const droppedPath = join(dir, "dropped.ndjson");
+    writeFileSync(droppedPath, withoutStep(original, "dispatch.circuit_broken.verified"));
+    const lost = verifyStalledTask("W1-T4678", evidence, { ...ctx, ledgerPath: droppedPath });
+    assert.equal(lost.alreadyVerified, false);
+
+    writeFileSync(ledgerPath, noiseBlock(300), { flag: "a" });
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, 2_000));
+    const rotation = rotateLedger(ledgerPath, { ceilingBytes: 2_000 });
+    assert.equal(rotation.rotated, true);
+    const after = verifyStalledTask("W1-T4678", evidence, { ...ctx, runId: "after-rotation" });
+    assert.equal(after.alreadyVerified, true);
+    assert.equal(after.fingerprint, first.fingerprint);
+    assert.equal(
+      readLedgerLines(ledgerPath).filter((line) => line.step === "dispatch.circuit_broken.verified").length,
+      1,
+      "rotation and the second read keep one marker for this fingerprint",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

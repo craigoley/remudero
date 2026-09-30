@@ -13,7 +13,7 @@
     - test/the-ruling-pin-binds-execution-authority.test.ts
   origin: "codex-recon#filing-risk-ruling-pin-2026-09-10"
   plan_refs: ["W1-T2977", "W1-T3143", "W1-T3336"]
-  status: queued
+  status: done
   attempts: 0
   rationale: |
     OBSERVED 2026-09-10 at origin/main 888b2ffa. `taskRulingPin` hashes exactly id, title,
@@ -80,6 +80,12 @@
     throw. Conversely, adding any excluded narrative or bookkeeping field to the digest must make
     the unchanged-pin case fail.
   note: |
+    DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #5030
+    (`fix(plan): bind filing rulings to execution authority (W1-T3344)`, trailer + head run-W1-T3344-1789075600000):
+    taskRulingPin in src/lib/task-linter.ts binds execution-authority fields; test/the-ruling-pin-binds-execution-
+    authority.test.ts. plan-reconcile refuses the `fix(plan)` subject. Every acceptance criterion holds on main and is
+    PRESERVED UNCHANGED: this record is marked done, not re-proved.
+
     W1-T3344 was reserved atomically on origin at `refs/rmd-id/W1-T3344`. The reservation walk
     advanced from W1-T3341 past concurrent claims and reported W1-T3344 as the id actually held.
 

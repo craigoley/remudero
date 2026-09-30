@@ -33,7 +33,7 @@
  * everywhere else in this codebase).
  */
 
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createConnection } from "node:net";
 import { promises as fsPromises } from "node:fs";
 import { execFile, execFileSync } from "node:child_process";
@@ -41,7 +41,7 @@ import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
-import { createOrReadExclusive } from "./fs-race-safe.js";
+import { createOrReadPublished, HEX_SECRET_RE, InvalidSecretFileError } from "./fs-race-safe.js";
 import {
   assertWriteTiersComplete,
   createConfirmNonceStore,
@@ -83,10 +83,18 @@ import {
 } from "./ci-incidents.js";
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
-import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
+import { buildReadModelViewRoutes } from "./views.js";
+import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
+import { navBadgeView, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
+import { NOW_VIEW_NAME } from "./now-view.js";
+import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
+import { withViewShadow } from "./view-shadow.js";
+import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
-import { buildInstanceGatewayRoutes, CORE_INSTANCE, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
+import { buildInstanceGatewayRoutes, CORE_INSTANCE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
+import { createReadModelWorker, READ_MODEL_VIEWS, readModelStatusView, type ReadModelInstance, type ReadModelWorkerHandle, type ReadModelWorkerOptions } from "./read-model-worker.js";
 import { buildOperatorAgentAnswer, buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
+import { buildOperatorAgentActionHandoffRoutes } from "./operator-agent-action-handoff.js";
 import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
@@ -100,6 +108,9 @@ import {
   buildKickRoute,
   buildMergeHoldRoute,
   buildPauseRoute,
+  buildAssistantControlRoute,
+  buildAssistantControlCapabilityRoute,
+  buildAssistantControlReceiptRoute,
   buildPrActionRoute,
   buildQuietHoursRoute,
   buildResumeRoute,
@@ -114,11 +125,11 @@ import {
 import { buildPanelGraphRoutes, inboxThreadStorePath, OPERATOR_ACTIVITY_CONTRACT_VERSION, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
 import { buildPanelSkillsRoutes } from "./panel-skills.js";
 import { buildPanelSkillRunRoutes } from "./panel-skill-run.js";
-import { buildRepoDashboardRoute } from "./repo-dashboard-route.js";
+import { buildRepoDashboardRoutes } from "./repo-dashboard-route.js";
 import { buildTaskCardRoute } from "./task-card.js";
 import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operator-notes.js";
 import { buildRecordJudgeLabelRoute, fileJudgeLabelStore } from "./judge-calibration.js";
-import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, type OperatorAgentMemorySource } from "./operator-agent.js";
+import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, prewarmOperatorAgentReads, type OperatorAgentMemorySource } from "./operator-agent.js";
 import { buildContextControlsRoutes } from "./context-controls.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import {
@@ -135,6 +146,7 @@ import {
   type IncidentInvariantRow,
 } from "./incident-invariants.js";
 import { checkServiceFreshness } from "./self-sync.js";
+import { reloadServePlan, touchesReloadablePlan } from "./serve-plan-reload.js";
 import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
@@ -152,6 +164,7 @@ import {
   coldAnalyticsSnapshot,
   createAnalyticsSnapshotCache,
   type AnalyticsSnapshot,
+  type AnalyticsSnapshotCache,
   type AnalyticsSnapshotCacheDeps,
 } from "./analytics-route.js";
 import type { LiveAnalyticsMetrics } from "./analytics-live-metrics.js";
@@ -180,6 +193,7 @@ import {
   type GithubEventWakeSemanticMode,
   type WakeCounters,
 } from "./github-event-wake.js";
+import { createGithubKeepWarm } from "./github-refresh-pacer.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
@@ -273,6 +287,7 @@ export const DEFAULT_SERVE_PORT = 4317;
 
 export interface ServeDeps {
   projectionWorker?: ConsoleProjectionWorker;
+  readModel?: Pick<ReadModelWorkerOptions, "tickMs" | "stopWaitMs" | "workerUrl" | "every">;
   consoleSnapshots?: { dir: string; prewarmPaths?: readonly string[] };
   /** Injectable ONLY so a unit test can pin the captured sha; real callers omit it and get
    *  {@link resolveConsoleSha}, resolved once at server start. */
@@ -324,6 +339,8 @@ export interface ServeDeps {
   issues: IssueCloser;
   /** Fleet-control flag-file root — MUST equal the `config.root` `rmd daemon`/`rmd drain` check (see module header). */
   fleetControlRoot: string;
+  /** Core repository resolved from the serving checkout, for assistant-action target binding. */
+  assistantRepository?: string;
   /** `plan/questions.ndjson` root — MUST equal the `repoRoot` `appendQuestion` writes into (see module header). */
   questionsRoot: string;
   tokens: ServiceTokens;
@@ -369,7 +386,7 @@ export interface ServeDeps {
   daemonHealth?: Omit<DaemonHealthDeps, "ledgerPath" | "diskPath"> & { diskPath?: string };
   /** W1-T4229: defaults to {@link assessGatewayCheckout} over {@link serveRepoDir}. */
   gatewayCheckout?: () => Promise<GatewayCheckoutAssessment>;
-  staleExitSeams?: Pick<StaleCodeExitDeps, "scheduleRecheck" | "exit">;
+  staleExitSeams?: Pick<StaleCodeExitDeps, "scheduleRecheck" | "exit" | "drain">;
   /**
    * W1-T288: GET /v1/control/status's daemon-liveness verdict deps (injectable ledger reader /
    * clock / liveness bound — see panel-actions.ts's `ControlStatusDeps` for each field's real
@@ -651,7 +668,7 @@ export const CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE: readonly string[] = [
 export const CONSOLE_STATUS_FULL_TASK_THRESHOLD = 500; // PRIMARY CONTROL
 export const CONSOLE_STATUS_RENDERED_TASK_LIMIT = 120; // BACKSTOP
 export const CONSOLE_STATUS_RESPONSE_SIZE_RATCHET_BYTES = 96_000;
-const CONSOLE_CACHED_READ_PATHS = new Set(["/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health", "/v1/repos", "/v1/feedback", "/v1/operator-activity"]);
+const CONSOLE_CACHED_READ_PATHS = new Set(["/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health", "/v1/repos", "/v1/repos/summary", "/v1/feedback", "/v1/operator-activity"]);
 const BLOCKING_REQUEST_PATH_SYMBOLS = [
   "readFileSync",
   "writeFileSync",
@@ -1301,6 +1318,7 @@ export interface GatewayCheckoutAssessment {
   state: GatewayCheckoutState;
   /** Behind AND clean: the entrypoint fast-forwards only a clean tree on boot. */
   restartDue: boolean;
+  reloadPlanAt?: string;
 }
 
 /** {@link assessGatewayCheckout}'s seams; every git call is injectable so a test stays hermetic. */
@@ -1396,7 +1414,9 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
     checkedAt: clock.iso(),
   };
   // NEVER DIRTY: the entrypoint refuses to sync it, so the restart would loop on the same sha.
-  return { state, restartDue: !svc.dirty && svc.behind !== null && behindBy !== 0 && serveRestartRelevant(svc.behind.changedPaths) };
+  const relevant = svc.behind !== null && behindBy !== 0 && serveRestartRelevant(svc.behind.changedPaths);
+  const reloadPlanAt = svc.behind !== null && behindBy !== 0 && !relevant && touchesReloadablePlan(svc.behind.changedPaths) ? svc.behind.newSha : undefined;
+  return { state, restartDue: !svc.dirty && relevant, ...(reloadPlanAt === undefined ? {} : { reloadPlanAt }) };
 }
 
 /** W1-T4229 BACKSTOP: fires only on a connection that never ends by itself (SSE, a hung client). */
@@ -1472,6 +1492,7 @@ export interface StaleCodeExitDeps {
   /** W1-T4229: {@link drainServer}; absent, the exit is immediate as before. */
   drain?: () => Promise<void>;
   changedPathsSince?: ChangedPathsReader;
+  reloadPlan?: (ref: string) => Promise<boolean>;
 }
 /** What {@link gateStaleCodeExit} hands back — a wrapper for the console's ONE SSE route and a
  *  wrapper for each HIGH-tier write route, both feeding the SAME internal decision. */
@@ -1522,7 +1543,7 @@ export interface StaleCodeExitGate {
  * What the gate needs to know is whether a HUMAN surface is being read.
  */
 export function stampReadWith(route: Route, stamp: () => void): Route {
-  if (route.scope !== "read") return route;
+  if (route.scope !== "read" || route.path === VIEW_EVENTS_PATH) return route;
   return {
     ...route,
     handler: (req, res, ctx) => {
@@ -1555,9 +1576,24 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   let dirtyReported: string | undefined;
   const readChangedPaths = deps.changedPathsSince ?? ((boot, target) => changedPathsSince(boot, target, serveRepoDir()));
   const relevance = new Map<string, boolean | "pending">();
+  let headPlanRef: string | undefined;
+  let originPlanRef: string | undefined;
+  let planLoadedRef: string | undefined;
+  let planReloading = false;
+  const syncPlan = (): void => {
+    const ref = originPlanRef ?? headPlanRef;
+    if (!deps.reloadPlan || ref === undefined || ref === planLoadedRef || planReloading || exiting) return;
+    planReloading = true;
+    deps.reloadPlan(ref).then(
+      (ok) => { if (ok) planLoadedRef = ref; },
+      (err: unknown) => log("serve.plan_reload_failed", { ref, reason: err instanceof Error ? err.message : String(err) }),
+    ).finally(() => { planReloading = false; });
+  };
   const settleRelevance = (currentSha: string, read: ChangedPathsRead): void => {
     const relevant = serveRestartRelevant(read.diffUnreadable === undefined ? read.changedPaths : undefined);
     relevance.set(currentSha, relevant);
+    if (!relevant && touchesReloadablePlan(read.changedPaths)) headPlanRef = currentSha;
+    syncPlan();
     if (!relevant) log("serve.stale_code_not_loaded", { bootSha: deps.bootSha, currentSha, changedPaths: read.changedPaths });
     else if (read.diffUnreadable !== undefined) log("serve.restart_diff_unreadable", { bootSha: deps.bootSha, currentSha, reason: read.diffUnreadable });
   };
@@ -1579,6 +1615,7 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
 
   const maybeExit = (): void => {
     if (exiting) return;
+    syncPlan();
     // NEVER NEGOTIABLE: an exit mid-write drops the request, and a drain's bound could cut one.
     if (inFlightWrites !== 0) return;
     const currentSha = resolveCurrentSha();
@@ -1627,6 +1664,8 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   };
   const noteCheckout = (next: GatewayCheckoutAssessment): void => {
     checkout = next;
+    originPlanRef = next.reloadPlanAt;
+    syncPlan();
     const { state } = next;
     if (state.dirty !== true || typeof state.behindBy !== "number" || state.behindBy === 0) return;
     // NEVER OVERWRITTEN; reported once per distinct head and path set, not once a minute.
@@ -2527,6 +2566,9 @@ export function readEvalCardInput(stateDir: string, trialId: string | undefined)
 
 interface ServeRoutesAssembly {
   routes: Route[];
+  instanceAnalyticsCaches: AnalyticsSnapshotCache[];
+  navBadgeScopes: () => NavBadgeScope[];
+  viewEvents: ViewEvents;
   /** The first GitHub App token mint. Absent when App refresh is not configured. */
   githubAppReady?: Promise<void>;
 }
@@ -2536,8 +2578,16 @@ function assembleServeRoutes(
   deps: ServeDeps,
   currentAnalyticsSnapshot: () => AnalyticsSnapshot = coldAnalyticsSnapshot,
   operatorAgentMemory?: OperatorAgentMemorySource,
+  readModel?: ReadModelWorkerHandle,
 ): ServeRoutesAssembly {
+  const instanceAnalyticsCaches: AnalyticsSnapshotCache[] = [];
+  const badgeScopes: NavBadgeScope[] = [];
+  const navBadgeScopes = (): NavBadgeScope[] => [
+    { instanceId: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, analytics: currentAnalyticsSnapshot, memory: operatorAgentMemory, ledgerPath: deps.ledgerPath },
+    ...badgeScopes];
   const modelApprovals = deps.modelApprovals ?? [];
+  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME], servedByDefault: [readModelStatusView.name],
+    ...(readModel ? { readModel } : {}), every: deps.readModel?.every, log: deps.log });
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
   // ever re-resolves it. See resolveConsoleSha for why re-reading per request would be worse
@@ -2617,10 +2667,14 @@ function assembleServeRoutes(
   // Personal context governance is mounted with the existing operator-agent routes. Its context
   // inventory is metadata-only; raw private content is consumed through the ledger-backed
   // preflight reader, never serialized by the browser-facing console route.
+  const goalBoardCache = createBoardSnapshotCache();
   const operatorAgentRoutes = buildOperatorAgentRoutes({
     ledgerPath: deps.ledgerPath,
+    root: deps.fleetControlRoot,
     ...(operatorAgentMemory ? { memory: operatorAgentMemory } : {}),
+    goalBoard: () => ({ plan: deps.board.plan, snapshot: goalBoardCache.get(deps.board) }),
   });
+  prewarmOperatorAgentReads(deps.ledgerPath).catch((e) => deps.log?.("serve.operator_agent_prewarm_failed", { reason: String((e as Error)?.message ?? e) }));
   // W1-T3893: the operator self-service surface (inventory/forget/revoke/export) over the SAME
   // ledger-backed context-governance engine above — same ledgerPath, so a self-service forget and
   // a governance delete are the identical durable receipt, never a second memory store. Raw
@@ -2648,15 +2702,24 @@ function assembleServeRoutes(
     for (const event of outcome.events) appendLedger(deps.ledgerPath, ciIncidentEventLedgerLine(event, nowMs));
   };
   const readLadder = (nowMs: number): RepairLadderState => (deps.repairLadder?.read ?? readRepairLadderState)(deps.fleetControlRoot, nowMs);
+  const assistantControl = { ...fleetControlDeps, claimRoot: deps.fleetControlRoot,
+    instance: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, bootSha: consoleSha };
   const rawRoutes = [
     withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen), modelApprovals), readLadder),
-    buildRepoDashboardRoute({
+    ...buildRepoDashboardRoutes({
       root: deps.questionsRoot,
       repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
+      ownInstance: deps.instances?.coreInstance ?? CORE_INSTANCE,
+      controlRoot: deps.fleetControlRoot,
+      incidentsDir: deps.incidents?.stateDir ?? dirname(deps.ledgerPath),
       ledgerPath: deps.ledgerPath,
       planPath: deps.panelGraph.planPath,
     }),
     buildRecentRoute(deps.board),
+    ...buildReadModelViewRoutes(withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name],
+      readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"] },
+      legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes })] })),
+    ...viewEvents.routes,
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),
     buildAccountUsageRoute(accountUsageDeps),
@@ -2676,6 +2739,9 @@ function assembleServeRoutes(
     buildPauseRoute(fleetControlDeps),
     buildResumeRoute(fleetControlDeps),
     buildStopRoute(fleetControlDeps),
+    buildAssistantControlRoute(assistantControl),
+    buildAssistantControlCapabilityRoute(assistantControl),
+    buildAssistantControlReceiptRoute(assistantControl),
     buildQuietHoursRoute(fleetControlDeps),
     buildAnswerQuestionRoute(questionDeps),
     buildApproveManualRoute(fleetControlDeps),
@@ -2729,6 +2795,9 @@ function assembleServeRoutes(
       snapshot: currentAnalyticsSnapshot(),
       inbox: readInboxAnswerEvidence(inboxThreadStorePath(deps.fleetControlRoot)),
     }), (input) => buildOperatorAgentAnswer(input)),
+    // W1-T4559: action-handoff-v1, the assistant's only write path, kept apart from read-only answer-v1.
+    ...buildOperatorAgentActionHandoffRoutes({ root: deps.fleetControlRoot, ledgerPath: deps.ledgerPath, claimRoot: deps.fleetControlRoot,
+      instance: assistantControl.instance, repository: assistantControl.repository }),
     ...contextControlsRoutes,
     ...buildPanelGraphRoutes(panelGraphDeps, () => deps.board.plan),
     // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,
@@ -2837,12 +2906,21 @@ function assembleServeRoutes(
   routes.push(
     ...buildInstanceGatewayRoutes(routes, {
       registryPath: daemonInstanceRegistryPath(deps.questionsRoot),
-      github: (repo) => buildBatchedGithub(repo.split("/")[0], repo.split("/")[1], { ttlMs: DEFAULT_BOARD_POLL_TTL_MS, log: deps.log }),
+      github: (repo) => buildBatchedGithub(repo.split("/")[0], repo.split("/")[1], { ttlMs: DEFAULT_BOARD_POLL_TTL_MS, log: deps.log, offLoop: true }),
       issues: deps.issues,
       controlStatus: deps.controlStatus,
       log: deps.log,
-      bound: (reads, board) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), { ...deps, board, consoleSnapshots: undefined }),
+      bound: (reads, board, instance) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), {
+        ...deps, board, consoleSnapshots: deps.consoleSnapshots && instance ? { dir: join(deps.consoleSnapshots.dir, "instances", instance) } : undefined,
+      }),
       ...deps.instances,
+      assistantClaimRoot: deps.fleetControlRoot,
+      assistantBootSha: consoleSha,
+      onAnalyticsCache: (cache, instance) => {
+        instanceAnalyticsCaches.push(cache);
+        badgeScopes.push({ instanceId: instance.name, repository: instance.repo, analytics: cache.current, ledgerPath: instance.ledgerPath,
+          memory: createOperatorAgentMemorySource(() => cache.current().operatorAgentMemory) });
+      },
     }),
   );
   // W1-T404 design (iii): `ci-parity:drift`-shaped completeness, run inside the PRODUCT function
@@ -2854,7 +2932,7 @@ function assembleServeRoutes(
   // tier sibling, as the runtime backstop for whatever the compiler cannot see. See
   // `assertRoutesScopeComplete`'s own doc.
   assertRoutesScopeComplete(routes);
-  return { routes, githubAppReady: githubAppRefresh.ready };
+  return { routes, instanceAnalyticsCaches, navBadgeScopes, viewEvents, githubAppReady: githubAppRefresh.ready };
 }
 
 /** Every REST route `rmd serve` registers — board, panel actions, panel graph, and the shell. */
@@ -2922,17 +3000,20 @@ export function startIncidentInvariantsMonitor(
 
 /**
  * Build (but do not `.listen()`) the full `rmd serve` HTTP server — one call, every route wired.
- * `deps.board.github`'s background TTL refresh (W1-T154) runs ONLY while at least one console is
- * connected — see {@link gatePrewarmOnClients} for the zero-viewer burn that gate exists to stop.
- * It is also stopped unconditionally when the returned server `close`s, so a server torn down
- * with a viewer still attached leaves no timer behind.
+ * `deps.board.github`'s background refresh keeps its facts warm with no viewer, paced by quota
+ * headroom (github-refresh-pacer.ts; the 2026-09-30 ruling amending W1-T154). A gateway whose warm
+ * is not off-loop keeps {@link gatePrewarmOnClients}'s reader gate instead. Both stop when the
+ * returned server `close`s, so no timer outlives it.
  */
 function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
-  const prewarm = gatePrewarmOnClients(
-    buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS),
-    deps.board.github,
-    deps.boardGithubRefreshMs ?? DEFAULT_BOARD_PREWARM_MS,
-  );
+  const github = deps.board.github;
+  github.serveOffLoop?.();
+  const statusStream = buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS);
+  const refreshMs = deps.boardGithubRefreshMs ?? DEFAULT_BOARD_PREWARM_MS;
+  const keepWarm = github.warmsOffLoop?.()
+    ? createGithubKeepWarm({ refresh: () => github.warm?.(), telemetry: () => github.warmTelemetry?.(), targetFreshnessMs: refreshMs, log: deps.log })
+    : undefined;
+  const prewarm = keepWarm ? keepWarm.gate(statusStream) : gatePrewarmOnClients(statusStream, github, refreshMs);
   // W1-T500: resolved ONCE, here, and threaded to BOTH `buildServeRoutes` (the mounted
   // `POST /v1/confirm` route's issuing store, via `deps.confirmNonces` below) and `createService`
   // (the `enforceWriteTiers` HIGH-tier dispatch check's consuming store) -- the one shared
@@ -2960,23 +3041,31 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   // {@link readAttention}.
   let lastReadAt: number | undefined;
   let drainTarget: Server | undefined;
+  let viewEventsHandover: (reason: string) => void = () => {};
   const wakeCounters = createWakeCounters();
   const stopWakeSummary = startWakeSummaryFlush({
     counters: wakeCounters,
     clock: systemClock,
     write: (window) => deps.log?.("github.wake.summary", { ...wakeSummaryRow(wakeCounters, window) }),
   });
+  const readModel = deps.readModel && createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, escalationRepository: deps.assistantRepository, ...deps.readModel });
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
     log: deps.log,
     beforeExit: () => {
+      readModel?.stop();
       analyticsCache.stop();
       liveAnalyticsCache.stop();
       stopWakeSummary();
+      prewarm.stop();
     },
     lastReadAt: () => lastReadAt,
     assessCheckout: deps.gatewayCheckout ?? (() => assessGatewayCheckout({ repoDir: serveRepoDir() })),
-    drain: () => (drainTarget ? drainServer(drainTarget) : Promise.resolve()),
+    drain: () => {
+      viewEventsHandover("recycle");
+      return drainTarget ? drainServer(drainTarget) : Promise.resolve();
+    },
+    reloadPlan: (ref) => reloadServePlan(deps.board, serveRepoDir(), ref, { log: deps.log }),
     ...deps.staleExitSeams,
   });
   // THE CLOCK PORT, never the legacy signature. clock-signature-census ratchets that shape per
@@ -3003,6 +3092,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     },
     analyticsCache.current,
     operatorAgentMemory,
+    readModel,
   );
   const routes = routeAssembly.routes.map((route) =>
     // rationale (7): HIGH-tier IS the write-consequence set this task must respect — the same
@@ -3044,11 +3134,26 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     enforceWriteTiers: true,
   });
   drainTarget = server;
+  viewEventsHandover = routeAssembly.viewEvents.handover;
+  if (readModel) {
+    serveReadModels.set(server, readModel);
+    server.once("listening", readModel.start);
+    server.on("close", readModel.stop);
+    server.once("listening", () => server.once("close", startNavBadgeSourcePublisher({
+      stateDir: dirname(deps.ledgerPath), inboxStateDir: join(deps.fleetControlRoot, "state"), scopes: routeAssembly.navBadgeScopes, every: deps.readModel?.every, log: deps.log,
+    })));
+    server.once("listening", () => server.once("close", startRepositoriesSourcePublisher({
+      stateDir: dirname(deps.ledgerPath), instances: () => repositoriesSources(deps), every: deps.readModel?.every, log: deps.log,
+    })));
+  }
   server.on("close", staleExit.stop);
   server.on("close", prewarm.stop);
+  if (keepWarm) server.once("listening", keepWarm.start);
   server.on("close", stopWakeSummary);
   server.once("listening", analyticsCache.start);
   server.on("close", analyticsCache.stop);
+  server.once("listening", () => { for (const cache of routeAssembly.instanceAnalyticsCaches) cache.start(); });
+  server.on("close", () => { for (const cache of routeAssembly.instanceAnalyticsCaches) cache.stop(); });
   server.once("listening", liveAnalyticsCache.start);
   server.on("close", liveAnalyticsCache.stop);
   server.on("close", watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances }));
@@ -3058,6 +3163,36 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   });
   server.on("close", stopIncidentInvariants);
   return { server, githubAppReady: routeAssembly.githubAppReady };
+}
+
+const serveReadModels = new WeakMap<Server, ReadModelWorkerHandle>();
+
+export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questionsRoot" | "instances" | "assistantRepository"> & { panelGraph?: Pick<ServeDeps["panelGraph"], "planPath"> }): ReadModelInstance[] {
+  const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath), feedbackRoot: deps.questionsRoot,
+    ...(deps.assistantRepository ? { repo: deps.assistantRepository } : {}), ...(deps.panelGraph?.planPath ? { planPath: deps.panelGraph.planPath } : {}) };
+  const others = livenessInstances({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances });
+  return [core, ...others.map((instance) => ({ name: instance.name, ledgerDir: instance.stateDir, repo: instance.repo }))];
+}
+
+export function repositoriesSources(deps: ServeDeps): RepositoriesSources["instances"] {
+  const core = deps.instances?.coreInstance ?? CORE_INSTANCE;
+  return [
+    { instanceId: core, options: {
+      root: deps.questionsRoot, repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot), ownInstance: core,
+      controlRoot: deps.fleetControlRoot, incidentsDir: deps.incidents?.stateDir ?? dirname(deps.ledgerPath), ledgerPath: deps.ledgerPath, planPath: deps.panelGraph.planPath,
+    } },
+    ...livenessInstances({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances }).map((instance) => {
+      const root = instanceStateRoot({ name: instance.name, repo: instance.repo, project: "", live: true }, dirname(dirname(instance.stateDir)));
+      const [owner, repo] = instance.repo.split("/");
+      return { instanceId: instance.name, options: {
+        root: root.root, ledgerPath: root.ledgerPath, planPath: root.planPath, instanceRepository: { owner, repo }, controlRoot: root.root, incidentsDir: join(root.root, "state"),
+      } };
+    }),
+  ];
+}
+
+export function stopServeReadModel(server: Server): boolean {
+  return serveReadModels.get(server)?.stop() ?? false;
 }
 
 export function buildServeServer(deps: ServeDeps): Server {
@@ -3528,23 +3663,44 @@ export function serviceTokensPath(configRoot: string): string {
  * redirected to a world-readable `serve.log`. Any token that reached a log, a terminal
  * transcript, or a chat window is compromised and must be rotated, not merely un-shared.
  *
- * CodeQL js/file-system-race, round 4 (alert #61): the `wx` attempt and the EEXIST fallback
- * read both go through the shared `createOrReadExclusive` helper (fs-race-safe.ts) — the same
- * one config.ts's `loadConfig` uses — rather than a fourth open-coded copy of this exact
- * create-or-read shape.
+ * CodeQL js/file-system-race (alert #61) and the half-written read: `createOrReadPublished`
+ * (fs-race-safe.ts, as config.ts's `loadConfig`) publishes the pair whole over the `wx` claim,
+ * so no reader parses an empty file. A present file that is not JSON holding a 64-hex `read`
+ * and `write` throws {@link InvalidSecretFileError} rather than serving on a broken pair.
  */
 export function resolveServiceTokens(configRoot: string): ServiceTokens {
   const p = serviceTokensPath(configRoot);
   mkdirSync(dirname(p), { recursive: true });
-  const result = createOrReadExclusive(p, 0o600);
+  const result = createOrReadPublished(p, 0o600);
   if (result.created) {
     try {
       const created: ServiceTokens = { read: randomBytes(32).toString("hex"), write: randomBytes(32).toString("hex") };
-      writeSync(result.fd, JSON.stringify(created, null, 2) + "\n");
+      result.publish(JSON.stringify(created, null, 2) + "\n");
       return created;
     } finally {
-      closeSync(result.fd);
+      result.release();
     }
   }
-  return JSON.parse(result.raw) as ServiceTokens;
+  return parseServiceTokens(p, result.raw);
+}
+
+function parseServiceTokens(path: string, raw: string): ServiceTokens {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    const reason = "service-tokens-not-json";
+    throw new InvalidSecretFileError(path, `is not valid JSON (${reason}: ${(err as Error).message})`);
+  }
+  const fields = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  for (const key of ["read", "write"] as const) {
+    const value = fields[key];
+    if (typeof value !== "string" || !HEX_SECRET_RE.test(value)) {
+      throw new InvalidSecretFileError(path, `has no 64-hex "${key}" token`);
+    }
+  }
+  if (fields.ingest !== undefined && typeof fields.ingest !== "string") {
+    throw new InvalidSecretFileError(path, `has a non-string "ingest" token`);
+  }
+  return fields as unknown as ServiceTokens;
 }

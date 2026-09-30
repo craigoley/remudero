@@ -1,0 +1,93 @@
+- id: W1-T4805
+  title: "THE TEST SUITE CAN STILL WRITE TO LIVE GITHUB — a daemon-boot test leaked 103 real plan-garden branches because the live-write guard is a per-call fence that fired after the push; make live remote writes impossible for the whole test process (dead push URLs, a sentinel token the transport refuses, no App key), keep remotes on the local-origin fixture, and prove it with a canary"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator direction 2026-09-29 (closing the self-improvement loop): the test suite cannot write to live GitHub"
+  plan_refs: [W1-T2346, W1-T2347]
+  files:
+    - test/setup/no-live-remote.ts
+    - test/setup/tmp-hygiene.ts
+    - src/lib/live-write-guard.ts
+    - src/lib/github-transport.ts
+    - test/live-write-guard.test.ts
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-29: the test "daemonCommand: builds the real daemon deps … present STOP"
+    (test/run-task.test.ts) boots the real daemon. The daemon's plan gardener then pushed a real
+    `plan-garden-*` branch to github.com/craigoley/remudero on every suite run: 103 branches
+    before the guard fired, and it fired only AFTER the push. #7895 moves those guards ahead of
+    the push. That closes one path.
+    EARLIER: #6949, a test that paused the LIVE fleet from a worker worktree; recon-AQ (the
+    header of src/lib/live-write-guard.ts): 6 branches, 5 PRs, 3 issues and one PR with
+    auto-merge armed.
+    WHY THIS KEEPS HAPPENING. src/lib/live-write-guard.ts detects the test runner through
+    `isTestRunner` (`NODE_TEST_CONTEXT`) and refuses at each call site that calls
+    `assertLiveWriteAllowed` for one of the five `LiveWriteBoundary` values. Its own header says
+    it "checks the CALL, not the DESTINATION", and src/lib/authority.ts lists real writes that no
+    `assertLiveWriteAllowed` wraps. Every new write path is unguarded until someone adds a fence,
+    and a fence placed after the effect does nothing. The test process itself still holds
+    everything a live write needs: git's credential helper for github.com, the operator's gh
+    keyring or a GH_TOKEN, and `GH_APP_PRIVATE_KEY_PATH` where set.
+    THE HOOK ALREADY EXISTS. Every runner invocation (package.json `test` and `test:ci`,
+    .github/workflows/ci.yml's coverage and containment steps, clock-sweep.yml) already passes
+    `--import ./test/setup/tmp-hygiene.ts`, and W1-T1217 made that import mandatory in CI.
+  design: |
+    (i) test/setup/no-live-remote.ts, imported first by test/setup/tmp-hygiene.ts so every
+    existing runner invocation picks it up. When `isTestRunner()` holds, at process level:
+    - git: set `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` so that
+      `url.<dead>.pushInsteadOf` rewrites `https://github.com/`, `git@github.com:` and
+      `ssh://git@github.com/` to a dead `file://` path. The dead path names this task, so a
+      push fails loudly with no network. Also set `GIT_TERMINAL_PROMPT=0`.
+    - gh: replace `GH_TOKEN` and `GITHUB_TOKEN` with an exported sentinel, and point
+      `GH_CONFIG_DIR` at an empty per-process temp dir so the operator's keyring login is
+      unreachable.
+    - App: delete `GH_APP_PRIVATE_KEY_PATH`, `GH_APP_ID` and `GH_APP_INSTALLATION_ID`.
+    Child processes inherit all of this, including a booted daemon, a spawned `bin/rmd` and a
+    raw `git push`. `RMD_ALLOW_LIVE_WRITES=1` (`LIVE_WRITE_OVERRIDE_ENV`) remains the only
+    whole-process opt-out.
+    (ii) src/lib/live-write-guard.ts exports the sentinel, and src/lib/github-transport.ts
+    refuses to run gh (read or write) when the token is the sentinel, throwing
+    `LiveWriteBlockedError`. The refusal names the command and this task. It must never fall
+    through to gh's own 401, which reads like an outage. The per-call
+    `assertLiveWriteAllowed` fences stay as a second layer; this task extends the guard and
+    adds no parallel one.
+    (iii) Tests that need a remote use the local-origin fixture (test/helpers/git-repo.ts
+    `gitRepo({ bare: true })` plus a clone), which the dead rewrite does not touch because it is
+    a file path. Run the whole suite once with (i) in place and list every test that newly fails:
+    each is either moved to the fixture or stubbed in this task, or, if it is out of scope,
+    reported by name in the PR as a follow-up. None is exempted.
+    (iv) A canary in test/live-write-guard.test.ts: from inside the suite, a real
+    `git push https://github.com/<owner>/<repo>.git` from a fixture repo fails and names the
+    dead rewrite; a transport gh write throws `LiveWriteBlockedError` for the sentinel; and a
+    child process spawned from the suite sees the sentinel and no App key path.
+    Out of scope: moving each existing `assertLiveWriteAllowed` fence ahead of its effect (#7895
+    does the plan gardener's), and the authority.ts gap table.
+  acceptance:
+    - claim: "a real git push to github from inside the suite fails loudly on the dead rewrite"
+      proof: 'grep: test("W1-T4805: a real push to github from the suite fails on the dead rewrite" in test/live-write-guard.test.ts'
+    - claim: "a gh call through the transport with the sentinel token is refused before gh runs"
+      proof: 'grep: test("W1-T4805: the transport refuses the sentinel token before gh runs" in test/live-write-guard.test.ts'
+    - claim: "a child process spawned by a test inherits the sentinel and no App key path"
+      proof: 'grep: test("W1-T4805: a spawned child inherits the sentinel and no app key" in test/live-write-guard.test.ts'
+    - claim: "the shared test setup installs the process-level containment"
+      proof: "grep: no-live-remote in test/setup/tmp-hygiene.ts"
+  falsifier: |
+    Drop the pushInsteadOf rewrite and the push canary reaches the network: it fails with an auth
+    or network error that does not name the dead rewrite, and the test fails. Let the transport
+    pass the sentinel to gh: the refusal test sees gh's 401 instead of LiveWriteBlockedError.
+    Load no-live-remote.ts only in package.json's `test` script: the CI coverage invocation, which
+    imports tmp-hygiene.ts, runs uncontained and the child test fails.
+  note: |
+    Reserved from the operator checkout for branch file/three-new-gardeners-1790707389087.
+    Scope-time checks 2026-09-29: no run-W1-T4805-* branch; no merged PR carries its trailer.
+    No plan record on origin/main or on any origin head's added shards matches live-write,
+    pushInsteadOf or "write to live". W1-T2346 and W1-T2347 (merged) are the per-effect
+    predecessors this task makes structural.

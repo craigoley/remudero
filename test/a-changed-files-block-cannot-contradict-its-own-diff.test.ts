@@ -2,12 +2,12 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
   CHANGED_FILES_HEADING,
-  buildPlanPrBody,
   changedFilesBlockDrift,
   hasChangedFilesBlock,
   renderAcceptanceBlock,
   renderChangedFilesBlock,
 } from "../src/lib/plan-pr-emitter.js";
+import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
 import { bodyContradictsDiff, changesetClaimsDisagreeing, parseAcceptanceBlock } from "../src/lib/review.js";
 
 /**
@@ -40,7 +40,7 @@ test("W1-T2535 criterion 1: a rendered block lists exactly the diff's files, in 
 test("W1-T2535 criterion 2: a body carrying the rendered block is not refused for the diff it was rendered from", () => {
   // THE LOAD-BEARING ONE. Structurally unfalsifiable rather than merely well-tested: the block IS
   // the diff, so there is no claim left to contradict.
-  const body = buildPlanPrBody({
+  const body = buildFixturePlanPrBody({
     intro: "Some prose about the change.",
     criteria: [{ claim: "it works", proof: "unit test: test/x.test.ts" }],
     changedFiles: FILES,
@@ -70,7 +70,7 @@ test("W1-T2535 criterion 2: a body carrying the rendered block is not refused fo
 });
 
 test("W1-T2535 criterion 3: a block left behind by a later commit is DETECTABLE, both directions", () => {
-  const body = buildPlanPrBody({
+  const body = buildFixturePlanPrBody({
     intro: "prose",
     criteria: [{ claim: "c", proof: "unit test: test/x.test.ts" }],
     changedFiles: ["src/a.ts", "test/a.test.ts"],
@@ -100,7 +100,7 @@ test("W1-T2535 criterion 5: the acceptance renderer's output is UNCHANGED — th
   const criteria = [{ claim: "W1-T9999 filed as a well-formed plan task shard", proof: "unit test: test/fixture.test.ts" }];
   // byte-identical to the pre-existing contract when changedFiles is omitted
   assert.equal(
-    buildPlanPrBody({ intro: "Filing W1-T9999.", criteria }),
+    buildFixturePlanPrBody({ intro: "Filing W1-T9999.", criteria }),
     "Filing W1-T9999.\n\nAcceptance:\n- W1-T9999 filed as a well-formed plan task shard | unit test: test/fixture.test.ts\n",
   );
   assert.equal(
@@ -109,14 +109,14 @@ test("W1-T2535 criterion 5: the acceptance renderer's output is UNCHANGED — th
   );
   // and with the block present, the Acceptance block is still LAST before the trailer (the #394
   // lesson: its bullets must never be interrupted)
-  const withBlock = buildPlanPrBody({ intro: "i", criteria, taskId: "W1-T1", changedFiles: ["a.ts"] });
+  const withBlock = buildFixturePlanPrBody({ intro: "i", criteria, taskId: "W1-T1", changedFiles: ["a.ts"] });
   assert.ok(withBlock.indexOf(CHANGED_FILES_HEADING) < withBlock.indexOf("Acceptance:"));
   assert.ok(withBlock.indexOf("Acceptance:") < withBlock.indexOf("Remudero-Task:"));
   assert.deepEqual(parseAcceptanceBlock(withBlock), criteria, "and the block still round-trips through the reviewer's parser");
 });
 
 test("W1-T2535 criterion 6: hand-editing the block to disagree with its diff is caught, not silently accepted", () => {
-  const body = buildPlanPrBody({
+  const body = buildFixturePlanPrBody({
     intro: "prose",
     criteria: [{ claim: "c", proof: "unit test: test/x.test.ts" }],
     changedFiles: ["src/a.ts", "src/b.ts"],
@@ -130,7 +130,7 @@ test("W1-T2535 criterion 6: hand-editing the block to disagree with its diff is 
 test("W1-T2535: a body with NO block is absent, not stale — the two must stay distinguishable", () => {
   // Fail-closed would be wrong: a body that never opted in has nothing to be stale about, and
   // reporting drift on it would flag every pre-existing PR in the repo.
-  const plain = buildPlanPrBody({ intro: "i", criteria: [{ claim: "c", proof: "unit test: test/x.test.ts" }] });
+  const plain = buildFixturePlanPrBody({ intro: "i", criteria: [{ claim: "c", proof: "unit test: test/x.test.ts" }] });
   assert.equal(hasChangedFilesBlock(plain), false);
   assert.deepEqual(changedFilesBlockDrift(plain, ["src/a.ts"]), { missing: [], extra: [] });
 });
@@ -139,7 +139,7 @@ test("W1-T2535: the block heading itself is not read as a scope CLAIM by the det
   // Load-bearing for the design: a section headed "Changed files" must not itself trip the very
   // detector it exists to satisfy. Measured against the three forms that DO fire — a plan-only
   // label, and a count in a sentence carrying changeset context — none of which this heading is.
-  const body = buildPlanPrBody({
+  const body = buildFixturePlanPrBody({
     intro: "prose",
     criteria: [{ claim: "c", proof: "unit test: test/x.test.ts" }],
     changedFiles: ["src/a.ts"],
@@ -153,7 +153,7 @@ test("W1-T2535: the block heading itself is not read as a scope CLAIM by the det
 test("W1-T2535: prose mentioning a path is never mistaken for the block", () => {
   // The reader parses only the backticked bullets the renderer emits. A body discussing
   // `src/other.ts` in its intro must not read as listing it.
-  const body = buildPlanPrBody({
+  const body = buildFixturePlanPrBody({
     intro: "This is unrelated to `src/other.ts`, which it does not touch.\n\n- `src/decoy.ts` in a stray bullet",
     criteria: [{ claim: "c", proof: "unit test: test/x.test.ts" }],
     changedFiles: ["src/a.ts"],

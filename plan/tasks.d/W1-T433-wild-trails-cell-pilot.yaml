@@ -53,9 +53,10 @@
   origin: oper#architecture-2026-08-11
   plan_refs: ["W1-T429", "W1-T408", "W1-T403"]
   files: [docs/runbooks/second-cell.md]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
-  note: "verify:human — every deliverable is an operator act on the operator's machine, and
+  note: "OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, 'the verify-human queue, cleared'): CLOSED — overtaken: the multi-instance design runs on Azure (core, console, site); launchd on the mini is obsolete. Wild-trails as a fleet repo is a separate operator question. verify:human — every deliverable is an operator act on the operator's machine, and
     the demonstration dialect is W1-T277's intended use for exactly this shape (the W1-T370
     precedent); isDispatchEligible refuses non-auto tasks before the linter, so this shard
     can never stall the queue. risk:high — it is the first time two governed dispatchers

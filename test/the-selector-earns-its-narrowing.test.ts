@@ -1,18 +1,26 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { parse as parseYaml } from "yaml";
 
+import { fixedClock } from "../src/lib/clock.js";
 import {
   SELECTOR_SHADOW_MIN_FAILURES,
   SELECTOR_SHADOW_MIN_RUNS,
+  SELECTOR_SHADOW_RECENT_WINDOW_MS,
+  SELECTOR_SHADOW_RUN_FIELDS,
   SELECTOR_SHADOW_SHARDS,
   parseSelectorShadowLines,
+  readCoverageShardLogsAsync,
   readSelectorShadowChangedPaths,
   readSelectorShadowRuns,
   readSelectorShadowRunsAsync,
   runSelectorShadowGardener,
+  selectorShadowFlakeLedger,
+  selectorShadowRecoveredFlakes,
   selectorShadowReport,
   startSelectorShadowGardener,
   type SelectorShadowRecord,
@@ -69,13 +77,71 @@ test("W1-T4439: the gardener reports each selection's miss rate from the shadow 
   assert.equal(ready.verdict, "ready");
   assert.equal(ready.narrow.missed, 0);
   assert.match(ready.reason, /W1-T4406 may be reviewed/);
+  const skipped = Array.from({ length: SELECTOR_SHADOW_SHARDS }, (_, i) =>
+    `coverage-shard (${i + 1}/8)\tW1-T2428 fast-lane: class=PLAN_ONLY — skipping Test with coverage`,
+  ).join("\n");
+  const withPlanOnly = selectorShadowReport([...enough, { id: 99, headSha: "plan-only", log: skipped }], 100);
+  assert.equal(withPlanOnly.runsSkipped, 1);
+  assert.equal(withPlanOnly.runsIncomplete, 0);
+  assert.equal(withPlanOnly.verdict, "ready", "an explicit eight-shard plan-only skip is not missing source evidence");
+  const partialSkip = selectorShadowReport([{ id: 100, headSha: "partial", log: skipped.split("\n").slice(0, 7).join("\n") }], 100);
+  assert.equal(partialSkip.runsSkipped, 0);
+  assert.equal(partialSkip.runsIncomplete, 1, "seven skips cannot hide a missing coverage shard");
 });
 
-test("W1-T4439: a missed failure files a task naming the missing edge", () => {
+test("selector-shadow reads all eight coverage job logs instead of a partial run-view aggregate", async () => {
+  const jobs = Array.from({ length: SELECTOR_SHADOW_SHARDS }, (_, i) =>
+    ({ id: i + 101, name: `coverage-shard (${i + 1}/8)`, status: "completed" }));
+  const calls: string[][] = [];
+  const io = {
+    readJson: async (args: string[]) => {
+      calls.push(args);
+      return { total_count: jobs.length + 1, jobs: [...jobs, { id: 999, name: "commitlint", status: "completed" }] };
+    },
+    readText: async (args: string[]) => {
+      calls.push(args);
+      return `AFFECTED-SUITES-SHADOW: ${JSON.stringify({ fullRun: true, floorSize: 20, failures: [] })}`;
+    },
+  };
+  const log = await readCoverageShardLogsAsync("acme", "remudero", 42, io);
+  assert.equal(parseSelectorShadowLines(log).length, SELECTOR_SHADOW_SHARDS);
+  assert.equal(calls.length, 1 + SELECTOR_SHADOW_SHARDS);
+  assert.deepEqual(calls[0], ["api", "repos/acme/remudero/actions/runs/42/jobs?per_page=100"]);
+  assert.deepEqual(calls.at(-1), ["api", "repos/acme/remudero/actions/jobs/108/logs"]);
+  const skippedLog = await readCoverageShardLogsAsync("acme", "remudero", 42, {
+    ...io, readText: async () => "W1-T2428 fast-lane: class=PLAN_ONLY — skipping Test with coverage",
+  });
+  const skippedReport = selectorShadowReport([{ id: 42, headSha: "plan-only", log: skippedLog }], 100);
+  assert.equal(skippedReport.runsSkipped, 1);
+  assert.equal(skippedReport.runsIncomplete, 0);
+  await assert.rejects(readCoverageShardLogsAsync("acme", "remudero", 42, {
+    ...io, readJson: async () => ({ total_count: 101, jobs }),
+  }), /incomplete job list/);
+  await assert.rejects(readCoverageShardLogsAsync("acme", "remudero", 42, {
+    ...io, readJson: async () => ({ total_count: 7, jobs: jobs.slice(0, 7) }),
+  }), /missing coverage jobs/);
+  for (const invalid of [
+    [{ ...jobs[0], status: "in_progress" }, ...jobs.slice(1)],
+    [{ ...jobs[0], id: undefined }, ...jobs.slice(1)],
+    [...jobs, { ...jobs[0], id: 109 }],
+  ]) {
+    await assert.rejects(readCoverageShardLogsAsync("acme", "remudero", 42, {
+      readJson: async () => ({ total_count: invalid.length, jobs: invalid }),
+      readText: async () => { throw new Error("unexpected job-log read"); },
+    }), /invalid coverage job 1/);
+  }
+  await assert.rejects(readCoverageShardLogsAsync("acme", "remudero", 42, {
+    ...io, readText: async () => { throw new Error("job log unavailable"); },
+  }), /job log unavailable/);
+});
+
+test("W1-T4439: a missed failure files a task naming the missing edge", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-`));
   mkdirSync(join(root, "test"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
   writeFileSync(join(root, "test", "a.test.ts"), "");
+  mkdirSync(join(root, "plan"), { recursive: true });
+  writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
   const observed = run(42, { fullRun: false, floorSize: 1, narrowSize: 0, failures: [
     { file: "test/a.test.ts", floor: "selected", narrow: "missed" },
   ] }, { headSha: "abc123", baseSha: "def456" });
@@ -86,54 +152,86 @@ test("W1-T4439: a missed failure files a task naming the missing edge", () => {
     repoRoot: root,
     openWorkspace: () => ({
       root,
+      branch: "selector-shadow-garden-test",
       land: (opts: { paths: string[]; title: string; body: string }) =>
         (landed.push(opts), "https://github.com/acme/remudero/pull/99"),
       dispose: () => {},
     }),
     log: (step: string) => { events.push(step); },
   };
-  const pass = () => runSelectorShadowGardener(deps, () => [observed], () => ["scripts/clock-signature-ratchet.mjs"], () => "W1-T9001");
-  const report = pass();
+  const pass = () => runSelectorShadowGardener(deps, () => [observed], () => ["scripts/clock-signature-ratchet.mjs"], (branch) => {
+    assert.equal(branch, "selector-shadow-garden-test");
+    return "W1-T9001";
+  });
+  const report = await pass();
   assert.equal(report.verdict, "misses");
   assert.equal(landed.length, 1);
   assert.deepEqual(landed[0]!.paths, ["plan/tasks.d/w1-t9001-selector-shadow-miss.yaml"]);
   const task = readFileSync(join(root, landed[0]!.paths[0]!), "utf8");
   assert.match(task, /scripts\/clock-signature-ratchet\.mjs -> test\/a\.test\.ts/);
   assert.match(task, /at abc123/);
-  assert.match(task, /origin: "selector-shadow:abc123:narrow:test\/a\.test\.ts"/);
+  assert.match(task, /origin: "selector-shadow-miss:test\/a\.test\.ts"/);
   assert.match(task, /verify: human/);
+  const filed = parseYaml(task) as Array<{ acceptance: Array<{ proof: string }> }>;
+  assert.equal(filed[0]!.acceptance[0]!.proof, "grep: test/a\\.test\\.ts in src/lib/affected-suites.ts");
+  assert.match(landed[0]!.body, /## Acceptance/);
+  assert.doesNotMatch(landed[0]!.body, /Remudero-Task:/);
+  const proof = landed[0]!.body.match(/proof: grep: (.+) in plan\/tasks\.d\/w1-t9001-selector-shadow-miss\.yaml/)?.[1];
+  assert.ok(proof);
+  assert.match(execFileSync("grep", ["-arn", "--", proof, join(root, landed[0]!.paths[0]!)], { encoding: "utf8" }), /origin:/);
   assert.ok(events.includes("selector-shadow.report"));
   assert.ok(events.includes("selector-shadow.miss_filed"));
-  pass();
+  await pass();
   assert.equal(landed.length, 1, "the same observed edge files once across passes");
 });
 
-test("W1-T4439: the GitHub reader keeps each run's exact head and comparison", () => {
+test("W1-T4764: the selector lists runs in a dated recent window", async () => {
   const calls: string[][] = [];
+  const now = Date.parse("2026-09-29T10:00:00.000Z");
   const runs = readSelectorShadowRuns("acme", "remudero", 2, {
+    clock: fixedClock(now),
     readJson: (args) => {
       calls.push(args);
-      return { workflow_runs: [{ id: 42, head_sha: "abc123", pull_requests: [{ number: 7, base: { sha: "def456" } }] }] };
+      return { workflow_runs: [
+        { id: 41, head_sha: "pending", status: "in_progress", created_at: new Date(now).toISOString() },
+        { id: 42, head_sha: "abc123", status: "completed", created_at: new Date(now).toISOString(), pull_requests: [{ number: 7, base: { sha: "def456" } }] },
+      ] };
     },
     readLog: (args) => (calls.push(args), "coverage-shard\tAFFECTED-SUITES-SHADOW: {}"),
   });
   assert.deepEqual(calls, [
-    ["api", "repos/acme/remudero/actions/workflows/ci.yml/runs?event=pull_request&status=completed&per_page=2"],
+    ["api", `repos/acme/remudero/actions/workflows/ci.yml/runs?event=pull_request&per_page=100&created=${encodeURIComponent(`>=${new Date(now - SELECTOR_SHADOW_RECENT_WINDOW_MS).toISOString()}`)}`,
+      "--jq", SELECTOR_SHADOW_RUN_FIELDS],
     ["run", "view", "42", "--repo", "acme/remudero", "--log"],
   ]);
   assert.deepEqual(runs, [{ id: 42, headSha: "abc123", baseSha: "def456", prNumber: 7,
     log: "coverage-shard\tAFFECTED-SUITES-SHADOW: {}" }]);
   const miss = { runId: 42, headSha: "abc123", baseSha: "def456", selection: "narrow" as const,
     file: "test/a.test.ts" };
-  assert.deepEqual(readSelectorShadowChangedPaths("acme", "remudero", miss, (args) => {
+  assert.deepEqual(await readSelectorShadowChangedPaths("acme", "remudero", miss, (args) => {
     assert.deepEqual(args, ["api", "repos/acme/remudero/compare/def456...abc123"]);
     return { files: [{ filename: "scripts/clock-signature-ratchet.mjs" }] };
   }), ["scripts/clock-signature-ratchet.mjs"]);
-  assert.throws(() => readSelectorShadowChangedPaths("acme", "remudero", miss, () => ({ files: null })), /incomplete comparison/);
-  assert.throws(() => readSelectorShadowChangedPaths("acme", "remudero", miss, () => null), /no comparison object for abc123/);
+  await assert.rejects(readSelectorShadowChangedPaths("acme", "remudero", miss, () => ({ files: null })), /incomplete comparison/);
+  await assert.rejects(readSelectorShadowChangedPaths("acme", "remudero", miss, () => null), /no comparison object for abc123/);
   assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => null, readLog: () => "" }), /no workflow-runs object/);
   assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({}), readLog: () => "" }), /no workflow_runs list/);
-  assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({ workflow_runs: [{ head_sha: "abc123" }] }), readLog: () => "" }), /no id or head SHA/);
+  assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({ workflow_runs: [{ head_sha: "abc123", status: "completed" }] }), readLog: () => "" }), /no id or head SHA/);
+  assert.throws(() => readSelectorShadowRuns("acme", "remudero", 2, { readJson: () => ({ workflow_runs: [{ id: 42, head_sha: "abc123" }] }), readLog: () => "" }), /no status/);
+});
+
+test("W1-T4764: a stale or undated run response cannot produce a ready verdict", () => {
+  const now = Date.parse("2026-09-29T10:00:00.000Z");
+  let logReads = 0;
+  for (const created_at of ["2026-08-20T00:00:00.000Z", undefined]) {
+    assert.throws(() => readSelectorShadowRuns("acme", "remudero", 60, {
+      clock: fixedClock(now),
+      readJson: () => ({ workflow_runs: Array.from({ length: 60 }, (_, id) =>
+        ({ id, head_sha: `head-${id}`, status: "completed", created_at })) }),
+      readLog: () => { logReads++; return ""; },
+    }), /missing or stale creation date/);
+  }
+  assert.equal(logReads, 0, "no old run log is read or scored");
 });
 
 test("the scheduled selector-shadow log read yields the daemon loop and does not overlap ticks", async () => {
@@ -176,7 +274,7 @@ test("the async selector-shadow reader keeps run logs sequential while other tim
   const reading = readSelectorShadowRunsAsync("acme", "remudero", 2, {
     readJson: async (args) => {
       calls.push(args);
-      return { workflow_runs: [{ id: 42, head_sha: "abc123" }, { id: 43, head_sha: "def456" }] };
+      return { workflow_runs: [{ id: 42, head_sha: "abc123", status: "completed", created_at: new Date().toISOString() }, { id: 43, head_sha: "def456", status: "completed", created_at: new Date().toISOString() }] };
     },
     readLog: async (args) => {
       calls.push(args);
@@ -185,14 +283,139 @@ test("the async selector-shadow reader keeps run logs sequential while other tim
     },
   });
   await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(calls.map((args) => args[2]), [undefined, "42"], "later logs wait for the first bounded read");
+  assert.deepEqual(calls.map((args) => args[2]), ["--jq", "42"], "later logs wait for the first bounded read");
   releaseFirst!();
   const runs = await reading;
-  assert.deepEqual(calls.map((args) => args[2]), [undefined, "42", "43"]);
+  assert.deepEqual(calls.map((args) => args[2]), ["--jq", "42", "43"]);
   assert.deepEqual(runs.map((run) => [run.id, run.headSha, run.log]), [
     [42, "abc123", "log for 42"],
     [43, "def456", "log for 43"],
   ]);
+});
+
+test("selector-shadow resumes a bounded log window across ticks and daemon restarts", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-cache-`));
+  const cachePath = join(root, "logs.json");
+  const headers = [1, 2, 3].map((id) => ({ id, head_sha: `head-${id}`, status: "completed", created_at: new Date(1_000).toISOString() }));
+  const record: SelectorShadowRecord = { fullRun: true, floorSize: 20, narrowSize: 10, failures: [] };
+  const fetched: number[] = [];
+  const io = {
+    cachePath,
+    freshLogsPerPass: 1,
+    clock: fixedClock(1_000),
+    readJson: async () => ({ workflow_runs: headers }),
+    readLog: async (args: string[]) => {
+      const id = Number(args[2]);
+      fetched.push(id);
+      return `large unrelated log\n${run(id, record).log}`;
+    },
+  };
+
+  const first = await readSelectorShadowRunsAsync("acme", "remudero", 3, io);
+  assert.deepEqual(fetched, [1], "one tick has a strict fresh-log budget");
+  assert.equal(selectorShadowReport(first, 100).verdict, "insufficient", "unread runs cannot certify a window");
+  assert.equal(first[1]?.log, "", "deferred runs remain explicitly incomplete");
+
+  await readSelectorShadowRunsAsync("acme", "remudero", 3, io);
+  const complete = await readSelectorShadowRunsAsync("acme", "remudero", 3, io);
+  assert.deepEqual(fetched, [1, 2, 3]);
+  assert.equal(complete.every((row) => parseSelectorShadowLines(row.log).length === SELECTOR_SHADOW_SHARDS), true);
+  assert.doesNotMatch(readFileSync(cachePath, "utf8"), /large unrelated log/, "only shadow evidence is persisted");
+
+  await readSelectorShadowRunsAsync("acme", "remudero", 3, io);
+  assert.deepEqual(fetched, [1, 2, 3], "a new reader invocation reuses completed runs");
+  headers[1] = { id: 2, head_sha: "replaced-head", status: "completed", created_at: new Date(1_000).toISOString() };
+  await readSelectorShadowRunsAsync("acme", "remudero", 3, io);
+  assert.deepEqual(fetched, [1, 2, 3, 2], "a run ID with a different head cannot reuse evidence");
+});
+
+test("selector-shadow re-reads an old aggregate cache and remembers explicit plan-only skips", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-cache-upgrade-`));
+  const cachePath = join(root, "logs.json");
+  writeFileSync(cachePath, JSON.stringify({ "42": { headSha: "head-42", log: "", fetchedAt: 1_000, complete: false } }));
+  const skipLog = Array.from({ length: SELECTOR_SHADOW_SHARDS }, (_, i) =>
+    `coverage-shard (${i + 1}/8)\tW1-T2428 fast-lane: class=PLAN_ONLY — skipping Test with coverage`,
+  ).join("\n");
+  let fetched = 0;
+  const io = {
+    cachePath, clock: fixedClock(1_000),
+    readJson: async () => ({ workflow_runs: [{ id: 42, head_sha: "head-42", status: "completed", created_at: new Date(1_000).toISOString() }] }),
+    readLog: async () => { fetched++; return skipLog; },
+  };
+  const first = await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
+  assert.equal(fetched, 1, "the old aggregate cache is not trusted for six more hours");
+  assert.equal(selectorShadowReport(first, 100).runsSkipped, 1);
+  await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
+  assert.equal(fetched, 1, "an explicit eight-shard skip is complete and reusable");
+});
+
+test("selector-shadow reports a corrupt cache and rebuilds it from run evidence", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-corrupt-`));
+  const cachePath = join(root, "logs.json");
+  writeFileSync(cachePath, "{invalid json");
+  const warnings: string[] = [];
+  const record: SelectorShadowRecord = { fullRun: true, floorSize: 20, narrowSize: 10, failures: [] };
+  const rows = await readSelectorShadowRunsAsync("acme", "remudero", 1, {
+    cachePath,
+    readJson: async () => ({ workflow_runs: [{ id: 1, head_sha: "head-1", status: "completed", created_at: new Date().toISOString() }] }),
+    readLog: async () => run(1, record).log,
+    warn: (message) => { warnings.push(message); },
+  });
+  assert.match(warnings[0] ?? "", /log cache unreadable/);
+  assert.equal(parseSelectorShadowLines(rows[0]?.log ?? "").length, SELECTOR_SHADOW_SHARDS);
+  assert.doesNotThrow(() => JSON.parse(readFileSync(cachePath, "utf8")), "the replacement cache is valid JSON");
+});
+
+test("selector-shadow names both cache write failures and re-reads on the next pass", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-write-`));
+  const warnings: string[] = [];
+  let logReads = 0;
+  const record: SelectorShadowRecord = { fullRun: true, floorSize: 20, narrowSize: 10, failures: [] };
+  const io = {
+    cachePath: join(root, "logs.json"),
+    readJson: async () => ({ workflow_runs: [{ id: 1, head_sha: "head-1", status: "completed", created_at: new Date().toISOString() }] }),
+    readLog: async () => { logReads++; return run(1, record).log; },
+    writeCache: () => { throw new Error("disk unavailable"); },
+    warn: (message: string) => { warnings.push(message); },
+  };
+  const first = await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
+  assert.equal(parseSelectorShadowLines(first[0]?.log ?? "").length, SELECTOR_SHADOW_SHARDS);
+  assert.deepEqual(warnings.map((message) => message.includes("cache write failed") ? "write" : message.includes("cache prune failed") ? "prune" : "other"), ["write", "prune"]);
+  await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
+  assert.equal(logReads, 2, "a failed cache write cannot be mistaken for persisted evidence");
+});
+
+test("selector-shadow keeps scanning after an unreadable log without treating it as complete", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-unreadable-`));
+  const cachePath = join(root, "logs.json");
+  const fetched: number[] = [];
+  const warnings: string[] = [];
+  const record: SelectorShadowRecord = { fullRun: true, floorSize: 20, narrowSize: 10, failures: [] };
+  const io = {
+    cachePath,
+    clock: fixedClock(1_000),
+    readJson: async () => ({ workflow_runs: [1, 2].map((id) => ({ id, head_sha: `head-${id}`, status: "completed", created_at: new Date(1_000).toISOString() })) }),
+    readLog: async (args: string[]) => {
+      const id = Number(args[2]);
+      fetched.push(id);
+      if (id === 1) throw new Error("workflow log unavailable");
+      return run(id, record).log;
+    },
+    warn: (message: string) => { warnings.push(message); },
+  };
+  const first = await readSelectorShadowRunsAsync("acme", "remudero", 2, io);
+  assert.deepEqual(fetched, [1, 2], "one bad log does not block later evidence");
+  assert.equal(first[0]?.log, "");
+  assert.equal(selectorShadowReport(first, 100).verdict, "insufficient");
+  assert.match(warnings[0] ?? "", /run 1 log unreadable/);
+  await readSelectorShadowRunsAsync("acme", "remudero", 2, io);
+  assert.deepEqual(fetched, [1, 2], "the incomplete entry backs off across invocations");
+
+  await assert.rejects(readSelectorShadowRunsAsync("acme", "remudero", 2, {
+    ...io,
+    cachePath: join(root, "auth-logs.json"),
+    readLog: async () => { throw new Error("HTTP 401 Bad credentials"); },
+  }), /HTTP 401/, "authentication failures remain visible for credential recovery");
 });
 
 test("W1-T4439: a failed pass is logged by name and never stops the daemon's timer", async () => {
@@ -242,20 +465,34 @@ test("a self-hosting daemon keeps timers alive while selector-shadow reads a run
     const start = captured?.gardens?.[6];
     assert.ok(start, "a seventh garden is wired after the ci-friction gardener");
     const done = join(home, "log-done");
+    const allDone = join(home, "all-logs-done");
+    const jobs = Array.from({ length: SELECTOR_SHADOW_SHARDS }, (_, i) =>
+      ({ id: i + 101, name: `coverage-shard (${i + 1}/8)`, status: "completed" }));
     const shim = ghShim([
-      { when: "actions/workflows/ci.yml/runs", stdout: JSON.stringify({ workflow_runs: [{ id: 42, head_sha: "abc123" }] }) },
-      { when: "run view 42", stdout: "unparseable log", delaySeconds: 0.5, doneFile: done },
+      { when: "actions/workflows/ci.yml/runs", stdout: JSON.stringify({ workflow_runs: [{ id: 42, head_sha: "abc123", status: "completed", created_at: new Date().toISOString() }] }) },
+      { when: "actions/runs/42/jobs", stdout: JSON.stringify({ total_count: jobs.length, jobs }) },
+      { when: "actions/jobs/101/logs", stdout: "unparseable log", delaySeconds: 0.5, doneFile: done },
+      ...jobs.slice(1).map((job, index) => ({
+        when: `actions/jobs/${job.id}/logs`, stdout: "unparseable log",
+        ...(index === jobs.length - 2 ? { doneFile: allDone } : {}),
+      })),
     ], { kind: "selector-shadow-log" });
     process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
     process.env.RMD_GH_TRANSPORT_FLOOR = "advisory";
     const garden = start!(60_000);
     try {
-      for (let waited = 0; !shim.calls().some((call) => call.includes("run view 42")) && waited < 5_000; waited += 10) {
+      for (let waited = 0; !shim.calls().some((call) => call.includes("actions/jobs/101/logs")) && waited < 5_000; waited += 10) {
         await new Promise((r) => setTimeout(r, 10));
       }
-      assert.ok(shim.calls().some((call) => call.includes("run view 42")), "the installed reader reached the fake run-log child");
+      assert.ok(shim.calls().some((call) => call.includes("actions/jobs/101/logs")), "the installed reader reached the coverage job log child");
       await new Promise((r) => setTimeout(r, 20));
       assert.equal(existsSync(done), false, "the daemon event loop ran before the log child finished");
+      // stop() clears future ticks, but the current eight-job read continues. Keep the
+      // shim installed until that read finishes so no later child hits the shared gh stub.
+      for (let waited = 0; !existsSync(allDone) && waited < 5_000; waited += 10) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert.ok(existsSync(allDone), "the current read completed all eight coverage jobs");
     } finally {
       garden.stop();
     }
@@ -267,4 +504,128 @@ test("a self-hosting daemon keeps timers alive while selector-shadow reads a run
     if (oldFloor === undefined) delete process.env.RMD_GH_TRANSPORT_FLOOR;
     else process.env.RMD_GH_TRANSPORT_FLOOR = oldFloor;
   }
+});
+
+function shardedLog(shards: Array<{ conclusion: string; lines: string[] }>): string {
+  return shards.flatMap((shard, i) => [
+    `coverage-shard (${i + 1}/8)\tSELECTOR-SHADOW-JOB: conclusion=${shard.conclusion}`,
+    ...shard.lines.map((line) => `coverage-shard (${i + 1}/8)\t${line}`),
+  ]).join("\n");
+}
+
+const shadowLine = (failures: SelectorShadowRecord["failures"]) =>
+  `2026-09-29T11:09:56.9991966Z AFFECTED-SUITES-SHADOW: ${JSON.stringify({ fullRun: false, floorSize: 80, narrowSize: 20, failures })}`;
+
+test("a failure inside a coverage job that concluded success is a recovered flake and never a selector miss", async () => {
+  const flakyShard = [
+    "2026-09-29T11:03:03.2408502Z \u001b[36;1m# step prints FLAKE-RETRY-RECOVERED and flake-retry-aggregate counts it.\u001b[0m",
+    "2026-09-29T11:04:00.0000000Z     FLAKE-RETRY-FILES: retrying 1 failed file(s) — test/nested-output.test.ts",
+    "2026-09-29T11:09:51.6870408Z FLAKE-RETRY-FILES: retrying 1 failed file(s) uninstrumented — test/flaky.test.ts",
+    "2026-09-29T11:09:55.0665865Z FLAKE-RETRY-RECOVERED: a flake, not a pass — coverage figures are pass one's — some test",
+    shadowLine([{ file: "test/flaky.test.ts", floor: "selected", narrow: "missed" }]),
+  ];
+  const brokenShard = [
+    "2026-09-29T11:09:51.0000000Z FLAKE-RETRY-FILES: retrying 1 failed file(s) uninstrumented — test/broken.test.ts",
+    shadowLine([{ file: "test/broken.test.ts", floor: "selected", narrow: "missed" }]),
+  ];
+  const jobs = Array.from({ length: SELECTOR_SHADOW_SHARDS }, (_, i) =>
+    ({ id: i + 101, name: `coverage-shard (${i + 1}/8)`, status: "completed", conclusion: i === 1 ? "failure" : "success" }));
+  const log = await readCoverageShardLogsAsync("acme", "remudero", 42, {
+    readJson: async () => ({ total_count: jobs.length, jobs }),
+    readText: async (args) => {
+      const shard = Number(/jobs\/(\d+)\/logs/.exec(args[1]!)![1]) - 100;
+      const lines = shard === 1 ? flakyShard : shard === 2 ? brokenShard : [shadowLine([])];
+      return ["unrelated line", ...lines].join("\n");
+    },
+  });
+  assert.match(log, /^coverage-shard \(1\/8\)\tSELECTOR-SHADOW-JOB: conclusion=success$/m);
+  assert.doesNotMatch(log, /unrelated line|nested-output|# step prints/, "only anchored evidence lines are kept");
+  const report = selectorShadowReport([{ id: 42, headSha: "abc", log }], 100);
+  assert.deepEqual(report.misses.map((m) => m.file), ["test/broken.test.ts"], "only the failure its retry did not recover is a miss");
+  assert.equal(report.recovered, 1);
+  assert.equal(report.narrow.failures, 1);
+  assert.equal(report.runsComplete, 1);
+  assert.deepEqual(selectorShadowRecoveredFlakes(log), [{ shard: 1, file: "test/flaky.test.ts" }]);
+  assert.deepEqual(selectorShadowRecoveredFlakes(shardedLog([{ conclusion: "failure", lines: flakyShard }])), [],
+    "a shard that failed anyway is not proof its retried files recovered");
+});
+
+test("a cancelled workflow run is dropped before it can hold the evidence window incomplete", async () => {
+  const read: string[] = [];
+  const runs = await readSelectorShadowRunsAsync("acme", "remudero", 2, {
+    readJson: async () => ({ workflow_runs: [
+      { id: 1, head_sha: "superseded", status: "completed", conclusion: "cancelled", created_at: new Date().toISOString() },
+      { id: 2, head_sha: "kept", status: "completed", conclusion: "success", created_at: new Date().toISOString() },
+    ] }),
+    readLog: async (args) => { read.push(args[2]!); return ""; },
+  });
+  assert.deepEqual(runs.map((r) => r.id), [2]);
+  assert.deepEqual(read, ["2"], "no log of a cancelled run is fetched");
+});
+
+test("a retry-recovered file is ledgered once as flake evidence for the test gardener", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-flakes-`));
+  const log = shardedLog(Array.from({ length: SELECTOR_SHADOW_SHARDS }, (_, i) => i === 0
+    ? { conclusion: "success", lines: [
+      "2026-09-29T11:09:51Z FLAKE-RETRY-FILES: retrying 2 failed file(s) uninstrumented — test/a.test.ts, test/b.test.ts",
+      "2026-09-29T11:09:55Z FLAKE-RETRY-RECOVERED: a flake, not a pass — x",
+      shadowLine([{ file: "test/a.test.ts", floor: "selected", narrow: "selected" }]),
+    ] }
+    : { conclusion: "success", lines: [shadowLine([])] }));
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const io = {
+    cachePath: join(root, "logs.json"),
+    clock: fixedClock(1_000),
+    readJson: async () => ({ workflow_runs: [{ id: 7, head_sha: "h", status: "completed", conclusion: "success", created_at: new Date(1_000).toISOString() }] }),
+    readLog: async () => log,
+    onFlakes: selectorShadowFlakeLedger((step, extra) => { rows.push({ step, extra }); }),
+  };
+  await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
+  await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
+  assert.deepEqual(rows, [
+    { step: "test.flake_retry", extra: { file: "test/a.test.ts", headline: "recovered on retry", ci_run_id: 7, shard: 1, source: "selector-shadow" } },
+    { step: "test.flake_retry", extra: { file: "test/b.test.ts", headline: "recovered on retry", ci_run_id: 7, shard: 1, source: "selector-shadow" } },
+  ], "a cached complete run is never reported twice");
+});
+
+test("a later miss of the same suite is ledgered as evidence for its task and never filed again", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-dedupe-`));
+  mkdirSync(join(root, "test"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
+  const shard = (id: string, origin: string, retired = false) => writeFileSync(join(root, "plan", "tasks.d", `${id.toLowerCase()}-x.yaml`), [
+    `- id: ${id}`, "  title: \"t\"", "  repo: remudero", "  depends_on: []", "  type: implement",
+    `  status: ${retired ? "blocked" : "queued"}`, ...(retired ? ["  retirement: withdrawn"] : []),
+    `  origin: ${JSON.stringify(origin)}`, "  files: [src/lib/affected-suites.ts]", "",
+  ].join("\n"));
+  shard("W1-T4715", "selector-shadow:old:narrow:test/known.test.ts");
+  shard("W1-T4716", "selector-shadow:old:narrow:test/retired.test.ts", true);
+  shard("W1-T4717", "selector-shadow:old:floor:test/both.test.ts", true);
+  shard("W1-T4718", "selector-shadow-miss:test/both.test.ts");
+  const missed = (id: number, file: string) => run(id, { fullRun: false, floorSize: 1, narrowSize: 0,
+    failures: [{ file, floor: "selected", narrow: "missed" }] }, { headSha: `head-${id}` });
+  const landed: string[] = [];
+  const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const deps = {
+    stateDir: join(root, "state"),
+    repoRoot: root,
+    openWorkspace: () => ({ root, branch: "b", land: (opts: { paths: string[] }) => (landed.push(...opts.paths), "https://github.com/acme/remudero/pull/1"), dispose: () => {} }),
+    log: (step: string, extra?: Record<string, unknown>) => { events.push({ step, extra }); },
+  };
+  let minted = 0;
+  const runs = [missed(1, "test/known.test.ts"), missed(2, "test/new.test.ts"), missed(3, "test/new.test.ts"),
+    missed(4, "test/retired.test.ts"), missed(5, "test/both.test.ts")];
+  await runSelectorShadowGardener(deps, () => runs, async () => [], () => `W1-T900${++minted}`);
+  assert.deepEqual(landed, ["plan/tasks.d/w1-t9001-selector-shadow-miss.yaml"], "one shard for the one suite with no task");
+  const evidence = events.filter((e) => e.step === "selector-shadow.miss_evidence").map((e) => [e.extra?.file, e.extra?.task_id, e.extra?.task_retired ?? false]);
+  assert.deepEqual(evidence, [
+    ["test/known.test.ts", "W1-T4715", false],
+    ["test/new.test.ts", "W1-T9001", false],
+    ["test/retired.test.ts", "W1-T4716", true],
+    ["test/both.test.ts", "W1-T4718", false],
+  ]);
+  await runSelectorShadowGardener(deps, () => [...runs, missed(6, "test/new.test.ts")], async () => [], () => `W1-T900${++minted}`);
+  assert.equal(landed.length, 1, "a new observation of a filed suite never files again");
+  assert.equal(events.filter((e) => e.step === "selector-shadow.miss_evidence").length, 5, "only the unseen observation adds evidence");
 });

@@ -29,6 +29,7 @@ import {
   type RiskPolicy,
 } from "./risk-judge.js";
 import type { Task } from "./plan.js";
+import { rulingVerifyViolation } from "./task-linter.js";
 import type { ShardUnderJudgement, VerifyHumanReleaseOutcome, VerifyHumanVerdict } from "./verify-human-judge.js";
 
 /**
@@ -72,6 +73,9 @@ export async function releaseAutomatedShard(
   // write refusal, and so no risk-judge spend is made on a record that cannot be released anyway.
   if (task.verify !== "human") return unavailable(`${shard.id} is verify: ${task.verify}, not parked`);
   if (task.status !== "queued") return unavailable(`${shard.id} is status: ${task.status}, not queued`);
+  if (rulingVerifyViolation({ ...task, verify: "auto" })) return { kind: "escalated", reason: `${shard.id} is ruling-shaped (it declares DECISIONS.md); rulings stay with the operator` };
+  if (task.dispatch_hold === true) return { kind: "escalated", reason: `${shard.id} has an explicit dispatch hold; only the operator can resolve it` };
+  if (task.risk === "high") return { kind: "escalated", reason: `${shard.id} is high-risk in the plan; a machine judge cannot release its human verification` };
 
   let risk: RiskJudgeVerdict;
   try {

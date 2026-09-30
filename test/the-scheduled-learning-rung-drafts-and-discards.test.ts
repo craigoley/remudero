@@ -106,11 +106,11 @@ test("W1-T3324: the plan-origins surface is LOAD-BEARING — a cause already fil
   assert.equal(dup.calls.length, 0, "and the filer must not be reached at all");
 });
 
-test("W1-T3324: a firing whose window read THROWS releases its allowance, so a transient outage does not spend the day", async () => {
+test("a failed window read records an attempt without spending the daily success allowance", async () => {
   // The observed 2026-09-09 shape: `gh: Bad credentials (HTTP 401)` from loadCiFailureWindow, with
   // `maxPerDay: 1`, consumed the day and produced nothing.
   const fires: string[] = [];
-  const releases: string[] = [];
+  const attempts: string[] = [];
   const run = buildCiLearningCadenceRunner({
     root,
     checkoutRoot,
@@ -120,19 +120,17 @@ test("W1-T3324: a firing whose window read THROWS releases its allowance, so a t
     fileShards: recordingFiler().fn as never,
     planOrigins: [],
     recordFire: () => fires.push("fired"),
-    releaseFire: () => releases.push("released"),
+    recordAttempt: () => attempts.push("attempted"),
   });
 
   await assert.rejects(run(), /Bad credentials/, "the throw must still surface — this is not a swallow");
-  assert.deepEqual(fires, ["fired"], "the fire is still recorded first, guarding the crash-loop");
-  assert.deepEqual(releases, ["released"], "and released, because this run did no work");
+  assert.deepEqual(attempts, ["attempted"], "the attempt starts a bounded retry interval");
+  assert.deepEqual(fires, [], "the daily success allowance was not spent");
 });
 
-test("W1-T3324: a firing that FILED keeps its fire, so the crash-loop guard still holds", async () => {
-  // The mirror. A run that did work must not release — otherwise the expensive window re-runs every
-  // tick, which is what "THE FIRE FIRST" exists to stop.
+test("a completed filing records the daily success marker", async () => {
   const fires: string[] = [];
-  const releases: string[] = [];
+  const attempts: string[] = [];
   const run = buildCiLearningCadenceRunner({
     root,
     checkoutRoot,
@@ -140,12 +138,12 @@ test("W1-T3324: a firing that FILED keeps its fire, so the crash-loop guard stil
     fileShards: recordingFiler().fn as never,
     planOrigins: [],
     recordFire: () => fires.push("fired"),
-    releaseFire: () => releases.push("released"),
+    recordAttempt: () => attempts.push("attempted"),
   });
 
   await run();
+  assert.deepEqual(attempts, ["attempted"]);
   assert.deepEqual(fires, ["fired"]);
-  assert.deepEqual(releases, [], "a run that filed must KEEP its fire");
 });
 
 test("W1-T3324: the run result names what LANDED, so filed-nothing and drafted-nothing are distinguishable", async () => {

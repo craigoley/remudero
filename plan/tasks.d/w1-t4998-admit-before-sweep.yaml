@@ -1,0 +1,47 @@
+- id: W1-T4998
+  title: "THE ADMISSION DECISION WAITS BEHIND A 15-MINUTE TICK — every daemon tick awaits the full sweep (bounded at 559 s) and the housekeeping cadences before it asks whether to start a build, so with src/ restarts every ~40 min a cycle gets one or two admission chances; 2026-09-30 16:30Z-20:19Z started zero builds"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: go (file the admit-before-the-sweep follow-up)"
+  note: "reservation hand-off: plan-admit-before-sweep-1790807174000 -> plan-admit-before-sweep-1790807174000"
+  plan_refs: [W1-T4945, W1-T4465, W1-T2965, W1-T3618]
+  files: [src/lib/daemon.ts, test/admission-does-not-wait-behind-the-sweep.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-30 (core ledger, union of live + rotations): each cycle ran daemon.boot -> daemon.tick ->
+    ~15 min of sweep passes, board fetches, config/hot-file/test scorecards and branch_reap -> the admission decision
+    (dispatch.wip_deferred) -> a second ~20 min tick -> daemon_selfrestart_for_freshness before the next admission.
+    Boots at 16:47, 17:49, 18:27, 19:06 and 19:45Z; admissions at 17:03, 18:05, 18:40, 19:23 and 20:05Z. Every
+    admission in the window was deferred at the WIP limit (10-16 open PRs), and the next one came 15+ minutes
+    later. No W1 build started from about 16:30Z until 20:19Z. In src/lib/daemon.ts the tick awaits runGatedSweep
+    (DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000) and the cadence block before the admission path.
+    W1-T4945 makes restarts rarer, and this task makes each tick reach admission sooner; they compose. The sweep's
+    own outcome feeds the pre-admission stale-reviewer re-check (W1-T3618), so that dependency is the design
+    constraint.
+  design: |
+    No new refusal and no new bound: this reorders existing work.
+    1. Run the admission decision BEFORE the sweep and the housekeeping cadences in each tick, or concurrently with
+       them. When the WIP gate defers, the next check comes on the next short poll, not after a full sweep.
+    2. The W1-T3618 stale-reviewer re-check reads the MOST RECENT completed sweep outcome, from this tick or the
+       previous one. A tick whose sweep has not finished yet uses the previous reading, and the first tick after a
+       boot has none, which is a first sighting exactly as today.
+    3. Log one `daemon.tick_phases` row per tick (ms to admission, ms in sweep, ms in cadences) so the effect is
+       measurable from the ledger.
+  acceptance:
+    - claim: "a tick reaches the admission decision before its sweep completes"
+      proof: 'grep: test("W1-T4998: a tick reaches the admission decision before its sweep completes" in test/admission-does-not-wait-behind-the-sweep.test.ts'
+    - claim: "the stale-reviewer re-check reads the most recent completed sweep outcome"
+      proof: 'grep: test("W1-T4998: the stale-reviewer re-check reads the most recent completed sweep outcome" in test/admission-does-not-wait-behind-the-sweep.test.ts'
+    - claim: "each tick logs its phase timings"
+      proof: 'grep: test("W1-T4998: each tick logs its phase timings with ms to admission" in test/admission-does-not-wait-behind-the-sweep.test.ts'
+  falsifier: |
+    Restore the await of runGatedSweep ahead of admission, and a sweep that never resolves keeps the first test's
+    dispatch spy at zero calls.

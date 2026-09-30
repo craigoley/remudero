@@ -83,21 +83,20 @@ test("learnings-v2: only named schemas are structured; legacy versions stay V1",
   }
 });
 
-test("learnings-v2: the live corpus retains its baseline V1 artifact hash", () => {
+// MEASURED 2026-09-30: pinning the LIVE corpus's hash (and its entry count) made every knowledge-gardener
+// pass fail this test by design — a lifecycle flip is part of the V1 hash — so each pass (#7073, #7101,
+// #7205, #7245, #7647, #7910) needed the pin hand-bumped, and #7976/#7977 sat blocked. The pin's stated
+// purpose was "the V1 hashing is unchanged, only the data moved", so the ALGORITHM is pinned on a fixed
+// fixture and the live corpus is checked for what it must always be: loadable and deterministically hashed.
+test("learnings-v2: the V1 artifact hash of a fixed corpus is unchanged", () => {
+  const fixed = [entry(), entry({ id: "second-fact", lifecycle: "superseded", fact: "A retired fact." })];
+  assert.equal(computeArtifactHash(fixed), "65ddd4cb3f2d6d20280685711ea303142c793ced75bac365e831fbcc96ce1ba8");
+});
+
+test("learnings-v2: the live corpus loads and hashes deterministically", () => {
   const corpus = loadLearningsCorpus(fileURLToPath(new URL("../learnings/", import.meta.url)));
-  assert.equal(corpus.length, 83);
-  // W1-T4240 repaired 17 dead `files:` globs; main's pre-repair corpus still hashes to the previous
-  // pin f13ba22d… under this code, so the V1 hashing is unchanged and only the data moved.
-  // The knowledge gardener's (W1-T4095) first pass (#7073) retired ls-remote-grep-matches-the-sha-column
-  // (lifecycle active → superseded, text kept); that corpus with ONLY the lifecycle flip reverted still
-  // hashes to the previous pin 895bc1fc…, so again only the data moved.
-  // Its pass in #7101 retired websearch-serverside-webfetch-unverified the same way (the operator kept
-  // sdk-result-envelope active); with ONLY that lifecycle flip reverted the corpus hashes to the previous pin 7548a929….
-  // #7205 retired 14 more the same way (the operator kept the five a test requires active); main's
-  // corpus still hashes to the previous pin 316723ed… under this code, so only the data moved.
-  // #7245 retired 2 more the same way (the operator again kept the three a test requires active); main's
-  // corpus still hashes to the previous pin 715eac5c… under this code, so only the data moved.
-  assert.equal(computeArtifactHash(corpus), "0cc5c5221a558baa29463504859572209fe17cfc5235b9bf2d56d3e55c0279f3");
+  assert.ok(corpus.length > 0, "the live corpus must load entries or this proves nothing");
+  assert.equal(computeArtifactHash(corpus), computeArtifactHash([...corpus].reverse()));
 });
 
 test("learnings-v2: a V1 or legacy artifact carrying origin is refused before trust", () => {

@@ -1,0 +1,42 @@
+- id: W1-T4916
+  title: "THE CHEAP INBOX DRAFTER LEAVES FIVE IN EIGHT DRAFTS DIRTY — escalate only a proposal the cash ladder could not draft clean to one subscription claude-sonnet-5-5 attempt, so the lane gets near-Sonnet quality at a fraction of Sonnet's cost"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: benchmark models for inbox drafting on value for money"
+  note: "reservation hand-off: plan-inbox-cascade-1790772603000 -> plan-inbox-cascade-1790772603000"
+  plan_refs: [W1-T3570, W1-T4864, W1-T4907]
+  files: [src/lib/inbox.ts, src/run-task.ts, test/a-dirty-cash-draft-escalates-once-to-sonnet.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 (docs/recon/openweight-inbox-draft-trial.md, "Bake-off"): the same 8 real proposals through
+    the production draft path. Cash gpt-oss-120b, which now leads the lane (#8045), drafted 3/8 lint-clean for
+    $0.045. Subscription claude-sonnet-5-5 drafted 7/8 clean for $2.83 notional, about 60x the cost per draft. The
+    ladder fall-through (W1-T4864) walks only cash deployments, so a proposal the cash ladder leaves dirty stays
+    undrafted. Sending only that remainder to Sonnet should approach Sonnet's clean rate while paying Sonnet for
+    about five proposals in eight rather than eight.
+    THINKING-LEVEL SWEEP, same 8 proposals: Sonnet 5.5 at medium drafted 8/8 clean for $2.08, at high 7/8 for $2.83
+    and at low 6/8 for $1.58, so the escalation runs at medium (better and 27% cheaper than high). gpt-oss-120b was
+    3/8 clean at low, medium and high alike.
+  design: |
+    After runDraftRung's cash attempts end without a lint-clean draft (a dirty relint limit or a fragment-contract
+    error), make ONE further attempt on subscription claude-sonnet-5-5 AT EFFORT MEDIUM (the balanced Claude candidate), carrying the
+    last fragment and its violations as the relint prompt when one exists. Record inbox.draft_escalated
+    {proposal_id, from, to, reason}. The escalation respects subscription headroom: when Claude is below reserve it
+    is skipped, and the proposal keeps today's outcome.
+  acceptance:
+    - claim: "a proposal the cash ladder leaves dirty gets one Sonnet attempt"
+      proof: 'grep: test("W1-T4916: a proposal the cash ladder leaves dirty gets one Sonnet attempt" in test/a-dirty-cash-draft-escalates-once-to-sonnet.test.ts'
+    - claim: "a clean cash draft never escalates"
+      proof: 'grep: test("W1-T4916: a clean cash draft never escalates" in test/a-dirty-cash-draft-escalates-once-to-sonnet.test.ts'
+    - claim: "escalation is skipped when subscription headroom is below reserve"
+      proof: 'grep: test("W1-T4916: escalation is skipped when subscription headroom is below reserve" in test/a-dirty-cash-draft-escalates-once-to-sonnet.test.ts'
+  falsifier: |
+    Escalate every proposal and the second test sees a clean cash draft sent to Sonnet.

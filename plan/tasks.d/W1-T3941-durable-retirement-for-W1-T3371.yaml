@@ -12,9 +12,14 @@
     - plan/tasks.d/W1-T3941-durable-retirement-for-W1-T3371.yaml
   origin: "operator-session#needs-me-review-2026-09-21"
   plan_refs: [W1-T3371, W1-T2392, W1-T3939]
-  status: queued
+  status: done
   attempts: 0
   note: |
+    DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #6371
+    (`chore(plan): record settled follow-up retirements`, head run-W1-T3941-1789983141972): W1-T3371 and W1-T3696 are
+    `status: blocked` + `retirement: retired`. Plan-only deliverable; plan-reconcile refuses the `chore(plan)` subject.
+    Every acceptance criterion holds on main and is PRESERVED UNCHANGED: this record is marked done, not re-proved.
+
     reservation hand-off: unknown -> run-W1-T3941-1789983141972
   rationale: |
     W1-T3371's record already says it was never dispatched and that #5089/#5099 supplied the

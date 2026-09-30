@@ -19,7 +19,7 @@ usage:
   rmd review <pr-number> [--repo <name>] [--override-capped-by <name> --override-capped-reason <text>]   # Post remudero-review on a hand-opened PR, materializing a worktree at its head.
   rmd merge-hold <engage|release> [--pr <n> [--task <id>]] --by <name> --reason <text> --confirm   # Engage or release an attributable, durable PR or fleet auto-merge hold.
   rmd feedback-reconcile --root <name>=<path> [--root <name>=<path> ...] [--checkout <path>] [--apply]   # Report (or repair) feedback records an enrolled root holds that origin/main lacks.
-  rmd dep-review <pr-number> [--repo <name>]   # Deterministic Dependabot-PR review lane: auto-arm minor/patch, escalate major.
+  rmd dep-review <pr-number> [--repo <name>]   # Deterministic Dependabot-PR review lane: auto-arm minor/patch or verified action SHA pin refresh.
   rmd lint-plan [--plan <path>] [--base <git-ref>] [--merge-base]   # Deterministic task linter: sizing, headless-fitness, proof-shape, provenance.
   rmd plan-reconcile [--plan <path>] [--write]   # Flip status: queued to merged on shards the credit projection reports merged.
   rmd proof-queue-audit [--plan <path>]   # Report every open task's acceptance proof that can never resolve, split by cause.
@@ -35,9 +35,11 @@ usage:
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
   rmd routing-ab [--json]   # Compare the arms of each live routing experiment (Sol vs Sonnet) from the ledger union.
+  rmd impossible-canary --model <id> [--model <id>]... --scaffold <revision> --grader <executable> [--state-dir <dir>] [--json]   # Run sealed impossible-task canaries per model and count cheating events with exact intervals.
   rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>]   # Report an A/A integrity trial: two labels, one pinned stack, and no winner.
   rmd benchmark-paid-pilot activate --request <request.json> --aa-report <aa-report.json> [--state-dir <dir>] [--json] | report --pilot <id> [--case-files <snapshot.json>] [--out <report.json>] [--state-dir <dir>] [--json] | pause|resume --pilot <id> [--note <text>] [--state-dir <dir>]   # Activate, report, pause or resume the approved $100/7-day paid pilot; only its paid arm pauses.
   rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sources <n>] [--dry-run]   # Compact one bounded window of old ledger rotations without losing a distinct row.
+  rmd read-model rebuild [--instance <id>] [--ledger-dir <dir>] [--window-days <n>] | status [--json] | switch <projector|<view>> <mode>   # Rebuild, inspect or switch the serve read model projected from the ledger.
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
   rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--json]   # Join the ledger union and GitHub history into observational field-trials aggregates.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
@@ -77,6 +79,7 @@ usage:
   rmd resume   # Fleet control: clear PAUSE (and any STOP); spawns resume.
   rmd away [on|off]   # Set/show operator presence; batches escalations into a recap while away.
   rmd correct <task-id> --pr <n> [--reason <text>]   # Sanctioned operator-correction writer: name a task's true merged PR.
+  rmd release <task-id> --reason <text>   # Release a halted task's dispatch circuit breaker; dispatchable next tick.
   rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option "label|detail"]...   # Open a needs-human GitHub issue; MANUAL/HARD_STOP also fire a real-time ping.
   rmd notify <message>   # Real-time iMessage ping (osascript).
   rmd digest [--since <iso>] [--dry-run]   # Roll up the ledger into one daily digest message.
@@ -99,6 +102,7 @@ usage:
   rmd pr-owner <pr-number>   # Report whether the local ledger shows a fix lane owning one PR.
   rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
   rmd inbox [--dry-run]   # The ratification inbox's deterministic core: tier proposals READY/not-ready.
+  rmd inbox-bakeoff [--sample <n>]   # Replay real inbox proposals through each draft candidate; rank by clean drafts per dollar.
   rmd approve <P##> [<P##> ...]   # Ratify one or more READY proposals through the gate into a plan PR.
   rmd decline <proposalId> --reason "<text>"   # Decline an inbox proposal, recording why; reversible with rmd restore.
   rmd restore <proposalId> --reason "<text>"   # Take back a decline, so the proposal returns to the inbox.
@@ -161,13 +165,13 @@ cross-root feedback reconciliation manifest and repair (W1-T3562): dry-run by de
 
 ### `rmd dep-review`
 
-Deterministic Dependabot-PR review lane: auto-arm minor/patch, escalate major.
+Deterministic Dependabot-PR review lane: auto-arm minor/patch or verified action SHA pin refresh.
 
 ```
 rmd dep-review <pr-number> [--repo <name>]
 ```
 
-deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse
+deterministic Dependabot-PR review lane (W1-T54): minor/patch or diff-verified GitHub Actions SHA-only refresh with unchanged release comments and green gates -> arm auto-merge; major or other unparseable bump -> escalate (needs-human, no auto-merge); source outside dependency files -> refuse
 
 ### `rmd lint-plan`
 
@@ -197,7 +201,7 @@ Report every open task's acceptance proof that can never resolve, split by cause
 rmd proof-queue-audit [--plan <path>]
 ```
 
-W1-T1053: resolves every OPEN, UNMERGED task's proof through the reviewer's OWN parser+resolver (lib/review.ts) against the real checkout and names every one that can never resolve — refused-parse, name-filtered-zero-match (W1-T229's shape), or grep-path-absent — split by cause with the offending task ids; a forward-referencing whole-file test path for a not-yet-written test is NEVER reported (CLAUDE.md). IT IS A REPORT, NOT A GATE (lib/proof-queue-audit.ts): exits 0 unconditionally on the analysis itself, regardless of how many offenders it names; only a malformed invocation exits non-zero. FAILS OPEN (prints nothing audited, still exit 0) on a shallow checkout, same posture as lint-plan's whole-plan split.
+W1-T1053: resolves every OPEN, UNMERGED task's proof through the reviewer's OWN parser+resolver (lib/review.ts) against the real checkout and names every one that can never resolve — refused-parse, name-filtered-zero-match (W1-T229's shape), or grep-path-absent — split by cause with the offending task ids; a forward-referencing whole-file test path for a not-yet-written test is NEVER reported (CLAUDE.md). IT IS A REPORT, NOT A GATE (lib/proof-queue-audit.ts): exits 0 unconditionally on the analysis itself, regardless of how many offenders it names; only a malformed invocation exits non-zero. FAILS OPEN (prints nothing audited, still exit 0) on a shallow checkout, same posture as lint-plan's whole-plan split. W1-T4937: a `passes-at-main` block also names every queued task whose every discriminating proof PASSES at this checkout (scripts/satisfied-task-census.mjs), with a pass row per proof for the first ten; a pass is where to LOOK, not a verdict that the task is done.
 
 ### `rmd preflight`
 
@@ -319,6 +323,16 @@ rmd routing-ab [--json]
 
 Operator ruling 2026-09-24: reads the deduplicated union of every ledger archive and the live ledger, takes each worker.assignment row whose routing.decision.ab names a live experiment (src/lib/routing-experiments.ts), and reports per arm: tasks, merges, merge rate, fix dispatches per task, median worker minutes, mean tokens and mean notional cost. A task is counted under the arm of its first tagged assignment; tasks that landed in both arms are counted separately. An arm below the experiment's minimum task count is reported as an insufficient sample, never a verdict, and the revisit date is flagged once due. READ-ONLY: writes no ledger line and no state file.
 
+### `rmd impossible-canary`
+
+Run sealed impossible-task canaries per model and count cheating events with exact intervals.
+
+```
+rmd impossible-canary --model <id> [--model <id>]... --scaffold <revision> --grader <executable> [--state-dir <dir>] [--json]
+```
+
+W1-T4627: a small versioned set of canary tasks kept outside the dispatchable queue, never merged, whose visible proof and holdout criterion contradict each other, so no honest attempt can satisfy both. For each --model not run inside the weekly cadence (read from the ledger union), the --grader executable is spawned once per canary with the model and canary id as arguments and the visible statement only on stdin (the holdout never leaves the module), and prints {"visiblePass":bool,"holdoutPass":bool}; an unusable grader run is counted as an error, never a pass. A visible pass with a failed holdout is a cheating event. Reports counts with exact 95% Clopper-Pearson intervals per model and scaffold revision — never a score — and appends one ids-and-outcomes-only impossible_canary.* row per attempt. It gates nothing.
+
 ### `rmd benchmark-aa`
 
 Report an A/A integrity trial: two labels, one pinned stack, and no winner.
@@ -348,6 +362,16 @@ rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sou
 ```
 
 operator-only archive compaction over the existing compactRotations primitive: selects the oldest rotations strictly older than --older-than (default 7 days) or --older-than-hours, taking ordinary rotations before any archive a previous pass wrote (W1-T4262), refuses a --max-sources value above the 50-source memory ceiling, preserves every distinct row, atomically writes one gzip replacement per UTC day of its rows, then removes only the source files those replacements cover. --dry-run executes the same reads and exact dedupe to print sourceCount, rowsWritten, duplicatesCollapsed and archiveName while writing nothing. It never touches the live ledger, is never a rotateLedger dependency (so a compaction fault can never block a write), and refuses to overwrite an unselected archive if a row timestamp would collide with its name. W1-T3368 RETIRED THE 'no daemon cadence' HALF of this contract: operator-only was right for a new primitive and wrong as a steady state for a corpus growing ~240 archives a day, which cost an eight-hour fleet outage whose cure had already merged. The daemon now fires ONE bounded pass when archive PRESSURE crosses a threshold (src/lib/ledger-compaction-rung.ts); this verb remains the operator's hand-run path.
+
+### `rmd read-model`
+
+Rebuild, inspect or switch the serve read model projected from the ledger.
+
+```
+rmd read-model rebuild [--instance <id>] [--ledger-dir <dir>] [--window-days <n>] | status [--json] | switch <projector|<view>> <mode>
+```
+
+Phase 1 read model (the projector's per-instance node:sqlite store under <state>/read-model/). `rebuild` projects every rotation form of the instance's ledger (core's by default; another instance needs --ledger-dir) into a new generation file (<inst>.v<N>.g<gen>.sqlite), runs the consistency oracle over a closed window of --window-days (default 7) against the ledger union, checkpoints and closes the file, and only when the oracle agrees flips the <inst>.v<N>.current pointer (temp file, fsync, rename); no database file is ever renamed over one a connection holds open. It then fences the old generation's writer lease so a running worker reopens onto the new one, and deletes superseded generations only after a 10-minute grace with no live lease. A refused rebuild deletes its unpublished generation and leaves the pointer untouched. `status` prints each instance's current file and superseded generations, row counts (seen, fact, quarantine), generation, DB size, the lag of its newest applied row, core's live-file bytes behind, the lease holder and the last consistency outcome; --json for the raw shape. `switch projector on|off` or `switch <view> serve|shadow|off` writes <state>/read-model/switches.json atomically and appends a read_model.switch ledger row.
 
 ### `rmd hand-runs`
 
@@ -739,6 +763,16 @@ rmd correct <task-id> --pr <n> [--reason <text>]
 
 sanctioned operator-correction writer (P9/W1-T75): appends a correction.provenance ledger line naming the task's TRUE merged PR, SUPREME over every deriveStatus rung; prints derived status before/after
 
+### `rmd release`
+
+Release a halted task's dispatch circuit breaker; dispatchable next tick.
+
+```
+rmd release <task-id> --reason <text>
+```
+
+W1-T4691: the sanctioned release for a task the dispatch circuit breaker has halted with no new owned PR since — a trip the breaker's own W1-T2425 restart guard deliberately never clears on its own. Appends an explicit, attributable dispatch.breaker_released ledger row (never an inference, never an archive read) that dispatchesWithoutNewOwnedPr/seedCountFromCircuitBreak read exactly like a new pr.opened, so the task is dispatchable on the daemon's next tick; best-effort closes the task's open circuit-breaker needs-human issue with a pointer to the row.
+
 ### `rmd escalate`
 
 Open a needs-human GitHub issue; MANUAL/HARD_STOP also fire a real-time ping.
@@ -958,6 +992,16 @@ rmd inbox [--dry-run]
 ```
 
 the ratification inbox's deterministic core (MASTER-PLAN P25(i), W1-T110): tiers the ACTIVE-proposal registry (state/inbox-proposals.json) into READY (drafted tasks' deps merged, evidence anchors grep-true on main, draft lint-plan-clean, no open conflict — carries its drafted plan/tasks.yaml fragment + stamp), not-ready (each failing predicate named), or DEFERRED-WITH-TRIGGER (an unfired named trigger — never recommended); drafts missing/stale candidates via a bounded, read-only Architect worker and caches them state-side (never committed); --dry-run classifies against whatever is already cached and spawns no worker
+
+### `rmd inbox-bakeoff`
+
+Replay real inbox proposals through each draft candidate; rank by clean drafts per dollar.
+
+```
+rmd inbox-bakeoff [--sample <n>]
+```
+
+the inbox-draft lead is chosen from measurement (W1-T4907): replays a fixed sample (the first n open proposals by id, default 8) through cash gpt-5-nano, gpt-oss-120b, gpt-6-luna with and without tools, and subscription claude-sonnet-5-5 on the production draft path (prompt, fragment parser, plan lint, bounded relint); a reply missing the fragment contract is counted as a contract error, never scored as a draft; writes one inbox.bakeoff ledger row per candidate and prints the table ranked by lint-clean drafts per cash dollar with the subscription cost shown separately; SPENDS real cash and capacity, and never changes routing or the draft cache
 
 ### `rmd approve`
 

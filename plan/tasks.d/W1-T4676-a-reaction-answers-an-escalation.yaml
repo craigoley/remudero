@@ -1,0 +1,32 @@
+- id: W1-T4676
+  title: "ANSWERING NEEDS A TYPED COMMENT — let the owner's thumbs-up on the escalation issue accept the recommended option and thumbs-down decline it, one tap in GitHub mobile, ignoring the fleet's own reactions"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #7747 (`chore: wip reaction reads land an owner thumbs-up/down escalation answer`, trailer + head run-W1-T4676-1790660566487): src/lib/escalation-answers.ts; test/a-reaction-answers-an-escalation.test.ts. plan-reconcile refuses the `chore:` subject. Every acceptance criterion holds on main and is PRESERVED UNCHANGED: this record is marked done, not re-proved.\n\nreservation hand-off: plan-innovation-1790600000 -> plan-innovation-operator-1790600000"
+  plan_refs: [W1-T4471]
+  files: [src/lib/escalation-answers.ts, test/a-reaction-answers-an-escalation.test.ts]
+  status: done
+  attempts: 0
+  rationale: |
+    OBSERVED: only comment text is read (src/lib/escalation-answers.ts, first word picks an option label) and the fleet
+    posts its own +1 as an acknowledgement. Buzz treats a reaction as an approval that can trigger workflows
+    (https://github.com/block/buzz README).
+  design: |
+    (i) The reader also reads reactions on open needs-question issues; only the human OWNER's +1 / -1 count.
+    (ii) +1 accepts the recommendation, -1 declines it; both land in the same question store as a typed reply.
+    (iii) The fleet's own acknowledgement reaction is never read as an answer.
+  acceptance:
+    - claim: "the owner's thumbs-up accepts the recommended option"
+      proof: 'grep: test("W1-T4676: the owner''s thumbs-up accepts the recommended option" in test/a-reaction-answers-an-escalation.test.ts'
+    - claim: "the fleet's own reaction is never read as an answer"
+      proof: 'grep: test("W1-T4676: the fleet''s own reaction is never read as an answer" in test/a-reaction-answers-an-escalation.test.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

@@ -103,6 +103,17 @@ test("a HIGH risk verdict ESCALATES and releases nothing", async () => {
   assert.equal(calls.written.length, 0);
 });
 
+test("an explicit dispatch hold or high plan risk cannot be downgraded by a machine judge", async () => {
+  for (const taskOver of [{ dispatch_hold: true }, { risk: "high" }]) {
+    const { calls, deps } = releaseDeps({ taskOver });
+    const out = await releaseAutomatedShard(SHARD, AUTOMATE, deps);
+    assert.equal(out.kind, "escalated", JSON.stringify(taskOver));
+    assert.match(out.reason, /operator|hold|high/i);
+    assert.equal(calls.judged, 0, "a held task must not spend another risk-judge call");
+    assert.equal(calls.written.length, 0, "a held task must not gain a machine release");
+  }
+});
+
 test("a LOW-CONFIDENCE verdict escalates too — a judge that is unsure never releases", async () => {
   const { calls, deps } = releaseDeps({ verdict: risk({ confidence: 0.1 }) });
   const out = await releaseAutomatedShard(SHARD, AUTOMATE, deps);

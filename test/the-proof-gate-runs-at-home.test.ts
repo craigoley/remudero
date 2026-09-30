@@ -43,8 +43,8 @@ function spawnWith(byProof: Record<string, number>) {
 test("a stale proof is named locally", () => {
   // THE WHOLE TASK: the refusal arrives before the push, naming the proof, so the fix costs
   // seconds instead of a CI round.
-  const stale = "grep: alreadyThere in src/lib/review.ts";
-  const live = "grep: brandNewSymbol in src/lib/review.ts";
+  const stale = "unit test: alreadyThere passes at both commits";
+  const live = "unit test: brandNewSymbol appears only at head";
   const { spawn, asked } = spawnWith({ [stale]: CHECK_PROOF_EXIT.executedStale });
   const out = runPreflightProofs("/repo", {
     git: GIT(),

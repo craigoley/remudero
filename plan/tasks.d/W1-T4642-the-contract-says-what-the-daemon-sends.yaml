@@ -14,7 +14,7 @@
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
     - test/the-contract-says-what-the-daemon-sends.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

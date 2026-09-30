@@ -15,7 +15,7 @@
     - src/lib/learnings.ts
     - scripts/learning-lexical-shadow.mjs
     - test/learnings.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T4354 proposes a seeded BM25 injection lane. A local replay over the first 500 plan records

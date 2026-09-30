@@ -1,0 +1,44 @@
+- id: W1-T4809
+  title: "AN IMAGE RECYCLE WAITS FOREVER ON A BUILD NOTHING STARTED — when two merges land seconds apart GitHub can fire no push event for the first, so a baked-path change is never built; the deploy tick then asks the registry for an image tagged with that exact commit, which no later build can ever satisfy. Accept any published image that contains the change, and dispatch the build when none does"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-29: keep going with follow ups — the Codex 0.159.0 image never reached the fleet"
+  note: "reservation hand-off: plan-image-build-heal-1790708371000 -> plan-image-build-heal-1790708371000"
+  plan_refs: [W1-T3240, W1-T3245, W1-T4589]
+  files: [src/lib/deployer.ts, test/an-image-recycle-never-waits-on-a-build-nothing-started.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-29: #7823 (Codex CLI 0.159.0, a deploy/ change) merged at 15:06:0x as 30f3c7b58, and the fleet
+    merged #7860 13 seconds later. GitHub's activity log for main has NO entry moving main to 30f3c7b58, and
+    `gh run list --commit 30f3c7b58` returns zero runs of any workflow (CI included); the next push's diff held
+    only a plan file, so acr-build's paths filter never saw the change (9b694d664 at 15:24 lost its runs the
+    same way). The watchdog tick then logged `deploy.skip ... the image for 30f3c7b58 is not published yet —
+    waiting for the build` every five minutes for 3.5 hours. A manual workflow_dispatch at main's head
+    (43a9a03, which contains 30f3c7b58) built and tagged successfully and the tick STILL skipped:
+    realDeployDeps.imagePublished(sha) runs `docker manifest inspect <image>:<newestBakedSha>`, an exact-tag
+    lookup that only a build OF that commit can satisfy. The operator had to build the exact commit from a
+    temporary branch to unstick it.
+  design: |
+    (i) Publication means "an image built from a commit that CONTAINS newestBakedSha". Resolve the newest
+    published image's build sha (the :latest tag's RMD_BUILD_SHA label or the newest image/<date>-<sha> git
+    tag) and accept it when newestBakedSha is its ancestor; recycle onto that image ref, not :<newestBakedSha>.
+    (ii) When no published image contains newestBakedSha and no acr-build run is queued or in progress, the
+    tick dispatches acr-build.yml (workflow_dispatch on main) once, records `deploy.image_build_dispatched`,
+    and waits for that run rather than re-dispatching every tick. The trigger is the observed absence of any
+    build, not a timeout.
+  acceptance:
+    - claim: "a published image built after the baked change satisfies the recycle"
+      proof: 'grep: test("W1-T4809: a published image built after the baked change satisfies the recycle" in test/an-image-recycle-never-waits-on-a-build-nothing-started.test.ts'
+    - claim: "a baked change no build covers dispatches the build exactly once"
+      proof: 'grep: test("W1-T4809: a baked change no build covers dispatches the build exactly once" in test/an-image-recycle-never-waits-on-a-build-nothing-started.test.ts'
+  falsifier: |
+    Restore the exact-tag lookup and the first test waits forever on an image built after the change. Drop the
+    in-progress check and the second test dispatches on every tick.

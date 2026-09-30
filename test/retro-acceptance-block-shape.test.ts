@@ -39,7 +39,8 @@ import {
   parseWhitelistedProof,
   wrappedGrepPattern,
 } from "../src/lib/review.js";
-import { buildPlanPrBody, renderAcceptanceBlock } from "../src/lib/plan-pr-emitter.js";
+import { renderAcceptanceBlock } from "../src/lib/plan-pr-emitter.js";
+import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
 
 // ── 1. retroPrompt() actually carries the new rules ─────────────────────────────────────────
 
@@ -200,7 +201,7 @@ test("renderAcceptanceBlock/buildPlanPrBody (the plan-filing lane) are byte-iden
   const criteria = [
     { claim: "W1-T9999 filed as a well-formed plan task shard, not (yet) implemented", proof: "unit test: test/fixture.test.ts" },
   ];
-  const body = buildPlanPrBody({ intro: "Filing W1-T9999.", criteria });
+  const body = buildFixturePlanPrBody({ intro: "Filing W1-T9999.", criteria });
   assert.equal(
     body,
     "Filing W1-T9999.\n\nAcceptance:\n- W1-T9999 filed as a well-formed plan task shard, not (yet) implemented | unit test: test/fixture.test.ts\n",

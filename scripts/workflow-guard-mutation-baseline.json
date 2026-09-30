@@ -3,15 +3,6 @@
     "ci#1: if [ \"${{ matrix.shard }}\" != \"1\" ]; then": {
       "reason": "The one-shard-only preamble. Mutated to always-skip, the three non-first shards keep doing exactly what they already do and shard 1 merely stops running a step it alone runs; nothing in the workflow's shape changes, so no source-reading suite can see it. Covering it needs a harness that executes this step body per shard, which test/workflow-single-suite-run.test.ts's runBash could give it. UNCOVERED, not acceptable-forever."
     },
-    "test-slow#1: if ! node --import tsx scripts/diff-class.mjs --list-plan-reading-suites --changed-files changed-files.txt > plan-reading-suites.txt; then": {
-      "reason": "The fail-closed arm of the plan-reading enumeration: if the classifier cannot list its suites, the job stands down. Forcing it always-true makes test-slow always stand down. test/plan-reading-fast-lane-sharding.test.ts drives the classifier, not this step's shell, so nothing distinguishes it today."
-    },
-    "test-slow#1: if [ \"${{ steps.plan-reading.outputs.established }}\" = \"true\" ]; then": {
-      "reason": "The duplicate-execution suppressor. Always-skip means the slow tier never runs on any diff -- a real vacuous pass, and the highest-value entry in this file to cover. It needs the same runBash treatment as the `ci` Test step got in W1-T3207."
-    },
-    "test-slow#1: if [ \"${{ steps.plan-reading.outputs.class }}\" = \"SOURCE\" ]; then": {
-      "reason": "W1-T3207's test-slow half: on a source diff the slow tier stands down because coverage-ratchet owns the single instrumented run. Its sibling in the `ci` job IS covered, by the push-side case added in #4733; this one has no equivalent, so an always-skip here means the slow tier never runs on any diff and nothing says so. The same runBash treatment closes it."
-    },
     "coverage-ratchet#1: if [ \"$CLASS\" != \"SOURCE\" ]; then": {
       "reason": "W1-T2428's fast lane: plan/docs diffs skip coverage work. Always-skip means a SOURCE PR is certified with no coverage measured at all. test/fast-lane-classifier.test.ts asserts the CLASSIFIER's verdicts, never that this step acts on them, so the two are not connected by any test."
     },

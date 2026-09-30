@@ -1,0 +1,73 @@
+- id: W1-T4848
+  title: "A REVIEW VERDICT HAS NO DURABLE, EVIDENCED FINDING — preserve optional per-finding receipts beside the existing criterion verdict so a fix, dismissal and model comparison can refer to the same claim"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 45.00
+  risk: high
+  band_meaning: span
+  origin: "operator research request 2026-09-29: CodeRabbit inspiration for the PR reviewer"
+  plan_refs: [W1-T230, W1-T58, W1-T65, W1-T72, W1-T4015, W1-T4620, W1-T4628, W1-T4615]
+  files: [src/lib/review-findings.ts, src/lib/review.ts, src/run-task.ts, test/review-finding-receipts.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED at origin/main a2be69a28: buildReviewPrompt asks the fresh reviewer for
+    REVIEW_VERDICT n: PASS|FAIL per acceptance criterion. The posted review and review.posted
+    ledger row retain the aggregate and unmet reasons, not an independently identifiable
+    issue with its exact code evidence, severity/category and remedy. W1-T4015 mines
+    failure-to-repair pairs at the review-class level; W1-T4620 compares judge verdicts;
+    W1-T4628 calibrates judges against a human sample. None can answer which individual
+    suggestion was useful, redundant or wrong. A paragraph in a GitHub review is not a
+    stable join key. No per-finding outcome should be inferred from a green PR.
+
+    W1-T230 protects the exact-head ledger verdict, W1-T58 protects blocked-review
+    criteria, and W1-T65/W1-T72 execute and describe the deterministic proof floor.
+    This task adds optional finding receipts beside those verdicts and changes none
+    of their gate predicates; overlapping src paths do not duplicate their scope.
+
+    CodeRabbit's actionable comments and agent fix prompts show the value of making a
+    review item executable by a fixer. Its published Opus 5.5 comparison also reports
+    known issues caught, actionable precision, comment volume and token usage together:
+    https://www.coderabbit.ai/blog/opus-5-5-model-review . A field study of 31,073
+    CodeRabbit review/feedback pairs found that rejected suggestions are common, so
+    merely counting comments as catches is unsafe: https://arxiv.org/abs/2607.03316 .
+  design: |
+    Add an OPTIONAL, bounded, machine-readable finding envelope to the fresh reviewer's
+    output. The orchestrator, not the model, assigns the stable finding id from repo,
+    PR, exact head SHA, criterion index, category and an evidence fingerprint. A finding
+    carries a concise mechanism, an actionable remedy or explicit none, severity,
+    category, and exact changed-line or verified repository anchor. Validate anchors
+    against the materialized PR-head tree and label an unsupported or outside-diff
+    claim as such rather than laundering it into a verified catch. Permit a verified
+    outside-diff dependency anchor when the finding identifies the changed producer
+    it depends on. Never execute commands supplied by reviewer output.
+
+    Ledger a review.finding receipt with reviewer model assignment/provenance and
+    capture state, deduped on replay. The companion review.posted row distinguishes
+    zero findings from extraction unavailable, and names dropped/invalid findings;
+    do not put raw private code in the telemetry export. A malformed finding or
+    telemetry outage cannot change the existing judgeReview verdict, required status,
+    auto-merge eligibility or review latency beyond a bounded local parse. Do not add
+    a new required check, human approval or routing policy in this task.
+  acceptance:
+    - claim: "a verified finding gets a stable, head-scoped receipt with criterion, category, model assignment and evidence anchor; rerun does not duplicate it"
+      proof: 'grep: test("W1-T4848: a verified finding gets one stable receipt" in test/review-finding-receipts.test.ts'
+    - claim: "invented paths, stale heads and unsupported outside-diff claims are not counted as verified catches"
+      proof: 'grep: test("W1-T4848: an ungrounded finding is not a catch" in test/review-finding-receipts.test.ts'
+    - claim: "malformed or absent finding output is observable as unknown, never a zero or a new PR block"
+      proof: 'grep: test("W1-T4848: finding extraction cannot hold a PR" in test/review-finding-receipts.test.ts'
+    - claim: "the production reviewer calls the finding recorder; a tested but unwired module is insufficient"
+      proof: 'grep: recordReviewFindings( in src/run-task.ts'
+  falsifier: |
+    Remove the anchor validation: the invented-path fixture starts counting a catch.
+    Remove the finding parser entirely: criterion review still passes, but the
+    receipt fixture fails. A malformed extraction must leave the pre-existing
+    judgeReview state and posted status byte-for-byte unchanged.
+  note: |
+    Reservation held at refs/rmd-id/W1-T4848 for branch
+    codex/coderabbit-review-evidence-20260929. Filing is plan-only; this task
+    changes no production review gate until a separate implementation PR merges.

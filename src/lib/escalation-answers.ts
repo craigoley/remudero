@@ -28,6 +28,24 @@
  * re-dispatches with. Acknowledgement is a `+1` reaction on the accepted comment (design iv) —
  * this module never posts a comment on the public issue. IDEMPOTENT PER COMMENT (design ii):
  * `plan/questions.ndjson`'s own `origin` field (`issue#<n>:comment:<id>`) is the dedup key.
+ *
+ * A REACTION ANSWERS TOO (W1-T4471 -> W1-T4676). Typing a comment is not the only channel a phone
+ * push notification leaves open — a thumbs-up/thumbs-down on the issue ITSELF is one tap. `+1`
+ * accepts the issue's own `## Recommendation` (an option label, same as a typed reply naming it);
+ * `-1` declines it; both land in the SAME `plan/questions.ndjson` store as a typed reply would.
+ * OWNER-ONLY here too, but GitHub's reactions endpoint carries NO `author_association` field the
+ * way comments do (there is no per-reaction relationship classification to read) — so this reader
+ * compares a reaction's `user.login` against the repo owner login the gateway itself was built
+ * with ({@link EscalationAnswerGateway.ownerLogin}, threaded straight from `ghEscalationAnswerGateway`'s
+ * own `owner` argument, the same `owner/repo` REST path segment every other read here already
+ * uses) rather than a `NONE`/`OWNER`/`CONTRIBUTOR`-style association. THE FLEET'S OWN
+ * ACKNOWLEDGEMENT REACTION (design iii): accepting a reaction posts the fleet's own `+1` back on
+ * the SAME issue ({@link EscalationAnswerGateway.reactPlusOneOnIssue}) so the operator sees it was
+ * seen — that reaction's author is whichever account `gh` is authenticated as, never the owner
+ * login, so it is excluded by the exact same login comparison and never re-read as a second
+ * answer. `listReactions`/`ownerLogin`/`reactPlusOneOnIssue` are OPTIONAL on the gateway interface
+ * so every W1-T4471 test double (built before reactions existed) keeps typechecking unchanged;
+ * omitting any of the three just reads zero reactions, same as before this task.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -63,9 +81,24 @@ export interface EscalationIssueComment {
   authorType: string;
 }
 
+/** One reaction on an OPEN needs-question issue ITSELF (never a comment) — W1-T4676. */
+export interface EscalationIssueReaction {
+  id: number;
+  /** GitHub's own reaction vocabulary (`+1`, `-1`, `laugh`, `hooray`, `confused`, `heart`,
+   *  `rocket`, `eyes`) — only `+1`/`-1` are ever acted on; every other content is skipped. */
+  content: string;
+  authorLogin: string;
+  /** `"User"` or `"Bot"` (GitHub's `user.type`) — same defense-in-depth as {@link
+   *  EscalationIssueComment.authorType}, though a login mismatch alone already excludes the
+   *  fleet's own account (see this module's header). */
+  authorType: string;
+}
+
 /** What {@link readEscalationAnswers} needs from GitHub — a NARROWER surface than {@link
- *  "./escalate.js".IssueGateway}: it only ever reads (`listOpen`, `listComments`) and
- *  acknowledges (`reactPlusOne`), never creates, closes, or comments. */
+ *  "./escalate.js".IssueGateway}: it only ever reads (`listOpen`, `listComments`,
+ *  `listReactions`) and acknowledges (`reactPlusOne`, `reactPlusOneOnIssue`), never creates,
+ *  closes, or comments. `listReactions`/`ownerLogin`/`reactPlusOneOnIssue` are OPTIONAL —
+ *  omitting all three (every W1-T4471 test double) just reads zero issue-level reactions. */
 export interface EscalationAnswerGateway {
   /** OPEN issues carrying `label` — the same REST read {@link "./escalate.js".IssueGateway.listOpen}
    *  makes. THROWS on a `gh` read failure; the caller degrades to "nothing new this pass". */
@@ -73,9 +106,20 @@ export interface EscalationAnswerGateway {
   /** Every comment on one issue, oldest first (GitHub's own order). THROWS on a `gh` read
    *  failure; the caller skips just that issue this pass. */
   listComments(issueNumber: number): EscalationIssueComment[];
+  /** Every reaction on the issue ITSELF, oldest first. THROWS on a `gh` read failure; the caller
+   *  skips just that issue's reactions this pass. Optional — see the interface's own header. */
+  listReactions?(issueNumber: number): EscalationIssueReaction[];
+  /** The repository owner's own GitHub login — the ONLY login {@link readEscalationAnswers}
+   *  ever accepts a reaction from (see this module's header on why a reaction, unlike a comment,
+   *  cannot be checked via `author_association`). Optional — see the interface's own header. */
+  readonly ownerLogin?: string;
   /** Acknowledge an ACCEPTED reply with a `+1` reaction — never a posted comment (design iv).
    *  Best-effort: a failed reaction never blocks the answer from landing. */
   reactPlusOne(commentId: number): void;
+  /** Acknowledge an ACCEPTED issue-level reaction with the fleet's OWN `+1` on the SAME issue —
+   *  mirrors {@link reactPlusOne} for a channel with no comment id to react to. Best-effort, and
+   *  optional — see the interface's own header. */
+  reactPlusOneOnIssue?(issueNumber: number): void;
 }
 
 /** One raw comment row as GitHub's REST `/issues/{n}/comments` endpoint returns it. */
@@ -83,6 +127,14 @@ interface RestCommentRow {
   id: number;
   body?: string;
   author_association?: string;
+  user?: { login?: string; type?: string } | null;
+}
+
+/** One raw reaction row as GitHub's REST `/issues/{n}/reactions` endpoint returns it — NO
+ *  `author_association` field (unlike {@link RestCommentRow}); see this module's header. */
+interface RestReactionRow {
+  id: number;
+  content?: string;
   user?: { login?: string; type?: string } | null;
 }
 
@@ -98,6 +150,7 @@ export function ghEscalationAnswerGateway(owner: string, repo: string): Escalati
   const repoArg = `${owner}/${repo}`;
   const run = (args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   return {
+    ownerLogin: owner,
     listOpen(label) {
       return parseLabelledIssuesRest(run(labelledIssuesRestArgs(repoArg, label, "open")));
     },
@@ -116,8 +169,25 @@ export function ghEscalationAnswerGateway(owner: string, repo: string): Escalati
         authorType: r.user?.type ?? "User",
       }));
     },
+    listReactions(issueNumber) {
+      const raw = run(["api", `repos/${repoArg}/issues/${issueNumber}/reactions?per_page=100`, "--paginate"]);
+      const rows = splitConcatenatedJsonPages(raw).flatMap((chunk) => {
+        const page = JSON.parse(chunk) as unknown;
+        if (!Array.isArray(page)) throw new Error(`listReactions: expected a JSON array page, got ${typeof page}`);
+        return page as RestReactionRow[];
+      });
+      return rows.map((r) => ({
+        id: r.id,
+        content: r.content ?? "",
+        authorLogin: r.user?.login ?? "",
+        authorType: r.user?.type ?? "User",
+      }));
+    },
     reactPlusOne(commentId) {
       run(["api", `repos/${repoArg}/issues/comments/${commentId}/reactions`, "-f", "content=+1"]);
+    },
+    reactPlusOneOnIssue(issueNumber) {
+      run(["api", `repos/${repoArg}/issues/${issueNumber}/reactions`, "-f", "content=+1"]);
     },
   };
 }
@@ -126,11 +196,27 @@ function isOwnerComment(c: EscalationIssueComment): boolean {
   return c.authorAssociation === "OWNER" && c.authorType.toLowerCase() !== "bot";
 }
 
+/** OWNER-ONLY for a reaction — a login match against `ownerLogin` (see this module's header for
+ *  why a reaction, unlike a comment, cannot be checked via `author_association`), plus the same
+ *  not-a-bot defense-in-depth {@link isOwnerComment} applies. Exported for a direct unit test. */
+export function isOwnerReaction(r: EscalationIssueReaction, ownerLogin: string): boolean {
+  return r.authorLogin.toLowerCase() === ownerLogin.toLowerCase() && r.authorType.toLowerCase() !== "bot";
+}
+
 /** The option labels an issue's own `## Options` section names, in the exact form {@link
  *  "./escalate.js".renderIssueBody} rendered them (`- **label** — detail`). */
 function parseOptionLabels(issueBody: string): string[] {
   const section = /##\s*Options\s*\n([\s\S]*?)(?=\n##\s|$)/i.exec(issueBody)?.[1] ?? "";
   return [...section.matchAll(/^-\s*\*\*(.+?)\*\*/gm)].map((m) => m[1].trim());
+}
+
+/** The `## Recommendation` line {@link "./escalate.js".renderIssueBody} rendered — one option's
+ *  own label (`Escalation.recommendation` "must be one of options[].label", escalate.ts), never
+ *  a multi-line block, so ONLY the line right after the heading is read (the heading's section
+ *  runs to the body's end, unlike {@link parseOptionLabels}'s `## Options`, since Recommendation
+ *  is renderIssueBody's LAST heading — reading to "the next `##`" would swallow the footer too). */
+function parseRecommendation(issueBody: string): string {
+  return /##\s*Recommendation\s*\n([^\n]*)/i.exec(issueBody)?.[1]?.trim() ?? "";
 }
 
 /**
@@ -149,6 +235,24 @@ export function answerTextFor(replyText: string, issueBody: string): string {
     if (match) return match;
   }
   return trimmed;
+}
+
+/**
+ * The answer text {@link appendQuestionAnswer} records for an ACCEPTED `+1`/`-1` reaction on the
+ * issue itself — design (i)/(ii). A reaction carries no text of its own to select or record, so
+ * both cases record the issue's own `## Recommendation` label: `+1` records it verbatim, exactly
+ * like a typed reply naming that option (see {@link answerTextFor}); `-1` records the SAME label
+ * prefixed with a plain decline, so `operatorVerdictEvidence`'s downstream constraint (lib/sweep.ts)
+ * reads unambiguously as a refusal rather than a second acceptance. `undefined` for any OTHER
+ * reaction content (`heart`, `rocket`, …) or an issue with no recoverable recommendation — neither
+ * is ever recorded. Exported for a direct, GitHub-free unit test of the selection rule.
+ */
+export function reactionAnswerText(content: string, issueBody: string): string | undefined {
+  const recommendation = parseRecommendation(issueBody);
+  if (!recommendation) return undefined;
+  if (content === "+1") return recommendation;
+  if (content === "-1") return `no — declining "${recommendation}"`;
+  return undefined;
 }
 
 /** Every `origin` already recorded in `plan/questions.ndjson` — the idempotency check (design
@@ -207,6 +311,22 @@ export function readEscalationAnswers(
     return { accepted, ignored, unreadable: 1 }; // the list itself was unreadable this pass
   }
   const recordedOrigins = recordedQuestionStoreOrigins(root);
+  /** Land one ACCEPTED answer (a comment or a reaction) in the shared store — design (ii)'s "one
+   *  sink, whichever channel answered", now three channels deep. */
+  const landAnswer = (taskId: string, origin: string, answer: string) => {
+    const recordedToQuestionStore = appendQuestionAnswer(root, { ts: clock.iso(), task: taskId, answer, origin });
+    writeLedger(deps.ledgerPath, {
+      run_id: runId,
+      task_id: taskId,
+      step: "panel.question_answered",
+      answer,
+      origin,
+      flows_to: "plan/questions.ndjson",
+      recorded_to_question_store: recordedToQuestionStore,
+    });
+    accepted++;
+    recordedOrigins.add(origin);
+  };
   for (const issue of issues) {
     const taskId = escalationTaskId(issue.body);
     if (!taskId) continue; // an issue with no recoverable task referent steers nothing
@@ -233,25 +353,31 @@ export function readEscalationAnswers(
       }
       const answer = answerTextFor(comment.body, issue.body ?? "");
       if (!answer) continue;
-      const recordedToQuestionStore = appendQuestionAnswer(root, {
-        ts: clock.iso(),
-        task: taskId,
-        answer,
-        origin,
-      });
-      writeLedger(deps.ledgerPath, {
-        run_id: runId,
-        task_id: taskId,
-        step: "panel.question_answered",
-        answer,
-        origin,
-        flows_to: "plan/questions.ndjson",
-        recorded_to_question_store: recordedToQuestionStore,
-      });
-      accepted++;
-      recordedOrigins.add(origin);
+      landAnswer(taskId, origin, answer);
       try {
         gateway.reactPlusOne(comment.id);
+      } catch {
+        // best-effort acknowledgement — a failed reaction never un-lands the answer.
+      }
+    }
+    // W1-T4676: reactions on the ISSUE itself — optional surface, see the gateway's own header.
+    if (!gateway.listReactions || !gateway.ownerLogin) continue;
+    let reactions: EscalationIssueReaction[];
+    try {
+      reactions = gateway.listReactions(issue.number);
+    } catch {
+      unreadable++; // counted, then just this issue's reactions are skipped this pass
+      continue;
+    }
+    for (const reaction of reactions) {
+      const origin = `issue#${issue.number}:reaction:${reaction.id}`;
+      if (recordedOrigins.has(origin)) continue; // design (ii): idempotent per reaction id
+      if (!isOwnerReaction(reaction, gateway.ownerLogin)) continue; // design (iii): includes the fleet's own +1
+      const answer = reactionAnswerText(reaction.content, issue.body ?? "");
+      if (!answer) continue; // not a +1/-1, or no recoverable recommendation to attach it to
+      landAnswer(taskId, origin, answer);
+      try {
+        gateway.reactPlusOneOnIssue?.(issue.number);
       } catch {
         // best-effort acknowledgement — a failed reaction never un-lands the answer.
       }

@@ -14,7 +14,7 @@
     - src/lib/paired-trial.ts
     - src/run-task.ts
     - test/a-paired-side-attempt-runs-in-a-sealed-worktree.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

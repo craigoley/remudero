@@ -1,0 +1,33 @@
+- id: W1-T4689
+  title: "W1-T3116 IS DISPATCHED AND RETURNS WITH NO PR, AGAIN AND AGAIN — its runs log dispatch.open_sibling_build while the only run-W1-T3116 PRs are a merged filing PR (#4554) and a closed build (#4596), and all seven of its proofs fail on main; find what the sibling check sees, fix it, and let the task build"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-defects-1790600000"
+  plan_refs: [W1-T3116, W1-T2397]
+  files: [src/run-task.ts, test/a-sibling-build-that-does-not-exist-does-not-block-dispatch.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-28: needs-human #7432 (circuit breaker). W1-T3116's five runs on 2026-09-27 each passed the
+    containment and isolation probes, 4 of 5 logged dispatch.open_sibling_build, none opened a PR. Its run-branch PRs are #4554
+    (MERGED — the FILING PR, on a run-W1-T3116- branch, the trap the shard-and-impl rule warns about) and #4596 (CLOSED).
+    `rmd check-proof` on each of its 7 proofs: fail. The breaker's 'correct the credit' option would have been wrong.
+  design: |
+    (i) Reproduce the sibling detection for W1-T3116 read-only and name which ref or PR it counts.
+    (ii) A merged filing PR or a closed build is never an open sibling build.
+    (iii) Close #7432 with the finding once W1-T3116 dispatches normally.
+  acceptance:
+    - claim: "a merged filing PR on a run branch is not an open sibling build"
+      proof: 'grep: test("W1-T4689: a merged filing PR on a run branch is not an open sibling build" in test/a-sibling-build-that-does-not-exist-does-not-block-dispatch.test.ts'
+    - claim: "a closed build is not an open sibling build"
+      proof: 'grep: test("W1-T4689: a closed build is not an open sibling build" in test/a-sibling-build-that-does-not-exist-does-not-block-dispatch.test.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

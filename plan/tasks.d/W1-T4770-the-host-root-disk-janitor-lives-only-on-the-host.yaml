@@ -1,0 +1,83 @@
+- id: W1-T4770
+  title: "THE AZURE HOST'S ROOT-DISK JANITOR EXISTS ONLY ON THE HOST — bring rmd-host-cleanup.sh and its crontab line into deploy/, test its safety rules, and install it from the host installer so it cannot drift or be lost with the VM"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator request 2026-09-29: version the host root-disk janitor"
+  plan_refs: [W1-T2877]
+  files:
+    - deploy/rmd-host-cleanup.sh
+    - deploy/install-host-units.sh
+    - test/host-root-disk-janitor.test.ts
+    - test/host-units-install.test.ts
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-29 (read-only `ssh remudero cat ~/rmd-host-cleanup.sh` and `crontab -l`): the
+    Azure host runs `~/rmd-host-cleanup.sh` from cron (`7 */6 * * *`, output appended to
+    ~/host-cleanup.log) since 2026-09-29. It exists in no tracked file: `git grep -il
+    'rmd-host-cleanup' origin/main` reads 0, and deploy/ holds no cleanup script for the Linux host
+    (deploy/mac/install-tmp-reclaim.sh is the Mac's). The script exists because
+    `deploy/host-update.sh --reclaim-only` prunes Docker on /mnt/rmd and freed 0 B on / for weeks
+    while logging success; root reached 99% and ENOSPC'd a `docker exec`. The operator extended it
+    the same day with 12-hour idle sweeps: temp scratch roots, finished agent worktrees under
+    ~/*/.claude/worktrees, and big idle scratch files; transcripts are archived to /mnt/rmd after
+    12 h, not deleted. A host rebuild loses all of this, and a hand edit changes it with no review.
+    W1-T2877 (deploy/install-host-units.sh) is the precedent: a hand install on this host was found
+    wrong by the first tracked, tested installer that ran against it.
+
+    THE SAFETY RULES THE SCRIPT ALREADY STATES, which are what the tests must hold:
+    (1) idle — nothing under a path written within IDLE_MINUTES (`is_idle`);
+    (2) not open — no process holds the path (`is_open`, from one `lsof -Fn` snapshot, matching the
+        container-side name too; the review-bundle arm uses `fuser` and fails closed when it is
+        missing or errors);
+    (3) worktrees are removed only when clean (`git status --porcelain` empty) AND saved — HEAD is
+        on a remote branch, or its `run-<id>-<digits>` branch's task has a `Remudero-Task: <id>`
+        commit on origin/main;
+    (4) archive, never delete, transcripts; refuse when the archive root is on the same filesystem
+        as /; age out only the archive itself after ARCHIVE_DAYS;
+    (5) DRY_RUN=1 changes nothing; a pass that leaves / at or above HIGH_WATER exits non-zero.
+  design: |
+    (i) Copy the host's script into deploy/rmd-host-cleanup.sh byte-faithfully first (a separate
+    commit makes the review diff show only intended changes), then make only the edits the tests
+    need: the sweep roots and the df/lsof/fuser probes become overridable through the existing
+    `RMD_CLEANUP_*` environment convention, with the current values as defaults, so a test drives a
+    fixture tree under test/helpers tmp dirs instead of the real /tmp and /mnt/rmd. Record the
+    crontab line (`7 */6 * * *`, log to ~/host-cleanup.log) in one place in deploy/, not in prose.
+    (ii) deploy/install-host-units.sh installs the script to its host path and installs or replaces
+    the crontab entry IDEMPOTENTLY (a second run leaves one entry, never two), with the same
+    dry-run and refusal conventions the installer already uses for its units.
+    (iii) test/host-root-disk-janitor.test.ts runs the REAL script against a fixture: one path per
+    safety rule on each side of it (an idle path is removed; a recently written one, an open one, a
+    dirty worktree and an unsaved worktree are each kept and the kept reason is logged), plus
+    DRY_RUN changing nothing and the same-filesystem archive refusal. Tests must pass on the Linux
+    CI runner and a macOS dev machine; the probes that differ (GNU df, lsof) come through the
+    overrides in (i), never a platform skip.
+    (iv) Out of scope: changing any threshold or root the operator chose, and anything
+    deploy/host-update.sh --reclaim-only does. The live host keeps running its current copy until an
+    operator runs the installer.
+  acceptance:
+    - claim: "an idle path held by no process is removed and a recently written path is kept"
+      proof: 'grep: test("W1-T4770: an idle unheld path is removed and a fresh one is kept" in test/host-root-disk-janitor.test.ts'
+    - claim: "a path some process holds open is kept even when idle"
+      proof: 'grep: test("W1-T4770: an open path is kept even when idle" in test/host-root-disk-janitor.test.ts'
+    - claim: "a worktree with uncommitted changes or commits not on GitHub is kept and the reason is logged"
+      proof: 'grep: test("W1-T4770: a dirty or unsaved worktree is kept with its reason" in test/host-root-disk-janitor.test.ts'
+    - claim: "dry run changes nothing and an archive root on the root filesystem is refused"
+      proof: 'grep: test("W1-T4770: dry run changes nothing and a same-filesystem archive is refused" in test/host-root-disk-janitor.test.ts'
+    - claim: "the installer installs the script and exactly one crontab entry on a second run"
+      proof: 'grep: test("W1-T4770: the installer leaves exactly one cleanup crontab entry" in test/host-units-install.test.ts'
+  falsifier: |
+    Remove the `is_open` check from the temp sweep: the open-path test fails. Drop the saved-branch
+    check from the worktree sweep: the unsaved-worktree test fails. Append the crontab line without
+    replacing an existing one: the second-run installer test counts two and fails.
+  note: |
+    W1-T4770 was reserved on origin for branch file/triage-claim-cash-trial-janitor before filing.
+    Scope-time checks 2026-09-29: no run-W1-T4770-* branch; `rmd-host-cleanup` appears in no plan
+    record on main or on any unmerged origin head.

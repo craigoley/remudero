@@ -11,7 +11,7 @@ import {
   type VerbCensusCadenceResult,
 } from "../src/lib/measurement-cadence.js";
 import { resolveLedgerUnion } from "../src/lib/ledger-grep.js";
-import { buildDigestCadenceDaemonHooks, buildMeasurementCadenceDaemonHooks } from "../src/run-task.js";
+import { buildDigestCadenceDaemonHooks } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 
 // ── W1-T2485 — THE VERB CENSUS GETS A SCHEDULER. `lib/emissions.ts` (`rmd emissions`) already
@@ -19,9 +19,8 @@ import type { Config } from "../src/lib/config.js";
 // answer can be trusted. What it never had was a CLOCK: an operator who never types the command
 // never sees it. This file proves the eight acceptance criteria on this task's own shard, in
 // that order, against SYNTHETIC fixtures (never this host's live repo/ledger state) except for
-// the two tests that deliberately exercise the REAL, unmocked daemon producer wiring — the same
-// "reachable through the daemon producer, not only through a mock" precedent
-// test/adoption-report-has-a-producer.test.ts already established for the fourth verb.
+// the digest test that deliberately exercises the REAL daemon producer wiring. The sibling
+// test/verb-census-fixture-isolation.test.ts exercises the measurement-cadence producer.
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 
@@ -317,39 +316,6 @@ test("runMeasurementCadenceReport attaches verbCensus last, leaving the existing
     assert.equal(result.verbCensus!.silentCount, 2);
   } finally {
     rmSync(checkoutDir, { recursive: true, force: true });
-  }
-});
-
-test("the measurement-cadence daemon hook attaches a verbCensus when called for real, unmocked", async () => {
-  // Mirrors test/adoption-report-has-a-producer.test.ts's own "reachable through the daemon
-  // producer, not only a mock" test exactly: no `run`/`check` override, so the real closure
-  // (including `checkoutDir: repoRoot`) actually executes against THIS repo's real source.
-  const root = tmp("rmd-vc-cadence-");
-  try {
-    mkdirSync(join(root, "state"), { recursive: true }); // no ledger archive: the corpus refuses
-    // The run closure stays REAL (no `run`/`check`); only its two GitHub-facing leaves are pinned
-    // offline, the same seams test/measurement-cadence.test.ts already injects. Left live, the
-    // credit projection shells the real `gh` whenever that host is authenticated (the verify-human
-    // rung writes ledger rows into this fixture first, so the "no ledger → empty set" short-circuit
-    // never fires): on an operator machine it returns the whole merged set, the plan-reconcile
-    // rung sees drift over its threshold and tries to force-push a landing branch, and only the
-    // live-write guard stops it. A CI runner with no GH_TOKEN never got that far, so this test's
-    // verdict depended on the host's gh login rather than on the verb census.
-    const hooks = buildMeasurementCadenceDaemonHooks({
-      config: { root } as Config,
-      now: () => new Date("2026-08-25T12:00:00Z"),
-      creditedMergedIds: () => new Set(),
-      planReconcileLand: () => {
-        throw new Error("a verb-census fixture must never reach the plan-reconcile landing bridge");
-      },
-      coverageImprovementReader: () => ({ status: "refused", reason: "no_coverage_merged_artifact", detail: "offline fixture" }),
-    });
-    const result = await hooks.runMeasurementCadence();
-    assert.ok(result.verbCensus, "the real daemon producer must attach a verbCensus");
-    assert.equal(result.verbCensus!.status, "refused", "no ledger archive exists in this fixture — refused, not a fabricated zero");
-    assert.match(result.verbCensus!.refusedReason ?? "", /ledger corpus incomplete/);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
   }
 });
 

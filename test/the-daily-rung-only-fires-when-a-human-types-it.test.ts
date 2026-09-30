@@ -93,7 +93,7 @@ test("W1-T2972 a NON-SELF target does not wire the rung at all", async () => {
 // ── THE HOOK BODY, CALLED FOR REAL — not just its type ───────────────────────────────────────
 
 import { buildCiLearningDaemonHooks } from "../src/run-task.js";
-import { ciLearningCadenceMarkerPath, readMeasurementCadenceMarker } from "../src/lib/measurement-cadence.js";
+import { ciLearningCadenceCheck, ciLearningCadenceMarkerPath, readMeasurementCadenceMarker } from "../src/lib/measurement-cadence.js";
 import { runDaemon } from "../src/lib/daemon.js";
 import { loadPlan } from "../src/lib/plan.js";
 import type { MergedSet } from "../src/lib/drain.js";
@@ -168,9 +168,7 @@ test("W1-T2972 THE WIRED HOOK, CALLED FOR REAL: check fires on a fresh root and 
   }
 });
 
-test("W1-T2972 THE FIRE IS RECORDED BEFORE THE RUN BODY — a run that throws cannot re-fire next tick", async () => {
-  // buildMeasurementCadenceDaemonHooks' stated crash-safety discipline. Without it a daemon that
-  // crashes inside the rung re-fires it on every poll, forever.
+test("W1-T2972 a failed run records an attempt and retries after 30 minutes without claiming success", async () => {
   const root = tmpRoot();
   try {
     const hooks = buildCiLearningDaemonHooks({
@@ -183,7 +181,9 @@ test("W1-T2972 THE FIRE IS RECORDED BEFORE THE RUN BODY — a run that throws ca
     });
     await assert.rejects(() => hooks.runCiLearningCadence(), /unreadable/);
     const after = readMeasurementCadenceMarker(ciLearningCadenceMarkerPath(root));
-    assert.equal(after.kind, "ok", "the marker MUST have advanced before the body threw");
+    assert.equal(after.kind, "absent", "a failed run cannot advance the success marker");
+    assert.equal(ciLearningCadenceCheck({ root, now: new Date(NOW.getTime() + 29 * 60_000), policy: ON.values.ciLearningCadence }).fire, false);
+    assert.equal(ciLearningCadenceCheck({ root, now: new Date(NOW.getTime() + 30 * 60_000), policy: ON.values.ciLearningCadence }).fire, true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -320,6 +320,8 @@ test("W1-T3542 criterion 2: a fired CI-learning daemon row names draft and landi
       filed: 2,
       skipped: 3,
       refused: 4,
+      window_complete: true,
+      unreadable_prs: 0,
       lesson_recurrences: { status: "unreadable" },
     },
     "W1-T3542 criterion 2: the durable row distinguishes landing outcomes from merely drafted work",

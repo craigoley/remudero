@@ -1,0 +1,33 @@
+- id: W1-T4842
+  title: "MERGED IS NOT WORKED — a fix declares the live query for its symptom, and the retro re-runs it days after merge and reports whether the symptom actually moved"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: go with all of these recommended follow ups (throughput, automated flow, self improvement)"
+  note: "reservation hand-off: plan-flow-improve-1790732974000 -> plan-flow-improve-1790732974000"
+  plan_refs: []
+  files: [src/lib/plan.ts, src/lib/retro.ts, test/a-merged-fix-is-re-measured-against-its-symptom.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-29: several fixes were proven only by re-running a live query by hand after merge: #7854 (a
+    healthy deploy clears DEPLOY_FAILED — worked on core and console, not on site, for a reason only the re-measure
+    found), #7898 and #7920 (board counts, re-measured against the fleet ledger). Unit tests passed in every case; only
+    the live re-measure distinguished "merged" from "worked".
+  design: |
+    (i) A task may declare `symptom_query:` — an rmd read (ledger-grep pattern plus expected direction) naming the
+    symptom it removes. (ii) The retro re-runs the query for fixes merged 1-7 days earlier and records
+    fix.remeasured {task, before, after, moved}; a fix whose symptom did not move is surfaced once.
+  acceptance:
+    - claim: "a fix whose symptom moved is recorded as worked"
+      proof: 'grep: test("W1-T4842: a fix whose symptom moved is recorded as worked" in test/a-merged-fix-is-re-measured-against-its-symptom.test.ts'
+    - claim: "a fix whose symptom did not move is surfaced"
+      proof: 'grep: test("W1-T4842: a fix whose symptom did not move is surfaced" in test/a-merged-fix-is-re-measured-against-its-symptom.test.ts'
+  falsifier: |
+    Record every merged fix as worked and the second test sees nothing surfaced.

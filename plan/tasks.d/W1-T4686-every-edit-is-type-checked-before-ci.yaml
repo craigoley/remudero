@@ -1,0 +1,32 @@
+- id: W1-T4686
+  title: "TYPE ERRORS FIRST APPEAR IN CI AND START A REPAIR ROUND — a PostToolUse hook runs an incremental type-check on the file a worker just edited and returns the errors to the worker in the same turn (SWE-agent's lint-on-edit); compare with and without through the routing experiment arms"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-memory-1790600000"
+  plan_refs: []
+  files: [src/lib/containment.ts, test/every-edit-is-type-checked-before-ci.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED: containment.ts has a PreToolUse deny hook but no PostToolUse feedback hook. SWE-agent's ablations: lint on
+    edit +3.0 points; removing the custom editor -7.7 (https://arxiv.org/pdf/2405.15793). Counterpoint: mini-swe-agent reaches
+    ~65% with bash alone, so the effect must be measured, not assumed.
+  design: |
+    (i) A PostToolUse hook on edit/write runs a bounded incremental type-check scoped to the edited file and returns new
+    errors to the worker.
+    (ii) Arm A/B through the existing routing experiment arms; the outcome is ci-gate-red fix rounds per task.
+  acceptance:
+    - claim: "an edit that introduces a type error returns it to the worker in the same turn"
+      proof: 'grep: test("W1-T4686: an edit that introduces a type error returns it to the worker in the same turn" in test/every-edit-is-type-checked-before-ci.test.ts'
+    - claim: "an edit with no new error returns nothing"
+      proof: 'grep: test("W1-T4686: an edit with no new error returns nothing" in test/every-edit-is-type-checked-before-ci.test.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

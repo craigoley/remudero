@@ -14,7 +14,7 @@
     - src/run-task.ts
     - src/lib/worker.ts
     - test/a-commit-names-the-assignment-that-wrote-it.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

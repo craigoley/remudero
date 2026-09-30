@@ -14,7 +14,7 @@
     - src/lib/fs-race-safe.ts
     - src/lib/config.ts
     - test/a-reader-never-parses-a-half-written-config.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -14,7 +14,7 @@
     - src/lib/task-case-file.ts
     - src/lib/benchmark-verified-outcome.ts
     - test/every-assignment-in-a-run-joins-its-outcome.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

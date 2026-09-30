@@ -1,0 +1,28 @@
+- id: W1-T4775
+  title: "98 plan-garden-* BRANCHES SIT ON ORIGIN WITH NO PULL REQUEST — gardenCheckout's land pushes the branch before createPlanPrRest, and a failed or refused PR create leaves the head behind forever, inflating the branch reaper's held set"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  priority: 3
+  status: queued
+  attempts: 0
+  origin: "oper#core-daemon-loop-profile-2026-09-29"
+  files: [src/run-task.ts, test/a-garden-branch-without-a-pr-is-deleted.test.ts]
+  rationale: |
+    On 2026-09-29, 98 of the 206 remote heads were plan-garden-<epoch>. The branch reaper holds
+    them: 189-193 held heads, up from 82 on 09-22. Its pass time grew from 41 s to 71-73 s with
+    them, about 100 passes a day. gardenCheckout's land pushes HEAD to refs/heads/<name>-garden-<ms>
+    and only then opens the PR. Nothing deletes the head when that create throws or is refused.
+  design: |
+    When createPlanPrRest throws after the push, delete the just-pushed head, then rethrow with the
+    create failure's reason and log `<name>.garden_head_deleted`. The existing orphans are left to
+    an operator. Name the command in the PR body; the change never deletes one itself.
+  acceptance:
+    - claim: "a refused garden PR create deletes its pushed head"
+      proof: 'grep: test("W1-T4775: a refused garden PR create deletes its pushed head" in test/a-garden-branch-without-a-pr-is-deleted.test.ts'
+    - claim: "a created garden PR keeps its head"
+      proof: 'grep: test("W1-T4775: a created garden PR keeps its head" in test/a-garden-branch-without-a-pr-is-deleted.test.ts'
+  falsifier: |
+    Remove the delete-on-failure arm and the refused-create test finds the head still pushed.

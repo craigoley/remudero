@@ -1,0 +1,56 @@
+- id: W1-T4797
+  title: "A WORKER PUSHES A DIFF-COVERAGE DROP IT COULD HAVE CAUGHT — coverage-ratchet is the fleet's costliest red check, and a scoped local precheck named CI's exact uncovered lines on 3 of 4 refused heads, so run it in the harness after the worker's commit and before the harness push"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 1
+  risk: medium
+  status: queued
+  attempts: 0
+  origin: "oper#diff-coverage-self-catch-2026-09-29"
+  plan_refs: ["W1-T1074", "W1-T3225", "W1-T4084", "W1-T4656"]
+  files: [src/run-task.ts, test/a-worker-catches-its-own-diff-coverage-drop-before-pushing.test.ts]
+  rationale: |
+    MEASURED 2026-09-29. RATCHET (#7862, #7863) counted 185 heads between 09-15 and 09-29 whose CI
+    diff-coverage step was red. Each of those heads cost a full CI cycle and then a ci-log fix
+    round. The ci-friction replay (#7853) puts ci-log:coverage-ratchet at the top of the fleet's
+    cost: 1896 recency-weighted PR-minutes across 228 rounds since 09-15. A ledger control reads
+    709 heads / 401 PRs whose coverage-ratchet check was red in the same window. That is an upper
+    bound, because the check also goes red on test failures inside the coverage shards.
+    RATCHET's throwaway two-tier precheck named CI's exact uncovered lines on 3 of the 4
+    CI-refused heads it was given, and flagged 0 of 4 green commits.
+    WHERE IT RUNS IS FORCED. A git hook may not spawn test suites (W1-T3225), so the pre-push hook
+    cannot host it. `rmd preflight --coverage` (W1-T1074, #2361) shells the full instrumented
+    suite, which is minutes, so it is an author tool, not a per-round step.
+    The harness already owns two moments when a commit exists and nothing is pushed yet:
+    - the implement run's orchestrator push (`gitPushRunBranch`);
+    - the fix rung's `landRoundPush`.
+    W1-T4656 already repairs one refused push there (census-precheck, `repairCensusRefusedPush`).
+    A diff-coverage refusal is the same shape.
+  design: |
+    It lives beside `repairCensusRefusedPush` in `src/run-task.ts`, and adds no new module.
+    (i) After the worker's commit and before the harness push, run a scoped precheck.
+    - It reuses `scripts/diff-coverage-local.mjs`, the same invocation CI uses (W1-T4084).
+    - It reruns only the suites the tier manifest (`scripts/test-tier-manifest.mjs`) and the
+      affected-suite selector map to the changed src files.
+    - It widens to their slow-tier siblings only when a changed file has no `SF:` record.
+    (ii) Handle the three outcomes as distinct values. Do not collapse them:
+    - `uncovered`: the round is refused before the push. The CI-identical uncovered-lines text goes
+      to the bounded repair rung, the same way `repairCensusRefusedPush` does it.
+    - `covered`: push as today.
+    - `unavailable` (timeout, spawn failure, or an unreadable lcov): push anyway. A precheck that
+      cannot look must never block. Ledger `push.coverage_precheck` with the outcome and its reason.
+    (iii) Bound the precheck by the tier manifest's own measured durations for the selected suites,
+    never by a fixed number of seconds. A run that exceeds that bound is `unavailable`, not
+    `uncovered`.
+  acceptance:
+    - claim: "a commit that drops diff coverage is returned to the worker with CI's uncovered lines before any push"
+      proof: 'grep: test("W1-T4797: a commit that drops diff coverage is returned to the worker before any push" in test/a-worker-catches-its-own-diff-coverage-drop-before-pushing.test.ts'
+    - claim: "a covered commit pushes with no extra round"
+      proof: 'grep: test("W1-T4797: a covered commit pushes with no extra round" in test/a-worker-catches-its-own-diff-coverage-drop-before-pushing.test.ts'
+    - claim: "a precheck that cannot run pushes anyway and ledgers why"
+      proof: 'grep: test("W1-T4797: a precheck that cannot run pushes anyway and ledgers why" in test/a-worker-catches-its-own-diff-coverage-drop-before-pushing.test.ts'
+  falsifier: |
+    Remove the precheck call before the harness push. The uncovered-commit test then sees the push
+    happen with no repair round.

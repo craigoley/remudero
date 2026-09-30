@@ -1,0 +1,34 @@
+- id: W1-T4841
+  title: "A WRONG COUNT CAN LIVE FOR WEEKS WHEN ONE READER IS TRUSTED — the status board's dispatch streaks were inflated up to about 800x from 2026-09-08 to 2026-09-29 and nothing noticed. Periodically compute key figures through two independent readers and alert when they disagree"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: go with all of these recommended follow ups (throughput, automated flow, self improvement)"
+  note: "reservation hand-off: plan-flow-improve-1790732974000 -> plan-flow-improve-1790732974000"
+  plan_refs: [W1-T4820]
+  files: [src/lib/reader-agreement.ts, src/lib/sweep.ts, test/two-readers-of-one-fact-must-agree.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-29: the board read W1-T2982's streak as 1,584 where the deduplicated ledger holds 32 dispatches
+    (true streak 2), because the union replays retained rows once per rotation and was read out of order (#7898,
+    #7920). `rmd ledger-grep`, an independent reader, gave the right answer the whole time.
+  design: |
+    checkReaderAgreement (new module) computes a small fixed set of figures (dispatch streak per halted task,
+    open-PR count, queued-task count, last healthy deploy per instance) through the board's reader and an independent
+    one, and the sweep records reader.disagreement with both values when they differ beyond an exact match.
+  acceptance:
+    - claim: "two readers that disagree raise a recorded disagreement"
+      proof: 'grep: test("W1-T4841: two readers that disagree raise a recorded disagreement" in test/two-readers-of-one-fact-must-agree.test.ts'
+    - claim: "two readers that agree record nothing"
+      proof: 'grep: test("W1-T4841: two readers that agree record nothing" in test/two-readers-of-one-fact-must-agree.test.ts'
+    - claim: "the new module is called from its owner"
+      proof: 'grep: checkReaderAgreement( in src/lib/sweep.ts'
+  falsifier: |
+    Compare a reader with itself and the first test can never fire.

@@ -1,0 +1,110 @@
+- id: W1-T4769
+  title: "A DEAD HOLDER'S TRIAGE CLAIM STALLS THE WHOLE FEEDBACK BACKLOG — release a claim whose holder shows no liveness evidence past a bounded window, and when the oldest entry is held by a live claim triage the next unclaimed one instead of ending the pass"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator report 2026-09-29: refs/rmd-triage/fb-1789237820690-d3ce67 and fb-1789955906700-8768c6 held by dead containers stalled a 44-entry feedback backlog"
+  plan_refs: [W1-T1132, W1-T2289, W1-T469]
+  files:
+    - src/lib/auto-triage.ts
+    - src/run-task.ts
+    - docs/forensics/auto-triage.md
+    - test/a-dead-triage-claim-is-released.test.ts
+    - test/feedback-triage-claim.test.ts
+    - test/auto-triage-rung.test.ts
+    - test/auto-triage-wiring.test.ts
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED (operator, 2026-09-29): refs/rmd-triage/fb-1789237820690-d3ce67 was claimed on
+    2026-09-13 by pid 94 in container 94fb66771d4b, a container that no longer existed. Auto-triage
+    refused that entry 70 times in 3 days with "is already being triaged by another lane", and because
+    every pass re-selects the SAME oldest entry, the 44-entry `status: new` backlog (oldest 12+ days)
+    never moved. A second claim, fb-1789955906700-8768c6 (2026-09-21, container 52abd52a2256), was
+    the same. The operator deleted both refs by hand on 2026-09-29.
+
+    READ AT SOURCE (a5c1cd0cf), two defects:
+    (1) `decideTriageClaimRelease` (src/lib/auto-triage.ts) has exactly three arms — `holder`,
+    `evidence` ("already has a merged triage outcome, so its claim is stale and any host may drop
+    it"), and `operator` — and the `operator` arm never releases. `claimTriage` runs it only on the
+    losing lane's contention path. A holder that died before its `finally` ran
+    (`releaseTriageClaimWithLogging` in the triage lane of src/run-task.ts) therefore holds the entry
+    until a person runs `git push origin :refs/rmd-triage/<id>`.
+    (2) `decideAutoTriage` always fires on `candidates[0]` (from `newFeedbackIdsOldestFirst`), and
+    `autoTriageCheck` (src/run-task.ts) never reads claim refs, so the claim is discovered only
+    inside the fired lane (`claimTriageWithLogging` → `REFUSED`, exit 2). The fire has already spent
+    the `minIntervalMinutes` floor and a `maxPerDay` slot on an entry that cannot proceed, and the
+    next pass picks the same entry again. One stuck claim is a total stall, not a one-entry delay.
+
+    WHY THE ORIGINAL "NO TIMER" RULING DOES NOT FORBID THIS. docs/forensics/auto-triage.md
+    #decidetriageclaimrelease rejected a bare TIMER because a triage is minutes long and any expiry
+    short enough to be useful would fire on healthy work. This task does not add a bare timer: it
+    releases only on NEGATIVE LIVENESS EVIDENCE — the holder's own identity (the anchor commit
+    message `gitTriageClaimReserver.mintAnchor` writes: `rmd-triage claim <pid>@<host> <iso>`) has
+    written no ledger row since the claim — and only after a window no healthy triage lasts. Ledger
+    rows already carry `host` and `actor_pid` (src/lib/ledger.ts). The age condition alone never
+    releases a claim whose holder is still writing rows.
+  design: |
+    (a) LIVENESS RELEASE. Add a pure assessor in src/lib/auto-triage.ts that takes the parsed
+    holder anchor (pid, host, claimed-at; parsed from the anchor commit's message, fetched by an
+    added optional method on the existing `TriageClaimReserver`), the ledger rows, `now`, and a
+    window. It returns one of three named verdicts, never a boolean:
+      - `dead`: the claim is older than the window AND the ledger has rows from that `host` at or
+        before the claim (the positive control that this ledger can see that host at all) AND no
+        row with that `host` + `actor_pid` exists after the claim time.
+      - `alive`: some row from that `host` + `actor_pid` exists after the claim, or the claim is
+        younger than the window.
+      - `unobservable`: the anchor does not parse, or this ledger has never seen that host. This
+        is NOT `dead`; it may release only past a longer, separately named ceiling (a second tier,
+        several times the window) and its ledger row must say the release was age-only.
+    Read ledger rows through the ledger UNION reader (src/lib/ledger-union.ts), never the live file
+    alone: compaction prunes the live ledger, so a row missing from it is not evidence of silence.
+    An unreadable union yields `unobservable`, never `dead`.
+    `decideTriageClaimRelease` gains one input (the verdict) and one arm, `liveness`, checked after
+    `holder` and `evidence`. It stays clock-free: the assessor owns the clock, so the existing
+    W1-T1132 NO TIMER pin still holds for the decision function. The window is derived from the
+    triage lane's own bound on a run, named as a constant with the derivation in its doc, not a
+    free number. Every release on this arm writes a `triage.claim_released` row with `arm:
+    "liveness"` (or the age-only tier) and its evidence: holder host, holder pid, claimed-at, the
+    last row seen from that host, and the tier.
+
+    (b) SKIP A HELD HEAD, DO NOT END THE PASS. `autoTriageCheck` reads the claim namespace once
+    per pass (one `ls-remote` of `refs/rmd-triage/*` against the SAME origin the triage lane claims
+    on, via an added optional method on `TriageClaimReserver`), runs the liveness release on each
+    claimed candidate, and passes the still-held ids to `decideAutoTriage` as an added optional
+    `AutoTriageInputs` field. `decideAutoTriage` fires on the oldest candidate NOT in that set, and
+    its reason names how many held entries it passed over. When every candidate is held it declines
+    with a reason naming that, rather than firing on a held one. An unreadable claim namespace is a
+    third value the caller can see (today's behaviour: pick the oldest and let the lane's claim
+    decide), never an empty set.
+
+    No new `XxxDeps`/`XxxSeams` type (deps-interface census): extend `TriageClaimReserver` and
+    `AutoTriageInputs` with optional fields. Keep every existing W1-T1132 test green; update the
+    `decideTriageClaimRelease` doc comment and docs/forensics/auto-triage.md#decidetriageclaimrelease
+    to state the new arm and why it is not the rejected timer.
+  acceptance:
+    - claim: "a claim whose holder wrote no ledger row since claiming and is older than the window is released on the liveness arm with its evidence ledgered"
+      proof: 'grep: test("W1-T4769: a silent holder past the window is released on the liveness arm" in test/a-dead-triage-claim-is-released.test.ts'
+    - claim: "a holder that is still writing ledger rows keeps its claim however old the claim is"
+      proof: 'grep: test("W1-T4769: a holder still writing rows keeps its claim" in test/a-dead-triage-claim-is-released.test.ts'
+    - claim: "a holder host this ledger has never seen is unobservable and is not released as dead"
+      proof: 'grep: test("W1-T4769: an unseen holder host is unobservable and not dead" in test/a-dead-triage-claim-is-released.test.ts'
+    - claim: "when the oldest entry is held the pass fires on the next unclaimed entry"
+      proof: 'grep: test("W1-T4769: a held oldest entry passes the fire to the next unclaimed entry" in test/a-dead-triage-claim-is-released.test.ts'
+    - claim: "when every entry is held the pass declines with a named reason instead of firing on a held one"
+      proof: 'grep: test("W1-T4769: every candidate held declines with a named reason" in test/a-dead-triage-claim-is-released.test.ts'
+  falsifier: |
+    Revert decideAutoTriage to always take candidates[0]: the held-oldest test fires on the held
+    entry and fails. Make the assessor treat an unseen host as dead: the unobservable test fails.
+    Drop the post-claim row check: the still-writing holder is released and its test fails.
+  note: |
+    W1-T4769 was reserved on origin for branch file/triage-claim-cash-trial-janitor before filing.
+    Scope-time checks 2026-09-29: no run-W1-T4769-* branch; no open plan head carries a triage-claim
+    liveness shard (a subject sweep of unmerged plan/ commits over every origin head matched only
+    the unrelated W1-T4447 live-write-guard filing).

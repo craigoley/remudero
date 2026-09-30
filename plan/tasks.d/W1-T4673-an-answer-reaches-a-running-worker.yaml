@@ -1,0 +1,33 @@
+- id: W1-T4673
+  title: "AN OPERATOR ANSWER WAITS FOR THE NEXT FIX ROUND EVEN WHILE THE WORKER IS STILL RUNNING — when an answer or note for task X lands while X's worker runs, feed it in at the next turn boundary (Buzz's 'mention it to steer it'); measure first how often that overlap happens"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
+  note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-operator-1790600000"
+  plan_refs: [W1-T4471, W1-T164]
+  files: [src/lib/worker.ts, test/an-answer-reaches-a-running-worker.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED: worker.ts has no streaming input or interrupt; operator notes are injected only before a run (W1-T164) and
+    answers only reach a fix round after the PR exists. Buzz delivers an @mention to the running agent and supports owner
+    commands !cancel / !rotate / !shutdown (https://github.com/block/buzz, crates/buzz-acp/README.md).
+  design: |
+    (i) Measure first: match answer and note timestamps against in-flight run windows in the ledger; stop if the overlap
+    is rare.
+    (ii) Deliver a mid-run answer at the next turn boundary through the SDK's streaming input, ledgered as worker.steered.
+    (iii) A 'rotate' answer restarts the task with fresh context.
+  acceptance:
+    - claim: "an answer that lands during a run is delivered at the next turn boundary"
+      proof: 'grep: test("W1-T4673: an answer that lands during a run is delivered at the next turn boundary" in test/an-answer-reaches-a-running-worker.test.ts'
+    - claim: "an answer with no running worker still waits for the fix round"
+      proof: 'grep: test("W1-T4673: an answer with no running worker still waits for the fix round" in test/an-answer-reaches-a-running-worker.test.ts'
+  falsifier: |
+    Remove the change and the first acceptance test fails.

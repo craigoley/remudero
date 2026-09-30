@@ -1,0 +1,39 @@
+- id: W1-T4818
+  title: "A RECORD TASK IS DISPATCHED TO WORKERS FOREVER — a task whose every acceptance proof greps its own shard has nothing for a worker to build, yet at verify: auto it is dispatched until its breaker trips (W1-T2982, W1-T1258). The plan lint refuses that shape"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 10.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-29: go with all of those follow ups (record tasks sent to workers)"
+  note: "OPERATOR DIRECTION 2026-09-30: no new rule may refuse or strand a PR. The first build (#8009) added a hard lint refusal and was closed; this task now routes a record task away from workers and only warns. reservation hand-off: plan-followups-1790712493000 -> plan-followups-1790712493000"
+  plan_refs: [W1-T2982, W1-T1258]
+  files: [src/lib/drain.ts, src/lib/task-linter.ts, test/a-record-task-is-never-dispatched-to-a-worker.test.ts]
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4818 — Every acceptance proof now holds on main, and did not when it was filed.
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-29: W1-T1258 and W1-T2982 each carried only acceptance proofs of the form `grep: <phrase> in
+    <their own shard>`, every one already true, at verify: auto. Workers were dispatched repeatedly and either made
+    tangential out-of-scope edits (W1-T1258) or refused ("I can't make the implementation within the task record's
+    declared scope", W1-T2982) until each circuit breaker tripped. W1-T1258's own text said it should be verify: human;
+    fixed by hand in #7905 and #7908.
+  design: |
+    A task whose acceptance proofs ALL grep its own plan/tasks.d shard has nothing for a worker to build. (i) The
+    drain never dispatches such a task to a worker; it routes it to the verify-human judge path, logging
+    dispatch.record_task_routed. (ii) The plan lint reports the shape as a WARNING that names both remedies
+    (verify: human for a ruling or record, or real proofs for the implementation it implies) and never refuses.
+  acceptance:
+    - claim: "a task whose every proof greps its own shard is routed to the judge, never to a worker"
+      proof: 'grep: test("W1-T4818: a task whose every proof greps its own shard is routed to the judge, never to a worker" in test/a-record-task-is-never-dispatched-to-a-worker.test.ts'
+    - claim: "the plan lint warns on that shape and never refuses it"
+      proof: 'grep: test("W1-T4818: the plan lint warns on that shape and never refuses it" in test/a-record-task-is-never-dispatched-to-a-worker.test.ts'
+    - claim: "a task with one proof outside its shard is dispatched as before"
+      proof: 'grep: test("W1-T4818: a task with one proof outside its shard is dispatched as before" in test/a-record-task-is-never-dispatched-to-a-worker.test.ts'
+  falsifier: |
+    Drop the rule and the W1-T2982 shape lints clean.

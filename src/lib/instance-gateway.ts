@@ -21,6 +21,7 @@
 import { readFileSync } from "node:fs";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
+import { coldAnalyticsSnapshot, createAnalyticsSnapshotCache, type AnalyticsSnapshot, type AnalyticsSnapshotCache } from "./analytics-route.js";
 import { buildRecentRoute, buildStatusRoute, type BoardDeps } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
 import { escalate, ghIssueGateway, type IssueGateway } from "./escalate.js";
@@ -29,8 +30,13 @@ import { ghExec } from "./github-transport.js";
 import { appendLedger } from "./ledger.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
+import { buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
+import { inboxThreadStorePath } from "./panel-graph.js";
 import {
   buildControlStatusRoute,
+  buildAssistantControlRoute,
+  buildAssistantControlCapabilityRoute,
+  buildAssistantControlReceiptRoute,
   buildPauseRoute,
   buildResumeRoute,
   buildStopRoute,
@@ -39,6 +45,7 @@ import {
   type IssueCloser,
 } from "./panel-actions.js";
 import { loadPlan, type Plan } from "./plan.js";
+import { buildRepoDashboardRoutes } from "./repo-dashboard-route.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { Route } from "./service.js";
 import type { GitHub } from "./status.js";
@@ -65,6 +72,9 @@ export interface InstanceGatewayOptions {
   registryPath?: string;
   stateBase?: string;
   coreInstance?: string;
+  /** Shared host-side action admission, wired by serve.ts from the core control root. */
+  assistantClaimRoot?: string;
+  assistantBootSha?: string;
   readText?: (path: string) => string;
   loadPlan?: (planPath: string) => Plan;
   /** The GitHub gateway for one instance's `owner/name`; serve.ts defaults it to a batched gateway. */
@@ -74,12 +84,14 @@ export interface InstanceGatewayOptions {
   controlStatus?: Omit<ControlStatusDeps, "root" | "ledgerPath">;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** Applied to each instance's raw read routes — serve.ts's per-route read cache and projection. */
-  bound?: (routes: Route[], board: BoardDeps) => Route[];
+  bound?: (routes: Route[], board: BoardDeps, instance?: string) => Route[];
   /** W1-T4418 liveness seams: the row reader, the `gh` runner behind its escalation, the clock, the timer. */
   readLastRows?: ReadLastRows;
   gh?: (args: string[]) => string;
   clock?: Clock;
   every?: (run: () => void, ms: number) => () => void;
+  /** The serve lifecycle starts and stops each independent, instance-rooted projection. */
+  onAnalyticsCache?: (cache: AnalyticsSnapshotCache, instance: { name: string; repo: string; ledgerPath: string }) => void;
 }
 
 export function instanceStateRoot(instance: RegistryInstance, stateBase: string): InstanceStateRoot {
@@ -138,15 +150,38 @@ export function guardInstanceRoute(route: Route, instance: string, availability:
 }
 
 /** The route set one non-core instance answers, rooted entirely in its own state and plan. */
-export function instanceRouteSet(root: InstanceStateRoot, board: BoardDeps, opts: InstanceGatewayOptions): Route[] {
+export function instanceRouteSet(
+  root: InstanceStateRoot,
+  board: BoardDeps,
+  opts: InstanceGatewayOptions,
+  repository: string,
+  currentAnalyticsSnapshot: () => AnalyticsSnapshot = coldAnalyticsSnapshot,
+): Route[] {
   const panel = { root: root.root, ledgerPath: root.ledgerPath, issues: opts.issues ?? { close() {} } };
-  const reads = [buildStatusRoute(board), buildRecentRoute(board), buildTaskCardRoute(board)];
+  const [owner, name] = repository.split("/");
+  const reads = [
+    buildStatusRoute(board), buildRecentRoute(board), buildTaskCardRoute(board),
+    ...buildRepoDashboardRoutes({
+      root: root.root, ledgerPath: root.ledgerPath, planPath: root.planPath, instanceRepository: { owner, repo: name },
+      controlRoot: root.root, incidentsDir: join(root.root, "state"),
+    }),
+  ];
+  const assistantControl = opts.assistantClaimRoot
+    ? { ...panel, claimRoot: opts.assistantClaimRoot, instance: root.instance, repository, bootSha: opts.assistantBootSha }
+    : undefined;
   return [
-    ...(opts.bound ? opts.bound(reads, board) : reads),
+    ...(opts.bound ? opts.bound(reads, board, root.instance) : reads),
+    buildOperatorAgentAnswerRoute(() => ({
+      repository,
+      instance: root.instance,
+      snapshot: currentAnalyticsSnapshot(),
+      inbox: readInboxAnswerEvidence(inboxThreadStorePath(root.root)),
+    })),
     buildControlStatusRoute({ ...panel, ...opts.controlStatus }),
     buildPauseRoute(panel),
     buildResumeRoute(panel),
     buildStopRoute(panel),
+    ...(assistantControl ? [buildAssistantControlRoute(assistantControl), buildAssistantControlCapabilityRoute(assistantControl), buildAssistantControlReceiptRoute(assistantControl)] : []),
   ];
 }
 
@@ -193,10 +228,26 @@ export function buildInstanceGatewayRoutes(coreRoutes: readonly Route[], opts: I
     const github: GitHub =
       startupReason === undefined && opts.github ? opts.github(instance.repo) : { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
     const board: BoardDeps = { plan, ledgerPath: root.ledgerPath, github };
+    let currentAnalyticsSnapshot: () => AnalyticsSnapshot = coldAnalyticsSnapshot;
+    if (startupReason === undefined) {
+      try {
+        // No core snapshot or core reader is passed across this boundary. Each cache reads only
+        // the mounted instance's state/ ledger union and owns its own 15-minute refresh timer.
+        const cache = createAnalyticsSnapshotCache({
+          stateDir: join(root.root, "state"),
+          log: (step, extra) => opts.log?.(step, { ...extra, instance: instance.name, repository: instance.repo }),
+        });
+        currentAnalyticsSnapshot = cache.current;
+        opts.onAnalyticsCache?.(cache, { name: instance.name, repo: instance.repo, ledgerPath: root.ledgerPath });
+      } catch (error) {
+        startupReason = `analytics projection for ${instance.name} could not be initialized: ${String((error as Error).message ?? error)}`;
+        opts.log?.("serve.instance_unavailable", { instance: instance.name, reason: startupReason });
+      }
+    }
     const probe = opts.probe ?? probeInstanceState;
     const availability = (): Promise<InstanceAvailability> =>
       startupReason === undefined ? probe(root) : Promise.resolve({ ok: false, reason: startupReason });
-    const routes = mountUnderInstance(instanceRouteSet(root, board, opts), instance.name);
+    const routes = mountUnderInstance(instanceRouteSet(root, board, opts, instance.repo, currentAnalyticsSnapshot), instance.name);
     out.push(...routes.map((route) => guardInstanceRoute(route, instance.name, availability)));
   }
   return out;

@@ -1,0 +1,90 @@
+- id: W1-T4914
+  title: "A PR'S CONFLICT WITH MAIN IS KNOWN ONLY WHEN GITHUB HAS LAZILY COMPUTED IT, AND NO ROW SAYS HOW LONG A PR SAT DIRTY — test-merge each open PR head against main with `git merge-tree --write-tree` (read-only, no push), ledger the verdict with the conflicting paths beside GitHub's own mergeable_state, so whether a refresh lane is owed is answered from the fleet's rows, not reconstructed from merge commits"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "research 2026-09-30: is a mechanical refresh lane for dirty/behind fleet PR branches worth building"
+  plan_refs: [W1-T3277, W1-T2999, W1-T528, W1-T186, W1-T4803]
+  files:
+    - src/lib/merge-probe.ts
+    - src/run-task.ts
+    - test/merge-probe.test.ts
+  status: merged
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 over 1,593 PRs merged 09-16..09-30: 538 distinct main-into-branch merge
+    commits on 312 PRs (a stacked PR's commit list repeats its base's merges, so per-PR rows
+    overcount). Re-tested with `git merge-tree --write-tree`, 439 (82%) merge cleanly and 99 (18%)
+    conflict, 61 of them on the two days 09-23 and 09-24. GitHub's own update-branch made 197 of
+    the clean ones, so the clean half is already handled. What could NOT be measured is how long a
+    conflicted PR sat dirty before anyone acted: no ledger row pairs GitHub's `mergeable_state`
+    with the truth, `mergeStateFromRest` (open-prs-rest.ts) maps `unknown` to undefined so the
+    sweep acts on nothing until GitHub finishes computing, and GitHub's compute
+    is lazy. A dirty PR registers ZERO check runs, so nothing fails visibly while it waits
+    (CLAUDE.md, "A CONFLICTING PR registers ZERO check runs"). A reconstruction from merge
+    commits gives a lower bound (median 17 min, p90 83 min from first conflicting main commit
+    to the resolving merge) and cannot separate "GitHub had not computed" from "nobody looked".
+    THE DECISION THIS TASK BUYS. A dirty-only refresh lane (one that pushes to PR branches, not filed) is owed only if the
+    probe shows a non-empty class of PRs the probe calls CLEAN while GitHub reports dirty or
+    unknown for longer than a grace. If GitHub is right whenever it has answered, update-branch
+    refuses every such PR (it fails on a conflict) and no lane can help: only an owner can resolve
+    a real conflict, and the existing conflicted rung (sweep.ts `conflicted` disposition row, fix
+    worker) and dirty-fleet-rebase rung (sweep.ts `rebaseDirtyFleetBranchViaGit`) already own the
+    fleet branches. Read-only is the point: no push, no update-branch, no worktree.
+  design: |
+    (i) src/lib/merge-probe.ts, pure decision plus one injectable git seam.
+    `probeMerge({ headSha, mainSha, git })` fetches `refs/pull/<n>/head` and `main` into the
+    sweep clone's existing fetch, then runs `git merge-tree --write-tree --name-only
+    --no-messages <headSha> <mainSha>`. Exit 0 is `clean` and returns the tree id; exit 1 is
+    `conflict` and returns the conflicting paths, capped; any other exit, an unreadable ref or a
+    thrown spawn is `unreadable`, NEVER `clean` (a catch that returns a success-shaped literal
+    is a claim; the three outcomes stay three values a caller can see).
+    (ii) `probeOpenPrMerges(prs, deps)` walks the open PRs and probes only a PR whose
+    (head sha, main sha) pair is not already ledgered, so a quiet pair is never probed twice.
+    A cap per pass, oldest activity first, rotating like `distanceRefreshProbeTargets`
+    (run-task.ts), so no PR is starved. It never runs on a draft.
+    (iii) One `sweep.merge_probe` ledger row per probe: pr_number, head_sha, main_sha,
+    verdict, conflict_paths, github_mergeable_state (the raw string `OpenPrView.mergeableState`
+    already carries, or `absent`), stacked_on (PR numbers named by `Stacked on #N` in the body,
+    parsed here as data and never acted on), and behind_by when already known. No disposition
+    changes: the row is observation, so a `sweep.disposed` row is byte-identical before and
+    after this task.
+    (iv) Wire it in src/run-task.ts beside `buildBehindMainByPr`, best-effort and non-fatal: a
+    throw from the probe logs and never fails the pass.
+    (v) The default git seam is exercised by one test that really shells out against a
+    throwaway repo (the seam's default and its catch arm are otherwise unreachable when every
+    test injects a fake), one clean and one conflicting fixture.
+  acceptance:
+    - claim: "a clean test merge is recorded as clean with no conflicting paths"
+      proof: 'grep: test("W1-T4914: a clean test merge is recorded as clean" in test/merge-probe.test.ts'
+    - claim: "a conflicting test merge is recorded with its conflicting paths"
+      proof: 'grep: test("W1-T4914: a conflicting test merge is recorded with its paths" in test/merge-probe.test.ts'
+    - claim: "an unreadable ref or failed spawn is recorded as unreadable and never as clean"
+      proof: 'grep: test("W1-T4914: an unreadable probe is never recorded as clean" in test/merge-probe.test.ts'
+    - claim: "the row carries GitHub's own mergeable_state beside the probe verdict"
+      proof: 'grep: test("W1-T4914: the row carries GitHub mergeable state beside the verdict" in test/merge-probe.test.ts'
+    - claim: "an unchanged head and main pair is not probed twice and a draft is never probed"
+      proof: 'grep: test("W1-T4914: an unchanged head and main pair is not probed again" in test/merge-probe.test.ts'
+    - claim: "the probe runs only read-only git verbs and never pushes"
+      proof: 'grep: test("W1-T4914: the probe issues no push and no update-branch" in test/merge-probe.test.ts'
+    - claim: "the default git seam really runs merge-tree against a throwaway repository"
+      proof: 'grep: test("W1-T4914: the default seam classifies a real conflict" in test/merge-probe.test.ts'
+    - claim: "the sweep pass runs the probe"
+      proof: "grep: probeOpenPrMerges( in src/run-task.ts"
+  falsifier: |
+    Map exit 1 to clean, or let a spawn error fall through to `clean`: the unreadable test
+    fails. Add a `push` or `update-branch` call to the probe: the read-only test fails. Key the
+    dedupe on head sha alone: a main advance is never re-probed and the unchanged-pair test
+    passes while the conflict appears unrecorded, so the test also advances main and asserts a
+    new row.
+  note: |
+    Filed as a draft by the 2026-09-30 refresh-lane research. Provisional id. Scope-time checks
+    still owed at filing: no run-W1-T4914-* branch; no merged PR carries its trailer.
+    Doctrine applied: a zero is not a measurement until a positive control proves the query could
+    see its corpus (the reconstruction's control was the 184 GitHub-committed merges, all clean).

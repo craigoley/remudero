@@ -15,7 +15,7 @@
     - src/lib/worker.ts
     - src/lib/review.ts
     - test/every-worker-call-carries-its-assignment.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

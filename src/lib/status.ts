@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { ghExec, ghExecFile } from "./github-transport.js";
-import { DEFAULT_GH_CALL_TIMEOUT_MS } from "./github-transport.js";
+import { DEFAULT_GH_CALL_TIMEOUT_MS, createNonBlockingGhCallPacer, parseGhRateLimitHeaders, splitGhHeaderBlock, type GhRateLimitReading } from "./github-transport.js";
+import type { WarmRefreshOutcome, WarmRefreshTelemetry } from "./github-refresh-pacer.js";
 // W1-T2440: the pre-warm walk runs on its own OS thread (`runPrewarmWorker`), so the `execFileSync` below stays
 // synchronous without parking the process serving `/v1/status`. That worker loads THIS module a second time;
 // `isMainThread`/`workerData` gate the worker-only branch near `buildBatchedGithub`.
@@ -287,6 +288,19 @@ export interface GitHub {
   /** OPTIONAL (W1-T154): force this gateway's fetch NOW rather than lazily, so serve boot never pays a cold
    *  fetch on the request path. Omitted ⇒ a no-op. */
   warm?(): void;
+  /** OPTIONAL (W1-T4771): from now on this gateway NEVER shells gh on the calling thread. A due read is
+   *  handed to the background walk and the last-held fact is served stale; a fact never held reads as
+   *  not-yet-collected. Called once by serve for its own gateway; the daemon and the CLI never call it. */
+  serveOffLoop?(): void;
+  /** OPTIONAL (W1-T4771): how old the OLDEST held PR fact is, in ms, or `undefined` when none is held yet.
+   *  Lets a caller serving a stale fact say how stale. */
+  factsAgeMs?(): number | undefined;
+  /** OPTIONAL (W1-T4771): whether a held PR fact is past its TTL, so a caller never labels an overdue fact fresh. */
+  factsStale?(): boolean;
+  /** OPTIONAL: whether `warm()` walks on a worker thread, so a background refresh can never block the caller. */
+  warmsOffLoop?(): boolean;
+  /** OPTIONAL: the last settled warm walk's cost and quota reading, for the keep-warm pacer (github-refresh-pacer.ts). */
+  warmTelemetry?(): WarmRefreshTelemetry;
   seedBoardSnapshot?(cache: BoardSnapshotCache): void;
   /** A read this gateway attempted actually FAILED, as against succeeding empty, so it defers rather than
    *  reading as a confirmed not-merged (W1-T119). NEVER FORCES A FETCH (W1-T2219): the STICKY verdict of the
@@ -898,7 +912,8 @@ export function readLedgerUnionBounded(
       order: "newest-first",
       rotationWindowMs: opts.windowMs ?? STATUS_BOARD_WINDOW_MS,
       minRotations: STATUS_BOARD_MIN_ROTATIONS,
-      dedupe: false,
+      // W1-T4820: every rotation that carries the retained core, and every row the live file shares with its
+      // archives, is one event read two or more times (1,042,796 rows, 676,741 distinct, 2026-09-29).
       readLiveRecords: () => live,
       satisfied: opts.satisfied,
       rotationRecords: opts.rotationRecords,
@@ -1272,6 +1287,13 @@ export function isMergeCreditLine(line: Record<string, unknown>): boolean {
  * but a refusal row is written by the DAEMON and carries the refused task elsewhere. The step literal is INLINE
  * on purpose — the rotation test scans consumer sources TEXTUALLY, so a symbol would blind that gate.
  * Why: W1-T1279 was refused every tick for 84 hours, then a restart let a fresh process dispatch
+ *
+ * W1-T4691 — A HALTED TASK IS FORWARD PROGRESS TOO, WHEN AN OPERATOR SAYS SO. `dispatch.breaker_released`
+ * (`rmd release`) is the ONLY reset a task with no new owned PR can ever produce — the breaker itself would
+ * otherwise never re-open, because the trip survives a compaction (W1-T2425's own invariant) and a task the
+ * breaker refuses to dispatch can never open the `pr.opened` line that resets it any other way. It joins the
+ * SAME reset arm as `pr.opened`/a merge credit, deliberately: it is an explicit, attributable operator row,
+ * never an inference, so the archive-reading approach W1-T2425's tests forbid stays forbidden.
  */
 export function seedCountFromCircuitBreak(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -1282,7 +1304,10 @@ export function seedCountFromCircuitBreak(
   // The ONE helper reading `task` as well as `task_id` — see {@link LedgerIndex} for why the bucket is keyed on
   // both, which is what keeps this scan's row set unchanged.
   for (const line of indexedTaskRows(lines, taskId, index)) {
-    if (line.task_id === taskId && (line.step === "pr.opened" || isMergeCreditLine(line))) {
+    if (
+      line.task_id === taskId &&
+      (line.step === "pr.opened" || isMergeCreditLine(line) || line.step === "dispatch.breaker_released")
+    ) {
       seed = undefined; // forward progress — the same reset the counter itself applies
       continue;
     }
@@ -1294,15 +1319,31 @@ export function seedCountFromCircuitBreak(
   return seed;
 }
 
-/**
- * W1-T2423 — THE RUN VERDICTS THAT MEAN THE TASK WORKER NEVER STARTED. Both are PREFLIGHT PROBES that refuse
- * ahead of every worker and FAIL CLOSED, so a run ending in either tested THE HOST, not the task. W1-T2249 IS
- * SUBSUMED, NOT RE-LITIGATED: it keyed the exclusion on a field stamped at WRITE time, making the rule
- * FORWARD-ONLY over a counter that reads history backwards, which is why it never fired. WHY A VERDICT AND NOT
- * A CHECK: `verdict` is written by the same call that has recorded these refusals all along.
- * Why: the measured verdict distribution is in docs/forensics/status.md
- */
-const PRE_WORKER_REFUSAL_VERDICTS: ReadonlySet<string> = new Set(["blocked_containment", "blocked_isolation"]);
+/** Infrastructure refusals did not give this task a chance to open a PR. Match the run's terminal
+ * verdict, which is already present in historical ledger rows, rather than a newer write-time flag. */
+const INFRASTRUCTURE_REFUSAL_VERDICTS: ReadonlySet<string> = new Set([
+  "blocked_containment",
+  "blocked_isolation",
+  "blocked_toolchain",
+  "blocked_transient",
+  "task_already_merged",
+]);
+
+/** A THROWN run's `failed` verdict (run-task.ts `endThrownRun`) at one of these stages is a deferral the harness
+ *  refused before any worker ran — 10 lock-contention refusals tripped W1-T4684's breaker on 2026-09-29. */
+const INFRASTRUCTURE_THROWN_STAGES: ReadonlySet<string> = new Set([
+  "managed_checkout.refresh",
+  "worktree.node_modules",
+  "preflight.containment",
+  "preflight.isolation",
+]);
+
+function infrastructureRefusal(line: Record<string, unknown>): string | undefined {
+  if (typeof line.verdict !== "string") return undefined;
+  if (INFRASTRUCTURE_REFUSAL_VERDICTS.has(line.verdict)) return line.verdict;
+  if (line.verdict === "failed" && typeof line.stage === "string" && INFRASTRUCTURE_THROWN_STAGES.has(line.stage)) return line.stage;
+  return undefined;
+}
 
 /** Options shared by {@link orphanedRunIds} and every counter built on it — never widened for
  *  anything else, so a caller cannot smuggle unrelated behavior through this bag. */
@@ -1333,9 +1374,15 @@ function latestLedgerTsMs(lines: ReadonlyArray<Record<string, unknown>>): number
   return max;
 }
 
+const MONITOR_WRITTEN_RUN_STEPS: ReadonlySet<string> = new Set([
+  "run.running_long", // the duration sentinel reports about a run that may already be dead
+  "cost.anomaly", // the cost sentinel reports about a run after the run has stopped
+  "worker.stalled", // the daemon's quiet-episode detector writes about the observed run
+]);
+
 /**
- * W1-T3523 — THE ORPHAN AS A FIRST-CLASS READING. Every `run_id` for `taskId` whose ONLY ledger row,
- * of ANY step, is its own `run.start` — MEASURED on the live ledger 2026-09-13: 97 of 203 dispatched
+ * W1-T3523 — THE ORPHAN AS A FIRST-CLASS READING. Every `run_id` for `taskId` whose ONLY run-produced
+ * ledger row is its own `run.start` — MEASURED on the live ledger 2026-09-13: 97 of 203 dispatched
  * runs (47%) carry no other row at all, the container-recycle shape (`deploy/recycle-container.sh`
  * `docker stop`s a worker whose liveness probe is process-only, so a killed worker never gets to
  * write anything past its own start). This needs no new writer and no schema change: every row this
@@ -1366,8 +1413,14 @@ export function orphanedRunIds(
   const livenessBoundMs = opts.livenessBoundMs ?? DEFAULT_LIVENESS_BOUND_MS;
   const rowCountByRunId = new Map<string, number>();
   const startTsByRunId = new Map<string, string>();
+  const counted = new Set<string>();
   for (const line of indexedTaskRows(lines, taskId, index)) {
     if (line.task_id !== taskId || typeof line.run_id !== "string") continue;
+    if (typeof line.step === "string" && MONITOR_WRITTEN_RUN_STEPS.has(line.step)) continue;
+    // A rotation union replays retained rows once per archive; a replayed lone run.start is still an orphan.
+    const key = `${line.run_id}|${String(line.step)}|${String(line.ts)}`;
+    if (counted.has(key)) continue;
+    counted.add(key);
     rowCountByRunId.set(line.run_id, (rowCountByRunId.get(line.run_id) ?? 0) + 1);
     if (line.step === "run.start" && typeof line.ts === "string" && !startTsByRunId.has(line.run_id)) {
       startTsByRunId.set(line.run_id, line.ts);
@@ -1376,7 +1429,7 @@ export function orphanedRunIds(
   const orphans = new Set<string>();
   if (nowMs === undefined) return orphans; // no notion of "now" anywhere in this ledger — unknown stays counted
   for (const [runId, ts] of startTsByRunId) {
-    if ((rowCountByRunId.get(runId) ?? 0) > 1) continue; // a later row exists for this run_id — not an orphan
+    if ((rowCountByRunId.get(runId) ?? 0) > 1) continue; // the run produced another row — not an orphan
     const startMs = Date.parse(ts);
     if (!Number.isFinite(startMs) || nowMs - startMs < livenessBoundMs) continue; // unknown age, or still live
     orphans.add(runId);
@@ -1394,50 +1447,99 @@ export function orphanedRunIds(
  * W1-T3523 WIDENS THE EXCLUSION ALONGSIDE W1-T2423's PREFLIGHT-REFUSAL ONE: a `run.start` whose run_id is
  * {@link orphanedRunIds} — infrastructure killed the worker before it wrote anything else — is likewise
  * excluded, because it is evidence about the HOST, not about the task, and an orphan must never cost the task
- * the same dispatch budget a real no-PR attempt does. A run.start with ANY other row for its run_id — even a
- * failing `verdict` — still counts: only a run with genuinely NO evidence past its own start, held stale long
- * enough to rule out "still running", is excused.
+ * the same dispatch budget a real no-PR attempt does. A run.start with any other run-produced row is not an orphan; only
+ * the infrastructure refusal verdicts above can exclude such a run. An unrecognised failing verdict counts.
+ *
+ * W1-T4691: `dispatch.breaker_released` (`rmd release`) resets this streak exactly like `pr.opened` or a
+ * merge credit — the ONE reset a task the breaker has already halted can still receive, since it needs no
+ * new owned PR to produce it. See {@link seedCountFromCircuitBreak}'s doc for the cross-restart half.
  */
+interface DispatchStreakTally {
+  count: number;
+  excludedDispatches: number;
+  excludedByReason: Record<string, number>;
+}
+
+/** `taskId`'s rows in timestamp order. A rotation union is live-first, then newest-first
+ *  ({@link readLedgerUnionBounded}), and the streak resets on the first forward-progress row it walks,
+ *  so walking a union in input order counted archived dispatches AFTER a live reset (measured
+ *  2026-09-29: six released tasks still read circuit-broken). Already-ordered rows, and rows missing a
+ *  `ts`, keep input order; the sort is stable. */
+function taskRowsInTimeOrder(rows: ReadonlyArray<Record<string, unknown>>, taskId: string): ReadonlyArray<Record<string, unknown>> {
+  // Each rotation re-archives the rows the live file retained, so a union carries up to one copy per
+  // archive (measured 2026-09-29: W1-T2982's 32 dispatches read as 1,584). One step for one run at
+  // one instant is one event, so its copies collapse here; rows without a ts or run_id are kept as they are.
+  const seen = new Set<string>();
+  const own = rows.filter((line) => {
+    if (line.task_id !== taskId) return false;
+    if (typeof line.ts !== "string" || typeof line.run_id !== "string") return true;
+    const key = `${line.run_id}|${String(line.step)}|${line.ts}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (!own.every((line) => typeof line.ts === "string")) return own;
+  let ordered = true;
+  for (let i = 1; i < own.length && ordered; i++) ordered = (own[i - 1]!.ts as string) <= (own[i]!.ts as string);
+  if (ordered) return own;
+  return own
+    .map((line, i) => ({ line, i }))
+    .sort((a, b) => ((a.line.ts as string) < (b.line.ts as string) ? -1 : (a.line.ts as string) > (b.line.ts as string) ? 1 : a.i - b.i))
+    .map(({ line }) => line);
+}
+
+function dispatchStreakTally(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  index?: LedgerIndex,
+  opts: OrphanDetectionOpts = {},
+): DispatchStreakTally {
+  const rows = taskRowsInTimeOrder(indexedTaskRows(lines, taskId, index), taskId);
+  // A run's terminal verdict follows its start, so collect exclusions before counting starts.
+  const refusalByRunId = new Map<string, string>();
+  for (const line of rows) {
+    if (
+      line.task_id === taskId &&
+      line.step === "verdict" &&
+      infrastructureRefusal(line) !== undefined &&
+      typeof line.run_id === "string"
+    ) {
+      refusalByRunId.set(line.run_id, infrastructureRefusal(line)!);
+    }
+  }
+  const orphanRunIds = orphanedRunIds(lines, taskId, index, opts);
+  let count = 0;
+  let excludedDispatches = 0;
+  let excludedByReason: Record<string, number> = {};
+  for (const line of rows) {
+    if (line.task_id !== taskId) continue;
+    if (line.step === "pr.opened" || isMergeCreditLine(line) || line.step === "dispatch.breaker_released") {
+      count = 0; // forward progress — a new PR, a credited merge, or an operator release resets the streak
+      excludedDispatches = 0;
+      excludedByReason = {};
+    } else if (line.step === "run.start") {
+      const reason = typeof line.run_id === "string"
+        ? refusalByRunId.get(line.run_id) ?? (orphanRunIds.has(line.run_id) ? "orphaned_run" : undefined)
+        : undefined;
+      if (reason !== undefined) {
+        excludedDispatches++;
+        excludedByReason[reason] = (excludedByReason[reason] ?? 0) + 1;
+        continue;
+      }
+      // Unknown run ids and runs with worker evidence remain counted.
+      count++;
+    }
+  }
+  return { count, excludedDispatches, excludedByReason };
+}
+
 export function dispatchesWithoutNewOwnedPr(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
   index?: LedgerIndex,
   opts: OrphanDetectionOpts = {},
 ): number {
-  const rows = indexedTaskRows(lines, taskId, index);
-  // PRE-SCAN (W1-T2249's shape, widened by W1-T2423) — two passes over the small per-task line set, because a
-  // run's verdict always lands AFTER its `run.start`, so the excluded run ids must be known first.
-  const preWorkerRefusalRunIds = new Set<string>();
-  for (const line of rows) {
-    if (
-      line.task_id === taskId &&
-      line.step === "verdict" &&
-      typeof line.verdict === "string" &&
-      PRE_WORKER_REFUSAL_VERDICTS.has(line.verdict) &&
-      typeof line.run_id === "string"
-    ) {
-      preWorkerRefusalRunIds.add(line.run_id);
-    }
-  }
-  const orphanRunIds = orphanedRunIds(lines, taskId, index, opts);
-  let count = 0;
-  for (const line of rows) {
-    if (line.task_id !== taskId) continue;
-    if (line.step === "pr.opened" || isMergeCreditLine(line)) {
-      count = 0; // forward progress — a new PR, or a credited merge, resets the streak
-    } else if (line.step === "run.start") {
-      // W1-T2423: a dispatch whose OWN run ended before the task worker started is a HOST preflight refusal,
-      // not a dispatch that produced nothing.
-      if (typeof line.run_id === "string" && preWorkerRefusalRunIds.has(line.run_id)) continue;
-      // W1-T3523: a dispatch whose run_id never wrote a SECOND row of any kind, held stale long enough to rule
-      // out "still running" — see {@link orphanedRunIds} — is a HOST killing the worker, not a task producing
-      // nothing. A run with no `run_id` at all, or one with any other row (even a failing verdict), still
-      // counts: unknown stays counted, so a crash can never buy a task extra dispatches.
-      if (typeof line.run_id === "string" && orphanRunIds.has(line.run_id)) continue;
-      count++;
-    }
-  }
-  return count;
+  return dispatchStreakTally(lines, taskId, index, opts).count;
 }
 
 /** True once `taskId` has been dispatched {@link DEFAULT_MAX_TASK_DISPATCHES} times with no new owned PR since
@@ -1661,6 +1763,10 @@ export interface DispatchBreakerDetail {
   ledgerState: DispatchBreakerState;
   /** `dispatchesWithoutNewOwnedPr` at decision time — the count the comparison used. */
   freshCount: number;
+  /** Runs excluded since the last owned PR or merge credit, from this evaluation's ledger scan. */
+  excludedDispatches: number;
+  /** The exclusion count by terminal verdict, plus `orphaned_run` for stale starts with no later row. */
+  excludedByReason: Record<string, number>;
   /** The bound `freshCount` was compared against. */
   maxDispatches: number;
   /** The cache's prior count for this task; absent on the first observation. W1-T2425: the cache may itself
@@ -1693,7 +1799,7 @@ export function evaluateDispatchBreakerDetailed(
   const lines = readLedgerLines(ledgerPath, ledgerFs);
   // R-23: ONE pass to bucket, then per-task lookups — the helpers below otherwise walk the whole array each.
   const index = buildLedgerIndex(lines);
-  const freshCount = dispatchesWithoutNewOwnedPr(lines, taskId, index);
+  const { count: freshCount, excludedDispatches, excludedByReason } = dispatchStreakTally(lines, taskId, index);
   let priorCount = cache.lastCounts.get(taskId);
   // W1-T2425: FIRST OBSERVATION OF THIS TASK IN THIS PROCESS — seed the baseline from the breaker's own on-disk
   // record so the regression arm below is reachable across a restart. Only ever on a MISS (a live process's own
@@ -1706,10 +1812,10 @@ export function evaluateDispatchBreakerDetailed(
     }
   }
   const hasNewOwnedPr = lastPrOpened(lines, taskId, index) !== undefined;
-  const base = { freshCount, maxDispatches, priorCount, hasNewOwnedPr };
+  const base = { freshCount, excludedDispatches, excludedByReason, maxDispatches, priorCount, hasNewOwnedPr };
 
-  if (priorCount !== undefined && freshCount < priorCount && !hasNewOwnedPr) {
-    // count regressed with nothing in the ledger to explain it
+  if (priorCount !== undefined && freshCount + excludedDispatches < priorCount && !hasNewOwnedPr) {
+    // count regressed with nothing in the ledger to explain it — runs now excluded as infrastructure DO explain it
     return { ...base, state: "indeterminate", ledgerState: "indeterminate" };
   }
 
@@ -1849,7 +1955,7 @@ export function taskIdFromRunBranch(head: string | undefined): string | undefine
   // W1-T3042 — THE CAPTURE MUST LOOK LIKE A TASK ID, or this invents one.
   //
   // `(.+)` is greedy and the shape has no second anchor, so any extra hyphenated segment before the
-  // epoch is swallowed whole: `run-W1-T3030-build-1788796682000` yielded `W1-T3030-build`. That is
+  // epoch is swallowed whole: `run-W1-T3030-build-<epochMs>` yielded `W1-T3030-build`. That is
   // not a failure to credit — it is a CREDIT FOR A TASK THAT DOES NOT EXIST, which is worse,
   // because a phantom id enters the merged set while the real task stays uncredited and eligible
   // for re-dispatch.
@@ -2574,8 +2680,8 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     // The removed clause read `&& !ownsOwnRunBranch(head, task.id)`, justified as "a worker's own
     // run-branch PR is an implementation by construction". IT IS NOT: a worker dispatched on a task
     // opens its PR from `run-<id>-<epoch>`, and a lane that decides the right move is an AMENDMENT
-    // files one from that same branch. MEASURED: #3195 (head `run-W1-T2371-1787887882921`, whole
-    // diff `plan/tasks.d/W1-T2371-*.yaml`) and #3896 (head `run-W1-T2648-1788508326964`) are exactly
+    // files one from that same branch. MEASURED: #3195 (head `run-W1-T2371-<epochMs>`, whole
+    // diff `plan/tasks.d/W1-T2371-*.yaml`) and #3896 (head `run-W1-T2648-<epochMs>`) are exactly
     // that shape, and the ledger arm above cannot catch them either — so nothing did, and W1-T2794's
     // supersession rung closed the validated build in #4461 against #3195.
     //
@@ -2994,6 +3100,22 @@ export const ENVIRONMENTAL_BLOCK_VERDICTS: ReadonlySet<string> = new Set([
 ]);
 /** W1-T4597: `failed` verdict stages that are environmental (the Codex output cap, W1-T4595). */
 export const ENVIRONMENTAL_BLOCK_STAGES: ReadonlySet<string> = new Set(["worker.bounded_output"]);
+/** W1-T4655/W1-T4701: the stages of the verdict a THROWN run writes (run-task.ts `endThrownRun`) — its
+ *  ending, never a new signal about the task, so each leaves the streak where its verdict-less run did. */
+export const THROWN_RUN_VERDICT_STAGE_LIST = [
+  "run.error",
+  "managed_checkout.refresh",
+  "worktree.node_modules",
+  "worktree.add",
+  "preflight.containment",
+  "preflight.isolation",
+] as const;
+export type ThrownRunVerdictStage = (typeof THROWN_RUN_VERDICT_STAGE_LIST)[number];
+/** W1-T4708: the stages of the verdict a pre-worktree refusal that RETURNS writes (run-task.ts `endRefusedRun`). */
+export const REFUSED_RUN_VERDICT_STAGE_LIST = ["dispatch.claim", "worktree.stale_base"] as const;
+export type RefusedRunVerdictStage = (typeof REFUSED_RUN_VERDICT_STAGE_LIST)[number];
+/** Every run-ending stage above, thrown or returned: a reader excluding one excludes the other (W1-T4708). */
+export const THROWN_RUN_VERDICT_STAGES: ReadonlySet<string> = new Set([...THROWN_RUN_VERDICT_STAGE_LIST, ...REFUSED_RUN_VERDICT_STAGE_LIST]);
 /** W1-T4597: an environmental block with no deploy since is re-offered after this long. */
 export const ENVIRONMENTAL_BLOCK_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 /** PRIMARY CONTROL (W1-T4597): consecutive environmental re-offers before the block stays durable. */
@@ -3075,7 +3197,9 @@ export function latestIndependentFailureBlock(
     if (line.task_id !== taskId && line.task !== taskId) continue;
     if (line.step === "verdict" && typeof line.run_id === "string") {
       stageByRun.set(line.run_id, line.stage);
-      if (!isEnvironmentalBlock(line.verdict, line.stage)) environmentalStreak = 0;
+      // W1-T4655/W1-T4701: a thrown run's verdict keeps the streak, as its verdict-less row did.
+      const thrownRunEnding = typeof line.stage === "string" && THROWN_RUN_VERDICT_STAGES.has(line.stage);
+      if (!thrownRunEnding && !isEnvironmentalBlock(line.verdict, line.stage)) environmentalStreak = 0;
     }
     if (line.step === "run.start") {
       if (retryPending) retrySpent = true;
@@ -4107,6 +4231,9 @@ interface PrewarmWorkerResponse {
   issues?: PrewarmChannelOutcome<BoardIssueRest>;
   /** One `[url, state]` per readable ref; an unreadable one is absent, as the synchronous read caches nothing. */
   reviews?: Array<[string, ReviewStateValue]>;
+  /** The newest X-Ratelimit-* reading off the walk's own metered calls, and how many calls the walk made. */
+  rateLimit?: GhRateLimitReading;
+  calls?: number;
 }
 
 /** Runs one channel's fetch inside the worker and NEVER throws out of this function — a failure becomes data in
@@ -4138,18 +4265,21 @@ function runPrewarmChannelsSync(req: PrewarmWorkerRequest): PrewarmWorkerRespons
   const walkPacer = createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {});
   const runSync = (args: string[]): string =>
     ghExecFile(req.ghBin, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26, timeout: GH_CALL_TIMEOUT_MS });
+  const response: PrewarmWorkerResponse = { calls: 0 };
   const makeFetchJson = (): { fetchJson: (args: string[]) => unknown; bytes: () => number } => {
     let bytes = 0;
     return {
       fetchJson: (args: string[]): unknown => {
-        const raw = paceGhEntry(walkPacer, isGhRateLimitError, () => runSync(args));
-        bytes += Buffer.byteLength(raw, "utf8");
-        return JSON.parse(raw);
+        response.calls = (response.calls ?? 0) + 1;
+        const { headers, body } = splitGhHeaderBlock(paceGhEntry(walkPacer, isGhRateLimitError, () => runSync(["api", "-i", ...args.slice(1)])));
+        const reading = parseGhRateLimitHeaders(headers);
+        if (reading.remaining !== undefined) response.rateLimit = reading;
+        bytes += Buffer.byteLength(body, "utf8");
+        return JSON.parse(body);
       },
       bytes: () => bytes,
     };
   };
-  const response: PrewarmWorkerResponse = {};
   if (req.fetchOpen) {
     const { fetchJson, bytes } = makeFetchJson();
     response.open = prewarmRunChannel(() => fetchBoardPrsRest(req.owner, req.repo, fetchJson, undefined, "open"), bytes);
@@ -4168,6 +4298,7 @@ function runPrewarmChannelsSync(req: PrewarmWorkerRequest): PrewarmWorkerRespons
   if (req.reviewRefs && req.reviewRefs.length > 0) {
     const reviews: Array<[string, ReviewStateValue]> = [];
     for (const ref of req.reviewRefs) {
+      response.calls = (response.calls ?? 0) + 1;
       try {
         reviews.push([ref.url, reviewStateFromCombinedStatus(JSON.parse(runSync(combinedStatusRestArgs(req.owner, req.repo, ref.headRef))))]);
       } catch {
@@ -4247,6 +4378,8 @@ export function buildBatchedGithub(
     /** How far AHEAD of expiry `warm()` refreshes: a warm on the TTL's own cadence must pass that cadence, or the
      *  cache expires between two warms and the next request walks GitHub on the serving thread. Omitted ⇒ 0. */
     prewarmLeadMs?: number;
+    /** W1-T4771: start in {@link GitHub.serveOffLoop} mode, so no child process is ever spawned on the calling thread. */
+    offLoop?: boolean;
   } = {},
 ): GitHub {
   const ttlMs = opts.ttlMs ?? 15_000;
@@ -4266,6 +4399,14 @@ export function buildBatchedGithub(
   const pacer = opts.pacer ?? (defaultGhCallPacer ??= createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {}));
   const now = opts.now ?? (() => Date.now());
   const log = opts.log ?? (() => {});
+  // W1-T4771: off-loop mode (serve). The pacer it runs under refuses rather than sleeping the thread, and a due
+  // read is only ever REQUESTED of the background walk, at most once per `warmRetryGapMs`, so a walk that keeps
+  // failing is not respawned by every board read.
+  let offLoop = opts.offLoop ?? false;
+  const offLoopPacer = createNonBlockingGhCallPacer();
+  const activePacer = (injected: boolean): GhCallPacer => (offLoop && !injected ? offLoopPacer : pacer);
+  const warmRetryGapMs = Math.min(ttlMs, 15_000);
+  let lastWarmRequestAt: number | undefined;
   /**
    * W1-T2323: PER HALF, because the halves attempt independently and a single pair of flags would let the
    * second attempt ERASE the first one's verdict — an open-half outage masked by a merged-half success is the
@@ -4288,6 +4429,7 @@ export function buildBatchedGithub(
   /** The one background walk this gateway ever has in flight at a time (W1-T2440) — a second `warm()` while
    *  this is set is a no-op, exactly like the existing "within TTL" no-op the synchronous path has. */
   let prewarmWorker: Worker | undefined;
+  let lastWarm: WarmRefreshOutcome | undefined;
   const lastFetchFailed = (): boolean => (openOutcome?.failed ?? false) || (mergedOutcome?.failed ?? false);
   const lastFetchFailureReason = (): GhFailureReason | undefined =>
     (openOutcome?.failed ? openOutcome.reason : undefined) ?? (mergedOutcome?.failed ? mergedOutcome.reason : undefined);
@@ -4365,6 +4507,7 @@ export function buildBatchedGithub(
       // reach here, so a third arm would be dead code no fixture could exercise.
       if (half === "open") lastOpenTruncated = fetched.truncated;
       else lastClosedTruncated = fetched.truncated;
+      if (half === "open" && !fetched.truncated) snapshotCache?.commitOpen?.(fetched.rows, now());
       // W1-T181: log the payload size on every SUCCESSFUL fetch, so the next approach to whatever ceiling is
       // set above is observable in advance instead of arriving as a silent outage. Call count and mode are
       // W1-T265 additions — that change's whole claim is the count, so it is measured here.
@@ -4427,12 +4570,16 @@ export function buildBatchedGithub(
     // W1-T2440: same guard as the row readers'. The fallback mirrors this function's own pre-first-fetch answer
     // (empty maps), never a new "no issues" fabrication.
     if (issuesWarmInFlight) return issueCache ?? { at: 0, byUrl: new Map(), byNum: new Map() };
+    if (offLoop && !opts.fetchAllIssues) {
+      if (!issueCache || now() - issueCache.at >= ttlMs) requestWarm();
+      return issueCache ?? { at: 0, byUrl: new Map(), byNum: new Map() };
+    }
     if (!issueCache || now() - issueCache.at >= ttlMs) {
       let all: BatchedIssue[];
       try {
         // W1-T468/W1-T1005: waits its turn on the shared pacer — an explicit `opts.pacer`, or the module-scoped
         // default — BEFORE the real call, and reports back whether it was rate-limited.
-        all = paceGhEntry(pacer, isGhRateLimitError, fetchAllIssues);
+        all = paceGhEntry(activePacer(opts.fetchAllIssues !== undefined), isGhRateLimitError, fetchAllIssues);
         lastIssueFetchFailed = false;
         lastIssueFetchFailureReason = undefined;
         log("board_gateway.issue_fetch_ok", { issueCount: all.length });
@@ -4511,7 +4658,7 @@ export function buildBatchedGithub(
       try {
         // W1-T468: same shared-pacer guard as the issue fetch above — one pacer instance across BOTH of this
         // gateway's reads, and run-task.ts's sweep enumeration, keeps three polite callers off second zero.
-        all = paceGhEntry(pacer, isGhRateLimitError, fetch);
+        all = paceGhEntry(activePacer(opts.fetchAll !== undefined), isGhRateLimitError, fetch);
         record({ failed: false, reason: undefined });
         log("board_gateway.fetch_ok", { prCount: all.length, channel });
       } catch (err) {
@@ -4547,6 +4694,10 @@ export function buildBatchedGithub(
     // beats a SECOND synchronous walk racing it on THIS thread. A caller needing to tell "no PRs" from "not
     // fetched yet" has `readState()`, which reports `"in_flight"` for the whole time this guard is taken.
     if (openWarmInFlight) return openHalf?.rows ?? [];
+    if (offLoop) {
+      if (!openHalf || now() - openHalf.at >= effectiveOpenTtlMs()) requestWarm();
+      return openHalf?.rows ?? [];
+    }
     if (!openHalf || now() - openHalf.at >= effectiveOpenTtlMs()) {
       const previouslyOpen = openHalf ? new Set(openHalf.rows.map((p) => p.number)) : undefined;
       const fetched = attemptFetch(() => restFetchHalf("open"), "open");
@@ -4580,6 +4731,10 @@ export function buildBatchedGithub(
     if (!splitHalves) return bothHalves().merged;
     // W1-T2440: same guard as `openRows` immediately above — the background worker owns this refresh.
     if (mergedWarmInFlight) return mergedHalf?.rows ?? [];
+    if (offLoop) {
+      if (!mergedHalf || now() - mergedHalf.at >= effectiveMergedTtlMs()) requestWarm();
+      return mergedHalf?.rows ?? [];
+    }
     if (!mergedHalf || now() - mergedHalf.at >= effectiveMergedTtlMs()) {
       const fetched = attemptFetch(() => restFetchHalf("closed"), "merged");
       // Verbatim, same reasoning as the open half — `mergedNewestFirst`'s own filter still decides merged-ness.
@@ -4691,7 +4846,7 @@ export function buildBatchedGithub(
    *  bodies for every absent id lets its gateway TTL expire mid-pass and restarts the same GitHub walk. */
   const mergedTrailerLookup = (): ((taskId: string) => PrRef | null) | null => {
     const idx = index();
-    if (lastFetchFailed()) return null;
+    if (unreadable()) return null;
     const byTask = new Map<string, PrRef>();
     for (const pr of idx.mergedNewestFirst) {
       for (const rawLine of (pr.body ?? "").split(/\r?\n/)) {
@@ -4727,6 +4882,7 @@ export function buildBatchedGithub(
     openHalf = { at: now(), rows: outcome.rows };
     openEpoch += 1;
     lastOpenTruncated = outcome.truncated;
+    if (!outcome.truncated) snapshotCache?.commitOpen?.(outcome.rows, now());
     log("board_gateway.fetch_ok", { prCount: outcome.rows.length, channel: "open" });
     log("board_gateway.fetch_bytes", { bytes: outcome.bytes, restCalls: outcome.calls, mode: outcome.mode, truncated: outcome.truncated, half: "open" });
     // W1-T2323's own cross-half invalidation, replayed here verbatim for the async path — see `openRows`'s doc
@@ -4735,7 +4891,8 @@ export function buildBatchedGithub(
       const stillOpen = new Set(outcome.rows.map((p) => p.number));
       for (const number of previouslyOpen) {
         if (!stillOpen.has(number)) {
-          mergedHalf = undefined;
+          // W1-T4771: off-loop keeps the held rows, marked due, so a read serves them stale rather than an empty half.
+          mergedHalf = offLoop && mergedHalf ? { ...mergedHalf, at: Number.MIN_SAFE_INTEGER } : undefined;
           break;
         }
       }
@@ -4804,6 +4961,18 @@ export function buildBatchedGithub(
     if (fetchIssues) issuesWarmInFlight = true;
     for (const ref of reviewRefs) reviewsWarmInFlight.add(ref.url);
     fetchInFlight = true;
+    const recordWarm = (msg: PrewarmWorkerResponse | undefined): void => {
+      const channels = [msg?.open, msg?.merged, msg?.issues].filter((c) => c !== undefined);
+      const calls = msg?.calls ?? 0;
+      lastWarm = {
+        seq: (lastWarm?.seq ?? 0) + 1,
+        settledAtMs: now(),
+        durationMs: Math.max(0, now() - startedAt),
+        spend: [{ resource: msg?.rateLimit?.resource ?? "core", calls, reading: msg?.rateLimit }],
+        rateLimited: channels.some((c) => !c.ok && c.reason === "rate_limit"),
+        failed: !msg || channels.some((c) => !c.ok),
+      };
+    };
     const finish = (): void => {
       prewarmWorker = undefined;
       openWarmInFlight = false;
@@ -4833,13 +5002,23 @@ export function buildBatchedGithub(
       // this fix degrades to a blocking call on the request-serving thread, and even degraded it stays
       // binary-aware.
       finish();
-      console.error(`board gateway: prewarm worker spawn failed, falling back to a synchronous walk: ${err instanceof Error ? err.message : String(err)}`);
       const elapsedMs = Math.max(0, now() - startedAt);
+      if (offLoop) {
+        // W1-T4771: no synchronous fallback on serve's thread — the channels this call asked for are marked failed.
+        const failure = { ok: false as const, reason: "transport" as GhFailureReason, message: `prewarm worker spawn failed: ${err instanceof Error ? err.message : String(err)}` };
+        if (fetchOpen) applyOpenOutcome(failure, elapsedMs, previouslyOpen);
+        if (fetchMerged) applyMergedOutcome(failure, elapsedMs);
+        if (fetchIssues) applyIssuesOutcome(failure);
+        recordWarm(undefined);
+        return;
+      }
+      console.error(`board gateway: prewarm worker spawn failed, falling back to a synchronous walk: ${err instanceof Error ? err.message : String(err)}`);
       const response = runPrewarmChannelsSync(req);
       if (response.open) applyOpenOutcome(response.open, elapsedMs, previouslyOpen);
       if (response.merged) applyMergedOutcome(response.merged, elapsedMs);
       if (response.issues) applyIssuesOutcome(response.issues);
       applyReviews(response.reviews);
+      recordWarm(response);
       return;
     }
     prewarmWorker = worker;
@@ -4848,10 +5027,11 @@ export function buildBatchedGithub(
     // SET, so every LATER warm became a permanent no-op. The latch is not three independent handlers, because
     // `error` and `exit` BOTH fire for a crashed worker.
     let settled = false;
-    const settle = (apply: () => void): void => {
+    const settle = (apply: () => void, msg?: PrewarmWorkerResponse): void => {
       if (settled) return;
       settled = true;
       apply();
+      recordWarm(msg);
       finish();
     };
     worker.once("exit", (code) => {
@@ -4874,7 +5054,7 @@ export function buildBatchedGithub(
         if (msg.merged) applyMergedOutcome(msg.merged, elapsedMs);
         if (msg.issues) applyIssuesOutcome(msg.issues);
         applyReviews(msg.reviews);
-      });
+      }, msg);
       void worker.terminate();
     });
     worker.once("error", (err) => {
@@ -4890,6 +5070,16 @@ export function buildBatchedGithub(
     });
   };
 
+  // W1-T4771: hands a due read to the background walk. Never fetches here, and at most once per `warmRetryGapMs`.
+  const requestWarm = (): void => {
+    if (lastWarmRequestAt !== undefined && now() - lastWarmRequestAt < warmRetryGapMs) return;
+    lastWarmRequestAt = now();
+    runPrewarmWorker();
+  };
+  // W1-T4771: off-loop, a PR half never collected reads as a FAILED read, never as "GitHub holds zero PRs".
+  const notYetCollected = (): boolean => offLoop && splitHalves && (!openHalf || !mergedHalf);
+  const unreadable = (): boolean => lastFetchFailed() || notYetCollected();
+
   return {
     prByRef(ref) {
       const p = lookup(ref);
@@ -4901,14 +5091,14 @@ export function buildBatchedGithub(
       if (hit) return asRef(hit);
       // W1-T2387: THIS is the gateway `resolveAlreadySatisfied` actually builds, so the union has to live here
       // too or the fix ships unwired. Body first; a FAILED fetch still reports as a failure.
-      if (lastFetchFailed()) return null;
+      if (unreadable()) return null;
       return commitTrailerFallback(taskId)[0] ?? null;
     },
     findMergedByTrailerAll(taskId) {
       // W1-T441: NO ADDITIONAL FETCH — the merged index already carries every merged PR's body from the ONE
       // batched read, so this is a filter over data in hand. null on a fetch failure (W1-T119), never [].
       const anchored = new RegExp(`^Remudero-Task:\\s*${escapeRegExp(taskId)}\\s*$`, "m");
-      if (lastFetchFailed()) return null;
+      if (unreadable()) return null;
       const byBody = index().mergedNewestFirst.filter((p) => anchored.test(p.body ?? "")).map(asRef);
       // W1-T2387: union, body-first — see the sibling above.
       return byBody.length > 0 ? byBody : commitTrailerFallback(taskId);
@@ -4916,12 +5106,12 @@ export function buildBatchedGithub(
     findMergedByHeadBranch(taskId) {
       // W1-T257: client-side head-ref match from the SAME single fetch — zero extra calls, STRUCTURED ref only.
       const idx = index();
-      return lastFetchFailed() ? null : idx.mergedNewestFirst.filter((p) => ownsBranch(p.headRefName, taskId)).map(asRef);
+      return unreadable() ? null : idx.mergedNewestFirst.filter((p) => ownsBranch(p.headRefName, taskId)).map(asRef);
     },
     listMergedHeadBranches() {
       // W1-T257: every merged PR with its head ref, from the ONE fetch; projectPlan groups client-side.
       const idx = index();
-      return lastFetchFailed() ? null : idx.mergedNewestFirst.map(asRef);
+      return unreadable() ? null : idx.mergedNewestFirst.map(asRef);
     },
     mergedTrailerLookup,
     listOpenHeadBranches() {
@@ -4929,7 +5119,7 @@ export function buildBatchedGithub(
       // gateway answering this walked 26 REST requests over 22.2 s for 6 open rows; it now walks 1 request over
       // 432 ms. THE VALUE IS UNCHANGED: the rows come from GitHub's own open-state query.
       const open = openRows();
-      return lastFetchFailed()
+      return unreadable()
         ? null
         : open
             .filter((p) => p.state === "OPEN")
@@ -4955,7 +5145,7 @@ export function buildBatchedGithub(
       const cached = changedFilesByUrl.get(prUrl);
       if (cached !== undefined) return cached ?? undefined;
       const number = prUrl.match(/\/pull\/(\d+)/)?.[1];
-      if (!number) return undefined;
+      if (!number || offLoop) return undefined;
       let paths: string[] | undefined;
       try {
         const raw = run(["api", "--paginate", `repos/${owner}/${repo}/pulls/${number}/files`, "--jq", ".[].filename"]);
@@ -4986,6 +5176,10 @@ export function buildBatchedGithub(
       if (!headRef) return undefined; // open PR with no resolvable head ref -> undetermined
       const cached = reviewStateCache.get(prUrl);
       if (cached && (now() - cached.at < ttlMs || reviewsWarmInFlight.has(prUrl))) return cached.state;
+      if (offLoop) {
+        requestWarm();
+        return cached?.state;
+      }
       try {
         const state = reviewStateFromCombinedStatus(JSON.parse(run(combinedStatusRestArgs(owner, repo, headRef))));
         reviewStateCache.set(prUrl, { at: now(), state });
@@ -5004,7 +5198,7 @@ export function buildBatchedGithub(
     // W1-T2440: an INJECTED gateway keeps calling the index builders directly and SYNCHRONOUSLY, since a
     // `Worker` cannot receive a closure; the real, unconfigured default takes `runPrewarmWorker`.
     warm() {
-      if (opts.exec || opts.fetchAll || opts.fetchAllIssues) {
+      if (opts.fetchAll || opts.fetchAllIssues || (opts.exec && !offLoop)) {
         index();
         issueIndex();
         return;
@@ -5022,10 +5216,10 @@ export function buildBatchedGithub(
     // UNCHANGED; only a caller that asks FIRST changes, and it now gets the honest "not attempted" reading
     // rather than a forced, blocking fetch.
     readFailed() {
-      return lastFetchFailed();
+      return unreadable();
     },
     readFailureReason() {
-      return lastFetchFailureReason();
+      return lastFetchFailureReason() ?? (notYetCollected() ? "not_yet_collected" : undefined);
     },
     readState() {
       return fetchState();
@@ -5043,14 +5237,29 @@ export function buildBatchedGithub(
     },
     issueReadFailed() {
       issueIndex();
-      return lastIssueFetchFailed;
+      return lastIssueFetchFailed || (offLoop && !opts.fetchAllIssues && !issueCache);
     },
     // W1-T2219: closes rationale (2)(c) — the issue-channel failure reason was already classified and logged
     // but had no accessor, so it was reachable only by reading the ledger, never by a caller. Non-forcing, like
     // `readFailureReason()` above: a caller consults this only after `issueReadFailed()`, which already forces
     // the issue index, is `true`.
     issueReadFailureReason() {
-      return lastIssueFetchFailureReason;
+      return lastIssueFetchFailureReason ?? (offLoop && !opts.fetchAllIssues && !issueCache ? "not_yet_collected" : undefined);
+    },
+    serveOffLoop() {
+      offLoop = true;
+    },
+    warmsOffLoop() {
+      return offLoop && !opts.fetchAll && !opts.fetchAllIssues;
+    },
+    warmTelemetry() {
+      return { inFlight: prewarmWorker !== undefined, last: lastWarm };
+    },
+    factsAgeMs() {
+      return openHalf && mergedHalf ? Math.max(0, now() - Math.min(openHalf.at, mergedHalf.at)) : undefined;
+    },
+    factsStale() {
+      return !openHalf || !mergedHalf || now() - openHalf.at >= effectiveOpenTtlMs() || now() - mergedHalf.at >= effectiveMergedTtlMs();
     },
   };
 }

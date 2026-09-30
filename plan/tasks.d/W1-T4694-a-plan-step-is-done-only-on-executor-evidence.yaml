@@ -1,0 +1,38 @@
+- id: W1-T4694
+  title: "A PLAN STEP IS DONE ONLY ON EXECUTOR EVIDENCE — once W1-T4657 labels caller-posted completions self-reported, an intent plan still counts any completion carrying an evidenceRef as a finished step, so a catalogue step can read succeeded on a caller's word"
+  repo: remudero
+  depends_on: ["W1-T3898", "W1-T4657"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  band_meaning: blast-radius
+  origin: "operator session 2026-09-28: follow-up named by W1-T4657's build"
+  plan_refs: ["W1-T3898", "W1-T4657", "W1-T4658"]
+  files:
+    - src/lib/intent-plan.ts
+    - test/a-plan-step-is-done-only-on-executor-evidence.test.ts
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T3898's intent plan reads `succeeded` only when every linked action has a completion receipt
+    carrying `evidenceRef`. W1-T4657 (in review) makes the executor write catalogue completions
+    itself with `code: "executor"` and an evidenceRef citing the executor's own ledger row, and
+    labels every caller-posted completion `code: "self-reported"`. The plan's execution reader does
+    not distinguish the two, so a step whose capability is in the executor catalogue can still read
+    done on a caller's claim — exactly the self-reporting W1-T4657 exists to remove.
+  design: |
+    In the intent plan's execution derivation, a step whose action capability is in W1-T4657's
+    executor catalogue counts as completed only on a completion receipt with `code: "executor"`; a
+    self-reported completion for such a step leaves it `awaiting-receipt` and is surfaced by name
+    (for example `self-reported-completion-ignored`) so the operator sees why. Steps whose
+    capability is outside the catalogue keep today's rule and are labelled self-reported in the
+    plan view. No change to the executor or the completion route.
+  acceptance:
+    - claim: "a catalogue step reads succeeded only on an executor completion receipt, a self-reported completion for it leaves the step awaiting a receipt with a named reason, and a non-catalogue step keeps today's rule"
+      proof: "unit test: test/a-plan-step-is-done-only-on-executor-evidence.test.ts"
+  falsifier: |
+    Post a caller completion with an evidenceRef for a `rmd.task.kick` step: the plan must not read
+    succeeded.

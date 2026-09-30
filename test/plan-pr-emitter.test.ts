@@ -6,7 +6,6 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import {
-  buildPlanPrBody,
   bodyNeedsAcceptanceRepair,
   buildPlanPrCommitMessage,
   createPlanPrRest,
@@ -14,6 +13,7 @@ import {
   filingAcceptanceCriteria,
   renderAcceptanceBlock,
 } from "../src/lib/plan-pr-emitter.js";
+import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
 
 // ── W1-T136: the shared plan-PR gate-contract module ────────────────────────────────────────
@@ -192,7 +192,7 @@ test("buildPlanPrCommitMessage: includes a correctly-formatted trailer when a ta
 // ── 5. PR-body assembly ──────────────────────────────────────────────────────────────────────
 
 test("buildPlanPrBody: assembles a judgeable body with NO trailer when taskId is omitted (the filing case)", () => {
-  const body = buildPlanPrBody({
+  const body = buildFixturePlanPrBody({
     intro: "Some intro prose.",
     criteria: filingAcceptanceCriteria(["W1-T900"], ["plan/tasks.yaml", "MASTER-PLAN.md"]),
   });
@@ -201,7 +201,7 @@ test("buildPlanPrBody: assembles a judgeable body with NO trailer when taskId is
 });
 
 test("buildPlanPrBody: includes the trailer when taskId is given (the implementing-PR case)", () => {
-  const body = buildPlanPrBody({
+  const body = buildFixturePlanPrBody({
     intro: "intro",
     criteria: [{ claim: "c", proof: "p" }],
     taskId: "W1-T5",

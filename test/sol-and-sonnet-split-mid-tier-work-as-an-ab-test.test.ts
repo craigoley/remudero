@@ -67,7 +67,7 @@ function capacity(provider: "claude" | "codex", usedPercent: number, model?: str
 }
 
 test("the assignment row carries the ab marker from a headroom auction and from nothing else", () => {
-  const claude = capacity("claude", 40);
+  const claude = capacity("claude", 40, "claude-sonnet-5");
   const codex = capacity("codex", 50, "gpt-6-sol");
   const input = {
     provider: "codex" as const,
@@ -80,7 +80,7 @@ test("the assignment row carries the ab marker from a headroom auction and from 
     policy: { preference: "automatic" as const, reservePercent: 5, provenance: "default" as const },
     capability: "balanced" as const,
   };
-  const args = { cwd: "/w", prompt: "p", model: "sonnet", effort: "high" } as SpawnWorkerArgs;
+  const args = { cwd: "/w", prompt: "p", taskId: "W1-T4617", model: "sonnet", effort: "high" } as SpawnWorkerArgs;
   assert.equal(workerSelectionAssignment(args, input).routing.decision?.ab, "sol-vs-sonnet");
   const preferred = workerSelectionAssignment(args, { ...input, capabilityPreference: { capability: "balanced", provider: "claude" } });
   assert.equal(preferred.routing.decision?.ab, undefined, "a preference, not headroom, chose this arm");
@@ -92,23 +92,30 @@ function assignment(task: string, id: string, provider: "claude" | "codex", ts: 
     run_id: `run-${task}`,
     task_id: task,
     step: "worker.assignment",
-    worker_assignment: { id, selected: { provider }, routing: { decision: ab ? { rule: "headroom-auction", ab } : { rule: "headroom-auction" } } },
+    worker_assignment: {
+      id,
+      selected: { provider, model: provider === "claude" ? "claude-sonnet-5" : "gpt-6-sol" },
+      routing: { decision: ab ? { rule: "headroom-auction", ab, considered: [
+        { provider: "claude", model: "claude-sonnet-5", eligible: true },
+        { provider: "codex", model: "gpt-6-sol", eligible: true },
+      ] } : { rule: "headroom-auction" } },
+    },
   };
 }
 
 const ROWS = [
   { ts: "2026-09-24T00:00:00Z", task_id: "T1", step: "verdict.merged" },
   assignment("T1", "a1", "claude", "2026-09-24T01:00:00Z"),
-  { ts: "2026-09-24T01:30:00Z", task_id: "T1", step: "implement.done", selection_assignment_id: "a1", worker_duration_ms: 600_000, tokens: { input: 1000, output: 200 }, cost_usd: 4 },
+  { ts: "2026-09-24T01:30:00Z", task_id: "T1", step: "worker.attempt", selection_assignment_id: "a1", worker_duration_ms: 600_000, tokens: { input: 1000, output: 200 }, total_cost_usd: 4, billing_mode: "subscription" },
   { ts: "2026-09-24T02:00:00Z", task_id: "T1", step: "fix.dispatch" },
   { ts: "2026-09-24T03:00:00Z", task_id: "T1", step: "fix.dispatch" },
   { ts: "2026-09-24T04:00:00Z", task_id: "T1", step: "verdict.merged" },
   { ts: "2026-09-24T00:30:00Z", task_id: "T2", step: "verdict.merged" },
   { ts: "2026-09-24T00:40:00Z", task_id: "T3", step: "fix.dispatch" },
   assignment("T2", "a2", "claude", "2026-09-24T01:00:00Z"),
-  { ts: "2026-09-24T01:40:00Z", task_id: "T2", step: "verdict", selection_assignment_id: "a2", worker_duration_ms: 1_200_000, tokens: { input: 3000, output: 600 }, cost_usd: 6 },
+  { ts: "2026-09-24T01:40:00Z", task_id: "T2", step: "verdict", selection_assignment_id: "a2", worker_duration_ms: 1_200_000, tokens: { input: 3000, output: 600 }, total_cost_usd: 6, billing_mode: "subscription" },
   assignment("T3", "a3", "codex", "2026-09-24T01:00:00Z"),
-  { ts: "2026-09-24T01:20:00Z", task_id: "T3", step: "implement.done", selection_assignment_id: "a3", worker_duration_ms: 300_000, tokens: { input: 500, output: 100 }, cost_usd: 0 },
+  { ts: "2026-09-24T01:20:00Z", task_id: "T3", step: "worker.attempt", selection_assignment_id: "a3", worker_duration_ms: 300_000, tokens: { input: 500, output: 100 }, cost_usd: 0 },
   { ts: "2026-09-24T05:00:00Z", task_id: "T3", step: "verdict.merged" },
   assignment("T4", "a4", "codex", "2026-09-24T01:00:00Z"),
   assignment("T4", "a5", "claude", "2026-09-24T02:00:00Z"),
@@ -131,7 +138,10 @@ test("the evaluator compares merge rate fix strikes time and cost per arm", () =
     meanFixDispatches: 1,
     medianWorkerMinutes: 15,
     meanTokens: 2400,
+    meanCashCostUsd: null,
     meanNotionalCostUsd: 5,
+    costMissingAssignments: 0,
+    nonStarterAssignments: 1,
   });
   assert.equal(sol?.tasks, 2, "the mixed task counts under the arm of its first tagged assignment");
   assert.equal(sol?.merged, 1);
@@ -147,8 +157,8 @@ test("rmd routing-ab prints each arm and refuses an unknown flag", async () => {
   const readRows = async () => ROWS;
   assert.equal(await routingAbCommand([], { stateDir: "/state", readRows, today: "2026-10-09", print: (line) => lines.push(line) }), 0);
   assert.match(lines[0]!, /\/state \(16 ledger rows read\)/);
-  assert.match(lines[1]!, /^sol-vs-sonnet: insufficient sample; 5 assignments, 1 tasks in both arms, 0 crossover tasks; revisit 2026-10-08 \(DUE\)$/);
-  assert.match(lines[2]!, /sonnet \(claude\): 2 tasks, 1 merged \(50\.0%\), 1\.0 fix dispatches\/task, 15\.0 min median, 2400 tokens, \$5\.00 notional/);
+  assert.match(lines[1]!, /^sol-vs-sonnet: insufficient sample; 5 assignments, 1 tasks in both arms, 0 crossover tasks; 0 generic units, 0 changed treatments and 0 unverified treatments excluded; revisit 2026-10-08 \(DUE\)$/);
+  assert.match(lines[2]!, /sonnet \(claude\): 2 tasks, 1 merged \(50\.0%\), 1\.0 fix dispatches\/task, 15\.0 min median, 2400 tokens, \$n\/a cash, \$5\.00 notional \(0 cost missing, 1 without attempt receipt\)/);
   const json: string[] = [];
   assert.equal(await routingAbCommand(["--json"], { stateDir: "/state", readRows, today: "2026-09-25", print: (line) => json.push(line) }), 0);
   assert.equal(JSON.parse(json[0]!).reports[0].arms[1].arm, "sol");

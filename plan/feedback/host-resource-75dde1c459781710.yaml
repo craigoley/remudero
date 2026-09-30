@@ -1,0 +1,19 @@
+id: host-resource-75dde1c459781710
+ts: 2026-09-30T12:30:57.361Z
+raw: >-
+  host-resource:azure:state
+
+
+  Host azure, device state: 41.3 GB free, falling 2.3 GB/h (Theil-Sen over 14
+  samples across 1.4 h); projected full in 18.0 h.
+
+  That host's janitor runs about every 6.0 h; the latest pass reclaimed 130 MB.
+attachments: []
+origin: incident#75dde1c4597817102af045f7a447744aab12b4cb55b9b188df98783a7b99cfc2
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

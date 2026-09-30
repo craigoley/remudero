@@ -13,7 +13,18 @@
  * performs no I/O and holds no ledger or HTTP concerns — src/lib/operator-agent.ts is the durable
  * producer/consumer that persists the records this module validates and advances, mirroring the
  * experiment-v1 split between record shape and ledger wiring.
+ *
+ * W1-T4665: the fix-rung prompt is the first candidate ever proposed through reflective evolution
+ * (prompt-evolution.ts) rather than hand-written. `proposePromptEvolutionPromotion`, below, is the
+ * ONLY bridge between that module's candidates and this one's guarded path — it wraps a candidate as
+ * a `proposed` PromotionRecord and nothing else in the codebase installs one directly, so a prompt
+ * candidate reaches production only by clearing this module's shadow -> canary -> observing ->
+ * promoted state machine with rollback, exactly like any other promotion.
  */
+
+import { normalQuantile } from "./eval-card.js";
+import { seedOf, seededRandom } from "./knowledge-value.js";
+import { proposePromptCandidates, type PromptCandidate } from "./prompt-evolution.js";
 
 export const EXPERIMENT_PROMOTION_VERSION = "experiment-promotion-v1";
 
@@ -199,6 +210,69 @@ export function validatePromotionRecord(value: unknown): PromotionRecord | null 
     createdAt: new Date(value.createdAt).toISOString(),
     state: "proposed",
   };
+}
+
+// --- Prompt evolution wiring (W1-T4665) --------------------------------------------------------
+
+/** Everything `proposePromptEvolutionPromotion` needs beyond the candidate itself: the same shape
+ *  `validatePromotionRecord` requires of every other promotion, so a prompt candidate carries the
+ *  identical comparable baseline and canary guardrails as any hand-proposed candidate. */
+export interface PromptEvolutionPromotionInput {
+  basePrompt: string;
+  transcripts: readonly unknown[];
+  seed: string;
+  baseline: string;
+  scope: PromotionScope;
+  comparisonPopulation: string;
+  denominatorFloor: number;
+  observationWindow: PromotionObservationWindow;
+  guardMetrics: PromotionGuardMetric[];
+  maxExposure: number;
+  owner: string;
+  expiresAt: string;
+  createdAt: string;
+  rollback: PromotionRollback;
+}
+
+export interface PromptEvolutionPromotionOutcome {
+  candidates: PromptCandidate[];
+  winner: PromptCandidate | undefined;
+  promotion: PromotionRecord | null;
+}
+
+/**
+ * The ONLY route a fix-rung prompt candidate may take toward production: propose candidates from
+ * recorded fix transcripts via prompt-evolution.ts's reflective, held-out-scored search
+ * (`proposePromptCandidates`), then wrap the leading candidate as a `proposed` `PromotionRecord` —
+ * validated by the exact same `validatePromotionRecord` every other candidate must pass — so it
+ * still has to clear this module's replayPromotion -> approved -> shadow -> canary -> observing ->
+ * promoted path with rollback before it is ever exposed. Nothing else in this codebase installs a
+ * prompt candidate directly: this function performs no I/O itself and returns `promotion: null`
+ * whenever no candidate was proposed or the wrapped record fails validation, rather than a partial
+ * or unguarded promotion.
+ */
+export function proposePromptEvolutionPromotion(input: PromptEvolutionPromotionInput): PromptEvolutionPromotionOutcome {
+  const candidates = proposePromptCandidates(input.basePrompt, input.transcripts, input.seed);
+  const winner = candidates[0];
+  if (!winner) return { candidates, winner: undefined, promotion: null };
+  const promotion = validatePromotionRecord({
+    version: EXPERIMENT_PROMOTION_VERSION,
+    promotionId: `prompt-evolution:${input.seed}:${winner.id}`,
+    candidate: winner.id,
+    baseline: input.baseline,
+    scope: input.scope,
+    comparisonPopulation: input.comparisonPopulation,
+    denominatorFloor: input.denominatorFloor,
+    observationWindow: input.observationWindow,
+    guardMetrics: input.guardMetrics,
+    maxExposure: input.maxExposure,
+    owner: input.owner,
+    expiresAt: input.expiresAt,
+    rollback: input.rollback,
+    createdAt: input.createdAt,
+    state: "proposed",
+  });
+  return { candidates, winner, promotion };
 }
 
 // --- Replay ------------------------------------------------------------------------------------
@@ -912,4 +986,157 @@ export function evaluateAssistantTrust(input: AssistantTrustEvaluationInput): As
   if (input.guard.state === "regressed") return { state: "blocked", reasons: [`guardrail breach: ${input.guard.breachedMetrics.join(", ")}`], evidence };
   if (input.guard.state === "unmeasurable") return { state: "unmeasurable", reasons: input.guard.reasons, evidence };
   return { state: "ready", reasons: [], evidence };
+}
+
+// --- Seed/shuffle promotion gate for learned artifacts (W1-T4669) -----------------------------
+//
+// OBSERVED: arXiv 2608.18066 (Aug 2026) — across self-improving agents, run-to-run variance rose
+// in 71% of cases and a shuffled task order turned an expected +1.5% into -4.5%. Everything above
+// this section guards a promotion's canary EXPOSURE once it is already proposed; nothing above
+// requires the proposal itself to have been measured more than once. A learned artifact (a prompt,
+// workflow, skill, or learning) clears THIS gate before it may ever become a `proposed`
+// PromotionRecord: its effect must be estimated over several INDEPENDENT seeds, each with its own
+// shuffled task order, and the resulting interval must exclude zero. The seed count is never fixed
+// — it grows one seed at a time until the interval is decided or the artifact's seed budget is
+// spent — and every seed, its shuffled order, and the interval are named on the ledger row this
+// section builds, never folded into a single pass/fail bit.
+
+/** Below this many independent seeds the gate is always `undecided`, whatever the interval says —
+ *  a gain seen on one seed alone can never clear it by chance. */
+export const MIN_SEED_SHUFFLE_SEEDS = 3;
+
+const SEED_SHUFFLE_ALPHA = 0.05;
+
+/**
+ * One seed's evidence: the seed itself, the task order that seed ran (POST-shuffle, from {@link
+ * shuffleTaskOrderForSeed}), and the paired effect it measured (candidate minus baseline, e.g.
+ * +0.015 for +1.5%). Seeds are independent draws — the gate below refuses a repeated seed.
+ */
+export interface SeedRunObservation {
+  seed: string;
+  order: readonly string[];
+  effect: number;
+}
+
+export type SeedShuffleDecision = "promote" | "reject" | "undecided";
+
+export interface SeedShuffleInterval {
+  estimate: number;
+  low: number;
+  high: number;
+}
+
+/** The ledger row this gate writes: every seed, the shuffled order it ran, and the interval —
+ *  never a single pass/fail bit standing in for them. */
+export interface SeedShuffleGateResult {
+  version: typeof EXPERIMENT_PROMOTION_VERSION;
+  seeds: string[];
+  orders: Record<string, readonly string[]>;
+  interval: SeedShuffleInterval;
+  decision: SeedShuffleDecision;
+  reasons: string[];
+}
+
+/**
+ * The shuffled task order one seed runs: a Fisher–Yates shuffle of `taskIds` driven by this
+ * artifact's own seed string through the repo's FNV-1a (`seedOf`) -> mulberry32 (`seededRandom`)
+ * draw (knowledge-value.ts) — deterministic and reproducible per seed, never the population's own
+ * natural order.
+ */
+export function shuffleTaskOrderForSeed(taskIds: readonly string[], seed: string): string[] {
+  const rng = seededRandom(seedOf(seed));
+  const order = [...taskIds];
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [order[i], order[j]] = [order[j]!, order[i]!];
+  }
+  return order;
+}
+
+/** Two-sided Wald interval over the per-seed effects at the seed-shuffle alpha. */
+function seedShuffleInterval(effects: readonly number[]): SeedShuffleInterval {
+  const n = effects.length;
+  const estimate = effects.reduce((sum, value) => sum + value, 0) / n;
+  if (n < 2) return { estimate, low: estimate, high: estimate };
+  const variance = effects.reduce((sum, value) => sum + (value - estimate) ** 2, 0) / (n - 1);
+  const se = Math.sqrt(variance / n);
+  const z = normalQuantile(1 - SEED_SHUFFLE_ALPHA / 2);
+  return { estimate, low: estimate - z * se, high: estimate + z * se };
+}
+
+/**
+ * Decides whether the seeds observed SO FAR settle the artifact's promotion: `promote` when the
+ * interval excludes zero on the high side, `reject` when it excludes zero on the low side or the
+ * seed budget is spent without ever excluding zero, and `undecided` otherwise — including always
+ * below {@link MIN_SEED_SHUFFLE_SEEDS} seeds, and always when a seed was reused (independence
+ * broken, so nothing here can be decided). `seedsRemaining` is how many more seeds this artifact's
+ * budget share can still afford; once it hits zero an undecided interval becomes a `reject`, never
+ * a silent `undecided` that a caller might mistake for still-pending.
+ */
+export function evaluateSeedShuffleGate(observations: readonly SeedRunObservation[], seedsRemaining: number): SeedShuffleGateResult {
+  const seeds = observations.map((observation) => observation.seed);
+  const orders: Record<string, readonly string[]> = Object.fromEntries(observations.map((observation) => [observation.seed, observation.order]));
+  const interval = seedShuffleInterval(observations.map((observation) => observation.effect));
+  const base = { version: EXPERIMENT_PROMOTION_VERSION as typeof EXPERIMENT_PROMOTION_VERSION, seeds, orders, interval };
+  if (new Set(seeds).size !== seeds.length) {
+    return { ...base, decision: "reject", reasons: ["a seed was reused: independent seeds are required and none may repeat"] };
+  }
+  if (observations.length < MIN_SEED_SHUFFLE_SEEDS) {
+    return { ...base, decision: "undecided", reasons: [`fewer than ${MIN_SEED_SHUFFLE_SEEDS} independent seeds observed so far`] };
+  }
+  const excludesZero = interval.low > 0 || interval.high < 0;
+  if (excludesZero) return { ...base, decision: interval.low > 0 ? "promote" : "reject", reasons: [] };
+  if (seedsRemaining > 0) return { ...base, decision: "undecided", reasons: ["the interval still includes zero and more seeds remain affordable"] };
+  return { ...base, decision: "reject", reasons: ["the interval still includes zero once the seed budget was spent"] };
+}
+
+/** One more seed's evidence: its own shuffled order and the paired effect it measured. */
+export type SeedShuffleRunner = (seed: string, order: readonly string[]) => SeedRunObservation | Promise<SeedRunObservation>;
+
+export interface SeedShuffleBudget {
+  /** The most seeds this artifact's budget share may ever spend; the loop never exceeds it. */
+  maxSeeds: number;
+}
+
+/**
+ * Grows the seed count one seed at a time — never a fixed count — running `run` on a freshly
+ * shuffled order for each new seed until {@link evaluateSeedShuffleGate} is no longer `undecided`
+ * (the interval excludes zero, so the artifact is promoted or rejected) or `budget.maxSeeds` is
+ * spent. `nextSeed(index)` must name each new seed deterministically (e.g. so a resumed gate
+ * reproduces the identical seed sequence); `taskIds` is the pinned task population each seed's own
+ * shuffled order is drawn from.
+ */
+export async function runSeedShuffleGate(input: {
+  taskIds: readonly string[];
+  budget: SeedShuffleBudget;
+  nextSeed: (index: number) => string;
+  run: SeedShuffleRunner;
+}): Promise<SeedShuffleGateResult> {
+  const observations: SeedRunObservation[] = [];
+  let gate = evaluateSeedShuffleGate(observations, input.budget.maxSeeds);
+  while (gate.decision === "undecided" && observations.length < input.budget.maxSeeds) {
+    const seed = input.nextSeed(observations.length);
+    const order = shuffleTaskOrderForSeed(input.taskIds, seed);
+    observations.push(await input.run(seed, order));
+    gate = evaluateSeedShuffleGate(observations, input.budget.maxSeeds - observations.length);
+  }
+  return gate;
+}
+
+/** The ledger row a seed-shuffle gate writes for one promotion: every seed, its shuffled order,
+ *  and the interval that decided (or has not yet decided) it — the design's "ledger row names
+ *  seeds, orders and the interval" contract. */
+export interface SeedShuffleLedgerRow {
+  version: typeof EXPERIMENT_PROMOTION_VERSION;
+  promotionId: string;
+  seeds: string[];
+  orders: Record<string, readonly string[]>;
+  interval: SeedShuffleInterval;
+  decision: SeedShuffleDecision;
+  reasons: string[];
+}
+
+export function seedShuffleLedgerRow(promotionId: string, gate: SeedShuffleGateResult): SeedShuffleLedgerRow {
+  return { version: EXPERIMENT_PROMOTION_VERSION, promotionId, seeds: gate.seeds, orders: gate.orders,
+    interval: gate.interval, decision: gate.decision, reasons: gate.reasons };
 }

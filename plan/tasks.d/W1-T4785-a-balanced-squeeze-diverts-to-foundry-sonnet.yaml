@@ -1,0 +1,49 @@
+- id: W1-T4785
+  title: "A BALANCED TASK SQUEEZED OFF BOTH SUBSCRIPTIONS SHOULD RUN ON FOUNDRY SONNET 5.5 — the only Claude cash path is the frontier-only Foundry Opus emergency, so a squeezed balanced (sonnet) task drops to the GPT Luna ladder. Operator ruling 2026-09-29: divert it to the deployed claude-sonnet-5-5 through the same /anthropic adapter, under the Opus emergency's shared Claude daily cap, with Luna kept as the fallback"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-29: switch our smart router and cash lanes to use sonnet 5.5 — ruled: balanced squeeze emergency"
+  note: "reservation hand-off: plan-cash-sonnet-1790686071000 -> plan-cash-sonnet-1790686071000"
+  plan_refs: [W1-T4079, W1-T3614]
+  files: [src/lib/worker-provider.ts, src/lib/worker.ts, test/a-balanced-squeeze-diverts-to-foundry-sonnet.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-29: synthwatch-foundry now serves claude-sonnet-5-5 (GlobalStandard, version 2). A live
+    POST to the daemon's own RMD_FOUNDRY_CLAUDE_ENDPOINT + /v1/messages returned 200 with model claude-sonnet-5-5;
+    claude-opus-5-5 answered the same probe as the control. But the source serves only Opus: FOUNDRY_OPUS_PRICE is
+    the one price row (worker-provider.ts `deployment === "claude-opus-5-5"`), the reservation cap filters to
+    claude-opus-5-5 rows, spawnFoundryOpusWorker refuses any `selection.model !== "claude-opus-5-5"`, and only the
+    subscription_only (frontier) branch of spawnWorker sets cashOpusEmergency. A squeezed balanced task takes
+    `cash-fallback`, and selectOpenWeightModel promotes Luna. The operator ruled on 2026-09-29 that the balanced
+    squeeze should run on Sonnet 5.5, with routine cash staying on the measured nano/OSS/Luna rows.
+  design: |
+    (i) Generalize the Foundry Claude adapter over a deployment -> price table: claude-opus-5-5 keeps its row, and
+    claude-sonnet-5-5 gets its own ($2 input / $10 output per million, Anthropic's list price 2026-09-29; re-read
+    Microsoft's Foundry rate and record readAt). The spawn gate admits either deployment only on a squeeze.
+    (ii) The daily ceiling becomes a FOUNDRY CLAUDE cap. It keeps the {normal 5, squeezed 10} values and is summed
+    over reservations of BOTH deployments, still inside the shared cash dailyCapUsd.
+    (iii) In spawnWorker's non-subscription_only capacity-blocked arm: when the requested model resolves to the
+    `balanced` capability and the Foundry Claude endpoint and key are present, divert first with a new routing rule
+    `cash-sonnet-fallback` to claude-sonnet-5-5. A refusal before transport (cap exhausted, absent credentials,
+    unsupported tool surface) falls through to today's `cash-fallback` Luna path, so the squeeze never holds a task
+    that runs today. Economy and non-squeezed cash are unchanged.
+  acceptance:
+    - claim: "a squeezed balanced task runs on Foundry Sonnet 5.5"
+      proof: 'grep: test("W1-T4785: a squeezed balanced task runs on Foundry Sonnet 5\.5" in test/a-balanced-squeeze-diverts-to-foundry-sonnet.test.ts'
+    - claim: "an exhausted Foundry Claude cap falls back to the Luna cash ladder instead of holding the task"
+      proof: 'grep: test("W1-T4785: an exhausted Foundry Claude cap falls back to the Luna cash ladder" in test/a-balanced-squeeze-diverts-to-foundry-sonnet.test.ts'
+    - claim: "Opus and Sonnet reservations share one Foundry Claude daily cap"
+      proof: 'grep: test("W1-T4785: Opus and Sonnet reservations share one Foundry Claude daily cap" in test/a-balanced-squeeze-diverts-to-foundry-sonnet.test.ts'
+    - claim: "the spawn path calls the generalized Foundry Claude worker"
+      proof: 'grep: spawnFoundryClaudeWorker( in src/lib/worker-provider.ts'
+  falsifier: |
+    Remove the balanced diversion and the first test sees a Luna deployment selected. Filter the cap to Opus
+    alone and the shared-cap test over-admits a Sonnet reservation.

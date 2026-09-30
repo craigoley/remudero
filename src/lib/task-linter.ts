@@ -55,12 +55,15 @@ export type LintCheck =
   | "proof-grep-safety"
   | "proof-grep-unmatchable"
   | "proof-grep-self-certifying"
+  | "proof-grep-already-true"
   | "proof-engine-divergence"
   | "proof-scope"
   | "proof-self-path"
+  | "record-task"
   | "proof-name-resolution"
   | "proof-unit-test-unresolvable"
   | "credited-test-path"
+  | "credited-file-coverage"
   | "shared-proof"
   | "unbound-criterion"
   | "post-merge-amendment"
@@ -87,7 +90,8 @@ export type LintCheck =
   | "advisory-routing"
   | "deferred-follow-up"
   | "proof-base-discrimination"
-  | "proof-unit-test-base-wrapper";
+  | "proof-unit-test-base-wrapper"
+  | "shard-shape";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -1098,6 +1102,38 @@ export function proofGrepSelfCertifyingViolations(task: Task, opts: LintOpts = {
   return violations;
 }
 
+export function proofGrepAlreadyTrueViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const { readGrepProofFile, baseAcceptance } = opts;
+  if (!readGrepProofFile || !baseAcceptance || task.verify !== "auto") return [];
+  const current = task.acceptance ?? [];
+  const judged = new Set([
+    ...criteriaAdded(baseAcceptance, current),
+    ...criteriaProofChanged(baseAcceptance, current).map((pair) => pair.current),
+  ]);
+  const violations: LintViolation[] = [];
+  current.forEach((c, i) => {
+    if (!judged.has(c) || c.satisfied_by || (c as { kind?: unknown }).kind === "guard") return;
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    const target = whitelisted && proofGrepPatternAndPath(whitelisted);
+    if (!target) return;
+    const rawFileText = readGrepProofFile(target.path);
+    if (rawFileText === undefined) return;
+    const fileText = ownPlanRecordOutsideAcceptance(task.id, target.path, rawFileText) ?? rawFileText;
+    if (classifyGrepZeroHit(target.pattern, fileText) !== "matched") return;
+    violations.push({
+      check: "proof-grep-already-true",
+      severity: "warn",
+      message:
+        `criterion ${i + 1} ("${(c.claim ?? "").slice(0, 60)}") \`grep:\` pattern "${target.pattern.slice(0, 70)}" ` +
+        `ALREADY MATCHES in ${target.path} on this tree, so proof-discrimination (a proof must fail at ` +
+        "the merge base and pass at head) grades it executed_stale and the build can never go green. " +
+        "Re-anchor the pattern on text the build ADDS, or declare `kind: guard` on the criterion when " +
+        "preservation of existing text is the point.",
+    });
+  });
+  return violations;
+}
+
 /** Every `grep:` proof whose named file exists and whose pattern is a POSITIVE detection of
  *  unmatchability: {@link classifyGrepZeroHit} returns "line-seam" or "case-only". Silent otherwise
  *  — not on disk yet, absent in every probed form (both legitimate forward references), or already
@@ -1381,6 +1417,33 @@ export function proofSelfPathViolations(task: Task, opts: LintOpts = {}): LintVi
   return violations;
 }
 
+/** W1-T4818: every proof is a `grep:` of the task's own shard — nothing to build. WARN ONLY (operator 2026-09-30). */
+export function isRecordTask(task: Task): boolean {
+  const ownPath = task.sourcePath;
+  const criteria = task.acceptance ?? [];
+  if (!ownPath || criteria.length === 0) return false;
+  return criteria.every((c) => {
+    if (c.satisfied_by) return false;
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    return whitelisted?.kind === "grep" && proofScopePath(whitelisted) === ownPath;
+  });
+}
+
+export function recordTaskViolations(task: Task): LintViolation[] {
+  if (!isRecordTask(task)) return [];
+  return [
+    {
+      check: "record-task",
+      severity: "warn",
+      message:
+        `task ${task.id}: every acceptance proof greps its OWN shard (${task.sourcePath}), so there is ` +
+        "nothing for a worker to build — the drain routes it to the judge and never dispatches it. " +
+        "Either file it as verify: human (a ruling or a record), or give it real proofs about the " +
+        "implementation it implies.",
+    },
+  ];
+}
+
 function proofTestPath(w: WhitelistedProof): string | undefined {
   const path = proofScopePath(w);
   return path?.startsWith("test/") ? path : undefined;
@@ -1410,6 +1473,55 @@ function creditedTestPathViolations(task: Task, opts: LintOpts = {}): LintViolat
     });
   }
   return violations;
+}
+
+// ── CREDITED-FILE-COVERAGE (W1-T3748 — a task declaring two surfaces is credited in full when
+// one ships) ──────────────────────────────────────────────────────────────────────────────────
+// `ownsBranch`/etc (status.ts) ask "which task does this PR belong to" — right for ATTRIBUTION,
+// wrong for COMPLETION, and the fleet uses one answer for both: a task's `files:` can declare two
+// surfaces, a build ship only one, and the branch-name credit path marks the whole task done with
+// no signal in the CREDITING path itself (W1-T3727 built only its alert_fix half; the retro half
+// was refiled as W1-T3746 only because a human happened to re-read the shard). review.ts's
+// `inverseScopeUntouchedFiles` (W1-T458) already renders this same gap, but only as a REVIEW-time
+// PR-comment advisory `unwiredAdvisoriesFor` itself says is "never consulted by state" — outside
+// the linter this repo's credit-time tooling calls. This gives the same comparison a linter home.
+//
+// ADVISORY, NO SEVERITY KNOB, DELIBERATELY: `files:` is already advisory elsewhere by design (see
+// `creditedTestPathViolations`'s plan-only exemption), so this must not refuse on first landing.
+// Ship a loud named warning; measure how often it fires on recent merges; let that decide whether
+// it ever ratchets to block — unlike every other severity-bearing check here, no `LintOpts` field
+// can escalate this one, because "advisory until measured" is not a default to override away.
+//
+// Gated on the SAME `opts.creditedBuild` contract {@link creditedTestPathViolations} uses (a build
+// actually being credited, never a queued task or whole-plan pass) plus a NEW `opts.creditedDiffFiles`
+// — the diff's changed-file list, from the one caller holding a real diff. Absent either ⇒ silent.
+// `plan/` paths are excluded from "declared": the FILES NOTE precedent (W1-T3730) has a filing's
+// own shard ride in `files:`, and a shard is never something an implementation PR re-touches.
+
+/** Every non-`plan/` path this task's `files:` declares that the diff crediting this task never
+ *  touched. See the section comment above for why this is warn-only with no severity override. */
+export function creditedFileCoverageViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  if (opts.creditedBuild !== true || opts.planOnlyFiling === true) return [];
+  const diffFiles = opts.creditedDiffFiles;
+  if (!diffFiles) return [];
+  const touched = new Set(diffFiles);
+  const declared = (task.files ?? []).filter((f) => !f.startsWith("plan/"));
+  const uncovered = declared.filter((f) => !touched.has(f));
+  if (uncovered.length === 0) return [];
+  return [
+    {
+      check: "credited-file-coverage",
+      severity: "warn",
+      message:
+        `task ${task.id} is credited as a build, but its declared files: name path(s) this diff never ` +
+        `touched: ${uncovered.join(", ")}. The branch-name credit path asks only which task a PR belongs ` +
+        "to, never whether the diff covered the declared scope, so this task would otherwise be marked " +
+        "done by a diff that shipped a strict subset of it. Either extend this build to cover the " +
+        "remaining path(s), or state in the PR which ones were deliberately left and why so the " +
+        "under-coverage is a recorded decision rather than a silent one. Advisory only — files: is " +
+        "advisory elsewhere by design and this does not refuse the build.",
+    },
+  ];
 }
 
 // ── PROOF-BASE-DISCRIMINATION (W1-T2835 — the proof that cannot tell head from base) ─────────
@@ -3249,7 +3361,23 @@ export const PLAN_ONLY_NEW_TASK_DIAGNOSTIC_CHECKS: ReadonlySet<LintCheck> = new 
   "shared-proof",
   "call-site",
   "proof-scope",
+  "shard-shape",
+  "proof-grep-already-true",
 ]);
+
+/** W1-T4700 (#7608): verify in the enum, a known repo, criteria unless human. WARN; promoted above when introduced. */
+export function shardShapeViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const verify: unknown = task.verify;
+  const defects: string[] = [];
+  if (verify !== "auto" && verify !== "human") defects.push(`verify must be "auto" or "human", got ${JSON.stringify(verify)}`);
+  if (opts.knownRepos && !opts.knownRepos.has(task.repo)) {
+    defects.push(`repo ${JSON.stringify(task.repo)} is not a repository the plan knows (${[...opts.knownRepos].sort().join(", ")})`);
+  }
+  if (task.type === "implement" && verify !== "human" && (task.acceptance ?? []).length === 0) {
+    defects.push("an implement task not at verify: human needs at least one acceptance criterion");
+  }
+  return defects.map((d) => ({ check: "shard-shape", severity: "warn", message: `task ${task.id}: ${d}` }));
+}
 
 export function promoteIntroducedPlanOnlyDiagnostics(
   head: readonly LintViolation[],
@@ -3352,10 +3480,14 @@ export interface LintOpts {
    *  are both SILENT, the same contract `blockedDisposition` and `newMonolithIds` already follow, and
    *  for the same reason — a whole-plan run has no base and must not report the standing population. */
   pathExistsAtBase?: (repoRelPath: string) => boolean;
+  /** W1-T3748 — the diff's changed-file list, for {@link creditedFileCoverageViolations}. Supplied
+   *  only by the one caller holding a real diff; absent ⇒ that check is silent. */
+  creditedDiffFiles?: readonly string[];
   /** Severity for {@link proofBaseDiscriminationViolations}. Default "warn", and NO call site wires
    *  "block": path-presence at base is a HEURISTIC for "the proof passes at base", so a repair whose
    *  target test is RED at base discriminates correctly and a blocking arm would refuse it wrongly. */
   proofBaseDiscrimination?: LintSeverity;
+  baseAcceptance?: AcceptanceCriterion[];
   /** The reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to a real checkout, so
    *  lint and review cannot disagree. Absent ⇒ {@link proofNameResolutionViolations}, {@link
    *  proofUnitTestUnresolvableViolations} (W1-T3639, the block-severity sibling that also
@@ -3415,6 +3547,8 @@ export interface LintOpts {
    *  per-file count blocks while at-or-below baseline remains advisory. */
   unboundCriterionBaseline?: UnboundCriterionBaseline;
   machineFilingAdmission?: MachineFilingAdmissionContext;
+  /** Repository names a task's `repo:` may carry. Absent ⇒ {@link shardShapeViolations}' repo rule is silent. */
+  knownRepos?: ReadonlySet<string>;
 }
 
 /** Lint one task, aggregating every check below. The hard checks — sizing, headless-fitness,
@@ -3439,6 +3573,7 @@ const BUILD_VERIFICATION_CHECKS = new Set<LintCheck>([
   "proof-grep-safety",
   "proof-grep-unmatchable",
   "proof-grep-self-certifying",
+  "proof-grep-already-true",
   "proof-engine-divergence",
   "proof-scope",
   "proof-self-path",
@@ -3497,12 +3632,15 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofGrepSafetyViolations(task, opts));
   violations.push(...proofScopeViolations(task, opts));
   violations.push(...proofSelfPathViolations(task, opts));
+  violations.push(...recordTaskViolations(task));
   violations.push(...proofNameResolutionViolations(task, opts));
   violations.push(...proofUnitTestUnresolvableViolations(task, opts));
   violations.push(...creditedTestPathViolations(task, opts));
+  violations.push(...creditedFileCoverageViolations(task, opts));
   violations.push(...sharedProofViolations(task));
   violations.push(...unboundCriterionViolations(task, opts));
   violations.push(...proofBaseDiscriminationViolations(task, opts));
+  violations.push(...proofGrepAlreadyTrueViolations(task, opts));
   violations.push(...proofUnitTestBaseWrapperViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...blockedDispositionViolations(task, opts));
@@ -3535,6 +3673,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...dispatchPriorityViolations(task));
   violations.push(...advisoryRoutingViolations(task));
   violations.push(...deferredFollowUpViolations(task));
+  violations.push(...shardShapeViolations(task, opts));
   if (opts.mountMaxTurns !== undefined) {
     const warn = budgetSanityWarning(opts.mountMaxTurns, opts.calibration);
     if (warn) violations.push(warn);

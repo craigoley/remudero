@@ -1,0 +1,77 @@
+- id: W1-T4921
+  title: "THE PRE-PUSH PROOF PRECHECK SKIPS A PLAN-ONLY BUILD AND NEVER ASKS THE MERGE BASE — #7882 was W1-T4550's BUILD (branch run-W1-T4550-…, diff only a plan shard) and hit the arm that says 'a plan-only filing; its proofs are the build PR's', and no pre-push arm runs a proof against the merge base; `rmd preflight --proofs` does, at 7-11 s per proof, unnamed by any hook or worker prompt: skip only a filing, and report a grep proof the reviewer's own classifier grades stale, in tens of milliseconds"
+  repo: remudero
+  depends_on: [W1-T4904]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: research whether a filing-time and pre-push proof dry run closes the two 2026-09-29 proof defects (#7882 W1-T4550, #7792 W1-T4681)"
+  plan_refs: [W1-T3738, W1-T4904]
+  files: [src/lib/proof-base-stale.ts, src/run-task.ts, scripts/proof-resolve-precheck.mjs, test/a-plan-only-build-is-asked-whether-its-proofs-discriminate.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 at origin/main 074249863. THIS IS THE SECOND, SMALLER HALF: W1-T4904 stops a new task being filed
+    with a proof that already matches; this covers the build-time cases it cannot.
+
+    (1) THE SKIP IS WRONGLY NAMED. scripts/proof-resolve-precheck.mjs `proofResolveVerdict` returns SKIP for any
+    `planOnlyDiff(diff)`, printing "a plan-only filing". planOnlyDiff (src/lib/review.ts) asks only whether every changed
+    path is plan scope, so a BUILD of a task whose `files:` is a plan shard is skipped too. Among 1,232 merged build PRs
+    since 2026-09-01 that carry a task, 7 were plan-only (0.6%): rare, but their proofs are `grep:` on plan text, the shape
+    that goes stale (of their 28 criteria, 2 graded stale at the merge and 8 grep proofs matched nothing). The repo already tells a build
+    from a filing by branch: doctrine "name a session branch run-<taskId>-<epochMs> when building a filed task", and
+    `taskIdFromRunBranch` (src/lib/status.ts) already resolves it.
+
+    (2) NOTHING PRE-PUSH ASKS THE MERGE BASE. hooks/pre-push runs proof-resolve-precheck, which uses certainHeadRefusals:
+    head-side only. `rmd preflight --proofs` (runPreflightProofs, W1-T3738, 2026-09-17) does run each proof with
+    `check-proof --base`, but it is opt-in, prints in docs/cli-reference.md only (grep of src/lib prompts, hooks, doctrine
+    and CLAUDE.md finds no other mention), and costs one process tree per proof: `check-proof --base` timed 10.8 s and 7.1 s
+    on two grep proofs here.
+
+    (3) THE CHEAP FORM EXISTS. materialiseBaseProofBlobs + preexistingProofHits + execWhitelistedProof (all exported from
+    src/lib/review.ts) grade a grep proof stale with the reviewer's own classifier and no worktree: a prototype over
+    W1-T4550's five criteria at the filing tree took 73 ms and returned stale for criterion 5 and only 5.
+
+    (4) WHY REPORT, NOT BLOCK. A worker may not edit a criterion (Standing rule 15, criterionFieldTampered), so a stale
+    plan proof is a defect the builder cannot repair; blocking the push strands the task with no PR, which the existing
+    precheck's own header calls worse than the refusal it predicts. The report exists so the builder names the defect and
+    stops, instead of pushing a PR that can never go green.
+
+    (5) WHAT THIS DOES NOT COVER, MEASURED. Of 26 built grep criteria that graded stale at the merge and joined to a filing row, 15 already matched
+    at their filing head (W1-T4904's population) and 11 did not: the text landed between filing and build. Only a
+    build-time arm sees those 11.
+  design: |
+    (i) proofResolveVerdict SKIPs a plan-only diff only when NO task id resolves from the branch name; a `run-<taskId>-`
+    branch proceeds to the existing criteria resolution. The SKIP line says "a plan-only filing (no run-<taskId> branch)".
+    (ii) New module src/lib/proof-base-stale.ts exports `certainStaleProofs(criteria, cwd, baseRev, deps)`: for each visible
+    criterion that is not `satisfied_by`, not `kind: guard`, and parses as a dialect `grep:` that PASSES at head, materialise
+    the base blob into a temp dir and ask preexistingProofHits; return `{claim, proof, why}` rows. `unit test:` proofs are
+    left to the gate (running a test at the base is not cheap). deps injects git show and the temp dir, and ONE test must
+    really shell out (CLAUDE.md coverage trap: a default seam every test fakes is unreachable coverage).
+    (iii) The script prints the rows non-blocking, exit 0, naming the two remedies for the human or fleet operator:
+    re-anchor the pattern on text the build adds, or declare `kind: guard`; and says the builder must not edit criteria.
+    Read the merge base as `git merge-base origin/main HEAD`, as runPreflightProofs does.
+    (iv) runPreflightProofs (src/run-task.ts) calls certainStaleProofs for its `grep:` proofs, so `rmd preflight --proofs` drops
+    from one process tree per grep proof to one in-process pass, and the hook and the verb share ONE predicate; `unit test:`
+    proofs keep the existing `check-proof --base` spawn. This call is also the new module's call site (lint rule `call-site`).
+  acceptance:
+    - claim: "a plan-only diff on a run-<taskId> branch is not skipped by the proof precheck"
+      proof: 'grep: test("W1-T4921: a plan-only build on a run branch is not skipped" in test/a-plan-only-build-is-asked-whether-its-proofs-discriminate.test.ts'
+    - claim: "a plan-only diff on a non-run branch is still skipped as a filing"
+      proof: 'grep: test("W1-T4921: a plan-only filing on a non-run branch is still skipped" in test/a-plan-only-build-is-asked-whether-its-proofs-discriminate.test.ts'
+    - claim: "a grep proof that also passes at the merge base is reported by name and does not block the push"
+      proof: 'grep: test("W1-T4921: a grep proof that also passes at the merge base is reported by name" in test/a-plan-only-build-is-asked-whether-its-proofs-discriminate.test.ts'
+    - claim: "the base blob is read by a real git show, not only by an injected fake"
+      proof: 'grep: test("W1-T4921: the base blob is read by a real git show" in test/a-plan-only-build-is-asked-whether-its-proofs-discriminate.test.ts'
+    - claim: "the new arm has a production call site in the preflight verb"
+      proof: "grep: certainStaleProofs( in src/run-task.ts"
+  falsifier: |
+    Restore the unconditional plan-only skip and the first test sees SKIP for a run-<taskId> branch.
+  note: |
+    File only after W1-T4904 is decided: if the operator wants build-time coverage alone, this can go first, but it then
+    catches a defect only after the shard is already filed. Known demand is one PR (#7882); the 11 drift cases in (5) are the
+    other justification.

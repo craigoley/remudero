@@ -14,7 +14,7 @@
     - src/lib/work-integrity.ts
     - src/lib/analytics-route.ts
     - test/work-integrity-is-measured-per-model.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -20,7 +20,7 @@
     - test/preference-policy-application.test.ts
     - test/preference-policy-expiry.test.ts
     - test/preference-policy-optout.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T3824 and W1-T3826 make explicit operator settings durable and scoped. That is different from

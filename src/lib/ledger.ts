@@ -24,6 +24,7 @@ import type { ExternalEffectResult } from "./action-reconciliation.js";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
+import { assertLedgerPathNotLive } from "./live-write-guard.js";
 import { rotationStampIso } from "./ledger-union.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
 import { WORKER_SCOPE_ENV } from "./worker-containment.js";
@@ -202,6 +203,7 @@ export function appendLedger(
   line: LedgerLine,
   opts: { ceilingBytes?: number; identity?: () => string; actor?: () => LedgerActor } = {},
 ): void {
+  assertLedgerPathNotLive(path);
   mkdirSync(dirname(path), { recursive: true });
   const record = {
     ts: new Date().toISOString(),
@@ -492,6 +494,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // baseline a restarted process cannot carry; archived away, a rotation un-trips a tripped breaker.
   "dispatch.circuit_broken",
   "dispatch.circuit_broken.escalated",
+  "dispatch.circuit_broken.verified", // W1-T4678 dedup survives rotation.
+  // W1-T4691: `rmd release`'s row — `seedCountFromCircuitBreak` and `dispatchStreakTally` (status.ts)
+  // both read it as forward progress, resetting a halted task's breaker. Rotated away, a released
+  // task's next restart would seed straight back from the still-live `dispatch.circuit_broken` row above.
+  "dispatch.breaker_released",
   // W1-T2910: `status.ts`'s projection reads this row to derive an independent-failure block and
   // clears it on a later dispatch (src/lib/status.ts, the `line.step === "dispatch.blocked_independent"`
   // arm). Rotated away, a block that was recorded stops being visible and the subtree is re-dispatched
@@ -612,6 +619,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "dep-review.migrate.completed",
   "review.posted",
   "review.post_refused",
+  "review.cannot_evaluate_escalated",
   // W1-T913: `lastPendingReviewStatusFromLedger` (review.ts) reads this back for per-head
   // idempotence AND the staleness clock; dropping it makes a review stalled for hours read as fresh.
   "review.pending_posted",
@@ -1040,15 +1048,27 @@ function archivedPrefixBytes(ledgerPath: string, snapshot: Buffer): number {
  *  lock in this repo, with no rotation-specific holder shape or liveness logic to drift. */
 type LedgerRotationLockInfo = DrainLockInfo;
 
+export function isRotationLockHolderStale(
+  held: DrainLockInfo,
+  opts: { hostname?: () => string; inContainer?: () => boolean; nowMs?: number; isPidAlive?: (pid: number) => boolean } = {},
+): boolean {
+  const myHost = (opts.hostname ?? hostname)();
+  if (held.host !== myHost) {
+    const startedMs = Date.parse(held.startedAt);
+    return !Number.isFinite(startedMs) || (opts.nowMs ?? systemClock.now()) - startedMs > LEDGER_ROTATION_SMOOTHING_WINDOW_MS;
+  }
+  return isHolderStale(held, { isPidAlive: opts.isPidAlive ?? defaultIsPidAlive, hostname: opts.hostname, inContainer: opts.inContainer });
+}
+
 /**
  * Try to take the rotation lock. Returns a release function, or `null` when a LIVE holder owns it —
  * the caller then SKIPS this rotation rather than waiting. APPEND IS THE PRIORITY: the append that
  * triggered it has already landed, and the holder's own catch-up read folds it in. Same acquire
- * shape as `acquireDrainLock`: an `O_EXCL` create is the atomic win, and a holder
- * {@link isHolderStale} judges dead is cleared through {@link reclaimStaleLock}, whose delete is
- * conditioned on the lock's on-disk identity so two reclaimers cannot both hold it. Falsifier:
- * test/ledger-rotation-is-locked.test.ts. Why: two rotators dropped every row appended between
- * their renames (R-1; docs/forensics/ledger.md#tryacquirerotationlock).
+ * shape as `acquireDrainLock`: an `O_EXCL` create is the atomic win, and a dead holder is cleared
+ * through {@link reclaimStaleLock}. W1-T4820: {@link isRotationLockHolderStale} judges a holder in the
+ * OTHER container by age, since daemon and serve share this ledger; calling it a dead container's cut
+ * twin archives. Falsifiers: test/ledger-rotation-is-locked.test.ts, test/the-status-board-reads-each-
+ * ledger-row-once.test.ts. Why: docs/forensics/ledger.md#tryacquirerotationlock (R-1).
  */
 function tryAcquireRotationLock(lockPath: string): (() => void) | null {
   const info: LedgerRotationLockInfo = { pid: process.pid, host: hostname(), startedAt: new Date().toISOString() };
@@ -1065,7 +1085,7 @@ function tryAcquireRotationLock(lockPath: string): (() => void) | null {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
       const result = reclaimStaleLock(lockPath, {
         parseHolder: parseDrainLockInfo,
-        isStale: (held) => isHolderStale(held, { isPidAlive: defaultIsPidAlive }),
+        isStale: (held) => isRotationLockHolderStale(held),
       });
       if (result.outcome === "live") return null;
       // "missing" | "reclaimed" | "lost" → retry the atomic create from the top.

@@ -2,6 +2,7 @@
  *  ledger and LEARNINGS into a structured gather a higher-tier Architect worker then synthesises
  *  into a plan-only PR: generation deterministic here, publication with the gate and the human. */
 
+import { fixDispatchCountsAttributed } from "./workflow-mining.js";
 import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
 // Import the DEFAULT export so a test's `t.mock.method` can intercept the marker's reads and
@@ -12,9 +13,10 @@ import { parse as parseYaml } from "yaml";
 import { updateProposalRegistry, type EvidenceAnchor, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
 import { tryEscalate } from "./escalate.js";
 import { appendLedger, type LedgerLine, type LedgerWriterDeps } from "./ledger.js";
-import { DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD, promotionTaint } from "./learnings.js";
+import { promotionTaint } from "./learnings.js";
 import type { Lifecycle, LearningEntry, PromotionResult, PromotionTaintResult } from "./learnings.js";
 import { resolveMountForClass, type Mounts } from "./mounts.js";
+import { isNeverWorkedVerdict } from "./never-worked.js";
 import {
   scanPlanCoherence,
   type PlanCoherenceFinding,
@@ -126,6 +128,15 @@ export interface RetroLedgerRead {
   dedupeEntriesPeak: number;
 }
 
+/** Render an epoch-ms instant as ISO-8601 — the ONE `new Date(` construction site this file uses
+ *  for that deterministic conversion (never a clock read: the ms always arrives as an argument),
+ *  so a second call site formatting a different already-computed instant reuses this one rather
+ *  than adding a second literal `new Date(` (test/clock-signature-census.test.ts's per-file
+ *  count, W1-T2897). */
+function msToIso(ms: number): string {
+  return new Date(ms).toISOString();
+}
+
 /** The window to read from, given the marker's timestamp (absent on a first-ever retro).
  *
  *  DELIBERATELY NOT CLAMPED to {@link RETRO_LEDGER_NO_MARKER_LOOKBACK_MS} when a marker IS present.
@@ -136,7 +147,7 @@ export interface RetroLedgerRead {
 export function retroLedgerWindowSince(markerTs: string | undefined, nowMs: number): string {
   const parsed = markerTs === undefined ? Number.NaN : Date.parse(markerTs);
   const fromMs = Number.isNaN(parsed) ? nowMs - RETRO_LEDGER_NO_MARKER_LOOKBACK_MS : parsed - RETRO_LEDGER_WINDOW_LEAD_MS;
-  return new Date(fromMs).toISOString();
+  return msToIso(fromMs);
 }
 
 export async function readRetroLedgerNdjson(
@@ -300,6 +311,8 @@ export interface RunSummary {
   observedVerdict?: string;
   creditTs?: string;
   creditMatch?: "pr_url" | "task_id";
+  /** W1-T4711: its verdict row {@link isNeverWorkedVerdict} — a run, but no sample of its class. */
+  neverWorked?: true;
 }
 
 const DONE_STEPS = new Set(["recon.done", "implement.done", "implement.resumed"]);
@@ -415,6 +428,7 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
       ...(typeof verdictLine?.guard === "string" ? { guard: verdictLine.guard } : {}),
       ...(typeof verdictLine?.check === "string" ? { check: verdictLine.check } : {}),
       ...(typeof verdictLine?.observed === "string" ? { observed: verdictLine.observed } : {}),
+      ...(isNeverWorkedVerdict(verdictLine) ? { neverWorked: true as const } : {}),
     });
   }
   // Deterministic order: by start timestamp then run id.
@@ -487,14 +501,21 @@ export interface ClassCalibration {
   turnsPerMerge: number | null;
   /** Output tokens per MERGED PR, same discipline as `turnsPerMerge`; `null` at a zero denominator. */
   outputTokensPerMerge: number | null;
+  /** W1-T4711: `neverWorked` runs of this class kept out of every figure above; absent when none. */
+  excludedCount?: number;
 }
 
 /** Aggregate runs BY TASK CLASS (W1-T167) — {@link aggregateByType} grouped on `taskClass`. A run
  *  with no class groups under `"unknown"`; `shipped` is joined back by `runId`, never re-read. */
 export function aggregateByClass(runs: RunSummary[], shipped?: ShippedRecord[]): ClassCalibration[] {
   const byClass = new Map<string, RunSummary[]>();
+  const excluded = new Map<string, number>();
   for (const r of runs) {
     const key = r.taskClass ?? "unknown";
+    if (r.neverWorked) {
+      excluded.set(key, (excluded.get(key) ?? 0) + 1);
+      continue;
+    }
     const arr = byClass.get(key) ?? [];
     arr.push(r);
     byClass.set(key, arr);
@@ -534,6 +555,7 @@ export function aggregateByClass(runs: RunSummary[], shipped?: ShippedRecord[]):
       mergedForDenominator,
       turnsPerMerge: mergedForDenominator === 0 ? null : round(totalTurns / mergedForDenominator),
       outputTokensPerMerge: mergedForDenominator === 0 ? null : round(totalOutputTokens / mergedForDenominator),
+      ...(excluded.has(taskClass) ? { excludedCount: excluded.get(taskClass) } : {}),
     });
   }
   out.sort((a, b) => (a.taskClass < b.taskClass ? -1 : a.taskClass > b.taskClass ? 1 : 0));
@@ -1818,7 +1840,7 @@ export function buildGather(opts: {
     failedReviewFeedback,
     failedReviewCandidates: mineFailedReviewReasonCandidatesFromFeedback(failedReviewFeedback),
     // Drafted from the SAME candidates above, never re-mined (W1-T2766).
-    skillDrafts: proceduralCandidates.map((c) => renderSkillDraft(c)).filter((d): d is SkillDraft => d !== undefined),
+    skillDrafts: proceduralCandidates.map((c) => renderSkillDraft(c, { runs: merged, records })).filter((d): d is SkillDraft => d !== undefined),
     learningsNow: learningsCount(opts.learningsMd),
     learningsAtMarker: opts.learningsAtMarker ?? 0,
     ...(githubUnavailable ? { githubUnavailable } : {}),
@@ -2133,10 +2155,24 @@ export function mineOverrunClasses(
   runs: RunSummary[],
   opts: { threshold?: number } = {},
 ): ClassOverrunProposal[] {
+  return mineOverrunClassesCounted(runs, opts).proposals;
+}
+
+/** {@link mineOverrunClasses} plus how many overrun-verdict runs it skipped as `neverWorked`
+ *  (W1-T4711): a refused dispatch is a host condition, never a class pattern. */
+export function mineOverrunClassesCounted(
+  runs: RunSummary[],
+  opts: { threshold?: number } = {},
+): { proposals: ClassOverrunProposal[]; excludedCount: number } {
   const threshold = opts.threshold ?? 2;
   const byClass = new Map<string, RunSummary[]>();
+  let excludedCount = 0;
   for (const r of runs) {
     if (!isOverrunRun(r)) continue;
+    if (r.neverWorked) {
+      excludedCount++;
+      continue;
+    }
     const key = overrunClassKey(r);
     const arr = byClass.get(key) ?? [];
     arr.push(r);
@@ -2159,7 +2195,7 @@ export function mineOverrunClasses(
     });
   }
   out.sort((a, b) => (a.taskType + a.risk < b.taskType + b.risk ? -1 : a.taskType + a.risk > b.taskType + b.risk ? 1 : 0));
-  return out;
+  return { proposals: out, excludedCount };
 }
 
 /** Render the mined overrun proposals (markdown) — printed by `--dry-run` and fed to the Architect. */
@@ -2496,13 +2532,7 @@ export const PROCEDURAL_SUCCESS_SIGNALS: ReadonlyArray<ProceduralSuccessSignal> 
 
 /** Count of `fix.dispatch` ledger lines per `run_id` — zero means a run never needed a fix rung. */
 export function fixDispatchCountByRun(records: LedgerRecord[]): Map<string, number> {
-  const out = new Map<string, number>();
-  for (const r of records) {
-    if (r.step !== "fix.dispatch" || !r.run_id) continue;
-    const key = String(r.run_id);
-    out.set(key, (out.get(key) ?? 0) + 1);
-  }
-  return out;
+  return fixDispatchCountsAttributed(records);
 }
 
 /** ONE mined procedural-success candidate — a reusable shape shared by >= `threshold` merged runs. */
@@ -3288,42 +3318,11 @@ export async function phraseProceduralCandidate(
   };
 }
 
-// ── PROMOTION PROPOSALS (W1-T1059) ─────────────────────────────────────────
+// ── PROMOTION CANDIDATE GATE (W1-T1059) ──────────────────────────────────
 //
-// `runPromotionPass` (learnings.ts) shipped under P32/W1-T146 with NO production caller, so its
-// ledger steps could never fire. This section is the caller's PURE half: it renders one pass's
-// results as a PROPOSAL for the Architect to ratify, and writes nothing anywhere.
-//
-// WHY THIS CLASSIFIER DOES NOT REUSE `PromotionStage`: that field answers `"judge"` for TWO
-// DISTINCT OUTCOMES — a considered `project-specific` NO, and a `broadly-applicable` call below
-// the confidence threshold, which must never promote. The conflation is REPORTED, NOT FIXED here
-// (learnings.ts is out of scope), so this module reads `applicability` and `confidence` directly.
-
-/** What one {@link PromotionResult} means for the Architect, with the two `stage: "judge"` outcomes kept apart. */
-export type PromotionDisposition =
-  | "proposed"
-  | "declined-tainted"
-  | "declined-scrub"
-  | "declined-top-layer"
-  | "declined-project-specific"
-  | "declined-low-confidence";
-
-/** The pure decision on ONE promotion result (Standing rule 12). One arm per outcome and never a
- *  shared arm for two: the four are different things to a reader deciding what to ratify. */
-export function classifyPromotionResult(
-  result: PromotionResult,
-  confidenceThreshold: number = DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD,
-): PromotionDisposition {
-  if (result.stage === "taint") return "declined-tainted";
-  if (result.stage === "scrub") return "declined-scrub";
-  if (result.stage === "top-layer") return "declined-top-layer";
-  if (result.promoted) return "proposed";
-  const verdict = result.verdict;
-  if (verdict && verdict.applicability === "broadly-applicable" && verdict.confidence < confidenceThreshold) {
-    return "declined-low-confidence";
-  }
-  return "declined-project-specific";
-}
+// The retro's promotion pass and its report section are RETIRED (2026-09-29, DECISIONS.md): it
+// re-judged the same four entries every retro and nothing read its output. This gate stays with
+// the learnings.ts pipeline for the rebuild the decision names.
 
 export interface TaintedPromotionCandidate {
   entry: LearningEntry;
@@ -3363,62 +3362,6 @@ export function gatePromotionCandidatesBeforeRanking(
     });
   }
   return { accepted, refused };
-}
-
-/** What {@link renderPromotionProposals} needs, so an empty corpus and an all-declined pass never render the same line. */
-export interface PromotionProposalInput {
-  /** Entries handed to the pass — NOT the number that reached the judge. */
-  corpusSize: number;
-  /** False when no judge was configured, in which case `results` is empty because the pass never ran. */
-  ranPass: boolean;
-  results: PromotionResult[];
-  confidenceThreshold?: number;
-}
-
-/** Render one pass as a retro-report section. THREE ZERO-LOOKING STATES ARE KEPT APART: the pass
- *  did not run, ran over an EMPTY corpus, or proposed nothing. Only the third is a finding. */
-export function renderPromotionProposals(input: PromotionProposalInput): string {
-  const head = "## Learnings promotion (P32/W1-T146) — proposals for the Architect to ratify";
-  if (!input.ranPass) {
-    return [
-      head,
-      "",
-      "The pass did NOT run: no promotion judge was supplied to this retro. Nothing was scrubbed,",
-      "judged or proposed. Supplying a judge makes the pass run over the active corpus and renders",
-      "its proposals here; it still writes nothing — ratification stays an Architect PR.",
-    ].join("\n");
-  }
-  if (input.corpusSize === 0) {
-    return [
-      head,
-      "",
-      "The pass ran over an EMPTY corpus — no entries were handed to it. This is not a statement",
-      "about what is promotable; it is a statement that nothing was read.",
-    ].join("\n");
-  }
-  const threshold = input.confidenceThreshold;
-  const rows = input.results.map((r) => ({ result: r, disposition: classifyPromotionResult(r, threshold) }));
-  const proposed = rows.filter((r) => r.disposition === "proposed");
-  const lines = [head, ""];
-  if (proposed.length === 0) {
-    lines.push("The pass ran over the active corpus and proposed nothing to promote.");
-  } else {
-    lines.push("PROPOSED — ratify by landing each entry at the named layer in a reviewed PR:");
-    for (const { result } of proposed) {
-      const to = result.promotedEntry?.layer ?? "?";
-      const confidence = result.verdict?.confidence ?? 0;
-      lines.push(`- ${result.entryId} -> ${to} (confidence ${confidence}) — ${result.verdict?.rationale ?? ""}`);
-    }
-  }
-  const declined = rows.filter((r) => r.disposition !== "proposed");
-  if (declined.length > 0) {
-    lines.push("", "DECLINED, by reason — each arm is a different decision, not one bucket:");
-    for (const { result, disposition } of declined) {
-      lines.push(`- ${result.entryId}: ${disposition} — ${result.reason}`);
-    }
-  }
-  lines.push("", "NOTHING ABOVE HAS BEEN WRITTEN. A promotion is a proposal; the Architect ratifies it in a PR.");
-  return lines.join("\n");
 }
 
 // ── Consolidation contradiction detection (W1-T88, ratifies P14, extends W1-T33) ──
@@ -4242,6 +4185,148 @@ export function checkRetroIntegrity(priorMergesSinceMarker: number, gatherShippe
     };
   }
   return { ok: true };
+}
+
+// ── W1-T4664: a retro that cannot publish backs off ────────────────────────
+//
+// A retro that FIRES but fails prepublish never advances the marker (by design — the runs it
+// read are still unconsumed), so `evaluateRetroTrigger` sees the same over-threshold count on
+// the very next poll: 24 of 37 retros 2026-09-25..28 re-fired inside the hour, each a full
+// 379-suite Opus attempt. A flat retry fence (state/last-retro-attempt.json, PR #7579) stops the
+// worst of it, but applies the SAME wait after the 1st failure and the 50th. This widens it to a
+// TIERED backoff with NO FIXED CEILING (the task's own design (ii)): the wait DOUBLES with each
+// consecutive failed attempt in the same marker cycle, and a further threshold's worth of merges
+// since that attempt opens an early exit independent of the clock. A published retro (the marker
+// moves) resets both — a fresh cycle earns a fresh, un-backed-off first attempt.
+
+/** One recorded automated-retro attempt — what {@link evaluateRetroBackoff} reads back to decide
+ *  whether a new attempt is due. `markerTs` is `null` (never `undefined`) for "no marker yet" so
+ *  it round-trips through JSON and a same-cycle comparison is exact. */
+export interface RetroAttemptRecord {
+  retroAttemptAt: string;
+  markerTs: string | null;
+  /** `mergesSinceMarker` the trigger observed AT this attempt — the floor a LATER attempt's own
+   *  count must clear, by a further `mergesThreshold`, for design (ii)'s merges-based exit. */
+  mergesSinceMarker: number;
+  /** Consecutive failed attempts in this SAME marker cycle, this one included. 1 for a first-ever
+   *  attempt or the first attempt of a fresh cycle (the marker just moved). */
+  streak: number;
+}
+
+/** Policy-data (Rule 2) for {@link evaluateRetroBackoff} — the SAME `?? DEFAULT` override shape
+ *  every other retro-cadence policy in this file uses. */
+export interface RetroBackoffPolicy {
+  /** The 1st failure's wait, in ms — doubles per ADDITIONAL consecutive failure, no ceiling. */
+  baseDelayMs: number;
+  /** A further this-many-merges since the failed attempt also opens an early exit. */
+  mergesThreshold: number;
+}
+
+/** Policy-data default: matches the pre-existing flat fence's 6h wait exactly, so a single
+ *  failure behaves exactly as it always did — only a SECOND consecutive failure sees it grow. */
+export function defaultRetroBackoffPolicy(): RetroBackoffPolicy {
+  return { baseDelayMs: 6 * 60 * 60 * 1000, mergesThreshold: DEFAULT_RETRO_MERGES_THRESHOLD };
+}
+
+export type RetroBackoffDecision =
+  | { eligible: true }
+  | { eligible: false; streak: number; nextEligibleAt: string; mergesFloor: number };
+
+/** PURE (W1-T4664). Decide whether a new automated retro attempt is due, given the last recorded
+ *  attempt (if any) and the CURRENT `mergesSinceMarker`/`markerTs`/`now` the trigger is about to
+ *  evaluate. No prior attempt, or a prior attempt against a DIFFERENT `markerTs` (the marker
+ *  moved — a publish landed, resetting the cycle), is always eligible: design (ii)'s "a published
+ *  retro resets both." Otherwise the streak's DOUBLING delay or the merges floor — whichever
+ *  opens first — decides; this function adds no ceiling to either. */
+export function evaluateRetroBackoff(
+  lastAttempt: RetroAttemptRecord | undefined,
+  mergesSinceMarker: number,
+  markerTs: string | undefined,
+  now: Date,
+  policy: RetroBackoffPolicy = defaultRetroBackoffPolicy(),
+): RetroBackoffDecision {
+  if (lastAttempt === undefined || lastAttempt.markerTs !== (markerTs ?? null)) {
+    return { eligible: true };
+  }
+  const delayMs = policy.baseDelayMs * Math.pow(2, Math.max(0, lastAttempt.streak - 1));
+  const nextEligibleAtMs = Date.parse(lastAttempt.retroAttemptAt) + delayMs;
+  const mergesFloor = lastAttempt.mergesSinceMarker + policy.mergesThreshold;
+  if (now.getTime() >= nextEligibleAtMs || mergesSinceMarker >= mergesFloor) {
+    return { eligible: true };
+  }
+  return {
+    eligible: false,
+    streak: lastAttempt.streak,
+    nextEligibleAt: msToIso(nextEligibleAtMs),
+    mergesFloor,
+  };
+}
+
+/** PURE (W1-T4664). The record {@link evaluateRetroBackoff} should be given NEXT, for an attempt
+ *  starting at `at`. The streak continues (+1) inside the SAME marker cycle as `prior`; it resets
+ *  to 1 whenever the marker moved (a publish) or there is no prior record — design (ii)'s
+ *  "a published retro resets both," applied to the record a caller persists after this attempt. */
+export function nextRetroAttemptRecord(
+  prior: RetroAttemptRecord | undefined,
+  at: Date,
+  markerTs: string | undefined,
+  mergesSinceMarker: number,
+): RetroAttemptRecord {
+  const sameCycle = prior !== undefined && prior.markerTs === (markerTs ?? null);
+  return {
+    retroAttemptAt: at.toISOString(),
+    markerTs: markerTs ?? null,
+    mergesSinceMarker,
+    streak: sameCycle ? prior!.streak + 1 : 1,
+  };
+}
+
+/** Load the last recorded automated-retro attempt. Absent, or damaged, both read as `undefined`
+ *  (permits a retry — the marker still guards a real double-publish; this is a soft backoff
+ *  fence, never a hard lock), mirroring {@link loadMarker}'s absent case but NOT its throw-on-
+ *  corrupt one, since a torn attempt record must never stall a retro that would otherwise fire. */
+export function loadRetroAttemptRecord(path: string): RetroAttemptRecord | undefined {
+  let raw: string;
+  try {
+    raw = fsMarker.readFileSync(path, "utf8");
+  } catch {
+    // Deliberately erased, not rethrown: ENOENT ("no attempt yet") and any other read failure
+    // both mean "nothing safely fences this tick" — a soft backoff fence must never itself
+    // become the reason a retro that would otherwise fire gets stuck.
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(raw) as Partial<RetroAttemptRecord>;
+    if (typeof parsed.retroAttemptAt !== "string") return undefined;
+    return {
+      retroAttemptAt: parsed.retroAttemptAt,
+      markerTs: typeof parsed.markerTs === "string" ? parsed.markerTs : null,
+      mergesSinceMarker: typeof parsed.mergesSinceMarker === "number" ? parsed.mergesSinceMarker : 0,
+      streak: typeof parsed.streak === "number" && parsed.streak >= 1 ? parsed.streak : 1,
+    };
+  } catch {
+    // Same reasoning as the read above: a torn/damaged attempt record permits a retry rather
+    // than wedging the trigger forever on a file only this soft fence ever writes.
+    return undefined;
+  }
+}
+
+/** Save an attempt record as ONE atomic unit — same staged-temp-file-then-`renameSync` shape as
+ *  {@link saveMarker}, for the same reason: a plain write could be observed torn mid-write. */
+export function saveRetroAttemptRecord(path: string, record: RetroAttemptRecord): void {
+  fsMarker.mkdirSync(dirname(path), { recursive: true });
+  const tmpPath = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const buf = Buffer.from(JSON.stringify(record) + "\n", "utf8");
+  const fd = fsMarker.openSync(tmpPath, "w");
+  try {
+    const written = fsMarker.writeSync(fd, buf, 0, buf.length);
+    if (written !== buf.length) {
+      throw new Error(`short write staging ${tmpPath} for ${path} (${written}/${buf.length} bytes)`);
+    }
+  } finally {
+    fsMarker.closeSync(fd);
+  }
+  fsMarker.renameSync(tmpPath, path);
 }
 
 function round(n: number): number {

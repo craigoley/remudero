@@ -550,9 +550,9 @@ test("POST /v1/escalation/mark-handled: closes the GitHub issue, then ledgers pa
   const issueUrl = "https://github.com/craigoley/remudero/issues/393";
 
   await withService(deps, async (base) => {
-    const res = await post(base, "/v1/escalation/mark-handled", WRITE_TOKEN, { taskId: "W1-T50", issueUrl });
+    const res = await post(base, "/v1/escalation/mark-handled", WRITE_TOKEN, { taskId: "W1-T50", issueUrl, class: "MANUAL", disposition: "acted" });
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { ok: true, taskId: "W1-T50", issueUrl });
+    assert.deepEqual(await res.json(), { ok: true, taskId: "W1-T50", issueUrl, class: "MANUAL", disposition: "acted", precision: 1, tier: "issue" });
   });
 
   assert.deepEqual(issues.closed, [issueUrl]);
@@ -560,6 +560,8 @@ test("POST /v1/escalation/mark-handled: closes the GitHub issue, then ledgers pa
   assert.equal(lines[0].step, "panel.escalation_marked_handled");
   assert.equal(lines[0].task_id, "W1-T50");
   assert.equal(lines[0].issue_url, issueUrl);
+  assert.equal(lines[0].class, "MANUAL");
+  assert.equal(lines[0].disposition, "acted");
 });
 
 test("POST /v1/escalation/mark-handled: issues.close throwing -> 500, no ledger line (never a false handled)", async () => {
@@ -575,6 +577,8 @@ test("POST /v1/escalation/mark-handled: issues.close throwing -> 500, no ledger 
     const res = await post(base, "/v1/escalation/mark-handled", WRITE_TOKEN, {
       taskId: "W1-T50",
       issueUrl: "https://github.com/craigoley/remudero/issues/999",
+      class: "MANUAL",
+      disposition: "acted",
     });
     assert.equal(res.status, 500);
   });

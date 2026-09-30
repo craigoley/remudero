@@ -10,17 +10,22 @@
 import { execFile } from "node:child_process";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { advanceIsMaterial } from "./self-sync.js";
+import { isReloadablePlanPath } from "./serve-plan-reload.js";
 
 const HOUSE_LAYOUT = resolveRepoLayout("", () => undefined);
 
-/** Read by serve at boot or by its entrypoint, beyond the daemon's {@link advanceIsMaterial} list.
- *  The state dir is W1-T4229's outage: serve loads managed-repos.json once, at boot. The plan dir
- *  is loaded once too (boardDeps.plan); skipping it waits on serve reloading its plan. */
-export const SERVE_ONLY_RESTART_PATHS: readonly string[] = ["hooks/", "settings/", "deploy/", `${HOUSE_LAYOUT.stateDir}/`, `${HOUSE_LAYOUT.planDir}/`];
+/** Read by serve from its checkout, beyond the daemon's {@link advanceIsMaterial} list; that tree
+ *  moves only at boot. settings/: serveCommand renders worker.json once. The state dir: mounts.yaml
+ *  and daemon-instances.yaml at boot, managed-repos.json per request (W1-T4229). The plan dir: every
+ *  path serve does NOT reload in place (W1-T4481). NOT hooks/ (serve renders only their directory
+ *  path; its sole spawn has no tools, so no hook runs) and NOT deploy/ (a restart re-runs the image's
+ *  baked entrypoint, not the checkout's, and the serve process reads no deploy/ file). */
+export const SERVE_ONLY_RESTART_PATHS: readonly string[] = ["settings/", `${HOUSE_LAYOUT.stateDir}/`, `${HOUSE_LAYOUT.planDir}/`];
 
+/** A plan/ path serve reloads in place is not a reason to restart; every other plan/ path still is. */
 export function serveRestartRelevant(changedPaths: readonly string[] | undefined): boolean {
   if (advanceIsMaterial(changedPaths)) return true;
-  return (changedPaths ?? []).some((raw) => SERVE_ONLY_RESTART_PATHS.some((prefix) => raw.trim().startsWith(prefix)));
+  return (changedPaths ?? []).some((raw) => !isReloadablePlanPath(raw) && SERVE_ONLY_RESTART_PATHS.some((prefix) => raw.trim().startsWith(prefix)));
 }
 
 /** An unreadable diff carries its reason rather than arriving as an empty list. */

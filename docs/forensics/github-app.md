@@ -116,12 +116,18 @@ pointer wherever that history still matters.
 // 26.7 MB over 14 REST calls, but that figure is wall-clock observation, not a re-readable value),
 // so 20s is chosen as roughly TWICE that ceiling for a call two orders of magnitude smaller (one
 // POST, a tiny JSON body) — generous enough that a healthy-but-slow network never trips it. A
-// failed scheduled refresh must not spend the whole five-minute margin again; the daemon retains
-// the last successful expiry and schedules any failure retry early enough for another full bounded
+// failed scheduled refresh must not spend the whole healthy-refresh margin again; the daemon retains
+// the last successful expiry and retries on its shorter failure cadence, early enough for another full bounded
 // exchange to settle before that token expires. Exported so a test can advance a mocked clock by
 // EXACTLY this amount rather than a magic number that would silently drift out of sync with it.
 export const EXCHANGE_TIMEOUT_MS = 20 * 1000;
 ```
+
+On 2026-09-28 the daemon minted at 12:46:43 UTC, then a retro and GitHub reads delayed its
+scheduled renewal beyond the old five-minute margin. Exchanges at 13:47 and 13:53 timed out; its
+expired token produced 401s until the daemon restarted. The healthy refresh now starts twenty
+minutes before expiry, failed exchanges retry every two minutes, and an automated retro child
+refreshes its own inherited token while it runs.
 
 Note: `EXCHANGE_TIMEOUT_MS` is grandfathered, undeclared, in `scripts/bound-kind-baseline.json`
 (`src/lib/github-app.ts:EXCHANGE_TIMEOUT_MS`) — this compaction adds neither `BACKSTOP` nor

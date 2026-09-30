@@ -1,0 +1,34 @@
+- id: W1-T4766
+  title: "A CONTAINER RECYCLE CAN KILL A LIVE AUTOMATED RETRO MID-PREFLIGHT — recognize the retro subprocess as in-flight work and refuse recycle until it ends"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  plan_refs: [W1-T4197, W1-T4198, W1-T4199]
+  status: merged
+  attempts: 0
+  origin: "operator request 2026-09-29: repair self-improvement paths"
+  files: [deploy/recycle-container.sh, test/recycle-container.test.ts]
+  rationale: |
+    The 2026-09-29 automated retro passed synthesis, failed preflight, completed a repair, and
+    started a second full suite. The daemon container recycled before a terminal retro receipt.
+    The recycle guard sees inflight dispatch locks and claude/codex worker processes, but the
+    detached node run-task.ts retro process is neither. This silently discards self-improvement
+    work and leaves only the attempt backoff.
+    W1-T4197..4199 share the recycle script and its suite but address pause ownership, instance
+    environment, and double-counted lane workers respectively. This task addresses only the
+    separate retro subprocess census. Its existing suite is a Rule 19 span, so risk is high.
+  design: |
+    Recognize the exact automated retro subprocess process shape in the recycle's in-flight
+    census. Count it as busy at any age, never as a hung fix worker. Respect the existing bounded
+    wait and refuse recycle with its process evidence if it remains live; proceed after it exits.
+    Do not remove the pause or the existing worker protections.
+  acceptance:
+    - claim: "a live retro blocks container removal even without an inflight lock"
+      proof: 'grep: test("W1-T4766: a live retro blocks container removal even without an inflight lock" in test/recycle-container.test.ts'
+    - claim: "recycle proceeds after that retro exits"
+      proof: 'grep: test("W1-T4766: recycle proceeds after that retro exits" in test/recycle-container.test.ts'
+  falsifier: |
+    Remove the retro process match and the live-retro test fails.

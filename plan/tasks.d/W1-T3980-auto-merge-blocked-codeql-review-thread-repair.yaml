@@ -73,7 +73,7 @@
       proof: "unit test: test/auto-merge-blocked-codeql-review-thread.test.ts"
     - claim: "the production gateway carries the observation into the open-PR view"
       proof: "grep: scannerBlocker: scannerBlockers in src/run-task.ts"
-  status: queued
+  status: merged
   attempts: 0
   origin: oper#observed-console-pr-1579-codeql-thread-2026-09-21
   note: |

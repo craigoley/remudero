@@ -48,11 +48,11 @@ jobs:
   ci-gate:
     name: ci-gate
     runs-on: ubuntu-latest
-    # INVARIANT: this bound must exceed what it bounds. WAIT_CAP_SECONDS (2400s) plus
-    # GRACE_WINDOW_SECONDS (600s) is a 50m worst case, so 60m stays a finite, loud ceiling above
+    # INVARIANT: this bound must exceed what it bounds. WAIT_CAP_SECONDS (3900s) plus
+    # GRACE_WINDOW_SECONDS (600s) is a 75m worst case, so 80m stays a finite, loud ceiling above
     # it instead of GitHub's 360m default (R-50). FALSIFIER:
     # test/ci-cache-concurrency-and-job-timeouts.test.ts asserts this timeout exceeds that sum.
-    timeout-minutes: 60
+    timeout-minutes: 80
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -141,6 +141,8 @@ jobs:
         "squash-trailer-gate",
         "gate-monotonic",
         "flake-retry-aggregate",
+        "test-slow-shard (1/2)",
+        "test-slow-shard (2/2)",
         "ci-shard (1/8)",
         "ci-shard (2/8)",
         "ci-shard (3/8)",
@@ -174,18 +176,18 @@ jobs:
       # stays 600s, and a rerun that lands GREEN is now observed within one minute. That reduces
       # the grace read ceiling from 30 to 10 without shortening its false-hold protection.
       GRACE_POLL_INTERVAL_SECONDS: "60"
-      # W1-T312 wait cap. Sized from a measured distribution of this repo's own required-check
-      # wall-clock, not a guess: n=10 on 2026-08-03, p95 ~1345s, so 2400s leaves ~79% headroom
-      # while staying a finite, loud bound. TRAP: the old 900s cap sat below that p95 and turned
-      # routine slow-but-green siblings into false timeouts (#1229, #1234). Env, like the grace
-      # knobs above, so tests can shrink it.
-      # Why: the full n=10 sample is in docs/forensics/ci-gate-yml.md (W1-T312).
-      WAIT_CAP_SECONDS: "2400"
+      # W1-T312's original n=10 sample (2026-08-03, p95 ~1345s) justified 2400s, but PR #8080
+      # showed the dependent coverage path needs a larger bound: the coverage shard can take 39m,
+      # then its aggregator has a 20m cap. 3900s is a finite 65m wait with six minutes beyond
+      # those two job caps; the regression test measures the whole dependency path. Env, like the
+      # grace knobs above, lets tests shrink it. The original sample is in
+      # docs/forensics/ci-gate-yml.md (W1-T312).
+      WAIT_CAP_SECONDS: "3900"
       # One recent successful ci-gate run (34709784197, 2026-09-12) emitted 73 wait-loop reads
       # before its siblings completed. Preserve the 15s observation cadence while checks are
       # first registering, then move to 60s: later reads only observe remote state and cannot
-      # make a required check complete sooner. At the 2400s cap this is at most 56 wait reads
-      # instead of 161, while adding no more than 60s to a long-tail terminal observation.
+      # make a required check complete sooner. At the 3900s cap this is at most 81 wait reads
+      # instead of 261, while adding no more than 60s to a long-tail terminal observation.
       WAIT_FAST_WINDOW_SECONDS: "300"
       WAIT_POLL_INTERVAL_SECONDS: "15"
       WAIT_SLOW_POLL_INTERVAL_SECONDS: "60"
@@ -228,16 +230,16 @@ jobs:
             # THEN DEDUPED BY NAME (W1-T123): a SHA accumulates one check-run PER ATTEMPT, so a
             # re-run of a required check leaves its earlier failed attempt in the list forever
             # unless we narrow to one row per name. Group by `name` and keep only the attempt with
-            # the latest `started_at` -- a name whose failed attempt is followed by a later
-            # success now reads as that success; everything downstream evaluates ONLY this
-            # deduped, latest-per-name list.
+            # the latest `started_at`, breaking same-second ties by numeric check-run id -- a
+            # name whose failed attempt is followed by a later success reads as that success;
+            # everything downstream evaluates ONLY this deduped, latest-per-name list.
             # (`--slurp` can't combine with `-q`, so flatten the page array with a separate jq.)
             local raw attempt=1
             while [ "${attempt}" -le "${RETRY_ATTEMPTS}" ]; do
               if raw="$(gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" --paginate --slurp)"; then
-                jq -c '[ .[].check_runs[] | {name, status, conclusion, started_at} ]
+                jq -c '[ .[].check_runs[] | {id, name, status, conclusion, started_at} ]
                         | group_by(.name)
-                        | map(max_by(.started_at))' <<< "${raw}"
+                        | map(max_by([.started_at, (.id // 0)]))' <<< "${raw}"
                 return 0
               fi
               echo "ci-gate: check-runs read FAILED (attempt ${attempt}/${RETRY_ATTEMPTS}) -- retrying in ${RETRY_BACKOFF_SECONDS}s" >&2

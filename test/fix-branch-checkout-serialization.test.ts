@@ -30,7 +30,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -42,6 +42,7 @@ import {
   decideRegisteredFixOwnerRecovery,
   checkoutFixHeadRef,
   createFixRungWorktree,
+  createFixRungWorktreeWithToolchain,
   fixBranchClaimKey,
   preserveAbandonedFixOwnerDivergence,
   publishAbandonedFixOwnerAhead,
@@ -115,6 +116,66 @@ function commitObject(repo: string, parent: string, msg: string): string {
 }
 
 // ── (i) checkoutFixHeadRef / createFixRungWorktree — the non-destructive checkout ─────
+
+test("the sweep fix worktree supplies commitlint before its worker commits", () => {
+  const root = tmp("rmd-fix-toolchain-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repoDir");
+    cloneOf(upstream, repoDir);
+    execFileSync("git", ["-C", repoDir, "branch", "run-toolchain-probe"]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", "run-toolchain-probe"]);
+    const bin = join(repoDir, "node_modules", ".bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "commitlint"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const hooks = join(repoDir, "hooks");
+    mkdirSync(hooks);
+    writeFileSync(join(hooks, "commit-msg"), readFileSync(join(process.cwd(), "hooks", "commit-msg")), { mode: 0o755 });
+    execFileSync("git", ["-C", repoDir, "config", "core.hooksPath", hooks]);
+
+    const unprepared = join(root, "unprepared");
+    createFixRungWorktree(repoDir, unprepared, "run-toolchain-probe");
+    writeFileSync(join(unprepared, "repair.txt"), "repaired\n");
+    execFileSync("git", ["-C", unprepared, "add", "--", "repair.txt"]);
+    assert.throws(
+      () => execFileSync("git", ["-C", unprepared, "commit", "--quiet", "-m", "fix: repair probe"]),
+      /commitlint is not installed in this worktree/,
+      "the old checkout reproduces the live failed commit",
+    );
+    execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", unprepared]);
+
+    const worktree = join(root, "fix-worktree");
+    createFixRungWorktreeWithToolchain(repoDir, worktree, "run-toolchain-probe");
+    assert.equal(lstatSync(join(worktree, "node_modules")).isSymbolicLink(), true);
+    writeFileSync(join(worktree, "repair.txt"), "repaired\n");
+    execFileSync("git", ["-C", worktree, "add", "--", "repair.txt"]);
+    execFileSync("git", ["-C", worktree, "commit", "--quiet", "-m", "fix: repair probe"]);
+    assert.equal(readFileSync(join(worktree, "repair.txt"), "utf8"), "repaired\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an unavailable sweep fix toolchain refuses before a repair can commit", () => {
+  const root = tmp("rmd-fix-toolchain-refusal-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repoDir");
+    cloneOf(upstream, repoDir);
+    execFileSync("git", ["-C", repoDir, "branch", "run-toolchain-refusal"]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", "run-toolchain-refusal"]);
+    const worktree = join(root, "fix-worktree");
+    const originalHead = sha(repoDir, "origin/run-toolchain-refusal");
+    assert.throws(
+      () => createFixRungWorktreeWithToolchain(repoDir, worktree, "run-toolchain-refusal", () => false),
+      /fix worktree toolchain unavailable/,
+    );
+    assert.equal(sha(worktree, "HEAD"), originalHead, "the checkout has made no repair commit");
+    assert.throws(() => lstatSync(join(worktree, "node_modules")), { code: "ENOENT" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("absent local ref: created fresh at origin/<branch> — unchanged from the old sequence", () => {
   const root = tmp("rmd-fbcs-absent-");

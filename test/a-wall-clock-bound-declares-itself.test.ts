@@ -10,11 +10,13 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HELPER = "test/helpers/wall-clock-bound.js";
 const THIS_FILE = "test/a-wall-clock-bound-declares-itself.test.ts";
 const HELPER_IMPORT = "helpers/wall-clock-bound.js";
-// W1-T4563: 20 -> 18 files and 30 -> 28 sites -- test/console-write-entry.test.ts's latency test
-// (GET /v1/console/write-grant) and test/serve.first-paint.test.ts measured the daemon's retired
-// console, and left with it.
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 18;
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 28;
+// W1-T4208 adds one test file and two declared bounds for the status JSON deadline.
+// W1-T4563 previously removed two retired console latency files (20 -> 18, 30 -> 28).
+// PR #7998 migrates the board pacing assertion: one new declaring file and assertion site.
+// It also adds the hung-gh /v1/status budget file: one more declaring file and assertion site.
+// PR #8080 adds the read-model worker's main-loop timing test: one declaring file and two sites.
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 23;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 37;
 const WALL_CLOCK_BOUND_FILE_FLOOR = 3;
 const WALL_CLOCK_BOUND_SITE_FLOOR = 4;
 

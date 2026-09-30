@@ -120,6 +120,45 @@ test("normalizeCodeScanningAlert reads security_severity_level, falls back to ru
   assert.equal(normalizeCodeScanningAlert({}).severity, "unknown");
 });
 
+test("W1-T4273: normalizeCodeScanningAlert extracts most_recent_instance location and message, absent when omitted", () => {
+  const alert = normalizeCodeScanningAlert({
+    ...CODE_SCANNING_RAW[0],
+    most_recent_instance: {
+      location: { path: "src/lib/ops.ts", start_line: 121, end_line: 124 },
+      message: { text: "A tainted value reaches this call." },
+    },
+  });
+  assert.deepEqual(alert.location, { path: "src/lib/ops.ts", startLine: 121, endLine: 124 });
+  assert.equal(alert.instanceMessage, "A tainted value reaches this call.");
+  const noInstance = normalizeCodeScanningAlert(CODE_SCANNING_RAW[0]);
+  assert.equal(Object.hasOwn(noInstance, "location"), false);
+  assert.equal(Object.hasOwn(noInstance, "instanceMessage"), false);
+  const noPath = normalizeCodeScanningAlert({
+    most_recent_instance: { location: { start_line: 9 }, message: { text: "Instance without a path" } },
+  });
+  assert.equal(Object.hasOwn(noPath, "location"), false);
+  assert.equal(noPath.instanceMessage, "Instance without a path");
+});
+
+test("W1-T4273: dependabot, secret-scanning and instance-less code-scanning alerts normalize unchanged", () => {
+  const dependabot = normalizeDependabotAlert(DEPENDABOT_RAW[0]);
+  const secret = normalizeSecretScanningAlert(SECRET_SCANNING_RAW[0]);
+  const code = normalizeCodeScanningAlert(CODE_SCANNING_RAW[0]);
+  assert.deepEqual([dependabot.severity, dependabot.summary, dependabot.url], [
+    "high", "prototype pollution in lodash", "https://github.com/craigoley/remudero/security/dependabot/12",
+  ]);
+  assert.deepEqual([secret.severity, secret.summary, secret.url], [
+    "critical", "AWS Access Key", "https://github.com/craigoley/remudero/security/secret-scanning/3",
+  ]);
+  assert.deepEqual([code.severity, code.summary, code.url], [
+    "critical", "SQL injection", "https://github.com/craigoley/remudero/security/code-scanning/5",
+  ]);
+  for (const alert of [dependabot, secret, code]) {
+    assert.equal(Object.hasOwn(alert, "location"), false);
+    assert.equal(Object.hasOwn(alert, "instanceMessage"), false);
+  }
+});
+
 test("normalizeDependabotAlert maps GitHub's 'moderate' to this module's 'medium'", () => {
   assert.equal(normalizeDependabotAlert(DEPENDABOT_RAW[0]).severity, "high");
   assert.equal(normalizeDependabotAlert({ security_advisory: { severity: "moderate" } }).severity, "medium");
@@ -326,6 +365,20 @@ test("renderAlertRaw names source/id/severity/summary and carries the alert url"
   const raw = renderAlertRaw("craigoley", "remudero", alert);
   assert.match(raw, /craigoley\/remudero code-scanning alert #5 \[critical\]: SQL injection/);
   assert.match(raw, /^https:\/\/github\.com\/craigoley\/remudero\/security\/code-scanning\/5$/m);
+});
+
+test("W1-T4273: renderAlertRaw appends location and instance message, byte-identical without a location", () => {
+  const base = "craigoley/remudero code-scanning alert #5 [critical]: SQL injection\n\n"
+    + "https://github.com/craigoley/remudero/security/code-scanning/5";
+  const withoutInstance = normalizeCodeScanningAlert(CODE_SCANNING_RAW[0]);
+  assert.equal(renderAlertRaw("craigoley", "remudero", withoutInstance), base);
+  const withInstance: RawAlert = {
+    ...withoutInstance,
+    location: { path: "src/lib/ops.ts", startLine: 121, endLine: 124 },
+    instanceMessage: "A tainted value reaches this call.",
+  };
+  assert.equal(renderAlertRaw("craigoley", "remudero", withInstance),
+    `${base}\n\nsrc/lib/ops.ts:121-124\nA tainted value reaches this call.`);
 });
 
 // ── pollAlerts feedback capture: the W1-T56 acceptance shape ───────────────

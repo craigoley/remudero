@@ -10,7 +10,9 @@
   origin: "deferred from W1-T3757's design (iii) — that task fixed the interval half of the same section and explicitly left this, because it needs a fourth marker state"
   plan_refs: [W1-T3757]
   files: [src/lib/status-board.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T3760 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t3760-a-down-writer-is-not-a-stale-rung
