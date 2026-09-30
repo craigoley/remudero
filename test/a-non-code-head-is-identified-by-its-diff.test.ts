@@ -168,9 +168,14 @@ test("an ordinary unidentified head is refused with its text unchanged", () => {
   assert.equal(
     result.message,
     "REFUSED — this head matches neither conforming form and carries no valid Remudero-Task " +
-      "trailer. Satisfy one: (1) push to a session branch shaped " +
+      "trailer. This gate refuses at push in hooks/pre-push, before a pull request exists, " +
+      "because the branch is still free to rename there. Satisfy one NOW, while it is free: " +
+      "(1) push to a session branch shaped " +
       "`run-<taskId>-<epochMs>` when building a filed task, or `run-unfiled-<epochMs>` " +
       "when the work has no filed task, or (2) carry an anchored `Remudero-Task: <id>` trailer " +
-      "on the head commit (either is enough — see W1-T3388).",
+      "on the head commit (either is enough — see W1-T3388). If a pull request is ALREADY open, " +
+      "renaming is no longer an option — a pull request's head ref cannot be renamed in GitHub " +
+      "once it exists — so the repair is to amend the head commit to add the trailer and " +
+      "force-push the same branch, not to open a new one.",
   );
 });
