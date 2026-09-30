@@ -44464,6 +44464,15 @@ export function approveParkedTask(
   if (task.status !== "queued") {
     return { code: 2, message: `rmd approve: ${taskId} is status:${task.status} — only a queued task can be released` };
   }
+  // The writer is the last authority boundary: callers other than the cadence helper may supply
+  // machine provenance. Neither a stale release nor a low model verdict can lift a plan hold or
+  // downgrade a task the plan itself calls high-risk. A human can still release high-risk work.
+  if (task.dispatch_hold === true) {
+    return { code: 2, message: `rmd approve: ${taskId} has an explicit dispatch hold — resolve it in the plan before release` };
+  }
+  if (deps.provenance !== undefined && task.risk === "high") {
+    return { code: 2, message: `rmd approve: ${taskId} is high-risk in the plan — a machine cannot release its human verification` };
+  }
   const already = releasedTaskIds(deps.ledgerLines ?? readLedgerRawLines(deps.ledgerPath));
   if (already.has(taskId)) {
     if (!deps.provenance) deps.recordDurableRelease?.(taskId);
