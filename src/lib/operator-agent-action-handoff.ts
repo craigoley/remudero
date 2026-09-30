@@ -244,7 +244,15 @@ export function prepareActionHandoff(deps: ActionHandoffConfig, actor: string, i
     writeExclusive(intentPath, JSON.stringify({ confirmationId }));
   } catch (error) {
     // Drop this attempt's preparation (a no-op when it was never written) so no orphan outlives it.
-    rmSync(paths.prepared, { force: true });
+    try {
+      rmSync(paths.prepared, { force: true });
+    } catch (cleanup) {
+      // force ignores ENOENT only: when the store directory is not a directory nothing was written to remove.
+      const code = errno(cleanup);
+      if (code !== "ENOTDIR" && code !== "ENOENT") {
+        return refusal(503, "store_unavailable", `the preview could not be stored and its preparation could not be removed: ${(cleanup as Error).message}`);
+      }
+    }
     if (errno(error) === "EEXIST" && existsSync(intentPath)) {
       // A concurrent request with this intent stored first: its preview is the one action.
       try {
