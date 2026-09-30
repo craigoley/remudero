@@ -136,7 +136,7 @@ const BASELINE_COMMAND_NAMES = [
   "alert-fix", "approve", "authority", "autonomy-rate", "away", "benchmark-aa", "benchmark-paid-pilot", "board", "bundle", "caller-sweep", "case-file", "check-acceptance", "check-proof",
   "census-membership", "ci-failures", "ci-learning", "correct", "coverage-improve", "daemon", "daemon-plist", "decline", "dep-review",
   "deploy", "deploy-plist", "deploy-run", "digest", "digest-plist", "doctor", "down", "drain",
-  "emissions", "escalate", "feedback", "feedback-reconcile", "field-trials", "fix", "hand-runs", "impossible-canary", "inbox", "init", "install-checkout", "issues",
+  "emissions", "escalate", "feedback", "feedback-reconcile", "field-trials", "fix", "hand-runs", "impossible-canary", "inbox", "inbox-bakeoff", "init", "install-checkout", "issues",
   "knowledge",
   "learnings", "ledger-compact", "ledger-grep", "lint-plan", "memory-lint", "merge-hold", "next-task-id", "note", "notify", "onboard", "ops", "pause",
   "peek", "plan", "plan-reconcile", "preflight", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
