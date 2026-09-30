@@ -1202,6 +1202,21 @@ export function resolveReleasedIds(deps: Pick<DrainDeps, "readLedgerLines">): Re
   return releasedTaskIds(read());
 }
 
+/**
+ * RECORD-TASK ROUTING LOG (W1-T4818). The selection scan re-offers a record task every tick, so the
+ * ledger line is written at most once per task id per drain run (`seen` is the run's own set).
+ */
+export function recordTaskRoutedLogger(
+  seen: Set<string>,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): (task: Task) => void {
+  return (t) => {
+    if (seen.has(t.id)) return;
+    seen.add(t.id);
+    log("dispatch.record_task_routed", { task: t.id });
+  };
+}
+
 export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}): Promise<DrainSummary> {
   if ((opts.laneCount ?? 1) >= 2) return runDrainLanes(plan, deps, opts);
 
@@ -1455,11 +1470,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
           deps.onCircuitBreak?.(t);
         }
       },
-      onRecordTaskRouted: (t) => {
-        if (routedRecordTasks.has(t.id)) return;
-        routedRecordTasks.add(t.id);
-        log("dispatch.record_task_routed", { task: t.id });
-      },
+      onRecordTaskRouted: recordTaskRoutedLogger(routedRecordTasks, log),
       isLifetimeCapExceeded: deps.isLifetimeCapExceeded,
       // LIFETIME DISPATCH CAP (W1-T316/W1-T271): a legible ledger line every tick, with the
       // caller's legacy observation hook fired at most once per task id per drain run.
@@ -1808,11 +1819,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
           deps.onCircuitBreak?.(t);
         }
       },
-      onRecordTaskRouted: (t) => {
-        if (routedRecordTasks.has(t.id)) return;
-        routedRecordTasks.add(t.id);
-        log("dispatch.record_task_routed", { task: t.id });
-      },
+      onRecordTaskRouted: recordTaskRoutedLogger(routedRecordTasks, log),
       isLifetimeCapExceeded: deps.isLifetimeCapExceeded,
       onLifetimeCapExceeded: (t) => {
         log("dispatch.lifetime_pressure", { task: t.id });

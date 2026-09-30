@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseTasksFromYaml, type Plan, type Task } from "../src/lib/plan.js";
-import { nextRunnable, runnableCandidates, type MergedSet } from "../src/lib/drain.js";
+import { nextRunnable, recordTaskRoutedLogger, runnableCandidates, type MergedSet } from "../src/lib/drain.js";
 import { isRecordTask, lintTask } from "../src/lib/task-linter.js";
 
 // W1-T4818 — a task whose EVERY acceptance proof greps its own plan/tasks.d shard has nothing for a
@@ -40,6 +40,17 @@ test("W1-T4818: a task whose every proof greps its own shard is routed to the ju
   assert.equal(nextRunnable(plan, NONE_MERGED, opts), undefined);
   assert.deepEqual(runnableCandidates(plan, NONE_MERGED, 4, opts), []);
   assert.deepEqual([...new Set(routed)], ["W1-T9001"]);
+});
+
+test("W1-T4818: the routing ledger line is written once per task per drain run", () => {
+  const record = taskFrom(shard("W1-T9001", SHARD, SELF_PROOFS), SHARD);
+  const lines: Array<{ event: string; detail: Record<string, unknown> }> = [];
+  const seen = new Set<string>();
+  const hook = recordTaskRoutedLogger(seen, (event, detail) => lines.push({ event, detail }));
+  hook(record);
+  hook(record);
+  assert.deepEqual(lines, [{ event: "dispatch.record_task_routed", detail: { task: "W1-T9001" } }]);
+  assert.deepEqual([...seen], ["W1-T9001"]);
 });
 
 test("W1-T4818: the plan lint warns on that shape and never refuses it", () => {
