@@ -8260,7 +8260,7 @@ async function fixRungStandDownReason(
       return {
         reason:
           `the only red required check(s) this strike would target (${redCheckSupersession.redNames.join(", ")}) ` +
-          `now show a later attempt already in flight on this head — standing down rather than spending a ` +
+          `now show a later attempt already in flight or green on this head — standing down rather than spending a ` +
           `strike on an already-superseded reading`,
       };
     }

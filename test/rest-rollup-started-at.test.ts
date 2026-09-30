@@ -132,14 +132,14 @@ test("stillRedRequiredNames: a REST rollup entry WITH a populated startedAt but 
   assert.deepEqual(stillRedRequiredNames(["ci"], rollup), ["ci"], "a fresh attempt that concluded failing is still red");
 });
 
-test("stillRedRequiredNames: a REST rollup entry WITH a populated startedAt that already CONCLUDED SUCCESS stays in the returned set — this function's contract is narrower than 'no longer red' (design note v), unchanged by populating the field", () => {
+test("stillRedRequiredNames: a REST rollup entry WITH a populated startedAt that already CONCLUDED SUCCESS is dropped as superseded (W1-T4902 widened the contract past 'in flight' only)", () => {
   const rollup = rollupFromRest(
     [{ name: "ci", status: "completed", conclusion: "success", started_at: "2026-08-26T18:00:00Z" }],
     [],
   );
   assert.deepEqual(
     stillRedRequiredNames(["ci"], rollup),
-    ["ci"],
-    "only an OBSERVED in-flight attempt is ever dropped — a concluded SUCCESS is left exactly as before this task",
+    [],
+    "an OBSERVED concluded SUCCESS is a later attempt that already superseded the red",
   );
 });
