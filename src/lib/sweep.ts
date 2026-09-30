@@ -17,7 +17,7 @@ import {
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
-import { systemClock, type Clock } from "./clock.js";
+import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { gitPushEmptyCommit, gitPushRunBranch } from "./git-push.js";
 import { ghJson, ghJsonAsync } from "./github-transport.js";
@@ -3098,7 +3098,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           await draftRefusalAmendment(c, {
             readShard: (taskId) => readTaskShard(repoDir, taskId),
             probeExisting: (branch) => probeExistingPlanPr(ghJsonForBuild, owner, repo, branch),
-            nowIso: () => new Date(nowMsImpl()).toISOString(),
+            nowIso: () => clockFromMillisFn(nowMsImpl).iso(),
             openAmendmentPr: (input) => {
               try {
                 planRepairGit("git", ["-C", repoDir, "fetch", "origin", "--quiet"]);

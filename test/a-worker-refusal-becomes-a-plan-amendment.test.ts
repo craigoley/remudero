@@ -51,7 +51,7 @@ const UNCATEGORIZED = [
   "1. [not-a-real-class] some free prose in the right position",
 ].join("\n");
 
-function ledgerPath(): string {
+function freshLogFile(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-refusal-amend-")), "state", "ledger.ndjson");
 }
 
@@ -223,14 +223,14 @@ function sweepDeps(path: string, extra: Partial<SweepDeps>): SweepDeps {
   };
 }
 
-function ledgerRows(path: string): Array<Record<string, unknown>> {
+function logRows(path: string): Array<Record<string, unknown>> {
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
 test("W1-T4838: a categorized refusal holds the task and drafts one amendment", async () => {
   const task = fixtureTask();
-  const path = ledgerPath();
+  const path = freshLogFile();
   appendLedger(path, verdictRow());
   const f = effectsFixture(task);
   const deps = sweepDeps(path, { draftRefusalAmendments: f.effects.draftRefusalAmendments });
@@ -254,18 +254,18 @@ test("W1-T4838: a categorized refusal holds the task and drafts one amendment", 
   );
 
   // Recorded once per source run, so the next pass finds nothing to do.
-  const recorded = ledgerRows(path).filter((r) => r.step === REFUSAL_AMENDMENT_STEP);
+  const recorded = logRows(path).filter((r) => r.step === REFUSAL_AMENDMENT_STEP);
   assert.equal(recorded.length, 1);
   assert.equal(recorded[0]!.outcome, "drafted");
   assert.equal(recorded[0]!.source_run_id, RUN);
   await withLiveWritesAllowed(() => runSweep([], deps));
   assert.equal(f.ghCalls.filter((c) => c.includes("--method")).length, 1, "a second pass drafts nothing more");
-  assert.equal(ledgerRows(path).filter((r) => r.step === REFUSAL_AMENDMENT_STEP).length, 1);
+  assert.equal(logRows(path).filter((r) => r.step === REFUSAL_AMENDMENT_STEP).length, 1);
 });
 
 test("W1-T4838: an uncategorized no_pr keeps the retry path", async () => {
   const task = fixtureTask();
-  const path = ledgerPath();
+  const path = freshLogFile();
   // Three ordinary failures: prose that says 'refused', an unknown class, and no excerpt at all.
   for (const [i, excerpt] of [UNCATEGORIZED, "worker completed without opening a PR", undefined].entries()) {
     appendLedger(path, verdictRow({ task_id: `${TASK}-${i}`, report_excerpt: excerpt }));
@@ -283,11 +283,11 @@ test("W1-T4838: an uncategorized no_pr keeps the retry path", async () => {
   assert.equal(f.ghCalls.length, 0, "no amendment PR is probed or opened");
   assert.equal(f.worktreeAdds.length, 0);
   assert.equal(terminalPreDispatchRefusalRevisions(join(f.root, "state")).size, 0, "nothing is held — the task retries");
-  assert.equal(ledgerRows(path).filter((r) => r.step === REFUSAL_AMENDMENT_STEP).length, 0);
+  assert.equal(logRows(path).filter((r) => r.step === REFUSAL_AMENDMENT_STEP).length, 0);
 });
 
 test("W1-T4838: a light pass and a caller that never wires the effect do nothing", async () => {
-  const path = ledgerPath();
+  const path = freshLogFile();
   appendLedger(path, verdictRow());
   let called = 0;
   const spy: SweepDeps["draftRefusalAmendments"] = async () => { called++; return []; };
@@ -300,12 +300,12 @@ test("W1-T4838: a light pass and a caller that never wires the effect do nothing
 
 test("W1-T4838: a finished task is neither held nor amended, and the effect is on the recorded surface", async () => {
   const done = fixtureTask({ status: "done" });
-  const path = ledgerPath();
+  const path = freshLogFile();
   appendLedger(path, verdictRow());
   const f = effectsFixture(done);
   await withLiveWritesAllowed(() => runSweep([], sweepDeps(path, { draftRefusalAmendments: f.effects.draftRefusalAmendments })));
   assert.equal(f.ghCalls.length, 0);
   assert.equal(terminalPreDispatchRefusalRevisions(join(f.root, "state")).size, 0);
   assert.ok((SWEEP_EFFECT_SURFACE as readonly string[]).includes("draftRefusalAmendments"));
-  assert.equal(ledgerRows(path).filter((r) => r.step === REFUSAL_AMENDMENT_STEP)[0]?.outcome, "task_closed");
+  assert.equal(logRows(path).filter((r) => r.step === REFUSAL_AMENDMENT_STEP)[0]?.outcome, "task_closed");
 });
