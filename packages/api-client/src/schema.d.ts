@@ -2413,6 +2413,38 @@ export interface components {
       policy?: ProviderRoutingPolicyStatus;
       preferenceBypass?: ProviderRoutingPreferenceBypass;
     };
+    /** One input a view was computed from (src/lib/views.ts's `ViewSource`). */
+    ViewSource: {
+      name: string;
+      /** The input's own as-of time; null when it has none yet. */
+      asOf: string | null;
+      state: "fresh" | "stale" | "unavailable";
+      reason?: string;
+    };
+    /** GET /v1/views/nav-badge (docs/views.md). The view envelope every /v1/views/<name> route answers: `version` is `data`'s schema version, `asOf` the oldest source's as-of, `stale` true when any source is stale or unavailable. A cold input makes its count absent with a `reason`, never a zero. */
+    NavBadgeView: {
+      view: "nav-badge";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        /** The operator-agent badge: proposals the console's engine would show (a port of its generateProposals and visibleProposals, src/lib/nav-badge-view.ts), with up to 20 of their ids for a parity check. */
+        agent: {
+          count?: number;
+          proposalIds: (string)[];
+          reason?: string;
+        };
+        /** Open inbox items by who must act, from the last GET /v1/inbox classification. */
+        inbox: {
+          ready?: number;
+          needsYou?: number;
+          fleet?: number;
+          reason?: string;
+        };
+      };
+    };
     /** One RECENT feed row minted from a ledger line (src/lib/board.ts's `RecentActivityEntry`). */
     RecentActivityEntry: {
       taskId: string;
@@ -4153,6 +4185,16 @@ export interface paths {
     get: {
       responses: {
           "200": VersionResult;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/views/nav-badge": {
+    get: {
+      responses: {
+          "200": NavBadgeView;
+          "304": undefined;
           "401": Error;
           "403": Error;
         };
