@@ -321,3 +321,9 @@ test("W1-T4914: the default seam classifies a real conflict", async () => {
     ],
   );
 });
+
+test("W1-T4914: a spawn that throws synchronously is unreadable, never a rejection", async () => {
+  const git = defaultMergeProbeGit(process.cwd());
+  assert.deepEqual(await git(["rev-parse", "bad\0arg"]), { status: null, stdout: "" });
+  assert.equal((await probeMerge({ headSha: "a".repeat(40), mainSha: "b".repeat(40), git })).verdict, "unreadable");
+});
