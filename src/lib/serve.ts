@@ -87,6 +87,7 @@ import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnaps
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
 import { buildOperatorAgentAnswer, buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
+import { buildOperatorAgentActionHandoffRoutes } from "./operator-agent-action-handoff.js";
 import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
@@ -2748,6 +2749,9 @@ function assembleServeRoutes(
       snapshot: currentAnalyticsSnapshot(),
       inbox: readInboxAnswerEvidence(inboxThreadStorePath(deps.fleetControlRoot)),
     }), (input) => buildOperatorAgentAnswer(input)),
+    // W1-T4559: action-handoff-v1, the assistant's only write path, kept apart from read-only answer-v1.
+    ...buildOperatorAgentActionHandoffRoutes({ root: deps.fleetControlRoot, ledgerPath: deps.ledgerPath, claimRoot: deps.fleetControlRoot,
+      instance: assistantControl.instance, repository: assistantControl.repository }),
     ...contextControlsRoutes,
     ...buildPanelGraphRoutes(panelGraphDeps, () => deps.board.plan),
     // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,

@@ -46,6 +46,7 @@
     CLOSE IF the operator rules the maintained projection unnecessary given W1-T4454's worker-thread
     projections, and record that ruling instead.
   note: |
+    OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, "the verify-human queue, cleared"): STAYS DEFERRED — no release trigger has fired; re-measure the cold board read after W1-T4820 merges (over 5 s fires the trigger).
     DEFERRED BY OPERATOR RULING, 2026-09-27 (DECISIONS.md "W1-T4568: the materialized read model is
     DEFERRED"). Its prerequisites shipped, and together with W1-T4452, W1-T4567 and W1-T4582 every GET read
     route now answers a warm request without re-opening a ledger archive: W1-T4576's reach census baseline

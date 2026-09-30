@@ -472,16 +472,16 @@ function openWeightResult(): WorkerResult {
 test("the capability ladder resolves an open-weight provider by table lookup", () => {
   const capabilities = loadMounts(join(REPO_ROOT, ".remudero", "mounts.yaml")).capabilities;
   const selected = selectOpenWeightModel(capabilities, "sonnet", "low");
-  // W1-T3598 led this row with gpt-5-nano and DEMOTED gpt-oss-120b rather than removing it. Both
-  // halves are asserted: the order (cheaper first) and the fallback's continued presence, so a
-  // later edit that deletes the trailing entry fails here rather than silently killing the lane.
+  // W1-T3598 led this row with gpt-5-nano and DEMOTED gpt-oss-120b rather than removing it; W1-T3570
+  // (2026-09-30) put gpt-6-luna ahead of both on draft quality. Both halves are asserted: the order and
+  // the fallbacks' continued presence, so a later edit that deletes a trailing entry fails here.
   assert.deepEqual(
     capabilities?.cash?.balanced.low,
-    ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna"],
+    ["gpt-6-luna", "gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna"],
     "the declared cash row, not fallback data, is the capability source",
   );
   assert.equal(selected.capability, "balanced");
-  assert.equal(selected.model, "gpt-5-nano", "the ladder's LEADING candidate is what resolves");
+  assert.equal(selected.model, "gpt-6-luna", "the ladder's LEADING candidate is what resolves");
   assert.equal(selected.effort, "low");
 
   const squeezed = selectOpenWeightModel(capabilities, "sonnet", "low", 4_000, { cashSqueezed: true });
@@ -531,7 +531,7 @@ test("the real cash mount passes the squeeze promotion without reading subscript
       permissionMode: "bypassPermissions",
       settingsFile,
       prompt: "short cash work",
-      model: "sonnet",
+      model: "haiku",
       effort: "low",
       mountProvider: "cash",
       cashSqueezed: true,
@@ -543,14 +543,15 @@ test("the real cash mount passes the squeeze promotion without reading subscript
       permissionMode: "bypassPermissions",
       settingsFile,
       prompt: "short cash work",
-      model: "sonnet",
+      model: "haiku",
       effort: "low",
       mountProvider: "cash",
       config,
       providerRouting: { spawnOpenWeight },
     } as never);
 
-    assert.deepEqual(selections, ["gpt-6-luna", "gpt-5-nano"], "only the squeeze cash spawn promotes Luna");
+    // W1-T3570: balanced is Luna-led either way, so the economy row (gpt-oss first) is where promotion shows.
+    assert.deepEqual(selections, ["gpt-6-luna", "gpt-oss-120b"], "only the squeeze cash spawn promotes Luna");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1114,14 +1115,14 @@ test("openweight configuration requires a daily cash cap and keeps its key outsi
       config: { ...uncapped, dailyCapUsd: 1 },
       providerRouting: {
         spawnOpenWeight: async (_args, _config, selection) => {
-          // Resolves through the ladder, which W1-T3598 leads with the cheaper deployment.
-          assert.equal(selection.model, "gpt-5-nano");
+          // Resolves through the ladder's balanced row, which W1-T3570 leads with gpt-6-luna.
+          assert.equal(selection.model, "gpt-6-luna");
           return openWeightResult();
         },
       },
     });
     assert.equal(result.provider, "cash");
-    assert.equal(result.routedModel, "gpt-5-nano");
+    assert.equal(result.routedModel, "gpt-6-luna");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

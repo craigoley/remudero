@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
@@ -46,6 +46,61 @@ export interface GardenState<C extends string> {
   pending?: { prUrl: string; actionClass: C; baseline: Outcome; atMerge?: Outcome };
   /** The current streak of passes whose filing threw, which defers the next attempt ({@link gardenFilingRetryAt}). */
   filingFailures?: { count: number; lastAt: string; reason: string };
+  /** Ids of overseer effect verdicts already folded into `classes` (newest last), so a replay credits once. */
+  foldedEffects?: string[];
+}
+
+/** A verdict the gardener overseer (W1-T4802) reached about a class: what a merged change did to its
+ *  targeted cost (`effect`), or that the class kept re-proposing the same change (`churn`). */
+export interface GardenEffect {
+  id: string;
+  actionClass: string;
+  verdict: "credit" | "debit";
+  kind: "effect" | "churn";
+  at: string;
+}
+
+const GARDEN_FOLDED_EFFECTS_KEPT = 200;
+
+export function gardenEffectsPath(stateDir: string, name: string): string {
+  return join(stateDir, `${name}-gardener-effects.json`);
+}
+
+/** The pending overseer verdicts for one gardener; an absent or unreadable file holds none. */
+export function readGardenEffects(path: string): GardenEffect[] {
+  if (!existsSync(path)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { effects?: GardenEffect[] };
+    return Array.isArray(parsed?.effects) ? parsed.effects.filter((e) => typeof e?.id === "string" && typeof e.actionClass === "string") : [];
+  } catch (error) {
+    // deliberate: an unreadable effects file is dropped, not thrown into the pass; the overseer
+    // holds its own record of each verdict and writes the file afresh.
+    void error;
+    return [];
+  }
+}
+
+/** Write the overseer's pending verdicts for one gardener. The overseer never touches the gardener's
+ *  own state file — a concurrent pass would overwrite it — so this file is the one seam between them. */
+export function writeGardenEffects(path: string, effects: readonly GardenEffect[]): void {
+  writeAtomic(path, JSON.stringify({ effects }, null, 2) + "\n");
+}
+
+/** Credit or debit each class named by a verdict not folded before. Unknown classes are skipped. */
+export function foldGardenEffects<C extends string>(state: GardenState<C>, effects: readonly GardenEffect[]): { state: GardenState<C>; applied: GardenEffect[] } {
+  const seen = new Set(state.foldedEffects ?? []);
+  const applied: GardenEffect[] = [];
+  const classes = { ...state.classes };
+  for (const e of effects) {
+    if (seen.has(e.id)) continue;
+    seen.add(e.id);
+    const c = classes[e.actionClass as C];
+    if (!c) continue;
+    classes[e.actionClass as C] = e.verdict === "credit" ? { ...c, alpha: c.alpha + 1 } : { ...c, beta: c.beta + 1 };
+    applied.push(e);
+  }
+  const foldedEffects = [...seen].slice(-GARDEN_FOLDED_EFFECTS_KEPT);
+  return { state: { ...state, classes, foldedEffects }, applied };
 }
 
 export type PrState = "open" | "merged" | "closed" | "unknown";
@@ -256,6 +311,16 @@ export function runGarden<C extends string, I, A extends GardenAction<C>, W exte
 ): { ran: boolean; plan?: GardenPlan<C, A>; prUrl?: string; scorecard?: Record<string, unknown> } {
   const statePath = gardenStatePath(deps.stateDir, spec.name);
   let state = readGardenState(statePath, spec.classes);
+  // The overseer's verdicts reach the Beta record here, at the start of a pass, from a file it owns.
+  const effectsPath = gardenEffectsPath(deps.stateDir, spec.name);
+  const pendingEffects = readGardenEffects(effectsPath);
+  if (pendingEffects.length > 0) {
+    const folded = foldGardenEffects(state, pendingEffects);
+    state = folded.state;
+    writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
+    rmSync(effectsPath, { force: true });
+    if (folded.applied.length > 0) deps.log(`${spec.name}.gardener_effects_folded`, { verdicts: folded.applied.map((e) => `${e.kind}:${e.verdict}:${e.actionClass}`), classes: state.classes });
+  }
   if ((gardenFilingRetryAt(state.filingFailures) ?? 0) > (deps.clock ?? systemClock).now()) return { ran: false };
   const cheap = spec.cheapFingerprint();
   const pendingBefore = state.pending;

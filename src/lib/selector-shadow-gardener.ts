@@ -500,10 +500,16 @@ export function selectorShadowCauseOrigin(file: string): string {
   return `selector-shadow-miss:${file}`;
 }
 
+/** W1-T4839: the one structural task a test missed AGAIN after its narrow repair merged. */
+export function selectorShadowStructuralOrigin(file: string): string {
+  return `selector-shadow-structural:${file}`;
+}
+
 /** The missed test file a plan origin names, in the cause form or the older per-observation form. */
 export function selectorShadowCauseOf(origin: string | undefined): string | undefined {
   if (!origin) return undefined;
   if (origin.startsWith("selector-shadow-miss:")) return origin.slice("selector-shadow-miss:".length);
+  if (origin.startsWith("selector-shadow-structural:")) return origin.slice("selector-shadow-structural:".length);
   return /^selector-shadow:[^:]+:(?:floor|narrow):(.+)$/.exec(origin)?.[1];
 }
 
@@ -530,7 +536,41 @@ export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string,
   ].join("\n");
 }
 
-type SelectorShadowPlanTask = { id: string; origin?: string; retirement?: string };
+/** The regression test a structural repair must add: its proof greps for the missed file there. */
+export function selectorShadowStructuralTestPath(file: string): string {
+  return `test/affected-suites-selects-${file.split("/").at(-1)!.replace(/\.test\.ts$/, "")}.test.ts`;
+}
+
+/** W1-T4839: a test that missed again after its narrow edge merged. The narrow edges did not hold,
+ *  so the task names every edge seen and asks for the selector's rule to be fixed, not one more edge. */
+export function selectorShadowStructuralTask(file: string, taskId: string, edges: readonly string[], repairedTaskId: string): string {
+  const testPath = selectorShadowStructuralTestPath(file);
+  const files = ["src/lib/affected-suites.ts", testPath];
+  const q = JSON.stringify;
+  return [
+    `- id: ${taskId}`,
+    `  title: ${q(`FIX THE SELECTOR STRUCTURALLY FOR ${file} — it was missed again after its narrow edge merged`)}`,
+    "  repo: remudero",
+    "  depends_on: []",
+    "  type: implement",
+    ...machineShardHeaderLines(files),
+    `  origin: ${q(selectorShadowStructuralOrigin(file))}`,
+    `  files: [${files.join(", ")}]`,
+    `  note: ${q(`W1-T4839: ${file} was missed again after ${repairedTaskId} (its narrow edge) merged, so another narrow edge is not the repair. Every edge seen: ${edges.join("; ")}. Find what these edges share and fix the selector's rule for it. Later misses of this suite are ledgered as selector-shadow.miss_evidence rows naming this task; no further task is filed for it.`)}`,
+    "  acceptance:",
+    `    - claim: ${q(`the selector includes ${file} for every edge seen (${edges.join("; ")}), with a regression test`)}`,
+    `      proof: ${q(`grep: ${file.replaceAll(".", "\\.")} in ${testPath}`)}`,
+    "",
+  ].join("\n");
+}
+
+type SelectorShadowPlanTask = { id: string; origin?: string; retirement?: string; status?: string };
+
+/** A home task counts as repaired once its plan status reads merged or done. */
+const SELECTOR_SHADOW_REPAIRED_STATUSES = new Set(["merged", "done"]);
+/** Changed-path reads (one GitHub compare each) an evidence-only pass may spend on naming edges. */
+const SELECTOR_SHADOW_EDGE_READS_PER_PASS = 8;
+const SELECTOR_SHADOW_EDGES_KEPT = 40;
 
 /** The daemon checkout's plan, read only when an unseen miss needs a home. */
 export function selectorShadowPlanTasks(repoRoot: string): SelectorShadowPlanTask[] {
@@ -547,79 +587,140 @@ export function selectorShadowFlakeLedger(log: GardenerDeps["log"]): (runId: num
   };
 }
 
-/** Report every pass. A miss whose suite already has a task is ledgered as evidence for it; at most
- *  one miss with no task files a new one, so the daemon cannot flood the plan. The shared gardener
- *  seam carries state, checkout, workspace and log; the reads are this gardener's own inputs, passed
- *  beside it rather than declared as another seam shape. */
+/** Report every pass. A missed TEST is the unit (W1-T4839): a miss whose suite already has a task is
+ *  ledgered as evidence for it, whatever edge it names. A suite missed again AFTER its narrow task
+ *  merged is filed once more as a structural task naming every edge seen, and never again. At most
+ *  one new task files per pass, so the daemon cannot flood the plan. The shared gardener seam carries
+ *  state, checkout, workspace and log; the reads are this gardener's own inputs, passed beside it
+ *  rather than declared as another seam shape. `isRepaired` overrides the default repair test (the
+ *  home task's plan status is merged/done, or src/lib/affected-suites.ts already names the suite). */
 export async function runSelectorShadowGardener(
   deps: GardenerDeps,
   readRuns: () => SelectorShadowRun[],
   readChangedPaths: (miss: SelectorShadowMiss) => string[] | Promise<string[]>,
   mintTaskId: (filingBranch: string) => string,
   planTasks: () => SelectorShadowPlanTask[] = () => selectorShadowPlanTasks(deps.repoRoot),
+  isRepaired?: (homeTaskId: string, file: string) => boolean,
 ): Promise<SelectorShadowReport> {
   const path = join(deps.stateDir, "selector-shadow-gardener.json");
   const stored = readFileIfExists(path);
-  const prior = stored === undefined ? {} : JSON.parse(stored) as { filedKeys?: string[]; causes?: Record<string, string> };
+  const prior = stored === undefined ? {} : JSON.parse(stored) as {
+    filedKeys?: string[]; causes?: Record<string, string>; edges?: Record<string, string[]>; structural?: Record<string, string>;
+  };
   if (prior.filedKeys !== undefined && !Array.isArray(prior.filedKeys)) throw new Error("selector shadow: invalid filed-keys state");
   const seen = new Set(prior.filedKeys ?? []);
   const causes: Record<string, string> = { ...(prior.causes ?? {}) };
+  const edges: Record<string, string[]> = { ...(prior.edges ?? {}) };
+  const structural: Record<string, string> = { ...(prior.structural ?? {}) };
+  const noteEdge = (file: string, edge: string): void => {
+    const held = edges[file] ?? [];
+    if (!held.includes(edge)) edges[file] = [...held, edge].slice(-SELECTOR_SHADOW_EDGES_KEPT);
+  };
   const report = selectorShadowReport(readRuns(), selectorShadowFullSuiteSize(deps.repoRoot));
   deps.log("selector-shadow.report", { ...report, misses: report.misses.slice(0, 20) });
   const unseen = report.misses.filter((m) => !seen.has(selectorShadowMissKey(m)));
   // The plan is read only when there is something new to place, never on an idle pass.
-  const planned = new Map<string, { id: string; retired: boolean }>();
+  const planned = new Map<string, { id: string; retired: boolean; structural: boolean }>();
+  const statusOf = new Map<string, string | undefined>();
   if (unseen.length > 0) {
     for (const task of planTasks()) {
+      statusOf.set(task.id, task.status);
       const file = selectorShadowCauseOf(task.origin);
       if (file === undefined) continue;
+      const isStructural = task.origin?.startsWith("selector-shadow-structural:") === true;
       const held = planned.get(file);
-      if (!held || (held.retired && task.retirement === undefined)) planned.set(file, { id: task.id, retired: task.retirement !== undefined });
+      const better = !held || (isStructural && !held.structural) ||
+        (!isStructural && !held.structural && held.retired && task.retirement === undefined);
+      if (better) planned.set(file, { id: task.id, retired: task.retirement !== undefined, structural: isStructural });
+      if (isStructural) structural[file] ??= task.id;
     }
   }
-  let filedThisPass = false;
-  for (const miss of unseen) {
-    const key = selectorShadowMissKey(miss);
-    const home = causes[miss.file] ?? planned.get(miss.file)?.id;
-    if (home !== undefined) {
-      seen.add(key);
-      causes[miss.file] = home;
-      deps.log("selector-shadow.miss_evidence", {
-        task_id: home, file: miss.file, selection: miss.selection, ci_run_id: miss.runId, head_sha: miss.headSha,
-        ...(miss.prNumber === undefined ? {} : { pr: miss.prNumber }),
-        ...(planned.get(miss.file)?.retired && planned.get(miss.file)?.id === home ? { task_retired: true } : {}),
-      });
-      continue;
-    }
-    if (filedThisPass) continue;
-    filedThisPass = true;
-    const changedPaths = await readChangedPaths(miss);
+  const repaired = (home: string, file: string): boolean => {
+    if (isRepaired) return isRepaired(home, file);
+    const status = statusOf.get(home);
+    if (status !== undefined && SELECTOR_SHADOW_REPAIRED_STATUSES.has(status)) return true;
+    return (readFileIfExists(join(deps.repoRoot, "src", "lib", "affected-suites.ts")) ?? "").includes(file);
+  };
+  const edgeOf = (miss: SelectorShadowMiss, paths: readonly string[]): string =>
+    `${paths.length ? paths.join(", ") : miss.headSha} -> ${miss.file}`;
+  /** Land one plan-task file for a miss, returning the PR url and the id minted for it. */
+  const land = async (miss: SelectorShadowMiss, build: (taskId: string) => { contents: string; title: string; body: (relativePath: string) => string }) => {
     const workspace = deps.openWorkspace();
     try {
       if (!workspace.branch) throw new Error("selector shadow: filing workspace has no branch for task-id reservation");
       const taskId = mintTaskId(workspace.branch);
       const name = `${taskId.toLowerCase()}-selector-shadow-miss.yaml`;
       const relativePath = join("plan", "tasks.d", name);
-      const contents = selectorShadowMissTask(miss, taskId, changedPaths);
-      const task = loadPlanFromYaml(contents, name).tasks[0];
+      const made = build(taskId);
+      const task = loadPlanFromYaml(made.contents, name).tasks[0];
       const lint = lintTask(task);
       if (!lint.ok) throw new Error(`selector shadow: missed-edge task failed lint: ${lint.violations.map((v) => v.check).join(", ")}`);
-      writeAtomic(join(workspace.root, relativePath), contents);
-      const originProof = selectorShadowCauseOrigin(miss.file).replaceAll(".", "\\.");
-      const prUrl = workspace.land({
-        paths: [relativePath],
-        title: `fix(selector): file missed ${miss.selection} edge for ${miss.file.split("/").at(-1)}`,
-        body: `The W1-T4439 shadow record observed ${miss.selection} miss on run ${miss.runId}: ${changedPaths.length ? changedPaths.join(", ") : miss.headSha} -> ${miss.file}.\n\nThe task is parked for review; W1-T4406 remains gated.\n\n## Acceptance\n\n- claim: the missed selector edge is recorded as a parked task\n  proof: grep: ${originProof} in ${relativePath}`,
-      });
+      writeAtomic(join(workspace.root, relativePath), made.contents);
+      const prUrl = workspace.land({ paths: [relativePath], title: made.title, body: made.body(relativePath) });
       if (!prUrl) throw new Error("selector shadow: task PR was not opened");
-      seen.add(key);
-      causes[miss.file] = taskId;
-      deps.log("selector-shadow.miss_filed", { task_id: taskId, pr_url: prUrl, edge: `${changedPaths.length ? changedPaths.join(", ") : miss.headSha} -> ${miss.file}` });
+      return { taskId, prUrl };
     } finally {
       workspace.dispose();
     }
+  };
+  let filedThisPass = false;
+  let edgeReads = 0;
+  for (const miss of unseen) {
+    const key = selectorShadowMissKey(miss);
+    const plannedHome = planned.get(miss.file);
+    const home = structural[miss.file] ?? causes[miss.file] ?? plannedHome?.id;
+    // A suite that already has its one structural task only ever gains evidence.
+    const escalate = home !== undefined && structural[miss.file] === undefined && plannedHome?.structural !== true &&
+      plannedHome?.retired !== true && repaired(home, miss.file);
+    if (home !== undefined && !escalate) {
+      let paths: string[] = [];
+      if (edgeReads < SELECTOR_SHADOW_EDGE_READS_PER_PASS) {
+        edgeReads++;
+        try {
+          paths = await readChangedPaths(miss);
+        } catch (error) {
+          deps.log("selector-shadow.edge_unread", { file: miss.file, head_sha: miss.headSha, error: String((error as Error)?.message ?? error) });
+        }
+      }
+      noteEdge(miss.file, edgeOf(miss, paths));
+      seen.add(key);
+      causes[miss.file] = home;
+      deps.log("selector-shadow.miss_evidence", {
+        task_id: home, file: miss.file, selection: miss.selection, ci_run_id: miss.runId, head_sha: miss.headSha,
+        ...(miss.prNumber === undefined ? {} : { pr: miss.prNumber }),
+        ...(plannedHome?.retired && plannedHome.id === home ? { task_retired: true } : {}),
+      });
+      continue;
+    }
+    if (filedThisPass) continue;
+    filedThisPass = true;
+    const changedPaths = await readChangedPaths(miss);
+    const edge = edgeOf(miss, changedPaths);
+    if (escalate) {
+      noteEdge(miss.file, edge);
+      const every = edges[miss.file]!;
+      const filed = await land(miss, (taskId) => ({
+        contents: selectorShadowStructuralTask(miss.file, taskId, every, home),
+        title: `fix(selector): file structural repair for ${miss.file.split("/").at(-1)}`,
+        body: (relativePath) => `${miss.file} was missed again (run ${miss.runId}: ${edge}) after ${home} merged its narrow edge, so this files ONE structural selector task naming every edge seen: ${every.join("; ")}.\n\nThe task is parked for review; later misses of this suite are ledgered as evidence, not filed.\n\n## Acceptance\n\n- claim: the structural repair is recorded as a parked task\n  proof: grep: ${selectorShadowStructuralOrigin(miss.file).replaceAll(".", "\\.")} in ${relativePath}`,
+      }));
+      seen.add(key);
+      causes[miss.file] = filed.taskId;
+      structural[miss.file] = filed.taskId;
+      deps.log("selector-shadow.structural_filed", { task_id: filed.taskId, pr_url: filed.prUrl, repaired_task_id: home, file: miss.file, edges: every });
+      continue;
+    }
+    const filed = await land(miss, (taskId) => ({
+      contents: selectorShadowMissTask(miss, taskId, changedPaths),
+      title: `fix(selector): file missed ${miss.selection} edge for ${miss.file.split("/").at(-1)}`,
+      body: (relativePath) => `The W1-T4439 shadow record observed ${miss.selection} miss on run ${miss.runId}: ${edge}.\n\nThe task is parked for review; W1-T4406 remains gated.\n\n## Acceptance\n\n- claim: the missed selector edge is recorded as a parked task\n  proof: grep: ${selectorShadowCauseOrigin(miss.file).replaceAll(".", "\\.")} in ${relativePath}`,
+    }));
+    seen.add(key);
+    causes[miss.file] = filed.taskId;
+    noteEdge(miss.file, edge);
+    deps.log("selector-shadow.miss_filed", { task_id: filed.taskId, pr_url: filed.prUrl, edge });
   }
-  writeAtomic(path, JSON.stringify({ filedKeys: [...seen], causes, report }) + "\n");
+  writeAtomic(path, JSON.stringify({ filedKeys: [...seen], causes, edges, structural, report }) + "\n");
   return report;
 }
 
@@ -631,6 +732,7 @@ export function startSelectorShadowGardener(
   mintTaskId: (filingBranch: string) => string,
   intervalMs: number,
   planTasks?: () => SelectorShadowPlanTask[],
+  isRepaired?: (homeTaskId: string, file: string) => boolean,
 ): { stop: () => void } {
   let running = false;
   const tick = async () => {
@@ -638,7 +740,7 @@ export function startSelectorShadowGardener(
     running = true;
     try {
       const runs = await readRuns();
-      await runSelectorShadowGardener(deps, () => runs, readChangedPaths, mintTaskId, planTasks);
+      await runSelectorShadowGardener(deps, () => runs, readChangedPaths, mintTaskId, planTasks, isRepaired);
     } catch (error) {
       deps.log("selector-shadow.gardener_failed", { error: String((error as Error)?.message ?? error) });
     } finally {

@@ -143,6 +143,46 @@ pointer wherever that history still matters.
  */
 ```
 
+### Amendment (W1-T4769): a fourth arm, `liveness` — not the rejected timer
+
+The block above is the W1-T1132 original and is kept verbatim. Its "operator" arm never released, so
+a holder that died before its `finally` (`refs/rmd-triage/fb-1789237820690-d3ce67`, claimed
+2026-09-13 by pid 94 in a container that no longer existed) held its entry until a person ran
+`git push origin :refs/rmd-triage/<id>`; auto-triage refused that entry 70 times in 3 days and the
+44-entry backlog never moved, because `decideAutoTriage` always fired on `candidates[0]`.
+
+What changed, and why it is not a bare timer:
+
+1. **Negative liveness evidence, not age alone.** `assessTriageClaimLiveness` returns `dead`,
+   `alive` or `unobservable`. `dead` needs (a) the claim older than
+   `TRIAGE_CLAIM_LIVENESS_WINDOW_MS`, (b) rows from the holder's `host` visible in the ledger union
+   (the positive control that this ledger can see that host at all), and (c) no row from that
+   `host` + `actor_pid` inside the last window. The holder's own `triage.claim` row is written just
+   after the anchor, so "a row after the claim" could never be false; the test is "a row in the
+   last window". A holder that keeps writing rows keeps its claim however old it is.
+2. **`unobservable` is not `dead`.** An anchor that does not parse, an unreadable union, or a host
+   this ledger has never seen releases only past `TRIAGE_CLAIM_AGE_ONLY_CEILING_MS` (6 windows), and its
+   `triage.claim_released` row says `tier: "age-only"` and `verdict: "unobservable"`.
+3. **The decision stays clock-free.** `decideTriageClaimRelease` reads a verdict it is handed
+   (`liveness.releasable`); the assessor owns the only clock. The W1-T1132 NO TIMER source pin still
+   holds for the decision body. The window is derived from the lane's own shape (the longest
+   row-less stretch is one Architect call, minutes) and is two hours — over ten such calls.
+4. **Release is conditional.** The drop is `--force-with-lease` on the sha that was judged, so a claim
+   that changed hands is never deleted.
+
+Every liveness release ledgers `triage.claim_released` with `arm`, `tier`, `verdict`, `holder_host`,
+`holder_pid`, `claimed_at` and `last_host_row_ts`.
+
+### Amendment (W1-T4769): skip a held head, do not end the pass
+
+`autoTriageCheck` decides once without claim knowledge (every refusal not about *which* entry returns
+with no git or ledger I/O). Only a would-be fire pays for `sweepTriageClaims`: one `ls-remote` of
+`refs/rmd-triage/*` on the clone the triage lane claims on, a liveness release for each dead claimed
+candidate, then a second `decideAutoTriage` with `heldCandidates`. It fires on the oldest candidate
+not held (its reason names how many it passed over) or declines naming that every candidate is held.
+An unreadable namespace is `heldCandidates: undefined` — the old behaviour, oldest entry, the lane's
+own claim decides — never an empty set.
+
 ## recordAutoTriageFire
 
 `src/lib/auto-triage.ts:411-424` at `7cdff72a`, 14 comment lines.

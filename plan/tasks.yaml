@@ -7672,6 +7672,7 @@
   risk: medium
   origin: architect
   status: blocked
+  retirement: retired
   attempts: 0
   note: "FALSIFIER RECORDED: the api-client contract (W3-T1a) means a NATIVE shell can be added later against a
     demonstrated need with ZERO console rework — retirement is reversible on evidence, not a permanent no. Superseded

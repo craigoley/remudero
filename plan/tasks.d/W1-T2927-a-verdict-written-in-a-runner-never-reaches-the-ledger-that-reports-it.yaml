@@ -3,12 +3,12 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   risk: high
   band_meaning: span
   budget_usd: 30.00
-  files: [test/a-verdict-written-in-a-runner-never-reaches-the-ledger-that-reports-it.test.ts]
+  files: [src/lib/sweep.ts, test/a-verdict-written-in-a-runner-never-reaches-the-ledger-that-reports-it.test.ts]
   origin: "operator-session#2026-09-05-w1-t2707-scope-check"
   plan_refs: ["W1-T2707", "W1-T393", "W1-T133", "D-10"]
   status: queued
@@ -91,6 +91,7 @@
     - claim: "the transport is exercised end to end over a real payload rather than asserted from the emitting side alone — a test that only proves a line was written inside the runner proves nothing this task is for"
       proof: "unit test: test/a-verdict-written-in-a-runner-never-reaches-the-ledger-that-reports-it.test.ts"
   note: |
+    OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, "the verify-human queue, cleared"): ROUTE (a) — the host sweep pulls the mutation-verdict-ledger artifact ci.yml already uploads (ci.yml's --ledger step) with its own read identity, following coverage-improvement.ts's artifact read, and appends only run_ids it has not recorded. (b) and (c) are declined.
     risk:high, band_meaning:span — the chosen route may touch a workflow, a host-side rung and a
     credential surface. `verify: human` and an EMPTY `files:` are deliberate: the route is an
     operator decision (design (a)/(b)/(c)), and a worker that picked one alone could put a CI job

@@ -156,6 +156,7 @@ import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { startGarden, type GardenCheckout, type GardenerDeps } from "./lib/gardener.js";
+import { productionGardenerOverseerPorts, startGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "./lib/config-gardener.js";
@@ -1314,7 +1315,7 @@ import {
   reviewProviderProvenanceLedgerFields,
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
-import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
 import {
   decideDispatchClaim,
   releaseDispatchClaim,
@@ -26883,6 +26884,14 @@ export function autoTriageCheck(
     deferralPending?: boolean;
     dispatchCount?: number;
     laneBudget?: number;
+    /** W1-T4769: injected claim reserver for the once-per-pass claim sweep. Production builds the
+     *  real one over the SAME clone the triage lane claims on. */
+    claimReserver?: TriageClaimReserver;
+    /** W1-T4769: injected ledger-union read for the liveness verdict; `undefined` = unreadable. */
+    readClaimLivenessRows?: (sinceIso: string) => Array<Record<string, unknown>> | undefined;
+    /** W1-T4769: injected owner/repo resolver for the real reserver's clone path; production uses
+     *  {@link resolveOwnerRepo}. */
+    resolveClaimRepo?: () => { repo: string };
   } = {},
 ): AutoTriageDecision {
   const config = opts.config ?? loadConfig();
@@ -26898,7 +26907,7 @@ export function autoTriageCheck(
   }
   const held = readDrainLock(triageLockPath(config.root));
   const now = opts.now ?? new Date();
-  return decideAutoTriage({
+  const inputs: AutoTriageInputs = {
     policy: policy.values.autoTriage,
     // W1-T469 — WAS HARDCODED `idle: true`, WHICH IS WHY THE GUARD WAS DOUBLY UNREACHABLE: the rung
     // sat inside the daemon's idle branch AND the input could never be false, so `!i.idle` could
@@ -26921,7 +26930,61 @@ export function autoTriageCheck(
     // SAME repoRoot, SAME reasoning, read through the SAME underlying walk (W1-T2289) — see
     // `oldestFeedbackAgeMs`'s own doc for why this must never drift onto `config.root`.
     oldestCandidateAgeMs: oldestFeedbackAgeMs(repoRoot, now),
-  });
+  };
+  // W1-T4769: decide FIRST without any claim knowledge — every refusal that does not depend on which
+  // entry is claimed returns here with no git or ledger I/O. Only a would-be fire pays for the sweep.
+  const first = decideAutoTriage(inputs);
+  if (!first.fire) return first;
+  const sweep = triageClaimSweepForPass(config, now, inputs.candidates, opts);
+  return sweep === undefined ? first : decideAutoTriage({ ...inputs, heldCandidates: sweep });
+}
+
+/**
+ * W1-T4769: the once-per-pass read of the triage claim namespace, with dead holders released on the
+ * liveness arm. Returns the ids still held, or `undefined` when the namespace could not be read
+ * (the caller then keeps today's behaviour: oldest candidate, the lane's own claim decides).
+ */
+function triageClaimSweepForPass(
+  config: Config,
+  now: Date,
+  candidates: readonly string[],
+  opts: {
+    claimReserver?: TriageClaimReserver;
+    readClaimLivenessRows?: (sinceIso: string) => Array<Record<string, unknown>> | undefined;
+    resolveClaimRepo?: () => { repo: string };
+  },
+): readonly string[] | undefined {
+  const ledgerPath = ledgerPathFor(config);
+  const log = (step: string, extra: Record<string, unknown> = {}): void => {
+    try {
+      appendProducerLedger(ledgerPath, "daemon", { run_id: "TRIAGE-CLAIM-SWEEP", step, ...extra });
+    } catch (e) {
+      // A ledger write hiccup must not turn the sweep into a throw that ends the pass; the release
+      // itself already happened. Carried on stderr so the lost row is not silent.
+      process.stderr.write(`triage claim sweep: could not ledger ${step}: ${String((e as Error)?.message ?? e)}\n`);
+    }
+  };
+  let reserver = opts.claimReserver;
+  if (reserver === undefined) {
+    // The SAME clone the triage lane claims on (`repoDir`): a claim is only visible on its own origin.
+    let repoDir: string;
+    try {
+      repoDir = join(config.root, "repos", (opts.resolveClaimRepo ?? resolveOwnerRepo)().repo);
+    } catch (e) {
+      log("triage.claim_sweep_unavailable", { reason: `cannot resolve the repo: ${String((e as Error)?.message ?? e)}` });
+      return undefined;
+    }
+    if (!existsSync(repoDir)) return undefined;
+    reserver = triageClaimReserverFor(repoDir);
+  }
+  const readRows =
+    opts.readClaimLivenessRows ??
+    ((sinceIso: string) => {
+      const read = readLedgerUnionRecordsSync(dirname(ledgerPath), { since: sinceIso, requireArchives: true, refuseIncomplete: true });
+      return read.ok ? read.rows : undefined;
+    });
+  const result = sweepTriageClaims(candidates, reserver, { now, readRows, log });
+  return result.held;
 }
 
 /**
@@ -33538,6 +33601,12 @@ export async function daemonCommand(
                   intervalMs,
                 ),
                 (intervalMs: number) => startEvidenceCoverageGardener(() => runEvidenceCoverageGardener(daemonEvidenceCoverageInput({ stateDir: join(config.root, "state"), root: repoRoot, log })), log, intervalMs),
+                // W1-T4802: the overseer watches every gardener -- liveness, the effect of merged changes and
+                // churn -- and folds effect back into each class's Beta record. Off: state/GARDENER_OVERSEER_OFF.
+                (intervalMs: number) => startGardenerOverseer(
+                  productionGardenerOverseerPorts({ stateDir: join(config.root, "state"), repoRoot, owner: self.owner, repo: self.repo, fetch: ghJson, log, escalate: raiseDuplicate }),
+                  intervalMs,
+                ),
                 // Operator ruling 2026-09-29: the LLM judge in the middle of machine-filed work.
                 (intervalMs: number) => startMachineFilingJudge(
                   productionMachineFilingJudgePorts({ repoRoot, stateDir: join(config.root, "state"), worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
