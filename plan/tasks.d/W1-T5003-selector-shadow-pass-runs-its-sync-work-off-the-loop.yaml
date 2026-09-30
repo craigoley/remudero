@@ -1,0 +1,41 @@
+- id: W1-T5003
+  title: "THE SELECTOR-SHADOW GARDENER BLOCKS THE CORE DAEMON LOOP — after its async log read, runSelectorShadowGardener walks test/ with readdirSync, loads the plan and files through synchronous git, part of the 5.4% it and the host-resource gardener took of loop busy time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  priority: 3
+  status: queued
+  attempts: 0
+  origin: "oper#core-daemon-loop-profile-2026-09-30"
+  files: [src/lib/selector-shadow-gardener.ts, src/run-task.ts, test/selector-shadow-pass-runs-its-sync-work-off-the-loop.test.ts]
+  rationale: |
+    A live CPU profile of remudero-daemon on 2026-09-30 (SIGUSR1 + CDP, 1370 s over two daemon
+    processes, 815 s busy) put stacks under runSelectorShadowGardener and runHostResourcePass at
+    5.4% of busy time together, in child_process execFileSync. The run-log read is already async
+    (readSelectorShadowRunsAsync), and its cadence sleep is W1-T4970's, so this share is the
+    synchronous remainder of the pass itself:
+    - selectorShadowFullSuiteSize walks the whole test/ tree with readdirSync on EVERY pass, even
+      an idle one;
+    - selectorShadowPlanTasks runs loadPlan over the plan shards whenever an unseen miss exists;
+    - each filing calls ciLearningTaskIdMinter and gardenCheckout's openWorkspace and land, which
+      run git (fetch, worktree, commit, push) and the PR create synchronously.
+    The gardener failed 513 times from 09-25 on and filed 33 near-duplicate shards, so the
+    filing path ran far more often than its design intended.
+    The raw 09-30 profile windows were not kept on the host, so the split between these sites is
+    not recoverable; the build re-attributes it with a short CDP profile first and fixes the sites
+    that measure.
+  design: |
+    Keep the pass's decisions and outputs identical. Memoize the suite size by the test tree's
+    git tree id (or compute it off the loop), read the plan through the already-reloaded board plan
+    or an async read, and run the mint and the landing through the async gardener checkout path,
+    awaited inside the existing one-pass-at-a-time guard.
+  acceptance:
+    - claim: "a timer keeps firing while a selector-shadow pass files a miss"
+      proof: 'grep: test("W1-T5003: a timer keeps firing while a selector-shadow pass files a miss" in test/selector-shadow-pass-runs-its-sync-work-off-the-loop.test.ts'
+    - claim: "an idle selector-shadow pass does not re-walk an unchanged test tree"
+      proof: 'grep: test("W1-T5003: an idle selector-shadow pass does not re-walk an unchanged test tree" in test/selector-shadow-pass-runs-its-sync-work-off-the-loop.test.ts'
+  falsifier: |
+    Restore the synchronous land and the per-pass readdirSync walk, and the timer-probe test counts
+    zero ticks during the filing while the walk counter reads one per pass.
