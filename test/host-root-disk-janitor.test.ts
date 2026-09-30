@@ -103,12 +103,12 @@ function repos(fx: Fixture) {
   git(main, "push", "origin", "HEAD:main");
   const wtRoot = join(fx.home, "agent", ".claude", "worktrees");
   mkdirSync(wtRoot, { recursive: true });
-  const addWorktree = (name: string, branch: string): string => {
+  const attach = (name: string, branch: string): string => {
     const wt = join(wtRoot, name);
     git(main, "worktree", "add", "-b", branch, wt, "main");
     return wt;
   };
-  return { main, addWorktree };
+  return { main, addWorktree: attach };
 }
 
 test("W1-T4770: an idle unheld path is removed and a fresh one is kept", () => {
