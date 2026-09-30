@@ -58,6 +58,7 @@ export type LintCheck =
   | "proof-engine-divergence"
   | "proof-scope"
   | "proof-self-path"
+  | "record-only-proofs"
   | "proof-name-resolution"
   | "proof-unit-test-unresolvable"
   | "credited-test-path"
@@ -1381,6 +1382,34 @@ export function proofSelfPathViolations(task: Task, opts: LintOpts = {}): LintVi
     });
   });
   return violations;
+}
+
+/** BLOCK an open `verify: auto` task whose every proof `grep:`s its own shard (W1-T4818). */
+export function recordOnlyProofViolations(task: Task): LintViolation[] {
+  const ownPath = task.sourcePath;
+  if (!ownPath || task.verify !== "auto") return [];
+  if (NON_OPEN_FILING_STATUSES.has(task.status)) return [];
+  const criteria = task.acceptance ?? [];
+  if (criteria.length === 0) return [];
+  const allOwnShardGreps = criteria.every((c) => {
+    if (c.satisfied_by) return false;
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    if (!whitelisted || whitelisted.kind !== "grep") return false;
+    return proofScopePath(whitelisted) === ownPath;
+  });
+  if (!allOwnShardGreps) return [];
+  return [
+    {
+      check: "record-only-proofs",
+      severity: "block",
+      message:
+        `every acceptance proof of ${task.id} greps its own shard "${ownPath}", so there is nothing ` +
+        "for a worker to build: each proof is already true or unreachable to a worker, and at " +
+        "verify: auto the task is dispatched until its circuit breaker trips. Either set " +
+        "verify: human (the task is a ruling or a record), or give it real proofs for the " +
+        "implementation it implies (a unit test: or a grep: of a file the worker changes).",
+    },
+  ];
 }
 
 function proofTestPath(w: WhitelistedProof): string | undefined {
@@ -3513,6 +3542,7 @@ const BUILD_VERIFICATION_CHECKS = new Set<LintCheck>([
   "proof-engine-divergence",
   "proof-scope",
   "proof-self-path",
+  "record-only-proofs",
   "proof-name-resolution",
   "proof-base-discrimination",
   "proof-unit-test-base-wrapper",
@@ -3568,6 +3598,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofGrepSafetyViolations(task, opts));
   violations.push(...proofScopeViolations(task, opts));
   violations.push(...proofSelfPathViolations(task, opts));
+  violations.push(...recordOnlyProofViolations(task));
   violations.push(...proofNameResolutionViolations(task, opts));
   violations.push(...proofUnitTestUnresolvableViolations(task, opts));
   violations.push(...creditedTestPathViolations(task, opts));
