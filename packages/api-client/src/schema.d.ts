@@ -467,9 +467,45 @@ export interface components {
       /** GET /v1/feedback only (W1-T1257): true when `discharged` could not be determined because the merged-set read failed or was truncated -- a partial read, never mistaken for "not discharged". Mutually exclusive with `discharged`; a read-time decoration only, exactly like `unverified`. */
       dischargeUndecidable?: boolean;
     };
-    /** GET /v1/feedback's body -- every captured feedback entry, oldest first. Served through the console read cache (src/lib/serve.ts's `boundConsoleReadRoute`), so `rmd serve` also splices in `staleness`; a cold or stalled cache answers `{entries: [], staleness}`. */
+    /** GET /v1/feedback's body -- every captured feedback entry, oldest first. Served through the console read cache (src/lib/serve.ts's `boundConsoleReadRoute`), so `rmd serve` also splices in `staleness`; a cold or stalled cache answers `{entries: [], staleness}`. With `?limit=` or `?cursor=`, `entries` is one page and `page` says where the next one starts. */
     FeedbackInboxResult: {
       entries: (FeedbackEntry)[];
+      page?: ReadPage;
+      staleness?: ConsoleResponseStaleness;
+    };
+    /** One page of a list read (src/lib/read-page.ts). Pass `nextCursor` back as `?cursor=` for the next page; its absence means this page is the last. The cursor names the last item served and its position, so an item that leaves the list between two reads never restarts the walk. */
+    ReadPage: {
+      /** GET /v1/inbox only -- the lane this page is from. */
+      section?: string;
+      /** Items in the whole list at the time of this read. */
+      total: number;
+      limit: number;
+      nextCursor?: string;
+    };
+    /** Every GET /v1/inbox lane's length, including the lanes a `?section=` read leaves out, so a badge or a tab count needs no second read. */
+    InboxCounts: {
+      ready: number;
+      drafting: number;
+      notReady: number;
+      declined: number;
+      fleet: number;
+      needsYou: {
+        ready: number;
+        drafting: number;
+        notReady: number;
+        declined: number;
+      };
+    };
+    /** GET /v1/inbox?section=<name>'s body: that one lane under its own key, exactly as the whole body carries it (`needsYou` an object of four lanes, every other section one page of an array), plus `counts` and, for a list section, `page`. */
+    InboxSectionResult: {
+      ready?: (InboxReadyItem)[];
+      drafting?: (InboxDraftingItem)[];
+      notReady?: (InboxNotReadyItem)[];
+      declined?: (InboxDeclinedItem)[];
+      fleet?: (InboxFleetItem)[];
+      needsYou?: InboxNeedsYou;
+      counts: InboxCounts;
+      page?: ReadPage;
       staleness?: ConsoleResponseStaleness;
     };
     /** POST /v1/feedback's body -- submit feedback from the panel (ALWAYS captured with origin: ui, never taken from this body). `replyTo`, if given, must name an existing entry parked `grilling` -- this is "answer a grill" v1 (src/lib/panel-graph.ts's header explains why): the answer is captured as a fresh feedback entry that re-enters triage, rather than a second, parallel answer-delivery primitive ahead of the still-unbuilt W1-T42 grill mechanics. */
@@ -2626,6 +2662,7 @@ export interface components {
       declined?: (InboxDeclinedItem)[];
       needsYou?: InboxNeedsYou;
       fleet?: (InboxFleetItem)[];
+      counts?: InboxCounts;
       staleness?: ConsoleResponseStaleness;
     };
     /** One stored daily digest (src/lib/serve.ts's `ConsoleInboxDigestEntry`). */
@@ -4366,8 +4403,9 @@ export interface paths {
   "/v1/inbox": {
     get: {
       responses: {
-          "200": InboxResult;
+          "200": unknown;
           "304": undefined;
+          "400": Error;
           "401": Error;
           "403": Error;
         };
