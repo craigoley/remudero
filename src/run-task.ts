@@ -44519,6 +44519,25 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
   );
 }
 
+/**
+ * W1-T4688: the exit of an approve whose PR is open but whose CI gate did not go green. A CI
+ * timeout or a freshness yield leaves the PR for the sweep — a HAND-OFF, reported with the retro's
+ * named hand-off code (3) — while a red CI stays 1. Same mapping {@link retroExitAfterPrOpened}
+ * gives the retro, so the two lanes cannot drift.
+ */
+export function approveExitWhenCiNotGreen(ci: "red" | "timeout" | "freshness_handoff"): number {
+  return retroExitAfterPrOpened(ci);
+}
+
+/**
+ * W1-T4688: `approve.skill_written` records that the skill is COMMITTED, so it is ledgered only
+ * after `commit` returns; a commit that throws (a commitlint refusal) ledgers nothing.
+ */
+export function commitThenLedgerSkillWrite(commit: () => void, ledger: () => void): void {
+  commit();
+  ledger();
+}
+
 export async function approveCommand(
   rest: string[],
   // W1-T3351 appended `root`/`clock`/`log` LAST, all optional: the `--note` chain needs a store
@@ -44848,9 +44867,13 @@ export async function approveCommand(
     writeSkillFile(id, skillFile) {
       const { branch, path } = freshSkillApproveWorktree();
       const relPath = writeApprovedSkillFile(path, skillFile, { mkdirSync, writeFileSync, existsSync }, join);
-      log("approve.skill_written", { proposal_id: id, path: relPath });
-      execFileSync("git", ["-C", path, "add", "--", relPath], { stdio: "inherit" });
-      execFileSync("git", ["-C", path, "commit", "-m", skillFileApproveCommitMessage(id, relPath)], { stdio: "inherit" });
+      commitThenLedgerSkillWrite(
+        () => {
+          execFileSync("git", ["-C", path, "add", "--", relPath], { stdio: "inherit" });
+          execFileSync("git", ["-C", path, "commit", "-m", skillFileApproveCommitMessage(id, relPath)], { stdio: "inherit" });
+        },
+        () => log("approve.skill_written", { proposal_id: id, path: relPath }),
+      );
       gitPushRunBranch(path);
       return branch;
     },
@@ -45034,7 +45057,7 @@ export async function approveCommand(
     if (ci !== "green") {
       console.log(`ci ${ci} — PR left OPEN: ${result.prUrl}`);
       removeApproveWorktree();
-      return 1;
+      return approveExitWhenCiNotGreen(ci);
     }
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
     const reviewCode = await reviewCommand(prNum);
@@ -45302,7 +45325,7 @@ async function approveBatchCommand(
     if (ci !== "green") {
       console.log(`ci ${ci} — PR left OPEN: ${result.prUrl}`);
       removeApproveWorktree();
-      return 1;
+      return approveExitWhenCiNotGreen(ci);
     }
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
     const reviewCode = await reviewCommand(prNum);
