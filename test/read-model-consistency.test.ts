@@ -131,7 +131,7 @@ test("a corrupted projection row is detected and healed on the second consecutiv
 
   const run = check(f);
   assert.equal(run.outcome, "healed");
-  assert.deepEqual(run.mismatches, { missing: 1, ledgerLost: 0, factMissing: 2, factCorrupt: 1 });
+  assert.deepEqual(run.mismatches, { missing: 1, ledgerLost: 0, factMissing: 2, factCorrupt: 1, projectionMissing: 0, projectionExtra: 0 });
   assert.equal(run.healedRows, 4);
   assert.equal(readModelDigest(f.db), clean, "the healed store equals a clean rebuild");
   assert.deepEqual(metrics(f).map((m) => [m.step, m.outcome ?? m.healed_rows]), [[READ_MODEL_CONSISTENCY_STEP, "healed"], [READ_MODEL_SELF_HEALED_STEP, 4]]);
@@ -271,6 +271,52 @@ test("a row quarantined at ingest is not a missing fact once its window closes",
   const run = check({ rowsDir, metricPath: join(scratch(t, "oracle-metric"), LIVE), db, lease: got.lease, lines: [] });
   assert.equal(run.outcome, "agree");
   assert.equal(run.ledgerRows, 2);
+});
+
+function repoTables(db: ReadModelDb): string {
+  const rows = db.prepare("SELECT ts_ms, h, body FROM repo_row ORDER BY ts_ms, h", { bigInts: true }).all();
+  const beat = db.prepare("SELECT k, last_ms FROM instance_heartbeat ORDER BY k", { bigInts: true }).all();
+  return JSON.stringify({ rows, beat }, (_key, value: unknown) => (typeof value === "bigint" ? value.toString() : value));
+}
+
+test("the oracle heal covers repo_row: a lost identity and its repo row come back together", (t) => {
+  const f = projected(t);
+  const clean = repoTables(f.db);
+  assert.ok(Number(f.db.prepare("SELECT count(*) AS n FROM repo_row").get()?.n) >= 8, "positive control: the run.start rows project");
+  // P1-BUILD-E's case: an identity the store lost carries a repo row, and healing `seen` alone left it out.
+  f.db.exec("DELETE FROM repo_row WHERE ts_ms = (SELECT max(ts_ms) FROM repo_row)");
+  f.db.exec("DELETE FROM seen WHERE ts_ms = (SELECT max(ts_ms) FROM seen)");
+  f.db.exec("UPDATE repo_row SET body = '{}' WHERE ts_ms = (SELECT min(ts_ms) FROM repo_row)");
+  const run = check(f);
+  assert.equal(run.outcome, "healed");
+  assert.equal(run.mismatches.projectionMissing, 2, "the deleted row and the true body of the corrupted one");
+  assert.equal(run.mismatches.projectionExtra, 1, "the corrupted body no ledger line explains");
+  assert.equal(repoTables(f.db), clean, "repo_row equals a clean projection again");
+  assert.equal(check(f, {}, fixedClock(CHECK_AT + 60_000)).outcome, "agree");
+});
+
+test("the oracle heal raises an instance heartbeat the daemon rows exceed", (t) => {
+  const f = projected(t);
+  writeFileSync(join(f.rowsDir, LIVE), text([...f.lines.slice(7), row(T0 + 20_000, "daemon.boot")]));
+  const clock = fixedClock(T0 + 60_000);
+  createLedgerProjector({ ledgerDir: f.rowsDir, db: f.db, lease: f.lease, clock }).tick();
+  const clean = repoTables(f.db);
+  assert.match(clean, new RegExp(String(T0 + 20_000)), "positive control: the daemon row set the heartbeat");
+  f.db.exec(`UPDATE instance_heartbeat SET last_ms = ${T0 - 1}`);
+  const run = check(f);
+  assert.equal(run.outcome, "healed");
+  assert.equal(run.mismatches.projectionMissing, 1);
+  assert.equal(repoTables(f.db), clean);
+});
+
+test("a repo row whose ledger line was lost is evidence and is not deleted by a heal", (t) => {
+  const f = projected(t);
+  writeFileSync(join(f.rowsDir, LIVE), text(f.lines.slice(7, 11)));
+  const before = repoTables(f.db);
+  const run = check(f);
+  assert.equal(run.mismatches.ledgerLost, 1);
+  assert.equal(run.mismatches.projectionExtra, 0);
+  assert.equal(repoTables(f.db), before);
 });
 
 test("the oracle schedule is due first then hourly after agreement and sooner after drift", (t) => {

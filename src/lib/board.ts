@@ -274,6 +274,18 @@ function safeFactsStale(github: BoardDeps["github"]): boolean {
   }
 }
 
+/** A memo hit re-reads the facts' age: the snapshot's own copy was true only when it was computed. */
+function withLiveGithubFacts(snapshot: BoardSnapshot, github: BoardDeps["github"]): BoardSnapshot {
+  const ageMs = safeFactsAgeMs(github);
+  return ageMs === undefined ? snapshot : { ...snapshot, github_facts_age_ms: ageMs, github_facts_status: safeFactsStale(github) ? "stale" : "fresh" };
+}
+
+/** The page is only as fresh as its stalest source; the console snapshot cache reads this header. */
+function staleSourceHeaders(snapshot: BoardSnapshot): Record<string, string> {
+  if (snapshot.github_facts_status !== "stale") return {};
+  return { [STALE_SOURCE_HEADER]: `github facts ${Math.round((snapshot.github_facts_age_ms ?? 0) / 1000)} s old` };
+}
+
 /** Read the live open half once — both a board-cache input and the immutable list every open-PR consumer uses. */
 function readPrQueueIndex(github: BoardDeps["github"]): PrQueueIndexRead {
   if (!github.listOpenHeadBranches) {
@@ -802,7 +814,7 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
         cached.ghFailed === ghFailed &&
         cached.ghTruncated === ghTruncated &&
         cached.prQueueIndexKey === prQueueIndexKey
-      ) return cached.snapshot;
+      ) return withLiveGithubFacts(cached.snapshot, deps.github);
       // ── THE INCREMENTAL PASS ─────────────────────────────────────────────────────────────
       // Everything GitHub-visible about this pass, shared by every task's key: an index change, a
       // gateway that started or stopped failing, or a truncated read each re-derive the whole
@@ -842,8 +854,8 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
   };
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+function sendJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", ...headers });
   res.end(JSON.stringify(body));
 }
 
@@ -863,6 +875,9 @@ export interface StatusResponse extends BoardSnapshot {
  *  param, so the request URL stays byte-identical to what every existing caller matches. */
 // Why: the query-param design this header replaced — docs/forensics/board.md#recap_ack_header
 export const RECAP_ACK_HEADER = "x-rmd-recap-ack";
+
+/** Names a source a cached page depends on that is stale, so the page's staleness says so too. */
+export const STALE_SOURCE_HEADER = "x-rmd-stale-source";
 
 /** Is this `GET /v1/status` an acknowledged view, or an automatic poll? Presence is the signal. */
 export function requestAcknowledgesRecap(headerValue: string | string[] | undefined): boolean {
@@ -887,7 +902,7 @@ export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Rou
     handler: (req, res) => {
       const snapshot = cache.get(deps);
       if (!lastSeen) {
-        sendJson(res, 200, snapshot);
+        sendJson(res, 200, snapshot, staleSourceHeaders(snapshot));
         return;
       }
       const tokenId = bearerTokenId(req);
@@ -901,7 +916,7 @@ export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Rou
       // what this response actually reflects. Gated on the ack flag: see this function's doc.
       if (requestAcknowledgesRecap(req.headers[RECAP_ACK_HEADER])) lastSeen.advance(tokenId, snapshot.generated_at);
       const body: StatusResponse = { ...snapshot, recap, sinceCheckpoint };
-      sendJson(res, 200, body);
+      sendJson(res, 200, body, staleSourceHeaders(snapshot));
     },
   };
 }

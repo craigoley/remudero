@@ -20,9 +20,9 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
 import { appendLedger } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { isFactStep, ledgerLineIdentity } from "./ledger-projector.js";
+import { LEDGER_ROW_PROJECTIONS, isFactStep, ledgerLineIdentity, type LedgerRowProjection } from "./ledger-projector.js";
 import { ledgerRotationEntries, readLedgerUnionRawLinesSync, realLedgerFs, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-union.js";
-import { withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
+import { openScratchReadModel, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
 
 export const READ_MODEL_CONSISTENCY_STEP = "read_model.consistency";
 export const READ_MODEL_SELF_HEALED_STEP = "read_model.self_healed";
@@ -76,6 +76,11 @@ export interface WindowComparison {
   factMissing: string[];
   /** `fact.seq` of rows whose body or derived columns no ledger row explains. */
   factCorrupt: number[];
+  /** Row-projection tables (`repo_row`, `instance_heartbeat`): rows the window's lines should have put there and did not. */
+  projectionMissing: string[];
+  /** Windowed projection rows no ledger line explains; each is deleted by a heal, except a row the ledger lost. */
+  projectionExtra: Array<{ table: string; tsMs: number; h: bigint }>;
+  quarantined: ReadonlySet<string>;
   lines: Map<string, string>;
   ids: Map<string, IdentityKey>;
 }
@@ -130,7 +135,7 @@ export function compareWindow(
   db: ReadModelDb,
   ledgerDir: string,
   window: OracleWindow,
-  opts: { factStep?: (step: string) => boolean; fs?: LedgerGrepFsDeps } = {},
+  opts: { factStep?: (step: string) => boolean; fs?: LedgerGrepFsDeps; projections?: readonly LedgerRowProjection[] } = {},
 ): WindowComparison {
   const factStep = opts.factStep ?? isFactStep;
   const base = opts.fs ?? realLedgerFs;
@@ -215,16 +220,95 @@ export function compareWindow(
     else if (!lost.has(key)) factCorrupt.push(Number(row.seq));
   }
   const factMissing = [...wantFacts.keys()].filter((key) => !matched.has(key));
-  return { window, forms, ledgerRows: lines.size, storeRows: stored.size, expectedFacts: wantFacts.size, missing, ledgerLost, factMissing, factCorrupt, lines, ids };
+  const projected = compareProjections(db, window, [...lines].filter(([key]) => !quarantined.has(key)), lost, opts.projections ?? LEDGER_ROW_PROJECTIONS);
+  return { window, forms, ledgerRows: lines.size, storeRows: stored.size, expectedFacts: wantFacts.size, missing, ledgerLost, factMissing, factCorrupt, ...projected, quarantined, lines, ids };
+}
+
+function tableColumns(db: ReadModelDb, table: string): string[] {
+  return db.prepare(`PRAGMA table_info(${table})`).all().map((row) => String(row.name));
+}
+
+function canonicalRow(row: Record<string, unknown>): string {
+  return JSON.stringify(Object.keys(row).sort().map((k) => [k, typeof row[k] === "bigint" ? String(row[k]) : row[k]]));
+}
+
+function applyProjections(db: ReadModelDb, projections: readonly LedgerRowProjection[], lines: ReadonlyArray<readonly [string, string]>): void {
+  for (const [, line] of lines) {
+    let parsed: { row?: Record<string, unknown> } | undefined;
+    const parse = (): Record<string, unknown> | undefined => (parsed ??= { row: parseLine(line) }).row;
+    for (const p of projections) if (p.markers.some((marker) => line.includes(marker))) p.apply(db, line, ledgerLineIdentity(line), parse);
+  }
+}
+
+function parseLine(line: string): Record<string, unknown> | undefined {
+  try {
+    const row = JSON.parse(line) as unknown;
+    return row !== null && typeof row === "object" ? row as Record<string, unknown> : undefined;
+  } catch {
+    // deliberate: an unparseable line projects nothing, exactly as the projector skips it.
+    return undefined;
+  }
+}
+
+/**
+ * Recomputes each row projection over the window's lines in a scratch database, with the projector's
+ * own `apply`, and compares it with the store. A table keyed on `(ts_ms, h)` is compared row for row
+ * inside the window; any other table (an aggregate such as a heartbeat) is seeded with the stored rows
+ * first, so drift means the window's lines would still move it.
+ */
+function compareProjections(
+  db: ReadModelDb,
+  window: OracleWindow,
+  lines: ReadonlyArray<readonly [string, string]>,
+  lost: ReadonlySet<string>,
+  projections: readonly LedgerRowProjection[],
+): Pick<WindowComparison, "projectionMissing" | "projectionExtra"> {
+  const projectionMissing: string[] = [];
+  const projectionExtra: WindowComparison["projectionExtra"] = [];
+  const present = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => String(row.name)));
+  const built = projections.filter((p) => p.tables.every((table) => present.has(table)));
+  if (built.length === 0) return { projectionMissing, projectionExtra };
+  const scratch = openScratchReadModel();
+  try {
+    const windowed = new Map<string, boolean>();
+    for (const p of built) {
+      scratch.exec(p.ddl);
+      for (const table of p.tables) {
+        const columns = tableColumns(db, table);
+        windowed.set(table, columns.includes("ts_ms") && columns.includes("h"));
+        if (windowed.get(table)) continue;
+        const insert = scratch.prepare(`INSERT OR REPLACE INTO ${table}(${columns.join(", ")}) VALUES(${columns.map(() => "?").join(", ")})`);
+        for (const row of db.prepare(`SELECT * FROM ${table}`, { bigInts: true }).all()) insert.run(...columns.map((c) => row[c]));
+      }
+    }
+    applyProjections(scratch, built, lines);
+    for (const [table, keyed] of windowed) {
+      const range = keyed ? " WHERE ts_ms BETWEEN ? AND ?" : "";
+      const args = keyed ? [window.t0, window.t1] : [];
+      const stored = db.prepare(`SELECT * FROM ${table}${range}`, { bigInts: true }).all(...args);
+      const want = scratch.prepare(`SELECT * FROM ${table}${range}`, { bigInts: true }).all(...args);
+      const have = new Set(stored.map(canonicalRow));
+      const expected = new Set(want.map(canonicalRow));
+      for (const row of want) if (!have.has(canonicalRow(row))) projectionMissing.push(`${table} ${keyed ? `${row.ts_ms}:${row.h}` : canonicalRow(row)}`);
+      if (!keyed) continue;
+      for (const row of stored) {
+        const id = { tsMs: Number(row.ts_ms), h: row.h as bigint };
+        if (!expected.has(canonicalRow(row)) && !lost.has(keyOf(id))) projectionExtra.push({ table, ...id });
+      }
+    }
+  } finally {
+    scratch.close();
+  }
+  return { projectionMissing, projectionExtra };
 }
 
 function projectionDrift(c: WindowComparison): number {
-  return c.missing.length + c.factMissing.length + c.factCorrupt.length;
+  return c.missing.length + c.factMissing.length + c.factCorrupt.length + c.projectionMissing.length + c.projectionExtra.length;
 }
 
 /** Rebuilds the window's projector rows from the ledger: inserts what is missing, deletes what no
  *  ledger row explains. Rows the ledger lost are left in place as evidence. */
-function healWindow(db: ReadModelDb, lease: ReadModelLease, c: WindowComparison, factStep: (step: string) => boolean): number {
+function healWindow(db: ReadModelDb, lease: ReadModelLease, c: WindowComparison, factStep: (step: string) => boolean, projections: readonly LedgerRowProjection[]): number {
   return withWriteTransaction(db, lease, () => {
     const drop = db.prepare("DELETE FROM fact WHERE seq = ?");
     const seen = db.prepare("INSERT OR IGNORE INTO seen(ts_ms, h) VALUES(?, ?)");
@@ -241,6 +325,12 @@ function healWindow(db: ReadModelDb, lease: ReadModelLease, c: WindowComparison,
       fact.run(ledgerLineIdentity(line).ts, c.ids.get(key)!.tsMs, cols.step, cols.task, cols.run, line);
       changed++;
     }
+    if (c.projectionMissing.length + c.projectionExtra.length > 0) {
+      for (const row of c.projectionExtra) changed += db.prepare(`DELETE FROM ${row.table} WHERE ts_ms = ? AND h = ?`).run(row.tsMs, row.h).changes;
+      const present = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => String(row.name)));
+      applyProjections(db, projections.filter((p) => p.tables.every((table) => present.has(table))), [...c.lines].filter(([key]) => !c.quarantined.has(key)));
+      changed += c.projectionMissing.length;
+    }
     db.prepare("UPDATE meta SET v = CAST(v AS INTEGER) + 1 WHERE k = 'generation'").run();
     return changed;
   });
@@ -255,7 +345,7 @@ export interface ConsistencyRun {
   forms: OracleFormRead[];
   ledgerRows: number;
   /** The comparison the outcome rests on: after the recheck, before any heal. */
-  mismatches: { missing: number; ledgerLost: number; factMissing: number; factCorrupt: number };
+  mismatches: { missing: number; ledgerLost: number; factMissing: number; factCorrupt: number; projectionMissing: number; projectionExtra: number };
   healedRows: number;
   escalationReasons: string[];
   /** The issue URL, null when escalation failed or no escalation path was supplied. */
@@ -279,6 +369,8 @@ export interface ConsistencyCheckOptions {
   window?: OracleWindow;
   factStep?: (step: string) => boolean;
   fs?: LedgerGrepFsDeps;
+  /** The row projections the store carries; defaults to the projector's own list. */
+  projections?: readonly LedgerRowProjection[];
 }
 
 function lostFingerprint(keys: string[]): string {
@@ -391,7 +483,8 @@ function runOnce(opts: ConsistencyCheckOptions): ConsistencyRun {
   const started = clock.now();
   const t1 = started - ORACLE_CLOSED_LAG_MS;
   const window = opts.window ?? { t0: t1 - (opts.windowMs ?? ORACLE_DEFAULT_WINDOW_MS), t1 };
-  const compare = (): WindowComparison => compareWindow(opts.db, opts.ledgerDir, window, { factStep, ...(opts.fs ? { fs: opts.fs } : {}) });
+  const projections = opts.projections ?? LEDGER_ROW_PROJECTIONS;
+  const compare = (): WindowComparison => compareWindow(opts.db, opts.ledgerDir, window, { factStep, projections, ...(opts.fs ? { fs: opts.fs } : {}) });
   let c = compare();
   let outcome: ConsistencyOutcome = "agree";
   let healedRows = 0;
@@ -408,7 +501,7 @@ function runOnce(opts: ConsistencyCheckOptions): ConsistencyRun {
     else reasons.push(`${c.ledgerLost.length} row(s) the projector holds are absent from every ledger rotation form`);
   }
   if (outcome !== "transient" && projectionDrift(c) > 0 && opts.lease) {
-    healedRows = healWindow(opts.db, opts.lease, c, factStep);
+    healedRows = healWindow(opts.db, opts.lease, c, factStep, projections);
     outcome = "healed";
     const after = compare();
     if (projectionDrift(after) > 0) reasons.push(`${projectionDrift(after)} projection mismatch(es) survived a rebuild of the window`);
@@ -416,10 +509,12 @@ function runOnce(opts: ConsistencyCheckOptions): ConsistencyRun {
   }
   if (reasons.length > 0) outcome = "escalated";
   const sample = [...c.missing, ...c.ledgerLost, ...c.factMissing].slice(0, SAMPLE_LIMIT).map((key) => c.lines.get(key) ?? `seen ${key}`)
+    .concat(c.projectionMissing.slice(0, SAMPLE_LIMIT).map((row) => `missing ${row}`))
     .concat(c.factCorrupt.slice(0, SAMPLE_LIMIT).map((seq) => `fact seq ${seq}`));
   const run: ConsistencyRun = {
     instance: opts.instance, outcome, window, forms: c.forms, ledgerRows: c.ledgerRows,
-    mismatches: { missing: c.missing.length, ledgerLost: c.ledgerLost.length, factMissing: c.factMissing.length, factCorrupt: c.factCorrupt.length },
+    mismatches: { missing: c.missing.length, ledgerLost: c.ledgerLost.length, factMissing: c.factMissing.length, factCorrupt: c.factCorrupt.length,
+      projectionMissing: c.projectionMissing.length, projectionExtra: c.projectionExtra.length },
     healedRows, escalationReasons: reasons, issueUrl: null, sample, elapsedMs: 0,
   };
   if (reasons.length > 0 && opts.escalation) run.issueUrl = tryEscalate(escalationFor(run, sample.map((s) => `\`${s.slice(0, 300)}\``)), opts.escalation);

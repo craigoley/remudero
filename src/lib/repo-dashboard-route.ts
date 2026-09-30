@@ -20,7 +20,7 @@
  * holds a per-repo proof policy, pool size or alert threshold. `not_computed` says so per field.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
@@ -163,6 +163,17 @@ export interface RepoTelemetry {
   cash_usd_7d: number | null;
   subscription: RepoSubscriptionUsage | null;
   modelsused: string[] | null;
+  /** What the shadow comparator judges a diff by (view-shadow.ts); only when asked for. */
+  shadow?: RepoShadowFacts;
+}
+
+/** Per count its members (a task id, or `<task>#<ts>` for one row), per sum the rows it added, and `last_run`'s row. */
+export interface RepoShadowFacts {
+  counts: Record<string, string[]>;
+  sums: Record<string, { rows: Array<[string, number]>; precision?: number }>;
+  lastRun: string | null;
+  /** The condition and reasons this repository's own signals give for other run counts. */
+  condition?: (runs7d: RepoRunOutcomes) => { condition: RepoCondition; reasons: string[] };
 }
 
 /** What only the instance that operates a repository knows about it. */
@@ -219,7 +230,7 @@ export function lastDaemonHeartbeatMs(rows: readonly Row[]): number | null {
  *  repository are its own work. */
 export function projectRepoTelemetry(
   repo: ManagedRepo,
-  sources: { ledger?: readonly Row[]; plan?: Plan; nowMs: number; own?: boolean },
+  sources: { ledger?: readonly Row[]; plan?: Plan; nowMs: number; own?: boolean; members?: boolean },
 ): RepoTelemetry {
   const { plan, nowMs } = sources;
   if (!sources.ledger) return UNKNOWN;
@@ -231,11 +242,13 @@ export function projectRepoTelemetry(
     return true;
   });
   const runRepo = new Map<string, string>();
+  const runTask = new Map<string, string>();
   const creditedAt = new Map<string, number>();
   for (const row of ledger) {
     const runId = str(row.run_id);
     const named = str(row.repo);
     if (row.step === "run.start" && runId && named) runRepo.set(runId, named);
+    if (row.step === "run.start" && runId && str(row.task_id)) runTask.set(runId, str(row.task_id)!);
     const ts = Date.parse(str(row.ts) ?? "");
     if (isMergeCreditLine(row) && typeof row.task_id === "string" && Number.isFinite(ts)) {
       creditedAt.set(row.task_id, Math.max(ts, creditedAt.get(row.task_id) ?? -Infinity));
@@ -246,9 +259,12 @@ export function projectRepoTelemetry(
   for (const row of ledger) if (row.step === "worker.attempt" && isWorkerCostRow(row)) runsWithAttempt.add(str(row.run_id) ?? "");
   let lastRunMs = -Infinity;
   let lastRun: string | null = null;
+  let lastRunRow: string | null = null;
+  const sumRows: Record<"tokens" | "cacheRead" | "cash" | "subTokens", Array<[string, number]>> = { tokens: [], cacheRead: [], cash: [], subTokens: [] };
+  const subCallRows: string[] = [];
   const succeededTasks = new Set<string>();
-  let failed = 0;
-  let superseded = 0;
+  const failedRows: string[] = [];
+  const supersededRows: string[] = [];
   let tokens = 0;
   let cacheRead = 0;
   let cash = 0;
@@ -265,12 +281,11 @@ export function projectRepoTelemetry(
     const verdict = str(row.verdict) ?? "";
     if (isMergeCreditLine(row) || (row.step === "verdict" && SUCCESS_VERDICTS.has(verdict))) {
       succeededTasks.add(taskId);
-      if (ts > lastRunMs) [lastRunMs, lastRun] = [ts, str(row.ts)!];
+      if (ts > lastRunMs) [lastRunMs, lastRun, lastRunRow] = [ts, str(row.ts)!, `${taskId}#${str(row.ts)}`];
     } else if (row.step === "verdict") {
-      if (ts > lastRunMs) [lastRunMs, lastRun] = [ts, str(row.ts)!];
+      if (ts > lastRunMs) [lastRunMs, lastRun, lastRunRow] = [ts, str(row.ts)!, `${taskId}#${str(row.ts)}`];
       if (!ERROR_VERDICTS.has(verdict)) continue;
-      if ((creditedAt.get(taskId) ?? -Infinity) >= ts) superseded += 1;
-      else failed += 1;
+      ((creditedAt.get(taskId) ?? -Infinity) >= ts ? supersededRows : failedRows).push(`${taskId}#${str(row.ts)}`);
     } else if (row.step === "worker.assignment") {
       const facts = assignmentFacts(row);
       const model = canonicalModel(facts.model);
@@ -290,20 +305,45 @@ export function projectRepoTelemetry(
       if (row.step !== "worker.attempt" && runsWithAttempt.has(str(row.run_id) ?? "")) continue;
       const t = (row.tokens && typeof row.tokens === "object" ? row.tokens : {}) as Row;
       const callTokens = num(t.input) + num(t.output) + num(t.cacheCreation);
+      const rowId = `${str(row.task_id) ?? runTask.get(str(row.run_id) ?? "") ?? `run:${str(row.run_id)}`}#${String(row.step)}@${str(row.ts)}`;
       tokens += callTokens;
       cacheRead += num(t.cacheRead);
+      sumRows.tokens.push([rowId, callTokens]);
+      sumRows.cacheRead.push([rowId, num(t.cacheRead)]);
       if (row.billing_mode === "api") {
         cash += num(row.total_cost_usd);
+        sumRows.cash.push([rowId, num(row.total_cost_usd)]);
         continue;
       }
       subCalls += 1;
       subTokens += callTokens;
+      subCallRows.push(rowId);
+      sumRows.subTokens.push([rowId, callTokens]);
     }
   }
   const open = plan?.tasks.filter((t) =>
     namesRepo(t.repo, repo) && t.status !== "merged" && t.status !== "done" && t.retirement === undefined
     && !creditedAt.has(t.id));
   const succeeded = succeededTasks.size;
+  const failed = failedRows.length;
+  const superseded = supersededRows.length;
+  const shadow: RepoShadowFacts | undefined = sources.members !== true ? undefined : {
+    counts: {
+      "health.queuedtasks": (open ?? []).map((t) => t.id),
+      "health.queued": (open ?? []).filter((t) => t.status === "queued").map((t) => t.id),
+      "health.runs7d.succeeded": [...succeededTasks],
+      "health.runs7d.failed": failedRows,
+      "health.runs7d.superseded": supersededRows,
+      "telemetry.subscription.calls7d": subCallRows,
+    },
+    sums: {
+      "telemetry.tokens7d": { rows: sumRows.tokens },
+      "telemetry.cache_read_tokens7d": { rows: sumRows.cacheRead },
+      "telemetry.cash_usd_7d": { rows: sumRows.cash, precision: 0.01 },
+      "telemetry.subscription.tokens7d": { rows: sumRows.subTokens },
+    },
+    lastRun: lastRunRow,
+  };
   return {
     queuedtasks: open ? open.length : null,
     queued: open ? open.filter((t) => t.status === "queued").length : null,
@@ -319,6 +359,7 @@ export function projectRepoTelemetry(
       windows: [...windows.values()].map((w) => w.value).sort((a, b) => `${a.provider}|${a.window}`.localeCompare(`${b.provider}|${b.window}`)),
     },
     modelsused: [...models].sort((a, b) => a.localeCompare(b)),
+    ...(shadow ? { shadow } : {}),
   };
 }
 
@@ -423,6 +464,8 @@ export interface RepoTelemetryRequest {
   /** The instance's fleet-control root (PAUSE/STOP) and incident state directory. */
   controlRoot?: string;
   incidentsDir?: string;
+  /** Also name each count's members, for the shadow comparator. */
+  members?: boolean;
 }
 
 export interface RepoLedgerIndexMeta {
@@ -515,7 +558,7 @@ export function computeRepoTelemetrySync(
   const signals = readSignals(req, lastDaemonMs);
   return {
     ok: true,
-    telemetry: req.repos.map((repo, i) => projectRepoTelemetry(repo, { ledger, plan, nowMs: req.nowMs, own: i === req.own })),
+    telemetry: req.repos.map((repo, i) => projectRepoTelemetry(repo, { ledger, plan, nowMs: req.nowMs, own: i === req.own, members: req.members === true })),
     ...(signals ? { signals } : {}),
     ...(index ? { index } : {}),
   };
@@ -595,6 +638,16 @@ async function statStamp(path: string): Promise<string> {
   }
 }
 
+function statStampSync(path: string): string {
+  try {
+    const s = statSync(path);
+    return `${s.size}:${s.mtimeMs}`;
+  } catch (err) {
+    // An unstattable input is part of the key: the pass that reads it reports the read failure itself.
+    return `unstattable:${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
+  }
+}
+
 export interface RepoDashboardOptions {
   /** Repository root containing the managed-repos state file. */
   root: string;
@@ -618,9 +671,104 @@ export interface RepoDashboardOptions {
   readPlan?: (path: string) => Plan;
   /** Test seam: the module a spawned telemetry worker loads. */
   workerUrl?: URL;
+  /** repoSummarySync also returns each own repository's {@link RepoShadowFacts}. */
+  shadowMembers?: boolean;
 }
 
 type Identity = { repo: ManagedRepo; source: RepoDashboardEntry["source"]; own: boolean };
+type RegistryRead = { state: "verified"; repos: Array<{ repo: ManagedRepo; name: string }> } | { state: "unavailable"; reason: string };
+type Resolved = { identities: Identity[]; registry?: { state: "verified" } | { state: "unavailable"; reason: string } };
+
+/** An unreadable registry (`text` undefined) or a malformed one is unavailable with a reason. */
+function parseRegistryRepos(text: string | undefined): RegistryRead {
+  if (text === undefined) return { state: "unavailable", reason: "unreadable" };
+  try {
+    const parsed = parseInstanceRegistry(text);
+    return {
+      state: "verified",
+      repos: parsed.instances.filter((instance) => instance.live).map((instance) => {
+        const [owner, repo] = instance.repo.split("/");
+        return { repo: { owner, repo }, name: instance.name };
+      }),
+    };
+  } catch (error) {
+    // Keep the known managed rows, but name the missing registry evidence. Never expose its
+    // host path in a browser response or pretend core is absent from the fleet.
+    return { state: "unavailable", reason: error instanceof InstanceRegistryError ? error.code : "unreadable" };
+  }
+}
+
+function resolveIdentities(deps: RepoDashboardOptions, read: RegistryRead | undefined): Resolved {
+  const managed = deps.instanceRepository ? [] : loadManagedRepos(deps.root);
+  const registry: RegistryRead | undefined = deps.instanceRepository ? { state: "verified", repos: [{ repo: deps.instanceRepository, name: "" }] } : read;
+  const byIdentity = new Map<string, Identity>();
+  if (registry?.state === "verified") {
+    for (const { repo, name } of registry.repos) {
+      const key = `${repo.owner}/${repo.repo}`.toLowerCase();
+      const own = deps.instanceRepository !== undefined || (deps.ownInstance !== undefined && name === deps.ownInstance);
+      if (!byIdentity.has(key) || own) byIdentity.set(key, { repo, source: "instance-registry", own });
+    }
+  }
+  for (const repo of managed) {
+    const key = `${repo.owner}/${repo.repo}`.toLowerCase();
+    if (!byIdentity.has(key)) byIdentity.set(key, { repo, source: "managed-repos", own: false });
+  }
+  return { identities: [...byIdentity.values()], ...(registry ? { registry: registry.state === "verified" ? { state: "verified" as const } : registry } : {}) };
+}
+
+function telemetryRequest(deps: RepoDashboardOptions, identities: Identity[], ledgerPath: string, planPath: string, planStamp: string, nowMs: number): RepoTelemetryRequest {
+  const ownIndex = identities.findIndex((i) => i.own);
+  return {
+    kind: REPO_TELEMETRY_WORKER_KIND, repos: identities.map((i) => i.repo), ledgerPath, planPath, nowMs, planStamp,
+    ...(ownIndex >= 0 ? { own: ownIndex } : {}),
+    ...(deps.controlRoot !== undefined ? { controlRoot: deps.controlRoot } : {}),
+    ...(deps.incidentsDir !== undefined ? { incidentsDir: deps.incidentsDir } : {}),
+    ...(deps.shadowMembers ? { members: true } : {}),
+  };
+}
+
+function dashboardResult(deps: RepoDashboardOptions, resolved: Resolved, outcome: RepoTelemetryOutcome | undefined, nowMs: number, onlyOwn: boolean): RepoDashboardResult {
+  const { identities, registry } = resolved;
+  const measured = outcome?.ok ? outcome : undefined;
+  const rows = identities.map((identity, i) =>
+    toDashboardEntry(identity.repo, measured?.telemetry[i] ?? UNKNOWN, identity.source, identity.own, identity.own ? measured?.signals : undefined, nowMs));
+  return {
+    generated_at: fixedClock(nowMs).iso(),
+    source: deps.instanceRepository ? "instance-registry" : registry?.state === "verified" ? "instance-registry+managed-repos" : "managed-repos",
+    ...(registry ? { registry } : {}),
+    repos: onlyOwn ? rows.filter((_row, i) => identities[i].own) : rows,
+  };
+}
+
+/**
+ * `GET /v1/repos/summary`'s body computed synchronously in the calling thread, with the same identities,
+ * telemetry and projection. The read-model worker calls it with `readLedger` over its `repo_row` table.
+ * A failed telemetry pass is `{ ok: false, reason }`, where the route answers its read-cache error.
+ */
+export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number): { ok: true; summary: RepoDashboardResult; shadow?: Record<string, RepoShadowFacts> } | { ok: false; reason: string } {
+  const planPath = deps.planPath ?? join(deps.root, "plan", "tasks.yaml");
+  let text: string | undefined;
+  if (deps.repoRegistryPath !== undefined && !deps.instanceRepository) {
+    try {
+      text = readFileSync(deps.repoRegistryPath, "utf8");
+    } catch {
+      // deliberate: an unreadable registry is named `unreadable` by parseRegistryRepos, as the route names it.
+      text = undefined;
+    }
+  }
+  const resolved = resolveIdentities(deps, deps.repoRegistryPath !== undefined ? parseRegistryRepos(text) : undefined);
+  if (resolved.identities.length === 0 || deps.ledgerPath === undefined) return { ok: true, summary: dashboardResult(deps, resolved, undefined, nowMs, true) };
+  const planStamp = `${statStampSync(planPath)}|${statStampSync(join(dirname(planPath), "tasks.d"))}`;
+  const outcome = computeRepoTelemetrySync(telemetryRequest(deps, resolved.identities, deps.ledgerPath, planPath, planStamp, nowMs), { readLedger: deps.readLedger, readPlan: deps.readPlan });
+  if (!outcome.ok) return outcome;
+  const shadow = Object.fromEntries(resolved.identities.flatMap((identity, i) => {
+    const t = outcome.telemetry[i]!;
+    const facts = identity.own ? t.shadow : undefined;
+    const condition = (runs7d: RepoRunOutcomes): { condition: RepoCondition; reasons: string[] } => deriveRepoCondition({ ...t, runs7d }, outcome.signals, nowMs);
+    return facts ? [[`${identity.repo.owner}/${identity.repo.repo}`, { ...facts, condition }]] : [];
+  }));
+  return { ok: true, summary: dashboardResult(deps, resolved, outcome, nowMs, true), ...(deps.shadowMembers ? { shadow } : {}) };
+}
 
 /**
  * GET /v1/repos — connected instances plus the independent issue-intake managed set — and
@@ -647,13 +795,7 @@ export function buildRepoDashboardRoutes(deps: RepoDashboardOptions): Route[] {
     if (cached && (ageMs < REPO_TELEMETRY_MIN_AGE_MS || (cached.key === key && ageMs < REPO_TELEMETRY_CACHE_TTL_MS))) return cached;
     if (inflight && inflight.key === key) return inflight.promise;
     const atMs = clock.now();
-    const req: RepoTelemetryRequest = {
-      kind: REPO_TELEMETRY_WORKER_KIND, repos, ledgerPath, planPath, nowMs: atMs, planStamp: `${stamps[1]}|${stamps[2]}`,
-      ...(ownIndex >= 0 ? { own: ownIndex } : {}),
-      ...(deps.controlRoot !== undefined ? { controlRoot: deps.controlRoot } : {}),
-      ...(deps.incidentsDir !== undefined ? { incidentsDir: deps.incidentsDir } : {}),
-    };
-    const promise = compute(req).then((outcome) => {
+    const promise = compute(telemetryRequest(deps, identities, ledgerPath, planPath, `${stamps[1]}|${stamps[2]}`, atMs)).then((outcome) => {
       cached = { key, atMs, outcome };
       return cached;
     });
@@ -662,55 +804,22 @@ export function buildRepoDashboardRoutes(deps: RepoDashboardOptions): Route[] {
       if (inflight?.promise === promise) inflight = undefined;
     });
   };
-  const resolve = async (): Promise<{ identities: Identity[]; registry?: { state: "verified" } | { state: "unavailable"; reason: string } }> => {
-    const managed = deps.instanceRepository ? [] : loadManagedRepos(deps.root);
-    let registry: { state: "verified"; repos: Array<{ repo: ManagedRepo; name: string }> } | { state: "unavailable"; reason: string } | undefined;
-    if (deps.instanceRepository) {
-      registry = { state: "verified", repos: [{ repo: deps.instanceRepository, name: "" }] };
-    } else if (deps.repoRegistryPath) {
-      try {
-        const parsed = parseInstanceRegistry(await readFile(deps.repoRegistryPath, "utf8"));
-        registry = {
-          state: "verified",
-          repos: parsed.instances.filter((instance) => instance.live).map((instance) => {
-            const [owner, repo] = instance.repo.split("/");
-            return { repo: { owner, repo }, name: instance.name };
-          }),
-        };
-      } catch (error) {
-        // Keep the known managed rows, but name the missing registry evidence. Never expose its
-        // host path in a browser response or pretend core is absent from the fleet.
-        registry = { state: "unavailable", reason: error instanceof InstanceRegistryError ? error.code : "unreadable" };
-      }
+  const resolve = async (): Promise<Resolved> => {
+    if (deps.instanceRepository || !deps.repoRegistryPath) return resolveIdentities(deps, undefined);
+    let text: string | undefined;
+    try {
+      text = await readFile(deps.repoRegistryPath, "utf8");
+    } catch {
+      // deliberate: an unreadable registry is named `unreadable` by parseRegistryRepos, beside a malformed one.
+      text = undefined;
     }
-    const byIdentity = new Map<string, Identity>();
-    if (registry?.state === "verified") {
-      for (const { repo, name } of registry.repos) {
-        const key = `${repo.owner}/${repo.repo}`.toLowerCase();
-        const own = deps.instanceRepository !== undefined || (deps.ownInstance !== undefined && name === deps.ownInstance);
-        if (!byIdentity.has(key) || own) byIdentity.set(key, { repo, source: "instance-registry", own });
-      }
-    }
-    for (const repo of managed) {
-      const key = `${repo.owner}/${repo.repo}`.toLowerCase();
-      if (!byIdentity.has(key)) byIdentity.set(key, { repo, source: "managed-repos", own: false });
-    }
-    return { identities: [...byIdentity.values()], ...(registry ? { registry: registry.state === "verified" ? { state: "verified" as const } : registry } : {}) };
+    return resolveIdentities(deps, parseRegistryRepos(text));
   };
   const project = async (onlyOwn: boolean): Promise<RepoDashboardResult> => {
-    const { identities, registry } = await resolve();
-    const measured = identities.length > 0 && deps.ledgerPath !== undefined ? await measure(identities, deps.ledgerPath) : undefined;
+    const resolved = await resolve();
+    const measured = resolved.identities.length > 0 && deps.ledgerPath !== undefined ? await measure(resolved.identities, deps.ledgerPath) : undefined;
     if (measured && !measured.outcome.ok) throw new RepoTelemetryUnavailableError(measured.outcome.reason);
-    const outcome = measured?.outcome.ok ? measured.outcome : undefined;
-    const nowMs = measured ? measured.atMs : clock.now();
-    const rows = identities.map((identity, i) =>
-      toDashboardEntry(identity.repo, outcome?.telemetry[i] ?? UNKNOWN, identity.source, identity.own, identity.own ? outcome?.signals : undefined, nowMs));
-    return {
-      generated_at: fixedClock(nowMs).iso(),
-      source: deps.instanceRepository ? "instance-registry" : registry?.state === "verified" ? "instance-registry+managed-repos" : "managed-repos",
-      ...(registry ? { registry } : {}),
-      repos: onlyOwn ? rows.filter((_row, i) => identities[i].own) : rows,
-    };
+    return dashboardResult(deps, resolved, measured?.outcome, measured ? measured.atMs : clock.now(), onlyOwn);
   };
   return [
     { method: "GET", path: "/v1/repos", scope: "read", handler: async (_req, res) => sendJson(res, 200, await project(false)) },

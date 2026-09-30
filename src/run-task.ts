@@ -19517,7 +19517,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       prUrl: view.url,
       reviewInputDigest: inputDigest,
       reviewEngineRevision: DEP_REVIEW_ENGINE_REVISION,
-      fetchLifecycle: () => fetchPrLifecycle(view.url),
+      fetchLifecycle: () => fetchPrLifecycle(view.url, deps.gh ?? ghJson, DEP_REVIEW_ENGINE_REVISION),
     });
     if (!posted.posted) {
       console.log(`no remudero-review posted (refused: ${posted.reason}): ${view.url}`);
@@ -19597,7 +19597,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     prUrl: view.url,
     reviewInputDigest: inputDigest,
     reviewEngineRevision: DEP_REVIEW_ENGINE_REVISION,
-    fetchLifecycle: () => fetchPrLifecycle(view.url),
+    fetchLifecycle: () => fetchPrLifecycle(view.url, deps.gh ?? ghJson, DEP_REVIEW_ENGINE_REVISION),
   });
   if (postedFailure.posted) {
     // W1-T228: ledger this verdict too (the pre-existing code never did) — a
@@ -25393,6 +25393,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         // (the changed-tasks/`--base` pass), so `blockedDispositionViolations` stays silent on
         // the whole-plan pass, exactly as this task's rationale scopes the refusal.
         blockedDisposition: { baseTask: oldTask },
+        baseAcceptance: oldById ? (oldTask?.acceptance ?? []) : undefined,
         // W1-T2676: `duplicateSurfaceViolations` is silent absent a corpus, and this `--base`
         // pass never built one, so the check that exists to catch two live shards declaring
         // one surface never ran on the CLI path an operator actually invokes. `plan.tasks` is
