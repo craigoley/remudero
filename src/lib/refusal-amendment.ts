@@ -38,7 +38,8 @@ import { parseCriterionRefusals, type CriterionRefusalClass } from "./review.js"
 export const REFUSAL_AMENDMENT_STEP = "refusal_amendment.drafted";
 
 /** A refusal older than this is history, not a live block (a hand-fixed task keeps its last
- *  `no_pr` row forever). Data, not an inlined constant. */
+ *  `no_pr` row forever). KIND: BACKSTOP — the latest-verdict fold is the primary control; this only
+ *  keeps an abandoned row from holding a task. Data, not an inlined constant. */
 export const REFUSAL_AMENDMENT_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
 
 /** The most criteria one report can refuse; bounds the parse, far above any real acceptance list. */
