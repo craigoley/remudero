@@ -76,3 +76,44 @@ writer lease, and how many future-dated rows were quarantined.
 `data.inbox`: `{ ready?, needsYou?, fleet?, reason? }`.
 - These are open inbox items by who must act.
 - The source is the classification that `GET /v1/inbox` writes (`state/inbox-classified.json`).
+
+## `repositories` (version 1)
+
+Dark until `switches.json` sets `repositories` to `serve`; until then it answers 404 and the console
+reads each instance's `repos/summary` as before. Schema: `RepositoriesView` in `openapi/daemon.yaml`.
+
+`data.instances[]`: `{ instanceId, summary?, reason? }`, one per instance serve holds.
+- `summary` IS that instance's `GET /v1/i/<instance>/repos/summary` body (`RepoDashboardResult`),
+  computed by the read-model worker from the instance's projected `repo_row` table (`src/lib/repositories-view.ts`).
+- A `reason` beside a `summary` means the last recompute failed and the summary shown is older.
+
+`data.projects[]`: `{ project, repos[{ id, reponame, instanceId, state }], worst{ state, repoId, repoName } }`.
+- This is the console's `groupRepoProjects`, precomputed. Projects come from the instance registry, in
+  first-seen order, and a repository the registry names no project for is its own project.
+- `state` (`RepositoryState`) runs worst first: `unavailable` (no summary), `stale`, `unknown` (no
+  ledger), `verified`. `worst` is the FIRST repository in the project holding the worst state: the
+  "Unavailable · worst is remudero" line.
+- It judges only what core measured. A console that cannot reach core still overlays its own
+  transport failure.
+- `data.projectsReason` is present when the registry could not be read.
+
+## `now` (version 1)
+
+`GET /v1/views/now?instance=<id>`: everything the console's /now renders for one instance. Schema:
+`NowView` in `openapi/daemon.yaml`.
+- A request without `instance` answers 400 `invalid_request`.
+- An instance the worker does not project answers 404 `view_not_ready`.
+- The worker materializes it only while `now` is `shadow` or `serve`, and serve answers only under
+  `serve`. Otherwise it answers 404, and the console reads `/v1/status` and `/v1/recent` as before.
+
+`data`: `{ instance, board{ generated_at, counts, spendTodayUsd, taskProjection, tasks[], groups{ running,
+needsYou, blocked, queued } }, prQueue, actions[], recent{ entries[], mergedToday{ count, day } }, health,
+questions }`.
+- `groups` is the console's `groupBoard` as ordered id lists.
+- `actions[].strike` is `{ n, of }`, parsed once from the sweep's reason.
+- `health` is the selected instance's own host probe. A field it could not read is absent and named in `health.reasons`.
+- `questions` is `{ count }` for core and `{ reason }` for any other instance.
+- Under `shadow`, the comparator (`src/lib/view-shadow.ts`) diffs a sampled body against `/now`'s legacy
+  sources. Those are GET /v1/status's board and PR queue over the instance's live file only, plus a fresh
+  host probe of that instance, computed in the worker (`createNowView`'s `legacy`).
+- Probe gauges come from the view whenever both probes read them, so two samples moments apart are not a diff.

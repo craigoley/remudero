@@ -59,7 +59,9 @@ function fixture(t: TestContext, opts: { lintScript?: string } = {}) {
   writeFileSync(join(work.dir, "plan", "tasks.yaml"), "[]\n");
   writeFileSync(join(work.dir, "plan", "tasks.d", ".gitkeep"), "");
   copyFileSync(join(REPO_ROOT, "plan", "policy.yaml"), join(work.dir, "plan", "policy.yaml"));
-  writeFileSync(join(work.dir, "docs", "a.md"), "hello\n");
+  // The clean-shard positive control adds the text its grep proof names. Keeping the
+  // target absent at the base makes that proof discriminating under lint-plan too.
+  writeFileSync(join(work.dir, "docs", "a.md"), "initial fixture text\n");
 
   work.git("config", "core.hooksPath", "hooks");
   work.addRemote("origin", remote.dir);
@@ -99,7 +101,8 @@ test("W1-T4901: a real push of a plan-only diff whose shard fails the plan lint 
 test("W1-T4901: positive control, a clean shard passes the same real push", (t) => {
   const f = fixture(t);
   f.writeShard(CLEAN_SHARD);
-  f.commit("file a clean shard", ["plan"]);
+  writeFileSync(join(f.work.dir, "docs", "a.md"), "hello\n");
+  f.commit("file a clean shard and its matching documentation", ["plan", "docs/a.md"]);
   const result = f.push();
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /lint-plan-precheck: OK/);
@@ -215,7 +218,8 @@ test("run in-process: a shard that fails the lint exits 1 naming the rule, a cle
   assert.deepEqual(refused.out, []);
 
   f.writeShard(CLEAN_SHARD);
-  f.commit("repair the shard", ["plan"]);
+  writeFileSync(join(f.work.dir, "docs", "a.md"), "hello\n");
+  f.commit("repair the shard and add its matching documentation", ["plan", "docs/a.md"]);
   assert.deepEqual(runIn(f.work.dir), { exit: 0, out: ["lint-plan-precheck: OK -- the plan lint passes on this diff"], err: [] });
 });
 

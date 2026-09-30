@@ -15,8 +15,8 @@ const HELPER_IMPORT = "helpers/wall-clock-bound.js";
 // PR #7998 migrates the board pacing assertion: one new declaring file and assertion site.
 // It also adds the hung-gh /v1/status budget file: one more declaring file and assertion site.
 // PR #8080 adds the read-model worker's main-loop timing test: one declaring file and two sites.
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 22;
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 34;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 23;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 37;
 const WALL_CLOCK_BOUND_FILE_FLOOR = 3;
 const WALL_CLOCK_BOUND_SITE_FLOOR = 4;
 

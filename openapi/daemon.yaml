@@ -6734,6 +6734,327 @@ components:
                     type: integer
                     description: Rows stamped more than five minutes past their ingest time.
                   reason: {type: string}
+            shadow:
+              type: array
+              description: Each shadowed view's diff counters and cutover readiness (src/lib/view-shadow.ts); absent before the first sample.
+              items:
+                $ref: "#/components/schemas/ViewShadowReadiness"
+
+    ViewShadowReadiness:
+      type: object
+      description: >
+        One view's shadow comparator counters. `ready` needs zero `real` diffs sustained over a day of
+        measured traffic and at least 3 x requests-per-day samples (the rule of three).
+      required: [view, requests, firstRequestMs, samples, diffs, streakSamples, streakSinceMs, lastRealMs, requestsPerDay, requiredSamples, ready, reason]
+      properties:
+        view: {type: string}
+        requests: {type: integer}
+        firstRequestMs: {type: [integer, "null"]}
+        samples: {type: integer}
+        diffs:
+          type: object
+          required: [legacy_horizon, timing, dedupe, real]
+          properties:
+            legacy_horizon: {type: integer}
+            timing: {type: integer}
+            dedupe: {type: integer}
+            real: {type: integer}
+        streakSamples: {type: integer}
+        streakSinceMs: {type: [integer, "null"]}
+        lastRealMs: {type: [integer, "null"]}
+        requestsPerDay: {type: [integer, "null"]}
+        requiredSamples: {type: [integer, "null"]}
+        ready: {type: boolean}
+        reason: {type: string}
+
+    RepositoriesView:
+      type: object
+      description: >
+        GET /v1/views/repositories (docs/views.md, src/lib/repositories-view.ts): the repository
+        portfolio across every instance serve holds, in one body. Each instance's `summary` IS its
+        GET /v1/i/<instance>/repos/summary body, computed by the read-model worker from that
+        instance's projected `repo_row` table; `projects` precomputes the console's grouping and its
+        "worst is <repo>" line. Dark until state/read-model/switches.json sets `repositories` to `serve`.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [repositories]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          description: A `ledger:<instance>` and a `repositories:<instance>` source per instance.
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [instances, projects]
+          properties:
+            instances:
+              type: array
+              description: One entry per instance serve published, in its order; `summary` absent with a `reason` until its first recompute.
+              items:
+                type: object
+                required: [instanceId]
+                properties:
+                  instanceId: {type: string}
+                  summary:
+                    $ref: "#/components/schemas/RepoDashboardResult"
+                  reason:
+                    type: string
+                    description: Why `summary` is absent, or (beside a summary) why the last recompute failed and the summary shown is older.
+            projects:
+              type: array
+              description: >
+                Registry projects in first-seen order. A repository the registry names no project for
+                is its own project, named after the repository.
+              items:
+                $ref: "#/components/schemas/RepositoriesProject"
+            projectsReason:
+              type: string
+              description: Present when the registry could not be read, so every repository is its own project.
+            reason:
+              type: string
+              description: Present with empty arrays before serve has published the repository sources.
+
+    RepositoriesProject:
+      type: object
+      description: One project of the repositories view, with the repository whose state is worst.
+      required: [project, repos, worst]
+      properties:
+        project: {type: string}
+        repos:
+          type: array
+          description: References into `data.instances[].summary.repos` by `id`.
+          items:
+            type: object
+            required: [id, reponame, instanceId, state]
+            properties:
+              id:
+                type: string
+                description: Canonical owner/repo; the instance name when neither the registry nor serve names its repository.
+              reponame: {type: string}
+              instanceId: {type: string}
+              state:
+                $ref: "#/components/schemas/RepositoryState"
+        worst:
+          type: object
+          description: The FIRST repository holding the project's worst state (never an average).
+          required: [state, repoId, repoName]
+          properties:
+            state:
+              $ref: "#/components/schemas/RepositoryState"
+            repoId: {type: string}
+            repoName: {type: string}
+
+    RepositoryState:
+      type: string
+      description: >
+        How far a repository's figures can be trusted, worst first: `unavailable` (no summary),
+        `stale` (the last recompute failed; the summary shown is older), `unknown` (computed, no
+        ledger), `verified`. The console's RepoHealthStatus.
+      enum: [unavailable, stale, unknown, verified]
+
+    NowView:
+      type: object
+      description: >
+        GET /v1/views/now?instance=<id> (docs/views.md, src/lib/now-view.ts): everything the console's
+        /now renders for ONE instance. The board is the legacy derivation over the read model's full
+        fact history; `groups` precomputes the console's groupBoard; `actions` carries structured
+        strikes; `health` is the selected instance's own host probe. Dark until
+        state/read-model/switches.json sets `now` to `serve`.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [now]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          description: "`ledger:<i>`, `github:<i>` (the persisted open-PR snapshot), `plan:<i>` and `host-probe:<i>`."
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [instance, board, prQueue, actions, recent, health, questions]
+          properties:
+            instance: {type: string}
+            board:
+              type: object
+              required: [generated_at, counts, spendTodayUsd, taskProjection, tasks, groups]
+              properties:
+                generated_at: {type: string}
+                counts:
+                  type: object
+                  required: [running, queued, blocked]
+                  properties:
+                    running: {type: integer}
+                    queued: {type: integer}
+                    blocked: {type: integer}
+                spendTodayUsd: {type: number}
+                taskProjection:
+                  type: object
+                  description: "`tasks` carries every running, needs-you and blocked task and the newest `limit` queued ones; `groups` names them all."
+                  required: [complete, returned, limit, total]
+                  properties:
+                    complete: {type: boolean}
+                    returned: {type: integer}
+                    limit: {type: integer}
+                    total: {type: integer}
+                tasks:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/NowTask"
+                groups:
+                  type: object
+                  description: Task ids in the console's groupBoard order; each task is in exactly one group.
+                  required: [running, needsYou, blocked, queued]
+                  properties:
+                    running: {type: array, items: {type: string}}
+                    needsYou: {type: array, items: {type: string}}
+                    blocked: {type: array, items: {type: string}}
+                    queued: {type: array, items: {type: string}}
+            prQueue:
+              type: object
+              required: [complete, rows]
+              properties:
+                complete: {type: boolean}
+                unavailableReason: {type: string}
+                rows:
+                  type: array
+                  items:
+                    type: object
+                    required: [prNumber, prUrl, title, disposition, queueClass, held]
+                    properties:
+                      prNumber: {type: integer}
+                      prUrl: {type: string}
+                      title: {type: string}
+                      taskId: {type: string}
+                      disposition: {type: string}
+                      queueClass:
+                        type: string
+                        enum: [actionable, active, ready-held, waiting, unknown]
+                      held: {type: boolean}
+            actions:
+              type: array
+              description: Blocked PRs and merge holds, most urgent tone first.
+              items:
+                $ref: "#/components/schemas/NowAction"
+            recent:
+              type: object
+              required: [entries, mergedToday]
+              properties:
+                entries:
+                  type: array
+                  items:
+                    type: object
+                    required: [ts, verb, taskId, title]
+                    properties:
+                      ts: {type: string}
+                      verb:
+                        type: string
+                        description: A RecentActivityEntry verb; a consumer renders an unknown one.
+                      taskId: {type: string}
+                      title: {type: string}
+                      detail: {type: string}
+                      costUsd: {type: number}
+                      prUrl: {type: string}
+                mergedToday:
+                  type: object
+                  description: Exact merges today (UTC), one per task and pull request, over full history.
+                  required: [count, day]
+                  properties:
+                    count: {type: integer}
+                    day: {type: string}
+            health:
+              type: object
+              description: The selected instance's own host probe; a field it could not read is absent, named in `reasons`.
+              required: [sampledAt]
+              properties:
+                sampledAt: {type: string}
+                diskFreeBytes: {type: number}
+                rateLimitRemaining: {type: integer}
+                lastPollAgeMs: {type: number}
+                reasons:
+                  type: object
+                  additionalProperties: {type: string}
+            questions:
+              description: Open feedback questions; core only, so another instance carries a `reason` instead.
+              oneOf:
+                - type: object
+                  required: [count]
+                  properties:
+                    count: {type: integer}
+                - type: object
+                  required: [reason]
+                  properties:
+                    reason: {type: string}
+
+    NowTask:
+      type: object
+      description: One board row as /now renders it; other StatusProjection fields stay on GET /v1/status.
+      required: [taskId, title, status, risk]
+      properties:
+        taskId: {type: string}
+        title: {type: string}
+        status: {type: string}
+        risk: {type: string}
+        lastActivityAt: {type: string}
+        prUrl: {type: string}
+        prNumber: {type: integer}
+        phase: {type: string}
+        elapsedMs: {type: number}
+        startedAt: {type: string}
+        needsHuman: {type: boolean, enum: [true]}
+        verifyHumanPending: {type: boolean, enum: [true]}
+        escalation:
+          type: object
+          properties:
+            title: {type: string}
+            issueUrl: {type: string}
+            unverified: {type: boolean, enum: [true]}
+            openedAt: {type: string}
+        worker:
+          type: object
+          properties:
+            servedModel: {type: string}
+            requestedModel: {type: string}
+
+    NowAction:
+      type: object
+      description: >
+        The console's actionQueueFromStatus, precomputed. `strike` is parsed once from the sweep's
+        reason in every form it writes, replacing the console's regex; `sortAt` is the row's own time.
+      required: [kind, disposition, reason, tone]
+      properties:
+        kind:
+          type: string
+          enum: [blocked_pr, merge_held]
+        taskId: {type: string}
+        prNumber: {type: integer}
+        prUrl: {type: string}
+        disposition: {type: string}
+        reason: {type: string}
+        tone:
+          type: string
+          enum: [exhausted, held, blocked, unknown, repairing]
+        strike:
+          type: object
+          required: [n, of]
+          properties:
+            n: {type: integer}
+            of: {type: integer}
+        sortAt: {type: string}
 
     RecentActivityEntry:
       type: object
@@ -12069,6 +12390,70 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: The view is switched off (`view_disabled`) or has no body yet (`view_not_ready`).
+
+  /v1/views/repositories:
+    get:
+      summary: The repository portfolio across every instance, served from the read model.
+      description: >
+        P1-08/P1-12. Each instance's GET /v1/i/<instance>/repos/summary body, computed by the
+        read-model worker, plus the portfolio grouped by registry project with each project's worst
+        repository. DARK: it answers 404 `view_not_ready` until state/read-model/switches.json sets
+        `repositories` to `serve`, and `off` answers 404 `view_disabled`; the console then reads the
+        per-instance repos/summary routes as before. Same ETag and 304 rules as every view. See
+        docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RepositoriesView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is switched off (`view_disabled`) or not served yet (`view_not_ready`).
+
+  /v1/views/now:
+    get:
+      summary: Everything the console's /now renders for one instance, served from the read model.
+      description: >
+        P1-11/P1-12. One body per instance, keyed by `?instance=`. DARK: it answers 404
+        `view_not_ready` until state/read-model/switches.json sets `now` to `serve` (the worker
+        materializes it under `shadow` too), and `off` answers 404 `view_disabled`; the console then
+        reads GET /v1/status and /v1/recent as before. An instance serve does not project also
+        answers 404 `view_not_ready`. Same ETag and 304 rules as every view. See docs/views.md.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: instance
+          in: query
+          required: true
+          description: The registry instance name (core's is `core`).
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NowView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is switched off (`view_disabled`) or not served yet for that instance (`view_not_ready`).
 
   /v1/recent:
     get:

@@ -722,7 +722,8 @@ export interface LedgerRotationMemoPass {
 
 /** A rotation memo: `pass` answers one union read from it, and `load` fills what a pass found missing. */
 export interface LedgerRotationMemo {
-  pass: () => LedgerRotationMemoPass;
+  /** `parseMissing` parses an unmemoized rotation inline and keeps it, so a pass after a rotation costs that rotation, not the union. */
+  pass: (opts?: { parseMissing?: boolean }) => LedgerRotationMemoPass;
   load: (entries: readonly LedgerCorpusEntry[]) => Promise<void>;
   size: () => number;
 }
@@ -746,6 +747,8 @@ export function createLedgerRotationMemo(
     statKey?: (path: string) => string;
     readFile?: (path: string) => Promise<Buffer>;
     yieldTurn?: () => Promise<void>;
+    /** Only lines matching this are parsed by `load`; `reduce` must drop every row it would reject. */
+    pattern?: RegExp;
   } = {},
 ): LedgerRotationMemo {
   const statKey = io.statKey ?? ((path: string) => {
@@ -768,7 +771,7 @@ export function createLedgerRotationMemo(
       const tornLines: string[] = [];
       for (let at = 0; at < buf.length; ) {
         const slice: Array<Record<string, unknown>> = [];
-        const scanned = scanLedgerBuffer(buf, undefined, (row) => slice.push(row), at, LEDGER_ROTATION_LOAD_LINES_PER_TURN, (line) => tornLines.push(line));
+        const scanned = scanLedgerBuffer(buf, io.pattern, (row) => slice.push(row), at, LEDGER_ROTATION_LOAD_LINES_PER_TURN, (line) => tornLines.push(line));
         torn += scanned.bad;
         at = scanned.next;
         rows = reduce([...rows, ...slice]);
@@ -791,7 +794,7 @@ export function createLedgerRotationMemo(
         await pending;
       }
     },
-    pass: () => {
+    pass: (passOpts = {}) => {
       const touched = new Map<string, MemoEntry>();
       const missing: LedgerCorpusEntry[] = [];
       const rotationRecords: LedgerRotationHook = (entry, parse) => {
@@ -807,7 +810,7 @@ export function createLedgerRotationMemo(
           touched.set(entry.path, hit);
           return hit.read;
         }
-        if (hit?.key !== key) {
+        if (hit?.key !== key && !passOpts.parseMissing) {
           missing.push(entry);
           return { rows: [], torn: 0, tornLines: [] };
         }

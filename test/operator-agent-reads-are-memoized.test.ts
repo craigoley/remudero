@@ -1,15 +1,21 @@
 // W1-T4582: six /v1/operator-agent/* reads re-parsed every rotated ledger archive on every request
 // (W1-T4576's reach census named consequences, context, experiments, promotions, proposals and
-// settings). They now read through one rotation memo per state dir and step set. A COMPLETE pass
-// parses only the live file; a pass that lacks a rotation answers with a full read and loads the
-// rotation off the request, so an answer is never missing rows.
+// settings). They now read through one rotation memo per state dir, holding every `panel.*` row. A
+// warm read parses only the live file; a read that lacks a rotation parses that rotation alone, so an
+// answer is never missing rows and never re-reads the union.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { OPERATOR_AGENT_EXPERIMENT_STEP, readOperatorAgentExperiments, settleOperatorAgentUnionLoads, type OperatorAgentExperiment } from "../src/lib/operator-agent.js";
+import {
+  OPERATOR_AGENT_EXPERIMENT_STEP,
+  prewarmOperatorAgentReads,
+  readOperatorAgentExperiments,
+  settleOperatorAgentUnionLoads,
+  type OperatorAgentExperiment,
+} from "../src/lib/operator-agent.js";
 import { CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE } from "../src/lib/serve.js";
 
 const ARCHIVE_MTIME_S = 1_790_000_000;
@@ -66,7 +72,7 @@ test("W1-T4582: a warm operator-agent read answers from the memo, not by re-open
   try {
     const path = archive(stateDir, "ledger.2026-09-19T00-00-00-000Z.ndjson.gz", "experiment:repo:archived");
     assert.deepEqual(ids(ledgerPath), ["experiment:repo:archived"], "the cold read is complete");
-    await settleOperatorAgentUnionLoads(); // the memo loads the rotation off the request
+    await settleOperatorAgentUnionLoads();
 
     // Same length, same mtime, unreadable bytes: only a read that re-opens the archive can notice.
     const before = statSync(path);
@@ -74,7 +80,7 @@ test("W1-T4582: a warm operator-agent read answers from the memo, not by re-open
     utimesSync(path, ARCHIVE_MTIME_S, ARCHIVE_MTIME_S);
     assert.deepEqual(ids(ledgerPath), ["experiment:repo:archived"], "the warm read is answered from the memo");
 
-    // A rotation written later is never missed: the pass lacks it, so that read is a full one.
+    // A rotation written later is never missed: the pass lacks it, so that read parses it.
     archive(stateDir, "ledger.2026-09-20T00-00-00-000Z.ndjson.gz", "experiment:repo:newer");
     assert.ok(ids(ledgerPath).includes("experiment:repo:newer"), "a new rotation is read the first time it is seen");
   } finally {
@@ -84,4 +90,22 @@ test("W1-T4582: a warm operator-agent read answers from the memo, not by re-open
 
 test("W1-T4582: no operator-agent read route is left in the unbounded-read baseline", () => {
   assert.deepEqual(CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE.filter((route) => route.startsWith("GET /v1/operator-agent/")), []);
+});
+
+test("a serve prewarm fills the one memo every operator-agent reader shares", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-oa-prewarm-"));
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const ledgerPath = join(stateDir, "ledger.ndjson");
+  writeFileSync(ledgerPath, "");
+  try {
+    const path = archive(stateDir, "ledger.2026-09-19T00-00-00-000Z.ndjson.gz", "experiment:repo:prewarmed");
+    await prewarmOperatorAgentReads(ledgerPath);
+    const before = statSync(path);
+    writeFileSync(path, Buffer.alloc(before.size, 0x21));
+    utimesSync(path, ARCHIVE_MTIME_S, ARCHIVE_MTIME_S);
+    assert.deepEqual(ids(ledgerPath), ["experiment:repo:prewarmed"], "the first experiments read is answered from the prewarmed memo");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
