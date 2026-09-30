@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { computeBoardSnapshot } from "../src/lib/board.js";
 import { createGhCallPacer, createNonBlockingGhCallPacer, GhPaceWouldBlockError, paceGhEntry } from "../src/lib/github-transport.js";
 import type { Plan } from "../src/lib/plan.js";
@@ -92,7 +93,7 @@ test("serve gh pacing waits without a blocking sleep", () => {
     GhPaceWouldBlockError,
     "a rate-limit backoff refuses instead of sleeping the thread",
   );
-  assert.ok(Date.now() - startedAt < 1_000, "neither refusal slept");
+  assertWallClockBound(Date.now() - startedAt, 1_000, "neither refusal slept");
 
   const blocking = createGhCallPacer({ minGapMs: 5_000, sleepSync: () => { throw new Error("slept"); } });
   blocking.wait();

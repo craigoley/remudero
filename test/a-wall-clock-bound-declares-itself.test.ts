@@ -12,8 +12,9 @@ const THIS_FILE = "test/a-wall-clock-bound-declares-itself.test.ts";
 const HELPER_IMPORT = "helpers/wall-clock-bound.js";
 // W1-T4208 adds one test file and two declared bounds for the status JSON deadline.
 // W1-T4563 previously removed two retired console latency files (20 -> 18, 30 -> 28).
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 19;
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 30;
+// PR #7998 migrates the board pacing assertion: one new declaring file and assertion site.
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 20;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 31;
 const WALL_CLOCK_BOUND_FILE_FLOOR = 3;
 const WALL_CLOCK_BOUND_SITE_FLOOR = 4;
 
