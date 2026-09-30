@@ -115,6 +115,37 @@ test("a spawned child inherits the live ledger deny root", () => {
   }
 });
 
+test("W1-T4944: shifted clock cannot write the live-root stand-in", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-shifted-live-stand-in-"));
+  const livePath = join(root, "state", "ledger.ndjson");
+  const fixturePath = join(mkdtempSync(join(tmpdir(), "rmd-shifted-ledger-fixture-")), "state", "ledger.ndjson");
+  const ledgerUrl = new URL("../src/lib/ledger.ts", import.meta.url).href;
+  const clockUrl = new URL("../scripts/clock-shift.mjs", import.meta.url).href;
+  const code = `
+    import { statSync } from "node:fs";
+    import { appendLedger } from ${JSON.stringify(ledgerUrl)};
+    appendLedger(${JSON.stringify(fixturePath)}, { run_id: "clock", task_id: "TEST", step: "fixture-write" });
+    if (Date.now() - statSync(${JSON.stringify(fixturePath)}).mtimeMs < 399 * 86_400_000) throw new Error("clock was not shifted");
+    console.log("shift-active");
+    appendLedger(${JSON.stringify(livePath)}, { run_id: "clock", task_id: "TEST", step: "should-not-write" });
+  `;
+  const previous = process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+  process.env[LIVE_LEDGER_DENY_ROOT_ENV] = root;
+  try {
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--import", clockUrl, "--input-type=module", "-e", code], {
+      cwd: process.cwd(), encoding: "utf8", env: { ...process.env, FK_SHIFT_DAYS: "400", NODE_TEST_CONTEXT: undefined },
+    });
+    assert.notEqual(child.status, 0);
+    assert.match(child.stdout, /shift-active/);
+    assert.match(child.stderr, /W1-T4923/);
+    assert.match(readFileSync(fixturePath, "utf8"), /"step":"fixture-write"/);
+    assert.equal(existsSync(livePath), false);
+  } finally {
+    if (previous === undefined) delete process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+    else process.env[LIVE_LEDGER_DENY_ROOT_ENV] = previous;
+  }
+});
+
 /** The env a real daemon/operator process carries: no runner variable at all. */
 const REAL_RUN: NodeJS.ProcessEnv = { PATH: "/usr/bin", HOME: "/Users/x" };
 /** The env node's own test runner sets — measured, not assumed (see the module header). */
