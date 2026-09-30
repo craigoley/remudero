@@ -11,7 +11,14 @@ import type { Clock } from "../src/lib/clock.js";
 import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
 import { createLedgerProjector, openProjectorReadModel, readModelDigest } from "../src/lib/ledger-projector.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
-import { ORACLE_AGREE_INTERVAL_MS, ORACLE_DRIFT_INTERVAL_MS, READ_MODEL_CONSISTENCY_STEP, READ_MODEL_SELF_HEALED_STEP } from "../src/lib/read-model-consistency.js";
+import {
+  ORACLE_AGREE_INTERVAL_MS,
+  ORACLE_DRIFT_INTERVAL_MS,
+  ORACLE_INGEST_SETTLE_MS,
+  ORACLE_SEED_ROWS_PER_MS,
+  READ_MODEL_CONSISTENCY_STEP,
+  READ_MODEL_SELF_HEALED_STEP,
+} from "../src/lib/read-model-consistency.js";
 import { acquireLease, releaseLease } from "../src/lib/read-model-db.js";
 import {
   READ_MODEL_CHECK_SHARE,
@@ -282,7 +289,8 @@ test("a lease held by another serve keeps this worker from writing and a stolen 
   t.after(() => other.close());
   assert.ok(acquireLease(other, { holder: "other-serve", clock }).ok);
   const sink = collect();
-  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock, holder: "me", post: sink.post });
+  // The oracle stays out of it: every tick here is a projector write the fence decides.
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock, holder: "me", post: sink.post, oracle: "off" });
   t.after(() => ticker.release());
   ticker.tick();
   let state = lastState(sink.messages).instances[0];
@@ -663,6 +671,7 @@ function checkWindows(stateDir: string): Array<[number, number]> {
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
+const SLICE_BUDGET_MS = 10 / ORACLE_SEED_ROWS_PER_MS;
 
 /** Eight days of rows every three hours up to an hour before T0: an archive, then the live file. */
 function spreadRows(dir: string): void {
@@ -681,7 +690,12 @@ function checkFixture(t: TestCtx, extra: { escalation?: { issues: IssueGateway; 
   const c = collect();
   const stepped = steppedClock();
   const clock = extra.clock ?? stepped.clock;
-  const make = () => createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: c.post, clock, holder: "serve-a", ...(extra.escalation ? { escalation: extra.escalation } : {}) });
+  // Marks settle at once here, and a slice holds about ten rows (the seed rate over 0.2 ms): the
+  // settle period and the slice sizing have tests of their own.
+  const make = () => createReadModelTicker({
+    stateDir, instances: [{ name: "core", ledgerDir }], post: c.post, clock, holder: "serve-a", ingestSettleMs: 0, oracleSliceBudgetMs: SLICE_BUDGET_MS,
+    ...(extra.escalation ? { escalation: extra.escalation } : {}),
+  });
   let ticker = make();
   t.after(() => ticker.release());
   return {
@@ -712,30 +726,75 @@ function tickUntilChecks(f: ReturnType<typeof checkFixture>, n: number, maxTicks
   return out;
 }
 
-test("seven consecutive slice checks tile the seven-day window exactly and no tick both projects and checks", (t) => {
+test("one cycle of row-count slice checks tiles the seven-day window exactly while the projector keeps projecting", (t) => {
   const f = checkFixture(t);
-  const ticks = tickUntilChecks(f, 7);
-  assert.deepEqual(ticks.filter((x) => x.projected && x.checked), [], "a check tick never projects");
-  assert.ok(ticks.filter((x) => x.projected).length >= 7, "projection ticks run between the checks");
+  // Ticks until a slice reaches the window's floor: the cycle's last.
+  const ticks: ReturnType<typeof tickUntilChecks> = [];
+  while (ticks.length < 200) {
+    ticks.push(...tickUntilChecks(f, 1));
+    const windows = checkWindows(f.stateDir);
+    if (windows.at(-1)![0] === windows[0]![1] - 7 * DAY) break;
+  }
+  const checkTicks = ticks.filter((x) => x.checked);
+  assert.ok(checkTicks.length >= 5 && checkTicks.every((x) => x.projected), "a slice never stops the projector: every tick that checked also projected its new row");
   const windows = checkWindows(f.stateDir);
   const end = windows[0]![1];
-  assert.deepEqual(windows, Array.from({ length: 7 }, (_, i) => [end - (i + 1) * DAY, end - i * DAY]), "slice i covers day i back from the cycle's end");
   assert.equal(end, ticks.find((x) => x.checked)!.at - 10 * 60_000, "the cycle ends at the closed-window edge of its first check");
+  assert.ok(windows.length >= 5, `a week of about 8 rows a day took ${windows.length} slices of about ten rows`);
+  for (let i = 1; i < windows.length; i++) assert.equal(windows[i]![1], windows[i - 1]![0] - 1, `slice ${i} ends just below slice ${i - 1}: no gap and no overlap`);
+  assert.ok(windows.every(([t0, t1]) => t1 - t0 < 7 * DAY), "no slice is the whole window");
   assert.ok(oracleRows(f.stateDir).every((r) => r.outcome === "agree"));
+  const checked = oracleRows(f.stateDir).reduce((sum, r) => sum + Number(r.compared), 0);
+  const inWindow = openProjectorReadModel(f.stateDir, "core", f.clock);
+  t.after(() => inWindow.close());
+  assert.equal(checked, Number(inWindow.prepare("SELECT count(*) AS n FROM seen WHERE ts_ms BETWEEN ? AND ?").get(end - 7 * DAY, end)?.n), "every row of the window was compared exactly once");
+  const cycle = windows.length;
   for (let i = 0; i < 10; i++) f.ticker.tick();
-  assert.equal(checkWindows(f.stateDir).length, 7, "a new cycle waits for the schedule hook after an agreeing cycle");
+  assert.equal(checkWindows(f.stateDir).length, cycle, "a new cycle waits for the schedule hook after an agreeing cycle");
   f.advance(ORACLE_AGREE_INTERVAL_MS);
   tickUntilChecks(f, 1);
-  assert.ok(checkWindows(f.stateDir)[7]![1] > end, "the next cycle ends later");
+  assert.ok(checkWindows(f.stateDir)[cycle]![1] > end, "the next cycle ends later");
 });
 
 test("the slice cursor survives a worker restart and the next slice resumes the cycle", (t) => {
   const f = checkFixture(t);
   tickUntilChecks(f, 3);
-  const end = checkWindows(f.stateDir)[0]![1];
+  const third = checkWindows(f.stateDir)[2]!;
   f.restart();
   tickUntilChecks(f, 1);
-  assert.deepEqual(checkWindows(f.stateDir)[3], [end - 4 * DAY, end - 3 * DAY], "the restarted worker checks the fourth slice of the same cycle");
+  assert.equal(checkWindows(f.stateDir)[3]![1], third[0] - 1, "the restarted worker checks the slice just below the third");
+});
+
+test("the worker compares only rows ingested before a mark older than the settle period", (t) => {
+  const ledgerDir = scratch(t, "rmw-settle-ledger");
+  const stateDir = scratch(t, "rmw-settle-state");
+  spreadRows(ledgerDir);
+  const c = collect();
+  const { clock, advance } = steppedClock();
+  const titles: string[] = [];
+  const issues: IssueGateway = { create: (title) => (titles.push(title), `https://github.com/craigoley/remudero/issues/${9000 + titles.length}`) };
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: c.post, clock, holder: "settle", escalation: { issues, ledgerPath: join(scratch(t, "rmw-settle-esc"), LIVE), runId: "rm" } });
+  t.after(() => ticker.release());
+  for (let i = 0; i < 5 && c.logs("read_model.consistency_deferred").length === 0; i++) ticker.tick();
+  assert.equal(checkWindows(stateDir).length, 0, "no mark has settled yet: nothing is compared");
+  assert.match(String(c.logs("read_model.consistency_deferred")[0]?.reason), /no ingest mark is 600000 ms old yet/);
+  // Rows arrive late, after the mark, with event times deep inside the window: a late-cut rotation and a live append.
+  const lateRow = (k: number) => JSON.stringify({ ts: new Date(T0 - 2 * DAY - k * HOUR).toISOString(), step: "run.start", task_id: `LATE-${k}`, run_id: `late-${k}` });
+  advance(ORACLE_INGEST_SETTLE_MS);
+  writeFileSync(join(ledgerDir, archiveName(T0 - DAY)), gzipSync(text([lateRow(1), lateRow(2)])));
+  appendFileSync(join(ledgerDir, LIVE), text([lateRow(3)]));
+  const rows = c.logs("read_model.consistency_deferred").length;
+  for (let i = 0; i < 40 && checkWindows(stateDir).length === 0; i++) {
+    ticker.tick();
+    advance(250);
+  }
+  assert.equal(c.logs("read_model.consistency_deferred").length, rows, "the next check found a settled mark");
+  const [metric] = oracleRows(stateDir);
+  assert.equal(metric?.outcome, "agree", "the rows that arrived after the mark are not drift");
+  assert.ok(Number(metric?.ingest_mark_age_ms) >= ORACLE_INGEST_SETTLE_MS, `the mark was ${metric?.ingest_mark_age_ms} ms old`);
+  assert.equal(metric?.unsettled, 3, "the three late rows wait for a later mark");
+  assert.deepEqual(titles, [], "nothing escalated");
+  assert.equal(oracleRows(stateDir).filter((r) => r.step === READ_MODEL_SELF_HEALED_STEP).length, 0, "and nothing was healed");
 });
 
 test("the next slice waits in proportion to what the last one cost", (t) => {
@@ -813,17 +872,18 @@ test("a drift the worker's windowed check detects is healed and a recurrence esc
   f.ticker.tick();
   const tamper = openProjectorReadModel(f.stateDir, "core");
   t.after(() => tamper.close());
-  const corruptDayBack = (days: number) => tamper.prepare("UPDATE fact SET body = body || ' ' WHERE seq = (SELECT max(seq) FROM fact WHERE ts_ms < ?)").run(T0 - days * DAY);
-  corruptDayBack(0);
+  const corruptBefore = (ms: number) => tamper.prepare("UPDATE fact SET body = body || ' ' WHERE seq = (SELECT max(seq) FROM fact WHERE ts_ms < ?)").run(ms);
+  corruptBefore(T0);
   f.ticker.tick();
   f.ticker.tick();
   assert.deepEqual(oracleRows(f.stateDir).map((r) => r.outcome ?? r.step), ["healed", READ_MODEL_SELF_HEALED_STEP], "the newest slice found the drift and healed it");
   assert.equal(tamper.prepare("SELECT count(*) AS n FROM fact WHERE body LIKE '% '").get()?.n, 0, "the corrupted fact was rebuilt from the ledger");
   assert.equal(titles.length, 0, "a first drift heals without asking anyone");
-  corruptDayBack(1);
-  f.ticker.tick();
-  f.ticker.tick();
-  assert.equal(oracleRows(f.stateDir).at(-2)?.outcome, "escalated", "a drift in the next slice within a day of the heal escalates");
+  // Just below the newest slice checked so far: inside the next one.
+  corruptBefore(checkWindows(f.stateDir).at(-1)![0]);
+  tickUntilChecks(f, 1);
+  const checks = oracleRows(f.stateDir).filter((r) => r.step === READ_MODEL_CONSISTENCY_STEP);
+  assert.equal(checks.at(-1)?.outcome, "escalated", "a drift in the next slice within a day of the heal escalates");
   assert.equal(titles.length, 1, "through the one escalation path");
 });
 
@@ -834,7 +894,7 @@ test("a blind slice is logged and waits out its back-off without failing the pro
   writeFileSync(join(ledgerDir, LIVE), text(rows(4, T0 - 30 * DAY)));
   const c = collect();
   const { clock, advance } = steppedClock();
-  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: c.post, clock });
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: c.post, clock, ingestSettleMs: 0 });
   t.after(() => ticker.release());
   ticker.tick();
   ticker.tick();
