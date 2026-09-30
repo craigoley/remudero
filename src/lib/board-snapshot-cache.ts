@@ -2,12 +2,15 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { dirname, join } from "node:path";
 import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
+import { fixedClock } from "./clock.js";
 
 const SNAPSHOT_SCHEMA = 1;
 const DEFAULT_MAX_BYTES = 128 * 1024 * 1024;
 const DEFAULT_MAX_ROWS = 100_000;
 const DEFAULT_MAX_LINE_BYTES = 512 * 1024;
 const READ_CHUNK_BYTES = 64 * 1024;
+const OPEN_SNAPSHOT_SCHEMA = 1;
+export const OPEN_SNAPSHOT_RESAVE_MS = 60_000;
 
 const defaultIo: BoardSnapshotIo = {
   stat(path) {
@@ -172,6 +175,45 @@ export function boardSnapshotPath(root: string, owner: string, repo: string): st
   return join(root, "state", "cache", "board", `${safe}-${digest}.ndjson`);
 }
 
+export function boardOpenSnapshotPath(root: string, owner: string, repo: string): string {
+  return boardSnapshotPath(root, owner, repo).replace(/\.ndjson$/, ".open.json");
+}
+
+export interface OpenBoardSnapshot {
+  repository: string;
+  savedAt: string;
+  rows: BoardPrRest[];
+}
+
+function isOpenDiskRow(value: unknown, maxStringBytes: number): value is BoardPrRest {
+  const row = value as Record<string, unknown> | null;
+  return !!row && typeof row === "object" && boundedInteger(row.number) && row.state === "OPEN" &&
+    ["url", "headRefName", "headRefOid", "body", "title", "updatedAt"].every((k) => boundedString(row[k], maxStringBytes));
+}
+
+export function readOpenBoardSnapshot(
+  root: string,
+  owner: string,
+  repo: string,
+  read: (path: string) => string = (path) => fs.readFileSync(path, "utf8"),
+): { ok: true; snapshot: OpenBoardSnapshot } | { ok: false; reason: string } {
+  const repository = `${owner}/${repo}`;
+  let parsed: Partial<OpenBoardSnapshot> & { type?: unknown; schema?: unknown };
+  try {
+    parsed = JSON.parse(read(boardOpenSnapshotPath(root, owner, repo))) as typeof parsed;
+  } catch (error) {
+    return { ok: false, reason: `open snapshot unreadable: ${(error as Error).message}` };
+  }
+  if (parsed.type !== "board-open-snapshot" || parsed.schema !== OPEN_SNAPSHOT_SCHEMA || parsed.repository !== repository) {
+    return { ok: false, reason: "open snapshot has another schema or repository" };
+  }
+  const rows = Array.isArray(parsed.rows) ? parsed.rows : [];
+  if (typeof parsed.savedAt !== "string" || !rows.every((row) => isOpenDiskRow(row, DEFAULT_MAX_LINE_BYTES))) {
+    return { ok: false, reason: "open snapshot holds an invalid row" };
+  }
+  return { ok: true, snapshot: { repository, savedAt: parsed.savedAt, rows } };
+}
+
 export function createBoardSnapshotCache(root: string, owner: string, repo: string, options: SnapshotOptions = {}): BoardSnapshotCache {
   const io = options.io ?? defaultIo;
   const emit = options.log ?? (() => {});
@@ -185,7 +227,7 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
 
   const log = (
     event: string,
-    channel: keyof SnapshotRows | "snapshot",
+    channel: keyof SnapshotRows | "snapshot" | "open",
     rows: number,
     bytes: number,
     reason?: keyof SnapshotReasons,
@@ -392,7 +434,41 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     }
   };
 
+  let openSaved: { key: string; atMs: number } | undefined;
+  const commitOpen = (rows: readonly BoardPrRest[], fetchedAtMs: number): boolean => {
+    const key = rows.map((row) => `${row.number}:${row.updatedAt}:${row.headRefOid}`).sort().join(",");
+    if (openSaved?.key === key && fetchedAtMs - openSaved.atMs < OPEN_SNAPSHOT_RESAVE_MS) return true;
+    const openRows = rows.filter((row) => row.state === "OPEN");
+    const body = Buffer.from(JSON.stringify({ type: "board-open-snapshot", schema: OPEN_SNAPSHOT_SCHEMA, repository,
+      savedAt: fixedClock(fetchedAtMs).iso(), rows: openRows }), "utf8");
+    const openPath = boardOpenSnapshotPath(root, owner, repo);
+    if (body.length > maxBytes || !openRows.every((row) => isOpenDiskRow(row, maxStringBytes))) {
+      log("board_snapshot.commit_refused", "open", rows.length, body.length, body.length > maxBytes ? "oversized" : "invalid_row");
+      return false;
+    }
+    const stage = `${openPath}.tmp-${process.pid}-${randomUUID()}`;
+    let fd: number | undefined;
+    try {
+      io.mkdir(dirname(openPath), 0o700);
+      fd = io.openWrite(stage, 0o600);
+      writeFully(io, fd, body);
+      io.fsync(fd);
+      io.close(fd);
+      fd = undefined;
+      io.rename(stage, openPath);
+      openSaved = { key, atMs: fetchedAtMs };
+      log("board_snapshot.committed", "open", openRows.length, body.length);
+      return true;
+    } catch {
+      safeClose(io, fd);
+      safeUnlink(io, stage);
+      log("board_snapshot.commit_refused", "open", rows.length, 0, "write_failed");
+      return false;
+    }
+  };
+
   return {
+    commitOpen,
     closedSeed() {
       return state.closed ? new Map([...state.closed].map(([number, row]) => [number, { ...row }])) : undefined;
     },
@@ -449,6 +525,7 @@ export interface BoardSnapshotCache {
   issueSeed(): Map<number, BoardIssueRest> | undefined;
   commitClosed(rows: readonly BoardPrRest[]): boolean;
   commitIssues(rows: readonly BoardIssueRest[]): boolean;
+  commitOpen?(rows: readonly BoardPrRest[], fetchedAtMs: number): boolean;
 }
 
 interface SnapshotOptions {
