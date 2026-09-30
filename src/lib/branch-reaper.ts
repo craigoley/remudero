@@ -24,6 +24,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isLandingRef } from "./feedback-landing.js";
+import type { Clock } from "./clock.js";
+import type { OrphanRunBranchEvidence } from "./drain.js";
 
 /**
  * The declared guard list (W1-T447) — branches the fleet must never delete, DECLARED so the
@@ -519,6 +521,21 @@ export function readAutomaticBranchReapState(path: string): AutomaticBranchReapS
   } catch {
     return {}; // absent, unreadable, or malformed — a first pass, NEVER a skip
   }
+}
+
+export function orphanRunBranchEvidenceReader(
+  statePath: string,
+  liveTaskIds: () => Iterable<string>,
+  clock: Pick<Clock, "now">,
+): () => OrphanRunBranchEvidence | undefined {
+  return () => {
+    try {
+      const noPrHeadShas = readAutomaticBranchReapState(statePath).noPrHeadShas ?? {};
+      return { noPrHeadShas, nowMs: clock.now(), liveTaskIds: new Set(liveTaskIds()) };
+    } catch {
+      return undefined; // lock state unknown: release nothing, every pushed run ref keeps blocking
+    }
+  };
 }
 
 /** Best-effort write: a state file this process cannot persist costs the next restart a first

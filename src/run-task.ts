@@ -2393,6 +2393,7 @@ import {
 } from "./lib/github-app.js";
 import {
   automaticBranchReapStateFileName,
+  orphanRunBranchEvidenceReader,
   branchCitationPattern,
   branchNamesFingerprint,
   decideAutomaticBranchReap,
@@ -33301,6 +33302,11 @@ export async function daemonCommand(
         // EMPTY set, so no task is refused — precisely today's behaviour. The degraded outcome is
         // "no improvement", never "dispatch wrongly blocked".
         readPushedRunBranches: () => readPushedRunBranchesOutput(),
+        readOrphanRunBranchEvidence: orphanRunBranchEvidenceReader(
+          join(config.root, "state", automaticBranchReapStateFileName(target.repo)),
+          () => liveInflightRuns(inflightDir).map((r) => r.taskId),
+          systemClock,
+        ),
         // W1-T177: a fresh `gh pr view` re-read, consulted only when isOpenPr
         // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
         readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
