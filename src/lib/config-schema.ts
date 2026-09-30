@@ -376,6 +376,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_ACCOUNT_FILE_PATH", "Points serve account-usage reads at the operator's account file copy.", ["src/lib/serve.ts"]),
   envEntry("RMD_ALLOW_LIVE_SPAWN", "Opt-in guard for live worker spawn boundaries.", ["src/lib/spawn-guard.ts"]),
   envEntry("RMD_ALLOW_LIVE_WRITES", "Opt-in guard for live write boundaries under tests.", ["src/lib/live-write-guard.ts", "src/run-task.ts"]),
+  envEntry("RMD_TEST_LIVE_DENY_ROOT", "Test-only operator root that ledger writes must never reach; propagated to children.", ["src/lib/live-write-guard.ts", "src/lib/env.ts"]),
   envEntry("RMD_AUTOMATED_RETRO_DECISION", "Carries an automated retro decision into retro subprocess handling.", ["src/lib/retro-subprocess.ts", "src/run-task.ts"]),
   envEntry("RMD_CASH_WEB_SEARCH_API_KEY", "Supplies the daemon's own credential for brokered cash-worker web search; never copied into a worker environment.", ["src/lib/cash-web-bridge.ts"]),
   envEntry("RMD_FOUNDRY_CLAUDE_API_KEY", "Daemon-only key for the bounded Foundry Opus cash adapter.", ["src/lib/worker-provider.ts"]),
