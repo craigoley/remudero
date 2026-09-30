@@ -201,6 +201,18 @@ test("W1-T4803: the costliest untracked hot file is filed plan-only with its rem
   assert.deepEqual([...HOT_FILE_REMEDIES], ["generate-in-ci", "split-per-entry", "append-only", "merge-driver"]);
 });
 
+test("W1-T4803: the cheap fingerprint moves when a rotated ledger archive appears or grows", () => {
+  const fx = fixture("hot-file-cheap-fp", [], () => assert.fail("nothing to land"));
+  const before = fx.spec.cheapFingerprint();
+  const archive = join(fx.deps.stateDir, "ledger.2026-09-01T00-00-00-000Z.ndjson");
+  writeFileSync(archive, "{}\n");
+  const one = fx.spec.cheapFingerprint();
+  assert.notEqual(one, before, "a new archive changes the fingerprint");
+  assert.match(one, /ledger\.2026-09-01T00-00-00-000Z\.ndjson:3:/, "the archive is named with its size");
+  writeFileSync(archive, "{}\n{}\n");
+  assert.notEqual(fx.spec.cheapFingerprint(), one, "a grown archive changes the fingerprint");
+});
+
 test("W1-T4803: a source module is priced but never filed", () => {
   const ledger = [
     ...conflictRound(20, 1, 120, ["src/run-task.ts"]),
