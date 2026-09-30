@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import type { ClaimGitDeps } from "./dispatch-claim.js";
+import { fixedClock } from "./clock.js";
 import { classifyPushFailure } from "./task-id-reservation.js";
 
 /**
@@ -37,8 +38,11 @@ export function triageLockPath(root: string): string {
 /** The ref one feedback id's triage claim occupies — under `refs/rmd-triage/`, invisible to a
  *  plain `git clone`/`fetch` and to `git ls-remote --heads`, matching `refs/rmd-id/`'s reasoning. */
 export function triageClaimRef(feedbackId: string): string {
-  return `refs/rmd-triage/${feedbackId}`;
+  return `${TRIAGE_CLAIM_NAMESPACE}${feedbackId}`;
 }
+
+/** The ref namespace every triage claim lives under. */
+export const TRIAGE_CLAIM_NAMESPACE = "refs/rmd-triage/";
 
 /** One claim attempt's outcome. `taken` is contention; `unreachable` is a failed READ of the
  *  world and must never be read as "free" — see {@link decideTriageClaim}'s fail-closed arm. */
@@ -85,8 +89,9 @@ export function feedbackOutcomeObserved(subjects: readonly string[], feedbackId:
   return subjects.some((s) => s.includes(feedbackId));
 }
 
-/** Which of the three release arms applies. There is no fourth, and deliberately no timer. */
-export type TriageClaimReleaseArm = "holder" | "evidence" | "operator";
+/** Which release arm applies. `liveness` (W1-T4769) is the fourth, and still no bare timer: it
+ *  fires only on a {@link TriageClaimLiveness} verdict from {@link assessTriageClaimLiveness}. */
+export type TriageClaimReleaseArm = "holder" | "evidence" | "liveness" | "operator";
 
 export interface TriageClaimReleaseDecision {
   readonly arm: TriageClaimReleaseArm;
@@ -95,13 +100,20 @@ export interface TriageClaimReleaseDecision {
 }
 
 /**
- * PURE. Exactly three release arms, checked in order, with NO time-based expiry: the lane that
- * took the claim releases it on completion (`holder`); any host may release a claim whose entry
- * already has a merged outcome (`evidence`), since the entry is then demonstrably done; anything
- * else needs an operator, because cross-host liveness cannot be decided the way a pid lock decides it.
- * Why: why a timer was rejected — docs/forensics/auto-triage.md#decidetriageclaimrelease.
+ * PURE and clock-free. Arms, checked in order: the lane that took the claim releases it on
+ * completion (`holder`); any host may release a claim whose entry already has a merged outcome
+ * (`evidence`); a claim whose holder shows NEGATIVE LIVENESS EVIDENCE releases on `liveness` — the
+ * verdict is computed by {@link assessTriageClaimLiveness}, which owns the only clock, so this
+ * function only reads a verdict it is handed; anything else needs an operator.
+ * Why: why a bare timer was rejected and why this arm is not one —
+ * docs/forensics/auto-triage.md#decidetriageclaimrelease.
  */
-export function decideTriageClaimRelease(i: { heldByThisRun: boolean; outcomeObserved: boolean; feedbackId: string }): TriageClaimReleaseDecision {
+export function decideTriageClaimRelease(i: {
+  heldByThisRun: boolean;
+  outcomeObserved: boolean;
+  feedbackId: string;
+  liveness?: TriageClaimLiveness;
+}): TriageClaimReleaseDecision {
   if (i.heldByThisRun) return { arm: "holder", release: true, reason: `this run holds ${triageClaimRef(i.feedbackId)} and is done with it` };
   if (i.outcomeObserved)
     return {
@@ -109,13 +121,152 @@ export function decideTriageClaimRelease(i: { heldByThisRun: boolean; outcomeObs
       release: true,
       reason: `feedback#${i.feedbackId} already has a merged triage outcome, so its claim is stale and any host may drop it`,
     };
+  if (i.liveness?.releasable === true) return { arm: "liveness", release: true, reason: `${triageClaimRef(i.feedbackId)}: ${i.liveness.reason}` };
   return {
     arm: "operator",
     release: false,
     reason:
-      `${triageClaimRef(i.feedbackId)} is held by another lane with no merged outcome yet — leaving it. ` +
-      `Cross-host liveness is not decidable, so clearing it is an operator call: ` +
+      `${triageClaimRef(i.feedbackId)} is held by another lane with no merged outcome yet — leaving it` +
+      (i.liveness ? ` (${i.liveness.reason})` : "") +
+      `. Cross-host liveness is not decidable from here, so clearing it is an operator call: ` +
       `git push origin :${triageClaimRef(i.feedbackId)}`,
+  };
+}
+
+/**
+ * How long a claim's holder may be silent in the ledger before it counts as dead. Derived from the
+ * triage lane's own shape, not a free number: the longest stretch that lane goes without writing a
+ * row is the Architect call, which costs minutes (see the module header), and everything around it
+ * (`triage.claim`, mint, PR open, CI wait, review) writes rows. Two hours is more than ten such
+ * calls back to back, so a healthy triage is never inside it.
+ */
+export const TRIAGE_CLAIM_LIVENESS_WINDOW_MS = 2 * 60 * 60 * 1000;
+
+/** The second tier's ceiling: several windows. Past it an UNOBSERVABLE holder (one this ledger has
+ *  never seen, or whose anchor does not parse) is released on age alone, and says so. */
+export const TRIAGE_CLAIM_AGE_ONLY_CEILING_MS = 6 * TRIAGE_CLAIM_LIVENESS_WINDOW_MS;
+
+/** How far before the claim a row from the holder's host still proves this ledger can see it. */
+export const TRIAGE_CLAIM_HOST_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
+/** The holder identity `gitTriageClaimReserver.mintAnchor` writes into the anchor commit message. */
+export interface TriageClaimHolder {
+  readonly pid: number;
+  readonly host: string;
+  readonly claimedAt: string;
+}
+
+/** PURE. Parses `rmd-triage claim <pid>@<host> <iso>`; `undefined` when it does not match. */
+export function parseTriageClaimAnchorMessage(message: string): TriageClaimHolder | undefined {
+  const m = /^rmd-triage claim (\d+)@(\S+) (\d{4}-\d{2}-\d{2}T\S+)\s*$/m.exec(message);
+  if (!m) return undefined;
+  if (Number.isNaN(Date.parse(m[3]))) return undefined;
+  return { pid: Number(m[1]), host: m[2], claimedAt: m[3] };
+}
+
+/** The slice of a ledger row the assessor reads. */
+export interface TriageLivenessRow {
+  readonly ts?: unknown;
+  readonly host?: unknown;
+  readonly actor_pid?: unknown;
+}
+
+/** The assessor's named verdict — never a boolean. */
+export type TriageClaimLivenessVerdict = "dead" | "alive" | "unobservable";
+
+export interface TriageClaimLiveness {
+  readonly verdict: TriageClaimLivenessVerdict;
+  /** True when {@link decideTriageClaimRelease} may drop the claim on the liveness arm. */
+  readonly releasable: boolean;
+  /** `silent` = negative evidence; `age-only` = the second tier, no evidence either way. */
+  readonly tier?: "silent" | "age-only";
+  readonly reason: string;
+  readonly holderHost?: string;
+  readonly holderPid?: number;
+  readonly claimedAt?: string;
+  /** Latest row seen from the holder's host, if any. */
+  readonly lastHostRowTs?: string;
+}
+
+/**
+ * PURE. Judges whether a claim's holder is still alive from the ledger rows it can see. `rows`
+ * is `undefined` when the ledger union was unreadable — that is `unobservable`, never `dead`,
+ * since compaction prunes the live file and a missing row is not evidence of silence.
+ *
+ *  - `alive`: the claim is younger than `windowMs`, or the holder's own `host` + `actor_pid`
+ *    wrote a row inside the last window. (Not merely "after the claim": the holder's own
+ *    `triage.claim` row is written right after the anchor, so that test could never fail.)
+ *  - `dead`: older than the window, AND rows from that host are visible (the positive control that
+ *    this ledger can see the host at all), AND none from that host + pid inside the window.
+ *  - `unobservable`: anchor did not parse, rows unreadable, or the host was never seen. Releasable
+ *    only past {@link TRIAGE_CLAIM_AGE_ONLY_CEILING_MS}, as tier `age-only`.
+ */
+export function assessTriageClaimLiveness(i: {
+  holder: TriageClaimHolder | undefined;
+  rows: readonly TriageLivenessRow[] | undefined;
+  now: Date;
+  windowMs?: number;
+  ceilingMs?: number;
+}): TriageClaimLiveness {
+  const windowMs = i.windowMs ?? TRIAGE_CLAIM_LIVENESS_WINDOW_MS;
+  const ceilingMs = i.ceilingMs ?? TRIAGE_CLAIM_AGE_ONLY_CEILING_MS;
+  const nowMs = i.now.getTime();
+  const claimedAt = i.holder?.claimedAt;
+  const claimedMs = claimedAt === undefined ? Number.NaN : Date.parse(claimedAt);
+  const ageMs = nowMs - claimedMs;
+  const base = { holderHost: i.holder?.host, holderPid: i.holder?.pid, claimedAt };
+  const mins = (ms: number): number => Math.round(ms / 60_000);
+  if (!Number.isNaN(ageMs) && ageMs < windowMs)
+    return { ...base, verdict: "alive", releasable: false, reason: `claimed ${mins(ageMs)}m ago, inside the ${mins(windowMs)}m liveness window` };
+
+  const unobservable = (why: string, lastHostRowTs?: string): TriageClaimLiveness => {
+    const past = !Number.isNaN(ageMs) && ageMs >= ceilingMs;
+    const hours = Math.round(ceilingMs / 3_600_000);
+    return {
+      ...base,
+      lastHostRowTs,
+      verdict: "unobservable",
+      releasable: past,
+      tier: past ? "age-only" : undefined,
+      reason: past
+        ? `${why}; released on AGE ALONE — no liveness evidence either way, claim older than ${hours}h`
+        : `${why}; not released as dead — only an age-only release past ${hours}h applies`,
+    };
+  };
+  if (i.holder === undefined) return unobservable("the claim anchor does not name a holder");
+  if (i.rows === undefined) return unobservable("the ledger union was unreadable");
+
+  let hostSeen = false;
+  let lastHostTs: string | undefined;
+  let lastHostMs = Number.NEGATIVE_INFINITY;
+  let lastHolderMs = Number.NEGATIVE_INFINITY;
+  for (const row of i.rows) {
+    if (row.host !== i.holder.host || typeof row.ts !== "string") continue;
+    const t = Date.parse(row.ts);
+    if (Number.isNaN(t) || t < claimedMs - TRIAGE_CLAIM_HOST_LOOKBACK_MS) continue;
+    hostSeen = true;
+    if (t > lastHostMs) {
+      lastHostMs = t;
+      lastHostTs = row.ts;
+    }
+    if (row.actor_pid === i.holder.pid && t > lastHolderMs) lastHolderMs = t;
+  }
+  if (!hostSeen) return unobservable(`this ledger has never seen host ${i.holder.host}`);
+  if (nowMs - lastHolderMs < windowMs)
+    return {
+      ...base,
+      lastHostRowTs: lastHostTs,
+      verdict: "alive",
+      releasable: false,
+      reason: `host ${i.holder.host} pid ${i.holder.pid} wrote a ledger row inside the last ${mins(windowMs)}m`,
+    };
+  return {
+    ...base,
+    lastHostRowTs: lastHostTs,
+    verdict: "dead",
+    releasable: true,
+    tier: "silent",
+    reason: `holder ${i.holder.pid}@${i.holder.host} claimed at ${claimedAt} and wrote no ledger row in the last ${mins(windowMs)}m (host last seen ${lastHostTs})`,
   };
 }
 
@@ -133,6 +284,12 @@ export interface TriageClaimReserver {
   /** Delete the claim ref. `expect` makes the delete conditional on the ref still carrying THAT
    *  anchor, so the holder arm can never delete a claim that has since become someone else's. */
   drop(feedbackId: string, opts?: { expect?: string }): boolean;
+  /** W1-T4769: the commit MESSAGE of the anchor at the claim ref (`rmd-triage claim <pid>@<host> <iso>`),
+   *  or `undefined` when absent or unfetchable. Optional so existing reservers stay valid. */
+  holderMessage?(feedbackId: string): string | undefined;
+  /** W1-T4769: every feedback id currently claimed, with its ref sha, from ONE `ls-remote` of
+   *  `refs/rmd-triage/*`. `undefined` when the namespace is unreadable — NOT an empty map. */
+  claimedIds?(): ReadonlyMap<string, string> | undefined;
 }
 
 /**
@@ -158,6 +315,21 @@ export function gitTriageClaimReserver(deps: ClaimGitDeps): TriageClaimReserver 
       if (res.status !== 0) return undefined;
       const sha = res.stdout.trim().split(/\s+/)[0];
       return sha ? sha : undefined;
+    },
+    holderMessage(feedbackId) {
+      if (deps.run(["fetch", "origin", triageClaimRef(feedbackId)]).status !== 0) return undefined;
+      const res = deps.run(["log", "-1", "--format=%B", "FETCH_HEAD"]);
+      return res.status === 0 ? res.stdout : undefined;
+    },
+    claimedIds() {
+      const res = deps.run(["ls-remote", "origin", `${TRIAGE_CLAIM_NAMESPACE}*`]);
+      if (res.status !== 0) return undefined;
+      const out = new Map<string, string>();
+      for (const line of res.stdout.split("\n")) {
+        const [sha, ref] = line.trim().split(/\s+/);
+        if (sha && ref?.startsWith(TRIAGE_CLAIM_NAMESPACE)) out.set(ref.slice(TRIAGE_CLAIM_NAMESPACE.length), sha);
+      }
+      return out;
     },
     drop(feedbackId, opts = {}) {
       const ref = triageClaimRef(feedbackId);
@@ -210,15 +382,88 @@ export interface TriageClaimReleaseResult extends TriageClaimReleaseDecision {
 export function releaseTriageClaim(
   feedbackId: string,
   reserver: TriageClaimReserver,
-  i: { anchor?: string; outcomeObserved?: boolean } = {},
+  i: { anchor?: string; outcomeObserved?: boolean; liveness?: TriageClaimLiveness; heldSha?: string } = {},
 ): TriageClaimReleaseResult {
   const decision = decideTriageClaimRelease({
     heldByThisRun: i.anchor !== undefined,
     outcomeObserved: i.outcomeObserved === true,
     feedbackId,
+    liveness: i.liveness,
   });
   if (!decision.release) return { ...decision, dropped: false };
-  return { ...decision, dropped: reserver.drop(feedbackId, i.anchor !== undefined ? { expect: i.anchor } : {}) };
+  // The liveness arm deletes conditionally on the sha it judged, so a claim that changed hands
+  // between the judgement and the delete is never dropped.
+  const expect = i.anchor ?? (decision.arm === "liveness" ? i.heldSha : undefined);
+  return { ...decision, dropped: reserver.drop(feedbackId, expect !== undefined ? { expect } : {}) };
+}
+
+/** What {@link sweepTriageClaims} learned. `held` is `undefined` when the claim namespace was
+ *  unreadable — a third value the caller must see, never an empty set standing in for it. */
+export interface TriageClaimSweep {
+  readonly held: readonly string[] | undefined;
+  readonly released: readonly string[];
+}
+
+/**
+ * Reads the claim namespace ONCE, then for each claimed candidate judges the holder's liveness and
+ * releases a dead one on the `liveness` arm, ledgering `triage.claim_released` with its evidence.
+ * Returns the ids STILL held. `readRows` is called lazily and at most once, and only when some
+ * claim is already past the window (a young claim needs no ledger to be `alive`). A reserver
+ * without the optional methods yields `held: undefined` — today's behaviour.
+ */
+export function sweepTriageClaims(
+  candidates: readonly string[],
+  reserver: TriageClaimReserver,
+  o: {
+    now: Date;
+    /** Rows stamped at or after `sinceIso`, or `undefined` when the ledger union was unreadable. */
+    readRows: (sinceIso: string) => readonly TriageLivenessRow[] | undefined;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    mergedSubjects?: () => readonly string[];
+  },
+): TriageClaimSweep {
+  const claimed = reserver.claimedIds?.();
+  if (claimed === undefined) return { held: undefined, released: [] };
+  const held: string[] = [];
+  const released: string[] = [];
+  let rows: readonly TriageLivenessRow[] | undefined;
+  let rowsRead = false;
+  for (const id of candidates) {
+    const sha = claimed.get(id);
+    if (sha === undefined) continue;
+    const holder = parseTriageClaimAnchorMessage(reserver.holderMessage?.(id) ?? "");
+    let liveness = assessTriageClaimLiveness({ holder, rows: undefined, now: o.now });
+    if (liveness.verdict !== "alive" && holder !== undefined) {
+      if (!rowsRead) {
+        rowsRead = true;
+        rows = o.readRows(fixedClock(Date.parse(holder.claimedAt) - TRIAGE_CLAIM_HOST_LOOKBACK_MS).iso());
+      }
+      liveness = assessTriageClaimLiveness({ holder, rows, now: o.now });
+    }
+    const result = releaseTriageClaim(id, reserver, {
+      outcomeObserved: feedbackOutcomeObserved(o.mergedSubjects?.() ?? [], id),
+      liveness,
+      heldSha: sha,
+    });
+    if (result.release) {
+      o.log("triage.claim_released", {
+        feedback_id: id,
+        ref: triageClaimRef(id),
+        arm: result.arm,
+        tier: result.arm === "liveness" ? liveness.tier : undefined,
+        dropped: result.dropped,
+        reason: result.reason,
+        verdict: liveness.verdict,
+        holder_host: liveness.holderHost,
+        holder_pid: liveness.holderPid,
+        claimed_at: liveness.claimedAt,
+        last_host_row_ts: liveness.lastHostRowTs,
+      });
+    }
+    if (result.release && result.dropped) released.push(id);
+    else held.push(id);
+  }
+  return { held, released };
 }
 
 /** {@link claimTriage} plus the one durable ledger row every caller needs, so every arm stays
@@ -360,6 +605,13 @@ export interface AutoTriageInputs {
    * Observability only; not itself a trigger. Optional, defaulting to 0.
    */
   oldestCandidateAgeMs?: number;
+  /**
+   * W1-T4769: candidates whose triage claim is still held by a live (or unjudgeable) holder, from
+   * {@link sweepTriageClaims}. The fire goes to the oldest candidate NOT in this set. `undefined`
+   * means the claim namespace was unreadable — today's behaviour: take the oldest and let the
+   * lane's own claim decide. Never an empty set standing in for "unknown".
+   */
+  heldCandidates?: readonly string[];
 }
 
 export type AutoTriageDecision =
@@ -430,10 +682,22 @@ export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
       ? `capacity went unfilled (${i.dispatchCount}/${i.laneBudget} lanes)`
       : `the backlog's own depth reached ${i.candidates.length} at status: new while neither lane signal tripped ` +
         `(oldest waiting ${((i.oldestCandidateAgeMs ?? 0) / DAY_MS).toFixed(1)}d)`;
+  const heldSet = new Set(i.heldCandidates ?? []);
+  const target = i.candidates.find((c) => !heldSet.has(c));
+  if (target === undefined) {
+    return {
+      fire: false,
+      reason: `every one of the ${i.candidates.length} candidate(s) at status: new is held by a live triage claim — nothing to fire on`,
+    };
+  }
+  const passedOver = i.candidates.indexOf(target);
   return {
     fire: true,
-    feedbackId: i.candidates[0],
-    reason: `${trigger}, under both bounds, oldest entry at status: new`,
+    feedbackId: target,
+    reason:
+      passedOver === 0
+        ? `${trigger}, under both bounds, oldest entry at status: new`
+        : `${trigger}, under both bounds, oldest unclaimed entry at status: new (passed over ${passedOver} held by a live claim)`,
   };
 }
 
