@@ -144,6 +144,34 @@ test("parked selector and CI friction proposals file without becoming auto-runna
   assert.ok(refused.violations.some((v) => v.check === "machine-filing-admission"));
 });
 
+test("W1-T4940: deduplicated selector-shadow-miss proposals stay parked at human verification", () => {
+  const filed = task({
+    author_class: "machine",
+    origin: "selector-shadow-miss:test/every-message-names-one-declared-sender.test.ts",
+    files: ["src/lib/affected-suites.ts"],
+  });
+  const result = lintTask(filed, {
+    machineFilingAdmission: {
+      plan: planFor(filed),
+      releasedIds: new Set(),
+      pathExists: () => true,
+    },
+  });
+
+  assert.equal(result.violations.find((v) => v.check === "machine-filing-admission"), undefined);
+  assert.equal(filed.verify, "human");
+
+  const wrongFile = task({ ...filed, files: ["src/lib/plan.ts"] });
+  const refused = lintTask(wrongFile, {
+    machineFilingAdmission: {
+      plan: planFor(wrongFile),
+      releasedIds: new Set(),
+      pathExists: () => true,
+    },
+  });
+  assert.ok(refused.violations.some((v) => v.check === "machine-filing-admission"));
+});
+
 test("W1-T4111: a machine-filed task the plan gardener retired is admitted without a selectability refusal", () => {
   const retired = task({ author_class: "machine", status: "blocked", retirement: "withdrawn", note: "plan gardener: merge into W1-T1" });
   const result = lintTask(retired, {
