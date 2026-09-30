@@ -924,6 +924,7 @@ import { routingAbCommand } from "./lib/routing-experiments.js";
 import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-canary.js";
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
+import { foldTriageLaneOutcomes, triageOutcomesCommand } from "./lib/triage-lane-outcomes.js";
 import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
@@ -47664,6 +47665,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T3718: the fix rung can stall with every provider refusing and both paid rungs switched off, and the only trace was one fix.spawn_infra_blocked ledger row. This reports the durable stall record (since when, for how long, and per provider whether it is FULL or CANNOT BE ASKED -- only the first argues for paying) and prices each paid rung: the one config edit that arms it (workerProviders.cashFallbackWhenBlocked, overflow: \"api_key\"), what it bills, its dailyCapUsd ceiling, and what would still refuse it with the switch on. REPORT-ONLY: it never writes config -- enabling a paid fallback spends money and stays an operator act. --json prints the same as one object.",
   },
   {
+    name: "triage-outcomes",
+    syntax: "rmd triage-outcomes [--json]",
+    summary: "Count the triage lane's terminal outcomes per provider and model; routes nothing.",
+    detail: "W1-T3547: folds the rows the triage lane already writes (triage.start, triage.synthesized, triage.relint, triage.relint_refused, triage.error, triage.grill_opened, pr.opened), joined by run id, over the three-form ledger union read with refuseIncomplete, so a partial corpus is refused rather than counted. Per provider and model it reports runs, terminal outcomes (propose, no_task, grill, error, relint_refused), attempts per run, relints, and cost with api-billed spend and subscription notional kept apart; a missing cost reads unknown, never zero. A run with no terminal row is censored, never scored. A group with fewer than 20 terminal runs is an insufficient sample and prints no rates. It never declares a winner and changes no mount, provider, config or spawn; the report names its confound, since a squeeze divert lands on whatever feedback arrives while both subscriptions are blocked. READ-ONLY. --json prints the same as one object.",
+  },
+  {
     name: "census-membership",
     syntax: "rmd census-membership [--base <ref>] [--files]",
     summary: "Name the population-walking census suites this diff enters.",
@@ -48608,6 +48615,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["ci-failures", (rest) => ciFailuresCommand(rest)],
   ["board", (rest) => boardCommand(rest)],
   ["census-membership", (rest) => censusMembershipCommand(rest)],
+  ["triage-outcomes", (rest) => triageOutcomesCommand(rest, (rows) => foldTriageLaneOutcomes(rows))],
   [
     "repair-ladder",
     (rest) => {
