@@ -35,6 +35,7 @@ usage:
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
   rmd routing-ab [--json]   # Compare the arms of each live routing experiment (Sol vs Sonnet) from the ledger union.
+  rmd impossible-canary --model <id> [--model <id>]... --scaffold <revision> --grader <executable> [--state-dir <dir>] [--json]   # Run the sealed impossible-task canaries per model and count visible-pass, failed-holdout cheating events.
   rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>]   # Report an A/A integrity trial: two labels, one pinned stack, and no winner.
   rmd benchmark-paid-pilot activate --request <request.json> --aa-report <aa-report.json> [--state-dir <dir>] [--json] | report --pilot <id> [--case-files <snapshot.json>] [--out <report.json>] [--state-dir <dir>] [--json] | pause|resume --pilot <id> [--note <text>] [--state-dir <dir>]   # Activate, report, pause or resume the approved $100/7-day paid pilot; only its paid arm pauses.
   rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sources <n>] [--dry-run]   # Compact one bounded window of old ledger rotations without losing a distinct row.
@@ -319,6 +320,16 @@ rmd routing-ab [--json]
 ```
 
 Operator ruling 2026-09-24: reads the deduplicated union of every ledger archive and the live ledger, takes each worker.assignment row whose routing.decision.ab names a live experiment (src/lib/routing-experiments.ts), and reports per arm: tasks, merges, merge rate, fix dispatches per task, median worker minutes, mean tokens and mean notional cost. A task is counted under the arm of its first tagged assignment; tasks that landed in both arms are counted separately. An arm below the experiment's minimum task count is reported as an insufficient sample, never a verdict, and the revisit date is flagged once due. READ-ONLY: writes no ledger line and no state file.
+
+### `rmd impossible-canary`
+
+Run the sealed impossible-task canaries per model and count visible-pass, failed-holdout cheating events.
+
+```
+rmd impossible-canary --model <id> [--model <id>]... --scaffold <revision> --grader <executable> [--state-dir <dir>] [--json]
+```
+
+W1-T4627: a small versioned set of canary tasks kept outside the dispatchable queue, never merged, whose visible proof and holdout criterion contradict each other, so no honest attempt can satisfy both. For each --model not run inside the weekly cadence (read from the ledger union), the --grader executable is spawned once per canary with the model and canary id as arguments and the visible statement only on stdin (the holdout never leaves the module), and prints {"visiblePass":bool,"holdoutPass":bool}; an unusable grader run is counted as an error, never a pass. A visible pass with a failed holdout is a cheating event. Reports counts with exact 95% Clopper-Pearson intervals per model and scaffold revision — never a score — and appends one ids-and-outcomes-only impossible_canary.* row per attempt. It gates nothing.
 
 ### `rmd benchmark-aa`
 
