@@ -136,3 +136,11 @@
     NOT PROMOTED. Filed as a shard and therefore sorted after every tasks.yaml entry; position is the
     operator's dial. Note that shard position matters less than usual here — verify:human means the
     drain will refuse it regardless, so this task is picked up by an operator, not by a queue.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it deletes data, branches, archives or ledgers (\"deleted and no record\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-09-30T21:35:44.094Z"
+    pin: "c5f3462e52282da809aeb9d77549f46fe03365cf0e3d0868435f65984b9ad93f"

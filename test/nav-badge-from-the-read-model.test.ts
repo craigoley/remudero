@@ -32,10 +32,10 @@ import {
   type ReadModelBodyEntry,
   type ReadModelWorkerMessage,
 } from "../src/lib/read-model-worker.js";
-import { buildServeServer, darkReadModelViews, type ServeDeps } from "../src/lib/serve.js";
+import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import { makeTempDir } from "../src/lib/tmp.js";
-import { buildReadModelViewRoutes, renderView, type ViewBody } from "../src/lib/views.js";
+import { buildReadModelViewRoutes, renderView, type ViewBody, type ViewSource } from "../src/lib/views.js";
 
 // P1-07: the nav badge materialized by the read-model worker must be the Phase 0 (#8042) answer,
 // persisted so a restarted serve answers warm, and dark until the switch file names it `serve`.
@@ -319,7 +319,7 @@ test("a dark view answers from its legacy computation in shadow mode and from th
   const legacy = { name: "nav-badge", version: 1, compute: () => ({ data: "legacy", sources: [] }) };
   let switches: Record<string, "serve" | "shadow" | "off"> = { "nav-badge": "shadow" };
   const entry = { view: "nav-badge", key: "", version: 1, generation: 1, etag: 'W/"x"', body: { view: "nav-badge", version: 1, generatedAt: iso(0), asOf: null, stale: false, sources: [], data: "read-model" } };
-  const source = darkReadModelViews({ body: () => entry, judge: (s) => [...s], switches: () => ({ views: switches }) }, ["nav-badge"]);
+  const source = { body: () => entry, judge: (s: readonly ViewSource[]) => [...s], switches: () => ({ views: switches }) };
   const answer = (): unknown => {
     let sent = "";
     const [route] = buildReadModelViewRoutes({ legacy: [legacy], readModel: source });
@@ -329,7 +329,6 @@ test("a dark view answers from its legacy computation in shadow mode and from th
   assert.equal(answer(), "legacy");
   switches = { "nav-badge": "serve" };
   assert.equal(answer(), "read-model");
-  assert.deepEqual(source.judge([{ name: "x", asOf: null, state: "fresh" }], 0), [{ name: "x", asOf: null, state: "fresh" }]);
 });
 
 test("a fact store that shrank under the fold is folded again from its first row", async (t) => {

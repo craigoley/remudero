@@ -20,7 +20,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghIssueGateway, type EscalateDeps } from "./escalate.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "./ledger-projector.js";
+import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector, type ProjectorTickResult } from "./ledger-projector.js";
 import { createNavBadgeReadModelView } from "./nav-badge-view.js";
 import { createNowView } from "./now-view.js";
 import {
@@ -64,6 +64,12 @@ export const READ_MODEL_STOP_WAIT_MS = 2_000;
 export const READ_MODEL_SWITCHES_FILE = "switches.json";
 /** The share of worker time the oracle's slices may take: the next slice waits cost / share. */
 export const READ_MODEL_CHECK_SHARE = 0.02;
+/**
+ * The share of one lease-renewal interval a pass over every instance may spend projecting. Each
+ * instance's tick budget is this share split among them, so a backlog of any size is applied in
+ * short ticks and every lease is renewed on schedule between them.
+ */
+export const READ_MODEL_PASS_SHARE = 0.5;
 
 const VIEW_BODY_DDL = `CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL,
   generation INTEGER NOT NULL, etag TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(view, key)) WITHOUT ROWID;`;
@@ -92,11 +98,11 @@ export function readModelSwitchesPath(stateDir: string): string {
 }
 
 /**
- * Reads the kill-switch file. An absent file is the defaults. A file that exists but does not
- * parse is `{ ok: false }` with its reason, so the caller keeps the switches it last read: an
- * operator's half-written "off" must never read as "on".
+ * Reads the kill-switch file. An absent file is the defaults, every view dark, with `absent` saying
+ * so. A file that exists but does not parse is `{ ok: false }` with its reason: the worker keeps the
+ * projector switch it last read, and serve's routes go dark, so a half-written "off" never reads as "on".
  */
-export function readReadModelSwitches(path: string): { ok: true; switches: ReadModelSwitches; mtimeMs: number } | { ok: false; reason: string } {
+export function readReadModelSwitches(path: string): { ok: true; switches: ReadModelSwitches; mtimeMs: number; absent?: string } | { ok: false; reason: string } {
   let text: string;
   let mtimeMs: number;
   let fd: number | undefined;
@@ -113,7 +119,7 @@ export function readReadModelSwitches(path: string): { ok: true; switches: ReadM
     }
     mtimeMs = Number(before.mtimeNs) / 1_000_000;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, switches: DEFAULT_READ_MODEL_SWITCHES, mtimeMs: 0 };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, switches: DEFAULT_READ_MODEL_SWITCHES, mtimeMs: 0, absent: `no switch file at ${path}` };
     return { ok: false, reason: `switch file unreadable: ${(error as Error).message}` };
   } finally {
     if (fd !== undefined) closeSync(fd);
@@ -227,9 +233,13 @@ export interface ReadModelTickerOptions {
   consistencyWindowMs?: number;
   /** "off" leaves every tick to the projector: a suite that pins what each tick projects. */
   oracle?: "on" | "off";
+  /** Each instance's projector budget per tick; derived from the lease timing when absent. */
+  tickBudgetMs?: number;
 }
 
 export interface ReadModelTicker {
+  /** Opens every instance's DB and takes its lease before the first tick, then posts the state. */
+  start(): void;
   tick(): void;
   /** Compares one sampled shadow request against the latest body; false when there was nothing to compare. */
   shadow(request: ShadowRequest): boolean;
@@ -257,6 +267,8 @@ interface Slot {
   checkAfter: number;
   /** Set by a caught-up projector tick when a slice is due; the NEXT tick runs it instead of projecting. */
   checkPending: boolean;
+  /** Present while a backlog is being applied over several ticks; the oracle waits until it clears. */
+  catchUp?: { startedAt: number; ticks: number; maxTickMs: number; lines: number; sourceBytes: number; loggedAt: number };
 }
 
 /**
@@ -298,6 +310,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const tickMs = opts.tickMs ?? READ_MODEL_TICK_MS;
   const stopRequested = opts.stopRequested ?? (() => false);
   const windowMs = opts.consistencyWindowMs ?? ORACLE_DEFAULT_WINDOW_MS;
+  const budgetMs = opts.tickBudgetMs ?? (READ_MODEL_LEASE_RENEW_MS * READ_MODEL_PASS_SHARE) / Math.max(1, opts.instances.length);
   const switchesPath = readModelSwitchesPath(opts.stateDir);
   const slots: Slot[] = opts.instances.map((instance) => ({
     instance,
@@ -350,9 +363,11 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const got = acquireLease(slot.db, { holder, clock });
     if (!got.ok) {
       slot.lease = undefined;
+      if (slot.state.heldBy !== `${got.pid}@${got.host}`) log("read_model.lease_elsewhere", { instance: slot.instance.name, heldBy: got.heldBy, pid: got.pid, host: got.host, expiresMs: got.expiresMs });
       Object.assign(slot.state, { lease: "elsewhere", heldBy: `${got.pid}@${got.host}`, reason: `lease held by pid ${got.pid} on ${got.host}` });
       return false;
     }
+    if (slot.state.lease !== "held") log("read_model.lease_acquired", { instance: slot.instance.name, holder, was: slot.state.lease });
     if (!slot.projector) {
       const db = slot.db;
       withWriteTransaction(db, got.lease, () => db.exec(VIEW_BODY_DDL));
@@ -370,15 +385,43 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     return true;
   }
 
+  /** A tick that stopped at its budget leaves the instance stale with its backlog and ETA; the last one ledgers the whole catch-up. */
+  function trackCatchUp(slot: Slot, result: ProjectorTickResult, started: number, ended: number): void {
+    if (!result.pending && !slot.catchUp) return;
+    const instance = slot.instance.name;
+    const run = (slot.catchUp ??= { startedAt: started, ticks: 0, maxTickMs: 0, lines: 0, sourceBytes: 0, loggedAt: Number.NEGATIVE_INFINITY });
+    run.ticks++;
+    run.maxTickMs = Math.max(run.maxTickMs, ended - started);
+    run.lines += result.lines;
+    run.sourceBytes += result.sourceBytes;
+    if (!result.pending) {
+      log("read_model.caught_up", { instance, ms: ended - run.startedAt, ticks: run.ticks, maxTickMs: run.maxTickMs, rows: run.lines, budgetMs });
+      slot.catchUp = undefined;
+      return;
+    }
+    const rowsBehind = Math.round((result.backlogBytes * run.lines) / Math.max(1, run.sourceBytes));
+    const etaMs = Math.round((result.backlogBytes * Math.max(1, ended - run.startedAt)) / Math.max(1, run.sourceBytes));
+    slot.state.reason = `catching up: about ${rowsBehind} rows (${result.backlogBytes} bytes) behind, done in about ${Math.ceil(etaMs / 1000)} s`;
+    if (ended - run.loggedAt < READ_MODEL_LEDGER_STALE_MS) return;
+    run.loggedAt = ended;
+    log("read_model.catch_up", { instance, rowsBehind, bytesBehind: result.backlogBytes, etaMs, ticks: run.ticks, maxTickMs: run.maxTickMs, budgetMs });
+  }
+
   function tickSlot(slot: Slot, now: number): void {
     try {
       if (!ensureLease(slot, now)) return;
-      const result = slot.projector!.tick();
+      const result = slot.projector!.tick({ budgetMs });
       const db = slot.db!;
       const newest = db.prepare("SELECT max(ts_ms) AS m FROM seen WHERE ts_ms > 0 AND ts_ms <= ?").get(now + FUTURE_ROW_TOLERANCE_MS)?.m;
-      Object.assign(slot.state, { tickedAt: now, generation: Number(db.meta("generation")), failures: 0, newestTs: newest == null ? null : fixedClock(Number(newest)).iso() });
+      // Stamped when the tick COMPLETED: a catch-up tick is judged from its end, not from its start.
+      const tickedAt = clock.now();
+      if (tickedAt - now > READ_MODEL_LEDGER_STALE_MS) {
+        log("read_model.slow_tick", { instance: slot.instance.name, ms: tickedAt - now, transactions: result.transactions, archivesRead: result.archivesRead, liveRestarted: result.liveRestarted });
+      }
+      Object.assign(slot.state, { tickedAt, generation: Number(db.meta("generation")), failures: 0, newestTs: newest == null ? null : fixedClock(Number(newest)).iso() });
       delete slot.state.reason;
       if (result.unread.length > 0) slot.state.reason = `unread archives: ${result.unread.join("; ")}`;
+      trackCatchUp(slot, result, now, tickedAt);
       slot.backoffUntil = 0;
       // A tick that read archives, restarted the live file or needed several chunks was catching up.
       const caughtUp = result.archivesRead === 0 && !result.liveRestarted && result.transactions <= 1 && result.unread.length === 0;
@@ -484,11 +527,29 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
   }
 
+  const postState = (now: number): void => opts.post({ type: "state", at: now, instances: slots.map((slot) => ({ ...slot.state })), switches });
+
   return {
+    start(): void {
+      const now = clock.now();
+      reloadSwitches(now);
+      if (switches.projector === "on") {
+        for (const slot of slots) {
+          try {
+            ensureLease(slot, now);
+          } catch (error) {
+            // failSlot logs it and backs this instance off; its first tick retries the open.
+            failSlot(slot, now, error);
+          }
+        }
+      }
+      postState(now);
+    },
     tick(): void {
       const now = clock.now();
       reloadSwitches(now);
-      const due = switches.projector === "on" ? slots.find((slot) => slot.checkPending) : undefined;
+      // The oracle's slices wait while any instance is still applying a backlog.
+      const due = switches.projector === "on" && !slots.some((slot) => slot.catchUp) ? slots.find((slot) => slot.checkPending) : undefined;
       if (due) {
         checkSlot(due, now);
       } else if (switches.projector === "off") {
@@ -496,11 +557,11 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       } else {
         for (const slot of slots) {
           if (stopRequested()) return;
-          if (now >= slot.backoffUntil) tickSlot(slot, now);
+          if (now >= slot.backoffUntil) tickSlot(slot, clock.now());
         }
       }
       materialize(now);
-      opts.post({ type: "state", at: now, instances: slots.map((slot) => ({ ...slot.state })), switches });
+      postState(now);
     },
     shadow(request: ShadowRequest): boolean {
       const body = latest.get(`${request.view}\u0000${request.key}`);
@@ -558,6 +619,7 @@ export function runReadModelWorker(
     stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, stopRequested, post, views: [...READ_MODEL_VIEWS, now], ...(escalation ? { escalation } : {}),
   });
   let timer: NodeJS.Timeout | undefined;
+  let started = false;
   let finished = false;
   const finish = (): void => {
     if (finished) return;
@@ -572,6 +634,11 @@ export function runReadModelWorker(
   const loop = (): void => {
     if (!stopRequested()) {
       try {
+        // The leases are taken before the first tick's work, so a long first tick never delays them.
+        if (!started) {
+          started = true;
+          ticker.start();
+        }
         ticker.tick();
       } catch (error) {
         port.postMessage({ type: "log", step: "read_model.tick_failed", extra: { error: (error as Error).message } } satisfies ReadModelWorkerMessage);
@@ -661,10 +728,13 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   opts.log?.("read_model.warm_boot", { bodies: warm.bodies.length, ...(warm.reason ? { reason: warm.reason } : {}) });
   const switchesPath = readModelSwitchesPath(opts.stateDir);
   let mainSwitches = DEFAULT_READ_MODEL_SWITCHES;
+  let darkReason: string | undefined;
   const refreshSwitches = (): void => {
     const read = readReadModelSwitches(switchesPath);
-    if (read.ok) mainSwitches = read.switches;
-    else opts.log?.("read_model.switch_unreadable", { reason: read.reason, kept: mainSwitches });
+    mainSwitches = read.ok ? read.switches : { projector: mainSwitches.projector, views: {} };
+    const reason = read.ok ? read.absent : read.reason;
+    if (reason !== undefined && reason !== darkReason) opts.log?.(read.ok ? "read_model.switch_absent" : "read_model.switch_unreadable", { reason, views: "dark" });
+    darkReason = reason;
   };
   refreshSwitches();
   let stopSwitchWatch: () => void = () => {};

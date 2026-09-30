@@ -16,9 +16,15 @@
  * edit (Standing rule 15), and refusing the push there would strand the task with no pull request at all, which is
  * worse than the review refusal it predicts.
  *
+ * A THIRD, REPORT-ONLY ARM (W1-T4921): a `grep:` proof that ALSO passes at the merge base, which the reviewer grades
+ * `executed_stale`. A worker may not edit a criterion, so it is reported and never blocks; the builder names the defect
+ * and stops rather than pushing a pull request that can never go green. A `plan-only` diff on a `run-<taskId>` branch
+ * is a BUILD, not a filing, so it is asked too.
+ *
  * Exit 0 clean or reported-only, 1 a blocking refusal, 2 could not read (the hook never blocks on 2).
  */
 import { certainHeadRefusals, extractTaskTrailerId, planOnlyDiff, resolvePlanCriteriaAtHead } from "../src/lib/review.js";
+import { certainStaleProofs } from "../src/lib/proof-base-stale.js";
 import { taskIdFromRunBranch } from "../src/lib/status.js";
 import { isMainModule } from "./lib/argv.mjs";
 import { gitOrThrow } from "./lib/git.mjs";
@@ -29,21 +35,37 @@ const PLAN = "plan/tasks.yaml";
  * The pure verdict. `resolveCriteria(taskId)` and `refusalsFor(criteria)` are injected so a test drives every arm
  * without a checkout; `main` below wires the reviewer's real functions.
  */
-export function proofResolveVerdict({ diff, headRef, headMessage, resolveCriteria, refusalsFor }) {
-  if (planOnlyDiff(diff)) return { exit: 0, lines: ["proof-resolve-precheck: SKIP -- a plan-only filing; its proofs are the build PR's"] };
-  const taskId = taskIdFromRunBranch(headRef) ?? extractTaskTrailerId(headMessage);
+export function proofResolveVerdict({ diff, headRef, headMessage, resolveCriteria, refusalsFor, staleFor = () => [] }) {
+  const branchTask = taskIdFromRunBranch(headRef);
+  if (planOnlyDiff(diff) && !branchTask) {
+    return { exit: 0, lines: ["proof-resolve-precheck: SKIP -- a plan-only filing (no run-<taskId> branch); its proofs are the build PR's"] };
+  }
+  const taskId = branchTask ?? extractTaskTrailerId(headMessage);
   if (!taskId) return { exit: 0, lines: ["proof-resolve-precheck: SKIP -- no task resolved from the branch or a Remudero-Task: trailer"] };
   const criteria = resolveCriteria(taskId);
   if (criteria.length === 0) return { exit: 0, lines: [`proof-resolve-precheck: SKIP -- ${taskId} resolves no acceptance criteria at HEAD`] };
   const refusals = refusalsFor(criteria);
-  if (refusals.length === 0) {
+  const stale = staleFor(criteria);
+  if (refusals.length === 0 && stale.length === 0) {
     return { exit: 0, lines: [`proof-resolve-precheck: OK -- ${criteria.length} ${taskId} criteria, none the reviewer is certain to refuse`] };
   }
   const blocking = refusals.filter((r) => !/^grep:/.test(r.proof));
-  const lines = [
-    `proof-resolve-precheck: remudero-review WILL REFUSE ${refusals.length} of ${taskId}'s proofs on this head:`,
-    ...refusals.map((r) => `  - ${r.proof}\n      why: ${r.why}\n      claim: ${r.claim}`),
-  ];
+  const lines = [];
+  if (refusals.length > 0) {
+    lines.push(
+      `proof-resolve-precheck: remudero-review WILL REFUSE ${refusals.length} of ${taskId}'s proofs on this head:`,
+      ...refusals.map((r) => `  - ${r.proof}\n      why: ${r.why}\n      claim: ${r.claim}`),
+    );
+  }
+  if (stale.length > 0) {
+    lines.push(
+      `proof-resolve-precheck: ${stale.length} of ${taskId}'s grep proofs ALSO PASS at the merge base (reported, never blocking):`,
+      ...stale.map((r) => `  - ${r.proof}\n      why: ${r.why}\n      claim: ${r.claim}`),
+      "  A builder may not edit a criterion (Standing rule 15): name this defect in your report and stop, so the operator",
+      "  can re-anchor the pattern on text the build adds, or declare `kind: guard` when preserving the text is the point.",
+    );
+  }
+  if (refusals.length === 0) return { exit: 0, lines };
   if (blocking.length > 0) {
     lines.push(
       "  TO FIX: a `unit test:` proof is matched as a LITERAL substring of a test NAME (test(\"...\") / it(\"...\")),",
@@ -70,6 +92,7 @@ function main() {
       headMessage: gitOrThrow(["log", "-1", "--format=%B"]),
       resolveCriteria: (taskId) => resolvePlanCriteriaAtHead(`Remudero-Task: ${taskId}`, repoRoot, PLAN, headSha).criteria,
       refusalsFor: (criteria) => certainHeadRefusals(criteria, repoRoot),
+      staleFor: (criteria) => certainStaleProofs(criteria, repoRoot, gitOrThrow(["merge-base", base, "HEAD"])),
     });
   } catch (e) {
     console.error(`proof-resolve-precheck: could not read this head (${e.message}) -- NOT reporting clean`);

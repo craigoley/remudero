@@ -14,6 +14,8 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { ghExec, ghJsonAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
+// @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
+import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
@@ -539,6 +541,7 @@ import {
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
 import { ghEscalationAnswerGateway, readEscalationAnswers, type EscalationAnswerGateway } from "./lib/escalation-answers.js";
 import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
+import { probeOpenPrMerges } from "./lib/merge-probe.js";
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
@@ -655,6 +658,8 @@ import { assertProposedPlanLoads,
   triageCommitMessage,
   triageDeclaredScope,
   triageEmptyScopeDisposition,
+  unresolvedCitationReferents,
+  worktreeCitationEvidence,
   feedbackEntryBlock,
   triagePrompt,
 } from "./lib/triage.js";
@@ -1186,7 +1191,7 @@ import {
 import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib/bundle.js";
 import { parse as parseYaml } from "yaml";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
-import { ProviderCapacityBlockedError, assertOpenWeightToolBoundary } from "./lib/worker-provider.js";
+import { ProviderCapacityBlockedError, assertOpenWeightToolBoundary, providerEligibility, type ProviderCapacity } from "./lib/worker-provider.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
 import {
   buildExportBundle,
@@ -1206,6 +1211,7 @@ import {
 } from "./lib/learnings.js";
 import type { LearningEntry, LearningsIndex, RuleHeadline } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
+import { certainStaleProofs, isDialectGrepProof } from "./lib/proof-base-stale.js";
 import { loadOperatorNotesForTask, renderOperatorNotes, appendOperatorNote } from "./lib/operator-notes.js";
 import { applyOperatorMergeHold, parseOperatorMergeHoldArgs } from "./lib/operator-merge-hold.js";
 import {
@@ -2257,6 +2263,7 @@ import {
   runAdhocLaneReapRung,
   runWorktreeReapRung,
   spawnWorker,
+  readClaudeProviderCapacity,
   activeWorkerCount,
   cacheTokenLedgerFields,
   capStderrExcerpt,
@@ -24385,6 +24392,23 @@ function printResolvedFully(sections: ReadonlyArray<[string, readonly string[] |
   console.log(`  ${RESOLVED_FULLY_CAVEAT}`);
 }
 
+const PASSES_AT_MAIN_CAP = 10;
+
+function printPassesAtMain(findings: ReadonlyArray<{ taskId: string; proofs: ReadonlyArray<{ proof: string; verdict: string }> }>): void {
+  const ids = findings.map((f) => f.taskId);
+  console.log(`\n  queued task(s) whose every discriminating proof PASSES at this checkout:`);
+  console.log(`    ${"passes-at-main".padEnd(26)} ${String(ids.length).padStart(3)} task(s): ${ids.join(", ") || "(none)"}`);
+  for (const f of findings.slice(0, PASSES_AT_MAIN_CAP)) {
+    console.log(`  ${f.taskId}`);
+    for (const p of f.proofs) console.log(`    ${p.verdict}: ${p.proof}`);
+  }
+  if (findings.length > PASSES_AT_MAIN_CAP) console.log(`  +${findings.length - PASSES_AT_MAIN_CAP} more`);
+  console.log(
+    "  a pass at main is where to LOOK, not a verdict that the task is done: the proof may not discriminate " +
+      "or the work may have shipped under another task",
+  );
+}
+
 /** {@link proofQueueAuditCommand}'s only I/O beyond the plan/checkout it is pointed at —
  *  injectable so a test can supply a fixture merge-evidence dump without a real git history or
  *  network, the same DI shape `LintPlanStatusDeps.readMergeEvidenceLog` already uses. */
@@ -24393,6 +24417,7 @@ export interface ProofQueueAuditDeps {
   /** W1-T2280: overrides the whole `--credited` resolution — the one seam a test needs to drive
    *  every branch below without a real ledger/git checkout. */
   creditedProofVisibility?: typeof creditedProofVisibility;
+  executeProof?: (parsed: unknown, proof: string) => "pass" | "fail" | "unreadable";
 }
 
 /** {@link creditedProofVisibility}'s return: what it found over the merge-credited population. */
@@ -24924,6 +24949,7 @@ export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAud
     console.log(`  ✗ ${o.taskId} criterion ${o.criterionIndex + 1} [${o.cause}] proof: "${o.proof.slice(0, 90)}"`);
   }
   printResolvedFully([["resolved-fully", report.resolvedFully]], "merge credit is not consulted here");
+  printPassesAtMain(censusSatisfiedTasks(population, deps.executeProof).findings);
   console.log(
     "\nrmd proof-queue-audit is a REPORT, not a gate — no dispatch, CI job or arm decision may consult this " +
       "verdict (lib/proof-queue-audit.ts). Exits 0 unconditionally, regardless of the count above.",
@@ -25811,9 +25837,10 @@ export function runPreflightProofs(
     };
   }
 
-  const stale: string[] = [];
+  const stale: string[] = certainStaleProofs(executable, repoRoot, mergeBase).map((row) => row.proof);
   for (const c of executable) {
     const proof = (c.proof ?? "").trim();
+    if (isDialectGrepProof(proof)) continue;
     const run = spawn(
       process.execPath,
       ["--import", "tsx", "src/run-task.ts", "check-proof", proof, "--base", mergeBase],
@@ -39248,6 +39275,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
   const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
   const behindMainByPr = buildBehindMainByPr(owner, repo, prsForFixRung);
+  await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { dryRun, behindMainByPr });
   // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
   // composition change, not a new read: the credit rung already built exactly this set, just
   // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
@@ -40470,6 +40498,7 @@ export function buildSweepHook(
       const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
       const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
       const behindMainByPr = buildBehindMainByPr(owner, repo, prsForFixRung);
+      await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr });
       // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
       // composition change, not a new read: the credit rung already built exactly this set, just
       // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
@@ -42241,7 +42270,8 @@ async function triageCommandLocked(
         // Ground truth: what did the worker ACTUALLY touch (before the harness's own status write)?
         const changedFiles = worktreeChangedFiles(worktreePath);
         const verdict = parseTriageVerdict(workerTranscript(worker));
-        return { decision: decideTriage({ verdict, changedFiles }), changedFiles };
+        const citation = verdict?.kind === "already_decided" ? unresolvedCitationReferents(verdict.citation, worktreeCitationEvidence(worktreePath)) : undefined;
+        return { decision: decideTriage({ verdict, changedFiles, citation }), changedFiles };
       },
       filed: (r) => r.decision.action === "propose",
       lint: () =>
@@ -42310,7 +42340,7 @@ async function triageCommandLocked(
         runId,
         ...summarizeDeps,
       });
-      log("triage.grill_opened", { issue_url: grillIssueUrl, options: decision.options.length, recommendation: decision.recommendation });
+      log("triage.grill_opened", { issue_url: grillIssueUrl, options: decision.options.length, recommendation: decision.recommendation, cause: decision.cause, unresolved: decision.unresolved });
       say(`grill opened (needs-human, ${decision.options.length} options + a recommendation): ${grillIssueUrl}`);
     }
 
@@ -43003,6 +43033,25 @@ export function buildInboxDraftSpawnArgs(args: {
   };
 }
 
+/** A cash draft's one Sonnet rescue, admitted against the live subscription reserve before the explicit Claude mount. */
+export async function spawnEscalatedInboxDraft(
+  args: Parameters<typeof buildInboxDraftSpawnArgs>[0],
+  rawSpawn: typeof spawnWorker = spawnWorker,
+  readCapacity: (config: Config) => Promise<ProviderCapacity> = (config) => readClaudeProviderCapacity(config, { forceRefresh: true }),
+): Promise<WorkerResult | undefined> {
+  const policy = resolveProviderRoutingPolicy(args.config.root, args.config);
+  if (!policy.routableProviders.includes("claude")) return undefined;
+  const capacity = await readCapacity(args.config);
+  if (!providerEligibility(capacity, policy.reservePercent).eligible) return undefined;
+  return rawSpawn({
+    ...buildInboxDraftSpawnArgs({
+      ...args,
+      mount: { ...args.mount, model: "sonnet", provider: "claude", effort: "medium" },
+    }),
+    onSelectionAssignment: undefined,
+  });
+}
+
 /**
  * Materialize ONE worktree and draft EVERY proposal in `toDraft` against it — the shared
  * harness-owned glue {@link runDraftRung}'s pure core (lib/inbox.ts) needs: a real
@@ -43111,6 +43160,16 @@ export async function draftProposalBatch(
             // a helper-level convention.
             disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
           }), onSelectionAssignment: undefined }),
+        ...(inboxDraftMount.provider === "cash" ? {
+          escalate: (_proposal: Proposal, prompt: string) => spawnEscalatedInboxDraft({
+            cwd: worktreePath,
+            settingsFile,
+            mount: inboxDraftMount,
+            config,
+            prompt,
+            disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
+          }, benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)),
+        } : {}),
         log,
       },
       runId,
@@ -47460,7 +47519,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "proof-queue-audit",
     syntax: "rmd proof-queue-audit [--plan <path>]",
     summary: "Report every open task's acceptance proof that can never resolve, split by cause.",
-    detail: "W1-T1053: resolves every OPEN, UNMERGED task's proof through the reviewer's OWN parser+resolver (lib/review.ts) against the real checkout and names every one that can never resolve — refused-parse, name-filtered-zero-match (W1-T229's shape), or grep-path-absent — split by cause with the offending task ids; a forward-referencing whole-file test path for a not-yet-written test is NEVER reported (CLAUDE.md). IT IS A REPORT, NOT A GATE (lib/proof-queue-audit.ts): exits 0 unconditionally on the analysis itself, regardless of how many offenders it names; only a malformed invocation exits non-zero. FAILS OPEN (prints nothing audited, still exit 0) on a shallow checkout, same posture as lint-plan's whole-plan split.",
+    detail: "W1-T1053: resolves every OPEN, UNMERGED task's proof through the reviewer's OWN parser+resolver (lib/review.ts) against the real checkout and names every one that can never resolve — refused-parse, name-filtered-zero-match (W1-T229's shape), or grep-path-absent — split by cause with the offending task ids; a forward-referencing whole-file test path for a not-yet-written test is NEVER reported (CLAUDE.md). IT IS A REPORT, NOT A GATE (lib/proof-queue-audit.ts): exits 0 unconditionally on the analysis itself, regardless of how many offenders it names; only a malformed invocation exits non-zero. FAILS OPEN (prints nothing audited, still exit 0) on a shallow checkout, same posture as lint-plan's whole-plan split. W1-T4937: a `passes-at-main` block also names every queued task whose every discriminating proof PASSES at this checkout (scripts/satisfied-task-census.mjs), with a pass row per proof for the first ten; a pass is where to LOOK, not a verdict that the task is done.",
   },
   {
     name: "preflight",

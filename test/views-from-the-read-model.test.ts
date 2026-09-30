@@ -136,13 +136,14 @@ test("a view switched off answers with its legacy computation or 404 view_disabl
   readModel.set(entry("only-read-model", { n: 1 }));
   const url = await listen(t, createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [legacy], readModel, readModelViews: ["only-read-model"] }) }));
 
+  readModel.switch({ projector: "on", views: { demo: "serve" } });
   assert.deepEqual((await get(url, "/v1/views/demo")).body?.data, { from: "read-model" }, "serve mode answers from the read model");
   readModel.switch({ projector: "on", views: { demo: "off", "only-read-model": "off" } });
   assert.deepEqual((await get(url, "/v1/views/demo")).body?.data, { from: "legacy" }, "off falls back to the legacy computation");
   assert.equal((await get(url, "/v1/views/demo?bad=1")).status, 400, "the legacy computation keeps its own 400");
   assert.deepEqual((await get(url, "/v1/views/only-read-model")).body, { error: "view_disabled", view: "only-read-model" });
   readModel.switch({ projector: "on", views: { demo: "shadow" } });
-  assert.deepEqual((await get(url, "/v1/views/demo")).body?.data, { from: "read-model" }, "shadow still serves the read model");
+  assert.deepEqual((await get(url, "/v1/views/demo")).body?.data, { from: "legacy" }, "shadow keeps the legacy computation primary");
 
   // The real switch file, read by serve's main thread: it works with no worker running at all.
   const stateDir = scratch(t, "views-switch");
@@ -152,7 +153,7 @@ test("a view switched off answers with its legacy computation or 404 view_disabl
   const handle = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], workerUrl: SILENT_WORKER, stopWaitMs: 20, every: (run) => ((refresh = run), () => undefined) });
   t.after(() => handle.stop());
   handle.start();
-  const real = await listen(t, createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [], readModel: handle, readModelViews: ["read-model"] }) }));
+  const real = await listen(t, createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [], readModel: handle, readModelViews: ["read-model"], servedByDefault: ["read-model"] }) }));
   assert.equal((await get(real, "/v1/views/read-model")).status, 200);
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "read-model": "off" } }));
   assert.equal((await get(real, "/v1/views/read-model")).status, 200, "the file is not read on the request path");
@@ -160,13 +161,13 @@ test("a view switched off answers with its legacy computation or 404 view_disabl
   assert.deepEqual((await get(real, "/v1/views/read-model")).body, { error: "view_disabled", view: "read-model" });
   writeFileSync(readModelSwitchesPath(stateDir), "{ half");
   refresh?.();
-  assert.equal((await get(real, "/v1/views/read-model")).status, 404, "a half-written file keeps the last good switch");
+  assert.equal((await get(real, "/v1/views/read-model")).status, 200, "a half-written file reverts every view to its default");
 });
 
 test("an unchanged view answers 304 even after it is materialized again", async (t) => {
   const readModel = fakeReadModel();
   readModel.set(entry("demo", { count: 2 }, [], "2026-09-30T12:00:00.000Z", 1));
-  const url = await listen(t, createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [], readModel, readModelViews: ["demo"] }) }));
+  const url = await listen(t, createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [], readModel, readModelViews: ["demo"], servedByDefault: ["demo"] }) }));
   const first = await get(url, "/v1/views/demo");
   assert.equal(first.status, 200);
   assert.ok(first.etag?.startsWith('W/"demo.1.'));
@@ -192,7 +193,7 @@ test("a stale source makes the view stale and names the source", async (t) => {
   assert.ok(tickedAt !== undefined, "the worker ticked");
   let now = tickedAt;
   const clock: Clock = { ...systemClock, now: () => now, iso: () => fixedClock(now).iso() };
-  const url = await listen(t, createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [], readModel: handle, readModelViews: ["read-model"], clock }) }));
+  const url = await listen(t, createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [], readModel: handle, readModelViews: ["read-model"], servedByDefault: ["read-model"], clock }) }));
 
   const fresh = await get(url, "/v1/views/read-model");
   assert.equal(fresh.body?.stale, false);
