@@ -19,6 +19,7 @@ import { isMainThread, parentPort, Worker, workerData } from "node:worker_thread
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "./ledger-projector.js";
+import { createNavBadgeReadModelView } from "./nav-badge-view.js";
 import {
   READ_MODEL_DIRNAME,
   ReadModelError,
@@ -167,7 +168,7 @@ export const readModelStatusView: ReadModelView = {
 };
 
 /** Every view the worker materializes; later Phase 1 views register here. */
-export const READ_MODEL_VIEWS: readonly ReadModelView[] = [readModelStatusView];
+export const READ_MODEL_VIEWS: readonly ReadModelView[] = [createNavBadgeReadModelView(ledgerSource), readModelStatusView];
 
 export interface ReadModelTickerOptions {
   /** Core's state dir: every instance's DB lives under its `read-model/` (design §1.7). */
