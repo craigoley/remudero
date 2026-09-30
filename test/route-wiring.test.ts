@@ -259,6 +259,14 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "W1-T3898: ledger-only intent-plan-v1 proposal (a non-operative preview); covered in test/intent-plan-envelope.test.ts and test/intent-plan-preview.test.ts",
   ],
   [
+    "POST /v1/operator-agent/action-handoff/prepare",
+    "W1-T4559: stores a non-mutating preview under the claim root; served-assembly wiring, allowlist, scope and model-authority refusals are covered in test/operator-agent-action-route.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/action-handoff/execute",
+    "W1-T4559: delegates to the catalogued pause/resume verb under fleetControlRoot; served-assembly wiring, confirmation, revalidation and replay are covered in test/operator-agent-action-route.test.ts",
+  ],
+  [
     "POST /v1/operator-agent/intent-plans/decision",
     "W1-T3898: ledger-only clarify/confirm/undo events plus the confirmation's linked automation actions; covered in test/intent-plan-clarification.test.ts, test/intent-plan-confirmation.test.ts and test/intent-plan-undo.test.ts",
   ],

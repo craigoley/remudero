@@ -120,22 +120,26 @@ test("repeated assistant intent has one action and one receipt", () => {
 });
 
 test("ambiguous external outcomes remain unresolved, never success-shaped", () => {
-  const { deps, root, done } = fixture({ execute: () => { throw new Error("socket hang up after dispatch"); } });
+  const { deps, root, done } = fixture();
+  const lostDeps: ActionHandoffDeps = { ...deps, execute: () => { throw new Error("socket hang up after dispatch"); } };
   try {
+    const refusedPreview = prepareActionHandoff(lostDeps, ACTOR, intent("intent-lost-00"));
+    assert.equal(refusedPreview.status, 503, "a policy check that cannot answer is not a preview");
+    assert.equal((refusedPreview.body as Record<string, unknown>).outcome, "refused");
     const prepared = prepareActionHandoff(deps, ACTOR, intent("intent-lost-01"));
     const confirmationId = (prepared.body as Record<string, string>).confirmationId;
     const confirm = { confirmationId, confirm: true, verb: "fleet.pause", instance: "core", repository: "owner/repo" } as const;
-    const lost = executeActionHandoff(deps, ACTOR, confirm);
+    const lost = executeActionHandoff(lostDeps, ACTOR, confirm);
     assert.equal(lost.status, 202);
     assert.equal((lost.body as Record<string, unknown>).outcome, "unresolved");
     assert.match(String((lost.body as Record<string, unknown>).reason), /socket hang up/);
-    const replay = executeActionHandoff(deps, ACTOR, confirm);
+    const replay = executeActionHandoff(lostDeps, ACTOR, confirm);
     assert.equal(replay.status, 409);
     assert.equal(((replay.body as Record<string, any>).receipt).outcome, "unresolved", "a replay never upgrades an unresolved outcome");
     assert.equal(isPaused(root), false);
 
     // A claim with no durable receipt (a crash between claim and receipt) is unresolved on replay.
-    const second = prepareActionHandoff({ ...deps, execute: undefined }, ACTOR, intent("intent-lost-02"));
+    const second = prepareActionHandoff(deps, ACTOR, intent("intent-lost-02"));
     const secondId = (second.body as Record<string, string>).confirmationId;
     writeFileSync(actionHandoffPaths(deps, secondId).claim, JSON.stringify({ at: "crashed" }));
     const crashed = executeActionHandoff(deps, ACTOR, { ...confirm, confirmationId: secondId });
