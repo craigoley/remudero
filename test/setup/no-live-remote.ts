@@ -26,7 +26,8 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isTestRunner, LIVE_WRITE_OVERRIDE_ENV, LIVE_WRITE_SENTINEL_TOKEN } from "../../src/lib/live-write-guard.js";
+import { discoverLiveLedgerRoot, isTestRunner, LIVE_LEDGER_DENY_ROOT_ENV, LIVE_WRITE_OVERRIDE_ENV,
+  LIVE_WRITE_SENTINEL_TOKEN } from "../../src/lib/live-write-guard.js";
 
 /** Where every rewritten github.com push URL lands. It does not exist; its NAME is the message. */
 export const DEAD_PUSH_ROOT = "file:///nonexistent/W1-T4805-live-github-push-blocked-by-the-test-suite/";
@@ -51,6 +52,7 @@ export function appendGitConfigEnv(key: string, value: string, env: NodeJS.Proce
 export function installNoLiveRemote(env: NodeJS.ProcessEnv = process.env): { ghConfigDir?: string } {
   if (!isTestRunner(env)) return {};
   if (env[LIVE_WRITE_OVERRIDE_ENV] === "1") return {};
+  env[LIVE_LEDGER_DENY_ROOT_ENV] = discoverLiveLedgerRoot(env);
   for (const prefix of GITHUB_PUSH_PREFIXES) appendGitConfigEnv(`url.${DEAD_PUSH_ROOT}.pushInsteadOf`, prefix, env);
   env.GIT_TERMINAL_PROMPT = "0";
   env.GH_TOKEN = LIVE_WRITE_SENTINEL_TOKEN;
