@@ -2704,6 +2704,12 @@ export interface components {
         history: number;
         awaiting_daemon: number;
       };
+      /** Classification of observed decision-labelled items. These categories sum to counts.decision; ready does not imply that operator judgment is required, and needsPreparation is not a dismissal instruction. All values are observational under partial source coverage. */
+      decisionReadiness: {
+        ready: number;
+        needsPreparation: number;
+        unknown: number;
+      };
       /** Conservative lower bounds; zero when any needed source is partial. */
       verifiedCounts: {
         decision: number;

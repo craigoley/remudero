@@ -163,6 +163,7 @@ import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, startTestGarden, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, startCiFrictionGardener, readCiFrictionLedgerRecords, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
+import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, selectorShadowFlakeLedger, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener, startEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
@@ -251,7 +252,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "machine-judge"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -1315,7 +1316,7 @@ import {
   reviewProviderProvenanceLedgerFields,
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
-import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
 import {
   decideDispatchClaim,
   releaseDispatchClaim,
@@ -11121,6 +11122,8 @@ export async function runFixRung(opts: {
         elapsed_ms: spawnElapsedMs,
         // The ci-friction gardener prices a ci-log round against each check and failing test.
         ci_failures: (currentCiFailures ?? []).map((f) => ({ check: f.name, signature: ciFailureSignature(f.logTail) ?? null })),
+        // W1-T4803: which files conflicted, so the hot-file gardener can rank them by PR minutes.
+        conflicted_files: conflictedFilePaths(currentMergeConflict),
       });
       deps.say(
         currentMergeConflict !== undefined
@@ -26884,6 +26887,14 @@ export function autoTriageCheck(
     deferralPending?: boolean;
     dispatchCount?: number;
     laneBudget?: number;
+    /** W1-T4769: injected claim reserver for the once-per-pass claim sweep. Production builds the
+     *  real one over the SAME clone the triage lane claims on. */
+    claimReserver?: TriageClaimReserver;
+    /** W1-T4769: injected ledger-union read for the liveness verdict; `undefined` = unreadable. */
+    readClaimLivenessRows?: (sinceIso: string) => Array<Record<string, unknown>> | undefined;
+    /** W1-T4769: injected owner/repo resolver for the real reserver's clone path; production uses
+     *  {@link resolveOwnerRepo}. */
+    resolveClaimRepo?: () => { repo: string };
   } = {},
 ): AutoTriageDecision {
   const config = opts.config ?? loadConfig();
@@ -26899,7 +26910,7 @@ export function autoTriageCheck(
   }
   const held = readDrainLock(triageLockPath(config.root));
   const now = opts.now ?? new Date();
-  return decideAutoTriage({
+  const inputs: AutoTriageInputs = {
     policy: policy.values.autoTriage,
     // W1-T469 — WAS HARDCODED `idle: true`, WHICH IS WHY THE GUARD WAS DOUBLY UNREACHABLE: the rung
     // sat inside the daemon's idle branch AND the input could never be false, so `!i.idle` could
@@ -26922,7 +26933,61 @@ export function autoTriageCheck(
     // SAME repoRoot, SAME reasoning, read through the SAME underlying walk (W1-T2289) — see
     // `oldestFeedbackAgeMs`'s own doc for why this must never drift onto `config.root`.
     oldestCandidateAgeMs: oldestFeedbackAgeMs(repoRoot, now),
-  });
+  };
+  // W1-T4769: decide FIRST without any claim knowledge — every refusal that does not depend on which
+  // entry is claimed returns here with no git or ledger I/O. Only a would-be fire pays for the sweep.
+  const first = decideAutoTriage(inputs);
+  if (!first.fire) return first;
+  const sweep = triageClaimSweepForPass(config, now, inputs.candidates, opts);
+  return sweep === undefined ? first : decideAutoTriage({ ...inputs, heldCandidates: sweep });
+}
+
+/**
+ * W1-T4769: the once-per-pass read of the triage claim namespace, with dead holders released on the
+ * liveness arm. Returns the ids still held, or `undefined` when the namespace could not be read
+ * (the caller then keeps today's behaviour: oldest candidate, the lane's own claim decides).
+ */
+function triageClaimSweepForPass(
+  config: Config,
+  now: Date,
+  candidates: readonly string[],
+  opts: {
+    claimReserver?: TriageClaimReserver;
+    readClaimLivenessRows?: (sinceIso: string) => Array<Record<string, unknown>> | undefined;
+    resolveClaimRepo?: () => { repo: string };
+  },
+): readonly string[] | undefined {
+  const ledgerPath = ledgerPathFor(config);
+  const log = (step: string, extra: Record<string, unknown> = {}): void => {
+    try {
+      appendProducerLedger(ledgerPath, "daemon", { run_id: "TRIAGE-CLAIM-SWEEP", step, ...extra });
+    } catch (e) {
+      // A ledger write hiccup must not turn the sweep into a throw that ends the pass; the release
+      // itself already happened. Carried on stderr so the lost row is not silent.
+      process.stderr.write(`triage claim sweep: could not ledger ${step}: ${String((e as Error)?.message ?? e)}\n`);
+    }
+  };
+  let reserver = opts.claimReserver;
+  if (reserver === undefined) {
+    // The SAME clone the triage lane claims on (`repoDir`): a claim is only visible on its own origin.
+    let repoDir: string;
+    try {
+      repoDir = join(config.root, "repos", (opts.resolveClaimRepo ?? resolveOwnerRepo)().repo);
+    } catch (e) {
+      log("triage.claim_sweep_unavailable", { reason: `cannot resolve the repo: ${String((e as Error)?.message ?? e)}` });
+      return undefined;
+    }
+    if (!existsSync(repoDir)) return undefined;
+    reserver = triageClaimReserverFor(repoDir);
+  }
+  const readRows =
+    opts.readClaimLivenessRows ??
+    ((sinceIso: string) => {
+      const read = readLedgerUnionRecordsSync(dirname(ledgerPath), { since: sinceIso, requireArchives: true, refuseIncomplete: true });
+      return read.ok ? read.rows : undefined;
+    });
+  const result = sweepTriageClaims(candidates, reserver, { now, readRows, log });
+  return result.held;
 }
 
 /**
@@ -27304,7 +27369,7 @@ export async function defaultVerifyHumanCadenceResult(
     const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
     const registryPath = join(config.root, "state", "inbox-proposals.json");
     const result = await verifyHumanCadence({
-      shards: parkedVerifyHumanShards(plan, repoRoot, clock),
+      shards: parkedVerifyHumanShards(plan, repoRoot, clock, readMergeCreditedTaskIds(ledgerPath).credited),
       priorVerdicts: priorVerifyHumanVerdicts(rows),
       priorAgeBandKeys: priorVerifyHumanAgeBandKeys(rows),
       judge: shadowedVerifyHumanJudge({
@@ -33550,6 +33615,28 @@ export async function daemonCommand(
                   productionMachineFilingJudgePorts({ repoRoot, stateDir: join(config.root, "state"), worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
                   intervalMs,
                 ),
+                // W1-T4803: the files merge conflicts strand pull requests on, ranked by PR minutes; the
+                // costliest one no task restructures is filed as one plan-only proposal. Appended after the
+                // established gardens so their positions in the list stay where their tests expect them.
+                (intervalMs: number) => {
+                  const stateDir = join(config.root, "state");
+                  const hotFileGarden: GardenerDeps = {
+                    stateDir,
+                    repoRoot,
+                    openWorkspace: () => gardenCheckout({ name: "hot-file", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
+                    log,
+                    escalate: raiseDuplicate,
+                  };
+                  const hotFileSources: HotFileGardenSources = {
+                    ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
+                    mainHistory: (sinceIso) => readMainHistory(repoRoot, sinceIso),
+                    planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+                    mintTaskId: ciLearningTaskIdMinter(repoRoot),
+                    fileExists: (file) => existsSync(join(repoRoot, file)),
+                  };
+                  return startGarden(hotFileGardenSpec(hotFileGarden, hotFileSources), hotFileGarden, intervalMs);
+                },
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
                 // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
                 // registry instance" has no selector yet -- `RegistryInstance` carries no role or
@@ -43682,7 +43769,7 @@ export async function routeAdaptiveLifetimePressure(
       rationale: "Repeated attributable dispatch pressure was observed; decide whether to automate, backlog, or ask the operator.",
       acceptance: (task.acceptance ?? []).map((criterion) => criterion.claim),
       ageDays: 0,
-      depsAllMerged: (task.depends_on ?? []).every((id) => deps.plan.byId.get(id)?.status === "merged"),
+      depsAllMerged: (task.depends_on ?? []).every((id) => planTaskLanded(deps.plan.byId.get(id))),
       citedInSrc: idCitedInSrc(task.id, deps.root),
       evidence,
       observationKey:
@@ -43971,7 +44058,7 @@ export async function verifyHumanSweepCommand(
   // status.ts's reader, which already parses and already skips an unreadable line — no second
   // JSON pass, and one bad line never hides the verdicts around it.
   const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
-  const shards = parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock);
+  const shards = parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock, readMergeCreditedTaskIds(ledgerPath).credited);
   const priorVerdicts = priorVerifyHumanVerdicts(rows);
 
   if (dryRun) {
@@ -44023,15 +44110,24 @@ export async function verifyHumanSweepCommand(
   return 0;
 }
 
+/** Has this plan task LANDED, by the credit `deriveStatus` honours rather than the decorative yaml `status:`?
+ *  `merged` or `done` status, an explicit `pr:` number (precedence source (b)), or a ledger merge credit. */
+export function planTaskLanded(task: Task | undefined, ledgerCredited?: ReadonlySet<string>): boolean {
+  if (!task) return false;
+  return task.status === "merged" || task.status === "done" || typeof task.pr === "number" || ledgerCredited?.has(task.id) === true;
+}
+
 /** The parked population, as {@link ShardUnderJudgement} — the ONE place plan records become
  *  judgeable input. Reads the plan and greps src/; writes nothing. */
-export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock): ShardUnderJudgement[] {
+export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, ledgerCredited?: ReadonlySet<string>): ShardUnderJudgement[] {
   const nowMs = clock.now();
   const out: ShardUnderJudgement[] = [];
   for (const task of plan.tasks) {
     // The machine-filing judge routes AND releases every machine record and every operator record that
     // is not ruling-shaped (operator ruling 2026-09-29); only rulings stay on this operator-facing sweep.
-    if (task.verify !== "human" || task.status !== "queued" || task.author_class === "machine" || !isRulingShaped(task)) continue;
+    // W1-T4860: "queued" and "landed" read the credit the dispatcher and board use, not the raw yaml `status:` —
+    // a ruling already executed and credited (`pr:`, `done`, ledger merge credit) is settled, never judged again.
+    if (task.verify !== "human" || task.status !== "queued" || planTaskLanded(task, ledgerCredited) || task.author_class === "machine" || !isRulingShaped(task)) continue;
     const deps = task.depends_on ?? [];
     out.push({
       id: task.id,
@@ -44039,7 +44135,7 @@ export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock):
       rationale: (task as { rationale?: string }).rationale ?? "",
       acceptance: (task.acceptance ?? []).map((c) => c.claim),
       ageDays: shardAgeDays(task.id, root, nowMs),
-      depsAllMerged: deps.every((d) => plan.byId.get(d)?.status === "merged"),
+      depsAllMerged: deps.every((d) => planTaskLanded(plan.byId.get(d), ledgerCredited)),
       citedInSrc: idCitedInSrc(task.id, root),
       ...(() => {
         const evidence = shardEvidence(task);
@@ -44367,6 +44463,15 @@ export function approveParkedTask(
   }
   if (task.status !== "queued") {
     return { code: 2, message: `rmd approve: ${taskId} is status:${task.status} — only a queued task can be released` };
+  }
+  // The writer is the last authority boundary: callers other than the cadence helper may supply
+  // machine provenance. Neither a stale release nor a low model verdict can lift a plan hold or
+  // downgrade a task the plan itself calls high-risk. A human can still release high-risk work.
+  if (task.dispatch_hold === true) {
+    return { code: 2, message: `rmd approve: ${taskId} has an explicit dispatch hold — resolve it in the plan before release` };
+  }
+  if (deps.provenance !== undefined && task.risk === "high") {
+    return { code: 2, message: `rmd approve: ${taskId} is high-risk in the plan — a machine cannot release its human verification` };
   }
   const already = releasedTaskIds(deps.ledgerLines ?? readLedgerRawLines(deps.ledgerPath));
   if (already.has(taskId)) {

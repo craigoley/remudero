@@ -16,7 +16,7 @@ const OTHER = "verify-human:W1-T217";
 const RULING = "ruling:operator-choice";
 const UNKNOWN = "new-producer:incomplete";
 
-function fixture(): { deps: PanelGraphDeps; ledgerPath: string } {
+function fixture(heldTaskId?: string): { deps: PanelGraphDeps; ledgerPath: string } {
   const root = mkdtempSync(join(tmpdir(), "rmd-inbox-attention-"));
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(root, "plan"), { recursive: true });
@@ -28,6 +28,7 @@ function fixture(): { deps: PanelGraphDeps; ledgerPath: string } {
   depends_on: []
   type: implement
   verify: human
+  ${id === heldTaskId ? "dispatch_hold: true" : ""}
   risk: high
   status: queued
   attempts: 0
@@ -96,6 +97,17 @@ test("W1-T4738: release receipt invalidates the inbox memo", () => {
   assert.notStrictEqual(after, before);
   assert.equal(after.classifications.find((row) => row.proposalId === HUMAN)?.state, "retired");
   assert.equal(after.classifications.find((row) => row.proposalId === OTHER)?.state, "not_ready");
+});
+
+test("a machine release cannot retire an explicitly held security ask", async () => {
+  const world = fixture("W1-T216");
+  appendFileSync(world.ledgerPath, JSON.stringify({ step: "ratify.approved", task_id: "W1-T216",
+    released: "verify-human", released_by: "verify-human-judge", author_class: "machine" }) + "\n");
+  const classified = classifyAllProposalsMemo(world.deps);
+  assert.equal(classified.classifications.find((row) => row.proposalId === HUMAN)?.state, "not_ready");
+  const visible = await threads(world.deps);
+  assert.ok(visible.some((row) => row.proposalId === HUMAN && row.attention === "decision"));
+  assert.ok(visible.some((row) => row.proposalId === OTHER));
 });
 
 test("W1-T4738: no release evidence keeps the ask visible", async () => {
