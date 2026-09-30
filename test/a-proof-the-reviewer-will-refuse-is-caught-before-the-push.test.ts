@@ -110,7 +110,7 @@ test("the pre-push verdict has no opinion on a filing or an unresolved task", ()
   const never = () => {
     throw new Error("must not be asked");
   };
-  const filing = proofResolveVerdict({ diff: PLAN_DIFF, headRef: "run-W1-T9-1790000000000", headMessage: "", resolveCriteria: never, refusalsFor: never });
+  const filing = proofResolveVerdict({ diff: PLAN_DIFF, headRef: "feature", headMessage: "", resolveCriteria: never, refusalsFor: never });
   assert.equal(filing.exit, 0);
   const untasked = proofResolveVerdict({ diff: BUILD_DIFF, headRef: "feature", headMessage: "fix: y", resolveCriteria: never, refusalsFor: never });
   assert.match(untasked.lines[0], /no task resolved/);
