@@ -275,9 +275,14 @@ capabilities:
     # selectOpenWeightModel(..., { cashSqueezed: true }) promotes it only when the subscription
     # auction has already blocked and this cash request is the squeeze fallback.
     balanced:
-      low:    [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna]
-      medium: [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna]
-      high:   [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna]
+      # W1-T3570 (operator ruling 2026-09-30): Luna leads balanced. Its only normal-traffic lane is inbox_draft,
+      # whose prompt W1-T3621 cut from ~259k to ~8k input tokens, removing the context ceiling that put nano
+      # first. On that slim prompt nano drafts came out lint-clean 49/200 (25%, 46 YAML parse failures,
+      # 09-16..09-30); the same nano was 12/12 clean on the full prompt, and every Claude lane was 100%.
+      # Nano and OSS trail as fallbacks.
+      low:    [gpt-6-luna, gpt-5-nano, gpt-oss-120b, gpt-5.6-luna]
+      medium: [gpt-6-luna, gpt-5-nano, gpt-oss-120b, gpt-5.6-luna]
+      high:   [gpt-6-luna, gpt-5-nano, gpt-oss-120b, gpt-5.6-luna]
     # LUNA TAKES gpt-5-mini's PLACE; TERRA IS THE ESCALATION BEHIND IT. Luna is cheaper
     # than mini on both axes ($0.20/$1.20 vs $0.25/$2.00) and spent 0 reasoning tokens on an
     # identical trivial prompt where mini spent 64 of 76, so mini was REMOVED rather than demoted.

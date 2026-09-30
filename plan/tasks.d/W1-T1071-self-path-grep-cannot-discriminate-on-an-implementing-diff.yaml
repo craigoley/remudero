@@ -110,6 +110,7 @@
       proof: "unit test: test/self-path-proof-discrimination.test.ts"
   files: [src/lib/review.ts, test/self-path-proof-discrimination.test.ts]
   status: blocked
+  retirement: retired
   attempts: 0
   origin: recon#self-path-grep-discrimination-2026-08-20
   plan_refs: ['W1-T1041', 'W1-T273', 'W1-T362', 'W1-T219', 'W1-T456']

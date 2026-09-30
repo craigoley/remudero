@@ -238,7 +238,7 @@ test("real cash worker boundary emits a distinct assignment for each walked mode
           : result("cash", selection.model, "pending");
       } },
     } as never);
-    assert.deepEqual(models, ["gpt-5-nano", "gpt-oss-120b"]);
+    assert.deepEqual(models, ["gpt-6-luna", "gpt-5-nano"]); // W1-T3570: the balanced ladder walks Luna first
     const ledger = rows(root);
     const assignments = ledger.filter((row) => row.step === "worker.assignment");
     const attempts = ledger.filter((row) => row.step === "worker.attempt");
@@ -275,7 +275,7 @@ test("real cash ladder continues when a fallback telemetry callback throws", asy
           : result("cash", selection.model, "pending");
       } },
     } as never);
-    assert.deepEqual(models, ["gpt-5-nano", "gpt-oss-120b"]);
+    assert.deepEqual(models, ["gpt-6-luna", "gpt-5-nano"]); // W1-T3570: the balanced ladder walks Luna first
     assert.equal(final.isError, false, "the telemetry sink cannot cancel the fallback rung");
     assert.ok(warnings.some((line) => line.includes("worker.openweight.rung_telemetry_unavailable")));
   } finally { clearOpenWeightAbsence(); console.error = originalError;

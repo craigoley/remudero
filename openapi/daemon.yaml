@@ -105,6 +105,87 @@ components:
             properties:
               sourceId: { type: string }
               reason: { type: string }
+    OperatorAgentActionHandoffPreview:
+      type: object
+      description: >
+        action-handoff-v1 preview (W1-T4559). Non-mutating; names the exact target, write tier,
+        consequence, expiry, and recovery verb. The confirmationId is single-use and bound to the
+        verified operator who prepared it.
+      required: [version, confirmationId, intentId, verb, capability, target, tier, consequence, recovery, preparedAt, expiresAt, mutated, confirmation]
+      properties:
+        version: { type: string, enum: [action-handoff-v1] }
+        confirmationId: { type: string }
+        intentId: { type: string }
+        verb: { type: string, enum: [fleet.pause, fleet.resume] }
+        capability: { type: string }
+        target:
+          type: object
+          required: [kind, instance, repository, state]
+          properties:
+            kind: { type: string, enum: [fleet-control] }
+            instance: { type: string }
+            repository: { type: string }
+            state:
+              type: object
+              required: [paused, stopped]
+              properties:
+                paused: { type: boolean }
+                stopped: { type: boolean }
+        tier: { type: string, enum: [low, middle] }
+        consequence:
+          type: object
+          required: [risk, reversible, summary]
+          properties:
+            risk: { type: string, enum: [low, medium] }
+            reversible: { type: boolean }
+            summary: { type: string }
+        recovery:
+          type: object
+          required: [verb, capability, plan]
+          properties:
+            verb: { type: string }
+            capability: { type: string }
+            plan: { type: string }
+        preparedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        mutated: { type: boolean }
+        confirmation: { type: string, enum: [explicit-operator-confirmation-required] }
+        existing: { type: boolean }
+
+    OperatorAgentActionHandoffReceipt:
+      type: object
+      description: >
+        The one attributable receipt for a claimed confirmation. `unresolved` means the external
+        outcome is not certified; it is never a success and never an invitation to retry.
+      required: [version, receiptId, confirmationId, intentId, verb, capability, instance, repository, actorHash, outcome, code, reason, at]
+      properties:
+        version: { type: string, enum: [action-handoff-v1] }
+        receiptId: { type: string }
+        confirmationId: { type: string }
+        intentId: { type: string }
+        verb: { type: string }
+        capability: { type: string }
+        instance: { type: string }
+        repository: { type: string }
+        actorHash: { type: string }
+        outcome: { type: string, enum: [succeeded, refused, unresolved] }
+        code: { type: string }
+        reason: { type: string }
+        at: { type: string, format: date-time }
+        automationReceiptId: { type: string }
+        evidenceRef: { type: string }
+
+    OperatorAgentActionHandoffRefusal:
+      type: object
+      description: A typed refusal; no target was written. A replay names the one stored receipt.
+      required: [version, outcome, code]
+      properties:
+        version: { type: string, enum: [action-handoff-v1] }
+        outcome: { type: string, enum: [refused, unresolved] }
+        code: { type: string }
+        detail: { type: string }
+        receipt: { $ref: "#/components/schemas/OperatorAgentActionHandoffReceipt" }
+
     InstanceUnavailable:
       type: object
       required: [error, status, instance, reason]
@@ -9647,6 +9728,127 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /v1/operator-agent/action-handoff/prepare:
+    post:
+      summary: Prepare an action-handoff-v1 preview for one allowlisted, reversible operator verb.
+      description: >
+        LOW-tier write that mutates no target (W1-T4559). Requires a verified operator session.
+        The verb must be in the v1 allowlist (fleet.pause, fleet.resume); high-tier, irreversible,
+        financial, destructive, and credential verbs are unavailable. instance and repository must
+        equal this serving instance's server-owned identity. Credential-shaped fields or values,
+        answer-v1 payloads, and unknown fields refuse. The verb's own catalogue policy runs as a dry
+        run. A repeated intentId from the same operator returns the first preview.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [intentId, verb, instance, repository]
+              properties:
+                intentId: { type: string, minLength: 8, maxLength: 128 }
+                verb: { type: string }
+                instance: { type: string }
+                repository: { type: string }
+      responses:
+        "200":
+          description: The first preview for a repeated intent.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffPreview" }
+        "201":
+          description: A new expiring preview with a single-use confirmation identity.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffPreview" }
+        "400":
+          description: Malformed, unknown verb, model-supplied authority, or an answer-v1 payload.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: No verified operator, or a verb excluded from v1.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
+        "409":
+          description: Cross-instance, cross-repository, intent conflict, or the verb policy refuses now.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
+        "503":
+          description: The handoff store or policy check is unavailable; nothing was prepared.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
+
+  /v1/operator-agent/action-handoff/execute:
+    post:
+      summary: Execute a prepared action-handoff-v1 action once, on explicit operator confirmation.
+      description: >
+        MIDDLE-tier write (W1-T4559). Requires the same verified operator who prepared it and
+        `confirm: true`. The confirmation is claimed once; the server then revalidates freshness,
+        instance and repository scope, target state, and verb policy before delegating to the
+        catalogued governed verb. Every claimed confirmation ends in one receipt; a replay returns
+        409 naming it. A 202 or 503 is unresolved and must be reconciled, never retried as new.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [confirmationId, confirm, verb, instance, repository]
+              properties:
+                confirmationId: { type: string }
+                confirm: { type: boolean, enum: [true] }
+                verb: { type: string }
+                instance: { type: string }
+                repository: { type: string }
+      responses:
+        "200":
+          description: The governed verb ran; the receipt cites its ledger evidence.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffReceipt" }
+        "202":
+          description: Unresolved; the external outcome is not certified.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffReceipt" }
+        "400":
+          description: Missing explicit confirmation, model-supplied authority, or an answer-v1 payload.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: No verified operator, or a different operator than the one who prepared it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
+        "404":
+          description: No prepared action has this confirmation identity.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
+        "409":
+          description: Refused after claim (stale, changed target or scope, policy) or a replay.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
+        "503":
+          description: Claim or receipt not durable; reconcile before any new intent.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorAgentActionHandoffRefusal" }
 
   /v1/operator-agent/proposals:
     get:

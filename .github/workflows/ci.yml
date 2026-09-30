@@ -41,6 +41,12 @@ on:
   # workflow that declares this trigger against it before the queue lets a PR land. No `types:`
   # filter, for the same INVARIANT 2 reason `pull_request` and `push` above carry none.
   merge_group:
+  # W1-T4817: a main commit GitHub fired no push event for (two fleet auto-merges landing seconds
+  # apart) is dispatched here, at main's head, by the sweep's `main.run_gap.dispatched` rung; it
+  # is also what lets an operator re-run `ci` on main by hand. A dispatch is neither
+  # `pull_request` nor `push`, so it takes the same shell-guarded lanes `merge_group` does.
+  # No `inputs:` — the sweep dispatches with none. `ci-gate.yml` still gains no trigger.
+  workflow_dispatch:
 
 permissions:
   actions: read
