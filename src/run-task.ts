@@ -43062,10 +43062,7 @@ const INBOX_BAKEOFF_DEFAULT_SAMPLE = 8;
  * verb the operator runs and never a rung the daemon does. It writes `inbox.bakeoff` rows only; the production
  * `inbox.drafted` rows, the draft cache and routing are untouched, so the table cannot move the lead by itself.
  */
-export async function inboxBakeoffCommand(
-  rest: string[],
-  deps: { config?: Config; rawSpawn?: typeof spawnWorker } = {},
-): Promise<number> {
+export async function inboxBakeoffCommand(rest: string[]): Promise<number> {
   const badArg = unknownArgError("inbox-bakeoff", rest, ["--sample"], []);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -43077,7 +43074,7 @@ export async function inboxBakeoffCommand(
     console.error(`inbox-bakeoff: --sample must be a positive integer, got ${sampleRaw}\n${USAGE}`);
     return 2;
   }
-  const config = deps.config ?? loadConfig();
+  const config = loadConfig();
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const proposals = parseProposalRegistry(readFileIfExists(registryPath))
     .sort((a, b) => a.id.localeCompare(b.id, "en", { numeric: true }))
@@ -43091,7 +43088,6 @@ export async function inboxBakeoffCommand(
   const ledgerPath = ledgerPathFor(config);
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "inbox-bakeoff", step, lane: "inbox-bakeoff", ...extra });
-  const rawSpawn = deps.rawSpawn ?? spawnWorker;
 
   const settingsFile = renderWorkerSettings({
     templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
@@ -43120,7 +43116,7 @@ export async function inboxBakeoffCommand(
         mount: cash ? baseMount : { ...baseMount, model: "sonnet", provider: "claude" },
         disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
       });
-      return await rawSpawn({
+      return await spawnWorker({
         ...args,
         onSelectionAssignment: undefined,
         ...(cash ? { routingTrial: { id: "inbox-bakeoff", arm: "cash", reason: `bake-off candidate ${candidate.id}`, models: [candidate.model] } } : {}),
