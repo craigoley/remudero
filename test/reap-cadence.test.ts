@@ -4,7 +4,8 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import {
@@ -14,6 +15,7 @@ import {
 } from "../src/lib/branch-reaper.js";
 import { runAutomaticBranchReapRung } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const runTaskSrc = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
@@ -146,4 +148,51 @@ test("automatic branch cadence: the remote write is wired to the full sweep hook
   const light = runTaskSrc.slice(lightStart);
   assert.match(full, /runAutomaticBranchReapRung\(/);
   assert.doesNotMatch(light, /runAutomaticBranchReapRung\(/);
+});
+
+function rungCompletedRow(exec: (cmd: string, args: string[]) => string, prior: AutomaticBranchReapState = {}): Record<string, unknown> {
+  const logs: Array<[string, Record<string, unknown>]> = [];
+  const scratch = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reap-cause-`));
+  try {
+    runAutomaticBranchReapRung(
+      "other-owner",
+      "target-repo",
+      { root: REPO_ROOT, claudeBin: "/bin/true" } as Config,
+      join(scratch, "ledger.ndjson"),
+      "SWEEP-CAUSE",
+      (step, extra = {}) => logs.push([step, extra]),
+      prior,
+      { root: REPO_ROOT, exec, clock: { now: () => 5000 } },
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+  const row = logs.find(([step]) => step === "branch_reap.sweep.completed");
+  assert.ok(row, `a completed row: ${logs.map(([s]) => s).join(",")}`);
+  return row[1];
+}
+
+test("a reap pass names the trigger apart from the cause of its non-zero exit", () => {
+  // The fleet pushes branches all day, so the trigger is branch-set-changed on nearly every pass;
+  // on 09-30 all 130 completed rows read reason=branch-set-changed and hid the guard-list drift.
+  const prior: AutomaticBranchReapState = { lastRunAtMs: 4000, lastBranchFingerprint: "main" };
+  const row = rungCompletedRow(fakeExec(() => ["main", "run-W1-T3720-1790578461549"], []), prior);
+  assert.equal(row.trigger, "branch-set-changed");
+  assert.equal(row.code, 1);
+  assert.match(String(row.reason), /^guard-list drift: .*orphan_declarations=\d+/);
+});
+
+test("a reap pass names a failed or refused prune as its cause", () => {
+  const names = () => ["main", "old"];
+  const failing = fakeExec(names, []);
+  const failedPush = rungCompletedRow((cmd, args) => {
+    if (args.includes("--delete")) throw new Error("remote rejected");
+    return failing(cmd, args);
+  });
+  assert.match(String(failedPush.reason), /^prune-failed: 1 branch\(es\) still on origin/);
+  const refused = rungCompletedRow((cmd, args) => {
+    if (cmd === "gh" && args.some((a) => a.includes("state=open"))) throw new Error("HTTP 403");
+    return failing(cmd, args);
+  });
+  assert.match(String(refused.reason), /^prune-refused: the open pull requests could not be re-read/);
 });

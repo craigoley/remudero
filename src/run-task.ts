@@ -21115,6 +21115,9 @@ export function reapBranchesCommand(
     /** Heads proven to have no PR at this tip sha ({@link nextNoPrHeadCache}); same contract as above. */
     noPrHeadShaCache?: ReadonlyMap<string, string>;
     onNoPrHeadCacheUpdate?: (next: Readonly<Record<string, string>>) => void;
+    /** Names why a pass exits non-zero (drift, a refused or failed prune), so a caller's ledger row
+     *  reports the cause rather than only the code. */
+    onExitReason?: (reason: string) => void;
   } = {},
 ): number {
   const print = opts.quiet ? (..._args: unknown[]) => {} : console.log;
@@ -21410,6 +21413,7 @@ export function reapBranchesCommand(
         `rmd reap-branches: --prune refused — could not re-read the open pull requests, and an ` +
           `unread list is indistinguishable from "none open": ${why}`,
       );
+      opts.onExitReason?.("prune-refused: the open pull requests could not be re-read");
       return 1;
     }
     if (!opts.quiet) console.error(`rmd reap-branches: the active-branch screen could not read the open pull requests (${why}) — ` +
@@ -21463,7 +21467,10 @@ export function reapBranchesCommand(
         deleted_branches: outcome.deleted,
       });
     }
-    if (outcome.failed.length > 0) return 1;
+    if (outcome.failed.length > 0) {
+      opts.onExitReason?.(`prune-failed: ${outcome.failed.reduce((n, f) => n + f.names.length, 0)} branch(es) still on origin`);
+      return 1;
+    }
   }
 
   let drift = false;
@@ -21495,6 +21502,10 @@ export function reapBranchesCommand(
       `rmd reap-branches: ${deadDeclaredGuards.length} declared guard(s) name a branch absent from origin AND ` +
         `are not cited anywhere else — the branch is gone, remove the declaration: ${deadDeclaredGuards.join(", ")}`,
     );
+  }
+  if (drift) {
+    const counts = { undeclared_guards: plan.undeclaredGuards, dangling_citations: danglingCitations, orphan_declarations: orphanDeclarations, dead_declared_guards: deadDeclaredGuards };
+    opts.onExitReason?.(`guard-list drift: ${Object.entries(counts).filter(([, v]) => v.length > 0).map(([k, v]) => `${k}=${v.length}`).join(" ")}`);
   }
   return drift ? 1 : 0;
 }
@@ -40003,8 +40014,12 @@ export function runAutomaticBranchReapRung(
     repository: `${owner}/${repo}`,
   });
   let code = 1;
+  let exitReason = "unnamed non-zero exit";
   try {
     code = reapBranchesCommand(opts.prune === false ? [] : ["--prune"], {
+      onExitReason: (why) => {
+        exitReason = why;
+      },
       root: checkoutRoot,
       ownerRepo: { owner, repo },
       exec,
@@ -40041,10 +40056,13 @@ export function runAutomaticBranchReapRung(
       // Keep the pre-pass fingerprint; a later poll will retry because the remote cannot be proved current.
     }
   }
+  // `trigger` is why the pass RAN (the fleet pushes branches all day, so it is nearly always
+  // branch-set-changed); `reason` is why it ended as it did — never the trigger read as a failure.
   log("branch_reap.sweep.completed", {
     outcome: code === 0 ? "ok" : "completed_with_drift_or_failure",
     code,
-    reason: decision.reason,
+    trigger: decision.reason,
+    reason: code === 0 ? "clean" : exitReason,
     repository: `${owner}/${repo}`,
   });
 }
