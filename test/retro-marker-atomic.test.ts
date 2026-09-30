@@ -658,6 +658,7 @@ function setupFakeRetroFixture(
       // retroCommand exits right after the marker-advance line with no further gh calls.
       `if [[ "$1" == 'api' ]]; then`,
       `  case "$2" in`,
+      `    */pulls?state=open*) echo '[]'; exit 0 ;;`,
       opts.existingPrWithoutReport
         ? `    */pulls?head=*) echo '[{"html_url":"https://github.com/craigoley/remudero/pull/434343","number":434343}]'; exit 0 ;;`
         : `    */pulls?head=*) echo '[]'; exit 0 ;;`,

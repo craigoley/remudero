@@ -841,6 +841,12 @@ import {
   type RetroPrepublishProvenance,
 } from "./lib/retro-preflight.js";
 import {
+  openRetroPrBlocking,
+  RETRO_OPEN_PR_MAX_AGE_MS,
+  staleOpenRetroPrs,
+  type OpenPrRow,
+} from "./lib/retro-open-pr-guard.js";
+import {
   AUTOMATED_RETRO_DECISION_ENV,
   decodeAutomatedRetroDecision,
   retroExitAfterPrOpened,
@@ -28737,6 +28743,7 @@ async function retroCommand(
     /** Test seam for the retro's blocking local publication gate. Production always uses the
      * real dynamically-enumerated plan-reading preflight. */
     prepublishPreflight?: typeof runRetroPrepublishPreflight;
+    openPrs?: GhApiFetcher;
   } = {},
 ): Promise<number> {
   const dryRun = rest.includes("--dry-run");
@@ -29064,6 +29071,17 @@ async function retroCommand(
       task_ids: [...new Set(retired.map((o) => o.taskId))].slice(0, 20),
     });
   }
+
+  const openRetroRows = (opts.openPrs ?? ghJson)(openPrsRestArgs(owner, repo)) as OpenPrRow[];
+  const blockingPr = openRetroPrBlocking(openRetroRows, retroReadStartedMs, RETRO_OPEN_PR_MAX_AGE_MS);
+  if (blockingPr) {
+    const ageMs = retroReadStartedMs - Date.parse(blockingPr.created_at);
+    log("retro.skipped_open_pr", { pr_number: blockingPr.number, pr_url: blockingPr.html_url, age_ms: ageMs });
+    say(`retro skipped — retro PR #${blockingPr.number} (${blockingPr.html_url}) is still open`);
+    return 1;
+  }
+  const staleRetroPrs = staleOpenRetroPrs(openRetroRows, retroReadStartedMs, RETRO_OPEN_PR_MAX_AGE_MS);
+  if (staleRetroPrs.length > 0) log("retro.open_pr_ignored_stale", { pr_numbers: staleRetroPrs.map((r) => r.number) });
 
   // W1-T2383 rank 3: the lane's own dispatch row, BESIDE its existing start row rather than
   // replacing it — `retro.start` carries this lane's own fields and has its own readers.
