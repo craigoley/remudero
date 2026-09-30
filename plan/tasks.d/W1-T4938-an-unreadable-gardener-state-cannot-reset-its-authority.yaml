@@ -1,0 +1,41 @@
+- id: W1-T4938
+  title: "An unreadable gardener state cannot reset its authority to the optimistic prior and open a duplicate PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high
+  origin: "operator gardener expansion request 2026-09-30; source audit of src/lib/gardener.ts"
+  files: [src/lib/gardener.ts, test/a-gardener-judges-its-own-actions.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    readGardenState currently returns initialGardenState (Beta(3,1)) when an EXISTING state
+    file cannot be parsed or lacks classes. runGarden can then forget a pending PR, a losing
+    outcome, a filing backoff, and the last fingerprint, and may land another PR for the
+    same work. This is not the same as first boot, when no state file exists. Every new
+    quality/debt/innovation gardener would inherit this unsafe recovery behavior.
+  design: |
+    Keep the no-file first-boot path. For an existing unreadable or structurally invalid
+    state file, fail the pass with a diagnostic naming the state path and failure class;
+    do not overwrite the file, consume effects, call inventory/apply/openWorkspace/land,
+    or replace its Beta record. startGarden should record its existing gardener_failed
+    ledger event so the failure is visible and retryable after repair. Validate the
+    loaded state enough to reject malformed classes, pending action class, and bad
+    fingerprint shape while preserving backward-compatible optional fields and
+    initialization of newly added classes. Do not change the healthy gardener ranking
+    or reinterpret a missing file as corruption.
+  acceptance:
+    - claim: "a corrupt existing state refuses an action without overwriting the state or losing a pending PR"
+      proof: 'grep: test("W1-T4938: corrupt existing gardener state refuses a duplicate PR" in test/a-gardener-judges-its-own-actions.test.ts'
+    - claim: "a missing state still initializes once and a valid older state still loads"
+      proof: 'grep: test("W1-T4938: first boot and compatible older gardener state still load" in test/a-gardener-judges-its-own-actions.test.ts'
+    - claim: "a timed gardener logs the unreadable path and retries after repair"
+      proof: 'grep: test("W1-T4938: unreadable gardener state is visible and repairable" in test/a-gardener-judges-its-own-actions.test.ts'
+  falsifier: |
+    Seed a malformed state file for a spec with an available action and a mocked landing
+    workspace. The current code replaces it with Beta(3,1) and can call land; the fix
+    must call land zero times, leave the file bytes unchanged, and log gardener_failed.
+    Removing the file should separately allow a first pass, proving the two cases differ.
