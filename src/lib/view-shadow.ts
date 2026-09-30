@@ -19,11 +19,8 @@
  * The request path never pays for this: the route only notes the request after its response finished,
  * the legacy side is computed on a deferred turn, and the diff and its evidence run in the worker.
  */
-import { readFileSync } from "node:fs";
 import { systemClock, type Clock } from "./clock.js";
 import { withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
-import { repoSummarySync } from "./repo-dashboard-route.js";
-import { repositoriesPortfolio, type RepositoriesData, type RepositoriesSources } from "./repositories-view.js";
 import { renderView, type ReadModelViewRoutesOptions, type ViewDefinition } from "./views.js";
 
 export const VIEW_SHADOW_DIFF_STEP = "view.shadow_diff";
@@ -53,7 +50,8 @@ export interface ShadowFieldDiff {
   members?: ShadowMembers;
 }
 
-/** The entity ids each side counted at one aggregate path, one entry per counted row. */
+/** The entity ids each side counted at one aggregate path, one entry per counted row. A member
+ *  `<id>#<row>` names the entity `<id>` and one row of it, so a row counted twice is a duplicate. */
 export interface ShadowMembers {
   legacy: readonly string[];
   view: readonly string[];
@@ -162,6 +160,13 @@ export function memberDelta(members: ShadowMembers): string[] {
   return [...new Set([...l.keys(), ...v.keys()])].filter((id) => (l.get(id) ?? 0) !== (v.get(id) ?? 0)).sort();
 }
 
+const entityOf = (member: string): string => member.split("#")[0]!;
+
+/** The entities whose rows the evidence must be read for: those of every differing member. */
+export function memberEntities(members: ShadowMembers): string[] {
+  return [...new Set(memberDelta(members).map(entityOf))];
+}
+
 /**
  * A count diff, explained id by id from its measured members: legacy's extra counts of one id are
  * `dedupe`; an id only one side counts is `timing` when a row between the two ages names it, else
@@ -185,8 +190,9 @@ function classifyAggregate(legacy: number, view: number, members: ShadowMembers,
     }
     units.dedupe += Math.max(0, dl - 1);
     if (Math.min(dl, 1) === dv) continue;
-    const cls: ShadowClassification = ev.namedInGap.has(id) ? "timing"
-      : ev.legacyHorizonMs !== undefined && ev.namedBeforeHorizon.has(id) ? "legacy_horizon" : "real";
+    const entity = entityOf(id);
+    const cls: ShadowClassification = ev.namedInGap.has(entity) ? "timing"
+      : ev.legacyHorizonMs !== undefined && ev.namedBeforeHorizon.has(entity) ? "legacy_horizon" : "real";
     units[cls]++;
     if (cls === "real") unexplained.push(id);
   }
@@ -271,6 +277,18 @@ export interface ShadowLegacy {
   duplicates?: { rows: number; ids: readonly string[] };
   /** Per aggregate path, what each side counted there; a count diff without them is `real`. */
   members?: Readonly<Record<string, ShadowMembers>>;
+  /** A value computed only from other paths (a rate from two counts): explained exactly when they are. */
+  derived?: Readonly<Record<string, readonly string[]>>;
+}
+
+/** A derived path takes its inputs' classes: `real` unless an input differs and every differing input is explained. */
+function classifyDerived(inputs: readonly string[], judged: ReadonlyArray<{ path: string; classification: ShadowClassification }>): { classification: ShadowClassification; reason: string } {
+  const classes = judged.filter((d) => inputs.includes(d.path)).map((d) => d.classification);
+  if (classes.length === 0 || classes.includes("real")) {
+    return { classification: "real", reason: classes.length === 0 ? `none of its inputs (${inputs.join(" ")}) differ` : "an input it is computed from is real" };
+  }
+  const top = SHADOW_CLASSIFICATIONS.find((c) => classes.includes(c))!;
+  return { classification: top, reason: `computed from ${inputs.join(" ")}, each explained (${classes.join(", ")})` };
 }
 
 export interface ViewShadowState {
@@ -368,10 +386,14 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
       });
       const viewAsOf = body.asOf === null ? null : Date.parse(body.asOf);
       const ev = opts.evidence({
-        view, ids: raw.flatMap((d) => [...d.ids, ...(d.members ? memberDelta(d.members) : [])]), legacyAsOfMs: legacy.asOfMs, viewAsOfMs: Number.isFinite(viewAsOf) ? viewAsOf : null,
+        view, ids: raw.flatMap((d) => [...d.ids, ...(d.members ? memberEntities(d.members) : [])]), legacyAsOfMs: legacy.asOfMs, viewAsOfMs: Number.isFinite(viewAsOf) ? viewAsOf : null,
         ...(legacy.horizonMs !== undefined ? { legacyHorizonMs: legacy.horizonMs } : {}), ...(legacy.duplicates ? { duplicates: legacy.duplicates } : {}),
       });
-      const diffs = raw.map((d) => ({ path: d.path, ...classifyShadowDiff(d, ev) }));
+      const judged = raw.filter((d) => !legacy.derived?.[d.path]).map((d) => ({ path: d.path, ...classifyShadowDiff(d, ev) }));
+      const diffs = raw.map((d) => {
+        const inputs = legacy.derived?.[d.path];
+        return inputs ? { path: d.path, ...classifyDerived(inputs, judged) } : judged.find((j) => j.path === d.path)!;
+      });
       for (const d of diffs) state.diffs[d.classification]++;
       if (diffs.some((d) => d.classification === "real")) Object.assign(state, { streakSamples: 0, streakSinceMs: now, lastRealMs: now });
       else state.streakSamples++;
@@ -438,21 +460,4 @@ export function legacyViewSampler(opts: { legacy: readonly ViewDefinition[]; pos
 /** The view routes' options with the shadow sampler attached when serve runs a read-model worker. */
 export function withViewShadow(handle: { shadow(request: ShadowRequest): void } | undefined, opts: ReadModelViewRoutesOptions): ReadModelViewRoutesOptions {
   return handle ? { ...opts, shadow: legacyViewSampler({ legacy: opts.legacy, post: (request) => handle.shadow(request), ...(opts.clock ? { clock: opts.clock } : {}) }) } : opts;
-}
-
-/** `repositories`' legacy side, computed in the worker: each instance's #7926 summary over its own ledger read. */
-export function legacyRepositories(sourcesPath: string, nowMs: number): ShadowLegacy | undefined {
-  let published: RepositoriesSources;
-  try {
-    published = JSON.parse(readFileSync(sourcesPath, "utf8")) as RepositoriesSources;
-  } catch {
-    // deliberate: no published sources means no legacy side to compare; the sample is skipped, not a diff.
-    return undefined;
-  }
-  const instances: RepositoriesData["instances"] = published.instances.map(({ instanceId, options }) => {
-    const outcome = repoSummarySync(options, nowMs);
-    return outcome.ok ? { instanceId, summary: outcome.summary } : { instanceId, reason: outcome.reason };
-  });
-  const data: RepositoriesData = { instances, ...repositoriesPortfolio(published, { instances }) };
-  return { data, asOfMs: nowMs };
 }

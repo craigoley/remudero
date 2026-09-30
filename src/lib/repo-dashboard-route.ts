@@ -163,6 +163,8 @@ export interface RepoTelemetry {
   cash_usd_7d: number | null;
   subscription: RepoSubscriptionUsage | null;
   modelsused: string[] | null;
+  /** Per count, what it counted (view-shadow.ts members): a task id, or `<task>#<ts>` for one verdict row. */
+  members?: Record<string, string[]>;
 }
 
 /** What only the instance that operates a repository knows about it. */
@@ -219,7 +221,7 @@ export function lastDaemonHeartbeatMs(rows: readonly Row[]): number | null {
  *  repository are its own work. */
 export function projectRepoTelemetry(
   repo: ManagedRepo,
-  sources: { ledger?: readonly Row[]; plan?: Plan; nowMs: number; own?: boolean },
+  sources: { ledger?: readonly Row[]; plan?: Plan; nowMs: number; own?: boolean; members?: boolean },
 ): RepoTelemetry {
   const { plan, nowMs } = sources;
   if (!sources.ledger) return UNKNOWN;
@@ -247,8 +249,8 @@ export function projectRepoTelemetry(
   let lastRunMs = -Infinity;
   let lastRun: string | null = null;
   const succeededTasks = new Set<string>();
-  let failed = 0;
-  let superseded = 0;
+  const failedRows: string[] = [];
+  const supersededRows: string[] = [];
   let tokens = 0;
   let cacheRead = 0;
   let cash = 0;
@@ -269,8 +271,7 @@ export function projectRepoTelemetry(
     } else if (row.step === "verdict") {
       if (ts > lastRunMs) [lastRunMs, lastRun] = [ts, str(row.ts)!];
       if (!ERROR_VERDICTS.has(verdict)) continue;
-      if ((creditedAt.get(taskId) ?? -Infinity) >= ts) superseded += 1;
-      else failed += 1;
+      ((creditedAt.get(taskId) ?? -Infinity) >= ts ? supersededRows : failedRows).push(`${taskId}#${str(row.ts)}`);
     } else if (row.step === "worker.assignment") {
       const facts = assignmentFacts(row);
       const model = canonicalModel(facts.model);
@@ -304,6 +305,15 @@ export function projectRepoTelemetry(
     namesRepo(t.repo, repo) && t.status !== "merged" && t.status !== "done" && t.retirement === undefined
     && !creditedAt.has(t.id));
   const succeeded = succeededTasks.size;
+  const failed = failedRows.length;
+  const superseded = supersededRows.length;
+  const members = sources.members !== true ? undefined : {
+    "health.queuedtasks": (open ?? []).map((t) => t.id),
+    "health.queued": (open ?? []).filter((t) => t.status === "queued").map((t) => t.id),
+    "health.runs7d.succeeded": [...succeededTasks],
+    "health.runs7d.failed": failedRows,
+    "health.runs7d.superseded": supersededRows,
+  };
   return {
     queuedtasks: open ? open.length : null,
     queued: open ? open.filter((t) => t.status === "queued").length : null,
@@ -319,6 +329,7 @@ export function projectRepoTelemetry(
       windows: [...windows.values()].map((w) => w.value).sort((a, b) => `${a.provider}|${a.window}`.localeCompare(`${b.provider}|${b.window}`)),
     },
     modelsused: [...models].sort((a, b) => a.localeCompare(b)),
+    ...(members ? { members } : {}),
   };
 }
 
@@ -423,6 +434,8 @@ export interface RepoTelemetryRequest {
   /** The instance's fleet-control root (PAUSE/STOP) and incident state directory. */
   controlRoot?: string;
   incidentsDir?: string;
+  /** Also name each count's members, for the shadow comparator. */
+  members?: boolean;
 }
 
 export interface RepoLedgerIndexMeta {
@@ -515,7 +528,7 @@ export function computeRepoTelemetrySync(
   const signals = readSignals(req, lastDaemonMs);
   return {
     ok: true,
-    telemetry: req.repos.map((repo, i) => projectRepoTelemetry(repo, { ledger, plan, nowMs: req.nowMs, own: i === req.own })),
+    telemetry: req.repos.map((repo, i) => projectRepoTelemetry(repo, { ledger, plan, nowMs: req.nowMs, own: i === req.own, members: req.members === true })),
     ...(signals ? { signals } : {}),
     ...(index ? { index } : {}),
   };
@@ -628,6 +641,8 @@ export interface RepoDashboardOptions {
   readPlan?: (path: string) => Plan;
   /** Test seam: the module a spawned telemetry worker loads. */
   workerUrl?: URL;
+  /** repoSummarySync also returns each own repository's count members (the shadow comparator's). */
+  shadowMembers?: boolean;
 }
 
 type Identity = { repo: ManagedRepo; source: RepoDashboardEntry["source"]; own: boolean };
@@ -678,6 +693,7 @@ function telemetryRequest(deps: RepoDashboardOptions, identities: Identity[], le
     ...(ownIndex >= 0 ? { own: ownIndex } : {}),
     ...(deps.controlRoot !== undefined ? { controlRoot: deps.controlRoot } : {}),
     ...(deps.incidentsDir !== undefined ? { incidentsDir: deps.incidentsDir } : {}),
+    ...(deps.shadowMembers ? { members: true } : {}),
   };
 }
 
@@ -699,7 +715,7 @@ function dashboardResult(deps: RepoDashboardOptions, resolved: Resolved, outcome
  * telemetry and projection. The read-model worker calls it with `readLedger` over its `repo_row` table.
  * A failed telemetry pass is `{ ok: false, reason }`, where the route answers its read-cache error.
  */
-export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number): { ok: true; summary: RepoDashboardResult } | { ok: false; reason: string } {
+export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number): { ok: true; summary: RepoDashboardResult; members?: Record<string, Record<string, string[]>> } | { ok: false; reason: string } {
   const planPath = deps.planPath ?? join(deps.root, "plan", "tasks.yaml");
   let text: string | undefined;
   if (deps.repoRegistryPath !== undefined && !deps.instanceRepository) {
@@ -715,7 +731,11 @@ export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number): { ok
   const planStamp = `${statStampSync(planPath)}|${statStampSync(join(dirname(planPath), "tasks.d"))}`;
   const outcome = computeRepoTelemetrySync(telemetryRequest(deps, resolved.identities, deps.ledgerPath, planPath, planStamp, nowMs), { readLedger: deps.readLedger, readPlan: deps.readPlan });
   if (!outcome.ok) return outcome;
-  return { ok: true, summary: dashboardResult(deps, resolved, outcome, nowMs, true) };
+  const members = Object.fromEntries(resolved.identities.flatMap((identity, i) => {
+    const counted = identity.own ? outcome.telemetry[i]?.members : undefined;
+    return counted ? [[`${identity.repo.owner}/${identity.repo.repo}`, counted]] : [];
+  }));
+  return { ok: true, summary: dashboardResult(deps, resolved, outcome, nowMs, true), ...(deps.shadowMembers ? { members } : {}) };
 }
 
 /**

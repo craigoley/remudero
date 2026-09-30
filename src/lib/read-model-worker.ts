@@ -31,8 +31,8 @@ import {
   type ReadModelLease,
 } from "./read-model-db.js";
 import { createNowView } from "./now-view.js";
-import { createRepositoriesReadModelView, repositoriesSourcesPath } from "./repositories-view.js";
-import { createViewShadow, legacyRepositories, readShadowEvidence, sqliteShadowStore, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ViewShadow } from "./view-shadow.js";
+import { createRepositoriesReadModelView } from "./repositories-view.js";
+import { createViewShadow, readShadowEvidence, sqliteShadowStore, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ViewShadow } from "./view-shadow.js";
 import { oldestAsOf, viewEtag, type ViewBody, type ViewBodyEntry, type ViewSource } from "./views.js";
 
 const READ_MODEL_WORKER_KIND = "remudero-read-model" as const;
@@ -260,9 +260,6 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }));
   const lastEtag = new Map<string, string>();
   const latest = new Map<string, ViewBody>();
-  const workerLegacy: Record<string, (now: number) => ShadowLegacy | undefined> = {
-    repositories: (now) => legacyRepositories(repositoriesSourcesPath(opts.stateDir), now),
-  };
   let comparator: { db: ReadModelDb; shadow: ViewShadow } | undefined;
   let switches = DEFAULT_READ_MODEL_SWITCHES;
   let switchesMtimeMs = -1;
@@ -413,7 +410,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     shadow(request: ShadowRequest): boolean {
       const body = latest.get(`${request.view}\u0000${request.key}`);
       try {
-        const legacy = request.legacy ?? workerLegacy[request.view]?.(clock.now())
+        const legacy = request.legacy
           ?? (body ? views.find((view) => view.name === request.view)?.legacy?.(request.key, clock.now(), body.data) : undefined);
         const shadow = body && legacy ? viewShadow() : undefined;
         if (!body || !legacy || !shadow) return false;

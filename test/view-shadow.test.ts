@@ -9,7 +9,7 @@ import { fixedClock, type Clock } from "../src/lib/clock.js";
 import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import { acquireLease, type ReadModelDb } from "../src/lib/read-model-db.js";
 import { createReadModelTicker, createReadModelWorker, readModelStatusView, runReadModelWorker, type ReadModelView, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { repositoriesSourcesPath } from "../src/lib/repositories-view.js";
+import { legacyRepositories, repositoriesSourcesPath } from "../src/lib/repositories-view.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import {
   VIEW_SHADOW_DIFF_STEP,
@@ -17,9 +17,8 @@ import {
   createShadowSampler,
   createViewShadow,
   diffViewData,
-  legacyRepositories,
   legacyViewSampler,
-  memberDelta,
+  memberEntities,
   readShadowEvidence,
   shadowReadiness,
   sqliteShadowStore,
@@ -128,7 +127,7 @@ test("a diff where legacy counted duplicate rows is dedupe", (t) => {
 function countClass(db: ReadModelDb, legacy: string[], view: string[], extra: { legacyAsOfMs?: number; legacyHorizonMs?: number } = {}): { classification: string; reason: string } {
   const [diff] = diffViewData({ counts: { queued: legacy.length } }, { counts: { queued: view.length } });
   const members = { legacy, view };
-  const ev = readShadowEvidence([db], { ids: memberDelta(members), legacyAsOfMs: extra.legacyAsOfMs ?? T0, viewAsOfMs: T0, legacyHorizonMs: extra.legacyHorizonMs ?? T0 - DAY });
+  const ev = readShadowEvidence([db], { ids: memberEntities(members), legacyAsOfMs: extra.legacyAsOfMs ?? T0, viewAsOfMs: T0, legacyHorizonMs: extra.legacyHorizonMs ?? T0 - DAY });
   return classifyShadowDiff({ ...diff!, members }, ev);
 }
 
@@ -170,6 +169,20 @@ test("compare attaches the legacy side's members to a count diff", (t) => {
   assert.deepEqual(result.diffs.map((d) => [d.path, d.classification]), [["counts.queued", "legacy_horizon"]]);
   const bare = shadow.compare({ view: "now", key: "", requests: 1, legacy: { ...legacy, members: {} }, body: { data: { counts: { queued: 2 } }, asOf: new Date(T0).toISOString() } });
   assert.deepEqual(bare.diffs.map((d) => d.classification), ["real"], "the same count without members stays real");
+});
+
+test("a rate computed from two counts is explained only when a count it reads is", (t) => {
+  const db = evidenceDb(t);
+  const shadow = createViewShadow({ clock: fixedClock(T0), log: () => {}, evidence: (input) => readShadowEvidence([db], input) });
+  const derived = { rate: ["ok", "bad"] };
+  const compare = (legacyData: unknown, members: Record<string, { legacy: string[]; view: string[] }>) =>
+    shadow.compare({ view: "r", key: "", requests: 1, legacy: { data: legacyData, asOfMs: T0, members, derived }, body: { data: { ok: 1, bad: 1, rate: 0.5 }, asOf: null } }).diffs;
+  const explained = compare({ ok: 1, bad: 2, rate: 2 / 3 }, { bad: { legacy: ["W1-T3#a", "W1-T3#a"], view: ["W1-T3#a"] } });
+  assert.deepEqual(explained.map((d) => [d.path, d.classification]), [["bad", "dedupe"], ["rate", "dedupe"]]);
+  const unexplained = compare({ ok: 2, bad: 2, rate: 0.5 + 1e-9 }, { ok: { legacy: ["W1-T3#o", "W1-T3#o"], view: ["W1-T3#o"] }, bad: { legacy: ["W1-T3#a", "W1-T9#b"], view: ["W1-T3#a"] } });
+  assert.deepEqual(unexplained.map((d) => [d.path, d.classification]), [["bad", "real"], ["ok", "dedupe"], ["rate", "real"]], "one explained input does not explain the rate");
+  const alone = compare({ ok: 1, bad: 1, rate: 0.4 }, {});
+  assert.deepEqual(alone.map((d) => [d.path, d.classification]), [["rate", "real"]]);
 });
 
 test("a structural diff matches array items by id and ignores build stamps", () => {

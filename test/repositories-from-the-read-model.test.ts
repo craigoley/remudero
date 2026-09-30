@@ -29,6 +29,7 @@ import {
 } from "../src/lib/repositories-view.js";
 import { buildServeServer, repositoriesSources, type ServeDeps } from "../src/lib/serve.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { VIEW_SHADOW_DIFF_STEP, type ShadowRequest } from "../src/lib/view-shadow.js";
 import type { ViewBody } from "../src/lib/views.js";
 
 // P1-08: the repositories view is #7926's repos summary for every instance, computed from each instance's
@@ -140,8 +141,9 @@ function fixture(t: TestCtx): Fixture {
   return { root, stateDir, consoleRoot, sources };
 }
 
-function ticker(f: Fixture, opts: { now?: number; holder?: string; view?: ReturnType<typeof createRepositoriesReadModelView<ReadModelInstanceState>> } = {}): { tick: () => ReadModelBodyEntry | undefined; release: () => void } {
+function ticker(f: Fixture, opts: { now?: number; holder?: string; view?: ReturnType<typeof createRepositoriesReadModelView<ReadModelInstanceState>> } = {}): { tick: () => ReadModelBodyEntry | undefined; release: () => void; shadow: (request: ShadowRequest) => boolean; logs: Array<{ step: string; extra: Record<string, unknown> }> } {
   let last: ReadModelBodyEntry | undefined;
+  const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
   let now = opts.now ?? NOW;
   const view = opts.view ?? createRepositoriesReadModelView(ledgerSource);
   const clock = { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() };
@@ -149,7 +151,7 @@ function ticker(f: Fixture, opts: { now?: number; holder?: string; view?: Return
     stateDir: f.stateDir,
     instances: [{ name: "core", ledgerDir: f.stateDir }, { name: "console", ledgerDir: join(f.consoleRoot, "state") }],
     views: [view], clock, holder: opts.holder ?? "serve-a",
-    post: (m) => void (m.type === "body" && (last = m.entry)),
+    post: (m) => void (m.type === "body" ? (last = m.entry) : m.type === "log" && logs.push({ step: m.step, extra: m.extra })),
   });
   return {
     tick: () => {
@@ -159,6 +161,8 @@ function ticker(f: Fixture, opts: { now?: number; holder?: string; view?: Return
       return last;
     },
     release: () => void inner.release(),
+    shadow: (request) => inner.shadow(request),
+    logs,
   };
 }
 
@@ -192,6 +196,33 @@ test("repositories from the read model equal the repos summary of each instance"
   assert.equal(paused.active, false, "the console instance is paused");
   assert.equal(paused.health.condition, "paused");
   assert.equal(paused.telemetry.modelsused?.includes("claude-opus-5-5"), true);
+});
+
+test("a repositories count diff is judged by the rows each id it counted", (t) => {
+  const f = fixture(t);
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => f.sources })();
+  const run = ticker(f);
+  repositories(run.tick());
+  t.after(() => run.release());
+  const live = join(f.stateDir, "ledger.ndjson");
+  const failedRow = readFileSync(live, "utf8").split("\n").find((line) => line.includes('"blocked_ci"'))!;
+  const base = "instances[instanceId=core].summary.repos[id=craigoley/remudero].health";
+  const sample = (): Array<{ path: string; classification: string; reason: string }> => {
+    assert.equal(run.shadow({ view: "repositories", key: "", requests: 1 }), true, "the worker computed the legacy side and compared");
+    const row = run.logs.filter((l) => l.step === VIEW_SHADOW_DIFF_STEP).at(-1);
+    assert.ok(row, "a view.shadow_diff row was written");
+    return row.extra.diffs as Array<{ path: string; classification: string; reason: string }>;
+  };
+  // Legacy's live file re-emits c-T2's failure under a retried run id; the view counted that failure once.
+  writeFileSync(live, `${readFileSync(live, "utf8")}${failedRow.replace('"run_id":"c2"', '"run_id":"c2b"')}\n`);
+  const dup = sample();
+  assert.deepEqual(dup.map((d) => [d.path, d.classification]), [[`${base}.errorrate`, "dedupe"], [`${base}.runs7d.failed`, "dedupe"]], JSON.stringify(dup));
+  // A failure no read-model row names: its count is real, though c-T2's duplicate is still explained.
+  const unnamed = JSON.stringify({ ts: iso(3_600_000), step: "verdict", run_id: "c9", task_id: "c-T9", verdict: "no_pr", repo: "craigoley/remudero" });
+  writeFileSync(live, `${readFileSync(live, "utf8")}${unnamed}\n`);
+  const failed = sample().find((d) => d.path === `${base}.runs7d.failed`)!;
+  assert.equal(failed.classification, "real");
+  assert.match(failed.reason, /no measured row explains c-T9#.*1 dedupe, 1 real/);
 });
 
 test("a row carried by several rotations is counted once", (t) => {

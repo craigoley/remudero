@@ -28,6 +28,7 @@ import {
   type RepoDashboardOptions,
   type RepoDashboardResult,
 } from "./repo-dashboard-route.js";
+import type { ShadowLegacy } from "./view-shadow.js";
 import type { ViewSource } from "./views.js";
 
 export const REPOSITORIES_VIEW_VERSION = 1;
@@ -136,6 +137,47 @@ interface InstanceSummary {
   sourcesMtimeMs: number;
   summary?: RepoDashboardResult;
   reason?: string;
+  /** What each own repository's counts counted, by repository id (the shadow comparator's members). */
+  members?: Record<string, Record<string, string[]>>;
+}
+
+type CountMembers = Record<string, Record<string, Record<string, string[]>>>;
+
+/** Each instance's count members as diff paths into `RepositoriesData`: `instances[instanceId=…].summary.repos[id=…].<count>`. */
+export function repositoriesMemberPaths(byInstance: CountMembers): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const [instanceId, repos] of Object.entries(byInstance)) {
+    for (const [repoId, counts] of Object.entries(repos)) {
+      for (const [count, ids] of Object.entries(counts)) out[`instances[instanceId=${instanceId}].summary.repos[id=${repoId}].${count}`] = ids;
+    }
+  }
+  return out;
+}
+
+/** `repositories`' legacy side: each instance's #7926 summary over its own ledger read, with its count members. */
+export function legacyRepositories(sourcesPath: string, nowMs: number): ShadowLegacy & { members: Record<string, { legacy: string[]; view: string[] }> } | undefined {
+  let published: RepositoriesSources;
+  try {
+    published = JSON.parse(readFileSync(sourcesPath, "utf8")) as RepositoriesSources;
+  } catch {
+    // deliberate: no published sources means no legacy side to compare; the sample is skipped, not a diff.
+    return undefined;
+  }
+  const counted: CountMembers = {};
+  const instances: RepositoriesData["instances"] = published.instances.map(({ instanceId, options }) => {
+    const outcome = repoSummarySync({ ...options, shadowMembers: true }, nowMs);
+    if (!outcome.ok) return { instanceId, reason: outcome.reason };
+    counted[instanceId] = outcome.members ?? {};
+    return { instanceId, summary: outcome.summary };
+  });
+  const data: RepositoriesData = { instances, ...repositoriesPortfolio(published, { instances }) };
+  const paths = repositoriesMemberPaths(counted);
+  const members = Object.fromEntries(Object.entries(paths).map(([path, ids]) => [path, { legacy: ids, view: [] as string[] }]));
+  const derived = Object.fromEntries(Object.keys(paths).filter((path) => path.endsWith(".health.runs7d.failed")).map((failed) => {
+    const health = failed.slice(0, -".runs7d.failed".length);
+    return [`${health}.errorrate`, [`${health}.runs7d.succeeded`, failed]];
+  }));
+  return { data, asOfMs: nowMs, members, derived };
 }
 
 function planReader(): (path: string) => Plan {
@@ -162,18 +204,30 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
   name: string;
   version: number;
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: RepositoriesData; sources: ViewSource[] }>;
+  legacy(key: string, now: number): ShadowLegacy | undefined;
 } {
   const sourcesFile = readOnMtimeChange(readSources);
   const registryFile = readOnMtimeChange(readRegistry);
   const computed = new Map<string, InstanceSummary>();
   const readPlan = planReader();
+  let sourcesPath: string | undefined;
   return {
     name: "repositories",
     version: REPOSITORIES_VIEW_VERSION,
+    /** The shadow comparator's legacy side, each count's members paired with what this view's summaries counted. */
+    legacy(_key, now) {
+      const legacy = sourcesPath === undefined ? undefined : legacyRepositories(sourcesPath, now);
+      if (!legacy) return undefined;
+      const mine = repositoriesMemberPaths(Object.fromEntries([...computed].map(([instanceId, s]) => [instanceId, s.members ?? {}])));
+      for (const path of Object.keys(mine)) legacy.members[path] ??= { legacy: [], view: [] };
+      for (const [path, pair] of Object.entries(legacy.members)) pair.view = mine[path] ?? [];
+      return legacy;
+    },
     materialize: ({ now, instances }) => {
       const dbPath = instances.find((slot) => slot.db)?.db?.path;
       if (dbPath === undefined) return [];
       const path = join(dirname(dbPath), REPOSITORIES_SOURCES_FILE);
+      sourcesPath = path;
       const published = sourcesFile(path);
       if (published === undefined) return [{ key: "", data: { instances: [], projects: [], reason: "serve has not published the repository sources yet" }, sources: [] }];
       const sourcesMtimeMs = statSync(path).mtimeMs;
@@ -190,8 +244,8 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
         if (!prior || ageMs >= REPO_TELEMETRY_CACHE_TTL_MS || (moved && ageMs >= REPO_TELEMETRY_MIN_AGE_MS)) {
           const next = summarize(slot, options, now, readPlan);
           current = next.summary
-            ? { atMs: now, generation, sourcesMtimeMs, summary: next.summary }
-            : { atMs: now, generation, sourcesMtimeMs, reason: next.reason, ...(prior?.summary ? { summary: prior.summary } : {}) };
+            ? { atMs: now, generation, sourcesMtimeMs, summary: next.summary, ...(next.members ? { members: next.members } : {}) }
+            : { atMs: now, generation, sourcesMtimeMs, reason: next.reason, ...(prior?.summary ? { summary: prior.summary, ...(prior.members ? { members: prior.members } : {}) } : {}) };
           computed.set(instanceId, current);
         }
         sources.push(summarySource(instanceId, current!));
@@ -231,7 +285,7 @@ function summarize(
   options: RepositoriesInstanceOptions,
   now: number,
   readPlan: (path: string) => Plan,
-): { summary?: RepoDashboardResult; reason?: string } {
+): { summary?: RepoDashboardResult; reason?: string; members?: Record<string, Record<string, string[]>> } {
   if (slot === undefined || slot.db === undefined) return { reason: "the read model does not project this instance" };
   if (slot.state.tickedAt === undefined) return { reason: "the read model has not projected this instance's ledger yet" };
   const db = slot.db;
@@ -241,8 +295,8 @@ function summarize(
   } catch (error) {
     return { reason: `repository rows unreadable: ${(error as Error).message}` };
   }
-  const outcome = repoSummarySync({ ...options, readLedger: () => rows, readPlan }, now);
-  return outcome.ok ? { summary: outcome.summary } : { reason: outcome.reason };
+  const outcome = repoSummarySync({ ...options, readLedger: () => rows, readPlan, shadowMembers: true }, now);
+  return outcome.ok ? { summary: outcome.summary, ...(outcome.members ? { members: outcome.members } : {}) } : { reason: outcome.reason };
 }
 
 /** Absent until the first summary, stale while the last recompute failed (#7928), else fresh. */
