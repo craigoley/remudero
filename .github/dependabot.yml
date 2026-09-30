@@ -6,6 +6,12 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    # head-identity-gate admits a bump by its `chore(deps)` subject; pin it rather than let
+    # Dependabot infer `build(deps)` from history.
+    commit-message:
+      prefix: chore
+      prefix-development: chore
+      include: scope
     # IGNORE-FREE by design (MASTER-PLAN §5 FLEET FINDING): minor+patch
     # bumps are grouped so they don't flood one-PR-per-bump; MAJOR bumps
     # are excluded from AUTO-MERGE at the dep-review lane (W1-T54), never
@@ -23,6 +29,9 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
     groups:
       image-cli-minor-and-patch:
         update-types:

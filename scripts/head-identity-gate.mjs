@@ -128,8 +128,15 @@ export function isDependencyDeclarationPath(path, readRootManifest = () => readF
  * @param {{ headRef: string | undefined, subject: string, changedPaths: readonly string[] | undefined }} input
  */
 export function isDependencyBumpHead({ headRef, subject, changedPaths }) {
-  if (!String(headRef ?? "").startsWith("dependabot/")) return false;
-  if (!/^chore\(deps(?:-dev)?\)/i.test(String(subject ?? "").trim())) return false;
+  const ref = String(headRef ?? "");
+  if (!ref.startsWith("dependabot/")) return false;
+  const line = String(subject ?? "").trim();
+  // Dependabot picks `build(deps)` or `chore(deps)` from repo history (measured 2026-09-30: #7956 and
+  // #7957 said `build(deps)`), and the fleet's branch update makes the head a merge of main into this
+  // same branch. Both are still a bump; the path limb below is what keeps the exemption safe.
+  const bumpSubject = /^(?:chore|build)\(deps(?:-dev)?\)/i.test(line);
+  const updateMerge = line === `Merge branch 'main' into ${ref}`;
+  if (!bumpSubject && !updateMerge) return false;
   if (!Array.isArray(changedPaths) || changedPaths.length === 0) return false;
   return changedPaths.every((path) => isDependencyDeclarationPath(path));
 }

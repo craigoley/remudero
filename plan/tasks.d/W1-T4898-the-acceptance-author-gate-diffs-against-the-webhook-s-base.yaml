@@ -1,0 +1,76 @@
+- id: W1-T4898
+  title: "THE ACCEPTANCE AUTHOR GATE DIFFS AGAINST THE WEBHOOK'S base.sha, SO A HEAD THAT ALREADY CARRIES NEWER MAIN IS JUDGED ON MAIN'S OWN PLAN SHARDS — W1-T3060 moved ci.yml's seven diffs onto the merge commit's first parent and left this standalone workflow on the payload; take the base from HEAD^1 when HEAD^2 is the payload's head"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 12.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator-session#followups-2026-09-29-stale-base-gate"
+  plan_refs: [W1-T3060, W1-T3197, W1-T3231, W1-T3414]
+  files:
+    - scripts/acceptance-author-gate.mjs
+    - test/acceptance-author-gate.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-29 on #7834: a PR that had merged main after main moved 10 commits was refused
+    `rule-15-split`; its real diff was 6 code and test files with no plan file, the gate's diff was 66
+    files. Re-running the job did not clear it, because a re-run replays the ORIGINAL event payload and
+    `pull_request.base.sha` in it is the old base. A fresh event (a body edit, a push) cleared it.
+    RE-VERIFIED on main 074249863 (2026-09-30). `scripts/acceptance-author-gate.mjs` still takes
+    `baseSha` from `readEventPayload` (`pr.base.sha`) and hands it, unchanged, to four range readers:
+    `changedPathsAtRange` and `introducedShardTaskIds` and `rule15SplitAtRange` (all
+    `git diff <base>...<head>`) and `commitTaskTrailersAtRange` (`git log <base>..<head>`). No commit
+    touches the script or `.github/workflows/acceptance-author-gate.yml` after #7434, and both diffs
+    are still payload-based. REPRODUCED: main C0, PR branch adds `src/x.ts`, main then adds one plan
+    shard, the PR merges main. `git diff --name-only C0...HEAD` names `plan/tasks.d/n.yaml` AND
+    `src/x.ts` (a mixed diff, so `rule15SplitViolation` refuses); `git diff --name-only main...HEAD`
+    names only `src/x.ts`.
+    THE SAME DEFECT CLASS WAS FIXED ELSEWHERE, NOT HERE. W1-T3060 (#4577, merged) took ci.yml's seven
+    `BASE_SHA` diffs from `HEAD^1`, the merge commit's first parent, which is right by construction
+    whatever the payload says (`grep -n 'HEAD\^1' .github/workflows/ci.yml` shows the sites). Its
+    fourth criterion greps ci.yml only, so this separate workflow file was outside it. The workflow
+    already checks out with `fetch-depth: 0` and the default `pull_request` checkout, whose HEAD is that
+    merge commit, so no extra fetch and no API call is needed: the property W1-T1060 built the gate
+    around survives.
+    THE CONSEQUENCE IS A FALSE REFUSAL ON A REQUIRED CHECK: `ci-gate` requires this job, so a stale base
+    blocks a PR whose author did nothing wrong, and the only cure today is a new event.
+  design: |
+    (i) scripts/acceptance-author-gate.mjs exports `resolveEffectiveBaseSha({ baseSha, headSha, root,
+    git })`. It runs `git rev-parse HEAD^1 HEAD^2` and returns HEAD^1 only when HEAD^2 equals the
+    payload's `headSha` (so HEAD is provably the merge commit of THIS head) and HEAD^1 is a full sha.
+    In every other case (no HEAD^2, a different second parent, git failure, missing shas) it returns
+    the payload `baseSha` unchanged, so a local run, a test fixture and a shallow checkout behave
+    exactly as today: the gate fails open on what it cannot read.
+    (ii) `main` computes it once and passes it as `baseSha` to the four range readers. The readers keep
+    their `{ baseSha, headSha }` contract; the existing test that asserts their exact git argv stays true.
+    (iii) OUT OF SCOPE, named so it is not mistaken for covered: `scripts/proof-discrimination-gate.mjs`
+    (`resolveMergeBase(payload.baseSha, ...)`) has the same payload dependence, but its workflow checks
+    out `head.sha` rather than the merge commit, so HEAD^1 does not exist there and the fix is different.
+    File it separately if it is seen refusing on a moved base.
+    Keep new prose in the test file: scripts/acceptance-author-gate.mjs is at 265 of its 500 comment
+    lines, and a single added block may not pass 25 lines.
+  acceptance:
+    - claim: "a head that already carries newer main is not charged with main's plan shards"
+      proof: 'grep: test("W1-T4898: a stale base sha does not charge newer main plan shards to the pull request" in test/acceptance-author-gate.test.ts'
+    - claim: "the merge commit's first parent replaces the payload base only when its second parent is the payload head"
+      proof: 'grep: test("W1-T4898: the merge first parent replaces the payload base only when its second parent is the payload head" in test/acceptance-author-gate.test.ts'
+    - claim: "a checkout that is not the payload's merge keeps the payload base"
+      proof: 'grep: test("W1-T4898: a checkout that is not the payload merge keeps the payload base sha" in test/acceptance-author-gate.test.ts'
+    - claim: "the gate's range readers take the resolved base"
+      proof: "grep: baseSha: effectiveBaseSha in scripts/acceptance-author-gate.mjs"
+  falsifier: |
+    Leave `main` passing `payload.baseSha`: the wiring grep reads 0. Return HEAD^1 without comparing
+    HEAD^2 to the payload head: the keep-the-payload-base test (a checkout on the head itself, one
+    parent) fails. Build the first test from a real repo (main, a PR branch, a later main commit that
+    adds a plan shard, the PR merging main, a checked-out merge commit) and read the diff both ways:
+    with the payload base the range names the shard, with the resolved base it does not. A fixture
+    that only checks the fixed form passes against today's script too.
+  note: |
+    Filed from the operator checkout (a web session cannot reserve ids). Scope-time subject sweep
+    2026-09-30 at main 074249863 and the 5 open PR heads: no plan record or open PR names the acceptance
+    gate's base. W1-T3060 is the merged precedent this task extends, not a duplicate.
