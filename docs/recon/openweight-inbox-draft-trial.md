@@ -28,4 +28,9 @@ by then been the whole inbox-draft lane for two weeks.
 
 `gpt-5-nano` is not admitted as the inbox-draft lead. This shard's own stop condition fired: a model that keeps using up its relint attempts is a stop even when it is cheaper, and 76% of proposals never drafted clean.
 
-The lead moves to cash `gpt-6-luna` (operator ruling 2026-09-30, #7963), with nano and `gpt-oss-120b` behind it. The slim prompt removed the context ceiling that had put nano first. Re-measure Luna's clean rate over its first 20 terminal drafts with this same query before calling the lane settled.
+The lead moved to cash `gpt-6-luna` (operator ruling 2026-09-30, #7963), and that move failed.
+Measured 2026-09-30 03:18Z..10:03Z: 39 Luna syntheses gave 38 draft errors ("output carrying NEITHER marker — it
+answered in prose instead of the fragment contract", ~269-character replies) and 1 clean draft. The
+adapter forces tool-enabled Luna to `reasoning_effort: none`, which plausibly drops the fragment contract.
+#8017 reverts the lead to nano as an interim, and a measured bake-off of nano, gpt-oss-120b, Luna without
+tools and Sonnet 5.5 on real inbox prompts decides the next lead.

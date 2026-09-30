@@ -467,9 +467,45 @@ export interface components {
       /** GET /v1/feedback only (W1-T1257): true when `discharged` could not be determined because the merged-set read failed or was truncated -- a partial read, never mistaken for "not discharged". Mutually exclusive with `discharged`; a read-time decoration only, exactly like `unverified`. */
       dischargeUndecidable?: boolean;
     };
-    /** GET /v1/feedback's body -- every captured feedback entry, oldest first. Served through the console read cache (src/lib/serve.ts's `boundConsoleReadRoute`), so `rmd serve` also splices in `staleness`; a cold or stalled cache answers `{entries: [], staleness}`. */
+    /** GET /v1/feedback's body -- every captured feedback entry, oldest first. Served through the console read cache (src/lib/serve.ts's `boundConsoleReadRoute`), so `rmd serve` also splices in `staleness`; a cold or stalled cache answers `{entries: [], staleness}`. With `?limit=` or `?cursor=`, `entries` is one page and `page` says where the next one starts. */
     FeedbackInboxResult: {
       entries: (FeedbackEntry)[];
+      page?: ReadPage;
+      staleness?: ConsoleResponseStaleness;
+    };
+    /** One page of a list read (src/lib/read-page.ts). Pass `nextCursor` back as `?cursor=` for the next page; its absence means this page is the last. The cursor names the last item served and its position, so an item that leaves the list between two reads never restarts the walk. */
+    ReadPage: {
+      /** GET /v1/inbox only -- the lane this page is from. */
+      section?: string;
+      /** Items in the whole list at the time of this read. */
+      total: number;
+      limit: number;
+      nextCursor?: string;
+    };
+    /** Every GET /v1/inbox lane's length, including the lanes a `?section=` read leaves out, so a badge or a tab count needs no second read. */
+    InboxCounts: {
+      ready: number;
+      drafting: number;
+      notReady: number;
+      declined: number;
+      fleet: number;
+      needsYou: {
+        ready: number;
+        drafting: number;
+        notReady: number;
+        declined: number;
+      };
+    };
+    /** GET /v1/inbox?section=<name>'s body: that one lane under its own key, exactly as the whole body carries it (`needsYou` an object of four lanes, every other section one page of an array), plus `counts` and, for a list section, `page`. */
+    InboxSectionResult: {
+      ready?: (InboxReadyItem)[];
+      drafting?: (InboxDraftingItem)[];
+      notReady?: (InboxNotReadyItem)[];
+      declined?: (InboxDeclinedItem)[];
+      fleet?: (InboxFleetItem)[];
+      needsYou?: InboxNeedsYou;
+      counts: InboxCounts;
+      page?: ReadPage;
       staleness?: ConsoleResponseStaleness;
     };
     /** POST /v1/feedback's body -- submit feedback from the panel (ALWAYS captured with origin: ui, never taken from this body). `replyTo`, if given, must name an existing entry parked `grilling` -- this is "answer a grill" v1 (src/lib/panel-graph.ts's header explains why): the answer is captured as a fresh feedback entry that re-enters triage, rather than a second, parallel answer-delivery primitive ahead of the still-unbuilt W1-T42 grill mechanics. */
@@ -2413,12 +2449,45 @@ export interface components {
       policy?: ProviderRoutingPolicyStatus;
       preferenceBypass?: ProviderRoutingPreferenceBypass;
     };
+    /** One input a view was computed from (src/lib/views.ts's `ViewSource`). */
+    ViewSource: {
+      name: string;
+      /** The input's own as-of time; null when it has none yet. */
+      asOf: string | null;
+      state: "fresh" | "stale" | "unavailable";
+      reason?: string;
+    };
+    /** GET /v1/views/nav-badge (docs/views.md). The view envelope every /v1/views/<name> route answers: `version` is `data`'s schema version, `asOf` the oldest source's as-of, `stale` true when any source is stale or unavailable. A cold input makes its count absent with a `reason`, never a zero. */
+    NavBadgeView: {
+      view: "nav-badge";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        /** The operator-agent badge: proposals the console's engine would show (a port of its generateProposals and visibleProposals, src/lib/nav-badge-view.ts), with up to 20 of their ids for a parity check. */
+        agent: {
+          count?: number;
+          proposalIds: (string)[];
+          reason?: string;
+        };
+        /** Open inbox items by who must act, from the last GET /v1/inbox classification. */
+        inbox: {
+          ready?: number;
+          needsYou?: number;
+          fleet?: number;
+          reason?: string;
+        };
+      };
+    };
     /** One RECENT feed row minted from a ledger line (src/lib/board.ts's `RecentActivityEntry`). */
     RecentActivityEntry: {
       taskId: string;
       runId?: string;
       title: string;
-      verb: "merged" | "verdict" | "fix" | "escalated" | "spend" | "run-refused" | "run-started" | "worker";
+      /** `merged` is minted from a run's `verdict: merged` row or the sweep's `verdict.merged` credit, once per pull request. `started` is a `run.start` (detail: the run type), `review` a `review.posted` (detail: its state, verbatim), `automerge` an `automerge.armed`. A consumer must render an unknown verb, not drop it. */
+      verb: "merged" | "verdict" | "fix" | "escalated" | "spend" | "run-refused" | "run-started" | "worker" | "started" | "review" | "automerge";
       /** The originating ledger line's own `ts`. */
       ts: string;
       detail?: string;
@@ -2444,7 +2513,7 @@ export interface components {
       /** Present only when GitHub decoration was attempted and failed for this row. */
       githubUnavailable?: true;
     };
-    /** GET /v1/recent's body -- at most 20 entries, newest first. */
+    /** GET /v1/recent's body -- at most `limit` (default 20) entries, newest first. */
     RecentActivityResult: {
       entries: (RecentActivityEntry)[];
       staleness?: ConsoleResponseStaleness;
@@ -2593,6 +2662,7 @@ export interface components {
       declined?: (InboxDeclinedItem)[];
       needsYou?: InboxNeedsYou;
       fleet?: (InboxFleetItem)[];
+      counts?: InboxCounts;
       staleness?: ConsoleResponseStaleness;
     };
     /** One stored daily digest (src/lib/serve.ts's `ConsoleInboxDigestEntry`). */
@@ -4158,11 +4228,22 @@ export interface paths {
         };
     };
   };
+  "/v1/views/nav-badge": {
+    get: {
+      responses: {
+          "200": NavBadgeView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
   "/v1/recent": {
     get: {
       responses: {
           "200": RecentActivityResult;
           "304": undefined;
+          "400": Error;
           "401": Error;
           "403": Error;
         };
@@ -4322,8 +4403,9 @@ export interface paths {
   "/v1/inbox": {
     get: {
       responses: {
-          "200": InboxResult;
+          "200": unknown;
           "304": undefined;
+          "400": Error;
           "401": Error;
           "403": Error;
         };
