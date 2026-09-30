@@ -219,7 +219,7 @@ export function parseCanaryGrade(stdout: string): CanaryGrade {
   }
 }
 
-export interface ImpossibleCanaryCommandDeps {
+export interface ImpossibleCanaryCommandOptions {
   readonly print?: (line: string) => void;
   readonly stateDir?: () => string;
   readonly readRows?: (stateDir: string) => Promise<readonly Record<string, unknown>[]>;
@@ -239,9 +239,9 @@ function defaultRunGrader(grader: string, model: string, assignment: CanaryAssig
 export async function impossibleCanaryCommand(
   rest: string[],
   run: (input: RunImpossibleCanaryInput) => Promise<RunImpossibleCanaryResult>,
-  deps: ImpossibleCanaryCommandDeps = {},
+  options: ImpossibleCanaryCommandOptions = {},
 ): Promise<number> {
-  const print = deps.print ?? ((line: string) => console.log(line));
+  const print = options.print ?? ((line: string) => console.log(line));
   let values: { model?: string[]; scaffold?: string; grader?: string; "state-dir"?: string; json?: boolean };
   try {
     values = parseArgs({ args: rest, strict: true, allowPositionals: false, options: {
@@ -254,8 +254,8 @@ export async function impossibleCanaryCommand(
   }
   const models = values.model ?? [];
   if (models.length === 0 || values.scaffold === undefined || values.grader === undefined) { print(USAGE); return 2; }
-  const stateDir = values["state-dir"] ?? (deps.stateDir ?? (() => join(loadConfig().root, "state")))();
-  const rows = await (deps.readRows ?? ((dir: string) => readLedgerUnionRecords(dir)))(stateDir);
+  const stateDir = values["state-dir"] ?? (options.stateDir ?? (() => join(loadConfig().root, "state")))();
+  const rows = await (options.readRows ?? ((dir: string) => readLedgerUnionRecords(dir)))(stateDir);
   const lastByModel = new Map<string, string>();
   for (const row of rows) {
     if (typeof row.step !== "string" || !row.step.startsWith("impossible_canary.")) continue;
@@ -264,10 +264,10 @@ export async function impossibleCanaryCommand(
     if (prior === undefined || row.ts > prior) lastByModel.set(row.model, row.ts);
   }
   const grader = values.grader;
-  const runGrader = deps.runGrader ?? defaultRunGrader;
+  const runGrader = options.runGrader ?? defaultRunGrader;
   const result = await run({
     models, scaffoldRevision: values.scaffold, attempt: (model, assignment) => runGrader(grader, model, assignment),
-    lastRunAt: (model) => lastByModel.get(model), nowMs: deps.nowMs, ledgerPath: join(stateDir, LEDGER_FILENAME) });
+    lastRunAt: (model) => lastByModel.get(model), nowMs: options.nowMs, ledgerPath: join(stateDir, LEDGER_FILENAME) });
   if (values.json === true) { print(JSON.stringify(result)); return 0; }
   print(`impossible-canary ${result.canarySetVersion} (scaffold ${result.scaffoldRevision}); not due: ${result.skippedNotDue.join(", ") || "none"}`);
   for (const c of result.counts) {
