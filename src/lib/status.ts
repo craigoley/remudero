@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { ghExec, ghExecFile } from "./github-transport.js";
-import { DEFAULT_GH_CALL_TIMEOUT_MS, createNonBlockingGhCallPacer } from "./github-transport.js";
+import { DEFAULT_GH_CALL_TIMEOUT_MS, createNonBlockingGhCallPacer, parseGhRateLimitHeaders, splitGhHeaderBlock, type GhRateLimitReading } from "./github-transport.js";
+import type { WarmRefreshOutcome, WarmRefreshTelemetry } from "./github-refresh-pacer.js";
 // W1-T2440: the pre-warm walk runs on its own OS thread (`runPrewarmWorker`), so the `execFileSync` below stays
 // synchronous without parking the process serving `/v1/status`. That worker loads THIS module a second time;
 // `isMainThread`/`workerData` gate the worker-only branch near `buildBatchedGithub`.
@@ -296,6 +297,10 @@ export interface GitHub {
   factsAgeMs?(): number | undefined;
   /** OPTIONAL (W1-T4771): whether a held PR fact is past its TTL, so a caller never labels an overdue fact fresh. */
   factsStale?(): boolean;
+  /** OPTIONAL: whether `warm()` walks on a worker thread, so a background refresh can never block the caller. */
+  warmsOffLoop?(): boolean;
+  /** OPTIONAL: the last settled warm walk's cost and quota reading, for the keep-warm pacer (github-refresh-pacer.ts). */
+  warmTelemetry?(): WarmRefreshTelemetry;
   seedBoardSnapshot?(cache: BoardSnapshotCache): void;
   /** A read this gateway attempted actually FAILED, as against succeeding empty, so it defers rather than
    *  reading as a confirmed not-merged (W1-T119). NEVER FORCES A FETCH (W1-T2219): the STICKY verdict of the
@@ -4226,6 +4231,9 @@ interface PrewarmWorkerResponse {
   issues?: PrewarmChannelOutcome<BoardIssueRest>;
   /** One `[url, state]` per readable ref; an unreadable one is absent, as the synchronous read caches nothing. */
   reviews?: Array<[string, ReviewStateValue]>;
+  /** The newest X-Ratelimit-* reading off the walk's own metered calls, and how many calls the walk made. */
+  rateLimit?: GhRateLimitReading;
+  calls?: number;
 }
 
 /** Runs one channel's fetch inside the worker and NEVER throws out of this function — a failure becomes data in
@@ -4257,18 +4265,21 @@ function runPrewarmChannelsSync(req: PrewarmWorkerRequest): PrewarmWorkerRespons
   const walkPacer = createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {});
   const runSync = (args: string[]): string =>
     ghExecFile(req.ghBin, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26, timeout: GH_CALL_TIMEOUT_MS });
+  const response: PrewarmWorkerResponse = { calls: 0 };
   const makeFetchJson = (): { fetchJson: (args: string[]) => unknown; bytes: () => number } => {
     let bytes = 0;
     return {
       fetchJson: (args: string[]): unknown => {
-        const raw = paceGhEntry(walkPacer, isGhRateLimitError, () => runSync(args));
-        bytes += Buffer.byteLength(raw, "utf8");
-        return JSON.parse(raw);
+        response.calls = (response.calls ?? 0) + 1;
+        const { headers, body } = splitGhHeaderBlock(paceGhEntry(walkPacer, isGhRateLimitError, () => runSync(["api", "-i", ...args.slice(1)])));
+        const reading = parseGhRateLimitHeaders(headers);
+        if (reading.remaining !== undefined) response.rateLimit = reading;
+        bytes += Buffer.byteLength(body, "utf8");
+        return JSON.parse(body);
       },
       bytes: () => bytes,
     };
   };
-  const response: PrewarmWorkerResponse = {};
   if (req.fetchOpen) {
     const { fetchJson, bytes } = makeFetchJson();
     response.open = prewarmRunChannel(() => fetchBoardPrsRest(req.owner, req.repo, fetchJson, undefined, "open"), bytes);
@@ -4287,6 +4298,7 @@ function runPrewarmChannelsSync(req: PrewarmWorkerRequest): PrewarmWorkerRespons
   if (req.reviewRefs && req.reviewRefs.length > 0) {
     const reviews: Array<[string, ReviewStateValue]> = [];
     for (const ref of req.reviewRefs) {
+      response.calls = (response.calls ?? 0) + 1;
       try {
         reviews.push([ref.url, reviewStateFromCombinedStatus(JSON.parse(runSync(combinedStatusRestArgs(req.owner, req.repo, ref.headRef))))]);
       } catch {
@@ -4417,6 +4429,7 @@ export function buildBatchedGithub(
   /** The one background walk this gateway ever has in flight at a time (W1-T2440) — a second `warm()` while
    *  this is set is a no-op, exactly like the existing "within TTL" no-op the synchronous path has. */
   let prewarmWorker: Worker | undefined;
+  let lastWarm: WarmRefreshOutcome | undefined;
   const lastFetchFailed = (): boolean => (openOutcome?.failed ?? false) || (mergedOutcome?.failed ?? false);
   const lastFetchFailureReason = (): GhFailureReason | undefined =>
     (openOutcome?.failed ? openOutcome.reason : undefined) ?? (mergedOutcome?.failed ? mergedOutcome.reason : undefined);
@@ -4948,6 +4961,18 @@ export function buildBatchedGithub(
     if (fetchIssues) issuesWarmInFlight = true;
     for (const ref of reviewRefs) reviewsWarmInFlight.add(ref.url);
     fetchInFlight = true;
+    const recordWarm = (msg: PrewarmWorkerResponse | undefined): void => {
+      const channels = [msg?.open, msg?.merged, msg?.issues].filter((c) => c !== undefined);
+      const calls = msg?.calls ?? 0;
+      lastWarm = {
+        seq: (lastWarm?.seq ?? 0) + 1,
+        settledAtMs: now(),
+        durationMs: Math.max(0, now() - startedAt),
+        spend: [{ resource: msg?.rateLimit?.resource ?? "core", calls, reading: msg?.rateLimit }],
+        rateLimited: channels.some((c) => !c.ok && c.reason === "rate_limit"),
+        failed: !msg || channels.some((c) => !c.ok),
+      };
+    };
     const finish = (): void => {
       prewarmWorker = undefined;
       openWarmInFlight = false;
@@ -4984,6 +5009,7 @@ export function buildBatchedGithub(
         if (fetchOpen) applyOpenOutcome(failure, elapsedMs, previouslyOpen);
         if (fetchMerged) applyMergedOutcome(failure, elapsedMs);
         if (fetchIssues) applyIssuesOutcome(failure);
+        recordWarm(undefined);
         return;
       }
       console.error(`board gateway: prewarm worker spawn failed, falling back to a synchronous walk: ${err instanceof Error ? err.message : String(err)}`);
@@ -4992,6 +5018,7 @@ export function buildBatchedGithub(
       if (response.merged) applyMergedOutcome(response.merged, elapsedMs);
       if (response.issues) applyIssuesOutcome(response.issues);
       applyReviews(response.reviews);
+      recordWarm(response);
       return;
     }
     prewarmWorker = worker;
@@ -5000,10 +5027,11 @@ export function buildBatchedGithub(
     // SET, so every LATER warm became a permanent no-op. The latch is not three independent handlers, because
     // `error` and `exit` BOTH fire for a crashed worker.
     let settled = false;
-    const settle = (apply: () => void): void => {
+    const settle = (apply: () => void, msg?: PrewarmWorkerResponse): void => {
       if (settled) return;
       settled = true;
       apply();
+      recordWarm(msg);
       finish();
     };
     worker.once("exit", (code) => {
@@ -5026,7 +5054,7 @@ export function buildBatchedGithub(
         if (msg.merged) applyMergedOutcome(msg.merged, elapsedMs);
         if (msg.issues) applyIssuesOutcome(msg.issues);
         applyReviews(msg.reviews);
-      });
+      }, msg);
       void worker.terminate();
     });
     worker.once("error", (err) => {
@@ -5220,6 +5248,12 @@ export function buildBatchedGithub(
     },
     serveOffLoop() {
       offLoop = true;
+    },
+    warmsOffLoop() {
+      return offLoop && !opts.fetchAll && !opts.fetchAllIssues;
+    },
+    warmTelemetry() {
+      return { inFlight: prewarmWorker !== undefined, last: lastWarm };
     },
     factsAgeMs() {
       return openHalf && mergedHalf ? Math.max(0, now() - Math.min(openHalf.at, mergedHalf.at)) : undefined;
