@@ -6,7 +6,8 @@
 // shut under the test runner, and lock them OPEN everywhere else so the daemon is unaffected.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -18,6 +19,7 @@ import { main } from "../src/run-task.js";
 import { ghExec, ghExecFile, ghJson } from "../src/lib/github-transport.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { writeLedger } from "./helpers/ledger-fixture.js";
 import { ghRefusalCount } from "./setup/tmp-hygiene.js";
 import { installNoLiveRemote } from "./setup/no-live-remote.js";
 import {
@@ -311,9 +313,8 @@ test("the cli test harness never resolves the live ledger path", async (t) => {
   const fixturePath = ledgerPathFor(loadConfig());
   assert.notEqual(fixturePath, join(liveRoot, "state", "ledger.ndjson"));
   const sentinelRoot = mkdtempSync(join(tmpdir(), "rmd-test-original-ledger-"));
-  const sentinelPath = join(sentinelRoot, "state", "ledger.ndjson");
-  mkdirSync(join(sentinelRoot, "state"));
-  writeFileSync(sentinelPath, "sentinel\n");
+  const sentinelPath = writeLedger([{ step: "sentinel" }], { dir: join(sentinelRoot, "state") }).path;
+  const sentinelBytes = readFileSync(sentinelPath);
 
   const originalArgv = process.argv;
   process.env[TEST_LIVE_STATE_ROOT_ENV] = sentinelRoot;
@@ -328,10 +329,10 @@ test("the cli test harness never resolves the live ledger path", async (t) => {
   }
   const rows = readFileSync(fixturePath, "utf8").trim().split("\n").map((row) => JSON.parse(row) as { step: string; verb: string });
   assert.ok(rows.some((row) => row.step === "cli.invoked" && row.verb === "help"));
-  assert.equal(readFileSync(sentinelPath, "utf8"), "sentinel\n", "the original ledger keeps every byte");
+  assert.deepEqual(readFileSync(sentinelPath), sentinelBytes, "the original ledger keeps every byte");
 });
 
-test("the test preload reads the original config without creating or changing it", () => {
+test("the test preload reads the original config without creating or changing it", async () => {
   for (const source of ["absent", "configured", "malformed"] as const) {
     const home = mkdtempSync(join(tmpdir(), `rmd-test-original-home-${source}-`));
     const configPath = join(home, ".config", "remudero", "config.json");
@@ -339,7 +340,7 @@ test("the test preload reads the original config without creating or changing it
     const original = source === "configured" ? JSON.stringify({ root: customRoot }) : "{broken";
     if (source !== "absent") {
       mkdirSync(join(home, ".config", "remudero"), { recursive: true });
-      writeFileSync(configPath, original);
+      await writeFile(configPath, original);
     }
     const env: NodeJS.ProcessEnv = { HOME: home, NODE_TEST_CONTEXT: "child-v8" };
     const installed = installNoLiveRemote(env);
