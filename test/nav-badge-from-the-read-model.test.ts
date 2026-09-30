@@ -108,7 +108,7 @@ function panelCorpus(): { core: { archive: string[]; live: string[] }; console: 
   };
 }
 
-function writeLedger(dir: string, archive: string[], live: string[]): void {
+function writeRotations(dir: string, archive: string[], live: string[]): void {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `ledger.${new Date(NOW - 3_500_000).toISOString().replace(/[:.]/g, "-")}.ndjson.gz`), gzipSync(`${archive.join("\n")}\n`));
   writeFileSync(join(dir, "ledger.ndjson"), `${live.join("\n")}\n`);
@@ -127,8 +127,8 @@ async function fixture(t: TestCtx, opts: { inbox?: boolean } = {}): Promise<Fixt
   const stateDir = join(root, "state");
   const consoleDir = join(root, "instances", "console", "state");
   const corpus = panelCorpus();
-  writeLedger(stateDir, corpus.core.archive, corpus.core.live);
-  writeLedger(consoleDir, corpus.console.archive, corpus.console.live);
+  writeRotations(stateDir, corpus.core.archive, corpus.core.live);
+  writeRotations(consoleDir, corpus.console.archive, corpus.console.live);
   if (opts.inbox !== false) {
     writeFileSync(join(stateDir, "inbox-classified.json"), JSON.stringify({ generatedAt: iso(30_000), states: { "ruling:a": "ready", "ruling:b": "not_ready", "ruling:c": "declined", "adoption:x": "ready", "adoption:y": "drafting" } }));
   }
