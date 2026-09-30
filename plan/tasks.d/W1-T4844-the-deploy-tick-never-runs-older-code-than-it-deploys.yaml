@@ -10,7 +10,7 @@
   risk: high
   band_meaning: span
   origin: "operator ask 2026-09-30: go with all of these recommended follow ups (throughput, automated flow, self improvement)"
-  note: "reservation hand-off: plan-flow-improve-1790732974000 -> plan-flow-improve-1790732974000"
+  note: "OPERATOR DIRECTION 2026-09-30: no new rule may refuse or strand a PR. The refuse-when-stale option is dropped; only the runnable-install option is built. reservation hand-off: plan-flow-improve-1790732974000 -> plan-flow-improve-1790732974000"
   plan_refs: [W1-T3604, W1-T4267]
   files: [deploy/install-host-units.sh, src/lib/deployer.ts, test/the-deploy-tick-never-runs-older-code-than-it-deploys.test.ts]
   status: queued
@@ -22,13 +22,13 @@
     core and console cleared. The install checkouts (daemon-install) are current but hold no node_modules, so the tick
     cannot simply switch to them — that is why this is filed rather than hand-patched.
   design: |
-    Choose on measurement and record it: make daemon-install runnable (install its node_modules at convergence) and
-    run deploy-run from it; or keep the daemon tree but have deploy-run refuse to act, logging
-    deploy.stale_code, when its own HEAD is behind the install checkout on deploy/ or src/lib/deployer.ts.
+    Make the install checkout runnable: host-unit convergence installs daemon-install's node_modules, and the
+    generated watchdog runs deploy-run from $CHECKOUT (the install checkout) instead of the daemon's working tree.
+    Nothing refuses; the deploy logic simply always comes from the checkout convergence keeps current.
   acceptance:
-    - claim: "a deploy tick whose code predates the install checkout does not act"
-      proof: 'grep: test("W1-T4844: a deploy tick whose code predates the install checkout does not act" in test/the-deploy-tick-never-runs-older-code-than-it-deploys.test.ts'
-    - claim: "a current deploy tick proceeds"
-      proof: 'grep: test("W1-T4844: a current deploy tick proceeds" in test/the-deploy-tick-never-runs-older-code-than-it-deploys.test.ts'
+    - claim: "the generated watchdog runs deploy-run from the install checkout"
+      proof: 'grep: test("W1-T4844: the generated watchdog runs deploy-run from the install checkout" in test/the-deploy-tick-never-runs-older-code-than-it-deploys.test.ts'
+    - claim: "convergence leaves the install checkout able to run rmd"
+      proof: 'grep: test("W1-T4844: convergence leaves the install checkout able to run rmd" in test/the-deploy-tick-never-runs-older-code-than-it-deploys.test.ts'
   falsifier: |
     Skip the freshness check and the first test deploys with stale code.
