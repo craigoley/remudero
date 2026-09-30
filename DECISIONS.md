@@ -3303,7 +3303,7 @@ literal header; records already pinned stay valid, and reverting any one to `ver
 
 ## 2026-09-30 — OPERATOR RULINGS: the verify-human queue, cleared
 
-**Author class:** each ruling below is the operator's own, given in chat on 2026-09-30 in answer to per-task recommendations. The operator session recorded them; it did not originate them. Every task was first re-checked against main and the fleet ledger, and each entry states the evidence.
+**Operator-authored direction:** each ruling below is the operator's own, given in chat on 2026-09-30 in answer to per-task recommendations. The operator session recorded them; it did not originate them. Every task was first re-checked against main and the fleet ledger, and each entry states the evidence.
 
 - **W1-T3570: STOP nano as the inbox-draft lead.** On the slim prompt, nano drafts were lint-clean 49/200 (25%), and only 48 of 199 proposals ever drafted clean. Claude lanes were 100%, and nano itself was 12/12 on the full prompt. The lead moves to cash `gpt-6-luna` (#7963), with nano and gpt-oss-120b as fallbacks. Report: `docs/recon/openweight-inbox-draft-trial.md` (#7965).
 - **W1-T2927: take route (a).** The host sweep pulls the `mutation-verdict-ledger` artifact that `ci.yml` already uploads, using its own read identity, and appends only `run_id`s it has not recorded. Route (b) is declined because it would put a write credential in a public repo's CI. Route (c) is declined because it turns typed data into prose.
