@@ -657,7 +657,7 @@ const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
 /** Eight days of rows every three hours up to an hour before T0: an archive, then the live file. */
-function spreadLedger(dir: string): void {
+function spreadRows(dir: string): void {
   mkdirSync(dir, { recursive: true });
   const at = (k: number) => T0 - 8 * DAY + k * 3 * HOUR;
   const line = (k: number) => JSON.stringify({ ts: new Date(at(k)).toISOString(), step: k % 2 ? "run.start" : "worker.activity", task_id: `T${k}`, run_id: `s-${k}` });
@@ -669,7 +669,7 @@ function spreadLedger(dir: string): void {
 function checkFixture(t: TestCtx, extra: { escalation?: { issues: IssueGateway; ledgerPath: string; runId: string }; clock?: Clock } = {}) {
   const ledgerDir = scratch(t, "rmw-check-ledger");
   const stateDir = scratch(t, "rmw-check-state");
-  spreadLedger(ledgerDir);
+  spreadRows(ledgerDir);
   const c = collect();
   const stepped = steppedClock();
   const clock = extra.clock ?? stepped.clock;

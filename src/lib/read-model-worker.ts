@@ -374,6 +374,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       const caughtUp = result.archivesRead === 0 && !result.liveRestarted && result.transactions <= 1 && result.unread.length === 0;
       slot.checkPending = opts.oracle !== "off" && caughtUp && now >= slot.checkAfter && (!nextOracleSlice(db, now, windowMs).startsCycle || consistencyCheckDue(db, now));
     } catch (error) {
+      // failSlot logs it, backs this instance off, and closes the slot on a lost lease.
       failSlot(slot, now, error);
     }
   }
@@ -422,6 +423,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       const finished = clock.now();
       slot.checkAfter = Math.max(slot.checkAfter, finished + (finished - now) / READ_MODEL_CHECK_SHARE);
     } catch (error) {
+      // failSlot logs it, backs this instance off, and closes the slot on a lost lease.
       failSlot(slot, now, error);
     }
   }
