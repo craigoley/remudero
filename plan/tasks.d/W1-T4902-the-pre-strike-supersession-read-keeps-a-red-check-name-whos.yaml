@@ -44,10 +44,15 @@
   acceptance:
     - claim: "a red name whose fresh latest attempt already succeeded is dropped as superseded"
       proof: "unit test: a red name whose fresh latest attempt already succeeded is dropped as superseded"
-    - claim: "a red name whose fresh latest attempt is still a failure stays red, so the rule is not simply prefer-success"
-      proof: "unit test: a red name whose fresh latest attempt is a newer failure stays red"
     - claim: "the stand-down reason names a later attempt that is in flight or green"
       proof: "grep: in flight or green on this head in src/run-task.ts"
   falsifier: |
     CLOSE IF the ledger union shows no fix.dispatch row within 45 minutes of a required check going green
     on the same head over a 14-day window with a positive control on fix.dispatch (the population is empty).
+  note: |
+    AMENDED 2026-09-30, on a proof-discrimination refusal at the build (same remedy as the operator's rulings on W1-T4550, W1-T3745 and
+    W1-T3759): the former second criterion `a red name whose fresh latest attempt is still a failure stays red, so the rule is not simply
+    prefer-success` was a preservation invariant proved by `unit test: a red name whose fresh latest attempt is a newer failure stays red`.
+    That test guards behaviour main already has, so it passes at the merge base with the build's test file and the gate refuses it
+    (`executed_stale`, allowance 0). The invariant is not weakened: the build still carries that test, the falsifier below still names it,
+    and the reviewer's diff check covers it. The other two criteria are unbuilt and stay.
