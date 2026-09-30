@@ -1,7 +1,7 @@
 /** Optional reviewer findings. This module is telemetry, never a review gate. */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { realpathSync, readFileSync, statSync } from "node:fs";
+import { constants, closeSync, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
 type Anchor = { path: string; line: number; kind: "changed" | "dependency"; changedProducer?: { path: string; line: number } };
@@ -70,8 +70,15 @@ function fileLine(root: string, path: string, line: number): string | undefined 
     const base = realpathSync(root);
     const target = realpathSync(resolve(base, path));
     const rel = relative(base, target);
-    if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || statSync(target).size > MAX_FILE_BYTES) return undefined;
-    return readFileSync(target, "utf8").split("\n")[line - 1];
+    if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return undefined;
+    const fd = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.size > MAX_FILE_BYTES) return undefined;
+      return readFileSync(fd, "utf8").split("\n")[line - 1];
+    } finally {
+      closeSync(fd);
+    }
   } catch { /* Unreadable or missing anchor file: no anchor text, so the finding stays unverified. */ return undefined; }
 }
 
