@@ -1,8 +1,6 @@
-# The knowledge gardener's (W1-T4095) RETIRE pass from PR #7910. Each proof executes for real
+# The knowledge gardener's (W1-T4095) RETIRE pass for bashrc-accident. Each proof executes for real
 # against the post-pass checkout/.
 - claim: this pass is recorded in the garden log
-  proof: "grep: ^## Pass 2026-09-29T19:45:53.218Z$ in docs/knowledge-garden-log.md"
-- claim: the gardener's retire of proc-environ-is-an-exec-time-snapshot is marked in its entry
-  proof: "grep: knowledge gardener: retire proc-environ-is-an-exec-time-snapshot$ in learnings/platform.yaml"
-- claim: the gardener's retire of scan-both-quote-styles is marked in its entry
-  proof: "grep: knowledge gardener: retire scan-both-quote-styles$ in learnings/testing.yaml"
+  proof: "grep: ^## Pass 2026-09-30T04:27:57.745Z$ in docs/knowledge-garden-log.md"
+- claim: the gardener's retire of bashrc-accident is marked in its entry
+  proof: "grep: knowledge gardener: retire bashrc-accident$ in learnings/platform.yaml"
