@@ -138,6 +138,14 @@ test("W1-T4864: a schema-valid draft always renders to parseable YAML", () => {
   // data the schema refuses is never rendered: a throw for the renderer, and a lintable fragment for the parser
   assert.throws(() => renderDraftFragmentYaml([task({ type: "bogus" })]), /not schema-valid/);
   assert.notEqual(validateDraftFragmentData([task({ acceptance: "a string" })]).length, 0);
+  // an array element that is not a task object is named by index, once each, and never rendered
+  assert.deepEqual(validateDraftFragmentData(["a string", null, [1], 7]), [
+    "task[0] must be an object",
+    "task[1] must be an object",
+    "task[2] must be an object",
+    "task[3] must be an object",
+  ]);
+  assert.throws(() => renderDraftFragmentYaml([null]), /task\[0\] must be an object/);
   const bad = parseDraftedCandidate(`=== FRAGMENT JSON START ===\n[{"id": 1}]\n=== FRAGMENT JSON END ===\nSTAMP: ${STAMP}`);
   assert.ok(bad && lintDraftedFragment(bad.fragmentYaml, "P9", bad.stampLine).length > 0);
   const broken = parseDraftedCandidate(`=== FRAGMENT JSON START ===\n[{"id": \n=== FRAGMENT JSON END ===\nSTAMP: ${STAMP}`);
