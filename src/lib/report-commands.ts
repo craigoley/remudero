@@ -36,6 +36,8 @@ import {
   type Config,
 } from "./config.js";
 import { flagValue, unknownArgError } from "./cli-args.js";
+import { dispatchClaimRef } from "./dispatch-claim.js";
+import { readSharedPause, realSharedPauseGitDeps } from "./fleet-control.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { resolveLedgerUnion } from "./ledger-grep.js";
 import { meaningOfStep } from "./ledger-steps.js";
@@ -63,6 +65,7 @@ import {
 import {
   buildBatchedGithub,
   deriveStatus,
+  GH_CALL_TIMEOUT_MS,
   readLedgerLines,
   taskIdFromRunBranch,
   type GitHub,
@@ -107,7 +110,7 @@ import { readFeedbackEntry, type FeedbackEntry } from "./feedback.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./trace.js";
 import { extractTaskTrailerId } from "./review.js";
 import { mapRestPr, singlePrRestArgs, type RestPullRow } from "./open-prs-rest.js";
-import { ghJson, GH_RATE_LIMIT_BUCKET_UNKNOWN } from "./github-transport.js";
+import { createGhCallPacer, ghExecFile, ghJson, GH_RATE_LIMIT_BUCKET_UNKNOWN } from "./github-transport.js";
 import { worktreesDir, readWorktreeBase } from "./worker.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { systemClock } from "./clock.js";
@@ -718,6 +721,8 @@ export interface StatusDeps extends ReportRepoContext {
   resolveSupervisorIntervalS?: () => number | undefined;
   ledgerPathFor?: (config: Config) => string;
   buildBatchedGithub?: typeof buildBatchedGithub;
+  /** Test seam for the JSON health probe's wall-clock budget; production uses 30 seconds. */
+  jsonDeadlineMs?: number;
   github?: GitHub | null;
   buildStatusBoard?: typeof buildStatusBoard;
   renderStatusBoardText?: typeof renderStatusBoardText;
@@ -729,6 +734,10 @@ export interface StatusDeps extends ReportRepoContext {
   usage?: string;
 }
 
+/** Leave five seconds to finish local derivation and serialize a truthful degraded board. */
+export const STATUS_JSON_DEADLINE_MS = 30_000;
+const STATUS_JSON_FINALIZE_RESERVE_MS = 5_000;
+
 export async function statusCommand(rest: string[], deps: StatusDeps = {}): Promise<number> {
   const out = deps.out ?? ((l: string) => console.log(l));
   const err = deps.err ?? ((l: string) => console.error(l));
@@ -737,9 +746,49 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
     err(badArg + "\n" + (deps.usage ?? ""));
     return 2;
   }
+  const jsonMode = rest.includes("--json");
+  const jsonBudget = deps.jsonDeadlineMs ?? STATUS_JSON_DEADLINE_MS;
+  const externalDeadline = jsonMode
+    ? systemClock.now() + Math.max(1, jsonBudget - Math.min(STATUS_JSON_FINALIZE_RESERVE_MS, Math.floor(jsonBudget / 6)))
+    : undefined;
+  const remainingExternalMs = (): number => Math.max(0, (externalDeadline ?? Infinity) - systemClock.now());
+  const externalReadFailures: Record<string, string> = {};
+  const recordError = (name: string, err: unknown): void => {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    externalReadFailures[name] = code === "ETIMEDOUT" || remainingExternalMs() === 0 ? "deadline" : code ?? "read-failed";
+  };
+  const deadlineError = (): NodeJS.ErrnoException => {
+    const error = new Error("status JSON external-read deadline exceeded") as NodeJS.ErrnoException;
+    error.code = "ETIMEDOUT";
+    return error;
+  };
+  const boundedGit = (repoDir: string, args: string[]): string => {
+    const remaining = remainingExternalMs();
+    if (remaining <= 0) throw new Error("status JSON external-read deadline exceeded");
+    return execFileSync("git", ["-C", repoDir, ...args], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 1 << 26,
+      timeout: Math.max(1, Math.floor(remaining)), killSignal: "SIGKILL",
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
+  };
   const config = (deps.loadConfig ?? loadConfig)();
   const uid = realUid();
-  const lifecycleExec = deps.lifecycleExec ?? defaultLifecycleExec;
+  const lifecycleExec = deps.lifecycleExec ?? (jsonMode
+    ? (cmd: string, args: string[]): string => {
+        const remaining = remainingExternalMs();
+        if (remaining <= 0) {
+          const error = deadlineError();
+          recordError("lifecycle", error);
+          throw error;
+        }
+        try {
+          return execFileSync(cmd, args, { encoding: "utf8", timeout: Math.max(1, Math.floor(remaining)), killSignal: "SIGKILL" });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException)?.code === "ETIMEDOUT") recordError("lifecycle", error);
+          throw error;
+        }
+      }
+    : defaultLifecycleExec);
   const queryService =
     deps.queryService ??
     ((service: ServiceName): { running: boolean; pid: number | null; lastExitCode?: number; sensed: boolean; sensor?: LivenessSensor } => {
@@ -749,6 +798,7 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
       // same `pid: null` a genuinely unloaded/stopped service returns (recon rationale Q1: the
       // panel "cannot tell 'I HAVE NO SENSOR HERE' from 'THE ANSWER IS NO'").
       const state = queryLaunchdServiceSensed(label, uid, lifecycleExec);
+      if (externalReadFailures.lifecycle === "deadline") return { running: false, pid: null, sensed: false };
       if (!state.sensed) return queryProcessServiceSensed(service, lifecycleExec);
       // "running" means a live pid, not merely "loaded" — a bootstrapped-but-not-spawned job
       // answers "is it running" with no, exactly like an unloaded one.
@@ -756,6 +806,7 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
       // deploy-supervisor is an interval job: its own `pid`/`loaded` mean nothing between ticks
       // — `launchctl list`'s Status column is the fact that actually carries its health.
       const listStatus = queryLaunchdListStatusSensed(label, lifecycleExec);
+      if (externalReadFailures.lifecycle === "deadline") return { running: false, pid: null, sensed: false };
       if (!listStatus.sensed) return queryProcessServiceSensed(service, lifecycleExec);
       return {
         running: listStatus.pid !== null,
@@ -779,6 +830,38 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
   const render = deps.renderStatusBoardText ?? renderStatusBoardText;
   const ledgerPath = (deps.ledgerPathFor ?? ledgerPathFor)(config);
   const repoDir = reportRepoRoot(deps);
+  let pushedBranchesUnavailable = false;
+  const jsonRemoteReads = jsonMode ? {
+    resolveOriginMainSha: (dir: string): string | undefined => {
+      try {
+        const sha = boundedGit(dir, ["rev-parse", "origin/main"]).trim();
+        return /^[0-9a-f]{7,40}$/i.test(sha) ? sha : undefined;
+      } catch (err) { recordError("originMainSha", err); return undefined; }
+    },
+    readPushedRunBranches: (dir: string): string => {
+      try { return boundedGit(dir, ["ls-remote", "--heads", "origin", "run-*"]); }
+      catch (err) { recordError("runBranches", err); pushedBranchesUnavailable = true; return ""; }
+    },
+    readSharedPauseState: (dir: string) => {
+      if (!existsSync(join(dir, ".git"))) return "absent" as const;
+      return readSharedPause({ ...realSharedPauseGitDeps(dir), run: (args: string[]) => {
+        try { return { status: 0, stdout: boundedGit(dir, args) }; }
+        catch (err) { recordError("sharedPause", err); return { status: 1, stdout: "" }; }
+      } });
+    },
+    readDispatchClaims: (dir: string) => {
+      if (!existsSync(join(dir, ".git"))) return { status: "clear" as const };
+      try {
+        const prefix = dispatchClaimRef("");
+        const claims = boundedGit(dir, ["ls-remote", "origin", `${prefix}*`]).split("\n").flatMap((line) => {
+          const [holder, ref] = line.trim().split("\t");
+          return holder && ref?.startsWith(prefix) && ref.length > prefix.length
+            ? [{ taskId: ref.slice(prefix.length), holder }] : [];
+        });
+        return claims.length ? { status: "held" as const, claims } : { status: "clear" as const };
+      } catch (err) { recordError("dispatchClaims", err); return { status: "unreachable" as const }; }
+    },
+  } : {};
   // GITHUB IS DECORATION, NEVER A GATE: `resolveOwnerRepo`/`buildBatchedGithub` can themselves
   // fail (no `git` remote, no network) — caught here so a status read NEVER throws on a bad
   // network day; the board degrades the rows that needed it to a stated unknown instead.
@@ -786,7 +869,29 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
   if (deps.github === undefined) {
     try {
       const { owner, repo } = reportOwnerRepo(deps, repoDir);
-      github = (deps.buildBatchedGithub ?? buildBatchedGithub)(owner, repo);
+      // A 60-second timeout PER request allowed several sequential GitHub reads to park a JSON
+      // health probe for minutes. Give the entire remote walk one shared budget. The gateway's
+      // existing failure flag then turns timed-out reads into queue/inbox unknowns, never zeroes.
+      github = jsonMode
+        ? (deps.buildBatchedGithub ?? buildBatchedGithub)(owner, repo, {
+            // The gateway's rate-limit pacer and refusal backoff also sleep synchronously. Bound
+            // those waits by the same clock; a per-child timeout alone cannot cap the whole walk.
+            pacer: createGhCallPacer({ sleepSync: (ms) => {
+              if (ms > remainingExternalMs()) throw deadlineError();
+              Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+            } }),
+            exec: (args) => {
+              const remaining = externalDeadline! - systemClock.now();
+              if (remaining <= 0) throw deadlineError();
+              return ghExecFile("gh", args, {
+                encoding: "utf8",
+                stdio: ["ignore", "pipe", "pipe"],
+                maxBuffer: 1 << 26,
+                timeout: Math.max(1, Math.min(remaining, GH_CALL_TIMEOUT_MS)),
+              });
+            },
+          })
+        : (deps.buildBatchedGithub ?? buildBatchedGithub)(owner, repo);
     } catch {
       // Deliberate degrade, documented above the try: no git remote / no network reads exactly
       // like an unreachable gateway would, never a thrown status read.
@@ -801,6 +906,7 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
     github,
     resolveHeadroomEnabled: () => resolveHeadroomEnabled(config),
     resolveSupervisorIntervalS,
+    ...jsonRemoteReads,
   });
   // W1-T1235: GITHUB BUCKETS, read BESIDE the board's own HEADROOM section rather than folded
   // into it (design (v)) — a local ledger fold of `automerge.rate_limit_refused` rows, never a
@@ -808,8 +914,23 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
   // request.
   const readLedger = deps.readLedgerLines ?? ((pth: string) => readLedgerLines(pth) as Array<Record<string, unknown>>);
   const ghBucketRefusals = latestGhRateLimitRefusalsFromLedger(readLedger(ledgerPath));
-  if (rest.includes("--json")) {
-    out(JSON.stringify({ ...model, ghBucketRefusals }, null, 2));
+  if (jsonMode) {
+    // The board's text renderer uses []/0 alongside an unknownReason to keep its established
+    // model types. In JSON, those success-shaped values invite consumers to treat an unfinished
+    // read as a measured empty queue or inbox. Make unavailable explicit at this boundary.
+    const queueHeadReason = [
+      model.queueHead.unknownReason,
+      pushedBranchesUnavailable ? "run-branch lookup unavailable before the status JSON deadline" : undefined,
+    ].filter(Boolean).join("; ") || undefined;
+    const queueHead = queueHeadReason
+      ? { ...model.queueHead, unknownReason: queueHeadReason, status: "unavailable", rows: null, refused: null, refusedTruncated: null }
+      : model.queueHead;
+    const inbox = model.inbox.unknownReason
+      ? { ...model.inbox, status: "unavailable", readyCount: null, notReadyCount: null }
+      : model.inbox;
+    const externalReads = Object.fromEntries(Object.entries(externalReadFailures).map(([name, reason]) =>
+      [name, { status: "unavailable", reason }]));
+    out(JSON.stringify({ ...model, queueHead, inbox, ghBucketRefusals, externalReads }, null, 2));
   } else {
     out(`${render(model)}\n\n${renderGhBucketsSection(ghBucketRefusals)}`);
   }

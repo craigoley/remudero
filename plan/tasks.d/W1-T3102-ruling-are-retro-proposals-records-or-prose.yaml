@@ -11,7 +11,7 @@
   files: [DECISIONS.md]
   origin: "operator-session#next-wave-2026-09-08"
   plan_refs: ["P47", "W1-T3088", "W1-T2458"]
-  status: queued
+  status: done
   attempts: 0
   # EXECUTED BY HAND 2026-09-22: this task's whole deliverable is a DECISIONS.md entry, and
   # ruling-verify correctly refuses it at verify: auto, so the operator wrote it in #6561.
@@ -86,6 +86,7 @@
     migration is a separate task that cites the ruling, and a builder who ships `plan/proposals.d/`
     here has decided the question the operator was asked.
   note: |
+    OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, "the verify-human queue, cleared"): DONE — ruled 2026-09-22 (#6561) and credited by pr: 6561; the queue read status alone.
     PRECEDENT, FOUND BY AUDIT 2026-09-08. W1-T2458 ("THE FLEET MINES ITS OWN NEXT-WORK LIST THROUGH
     FIVE SYMBOLS AND DEPOSITS IT IN A MARKDOWN SECTION NO RUNG READS") is `status: merged` — the
     SAME defect shape as this ruling, on a DIFFERENT corpus: followups rather than retro proposals.

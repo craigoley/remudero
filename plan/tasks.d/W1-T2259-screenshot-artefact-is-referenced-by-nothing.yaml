@@ -3,11 +3,11 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   risk: high
   budget_usd: 30.00
-  files: [scripts/shell-screenshot.mjs, docs/design-review/w1-t153/shell-390.png, docs/design-review/w1-t153/shell-1440.png, test/no-raw-nul.test.ts, test/screenshot-artefact-retired.test.ts]
+  files: [scripts/comment-load-baseline.json, scripts/shell-screenshot.mjs, docs/design-review/w1-t153/shell-390.png, docs/design-review/w1-t153/shell-1440.png, test/no-raw-nul.test.ts, test/screenshot-artefact-retired.test.ts]
   origin: oper#screenshot-artefact-unreferenced-2026-08-25
   plan_refs: ["W1-T153"]
   status: queued
@@ -49,6 +49,7 @@
     retirement removes two of three entries, so the test's list, its title's count and its trailing
     comment all move together — this is not a two-line deletion.
   note: |
+    OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, "the verify-human queue, cleared"): APPROVED AS AUTO — delete the orphan script, its two PNGs, and its allowlist and comment-load baseline entries.
     Q1 — DOES THE ARTEFACT STILL SERVE ANYTHING, AND IS THE ALLOWLIST DEBT? Two separable answers,
     and conflating them is the trap.
     NOTHING REGENERATES OR READS THE IMAGES. The script that produces them is unreachable (finding 1

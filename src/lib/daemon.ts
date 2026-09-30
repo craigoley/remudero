@@ -117,6 +117,15 @@ import type { GithubPostureFinding } from "./github-posture.js";
 import { clockFromDateFn, clockFromIsoFn, type Clock } from "../lib/clock.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
+import {
+  IDLE_LANE_SUMMARY_WINDOW_MS,
+  accountIdleLaneMinutes,
+  idleLaneCauseForStep,
+  newIdleLaneAccount,
+  rollIdleLaneWindow,
+  summarizeIdleLaneAccount,
+  type IdleLaneCause,
+} from "./idle-lane-accounting.js";
 
 /** W1-T3978: the implement producer's exact refusal, carried as runtime metadata without widening
  * the shared RunResult union used by every other dispatch lane. */
@@ -2298,7 +2307,35 @@ export async function runDaemon(
     state: sweepRetriggerState,
     liveness: sweepLiveness,
   };
-  const log = deps.log ?? (() => {});
+  const emitLog = deps.log ?? (() => {});
+  // W1-T4837: idle build-lane minute accounting. The daemon's own log stream is observed rather than a flag
+  // threaded through every decline, so a hold written by any layer names the cause of the tick it lands in.
+  const idleLaneClock = clockFromDateFn(deps.now);
+  let idleLaneAccount = newIdleLaneAccount(idleLaneClock.now());
+  let idleLaneTickCause: IdleLaneCause | undefined;
+  let idleLaneDispatchable = 0;
+  const log: typeof emitLog = (step, fields) => {
+    idleLaneTickCause = idleLaneCauseForStep(step) ?? idleLaneTickCause;
+    emitLog(step, fields);
+  };
+  // One sample per tick outcome: what the lanes are doing and why they are not doing more. `dispatchable`
+  // is refreshed only on ticks that ran selection; a tick that never reached selection (a pause) reuses the
+  // last known count rather than guessing. One `lane.idle_summary` row per window.
+  const sampleIdleLane = (busyLanes: number, selectionRan: boolean, dispatchable?: number): void => {
+    if (dispatchable !== undefined) idleLaneDispatchable = dispatchable;
+    const atMs = idleLaneClock.now();
+    idleLaneAccount = accountIdleLaneMinutes(idleLaneAccount, {
+      atMs,
+      busyLanes,
+      dispatchable: idleLaneDispatchable,
+      cause: idleLaneTickCause,
+      selectionRan,
+    });
+    if (atMs - idleLaneAccount.windowStartMs >= IDLE_LANE_SUMMARY_WINDOW_MS) {
+      emitLog("lane.idle_summary", { ...summarizeIdleLaneAccount(idleLaneAccount, atMs) });
+      idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
+    }
+  };
   // Shared by both governor call sites below, so the two cannot silently drift into different field
   // names for the same verdict (W1-T342).
   const logDispatchGovernorDefer = (verdict: DispatchGovernorVerdict, tick: number): void => {
@@ -2810,6 +2847,7 @@ export async function runDaemon(
     // daemon stayed alive, and the freshness judges read a false FAIL. Placed as literally the first statement
     // of the loop body so no branch below can skip it (W1-T1274).
     log("daemon.tick", { poll_interval_ms: pollIntervalMs });
+    idleLaneTickCause = undefined;
 
     if (opts.max !== undefined && attempted.length >= opts.max) {
       return summary("max_reached", `${opts.max} task(s)`);
@@ -2892,6 +2930,7 @@ export async function runDaemon(
     if (paused) {
       ticks++;
       log("daemon.pause", { tick: ticks, detail: paused, poll_interval_ms: pollIntervalMs });
+      sampleIdleLane(0, false);
       // W1-T4685: the SAME observation, tracked as one row instead of one line per tick — see
       // `gateObservations`'s own comment above for why this sits BESIDE the line above it, not in
       // place of it.
@@ -4054,6 +4093,17 @@ export async function runDaemon(
       await flushLifetimePressure();
       ticks++;
       log("daemon.idle", { tick: ticks, poll_interval_ms: pollIntervalMs });
+      {
+        // Dispatchable = queued and unmerged, less what eligibility filtered for a reason other than "already
+        // merged" (which `isMerged` already removed). An estimate: it can only over-count, never hide work.
+        const filteredTally = idleReasons.snapshot();
+        const filtered = (Object.keys(filteredTally) as Array<keyof typeof filteredTally>).reduce(
+          (n, r) => (r === "already-merged" ? n : n + filteredTally[r].count),
+          0,
+        );
+        const queuedUnmerged = planForBatch.tasks.filter((t) => t.status === "queued" && !isMerged(t.id)).length;
+        sampleIdleLane(0, true, Math.max(0, queuedUnmerged - filtered));
+      }
       // Cadence: on change, not every tick. The idle row still fires every poll and is byte-compatible with
       // before. The reasons ride a separate step, emitted only when the picture actually changes — logging
       // the tally on all ~390 ticks would be 390 identical lines that bury the one that matters.
@@ -4191,6 +4241,7 @@ export async function runDaemon(
         poll_interval_ms: pollIntervalMs,
         recheck: true,
       });
+      sampleIdleLane(0, false);
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
     }
@@ -4210,6 +4261,7 @@ export async function runDaemon(
         poll_interval_ms: pollIntervalMs,
         recheck: true,
       });
+      sampleIdleLane(0, false);
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
     }
@@ -4285,6 +4337,7 @@ export async function runDaemon(
       await flushLifetimePressure();
       ticks++;
       logDispatchGovernorDefer(deferredVerdict!, ticks);
+      sampleIdleLane(0, true, dispatchSet.length);
       if (await stopInterphaseReviewClock()) continue;
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
@@ -4320,6 +4373,7 @@ export async function runDaemon(
         const interphaseWakeSeen = await stopInterphaseReviewClock();
         if (interphaseWakeSeen) log("daemon.dispatch.wake_deferred", { tasks: admitted.map((t) => t.id) });
     const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger, headroomSampler).stop;
+    sampleIdleLane(admitted.length, true, dispatchSet.length);
 
     // Concurrent dispatch: settle-all, never fail-fast, so a sibling lane's rejection can never abort another lane
     // in flight, and every lane's outcome is recorded before this tick decides anything (W1-T343). W1-T4416: a lane
@@ -4382,6 +4436,10 @@ export async function runDaemon(
     await stopTicker();
     await flushLifetimePressure();
     restartInterphaseReviewClock();
+    // Lanes are back to empty here; whatever holds them empty from now on is named by the next tick's sample,
+    // and an interval nothing names is reported as unknown rather than absorbed.
+    idleLaneTickCause = undefined;
+    sampleIdleLane(0, false);
 
     // Classify every lane's settlement before this tick decides anything, mirroring `runDrainLanes`.
     // A positively transient gh transport failure and a spawn-infra failure degrade into their bounded
