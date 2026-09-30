@@ -86,6 +86,7 @@ import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildReadModelViewRoutes, type ViewBodySource } from "./views.js";
 import { navBadgeView, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
 import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
+import { withViewShadow } from "./view-shadow.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
@@ -2708,8 +2709,8 @@ function assembleServeRoutes(
       planPath: deps.panelGraph.planPath,
     }),
     buildRecentRoute(deps.board),
-    ...buildReadModelViewRoutes({ readModel: readModel && darkReadModelViews(readModel, ["nav-badge", "repositories"]), readModelViews: READ_MODEL_VIEWS.map((view) => view.name),
-      legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes })] }),
+    ...buildReadModelViewRoutes(withViewShadow(readModel, { readModel: readModel && darkReadModelViews(readModel, ["nav-badge", "repositories"]), readModelViews: READ_MODEL_VIEWS.map((view) => view.name),
+      legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes })] })),
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),
     buildAccountUsageRoute(accountUsageDeps),
