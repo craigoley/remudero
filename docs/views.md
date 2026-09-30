@@ -56,6 +56,15 @@ reads no file and no SQLite.
 It is the read model's own status: the committed projector transactions per instance DB, who holds the
 writer lease, and how many future-dated rows were quarantined.
 
+## `repositories` (version 1)
+
+`GET /v1/views/repositories` returns `data.instances[]`, one entry per configured daemon instance.
+Each entry names its `instanceId` and carries that instance's `RepoDashboardResult` as `summary` when
+available; otherwise it carries a `reason`. The summary keeps the existing repository-card contract,
+including explicit null/unmeasured telemetry and `not_computed` fields. `data.reason` explains a
+portfolio-wide unavailable input. Per-instance `repositories:<instance>` sources report summary
+freshness, and `ledger:<instance>` sources report projector freshness.
+
 ## Rules for a new view
 
 1. Name it after the surface (`nav-badge`, `now`, `repositories`), not after its inputs.

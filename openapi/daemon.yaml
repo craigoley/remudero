@@ -6735,6 +6735,43 @@ components:
                     description: Rows stamped more than five minutes past their ingest time.
                   reason: {type: string}
 
+    RepositoriesView:
+      type: object
+      description: >
+        GET /v1/views/repositories (docs/views.md): the per-instance repository portfolio
+        materialized by src/lib/repositories-view.ts. A summary is absent until that instance's
+        repository route inputs have been projected; `reason` is explicit rather than an empty card.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [repositories]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [instances]
+          properties:
+            instances:
+              type: array
+              items:
+                type: object
+                required: [instanceId]
+                properties:
+                  instanceId: {type: string}
+                  summary:
+                    $ref: "#/components/schemas/RepoDashboardResult"
+                  reason: {type: string}
+            reason: {type: string}
+
     RecentActivityEntry:
       type: object
       description: One RECENT feed row minted from a ledger line (src/lib/board.ts's `RecentActivityEntry`).
@@ -12061,6 +12098,32 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ReadModelStatusView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is switched off (`view_disabled`) or has no body yet (`view_not_ready`).
+
+  /v1/views/repositories:
+    get:
+      summary: The repository portfolio across instances, served from the read-model worker's in-memory body.
+      description: >
+        The read-model version of each instance's GET /v1/repos/summary projection. A request reads
+        memory only; summary recomputation, the projector and per-view switch run off the request
+        path. Each instance includes its RepoDashboardResult when available, otherwise a reason.
+        Same ETag and 304 rules as every view. See docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The per-instance repository portfolio.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RepositoriesView"
         "304":
           description: The request's `If-None-Match` matched the view's ETag; no body.
         "401":

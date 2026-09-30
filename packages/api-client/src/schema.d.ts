@@ -2604,6 +2604,23 @@ export interface components {
         })[];
       };
     };
+    /** GET /v1/views/repositories (docs/views.md): the per-instance repository portfolio materialized by src/lib/repositories-view.ts. A summary is absent until that instance's repository route inputs have been projected; `reason` is explicit rather than an empty card. */
+    RepositoriesView: {
+      view: "repositories";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        instances: ({
+          instanceId: string;
+          summary?: RepoDashboardResult;
+          reason?: string;
+        })[];
+        reason?: string;
+      };
+    };
     /** One RECENT feed row minted from a ledger line (src/lib/board.ts's `RecentActivityEntry`). */
     RecentActivityEntry: {
       taskId: string;
@@ -4366,6 +4383,17 @@ export interface paths {
     get: {
       responses: {
           "200": ReadModelStatusView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/repositories": {
+    get: {
+      responses: {
+          "200": RepositoriesView;
           "304": undefined;
           "401": Error;
           "403": Error;
