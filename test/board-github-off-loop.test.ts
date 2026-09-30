@@ -3,7 +3,7 @@
 // yet covered ran execFileSync and paceGhEntry's blocking sleep on the thread every console route shares.
 
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -32,6 +32,23 @@ else
 fi
 `;
   const path = join(dir, "board-gh");
+  writeFileSync(path, script);
+  chmodSync(path, 0o755);
+  return path;
+}
+
+function writeIssueBoardGh(dir: string): string {
+  const script = `#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"/issues?"* ]]; then
+  cat <<'JSON'
+[{"number":9,"html_url":"https://github.com/o/r/issues/9","state":"open","title":"needs an operator","updated_at":"2026-09-30T00:00:00Z"}]
+JSON
+else
+  echo '[]'
+fi
+`;
+  const path = join(dir, "issue-board-gh");
   writeFileSync(path, script);
   chmodSync(path, 0o755);
   return path;
@@ -81,6 +98,33 @@ test("a due board github read on serve spawns no synchronous gh child", async ()
   await settle(gh);
   assert.equal(gh.reviewState?.(OPEN_PR_URL), "success", "the walk refreshed it off the loop");
   assert.deepEqual(syncCalls, [], "no read spawned a synchronous gh child");
+});
+
+test("the first off-loop issue lookup requests a background read and serves its result", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-off-loop-first-issue-"));
+  const syncCalls: string[] = [];
+  const issueUrl = "https://github.com/o/r/issues/9";
+  const gh = buildBatchedGithub("o", "r", {
+    ghBin: writeIssueBoardGh(dir),
+    exec: (args) => {
+      syncCalls.push(args.join(" "));
+      throw new Error("a synchronous issue fetch ran on the serving thread");
+    },
+    ttlMs: 1_000,
+    offLoop: true,
+  });
+
+  try {
+    assert.equal(gh.issueByUrl?.(issueUrl), null, "an uncollected issue is unavailable, not a confirmed miss");
+    assert.equal(gh.issueReadFailed?.(), true);
+    assert.equal(gh.readState?.(), "in_flight", "the due issue read was handed to the worker");
+    await settle(gh);
+    assert.deepEqual(gh.issueByUrl?.(issueUrl), { state: "open", title: "needs an operator" });
+    assert.equal(gh.issueReadFailed?.(), false);
+    assert.deepEqual(syncCalls, [], "the first issue lookup never shells gh on the serving thread");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("serve gh pacing waits without a blocking sleep", () => {

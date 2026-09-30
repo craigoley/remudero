@@ -18,8 +18,8 @@ import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 const GH_HANG_S = 4;
 
 function hangableGh(dir: string, hangFlag: string): string {
-  const script = `#!/usr/bin/env bash
-if [[ -e "${hangFlag}" ]]; then sleep ${GH_HANG_S}; fi
+const script = `#!/usr/bin/env bash
+if [[ -e "${hangFlag}" ]]; then rm -f "${hangFlag}"; sleep ${GH_HANG_S}; fi
 args="$*"
 if [[ "$args" == *"state=open"* ]]; then
   echo '[{"number":7,"html_url":"https://github.com/o/r/pull/7","state":"open","merged":false,"body":"","updated_at":"2026-09-24T00:00:00Z","head":{"ref":"run-unfiled-1","sha":"abc"},"auto_merge":null,"title":"an open pr"}]'
@@ -90,12 +90,16 @@ test("a hung gh leaves /v1/status inside its budget with its github facts labell
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     const headers = { authorization: "Bearer read-token" };
 
+    const warmStartedAt = performance.now();
     github.warm?.();
     await settled(github);
+    const fetchDurationMs = performance.now() - warmStartedAt;
     assert.equal(github.listOpenHeadBranches?.()?.length, 1, "a positive control: the first walk landed one open PR");
 
     writeFileSync(hangFlag, "");
-    await new Promise((resolve) => setTimeout(resolve, ttlMs + 100));
+    // The gateway's TTL floor is the measured time the previous fetch took, not just `ttlMs`.
+    // Cross both thresholds so this read is genuinely stale even on a slow CI runner.
+    await new Promise((resolve) => setTimeout(resolve, Math.max(ttlMs, fetchDurationMs) + 100));
     const started = performance.now();
     const res = await fetch(`${base}/v1/status`, { headers });
     const elapsedMs = performance.now() - started;
@@ -105,6 +109,7 @@ test("a hung gh leaves /v1/status inside its budget with its github facts labell
     assertWallClockBound(elapsedMs, CONSOLE_READ_ROUTE_BUDGET_MS + 250, "/v1/status must answer inside its budget while gh hangs");
     assert.ok((body.github_facts_age_ms ?? -1) >= ttlMs, `the facts' age must be their real age, got ${body.github_facts_age_ms}`);
     assert.equal(body.github_facts_status, "stale", "github facts past their TTL are never labelled fresh");
+    await settled(github);
   } finally {
     server.close();
     if (existsSync(hangFlag)) rmSync(hangFlag);
