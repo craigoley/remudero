@@ -15,7 +15,8 @@
     - test/feedback-landing-union-writer.test.ts
   origin: "followup#5317-feedback-landing-review-2026-09-21"
   plan_refs: [W1-T530, W1-T913, W1-T3990]
-  status: queued
+  status: blocked
+  retirement: closed
   priority: 1
   rationale: |
     OBSERVED on current origin/main 282d8fea7cd7e378087306f64802de83b9e97715 and in issue #5317:
@@ -55,6 +56,13 @@
     The shared review producer remains the sole status writer, and its current-head/retry tests are
     the evidence for review behavior rather than a second landing-local implementation.
   note: |
+    CLOSED 2026-09-30 (operator ruling) — SUPERSEDED BY W1-T3995, WHICH WAS FILED AS THIS RECORD'S FOLLOW-UP WITH NON-
+    STALE PROOFS AND IS MERGED (#6492 `fix(feedback): hand off landing PRs to review`, trailer W1-T3995). The behaviour
+    is on main: src/lib/feedback-landing.ts no longer arms auto-merge on the landing PR (test/feedback-landing-union-
+    writer.test.ts asserts mergeCount 0 before review) and requestLandingReview in src/run-task.ts hands the PR to the
+    shared review producer. Three of this record's four proofs name tests that predate it (#5567), so a build could not
+    discriminate. The acceptance criteria are PRESERVED UNCHANGED.
+
     reservation hand-off: run-W1-T3991-1790034800000 -> run-W1-T3992-1790037600000
     reservation holder: run-W1-T3992-1790037600000
     This is a follow-up implementation task because W1-T3990 is terminally credited by the plan

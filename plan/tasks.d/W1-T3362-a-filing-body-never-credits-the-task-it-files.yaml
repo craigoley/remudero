@@ -10,7 +10,13 @@
     - src/lib/plan-pr-emitter.ts
     - test/a-filing-body-never-credits-the-task-it-files.test.ts
   origin: "sweep-forensics#2026-09-10-queue-day"
-  status: queued
+  status: done
+  note: |
+    DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #6442
+    (`fix(plan): omit self-credit trailer from filing bodies that add the task's shard`, trailer + head
+    run-W1-T3362-1790019891145): src/lib/plan-pr-emitter.ts; test/a-filing-body-never-credits-the-task-it-files.test.ts.
+    plan-reconcile refuses the `fix(plan)` subject. Every acceptance criterion holds on main and is PRESERVED UNCHANGED:
+    this record is marked done, not re-proved.
   attempts: 0
   acceptance:
     - claim: "a body emitted for a filing PR never credits a task that same PR contributes the record for"

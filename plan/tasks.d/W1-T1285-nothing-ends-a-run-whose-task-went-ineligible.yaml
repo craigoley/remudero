@@ -118,6 +118,11 @@
     - claim: "a cancelled run leaves its pushed branch intact, so the commits survive the cancellation"
       proof: "unit test: test/run-cancel-on-ineligible.test.ts"
   note: |
+    UNBLOCKING QUERY ANSWERED 2026-09-30 (operator session, deduplicated ledger union, last 30 days): of 657 finished
+    runs, 5 had their task credited merged by another actor while the run was still going (0.8%). All five were
+    2026-09-02..09-07, and every credit came from daemon credit backfill, so some may be bookkeeping rather than
+    real overlap. None have occurred since 2026-09-07, after dispatch claims and the open-sibling-build guard. That
+    is above this shard's close-if-one-or-two bar, so it stays blocked; re-run the query before building it.
     RISK BAND -- BOTH READINGS, BECAUSE THE BAND EXEMPTS THE CHECK RATHER THAN CLEARING IT.
     `sizingViolation` (`src/lib/task-linter.ts`) opens with `if (task.risk === "high") return
     undefined; // Rule 19 exemption`, so `high` means the span was NEVER SCORED, not that it was

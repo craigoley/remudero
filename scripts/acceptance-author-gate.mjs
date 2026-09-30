@@ -116,6 +116,23 @@ export function readEventPayload(eventPath) {
   return { readable: true, body: typeof pr.body === "string" ? pr.body : "", authorLogin, baseSha, headSha, headRefName };
 }
 
+/** Use the checked-out PR merge commit only when its second parent is this event's head. */
+export function resolveEffectiveBaseSha({ baseSha, headSha, root = REPO_ROOT, git } = {}) {
+  if (!baseSha || !headSha) return baseSha;
+  const run =
+    git ??
+    ((args) => execFileSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] }));
+  try {
+    const parents = String(run(["rev-parse", "HEAD^1", "HEAD^2"])).trim().split(/\s+/);
+    if (parents.length === 2 && /^[0-9a-f]{40}$/i.test(parents[0]) && parents[1] === headSha) {
+      return parents[0];
+    }
+  } catch {
+    // A head checkout, shallow history, or unavailable git keeps the payload base.
+  }
+  return baseSha;
+}
+
 /**
  * W1-T3231 — the task ids whose PLAN RECORD this diff INTRODUCES.
  *
@@ -669,7 +686,7 @@ export function resolveEventPath(flagValue, env = process.env) {
       };
 }
 
-export function main(argv) {
+export function main(argv, { root = REPO_ROOT } = {}) {
   const { values } = parseArgs({
     args: argv,
     options: { "event-path": { type: "string" }, "commit-trailer-only": { type: "boolean" } },
@@ -689,23 +706,25 @@ export function main(argv) {
     return;
   }
 
-  const trailerCommits = commitTaskTrailersAtRange({ baseSha: payload.baseSha, headSha: payload.headSha });
-  const changedPaths = changedPathsAtRange({ baseSha: payload.baseSha, headSha: payload.headSha });
-  const taskFilesForId = planTaskFilesResolver();
+  const effectiveBaseSha = resolveEffectiveBaseSha({ baseSha: payload.baseSha, headSha: payload.headSha, root });
+  const trailerCommits = commitTaskTrailersAtRange({ baseSha: effectiveBaseSha, headSha: payload.headSha, root });
+  const changedPaths = changedPathsAtRange({ baseSha: effectiveBaseSha, headSha: payload.headSha, root });
+  const taskFilesForId = planTaskFilesResolver(root);
   const result = values["commit-trailer-only"]
     ? evaluateCommitTrailerGate({ trailerCommits, changedPaths, taskFilesForId })
     : evaluateGate({
       body: payload.body,
       authorLogin: payload.authorLogin,
       headRefName: payload.headRefName,
-      trailerResolves: planTrailerResolver(),
-      criteriaFromHeadPlan: criteriaResolveAtHead({ body: payload.body, headSha: payload.headSha }),
-      introducedTaskIds: introducedShardTaskIds({ baseSha: payload.baseSha, headSha: payload.headSha }),
+      trailerResolves: planTrailerResolver(root),
+      criteriaFromHeadPlan: criteriaResolveAtHead({ body: payload.body, headSha: payload.headSha, root }),
+      introducedTaskIds: introducedShardTaskIds({ baseSha: effectiveBaseSha, headSha: payload.headSha, root }),
       trailerCommits,
       changedPaths,
       taskFilesForId,
-      taskAcceptanceForId: planTaskAcceptanceResolver(),
-      rule15Verdict: rule15SplitAtRange({ baseSha: payload.baseSha, headSha: payload.headSha }),
+      taskAcceptanceForId: planTaskAcceptanceResolver(root),
+      rule15Verdict: rule15SplitAtRange({ baseSha: effectiveBaseSha, headSha: payload.headSha, root }),
+      root,
     });
   if (!result.ok) {
     console.error(`acceptance-author-gate: REFUSED (${result.defect}) — ${result.message}`);
