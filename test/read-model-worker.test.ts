@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fsDefault, { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -450,6 +451,25 @@ test("the switch reader does not follow a symlink to a different file", (t) => {
   const result = readReadModelSwitches(path);
   assert.equal(result.ok, false);
   assert.match(String((result as { reason: string }).reason), /unreadable/);
+});
+
+test("the switch reader rejects a file changed during its read", (t) => {
+  const root = scratch(t, "rmw-switch-changing");
+  const path = join(root, "switches.json");
+  writeFileSync(path, JSON.stringify({ projector: "off" }));
+  const realReadFileSync = fsDefault.readFileSync.bind(fsDefault);
+  const readSpy = t.mock.method(fsDefault, "readFileSync", (target: unknown, ...rest: unknown[]) => {
+    const result = realReadFileSync(target as string, ...(rest as []));
+    if (typeof target === "number") appendFileSync(path, " ");
+    return result;
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.deepEqual(readReadModelSwitches(path), { ok: false, reason: "switch file changed while being read" });
+  } finally {
+    readSpy.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 test("the ledger source reads stale when its projector is behind or has not ticked", () => {
