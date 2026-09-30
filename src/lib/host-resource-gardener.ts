@@ -606,8 +606,10 @@ export function runHostResourcePass(ports: HostResourcePorts): PassResult {
     if (isPersistentGrower(a) && ports.fileConsumer) {
       const origin = consumerOrigin(f.host, a.consumer);
       const rec = state.filed[origin];
-      const retryOk = !rec?.failedAt || nowMs - Date.parse(rec.failedAt) >= FILE_RETRY_MS;
-      if (!ports.planOrigins().includes(origin) && !rec?.url && retryOk) {
+      const failedAtMs = rec?.failedAt === undefined ? undefined : Date.parse(rec.failedAt);
+      const retryOk = failedAtMs === undefined || nowMs - failedAtMs >= FILE_RETRY_MS;
+      const alreadyFiled = rec !== undefined && rec.url !== undefined;
+      if (!ports.planOrigins().includes(origin) && !alreadyFiled && retryOk) {
         try {
           const url = ports.fileConsumer({ host: f.host, device: f.device, consumer: a.consumer, origin, attribution: a });
           if (url !== undefined) {
