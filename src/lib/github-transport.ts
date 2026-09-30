@@ -408,10 +408,15 @@ export function createGhCallPacer(
 }
 
 /** Raised by {@link createNonBlockingGhCallPacer} in place of a synchronous sleep, so the caller sees why no call was made. */
-export class GhPaceWouldBlockError extends Error {
+export class GhPaceWouldBlockError extends RmdError {
   readonly waitMs: number;
   constructor(waitMs: number) {
-    super(`gh call pacer refused to sleep ${waitMs}ms on this thread: a blocking sleep would freeze the event loop, so retry after the gap`);
+    super(
+      "github",
+      1,
+      `gh call pacer refused to sleep ${waitMs}ms on this thread: a blocking sleep would freeze the event loop, so retry after the gap`,
+      { waitMs },
+    );
     this.name = "GhPaceWouldBlockError";
     this.waitMs = waitMs;
   }
