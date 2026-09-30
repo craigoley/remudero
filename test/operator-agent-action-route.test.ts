@@ -8,7 +8,7 @@ import { test } from "node:test";
 
 import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
 import { isPaused, isStopped, pauseFilePath, requestStop, stopFilePath } from "../src/lib/fleet-control.js";
-import { buildOperatorAgentActionHandoffRoutes, type ActionHandoffDeps } from "../src/lib/operator-agent-action-handoff.js";
+import { buildOperatorAgentActionHandoffRoutes, type ActionHandoffConfig } from "../src/lib/operator-agent-action-handoff.js";
 import { createService, type Route, type Scope } from "../src/lib/service.js";
 import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -18,7 +18,7 @@ const PREPARE = "/v1/operator-agent/action-handoff/prepare";
 const EXECUTE = "/v1/operator-agent/action-handoff/execute";
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 
-interface Harness { base: string; root: string; deps: ActionHandoffDeps; advance: (ms: number) => void }
+interface Harness { base: string; root: string; deps: ActionHandoffConfig; advance: (ms: number) => void }
 
 async function listen(routes: Route[]): Promise<{ server: Server; base: string }> {
   const server = createService({
@@ -36,11 +36,11 @@ async function listen(routes: Route[]): Promise<{ server: Server; base: string }
   return { server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
 }
 
-async function withHandoff(action: (h: Harness) => Promise<void>, overrides: Partial<ActionHandoffDeps> = {}): Promise<void> {
+async function withHandoff(action: (h: Harness) => Promise<void>, overrides: Partial<ActionHandoffConfig> = {}): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}action-route-`));
   mkdirSync(join(root, "state"), { recursive: true });
   let now = T0;
-  const deps: ActionHandoffDeps = { root, claimRoot: root, ledgerPath: join(root, "state", "ledger.ndjson"), instance: "core", repository: "owner/repo", clock: clockFromMillisFn(() => now), ...overrides };
+  const deps: ActionHandoffConfig = { root, claimRoot: root, ledgerPath: join(root, "state", "ledger.ndjson"), instance: "core", repository: "owner/repo", clock: clockFromMillisFn(() => now), ...overrides };
   const { server, base } = await listen(buildOperatorAgentActionHandoffRoutes(deps));
   try {
     await action({ base, root, deps, advance: (ms) => { now += ms; } });

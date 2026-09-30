@@ -8,7 +8,7 @@ import {
   actionHandoffPaths,
   executeActionHandoff,
   prepareActionHandoff,
-  type ActionHandoffDeps,
+  type ActionHandoffConfig,
 } from "../src/lib/operator-agent-action-handoff.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { isPaused, isStopped } from "../src/lib/fleet-control.js";
@@ -17,11 +17,11 @@ import { writeLedger } from "./helpers/ledger-fixture.js";
 const ACTOR = "operator:alice";
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 
-function fixture(overrides: Partial<ActionHandoffDeps> = {}): { deps: ActionHandoffDeps; root: string; done: () => void } {
+function fixture(overrides: Partial<ActionHandoffConfig> = {}): { deps: ActionHandoffConfig; root: string; done: () => void } {
   const seeded = writeLedger();
   const root = seeded.dir;
   mkdirSync(join(root, "state"), { recursive: true });
-  const deps: ActionHandoffDeps = {
+  const deps: ActionHandoffConfig = {
     root, claimRoot: root, ledgerPath: seeded.path,
     instance: "core", repository: "owner/repo", clock: fixedClock(T0), ...overrides,
   };
@@ -122,7 +122,7 @@ test("repeated assistant intent has one action and one receipt", () => {
 
 test("ambiguous external outcomes remain unresolved, never success-shaped", () => {
   const { deps, root, done } = fixture();
-  const lostDeps: ActionHandoffDeps = { ...deps, execute: () => { throw new Error("socket hang up after dispatch"); } };
+  const lostDeps: ActionHandoffConfig = { ...deps, execute: () => { throw new Error("socket hang up after dispatch"); } };
   try {
     const refusedPreview = prepareActionHandoff(lostDeps, ACTOR, intent("intent-lost-00"));
     assert.equal(refusedPreview.status, 503, "a policy check that cannot answer is not a preview");

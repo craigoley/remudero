@@ -37,7 +37,7 @@ const SUMMARY: Readonly<Record<string, string>> = Object.freeze({
   "fleet.resume": "Resume dispatch: lifts a pause; a STOP is never lifted by this action.",
 });
 
-export interface ActionHandoffDeps {
+export interface ActionHandoffConfig {
   /** The fleet-control root the delegated verb writes: the target. */
   root: string;
   ledgerPath: string;
@@ -84,7 +84,7 @@ const sha = (value: string): string => createHash("sha256").update(value).digest
 const refusal = (status: number, code: string, detail: string, extra: Record<string, unknown> = {}): ActionHandoffResult =>
   ({ status, body: { version: ACTION_HANDOFF_VERSION, outcome: "refused", code, detail, ...extra } });
 
-export function actionHandoffPaths(deps: Pick<ActionHandoffDeps, "claimRoot">, confirmationId: string) {
+export function actionHandoffPaths(deps: Pick<ActionHandoffConfig, "claimRoot">, confirmationId: string) {
   const dir = join(deps.claimRoot, "state", "assistant-action-handoffs");
   const key = sha(confirmationId);
   return { dir, prepared: join(dir, `${key}.prepared.json`), claim: join(dir, `${key}.claim.json`), receipt: join(dir, `${key}.receipt.json`) };
@@ -114,7 +114,7 @@ function eligible(verb: string): { ok: true; entry: CatalogueEntry; recovery: st
   return { ok: true, entry, recovery };
 }
 
-function observeTarget(deps: ActionHandoffDeps): TargetState {
+function observeTarget(deps: ActionHandoffConfig): TargetState {
   return { paused: isPaused(deps.root), stopped: isStopped(deps.root) };
 }
 
@@ -123,7 +123,7 @@ function targetDigest(verb: string, instance: string, repository: string, state:
 }
 
 /** The automation-action record the catalogue executor admits; every field is server-owned. */
-function automationAction(deps: ActionHandoffDeps, prepared: Pick<Prepared, "confirmationId">, verb: string, entry: CatalogueEntry, repository: string, nowMs: number, expiresAtMs: number): AutomationAction {
+function automationAction(deps: ActionHandoffConfig, prepared: Pick<Prepared, "confirmationId">, verb: string, entry: CatalogueEntry, repository: string, nowMs: number, expiresAtMs: number): AutomationAction {
   const clock = fixedClock(nowMs);
   return {
     version: AUTOMATION_ACTION_VERSION, actionId: `${ACTION_HANDOFF_VERSION}:${sha(prepared.confirmationId).slice(0, 32)}`,
@@ -139,7 +139,7 @@ function automationAction(deps: ActionHandoffDeps, prepared: Pick<Prepared, "con
   };
 }
 
-function delegate(deps: ActionHandoffDeps, actor: string, action: AutomationAction, nowMs: number, dryRun: boolean): CatalogueExecution {
+function delegate(deps: ActionHandoffConfig, actor: string, action: AutomationAction, nowMs: number, dryRun: boolean): CatalogueExecution {
   const at = fixedClock(nowMs).iso();
   return (deps.execute ?? executeCatalogueAction)({
     action, receipts: [], dryRun, clock: fixedClock(nowMs), callerTier: "middle", origin: actor,
@@ -189,7 +189,7 @@ function readPrepared(path: string): Prepared {
 }
 
 /** PREPARE: typed, allowlisted, instance-scoped, non-mutating. A repeated intent returns its first preview. */
-export function prepareActionHandoff(deps: ActionHandoffDeps, actor: string, input: PrepareInput): ActionHandoffResult {
+export function prepareActionHandoff(deps: ActionHandoffConfig, actor: string, input: PrepareInput): ActionHandoffResult {
   const verb = eligible(input.verb);
   if (!verb.ok) return refusal(verb.code === "unknown_verb" ? 400 : 403, verb.code, `${input.verb} is not an action-handoff-v1 verb`);
   if (input.instance !== deps.instance) return refusal(409, "cross_instance", `this route acts only for instance ${deps.instance}`);
@@ -266,7 +266,7 @@ function replayed(paths: ReturnType<typeof actionHandoffPaths>, confirmationId: 
 }
 
 /** EXECUTE: single-use, explicitly confirmed, revalidated, delegated, receipted. */
-export function executeActionHandoff(deps: ActionHandoffDeps, actor: string, input: ExecuteInput): ActionHandoffResult {
+export function executeActionHandoff(deps: ActionHandoffConfig, actor: string, input: ExecuteInput): ActionHandoffResult {
   const paths = actionHandoffPaths(deps, input.confirmationId);
   let prepared: Prepared;
   try {
@@ -338,7 +338,7 @@ function route(path: string, tier: WriteTier, validate: (body: unknown) => Actio
 }
 
 /** Prepare is LOW tier (it writes no target); execute is MIDDLE, the tier of the verbs it delegates to. */
-export function buildOperatorAgentActionHandoffRoutes(deps: ActionHandoffDeps): Route[] {
+export function buildOperatorAgentActionHandoffRoutes(deps: ActionHandoffConfig): Route[] {
   return [
     route("/v1/operator-agent/action-handoff/prepare", "low", validatePrepare, (actor, input: PrepareInput) => prepareActionHandoff(deps, actor, input)),
     route("/v1/operator-agent/action-handoff/execute", "middle", validateExecute, (actor, input: ExecuteInput) => executeActionHandoff(deps, actor, input)),
