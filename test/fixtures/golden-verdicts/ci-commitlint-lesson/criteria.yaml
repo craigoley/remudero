@@ -1,0 +1,2 @@
+- claim: the commitlint gate lesson is present in a matched learning
+  proof: "grep: ci-learning:7204:commitlint in learnings/ci.yaml"

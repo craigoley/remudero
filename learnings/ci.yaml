@@ -121,7 +121,7 @@
 - id: commitlint-pr-title-lane
   subsystem: ci
   lifecycle: active
-  files: [plan/tasks.d/**, src/lib/plan-pr-emitter.ts, src/run-task.ts, .github/workflows/ci.yml]
+  files: ["plan/tasks.d/**", src/lib/plan-pr-emitter.ts, src/run-task.ts, .github/workflows/ci.yml]
   fact: >-
     The commitlint gate checks the LIVE PR TITLE, which becomes the squash-merge subject, not the
     branch's commit history. Before spending another CI cycle, make the title `type(scope): subject`
