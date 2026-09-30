@@ -34,9 +34,12 @@ test("W1-T4848: a verified finding gets one stable receipt", () => fixture((root
   const input = { ...base, root, headSha, text: finding({ path: "src/changed.ts", line: 1, kind: "changed" }) };
   const first = extractReviewFindings(input);
   const second = extractReviewFindings(input);
+  writeFileSync(join(root, "src", "changed.ts"), "export const changed = false;\n");
+  const afterWorktreeMutation = extractReviewFindings(input);
   assert.equal(first.state, "captured");
   assert.equal(first.verifiedCount, 1);
   assert.equal(first.findings[0]?.id, second.findings[0]?.id);
+  assert.equal(first.findings[0]?.id, afterWorktreeMutation.findings[0]?.id, "anchors read the immutable head blob, not a mutable worktree file");
   assert.equal(first.findings[0]?.anchor.status, "verified");
   const rows: Array<Record<string, unknown>> = [];
   const provenance = { provider: "codex", requestedModel: "reviewer", servedModel: "gpt-6-sol", effort: "high", sessionId: "s", selectionAssignmentId: "assignment-1" };

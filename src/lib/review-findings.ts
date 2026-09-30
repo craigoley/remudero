@@ -1,8 +1,7 @@
 /** Optional reviewer findings. This module is telemetry, never a review gate. */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants, closeSync, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute } from "node:path";
 
 type Anchor = { path: string; line: number; kind: "changed" | "dependency"; changedProducer?: { path: string; line: number } };
 type Candidate = { criterion: number; category: string; severity: "low" | "medium" | "high"; mechanism: string; remedy: string | null; anchor: Anchor };
@@ -64,22 +63,24 @@ function addedLines(diff: string): Map<string, string> {
   return lines;
 }
 
-function fileLine(root: string, path: string, line: number): string | undefined {
+function fileLine(root: string, headSha: string, path: string, line: number, cache: Map<string, string[] | null>): string | undefined {
   if (!path || isAbsolute(path) || path.split("/").includes("..") || path.includes("\\")) return undefined;
+  // Read the immutable Git blob, not a worktree path that can be replaced between
+  // realpath/stat/read. The exact-head check below rejects a stale source checkout.
   try {
-    const base = realpathSync(root);
-    const target = realpathSync(resolve(base, path));
-    const rel = relative(base, target);
-    if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return undefined;
-    const fd = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      const stat = fstatSync(fd);
-      if (!stat.isFile() || stat.size > MAX_FILE_BYTES) return undefined;
-      return readFileSync(fd, "utf8").split("\n")[line - 1];
-    } finally {
-      closeSync(fd);
+    if (!/^[a-f0-9]{40,64}$/.test(headSha)) return undefined;
+    if (!cache.has(path)) {
+      const blob = execFileSync("git", ["-C", root, "show", `${headSha}:${path}`], {
+        encoding: "utf8", timeout: 500, maxBuffer: MAX_FILE_BYTES, stdio: ["ignore", "pipe", "ignore"],
+      });
+      cache.set(path, blob.split("\n"));
     }
-  } catch { /* Unreadable or missing anchor file: no anchor text, so the finding stays unverified. */ return undefined; }
+    return cache.get(path)?.[line - 1];
+  } catch {
+    // A missing/oversized/unreadable Git blob is unsupported evidence, never a verified catch.
+    cache.set(path, null);
+    return undefined;
+  }
 }
 
 export function extractReviewFindings(input: {
@@ -97,6 +98,7 @@ export function extractReviewFindings(input: {
   if (rows.length === 0 && !none) return { state: "unavailable", findings, verifiedCount: 0, invalidCount: 0, droppedCount: 0 };
   if (input.diff.length > 2_097_152) return { state: "partial", findings, verifiedCount: 0, invalidCount: 0, droppedCount: rows.length };
   const changed = addedLines(input.diff);
+  const blobCache = new Map<string, string[] | null>();
   let exactHead = false;
   try {
     exactHead = execFileSync("git", ["-C", input.root, "rev-parse", "HEAD"], { encoding: "utf8", timeout: 1500, stdio: ["ignore", "pipe", "ignore"] }).trim() === input.headSha;
@@ -105,13 +107,17 @@ export function extractReviewFindings(input: {
     if (findings.length >= MAX_FINDINGS) { droppedCount++; continue; }
     let parsed: unknown;
     try { parsed = JSON.parse(row.replace(/^\s*REVIEW_FINDING\s+/, "")); }
-    catch { /* Malformed JSON row: counted in invalidCount, never surfaced as a finding. */ invalidCount++; continue; }
+    catch {
+      // Malformed JSON increments missingness; it is never treated as a zero-finding review.
+      invalidCount++;
+      continue;
+    }
     const item = candidate(parsed, input.criteriaCount);
     if (!item) { invalidCount++; continue; }
-    const anchorText = fileLine(input.root, item.anchor.path, item.anchor.line);
+    const anchorText = exactHead ? fileLine(input.root, input.headSha, item.anchor.path, item.anchor.line, blobCache) : undefined;
     const expected = changed.get(`${item.anchor.path}:${item.anchor.line}`);
     const producer = item.anchor.changedProducer;
-    const producerText = producer ? fileLine(input.root, producer.path, producer.line) : undefined;
+    const producerText = exactHead && producer ? fileLine(input.root, input.headSha, producer.path, producer.line, blobCache) : undefined;
     const producerExpected = producer ? changed.get(`${producer.path}:${producer.line}`) : undefined;
     const verified = exactHead && anchorText !== undefined && (
       item.anchor.kind === "changed" ? expected !== undefined && expected === anchorText :
@@ -143,6 +149,9 @@ export function recordReviewFindings(capture: FindingCapture, input: {
         served_model: input.provenance.servedModel, routed_model: input.provenance.routedModel ?? null,
         selection_assignment_id: input.provenance.selectionAssignmentId ?? null,
       });
-    } catch { /* Telemetry failure cannot change a posted verdict or auto-merge. */ }
+    } catch (error) {
+      // The status/arm already completed. Report lost telemetry without changing either result.
+      console.warn("review.finding receipt unavailable:", error);
+    }
   }
 }
