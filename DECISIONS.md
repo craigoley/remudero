@@ -3300,3 +3300,34 @@ runs no backstop, because the operator's bit is the decision.
 
 Rollback: remove the `machine-judge` garden from the daemon's gardens and revert the filers to the
 literal header; records already pinned stay valid, and reverting any one to `verify: human` parks it.
+
+## 2026-09-30 — OPERATOR RULINGS: the verify-human queue, cleared
+
+**Author class:** each ruling below is the operator's own, given in chat on 2026-09-30 in answer to per-task recommendations. The operator session recorded them; it did not originate them. Every task was first re-checked against main and the fleet ledger, and each entry states the evidence.
+
+- **W1-T3570: STOP nano as the inbox-draft lead.** On the slim prompt, nano drafts were lint-clean 49/200 (25%), and only 48 of 199 proposals ever drafted clean. Claude lanes were 100%, and nano itself was 12/12 on the full prompt. The lead moves to cash `gpt-6-luna` (#7963), with nano and gpt-oss-120b as fallbacks. Report: `docs/recon/openweight-inbox-draft-trial.md` (#7965).
+- **W1-T2927: take route (a).** The host sweep pulls the `mutation-verdict-ledger` artifact that `ci.yml` already uploads, using its own read identity, and appends only `run_id`s it has not recorded. Route (b) is declined because it would put a write credential in a public repo's CI. Route (c) is declined because it turns typed data into prose.
+- **W1-T3801: FIRST GATE-POSTURE PILOT = `coverage-ratchet`.** It was the most frequent real first-head failure (3 of 7 in 50 PRs, 2026-09-29/30).
+  - The finding is deterministic: coverage fell below its ratchet.
+  - The judge chooses only the consequence: STOP, or PROCEED with one coverage-improvement debt task filed idempotently through `coverage-improvement.ts`.
+  - Excluded from the pilot: security, credentials, CI-red, merge-authority and tenant gates.
+  - A judge outage restores today's behaviour.
+- **W1-T4354: release the BM25 learnings lane as a randomized arm.** It uses a small seeded propensity and fills only the budget the glob/symbol/error match leaves empty. 743 of 2,599 tasks (29%) match zero learnings. The outcome fold (W1-T4241/W1-T4243), not hand labels, decides whether it stays.
+- **W1-T365: confirm the rule-13 amendment text.** A passing test does not prove wiring. Build the gate as an answerable refusal that reuses the existing `SHIPS-UNWIRED:` / `WIRED-AT:` markers, never an unanswerable block.
+- **W1-T926: drop the live launchd half.** The fleet restarts through `deploy/recycle-container.sh`, so launchd is obsolete here. Retarget the headless dirt-shape drill at the container instance checkout and launcher convergence, where an untracked file still silently blocks convergence.
+- **W1-T239: no destructive live drill.** Take each worker-home link's verdict from what the fleet already records per host: linked or absent. The keychain link is macOS-only and not needed on the Linux fleet. Sequence after W1-T4348, which changes the `.claude` link.
+- **W1-T4568: stays DEFERRED.** None of the 2026-09-27 release triggers has fired. The ~4 s cold board read comes from replayed ledger rows, which W1-T4820 fixes, not from the lack of a store. Re-measure the cold read after W1-T4820 merges; over 5 s fires the trigger, and node:sqlite remains the store.
+- **W1-T2259: approve as verify: auto.** Delete the orphan `scripts/shell-screenshot.mjs`, its two stale PNGs, and its allowlist and comment-load baseline entries.
+
+**Closed without a new ruling, on evidence:**
+- W1-T2615: already applied in `a0f56cae8`.
+- W1-T3102 and W1-T3103: ruled 2026-09-22 (#6561) and credited, but still read as queued.
+- W1-T3887: the site already pins core `2ccb1710c`, merged via site #119.
+- W1-T971: overtaken by W1-T2766, and one fact it would pin is now false.
+- W1-T433: the multi-instance design already runs on Azure (core, console, site); launchd on the mini is obsolete. Whether the fleet should drive wild-trails is a separate, open operator question.
+
+**Pending the operator:**
+- W1-T1258 (Law N vocabulary).
+- W1-T3332 (acceptance rewrite).
+- W1-T2635's five unclear records.
+- W1-T4532 (tag ruleset, by hand).
