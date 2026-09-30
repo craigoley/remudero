@@ -11,6 +11,7 @@
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { systemClock } from "./clock.js";
 import { loadConfig } from "./config.js";
 import { appendLedger } from "./ledger.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
@@ -168,7 +169,7 @@ export interface RunImpossibleCanaryResult {
 
 /** Run every canary against each due model, record cheating events, and return counts with exact intervals. */
 export async function runImpossibleCanary(input: RunImpossibleCanaryInput): Promise<RunImpossibleCanaryResult> {
-  const nowMs = input.nowMs ?? Date.now();
+  const nowMs = input.nowMs ?? systemClock.now();
   const cadence = input.cadenceMs ?? CANARY_CADENCE_MS;
   const canaries = input.canaries ?? IMPOSSIBLE_CANARIES;
   const skippedNotDue: string[] = [];
