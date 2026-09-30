@@ -31,6 +31,7 @@ import { TRIAL_ID_RE } from "./benchmark-aa.js";
 import { loadPaidPilotProtocol, paidArmPauseReasons, readPaidPilotControls, readPaidPilotEvidence,
   REVIEWER_REPLAY_STEPS, PAID_PILOT_AA_RECEIPT_MAX_AGE_MS, PAID_PILOT_CASH_CEILING_USD,
   type PaidPilotProtocol, type ReviewerReplayScope } from "./benchmark-paid-pilot.js";
+import { systemClock } from "./clock.js";
 import { appendLedger } from "./ledger.js";
 import { ledgerLivePath } from "./ledger-union.js";
 import { SEEDED_GOLDENS, type GoldenTask, type HarnessRunner, type ReplayOutcome } from "./replay.js";
@@ -195,18 +196,19 @@ function reviewerAaVerdict(report: PairedReviewReport, model: string, seed: stri
   return groups.size === 2 ? "no-integrity-concern-detected" : "integrity-concerns";
 }
 
-function aaEvidenceValid(stateDir: string, protocol: PaidPilotProtocol, input: PaidPairedReviewInput): boolean {
+function aaEvidenceStatus(stateDir: string, protocol: PaidPilotProtocol, input: PaidPairedReviewInput):
+  { ok: true } | { ok: false; reason: string } {
   try {
     const latest = readdirSync(stateDir).filter((name) => name.startsWith(reviewerAaPrefix(protocol.pilotId)) && name.endsWith(".json"))
       .sort().at(-1);
-    if (!latest) return false;
+    if (!latest) return { ok: false, reason: "reviewer-aa-missing" };
     const record = JSON.parse(readFileSync(join(stateDir, latest), "utf8"));
     const report = record.report as PairedReviewReport;
     const receipt = record.receipt;
-    const age = Date.now() - Date.parse(String(receipt?.asOf));
+    const age = systemClock.now() - Date.parse(String(receipt?.asOf));
     const caseIds = report.pairs.map((pair) => pair.caseId).sort();
     const scopedIds = protocol.reviewerReplay?.cases.map((item) => item.id).sort();
-    return receipt?.version === "paid-reviewer-aa-v1" && receipt.protocolDigest === protocol.digest
+    const valid = receipt?.version === "paid-reviewer-aa-v1" && receipt.protocolDigest === protocol.digest
       && receipt.scopeDigest === digest(protocol.reviewerReplay)
       && receipt.stackDigest === digest(input.stack) && receipt.seedDigest === digest(input.seed)
       && receipt.reportDigest === digest(report) && receipt.verdict === "no-integrity-concern-detected"
@@ -215,11 +217,12 @@ function aaEvidenceValid(stateDir: string, protocol: PaidPilotProtocol, input: P
       && Date.parse(String(receipt.asOf)) >= Date.parse(protocol.activatedAt)
       && Date.parse(String(receipt.asOf)) < Date.parse(protocol.expiresAt)
       && JSON.stringify(caseIds) === JSON.stringify(scopedIds);
-  } catch { return false; }
+    return valid ? { ok: true } : { ok: false, reason: "reviewer-aa-invalid-or-failed" };
+  } catch { return { ok: false, reason: "reviewer-aa-unreadable" }; }
 }
 
 export async function replayPairedReviews(input: PaidPairedReviewInput): Promise<{ state: "refused"; reason: string }
-  | { state: "evaluated"; report: PairedReviewReport; excludedPairIds: string[]; aaVerdict: string | null }> {
+  | { state: "evaluated"; report: PairedReviewReport; excludedPairIds: string[]; aaVerdict: string | null; reason?: string }> {
   for (const gate of [replayOptIn(input.argv), replayIdleGate(input.idle)]) {
     if (!gate.enabled) return { state: "refused", reason: gate.reason };
   }
@@ -240,8 +243,10 @@ export async function replayPairedReviews(input: PaidPairedReviewInput): Promise
     || input.stack.tool !== protocol.revisions.toolRevision || input.stack.scorer !== protocol.revisions.scorerRevision
     || input.stack.environment !== protocol.revisions.environmentRevision)
     return { state: "refused", reason: "reviewer-evidence-or-stack-unpinned" };
-  if (input.phase === "comparison" && !aaEvidenceValid(input.stateDir, protocol, input))
-    return { state: "refused", reason: "reviewer-aa-unavailable-or-failed" };
+  if (input.phase === "comparison") {
+    const aa = aaEvidenceStatus(input.stateDir, protocol, input);
+    if (!aa.ok) return { state: "refused", reason: aa.reason };
+  }
   const admitted = new Set(boundedCorpus(input.corpus.flatMap((item) => {
     const golden = goldenTaskFromCorpusItem(item);
     return golden ? [golden] : [];
@@ -267,7 +272,7 @@ export async function replayPairedReviews(input: PaidPairedReviewInput): Promise
         let evidence;
         try { evidence = await readPaidPilotEvidence(input.stateDir, protocol); }
         catch { return { allowed: false, reason: "spend-source-read-failed" }; }
-        const pause = paidArmPauseReasons(protocol, evidence, new Date().toISOString(), scope.cashReserveUsdPerCall);
+        const pause = paidArmPauseReasons(protocol, evidence, systemClock.iso(), scope.cashReserveUsdPerCall);
         if (controls.state !== "observed" || controls.paused) pause.reasons.push(controls.reason ?? "operator-paused");
         if (pause.reasons.length > 0) return { allowed: false, reason: pause.reasons.join("+") };
         const callId = randomUUID();
@@ -309,7 +314,7 @@ export async function replayPairedReviews(input: PaidPairedReviewInput): Promise
       && report.costMissingArms === 0 && report.cashCostUsd !== null
       && report.pairs.every((pair) => pair.missing.length === 0);
     const retained = input.phase === "aa" || !complete ? { ...report, byModel: [] } : report;
-    const reportName = `benchmark-paid-pilot-v1.${protocol.pilotId}.reviewer-report.${Date.now()}.${randomUUID()}.json`;
+    const reportName = `benchmark-paid-pilot-v1.${protocol.pilotId}.reviewer-report.${systemClock.now()}.${randomUUID()}.json`;
     try {
       writeFileSync(join(input.stateDir, reportName), JSON.stringify({ version: "paid-reviewer-report-v1", phase: input.phase,
         protocolDigest: protocol.digest, report: retained }), { flag: "wx", mode: 0o600 });
@@ -321,7 +326,7 @@ export async function replayPairedReviews(input: PaidPairedReviewInput): Promise
           cost_missing_arms: retained.costMissingArms } });
     } catch {
       return { state: "evaluated", report: { ...report, byModel: [] }, excludedPairIds,
-        aaVerdict: "reviewer-result-not-durable" };
+        aaVerdict: null, reason: "reviewer-result-not-durable" };
     }
     let aaVerdict: string | null = null;
     if (input.phase === "aa") {
@@ -329,10 +334,11 @@ export async function replayPairedReviews(input: PaidPairedReviewInput): Promise
         ? reviewerAaVerdict(retained, protocol.arms.paid.model, input.seed) : "integrity-concerns";
       const receipt = { version: "paid-reviewer-aa-v1", protocolDigest: protocol.digest, scopeDigest: digest(scope),
         stackDigest: digest(input.stack), seedDigest: digest(input.seed), reportDigest: digest(retained),
-        asOf: new Date().toISOString(), verdict: aaVerdict };
-      const path = join(input.stateDir, `${reviewerAaPrefix(protocol.pilotId)}${Date.now()}.${randomUUID()}.json`);
+        asOf: systemClock.iso(), verdict: aaVerdict };
+      const path = join(input.stateDir, `${reviewerAaPrefix(protocol.pilotId)}${systemClock.now()}.${randomUUID()}.json`);
       try { writeFileSync(path, JSON.stringify({ receipt, report: retained }), { flag: "wx", mode: 0o600 }); }
-      catch { aaVerdict = "receipt-not-persisted"; }
+      catch { return { state: "evaluated", report: retained, excludedPairIds, aaVerdict: null,
+        reason: "reviewer-aa-receipt-not-durable" }; }
     }
     return { state: "evaluated", report: retained, excludedPairIds, aaVerdict };
   } finally { rmdirSync(lockPath); }

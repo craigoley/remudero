@@ -126,8 +126,8 @@ function parseReviewerReplay(value: unknown, population: readonly PaidPilotTask[
     const repo = text(entry?.repo);
     const sha = (part: unknown): part is string => typeof part === "string" && /^[a-f0-9]{40,64}$/.test(part);
     if (id === null || corpusTaskId === null || repo === null || seen.has(id) || !repos.has(repo)
-      || tasks.get(corpusTaskId) !== repo || !sha(entry?.baseSha) || !sha(entry?.bugHeadSha)
-      || !sha(entry?.benignHeadSha) || !sha(entry?.sealedManifestDigest)
+      || tasks.get(corpusTaskId) !== repo || sha(entry?.baseSha) !== true || sha(entry?.bugHeadSha) !== true
+      || sha(entry?.benignHeadSha) !== true || sha(entry?.sealedManifestDigest) !== true
       || entry.bugHeadSha === entry.benignHeadSha) return "reviewer-case-invalid";
     seen.add(id);
     cases.push({ id, corpusTaskId, repo, baseSha: entry.baseSha, bugHeadSha: entry.bugHeadSha,

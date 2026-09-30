@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { gzipSync } from "node:zlib";
 import { BENCHMARK_AA_RECEIPT_VERSION, BENCHMARK_AA_VERSION } from "../src/lib/benchmark-aa.js";
 import { activateBenchmarkPaidPilot, appendPaidPilotControl, buildPaidPilotReport, paidArmPauseReasons,
   parsePaidPilotRequest, readPaidPilotEvidence,
@@ -100,7 +101,15 @@ test("W1-T4929: paid admission is rechecked before each reviewer call", async (t
   assert.ok(result.report.pairs[0]?.missing.some((reason) => reason.includes("cash-budget-exhausted")));
   const evidence = await readPaidPilotEvidence(stateDir, protocol);
   assert.equal(paidArmPauseReasons(protocol, evidence, new Date().toISOString()).spend?.cashEstimateUsd, 50);
-  assert.equal(readFileSync(join(stateDir, "ledger.ndjson"), "utf8").match(/reviewer_replay\.receipt/g)?.length, 1);
+  const live = readFileSync(join(stateDir, "ledger.ndjson"), "utf8");
+  assert.equal(live.match(/reviewer_replay\.receipt/g)?.length, 1);
+  writeFileSync(join(stateDir, "ledger.2099-01-01T00-00-00-000Z.ndjson.gz"), gzipSync(live));
+  writeFileSync(join(stateDir, "ledger.2099-01-01T00-00-01-000Z.ndjson"), live);
+  const union = await readPaidPilotEvidence(stateDir, protocol);
+  assert.deepEqual(union.forms, { gzip: 1, plain: 1, live: 1 });
+  assert.ok(union.duplicateRows > 0);
+  assert.equal(paidArmPauseReasons(protocol, union, new Date().toISOString()).spend?.cashEstimateUsd, 50,
+    "overlapping archive and live rows are one cash receipt, never three");
 });
 
 test("W1-T4929: unavailable spend pauses the paid arm alone", async (t) => {
@@ -131,7 +140,7 @@ test("W1-T4929: A/A failure withholds model comparison", async (t) => {
   assert.deepEqual(aa.report.byModel, []);
   const before = calls;
   const comparison = await replayPairedReviews(replayInput(stateDir, [pair], review, "comparison"));
-  assert.deepEqual(comparison, { state: "refused", reason: "reviewer-aa-unavailable-or-failed" });
+  assert.deepEqual(comparison, { state: "refused", reason: "reviewer-aa-invalid-or-failed" });
   assert.equal(calls, before);
 });
 
