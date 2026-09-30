@@ -163,6 +163,7 @@ import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, startTestGarden, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, startCiFrictionGardener, readCiFrictionLedgerRecords, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
+import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, selectorShadowFlakeLedger, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener, startEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
@@ -251,7 +252,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "machine-judge"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -11121,6 +11122,8 @@ export async function runFixRung(opts: {
         elapsed_ms: spawnElapsedMs,
         // The ci-friction gardener prices a ci-log round against each check and failing test.
         ci_failures: (currentCiFailures ?? []).map((f) => ({ check: f.name, signature: ciFailureSignature(f.logTail) ?? null })),
+        // W1-T4803: which files conflicted, so the hot-file gardener can rank them by PR minutes.
+        conflicted_files: conflictedFilePaths(currentMergeConflict),
       });
       deps.say(
         currentMergeConflict !== undefined
@@ -33612,6 +33615,28 @@ export async function daemonCommand(
                   productionMachineFilingJudgePorts({ repoRoot, stateDir: join(config.root, "state"), worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
                   intervalMs,
                 ),
+                // W1-T4803: the files merge conflicts strand pull requests on, ranked by PR minutes; the
+                // costliest one no task restructures is filed as one plan-only proposal. Appended after the
+                // established gardens so their positions in the list stay where their tests expect them.
+                (intervalMs: number) => {
+                  const stateDir = join(config.root, "state");
+                  const hotFileGarden: GardenerDeps = {
+                    stateDir,
+                    repoRoot,
+                    openWorkspace: () => gardenCheckout({ name: "hot-file", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
+                    log,
+                    escalate: raiseDuplicate,
+                  };
+                  const hotFileSources: HotFileGardenSources = {
+                    ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
+                    mainHistory: (sinceIso) => readMainHistory(repoRoot, sinceIso),
+                    planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+                    mintTaskId: ciLearningTaskIdMinter(repoRoot),
+                    fileExists: (file) => existsSync(join(repoRoot, file)),
+                  };
+                  return startGarden(hotFileGardenSpec(hotFileGarden, hotFileSources), hotFileGarden, intervalMs);
+                },
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
                 // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
                 // registry instance" has no selector yet -- `RegistryInstance` carries no role or
