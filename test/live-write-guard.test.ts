@@ -387,13 +387,16 @@ test("a spawned child inherits the live ledger deny root", () => {
   const ledgerUrl = pathToFileURL(join(process.cwd(), "src", "lib", "ledger.ts")).href;
   const probe = `import { appendLedger } from ${JSON.stringify(ledgerUrl)};\n` +
     `try { appendLedger(${JSON.stringify(path)}, { run_id: "child", task_id: "CLI", step: "cli.invoked" }); console.log("wrote"); }\n` +
-    `catch (error) { console.log(error.name + ":" + error.message); }`;
+    `catch (error) { console.log(error.name + ":" + error.message); }\n` +
+    `console.log("coverage=" + String(process.env.NODE_V8_COVERAGE));`;
   const childEnv: NodeJS.ProcessEnv = { ...process.env, [TEST_LIVE_STATE_ROOT_ENV]: deniedRoot };
+  childEnv.NODE_V8_COVERAGE = undefined;
   delete childEnv.NODE_TEST_CONTEXT;
   const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", probe], {
     encoding: "utf8",
     env: childEnv,
   });
   assert.match(output, /LiveWriteBlockedError:.*W1-T4923/);
+  assert.match(output, /coverage=undefined/);
   assert.equal(existsSync(path), false);
 });
