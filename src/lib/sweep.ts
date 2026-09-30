@@ -17,7 +17,7 @@ import {
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
-import { systemClock, type Clock } from "./clock.js";
+import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { gitPushEmptyCommit, gitPushRunBranch } from "./git-push.js";
 import { ghJson, ghJsonAsync } from "./github-transport.js";
@@ -164,6 +164,17 @@ import {
   type MainRunGapDispatch,
   type MainRunGapHistory,
 } from "./main-run-gaps.js";
+import {
+  REFUSAL_AMENDMENT_STEP,
+  draftRefusalAmendment,
+  extractRefusal,
+  holdTaskForRefusal,
+  noPrVerdictRowsFromLedger,
+  readTaskShard,
+  taskAwaitsAmendment,
+  type RefusalAmendmentResult,
+  type RefusalCandidate,
+} from "./refusal-amendment.js";
 // Re-exported so existing `import type { … } from "./sweep.js"` call sites keep working.
 export type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
 // W1-T2340: declared in a leaf module so open-prs-rest.ts's producer imports it without closing
@@ -1439,6 +1450,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "reviewerCodeStaleThisPass",
   // W1-T4415: every open draft is marked ready for review (operator ruling 2026-09-24: no drafts).
   "readyDraft",
+  // W1-T4838: a worker's categorized refusal is held and drafted as a plan amendment, not retried.
+  "draftRefusalAmendments",
 ] as const;
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
@@ -1456,6 +1469,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "repushAbsent"
   | "updateBranch"
   | "readyDraft"
+  | "draftRefusalAmendments"
   | "captureRepairFeedback"
   | "disarmAutoMerge"
   | "stackPrerequisite"
@@ -3062,6 +3076,79 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     updateBranch: (pr) => updateBranchImpl(pr),
 
     readyDraft: (pr) => readyDraftImpl(pr),
+
+    // W1-T4838 — hold each refused task, then open ONE plan-only amendment PR for it. The hold is
+    // written FIRST (cheap, local, idempotent) so a slow or failed PR never lets the task re-dispatch.
+    draftRefusalAmendments: async (candidates) => {
+      const results: RefusalAmendmentResult[] = [];
+      const currentPlan = reloadPlanForFix() ?? plan;
+      for (const c of candidates) {
+        const task = currentPlan.byId.get(c.taskId);
+        const base = { taskId: c.taskId, sourceRunId: c.runId, classes: c.refusals.map((r) => r.refusalClass) };
+        if (!task || !taskAwaitsAmendment(task)) {
+          results.push({ ...base, outcome: "task_closed" });
+          continue;
+        }
+        try {
+          holdTaskForRefusal(join(config.root, "state"), task, c.refusals);
+        } catch (e) {
+          log("sweep.refusal_amendment.hold_failed", { task_id: c.taskId, error: String((e as Error)?.message ?? e) });
+        }
+        results.push(
+          await draftRefusalAmendment(c, {
+            readShard: (taskId) => readTaskShard(repoDir, taskId),
+            probeExisting: (branch) => probeExistingPlanPr(ghJsonForBuild, owner, repo, branch),
+            nowIso: () => clockFromMillisFn(nowMsImpl).iso(),
+            openAmendmentPr: (input) => {
+              try {
+                planRepairGit("git", ["-C", repoDir, "fetch", "origin", "--quiet"]);
+              } catch {
+                /* best-effort — a stale local view still lets the PR open */
+              }
+              const worktreePath = join(worktreesDir(config), `refusal-amendment-${c.taskId}-${nowMsImpl()}`);
+              try {
+                try {
+                  planRepairGit("git", ["-C", repoDir, "branch", "-D", input.branch]);
+                } catch {
+                  /* no stale local branch to clear — the common case */
+                }
+                worktreeAddForBuild(repoDir, worktreePath, input.branch, "origin/main", { log });
+                writeFileSync(join(worktreePath, input.shardRelPath), input.amendedText);
+                planRepairGit("git", ["-C", worktreePath, "add", input.shardRelPath]);
+                planRepairGit("git", [
+                  "-C",
+                  worktreePath,
+                  "commit",
+                  "-m",
+                  buildPlanPrCommitMessage({ scope: "plan", subject: `propose an amendment for ${c.taskId}`, extraBody: input.commitBody }),
+                ]);
+                const headSha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD"]).trim();
+                gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
+                assertLiveWriteAllowed("gh-pr-create", `opening the refusal-amendment PR for ${c.taskId}'s shard`);
+                return createPlanPrRest(ghJsonForBuild, owner, repo, {
+                  title: input.title,
+                  body: buildPlanPrBodyImpl({
+                    intro: input.prIntro,
+                    criteria: [{ claim: input.claim, proof: input.proof }],
+                    changedFiles: [input.shardRelPath],
+                    proofCwd: worktreePath,
+                  }),
+                  head: input.branch,
+                  base: "main",
+                });
+              } finally {
+                try {
+                  worktreeRemoveForBuild(repoDir, worktreePath);
+                } catch {
+                  /* best-effort cleanup */
+                }
+              }
+            },
+          }),
+        );
+      }
+      return results;
+    },
 
     rebaseDirtyFleetBranch: (pr) =>
       rebaseDirtyFleetBranchImpl
@@ -8097,6 +8184,11 @@ export interface SweepDeps {
   withdrawStackAutoMerge?: (pr: OpenPrView) => DisarmOutcome | void | Promise<DisarmOutcome | void>;
   /** W1-T4415 — mark one open draft PR ready for review. Called for EVERY draft, whatever its checks. */
   readyDraft?: (pr: OpenPrView) => void | Promise<void>;
+  /** W1-T4838 — for each task whose latest `no_pr` verdict carries a CATEGORIZED worker refusal:
+   *  hold it from dispatch and open ONE plan-only amendment PR. `runSweep` nominates only rows
+   *  where {@link extractRefusal} found a refusal, so an ordinary `no_pr` never reaches this and
+   *  keeps its retry path. Called once per full pass; omitted, the sweep never looks. */
+  draftRefusalAmendments?: (candidates: readonly RefusalCandidate[]) => Promise<readonly RefusalAmendmentResult[]>;
   /** Close a superseded/abandoned PR with a stated reason. */
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
   /** Invoke the W1-T54 dep-review lane on a Dependabot PR and return its DECISION, so the disposed
@@ -9623,6 +9715,40 @@ export async function runSweep(
       }
     } catch (e) {
       log("sweep.main_run_gap.error", { phase: "reconcile", error: String((e as Error)?.message ?? e) });
+    }
+  }
+
+  // ── W1-T4838 A WORKER'S CATEGORIZED REFUSAL IS AN AMENDMENT, NOT A FAILED ATTEMPT ─────────
+  // Full passes only. Only a `no_pr` row whose excerpt `extractRefusal` parses is a candidate: an
+  // uncategorized `no_pr` is skipped here and retries exactly as before. `error` outcomes write no
+  // ledger row, so the next pass retries; every other outcome is recorded once per source run.
+  if (deps.draftRefusalAmendments && deps.repairAdmissionSurface !== "light") {
+    try {
+      const candidates: RefusalCandidate[] = [];
+      for (const row of noPrVerdictRowsFromLedger(ledgerLines, now)) {
+        const refusals = extractRefusal(row.reportExcerpt);
+        if (refusals.length > 0) candidates.push({ ...row, refusals });
+      }
+      if (candidates.length > 0) {
+        for (const r of await deps.draftRefusalAmendments(candidates)) {
+          if (r.outcome === "error") {
+            log("sweep.refusal_amendment.error", { task_id: r.taskId, error: r.error });
+            continue;
+          }
+          appendLine(deps.ledgerPath, {
+            run_id: deps.runId,
+            task_id: r.taskId,
+            step: REFUSAL_AMENDMENT_STEP,
+            source_run_id: r.sourceRunId,
+            outcome: r.outcome,
+            classes: r.classes,
+            ...(r.prUrl !== undefined ? { pr_url: r.prUrl } : {}),
+          });
+          log(REFUSAL_AMENDMENT_STEP, { task_id: r.taskId, outcome: r.outcome, pr_url: r.prUrl });
+        }
+      }
+    } catch (e) {
+      log("sweep.refusal_amendment.error", { error: String((e as Error)?.message ?? e) });
     }
   }
 

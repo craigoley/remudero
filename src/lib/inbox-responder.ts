@@ -89,7 +89,7 @@ export type AttentionSourceState = "observed" | "partial" | "unavailable";
 export interface AttentionCensusInput {
   views: ThreadSummaryView[];
   classifications: InboxClassification[];
-  taskFacts: ReadonlyMap<string, { verify: string; repo: string; title: string; status?: string; retirement?: string }>;
+  taskFacts: ReadonlyMap<string, { verify: string; repo: string; title: string; status?: string; retirement?: string; dispatchHold?: boolean; risk?: string }>;
   releasedTaskIds: ReadonlySet<string>;
   releaseReceipts?: ReadonlyMap<string, string>;
   mergedTaskIds?: ReadonlySet<string>;
@@ -130,12 +130,17 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
     if (classification) sourceFacts.push({ source: "classification", detail: `${view.proposalId}: ${classification.state}${classification.reasons.length ? `; predicates: ${classification.reasons.map((reason) => reason.predicate).join(", ")}` : ""}` });
     if (task) sourceFacts.push({ source: "plan", detail: `${taskId}: verify: ${task.verify}; repo: ${task.repo}; ${task.title}` });
     if (task?.status === "blocked" && task.retirement) sourceFacts.push({ source: "plan-lifecycle", detail: `${taskId}: status blocked; retirement ${task.retirement}` });
+    if (task?.dispatchHold) sourceFacts.push({ source: "plan-lifecycle", detail: `${taskId}: dispatch_hold: true; a release receipt alone cannot make this task dispatchable` });
+    if (task?.risk === "high") sourceFacts.push({ source: "plan", detail: `${taskId}: risk: high in the filed task` });
     if (judge) sourceFacts.push({ source: "judge", detail: `${judge.decision}: ${judge.reason.slice(0, 300)}` });
     if (released) sourceFacts.push({ source: "ledger", detail: input.releaseReceipts?.get(taskId!) ?? `${taskId}: ratify.approved released verify-human` });
     if (taskId && input.mergedTaskIds?.has(taskId)) sourceFacts.push({ source: "githubProjection", detail: `${taskId}: merged task credit observed` });
     if (classification?.retiredReason) sourceFacts.push({ source: "classification", detail: classification.retiredReason });
     const whyMe = view.attention === "decision"
-      ? taskId ? `${taskId} requires an operator decision${task ? ` (verify: ${task.verify})` : "; task evidence unavailable"}.` : `Proposal ${view.proposalId} is ready for an operator decision.`
+      ? taskId ? task?.dispatchHold
+        ? `${taskId} still has an explicit dispatch hold. A release receipt does not lift it; the operator must review the held task.`
+        : `${taskId} requires an operator decision${task ? ` (verify: ${task.verify})` : "; task evidence unavailable"}.`
+        : `Proposal ${view.proposalId} is ready for an operator decision.`
       : view.attention === "reply" ? `Proposal ${view.proposalId} asks for an operator reply.`
       : view.attention === "awaiting_daemon" ? "Your reply is delivered; waiting for the daemon."
       : view.attention === "history" ? "Past operator item; no current decision requested."
@@ -148,17 +153,25 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
     };
   }).sort((a, b) => a.proposalId.localeCompare(b.proposalId));
   const counts = { decision: 0, reply: 0, in_progress: 0, history: 0, awaiting_daemon: 0 };
+  // A human-attention label is not proof that the proposal is prepared for approval. Keep the
+  // observed decision total, but expose that distinction before a UI calls it actionable.
+  const decisionReadiness = { ready: 0, needsPreparation: 0, unknown: 0 };
   const kinds: Record<string, number> = {};
   for (const item of items) {
     counts[item.attention] += 1;
     kinds[item.kind] = (kinds[item.kind] ?? 0) + 1;
+    if (item.attention === "decision") {
+      if (item.classification === "ready") decisionReadiness.ready += 1;
+      else if (item.classification === "not_ready" || item.classification === "drafting") decisionReadiness.needsPreparation += 1;
+      else decisionReadiness.unknown += 1;
+    }
   }
   const contradictoryRelease = items.some((item) => item.taskId && input.releasedTaskIds.has(item.taskId) && item.attention === "decision");
   const missingReferent = items.some((item) => (item.taskId && !input.taskFacts.has(item.taskId)) || item.classification === "unavailable");
   const state = Object.values(input.sources).every((source) => source === "observed") && !contradictoryRelease && !missingReferent ? "complete" : "partial";
   const verifiedCounts = state === "complete" ? { ...counts } : { decision: 0, reply: 0, in_progress: 0, history: 0, awaiting_daemon: 0 };
   const result = { scope: "core" as const, state, countSemantics: "observed_snapshot_not_verified" as const,
-    sources: input.sources, counts, verifiedCounts, kinds, items, ...(contradictoryRelease ? { discrepancy: "active_human_ask_has_release_receipt" } : {}) };
+    sources: input.sources, counts, decisionReadiness, verifiedCounts, kinds, items, ...(contradictoryRelease ? { discrepancy: "active_human_ask_has_release_receipt" } : {}) };
   const snapshotKey = createHash("sha256").update(JSON.stringify(result)).digest("hex");
   return { ...result, snapshotKey };
 }

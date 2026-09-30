@@ -742,7 +742,7 @@ export function decisionKey(fp: DecisionFingerprint): string {
 }
 
 export function createBoardSnapshotCache(): BoardSnapshotCache {
-  let cached: { decisionKey: string; ghFailed: boolean; ghTruncated: boolean; prQueueIndexKey: string; snapshot: BoardSnapshot } | undefined;
+  let cached: { plan: Plan; decisionKey: string; ghFailed: boolean; ghTruncated: boolean; prQueueIndexKey: string; snapshot: BoardSnapshot } | undefined;
   let lastGoodPrQueueAt: string | undefined;
   // Folded across requests (W1-T2919), so a cache hit costs one pass over the lines appended
   // since the last one, never a re-walk of the whole ledger.
@@ -771,6 +771,7 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
       const ghTruncated = safeQueueTruncated(deps.github);
       if (
         cached &&
+        cached.plan === deps.plan &&
         cached.decisionKey === key &&
         cached.ghFailed === ghFailed &&
         cached.ghTruncated === ghTruncated &&
@@ -782,7 +783,7 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
       // plan, exactly as they do today.
       const gatewayKey = prQueueIndexKey + "|" + ghFailed + "|" + ghTruncated;
       taskFingerprints = foldTaskFingerprints(lines, taskFingerprints);
-      if (heldGatewayKey !== gatewayKey) {
+      if (heldGatewayKey !== gatewayKey || cached?.plan !== deps.plan) {
         // An index change, or a gateway that started or stopped failing, can move ANY task's
         // projection — so nothing is reused this pass. Identical to today's behaviour.
         projectionByTask.clear();
@@ -809,7 +810,7 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
         },
       );
       if (snapshot.prQueue.complete) lastGoodPrQueueAt = snapshot.generated_at;
-      cached = { decisionKey: key, ghFailed, ghTruncated, prQueueIndexKey, snapshot };
+      cached = { plan: deps.plan, decisionKey: key, ghFailed, ghTruncated, prQueueIndexKey, snapshot };
       return snapshot;
     },
   };
