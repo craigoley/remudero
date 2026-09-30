@@ -10,6 +10,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ghExec, ghExecFile, ghJson } from "../src/lib/github-transport.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ghRefusalCount } from "./setup/tmp-hygiene.js";
 import {
@@ -256,11 +257,30 @@ test("W1-T4805: the transport refuses the sentinel token before gh runs", () => 
       assert.match(e.message, /gh pr create 1/, "the refusal must name the command");
       return true;
     });
-  refused(() => ghExec(["pr", "create", "1", "--fill"], { encoding: "utf8" }));
-  refused(() => ghExecFile("gh", ["pr", "create", "1"], { encoding: "utf8" }));
-  refused(() => ghJson(["pr", "create", "1"]));
-  // the shared refusing stub `gh` on PATH was never spawned: the transport's refusal came first
+  // PATH resolves no gh under the temp dir, so the only gh a spawn could reach is a real one
+  const originalPath = process.env.PATH;
+  process.env.PATH = "/nonexistent-w1-t4805";
+  try {
+    refused(() => ghExec(["pr", "create", "1", "--fill"], { encoding: "utf8" }));
+    refused(() => ghExecFile("gh", ["pr", "create", "1"], { encoding: "utf8" }));
+    refused(() => ghJson(["pr", "create", "1"]));
+  } finally {
+    process.env.PATH = originalPath;
+  }
+  // the shared refusing stub `gh` was never spawned: the transport's refusal came first
   assert.equal(ghRefusalCount(), before, "gh must not have been spawned");
+});
+
+test("W1-T4805: a test's own PATH-stubbed gh still runs under the sentinel", () => {
+  const shim = ghShim([{ when: "pr view", stdout: "stubbed" }], { kind: "sentinel-own-stub" });
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${originalPath}`;
+  try {
+    assert.equal(ghExec(["pr", "view", "1"], { encoding: "utf8" }).trim(), "stubbed");
+  } finally {
+    process.env.PATH = originalPath;
+  }
+  assert.deepEqual(shim.calls(), ["pr view 1"]);
 });
 
 test("W1-T4805: a spawned child inherits the sentinel and no app key", () => {
