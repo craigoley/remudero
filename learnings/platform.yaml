@@ -93,7 +93,8 @@
 
 - id: bashrc-accident
   subsystem: containment
-  lifecycle: active
+  # knowledge gardener: retire bashrc-accident
+  lifecycle: superseded
   files: [src/lib/worker.ts, src/lib/containment.ts]
   fact: >-
     CLAUDE_CODE_SHELL=/bin/bash isolation works only because ~/.bashrc is ABSENT on this host — an

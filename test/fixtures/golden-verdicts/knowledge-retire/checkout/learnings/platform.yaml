@@ -1,3 +1,3 @@
-- id: proc-environ-is-an-exec-time-snapshot
-  # knowledge gardener: retire proc-environ-is-an-exec-time-snapshot
+- id: bashrc-accident
+  # knowledge gardener: retire bashrc-accident
   lifecycle: superseded

@@ -10,6 +10,9 @@
 // and status. The validator is STRICT on one axis JSON Schema is not: a key the body carries that
 // the schema never declares is a violation, because "the contract says what the daemon sends" is
 // exactly the claim an undeclared key falsifies. Its own positive/negative control runs first.
+import type { PrQueueRow } from "../src/lib/board.js";
+import type { BlockedPrBlocker, MergeHeldRow } from "../src/lib/status-board.js";
+import type { ConsoleModelApproval } from "../src/lib/serve.js";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
@@ -327,4 +330,34 @@ test("the /v1/pr-actions switched_off 409 the daemon sends validates against its
   });
   // The shared Error enum stays closed: switched_off is the dedicated schema's, not Error's.
   assert.notEqual(violations({ error: "switched_off" }, { $ref: "#/components/schemas/Error" }).length, 0);
+});
+
+
+test("the whole GET /v1/status body the console reads validates against StatusSnapshot", async (t) => {
+  const root = tmpRoot(t);
+  await withServer(depsFor(root), async (base) => {
+    const sent = await call(base, "GET", "/v1/status", bearerRead);
+    assert.equal(sent.status, 200);
+    const body = sent.body as Record<string, unknown>;
+    // CONTROL: every key the console contract pins must really be on the body, or this proves nothing.
+    for (const key of ["prQueue", "blockedPrs", "mergeHeld", "taskProjection", "counts", "spend", "modelApprovals", "repairLadder", "staleness"]) {
+      assert.ok(key in body, `GET /v1/status sent no ${key}: ${JSON.stringify(body)}`);
+    }
+    assertSends("/v1/status", "GET", 200, sent.body);
+  });
+});
+
+test("a populated status row of every declared kind validates against its declared schema", () => {
+  const prRow: PrQueueRow = {
+    prNumber: 8031, prUrl: "https://github.com/o/r/pull/8031", title: "t", headRefName: "run-x", headSha: "a".repeat(40), taskId: "W1-T1",
+    disposition: "post-review", reason: "checks pending", reviewState: "pending", queueClass: "active", held: false,
+    snapshotAt: "2026-09-30T12:00:00.000Z", observedAt: "2026-09-30T12:00:00.000Z",
+  };
+  const blocked: BlockedPrBlocker = { kind: "blocked_pr", taskId: "W1-T1", prNumber: 1, prUrl: "https://github.com/o/r/pull/1", disposition: "blocked-fixable", reason: "ci red" };
+  const held: MergeHeldRow = { prNumber: 2, taskId: "W1-T2", by: "operator", reason: "hold" };
+  const approval: ConsoleModelApproval = { model: "m", approvedBy: "op", approvedAt: "2026-09-30T00:00:00.000Z", expiresAt: "2026-10-30T00:00:00.000Z", expired: false };
+  const schema = declaredBody("/v1/status", "GET", 200);
+  const status = { generated_at: "2026-09-30T12:00:00.000Z", tasks: [], prQueue: { complete: true, rows: [prRow], lastGoodAt: "2026-09-30T11:00:00.000Z" }, blockedPrs: [blocked], blockedPrsUnverifiedReason: "gh down", mergeHeld: [held, { by: "operator", reason: "fleet hold" }], modelApprovals: [approval] };
+  assert.deepEqual(violations(status, schema), []);
+  assert.notDeepEqual(violations({ ...status, prQueue: { complete: true, rows: [{ ...prRow, queueClass: "someday" }] } }, schema), [], "the control: a wrong enum still fails");
 });

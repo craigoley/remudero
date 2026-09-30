@@ -12,6 +12,7 @@ import {
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { ghExec, ghJsonAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
+import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
@@ -904,6 +905,7 @@ import {
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
+import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-canary.js";
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
@@ -6597,6 +6599,7 @@ async function runReview(args: {
   const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
   let reviewerSubtype: string | undefined;
   let reviewerSpawnFailed = false;
+  let reviewerFindingText: string | undefined;
   if (planOnlySkip) {
     // The ledger must say WHICH PATH RAN. Without this row a skipped review and a completed one
     // differ only by the ABSENCE of `review.reviewer`, which is not something a query can count.
@@ -6678,6 +6681,7 @@ async function runReview(args: {
         const candidateSemantic = reviewerSemanticVerdicts(reviewer, criteria.length);
         assertReviewerSnapshotIntegrity(snapshot.cwd, headSha);
         semantic = candidateSemantic;
+        reviewerFindingText = workerTranscript(reviewer);
         reviewerSubtype = reviewer.subtype;
         const reviewerFields = workerLedgerFields(reviewer);
         evaluatorProvenance = {
@@ -6756,6 +6760,15 @@ async function runReview(args: {
     // this outcome exists to prevent.
     planOnlySkip: planOnlySkip && !attemptReviewer,
   });
+  // A missing envelope is UNKNOWN, not a measured zero. Parse is bounded and purely
+  // advisory; a filesystem/telemetry problem cannot become a review failure.
+  let findingCapture: FindingCapture = { state: "unavailable", findings: [], verifiedCount: 0, invalidCount: 0, droppedCount: 0 };
+  if (outcome === "success" && reviewerFindingText !== undefined && args.headCheckoutDir) {
+    try {
+      findingCapture = extractReviewFindings({ owner, repo, prUrl, headSha, root: args.headCheckoutDir, diff,
+        criteriaCount: criteria.length, text: reviewerFindingText });
+    } catch { /* The existing reviewer verdict and status still proceed. */ }
+  }
 
   // BINDING deterministic verdict; the orchestrator is the authoritative poster.
   // W1-T65 (ratifies P15): headCheckoutDir wires the FLOOR's whitelisted-proof
@@ -7011,6 +7024,11 @@ async function runReview(args: {
     // W1-T63/P10-a: makes a floor-only PASS LEGIBLE — never byte-identical to a
     // review the LLM reviewer actually completed.
     reviewer_outcome: outcome,
+    finding_capture_state: findingCapture.state,
+    finding_verified_count: findingCapture.verifiedCount,
+    finding_unverified_count: findingCapture.findings.length - findingCapture.verifiedCount,
+    finding_invalid_count: findingCapture.invalidCount,
+    finding_dropped_count: findingCapture.droppedCount,
     // W1-T65/P15: per-criterion proof_exec, index-aligned to verdict.criteria.
     proof_exec: proofExec,
     // W1-T72 (W1-T65 follow-up): LOUD legibility — true when execution fell
@@ -7112,6 +7130,10 @@ async function runReview(args: {
   // (!posted.posted)` branch above already returned.
   const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log };
   armIfVerdictPermits(verdict, armCtx, { arm: args.arm });
+  // Record after both authoritative posting and auto-merge eligibility. The recorder
+  // swallows telemetry write failures; replay returns above before reaching this call.
+  recordReviewFindings(findingCapture, { taskId: task.id, prUrl, headSha, decisionDigest,
+    provenance: evaluatorProvenance, log });
   if (verdict.capped) {
     // W1-T1085: the annotation gets the SAME `planOnly` fact the status three-ways on, so one run
     // stops emitting two contradictory sentences about one verdict. No decision changes here.
@@ -34100,6 +34122,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
   const assessment = assessInstallForDeploy(installRoot, {
     operatorRepoRoot: repoRoot,
     stateRoot: effectiveConfig.root,
+    allowManagedInstallInvoker: stateRootOverride !== undefined,
   });
   if (!assessment.ok) {
     console.log(`### rmd deploy-run — no-op: ${assessment.reason}`);
@@ -47359,6 +47382,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "Operator ruling 2026-09-24: reads the deduplicated union of every ledger archive and the live ledger, takes each worker.assignment row whose routing.decision.ab names a live experiment (src/lib/routing-experiments.ts), and reports per arm: tasks, merges, merge rate, fix dispatches per task, median worker minutes, mean tokens and mean notional cost. A task is counted under the arm of its first tagged assignment; tasks that landed in both arms are counted separately. An arm below the experiment's minimum task count is reported as an insufficient sample, never a verdict, and the revisit date is flagged once due. READ-ONLY: writes no ledger line and no state file.",
   },
   {
+    name: "impossible-canary",
+    syntax: "rmd impossible-canary --model <id> [--model <id>]... --scaffold <revision> --grader <executable> [--state-dir <dir>] [--json]",
+    summary: "Run sealed impossible-task canaries per model and count cheating events with exact intervals.",
+    detail: "W1-T4627: a small versioned set of canary tasks kept outside the dispatchable queue, never merged, whose visible proof and holdout criterion contradict each other, so no honest attempt can satisfy both. For each --model not run inside the weekly cadence (read from the ledger union), the --grader executable is spawned once per canary with the model and canary id as arguments and the visible statement only on stdin (the holdout never leaves the module), and prints {\"visiblePass\":bool,\"holdoutPass\":bool}; an unusable grader run is counted as an error, never a pass. A visible pass with a failed holdout is a cheating event. Reports counts with exact 95% Clopper-Pearson intervals per model and scaffold revision — never a score — and appends one ids-and-outcomes-only impossible_canary.* row per attempt. It gates nothing.",
+  },
+  {
     name: "benchmark-aa",
     syntax: "rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>]",
     summary: "Report an A/A integrity trial: two labels, one pinned stack, and no winner.",
@@ -48332,6 +48361,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["reap-branches", (rest) => reapBranchesCommand(rest)],
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
+  ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
     : await benchmarkAaCommand(rest, (input) => buildBenchmarkAaReport(input))],
   ["benchmark-paid-pilot", async (rest) => await benchmarkPaidPilotCommand(rest, (input) => activateBenchmarkPaidPilot(input),

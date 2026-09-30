@@ -1,0 +1,72 @@
+- id: W1-T4905
+  title: "A REVIEWER THAT BLOCKS BOTH THE BUG AND ITS BENIGN TWIN IS NOT A GOOD DIAGNOSTICIAN — add blinded paired cases that score mechanism, specificity and comment burden"
+  repo: remudero
+  depends_on: [W1-T4619, W1-T4848]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator-approved CodeRabbit-inspired reviewer and field-trial follow-ups 2026-09-30"
+  plan_refs: [W1-T4619, W1-T4620, W1-T4628, W1-T4848, W1-T4849]
+  files: [src/lib/paired-review-eval.ts, src/lib/replay-harness.ts, test/paired-review-eval.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-30: W1-T4619 provides dated held-out executable golden work;
+    W1-T4620 compares shadow-judge verdicts; W1-T4628 calibrates verdicts against
+    a human sample; W1-T4848 adds head-anchored finding receipts. None pairs a real
+    faulty change with a very similar non-faulty change, so a reviewer that merely
+    objects to both can look sensitive while offering little practical value.
+    An ungrounded FAIL or a high comment count is not mechanism diagnosis.
+
+    CodeRabbit's model-review comparisons report catch rate beside precision,
+    comments, latency and tokens: https://www.coderabbit.ai/blog/opus-5-5-model-review .
+    A mechanism-grounded paired-PR study describes the verdict/diagnosis gap:
+    https://arxiv.org/abs/2608.25730 . These motivate an evaluation design,
+    not a claim that either vendor's results transfer to this fleet.
+  design: |
+    Derive a bounded, opt-in set of bug/benign twins from dated, held-out real
+    changes. Each pair shares repository, base, task context, changed-file shape,
+    harness and scorer; its difference must be the labeled fault mechanism, not
+    a conspicuous label, path or prompt. Preserve a sealed provenance record:
+    exact base/head identities, independent label evidence, date, mechanism,
+    and whether the benign twin was reviewed by a human or verified by an
+    executable falsifier. A twin lacking those controls is ungradable, not clean.
+
+    Replay read-only reviewer models/efforts on both arms with seeded order,
+    assignment propensity, pinned prompt/tool/harness/scorer/environment revisions
+    and no label or future-fix leakage. Do not alter live PR routing or review
+    statuses. Record criterion verdict and W1-T4848 finding IDs separately.
+    Score bug detection AND benign specificity, exact mechanism and line evidence,
+    actionable remedy, false comments on the benign arm, time/tokens, and cash
+    versus notional cost. A generic block gets verdict credit at most, never
+    diagnosis credit; an unsupported anchor gets none. Unknown labels, missing
+    assignments, failed replays and extraction gaps stay in denominators as
+    named missingness, not zero. Show paired uncertainty and sample counts;
+    suppress model-winner claims when cases or provenance are insufficient.
+
+    Feed evidenced misses into the existing proposal path as candidates. Never
+    add a required check, human approval or hard threshold to PR flow. Spend
+    consumes the separately authorized paid-pilot envelope only when its existing
+    budget and consent controls permit it; otherwise the paid arm pauses alone.
+  acceptance:
+    - claim: "a faulty and benign twin are graded as a pair only with sealed labels, shared context and a proven benign control"
+      proof: 'grep: test("W1-T4905: bug and benign twins share context but opposite labels" in test/paired-review-eval.test.ts'
+    - claim: "a blanket block without mechanism diagnosis earns no diagnosis credit and benign false comments are counted"
+      proof: 'grep: test("W1-T4905: verdict without mechanism earns no diagnosis credit" in test/paired-review-eval.test.ts'
+    - claim: "replay records provenance and missingness but never changes live review, routing or PR gates"
+      proof: 'grep: test("W1-T4905: paired replay is read-only and reports missingness" in test/paired-review-eval.test.ts'
+    - claim: "the real held-out replay path calls the paired evaluator"
+      proof: 'grep: runPairedReviewEvaluation( in src/lib/replay-harness.ts'
+  falsifier: |
+    Feed a reviewer that fails both arms with a generic warning: verdict sensitivity
+    may be nonzero, but diagnosis credit is zero and benign false-comment burden
+    rises. Remove the benign-label control or the production replay call: the
+    first or fourth acceptance proof fails, respectively.
+  note: |
+    Reserved at refs/rmd-id/W1-T4905 for branch
+    codex/paired-review-eval-20260930. Plan-only; W1-T4848 is an open
+    implementation PR at filing, not a shipped prerequisite.

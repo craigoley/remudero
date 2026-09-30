@@ -66,21 +66,8 @@ test("cash economy and balanced rows retain Luna as the independent squeeze cand
   assert.ok(cash, "the cash ladder must exist");
   for (const effort of ["low", "medium", "high"] as const) {
     assert.deepEqual(cash.economy[effort], ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", "gpt-5.6-luna"]);
+    assert.deepEqual(cash.balanced[effort], ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna"]);
   }
-  for (const effort of ["low", "medium", "high"] as const) {
-    // W1-T3570: Luna leads balanced (inbox_draft's row); nano and OSS stay behind it as fallbacks.
-    assert.deepEqual(cash.balanced[effort], ["gpt-6-luna", "gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna"]);
-  }
-});
-
-test("the inbox-draft lane leads with Luna on its slim prompt", () => {
-  const mounts = loadMounts(".remudero/mounts.yaml");
-  const lane = mounts.synthesis.inbox_draft;
-  assert.ok(lane, "the inbox_draft mount row must exist");
-  // ~8k input tokens is what the lane sent 2026-09-16..30 after W1-T3621 slimmed its prompt.
-  const pick = selectOpenWeightModel(mounts.capabilities, lane.model, lane.effort, 32_000, { ready: () => true });
-  assert.equal(pick.model, "gpt-6-luna");
-  assert.deepEqual(pick.alternatives.slice(0, 2), ["gpt-5-nano", "gpt-oss-120b"]);
 });
 
 // Terra earns its place on CAPABILITY, not price: it is 10x luna on both axes and may lead the
@@ -109,4 +96,14 @@ test("terra leads NOTHING — it is the escalation behind luna, never a lane's f
     }
   }
   assert.ok(frontierRows > 0, "the frontier band must exist, or this asserts nothing");
+});
+
+// W1-T3570 bake-off, 2026-09-30: 8 real proposals through the production prompt, lint and relint —
+// gpt-oss-120b 3/8 clean at $0.045, gpt-5-nano 1/8 at $0.051, gpt-6-luna 0/8 (fragment contract).
+test("the inbox-draft lane leads with gpt-oss-120b, the bake-off winner", () => {
+  const mounts = loadMounts(".remudero/mounts.yaml");
+  const lane = mounts.synthesis.inbox_draft;
+  const pick = selectOpenWeightModel(mounts.capabilities, lane.model, lane.effort, 32_000, { ready: () => true });
+  assert.equal(pick.model, "gpt-oss-120b");
+  assert.equal(pick.alternatives[0], "gpt-5-nano");
 });

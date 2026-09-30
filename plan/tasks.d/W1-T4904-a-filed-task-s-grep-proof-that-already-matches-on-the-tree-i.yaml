@@ -1,0 +1,85 @@
+- id: W1-T4904
+  title: "A FILED TASK'S GREP PROOF THAT ALREADY MATCHES ON THE TREE IT WILL BE BUILT FROM IS UNBUILDABLE AS WRITTEN, AND LINT-PLAN IS SILENT — proof-discrimination refuses a proof that passes at the merge base, and W1-T4550's fifth criterion did (grep exit 0, 1 hit, at its own filing head) while lint-plan reported 0 findings; make lint-plan report it on a new or newly changed criterion, naming kind: guard as the remedy, and refuse it only on a plan-only filing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: research whether a filing-time and pre-push proof dry run closes the two 2026-09-29 proof defects (#7882 W1-T4550, #7792 W1-T4681)"
+  plan_refs: [W1-T4419, W1-T3814, W1-T2835, W1-T120, W1-T3730]
+  files: [src/lib/task-linter.ts, src/run-task.ts, test/a-grep-proof-that-already-matches-is-refused-at-filing.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 at origin/main 074249863; nothing here is carried from an earlier session.
+
+    (1) THE DEFECT. W1-T4550's fifth criterion was `grep: a target is never re-derived from a bare repo name lacking
+    its owner in plan/tasks.d/W1-T3529-run-review-evidence-target.yaml` — text that is present and unchanged in the
+    target, so `proof-discrimination` (a proof must FAIL at the merge base and PASS at head) could never pass it, and
+    its row in scripts/proof-discrimination-baseline.json is 0. Replayed at the filing commit ad7596980 with the
+    reviewer's own invocation `grep -arn -- <pattern> <path>`: criteria 1-4 exit 1 with 0 hits, criterion 5 exits 0
+    with 1 hit. `rmd check-proof '<proof>' --base HEAD` at that tree prints `executed_stale`, exit 5. The fix cost a
+    build PR (#7882) that could not go green plus an operator amendment (#7894).
+
+    (2) LINT-PLAN SAW NOTHING. `rmd lint-plan --base ad7596980^` on that same filing reports 3 tasks checked, 0 failing,
+    2 warnings, both `sizing` on other tasks. `proofGrepUnmatchableViolations` and `proofGrepSelfCertifyingViolations`
+    (src/lib/task-linter.ts) read the target's text and call classifyGrepZeroHit, but stay silent on `matched` by
+    design ("already matching today (`executed_stale`'s business, W1-T273)"). The gate that owns that business first
+    sees a shard's proofs on the BUILD pull request, because criteriaForReview resolves them from the trailer there.
+
+    (3) THE POPULATION. 899 first-parent commits since 2026-09-01 added a plan/tasks.d shard: 1,708 dialect `grep:`
+    proofs on 810 tasks, each executed against the tree of its own filing commit. 125 proofs on 68 tasks already
+    matched (33 of them a task grepping its own shard's prose, which W1-T4818 addresses). Of the 125 that were later
+    built and joined by task and pattern, 15 graded `executed_stale` at build and 1 discriminated. CONTROL: 1,583 of the
+    1,708 did not match, and 950 of the 965 that joined a build discriminated. THE OBVIOUS EXEMPTION IS USELESS: 111 of
+    the 125 name a file in the task's own `files:`, so a rule "unless files: includes the target" would have stayed
+    silent on W1-T4550 as well.
+
+    (4) THE LIVE QUEUE. Of 176 queued tasks carrying a `grep:` proof, 52 already match on main. 43 of those have a
+    merged build (status lag, CLAUDE.md "a shard's status: field is not a completion signal"), 2 more merged after the
+    merged-PR list was cut (#7925, #7942), 4 are verify: human records, and three unbuilt verify: auto tasks remain — W1-T3547, W1-T3745, W1-T3759 — each of which the gate will
+    refuse when built. This task does NOT touch them; it stops the count growing.
+
+    (5) THE ALLOW-LIST ALREADY EXISTS. W1-T4419 shipped `kind: guard` on the gate side
+    (scripts/proof-discrimination-gate.mjs skips it for the head-versus-base comparison; review still requires it to
+    pass at head). W1-T4550's fifth criterion was exactly a guard — "the rewrite touched only proof lines" — and nobody
+    knew to write it as one. The lint must name `kind: guard` in its message. plan.ts does not type the field (its half of
+    W1-T4419 never landed), so read it as the gate does: `criterion.kind === "guard"`.
+  design: |
+    New check `proof-grep-already-true` in src/lib/task-linter.ts, inside lintTask, next to proofBaseDiscriminationViolations.
+    For each criterion of a `verify: auto` task that is not `satisfied_by`, not `kind: guard`, and is NEW or has a CHANGED
+    proof relative to `opts.baseAcceptance` (criteriaProofChanged / criterionKey; a task with no base record treats every
+    criterion as new): parse with parseWhitelistedProof; for a dialect `grep:` whose target exists per
+    `opts.readGrepProofFile`, take the file text minus the task's own acceptance block (ownPlanRecordOutsideAcceptance) and
+    report when classifyGrepZeroHit(pattern, text) === "matched". Silent on an absent target (a forward reference), on
+    `unit test:` proofs (proofBaseDiscriminationViolations owns the path form), on `verify: human`, and on an unchanged
+    inherited criterion, so amending an old shard never trips it. SEVERITY: warn everywhere; add the check to
+    PLAN_ONLY_NEW_TASK_DIAGNOSTIC_CHECKS so a plan-only filing that INTRODUCES one is refused (W1-T3814's existing
+    promotion), and to BUILD_VERIFICATION_CHECKS so a retired record downgrades it. src/run-task.ts sets
+    `opts.baseAcceptance` from oldById in the changed-tasks pass, the one place that already wires readGrepProofFile.
+    The message names the remedy: re-anchor the pattern on text the build ADDS, or declare `kind: guard` when
+    preservation is the point.
+  acceptance:
+    - claim: "a grep proof that already matches its target is reported on a newly filed verify auto task"
+      proof: 'grep: test("W1-T4904: a grep proof that already matches its target is reported on a new task" in test/a-grep-proof-that-already-matches-is-refused-at-filing.test.ts'
+    - claim: "a criterion declared kind guard is not reported as already matching"
+      proof: 'grep: test("W1-T4904: a criterion declared kind guard is not reported as already matching" in test/a-grep-proof-that-already-matches-is-refused-at-filing.test.ts'
+    - claim: "an unchanged inherited criterion is not reported when an old task is amended"
+      proof: 'grep: test("W1-T4904: an unchanged criterion on an amended task is not reported" in test/a-grep-proof-that-already-matches-is-refused-at-filing.test.ts'
+    - claim: "a plan-only filing that introduces an already matching grep proof is refused"
+      proof: 'grep: test("W1-T4904: a plan-only filing that introduces an already matching grep proof is refused" in test/a-grep-proof-that-already-matches-is-refused-at-filing.test.ts'
+  falsifier: |
+    Remove the check and a new shard whose grep names text already present in a different record's shard, the W1-T4550
+    shape, lints clean again: the first criterion's test then fails.
+  note: |
+    NOT IN SCOPE: the three live unbuilt tasks above, the 5,368 whole-file `unit test:` proofs grandfathered in
+    scripts/proof-discrimination-baseline.json, and any change to the gate or the reviewer. Retiring or repointing those is
+    a separate operator amendment. W1-T120 and W1-T3730 share task-linter.ts/run-task.ts as a surface, not a behaviour: the first is
+    a read-identity assertion, the second is the filing/test-file declaration rule; this adds one check beside them.
+    THE PROOF FORM: the criteria use the `grep: test("..." in <test file>` idiom because W1-T3730 is still open, so a title-form
+    `unit test:` proof is refused at filing for a task that declares its own test file. The builder must write the test titles
+    with DOUBLE quotes and verbatim — the quote form #7792 tripped on.

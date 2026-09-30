@@ -1,0 +1,53 @@
+# PROVISIONAL draft 3a (research 3, superseded reds). The id below is provisional and will be renumbered centrally.
+# Validated with `rmd lint-plan --base origin/main --merge-base` in a throwaway worktree: 0 failing, advisory warnings only.
+- id: W1-T4902
+  title: "THE PRE-STRIKE SUPERSESSION READ KEEPS A RED CHECK NAME WHOSE FRESH LATEST ATTEMPT ALREADY SUCCEEDED — stillRedRequiredNames drops a name only for a later attempt still IN FLIGHT, so a fix strike can be spent on a check that is green on the same head"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "research 2026-09-30 (superseded reds): triage on 2026-09-29 repeatedly established 'this red is superseded' by hand; the sweep's own dedupe is correct, this one pre-strike arm is the narrow exception"
+  plan_refs: ["W1-T1278", "W1-T457", "W1-T4105", "W1-T4729"]
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 by running the shipped function, not by reading it. Given a rollup holding
+    acceptance-author-gate FAILURE (started 12:12:59, check-run id 109400074596) and a later
+    acceptance-author-gate SUCCESS (started 14:00:47, id 109443317882) on the SAME head -- the exact
+    shape on #7793 at d450e4820 -- dedupeRollupByLatestAttempt keeps the SUCCESS and checksStateFromRollup
+    answers "green", but stillRedRequiredNames(["acceptance-author-gate"], rollup) returns
+    ["acceptance-author-gate"]: still red. It drops a name ONLY when the fresh latest attempt is
+    non-terminal (`inFlight = !REQUIRED_CHECK_OK && !REQUIRED_CHECK_FAIL`), so the arm meant to answer
+    "has a later attempt already superseded the red I am about to spend a strike on" answers no once
+    that later attempt FINISHED green. The window is the gap between the sweep pass that read the red
+    and the pre-strike re-read at site `rung.strike`; W1-T4105's watch only covers a worker already
+    running. Positive control for the population: on 200 recent PR final heads (47 closed-unmerged,
+    153 merged) 58 (head, name) pairs had an older non-green run and a later OK run of the same name,
+    median 3.6 min between the two, p90 22.9 min -- the window is minutes wide, the fix worker's spawn
+    is not. NOT MEASURED: how many fix strikes actually landed in that window, because the host ledger
+    (fix.dispatch / fix.stood_down rows) is not on disk in the research session.
+  design: |
+    In stillRedRequiredNames drop a name when its fresh latest attempt has an observed startedAt and is
+    EITHER non-terminal OR a REQUIRED_CHECK_OK conclusion (SUCCESS, SKIPPED, NEUTRAL). A latest attempt
+    that is a REQUIRED_CHECK_FAIL conclusion still keeps the name red; an absent name or one with no
+    startedAt still fails open (stays red). Update the stand-down reason in runFixRung to say the later
+    attempt is "in flight or green on this head". No new seam, no new read: the fresh rollup is already
+    in hand. The tests live in a new test/still-red-required-names-success.test.ts.
+  acceptance:
+    - claim: "a red name whose fresh latest attempt already succeeded is dropped as superseded"
+      proof: "unit test: a red name whose fresh latest attempt already succeeded is dropped as superseded"
+    - claim: "a red name whose fresh latest attempt is still a failure stays red, so the rule is not simply prefer-success"
+      proof: "unit test: a red name whose fresh latest attempt is a newer failure stays red"
+    - claim: "the stand-down reason names a later attempt that is in flight or green"
+      proof: "grep: in flight or green on this head in src/run-task.ts"
+  falsifier: |
+    CLOSE IF the ledger union shows no fix.dispatch row within 45 minutes of a required check going green
+    on the same head over a 14-day window with a positive control on fix.dispatch (the population is empty).

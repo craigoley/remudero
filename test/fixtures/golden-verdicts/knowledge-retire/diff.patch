@@ -4,25 +4,16 @@ index eec1a345d..bb454ca95 100644
 +++ b/docs/knowledge-garden-log.md
 @@ -48,0 +49,7 @@
 +
-+## Pass 2026-09-29T19:45:53.218Z
++## Pass 2026-09-30T04:27:57.745Z
 +
-+- retire proc-environ-is-an-exec-time-snapshot: Workers offered it have rarely used it, compared with other learnings.
-+- retire scan-both-quote-styles: Workers offered it have rarely used it, compared with other learnings.
++- retire bashrc-accident: Workers offered it have rarely used it, compared with other learnings.
 +
 +Learnings used when offered: 13%. Dangling Why pointers: 1.
 diff --git a/learnings/platform.yaml b/learnings/platform.yaml
 index 1c45f91d1..d1bdce478 100644
 --- a/learnings/platform.yaml
 +++ b/learnings/platform.yaml
-@@ -284,1 +284,2 @@
+@@ -93,1 +93,2 @@
 -  lifecycle: active
-+  # knowledge gardener: retire proc-environ-is-an-exec-time-snapshot
-+  lifecycle: superseded
-diff --git a/learnings/testing.yaml b/learnings/testing.yaml
-index e4bbbfbe5..7941770c3 100644
---- a/learnings/testing.yaml
-+++ b/learnings/testing.yaml
-@@ -58,1 +58,2 @@
--  lifecycle: active
-+  # knowledge gardener: retire scan-both-quote-styles
++  # knowledge gardener: retire bashrc-accident
 +  lifecycle: superseded
