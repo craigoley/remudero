@@ -7934,6 +7934,23 @@ export function proofDiscriminationEvidenceFromCriteria(
   return proofs.length > 0 ? { proofs } : undefined;
 }
 
+const STALE_PROOF_LOG_LINE = /^(?:\S+Z )?\s*proof: (\S.*?)\s*$/gm;
+
+/** W1-T4957: stale proofs from the required `proof-discrimination` check's own log, only when it is the sole red. */
+export function proofDiscriminationEvidenceFromCheckLog(
+  failures: readonly CiFailure[],
+): ProofDiscriminationEvidence | undefined {
+  if (failures.length === 0 || failures.some((failure) => failure.name !== "proof-discrimination")) return undefined;
+  const proofs = failures.flatMap((failure) =>
+    /proof\(s\) pass at both PR head and merge base/.test(failure.logTail)
+      ? [...failure.logTail.matchAll(STALE_PROOF_LOG_LINE)].map((match) => match[1]!)
+      : [],
+  );
+  return proofs.length > 0
+    ? { proofs: [...new Set(proofs)].map((proof) => ({ claim: proof, proof, proofExec: "executed_stale" as const })) }
+    : undefined;
+}
+
 /** One of the four preconditions {@link diagnoseCappedRoutingBlock} names — matched to this
  *  task's own filed rationale (W1-T3669), in the SAME order the routing block in
  *  {@link runSweep} reads them. */
@@ -10947,7 +10964,10 @@ export async function runSweep(
               // routed on — a failing review carries the unmet set, a blocked_ci PR carries ci-log
               // evidence, never a mix. W1-T2236: the review branch also carries
               // `actionableGateFailures`. W1-T2231: the dedup gate reads `acted`, never `spent`.
-              const fixEvidence = isBlockedCi(pr)
+              const staleProofs = proofDiscriminationEvidenceFromCheckLog(ciFailuresForFix);
+              const fixEvidence = staleProofs
+                ? { unmetCriteria: [], proofDiscrimination: staleProofs }
+                : isBlockedCi(pr)
                 ? { unmetCriteria: [], ciFailures: ciFailuresForFix }
                 : {
                     unmetCriteria: pr.unmetCriteria,
@@ -10968,6 +10988,20 @@ export async function runSweep(
               if (terminalStandDown) {
                 acted = false;
                 standDownReason = terminalStandDown;
+                break;
+              }
+              if (staleProofs && pr.changedFiles?.length === 0) {
+                let carried = "no merged stack parent could be read";
+                try {
+                  const stack = deps.stackPrerequisite?.(pr);
+                  if (stack?.state === "ready") carried = `merged stack parent ${stack.parentNumbers.map((n) => `#${n}`).join(", ")} carries its tests`;
+                } catch (error) {
+                  const failed = String((error as Error)?.message ?? error);
+                  carried = `no merged stack parent could be read: ${failed}`;
+                }
+                reason = `superseded — the stale-proof red leaves nothing in this PR's diff against main (${carried})`;
+                extraDisposedFields = { ...extraDisposedFields, stale_proof_superseded: true };
+                await deps.close(pr, reason);
                 break;
               }
               // W1-T4004 — THE DETERMINISTIC REPAIR IS TRIED FIRST, AND ONLY UNDER THREE CONDITIONS
