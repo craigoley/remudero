@@ -22,13 +22,24 @@ export interface FindingFlowRow {
 }
 
 /** The caller must authenticate these independently. No raw ledger/GitHub resolved-thread row is accepted as a label. */
-export type VerifiedFindingEvidence = {
-  findingId: string; prUrl: string; headSha: string; observedAt: string; provenance: string;
-  kind: "mechanism-falsifier"; beforeFails: boolean; afterPasses: boolean; mechanismMatched: boolean;
-} | {
-  findingId: string; prUrl: string; headSha: string; observedAt: string; provenance: string;
-  kind: "human-acceptance" | "human-rejection"; reason: string;
-};
+interface FindingEvidenceBase {
+  findingId: string;
+  prUrl: string;
+  headSha: string;
+  observedAt: string;
+  provenance: string;
+}
+interface MechanismFalsifierEvidence extends FindingEvidenceBase {
+  kind: "mechanism-falsifier";
+  beforeFails: boolean;
+  afterPasses: boolean;
+  mechanismMatched: boolean;
+}
+interface HumanVerdictEvidence extends FindingEvidenceBase {
+  kind: "human-acceptance" | "human-rejection";
+  reason: string;
+}
+export type VerifiedFindingEvidence = MechanismFalsifierEvidence | HumanVerdictEvidence;
 
 export type FindingOutcome = "confirmed-repair" | "human-accepted" | "human-rejected" | "conflicting" | "unknown" | "superseded";
 export interface FindingOutcomeCell {
