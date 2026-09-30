@@ -61,7 +61,7 @@ function probe(
   return probeOpenPrMerges(prs, fx.ledgerPath, fx.log, "unused-cwd", opts);
 }
 
-test("W1-T4914: a clean test merge is recorded as clean with no conflicting paths", () => {
+test("W1-T4914: a clean test merge is recorded as clean", () => {
   const { git } = mergeTreeGit(MAIN_A, { status: 0, stdout: `${TREE}\n` });
   const fx = recorder();
   const summary = probe([view({ prNumber: 7, headSha: "h7" })], fx, { git });
