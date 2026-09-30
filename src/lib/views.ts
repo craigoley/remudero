@@ -34,7 +34,8 @@ export interface ViewSource {
 export interface ViewDefinition<T = unknown> {
   name: string;
   version: number;
-  compute: () => { data: T; sources: ViewSource[] };
+  /** A view's query parameters narrow it; an unusable one is `{ error }`, answered 400 `invalid_request`. */
+  compute: (params: URLSearchParams) => { data: T; sources: ViewSource[] } | { error: string };
 }
 
 export interface ViewBody<T = unknown> {
@@ -48,8 +49,14 @@ export interface ViewBody<T = unknown> {
 }
 
 /** The body and entity tag {@link buildViewRoutes} serves for one view. */
-export function renderView<T>(view: ViewDefinition<T>, clock: Clock = systemClock): { body: ViewBody<T>; etag: string } {
-  const { data, sources } = view.compute();
+export function renderView<T>(
+  view: ViewDefinition<T>,
+  clock: Clock = systemClock,
+  params: URLSearchParams = new URLSearchParams(),
+): { body: ViewBody<T>; etag: string } | { error: string } {
+  const computed = view.compute(params);
+  if ("error" in computed) return computed;
+  const { data, sources } = computed;
   const stale = sources.some((source) => source.state !== "fresh");
   const times = sources.flatMap((source) => (source.asOf === null ? [] : [source.asOf])).sort();
   const hash = createHash("sha1").update(JSON.stringify({ version: view.version, stale, data })).digest("base64url");
@@ -66,7 +73,13 @@ export function buildViewRoutes(views: readonly ViewDefinition[], clock: Clock =
     path: `/v1/views/${view.name}`,
     scope: "read",
     handler: (req, res) => {
-      const { body, etag } = renderView(view, clock);
+      const rendered = renderView(view, clock, new URL(req.url ?? "/", "http://localhost").searchParams);
+      if ("error" in rendered) {
+        res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "invalid_request", detail: rendered.error }));
+        return;
+      }
+      const { body, etag } = rendered;
       if (ifNoneMatchHits(req.headers["if-none-match"], etag)) {
         res.writeHead(304, { etag, "cache-control": "no-cache" });
         res.end();

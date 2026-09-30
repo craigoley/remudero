@@ -5,9 +5,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { coldAnalyticsSnapshot, type AnalyticsSnapshot } from "../src/lib/analytics-route.js";
 import { fixedClock } from "../src/lib/clock.js";
-import { navBadgeView, operatorAgentCandidates, visibleOperatorAgentProposals } from "../src/lib/nav-badge-view.js";
+import { navBadgeView, operatorAgentCandidates, visibleOperatorAgentProposals, type NavBadgeData, type NavBadgeScope } from "../src/lib/nav-badge-view.js";
 import type { OperatorAgentHistory, OperatorAgentMemorySource } from "../src/lib/operator-agent.js";
+import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { createService } from "../src/lib/service.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { buildViewRoutes, renderView, type ViewBody, type ViewDefinition } from "../src/lib/views.js";
 
@@ -102,8 +104,18 @@ test("every evidence family the console engine reads becomes a candidate here to
   ].sort());
 });
 
-function badgeView(snapshot: AnalyticsSnapshot, inboxRoot: string, memory: OperatorAgentMemorySource = readyMemory) {
-  return navBadgeView({ analytics: () => snapshot, memory, ledgerPath: join(inboxRoot, "state", "ledger.ndjson"), inboxRoot, repository: REPO, instanceId: "core", clock: fixedClock(NOW) });
+function scope(instanceId: string, snapshot: AnalyticsSnapshot, root: string, memory: OperatorAgentMemorySource = readyMemory, repository: string | undefined = REPO): NavBadgeScope {
+  return { instanceId, repository, analytics: () => snapshot, memory, ledgerPath: join(root, "state", "ledger.ndjson") };
+}
+
+function badgeView(root: string, scopes: NavBadgeScope[]) {
+  return navBadgeView({ scopes: () => scopes, inboxRoot: root, clock: fixedClock(NOW) });
+}
+
+function render(view: ViewDefinition<NavBadgeData>, query = ""): ViewBody<NavBadgeData> {
+  const rendered = renderView(view, fixedClock(NOW), new URLSearchParams(query));
+  assert.ok(!("error" in rendered), JSON.stringify(rendered));
+  return rendered.body;
 }
 
 test("the nav badge view counts inbox items by who must act from the last classification", () => {
@@ -113,26 +125,44 @@ test("the nav badge view counts inbox items by who must act from the last classi
     join(root, "state", "inbox-classified.json"),
     JSON.stringify({ generatedAt: new Date(NOW - 30_000).toISOString(), states: { "ruling:a": "ready", "ruling:b": "not_ready", "ruling:c": "declined", "adoption:x": "ready", "adoption:y": "drafting" } }),
   );
-  const { body } = renderView(badgeView(busySnapshot(), root), fixedClock(NOW));
+  const body = render(badgeView(root, [scope("core", busySnapshot(), root)]));
   assert.deepEqual(body.data.inbox, { ready: 1, needsYou: 2, fleet: 2 });
   assert.equal(body.data.agent.count, 2);
   assert.equal(body.stale, false);
   assert.ok(JSON.stringify(body).length < 1_000, "a few hundred bytes, not ~370 KB");
 });
 
+test("the agent badge sums every instance and says which ones it could not count", () => {
+  const root = makeTempDir("nav-badge-fleet");
+  const quiet = busySnapshot({ runs: 1, tokens: 1 });
+  quiet.routingTelemetry = { ...quiet.routingTelemetry, buckets: [] };
+  const views = badgeView(root, [scope("core", busySnapshot(), root), scope("console", busySnapshot(), root, readyMemory, "craigoley/remudero-console"), scope("site", quiet, root, readyMemory, "craigoley/remudero-site")]);
+  const all = render(views).data.agent;
+  assert.equal(all.count, 4, "two proposals on each busy instance, none on the quiet one");
+  assert.deepEqual(all.instances.map((i) => [i.instanceId, i.count]), [["core", 2], ["console", 2], ["site", 0]]);
+  assert.ok(all.proposalIds.some((id) => id.startsWith("operator-agent:craigoley-remudero-console:console-")), "ids are scoped to their instance");
+  assert.equal(render(views, "instances=console").data.agent.count, 2, "?instances= narrows the sum");
+  const cold = badgeView(root, [scope("core", busySnapshot(), root), scope("console", busySnapshot({ asOf: null }), root)]);
+  const partial = render(cold).data.agent;
+  assert.equal(partial.count, undefined, "a partial sum is never presented as the total");
+  assert.equal(partial.atLeast, 2);
+  assert.match(partial.reason ?? "", /1 of 2 instances not counted/);
+  const refused = renderView(views, fixedClock(NOW), new URLSearchParams("instances=nope"));
+  assert.ok("error" in refused && /unknown instance: nope/.test(refused.error));
+});
+
 test("a cold input makes its count absent with a reason and the view stale", () => {
   const root = makeTempDir("nav-badge-cold");
-  const cold = renderView(badgeView(busySnapshot({ asOf: null }), root), fixedClock(NOW)).body;
+  const cold = render(badgeView(root, [scope("core", busySnapshot({ asOf: null }), root)]));
   assert.equal(cold.data.agent.count, undefined, "unknown is never a zero");
-  assert.match(cold.data.agent.reason ?? "", /analytics/);
+  assert.match(cold.data.agent.instances[0]?.reason ?? "", /analytics/);
   assert.equal(cold.data.inbox.ready, undefined);
   assert.equal(cold.stale, true);
   const warming: OperatorAgentMemorySource = { current: () => ({ state: "cold", asOf: null, rows: [] }), record: () => undefined };
-  assert.match(renderView(badgeView(busySnapshot(), root, warming), fixedClock(NOW)).body.data.agent.reason ?? "", /memory/);
-  const noRepository = navBadgeView({ analytics: () => busySnapshot(), memory: readyMemory, ledgerPath: join(root, "ledger.ndjson"), inboxRoot: root, instanceId: "core", clock: fixedClock(NOW) });
-  assert.match(renderView(noRepository, fixedClock(NOW)).body.data.agent.reason ?? "", /repository/);
-  const old = renderView(badgeView(busySnapshot({ asOf: new Date(NOW - 3 * 3_600_000).toISOString() }), root), fixedClock(NOW)).body;
-  assert.equal(old.sources.find((s) => s.name === "analytics")?.state, "stale");
+  assert.match(render(badgeView(root, [scope("core", busySnapshot(), root, warming)])).data.agent.instances[0]?.reason ?? "", /memory/);
+  assert.match(render(badgeView(root, [{ ...scope("core", busySnapshot(), root), repository: undefined }])).data.agent.instances[0]?.reason ?? "", /repository/);
+  const old = render(badgeView(root, [scope("core", busySnapshot({ asOf: new Date(NOW - 3 * 3_600_000).toISOString() }), root)]));
+  assert.equal(old.sources.find((s) => s.name === "analytics:core")?.state, "stale");
 });
 
 test("a view answers a matching If-None-Match with 304 even after a recompute", async () => {
@@ -159,3 +189,41 @@ test("a view answers a matching If-None-Match with 304 even after a recompute", 
   }
 });
 
+
+test("the assembled serve answers GET views nav-badge for its core instance and refuses an unknown one", async () => {
+  const root = makeTempDir("nav-badge-serve");
+  mkdirSync(join(root, "state"), { recursive: true });
+  mkdirSync(join(root, "plan"), { recursive: true });
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const planPath = join(root, "plan", "tasks.yaml");
+  writeFileSync(ledgerPath, "");
+  writeFileSync(planPath, "[]\n");
+  const deps: ServeDeps = {
+    board: { plan: { tasks: [], byId: new Map() }, ledgerPath, github: fakeGitHub() },
+    panelGraph: { root, planPath, ledgerPath, github: { prView: () => null }, statusGithub: fakeGitHub(), ratify: { approve: () => {}, reframe: () => {} } },
+    ledgerPath,
+    issues: { close: () => {} },
+    fleetControlRoot: root,
+    questionsRoot: root,
+    tokens: { read: "r", write: "w" },
+    log: () => {},
+    assistantRepository: REPO,
+  };
+  const server = buildServeServer(deps);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/views/nav-badge`;
+  try {
+    const res = await fetch(base, { headers: { authorization: "Bearer r" } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as ViewBody<NavBadgeData>;
+    assert.equal(body.view, "nav-badge");
+    assert.deepEqual(body.data.agent.instances.map((i) => [i.instanceId, i.repository]), [["core", REPO]]);
+    const core = body.data.agent.instances[0];
+    assert.ok(core?.count !== undefined || (core?.reason ?? "").length > 0, `a count or the reason there is none: ${JSON.stringify(core)}`);
+    const refused = await fetch(`${base}?instances=nope`, { headers: { authorization: "Bearer r" } });
+    assert.equal(refused.status, 400);
+    assert.equal(((await refused.json()) as { error: string }).error, "invalid_request");
+  } finally {
+    server.close();
+  }
+});

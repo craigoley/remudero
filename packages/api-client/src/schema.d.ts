@@ -2432,8 +2432,18 @@ export interface components {
       data: {
         /** The operator-agent badge: proposals the console's engine would show (a port of its generateProposals and visibleProposals, src/lib/nav-badge-view.ts), with up to 20 of their ids for a parity check. */
         agent: {
+          /** Present only when every selected instance was counted. */
           count?: number;
+          /** Present instead of `count` when only some instances were counted -- a floor, never a total. */
+          atLeast?: number;
           proposalIds: (string)[];
+          /** One entry per selected instance; `count` absent with a `reason` when it could not be counted. */
+          instances: ({
+            instanceId: string;
+            repository?: string;
+            count?: number;
+            reason?: string;
+          })[];
           reason?: string;
         };
         /** Open inbox items by who must act, from the last GET /v1/inbox classification. */
@@ -4196,6 +4206,7 @@ export interface paths {
       responses: {
           "200": NavBadgeView;
           "304": undefined;
+          "400": Error;
           "401": Error;
           "403": Error;
         };
