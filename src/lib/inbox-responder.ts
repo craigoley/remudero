@@ -112,7 +112,8 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
     const taskId = /^verify-human:(W\d+-T[A-Za-z0-9]+)$/.exec(c.proposalId)?.[1];
     if (!taskId || c.state !== "retired" || visibleIds.has(c.proposalId)) return [];
     const task = input.taskFacts.get(taskId);
-    if (!input.releasedTaskIds.has(taskId) && !(task?.status === "blocked" && task.retirement)) return [];
+    const noLongerHuman = task?.verify === "auto" && task.dispatchHold !== true;
+    if (!input.releasedTaskIds.has(taskId) && !(task?.status === "blocked" && task.retirement) && !noLongerHuman) return [];
     return [{
       threadId: inboxThreadId(c.proposalId), proposalId: c.proposalId,
       headline: c.proposalId, snippet: c.retiredReason ?? "Closed in the plan or released to the fleet",

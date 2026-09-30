@@ -1187,6 +1187,17 @@ export function classifyProposal(
       retiredReason: `${proposal.id}'s task ${humanTaskId} was explicitly ${humanTask.retirement} in the plan; its prior operator ask remains in history`,
     };
   }
+  // A current plan task that no longer requires human verification makes its old
+  // verify-human proposal obsolete. Derive this only from a present, unheld task:
+  // missing plan evidence or an explicit hold must leave the ask visible.
+  if (humanTask?.verify === "auto" && humanTask.dispatch_hold !== true) {
+    return {
+      proposalId: proposal.id,
+      state: "retired",
+      reasons: [],
+      retiredReason: `${proposal.id}'s current plan task ${humanTaskId} is verify: auto without a dispatch hold; its prior operator ask remains in history`,
+    };
+  }
   const mergedTaskReferent = taskReferentMerged(proposal, ctx);
   if (mergedTaskReferent !== undefined) {
     return {
