@@ -153,6 +153,17 @@ export type { SupersessionDiffFinding, SupersessionEvidence, SupersessionStatus,
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
 import type { WorkflowRunObservation } from "./workflow-run.js";
 import type { ReviewCapacityPolicy } from "./review-capacity.js";
+import {
+  dispatchMainRunGaps,
+  findMainCommitsWithNoRuns,
+  MAIN_RUN_GAP_LOOKBACK,
+  MAIN_RUN_GAP_STEP,
+  mainRunGapHistoryFromLedger,
+  readWorkflowPushTriggers,
+  type MainCommitRef,
+  type MainRunGapDispatch,
+  type MainRunGapHistory,
+} from "./main-run-gaps.js";
 // Re-exported so existing `import type { … } from "./sweep.js"` call sites keep working.
 export type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
 // W1-T2340: declared in a leaf module so open-prs-rest.ts's producer imports it without closing
@@ -1408,6 +1419,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "reaggregateCiGate",
   "readMainTip",
   "readMainRepair",
+  // W1-T4817: finds a main commit no workflow ran on and dispatches its workflows at main's head.
+  "reconcileMainRunGaps",
   "readStaleRedWorkflowRuns",
   "runStaleRedLocalRoute",
   "releaseStaleRed",
@@ -1455,6 +1468,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "reaggregateCiGate"
   | "readMainTip"
   | "readMainRepair"
+  | "reconcileMainRunGaps"
   | "readStaleRedWorkflowRuns"
   | "runStaleRedLocalRoute"
   | "releaseStaleRed"
@@ -3067,6 +3081,72 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // lane may still use a valid SHA when the timestamp is absent; the newer lane cannot.
     readMainRepair,
     readMainTip: async () => (await readMainCommit())?.sha,
+
+    // W1-T4817 — every read rides `readJsonImpl`, the one write rides `ghRunImpl`; a failed read
+    // degrades to "no gap found this pass", never a guessed dispatch.
+    reconcileMainRunGaps: async (history) => {
+      let commits: MainCommitRef[] = [];
+      try {
+        const listed = (await readJsonImpl(["api", `repos/${owner}/${repo}/commits?sha=main&per_page=${MAIN_RUN_GAP_LOOKBACK * 2}`])) as
+          | Array<{ sha?: unknown; parents?: Array<{ sha?: unknown }> }>
+          | undefined;
+        commits = (Array.isArray(listed) ? listed : []).flatMap((c) =>
+          typeof c?.sha === "string"
+            ? [{ sha: c.sha, parents: (c.parents ?? []).flatMap((p) => (typeof p?.sha === "string" ? [p.sha] : [])) }]
+            : [],
+        );
+      } catch (e) {
+        log("sweep.main_run_gap.error", { phase: "list_commits", error: String((e as Error)?.message ?? e) });
+        return [];
+      }
+      const head = commits[0]?.sha;
+      if (head === undefined) return [];
+      const gaps = await findMainCommitsWithNoRuns(
+        {
+          listMainCommits: async () => commits,
+          countRunsForSha: async (sha) => {
+            try {
+              const body = (await readJsonImpl(["api", `repos/${owner}/${repo}/actions/runs?head_sha=${sha}&per_page=1`])) as
+                | { total_count?: unknown }
+                | undefined;
+              return typeof body?.total_count === "number" ? body.total_count : undefined;
+            } catch (e) {
+              log("sweep.main_run_gap.error", { phase: "count_runs", commit: sha, error: String((e as Error)?.message ?? e) });
+              return undefined;
+            }
+          },
+        },
+        { skip: history.complete },
+      );
+      if (gaps.length === 0) return [];
+      let triggers: ReturnType<typeof readWorkflowPushTriggers>;
+      try {
+        triggers = readWorkflowPushTriggers(repoDir);
+      } catch (e) {
+        log("sweep.main_run_gap.error", { phase: "read_workflows", error: String((e as Error)?.message ?? e) });
+        return [];
+      }
+      return dispatchMainRunGaps({
+        gaps,
+        head,
+        history,
+        triggers,
+        changedFiles: async (sha) => {
+          try {
+            const body = (await readJsonImpl(["api", `repos/${owner}/${repo}/commits/${sha}`])) as
+              | { files?: Array<{ filename?: unknown }> }
+              | undefined;
+            return (body?.files ?? []).flatMap((f) => (typeof f?.filename === "string" ? [f.filename] : []));
+          } catch (e) {
+            log("sweep.main_run_gap.error", { phase: "changed_files", commit: sha, error: String((e as Error)?.message ?? e) });
+            return undefined;
+          }
+        },
+        dispatch: (workflowFile, ref) => {
+          ghRunImpl("gh", ["api", "-X", "POST", `repos/${owner}/${repo}/actions/workflows/${workflowFile}/dispatches`, "-f", `ref=${ref}`]);
+        },
+      });
+    },
 
     // W1-T2620 (design iv) — THE LEAF IS THE ONE THAT EXISTS: the SAME `pushEmptyCommit` leaf
     // `repushAbsent` (above) and `sweepPostFixReverification`'s own redrive (this file) already
@@ -8235,6 +8315,13 @@ export interface SweepDeps {
   /** W1-T3422 — SHA plus the main commit's actual time from one REST response. Missing or
    * malformed evidence leaves the exact stale-red lane silent while W1-T2620 may still use SHA. */
   readMainRepair?: () => MainRepairEvidence | undefined | Promise<MainRepairEvidence | undefined>;
+  /** W1-T4817 — a main commit NO workflow ran on (two auto-merges landing seconds apart can leave
+   *  GitHub firing no push event for the first) is dispatched at main's head, once. Receives the
+   *  history folded from the ledger's `main.run_gap.dispatched` rows, so a commit already handled
+   *  is never read or dispatched again; returns what it did, one entry per gap commit, and
+   *  `runSweep` writes each as a ledger row. Called once per full pass, never per light-pass PR.
+   *  Omitted, the sweep never looks. A THROW is contained and logged: it never fails the pass. */
+  reconcileMainRunGaps?: (history: MainRunGapHistory) => Promise<readonly MainRunGapDispatch[]>;
   /** W1-T2620 — RELEASE the one base-caused stand-down chosen this pass: never a loop, the same
    *  AT-MOST-ONCE shape the update-branch dep uses. THE LEAF IS THE ONE THAT EXISTS, never a second
    *  outward path. Omitted, the target still stands down with the ordinary sentence; a THROW is
@@ -9510,6 +9597,32 @@ export async function runSweep(
       }
     } catch (e) {
       log("sweep.running_long.error", { error: String((e as Error)?.message ?? e) });
+    }
+  }
+
+  // ── W1-T4817 MAIN COMMIT WITH NO WORKFLOW RUN ─────────────────────────────────────────────
+  // Full passes only: a light pass fans this function out one PR at a time, and the reads below
+  // are per-pass, not per-PR. The dedupe is the ledger fold handed to the effect, so a commit
+  // already handled costs no read and is never dispatched a second time.
+  if (deps.reconcileMainRunGaps && deps.repairAdmissionSurface !== "light") {
+    try {
+      const dispatched = await deps.reconcileMainRunGaps(mainRunGapHistoryFromLedger(ledgerLines));
+      for (const d of dispatched) {
+        appendLine(deps.ledgerPath, {
+          run_id: deps.runId,
+          task_id: "SWEEP",
+          step: MAIN_RUN_GAP_STEP,
+          commit: d.commit,
+          head: d.head,
+          ref: d.ref,
+          workflows: d.workflows,
+          failed: d.failed,
+          errors: d.errors,
+        });
+        log(MAIN_RUN_GAP_STEP, { commit: d.commit, head: d.head, workflows: d.workflows, failed: d.failed });
+      }
+    } catch (e) {
+      log("sweep.main_run_gap.error", { phase: "reconcile", error: String((e as Error)?.message ?? e) });
     }
   }
 
