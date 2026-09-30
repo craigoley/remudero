@@ -1,0 +1,31 @@
+- id: W1-T4862
+  title: "RECORDING A RETIREMENT IS REFUSED BY THE PLAN LINT — editing a superseded shard to add `retirement:` makes lint-plan check its never-built unit-test proofs and refuse them as unresolvable, so W1-T971 and W1-T1075 could not be closed on 2026-09-30"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 10.00
+  risk: low
+  origin: "operator ask 2026-09-30: file, build and retire as you see fit (verify-human review follow-ups)"
+  note: "reservation hand-off: plan-systemic-0930-1790738140000 -> plan-systemic-0930-1790738140000"
+  plan_refs: [W1-T2635]
+  files: [src/lib/task-linter.ts, test/a-retired-record-is-not-held-to-unbuilt-proofs.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-30: adding `status: blocked` + `retirement: closed` to W1-T971, and `retirement: retired` to
+    W1-T1075 (its own text already says SUPERSEDED), failed lint-plan with proof-unit-test-unresolvable for every
+    criterion, because the shard counts as changed and its tests were never built. A retired shard will never be
+    built, so resolvability is the wrong question for it.
+  design: |
+    Proof-resolution checks (proof-unit-test-unresolvable and its siblings) skip a task whose status is blocked with a
+    retirement; checks that still matter for a record (valid YAML, disposition named) keep running.
+  acceptance:
+    - claim: "a retired shard with unbuilt test proofs lints clean"
+      proof: 'grep: test("W1-T4862: a retired shard with unbuilt test proofs lints clean" in test/a-retired-record-is-not-held-to-unbuilt-proofs.test.ts'
+    - claim: "a queued shard with an unresolvable test proof is still refused"
+      proof: 'grep: test("W1-T4862: a queued shard with an unresolvable test proof is still refused" in test/a-retired-record-is-not-held-to-unbuilt-proofs.test.ts'
+  falsifier: |
+    Skip the check for every blocked task and the second test's queued case must still fail.
