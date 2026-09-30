@@ -34,10 +34,13 @@ test("W1-T4661: an already-merged verdict is terminal, not a transient retry", a
         ? { taskId, runId: "refusal-run", merged: false, costUsd: 0, verdict: "task_already_merged" }
         : { taskId, runId: "other-run", merged: true, costUsd: 0.2, verdict: "merged" };
     },
-    readLedgerLines: () => [JSON.stringify({
-      ts: "2026-09-28T01:49:00Z", run_id: "refusal-run", task_id: "A",
-      step: "dispatch.refused_already_merged", pr_url: prUrl,
-    })],
+    readLedgerLines: () => [
+      "{", // a torn live-ledger line must not turn a confirmed merge into a daemon crash
+      JSON.stringify({
+        ts: "2026-09-28T01:49:00Z", run_id: "refusal-run", task_id: "A",
+        step: "dispatch.refused_already_merged", pr_url: prUrl,
+      }),
+    ],
     sleep: async () => {},
     log: (step, fields = {}) => events.push({ step, fields }),
   }, { max: 2, pollIntervalMs: 1 });
@@ -46,6 +49,7 @@ test("W1-T4661: an already-merged verdict is terminal, not a transient retry", a
   assert.deepEqual(summary.merged, ["D"], "do not claim A merged from an unreadable daemon projection");
   assert.ok(refreshes >= 2, "the worker refusal forces a same-tick merged-view refresh");
   assert.equal(events.some((event) => event.step === "daemon.block.transient_retry"), false);
+  assert.equal(events.some((event) => event.step === "daemon.merge_credit_evidence_invalid"), true);
   assert.deepEqual(events.find((event) => event.step === "daemon.merge_credit_correction")?.fields,
     { task: "A", run_id: "refusal-run", pr_url: prUrl, merge_observation_lag_ms: null, credit_visible: false });
 });
