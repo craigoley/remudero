@@ -257,7 +257,8 @@ function safeQueueTruncated(github: BoardDeps["github"]): boolean {
 function safeFactsAgeMs(github: BoardDeps["github"]): number | undefined {
   try {
     return github.factsAgeMs?.();
-  } catch {
+  } catch (error) {
+    void error; // an unreadable age is reported as absent; it never fails the snapshot it decorates
     return undefined;
   }
 }

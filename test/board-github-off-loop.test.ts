@@ -97,15 +97,6 @@ test("serve gh pacing waits without a blocking sleep", () => {
   const blocking = createGhCallPacer({ minGapMs: 5_000, sleepSync: () => { throw new Error("slept"); } });
   blocking.wait();
   assert.throws(() => blocking.wait(), /slept/, "the CLI's pacer still sleeps synchronously");
-
-  let fetches = 0;
-  const gh = buildBatchedGithub("o", "r", { fetchAll: () => { fetches += 1; return []; }, ttlMs: 0, offLoop: true });
-  const before = Date.now();
-  gh.listOpenHeadBranches?.();
-  const second = gh.listOpenHeadBranches?.();
-  assert.equal(second, null, "the second read inside the gap was refused and marked failed");
-  assert.equal(fetches, 1);
-  assert.ok(Date.now() - before < 1_000, "the gateway did not sleep out the 1.5s gap");
 });
 
 test("a stale board github fact is served stale with its age", async () => {

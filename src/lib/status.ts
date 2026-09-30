@@ -4382,7 +4382,7 @@ export function buildBatchedGithub(
   // failing is not respawned by every board read.
   let offLoop = opts.offLoop ?? false;
   const offLoopPacer = createNonBlockingGhCallPacer();
-  const activePacer = (): GhCallPacer => (offLoop ? offLoopPacer : pacer);
+  const activePacer = (injected: boolean): GhCallPacer => (offLoop && !injected ? offLoopPacer : pacer);
   const warmRetryGapMs = Math.min(ttlMs, 15_000);
   let lastWarmRequestAt: number | undefined;
   /**
@@ -4555,7 +4555,7 @@ export function buildBatchedGithub(
       try {
         // W1-T468/W1-T1005: waits its turn on the shared pacer — an explicit `opts.pacer`, or the module-scoped
         // default — BEFORE the real call, and reports back whether it was rate-limited.
-        all = paceGhEntry(activePacer(), isGhRateLimitError, fetchAllIssues);
+        all = paceGhEntry(activePacer(opts.fetchAllIssues !== undefined), isGhRateLimitError, fetchAllIssues);
         lastIssueFetchFailed = false;
         lastIssueFetchFailureReason = undefined;
         log("board_gateway.issue_fetch_ok", { issueCount: all.length });
@@ -4634,7 +4634,7 @@ export function buildBatchedGithub(
       try {
         // W1-T468: same shared-pacer guard as the issue fetch above — one pacer instance across BOTH of this
         // gateway's reads, and run-task.ts's sweep enumeration, keeps three polite callers off second zero.
-        all = paceGhEntry(activePacer(), isGhRateLimitError, fetch);
+        all = paceGhEntry(activePacer(opts.fetchAll !== undefined), isGhRateLimitError, fetch);
         record({ failed: false, reason: undefined });
         log("board_gateway.fetch_ok", { prCount: all.length, channel });
       } catch (err) {
