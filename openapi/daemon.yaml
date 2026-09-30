@@ -6384,7 +6384,12 @@ components:
           type: string
         verb:
           type: string
-          enum: [merged, verdict, fix, escalated, spend, run-refused, run-started, worker]
+          enum: [merged, verdict, fix, escalated, spend, run-refused, run-started, worker, started, review, automerge]
+          description: >
+            `merged` is minted from a run's `verdict: merged` row or the sweep's `verdict.merged`
+            credit, once per pull request. `started` is a `run.start` (detail: the run type),
+            `review` a `review.posted` (detail: its state, verbatim), `automerge` an
+            `automerge.armed`. A consumer must render an unknown verb, not drop it.
         ts:
           type: string
           description: The originating ledger line's own `ts`.
@@ -6437,7 +6442,7 @@ components:
 
     RecentActivityResult:
       type: object
-      description: GET /v1/recent's body -- at most 20 entries, newest first.
+      description: GET /v1/recent's body -- at most `limit` (default 20) entries, newest first.
       required: [entries]
       properties:
         entries:
@@ -11618,16 +11623,34 @@ paths:
 
   /v1/recent:
     get:
-      summary: The RECENT activity feed -- the newest 20 ledger-derived entries.
+      summary: The RECENT activity feed -- the newest ledger-derived entries (20 by default).
       description: >
         src/lib/board.ts's `buildRecentRoute` / `computeRecentActivity`: classifies only ledger
         lines new since the last read, decorates each fresh entry with its PR title once, and
-        returns the newest 20, newest first. Served through the console read cache
+        returns the newest `limit` (default 20) of the last 200, newest first, optionally narrowed
+        to `verb`. Served through the console read cache
         (src/lib/serve.ts's `boundConsoleReadRoute`), so the body carries `staleness`, a weak
         `ETag` is set, and before any live snapshot exists the fallback body is
         `{entries: [], staleness}`.
       security:
         - bearerRead: []
+      parameters:
+        - name: verb
+          in: query
+          required: false
+          description: >
+            Comma-separated verbs (see RecentActivityEntry.verb) to keep, e.g. `merged` for a
+            merges panel that a busy hour of run starts would otherwise push out of the page.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Page size, 1 to 200. Default 20.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
       responses:
         "200":
           description: The feed.
@@ -11635,6 +11658,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RecentActivityResult"
+        "400":
+          description: An unknown `verb` or an out-of-range `limit`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "304":
           description: The request's `If-None-Match` matched the cached snapshot's ETag; no body.
         "401":

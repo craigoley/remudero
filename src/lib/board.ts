@@ -887,7 +887,23 @@ export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Rou
 // rungs. GitHub only decorates a row that already carries a PR link; a failed decoration marks
 // it `githubUnavailable` and never removes it (see {@link decoratePrTitle}).
 
-export type RecentActivityVerb = "merged" | "verdict" | "fix" | "escalated" | "spend" | "run-refused" | "run-started" | "worker";
+export type RecentActivityVerb =
+  | "merged"
+  | "verdict"
+  | "fix"
+  | "escalated"
+  | "spend"
+  | "run-refused"
+  | "run-started"
+  | "worker"
+  | "started"
+  | "review"
+  | "automerge";
+
+/** Every verb the feed can mint, so a `?verb=` filter can refuse a typo instead of answering empty. */
+export const RECENT_ACTIVITY_VERBS: readonly RecentActivityVerb[] = [
+  "merged", "verdict", "fix", "escalated", "spend", "run-refused", "run-started", "worker", "started", "review", "automerge",
+];
 
 /** The steps that record the daemon's resolution of an operator-initiated console action
  *  (W1-T266) — an allowlist, not a removal of the `!task` guard every other pseudo-id line
@@ -953,6 +969,10 @@ interface RecentActivityState {
    *  `scannedLines`' line-level cursor — this is what makes even a full re-scan O(new bytes),
    *  not O(history). */
   ledgerTail: LedgerTailCache;
+  /** The array the default tail reader returned last time. {@link readLedgerTail} extends one
+   *  array in place and starts a new one only when the file shrank, so a different array means a
+   *  rotation rewrote the live file, even when the rewrite left it with more lines than were scanned. */
+  lastLines?: ReadonlyArray<Record<string, unknown>>;
 }
 
 /** Opaque handle a caller holds across requests, mirroring {@link BoardSnapshotCache} — never reconstructed per render. */
@@ -1010,6 +1030,10 @@ function boundedRecentTelemetryText(value: unknown): string | undefined {
   return text.length <= 160 ? text : `${text.slice(0, 159)}…`;
 }
 
+function recentPrNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
 function recentWorkerRole(value: unknown): RecentActivityEntry["workerRole"] {
   return value === "recon" || value === "implementer" || value === "reviewer" || value === "fixer" || value === "triage" || value === "retro" || value === "unknown"
     ? value
@@ -1034,6 +1058,16 @@ function classifyLine(
       const verdict = typeof line.verdict === "string" ? line.verdict : "unknown";
       return { taskId, title, ts, verb: verdict === "merged" ? "merged" : "verdict", detail: verdict, costUsd, prUrl, prNumber };
     }
+    // The sweep's merge credit: on the live fleet it is how nearly every merge is recorded, because
+    // the run's own `verdict` row closes as blocked_ci or awaiting review long before GitHub merges.
+    case "verdict.merged":
+      return { taskId, title, ts, verb: "merged", detail: "merged", prUrl, prNumber: prNumber ?? recentPrNumber(line.pr_number) };
+    case "run.start":
+      return { taskId, title, ts, verb: "started", detail: boundedRecentTelemetryText(line.type) ?? boundedRecentTelemetryText(line.lane) ?? "run" };
+    case "review.posted":
+      return { taskId, title, ts, verb: "review", detail: boundedRecentTelemetryText(line.state) ?? "posted", prUrl, prNumber };
+    case "automerge.armed":
+      return { taskId, title, ts, verb: "automerge", detail: "armed", prUrl, prNumber: prNumber ?? recentPrNumber(line.pr_number) };
     case "fix.dispatch":
       return { taskId, title, ts, verb: "fix", detail: `dispatched (strike ${String(line.strike ?? "?")})`, prUrl, prNumber };
     case "fix.done":
@@ -1105,7 +1139,9 @@ export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCach
   const lines = readLedger(deps.ledgerPath);
   // A shorter ledger than last scanned should never happen (append-only); degrade safely by
   // rescanning from scratch rather than slicing with a negative offset.
-  if (lines.length < state.scannedLines) {
+  const rewritten = deps.readLedger === undefined && state.lastLines !== undefined && lines !== state.lastLines;
+  state.lastLines = lines;
+  if (rewritten || lines.length < state.scannedLines) {
     state.scannedLines = 0;
     state.entries = [];
     state.prByRun = new Map();
@@ -1136,11 +1172,35 @@ export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCach
     const prUrl = typeof line.pr_url === "string" ? line.pr_url : runId ? state.prByRun.get(runId) : undefined;
     const entry = classifyLine(line, taskId, task?.title ?? taskId, ts, prUrl);
     if (!entry) continue;
+    // One merge, one row: a run's own `verdict: merged` and the sweep's `verdict.merged` credit
+    // both record the same merge, and the console counts merges off this feed.
+    if (entry.verb === "merged" && state.entries.some((e) => e.verb === "merged" && e.taskId === entry.taskId && e.prUrl === entry.prUrl)) continue;
     state.entries.push(decoratePrTitle(runId ? { ...entry, runId } : entry, deps));
     if (state.entries.length > RECENT_ACTIVITY_HISTORY_CAP) state.entries.shift();
   }
 
   return state.entries.slice(-max).reverse();
+}
+
+/** The feed's default page, and what `?limit=` may raise it to (the whole retained history). */
+const RECENT_DEFAULT_LIMIT = 20;
+
+/** `?verb=merged,review` narrows the feed to those verbs, and `?limit=` sizes it (1..200), so a
+ *  merges panel is not starved by a busy hour of run starts. Both are optional: a bare GET is the
+ *  newest 20 of every verb, as it always was. */
+function recentQuery(rawUrl: string | undefined): { verbs?: ReadonlySet<string>; limit: number } | { error: string } {
+  const params = new URL(rawUrl ?? "/", "http://localhost").searchParams;
+  const limitRaw = params.get("limit");
+  const limit = limitRaw === null ? RECENT_DEFAULT_LIMIT : Number(limitRaw);
+  if (!Number.isInteger(limit) || limit < 1 || limit > RECENT_ACTIVITY_HISTORY_CAP) {
+    return { error: `limit must be an integer from 1 to ${RECENT_ACTIVITY_HISTORY_CAP}` };
+  }
+  const verbRaw = params.get("verb");
+  if (verbRaw === null) return { limit };
+  const verbs = verbRaw.split(",").map((v) => v.trim()).filter(Boolean);
+  const unknown = verbs.filter((v) => !(RECENT_ACTIVITY_VERBS as readonly string[]).includes(v));
+  if (verbs.length === 0 || unknown.length > 0) return { error: `unknown verb: ${unknown.join(",") || "(empty)"}` };
+  return { verbs: new Set(verbs), limit };
 }
 
 /** GET /v1/recent — the RECENT section's data, read-scoped, one {@link RecentActivityCache} per route instance. */
@@ -1150,8 +1210,16 @@ export function buildRecentRoute(deps: BoardDeps): Route {
     method: "GET",
     path: "/v1/recent",
     scope: "read",
-    handler: (_req, res) => {
-      sendJson(res, 200, { entries: computeRecentActivity(deps, cache) });
+    handler: (req, res) => {
+      const query = recentQuery(req.url);
+      if ("error" in query) {
+        sendJson(res, 400, { error: "invalid_request", detail: query.error });
+        return;
+      }
+      const entries = computeRecentActivity(deps, cache, RECENT_ACTIVITY_HISTORY_CAP);
+      const verbs = query.verbs;
+      const matching = verbs ? entries.filter((e) => verbs.has(e.verb)) : entries;
+      sendJson(res, 200, { entries: matching.slice(0, query.limit) });
     },
   };
 }
