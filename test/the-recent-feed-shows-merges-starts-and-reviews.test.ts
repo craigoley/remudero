@@ -68,6 +68,23 @@ test("one merge recorded by a verdict row and a verdict.merged credit is one mer
   assert.equal(merges[0]?.ts, MERGE_CREDIT.ts, "the sweep credit carries the actual merge time, not the run's earlier verdict time");
 });
 
+test("a merge credit or arming row with no pr_url takes its PR number from pr_number, and only a sane one", () => {
+  const { pr_url: _mergeUrl, ...bareMerge } = MERGE_CREDIT;
+  const { pr_url: _armedUrl, ...bareArmed } = ARMED;
+  const feed = computeRecentActivity(depsFor([bareArmed, bareMerge]), createRecentActivityCache());
+  const byVerb = new Map(feed.map((e) => [e.verb, e]));
+  assert.equal(byVerb.get("merged")?.prNumber, 8003);
+  assert.equal(byVerb.get("automerge")?.prNumber, 8003);
+  assert.equal(byVerb.get("merged")?.prUrl, undefined);
+
+  for (const bad of [0, -3, 1.5, "8003", null]) {
+    const badFeed = computeRecentActivity(depsFor([{ ...bareMerge, pr_number: bad }]), createRecentActivityCache());
+    const merged = badFeed.find((e) => e.verb === "merged");
+    assert.ok(merged, `a merge row with pr_number ${JSON.stringify(bad)} still reaches the feed`);
+    assert.equal(merged.prNumber, undefined, `pr_number ${JSON.stringify(bad)} is not a PR number`);
+  }
+});
+
 test("a rotation that leaves the live ledger with more lines than were scanned is rescanned not skipped", () => {
   // Rotation rewrites the live file smaller in BYTES; with short rows it can still hold more LINES
   // than the feed had scanned, and the old line cursor then skipped the new file's head.
