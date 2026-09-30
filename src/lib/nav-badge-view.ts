@@ -15,18 +15,27 @@
  * operator-agent memory folded from it, and the inbox classification `GET /v1/inbox` writes. A cold
  * input makes its count absent with a reason, never a zero.
  */
-import { join } from "node:path";
+import { readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { ANALYTICS_REFRESH_INTERVAL_MS, ANALYTICS_REFRESH_TIMEOUT_MS, type AnalyticsSnapshot } from "./analytics-route.js";
 import { systemClock, type Clock } from "./clock.js";
-import { readClassificationSnapshot } from "./fleet-lane.js";
+import { classificationSnapshotPath, readClassificationSnapshot } from "./fleet-lane.js";
+import { writeAtomic } from "./fs-race-safe.js";
 import { inboxOwner } from "./inbox-owner.js";
 import {
+  OPERATOR_AGENT_DECISION_STEP,
+  OPERATOR_AGENT_OUTCOME_STEP,
+  OPERATOR_AGENT_PROPOSAL_STEP,
+  OPERATOR_AGENT_SETTINGS_STEP,
   readOperatorAgentHistory,
   readOperatorAgentSettings,
+  selectOperatorAgentMemoryRow,
   type OperatorAgentHistory,
+  type OperatorAgentMemoryLedgerRow,
   type OperatorAgentMemorySource,
   type OperatorAgentSettings,
 } from "./operator-agent.js";
+import { READ_MODEL_DIRNAME, type ReadModelDb } from "./read-model-db.js";
 import type { ViewDefinition, ViewSource } from "./views.js";
 
 export const NAV_BADGE_VIEW_VERSION = 1;
@@ -56,6 +65,35 @@ export interface NavBadgeData {
 }
 
 type Candidate = { proposalId: string; category: string; signal: string; confidence: number };
+
+type OperatorAgentProjection = AnalyticsSnapshot["consoleV1"]["operatorAgent"];
+
+/** The slice of an analytics snapshot the agent badge reads, and all the read model persists of it. */
+export interface NavBadgeAnalytics {
+  asOf: string | null;
+  consoleV1: {
+    metrics: AnalyticsSnapshot["consoleV1"]["metrics"];
+    operatorAgent: {
+      proof: OperatorAgentProjection["proof"];
+      outcomes: Pick<OperatorAgentProjection["outcomes"], "classes">;
+      decisions: Pick<OperatorAgentProjection["decisions"], "classes">;
+      capacity: Pick<OperatorAgentProjection["capacity"], "measurements">;
+    };
+  };
+  routingTelemetry: Pick<AnalyticsSnapshot["routingTelemetry"], "buckets">;
+}
+
+export function navBadgeAnalyticsSlice(snapshot: NavBadgeAnalytics): NavBadgeAnalytics {
+  const agent = snapshot.consoleV1.operatorAgent;
+  return {
+    asOf: snapshot.asOf,
+    consoleV1: {
+      metrics: snapshot.consoleV1.metrics,
+      operatorAgent: { proof: agent.proof, outcomes: { classes: agent.outcomes.classes }, decisions: { classes: agent.decisions.classes }, capacity: { measurements: agent.capacity.measurements } },
+    },
+    routingTelemetry: { buckets: snapshot.routingTelemetry.buckets },
+  };
+}
 
 function slug(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "repo";
@@ -99,7 +137,7 @@ function preferenceAdjustment(history: readonly OperatorAgentHistory[], category
 
 /** Every proposal the console engine would generate for one instance, before visibility filtering. */
 export function operatorAgentCandidates(
-  snapshot: Pick<AnalyticsSnapshot, "consoleV1" | "routingTelemetry">,
+  snapshot: NavBadgeAnalytics,
   scope: { repository: string; instanceId: string },
   history: readonly OperatorAgentHistory[],
 ): Candidate[] {
@@ -177,20 +215,81 @@ export interface NavBadgeScope {
 }
 
 type InstanceBadge = NavBadgeData["agent"]["instances"][number];
+type CountedInstance = { badge: InstanceBadge; ids: string[] };
 
-function instanceBadge(scope: NavBadgeScope, nowMs: number, sources: ViewSource[]): { badge: InstanceBadge; ids: string[] } {
-  const snapshot = scope.analytics();
-  const analyticsState = sourceAge(snapshot.asOf, nowMs, ANALYTICS_STALE_AFTER_MS);
-  sources.push({ name: `analytics:${scope.instanceId}`, asOf: snapshot.asOf, state: analyticsState });
-  const base = { instanceId: scope.instanceId, ...(scope.repository ? { repository: scope.repository } : {}) };
-  if (scope.repository === undefined) return { badge: { ...base, reason: "serve names no repository for this instance" }, ids: [] };
-  if (analyticsState === "unavailable") return { badge: { ...base, reason: "analytics has not completed its first refresh" }, ids: [] };
-  if (scope.memory?.current().state !== "ready") return { badge: { ...base, reason: "operator-agent memory has not completed its first refresh" }, ids: [] };
-  const opDeps = { ledgerPath: scope.ledgerPath, memory: scope.memory };
+/** What one instance's count needs; `memory` is its operator-agent rows, or why they cannot be read. */
+interface InstanceInputs {
+  instanceId: string;
+  repository?: string;
+  analytics: NavBadgeAnalytics | null;
+  memory: () => { rows: readonly OperatorAgentMemoryLedgerRow[] } | { reason: string };
+}
+
+function countInstance(input: InstanceInputs, nowMs: number, sources: ViewSource[]): CountedInstance {
+  const analyticsState = sourceAge(input.analytics?.asOf ?? null, nowMs, ANALYTICS_STALE_AFTER_MS);
+  sources.push({ name: `analytics:${input.instanceId}`, asOf: input.analytics?.asOf ?? null, state: analyticsState });
+  const base = { instanceId: input.instanceId, ...(input.repository ? { repository: input.repository } : {}) };
+  if (input.repository === undefined) return { badge: { ...base, reason: "serve names no repository for this instance" }, ids: [] };
+  if (input.analytics === null || analyticsState === "unavailable") return { badge: { ...base, reason: "analytics has not completed its first refresh" }, ids: [] };
+  const memory = input.memory();
+  if ("reason" in memory) return { badge: { ...base, reason: memory.reason }, ids: [] };
+  const opDeps = { ledgerPath: "", now: () => nowMs, memory: { current: () => ({ state: "ready" as const, asOf: null, rows: memory.rows }), record: () => undefined } };
   const history = readOperatorAgentHistory(opDeps);
-  const settings = readOperatorAgentSettings(opDeps, { kind: "repository", repository: scope.repository }).settings;
-  const ids = visibleOperatorAgentProposals(operatorAgentCandidates(snapshot, { repository: scope.repository, instanceId: scope.instanceId }, history), history, settings);
+  const settings = readOperatorAgentSettings(opDeps, { kind: "repository", repository: input.repository }).settings;
+  const ids = visibleOperatorAgentProposals(operatorAgentCandidates(input.analytics, { repository: input.repository, instanceId: input.instanceId }, history), history, settings);
   return { badge: { ...base, count: ids.length }, ids };
+}
+
+function instanceBadge(scope: NavBadgeScope, nowMs: number, sources: ViewSource[]): CountedInstance {
+  const snapshot = scope.analytics();
+  return countInstance({
+    instanceId: scope.instanceId,
+    ...(scope.repository ? { repository: scope.repository } : {}),
+    analytics: snapshot,
+    memory: () => {
+      const current = scope.memory?.current();
+      return current?.state === "ready" ? { rows: current.rows } : { reason: "operator-agent memory has not completed its first refresh" };
+    },
+  }, nowMs, sources);
+}
+
+/** The instance counts summed: `count` when every instance was counted, else `atLeast` and a reason. */
+function sumAgent(counted: readonly CountedInstance[]): NavBadgeData["agent"] {
+  const known = counted.filter((c) => c.badge.count !== undefined);
+  const total = known.reduce((sum, c) => sum + (c.badge.count ?? 0), 0);
+  return {
+    ...(known.length === counted.length ? { count: total } : known.length > 0 ? { atLeast: total } : {}),
+    proposalIds: counted.flatMap((c) => c.ids).slice(0, MAX_PROPOSAL_IDS),
+    instances: counted.map((c) => c.badge),
+    ...(known.length < counted.length ? { reason: `${counted.length - known.length} of ${counted.length} instances not counted` } : {}),
+  };
+}
+
+type Classification = ReturnType<typeof readClassificationSnapshot>;
+
+function inboxCounts(classified: Classification, nowMs: number, sources: ViewSource[]): NavBadgeData["inbox"] {
+  sources.push({ name: "inbox-classification", asOf: classified?.generatedAt ?? null, state: classified ? sourceAge(classified.generatedAt, nowMs, INBOX_STALE_AFTER_MS) : "unavailable" });
+  if (!classified) return { reason: "no inbox classification has been written yet" };
+  let ready = 0;
+  let needsYou = 0;
+  let fleet = 0;
+  for (const [proposalId, state] of Object.entries(classified.states)) {
+    if (state !== "ready" && state !== "drafting" && state !== "not_ready") continue;
+    if (inboxOwner({ id: proposalId }) === "fleet") fleet += 1;
+    else {
+      needsYou += 1;
+      if (state === "ready") ready += 1;
+    }
+  }
+  return { ready, needsYou, fleet };
+}
+
+/** `?instances=a,b` narrows to those instances; a name serve does not have is an error. */
+function selectInstances<T extends { instanceId: string }>(all: readonly T[], params: URLSearchParams): T[] | { error: string } {
+  const asked = params.get("instances")?.split(",").map((name) => name.trim()).filter(Boolean);
+  const unknown = (asked ?? []).filter((name) => !all.some((scope) => scope.instanceId === name));
+  if (unknown.length > 0) return { error: `unknown instance: ${unknown.join(",")}; serve has ${all.map((s) => s.instanceId).join(",")}` };
+  return asked ? all.filter((scope) => asked.includes(scope.instanceId)) : [...all];
 }
 
 /** The nav-badge view over serve's own caches, every instance by default or `?instances=a,b`. */
@@ -200,41 +299,176 @@ export function navBadgeView(deps: { scopes: () => readonly NavBadgeScope[]; inb
     version: NAV_BADGE_VIEW_VERSION,
     compute: (params) => {
       const nowMs = (deps.clock ?? systemClock).now();
-      const all = deps.scopes();
-      const asked = params.get("instances")?.split(",").map((name) => name.trim()).filter(Boolean);
-      const unknown = (asked ?? []).filter((name) => !all.some((scope) => scope.instanceId === name));
-      if (unknown.length > 0) return { error: `unknown instance: ${unknown.join(",")}; serve has ${all.map((s) => s.instanceId).join(",")}` };
-      const scopes = asked ? all.filter((scope) => asked.includes(scope.instanceId)) : all;
+      const scopes = selectInstances(deps.scopes(), params);
+      if ("error" in scopes) return scopes;
       const sources: ViewSource[] = [];
-      const counted = scopes.map((scope) => instanceBadge(scope, nowMs, sources));
-      const known = counted.filter((c) => c.badge.count !== undefined);
-      const total = known.reduce((sum, c) => sum + (c.badge.count ?? 0), 0);
-      const agent: NavBadgeData["agent"] = {
-        ...(known.length === counted.length ? { count: total } : known.length > 0 ? { atLeast: total } : {}),
-        proposalIds: counted.flatMap((c) => c.ids).slice(0, MAX_PROPOSAL_IDS),
-        instances: counted.map((c) => c.badge),
-        ...(known.length < counted.length ? { reason: `${counted.length - known.length} of ${counted.length} instances not counted` } : {}),
-      };
-
-      const classified = readClassificationSnapshot(join(deps.inboxRoot, "state"));
-      sources.push({ name: "inbox-classification", asOf: classified?.generatedAt ?? null, state: classified ? sourceAge(classified.generatedAt, nowMs, INBOX_STALE_AFTER_MS) : "unavailable" });
-      let inbox: NavBadgeData["inbox"];
-      if (!classified) inbox = { reason: "no inbox classification has been written yet" };
-      else {
-        let ready = 0;
-        let needsYou = 0;
-        let fleet = 0;
-        for (const [proposalId, state] of Object.entries(classified.states)) {
-          if (state !== "ready" && state !== "drafting" && state !== "not_ready") continue;
-          if (inboxOwner({ id: proposalId }) === "fleet") fleet += 1;
-          else {
-            needsYou += 1;
-            if (state === "ready") ready += 1;
-          }
-        }
-        inbox = { ready, needsYou, fleet };
-      }
+      const agent = sumAgent(scopes.map((scope) => instanceBadge(scope, nowMs, sources)));
+      const inbox = inboxCounts(readClassificationSnapshot(join(deps.inboxRoot, "state")), nowMs, sources);
       return { data: { agent, inbox }, sources };
+    },
+  };
+}
+
+// ---- Phase 1 (P1-07): the same view materialized by the read-model worker ----
+
+/** Serve's main thread publishes the badge's non-ledger inputs here; the worker reads them on mtime. */
+export const NAV_BADGE_SOURCES_FILE = "nav-badge-sources.json";
+/** How often serve checks its analytics caches for a newer slice to publish. */
+export const NAV_BADGE_SOURCES_PUBLISH_MS = 5_000;
+const OPERATOR_AGENT_MEMORY_STEPS = [OPERATOR_AGENT_PROPOSAL_STEP, OPERATOR_AGENT_DECISION_STEP, OPERATOR_AGENT_OUTCOME_STEP, OPERATOR_AGENT_SETTINGS_STEP];
+
+/** The published inputs: each scope's persisted analytics slice, and where the inbox classification lives. */
+export interface NavBadgeSources {
+  inboxStateDir: string;
+  instances: Array<{ instanceId: string; repository?: string; analytics: NavBadgeAnalytics | null }>;
+}
+
+export function navBadgeSourcesPath(stateDir: string): string {
+  return join(stateDir, READ_MODEL_DIRNAME, NAV_BADGE_SOURCES_FILE);
+}
+
+function readNavBadgeSources(path: string): NavBadgeSources | undefined {
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as NavBadgeSources;
+  } catch {
+    // deliberate: an absent or half-written file reads as no published inputs; every instance then reads cold with its reason.
+    return undefined;
+  }
+}
+
+/**
+ * Writes the badge's non-ledger inputs for the worker whenever one changes. A scope whose analytics
+ * is cold keeps the slice this file already holds, so a restarted serve never unpublishes the last
+ * good analytics: the worker counts from it while the new process's first refresh runs.
+ */
+export function createNavBadgeSourcePublisher(opts: { stateDir: string; inboxStateDir: string; scopes: () => readonly NavBadgeScope[] }): () => boolean {
+  const path = navBadgeSourcesPath(opts.stateDir);
+  const kept = new Map((readNavBadgeSources(path)?.instances ?? []).map((instance) => [instance.instanceId, instance.analytics]));
+  let written: string | undefined;
+  return () => {
+    const instances = opts.scopes().map((scope) => {
+      const snapshot = scope.analytics();
+      const analytics = snapshot.asOf === null ? kept.get(scope.instanceId) ?? null : navBadgeAnalyticsSlice(snapshot);
+      kept.set(scope.instanceId, analytics);
+      return { instanceId: scope.instanceId, ...(scope.repository ? { repository: scope.repository } : {}), analytics };
+    });
+    const text = JSON.stringify({ inboxStateDir: opts.inboxStateDir, instances } satisfies NavBadgeSources);
+    if (text === written) return false;
+    writeAtomic(path, text);
+    written = text;
+    return true;
+  };
+}
+
+type PublisherTiming = { every?: (run: () => void, ms: number) => () => void; log?: (step: string, extra?: Record<string, unknown>) => void };
+
+/** Runs a read-model source publisher now and then every {@link NAV_BADGE_SOURCES_PUBLISH_MS}, logging a failed
+ *  write under `step` and trying again next time; returns the stop. */
+export function startSourcePublisher(publish: () => unknown, step: string, opts: PublisherTiming): () => void {
+  const run = (): void => {
+    try {
+      publish();
+    } catch (error) {
+      opts.log?.(step, { error: (error as Error).message });
+    }
+  };
+  run();
+  if (opts.every) return opts.every(run, NAV_BADGE_SOURCES_PUBLISH_MS);
+  const timer = setInterval(run, NAV_BADGE_SOURCES_PUBLISH_MS);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
+export function startNavBadgeSourcePublisher(opts: Parameters<typeof createNavBadgeSourcePublisher>[0] & PublisherTiming): () => void {
+  return startSourcePublisher(createNavBadgeSourcePublisher(opts), "read_model.nav_badge_sources_failed", opts);
+}
+
+/** A file read again only when its mtime moves. */
+export function readOnMtimeChange<T>(read: (path: string) => T): (path: string) => T | undefined {
+  let last: { path: string; mtimeMs: number; value: T } | undefined;
+  return (path) => {
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(path).mtimeMs;
+    } catch {
+      // deliberate: an absent input is cold, and each reader turns that into its own reason.
+      last = undefined;
+      return undefined;
+    }
+    if (last?.path !== path || last.mtimeMs !== mtimeMs) last = { path, mtimeMs, value: read(path) };
+    return last.value;
+  };
+}
+
+interface MemoryFold {
+  seq: number;
+  rows: Array<{ tsMs: number; seq: number; row: OperatorAgentMemoryLedgerRow }>;
+}
+
+/** Operator-agent rows from the fact store, folded incrementally past the last applied `seq`. */
+function operatorAgentFacts(folds: WeakMap<ReadModelDb, MemoryFold>, db: ReadModelDb): readonly OperatorAgentMemoryLedgerRow[] {
+  let fold = folds.get(db);
+  // A projector that rebuilt this store in place restarts `seq`: fold again from the first row.
+  if (!fold || Number(db.prepare("SELECT coalesce(max(seq), 0) AS m FROM fact").get()?.m) < fold.seq) folds.set(db, (fold = { seq: 0, rows: [] }));
+  const fresh = db.prepare(`SELECT seq, ts_ms, body FROM fact WHERE seq > ? AND step IN (${OPERATOR_AGENT_MEMORY_STEPS.map(() => "?").join(", ")}) ORDER BY seq`)
+    .all(fold.seq, ...OPERATOR_AGENT_MEMORY_STEPS);
+  for (const fact of fresh) {
+    fold.seq = Number(fact.seq);
+    const row = selectOperatorAgentMemoryRow(JSON.parse(String(fact.body)) as Record<string, unknown>);
+    if (row) fold.rows.push({ tsMs: Number(fact.ts_ms), seq: fold.seq, row });
+  }
+  if (fresh.length > 0) fold.rows.sort((a, b) => a.tsMs - b.tsMs || a.seq - b.seq);
+  return fold.rows.map((entry) => entry.row);
+}
+
+/**
+ * `nav-badge` materialized by the read-model worker (P1-07, design §3.3): the same count as
+ * {@link navBadgeView}, with each instance's operator-agent history folded from its own read
+ * model's `panel.*` facts, and its analytics from the slice serve persisted. One body for every
+ * instance, and one per `?instances=<one>`. `ledgerSource` is the worker's own, passed in so this
+ * module never imports the worker.
+ */
+export function createNavBadgeReadModelView<S extends { instance: string; tickedAt?: number }>(ledgerSource: (state: S, now: number) => ViewSource): {
+  name: string;
+  version: number;
+  materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: NavBadgeData; sources: ViewSource[] }>;
+} {
+  const folds = new WeakMap<ReadModelDb, MemoryFold>();
+  const sourcesFile = readOnMtimeChange(readNavBadgeSources);
+  const classification = readOnMtimeChange((path) => readClassificationSnapshot(dirname(path)));
+  return {
+    name: "nav-badge",
+    version: NAV_BADGE_VIEW_VERSION,
+    materialize: ({ now, instances }) => {
+      const dbPath = instances.find((slot) => slot.db)?.db?.path;
+      if (dbPath === undefined) return [];
+      const published = sourcesFile(join(dirname(dbPath), NAV_BADGE_SOURCES_FILE));
+      const inputs: InstanceInputs[] = (published?.instances ?? []).map((scope) => ({
+        ...scope,
+        memory: () => {
+          const slot = instances.find((candidate) => candidate.state.instance === scope.instanceId);
+          if (slot === undefined || slot.db === undefined) return { reason: "the read model does not project this instance" };
+          if (slot.state.tickedAt === undefined) return { reason: "the read model has not projected this instance's ledger yet" };
+          return { rows: operatorAgentFacts(folds, slot.db) };
+        },
+      }));
+      const classified = published ? classification(classificationSnapshotPath(published.inboxStateDir)) : undefined;
+      const body = (selected: readonly InstanceInputs[]): { data: NavBadgeData; sources: ViewSource[] } => {
+        const sources: ViewSource[] = [];
+        const agent = published
+          ? sumAgent(selected.map((input) => countInstance(input, now, sources)))
+          : { proposalIds: [], instances: [], reason: "serve has not published the badge's inputs yet" };
+        for (const input of selected) {
+          const slot = instances.find((candidate) => candidate.state.instance === input.instanceId);
+          if (slot) sources.push(ledgerSource(slot.state, now));
+        }
+        const inbox = published ? inboxCounts(classified, now, sources) : { reason: "serve has not published the badge's inputs yet" };
+        return { data: { agent, inbox }, sources };
+      };
+      return [
+        { key: "", ...body(inputs) },
+        ...inputs.map((input) => ({ key: `instances=${encodeURIComponent(input.instanceId)}`, ...body([input]) })),
+      ];
     },
   };
 }

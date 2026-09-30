@@ -19,7 +19,7 @@
  */
 import { createHash } from "node:crypto";
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from "node:http";
-import { RECAP_ACK_HEADER } from "./board.js";
+import { RECAP_ACK_HEADER, STALE_SOURCE_HEADER } from "./board.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { startConsoleProjectionWorker, type ConsoleProjectionWorker } from "./console-projection-worker.js";
 import type { ConsoleSnapshotStore } from "./console-snapshot-store.js";
@@ -354,6 +354,8 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
     const staleness = responseStaleness(clock.now(), cached?.generatedAtMs, entry.refreshPromise !== undefined, budgetMs, freshForOf(entry), entry.lastError);
     if (entry.lastError !== undefined && cached) return { ...staleness, status: "stale", stale: true };
     if (entry.restoredFrom !== undefined) return { ...staleness, status: "stale", stale: true, reason: `restored from before a serve restart (code ${entry.restoredFrom})` };
+    const staleSource = cached?.headers[STALE_SOURCE_HEADER];
+    if (staleSource) return { ...staleness, status: "stale", stale: true, reason: staleSource };
     return staleness;
   };
 

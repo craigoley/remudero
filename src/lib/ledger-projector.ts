@@ -17,6 +17,7 @@ import { DECISION_RELEVANT_LEDGER_STEPS, MODEL_ATTRIBUTION_LEDGER_STEPS, RENDER_
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { ledgerRotationEntries, type LedgerCorpusEntry } from "./ledger-union.js";
 import { openReadModel, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
+import { REPO_ROW_PROJECTION } from "./repo-ledger-index.js";
 
 export const LEDGER_PROJECTOR_SCHEMA_VERSION = 1;
 /** A row stamped further ahead of ingest time than this is quarantined, not applied (design §1.2). */
@@ -59,6 +60,23 @@ export function ledgerLineIdentity(line: string): { ts: string; tsMs: number; h:
   return { ts, tsMs: Number.isFinite(parsed) ? parsed : 0, h: createHash("sha1").update(line).digest().readBigInt64BE(0) };
 }
 
+/**
+ * A table the projector maintains beside `fact`, fed each fresh line whose text carries one of its
+ * `markers`, inside the transaction that checkpoints that line (design D3/D4). A projection whose
+ * `version` a store has not built is rebuilt from the ledger: the store forgets every file it read.
+ */
+export interface LedgerRowProjection {
+  name: string;
+  version: number;
+  tables: readonly string[];
+  ddl: string;
+  markers: readonly string[];
+  apply(db: ReadModelDb, line: string, id: { ts: string; tsMs: number; h: bigint }, parse: () => Record<string, unknown> | undefined): void;
+}
+
+/** Every projection a store carries; a view that needs a table no projection keeps adds one here. */
+export const LEDGER_ROW_PROJECTIONS: readonly LedgerRowProjection[] = [REPO_ROW_PROJECTION];
+
 export interface LedgerProjectorOptions {
   /** The instance's state dir: the one holding its live ledger and rotation archives. */
   ledgerDir: string;
@@ -71,6 +89,7 @@ export interface LedgerProjectorOptions {
   beforeCheckpoint?: (source: string) => void;
   /** Runs after an archive descriptor is opened and identified, before its contents are read. */
   beforeArchiveRead?: (path: string) => void;
+  projections?: readonly LedgerRowProjection[];
 }
 
 export interface ProjectorTickResult {
@@ -129,6 +148,8 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
   const clock = opts.clock ?? systemClock;
   const factStep = opts.factStep ?? isFactStep;
   const chunkBytes = opts.chunkBytes ?? DEFAULT_CHUNK_BYTES;
+  const projections = opts.projections ?? LEDGER_ROW_PROJECTIONS;
+  let projectionsBuilt = false;
   const sql = {
     seen: db.prepare("INSERT OR IGNORE INTO seen(ts_ms, h) VALUES(?, ?)"),
     fact: db.prepare("INSERT INTO fact(ts, ts_ms, step, task_id, run_id, body) VALUES(?, ?, ?, ?, ?, ?)"),
@@ -140,6 +161,21 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     forget: db.prepare("DELETE FROM source_file WHERE name = ?"),
   };
   let gateMtimeMs: number | undefined;
+
+  /** Creates each projection's tables; one this store has not built empties the store so the tick re-reads it all. */
+  function buildProjections(): void {
+    const stale = projections.filter((p) => db.prepare("SELECT v FROM meta WHERE k = ?").get(`projection:${p.name}`)?.v !== String(p.version));
+    if (stale.length > 0) {
+      withWriteTransaction(db, lease, () => {
+        for (const p of projections) db.exec(p.ddl);
+        if (Number(db.prepare("SELECT count(*) AS n FROM source_file").get()?.n) > 0) {
+          for (const table of ["seen", "fact", "quarantine", "source_file", ...projections.flatMap((p) => p.tables)]) db.exec(`DELETE FROM ${table}`);
+        }
+        for (const p of stale) db.prepare("INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").run(`projection:${p.name}`, String(p.version));
+      });
+    }
+    projectionsBuilt = true;
+  }
 
   function applyText(text: string, now: number, c: ProjectorTickResult): void {
     for (let start = 0, nl = text.indexOf("\n"); nl >= 0; start = nl + 1, nl = text.indexOf("\n", start)) {
@@ -159,10 +195,13 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
         c.quarantined++;
         continue;
       }
+      let parsed: { row?: Record<string, unknown> } | undefined;
+      const parse = (): Record<string, unknown> | undefined => (parsed ??= { row: parseRow(line) }).row;
+      for (const p of projections) if (p.markers.some((marker) => line.includes(marker))) p.apply(db, line, id, parse);
       // A second `"step":"` means the first may be nested, so only a parse can name the row's step.
       const ambiguous = at >= 0 && line.includes(STEP_KEY, at + STEP_KEY.length);
       if (!ambiguous && !(at >= 0 && factStep(scanned))) continue;
-      const row = parseRow(line);
+      const row = parse();
       if (!row) {
         c.torn++;
         continue;
@@ -267,6 +306,7 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
 
   return {
     tick(): ProjectorTickResult {
+      if (!projectionsBuilt) buildProjections();
       const now = clock.now();
       const c: ProjectorTickResult = {
         listed: false, archivesRead: 0, liveBytes: 0, liveRestarted: false, lines: 0, fresh: 0, duplicates: 0,

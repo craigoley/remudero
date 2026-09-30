@@ -8207,7 +8207,11 @@ function prLifecycleUrlTarget(prUrl: string): { owner: string; repo: string; num
  * prStateFromRest}, the SAME fold `liveStateFromRest` composes. THE FOLD IS BENIGN HERE: a naive `.state`-only read
  * would mislabel a MERGED PR as merely `closed`, but {@link decideReviewStatusPost} refuses posting on merged OR
  * closed alike — unlike at `terminalStateReason` (sweep.ts), which this function does not touch. */
-export function fetchPrLifecycle(prUrl: string, fetch: GhApiFetcher = ghJson): PrLifecycleState {
+export function fetchPrLifecycle(
+  prUrl: string,
+  fetch: GhApiFetcher = ghJson,
+  engineRevision: string = REVIEW_ENGINE_REVISION,
+): PrLifecycleState {
   const target = prLifecycleUrlTarget(prUrl);
   if (!target) {
     throw new Error(
@@ -8226,7 +8230,7 @@ export function fetchPrLifecycle(prUrl: string, fetch: GhApiFetcher = ghJson): P
     typeof headSha === "string" &&
     headSha !== "" &&
     (typeof row.body === "string" || row.body === null)
-      ? reviewInputDigest(headSha, row.body ?? "")
+      ? reviewInputDigest(headSha, row.body ?? "", engineRevision)
       : undefined;
   return {
     merged: state === "MERGED",
