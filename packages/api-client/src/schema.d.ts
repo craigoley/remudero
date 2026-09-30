@@ -2582,6 +2582,28 @@ export interface components {
         };
       };
     };
+    /** GET /v1/views/read-model (docs/views.md): the Phase 1 read model's own status, one body per serve, materialized by the read-model worker (src/lib/read-model-worker.ts). Each instance's `ledger:<instance>` source is re-judged at request time, so a stalled projector reads stale. */
+    ReadModelStatusView: {
+      view: "read-model";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        instances: ({
+          instance: string;
+          /** The instance DB's committed projector transaction count. */
+          generation: number;
+          lease: "held" | "elsewhere" | "none";
+          /** pid@host of another serve holding the writer lease. */
+          heldBy?: string;
+          /** Rows stamped more than five minutes past their ingest time. */
+          quarantined: number;
+          reason?: string;
+        })[];
+      };
+    };
     /** One RECENT feed row minted from a ledger line (src/lib/board.ts's `RecentActivityEntry`). */
     RecentActivityEntry: {
       taskId: string;
@@ -4337,6 +4359,17 @@ export interface paths {
           "400": Error;
           "401": Error;
           "403": Error;
+        };
+    };
+  };
+  "/v1/views/read-model": {
+    get: {
+      responses: {
+          "200": ReadModelStatusView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
         };
     };
   };

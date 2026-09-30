@@ -58,22 +58,104 @@ export function renderView<T>(
   if ("error" in computed) return computed;
   const { data, sources } = computed;
   const stale = sources.some((source) => source.state !== "fresh");
-  const times = sources.flatMap((source) => (source.asOf === null ? [] : [source.asOf])).sort();
-  const hash = createHash("sha1").update(JSON.stringify({ version: view.version, stale, data })).digest("base64url");
   return {
-    body: { view: view.name, version: view.version, generatedAt: clock.iso(), asOf: times[0] ?? null, stale, sources, data },
-    etag: `W/"${view.name}.${view.version}.${hash}"`,
+    body: { view: view.name, version: view.version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data },
+    etag: viewEtag(view.name, view.version, stale, data),
   };
+}
+
+/** The weak entity tag over `{version, stale, data}`: the times never change it. */
+export function viewEtag(name: string, version: number, stale: boolean, data: unknown): string {
+  const hash = createHash("sha1").update(JSON.stringify({ version, stale, data })).digest("base64url");
+  return `W/"${name}.${version}.${hash}"`;
+}
+
+/** The oldest input's as-of time, which is how old the view's facts are. */
+export function oldestAsOf(sources: readonly ViewSource[]): string | null {
+  return sources.flatMap((source) => (source.asOf === null ? [] : [source.asOf])).sort()[0] ?? null;
 }
 
 /** One read-scoped route per view, at `/v1/views/<name>`. */
 export function buildViewRoutes(views: readonly ViewDefinition[], clock: Clock = systemClock): Route[] {
-  return views.map((view) => ({
+  return buildReadModelViewRoutes({ legacy: views, clock });
+}
+
+/** A read-model body's key: the request's query sorted by name, so parameter order never splits a row. */
+export function viewKey(params: URLSearchParams): string {
+  return [...params]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
+    .join("&");
+}
+
+/** One materialized body as the read-model worker stores and posts it. */
+export interface ViewBodyEntry {
+  view: string;
+  key: string;
+  version: number;
+  generation: number;
+  etag: string;
+  body: ViewBody;
+}
+
+/** What the routes need from the read-model worker's handle (src/lib/read-model-worker.ts). */
+export interface ViewBodySource {
+  body(view: string, key?: string): ViewBodyEntry | undefined;
+  judge(sources: readonly ViewSource[], now: number): ViewSource[];
+  switches(): { views: Record<string, "serve" | "shadow" | "off"> };
+}
+
+export interface ReadModelViewRoutesOptions {
+  /** The Phase 0 in-process computations; a view switched off, or with no body yet, answers from these. */
+  legacy: readonly ViewDefinition[];
+  /** Every view the read-model worker materializes; each is routed even while the worker is absent. */
+  readModelViews?: readonly string[];
+  readModel?: ViewBodySource;
+  clock?: Clock;
+}
+
+/**
+ * `/v1/views/<name>` served from the read-model worker's in-memory bodies (Phase 1 P1-06).
+ *
+ * - The per-view switch `serve` or `shadow` (the default) answers with the worker's body. Its sources
+ *   are re-judged at request time, so a stalled projector or a body loaded at boot reads stale and
+ *   says which source and why. A view with no body yet answers from its legacy computation, else 404
+ *   `view_not_ready`.
+ * - `off` answers from the legacy computation, else 404 `view_disabled`: the console's fallback path.
+ *
+ * A request reads memory only. The bodies, the instance states and the switches all arrive off the
+ * request path (design D5).
+ */
+export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Route[] {
+  const clock = opts.clock ?? systemClock;
+  const legacy = new Map(opts.legacy.map((view) => [view.name, view]));
+  const names = [...new Set([...legacy.keys(), ...(opts.readModelViews ?? [])])];
+  const flippedEtags = new WeakMap<ViewBodyEntry, string>();
+  const judged = (readModel: ViewBodySource, entry: ViewBodyEntry): { body: ViewBody; etag: string } => {
+    const sources = readModel.judge(entry.body.sources, clock.now());
+    const stale = sources.some((source) => source.state !== "fresh");
+    let etag = entry.etag;
+    if (stale !== entry.body.stale) {
+      etag = flippedEtags.get(entry) ?? viewEtag(entry.view, entry.version, stale, entry.body.data);
+      flippedEtags.set(entry, etag);
+    }
+    return { body: { ...entry.body, stale, asOf: oldestAsOf(sources), sources }, etag };
+  };
+  return names.map((name) => ({
     method: "GET",
-    path: `/v1/views/${view.name}`,
+    path: `/v1/views/${name}`,
     scope: "read",
     handler: (req, res) => {
-      const rendered = renderView(view, clock, new URL(req.url ?? "/", "http://localhost").searchParams);
+      const params = new URL(req.url ?? "/", "http://localhost").searchParams;
+      const mode = opts.readModel?.switches().views[name] ?? "serve";
+      const entry = mode === "off" ? undefined : opts.readModel?.body(name, viewKey(params));
+      const fallback = legacy.get(name);
+      const rendered = entry && opts.readModel ? judged(opts.readModel, entry) : fallback ? renderView(fallback, clock, params) : undefined;
+      if (rendered === undefined) {
+        res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: mode === "off" ? "view_disabled" : "view_not_ready", view: name }));
+        return;
+      }
       if ("error" in rendered) {
         res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ error: "invalid_request", detail: rendered.error }));

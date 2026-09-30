@@ -1,0 +1,426 @@
+import assert from "node:assert/strict";
+import { appendFileSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { test } from "node:test";
+import { computeBoardSnapshot, type BoardSnapshot } from "../src/lib/board.js";
+import {
+  OPEN_SNAPSHOT_RESAVE_MS,
+  boardOpenSnapshotPath,
+  createBoardSnapshotCache,
+  readOpenBoardSnapshot,
+  type BoardSnapshotIo,
+} from "../src/lib/board-snapshot-cache.js";
+import type { Clock } from "../src/lib/clock.js";
+import { createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "../src/lib/ledger-projector.js";
+import {
+  NOW_GITHUB_STALE_MS,
+  NOW_HOST_PROBE_MS,
+  NOW_QUEUED_ROWS,
+  NOW_REFRESH_MS,
+  createNowView,
+  defaultProbeHost,
+  groupNowBoard,
+  mergedTodayCount,
+  nowActions,
+  nowBoardShadowDiff,
+  nowPlanPath,
+  parseStrike,
+  snapshotGithub,
+  type NowInstance,
+  type NowViewContext,
+  type NowViewData,
+  type NowViewOptions,
+} from "../src/lib/now-view.js";
+import type { BoardPrRest } from "../src/lib/open-prs-rest.js";
+import type { Plan, Task } from "../src/lib/plan.js";
+import { acquireLease, type ReadModelDb } from "../src/lib/read-model-db.js";
+import { buildBatchedGithub, DEFAULT_LIVENESS_BOUND_MS, readLedgerLines, type GitHub } from "../src/lib/status.js";
+import { makeTempDir } from "../src/lib/tmp.js";
+
+const T0 = Date.parse("2026-09-30T12:00:00.000Z");
+type TestCtx = { after: (fn: () => void) => void };
+
+function scratch(t: TestCtx): string {
+  const dir = makeTempDir("now-view");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+function task(id: string, over: Partial<Task> = {}): Task {
+  return { id, title: `task ${id}`, repo: "remudero", depends_on: [], type: "implement", risk: "medium", verify: "auto", status: "queued", attempts: 0, ...over };
+}
+
+function planOf(tasks: Task[]): Plan {
+  return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+}
+
+function stubGateway(over: Partial<GitHub> = {}): GitHub {
+  return {
+    readFailed: () => false,
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    findMergedByHeadBranch: () => [],
+    listMergedHeadBranches: () => [],
+    listOpenHeadBranches: () => [],
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    issueByUrl: () => ({ state: "OPEN", title: "stuck on a human" }),
+    ...over,
+  } as GitHub;
+}
+
+interface Stepped extends Clock {
+  set(ms: number): void;
+}
+
+function stepped(): Stepped {
+  let now = T0;
+  return { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString(), set: (ms) => { now = ms; } };
+}
+
+interface Rig {
+  name: string;
+  ledgerDir: string;
+  db: ReadModelDb;
+  projector: LedgerProjector;
+  /** Appends rows to the live file at the clock's time (or each row's own `ts`) and ticks the projector. */
+  append(...rows: Array<Record<string, unknown>>): void;
+}
+
+function rig(t: TestCtx, root: string, name: string, clock: Stepped): Rig {
+  const ledgerDir = join(root, name, "state");
+  mkdirSync(ledgerDir, { recursive: true });
+  const db = openProjectorReadModel(join(root, "read-model-home"), name, clock);
+  t.after(() => db.close());
+  const acquired = acquireLease(db, { clock, ttlMs: 1e12 });
+  assert.ok(acquired.ok);
+  const projector = createLedgerProjector({ ledgerDir, db, lease: acquired.lease, clock });
+  return {
+    name, ledgerDir, db, projector,
+    append: (...rows) => {
+      appendFileSync(join(ledgerDir, "ledger.ndjson"), rows.map((r) => `${JSON.stringify({ ts: clock.iso(), host: "h1", ...r })}\n`).join(""));
+      projector.tick();
+    },
+  };
+}
+
+function ctxOf(clock: Clock, rigs: Rig[], mode: string | null = "shadow", lease: "held" | "elsewhere" = "held"): NowViewContext {
+  return {
+    now: clock.now(),
+    ...(mode ? { switches: { views: { now: mode } } } : {}),
+    instances: rigs.map((r) => ({
+      state: { instance: r.name, generation: Number(r.db.meta("generation")), lease, failures: 0, tickedAt: clock.now(), newestTs: null },
+      db: r.db,
+    })),
+  };
+}
+
+function viewOf(clock: Clock, instances: NowInstance[], over: Partial<NowViewOptions> = {}): ReturnType<typeof createNowView> {
+  return createNowView({
+    instances, clock,
+    readPlan: () => planOf([task("W1-T1"), task("W1-T2"), task("W1-T3"), task("W1-T4"), task("W1-T5")]),
+    github: () => ({ github: stubGateway(), generation: "g", source: { asOf: null, state: "fresh" } }),
+    hostProbe: { rateLimit: () => 4321, diskFree: () => 1 },
+    ...over,
+  });
+}
+
+function only(bodies: Array<{ key: string; data: NowViewData }>, key = "instance=core"): NowViewData {
+  const body = bodies.find((b) => b.key === key);
+  assert.ok(body, `a body for ${key}: got ${bodies.map((b) => b.key).join(",") || "none"}`);
+  return body.data;
+}
+
+/** The legacy GET /v1/status board: the same function over the LIVE FILE ONLY, as `createBoardSnapshotCache` reads it. */
+function legacyBoard(ledgerDir: string, plan: Plan, clock: Clock): BoardSnapshot {
+  const ledgerPath = join(ledgerDir, "ledger.ndjson");
+  return computeBoardSnapshot({ plan, ledgerPath, github: stubGateway(), readLedger: () => readLedgerLines(ledgerPath), now: () => clock.now() });
+}
+
+const PLAN = planOf([task("W1-T1"), task("W1-T2"), task("W1-T3"), task("W1-T4"), task("W1-T5")]);
+
+function boardRows(r: Rig, clock: Stepped): void {
+  clock.set(T0);
+  r.append({ step: "escalation.issue_opened", task_id: "W1-T2", issue_url: "https://github.com/o/r/issues/5", class: "MANUAL" });
+  r.append({ run_id: "run-W1-T3", task_id: "W1-T3", step: "dispatch.blocked_independent", verdict: "failed" });
+  clock.set(T0 + 30_000);
+  r.append({ step: "run.start", task_id: "W1-T1", run_id: "r1" });
+  clock.set(T0 + 60_000);
+}
+
+test("the now view's board groups equal the legacy status board groups on a fixture", (t) => {
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  boardRows(core, clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }]);
+  const data = only(view.materialize(ctxOf(clock, [core])));
+  const legacy = legacyBoard(core.ledgerDir, PLAN, clock);
+  // Positive control: every group holds a row, so the equality below compares something.
+  assert.deepEqual(data.board.groups, { running: ["W1-T1"], needsYou: ["W1-T2"], blocked: ["W1-T3"], queued: ["W1-T4", "W1-T5"] });
+  assert.deepEqual(data.board.groups, groupNowBoard(legacy.tasks));
+  assert.deepEqual(data.board.counts, { running: legacy.counts.running, queued: legacy.counts.queued, blocked: legacy.counts.blocked });
+  assert.deepEqual(nowBoardShadowDiff(data, legacy, [], T0), [], "no difference to classify");
+  assert.equal(data.board.tasks.find((x) => x.taskId === "W1-T2")?.escalation?.issueUrl, "https://github.com/o/r/issues/5");
+  assert.equal(data.board.tasks.find((x) => x.taskId === "W1-T1")?.phase !== undefined, true);
+
+  // The ledger clock moves past W1-T1's lone start: the reused board re-derives it exactly as the legacy board does.
+  clock.set(T0 + 30_000 + DEFAULT_LIVENESS_BOUND_MS + 60_000);
+  core.append({ step: "verdict", task_id: "W1-T4", run_id: "r4", verdict: "no_pr" });
+  const later = only(view.materialize(ctxOf(clock, [core])));
+  const legacyLater = legacyBoard(core.ledgerDir, PLAN, clock);
+  assert.equal(later.board.groups.running.includes("W1-T1"), false, "the lone start is no longer running");
+  assert.deepEqual(later.board.groups, groupNowBoard(legacyLater.tasks));
+});
+
+test("full-history board diffs against the live-file legacy board are tagged legacy_horizon", (t) => {
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  // A rotation archived the block row: the live file no longer names W1-T3.
+  const archived = { ts: new Date(T0 - 2 * 3_600_000).toISOString(), host: "h1", run_id: "run-W1-T3", task_id: "W1-T3", step: "dispatch.blocked_independent", verdict: "failed" };
+  writeFileSync(join(core.ledgerDir, "ledger.2026-09-30T10-30-00-000Z.ndjson"), `${JSON.stringify(archived)}\n`);
+  clock.set(T0);
+  core.append({ step: "escalation.issue_opened", task_id: "W1-T2", issue_url: "https://github.com/o/r/issues/5", class: "MANUAL" });
+  clock.set(T0 + 60_000);
+  const data = only(viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }]).materialize(ctxOf(clock, [core])));
+  const legacy = legacyBoard(core.ledgerDir, PLAN, clock);
+  assert.deepEqual(data.board.groups.blocked, ["W1-T3"], "the view reads the archived row");
+  const rows = [archived];
+  assert.deepEqual(nowBoardShadowDiff(data, legacy, rows, T0), [{ taskId: "W1-T3", view: "blocked", legacy: "queued", classification: "legacy_horizon" }]);
+  assert.deepEqual(nowBoardShadowDiff(data, legacy, rows, T0 - 3 * 3_600_000).map((d) => d.classification), ["bug"], "a diff the horizon cannot explain is a bug");
+});
+
+test("the now view reports host health for the selected instance, not core", (t) => {
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const site = rig(t, root, "site", clock);
+  clock.set(T0);
+  core.append({ step: "daemon.tick", poll_interval_ms: 60_000 });
+  clock.set(T0 + 300_000);
+  site.append({ step: "daemon.tick" });
+  clock.set(T0 + 360_000);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }, { name: "site", ledgerDir: site.ledgerDir }], {
+    hostProbe: { rateLimit: () => 4321, diskFree: (path) => (path === core.ledgerDir ? 111 : path === site.ledgerDir ? 222 : undefined) },
+  });
+  const bodies = view.materialize(ctxOf(clock, [core, site]));
+  const coreHealth = only(bodies).health;
+  const siteHealth = only(bodies, "instance=site").health;
+  assert.deepEqual({ disk: coreHealth.diskFreeBytes, rate: coreHealth.rateLimitRemaining, age: coreHealth.lastPollAgeMs }, { disk: 111, rate: 4321, age: 360_000 });
+  assert.deepEqual({ disk: siteHealth.diskFreeBytes, rate: siteHealth.rateLimitRemaining, age: siteHealth.lastPollAgeMs }, { disk: 222, rate: undefined, age: 60_000 });
+  assert.match(siteHealth.reasons?.rateLimitRemaining ?? "", /core's GitHub token/);
+  const hostSource = bodies.find((b) => b.key === "instance=site")?.sources.find((s) => s.name === "host-probe:site");
+  assert.equal(hostSource?.asOf, new Date(T0 + 360_000).toISOString());
+
+  const blind = defaultProbeHost({ name: "core", ledgerDir: join(root, "nowhere") }, true, clock, { rateLimit: () => undefined, diskFree: () => undefined });
+  assert.deepEqual(Object.keys(blind.reasons ?? {}).sort(), ["diskFreeBytes", "lastPollAgeMs", "rateLimitRemaining"]);
+  assert.deepEqual([blind.diskFreeBytes, blind.lastPollAgeMs, blind.rateLimitRemaining], [undefined, undefined, undefined]);
+});
+
+test("an action's strike count is a structured field", () => {
+  assert.deepEqual(parseStrike("fix strike repeated the identical unmet criteria (strike 1/2) — escalating"), { n: 1, of: 2 });
+  assert.deepEqual(parseStrike("fix strikes exhausted (3/2) — escalating"), { n: 3, of: 2 });
+  assert.deepEqual(parseStrike("exhausted: fix strikes 2/2"), { n: 2, of: 2 });
+  assert.deepEqual(parseStrike("its shared fix budget is exhausted (2/2)"), { n: 2, of: 2 });
+  assert.equal(parseStrike("conflicted with main"), undefined);
+  const rows = [
+    { ts: "2026-09-30T11:00:00.000Z", step: "sweep.disposed", pr_number: 11 },
+    { ts: "2026-09-30T11:05:00.000Z", step: "sweep.disposed", pr_number: 11 },
+    { ts: "2026-09-30T11:10:00.000Z", step: "automerge.hold_engaged", pr_number: 13 },
+    { ts: "2026-09-30T11:11:00.000Z", step: "sweep.disposed" },
+  ];
+  const actions = nowActions({
+    blockedPrs: [
+      { kind: "blocked_pr", prNumber: 11, prUrl: "https://github.com/o/r/pull/11", taskId: "W1-T1", disposition: "blocked-fixable", reason: "unmet criteria (strike 1/2)" },
+      { kind: "blocked_pr", prNumber: 12, disposition: "blocked-ambiguous", reason: "fix strikes exhausted (3/2) — escalating" },
+      { kind: "blocked_pr", prNumber: 14, disposition: "conflicted", reason: "conflicts with main" },
+    ],
+    mergeHeld: [{ prNumber: 13, taskId: "W1-T3", by: "operator", reason: "hold for the release" }, { by: "operator", reason: "fleet hold" }],
+  }, rows);
+  assert.deepEqual(actions.map((a) => [a.prNumber ?? null, a.tone, a.strike ?? null, a.sortAt ?? null]), [
+    [12, "exhausted", { n: 3, of: 2 }, null],
+    [13, "held", null, "2026-09-30T11:10:00.000Z"],
+    [null, "held", null, null],
+    [14, "unknown", null, null],
+    [11, "repairing", { n: 1, of: 2 }, "2026-09-30T11:05:00.000Z"],
+  ]);
+  assert.equal(actions.at(-1)?.taskId, "W1-T1");
+  assert.equal(actions.at(-1)?.prUrl, "https://github.com/o/r/pull/11");
+});
+
+function openPr(number: number, taskId: string): BoardPrRest {
+  return {
+    number, url: `https://github.com/o/r/pull/${number}`, state: "OPEN", headRefName: `run-${taskId}-1790000000000`, headRefOid: `sha-${number}`,
+    body: "work in progress", autoMergeRequest: null, title: `open ${number}`, updatedAt: "2026-09-30T11:00:00Z",
+  };
+}
+
+function restPull(row: BoardPrRest): Record<string, unknown> {
+  return {
+    number: row.number, html_url: row.url, state: row.state === "OPEN" ? "open" : "closed", merged_at: null, body: row.body, title: row.title,
+    updated_at: row.updatedAt, head: { ref: row.headRefName, sha: row.headRefOid }, auto_merge: row.autoMergeRequest,
+  };
+}
+
+test("the now view shows open pull requests from the persisted snapshot", (t) => {
+  const root = scratch(t);
+  const clock = stepped();
+  const instanceRoot = join(root, "console");
+  const inst = rig(t, root, "console", clock);
+  inst.append({ step: "daemon.tick" });
+  const plan = planOf([task("W1-T7"), task("W1-T8")]);
+  const instance: NowInstance = { name: "console", ledgerDir: inst.ledgerDir, repo: "o/r" };
+  const withoutSnapshot = only(createNowView({ instances: [instance], clock, readPlan: () => plan, hostProbe: { rateLimit: () => 1 } })
+    .materialize(ctxOf(clock, [inst])), "instance=console");
+  assert.deepEqual(withoutSnapshot.prQueue.rows, [], "before the gateway persists its open half there is nothing to show");
+
+  // The legacy gateway fetches its open half as it always has; the snapshot cache now persists it.
+  const logged: Array<{ event: string; extra?: Record<string, unknown> }> = [];
+  const open = [openPr(9001, "W1-T7")];
+  const calls: string[] = [];
+  const gateway = buildBatchedGithub("o", "r", {
+    ttlMs: 0, now: () => clock.now(),
+    snapshotCache: createBoardSnapshotCache(instanceRoot, "o", "r", { log: (event, extra) => logged.push({ event, ...(extra ? { extra } : {}) }) }),
+    exec: (args) => {
+      calls.push(args[1] ?? "");
+      return /state=open/.test(args[1] ?? "") ? JSON.stringify(open.map(restPull)) : "[]";
+    },
+  });
+  assert.deepEqual(gateway.listOpenHeadBranches!()?.map((p) => p.number), [9001]);
+  gateway.listOpenHeadBranches!();
+  const committed = () => logged.filter((l) => l.event === "board_snapshot.committed" && l.extra?.channel === "open").length;
+  assert.equal(committed(), 1, "an unchanged open set within a minute is not rewritten");
+  clock.set(T0 + OPEN_SNAPSHOT_RESAVE_MS);
+  gateway.listOpenHeadBranches!();
+  assert.equal(committed(), 2, "a minute later it is re-saved, so its age stays honest");
+  assert.equal(calls.filter((c) => /state=open/.test(c)).length, 3, "no GitHub read beyond the gateway's own");
+
+  const bodies = createNowView({ instances: [instance], clock, readPlan: () => plan, hostProbe: { rateLimit: () => 1 } })
+    .materialize(ctxOf(clock, [inst]));
+  const data = only(bodies, "instance=console");
+  assert.deepEqual(data.prQueue.rows.map((r) => [r.prNumber, r.taskId]), [[9001, "W1-T7"]]);
+  assert.equal(data.board.tasks.find((x) => x.taskId === "W1-T7")?.prUrl, "https://github.com/o/r/pull/9001");
+  const githubSource = bodies[0]!.sources.find((s) => s.name === "github:console");
+  assert.deepEqual(githubSource, { name: "github:console", asOf: new Date(T0 + OPEN_SNAPSHOT_RESAVE_MS).toISOString(), state: "fresh" });
+  clock.set(T0 + OPEN_SNAPSHOT_RESAVE_MS + NOW_GITHUB_STALE_MS + 1_000);
+  assert.match(String(snapshotGithub(instanceRoot, "o", "r", clock).source.reason), /last saved 181 s ago/);
+});
+
+test("the open snapshot refuses what it cannot keep and says why on read", (t) => {
+  const root = scratch(t);
+  const logged: string[] = [];
+  const log = (event: string, extra?: Record<string, unknown>) => logged.push(`${event}:${String(extra?.reason ?? "")}`);
+  assert.equal(createBoardSnapshotCache(root, "o", "r", { log, bounds: { maxBytes: 10 } }).commitOpen!([openPr(1, "W1-T1")], T0), false);
+  assert.equal(createBoardSnapshotCache(root, "o", "r", { log }).commitOpen!([{ ...openPr(2, "W1-T2"), title: 7 as unknown as string }], T0), false);
+  const failingIo = { mkdir: () => {}, openWrite: () => { throw new Error("disk full"); }, stat: () => { throw new Error("absent"); } } as unknown as BoardSnapshotIo;
+  assert.equal(createBoardSnapshotCache(root, "o", "r", { log, io: failingIo }).commitOpen!([openPr(3, "W1-T3")], T0), false);
+  assert.deepEqual(logged.filter((l) => l.startsWith("board_snapshot.commit_refused")), [
+    "board_snapshot.commit_refused:oversized", "board_snapshot.commit_refused:invalid_row", "board_snapshot.commit_refused:write_failed",
+  ]);
+  assert.match((readOpenBoardSnapshot(root, "o", "r") as { reason: string }).reason, /unreadable/);
+  const path = boardOpenSnapshotPath(root, "o", "r");
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, JSON.stringify({ type: "board-open-snapshot", schema: 1, repository: "o/other", savedAt: "x", rows: [] }));
+  assert.match((readOpenBoardSnapshot(root, "o", "r") as { reason: string }).reason, /another schema or repository/);
+  writeFileSync(path, JSON.stringify({ type: "board-open-snapshot", schema: 1, repository: "o/r", savedAt: "x", rows: [{ number: 1 }] }));
+  assert.match((readOpenBoardSnapshot(root, "o", "r") as { reason: string }).reason, /invalid row/);
+  writeFileSync(path, JSON.stringify({ type: "board-open-snapshot", schema: 1, repository: "o/r", savedAt: "x" }));
+  assert.deepEqual(readOpenBoardSnapshot(root, "o", "r"), { ok: true, snapshot: { repository: "o/r", savedAt: "x", rows: [] } });
+});
+
+test("the now view stays dark until its switch reads shadow or serve", (t) => {
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  core.append({ step: "daemon.tick" });
+  const logged: string[] = [];
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { log: (step) => logged.push(step) });
+  assert.deepEqual(view.materialize(ctxOf(clock, [core], null)), [], "no switch: dark");
+  assert.deepEqual(view.materialize(ctxOf(clock, [core], "off")), []);
+  assert.deepEqual(view.materialize(ctxOf(clock, [core], "shadow", "elsewhere")), [], "another serve holds the lease");
+  assert.equal(view.materialize(ctxOf(clock, [core], "serve")).length, 1);
+  assert.deepEqual(view.materialize(ctxOf(clock, [core], "serve")), [], "nothing moved: no new body");
+  core.append({ step: "verdict", task_id: "W1-T4", run_id: "r4", verdict: "no_pr" });
+  assert.equal(view.materialize(ctxOf(clock, [core])).length, 1, "a new generation re-materializes");
+  clock.set(T0 + NOW_REFRESH_MS);
+  assert.equal(view.materialize(ctxOf(clock, [core])).length, 1, "the clock re-materializes");
+  const stranger = ctxOf(clock, [core]);
+  assert.deepEqual(view.materialize({ ...stranger, instances: [{ ...stranger.instances[0]!, state: { ...stranger.instances[0]!.state, instance: "unknown" } }] }), []);
+  assert.deepEqual(logged, []);
+});
+
+test("questions are counted for core only and one failing instance leaves the others", (t) => {
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const site = rig(t, root, "site", clock);
+  const bare = rig(t, root, "bare", clock);
+  const feedbackRoot = join(root, "checkout");
+  mkdirSync(join(feedbackRoot, "plan", "feedback"), { recursive: true });
+  for (const [id, status] of [["fb-1", "grilling"], ["fb-2", "grilling"], ["fb-3", "new"]]) {
+    writeFileSync(join(feedbackRoot, "plan", "feedback", `${id}.yaml`), `id: ${id}\nstatus: ${status}\n`);
+  }
+  const logged: Array<Record<string, unknown>> = [];
+  const view = viewOf(clock, [
+    { name: "core", ledgerDir: core.ledgerDir, feedbackRoot },
+    { name: "site", ledgerDir: site.ledgerDir, feedbackRoot },
+    { name: "bare", ledgerDir: bare.ledgerDir },
+  ], {
+    coreInstance: "core",
+    readPlan: (instance) => {
+      if (instance.name === "bare") throw new Error("plan unreadable");
+      return PLAN;
+    },
+    log: (step, extra) => logged.push({ step, ...extra }),
+  });
+  const bodies = view.materialize(ctxOf(clock, [core, site, bare]));
+  assert.deepEqual(only(bodies).questions, { count: 2 });
+  assert.deepEqual(only(bodies, "instance=site").questions, { reason: "feedback questions live in core only" });
+  assert.equal(bodies.some((b) => b.key === "instance=bare"), false);
+  assert.deepEqual(logged, [{ step: "read_model.now_view_failed", instance: "bare", error: "plan unreadable" }]);
+  const unrooted = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }]).materialize(ctxOf(clock, [core]));
+  assert.deepEqual(only(unrooted).questions, { reason: "no feedback root is configured" });
+});
+
+test("the default seams read each instance's own plan and snapshot", (t) => {
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const planPath = join(root, "checkout", "plan", "tasks.yaml");
+  mkdirSync(join(root, "checkout", "plan", "tasks.d"), { recursive: true });
+  writeFileSync(planPath, "- id: W1-T1\n  title: first\n  repo: remudero\n  depends_on: []\n  type: implement\n  risk: medium\n  verify: auto\n  status: queued\n");
+  assert.equal(nowPlanPath({ name: "core", ledgerDir: core.ledgerDir, planPath }), planPath);
+  assert.equal(nowPlanPath({ name: "site", ledgerDir: join(root, "site", "state"), repo: "o/site" }), join(root, "site", "repos", "site", "plan", "tasks.yaml"));
+  assert.equal(nowPlanPath({ name: "x", ledgerDir: join(root, "x", "state") }), undefined);
+  const logged: Array<Record<string, unknown>> = [];
+  const view = createNowView({ instances: [{ name: "core", ledgerDir: core.ledgerDir, planPath, repo: "o/r" }, { name: "x", ledgerDir: core.ledgerDir }], clock,
+    hostProbe: { rateLimit: () => 1 }, ledgerSource: (state) => ({ name: `ledger:${state.instance}`, asOf: null, state: "fresh" }), log: (step, extra) => logged.push({ step, ...extra }) });
+  const x = ctxOf(clock, [core]);
+  const bodies = view.materialize({ ...x, instances: [...x.instances, { ...x.instances[0]!, state: { ...x.instances[0]!.state, instance: "x" } }] });
+  const data = only(bodies);
+  assert.deepEqual(data.board.tasks.map((r) => r.taskId), ["W1-T1"]);
+  assert.deepEqual(bodies[0]!.sources.map((s) => `${s.name}=${s.state}`), ["ledger:core=fresh", "github:core=stale", "plan:core=fresh", "host-probe:core=fresh"]);
+  assert.equal(bodies[0]!.sources.find((s) => s.name === "plan:core")?.asOf, new Date(statSync(planPath).mtimeMs).toISOString());
+  assert.match(String(logged[0]?.error), /names no repository/);
+});
+
+test("merged today is exact: one per task and pull request, today and in the plan only", () => {
+  const rows = [
+    { ts: "2026-09-30T01:00:00.000Z", step: "pr.opened", run_id: "r1", task_id: "W1-T1", pr_url: "https://github.com/o/r/pull/1" },
+    { ts: "2026-09-30T02:00:00.000Z", step: "verdict", verdict: "merged", run_id: "r1", task_id: "W1-T1" },
+    { ts: "2026-09-30T02:05:00.000Z", step: "verdict.merged", task_id: "W1-T1", pr_url: "https://github.com/o/r/pull/1" },
+    { ts: "2026-09-30T03:00:00.000Z", step: "verdict.merged", task_id: "W1-T2", pr_url: "https://github.com/o/r/pull/2" },
+    { ts: "2026-09-29T23:59:00.000Z", step: "verdict.merged", task_id: "W1-T3", pr_url: "https://github.com/o/r/pull/3" },
+    { ts: "2026-09-30T04:00:00.000Z", step: "verdict.merged", task_id: "SWEEP", pr_url: "https://github.com/o/r/pull/4" },
+    { ts: "2026-09-30T04:00:00.000Z", step: "verdict", verdict: "no_pr", task_id: "W1-T3" },
+  ];
+  assert.deepEqual(mergedTodayCount(rows, PLAN, Date.parse("2026-09-30T12:00:00.000Z")), { count: 2, day: "2026-09-30" });
+});
+
+test("a large plan carries every id in its groups and bounds its queued rows", () => {
+  const tasks = Array.from({ length: NOW_QUEUED_ROWS + 5 }, (_, i) => ({ taskId: `W1-T${i}`, title: `t${i}`, risk: "medium", status: "queued", merged: false, source: "none" }));
+  const groups = groupNowBoard([...tasks, { taskId: "W1-TX", title: "x", risk: "low", status: "mystery", merged: false, source: "none" }] as never);
+  assert.equal(groups.queued.length, NOW_QUEUED_ROWS + 6, "an unknown status still lands in queued");
+  assert.equal(NOW_HOST_PROBE_MS > NOW_REFRESH_MS, true);
+});
