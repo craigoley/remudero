@@ -9425,6 +9425,26 @@ export function withFullSweepRepairAdmission(deps: SweepDeps): SweepDeps {
   return { ...deps, detachFixWait: true, repairAdmissionSurface: "full" };
 }
 
+export function stackParentHoldReason(check: StackPrerequisiteCheck): string | undefined {
+  const open = check.openParentNumbers ?? [];
+  if (check.state !== "blocked" || open.length === 0) return undefined;
+  return `declared stack parent(s) ${open.map((n) => `#${n}`).join(", ")} still open — fix round held until they merge or close`;
+}
+
+function stackParentHold(deps: SweepDeps, pr: OpenPrView): { reason?: string; fields?: Record<string, unknown> } {
+  if (!deps.stackPrerequisite) return {};
+  let check: StackPrerequisiteCheck;
+  try {
+    check = deps.stackPrerequisite(pr);
+  } catch {
+    // A failed read is not evidence of an unstacked PR: no hold, but recorded so it is never silent.
+    return { fields: { stack_parent_read: "unreadable" } };
+  }
+  if (check.state === "unreadable") return { fields: { stack_parent_read: "unreadable" } };
+  const reason = stackParentHoldReason(check);
+  return reason ? { reason, fields: { stack_parent_hold: check.openParentNumbers } } : {};
+}
+
 function workerAdmissionHoldReason(deps: SweepDeps): string | undefined {
   if (!deps.workerAdmissionHold) return undefined;
   try {
@@ -10947,6 +10967,13 @@ export async function runSweep(
                 standDownReason = workerHold;
                 break;
               }
+              const stackHold = stackParentHold(deps, pr);
+              if (stackHold.fields) extraDisposedFields = { ...extraDisposedFields, ...stackHold.fields };
+              if (stackHold.reason) {
+                acted = false;
+                standDownReason = stackHold.reason;
+                break;
+              }
               const ratchetScripts =
                 policy.recordableRatchetRepairEnabled === true && deps.repairRecordableRatchet
                   ? ratifiedBaselineRatchetRepairFor(pr)
@@ -11054,6 +11081,13 @@ export async function runSweep(
               if (workerHold) {
                 acted = false;
                 standDownReason = workerHold;
+                break;
+              }
+              const stackHold = stackParentHold(deps, pr);
+              if (stackHold.fields) extraDisposedFields = { ...extraDisposedFields, ...stackHold.fields };
+              if (stackHold.reason) {
+                acted = false;
+                standDownReason = stackHold.reason;
                 break;
               }
               const conflictedFixClaim = claimFixDispatch(pr);
