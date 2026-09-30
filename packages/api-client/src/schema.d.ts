@@ -2344,6 +2344,39 @@ export interface components {
       file: string;
       fn: string;
     };
+    /** POST /v1/console/telemetry (src/lib/console-telemetry.ts): one batch of the console's latency beacon, at most 50 records. Fields a record carries that are not declared here are dropped. */
+    ConsoleTelemetryRequest: {
+      records: (ConsoleLatencyRecord)[];
+    };
+    /** One applied view update as the console measured it; each becomes one `console.latency` ledger row. Durations are milliseconds, 0 to 3600000, rounded. Browser-side hops are measured on the browser clock; `transportMs` alone uses `clockOffsetMs`, the offset estimated from the events stream's `hello.serverNow`. */
+    ConsoleLatencyRecord: {
+      view: string;
+      /** The view key; empty for an unkeyed view. */
+      key: string;
+      cause: "body" | "judge" | "hello" | "poll";
+      /** The serve-clock time of the view event */
+      emittedAt?: string;
+      /** View event emitted by serve to received by the browser. */
+      transportMs?: number;
+      /** The refetch */
+      fetchMs?: number;
+      /** The core read inside the refetch */
+      coreMs?: number;
+      /** Response to the view store applying it. */
+      applyMs?: number;
+      /** Store update to the next painted frame. */
+      paintMs?: number;
+      /** View event emitted to painted. */
+      totalMs?: number;
+      /** The browser clock minus serve's. */
+      clockOffsetMs?: number;
+    };
+    ConsoleTelemetryResult: {
+      /** Records ledgered as console.latency rows. */
+      accepted: number;
+      /** Records past the pace of about one row a second */
+      dropped: number;
+    };
     /** POST /v1/incidents/events's body (src/lib/incident-events.ts's `IncidentEventInput`, validated by `validateIncidentEventBody`). At most 16 KiB. The daemon scrubs `message` and `route` (query/fragment stripped; token, email and uuid shapes redacted) and caps `message` at 500 characters and `frames` at 20 before anything is fingerprinted or stored. */
     IncidentEventRequest: {
       source: "console" | "gateway" | "daemon";
@@ -3510,7 +3543,7 @@ export interface components {
     bearerRead: { type: "http"; scheme: "bearer" };
     /** Write-scoped bearer token. Required for any route whose `scope` is `write` (src/lib/service.ts's `Scope`). */
     bearerWrite: { type: "http"; scheme: "bearer" };
-    /** W1-T4383 ingest-only bearer token (src/lib/service.ts's `ingestTokenProvider`). Grants exactly POST /v1/incidents/events and falls through to 401 on every other route. */
+    /** W1-T4383 ingest-only bearer token (src/lib/service.ts's `ingestTokenProvider`). Grants exactly POST /v1/incidents/events and POST /v1/console/telemetry, and falls through to 401 on every other route. */
     bearerIngest: { type: "http"; scheme: "bearer" };
   };
 }
@@ -4710,6 +4743,17 @@ export interface paths {
     post: {
       responses: {
           "200": IncidentEventResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "413": IncidentIngestBodyTooLarge;
+        };
+    };
+  };
+  "/v1/console/telemetry": {
+    post: {
+      responses: {
+          "200": ConsoleTelemetryResult;
           "400": Error;
           "401": Error;
           "403": Error;
