@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import {
   PR_URL_RE,
   ciFrictionRecencyWeight,
@@ -286,7 +286,7 @@ export interface HotFileGardenSources {
 }
 
 export function hotFileInventory(sources: HotFileGardenSources, nowMs: number): HotFileInventory {
-  const sinceIso = new Date(nowMs - HOT_FILE_WINDOW_MS).toISOString();
+  const sinceIso = fixedClock(nowMs - HOT_FILE_WINDOW_MS).iso();
   let history: readonly MainCommit[] | undefined;
   const readHistory = (): readonly MainCommit[] => (history ??= sources.mainHistory(sinceIso));
   const { rounds, unattributedMinutes } = hotFileRoundsFromLedger(sources.ledgerRecords(), (q) => backfillConflictedFiles(readHistory(), q));
