@@ -25,6 +25,7 @@
  * reachable -- a producer that ran zero goldens must still render "no run recorded", never 0%.
  */
 import { SEEDED_GOLDENS, type GoldenTask, type HarnessRunner, type ReplayOutcome } from "./replay.js";
+import { runPairedReviewEvaluation, type PairedReviewEvalInput, type PairedReviewReport } from "./paired-review-eval.js";
 import {
   deriveGoldenCorpus,
   goldenTaskFromCorpusItem,
@@ -145,4 +146,21 @@ export function drawReplaySample(req: { argv: readonly string[]; idle: ReplayIdl
   });
   const goldens = boundedCorpus(paired.map((p) => p.golden), req.limit);
   return { enabled: true, reason, goldens, items: paired.slice(0, goldens.length).map((p) => p.item), excluded };
+}
+
+export async function replayPairedReviews(input: PairedReviewEvalInput & {
+  argv: readonly string[]; idle: ReplayIdleSignal; spendAllowed: boolean;
+}): Promise<{ state: "refused"; reason: string } | { state: "evaluated"; report: PairedReviewReport; excludedPairIds: string[] }> {
+  for (const gate of [replayOptIn(input.argv), replayIdleGate(input.idle)]) {
+    if (!gate.enabled) return { state: "refused", reason: gate.reason };
+  }
+  if (!input.spendAllowed) return { state: "refused", reason: "paid-budget-or-consent-unavailable" };
+  const admitted = new Set(boundedCorpus(input.corpus.flatMap((item) => {
+    const golden = goldenTaskFromCorpusItem(item);
+    return golden ? [golden] : [];
+  })).map((golden) => golden.task.id));
+  const pairs = input.pairs.filter((pair) => admitted.has(pair.corpusTaskId));
+  const excludedPairIds = input.pairs.filter((pair) => !admitted.has(pair.corpusTaskId)).map((pair) => pair.id);
+  const report = await runPairedReviewEvaluation({ ...input, pairs });
+  return { state: "evaluated", report, excludedPairIds };
 }

@@ -1,0 +1,119 @@
+- id: W1-T4946
+  title: "THE RETRO'S OWN ACCEPTANCE-BLOCK REPAIR IS A DEAD LETTER — bodyNeedsAcceptanceRepair reads a body carrying only PR_OPEN_TIME_ACCEPTANCE_FALLBACK's grep proof as healthy, so the retro-specific claim never substitutes it, and that claim's own hardcoded proof is free prose that would fail acceptance-author-gate even if it fired, or fail proof-discrimination as a stale generic anchor with zero grandfathered allowance if it were merely dialect-patched"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 60.00
+  origin: "followup:DAEMON-1789365794642:2026-09-14T07:13:36.301Z:0"
+  plan_refs: ["W1-T136", "W1-T3386", "W1-T3508"]
+  files: [src/run-task.ts, test/retro-acceptance-repair.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED (RETRO-1789367285330, run DAEMON-1789365794642, PR #5499): a retro/plan-sync PR opened
+    via `ghPrCreateFillCommand` with no commit-derived Acceptance header failed `proof-discrimination`
+    with zero grandfathered allowance and had to be hand-patched. TRACED TO SOURCE (this session,
+    verified directly against `src/run-task.ts`, `src/lib/plan-pr-emitter.ts`,
+    `scripts/acceptance-author-gate.mjs`, `scripts/proof-discrimination-gate.mjs`): two compounding
+    defects in `repairRetroAcceptanceBlock` (run-task.ts), the retro's own W1-T136 backstop for exactly
+    this case, called from `retroCommand` one line after `ensureTaskTrailer` (run-task.ts:24402/:24410).
+
+    DEFECT 1 — THE TRIGGER NEVER FIRES ON THE CASE IT EXISTS FOR. `ghPrCreateFillCommand` already
+    auto-authors a body from `PR_OPEN_TIME_ACCEPTANCE_FALLBACK` whenever the commit-derived body carries
+    no Acceptance block — a generic, task-agnostic, DIALECT-VALID criterion (`proof: "grep: ^export
+    function acceptanceAuthorTimeCheck in src/lib/review.ts"`). By the time `repairRetroAcceptanceBlock`
+    runs, `bodyNeedsAcceptanceRepair(body)` (plan-pr-emitter.ts) sees one criterion, a non-empty proof,
+    no truncation — `criteriaParsed === 1`, `emptyProofs === 0`, `truncatedAtBullet === undefined` — and
+    returns `false`. The function returns `"healthy"` and never substitutes its own retro-specific claim
+    ("the retro's plan-only sync PR is gate-compliant"). Every retro PR that reaches this state ships
+    with ONLY the generic placeholder, forever.
+
+    DEFECT 2 — EVEN IF THE TRIGGER FIRED, THE REPLACEMENT WOULD NOT SURVIVE CI EITHER, layered:
+    (a) `repairRetroAcceptanceBlock`'s hardcoded fallback proof is FREE PROSE — "SHIPPED-log/NET-STATE/
+        calibration-table updates and the COMPRESSION deletion are in this diff; ..." — with no
+        `grep:`/`unit test:` prefix. `parseWhitelistedProof` (review.ts) returns `null` for it, so
+        `acceptance-author-gate.mjs`'s `authorTimeProofShapeRefusal` would refuse it with defect
+        `proof-shape` — the EXACT class W1-T3508 (already merged) fixed for `PR_OPEN_TIME_ACCEPTANCE_FALLBACK`
+        and `ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK`, left untouched on this third fallback (W1-T3508's own
+        scope note: "Replace only those two generic fallback proof strings").
+    (b) Even a dialect-valid version of the SAME generic proof (reusing the shared
+        `grep: ^export function acceptanceAuthorTimeCheck in src/lib/review.ts` anchor
+        `PR_OPEN_TIME_ACCEPTANCE_FALLBACK` already uses) would still fail `proof-discrimination-gate`
+        (`scripts/proof-discrimination-gate.mjs`, W1-T3386): that anchor is a permanent declaration in
+        review.ts a plan-only retro PR never touches, so `check-proof --base` reads it as passing
+        identically at head and merge base — `executed_stale`. A retro/plan-sync PR carries no
+        `Remudero-Task:` trailer, so `staleAllowanceFor(undefined, baseline)` returns 0 — confirmed in
+        the gate's own failure text: "No resolvable Remudero-Task trailer, so no grandfathered allowance
+        applies: a PR authoring its own body criteria has no backlog to inherit." One stale proof, zero
+        allowance, hard fail.
+
+    Fixing the trigger ALONE just relocates the failure from `proof-discrimination-gate` to the earlier
+    `acceptance-author-gate`; fixing the fallback's dialect ALONE never runs, because the trigger still
+    reads the generic block as healthy. The two halves are one concern: the retro's own gate-compliance
+    claim, made to actually fire AND to actually survive both required checks.
+  design: |
+    TWO changes to `repairRetroAcceptanceBlock`, both in src/run-task.ts, NEITHER touching the shared
+    `bodyNeedsAcceptanceRepair` (plan-pr-emitter.ts) — that predicate serves every other plan-PR emitter
+    and its own regression test states "a rung that rewrites correct bodies is worse than one that
+    misses defective ones"; widening it globally would break that invariant for callers this task has no
+    business touching.
+
+    (i) A NARROW, LOCAL PREDICATE at this call site: recognize a body whose ONLY parsed criterion
+    matches `PR_OPEN_TIME_ACCEPTANCE_FALLBACK`'s claim and proof (or, more robustly, whose sole proof
+    greps the same `acceptanceAuthorTimeCheck` anchor both existing fallback constants already share)
+    and treat that state as needing repair even though `bodyNeedsAcceptanceRepair` calls it healthy.
+    `ensureJudgeableBody`'s "recover the author's own criteria first" path must NOT recover this
+    placeholder as though it were real content — it is generic filler, not something the retro-specific
+    claim should ever be asked to preserve.
+
+    (ii) A NON-STALE, EXECUTABLE PROOF for the retro-specific fallback itself. VERIFY FROM SOURCE before
+    choosing the mechanism (distrust this note) — two directions already have precedent in this codebase:
+      - reuse the diff-reading pattern `repairRetroChangesetClaim` already establishes one function
+        below it (its injected `changedFiles` dependency, defaulted to `defaultRetroChangedFiles`'s
+        `gh pr diff <url> --name-only`), extended to read enough of the diff to anchor a `grep:` proof at
+        a line THIS retro run's diff genuinely adds to MASTER-PLAN.md's "## SHIPPED log" section (or to
+        the freshly-regenerated docs/ORIENTATION.md / plan/plan-index.json) — a target absent at the
+        merge base discriminates by construction, the same rule `classifyBaseProofOutcome` (review.ts,
+        W1-T3190) already applies to a `grep:` proof whose target FILE is newly added, generalized here
+        to a target LINE within an existing, always-touched file;
+      - OR derive the anchor from something already unique per run and already written before this call
+        fires — `runId` is available in `retroCommand`'s call chain and `ensureTaskTrailer` has already
+        stamped a run-scoped trailer onto this exact PR one call earlier (run-task.ts:24402, one line
+        before :24410).
+    Whichever is chosen, the proof must genuinely discriminate: a synthesized "merge base" that lacks
+    whatever it targets must make the SAME proof read as not-passing there, not merely look
+    dialect-shaped. A proof that is dialect-valid but still passes identically at head and base has
+    fixed nothing — it has only moved which required check reports the same failure.
+
+    Neither change may regress the two existing regression locks in test/retro-acceptance-repair.test.ts:
+    a genuinely healthy, unrelated body (`HEALTHY_BODY`) must still be left untouched (no edit, no
+    ledger line), and a body with no Acceptance block at all must still repair exactly as it does today.
+  acceptance:
+    - claim: "a PR body whose only parsed criterion is PR_OPEN_TIME_ACCEPTANCE_FALLBACK's own claim and proof is no longer read as healthy — the retro-specific claim replaces it, and the generic placeholder is not recovered as though it were real author content"
+      proof: "unit test: a body carrying only the open-time fallback is repaired, not read as healthy"
+    - claim: "the two existing regression locks are unbroken: a genuinely healthy, unrelated body is still left untouched (no edit, no ledger line), and a body with no Acceptance block at all still repairs exactly as before"
+      proof: "unit test: an unrelated healthy body is still left alone and a blockless body still repairs"
+    - claim: "the substituted retro-specific proof parses as a whitelisted, executable house-dialect proof — the same check acceptance-author-gate's proof-shape refusal runs against every criterion"
+      proof: "unit test: the substituted retro fallback proof parses as a whitelisted proof"
+    - claim: "the substituted proof genuinely discriminates: run against a synthesized merge-base that lacks whatever it targets, the SAME proof reads as not passing there, so it cannot classify executed_stale the way the generic acceptanceAuthorTimeCheck anchor does today"
+      proof: "unit test: the substituted retro fallback proof does not pass against a base lacking its anchor"
+  falsifier: |
+    Restore `bodyNeedsAcceptanceRepair`'s bare call as the ONLY trigger and hand it a body carrying just
+    `PR_OPEN_TIME_ACCEPTANCE_FALLBACK`'s criterion — the rung must again return "healthy" with the
+    generic placeholder left standing. Separately, revert the substituted fallback's proof to free prose
+    (or to the shared static `acceptanceAuthorTimeCheck` anchor) — the first must again fail
+    `parseWhitelistedProof`, and the second must again read `executed_pass` identically against a
+    synthesized base lacking nothing the diff added. A test that only checks a criterion count, or only
+    checks that SOME proof string was written, does not discriminate either defect.
+  note: |
+    risk:high / band_meaning:blast-radius, not span: this is one concern (the retro's own gate-compliance
+    claim, made to fire and to survive) touching two files, but a wrong narrowing either regresses the
+    "never rewrite a genuinely healthy body" invariant W1-T136's whole design rests on, or leaves the
+    retro's own plan-sync PR permanently unmergeable — the mechanism the self-improvement loop's plan/
+    docs updates ride on. W1-T3386 (introduced proof-discrimination-gate) and W1-T3508 (fixed the two
+    sibling fallbacks' dialect) are both already merged on this checkout; neither is a blocking
+    dependency, both are the precedent this task extends to the one fallback they deliberately left out.

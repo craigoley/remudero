@@ -1,0 +1,38 @@
+- id: W1-T4939
+  title: "THE IDLE-LANE ACCOUNT BARELY RECORDS — W1-T4837's summary is emitted once per window from memory, the daemon restarts on merges before most windows close, and rotation may shed the rows; only 2 lane.idle_summary rows exist a day after it shipped. Flush the account on restart, keep the rows through rotation, and show them in rmd status"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: recommend follow-ups (throughput measurement)"
+  note: "reservation hand-off: plan-idle-persist-1790782524000 -> plan-idle-persist-1790782524000"
+  plan_refs: [W1-T4837]
+  files: [src/lib/daemon.ts, src/lib/ledger.ts, src/lib/status-board.ts, test/idle-lane-minutes-survive-a-daemon-restart.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-30: W1-T4837 (idle-lane accounting) runs in the daemon tree, but `rmd ledger-grep lane.idle_summary`
+    finds 2 rows in total, the latest covering 2.79 idle minutes (largest cause wip_limit). The account accumulates in
+    memory and emits once IDLE_LANE_SUMMARY_WINDOW_MS has elapsed, and the daemon restarts on its own freshness check
+    after merges, so most windows die before they close. W1-T4837's builder harvested two follow-ups that never became
+    tasks: add lane.idle_summary to the rotation's retained steps (src/lib/ledger.ts, beside daemon.idle_reasons), and
+    teach rmd status to read it. Without this data the throughput work (51% of lane-minutes idle on 2026-09-29) is
+    steered by guesses.
+  design: |
+    (i) On shutdown (SIGTERM, the freshness exit) and on boot, the daemon emits any partial window as a lane.idle_summary
+    row marked partial: true, so no idle minute is lost to a restart. (ii) lane.idle_summary joins the retained-step
+    list in src/lib/ledger.ts. (iii) rmd status shows idle minutes by cause over the last 24 hours, summed across rows.
+  acceptance:
+    - claim: "a restart flushes the open idle window instead of losing it"
+      proof: 'grep: test("W1-T4939: a restart flushes the open idle window instead of losing it" in test/idle-lane-minutes-survive-a-daemon-restart.test.ts'
+    - claim: "idle summaries are retained through log rotation"
+      proof: 'grep: test("W1-T4939: idle summaries are retained through log rotation" in test/idle-lane-minutes-survive-a-daemon-restart.test.ts'
+    - claim: "rmd status shows idle minutes by cause for the last day"
+      proof: 'grep: test("W1-T4939: rmd status shows idle minutes by cause for the last day" in test/idle-lane-minutes-survive-a-daemon-restart.test.ts'
+  falsifier: |
+    Drop the shutdown flush and the first test loses the partial window.

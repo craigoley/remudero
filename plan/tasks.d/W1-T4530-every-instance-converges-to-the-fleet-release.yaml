@@ -1,7 +1,7 @@
 - id: W1-T4530
   title: "EVERY INSTANCE JUDGES AND DEPLOYS ON ITS OWN, SO THE FLEET DRIFTS APART — a non-primary instance stops running the deploy judge and instead converges to the newest promoted, unrevoked release tag, in its own idle window, with a deadline"
   repo: remudero
-  depends_on: [W1-T4529]
+  depends_on: [W1-T4529, W1-T4532]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -10,6 +10,9 @@
   band_meaning: span
   origin: "session: 2026-09-24 release-tag design"
   note: |
+    DEPENDENCY ADDED 2026-09-30 (operator ruling): W1-T4532, the tag ruleset that lets only the fleet App create
+    release/ring/revoked tags, must be in place first, because once this ships a ring/fleet tag is a fleet-wide deploy.
+    The operator marks W1-T4532 done after making the repository-settings change; until then this task waits.
     reservation hand-off: run-W1-T4527-1790294141611 -> plan-file-W1-T4527-1790294141611
   plan_refs: ["W1-T4527", "W1-T4528", "W1-T4529"]
   files: [src/lib/release-tags.ts, src/lib/deployer.ts, src/run-task.ts, test/every-instance-converges-to-the-fleet-release.test.ts]

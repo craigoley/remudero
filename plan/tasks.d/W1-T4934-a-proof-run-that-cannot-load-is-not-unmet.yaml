@@ -1,0 +1,58 @@
+- id: W1-T4934
+  title: "THE REVIEWER GRADES A PROOF UNMET WHEN ITS TEST RUN COULD NOT LOAD — on console PR #1866 every test file failed with Cannot find package, 0 tests matched, and six proofs were graded unmet; a run whose files fail to load is an infrastructure error: refresh the toolchain and re-run, otherwise post cannot-evaluate and escalate, never FAIL the PR"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "coordinator measurement 2026-09-30 (console PR #1866 review FAIL); core-console architecture session"
+  plan_refs: ["W1-T3525", "W1-T4933", "W1-T2236"]
+  files:
+    - src/lib/review.ts
+    - test/a-proof-run-that-cannot-load-is-not-unmet.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 by the coordinator. The console reviewer runs
+    `vitest run --reporter=tap -t "<title>" tests/`. The managed checkout's node_modules predated
+    a lockfile change (W1-T4933), so every test file importing lib/upstream-snapshot.ts failed
+    to load with "Cannot find package '@vercel/functions'". `vitestNameFilteredOutcome`
+    (src/lib/review.ts, W1-T3525) sees zero non-skipped leaves on a completed run and returns
+    "no-match". A file that failed to load and a title that matches nothing read the same, so all
+    six proofs on #1866 were graded "unmet" and the PR got FAIL. Its author could not fix that:
+    the defect was the reviewer's toolchain. The run was also `-t` over all of `tests/`, which
+    swept in e2e specs the proof never named.
+  design: |
+    (i) Classify load failure before match. In the vitest and node --test name-filtered paths, a
+    run is `cannot-load` when every selected file failed to load, or when module-resolution errors
+    ("Cannot find package", "Cannot find module", ERR_MODULE_NOT_FOUND) account for most failing
+    files and no leaf matched. It is never "no-match" or "fail". Parse this off the TAP wrapper
+    lines and stderr, and never guess from exit code alone.
+    (ii) On `cannot-load`: refresh the checkout's toolchain once, through the W1-T4933 refresh
+    (or `ensureInstallFresh` until it lands), and re-run. If it still cannot load, the criterion
+    is `cannot-evaluate`. The review posts a distinct non-failure state that names the load
+    error, never FAIL, and escalates once per head through the existing escalation path.
+    (iii) Scope name-filtered runs to the proof's own test file when the proof or the PR diff
+    names one, instead of every file under `tests/`. A bare title keeps today's search root,
+    minus e2e specs.
+  acceptance:
+    - claim: "a name-filtered run whose files all fail to load is cannot-load and not no-match"
+      proof: "unit test: a name-filtered run whose files all fail to load is cannot-load"
+    - claim: "a proof that still cannot load after a toolchain refresh is cannot-evaluate and never fails the PR"
+      proof: "unit test: a proof that cannot load after a refresh is cannot-evaluate and never fails the review"
+    - claim: "a name-filtered run is scoped to the proof's own test file when one is named"
+      proof: "unit test: a name-filtered proof run is scoped to its own test file"
+  falsifier: |
+    Feed #1866's shape (every wrapper `not ok` with Cannot find package, zero leaves) to today's
+    `vitestNameFilteredOutcome`: it returns "no-match", and the first proof fails. Drop the
+    refresh-and-rerun: the second proof sees FAIL on the review. Keep `tests/` as the search
+    root: the third proof sees an e2e spec selected.
+  note: |
+    Reserved from the operator checkout for branch file/review-toolchain-tasks-1790778861427.
+    Scope-time checks 2026-09-30: no run-W1-T4934-* branch; no main commit names the id. No plan
+    record on origin/main or on any open head's added shards covers a load failure graded as
+    unmet. W1-T3525 built the vitest outcome parser this extends.
