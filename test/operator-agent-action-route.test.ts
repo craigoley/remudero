@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
 import { isPaused, isStopped, pauseFilePath, requestStop, stopFilePath } from "../src/lib/fleet-control.js";
 import { buildOperatorAgentActionHandoffRoutes, type ActionHandoffDeps } from "../src/lib/operator-agent-action-handoff.js";
 import { createService, type Route, type Scope } from "../src/lib/service.js";
@@ -39,7 +40,7 @@ async function withHandoff(action: (h: Harness) => Promise<void>, overrides: Par
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}action-route-`));
   mkdirSync(join(root, "state"), { recursive: true });
   let now = T0;
-  const deps: ActionHandoffDeps = { root, claimRoot: root, ledgerPath: join(root, "state", "ledger.ndjson"), instance: "core", repository: "owner/repo", now: () => now, ...overrides };
+  const deps: ActionHandoffDeps = { root, claimRoot: root, ledgerPath: join(root, "state", "ledger.ndjson"), instance: "core", repository: "owner/repo", clock: clockFromMillisFn(() => now), ...overrides };
   const { server, base } = await listen(buildOperatorAgentActionHandoffRoutes(deps));
   try {
     await action({ base, root, deps, advance: (ms) => { now += ms; } });
@@ -164,7 +165,7 @@ test("unsafe assistant actions refuse without a target write", async () => {
       assert.equal(((await response.json()) as { code: string }).code, code, label);
     }
     const stale = await prepare(base, "intent-unsafe-stale");
-    const staleDeps = { ...deps, now: () => T0 + 60 * 60_000 };
+    const staleDeps = { ...deps, clock: fixedClock(T0 + 60 * 60_000) };
     const later = await listen(buildOperatorAgentActionHandoffRoutes(staleDeps));
     try {
       assert.equal(((await (await post(later.base, EXECUTE, confirmed(stale))).json()) as { code: string }).code, "stale_preview");

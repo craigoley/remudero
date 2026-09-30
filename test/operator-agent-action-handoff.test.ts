@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -11,23 +10,25 @@ import {
   prepareActionHandoff,
   type ActionHandoffDeps,
 } from "../src/lib/operator-agent-action-handoff.js";
+import { fixedClock } from "../src/lib/clock.js";
 import { isPaused, isStopped } from "../src/lib/fleet-control.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const ACTOR = "operator:alice";
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 
 function fixture(overrides: Partial<ActionHandoffDeps> = {}): { deps: ActionHandoffDeps; root: string; done: () => void } {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}action-handoff-`));
+  const seeded = writeLedger();
+  const root = seeded.dir;
   mkdirSync(join(root, "state"), { recursive: true });
   const deps: ActionHandoffDeps = {
-    root, claimRoot: root, ledgerPath: join(root, "state", "ledger.ndjson"),
-    instance: "core", repository: "owner/repo", now: () => T0, ...overrides,
+    root, claimRoot: root, ledgerPath: seeded.path,
+    instance: "core", repository: "owner/repo", clock: fixedClock(T0), ...overrides,
   };
   return { deps, root, done: () => rmSync(root, { recursive: true, force: true }) };
 }
 
-function ledgerRows(path: string): Array<Record<string, unknown>> {
+function appendedRows(path: string): Array<Record<string, unknown>> {
   return existsSync(path) ? readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>) : [];
 }
 
@@ -55,7 +56,7 @@ test("a prepared action is typed, allowlisted, instance-scoped, non-mutating, an
     assert.equal(preview.mutated, false);
     assert.equal(preview.confirmation, "explicit-operator-confirmation-required");
     assert.equal(isPaused(root), false, "prepare performs no target mutation");
-    assert.deepEqual(ledgerRows(deps.ledgerPath), [], "prepare appends no ledger row");
+    assert.deepEqual(appendedRows(deps.ledgerPath), [], "prepare appends no ledger row");
 
     const resume = prepareActionHandoff(deps, ACTOR, intent("intent-prepare-02", "fleet.resume"));
     assert.equal(resume.status, 201);
@@ -111,7 +112,7 @@ test("repeated assistant intent has one action and one receipt", () => {
     assert.equal((replay.body as Record<string, unknown>).code, "replayed");
     assert.deepEqual((replay.body as Record<string, unknown>).receipt, receipt, "the replay names the one stored receipt");
 
-    const rows = ledgerRows(deps.ledgerPath);
+    const rows = appendedRows(deps.ledgerPath);
     assert.equal(rows.filter((row) => row.step === "panel.pause_requested").length, 1, "one governed verb ran");
     assert.equal(rows.filter((row) => row.step === "operator_agent.action_handoff_receipt").length, 1, "one attributable receipt");
   } finally {
@@ -164,7 +165,7 @@ test("a delegated refusal after confirmation is recorded as a refused receipt, n
     assert.equal((refused.body as Record<string, unknown>).outcome, "refused");
     assert.equal((refused.body as Record<string, unknown>).code, "policy_refused");
     assert.equal(isPaused(root) || isStopped(root), false);
-    assert.equal(ledgerRows(deps.ledgerPath).filter((row) => row.step === "operator_agent.action_handoff_receipt").length, 1);
+    assert.equal(appendedRows(deps.ledgerPath).filter((row) => row.step === "operator_agent.action_handoff_receipt").length, 1);
   } finally {
     done();
   }

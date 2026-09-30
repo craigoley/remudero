@@ -18,7 +18,7 @@ import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, un
 import { join } from "node:path";
 import { ACTION_CATALOGUE, executeCatalogueAction, type CatalogueEntry, type CatalogueExecution } from "./action-executor.js";
 import { AUTOMATION_ACTION_VERSION, automationRedactionViolation, type AutomationAction, type DelegationRiskTier } from "./automation-action.js";
-import { fixedClock, systemClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { isPaused, isStopped } from "./fleet-control.js";
 import { appendPanelLedger, jsonAction, sendJson } from "./panel-actions.js";
 import { verifiedActor, type Route, type WriteTier } from "./service.js";
@@ -45,7 +45,7 @@ export interface ActionHandoffDeps {
   claimRoot: string;
   instance: string;
   repository?: string;
-  now?: () => number;
+  clock?: Clock;
   ttlMs?: number;
   /** Test seam; production delegates to the catalogue executor. */
   execute?: (request: Parameters<typeof executeCatalogueAction>[0]) => CatalogueExecution;
@@ -195,7 +195,7 @@ export function prepareActionHandoff(deps: ActionHandoffDeps, actor: string, inp
   if (input.instance !== deps.instance) return refusal(409, "cross_instance", `this route acts only for instance ${deps.instance}`);
   if (!deps.repository) return refusal(409, "repository_unverified", "the serving instance has no verified repository identity");
   if (input.repository.toLowerCase() !== deps.repository.toLowerCase()) return refusal(409, "cross_repository", `this instance acts only for ${deps.repository}`);
-  const nowMs = (deps.now ?? systemClock.now)();
+  const nowMs = (deps.clock ?? systemClock).now();
   const actorHash = sha(actor);
   const fingerprint = sha(JSON.stringify({ actorHash, verb: input.verb, instance: deps.instance, repository: deps.repository }));
   const intentPath = join(actionHandoffPaths(deps, "").dir, `${sha(`${actorHash}:${input.intentId}`)}.intent.json`);
@@ -279,7 +279,7 @@ export function executeActionHandoff(deps: ActionHandoffDeps, actor: string, inp
   }
   const actorHash = sha(actor);
   if (prepared.actorHash !== actorHash) return refusal(403, "actor_mismatch", "only the operator who prepared this action may confirm it");
-  const nowMs = (deps.now ?? systemClock.now)();
+  const nowMs = (deps.clock ?? systemClock).now();
   try {
     writeExclusive(paths.claim, JSON.stringify({ at: fixedClock(nowMs).iso(), actorHash }));
   } catch (error) {
