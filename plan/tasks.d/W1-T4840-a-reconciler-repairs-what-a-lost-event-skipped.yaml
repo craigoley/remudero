@@ -1,0 +1,35 @@
+- id: W1-T4840
+  title: "PIPELINES ADVANCE ONLY ON EVENTS, SO A LOST EVENT STALLS THEM SILENTLY — one reconciler compares desired and observed state for each pipeline (CI run per main commit, image per baked change, deploy per image, no failure latch older than the last healthy deploy) and repairs the gap"
+  repo: remudero
+  depends_on: [W1-T4809, W1-T4817]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: go with all of these recommended follow ups (throughput, automated flow, self improvement)"
+  note: "reservation hand-off: plan-flow-improve-1790732974000 -> plan-flow-improve-1790732974000"
+  plan_refs: [W1-T4809, W1-T4817, W1-T4839]
+  files: [src/lib/state-reconciler.ts, src/lib/sweep.ts, test/a-reconciler-repairs-what-a-lost-event-skipped.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-29, four stalls with one shape: a push event GitHub never fired (30f3c7b58, 9b694d664) so CI and
+    the image build never ran; the deploy tick then waited 3.5 h on an exact image tag no later build could satisfy;
+    DEPLOY_FAILED latches sat 2-12 days past healthy deploys; a deploy tick ran deploy code older than main. Each was
+    found by hand. W1-T4809 and W1-T4817 fix two of these individually.
+  design: |
+    reconcileFleetState (new module) holds a table of (desired, observed, repair) rows and the sweep runs it each
+    cycle. Rows from W1-T4809 and W1-T4817 move into it rather than living as separate loops; each repair is recorded
+    as reconcile.repaired with the gap it closed, and a gap that persists after its repair escalates once.
+  acceptance:
+    - claim: "a gap between desired and observed state is repaired once and recorded"
+      proof: 'grep: test("W1-T4840: a gap between desired and observed state is repaired once and recorded" in test/a-reconciler-repairs-what-a-lost-event-skipped.test.ts'
+    - claim: "a gap its repair did not close escalates once"
+      proof: 'grep: test("W1-T4840: a gap its repair did not close escalates once" in test/a-reconciler-repairs-what-a-lost-event-skipped.test.ts'
+    - claim: "the new module is called from its owner"
+      proof: 'grep: reconcileFleetState( in src/lib/sweep.ts'
+  falsifier: |
+    Remove the repair step and the first test leaves the gap open.

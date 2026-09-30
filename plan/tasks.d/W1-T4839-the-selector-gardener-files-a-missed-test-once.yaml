@@ -1,0 +1,35 @@
+- id: W1-T4839
+  title: "THE SELECTOR GARDENER FILES THE SAME MISSED TEST OVER AND OVER — cold-status-reads 8 times, serve-browser-teardown 6, codex-reviewer-production-wiring 6 since 09-28, each a filing PR plus a build PR, and the selector keeps missing them. File per missed test, and escalate a repeat to one structural fix"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: go with all of these recommended follow ups (throughput, automated flow, self improvement)"
+  note: "reservation hand-off: plan-flow-improve-1790732974000 -> plan-flow-improve-1790732974000"
+  plan_refs: []
+  files: [src/lib/selector-shadow-gardener.ts, test/the-selector-gardener-files-a-missed-test-once.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30: selector-shadow-garden opened 27 of the 189 PRs merged on 2026-09-29. Merged filings since
+    09-28 by missed test: cold-status-reads-return-within-the-client-budget.test.ts 8, serve-browser-teardown.test.ts 6,
+    codex-reviewer-production-wiring.test.ts 6, deps-interface-census.test.ts 4, and three more at 3. Each filing names
+    a narrow edge (a source file or sha to that test) and is built and merged, so the queue stays small (2 queued) while
+    the same test is missed again the next day: the narrow repairs never close the selector's gap for that test.
+  design: |
+    (i) A missed TEST, not a missed edge, is the unit: while a filing for that test is open or merged inside the
+    gardener's window, a new miss appends evidence to it rather than filing again.
+    (ii) A test missed again after an earlier repair merged is filed once as a structural selector task naming every
+    edge seen, instead of another narrow edge.
+  acceptance:
+    - claim: "a second miss of the same test adds evidence and files nothing"
+      proof: 'grep: test("W1-T4839: a second miss of the same test adds evidence and files nothing" in test/the-selector-gardener-files-a-missed-test-once.test.ts'
+    - claim: "a miss after a merged repair files one structural task"
+      proof: 'grep: test("W1-T4839: a miss after a merged repair files one structural task" in test/the-selector-gardener-files-a-missed-test-once.test.ts'
+  falsifier: |
+    Key the dedupe on the edge again and the first test files a second task.
