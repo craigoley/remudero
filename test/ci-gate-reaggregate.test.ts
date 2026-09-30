@@ -389,15 +389,16 @@ test("ci-gate: adaptive wait and grace cadences cap check-runs reads without sho
   const slowPoll = Number(env.WAIT_SLOW_POLL_INTERVAL_SECONDS);
   const graceWindow = Number(env.GRACE_WINDOW_SECONDS);
   const gracePoll = Number(env.GRACE_POLL_INTERVAL_SECONDS);
-  assert.ok(fastWindow > 0 && fastWindow < waitCap, "the fast observation window must be a proper prefix of the unchanged wait cap");
+  assert.ok(fastWindow > 0 && fastWindow < waitCap, "the fast observation window must be a proper prefix of the wait cap");
   assert.ok(slowPoll > fastPoll, "the long-tail wait cadence must actually reduce reads");
-  assert.ok(gracePoll > 0 && gracePoll <= graceWindow, "the grace cadence must still observe inside its unchanged window");
+  assert.ok(gracePoll > 0 && gracePoll <= graceWindow, "the grace cadence must still observe inside its window");
 
   const adaptiveWaitReads = 1 + Math.ceil(fastWindow / fastPoll) + Math.ceil((waitCap - fastWindow) / slowPoll);
   const fixedWaitReads = 1 + Math.ceil(waitCap / fastPoll);
   const adaptiveGraceReads = Math.ceil(graceWindow / gracePoll);
   const fixedGraceReads = Math.ceil(graceWindow / 20);
-  assert.equal(adaptiveWaitReads, 56, "the shipped wait cap should use no more than 56 check-runs reads");
+  assert.ok(adaptiveWaitReads <= 81,
+    "the 65-minute wait for the coverage shard and aggregator must use no more than 81 check-runs reads");
   assert.equal(adaptiveGraceReads, 10, "the shipped grace window should use no more than 10 check-runs reads");
   assert.ok(adaptiveWaitReads + adaptiveGraceReads < fixedWaitReads + fixedGraceReads, "the adaptive cadence must reduce the maximum API reads while retaining both windows");
 });

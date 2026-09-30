@@ -553,6 +553,8 @@ export interface LedgerUnionRawReadOptions extends LedgerUnionOptions {
    *  window — a FLOOR that only ever adds files, so a host rotating once a week keeps its last month. */
   minRotations?: number;
   pattern?: RegExp;
+  /** Keeps only the lines it accepts, tested before dedupe, so a narrow caller retains only its own rows. */
+  keep?: (line: string) => boolean;
   dedupe?: boolean;
   requireArchives?: boolean;
   refuseIncomplete?: boolean;
@@ -630,7 +632,7 @@ export function readLedgerUnionRawLinesSync(
       if (end === -1) end = buf.length;
       if (end > start) {
         const line = buf.toString("utf8", start, end).trim();
-        if (line && (!opts.pattern || opts.pattern.test(line)) && (!stepFilter || stepFilter(line))) {
+        if (line && (!opts.pattern || opts.pattern.test(line)) && (!stepFilter || stepFilter(line)) && (!opts.keep || opts.keep(line))) {
           if (opts.dedupe === false) {
             rawLines.push(line);
           } else if (!seen.has(line)) {

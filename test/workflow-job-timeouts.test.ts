@@ -179,6 +179,18 @@ test("W1-T1009: the bound is strictly below ci-gate's own declared wait cap", as
   }
 });
 
+test("the coverage aggregator survives the observed ten-minute raw V8 merge and the gate waits for both jobs", async () => {
+  const jobs = await loadCiJobs();
+  const shardMinutes = jobs["coverage-ratchet"]?.["timeout-minutes"];
+  const aggregatorMinutes = jobs["coverage-ratchet-required"]?.["timeout-minutes"];
+  const waitCapSeconds = await loadWaitCapSeconds();
+  assert.ok(typeof shardMinutes === "number" && shardMinutes > 0, "coverage shards need a finite bound");
+  assert.ok(typeof aggregatorMinutes === "number" && aggregatorMinutes > 10,
+    "PR #8080's raw V8 merge was cancelled at the former 10-minute aggregator bound");
+  assert.ok((shardMinutes + aggregatorMinutes) * 60 < waitCapSeconds,
+    "ci-gate must outwait the coverage shard and its dependent aggregator, including scheduling room");
+});
+
 // ── acceptance 4: the coupling to ci-gate's cap is written down in ci.yml itself ────────────
 
 test("W1-T1009: ci.yml's heavy-band comment names WAIT_CAP_SECONDS, coupling the two files", async () => {

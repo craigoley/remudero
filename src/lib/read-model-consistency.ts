@@ -124,6 +124,13 @@ export function factColumns(line: string, factStep: (step: string) => boolean): 
  * {@link ReadModelConsistencyError} when the positive control fails: a form the directory holds
  * went unread, or the window read zero ledger rows.
  */
+function inWindow(line: string, window: OracleWindow): boolean {
+  const end = line.startsWith('{"ts":"') ? line.indexOf('"', 7) : -1;
+  const ms = end > 7 ? Date.parse(line.slice(7, end)) : Number.NaN;
+  const at = Number.isFinite(ms) ? ms : 0;
+  return at >= window.t0 && at <= window.t1;
+}
+
 export function compareWindow(
   db: ReadModelDb,
   ledgerDir: string,
@@ -158,7 +165,8 @@ export function compareWindow(
       return out;
     },
   };
-  const union = readLedgerUnionRawLinesSync(ledgerDir, { since: isoAt(window.t0) }, probe);
+  // Only the window's rows are retained: a one-day slice holds one day, however many files it opens.
+  const union = readLedgerUnionRawLinesSync(ledgerDir, { since: isoAt(window.t0), keep: (line) => inWindow(line, window) }, probe);
   const forms = (["gzip", "plain", "live"] as const).map((form): OracleFormRead => ({
     form,
     expected: expected.filter((p) => formOf(p) === form).length,
@@ -357,6 +365,8 @@ export interface ConsistencyCheckOptions {
   escalation?: EscalateDeps;
   clock?: Clock;
   windowMs?: number;
+  /** An explicit closed window (a rolling slice), in place of the one `windowMs` ends at now. */
+  window?: OracleWindow;
   factStep?: (step: string) => boolean;
   fs?: LedgerGrepFsDeps;
   /** The row projections the store carries; defaults to the projector's own list. */
@@ -379,9 +389,10 @@ export const ORACLE_AGREE_INTERVAL_MS = 60 * 60_000;
 export const ORACLE_DRIFT_INTERVAL_MS = 10 * 60_000;
 
 /**
- * WHERE THE ORACLE RUNS. Serve's read-model worker asks this after each tick, per instance, and
- * runs {@link runConsistencyCheck} with its lease and the DEFAULT window when it answers true: a
- * 30-day window cost 0.29 s on a copy of the core ledger, so a 7-day one fits in a worker tick. The
+ * WHERE THE ORACLE RUNS. Serve's read-model worker asks this before starting a cycle of
+ * {@link nextOracleSlice} day slices, each checked in a worker tick of its own. On a copy of the
+ * host's core ledger one 7-day check held a tick 5-9 s and added ~660 MB RSS; a day slice took
+ * 1.0-3.3 s (66k-160k rows) and ~165 MB. It never touches serve's main thread. The
  * full corpus (10.1 s, 730 MB RSS on the same copy) runs only by hand, as the check inside
  * `rmd read-model rebuild --window-days <n>`. Due when no run is recorded, an hour after an
  * agreement, and ten minutes after any other outcome, so a drift is rechecked sooner.
@@ -390,6 +401,43 @@ export function consistencyCheckDue(db: ReadModelDb, now: number): boolean {
   const last = history(db).at(-1);
   if (!last) return true;
   return now - last.atMs >= (last.outcome === "agree" ? ORACLE_AGREE_INTERVAL_MS : ORACLE_DRIFT_INTERVAL_MS);
+}
+
+/** Serve's rolling slice: one closed day per check, so a check holds one day's rows, never seven. */
+export const ORACLE_SLICE_MS = 24 * 60 * 60_000;
+const SLICE_CURSOR_KEY = "oracle_slice";
+
+/** A cycle's fixed end, and the slice to check next (0 is the newest). Kept in the DB's meta. */
+export interface OracleSliceCursor {
+  end: number;
+  index: number;
+  slices: number;
+}
+
+/**
+ * The next slice of the rolling cycle. A cycle fixes its `end` when its first slice runs, and slice
+ * `i` covers `[end - (i+1) day, end - i day]`, so its `slices` checks tile the window exactly. A
+ * finished, absent or unreadable cursor starts a new cycle ending at the closed-window edge.
+ */
+export function nextOracleSlice(db: ReadModelDb, now: number, windowMs: number = ORACLE_DEFAULT_WINDOW_MS): { window: OracleWindow; cursor: OracleSliceCursor; startsCycle: boolean } {
+  let cursor: OracleSliceCursor | undefined;
+  try {
+    const stored = JSON.parse(db.meta(SLICE_CURSOR_KEY) ?? "null") as OracleSliceCursor | null;
+    if (stored && Number.isFinite(stored.end) && stored.index >= 0 && stored.index < stored.slices) cursor = stored;
+  } catch {
+    // deliberate: an unparseable cursor starts a new cycle, which re-covers every slice.
+    cursor = undefined;
+  }
+  const startsCycle = cursor === undefined;
+  cursor ??= { end: now - ORACLE_CLOSED_LAG_MS, index: 0, slices: Math.max(1, Math.ceil(windowMs / ORACLE_SLICE_MS)) };
+  const window = { t0: Math.max(cursor.end - windowMs, cursor.end - (cursor.index + 1) * ORACLE_SLICE_MS), t1: cursor.end - cursor.index * ORACLE_SLICE_MS };
+  return { window, cursor, startsCycle };
+}
+
+/** Records that `cursor`'s slice ran; the lease's fence keeps a stale worker from moving it. */
+export function advanceOracleSlice(db: ReadModelDb, lease: ReadModelLease, cursor: OracleSliceCursor): void {
+  const next = JSON.stringify({ ...cursor, index: cursor.index + 1 });
+  withWriteTransaction(db, lease, () => db.prepare("INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").run(SLICE_CURSOR_KEY, next));
 }
 
 function escalationFor(run: ConsistencyRun, detail: string[]): Escalation {
@@ -434,7 +482,7 @@ function runOnce(opts: ConsistencyCheckOptions): ConsistencyRun {
   const factStep = opts.factStep ?? isFactStep;
   const started = clock.now();
   const t1 = started - ORACLE_CLOSED_LAG_MS;
-  const window = { t0: t1 - (opts.windowMs ?? ORACLE_DEFAULT_WINDOW_MS), t1 };
+  const window = opts.window ?? { t0: t1 - (opts.windowMs ?? ORACLE_DEFAULT_WINDOW_MS), t1 };
   const projections = opts.projections ?? LEDGER_ROW_PROJECTIONS;
   const compare = (): WindowComparison => compareWindow(opts.db, opts.ledgerDir, window, { factStep, projections, ...(opts.fs ? { fs: opts.fs } : {}) });
   let c = compare();

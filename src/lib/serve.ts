@@ -384,7 +384,7 @@ export interface ServeDeps {
   daemonHealth?: Omit<DaemonHealthDeps, "ledgerPath" | "diskPath"> & { diskPath?: string };
   /** W1-T4229: defaults to {@link assessGatewayCheckout} over {@link serveRepoDir}. */
   gatewayCheckout?: () => Promise<GatewayCheckoutAssessment>;
-  staleExitSeams?: Pick<StaleCodeExitDeps, "scheduleRecheck" | "exit">;
+  staleExitSeams?: Pick<StaleCodeExitDeps, "scheduleRecheck" | "exit" | "drain">;
   /**
    * W1-T288: GET /v1/control/status's daemon-liveness verdict deps (injectable ledger reader /
    * clock / liveness bound — see panel-actions.ts's `ControlStatusDeps` for each field's real
@@ -3039,7 +3039,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     clock: systemClock,
     write: (window) => deps.log?.("github.wake.summary", { ...wakeSummaryRow(wakeCounters, window) }),
   });
-  const readModel = deps.readModel && createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, ...deps.readModel });
+  const readModel = deps.readModel && createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, escalationRepository: deps.assistantRepository, ...deps.readModel });
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
     log: deps.log,
