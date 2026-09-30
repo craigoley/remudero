@@ -135,7 +135,8 @@ test("serve's main loop lag stays under 50 ms while the worker rebuilds", async 
 
   // Positive control: the same rebuild run on the main thread holds the loop, so the probe can see a stall.
   const inlineState = scratch(t, "rmw-lag-inline");
-  const inline = createReadModelTicker({ stateDir: inlineState, instances: [{ name: "core", ledgerDir }], post: () => {} });
+  // Unbudgeted: the control is the whole rebuild in one tick, however loaded the machine is.
+  const inline = createReadModelTicker({ stateDir: inlineState, instances: [{ name: "core", ledgerDir }], post: () => {}, tickBudgetMs: Number.POSITIVE_INFINITY });
   const control = loopProbe();
   inline.tick();
   const inlineLag = control.stop();
