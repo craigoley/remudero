@@ -1180,7 +1180,7 @@ import {
 import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib/bundle.js";
 import { parse as parseYaml } from "yaml";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
-import { ProviderCapacityBlockedError, assertOpenWeightToolBoundary } from "./lib/worker-provider.js";
+import { ProviderCapacityBlockedError, assertOpenWeightToolBoundary, providerEligibility, type ProviderCapacity } from "./lib/worker-provider.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
 import {
   buildExportBundle,
@@ -2251,6 +2251,7 @@ import {
   runAdhocLaneReapRung,
   runWorktreeReapRung,
   spawnWorker,
+  readClaudeProviderCapacity,
   activeWorkerCount,
   cacheTokenLedgerFields,
   capStderrExcerpt,
@@ -42985,6 +42986,25 @@ export function buildInboxDraftSpawnArgs(args: {
   };
 }
 
+/** A cash draft's one Sonnet rescue, admitted against the live subscription reserve before the explicit Claude mount. */
+export async function spawnEscalatedInboxDraft(
+  args: Parameters<typeof buildInboxDraftSpawnArgs>[0],
+  rawSpawn: typeof spawnWorker = spawnWorker,
+  readCapacity: (config: Config) => Promise<ProviderCapacity> = (config) => readClaudeProviderCapacity(config, { forceRefresh: true }),
+): Promise<WorkerResult | undefined> {
+  const policy = resolveProviderRoutingPolicy(args.config.root, args.config);
+  if (!policy.routableProviders.includes("claude")) return undefined;
+  const capacity = await readCapacity(args.config);
+  if (!providerEligibility(capacity, policy.reservePercent).eligible) return undefined;
+  return rawSpawn({
+    ...buildInboxDraftSpawnArgs({
+      ...args,
+      mount: { ...args.mount, model: "sonnet", provider: "claude", effort: "medium" },
+    }),
+    onSelectionAssignment: undefined,
+  });
+}
+
 /**
  * Materialize ONE worktree and draft EVERY proposal in `toDraft` against it — the shared
  * harness-owned glue {@link runDraftRung}'s pure core (lib/inbox.ts) needs: a real
@@ -43093,6 +43113,16 @@ export async function draftProposalBatch(
             // a helper-level convention.
             disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
           }), onSelectionAssignment: undefined }),
+        ...(inboxDraftMount.provider === "cash" ? {
+          escalate: (_proposal: Proposal, prompt: string) => spawnEscalatedInboxDraft({
+            cwd: worktreePath,
+            settingsFile,
+            mount: inboxDraftMount,
+            config,
+            prompt,
+            disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
+          }, benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)),
+        } : {}),
         log,
       },
       runId,
