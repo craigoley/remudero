@@ -137,15 +137,15 @@ const STILL_RED_ROUTES = {
   [COMBINED_STATUS_PATH]: { statuses: [] },
 };
 
-/** `buildSweepEffects` with every optional dep left at its default EXCEPT `log`, `ghRunImpl`
- *  and `readJsonImpl` (W1-T2300) — the same wiring gap
+/** `buildSweepEffects` with every optional dep left at its default EXCEPT `log`, `ghRunImpl`,
+ *  `readJsonImpl`, and the stack reader (W1-T4903) — the same wiring gap
  *  `test/cancelled-required-check-requeue.test.ts`'s own GUARDED SITE tests already drive. */
 function buildEffects(
   ghRunImpl: (file: string, args: readonly string[]) => void,
   readJsonImpl: (args: string[]) => Promise<unknown>,
   log: (step: string, extra?: Record<string, unknown>) => void = () => {},
 ) {
-  return buildSweepEffects({
+  const effects = buildSweepEffects({
     owner: OWNER,
     repo: REPO,
     config: { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t2300-stale-gate-root-")) } as never,
@@ -169,6 +169,12 @@ function buildEffects(
     disarmImpl: undefined,
     readJsonImpl: readJsonImpl,
   });
+  return {
+    ...effects,
+    // This suite's PR fixtures are unstacked. Keep the newly consulted parent check offline,
+    // just like the CI-gate REST and rerun dependencies above.
+    stackPrerequisite: () => ({ state: "unstacked" as const, parentNumbers: [] }),
+  };
 }
 
 // ── acceptance 1 — reachable from the CLI's own buildSweepEffects, and the detector fires ───────
