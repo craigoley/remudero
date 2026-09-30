@@ -2,8 +2,8 @@
 
 A view is **one read per console surface, computed in core**. The console renders it; it does not
 assemble it from raw routes. The first view is `nav-badge` (arch plan Phase 0, item 0.4). Phase 1
-moves every view onto the projector's `node:sqlite` read model and pushes `view → version` over one
-SSE stream; the wire shape below is the contract those phases keep.
+moves every view onto the projector's `node:sqlite` read model, and Phase 2 pushes `view → version`
+over one SSE stream (below); the wire shape below is the contract those phases keep.
 
 ## Body
 
@@ -64,6 +64,51 @@ reads no file and no SQLite.
 - **Worker diagnostics.** The worker ledgers `read_model.lease_acquired` and `read_model.lease_elsewhere`
   when an instance's lease changes hands, and `read_model.slow_tick` when one projector tick takes longer
   than the 10 s stale bound. A source's staleness is judged from when its tick completed.
+
+## Push: `GET /v1/views/events` (Phase 2)
+
+One SSE stream says WHICH view bodies changed; the client refetches only those, with `If-None-Match`
+(`src/lib/view-events.ts`). It carries versions, never bodies, and **the version is the ETag**. The ETag
+ignores times, so after a serve restart an unchanged view keeps its version and nothing is refetched.
+Read scope, like every view; schemas `ViewHello`, `ViewEvent`, `ViewHandover`, `ViewVersions` in
+`openapi/daemon.yaml`.
+
+```
+retry: 3000
+
+id: <bootId>:<seq>
+event: hello
+data: {"bootId":"…","serverNow":"…","views":{"now":{"instance=core":"W/\"now.1.…\""}},"disabled":["repositories"]}
+
+id: <bootId>:<seq>
+event: view
+data: {"view":"now","key":"instance=core","etag":"W/\"now.1.…\"","stale":false,"emittedAt":"…","asOf":"…","cause":"body"}
+
+: hb
+
+event: handover
+data: {"reason":"recycle","retryMs":0}
+```
+
+- **`hello` on every connect** is the resync: the full `{view: {key: etag}}` map of served bodies, and
+  the views not switched `serve` in `disabled`. The client diffs it against what it holds. There is no
+  event log; `Last-Event-ID` is only logged (`view_events.open`).
+- **`view`** when a served body's ETag changes. `cause: body` is a new body from the read-model worker.
+  `cause: judge` is the 1 s sweep re-judging each body's sources exactly as a GET does, so a stalled
+  projector flips the view stale on screen without a worker message. The event's `etag` is the one the
+  refetch answers with.
+- Only views switched `serve` (and the read model's own status) emit. `?views=a,b` narrows the stream.
+  Keys carry the instance (`instance=console`), so one stream covers every instance.
+- **Backpressure:** while a socket holds more than 64 KiB, a new event REPLACES the one pending for its
+  key, so a slow reader costs at most one event per key. A reader backed up for 60 s gets `handover`
+  (`slow_consumer`) and its reconnect resyncs from `hello`.
+- `: hb` every 25 s. When serve drains for a restart, every stream gets `handover` (`recycle`) at once,
+  so the drain is not held and EventSource reconnects immediately.
+- **Not read attention.** An open stream never extends serve's recycle patience (a console tab left
+  open would otherwise hold a stale serve up to an hour). The refetches it causes are ordinary reads.
+
+`GET /v1/views/versions` answers the same map as JSON, with its own ETag (304 when unchanged): the
+client's fallback poll while its stream is down.
 
 ## `read-model` (version 1)
 

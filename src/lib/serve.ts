@@ -84,6 +84,7 @@ import {
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildReadModelViewRoutes } from "./views.js";
+import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
 import { navBadgeView, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
 import { NOW_VIEW_NAME } from "./now-view.js";
 import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
@@ -1542,7 +1543,7 @@ export interface StaleCodeExitGate {
  * What the gate needs to know is whether a HUMAN surface is being read.
  */
 export function stampReadWith(route: Route, stamp: () => void): Route {
-  if (route.scope !== "read") return route;
+  if (route.scope !== "read" || route.path === VIEW_EVENTS_PATH) return route;
   return {
     ...route,
     handler: (req, res, ctx) => {
@@ -2567,6 +2568,7 @@ interface ServeRoutesAssembly {
   routes: Route[];
   instanceAnalyticsCaches: AnalyticsSnapshotCache[];
   navBadgeScopes: () => NavBadgeScope[];
+  viewEvents: ViewEvents;
   /** The first GitHub App token mint. Absent when App refresh is not configured. */
   githubAppReady?: Promise<void>;
 }
@@ -2584,6 +2586,8 @@ function assembleServeRoutes(
     { instanceId: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, analytics: currentAnalyticsSnapshot, memory: operatorAgentMemory, ledgerPath: deps.ledgerPath },
     ...badgeScopes];
   const modelApprovals = deps.modelApprovals ?? [];
+  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME], servedByDefault: [readModelStatusView.name],
+    ...(readModel ? { readModel } : {}), every: deps.readModel?.every, log: deps.log });
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
   // ever re-resolves it. See resolveConsoleSha for why re-reading per request would be worse
@@ -2715,6 +2719,7 @@ function assembleServeRoutes(
     ...buildReadModelViewRoutes(withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name],
       readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"] },
       legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes })] })),
+    ...viewEvents.routes,
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),
     buildAccountUsageRoute(accountUsageDeps),
@@ -2927,7 +2932,7 @@ function assembleServeRoutes(
   // tier sibling, as the runtime backstop for whatever the compiler cannot see. See
   // `assertRoutesScopeComplete`'s own doc.
   assertRoutesScopeComplete(routes);
-  return { routes, instanceAnalyticsCaches, navBadgeScopes, githubAppReady: githubAppRefresh.ready };
+  return { routes, instanceAnalyticsCaches, navBadgeScopes, viewEvents, githubAppReady: githubAppRefresh.ready };
 }
 
 /** Every REST route `rmd serve` registers — board, panel actions, panel graph, and the shell. */
@@ -3036,6 +3041,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   // {@link readAttention}.
   let lastReadAt: number | undefined;
   let drainTarget: Server | undefined;
+  let viewEventsHandover: (reason: string) => void = () => {};
   const wakeCounters = createWakeCounters();
   const stopWakeSummary = startWakeSummaryFlush({
     counters: wakeCounters,
@@ -3055,7 +3061,10 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     },
     lastReadAt: () => lastReadAt,
     assessCheckout: deps.gatewayCheckout ?? (() => assessGatewayCheckout({ repoDir: serveRepoDir() })),
-    drain: () => (drainTarget ? drainServer(drainTarget) : Promise.resolve()),
+    drain: () => {
+      viewEventsHandover("recycle");
+      return drainTarget ? drainServer(drainTarget) : Promise.resolve();
+    },
     reloadPlan: (ref) => reloadServePlan(deps.board, serveRepoDir(), ref, { log: deps.log }),
     ...deps.staleExitSeams,
   });
@@ -3125,6 +3134,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     enforceWriteTiers: true,
   });
   drainTarget = server;
+  viewEventsHandover = routeAssembly.viewEvents.handover;
   if (readModel) {
     serveReadModels.set(server, readModel);
     server.once("listening", readModel.start);

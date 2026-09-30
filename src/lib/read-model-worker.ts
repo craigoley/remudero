@@ -81,6 +81,13 @@ export const READ_MODEL_PASS_SHARE = 0.5;
 /** BACKSTOP: the oracle thread's heap; a slice that outgrows it kills that thread, never serve's. */
 export const READ_MODEL_ORACLE_HEAP_MB = 1_024;
 const READ_MODEL_ORACLE_KIND = "remudero-read-model-oracle" as const;
+/**
+ * The share of each pass kept for view bodies, and of worker time they may take: a view that cost
+ * `c` ms is not rebuilt for `c / share` ms. Measured on the host's core ledger as three instances,
+ * `now` cost 0.6-1.4 s per instance whenever a generation moved and nav-badge ~130 ms even idle,
+ * so unbudgeted bodies alone held ticks of 2-4 s beside a catch-up.
+ */
+export const READ_MODEL_VIEW_SHARE = 0.4;
 
 const VIEW_BODY_DDL = `CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL,
   generation INTEGER NOT NULL, etag TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(view, key)) WITHOUT ROWID;`;
@@ -191,6 +198,8 @@ export interface ReadModelView {
   materialize(ctx: ReadModelViewContext): Array<{ key: string; data: unknown; sources: ViewSource[] }>;
   /** The shadow comparator's legacy side for one key, computed in the worker beside the view's body. */
   legacy?(key: string, now: number, data: unknown): ShadowLegacy | undefined;
+  /** Its bodies are per instance: each instance's is built, timed and paced as a unit of its own. */
+  perInstance?: boolean;
 }
 
 /** The `ledger:<i>` source every read-model view carries: stale while its projector is behind. */
@@ -252,6 +261,8 @@ export interface ReadModelTickerOptions {
   oracleSliceBudgetMs?: number;
   /** Each instance's projector budget per tick; derived from the lease timing when absent. */
   tickBudgetMs?: number;
+  /** A whole pass's budget: projection, then view bodies in what is left of it. */
+  passBudgetMs?: number;
   /** Where slices run; in this thread by default, on the oracle's own thread inside serve's worker. */
   oracleRunner?: ReadModelOracle;
 }
@@ -384,6 +395,16 @@ export interface ReadModelTicker {
   release(): number;
 }
 
+/** One view, or one instance's share of a per-instance view: the unit the pass budgets, times and paces. */
+interface ViewUnit {
+  view: ReadModelView;
+  slot?: Slot;
+  /** What its last build took; absent until it has run once. */
+  costMs?: number;
+  /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}. */
+  dueAt: number;
+}
+
 class ReadModelStopRequested extends RmdError {
   constructor() {
     super("read-model", GENERIC_EXIT_CODE, "the read-model worker is stopping");
@@ -454,7 +475,10 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const oracle = opts.oracleRunner ?? inProcessOracle((request) => slots.find((slot) => slot.db?.path === request.dbPath)?.db, clock, opts.escalation);
   /** The slot whose slice is running; one at a time across every instance. */
   let checking: Slot | undefined;
-  const budgetMs = opts.tickBudgetMs ?? (READ_MODEL_LEASE_RENEW_MS * READ_MODEL_PASS_SHARE) / Math.max(1, opts.instances.length);
+  const passMs = opts.passBudgetMs ?? READ_MODEL_LEASE_RENEW_MS * READ_MODEL_PASS_SHARE;
+  const budgetMs = opts.tickBudgetMs ?? (passMs * (1 - READ_MODEL_VIEW_SHARE)) / Math.max(1, opts.instances.length);
+  /** A view unit measured over this runs in a tick of its own, so it never lands on top of a projection. */
+  const soloMs = passMs * READ_MODEL_VIEW_SHARE;
   const switchesPath = readModelSwitchesPath(opts.stateDir);
   const slots: Slot[] = opts.instances.map((instance) => ({
     instance,
@@ -464,6 +488,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     checkAfter: 0,
     checkPending: false,
   }));
+  const units = views.flatMap((view): ViewUnit[] => (view.perInstance ? slots.map((slot) => ({ view, slot, dueAt: 0 })) : [{ view, dueAt: 0 }]));
+  let lastSolo = false;
   const lastEtag = new Map<string, string>();
   const latest = new Map<string, ViewBody>();
   let comparator: { db: ReadModelDb; shadow: ViewShadow } | undefined;
@@ -671,28 +697,53 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     return comparator.shadow;
   }
 
-  function materialize(now: number): void {
+  function build(unit: ViewUnit, now: number, ctx: ReadModelViewContext, generation: number): void {
+    const { view } = unit;
+    const started = clock.now();
+    try {
+      const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
+      for (const { key, data, sources } of view.materialize(scoped)) {
+        const stale = sources.some((source) => source.state !== "fresh");
+        const etag = viewEtag(view.name, view.version, stale, data);
+        const id = `${view.name}\u0000${key}`;
+        if (lastEtag.get(id) === etag) continue;
+        const body: ViewBody = { view: view.name, version: view.version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data };
+        const entry: ReadModelBodyEntry = { view: view.name, key, version: view.version, generation, etag, body };
+        if (switches.projector === "on") persist(entry);
+        lastEtag.set(id, etag);
+        latest.set(id, body);
+        opts.post({ type: "body", entry });
+      }
+    } catch (error) {
+      log("read_model.materialize_failed", { view: view.name, error: (error as Error).message });
+    }
+    const finished = clock.now();
+    unit.costMs = finished - started;
+    unit.dueAt = finished + unit.costMs / READ_MODEL_VIEW_SHARE;
+    if (unit.costMs > passMs) log("read_model.slow_view", { view: view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}), ms: unit.costMs, passMs });
+  }
+
+  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => switches.views[unit.view.name] !== "off" && unit.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
+
+  /**
+   * Builds the due view units, oldest first, in what is left of the pass that began at `tickStart`.
+   * A unit starts only if its last cost fits what is left; one never measured starts only while this
+   * phase has spent nothing, so it overshoots by itself at most once and is measured from then on.
+   */
+  function materialize(now: number, tickStart: number, only?: ViewUnit): void {
     const shadow = comparator?.shadow.readiness();
     const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
-    for (const view of views) {
-      if (switches.views[view.name] === "off") continue;
-      try {
-        for (const { key, data, sources } of view.materialize(ctx)) {
-          const stale = sources.some((source) => source.state !== "fresh");
-          const etag = viewEtag(view.name, view.version, stale, data);
-          const id = `${view.name}\u0000${key}`;
-          if (lastEtag.get(id) === etag) continue;
-          const body: ViewBody = { view: view.name, version: view.version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data };
-          const entry: ReadModelBodyEntry = { view: view.name, key, version: view.version, generation, etag, body };
-          if (switches.projector === "on") persist(entry);
-          lastEtag.set(id, etag);
-          latest.set(id, body);
-          opts.post({ type: "body", entry });
-        }
-      } catch (error) {
-        log("read_model.materialize_failed", { view: view.name, error: (error as Error).message });
-      }
+    if (only) return build(only, now, ctx, generation);
+    const left = passMs - (clock.now() - tickStart);
+    let spent = 0;
+    for (const unit of dueUnits(now)) {
+      if (stopRequested()) return;
+      const fits = unit.costMs === undefined ? spent === 0 : unit.costMs <= soloMs && spent + unit.costMs <= left;
+      if (!fits) continue;
+      const before = clock.now();
+      build(unit, now, ctx, generation);
+      spent += clock.now() - before;
     }
   }
 
@@ -723,6 +774,13 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         : undefined;
       // A slice is started, never waited for: on the oracle's thread it runs while this tick projects.
       if (due) startCheck(due, now);
+      // A view too big to share a pass gets a tick of its own, never two in a row, so the projector keeps moving.
+      const solo = lastSolo ? undefined : dueUnits(now).find((unit) => (unit.costMs ?? 0) > soloMs);
+      lastSolo = solo !== undefined;
+      if (solo) {
+        materialize(now, now, solo);
+        return postState(now);
+      }
       if (switches.projector === "off") {
         for (const slot of slots) slot.state.reason = "projector switched off";
       } else {
@@ -731,7 +789,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
           if (now >= slot.backoffUntil) tickSlot(slot, clock.now());
         }
       }
-      materialize(now);
+      materialize(now, now);
       postState(now);
     },
     shadow(request: ShadowRequest): boolean {
@@ -870,6 +928,8 @@ export interface ReadModelWorkerHandle {
   stop(): boolean;
   /** Hands one sampled shadow request to the worker, which diffs it off serve's main thread. */
   shadow(request: ShadowRequest): void;
+  /** Calls `listener` with each body the worker posts, after it is stored; returns the unsubscribe. */
+  onBody(listener: (entry: ReadModelBodyEntry) => void): () => void;
 }
 
 export interface ReadModelWorkerOptions {
@@ -921,10 +981,13 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   let stopping = false;
   let deaths = 0;
   let respawnTimer: NodeJS.Timeout | undefined;
+  const bodyListeners = new Set<(entry: ReadModelBodyEntry) => void>();
 
   const onMessage = (msg: ReadModelWorkerMessage): void => {
-    if (msg.type === "body") bodies.set(readModelBodyKey(msg.entry.view, msg.entry.key), msg.entry);
-    else if (msg.type === "log") opts.log?.(msg.step, msg.extra);
+    if (msg.type === "body") {
+      bodies.set(readModelBodyKey(msg.entry.view, msg.entry.key), msg.entry);
+      for (const listener of bodyListeners) listener(msg.entry);
+    } else if (msg.type === "log") opts.log?.(msg.step, msg.extra);
     else {
       at = msg.at;
       switches = msg.switches;
@@ -967,6 +1030,10 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     }),
     switches: () => mainSwitches,
     shadow: (request) => worker?.postMessage({ type: "shadow", ...request }),
+    onBody: (listener) => {
+      bodyListeners.add(listener);
+      return () => bodyListeners.delete(listener);
+    },
     start: () => {
       if (worker || stopping) return;
       spawn();
