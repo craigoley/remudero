@@ -19,6 +19,7 @@ import {
   diffViewData,
   legacyViewSampler,
   memberEntities,
+  sumEntities,
   readShadowEvidence,
   shadowReadiness,
   sqliteShadowStore,
@@ -169,6 +170,48 @@ test("compare attaches the legacy side's members to a count diff", (t) => {
   assert.deepEqual(result.diffs.map((d) => [d.path, d.classification]), [["counts.queued", "legacy_horizon"]]);
   const bare = shadow.compare({ view: "now", key: "", requests: 1, legacy: { ...legacy, members: {} }, body: { data: { counts: { queued: 2 } }, asOf: new Date(T0).toISOString() } });
   assert.deepEqual(bare.diffs.map((d) => d.classification), ["real"], "the same count without members stays real");
+});
+
+/** Classifies one sum diff the way `compare` does: its rows attached and their entities looked up. */
+function sumClass(db: ReadModelDb, legacy: Array<[string, number]>, view: Array<[string, number]>, extra: { legacyAsOfMs?: number; precision?: number } = {}): { classification: string; reason: string } {
+  const total = (rows: Array<[string, number]>): number => rows.reduce((acc, [, x]) => acc + x, 0);
+  const [diff] = diffViewData({ cost: total(legacy) }, { cost: total(view) });
+  const sum = { legacy, view, ...(extra.precision !== undefined ? { precision: extra.precision } : {}) };
+  const ev = readShadowEvidence([db], { ids: sumEntities(sum), legacyAsOfMs: extra.legacyAsOfMs ?? T0, viewAsOfMs: T0, legacyHorizonMs: T0 - DAY });
+  return classifyShadowDiff({ ...diff!, sum }, ev);
+}
+
+test("a sum diff is judged by the rows each side added", (t) => {
+  const db = evidenceDb(t);
+  const dup = sumClass(db, [["W1-T3#a", 5], ["W1-T3#a", 5], ["W1-T8#b", 2]], [["W1-T3#a", 5], ["W1-T8#b", 2]]);
+  assert.equal(dup.classification, "dedupe", dup.reason);
+  assert.match(dup.reason, /dedupe 5/);
+  assert.equal(sumClass(db, [], [["W1-T1#a", 3]]).classification, "legacy_horizon", "a row whose task only pre-horizon rows name");
+  assert.equal(sumClass(db, [], [["W1-T2#a", 3]], { legacyAsOfMs: T0 - HOUR }).classification, "timing", "a row between the two ages");
+  const residual = sumClass(db, [["W1-T3#a", 5], ["W1-T3#a", 5]], [["W1-T3#a", 5], ["W1-T9#c", 1.5]]);
+  assert.equal(residual.classification, "real", residual.reason);
+  assert.match(residual.reason, /a residual of 1.5 no measured row explains \(W1-T9#c; dedupe 5, real 1.5\)/);
+  assert.equal(sumClass(db, [["W1-T3#a", 5]], [["W1-T3#a", 6]]).classification, "real", "one row with two amounts is not a duplicate");
+  assert.equal(sumClass(db, [["W1-T3#a", 5]], [["W1-T3#a", 5], ["W1-T3#a", 5]]).classification, "real", "the view adding a row twice is a view bug");
+  const [cash] = diffViewData({ cash: 1.26 }, { cash: 1.25 });
+  const rounded = classifyShadowDiff({ ...cash!, sum: { legacy: [["W1-T3#a", 1.254], ["W1-T3#a", 1.254]], view: [["W1-T3#a", 1.254]], precision: 0.01 } }, NONE);
+  assert.match(rounded.reason, /do not account for 1.26 vs 1.25/, "two copies of 1.254 sum past the value legacy reports");
+  const [within] = diffViewData({ cash: 2.51 }, { cash: 1.25 });
+  assert.equal(classifyShadowDiff({ ...within!, sum: { legacy: [["W1-T3#a", 1.254], ["W1-T3#a", 1.254]], view: [["W1-T3#a", 1.254]], precision: 0.01 } }, NONE).classification, "dedupe", "rounding to the cent is not a residual");
+});
+
+test("a latest-time diff is explained only by the later side's own row", (t) => {
+  const db = evidenceDb(t);
+  const at = (ms: number): string => new Date(ms).toISOString();
+  const classify = (latest: { legacy: string | null; view: string | null }, legacyAsOfMs = T0): string => {
+    const [diff] = diffViewData({ last_run: at(T0 - 2 * HOUR) }, { last_run: at(T0 - 30 * 60_000) });
+    const ev = readShadowEvidence([db], { ids: [latest.legacy, latest.view].flatMap((r) => (r ? [r.split("#")[0]!] : [])), legacyAsOfMs, viewAsOfMs: T0, legacyHorizonMs: T0 - DAY });
+    return classifyShadowDiff({ ...diff!, latest }, ev).classification;
+  };
+  assert.equal(classify({ legacy: "W1-T3#x", view: "W1-T2#y" }, T0 - HOUR), "timing");
+  assert.equal(classify({ legacy: "W1-T3#x", view: "W1-T1#y" }), "legacy_horizon");
+  assert.equal(classify({ legacy: "W1-T3#x", view: "W1-T9#y" }), "real");
+  assert.equal(classify({ legacy: "W1-T3#x", view: null }), "real");
 });
 
 test("a rate computed from two counts is explained only when a count it reads is", (t) => {

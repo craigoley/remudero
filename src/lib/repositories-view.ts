@@ -27,6 +27,7 @@ import {
   repoSummarySync,
   type RepoDashboardOptions,
   type RepoDashboardResult,
+  type RepoShadowFacts,
 } from "./repo-dashboard-route.js";
 import type { ShadowLegacy } from "./view-shadow.js";
 import type { ViewSource } from "./views.js";
@@ -137,25 +138,52 @@ interface InstanceSummary {
   sourcesMtimeMs: number;
   summary?: RepoDashboardResult;
   reason?: string;
-  /** What each own repository's counts counted, by repository id (the shadow comparator's members). */
-  members?: Record<string, Record<string, string[]>>;
+  /** Each own repository's shadow facts, by repository id. */
+  shadow?: Record<string, RepoShadowFacts>;
 }
 
-type CountMembers = Record<string, Record<string, Record<string, string[]>>>;
+type ShadowFactsByInstance = Record<string, Record<string, RepoShadowFacts>>;
 
-/** Each instance's count members as diff paths into `RepositoriesData`: `instances[instanceId=…].summary.repos[id=…].<count>`. */
-export function repositoriesMemberPaths(byInstance: CountMembers): Record<string, string[]> {
-  const out: Record<string, string[]> = {};
-  for (const [instanceId, repos] of Object.entries(byInstance)) {
-    for (const [repoId, counts] of Object.entries(repos)) {
-      for (const [count, ids] of Object.entries(counts)) out[`instances[instanceId=${instanceId}].summary.repos[id=${repoId}].${count}`] = ids;
+const canonicalJson = (value: unknown): string => JSON.stringify(value);
+
+/**
+ * Pairs each side's shadow facts under their diff paths into `RepositoriesData`
+ * (`instances[instanceId=…].summary.repos[id=…].<field>`). `errorrate` and `cost_7d` are derived from the
+ * counts and sum they are computed from. `condition` and `reasons` are derived from the run counts only when
+ * legacy's own signals, given the view's run counts, reproduce the view's exactly; otherwise they stay `real`.
+ */
+export function repositoriesShadowPairing(legacyFacts: ShadowFactsByInstance, viewFacts: ShadowFactsByInstance, view: RepositoriesData | undefined): Required<Pick<ShadowLegacy, "members" | "sums" | "latest" | "derived">> {
+  const members: Record<string, { legacy: string[]; view: string[] }> = {};
+  const sums: Record<string, { legacy: Array<[string, number]>; view: Array<[string, number]>; precision?: number }> = {};
+  const latest: Record<string, { legacy: string | null; view: string | null }> = {};
+  const derived: Record<string, string[]> = {};
+  for (const instanceId of new Set([...Object.keys(legacyFacts), ...Object.keys(viewFacts)])) {
+    for (const repoId of new Set([...Object.keys(legacyFacts[instanceId] ?? {}), ...Object.keys(viewFacts[instanceId] ?? {})])) {
+      const l = legacyFacts[instanceId]?.[repoId];
+      const v = viewFacts[instanceId]?.[repoId];
+      const base = `instances[instanceId=${instanceId}].summary.repos[id=${repoId}]`;
+      for (const k of new Set([...Object.keys(l?.counts ?? {}), ...Object.keys(v?.counts ?? {})])) members[`${base}.${k}`] = { legacy: l?.counts[k] ?? [], view: v?.counts[k] ?? [] };
+      for (const k of new Set([...Object.keys(l?.sums ?? {}), ...Object.keys(v?.sums ?? {})])) {
+        const precision = (l ?? v)!.sums[k]?.precision;
+        sums[`${base}.${k}`] = { legacy: l?.sums[k]?.rows ?? [], view: v?.sums[k]?.rows ?? [], ...(precision !== undefined ? { precision } : {}) };
+      }
+      latest[`${base}.health.last_run`] = { legacy: l?.lastRun ?? null, view: v?.lastRun ?? null };
+      const runs = [`${base}.health.runs7d.succeeded`, `${base}.health.runs7d.failed`];
+      derived[`${base}.health.errorrate`] = runs;
+      derived[`${base}.telemetry.cost_7d`] = [`${base}.telemetry.cash_usd_7d`];
+      const shown = view?.instances.find((i) => i.instanceId === instanceId)?.summary?.repos.find((r) => r.id === repoId)?.health;
+      const again = shown?.runs7d && l?.condition ? l.condition(shown.runs7d) : undefined;
+      if (again && again.condition === shown!.condition && canonicalJson(again.reasons) === canonicalJson(shown!.reasons)) {
+        derived[`${base}.health.condition`] = runs;
+        derived[`${base}.health.reasons`] = runs;
+      }
     }
   }
-  return out;
+  return { members, sums, latest, derived };
 }
 
-/** `repositories`' legacy side: each instance's #7926 summary over its own ledger read, with its count members. */
-export function legacyRepositories(sourcesPath: string, nowMs: number): ShadowLegacy & { members: Record<string, { legacy: string[]; view: string[] }> } | undefined {
+/** `repositories`' legacy side: each instance's #7926 summary over its own ledger read, with its shadow facts. */
+export function legacyRepositories(sourcesPath: string, nowMs: number): ShadowLegacy & { facts: ShadowFactsByInstance } | undefined {
   let published: RepositoriesSources;
   try {
     published = JSON.parse(readFileSync(sourcesPath, "utf8")) as RepositoriesSources;
@@ -163,21 +191,15 @@ export function legacyRepositories(sourcesPath: string, nowMs: number): ShadowLe
     // deliberate: no published sources means no legacy side to compare; the sample is skipped, not a diff.
     return undefined;
   }
-  const counted: CountMembers = {};
+  const facts: ShadowFactsByInstance = {};
   const instances: RepositoriesData["instances"] = published.instances.map(({ instanceId, options }) => {
     const outcome = repoSummarySync({ ...options, shadowMembers: true }, nowMs);
     if (!outcome.ok) return { instanceId, reason: outcome.reason };
-    counted[instanceId] = outcome.members ?? {};
+    facts[instanceId] = outcome.shadow ?? {};
     return { instanceId, summary: outcome.summary };
   });
   const data: RepositoriesData = { instances, ...repositoriesPortfolio(published, { instances }) };
-  const paths = repositoriesMemberPaths(counted);
-  const members = Object.fromEntries(Object.entries(paths).map(([path, ids]) => [path, { legacy: ids, view: [] as string[] }]));
-  const derived = Object.fromEntries(Object.keys(paths).filter((path) => path.endsWith(".health.runs7d.failed")).map((failed) => {
-    const health = failed.slice(0, -".runs7d.failed".length);
-    return [`${health}.errorrate`, [`${health}.runs7d.succeeded`, failed]];
-  }));
-  return { data, asOfMs: nowMs, members, derived };
+  return { data, asOfMs: nowMs, facts };
 }
 
 function planReader(): (path: string) => Plan {
@@ -204,7 +226,7 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
   name: string;
   version: number;
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: RepositoriesData; sources: ViewSource[] }>;
-  legacy(key: string, now: number): ShadowLegacy | undefined;
+  legacy(key: string, now: number, data: unknown): ShadowLegacy | undefined;
 } {
   const sourcesFile = readOnMtimeChange(readSources);
   const registryFile = readOnMtimeChange(readRegistry);
@@ -214,14 +236,12 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
   return {
     name: "repositories",
     version: REPOSITORIES_VIEW_VERSION,
-    /** The shadow comparator's legacy side, each count's members paired with what this view's summaries counted. */
-    legacy(_key, now) {
+    /** The shadow comparator's legacy side, its facts paired with this view's own summaries' facts. */
+    legacy(_key, now, data) {
       const legacy = sourcesPath === undefined ? undefined : legacyRepositories(sourcesPath, now);
       if (!legacy) return undefined;
-      const mine = repositoriesMemberPaths(Object.fromEntries([...computed].map(([instanceId, s]) => [instanceId, s.members ?? {}])));
-      for (const path of Object.keys(mine)) legacy.members[path] ??= { legacy: [], view: [] };
-      for (const [path, pair] of Object.entries(legacy.members)) pair.view = mine[path] ?? [];
-      return legacy;
+      const mine = Object.fromEntries([...computed].map(([instanceId, s]) => [instanceId, s.shadow ?? {}]));
+      return { data: legacy.data, asOfMs: legacy.asOfMs, ...repositoriesShadowPairing(legacy.facts, mine, data as RepositoriesData) };
     },
     materialize: ({ now, instances }) => {
       const dbPath = instances.find((slot) => slot.db)?.db?.path;
@@ -244,8 +264,8 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
         if (!prior || ageMs >= REPO_TELEMETRY_CACHE_TTL_MS || (moved && ageMs >= REPO_TELEMETRY_MIN_AGE_MS)) {
           const next = summarize(slot, options, now, readPlan);
           current = next.summary
-            ? { atMs: now, generation, sourcesMtimeMs, summary: next.summary, ...(next.members ? { members: next.members } : {}) }
-            : { atMs: now, generation, sourcesMtimeMs, reason: next.reason, ...(prior?.summary ? { summary: prior.summary, ...(prior.members ? { members: prior.members } : {}) } : {}) };
+            ? { atMs: now, generation, sourcesMtimeMs, summary: next.summary, ...(next.shadow ? { shadow: next.shadow } : {}) }
+            : { atMs: now, generation, sourcesMtimeMs, reason: next.reason, ...(prior?.summary ? { summary: prior.summary, ...(prior.shadow ? { shadow: prior.shadow } : {}) } : {}) };
           computed.set(instanceId, current);
         }
         sources.push(summarySource(instanceId, current!));
@@ -285,7 +305,7 @@ function summarize(
   options: RepositoriesInstanceOptions,
   now: number,
   readPlan: (path: string) => Plan,
-): { summary?: RepoDashboardResult; reason?: string; members?: Record<string, Record<string, string[]>> } {
+): { summary?: RepoDashboardResult; reason?: string; shadow?: Record<string, RepoShadowFacts> } {
   if (slot === undefined || slot.db === undefined) return { reason: "the read model does not project this instance" };
   if (slot.state.tickedAt === undefined) return { reason: "the read model has not projected this instance's ledger yet" };
   const db = slot.db;
@@ -296,7 +316,7 @@ function summarize(
     return { reason: `repository rows unreadable: ${(error as Error).message}` };
   }
   const outcome = repoSummarySync({ ...options, readLedger: () => rows, readPlan, shadowMembers: true }, now);
-  return outcome.ok ? { summary: outcome.summary, ...(outcome.members ? { members: outcome.members } : {}) } : { reason: outcome.reason };
+  return outcome.ok ? { summary: outcome.summary, ...(outcome.shadow ? { shadow: outcome.shadow } : {}) } : { reason: outcome.reason };
 }
 
 /** Absent until the first summary, stale while the last recompute failed (#7928), else fresh. */

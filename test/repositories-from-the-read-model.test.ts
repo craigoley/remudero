@@ -23,6 +23,7 @@ import {
   createRepositoriesSourcePublisher,
   groupRepositoryProjects,
   readRepoRows,
+  repositoriesShadowPairing,
   startRepositoriesSourcePublisher,
   type RepositoriesData,
   type RepositoriesSources,
@@ -223,6 +224,51 @@ test("a repositories count diff is judged by the rows each id it counted", (t) =
   const failed = sample().find((d) => d.path === `${base}.runs7d.failed`)!;
   assert.equal(failed.classification, "real");
   assert.match(failed.reason, /no measured row explains c-T9#.*1 dedupe, 1 real/);
+});
+
+test("a repositories sum and the condition it drives are judged by the rows each side added", (t) => {
+  const f = fixture(t);
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => f.sources })();
+  const run = ticker(f);
+  repositories(run.tick());
+  t.after(() => run.release());
+  const live = join(f.stateDir, "ledger.ndjson");
+  const lines = readFileSync(live, "utf8").split("\n");
+  const apiCall = lines.find((line) => line.includes('"billing_mode":"api"'))!;
+  const failure = lines.find((line) => line.includes('"blocked_ci"'))!;
+  // Legacy's live file re-emits one api call and one failure twice under retried run ids; the view added each once.
+  const again = [
+    apiCall.replace('"run_id":"c1"', '"run_id":"c1b","task_id":"c-T1"'),
+    failure.replace('"run_id":"c2"', '"run_id":"c2b"'),
+    failure.replace('"run_id":"c2"', '"run_id":"c2c"'),
+  ];
+  writeFileSync(live, `${readFileSync(live, "utf8")}${again.join("\n")}\n`);
+  assert.equal(run.shadow({ view: "repositories", key: "", requests: 1 }), true);
+  const diffs = run.logs.filter((l) => l.step === VIEW_SHADOW_DIFF_STEP).at(-1)!.extra.diffs as Array<{ path: string; classification: string; reason: string }>;
+  const base = "instances[instanceId=core].summary.repos[id=craigoley/remudero].";
+  assert.deepEqual(diffs.map((d) => [d.path.replace(base, ""), d.classification]), [
+    ["health.condition", "dedupe"],
+    ["health.errorrate", "dedupe"],
+    ["health.reasons", "dedupe"],
+    ["health.runs7d.failed", "dedupe"],
+    ["telemetry.cache_read_tokens7d", "dedupe"],
+    ["telemetry.cash_usd_7d", "dedupe"],
+    ["telemetry.cost_7d", "dedupe"],
+    ["telemetry.tokens7d", "dedupe"],
+  ], JSON.stringify(diffs));
+});
+
+test("condition is derived from the run counts only when legacy's signals reproduce the view's", () => {
+  const facts = (condition: string) => ({ core: { "o/r": { counts: {}, sums: { "telemetry.cash_usd_7d": { rows: [], precision: 0.01 } }, lastRun: null, condition: () => ({ condition, reasons: [] }) } } });
+  const view = { instances: [{ instanceId: "core", summary: { repos: [{ id: "o/r", health: { runs7d: { succeeded: 1, failed: 0, superseded: 0 }, condition: "healthy", reasons: [] } }] } }], projects: [] } as unknown as RepositoriesData;
+  const base = "instances[instanceId=core].summary.repos[id=o/r].health";
+  const same = repositoriesShadowPairing(facts("healthy") as never, {}, view);
+  assert.deepEqual(same.derived[`${base}.condition`], [`${base}.runs7d.succeeded`, `${base}.runs7d.failed`]);
+  assert.equal(same.sums["instances[instanceId=core].summary.repos[id=o/r].telemetry.cash_usd_7d"]!.precision, 0.01);
+  const down = repositoriesShadowPairing(facts("down") as never, {}, view);
+  assert.equal(down.derived[`${base}.condition`], undefined, "a heartbeat the counts cannot explain leaves condition real");
+  assert.equal(down.derived[`${base}.reasons`], undefined);
+  assert.deepEqual(down.latest[`${base}.last_run`], { legacy: null, view: null });
 });
 
 test("a row carried by several rotations is counted once", (t) => {

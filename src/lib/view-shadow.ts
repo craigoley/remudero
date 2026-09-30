@@ -48,6 +48,23 @@ export interface ShadowFieldDiff {
   ids: string[];
   /** A count's members, when the legacy side measured them for this path. */
   members?: ShadowMembers;
+  /** A sum's rows, when the legacy side measured them for this path. */
+  sum?: ShadowSum;
+  /** The row a latest-time value is, on each side. */
+  latest?: ShadowLatest;
+}
+
+/** The rows each side added into one sum, `[identity, amount]`; `precision` is the rounding the value carries. */
+export interface ShadowSum {
+  legacy: ReadonlyArray<readonly [string, number]>;
+  view: ReadonlyArray<readonly [string, number]>;
+  precision?: number;
+}
+
+/** The row (`<entity>#<row>`) whose time each side reports as a latest-time value. */
+export interface ShadowLatest {
+  legacy: string | null;
+  view: string | null;
 }
 
 /** The entity ids each side counted at one aggregate path, one entry per counted row. A member
@@ -202,6 +219,68 @@ function classifyAggregate(legacy: number, view: number, members: ShadowMembers,
   return { classification: top, reason: `every counted row differing is explained (${breakdown})` };
 }
 
+function amountsById(rows: ReadonlyArray<readonly [string, number]>): Map<string, number[]> {
+  const out = new Map<string, number[]>();
+  for (const [id, amount] of rows) out.set(id, [...(out.get(id) ?? []), amount]);
+  return out;
+}
+
+/** The entities of every row one sum's two sides added differently. */
+export function sumEntities(sum: ShadowSum): string[] {
+  const l = amountsById(sum.legacy);
+  const v = amountsById(sum.view);
+  const differ = [...new Set([...l.keys(), ...v.keys()])].filter((id) => canonical(l.get(id) ?? []) !== canonical(v.get(id) ?? []));
+  return [...new Set(differ.map(entityOf))];
+}
+
+/**
+ * A sum diff, explained by the rows each side added: a row legacy added again with the same amount is
+ * `dedupe`; a row only one side added is `timing` or `legacy_horizon` by its entity's rows. Every other
+ * amount is the residual, and a residual beyond the value's rounding makes it `real`.
+ */
+function classifySum(legacy: number, view: number, sum: ShadowSum, ev: ShadowEvidence): { classification: ShadowClassification; reason: string } {
+  const tolerance = (sum.precision ?? 0) / 2 + 1e-9;
+  const total = (rows: ShadowSum["legacy"]): number => rows.reduce((acc, [, amount]) => acc + amount, 0);
+  if (Math.abs(total(sum.legacy) - legacy) > tolerance || Math.abs(total(sum.view) - view) > tolerance) {
+    return { classification: "real", reason: `the summed rows (${total(sum.legacy)} legacy, ${total(sum.view)} view) do not account for ${legacy} vs ${view}` };
+  }
+  const l = amountsById(sum.legacy);
+  const v = amountsById(sum.view);
+  const amounts: Record<ShadowClassification, number> = { legacy_horizon: 0, timing: 0, dedupe: 0, real: 0 };
+  const unexplained: string[] = [];
+  for (const id of [...new Set([...l.keys(), ...v.keys()])].sort()) {
+    const ls = l.get(id) ?? [];
+    const vs = v.get(id) ?? [];
+    if (canonical(ls) === canonical(vs)) continue;
+    const one = ls[0] ?? vs[0]!;
+    if (vs.length > 1 || ![...ls, ...vs].every((amount) => amount === one)) {
+      amounts.real += Math.abs(total(ls.map((a) => [id, a])) - total(vs.map((a) => [id, a])));
+      unexplained.push(id);
+      continue;
+    }
+    amounts.dedupe += Math.abs(one) * Math.max(0, ls.length - 1);
+    if (Math.min(ls.length, 1) === vs.length) continue;
+    const entity = entityOf(id);
+    const cls: ShadowClassification = ev.namedInGap.has(entity) ? "timing"
+      : ev.legacyHorizonMs !== undefined && ev.namedBeforeHorizon.has(entity) ? "legacy_horizon" : "real";
+    amounts[cls] += Math.abs(one);
+    if (cls === "real") unexplained.push(id);
+  }
+  const breakdown = SHADOW_CLASSIFICATIONS.filter((c) => amounts[c] > 0).map((c) => `${c} ${amounts[c]}`).join(", ");
+  if (amounts.real > tolerance) return { classification: "real", reason: `a residual of ${amounts.real} no measured row explains (${unexplained.join(" ")}; ${breakdown})` };
+  const top = (["dedupe", "timing", "legacy_horizon"] as const).reduce((a, b) => (amounts[b] > amounts[a] ? b : a));
+  return { classification: top, reason: `every differing row is explained (${breakdown})` };
+}
+
+/** A latest-time diff: the later side's row must be one the other side could not yet, or ever, see. */
+function classifyLatest(legacy: string, view: string, latest: ShadowLatest, ev: ShadowEvidence): { classification: ShadowClassification; reason: string } {
+  const row = Date.parse(view) > Date.parse(legacy) ? latest.view : latest.legacy;
+  const entity = row === null ? undefined : entityOf(row);
+  if (entity !== undefined && ev.namedInGap.has(entity)) return { classification: "timing", reason: `the later row ${row} landed between the two ages` };
+  if (entity !== undefined && ev.legacyHorizonMs !== undefined && ev.namedBeforeHorizon.has(entity)) return { classification: "legacy_horizon", reason: `the later row ${row} names an entity older than the legacy horizon` };
+  return { classification: "real", reason: `no measured row explains the later ${row ?? "value"}` };
+}
+
 /**
  * Classifies one differing path. Checked in order, each on its own evidence: `dedupe`, then `timing`,
  * then `legacy_horizon`; anything left is `real`. A diff is judged on its own ids or members only, so a
@@ -212,6 +291,8 @@ export function classifyShadowDiff(diff: ShadowFieldDiff, ev: ShadowEvidence): {
   const any = (set: ReadonlySet<string>): boolean => ids.some((id) => set.has(id));
   const { legacy, view } = diff;
   if (diff.members && typeof legacy === "number" && typeof view === "number") return classifyAggregate(legacy, view, diff.members, ev);
+  if (diff.sum && typeof legacy === "number" && typeof view === "number") return classifySum(legacy, view, diff.sum, ev);
+  if (diff.latest && typeof legacy === "string" && typeof view === "string") return classifyLatest(legacy, view, diff.latest, ev);
   if (Array.isArray(legacy) && Array.isArray(view) && hasDuplicates(legacy) && canonical(uniqueInOrder(legacy)) === canonical(view)) {
     return { classification: "dedupe", reason: `legacy lists ${legacy.length - view.length} duplicate element(s)` };
   }
@@ -277,6 +358,10 @@ export interface ShadowLegacy {
   duplicates?: { rows: number; ids: readonly string[] };
   /** Per aggregate path, what each side counted there; a count diff without them is `real`. */
   members?: Readonly<Record<string, ShadowMembers>>;
+  /** Per sum path, the rows each side added; a sum diff without them is `real`. */
+  sums?: Readonly<Record<string, ShadowSum>>;
+  /** Per latest-time path, the row each side's value is. */
+  latest?: Readonly<Record<string, ShadowLatest>>;
   /** A value computed only from other paths (a rate from two counts): explained exactly when they are. */
   derived?: Readonly<Record<string, readonly string[]>>;
 }
@@ -382,11 +467,14 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
       state.streakSinceMs ??= now;
       const raw = diffViewData(legacy.data, body.data).map((d) => {
         const members = legacy.members?.[d.path];
-        return members ? { ...d, members } : d;
+        const sum = legacy.sums?.[d.path];
+        const latest = legacy.latest?.[d.path];
+        return { ...d, ...(members ? { members } : {}), ...(sum ? { sum } : {}), ...(latest ? { latest } : {}) };
       });
       const viewAsOf = body.asOf === null ? null : Date.parse(body.asOf);
       const ev = opts.evidence({
-        view, ids: raw.flatMap((d) => [...d.ids, ...(d.members ? memberEntities(d.members) : [])]), legacyAsOfMs: legacy.asOfMs, viewAsOfMs: Number.isFinite(viewAsOf) ? viewAsOf : null,
+        view, ids: raw.flatMap((d) => [...d.ids, ...(d.members ? memberEntities(d.members) : []), ...(d.sum ? sumEntities(d.sum) : []),
+          ...(d.latest ? [d.latest.legacy, d.latest.view].flatMap((row) => (row === null ? [] : [entityOf(row)])) : [])]), legacyAsOfMs: legacy.asOfMs, viewAsOfMs: Number.isFinite(viewAsOf) ? viewAsOf : null,
         ...(legacy.horizonMs !== undefined ? { legacyHorizonMs: legacy.horizonMs } : {}), ...(legacy.duplicates ? { duplicates: legacy.duplicates } : {}),
       });
       const judged = raw.filter((d) => !legacy.derived?.[d.path]).map((d) => ({ path: d.path, ...classifyShadowDiff(d, ev) }));

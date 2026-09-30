@@ -163,8 +163,17 @@ export interface RepoTelemetry {
   cash_usd_7d: number | null;
   subscription: RepoSubscriptionUsage | null;
   modelsused: string[] | null;
-  /** Per count, what it counted (view-shadow.ts members): a task id, or `<task>#<ts>` for one verdict row. */
-  members?: Record<string, string[]>;
+  /** What the shadow comparator judges a diff by (view-shadow.ts); only when asked for. */
+  shadow?: RepoShadowFacts;
+}
+
+/** Per count its members (a task id, or `<task>#<ts>` for one row), per sum the rows it added, and `last_run`'s row. */
+export interface RepoShadowFacts {
+  counts: Record<string, string[]>;
+  sums: Record<string, { rows: Array<[string, number]>; precision?: number }>;
+  lastRun: string | null;
+  /** The condition and reasons this repository's own signals give for other run counts. */
+  condition?: (runs7d: RepoRunOutcomes) => { condition: RepoCondition; reasons: string[] };
 }
 
 /** What only the instance that operates a repository knows about it. */
@@ -233,11 +242,13 @@ export function projectRepoTelemetry(
     return true;
   });
   const runRepo = new Map<string, string>();
+  const runTask = new Map<string, string>();
   const creditedAt = new Map<string, number>();
   for (const row of ledger) {
     const runId = str(row.run_id);
     const named = str(row.repo);
     if (row.step === "run.start" && runId && named) runRepo.set(runId, named);
+    if (row.step === "run.start" && runId && str(row.task_id)) runTask.set(runId, str(row.task_id)!);
     const ts = Date.parse(str(row.ts) ?? "");
     if (isMergeCreditLine(row) && typeof row.task_id === "string" && Number.isFinite(ts)) {
       creditedAt.set(row.task_id, Math.max(ts, creditedAt.get(row.task_id) ?? -Infinity));
@@ -248,6 +259,9 @@ export function projectRepoTelemetry(
   for (const row of ledger) if (row.step === "worker.attempt" && isWorkerCostRow(row)) runsWithAttempt.add(str(row.run_id) ?? "");
   let lastRunMs = -Infinity;
   let lastRun: string | null = null;
+  let lastRunRow: string | null = null;
+  const sumRows: Record<"tokens" | "cacheRead" | "cash" | "subTokens", Array<[string, number]>> = { tokens: [], cacheRead: [], cash: [], subTokens: [] };
+  const subCallRows: string[] = [];
   const succeededTasks = new Set<string>();
   const failedRows: string[] = [];
   const supersededRows: string[] = [];
@@ -267,9 +281,9 @@ export function projectRepoTelemetry(
     const verdict = str(row.verdict) ?? "";
     if (isMergeCreditLine(row) || (row.step === "verdict" && SUCCESS_VERDICTS.has(verdict))) {
       succeededTasks.add(taskId);
-      if (ts > lastRunMs) [lastRunMs, lastRun] = [ts, str(row.ts)!];
+      if (ts > lastRunMs) [lastRunMs, lastRun, lastRunRow] = [ts, str(row.ts)!, `${taskId}#${str(row.ts)}`];
     } else if (row.step === "verdict") {
-      if (ts > lastRunMs) [lastRunMs, lastRun] = [ts, str(row.ts)!];
+      if (ts > lastRunMs) [lastRunMs, lastRun, lastRunRow] = [ts, str(row.ts)!, `${taskId}#${str(row.ts)}`];
       if (!ERROR_VERDICTS.has(verdict)) continue;
       ((creditedAt.get(taskId) ?? -Infinity) >= ts ? supersededRows : failedRows).push(`${taskId}#${str(row.ts)}`);
     } else if (row.step === "worker.assignment") {
@@ -291,14 +305,20 @@ export function projectRepoTelemetry(
       if (row.step !== "worker.attempt" && runsWithAttempt.has(str(row.run_id) ?? "")) continue;
       const t = (row.tokens && typeof row.tokens === "object" ? row.tokens : {}) as Row;
       const callTokens = num(t.input) + num(t.output) + num(t.cacheCreation);
+      const rowId = `${str(row.task_id) ?? runTask.get(str(row.run_id) ?? "") ?? `run:${str(row.run_id)}`}#${String(row.step)}@${str(row.ts)}`;
       tokens += callTokens;
       cacheRead += num(t.cacheRead);
+      sumRows.tokens.push([rowId, callTokens]);
+      sumRows.cacheRead.push([rowId, num(t.cacheRead)]);
       if (row.billing_mode === "api") {
         cash += num(row.total_cost_usd);
+        sumRows.cash.push([rowId, num(row.total_cost_usd)]);
         continue;
       }
       subCalls += 1;
       subTokens += callTokens;
+      subCallRows.push(rowId);
+      sumRows.subTokens.push([rowId, callTokens]);
     }
   }
   const open = plan?.tasks.filter((t) =>
@@ -307,12 +327,22 @@ export function projectRepoTelemetry(
   const succeeded = succeededTasks.size;
   const failed = failedRows.length;
   const superseded = supersededRows.length;
-  const members = sources.members !== true ? undefined : {
-    "health.queuedtasks": (open ?? []).map((t) => t.id),
-    "health.queued": (open ?? []).filter((t) => t.status === "queued").map((t) => t.id),
-    "health.runs7d.succeeded": [...succeededTasks],
-    "health.runs7d.failed": failedRows,
-    "health.runs7d.superseded": supersededRows,
+  const shadow: RepoShadowFacts | undefined = sources.members !== true ? undefined : {
+    counts: {
+      "health.queuedtasks": (open ?? []).map((t) => t.id),
+      "health.queued": (open ?? []).filter((t) => t.status === "queued").map((t) => t.id),
+      "health.runs7d.succeeded": [...succeededTasks],
+      "health.runs7d.failed": failedRows,
+      "health.runs7d.superseded": supersededRows,
+      "telemetry.subscription.calls7d": subCallRows,
+    },
+    sums: {
+      "telemetry.tokens7d": { rows: sumRows.tokens },
+      "telemetry.cache_read_tokens7d": { rows: sumRows.cacheRead },
+      "telemetry.cash_usd_7d": { rows: sumRows.cash, precision: 0.01 },
+      "telemetry.subscription.tokens7d": { rows: sumRows.subTokens },
+    },
+    lastRun: lastRunRow,
   };
   return {
     queuedtasks: open ? open.length : null,
@@ -329,7 +359,7 @@ export function projectRepoTelemetry(
       windows: [...windows.values()].map((w) => w.value).sort((a, b) => `${a.provider}|${a.window}`.localeCompare(`${b.provider}|${b.window}`)),
     },
     modelsused: [...models].sort((a, b) => a.localeCompare(b)),
-    ...(members ? { members } : {}),
+    ...(shadow ? { shadow } : {}),
   };
 }
 
@@ -641,7 +671,7 @@ export interface RepoDashboardOptions {
   readPlan?: (path: string) => Plan;
   /** Test seam: the module a spawned telemetry worker loads. */
   workerUrl?: URL;
-  /** repoSummarySync also returns each own repository's count members (the shadow comparator's). */
+  /** repoSummarySync also returns each own repository's {@link RepoShadowFacts}. */
   shadowMembers?: boolean;
 }
 
@@ -715,7 +745,7 @@ function dashboardResult(deps: RepoDashboardOptions, resolved: Resolved, outcome
  * telemetry and projection. The read-model worker calls it with `readLedger` over its `repo_row` table.
  * A failed telemetry pass is `{ ok: false, reason }`, where the route answers its read-cache error.
  */
-export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number): { ok: true; summary: RepoDashboardResult; members?: Record<string, Record<string, string[]>> } | { ok: false; reason: string } {
+export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number): { ok: true; summary: RepoDashboardResult; shadow?: Record<string, RepoShadowFacts> } | { ok: false; reason: string } {
   const planPath = deps.planPath ?? join(deps.root, "plan", "tasks.yaml");
   let text: string | undefined;
   if (deps.repoRegistryPath !== undefined && !deps.instanceRepository) {
@@ -731,11 +761,13 @@ export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number): { ok
   const planStamp = `${statStampSync(planPath)}|${statStampSync(join(dirname(planPath), "tasks.d"))}`;
   const outcome = computeRepoTelemetrySync(telemetryRequest(deps, resolved.identities, deps.ledgerPath, planPath, planStamp, nowMs), { readLedger: deps.readLedger, readPlan: deps.readPlan });
   if (!outcome.ok) return outcome;
-  const members = Object.fromEntries(resolved.identities.flatMap((identity, i) => {
-    const counted = identity.own ? outcome.telemetry[i]?.members : undefined;
-    return counted ? [[`${identity.repo.owner}/${identity.repo.repo}`, counted]] : [];
+  const shadow = Object.fromEntries(resolved.identities.flatMap((identity, i) => {
+    const t = outcome.telemetry[i]!;
+    const facts = identity.own ? t.shadow : undefined;
+    const condition = (runs7d: RepoRunOutcomes): { condition: RepoCondition; reasons: string[] } => deriveRepoCondition({ ...t, runs7d }, outcome.signals, nowMs);
+    return facts ? [[`${identity.repo.owner}/${identity.repo.repo}`, { ...facts, condition }]] : [];
   }));
-  return { ok: true, summary: dashboardResult(deps, resolved, outcome, nowMs, true), ...(deps.shadowMembers ? { members } : {}) };
+  return { ok: true, summary: dashboardResult(deps, resolved, outcome, nowMs, true), ...(deps.shadowMembers ? { shadow } : {}) };
 }
 
 /**
