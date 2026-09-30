@@ -78,6 +78,79 @@ test("W1-T4809: a published image built after the baked change satisfies the rec
   }
 });
 
+function realDepsWith(root: string, execFile: (cmd: string, args: string[]) => string) {
+  const install = join(root, "install");
+  const state = join(root, "state-root");
+  mkdirSync(join(install, ".remudero"), { recursive: true });
+  mkdirSync(join(state, "state"), { recursive: true });
+  writeFileSync(
+    join(install, ".remudero", "daemon-instances.yaml"),
+    readFileSync(join(REPO_ROOT, ".remudero", "daemon-instances.yaml"), "utf8")
+      .replace("state_dir: /home/craigoleyagent/rmd-state2", `state_dir: ${state}`),
+  );
+  return realDeployDeps({
+    installPath: install, stateRoot: state, daemonLabel: "com.remudero.daemon", serveLabel: "com.remudero.serve",
+    servePort: 4317, uid: 502, ledgerPath: join(root, "ledger.ndjson"),
+    log: () => {}, execFile, sleep: () => {},
+  });
+}
+
+test("W1-T4809: an unlistable tag set leaves the registry's exact-tag 'no' standing", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-image-notags-"));
+  try {
+    const deps = realDepsWith(root, (cmd, args) => {
+      if (cmd === "git" && args.includes("tag")) throw new Error("fatal: cannot list tags");
+      if (cmd === "docker") throw new Error("no such manifest");
+      return "";
+    });
+    assert.equal(deps.imagePublished?.(BAKED), false, "no tag list, no descendant proof: still a registry no");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4809: the real in-flight read and dispatch drive the gh CLI against origin", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-image-gh-"));
+  try {
+    let runs: string = "[]";
+    let origin = "https://github.com/craigoley/remudero.git\n";
+    let ghFails = false;
+    const calls: string[][] = [];
+    const deps = realDepsWith(root, (cmd, args) => {
+      if (cmd === "git" && args.includes("remote")) return origin;
+      if (cmd === "gh") {
+        calls.push(args);
+        if (ghFails) throw new Error("gh: not logged in");
+        return args[0] === "run" ? runs : "";
+      }
+      return "";
+    });
+
+    assert.equal(deps.imageBuildInFlight?.(), false, "an empty run list means no build is running");
+    assert.deepEqual(calls[0]?.slice(0, 5), ["run", "list", "-R", "craigoley/remudero", "--workflow"]);
+    runs = JSON.stringify([{ status: "completed" }, { status: "queued" }]);
+    assert.equal(deps.imageBuildInFlight?.(), true, "a queued run is a build in flight");
+    runs = JSON.stringify({ not: "a list" });
+    assert.equal(deps.imageBuildInFlight?.(), undefined, "an unexpected shape is unknown");
+    runs = "not json";
+    assert.equal(deps.imageBuildInFlight?.(), undefined, "unparseable output is unknown");
+    origin = "/srv/mirror/remudero\n";
+    assert.equal(deps.imageBuildInFlight?.(), undefined, "a non-github origin is unknown");
+    origin = "git@github.com:craigoley/remudero.git\n";
+    ghFails = true;
+    assert.equal(deps.imageBuildInFlight?.(), undefined, "a failing gh is unknown, never 'nothing running'");
+
+    ghFails = false;
+    calls.length = 0;
+    deps.dispatchImageBuild?.();
+    assert.deepEqual(calls, [["workflow", "run", "acr-build.yml", "-R", "craigoley/remudero", "--ref", "main"]]);
+    origin = "/srv/mirror/remudero\n";
+    assert.throws(() => deps.dispatchImageBuild?.(), /not a github\.com remote/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T4809: a baked change no build covers dispatches the build exactly once", () => {
   const events: { step: string; data?: Record<string, unknown> }[] = [];
   let dispatches = 0;
