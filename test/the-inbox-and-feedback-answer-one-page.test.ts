@@ -137,3 +137,32 @@ test("a read page resumes at the cursor position when the item it names has left
   const forged = readPageRequest(new URLSearchParams(`cursor=${Buffer.from(JSON.stringify(["x", -1])).toString("base64url")}`), 100, 500);
   assert.ok("error" in forged);
 });
+
+test("a cached read keys on its whole query so two queries never share a body", async () => {
+  const { createConsoleSnapshotCache } = await import("../src/lib/console-snapshot-cache.js");
+  let calls = 0;
+  const route = {
+    method: "GET" as const,
+    path: "/v1/inbox",
+    scope: "read" as const,
+    handler: (req: { url?: string }, res: { writeHead: (s: number, h: Record<string, string>) => void; end: (b: string) => void }) => {
+      calls += 1;
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ echo: req.url }));
+    },
+  };
+  const cache = createConsoleSnapshotCache(route as never, { budgetMs: 50, fallbackBody: (staleness) => ({ staleness }), setTimer: () => {} });
+  const read = async (url: string): Promise<{ echo?: string }> => {
+    let body = "";
+    const res = { writeHead: () => res, setHeader: () => res, end: (chunk?: unknown) => void (body += chunk === undefined ? "" : String(chunk)) };
+    await cache.handler({ method: "GET", url, headers: { authorization: `Bearer ${READ}` } } as never, res as never, { params: {} });
+    return JSON.parse(body) as { echo?: string };
+  };
+  assert.equal((await read("/v1/inbox?section=needsYou")).echo, "/v1/inbox?section=needsYou");
+  assert.equal((await read("/v1/inbox?section=fleet&limit=2")).echo, "/v1/inbox?section=fleet&limit=2");
+  assert.equal((await read("/v1/inbox")).echo, "/v1/inbox");
+  assert.equal((await read("/v1/recent?verb=merged")).echo, "/v1/recent?verb=merged");
+  const before = calls;
+  assert.equal((await read("/v1/inbox?limit=2&section=fleet")).echo, "/v1/inbox?section=fleet&limit=2", "the same query in another order is the same entry");
+  assert.equal(calls, before);
+});

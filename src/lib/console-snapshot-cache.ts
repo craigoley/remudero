@@ -261,6 +261,15 @@ function defaultSetTimer(run: () => void, ms: number): void {
   setTimeout(run, ms).unref();
 }
 
+/** One entry per distinct query, whatever order its parameters arrive in: `?section=fleet&limit=2`
+ *  and `?limit=2&section=fleet` are one read, and no two different queries ever share a body. */
+export function normalizedReadUrl(rawUrl: string): string {
+  const url = new URL(rawUrl, "http://localhost");
+  url.searchParams.sort();
+  const query = url.searchParams.toString();
+  return query ? `${url.pathname}?${query}` : url.pathname;
+}
+
 export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapshotCacheOptions): { handler: Route["handler"]; restored: Promise<void> } {
   const clock = options.clock ?? systemClock;
   const generation = options.generation ?? createConsoleWriteGeneration();
@@ -276,7 +285,7 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
   const viewed = (entry: SnapshotEntry): boolean => clock.now() - entry.lastReadAtMs <= CONSOLE_SNAPSHOT_VIEWER_IDLE_MS;
 
   const entryFor = (req: IncomingMessage): SnapshotEntry => {
-    const key = `${req.headers ? bearerTokenId(req) : "unknown"} ${req.url ?? route.path}`;
+    const key = `${req.headers ? bearerTokenId(req) : "unknown"} ${normalizedReadUrl(req.url ?? route.path)}`;
     let entry = entries.get(key);
     if (!entry) {
       entry = { key, generation: -1, lastReadAtMs: clock.now(), lastReq: req, computeMs: 0, warmArmed: false };
