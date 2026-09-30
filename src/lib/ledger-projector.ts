@@ -27,6 +27,8 @@ export const DEFAULT_CHUNK_BYTES = 8 << 20;
 /** A directory mtime younger than this may still move within the same timestamp tick. */
 export const DIR_GATE_SETTLE_MS = 2_000;
 const FINGERPRINT_BYTES = 4_096;
+/** An archive checkpoint whose `fp` starts with this was stopped mid-file; its `off` is into the decompressed text. */
+const PARTIAL_ARCHIVE = "partial:";
 const STEP_KEY = '"step":"';
 
 export const LEDGER_PROJECTOR_DDL = `
@@ -108,10 +110,20 @@ export interface ProjectorTickResult {
   transactions: number;
   /** Archives that could not be read this tick; each is retried on the next one. */
   unread: string[];
+  /** True when the tick stopped at its budget with rows still to apply: the next tick resumes. */
+  pending: boolean;
+  /** Source bytes (compressed, for an archive) this tick consumed, and those still unapplied when it stopped. */
+  sourceBytes: number;
+  backlogBytes: number;
 }
 
 export interface LedgerProjector {
-  tick(): ProjectorTickResult;
+  /**
+   * Applies what the ledger has beyond the checkpoints. With `budgetMs`, no new transaction starts
+   * once the budget is spent (the first always runs), and each is sized from the measured rows per
+   * ms to fit what is left, so a backlog becomes many short ticks. Without it, everything is applied.
+   */
+  tick(budget?: { budgetMs: number }): ProjectorTickResult;
 }
 
 interface Checkpoint {
@@ -161,6 +173,27 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     forget: db.prepare("DELETE FROM source_file WHERE name = ?"),
   };
   let gateMtimeMs: number | undefined;
+  /** Rows applied per ms in the last timed transaction; unknown until one took measurable time. */
+  let linesPerMs: number | undefined;
+  let deadline = Number.POSITIVE_INFINITY;
+
+  /** Out of budget: every tick applies at least one transaction, so a backlog always moves. */
+  function spent(c: ProjectorTickResult): boolean {
+    return c.transactions > 0 && clock.now() >= deadline;
+  }
+
+  /** Where the next transaction ends: the whole range, or as many lines as fit what is left of the budget. */
+  function rangeEnd(buf: Buffer, from: number, to: number): number {
+    if (linesPerMs === undefined || deadline === Number.POSITIVE_INFINITY) return to;
+    let lines = Math.max(1, Math.floor(linesPerMs * (deadline - clock.now())));
+    let at = from;
+    while (lines-- > 0) {
+      const nl = buf.indexOf(0x0a, at);
+      if (nl < 0 || nl >= to) return to;
+      at = nl + 1;
+    }
+    return at;
+  }
 
   /** Creates each projection's tables; one this store has not built empties the store so the tick re-reads it all. */
   function buildProjections(): void {
@@ -214,6 +247,8 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
   }
 
   function commit(source: string, c: ProjectorTickResult, apply: () => void, checkpoint: Checkpoint): void {
+    const started = clock.now();
+    const linesBefore = c.lines;
     withWriteTransaction(db, lease, () => {
       apply();
       opts.beforeCheckpoint?.(source);
@@ -221,24 +256,44 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       sql.generation.run();
     });
     c.transactions++;
+    const tookMs = clock.now() - started;
+    if (tookMs > 0 && c.lines > linesBefore) linesPerMs = (c.lines - linesBefore) / tookMs;
+  }
+
+  /** The decompressed length of an archive stopped mid-file; undefined for one read whole. */
+  function partialLength(prev: Checkpoint): number | undefined {
+    return prev.fp !== null && prev.fp.startsWith(PARTIAL_ARCHIVE) ? Number(prev.fp.slice(PARTIAL_ARCHIVE.length)) : undefined;
+  }
+
+  /** The part of an archive not yet applied, in source bytes; a partial one is prorated. */
+  function archiveBacklog(prev: Checkpoint | undefined, ino: string, size: number): number {
+    if (!prev || prev.ino !== ino || prev.size !== size) return size;
+    const length = partialLength(prev);
+    return length === undefined ? 0 : Math.round(size * (1 - prev.off / length));
   }
 
   function ingestArchive(entry: LedgerCorpusEntry, known: Map<string, Checkpoint>, now: number, c: ProjectorTickResult): boolean {
     const name = basename(entry.path);
-    let text: string;
+    let data: Buffer;
     let ino: string;
     let size: number;
     let fd: number | undefined;
+    const prev = known.get(name);
     try {
       fd = openSync(entry.path, "r");
       const st = fstatSync(fd, { bigint: true });
       ino = String(st.ino);
       size = Number(st.size);
-      const prev = known.get(name);
-      if (prev && prev.ino === ino && prev.size === size) return true; // a rotation is immutable once named
+      if (archiveBacklog(prev, ino, size) === 0) return true; // a rotation is immutable once named
+      if (spent(c)) {
+        c.pending = true;
+        c.backlogBytes += archiveBacklog(prev, ino, size);
+        return false;
+      }
       opts.beforeArchiveRead?.(entry.path);
       const raw = readFileSync(fd);
-      text = (entry.form === "gzip" ? gunzipSync(raw) : raw).toString("utf8");
+      data = entry.form === "gzip" ? gunzipSync(raw) : raw;
+      if (data.length > 0 && data[data.length - 1] !== 0x0a) data = Buffer.concat([data, Buffer.from("\n")]);
     } catch (error) {
       // Named in `unread` and retried next tick: a vanished or half-readable archive never wedges the tail.
       c.unread.push(`${name}: ${(error as Error).message}`);
@@ -246,7 +301,21 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     } finally {
       if (fd !== undefined) closeSync(fd);
     }
-    commit(name, c, () => applyText(text.endsWith("\n") ? text : `${text}\n`, now, c), { ino, size, off: size, fp: null });
+    const partial = prev !== undefined && partialLength(prev) !== undefined && prev.ino === ino && prev.size === size ? prev : undefined;
+    let off = partial ? partial.off : 0;
+    do {
+      if (spent(c)) {
+        c.pending = true;
+        c.backlogBytes += Math.round(size * (1 - off / data.length));
+        return false;
+      }
+      const from = off;
+      const to = rangeEnd(data, from, data.length);
+      const done = to >= data.length;
+      commit(name, c, () => applyText(data.toString("utf8", from, to), now, c), done ? { ino, size, off: size, fp: null } : { ino, size, off: to, fp: `${PARTIAL_ARCHIVE}${data.length}` });
+      c.sourceBytes += Math.round(size * ((to - from) / Math.max(1, data.length)));
+      off = to;
+    } while (off < data.length);
     c.archivesRead++;
     return true;
   }
@@ -285,6 +354,11 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       let off = resumable ? prev.off : 0;
       c.liveRestarted = prev !== undefined && !resumable;
       for (let want = chunkBytes; off < size;) {
+        if (spent(c)) {
+          c.pending = true;
+          c.backlogBytes += size - off;
+          break;
+        }
         const buf = Buffer.alloc(Math.min(want, size - off));
         readSync(fd, buf, 0, buf.length, off);
         const lastNl = buf.lastIndexOf(0x0a);
@@ -293,9 +367,11 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
           want *= 2;
           continue;
         }
-        const next = off + lastNl + 1;
-        commit(LEDGER_FILENAME, c, () => applyText(buf.toString("utf8", 0, lastNl + 1), now, c), { ino, size, off: next, fp: fingerprint(fd, next) });
-        c.liveBytes += lastNl + 1;
+        const end = rangeEnd(buf, 0, lastNl + 1);
+        const next = off + end;
+        commit(LEDGER_FILENAME, c, () => applyText(buf.toString("utf8", 0, end), now, c), { ino, size, off: next, fp: fingerprint(fd, next) });
+        c.liveBytes += end;
+        c.sourceBytes += end;
         off = next;
         want = chunkBytes;
       }
@@ -305,12 +381,13 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
   }
 
   return {
-    tick(): ProjectorTickResult {
+    tick(budget?: { budgetMs: number }): ProjectorTickResult {
       if (!projectionsBuilt) buildProjections();
       const now = clock.now();
+      deadline = budget ? now + budget.budgetMs : Number.POSITIVE_INFINITY;
       const c: ProjectorTickResult = {
         listed: false, archivesRead: 0, liveBytes: 0, liveRestarted: false, lines: 0, fresh: 0, duplicates: 0,
-        facts: 0, quarantined: 0, torn: 0, transactions: 0, unread: [],
+        facts: 0, quarantined: 0, torn: 0, transactions: 0, unread: [], pending: false, sourceBytes: 0, backlogBytes: 0,
       };
       const known = new Map<string, Checkpoint>();
       for (const row of sql.checkpoints.all()) {
