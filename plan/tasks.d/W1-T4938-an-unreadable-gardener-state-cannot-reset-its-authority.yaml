@@ -8,6 +8,7 @@
   budget_usd: 18.00
   risk: high
   origin: "operator gardener expansion request 2026-09-30; source audit of src/lib/gardener.ts"
+  note: "reservation hand-off: plan-opportunity-garden-1790781800000 -> plan-opportunity-intake-1790799000000"
   files: [src/lib/gardener.ts, test/a-gardener-judges-its-own-actions.test.ts]
   status: queued
   attempts: 0
