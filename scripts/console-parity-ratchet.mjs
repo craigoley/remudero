@@ -111,6 +111,9 @@ export const CLI_ONLY = {
       "reap-branches",
       "ledger-compact",
       "ledger-grep",
+      // Phase 1 P1-04: rebuilds and swaps a host-local SQLite file and writes the kill-switch file on
+      // the daemon host; the console reads the views it feeds, never the store itself.
+      "read-model",
       // 2026-09-24 ruling: an operator report over the ledger union on the daemon host; the console
       // reads the same experiment through routing.decision on each worker.assignment row.
       "routing-ab",
@@ -190,6 +193,7 @@ export const CLI_ONLY = {
     "operator-shell-only: the alert-fix lane's act-vs-escalate policy decision runs against the " +
     "local alert queue `ops` populates; no console route triggers it",
   issues: "operator-shell-only: polls the GitHub issues API and writes into the local feedback inbox; no console route ingests issues",
+  "inbox-bakeoff": "operator-shell-only: replays draft candidates through paid local worker spawns and writes the measurement ledger; no console route launches a spend-bearing bake-off",
   audit: "operator-shell-only: grades a written audit against a checked-in fixture and prints the diff; no console route runs a grading pass",
   away: "sets or shows local operator-presence state used to batch escalations; no console route reads or writes it",
   "repair-ladder":

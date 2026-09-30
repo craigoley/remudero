@@ -39,6 +39,7 @@ usage:
   rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>]   # Report an A/A integrity trial: two labels, one pinned stack, and no winner.
   rmd benchmark-paid-pilot activate --request <request.json> --aa-report <aa-report.json> [--state-dir <dir>] [--json] | report --pilot <id> [--case-files <snapshot.json>] [--out <report.json>] [--state-dir <dir>] [--json] | pause|resume --pilot <id> [--note <text>] [--state-dir <dir>]   # Activate, report, pause or resume the approved $100/7-day paid pilot; only its paid arm pauses.
   rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sources <n>] [--dry-run]   # Compact one bounded window of old ledger rotations without losing a distinct row.
+  rmd read-model rebuild [--instance <id>] [--ledger-dir <dir>] [--window-days <n>] | status [--json] | switch <projector|<view>> <mode>   # Rebuild, inspect or switch the serve read model projected from the ledger.
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
   rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--json]   # Join the ledger union and GitHub history into observational field-trials aggregates.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
@@ -101,6 +102,7 @@ usage:
   rmd pr-owner <pr-number>   # Report whether the local ledger shows a fix lane owning one PR.
   rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
   rmd inbox [--dry-run]   # The ratification inbox's deterministic core: tier proposals READY/not-ready.
+  rmd inbox-bakeoff [--sample <n>]   # Replay real inbox proposals through each draft candidate; rank by clean drafts per dollar.
   rmd approve <P##> [<P##> ...]   # Ratify one or more READY proposals through the gate into a plan PR.
   rmd decline <proposalId> --reason "<text>"   # Decline an inbox proposal, recording why; reversible with rmd restore.
   rmd restore <proposalId> --reason "<text>"   # Take back a decline, so the proposal returns to the inbox.
@@ -360,6 +362,16 @@ rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sou
 ```
 
 operator-only archive compaction over the existing compactRotations primitive: selects the oldest rotations strictly older than --older-than (default 7 days) or --older-than-hours, taking ordinary rotations before any archive a previous pass wrote (W1-T4262), refuses a --max-sources value above the 50-source memory ceiling, preserves every distinct row, atomically writes one gzip replacement per UTC day of its rows, then removes only the source files those replacements cover. --dry-run executes the same reads and exact dedupe to print sourceCount, rowsWritten, duplicatesCollapsed and archiveName while writing nothing. It never touches the live ledger, is never a rotateLedger dependency (so a compaction fault can never block a write), and refuses to overwrite an unselected archive if a row timestamp would collide with its name. W1-T3368 RETIRED THE 'no daemon cadence' HALF of this contract: operator-only was right for a new primitive and wrong as a steady state for a corpus growing ~240 archives a day, which cost an eight-hour fleet outage whose cure had already merged. The daemon now fires ONE bounded pass when archive PRESSURE crosses a threshold (src/lib/ledger-compaction-rung.ts); this verb remains the operator's hand-run path.
+
+### `rmd read-model`
+
+Rebuild, inspect or switch the serve read model projected from the ledger.
+
+```
+rmd read-model rebuild [--instance <id>] [--ledger-dir <dir>] [--window-days <n>] | status [--json] | switch <projector|<view>> <mode>
+```
+
+Phase 1 read model (the projector's per-instance node:sqlite store under <state>/read-model/). `rebuild` projects every rotation form of the instance's ledger (core's by default; another instance needs --ledger-dir) into a new generation file (<inst>.v<N>.g<gen>.sqlite), runs the consistency oracle over a closed window of --window-days (default 7) against the ledger union, checkpoints and closes the file, and only when the oracle agrees flips the <inst>.v<N>.current pointer (temp file, fsync, rename); no database file is ever renamed over one a connection holds open. It then fences the old generation's writer lease so a running worker reopens onto the new one, and deletes superseded generations only after a 10-minute grace with no live lease. A refused rebuild deletes its unpublished generation and leaves the pointer untouched. `status` prints each instance's current file and superseded generations, row counts (seen, fact, quarantine), generation, DB size, the lag of its newest applied row, core's live-file bytes behind, the lease holder and the last consistency outcome; --json for the raw shape. `switch projector on|off` or `switch <view> serve|shadow|off` writes <state>/read-model/switches.json atomically and appends a read_model.switch ledger row.
 
 ### `rmd hand-runs`
 
@@ -980,6 +992,16 @@ rmd inbox [--dry-run]
 ```
 
 the ratification inbox's deterministic core (MASTER-PLAN P25(i), W1-T110): tiers the ACTIVE-proposal registry (state/inbox-proposals.json) into READY (drafted tasks' deps merged, evidence anchors grep-true on main, draft lint-plan-clean, no open conflict — carries its drafted plan/tasks.yaml fragment + stamp), not-ready (each failing predicate named), or DEFERRED-WITH-TRIGGER (an unfired named trigger — never recommended); drafts missing/stale candidates via a bounded, read-only Architect worker and caches them state-side (never committed); --dry-run classifies against whatever is already cached and spawns no worker
+
+### `rmd inbox-bakeoff`
+
+Replay real inbox proposals through each draft candidate; rank by clean drafts per dollar.
+
+```
+rmd inbox-bakeoff [--sample <n>]
+```
+
+the inbox-draft lead is chosen from measurement (W1-T4907): replays a fixed sample (the first n open proposals by id, default 8) through cash gpt-5-nano, gpt-oss-120b, gpt-6-luna with and without tools, and subscription claude-sonnet-5-5 on the production draft path (prompt, fragment parser, plan lint, bounded relint); a reply missing the fragment contract is counted as a contract error, never scored as a draft; writes one inbox.bakeoff ledger row per candidate and prints the table ranked by lint-clean drafts per cash dollar with the subscription cost shown separately; SPENDS real cash and capacity, and never changes routing or the draft cache
 
 ### `rmd approve`
 

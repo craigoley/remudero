@@ -3,6 +3,7 @@
 // classifyWorktreeBase, MemInfo, WorktreeBaseRow, readNvmrcVersion) moved with doctorCommand to
 // src/lib/report-commands.ts (W1-T2888); it imports them from lib/doctor.js directly. The symbols
 // below have SECOND callers outside doctorCommand and stay imported here too.
+import { retryWhileLockBusy } from "./lib/lock-busy-retry.js";
 import {
   appendCaptureSurfaceFireHistory,
   judgeDiskHeadroom,
@@ -47,6 +48,7 @@ import {
 import { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs } from "./lib/ledger-path.js";
 export { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs };
 import { ledgerCompactCommand, type LedgerCompactCommandDeps } from "./lib/ledger-compact.js";
+import { readModelCommand } from "./lib/read-model-cli.js";
 export { ledgerCompactCommand } from "./lib/ledger-compact.js";
 import {
   decideLedgerCompaction,
@@ -766,6 +768,7 @@ import {
   ratificationPrBody,
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
+import { renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
 import {
   buildFeedbackDocket,
   feedbackDocketDue,
@@ -6148,7 +6151,7 @@ async function waitForCiGreen(
       }
     }
     if (i === 0 || i % 5 === 0) log("ci.polling", { ci: String(ci?.conclusion ?? ci?.status ?? "pending") });
-    if (stall.stalled) {
+    if (stall.stalled && !rollupHasRunningCheck(roll)) {
       log("ci.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW, sha });
       return { state: "timeout", sha, ...boundedCiGateChecks(stall.pending) };
     }
@@ -8261,7 +8264,7 @@ async function fixRungStandDownReason(
       return {
         reason:
           `the only red required check(s) this strike would target (${redCheckSupersession.redNames.join(", ")}) ` +
-          `now show a later attempt already in flight on this head — standing down rather than spending a ` +
+          `now show a later attempt already in flight or green on this head — standing down rather than spending a ` +
           `strike on an already-superseded reading`,
       };
     }
@@ -13666,6 +13669,10 @@ export class ManagedCheckoutRefreshRefusedError extends RmdError {
   }
 }
 
+export function isManagedCheckoutLockBusy(error: unknown): boolean {
+  return error instanceof ManagedCheckoutRefreshRefusedError && error.reason.startsWith("another dispatch holds ");
+}
+
 /** W1-T4356: W1-T4193's refusal, naming why the checkout whose install it would borrow was left behind. */
 class ManagedCheckoutNotRefreshedError extends WorktreeNodeModulesRefusedError {
   constructor(refused: WorktreeNodeModulesRefusedError, readonly notRefreshed: string) {
@@ -15597,8 +15604,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // W1-T4193 below. A refusal here is that same deferral, raised before a worktree exists.
   let checkoutRefresh: ManagedCheckoutRefresh;
   try {
-    checkoutRefresh = refreshManagedCheckout(
-      repoDir, join(config.root, "state", `managed-checkout-${task.repo}.lock`), log, opts.managedCheckoutInstall,
+    checkoutRefresh = await retryWhileLockBusy(
+      () => refreshManagedCheckout(repoDir, join(config.root, "state", `managed-checkout-${task.repo}.lock`), log, opts.managedCheckoutInstall),
+      isManagedCheckoutLockBusy,
+      { log },
     );
   } catch (e) {
     log("managed_checkout.refresh_refused", { reason: String((e as Error)?.message ?? e) });
@@ -43054,6 +43063,92 @@ export async function draftProposalBatch(
   }
 }
 
+/** How many real proposals `rmd inbox-bakeoff` replays through every candidate unless `--sample` says otherwise. */
+const INBOX_BAKEOFF_DEFAULT_SAMPLE = 8;
+
+/**
+ * `rmd inbox-bakeoff [--sample <n>]` (W1-T4907) — replay a fixed sample of the real open inbox proposals (the first
+ * `n` by id, so two runs see the same ones) through each candidate lane on the PRODUCTION draft path, then print the
+ * ranking by lint-clean drafts per cash dollar. It spends real cash and subscription capacity, which is why it is a
+ * verb the operator runs and never a rung the daemon does. It writes `inbox.bakeoff` rows only; the production
+ * `inbox.drafted` rows, the draft cache and routing are untouched, so the table cannot move the lead by itself.
+ */
+export async function inboxBakeoffCommand(
+  rest: string[],
+  rawSpawn: typeof spawnWorker = spawnWorker,
+  replay: typeof runInboxBakeoff = runInboxBakeoff,
+  repoClone: (args: string[]) => void = (args) => { ghExec(args, { stdio: "inherit" }); },
+): Promise<number> {
+  const badArg = unknownArgError("inbox-bakeoff", rest, ["--sample"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const sampleRaw = flagValue(rest, "--sample");
+  const sample = sampleRaw === undefined ? INBOX_BAKEOFF_DEFAULT_SAMPLE : Number(sampleRaw);
+  if (!Number.isInteger(sample) || sample < 1) {
+    console.error(`inbox-bakeoff: --sample must be a positive integer, got ${sampleRaw}\n${USAGE}`);
+    return 2;
+  }
+  const config = loadConfig();
+  const registryPath = join(config.root, "state", "inbox-proposals.json");
+  const proposals = parseProposalRegistry(readFileIfExists(registryPath))
+    .sort((a, b) => a.id.localeCompare(b.id, "en", { numeric: true }))
+    .slice(0, sample);
+  if (proposals.length === 0) {
+    console.error("inbox-bakeoff: no open inbox proposals to replay");
+    return 1;
+  }
+  const { owner, repo } = resolveOwnerRepo();
+  const runId = `BAKEOFF-${Date.now()}`;
+  const ledgerPath = ledgerPathFor(config);
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "inbox-bakeoff", step, lane: "inbox-bakeoff", ...extra });
+
+  const settingsFile = renderWorkerSettings({
+    templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+    hooksDir: join(resolveInstallRoot(config), "hooks"),
+    outPath: join(config.root, "tmp", `inbox-bakeoff-settings-${runId}.json`),
+  });
+  validateWorkerSettingsFile(settingsFile);
+  const repoDir = join(config.root, "repos", repo);
+  if (!existsSync(repoDir)) {
+    mkdirSync(dirname(repoDir), { recursive: true });
+    repoClone(["repo", "clone", `${owner}/${repo}`, repoDir]);
+  }
+  const baseMount = loadMounts(mountsPath(repoRoot)).synthesis.inbox_draft;
+  const { branch, worktreePath } = createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
+  try {
+    const planText = readFileSync(join(worktreePath, "plan", "tasks.yaml"), "utf8");
+    const spawnFor = (candidate: BakeoffCandidate) => async (_proposal: Proposal, prompt: string) => {
+      const cash = candidate.billing === "cash";
+      // A cash candidate is pinned by restricting the cash ladder to its one deployment; the subscription candidate
+      // by giving the spawn a Claude mount. Neither writes a selection assignment — this is a measurement, not a route.
+      const args = buildInboxDraftSpawnArgs({
+        cwd: worktreePath,
+        settingsFile,
+        prompt,
+        config,
+        mount: cash ? baseMount : { ...baseMount, model: "sonnet", provider: "claude" },
+        disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
+      });
+      return await rawSpawn({
+        ...args,
+        onSelectionAssignment: undefined,
+        ...(cash ? { routingTrial: { id: "inbox-bakeoff", arm: "cash", reason: `bake-off candidate ${candidate.id}`, models: [candidate.model] } } : {}),
+        ...(candidate.tools ? {} : { tools: [] }),
+      });
+    };
+    const rows = await replay({ proposals, planText, spawnFor, log, runId });
+    console.log(`inbox-bakeoff: ${proposals.length} proposals (${proposals.map((p) => p.id).join(", ")}) on branch ${branch}\n`);
+    console.log(renderBakeoff(rows));
+    return 0;
+  } finally {
+    worktreeRemove(repoDir, worktreePath);
+    removeRunLock(worktreePath);
+  }
+}
+
 /**
  * The daemon's per-poll DRAFT rung (W1-T192, ratifies P25's autonomous half). Reachable from
  * the daemon's OWN `deps.sweep()` seam (daemon.ts:274) — wired into {@link buildSweepHook}
@@ -47409,6 +47504,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "operator-only archive compaction over the existing compactRotations primitive: selects the oldest rotations strictly older than --older-than (default 7 days) or --older-than-hours, taking ordinary rotations before any archive a previous pass wrote (W1-T4262), refuses a --max-sources value above the 50-source memory ceiling, preserves every distinct row, atomically writes one gzip replacement per UTC day of its rows, then removes only the source files those replacements cover. --dry-run executes the same reads and exact dedupe to print sourceCount, rowsWritten, duplicatesCollapsed and archiveName while writing nothing. It never touches the live ledger, is never a rotateLedger dependency (so a compaction fault can never block a write), and refuses to overwrite an unselected archive if a row timestamp would collide with its name. W1-T3368 RETIRED THE 'no daemon cadence' HALF of this contract: operator-only was right for a new primitive and wrong as a steady state for a corpus growing ~240 archives a day, which cost an eight-hour fleet outage whose cure had already merged. The daemon now fires ONE bounded pass when archive PRESSURE crosses a threshold (src/lib/ledger-compaction-rung.ts); this verb remains the operator's hand-run path.",
   },
   {
+    name: "read-model",
+    syntax: "rmd read-model rebuild [--instance <id>] [--ledger-dir <dir>] [--window-days <n>] | status [--json] | switch <projector|<view>> <mode>",
+    summary: "Rebuild, inspect or switch the serve read model projected from the ledger.",
+    detail: "Phase 1 read model (the projector's per-instance node:sqlite store under <state>/read-model/). `rebuild` projects every rotation form of the instance's ledger (core's by default; another instance needs --ledger-dir) into a new generation file (<inst>.v<N>.g<gen>.sqlite), runs the consistency oracle over a closed window of --window-days (default 7) against the ledger union, checkpoints and closes the file, and only when the oracle agrees flips the <inst>.v<N>.current pointer (temp file, fsync, rename); no database file is ever renamed over one a connection holds open. It then fences the old generation's writer lease so a running worker reopens onto the new one, and deletes superseded generations only after a 10-minute grace with no live lease. A refused rebuild deletes its unpublished generation and leaves the pointer untouched. `status` prints each instance's current file and superseded generations, row counts (seen, fact, quarantine), generation, DB size, the lag of its newest applied row, core's live-file bytes behind, the lease holder and the last consistency outcome; --json for the raw shape. `switch projector on|off` or `switch <view> serve|shadow|off` writes <state>/read-model/switches.json atomically and appends a read_model.switch ledger row.",
+  },
+  {
     name: "hand-runs",
     syntax: "rmd hand-runs",
     summary: "Print which verb sequence the operator keeps hand-running, on demand.",
@@ -47764,6 +47865,12 @@ const COMMANDS: readonly CommandSpec[] = [
     syntax: "rmd inbox [--dry-run]",
     summary: "The ratification inbox's deterministic core: tier proposals READY/not-ready.",
     detail: "the ratification inbox's deterministic core (MASTER-PLAN P25(i), W1-T110): tiers the ACTIVE-proposal registry (state/inbox-proposals.json) into READY (drafted tasks' deps merged, evidence anchors grep-true on main, draft lint-plan-clean, no open conflict — carries its drafted plan/tasks.yaml fragment + stamp), not-ready (each failing predicate named), or DEFERRED-WITH-TRIGGER (an unfired named trigger — never recommended); drafts missing/stale candidates via a bounded, read-only Architect worker and caches them state-side (never committed); --dry-run classifies against whatever is already cached and spawns no worker",
+  },
+  {
+    name: "inbox-bakeoff",
+    syntax: "rmd inbox-bakeoff [--sample <n>]",
+    summary: "Replay real inbox proposals through each draft candidate; rank by clean drafts per dollar.",
+    detail: "the inbox-draft lead is chosen from measurement (W1-T4907): replays a fixed sample (the first n open proposals by id, default 8) through cash gpt-5-nano, gpt-oss-120b, gpt-6-luna with and without tools, and subscription claude-sonnet-5-5 on the production draft path (prompt, fragment parser, plan lint, bounded relint); a reply missing the fragment contract is counted as a contract error, never scored as a draft; writes one inbox.bakeoff ledger row per candidate and prints the table ranked by lint-clean drafts per cash dollar with the subscription cost shown separately; SPENDS real cash and capacity, and never changes routing or the draft cache",
   },
   {
     name: "approve",
@@ -48371,6 +48478,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     { pairedReport: pairedPilotReportView })],
   ["memory-lint", (rest) => memoryLintCommand(rest)],
   ["ledger-compact", (rest) => ledgerCompactCommand(rest)],
+  ["read-model", (rest) => readModelCommand(rest)],
   ["hand-runs", (rest) => handRunsCommand(rest)],
   ["field-trials", async (rest) => await fieldTrialsCommand(rest, (input) => buildFieldTrialsFlowSnapshot(input))],
   ["ci-failures", (rest) => ciFailuresCommand(rest)],
@@ -48497,6 +48605,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["pr-owner", (rest) => prOwnerCommand(rest)],
   ["plan", async (rest) => await planCommand(rest)],
   ["inbox", async (rest) => await inboxCommand(rest)],
+  ["inbox-bakeoff", async (rest) => await inboxBakeoffCommand(rest)],
   [
     "approve",
     async (rest) => {
