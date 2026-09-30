@@ -7080,7 +7080,7 @@ components:
       description: >
         Read-only core-daemon census. Snapshot counts may overcount actionability when a release
         source is missing; verifiedCounts are conservative lower bounds. No proposal is changed.
-      required: [scope, state, countSemantics, snapshotKey, sources, counts, verifiedCounts, kinds, items]
+      required: [scope, state, countSemantics, snapshotKey, sources, counts, decisionReadiness, verifiedCounts, kinds, items]
       properties:
         scope:
           type: string
@@ -7126,6 +7126,23 @@ components:
               type: integer
             awaiting_daemon:
               type: integer
+        decisionReadiness:
+          type: object
+          description: >
+            Classification of observed decision-labelled items. These categories sum to counts.decision;
+            ready does not imply that operator judgment is required, and needsPreparation is not a
+            dismissal instruction. All values are observational under partial source coverage.
+          required: [ready, needsPreparation, unknown]
+          properties:
+            ready:
+              type: integer
+              minimum: 0
+            needsPreparation:
+              type: integer
+              minimum: 0
+            unknown:
+              type: integer
+              minimum: 0
         verifiedCounts:
           type: object
           description: Conservative lower bounds; zero when any needed source is partial.
