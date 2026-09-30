@@ -1709,23 +1709,30 @@ export function refreshProofToolchain(cwd: string, exec: typeof execFileSync = e
     if (hadOld) renameSync(liveModules, oldModules);
     try {
       renameSync(stagedModules, liveModules);
-    } catch {
+    } catch (error) {
+      console.error("review toolchain install swap failed", error);
       if (hadOld) {
         try { renameSync(oldModules, liveModules); }
-        catch { preserveBackup = true; }
+        catch (restoreError) {
+          console.error("review toolchain install rollback failed; old tree retained in staging backup", restoreError);
+          preserveBackup = true;
+        }
       }
       return false;
     }
     return true;
-  } catch {
+  } catch (error) {
+    console.error("review toolchain staged install failed", error);
     // A failed refresh leaves the old install serving and permits the one proof retry.
     return false;
   } finally {
     if (stage) {
-      try { rmSync(stage, { recursive: true, force: true }); } catch { /* best-effort staging cleanup */ }
+      try { rmSync(stage, { recursive: true, force: true }); }
+      catch (error) { console.error("review toolchain staging cleanup failed", error); }
     }
     if (backup && !preserveBackup) {
-      try { rmSync(backup, { recursive: true, force: true }); } catch { /* old tree is regenerable */ }
+      try { rmSync(backup, { recursive: true, force: true }); }
+      catch (error) { console.error("review toolchain old-install cleanup failed", error); }
     }
   }
 }
