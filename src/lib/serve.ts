@@ -3148,12 +3148,6 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
 
 const serveReadModels = new WeakMap<Server, ReadModelWorkerHandle>();
 
-export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questionsRoot" | "instances">): ReadModelInstance[] {
-  const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath) };
-  const others = livenessInstances({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances });
-  return [core, ...others.map((instance) => ({ name: instance.name, ledgerDir: instance.stateDir }))];
-}
-
 export function repositoriesSources(deps: ServeDeps): RepositoriesSources["instances"] {
   const core = deps.instances?.coreInstance ?? CORE_INSTANCE;
   return [
@@ -3177,6 +3171,13 @@ export function darkReadModelViews(source: ViewBodySource, dark: readonly string
     judge: (sources, now) => source.judge(sources, now),
     switches: () => source.switches(),
   };
+}
+
+export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questionsRoot" | "instances" | "assistantRepository"> & { panelGraph?: Pick<ServeDeps["panelGraph"], "planPath"> }): ReadModelInstance[] {
+  const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath), feedbackRoot: deps.questionsRoot,
+    ...(deps.assistantRepository ? { repo: deps.assistantRepository } : {}), ...(deps.panelGraph?.planPath ? { planPath: deps.panelGraph.planPath } : {}) };
+  const others = livenessInstances({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances });
+  return [core, ...others.map((instance) => ({ name: instance.name, ledgerDir: instance.stateDir, repo: instance.repo }))];
 }
 
 export function stopServeReadModel(server: Server): boolean {

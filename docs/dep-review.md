@@ -29,15 +29,16 @@ in this fail-closed order:
    the PR without deleting its branch. It posts no successful
    `remudero-review` status and never arms auto-merge. Exit 0 only after
    capture, command, and close all complete.
-3. **`escalate`** — a bump whose semver level cannot be parsed, or a major
-   whose dependency identity cannot be safely extracted. That still uses the
-   existing `MANUAL` needs-human escalation issue carrying the PR's release
-   notes. Exit 1.
-4. **`hold`** — a minor/patch bump with a required check genuinely red or still
-   pending. **Nothing is posted**; the caller (a future poll / `rmd drain`)
-   tries again later. Exit 1.
-5. **`arm`** — a minor/patch bump, confined to manifests, every required gate
-   green: post `remudero-review=success` and arm GitHub auto-merge. Exit 0.
+3. **`escalate`** — a bump whose semver level cannot be parsed and whose diff is
+   not a verified action-pin-only refresh, or a major whose dependency identity
+   cannot be safely extracted. That uses the existing `MANUAL` needs-human issue
+   carrying the PR's release notes. Exit 1.
+4. **`hold`** — a minor/patch bump or verified pin-only refresh with a required
+   check genuinely red or still pending. **Nothing is posted**; the caller (a
+   future poll / `rmd drain`) tries again later. Exit 1.
+5. **`arm`** — a minor/patch bump, or a verified pin-only refresh, confined to
+   dependency files, with every required gate green: post
+   `remudero-review=success` and arm GitHub auto-merge. Exit 0.
 
 The semver level is the **worst** constituent bump across every `from X to Y`
 pair Dependabot lists in the title/body — a grouped PR with even one major
@@ -45,6 +46,17 @@ constituent migrates the whole PR (never split the difference on a mixed-risk
 group). Dependency identities are parsed only from Dependabot's own anchored
 summary lines (`Updates \`pkg\` from X to Y`, `Bumps [pkg](...) from X to Y`,
 or the title's `bump pkg from X to Y`), never from release-note prose.
+
+A PR with no parseable semver pair is **not** assigned a fake patch level. It is
+admitted as `pinOnly` only when every changed file is a workflow YAML file and
+every changed content line is a paired `uses:` replacement from one full 40-hex
+SHA to another for the exact same action and exact same trailing `vX.Y.Z`
+release comment. Dependabot's anchored summary must name that same action and
+old/new SHA pair. Added/deleted uses, changed comments, mismatched summaries, or
+any other workflow edit remain `unknown` and escalate. `remudero-review` labels the
+allowed case as a pin-only SHA refresh; the lane records it under its own
+`dep-review-action-sha-pin-v1` decision revision so this policy change re-arms
+the same PR head without invalidating unrelated task-review statuses.
 
 ## The call site
 

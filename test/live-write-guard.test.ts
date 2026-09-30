@@ -6,23 +6,114 @@
 // shut under the test runner, and lock them OPEN everywhere else so the daemon is unaffected.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ghExec, ghExecFile, ghJson } from "../src/lib/github-transport.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ghRefusalCount } from "./setup/tmp-hygiene.js";
+import { appendLedger } from "../src/lib/ledger.js";
+import { ledgerPathFor } from "../src/lib/ledger-path.js";
+import { buildWorkerEnv } from "../src/lib/env.js";
+import { main } from "../src/run-task.js";
 import {
+  assertLedgerPathNotLive,
   assertLiveWriteAllowed,
+  discoverLiveLedgerRoot,
   isTestRunner,
   LiveWriteBlockedError,
   LIVE_WRITE_OVERRIDE_ENV,
+  LIVE_LEDGER_DENY_ROOT_ENV,
   LIVE_WRITE_SENTINEL_TOKEN,
   liveWritesExempt,
   withLiveWritesAllowed,
   type LiveWriteBoundary,
 } from "../src/lib/live-write-guard.js";
+
+test("the cli test harness never resolves the live ledger path", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-ledger-guard-home-"));
+  const root = join(home, "operator-root");
+  const configDir = join(home, ".config", "remudero");
+  mkdirSync(configDir, { recursive: true });
+  await writeFile(join(configDir, "config.json"), JSON.stringify({ root, claudeBin: "/bin/true" }));
+  assert.equal(discoverLiveLedgerRoot({ HOME: home }), root);
+  assert.ok(process.env[LIVE_LEDGER_DENY_ROOT_ENV], "the shared setup must export a deny root before tests load");
+  assert.notEqual(ledgerPathFor({ root: home } as never), ledgerPathFor({ root } as never));
+  const originalHome = process.env.HOME;
+  const originalDenyRoot = process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+  const originalArgv = process.argv;
+  // The scratch config stands in for a live config. main() must reach cli.invoked, but
+  // appendLedger must refuse it before creating even the state directory.
+  process.env.HOME = home;
+  process.env[LIVE_LEDGER_DENY_ROOT_ENV] = root;
+  process.argv = [process.execPath, "run-task.js", "--help"];
+  t.mock.method(process, "exit", ((code?: number): never => { throw new Error(`expected exit ${code}`); }) as typeof process.exit);
+  t.mock.method(console, "log", () => {});
+  try {
+    await assert.rejects(main(), /expected exit 0/);
+    assert.equal(existsSync(ledgerPathFor({ root } as never)), false);
+    assert.equal(existsSync(join(root, "state")), false);
+  } finally {
+    process.argv = originalArgv;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalDenyRoot === undefined) delete process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+    else process.env[LIVE_LEDGER_DENY_ROOT_ENV] = originalDenyRoot;
+  }
+});
+
+test("an append under the live state root from the suite is refused before writing", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-ledger-deny-"));
+  const alias = join(mkdtempSync(join(tmpdir(), "rmd-ledger-alias-")), "state-link");
+  mkdirSync(join(root, "state"));
+  symlinkSync(join(root, "state"), alias);
+  const finalAlias = join(mkdtempSync(join(tmpdir(), "rmd-ledger-final-alias-")), "ledger-link");
+  symlinkSync(join(root, "state", "ledger.ndjson"), finalAlias);
+  const previous = process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+  process.env[LIVE_LEDGER_DENY_ROOT_ENV] = root;
+  try {
+    for (const path of [join(root, "state", "ledger.ndjson"), join(alias, "ledger.ndjson"), finalAlias]) {
+      assert.throws(() => appendLedger(path, { run_id: "test", task_id: "TEST", step: "should-not-write" }),
+        (error: unknown) => error instanceof LiveWriteBlockedError && error.boundary === "ledger-append" && /W1-T4923/.test(error.message));
+    }
+    assert.equal(existsSync(join(root, "state", "ledger.ndjson")), false);
+    const fixture = join(mkdtempSync(join(tmpdir(), "rmd-ledger-allowed-")), "state", "ledger.ndjson");
+    appendLedger(fixture, { run_id: "test", task_id: "TEST", step: "fixture-write" });
+    assert.match(readFileSync(fixture, "utf8"), /fixture-write/);
+    assert.doesNotThrow(() => assertLedgerPathNotLive(join(root, "state", "ledger.ndjson"), {}),
+      "a real daemon process with no test marker must remain unaffected");
+  } finally {
+    if (previous === undefined) delete process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+    else process.env[LIVE_LEDGER_DENY_ROOT_ENV] = previous;
+  }
+});
+
+test("a spawned child inherits the live ledger deny root", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-ledger-child-deny-"));
+  const path = join(root, "state", "ledger.ndjson");
+  const moduleUrl = new URL("../src/lib/ledger.ts", import.meta.url).href;
+  const code = `import { appendLedger } from ${JSON.stringify(moduleUrl)}; appendLedger(${JSON.stringify(path)}, { run_id: "child", task_id: "TEST", step: "should-not-write" });`;
+  const previous = process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+  process.env[LIVE_LEDGER_DENY_ROOT_ENV] = root;
+  try {
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], {
+      cwd: process.cwd(), encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+    });
+    assert.notEqual(child.status, 0);
+    assert.match(child.stderr, /W1-T4923/);
+    assert.equal(existsSync(path), false);
+    const worker = buildWorkerEnv({ [LIVE_LEDGER_DENY_ROOT_ENV]: "/forged" }, {
+      HOME: "/fixture", [LIVE_LEDGER_DENY_ROOT_ENV]: root,
+    });
+    assert.equal(worker[LIVE_LEDGER_DENY_ROOT_ENV], root, "even an extra env cannot widen a test worker's ledger access");
+  } finally {
+    if (previous === undefined) delete process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+    else process.env[LIVE_LEDGER_DENY_ROOT_ENV] = previous;
+  }
+});
 
 /** The env a real daemon/operator process carries: no runner variable at all. */
 const REAL_RUN: NodeJS.ProcessEnv = { PATH: "/usr/bin", HOME: "/Users/x" };

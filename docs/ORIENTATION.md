@@ -1,20 +1,18 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-09-30T12:49:49.237Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-09-30T17:35:45.105Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-14 run(s) since the last retro marker. Verdicts: {"blocked_ci":1,"failed":2,"incomplete":7,"merged":4}.
+11 run(s) since the last retro marker. Verdicts: {"blocked_containment":1,"failed":4,"handed_off":1,"incomplete":3,"merged":2}.
 
 ### Shipped since marker
-- RETRO → https://github.com/craigoley/remudero/pull/7992 (gate-side merge; run ended incomplete)
-- W1-T4688 → https://github.com/craigoley/remudero/pull/7987 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed failed)
-- W1-T4770 → https://github.com/craigoley/remudero/pull/7994 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T4804 → https://github.com/craigoley/remudero/pull/7999 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
-- W1-T4811 → https://github.com/craigoley/remudero/pull/8003 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
+- RETRO → https://github.com/craigoley/remudero/pull/8049 (gate-side merge; run ended incomplete)
+- W1-T4818 → https://github.com/craigoley/remudero/pull/8057 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T4819 → https://github.com/craigoley/remudero/pull/8070 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
 
 ## Next runnable task
 
