@@ -121,9 +121,11 @@ export function parseBranchCitationHits(raw: string): BranchCitationHit[] {
   return hits;
 }
 
+export const DECLARED_BRANCH_GUARDS_FILE = "src/lib/branch-reaper.ts";
+
 /**
  * `DECLARED_BRANCH_GUARDS`'s own [start, end] line span (1-indexed, inclusive) inside
- * `src/run-task.ts`'s CURRENT text, found dynamically rather than hardcoded — W1-T2226
+ * {@link DECLARED_BRANCH_GUARDS_FILE}'s CURRENT text, found dynamically rather than hardcoded — W1-T2226
  * rationale (5): the declaration lives in a grepped root, so every declared name reads
  * `namedInSource: true` by virtue of its own declaration, and a reverse check that fails to
  * exclude this exact span can never report an orphan. Returns `undefined` if the marker moved or
