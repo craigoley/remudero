@@ -6762,7 +6762,7 @@ async function runReview(args: {
   // A missing envelope is UNKNOWN, not a measured zero. Parse is bounded and purely
   // advisory; a filesystem/telemetry problem cannot become a review failure.
   let findingCapture: FindingCapture = { state: "unavailable", findings: [], verifiedCount: 0, invalidCount: 0, droppedCount: 0 };
-  if (reviewerFindingText !== undefined && args.headCheckoutDir) {
+  if (outcome === "success" && reviewerFindingText !== undefined && args.headCheckoutDir) {
     try {
       findingCapture = extractReviewFindings({ owner, repo, prUrl, headSha, root: args.headCheckoutDir, diff,
         criteriaCount: criteria.length, text: reviewerFindingText });
