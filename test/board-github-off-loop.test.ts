@@ -8,11 +8,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { computeBoardSnapshot } from "../src/lib/board.js";
 import { createGhCallPacer, createNonBlockingGhCallPacer, GhPaceWouldBlockError, paceGhEntry } from "../src/lib/github-transport.js";
 import type { Plan } from "../src/lib/plan.js";
 import { buildBatchedGithub, type GitHub } from "../src/lib/status.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 const OPEN_PR_URL = "https://github.com/o/r/pull/7";
 
