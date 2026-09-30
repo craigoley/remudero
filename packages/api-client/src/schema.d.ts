@@ -2548,6 +2548,36 @@ export interface components {
       state: "fresh" | "stale" | "unavailable";
       reason?: string;
     };
+    /** GET /v1/views/versions and the `hello` event on GET /v1/views/events (docs/views.md): the version of every served view body, which is its ETag, by view name and key. A view whose switch is not `serve` has no versions and is listed in `disabled`. */
+    ViewVersions: {
+      /** View name to (key to ETag). An unkeyed view has the empty key. */
+      views: Record<string, Record<string, string>>;
+      disabled: (string)[];
+    };
+    /** The first event on every GET /v1/views/events connection (`event: hello`): ViewVersions flattened (this generator's subset has no allOf) plus the process's `bootId` (each event id is `<bootId>:<seq>`) and `serverNow`. */
+    ViewHello: {
+      bootId: string;
+      serverNow: string;
+      views: Record<string, Record<string, string>>;
+      disabled: (string)[];
+    };
+    /** A `view` event on GET /v1/views/events. The served body of (view, key) now has this ETag. */
+    ViewEvent: {
+      view: string;
+      key: string;
+      etag: string;
+      stale: boolean;
+      emittedAt: string;
+      asOf: string | null;
+      /** `body`: the read-model worker posted a new body. `judge`: re-judging the sources flipped `stale`. */
+      cause: "body" | "judge";
+    };
+    /** The last event on a GET /v1/views/events stream that serve ends (a drain, or a subscriber stalled too long). */
+    ViewHandover: {
+      /** `recycle` on a drain, `slow_consumer` for a stalled subscriber. */
+      reason: string;
+      retryMs: number;
+    };
     /** GET /v1/views/nav-badge (docs/views.md). The view envelope every /v1/views/<name> route answers: `version` is `data`'s schema version, `asOf` the oldest source's as-of, `stale` true when any source is stale or unavailable. A cold input makes its count absent with a `reason`, never a zero. */
     NavBadgeView: {
       view: "nav-badge";
@@ -4583,6 +4613,26 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": undefined;
+        };
+    };
+  };
+  "/v1/views/events": {
+    get: {
+      responses: {
+          "200": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/versions": {
+    get: {
+      responses: {
+          "200": ViewVersions;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
         };
     };
   };
