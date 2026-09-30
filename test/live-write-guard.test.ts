@@ -96,16 +96,23 @@ test("a spawned child inherits the live ledger deny root", () => {
   const path = join(root, "state", "ledger.ndjson");
   const moduleUrl = new URL("../src/lib/ledger.ts", import.meta.url).href;
   const code = `import { appendLedger } from ${JSON.stringify(moduleUrl)}; appendLedger(${JSON.stringify(path)}, { run_id: "child", task_id: "TEST", step: "should-not-write" });`;
-  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], {
-    cwd: process.cwd(), encoding: "utf8", env: { ...process.env, [LIVE_LEDGER_DENY_ROOT_ENV]: root, NODE_TEST_CONTEXT: undefined },
-  });
-  assert.notEqual(child.status, 0);
-  assert.match(child.stderr, /W1-T4923/);
-  assert.equal(existsSync(path), false);
-  const worker = buildWorkerEnv({ [LIVE_LEDGER_DENY_ROOT_ENV]: "/forged" }, {
-    HOME: "/fixture", [LIVE_LEDGER_DENY_ROOT_ENV]: root,
-  });
-  assert.equal(worker[LIVE_LEDGER_DENY_ROOT_ENV], root, "even an extra env cannot widen a test worker's ledger access");
+  const previous = process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+  process.env[LIVE_LEDGER_DENY_ROOT_ENV] = root;
+  try {
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], {
+      cwd: process.cwd(), encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+    });
+    assert.notEqual(child.status, 0);
+    assert.match(child.stderr, /W1-T4923/);
+    assert.equal(existsSync(path), false);
+    const worker = buildWorkerEnv({ [LIVE_LEDGER_DENY_ROOT_ENV]: "/forged" }, {
+      HOME: "/fixture", [LIVE_LEDGER_DENY_ROOT_ENV]: root,
+    });
+    assert.equal(worker[LIVE_LEDGER_DENY_ROOT_ENV], root, "even an extra env cannot widen a test worker's ledger access");
+  } finally {
+    if (previous === undefined) delete process.env[LIVE_LEDGER_DENY_ROOT_ENV];
+    else process.env[LIVE_LEDGER_DENY_ROOT_ENV] = previous;
+  }
 });
 
 /** The env a real daemon/operator process carries: no runner variable at all. */
