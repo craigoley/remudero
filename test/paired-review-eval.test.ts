@@ -132,3 +132,25 @@ test("missing paid-pilot admission pauses only evaluation calls, never review or
   assert.equal(report.pairs[0]?.missing.filter((reason) => reason.includes("cash-budget-exhausted")).length, 2);
   assert.equal(report.costMissingArms, 0, "a refused call is not a missing cost receipt for a call that happened");
 });
+
+test("an independent provenance read failure leaves the pair ungradable without dispatch", async () => {
+  let calls = 0;
+  const report = await runPairedReviewEvaluation({ pairs: [pair], corpus: [corpusItem], stack, seed: "seed",
+    validateLabel, validatePair: () => { throw new Error("evidence store unavailable"); }, admitReview,
+    review: async () => { calls++; return output("fail"); } });
+  assert.equal(calls, 0);
+  assert.equal(report.pairs[0]?.state, "ungradable");
+  assert.equal(report.pairs[0]?.reason, "independent-validation-unavailable:Error");
+  assert.equal(report.gradedPairs, 0);
+});
+
+test("a paid admission read failure pauses the arm without calling the reviewer", async () => {
+  let calls = 0;
+  const report = await runPairedReviewEvaluation({ pairs: [pair], corpus: [corpusItem], stack, seed: "seed",
+    validateLabel, validatePair, admitReview: async () => { throw new Error("budget evidence unavailable"); },
+    review: async () => { calls++; return output("fail"); } });
+  assert.equal(calls, 0);
+  assert.equal(report.pairs[0]?.state, "incomplete");
+  assert.equal(report.pairs[0]?.missing.filter((reason) => reason.includes("admission-read-failed:Error")).length, 2);
+  assert.equal(report.costMissingArms, 0);
+});
