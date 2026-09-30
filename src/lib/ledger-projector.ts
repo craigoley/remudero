@@ -26,8 +26,17 @@ export const FUTURE_ROW_TOLERANCE_MS = 5 * 60_000;
 export const DEFAULT_CHUNK_BYTES = 8 << 20;
 /** A directory mtime younger than this may still move within the same timestamp tick. */
 export const DIR_GATE_SETTLE_MS = 2_000;
+/** A closed gate re-lists after this long anyway: a directory whose mtime failed to move never hides a rotation for good. */
+export const DIR_GATE_RELIST_MS = 60_000;
+/** The fewest lines a tick's first transaction applies, so a collapsed rate estimate still moves a backlog. */
+export const MIN_TRANSACTION_LINES = 64;
 const FINGERPRINT_BYTES = 4_096;
-/** An archive checkpoint whose `fp` starts with this was stopped mid-file; its `off` is into the decompressed text. */
+/**
+ * An archive checkpoint names its bytes, never its inode: a deleted archive's inode is recycled, so
+ * a new file can arrive with an old name, inode and size. A read archive's `fp` is `head:<sha1>`;
+ * one stopped mid-file is `partial:<decompressed length>:<sha1>`, its `off` into the decompressed text.
+ */
+const ARCHIVE_HEAD = "head:";
 const PARTIAL_ARCHIVE = "partial:";
 const STEP_KEY = '"step":"';
 
@@ -145,6 +154,13 @@ function fingerprint(fd: number, upTo: number): string {
   return hash.digest("hex");
 }
 
+/** Hash of an archive's first {@link FINGERPRINT_BYTES}: with its size, the identity of an immutable file. */
+function headFingerprint(fd: number, size: number): string {
+  const buf = Buffer.alloc(Math.min(FINGERPRINT_BYTES, size));
+  readSync(fd, buf, 0, buf.length, 0);
+  return createHash("sha1").update(buf).digest("hex");
+}
+
 function parseRow(line: string): Record<string, unknown> | undefined {
   try {
     const row: unknown = JSON.parse(line);
@@ -173,6 +189,7 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     forget: db.prepare("DELETE FROM source_file WHERE name = ?"),
   };
   let gateMtimeMs: number | undefined;
+  let listedAt = Number.NEGATIVE_INFINITY;
   /** Rows applied per ms in the last timed transaction; unknown until one took measurable time. */
   let linesPerMs: number | undefined;
   let deadline = Number.POSITIVE_INFINITY;
@@ -183,9 +200,9 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
   }
 
   /** Where the next transaction ends: the whole range, or as many lines as fit what is left of the budget. */
-  function rangeEnd(buf: Buffer, from: number, to: number): number {
+  function rangeEnd(buf: Buffer, from: number, to: number, c: ProjectorTickResult): number {
     if (linesPerMs === undefined || deadline === Number.POSITIVE_INFINITY) return to;
-    let lines = Math.max(1, Math.floor(linesPerMs * (deadline - clock.now())));
+    let lines = Math.max(c.transactions === 0 ? MIN_TRANSACTION_LINES : 1, Math.floor(linesPerMs * (deadline - clock.now())));
     let at = from;
     while (lines-- > 0) {
       const nl = buf.indexOf(0x0a, at);
@@ -256,18 +273,23 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       sql.generation.run();
     });
     c.transactions++;
-    const tookMs = clock.now() - started;
-    if (tookMs > 0 && c.lines > linesBefore) linesPerMs = (c.lines - linesBefore) / tookMs;
+    // A transaction too fast to time is measured as 1 ms: skipping it would pin a collapsed estimate forever.
+    if (c.lines > linesBefore) linesPerMs = (c.lines - linesBefore) / Math.max(1, clock.now() - started);
   }
 
   /** The decompressed length of an archive stopped mid-file; undefined for one read whole. */
   function partialLength(prev: Checkpoint): number | undefined {
-    return prev.fp !== null && prev.fp.startsWith(PARTIAL_ARCHIVE) ? Number(prev.fp.slice(PARTIAL_ARCHIVE.length)) : undefined;
+    return prev.fp !== null && prev.fp.startsWith(PARTIAL_ARCHIVE) ? Number(prev.fp.slice(PARTIAL_ARCHIVE.length).split(":")[0]) : undefined;
+  }
+
+  /** Whether a checkpoint describes these bytes: same size and head. A checkpoint without a head is re-read once. */
+  function sameArchive(prev: Checkpoint, head: string, size: number): boolean {
+    return prev.size === size && prev.fp !== null && (prev.fp === `${ARCHIVE_HEAD}${head}` || (prev.fp.startsWith(PARTIAL_ARCHIVE) && prev.fp.endsWith(`:${head}`)));
   }
 
   /** The part of an archive not yet applied, in source bytes; a partial one is prorated. */
-  function archiveBacklog(prev: Checkpoint | undefined, ino: string, size: number): number {
-    if (!prev || prev.ino !== ino || prev.size !== size) return size;
+  function archiveBacklog(prev: Checkpoint | undefined, head: string, size: number): number {
+    if (!prev || !sameArchive(prev, head, size)) return size;
     const length = partialLength(prev);
     return length === undefined ? 0 : Math.round(size * (1 - prev.off / length));
   }
@@ -277,6 +299,7 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     let data: Buffer;
     let ino: string;
     let size: number;
+    let head: string;
     let fd: number | undefined;
     const prev = known.get(name);
     try {
@@ -284,10 +307,11 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       const st = fstatSync(fd, { bigint: true });
       ino = String(st.ino);
       size = Number(st.size);
-      if (archiveBacklog(prev, ino, size) === 0) return true; // a rotation is immutable once named
+      head = headFingerprint(fd, size);
+      if (archiveBacklog(prev, head, size) === 0) return true; // a rotation is immutable once named
       if (spent(c)) {
         c.pending = true;
-        c.backlogBytes += archiveBacklog(prev, ino, size);
+        c.backlogBytes += archiveBacklog(prev, head, size);
         return false;
       }
       opts.beforeArchiveRead?.(entry.path);
@@ -301,7 +325,7 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     } finally {
       if (fd !== undefined) closeSync(fd);
     }
-    const partial = prev !== undefined && partialLength(prev) !== undefined && prev.ino === ino && prev.size === size ? prev : undefined;
+    const partial = prev !== undefined && partialLength(prev) !== undefined && sameArchive(prev, head, size) ? prev : undefined;
     let off = partial ? partial.off : 0;
     do {
       if (spent(c)) {
@@ -310,9 +334,9 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
         return false;
       }
       const from = off;
-      const to = rangeEnd(data, from, data.length);
+      const to = rangeEnd(data, from, data.length, c);
       const done = to >= data.length;
-      commit(name, c, () => applyText(data.toString("utf8", from, to), now, c), done ? { ino, size, off: size, fp: null } : { ino, size, off: to, fp: `${PARTIAL_ARCHIVE}${data.length}` });
+      commit(name, c, () => applyText(data.toString("utf8", from, to), now, c), done ? { ino, size, off: size, fp: `${ARCHIVE_HEAD}${head}` } : { ino, size, off: to, fp: `${PARTIAL_ARCHIVE}${data.length}:${head}` });
       c.sourceBytes += Math.round(size * ((to - from) / Math.max(1, data.length)));
       off = to;
     } while (off < data.length);
@@ -322,8 +346,9 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
 
   function listRotations(known: Map<string, Checkpoint>, now: number, c: ProjectorTickResult): void {
     const dirMtimeMs = statSync(ledgerDir).mtimeMs;
-    if (gateMtimeMs !== undefined && dirMtimeMs === gateMtimeMs) return;
+    if (gateMtimeMs !== undefined && dirMtimeMs === gateMtimeMs && now - listedAt < DIR_GATE_RELIST_MS) return;
     c.listed = true;
+    listedAt = now;
     const names = readdirSync(ledgerDir);
     let complete = true;
     for (const entry of ledgerRotationEntries(names, ledgerDir)) complete = ingestArchive(entry, known, now, c) && complete;
@@ -367,7 +392,7 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
           want *= 2;
           continue;
         }
-        const end = rangeEnd(buf, 0, lastNl + 1);
+        const end = rangeEnd(buf, 0, lastNl + 1, c);
         const next = off + end;
         commit(LEDGER_FILENAME, c, () => applyText(buf.toString("utf8", 0, end), now, c), { ino, size, off: next, fp: fingerprint(fd, next) });
         c.liveBytes += end;
