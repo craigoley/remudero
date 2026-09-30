@@ -8,10 +8,13 @@ import type { IssueGateway } from "../src/lib/escalate.js";
 import { createLedgerProjector, openProjectorReadModel, readModelDigest } from "../src/lib/ledger-projector.js";
 import { realLedgerFs, type LedgerGrepFsDeps } from "../src/lib/ledger-union.js";
 import {
+  ORACLE_AGREE_INTERVAL_MS,
   ORACLE_CLOSED_LAG_MS,
+  ORACLE_DRIFT_INTERVAL_MS,
   READ_MODEL_CONSISTENCY_STEP,
   READ_MODEL_SELF_HEALED_STEP,
   ReadModelConsistencyError,
+  consistencyCheckDue,
   factColumns,
   runConsistencyCheck,
   type ConsistencyCheckOptions,
@@ -311,4 +314,15 @@ test("a repo row whose ledger line was lost is evidence and is not deleted by a 
   assert.equal(run.mismatches.ledgerLost, 1);
   assert.equal(run.mismatches.projectionExtra, 0);
   assert.equal(repoTables(f.db), before);
+});
+
+test("the oracle schedule is due first then hourly after agreement and sooner after drift", (t) => {
+  const f = projected(t);
+  assert.equal(consistencyCheckDue(f.db, CHECK_AT), true, "never run: due");
+  check(f);
+  assert.equal(consistencyCheckDue(f.db, CHECK_AT + ORACLE_DRIFT_INTERVAL_MS), false, "an agreement waits the hour");
+  assert.equal(consistencyCheckDue(f.db, CHECK_AT + ORACLE_AGREE_INTERVAL_MS), true);
+  f.db.exec("DELETE FROM fact WHERE seq = (SELECT min(seq) FROM fact)");
+  check(f, {}, fixedClock(CHECK_AT + ORACLE_AGREE_INTERVAL_MS));
+  assert.equal(consistencyCheckDue(f.db, CHECK_AT + ORACLE_AGREE_INTERVAL_MS + ORACLE_DRIFT_INTERVAL_MS), true, "after a heal the next check comes sooner");
 });

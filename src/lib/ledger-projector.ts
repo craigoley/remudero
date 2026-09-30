@@ -42,8 +42,8 @@ export const LEDGER_PROJECTOR_DDL = `
 `;
 
 /** Opens (or creates) one instance's projector read model under `stateDir` (core's, design §1.7). */
-export function openProjectorReadModel(stateDir: string, instance: string, clock?: Clock): ReadModelDb {
-  return openReadModel({ stateDir, instance, schemaVersion: LEDGER_PROJECTOR_SCHEMA_VERSION, ddl: LEDGER_PROJECTOR_DDL, ...(clock ? { clock } : {}) });
+export function openProjectorReadModel(stateDir: string, instance: string, clock?: Clock, generation?: string | null): ReadModelDb {
+  return openReadModel({ stateDir, instance, schemaVersion: LEDGER_PROJECTOR_SCHEMA_VERSION, ddl: LEDGER_PROJECTOR_DDL, ...(clock ? { clock } : {}), ...(generation !== undefined ? { generation } : {}) });
 }
 
 /** The steps the fact store keeps (design §3.5 `FACT_STEPS`); every other row is identity-only. */

@@ -1,0 +1,44 @@
+- id: W1-T4945
+  title: "EVERY src/ MERGE RESTARTS THE DAEMON, HALF OF THEM MID-WORK — about 25 boots a day, 36 drains in three days costing ~82 minutes a day of no new dispatch, and ~10 runs a day handed off. Restart for freshness at the cheapest moment: immediately when idle, and while busy only when the weighted change pressure justifies the drain"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator question 2026-09-30: do we need to raise the change-pressure ceiling so we restart less, or make it more efficient"
+  note: "reservation hand-off: plan-freshness-cheapest-1790787126000 -> plan-freshness-cheapest-1790787126000"
+  plan_refs: [W1-T2965, W1-T3245]
+  files: [src/lib/self-sync.ts, src/lib/daemon.ts, src/lib/deploy-judge.ts, test/the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 (rmd ledger-grep, 2026-09-28..30): daemon.boot 24/27/27 per day; daemon.freshness_drain 36
+    started and completed, median 8.3 min, p90 11.1, max 14.1, 246 minutes in total, during which no new work starts;
+    run.freshness_handoff 7/10/12 per day. deploy.restart_pressure: zero rows, because this fleet recycles on image
+    drift, so the weighted change-pressure judge (deploy-judge.ts) never governs these restarts. The daemon's own
+    freshness check does, and advanceIsMaterial (self-sync.ts) calls ANY change under src/, bin/ or a package or tsconfig
+    file material, so nearly every code merge (about 100 merges a day) restarts or drains the daemon. About half the boots
+    already happen idle and cost almost nothing; the drained half is the cost.
+  design: |
+    Decide WHEN, not WHETHER, to take a material advance. (i) If the daemon is idle (no worker, no in-flight review,
+    no detached sweep action), restart at once — that is free. (ii) If busy, score the advance with deploy-judge's
+    change-pressure scoring (the weighted restart-worth the deploy tick already uses): a change to the daemon's own
+    loop, dispatch, drain or ledger code restarts via the existing drain; a low-weight change accumulates pressure and
+    waits for the next idle moment. (iii) Pressure also grows with how long the daemon has been stale, so no deferred
+    advance waits indefinitely — tiered, with no fixed ceiling. Record daemon.freshness_decision {weight, pressure,
+    busy, action} so the choice is auditable.
+  acceptance:
+    - claim: "an idle daemon takes a material advance at once"
+      proof: 'grep: test("W1-T4945: an idle daemon takes a material advance at once" in test/the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts'
+    - claim: "a busy daemon defers a low-weight advance to the next idle moment"
+      proof: 'grep: test("W1-T4945: a busy daemon defers a low-weight advance to the next idle moment" in test/the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts'
+    - claim: "a change to the daemon's own loop still drains and restarts while busy"
+      proof: 'grep: test("W1-T4945: a change to the daemon own loop still drains and restarts while busy" in test/the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts'
+    - claim: "a deferred advance cannot wait indefinitely"
+      proof: 'grep: test("W1-T4945: a deferred advance cannot wait indefinitely" in test/the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts'
+  falsifier: |
+    Restart on every material advance again and the second test drains for a low-weight change.

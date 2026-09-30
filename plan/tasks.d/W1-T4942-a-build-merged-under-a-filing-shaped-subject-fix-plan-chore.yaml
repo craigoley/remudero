@@ -1,0 +1,107 @@
+- id: W1-T4942
+  title: "A BUILD MERGED UNDER A FILING-SHAPED SUBJECT (`fix(plan)`, `chore: wip`, `docs:`) CAN NEVER BE RECONCILED TO DONE — `creditIsReconcilable` reads only `creditIsImplementation`, which `creditSubjectIsImplementation` derives from the merge SUBJECT ALONE, so 15 shipped src/test tasks read `status: queued` until a hand-written closure PR (#8086) and 9 more still do, while `buildCreditCandidates` already holds each merge's changed paths (`mergedPathsByPr`) and they show the source it built"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: why do built-and-merged tasks still read queued when plan-reconcile cannot credit them (15 real src/test implementations refused only on their merge subject)"
+  plan_refs: [W1-T3063, W1-T3067, W1-T3084, W1-T4078, W1-T3970, W1-T3961, W1-T77, W1-T78, W1-T100, W1-T150, W1-T168, W1-T4902]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-build-under-a-filing-shaped-subject-earns-reconcile-credit.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 at origin/main 75bb6ed64. THE REFUSAL IS UPSTREAM OF THE WRITE, AND IT IS THE WRONG DISCRIMINATOR.
+
+    (1) THE MECHANISM. `rmd plan-reconcile` and the daemon's measurement-cadence rung both read `defaultCreditedMergedIds`
+    (src/run-task.ts), which keeps a `buildCreditCandidates` row only when `creditIsReconcilable` holds:
+    `merged === true && creditIsImplementation === true`. `creditCandidatesFromProjection` sets that flag from
+    `creditSubjectIsImplementation(mergeSubjects.get(prNumber))` (src/lib/sweep.ts), i.e. `!FILING_SUBJECT_RE.test(subject)`, and
+    `FILING_SUBJECT_RE` is `chore(plan)|fix(plan)|chore(triage)|chore(feedback)|docs(plan)|plan:|docs:|chore:`. The subject is the ONLY
+    evidence consulted. W1-T3063 (#4483) introduced it to stop a supersession CLOSE of an open build, and W1-T3084 (#4615) copied the
+    same flag onto the plan-reconcile WRITE for parity; W1-T3067's own design (v) records that "the subject is the WRONG discriminator"
+    for credit ("would strip three correct credits to fix two wrong ones") and moved the real answer, the changed paths, into
+    `deriveStatus` (`mergedPathsByPr` + `isPlanOnlyChangeset`). The reconcile predicate never got that second half.
+
+    (2) THE POPULATION, my own scripts over the full closed-PR list (6,444 REST rows, CRLF-safe anchored trailer plus `run-<id>-<epoch>`
+    head) and `git log origin/main --first-parent --name-only`. 243 (task, credit PR) pairs in the plan carry a filing-shaped subject:
+    212 touch only plan scope or `DECISIONS.md` (`isBookkeepingOnlyChangeset`), 1 has no path list, and 30 touch source (30 different
+    tasks, none with any other credit PR). At the merge base of the closure PR #8086 (5e7645cf9), 26 of those 30 read `status: queued`
+    and 4 already read `merged` (flipped by an earlier reconcile, before W1-T3084 added the filter): the 15 that #8086 hand-closed
+    (7 `fix(plan)`: W1-T3336 W1-T3344 W1-T3362 W1-T3397 W1-T3730 W1-T3761 W1-T4432; 8 `chore: wip`: W1-T1097 W1-T3743 W1-T3849
+    W1-T4084 W1-T4097 W1-T4442 W1-T4676 W1-T4683) and 11 that STILL read queued at origin/main. A replay of the real
+    `buildCreditCandidates` at origin/main (real gateway over the real PR rows) reaches 9 of the 11 with this fix: W1-T2334, W1-T2456,
+    W1-T2471, W1-T2640, W1-T2907, W1-T2918, W1-T3243, W1-T3675, W1-T4753. The other two, W1-T526 (#1926) and W1-T991 (#2146), sit at
+    first-parent positions 4,606 and 4,436, beyond the 4,000-commit `MERGED_PATHS_SCAN_LIMIT`, so `mergedPathsByPr` has no entry and
+    they stay refused (unknown declines). THE WINDOW IS ERODING: at about 125 merges a day (873 first-parent commits since 2026-09-23)
+    #3152, #3265, #3336 and #3867 (positions 3,568 / 3,470 / 3,421 / 3,001) leave it within days, after which a path arm cannot see
+    them either. (W1-T326, W1-T413 and W1-T262 have a `DECISIONS.md`-only credit diff and stay refused: they are ruling records, not
+    builds.) The 9 are credit-equivalent evidence, not a verified-complete list: reconcile flips on a credited merge, as it does for
+    every other shard.
+
+    (3) WHAT IT IS NOT. It does NOT re-dispatch a built task. `isDispatchEligible` (src/lib/drain.ts) declines on `isMerged(t.id)` before
+    any other guard, and the daemon's `isMerged` is `projectPlan(...).get(id).merged` (`refreshMerged`, src/run-task.ts); `deriveStatus`
+    rung (c) credits by anchored trailer or `run-<id>-` head with NO subject test. Replayed with the real `buildBatchedGithub` over the
+    real PR rows and the plan at 5e7645cf9: all 15 read `merged: true` in the daemon's projection (14 by trailer, W1-T3761 by head
+    branch), and none is in `runnableCandidates` (135 other tasks are, the positive control). After the credit PR NONE of the 30 build-diff
+    filing-credit tasks has a later PR of any state. The cost is real but lower: a stale `status: queued` the queue audits keep listing, a
+    plan-file reader that disagrees with the projection, and a hand-written closure PR per batch (#8058, #8086). The sweep's supersession
+    close and the escalation closer read the subject too, but they REFUSE a close on it, which is the safe direction.
+
+    (4) WHY THE BOUNDARY MOVES ON THE DIFF, NOT THE WORDS. CLAUDE.md's plan-hygiene doctrine already defines a filing by what it carries:
+    a `chore(plan): file ...` PR is plan-only (`rule15-filing` refuses an out-of-plan path beside a plan record), so its diff is plan scope
+    and `isPlanOnlyChangeset` is true; a build's diff is not. `fix(plan)` here is a SUBSYSTEM name (the plan loader, linter and emitter in
+    src/lib/plan*.ts) and `chore: wip` is the fleet's own salvage-commit subject (`commitWorkerEdits`), neither a statement that no code
+    shipped. `PLAN_DECLARING_SUBJECT_RE` (src/lib/risk-judge.ts, W1-T2371) is the precedent: it already requires the filing subject AND an
+    all-`plan/` diff before treating a change as a filing.
+  design: |
+    (i) `CreditCandidate` (src/lib/sweep.ts) gains `creditHasBuildDiff?: boolean`: true ONLY when the merge's changed paths were read,
+    are non-empty, and are NOT bookkeeping-only (`isBookkeepingOnlyChangeset`, src/lib/status.ts: plan scope plus `DECISIONS.md`). false
+    when they are bookkeeping-only. undefined when no path list exists for the PR (outside the 4,000-commit path window, or an unreadable
+    log): the SAME "unknown declines" polarity `creditIsImplementation` already has.
+    (ii) `creditCandidatesFromProjection` (src/run-task.ts) takes an optional fourth argument, the `mergedPathsByPr` map, and sets the flag.
+    `buildCreditCandidates` passes the map it already builds (`deps.mergedPathsByPr`): no new git read. A body that names the PR a
+    prerequisite-only instrument (W1-T4078) forces the flag false, as it forces `creditIsImplementation` false.
+    (iii) `creditIsReconcilable` becomes `merged === true && (creditIsImplementation === true || creditHasBuildDiff === true)`.
+    THE SUBJECT PATH IS NOT TOUCHED: `FILING_SUBJECT_RE`, `creditSubjectIsImplementation`, `stampTaskMergedBy` (the supersession CLOSE)
+    and `reconcileImplementationEvidence` (the escalation close) keep reading the subject alone. Those are the destructive consumers
+    W1-T3063 protects; widening them is a separate ruling, and this task must not decide it by accident. Only the one-way, PR-reviewed
+    `status: queued -> merged` write moves.
+    (iv) NOT IN SCOPE, said plainly: the 6 plan-only deliverables (`chore(plan)`/`docs:` PRs whose whole deliverable is plan text) stay
+    refused, and so do W1-T326/W1-T507/W1-T518 (outside the 5,000-commit subject window): a path arm cannot see them either.
+  acceptance:
+    - claim: "a merge whose diff touches source under a filing-shaped subject (the fix(plan) and chore: wip shapes) is reconcilable"
+      proof: 'grep: test("W1-T4942: a code-touching merge under a filing-shaped subject is reconcilable" in test/a-build-under-a-filing-shaped-subject-earns-reconcile-credit.test.ts'
+    - claim: "a plan-only filing, and a DECISIONS.md-only close, under a filing-shaped subject are still refused"
+      proof: 'grep: test("W1-T4942: a plan-only filing under a filing-shaped subject is still refused" in test/a-build-under-a-filing-shaped-subject-earns-reconcile-credit.test.ts'
+    - claim: "an unknown or empty path list never earns reconcile credit, so a failed git read cannot flip a shard"
+      proof: 'grep: test("W1-T4942: an unknown or empty diff never earns reconcile credit" in test/a-build-under-a-filing-shaped-subject-earns-reconcile-credit.test.ts'
+    - claim: "a prerequisite-only body is refused even when its diff touches source"
+      proof: 'grep: test("W1-T4942: a prerequisite-only merge is refused despite a code diff" in test/a-build-under-a-filing-shaped-subject-earns-reconcile-credit.test.ts'
+    - claim: "the supersession close still declines a filing-shaped subject even with a code diff, so the destructive consumer is unchanged"
+      proof: 'grep: test("W1-T4942: the supersession close still declines a filing-shaped subject" in test/a-build-under-a-filing-shaped-subject-earns-reconcile-credit.test.ts'
+    - claim: "the real credit builder reads the merge's paths from a real git log, not only an injected map"
+      proof: 'grep: test("W1-T4942: the real credit builder reads merge paths from git" in test/a-build-under-a-filing-shaped-subject-earns-reconcile-credit.test.ts'
+    - claim: "the new flag has a production call site in the credit builder"
+      proof: "grep: creditHasBuildDiff in src/run-task.ts"
+  falsifier: |
+    Delete the `creditHasBuildDiff === true` clause from `creditIsReconcilable` and the first test reddens (a `fix(plan)` merge touching
+    src/lib/plan.ts is refused again) while the plan-only test stays green. Make the path predicate return true for a plan-only diff and
+    the second test reddens (a `chore(plan): file ...` merge would credit the task it merely files, the #3195/#4461 incident). BOTH
+    directions are needed: a test that only reddens on removal pins that the flag exists, not what it decides.
+  note: |
+    THE TWO EXISTING PINS THIS MUST NOT MOVE: `test/a-filing-credit-must-never-close-a-build.test.ts` (W1-T3063 criterion 1, the #4461
+    incident, and criterion 4, the vocabulary) stays green because the subject path is untouched, and
+    `test/a-plan-only-filing-cannot-earn-a-merge-credit.test.ts` (W1-T3067 criteria 1 and 2, `isPlanOnlyChangeset` splits the #3195
+    shape from a src diff) already states the diff boundary this task reuses.
+    THE duplicate-surface ADVISORY names W1-T77/T78/T100/T150/T168 (monolith records) and W1-T4902: each declares src/lib/sweep.ts and
+    src/run-task.ts as this task does, none edits `creditSubjectIsImplementation`, `creditCandidatesFromProjection` or
+    `creditIsReconcilable`; they are cited in plan_refs for that reason and not narrowed away.
+    NOT THIS TASK: W1-T3376 and W1-T3763 are NOT refused by the subject (both read `creditIsImplementation: true` in a clean replay), so
+    this fix does not flip them. Both credit and dispatch are already correct for them; what stops the reconcile write is a credit row pointing at a PR the subject scan cannot read (a stacked PR merged into a non-main base, or a filing PR), which needs the daemon's ledger and merge-credit.json to confirm.
+    RISK: high because a wrong `true` writes `status: merged` onto a shard whose work did not ship; the one-way rule, the
+    retirement guard and the PR review of every reconcile landing bound it, and the plan-only case is the falsifier.
