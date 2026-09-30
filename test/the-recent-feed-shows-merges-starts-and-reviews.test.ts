@@ -63,7 +63,9 @@ test("a run start and its review and auto-merge each reach the recent feed", () 
 test("one merge recorded by a verdict row and a verdict.merged credit is one merged row", () => {
   const ownVerdict = { ...RUN_VERDICT, verdict: "merged" };
   const feed = computeRecentActivity(depsFor([ownVerdict, MERGE_CREDIT]), createRecentActivityCache());
-  assert.equal(feed.filter((e) => e.verb === "merged").length, 1, "the console counts merges off this feed, so a double row double-counts");
+  const merges = feed.filter((e) => e.verb === "merged");
+  assert.equal(merges.length, 1, "the console counts merges off this feed, so a double row double-counts");
+  assert.equal(merges[0]?.ts, MERGE_CREDIT.ts, "the sweep credit carries the actual merge time, not the run's earlier verdict time");
 });
 
 test("a rotation that leaves the live ledger with more lines than were scanned is rescanned not skipped", () => {

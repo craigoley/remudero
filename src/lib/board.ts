@@ -1173,8 +1173,18 @@ export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCach
     const entry = classifyLine(line, taskId, task?.title ?? taskId, ts, prUrl);
     if (!entry) continue;
     // One merge, one row: a run's own `verdict: merged` and the sweep's `verdict.merged` credit
-    // both record the same merge, and the console counts merges off this feed.
-    if (entry.verb === "merged" && state.entries.some((e) => e.verb === "merged" && e.taskId === entry.taskId && e.prUrl === entry.prUrl)) continue;
+    // both record the same merge, and the console counts merges off this feed. Keep the later
+    // timestamp when both rows exist: the sweep credit records when the merge actually happened.
+    if (entry.verb === "merged") {
+      const duplicateIndex = state.entries.findIndex((e) => e.verb === "merged" && e.taskId === entry.taskId && e.prUrl === entry.prUrl);
+      if (duplicateIndex >= 0) {
+        const previous = state.entries[duplicateIndex];
+        if (previous && Date.parse(entry.ts) > Date.parse(previous.ts)) {
+          state.entries[duplicateIndex] = decoratePrTitle(runId ? { ...entry, runId } : entry, deps);
+        }
+        continue;
+      }
+    }
     state.entries.push(decoratePrTitle(runId ? { ...entry, runId } : entry, deps));
     if (state.entries.length > RECENT_ACTIVITY_HISTORY_CAP) state.entries.shift();
   }
