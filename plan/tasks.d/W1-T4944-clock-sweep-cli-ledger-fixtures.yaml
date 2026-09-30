@@ -37,8 +37,10 @@
     Give each of the wipe-test and peek main() dispatch tests a scratch HOME
     whose config names a scratch root. Assert that cli.invoked reaches only that
     fixture ledger while their command exit assertions stay unchanged. Exercise
-    both under +400 days with the clock-shift preload and the normal test setup,
-    and prove no append reaches a scratch stand-in for the live root. Report the
+    both under +400 days only in a process with an isolated TMPDIR: main() runs
+    the real temp sweep before CLI logging, and a shifted clock would otherwise
+    delete active rmd-prefixed dirs on the shared temp root. Prove no append
+    reaches a scratch stand-in for the live root. Report the
     observed archive rows and the unresolved exact historical invocation in the
     PR. This is fixture repair, not a new PR approval gate. Do not rewrite the
     append-only archive or infer success from a zero without a positive fixture
