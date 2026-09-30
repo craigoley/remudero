@@ -39249,7 +39249,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
   const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
   const behindMainByPr = buildBehindMainByPr(owner, repo, prsForFixRung);
-  probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { dryRun, behindMainByPr });
+  await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { dryRun, behindMainByPr });
   // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
   // composition change, not a new read: the credit rung already built exactly this set, just
   // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
@@ -40472,7 +40472,7 @@ export function buildSweepHook(
       const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
       const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
       const behindMainByPr = buildBehindMainByPr(owner, repo, prsForFixRung);
-      probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr });
+      await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr });
       // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
       // composition change, not a new read: the credit rung already built exactly this set, just
       // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open

@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { readLedgerLines } from "./status.js";
 import type { OpenPrView } from "./sweep.js";
 
@@ -13,7 +13,7 @@ export interface MergeProbeGitResult {
   status: number | null;
   stdout: string;
 }
-export type MergeProbeGit = (args: readonly string[]) => MergeProbeGitResult;
+export type MergeProbeGit = (args: readonly string[]) => MergeProbeGitResult | Promise<MergeProbeGitResult>;
 
 export type MergeProbeResult =
   | { verdict: "clean"; tree: string }
@@ -21,16 +21,24 @@ export type MergeProbeResult =
   | { verdict: "unreadable"; reason: string };
 
 export function defaultMergeProbeGit(cwd: string): MergeProbeGit {
-  return (args) => {
-    const res = spawnSync("git", [...args], { cwd, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
-    return { status: res.error ? null : res.status, stdout: res.stdout ?? "" };
-  };
+  // GitHub and merge-tree can take the full timeout. Keep that wait off the daemon's event loop so
+  // its review clock can still admit and post reviews while this observation is in flight.
+  return (args) => new Promise((resolve) => {
+    try {
+      execFile("git", [...args], { cwd, encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
+        const code = (error as { code?: unknown } | null)?.code;
+        resolve({ status: error ? (typeof code === "number" ? code : null) : 0, stdout: stdout ?? "" });
+      });
+    } catch {
+      resolve({ status: null, stdout: "" });
+    }
+  });
 }
 
 /** Read-only test merge: exit 0 is clean, exit 1 a conflict, anything else unreadable. */
-export function probeMerge(input: { headSha: string; mainSha: string; git: MergeProbeGit }): MergeProbeResult {
+export async function probeMerge(input: { headSha: string; mainSha: string; git: MergeProbeGit }): Promise<MergeProbeResult> {
   try {
-    const res = input.git(["merge-tree", "--write-tree", "--name-only", "--no-messages", input.headSha, input.mainSha]);
+    const res = await input.git(["merge-tree", "--write-tree", "--name-only", "--no-messages", input.headSha, input.mainSha]);
     const lines = res.stdout.split("\n").filter((line) => line !== "");
     const tree = lines[0] ?? "";
     if (!/^[0-9a-f]{40,64}$/.test(tree) || (res.status !== 0 && res.status !== 1)) {
@@ -56,7 +64,7 @@ export interface MergeProbeSummary {
 
 /** Probe each open, non-draft PR head against main once per (head, main) pair. Observation only:
  *  read-only verbs, nothing written to a PR. A throw is logged and never fails the pass. */
-export function probeOpenPrMerges(
+export async function probeOpenPrMerges(
   prs: readonly OpenPrView[],
   ledgerPath: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -67,13 +75,13 @@ export function probeOpenPrMerges(
     git?: MergeProbeGit;
     limit?: number;
   } = {},
-): MergeProbeSummary {
+): Promise<MergeProbeSummary> {
   const eligible = prs.filter((pr) => pr.isDraft !== true);
   if (eligible.length === 0 || opts.dryRun === true) return { probed: 0 };
   try {
     const git = opts.git ?? defaultMergeProbeGit(cwd);
-    const fetched = git(["fetch", "--no-tags", "--quiet", "origin", "main"]);
-    const main = fetched.status === 0 ? git(["rev-parse", "FETCH_HEAD"]) : fetched;
+    const fetched = await git(["fetch", "--no-tags", "--quiet", "origin", "main"]);
+    const main = fetched.status === 0 ? await git(["rev-parse", "FETCH_HEAD"]) : fetched;
     const mainSha = main.status === 0 ? main.stdout.trim() : "";
     if (mainSha === "") {
       log(`${MERGE_PROBE_STEP}.main_unreadable`, { git_status: main.status });
@@ -89,8 +97,8 @@ export function probeOpenPrMerges(
       .sort((a, b) => a.lastActivityAt.localeCompare(b.lastActivityAt) || a.prNumber - b.prNumber)
       .slice(0, opts.limit ?? MERGE_PROBE_LIMIT);
     for (const pr of targets) {
-      git(["fetch", "--no-tags", "--quiet", "origin", `refs/pull/${pr.prNumber}/head`]);
-      const result = probeMerge({ headSha: pr.headSha, mainSha, git });
+      await git(["fetch", "--no-tags", "--quiet", "origin", `refs/pull/${pr.prNumber}/head`]);
+      const result = await probeMerge({ headSha: pr.headSha, mainSha, git });
       const behind = opts.behindMainByPr?.get(pr.prNumber);
       log(MERGE_PROBE_STEP, {
         pr_number: pr.prNumber,
