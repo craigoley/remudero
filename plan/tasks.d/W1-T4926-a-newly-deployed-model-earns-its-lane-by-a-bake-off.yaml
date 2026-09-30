@@ -1,0 +1,43 @@
+- id: W1-T4926
+  title: "A NEWLY DEPLOYED MODEL IS ROUTED ON A GUESS — run the inbox-draft bake-off automatically when a model is deployed (a new cash price row or Claude candidate), across its thinking levels, and put the ranked table in front of the operator; never on a schedule"
+  repo: remudero
+  depends_on: [W1-T4907]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator direction 2026-09-30: bake-offs run when a new model is deployed, not regularly, and must consider thinking levels"
+  note: "reservation hand-off: plan-bakeoff-trigger-1790777606000 -> plan-bakeoff-trigger-1790777606000"
+  plan_refs: [W1-T4907, W1-T3570, W1-T4916]
+  files: [src/lib/bakeoff-trigger.ts, src/lib/sweep.ts, test/a-newly-deployed-model-earns-its-lane-by-a-bake-off.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30: gpt-6-luna was routed to lead the inbox lane on price and model generation (#7963) and failed
+    the fragment contract 38 of 39 times live; a replay bake-off (docs/recon/openweight-inbox-draft-trial.md) then
+    ranked gpt-oss-120b 3/8 clean at $0.045 and Sonnet 5.5 7/8 at about 60x the cost. That bake-off ran every
+    candidate at the lane's configured effort only; a follow-up sweep measured thinking levels separately. The operator
+    ruled that bake-offs run when a model is DEPLOYED, not on a schedule, and must cover thinking levels.
+  design: |
+    (i) findUntrialedModels (new module) compares the deployable model set (OPENWEIGHT_PRICES rows plus mounts
+    claude_candidates) with a recorded set of models already baked off (state/bakeoff-trialed.json), so a new
+    deployment is noticed once and nothing re-runs on a timer.
+    (ii) For each untrialed model the sweep runs W1-T4907's bake-off once for the inbox-draft lane, for every
+    thinking level the model accepts (reasoning_effort low, medium and high for cash models, or none where the
+    adapter forces it, and the effort levels for Claude models), next to the incumbent lead at its current effort.
+    (iii) It files ONE inbox proposal with the ranked table (clean drafts, contract errors, cost, wall time per
+    model and level) and records the model as trialed. It never changes routing; the operator picks.
+  acceptance:
+    - claim: "a newly deployed model is trialed once and never on a timer"
+      proof: 'grep: test("W1-T4926: a newly deployed model is trialed once and never on a timer" in test/a-newly-deployed-model-earns-its-lane-by-a-bake-off.test.ts'
+    - claim: "the trial covers every thinking level the model accepts"
+      proof: 'grep: test("W1-T4926: the trial covers every thinking level the model accepts" in test/a-newly-deployed-model-earns-its-lane-by-a-bake-off.test.ts'
+    - claim: "the result is one proposal with the ranked table, and routing is unchanged"
+      proof: 'grep: test("W1-T4926: the result is one proposal with the ranked table, and routing is unchanged" in test/a-newly-deployed-model-earns-its-lane-by-a-bake-off.test.ts'
+    - claim: "the sweep calls the trigger"
+      proof: 'grep: findUntrialedModels( in src/lib/sweep.ts'
+  falsifier: |
+    Run the bake-off on every sweep and the first test sees a second trial for the same model.
