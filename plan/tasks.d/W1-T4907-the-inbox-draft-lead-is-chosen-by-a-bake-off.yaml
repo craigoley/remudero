@@ -1,0 +1,41 @@
+- id: W1-T4907
+  title: "THE INBOX-DRAFT LEAD WAS CHOSEN ON A GUESS TWICE — nano drafts clean 25% on the slim prompt, and gpt-6-luna, picked to replace it, failed the fragment contract on 38 of 39 syntheses. Replay real inbox proposals through each candidate offline and pick the lead from measured clean-draft rate per dollar"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: build what helps automated flow and self-improvement (inbox lane regression)"
+  note: "reservation hand-off: plan-inbox-bakeoff-1790767768000 -> plan-inbox-bakeoff-1790767768000"
+  plan_refs: [W1-T3570, W1-T4864]
+  files: [src/lib/inbox-bakeoff.ts, src/run-task.ts, test/the-inbox-draft-lead-is-chosen-by-a-bake-off.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 (fleet ledger): cash gpt-5-nano on the slim prompt drafted 49 of 200 terminal drafts
+    clean (25%), with about 52% of syntheses erroring (docs/recon/openweight-inbox-draft-trial.md). #7963 moved
+    the lead to gpt-6-luna on price and generation alone, and in 03:18Z..10:03Z Luna produced 38 draft errors in
+    39 syntheses ("output carrying NEITHER marker — it answered in prose instead of the fragment contract",
+    ~269-character replies); #8017 reverted it. The adapter forces tool-enabled gpt-6-luna to
+    reasoning_effort none, which plausibly explains it. No lead has ever been chosen by replaying the same
+    proposals through the candidates.
+  design: |
+    `rmd inbox-bakeoff` (new module, CLI verb) replays a fixed sample of recent real inbox proposals through
+    each candidate lane with the production prompt and lint: cash gpt-5-nano, gpt-oss-120b, gpt-6-luna with tools,
+    gpt-6-luna without tools (reasoning allowed), and subscription claude-sonnet-5-5. For each it records
+    fragment-contract errors, lint-clean drafts, cash cost and wall time, writes one bakeoff row per candidate,
+    and prints the ranking by clean drafts per dollar with Sonnet's subscription cost shown separately. It never
+    changes routing; the operator picks from the table.
+  acceptance:
+    - claim: "each candidate's clean-draft rate and cost are measured on the same proposals"
+      proof: 'grep: test("W1-T4907: each candidate is measured on the same proposals" in test/the-inbox-draft-lead-is-chosen-by-a-bake-off.test.ts'
+    - claim: "a fragment-contract error is counted, never scored as a draft"
+      proof: 'grep: test("W1-T4907: a fragment-contract error is counted, never scored as a draft" in test/the-inbox-draft-lead-is-chosen-by-a-bake-off.test.ts'
+    - claim: "the CLI verb calls the bake-off"
+      proof: 'grep: runInboxBakeoff( in src/run-task.ts'
+  falsifier: |
+    Score a prose reply as a draft and the second test counts Luna's failures as output.
