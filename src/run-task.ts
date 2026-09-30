@@ -21875,7 +21875,9 @@ export function boardCommand(rest: string[], deps: BoardCommandOptions = {}): nu
       const draft = pr.isDraft ? " [draft]" : "";
       const failing = pr.failingChecks.length > 0 ? `  failing=${pr.failingChecks.join(",")}` : "";
       const pending = pr.pendingChecks.length > 0 ? `  pending=${pr.pendingChecks.join(",")}` : "";
-      console.log(`    #${pr.number} ${pr.title}${draft} (${pr.headRefName})${failing}${pending}`);
+      const dropped = pr.supersededChecks ?? [];
+      const superseded = dropped.length > 0 ? `  superseded: ${dropped.join(",")}` : "";
+      console.log(`    #${pr.number} ${pr.title}${draft} (${pr.headRefName})${failing}${pending}${superseded}`);
     }
   }
   return 0;

@@ -53,6 +53,7 @@ import {
   SERVE_LABEL,
   SUPERVISOR_LABEL,
 } from "./launchd.js";
+import { classifyRollupSupersession, type RollupCheckEntry } from "./sweep.js";
 import { resolveInstallRoot } from "./install-root.js";
 import {
   buildStatusBoard,
@@ -947,8 +948,7 @@ export function parseCasePrSnapshot(value: unknown, readAt: string): CasePrRead 
     return { state: "unavailable", reason: "pr-identity-invalid" };
   }
   const checks: CasePrSnapshot["checks"] = Array.isArray(row.statusCheckRollup)
-    ? row.statusCheckRollup.flatMap((entry: unknown) => {
-      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    ? classifyRollupSupersession(row.statusCheckRollup.filter((e: unknown): e is RollupCheckEntry => !!e && typeof e === "object" && !Array.isArray(e))).latest.flatMap((entry) => {
       const check = entry as Record<string, unknown>;
       const name = typeof check.name === "string" ? check.name : typeof check.context === "string" ? check.context : null;
       const raw = check.__typename === "StatusContext" ? check.state : check.conclusion ?? check.status;
