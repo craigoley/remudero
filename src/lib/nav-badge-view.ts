@@ -44,7 +44,14 @@ const INBOX_STALE_AFTER_MS = 10 * 60_000;
 const MAX_PROPOSAL_IDS = 20;
 
 export interface NavBadgeData {
-  agent: { count?: number; proposalIds: string[]; reason?: string };
+  /** `count` when every instance was counted, `atLeast` when only some were (a floor, never a total). */
+  agent: {
+    count?: number;
+    atLeast?: number;
+    proposalIds: string[];
+    instances: Array<{ instanceId: string; repository?: string; count?: number; reason?: string }>;
+    reason?: string;
+  };
   inbox: { ready?: number; needsYou?: number; fleet?: number; reason?: string };
 }
 
@@ -160,37 +167,54 @@ function sourceAge(asOf: string | null, nowMs: number, staleAfterMs: number): Vi
   return nowMs - Date.parse(asOf) > staleAfterMs ? "stale" : "fresh";
 }
 
-/** The nav-badge view over serve's own caches. */
-export function navBadgeView(deps: {
+/** One daemon instance the agent badge covers: its analytics, its operator-agent memory, its ledger. */
+export interface NavBadgeScope {
+  instanceId: string;
+  repository?: string;
   analytics: () => AnalyticsSnapshot;
   memory?: OperatorAgentMemorySource;
   ledgerPath: string;
-  inboxRoot: string;
-  repository?: string;
-  instanceId: string;
-  clock?: Clock;
-}): ViewDefinition<NavBadgeData> {
+}
+
+type InstanceBadge = NavBadgeData["agent"]["instances"][number];
+
+function instanceBadge(scope: NavBadgeScope, nowMs: number, sources: ViewSource[]): { badge: InstanceBadge; ids: string[] } {
+  const snapshot = scope.analytics();
+  const analyticsState = sourceAge(snapshot.asOf, nowMs, ANALYTICS_STALE_AFTER_MS);
+  sources.push({ name: `analytics:${scope.instanceId}`, asOf: snapshot.asOf, state: analyticsState });
+  const base = { instanceId: scope.instanceId, ...(scope.repository ? { repository: scope.repository } : {}) };
+  if (scope.repository === undefined) return { badge: { ...base, reason: "serve names no repository for this instance" }, ids: [] };
+  if (analyticsState === "unavailable") return { badge: { ...base, reason: "analytics has not completed its first refresh" }, ids: [] };
+  if (scope.memory?.current().state !== "ready") return { badge: { ...base, reason: "operator-agent memory has not completed its first refresh" }, ids: [] };
+  const opDeps = { ledgerPath: scope.ledgerPath, memory: scope.memory };
+  const history = readOperatorAgentHistory(opDeps);
+  const settings = readOperatorAgentSettings(opDeps, { kind: "repository", repository: scope.repository }).settings;
+  const ids = visibleOperatorAgentProposals(operatorAgentCandidates(snapshot, { repository: scope.repository, instanceId: scope.instanceId }, history), history, settings);
+  return { badge: { ...base, count: ids.length }, ids };
+}
+
+/** The nav-badge view over serve's own caches, every instance by default or `?instances=a,b`. */
+export function navBadgeView(deps: { scopes: () => readonly NavBadgeScope[]; inboxRoot: string; clock?: Clock }): ViewDefinition<NavBadgeData> {
   return {
     name: "nav-badge",
     version: NAV_BADGE_VIEW_VERSION,
-    compute: () => {
+    compute: (params) => {
       const nowMs = (deps.clock ?? systemClock).now();
-      const snapshot = deps.analytics();
-      const memory = deps.memory?.current();
-      const analyticsState = sourceAge(snapshot.asOf, nowMs, ANALYTICS_STALE_AFTER_MS);
-      const sources: ViewSource[] = [{ name: "analytics", asOf: snapshot.asOf, state: analyticsState }];
-
-      let agent: NavBadgeData["agent"];
-      if (deps.repository === undefined) agent = { proposalIds: [], reason: "serve names no core repository" };
-      else if (analyticsState === "unavailable") agent = { proposalIds: [], reason: "analytics has not completed its first refresh" };
-      else if (memory?.state !== "ready") agent = { proposalIds: [], reason: "operator-agent memory has not completed its first refresh" };
-      else {
-        const opDeps = { ledgerPath: deps.ledgerPath, memory: deps.memory };
-        const history = readOperatorAgentHistory(opDeps);
-        const settings = readOperatorAgentSettings(opDeps, { kind: "repository", repository: deps.repository }).settings;
-        const ids = visibleOperatorAgentProposals(operatorAgentCandidates(snapshot, { repository: deps.repository, instanceId: deps.instanceId }, history), history, settings);
-        agent = { count: ids.length, proposalIds: ids.slice(0, MAX_PROPOSAL_IDS) };
-      }
+      const all = deps.scopes();
+      const asked = params.get("instances")?.split(",").map((name) => name.trim()).filter(Boolean);
+      const unknown = (asked ?? []).filter((name) => !all.some((scope) => scope.instanceId === name));
+      if (unknown.length > 0) return { error: `unknown instance: ${unknown.join(",")}; serve has ${all.map((s) => s.instanceId).join(",")}` };
+      const scopes = asked ? all.filter((scope) => asked.includes(scope.instanceId)) : all;
+      const sources: ViewSource[] = [];
+      const counted = scopes.map((scope) => instanceBadge(scope, nowMs, sources));
+      const known = counted.filter((c) => c.badge.count !== undefined);
+      const total = known.reduce((sum, c) => sum + (c.badge.count ?? 0), 0);
+      const agent: NavBadgeData["agent"] = {
+        ...(known.length === counted.length ? { count: total } : known.length > 0 ? { atLeast: total } : {}),
+        proposalIds: counted.flatMap((c) => c.ids).slice(0, MAX_PROPOSAL_IDS),
+        instances: counted.map((c) => c.badge),
+        ...(known.length < counted.length ? { reason: `${counted.length - known.length} of ${counted.length} instances not counted` } : {}),
+      };
 
       const classified = readClassificationSnapshot(join(deps.inboxRoot, "state"));
       sources.push({ name: "inbox-classification", asOf: classified?.generatedAt ?? null, state: classified ? sourceAge(classified.generatedAt, nowMs, INBOX_STALE_AFTER_MS) : "unavailable" });

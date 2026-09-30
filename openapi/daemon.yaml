@@ -6657,12 +6657,28 @@ components:
                 The operator-agent badge: proposals the console's engine would show (a port of its
                 generateProposals and visibleProposals, src/lib/nav-badge-view.ts), with up to 20
                 of their ids for a parity check.
-              required: [proposalIds]
+              required: [proposalIds, instances]
               properties:
-                count: {type: integer}
+                count:
+                  type: integer
+                  description: Present only when every selected instance was counted.
+                atLeast:
+                  type: integer
+                  description: Present instead of `count` when only some instances were counted -- a floor, never a total.
                 proposalIds:
                   type: array
                   items: {type: string}
+                instances:
+                  type: array
+                  description: One entry per selected instance; `count` absent with a `reason` when it could not be counted.
+                  items:
+                    type: object
+                    required: [instanceId]
+                    properties:
+                      instanceId: {type: string}
+                      repository: {type: string}
+                      count: {type: integer}
+                      reason: {type: string}
                 reason: {type: string}
             inbox:
               type: object
@@ -11953,9 +11969,18 @@ paths:
         src/lib/nav-badge-view.ts over serve's own caches (analytics snapshot, operator-agent
         memory, the inbox classification). Replaces the console's ~12 upstream reads (~370 KB) per
         page view. A weak ETag hashes the view's version, stale flag and data, so an unchanged view
-        answers If-None-Match with 304 even after a recompute. See docs/views.md.
+        answers If-None-Match with 304 even after a recompute. The agent badge sums every daemon
+        instance serve holds (core and each registry instance); `?instances=` narrows it. See
+        docs/views.md.
       security:
         - bearerRead: []
+      parameters:
+        - name: instances
+          in: query
+          required: false
+          description: Comma-separated registry instance names to count; default every instance.
+          schema:
+            type: string
       responses:
         "200":
           description: The view.
@@ -11963,6 +11988,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NavBadgeView"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
         "304":
           description: The request's `If-None-Match` matched the view's ETag; no body.
         "401":
