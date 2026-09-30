@@ -74,17 +74,13 @@
   acceptance:
     - claim: "rule 13 no longer offers a passing test as an alternative to call-site evidence for a task whose deliverable is wiring, and says so in terms a reader can check"
       proof: "grep: wiring is not proved by a passing test in MASTER-PLAN.md"
-    - claim: "a diff adding an injectable parameter that no non-test call site supplies is refused at review, and one whose caller is supplied in the same change passes"
-      proof: "unit test: test/ships-unwired-floor.test.ts"
-    - claim: "the refusal is answerable — a PR body naming the task or PR that will supply the caller clears it, so the deliberate append-last idiom is taxed rather than forbidden"
-      proof: "unit test: test/ships-unwired-floor.test.ts"
   risk: high
   origin: oper#ruling-production-path-proofs-2026-08-05
   plan_refs: ["§12", "W1-T322", "W1-T352", "W1-T353"]
-  files: [MASTER-PLAN.md, src/lib/reachability.ts, src/lib/review.ts, test/ships-unwired-floor.test.ts]
+  files: [MASTER-PLAN.md]
   status: queued
   attempts: 0
-  note: "OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, 'the verify-human queue, cleared'): CONFIRMED — build the gate as an answerable refusal that reuses the existing SHIPS-UNWIRED: / WIRED-AT: markers, never an unanswerable block. verify:human REQUIRED BY W1-T353, not chosen for convenience: this task's deliverable is a
+  note: "OPERATOR DIRECTION 2026-09-30: no new rule may refuse or strand a PR. Only the rule-13 text amendment is built. The review gate stays as it is: the existing SHIPS-UNWIRED floor is already advisory (review.ts), and no refusal is added. OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, 'the verify-human queue, cleared'): CONFIRMED — build the gate as an answerable refusal that reuses the existing SHIPS-UNWIRED: / WIRED-AT: markers, never an unanswerable block. verify:human REQUIRED BY W1-T353, not chosen for convenience: this task's deliverable is a
     RULING — an amendment to a standing rule — and W1-T353's linter refuses a ruling-shaped task that
     is not verify:human. The gate half is machine-checkable; the rule half is a judgement about what
     the fleet is permitted to accept as proof, and that is the operator's to confirm.

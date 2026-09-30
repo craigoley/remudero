@@ -167,7 +167,8 @@ import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGa
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, selectorShadowFlakeLedger, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener, startEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
-import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
+import { daemonSreLaneInput, openIncidentFeedbackOrigins, startSreLane } from "./lib/sre-lane.js";
+import { fileConsumerVia, gitHeartbeatSource, startHostResourceGardener } from "./lib/host-resource-gardener.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
@@ -252,7 +253,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -33637,6 +33638,25 @@ export async function daemonCommand(
                   };
                   return startGarden(hotFileGardenSpec(hotFileGarden, hotFileSources), hotFileGarden, intervalMs);
                 },
+                // W1-T4804: host disk, swap and inodes are projected to full from the heartbeat history and
+                // answered in tiers against each host's own janitor cadence. Off: state/HOST_RESOURCE_OFF.
+                (intervalMs: number) => {
+                  const stateDir = join(config.root, "state");
+                  const mintTaskId = ciLearningTaskIdMinter(repoRoot);
+                  return startHostResourceGardener(
+                    {
+                      stateDir,
+                      log,
+                      readHeartbeats: gitHeartbeatSource(repoRoot),
+                      handoff: (h) => void captureFeedback(repoRoot, { id: h.id, raw: h.raw, origin: h.origin as FeedbackOrigin }),
+                      openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot),
+                      escalate: raiseDuplicate,
+                      planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+                      fileConsumer: fileConsumerVia(() => gardenCheckout({ name: "host-resource", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }), mintTaskId),
+                    },
+                    intervalMs,
+                  );
+                },
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
                 // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
                 // registry instance" has no selector yet -- `RegistryInstance` carries no role or
@@ -44528,6 +44548,42 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
   );
 }
 
+/**
+ * W1-T4688: the exit of an approve whose PR is open but whose CI gate did not go green. A CI
+ * timeout or a freshness yield leaves the PR for the sweep — a HAND-OFF, reported with the retro's
+ * named hand-off code (3) — while a red CI stays 1. Same mapping {@link retroExitAfterPrOpened}
+ * gives the retro, so the two lanes cannot drift.
+ */
+export function approveExitWhenCiNotGreen(ci: "red" | "timeout" | "freshness_handoff"): number {
+  return retroExitAfterPrOpened(ci);
+}
+
+/**
+ * W1-T4688: the shared tail of an approve whose CI gate did not go green (single and batch paths).
+ * Returns undefined for a green CI (the caller proceeds to review); otherwise reports the PR left
+ * open, releases the worktree and returns the exit code. One helper so both paths are covered by
+ * the same behavioural test.
+ */
+export function approveCiNotGreenExit(
+  ci: "green" | "red" | "timeout" | "freshness_handoff",
+  prUrl: string,
+  release: () => void,
+): number | undefined {
+  if (ci === "green") return undefined;
+  console.log(`ci ${ci} — PR left OPEN: ${prUrl}`);
+  release();
+  return approveExitWhenCiNotGreen(ci);
+}
+
+/**
+ * W1-T4688: `approve.skill_written` records that the skill is COMMITTED, so it is ledgered only
+ * after `commit` returns; a commit that throws (a commitlint refusal) ledgers nothing.
+ */
+export function commitThenLedgerSkillWrite(commit: () => void, ledger: () => void): void {
+  commit();
+  ledger();
+}
+
 export async function approveCommand(
   rest: string[],
   // W1-T3351 appended `root`/`clock`/`log` LAST, all optional: the `--note` chain needs a store
@@ -44857,9 +44913,13 @@ export async function approveCommand(
     writeSkillFile(id, skillFile) {
       const { branch, path } = freshSkillApproveWorktree();
       const relPath = writeApprovedSkillFile(path, skillFile, { mkdirSync, writeFileSync, existsSync }, join);
-      log("approve.skill_written", { proposal_id: id, path: relPath });
-      execFileSync("git", ["-C", path, "add", "--", relPath], { stdio: "inherit" });
-      execFileSync("git", ["-C", path, "commit", "-m", skillFileApproveCommitMessage(id, relPath)], { stdio: "inherit" });
+      commitThenLedgerSkillWrite(
+        () => {
+          execFileSync("git", ["-C", path, "add", "--", relPath], { stdio: "inherit" });
+          execFileSync("git", ["-C", path, "commit", "-m", skillFileApproveCommitMessage(id, relPath)], { stdio: "inherit" });
+        },
+        () => log("approve.skill_written", { proposal_id: id, path: relPath }),
+      );
       gitPushRunBranch(path);
       return branch;
     },
@@ -45040,11 +45100,8 @@ export async function approveCommand(
     );
 
     const ci = ciGateState(await waitForCiGreen(result.prUrl, (s, extra) => log(s, extra)));
-    if (ci !== "green") {
-      console.log(`ci ${ci} — PR left OPEN: ${result.prUrl}`);
-      removeApproveWorktree();
-      return 1;
-    }
+    const notGreenExit = approveCiNotGreenExit(ci, result.prUrl, removeApproveWorktree);
+    if (notGreenExit !== undefined) return notGreenExit;
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
     const reviewCode = await reviewCommand(prNum);
     // W1-T230: a ratification PR carries NO Remudero-Task trailer by design
@@ -45308,11 +45365,8 @@ async function approveBatchCommand(
     console.log(`rmd approve: batch of ${result.accepted.length} — plan PR opened: ${result.prUrl}`);
 
     const ci = ciGateState(await waitForCiGreen(result.prUrl, (s, extra) => log(s, extra)));
-    if (ci !== "green") {
-      console.log(`ci ${ci} — PR left OPEN: ${result.prUrl}`);
-      removeApproveWorktree();
-      return 1;
-    }
+    const notGreenExit = approveCiNotGreenExit(ci, result.prUrl, removeApproveWorktree);
+    if (notGreenExit !== undefined) return notGreenExit;
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
     const reviewCode = await reviewCommand(prNum);
     let armHeadSha: string | undefined;
