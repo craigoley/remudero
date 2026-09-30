@@ -16,7 +16,7 @@
   files:
     - src/lib/sweep.ts
     - src/run-task.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 by running the shipped function, not by reading it. Given a rollup holding

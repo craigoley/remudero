@@ -15,7 +15,7 @@
     - src/lib/arm-auto-merge.ts
     - src/lib/sweep.ts
     - test/stacked-child-fix-hold.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE STACK WAS DECLARED, SO NO OVERLAP DETECTOR WOULD HAVE HELD IT. All four PR bodies open with

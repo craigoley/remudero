@@ -1,0 +1,14 @@
+violation: none
+rule: >
+  W1-T4705: the CI lesson's cited incident must be a real, executable proof against
+  the active learnings entry. This verdict catches a false CAPPED result caused by
+  treating an unquoted YAML glob as a JavaScript block comment.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass

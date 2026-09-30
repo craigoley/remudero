@@ -69,6 +69,7 @@ import {
   INCIDENT_INGEST_ROUTE_METHOD,
   INCIDENT_INGEST_ROUTE_PATH,
 } from "./incident-events.js";
+import { buildConsoleTelemetryRoute, CONSOLE_TELEMETRY_ROUTE_METHOD, CONSOLE_TELEMETRY_ROUTE_PATH } from "./console-telemetry.js";
 import { buildIncidentsRoute, type IncidentsRouteInput } from "./incident-lifecycle.js";
 import { BENCHMARK_AA_VERSION, TRIAL_ID_RE } from "./benchmark-aa.js";
 import { BENCHMARK_PAID_PILOT_VERSION, loadPaidPilotProtocol, paidPilotEvalCardTrial } from "./benchmark-paid-pilot.js";
@@ -2893,6 +2894,7 @@ function assembleServeRoutes(
       onCheckRunCompleted,
     }),
     buildIncidentEventsRoute({ ledgerPath: deps.ledgerPath }),
+    buildConsoleTelemetryRoute({ ledgerPath: deps.ledgerPath }),
     // W1-T4387: the fix-verification lifecycle's own read surface, beside the ingest route above.
     // `stateDir` defaults to `dirname(deps.ledgerPath)` -- the SAME derivation `replay` and
     // `selfMeasurement` already use, never a second root.
@@ -3114,7 +3116,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       audience: deps.accessAudience ?? accessConfig().accessAudience,
       log: deps.log,
     }).concat(
-      ingestToken ? [ingestTokenProvider({ token: ingestToken, method: INCIDENT_INGEST_ROUTE_METHOD, path: INCIDENT_INGEST_ROUTE_PATH })] : [],
+      ingestToken ? [ingestTokenProvider({ token: ingestToken, method: INCIDENT_INGEST_ROUTE_METHOD, path: INCIDENT_INGEST_ROUTE_PATH }),
+        ingestTokenProvider({ token: ingestToken, method: CONSOLE_TELEMETRY_ROUTE_METHOD, path: CONSOLE_TELEMETRY_ROUTE_PATH })] : [],
     ),
     // W1-T4244: the signed-in operator, consulted BEFORE the bearer token the console also sends.
     operatorSession: operatorSessionProvider(deps.operatorIdentity ?? operatorIdentityConfig(loadConfig, { log: deps.log }), { ...deps.operatorIdentityIo, log: deps.log }),

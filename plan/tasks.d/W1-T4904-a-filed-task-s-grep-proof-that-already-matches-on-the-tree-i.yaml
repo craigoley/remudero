@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-30: research whether a filing-time and pre-push proof dry run closes the two 2026-09-29 proof defects (#7882 W1-T4550, #7792 W1-T4681)"
   plan_refs: [W1-T4419, W1-T3814, W1-T2835, W1-T120, W1-T3730]
   files: [src/lib/task-linter.ts, src/run-task.ts, test/a-grep-proof-that-already-matches-is-refused-at-filing.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 at origin/main 074249863; nothing here is carried from an earlier session.

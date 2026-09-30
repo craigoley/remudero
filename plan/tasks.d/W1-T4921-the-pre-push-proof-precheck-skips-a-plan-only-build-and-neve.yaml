@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-30: research whether a filing-time and pre-push proof dry run closes the two 2026-09-29 proof defects (#7882 W1-T4550, #7792 W1-T4681)"
   plan_refs: [W1-T3738, W1-T4904]
   files: [src/lib/proof-base-stale.ts, src/run-task.ts, scripts/proof-resolve-precheck.mjs, test/a-plan-only-build-is-asked-whether-its-proofs-discriminate.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 at origin/main 074249863. THIS IS THE SECOND, SMALLER HALF: W1-T4904 stops a new task being filed

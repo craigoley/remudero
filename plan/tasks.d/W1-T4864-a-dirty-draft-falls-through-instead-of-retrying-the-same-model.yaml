@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-systemic-0930-1790738140000 -> plan-systemic-0930-1790738140000"
   plan_refs: [W1-T3570, W1-T3621]
   files: [src/lib/inbox.ts, test/a-dirty-draft-falls-through-instead-of-retrying-the-same-model.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 (docs/recon/openweight-inbox-draft-trial.md, W1-T3570): cash gpt-5-nano, 09-16..09-30, 3,311

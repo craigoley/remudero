@@ -70,7 +70,8 @@ components:
       scheme: bearer
       description: >
         W1-T4383 ingest-only bearer token (src/lib/service.ts's `ingestTokenProvider`). Grants
-        exactly POST /v1/incidents/events and falls through to 401 on every other route.
+        exactly POST /v1/incidents/events and POST /v1/console/telemetry, and falls through to 401 on
+        every other route.
 
   schemas:
     OperatorAgentAnswer:
@@ -6123,6 +6124,49 @@ components:
           type: string
         fn:
           type: string
+
+    ConsoleTelemetryRequest:
+      type: object
+      description: >
+        POST /v1/console/telemetry (src/lib/console-telemetry.ts): one batch of the console's latency
+        beacon, at most 50 records. Fields a record carries that are not declared here are dropped.
+      required: [records]
+      properties:
+        records:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/ConsoleLatencyRecord"
+
+    ConsoleLatencyRecord:
+      type: object
+      description: >
+        One applied view update as the console measured it; each becomes one `console.latency` ledger
+        row. Durations are milliseconds, 0 to 3600000, rounded. Browser-side hops are measured on the
+        browser clock; `transportMs` alone uses `clockOffsetMs`, the offset estimated from the events
+        stream's `hello.serverNow`.
+      required: [view, key, cause]
+      properties:
+        view: {type: string}
+        key: {type: string, description: The view key; empty for an unkeyed view.}
+        cause:
+          type: string
+          enum: [body, judge, hello, poll]
+        emittedAt: {type: string, format: date-time, description: The serve-clock time of the view event, when one caused the update.}
+        transportMs: {type: number, description: View event emitted by serve to received by the browser.}
+        fetchMs: {type: number, description: The refetch, browser to console route to core and back.}
+        coreMs: {type: number, description: The core read inside the refetch, from Server-Timing.}
+        applyMs: {type: number, description: Response to the view store applying it.}
+        paintMs: {type: number, description: Store update to the next painted frame.}
+        totalMs: {type: number, description: View event emitted to painted.}
+        clockOffsetMs: {type: number, description: The browser clock minus serve's.}
+
+    ConsoleTelemetryResult:
+      type: object
+      required: [accepted, dropped]
+      properties:
+        accepted: {type: integer, description: Records ledgered as console.latency rows.}
+        dropped: {type: integer, description: Records past the pace of about one row a second, not ledgered.}
 
     IncidentEventRequest:
       type: object
@@ -12997,6 +13041,45 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/IncidentEventResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          description: The body exceeded 16 KiB.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentIngestBodyTooLarge"
+
+  /v1/console/telemetry:
+    post:
+      summary: The console's latency beacon -- one console.latency ledger row per applied view update.
+      description: >
+        Arch plan Phase 2 (src/lib/console-telemetry.ts's `buildConsoleTelemetryRoute`, write scope, tier
+        low). The console forwards its browser beacon here, and each record becomes one
+        `console.latency` row in core's ledger. Rows are paced to about one a second sustained, after a
+        burst of 60; records past the pace are counted in `dropped`, and at most one
+        `console.latency_dropped` row a minute says how many. Reachable with the write token or with the
+        ingest-only token, which grants this one method and path besides the incident route.
+      security:
+        - bearerWrite: []
+        - bearerIngest: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConsoleTelemetryRequest"
+      responses:
+        "200":
+          description: The batch was accepted; `accepted` records were ledgered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsoleTelemetryResult"
         "400":
           $ref: "#/components/responses/InvalidRequest"
         "401":

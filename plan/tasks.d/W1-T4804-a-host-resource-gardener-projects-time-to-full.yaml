@@ -17,7 +17,7 @@
     - src/run-task.ts
     - test/host-resource-gardener.test.ts
     - test/fleet-heartbeat.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-29 (read-only):
