@@ -98,7 +98,7 @@ function recycle(hostMib: number | undefined): { args: string[]; output: string 
   }
 }
 
-function serveDryRun(): { status: number | null; out: string } {
+function serveDryRun(env: Record<string, string> = {}): { status: number | null; out: string } {
   const root = mkdtempSync(join(tmpdir(), "rmd-serve-share-"));
   try {
     const bin = join(root, "bin");
@@ -118,6 +118,7 @@ function serveDryRun(): { status: number | null; out: string } {
         RMD_SERVE_REPO_DIR: join(root, "code"),
         RMD_SERVE_DOCKER_NETWORK: "rmd-test-net",
         RMD_SERVE_DOCKERENV_PATH: join(root, "no-dockerenv"),
+        ...env,
       },
     });
     return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
@@ -134,9 +135,34 @@ test("W1-T4102: serve is launched with protected memory and a higher cpu weight 
   const line = serve.out.split("\n").find((l) => l.includes("docker run -d --name remudero-serve")) ?? "";
   const serveArgs = line.split(/\s+/);
   assert.ok(serveArgs.includes("--memory-reservation=1536m"), `serve's memory is protected: ${line}`);
-  assert.ok(!serveArgs.some((a) => a.startsWith("--memory=")), "serve has no hard memory limit — an OOM-killed console is worse than a slow one");
   const build = recycle(HOST_MIB).args;
   assert.ok(shares(serveArgs) > shares(build), `serve ${shares(serveArgs)} must outweigh a build daemon ${shares(build)}`);
+});
+
+function serveRunArgs(env: Record<string, string> = {}): { args: string[]; out: string } {
+  const serve = serveDryRun(env);
+  assert.equal(serve.status, 0, serve.out);
+  return { args: (serve.out.split("\n").find((l) => l.includes("docker run -d --name remudero-serve")) ?? "").split(/\s+/), out: serve.out };
+}
+
+test("serve is launched with a memory ceiling that bounds a leak and leaves room to swap", () => {
+  const { args, out } = serveRunArgs();
+  assert.ok(args.includes("--memory=5120m"), `a 5 GiB ceiling, 1.4x the highest reading of 3.64 GiB: ${args.join(" ")}`);
+  assert.ok(args.includes("--memory-swap=6144m"), "1 GiB of swap before the kernel kills anything");
+  assert.ok(args.includes("--memory-reservation=1536m"), "the protected reserve is unchanged, so no build daemon's ceiling moves");
+  assert.ok(!args.some((a) => a.startsWith("--cpus=")), "no CPU quota by default — the weight already wins contention");
+  assert.match(out, /memory ceiling 5120 MiB \(\+1024 MiB swap\)/);
+});
+
+test("the serve memory ceiling and a CPU quota are operator knobs without a code change", () => {
+  const off = serveRunArgs({ RMD_SERVE_MEMORY_LIMIT_MIB: "0" });
+  assert.ok(!off.args.some((a) => a.startsWith("--memory=")), "0 turns the ceiling off");
+  assert.match(off.out, /NO memory ceiling/);
+  const below = serveRunArgs({ RMD_SERVE_MEMORY_LIMIT_MIB: "1024" });
+  assert.ok(!below.args.some((a) => a.startsWith("--memory=")), "a ceiling under the protected reserve is refused, not applied");
+  const tuned = serveRunArgs({ RMD_SERVE_MEMORY_LIMIT_MIB: "6144", RMD_SERVE_CPUS: "4" });
+  assert.ok(tuned.args.includes("--memory=6144m") && tuned.args.includes("--memory-swap=7168m"));
+  assert.ok(tuned.args.includes("--cpus=4"));
 });
 
 test("W1-T4102: every build daemon is launched with a memory ceiling that leaves the host reserve free", () => {

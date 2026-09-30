@@ -62,11 +62,17 @@ export function writeClassificationSnapshot(stateDir: string, classifications: A
 }
 
 function readClassificationStates(stateDir: string): Record<string, string> | undefined {
+  return readClassificationSnapshot(stateDir)?.states;
+}
+
+/** The last `GET /v1/inbox` classification, with when it was written; undefined when none is readable. */
+export function readClassificationSnapshot(stateDir: string): { generatedAt: string | null; states: Record<string, string> } | undefined {
   const raw = readJson(classificationSnapshotPath(stateDir));
   if (!raw) return undefined;
   try {
-    const parsed = JSON.parse(raw) as { states?: unknown };
-    return parsed.states && typeof parsed.states === "object" ? (parsed.states as Record<string, string>) : undefined;
+    const parsed = JSON.parse(raw) as { generatedAt?: unknown; states?: unknown };
+    if (!parsed.states || typeof parsed.states !== "object") return undefined;
+    return { generatedAt: typeof parsed.generatedAt === "string" ? parsed.generatedAt : null, states: parsed.states as Record<string, string> };
   } catch {
     // deliberate: an unreadable snapshot reads as none, and the lane then does nothing this pass.
     return undefined;

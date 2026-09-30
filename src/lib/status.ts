@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { ghExec, ghExecFile } from "./github-transport.js";
-import { DEFAULT_GH_CALL_TIMEOUT_MS } from "./github-transport.js";
+import { DEFAULT_GH_CALL_TIMEOUT_MS, createNonBlockingGhCallPacer } from "./github-transport.js";
 // W1-T2440: the pre-warm walk runs on its own OS thread (`runPrewarmWorker`), so the `execFileSync` below stays
 // synchronous without parking the process serving `/v1/status`. That worker loads THIS module a second time;
 // `isMainThread`/`workerData` gate the worker-only branch near `buildBatchedGithub`.
@@ -287,6 +287,15 @@ export interface GitHub {
   /** OPTIONAL (W1-T154): force this gateway's fetch NOW rather than lazily, so serve boot never pays a cold
    *  fetch on the request path. Omitted ⇒ a no-op. */
   warm?(): void;
+  /** OPTIONAL (W1-T4771): from now on this gateway NEVER shells gh on the calling thread. A due read is
+   *  handed to the background walk and the last-held fact is served stale; a fact never held reads as
+   *  not-yet-collected. Called once by serve for its own gateway; the daemon and the CLI never call it. */
+  serveOffLoop?(): void;
+  /** OPTIONAL (W1-T4771): how old the OLDEST held PR fact is, in ms, or `undefined` when none is held yet.
+   *  Lets a caller serving a stale fact say how stale. */
+  factsAgeMs?(): number | undefined;
+  /** OPTIONAL (W1-T4771): whether a held PR fact is past its TTL, so a caller never labels an overdue fact fresh. */
+  factsStale?(): boolean;
   seedBoardSnapshot?(cache: BoardSnapshotCache): void;
   /** A read this gateway attempted actually FAILED, as against succeeding empty, so it defers rather than
    *  reading as a confirmed not-merged (W1-T119). NEVER FORCES A FETCH (W1-T2219): the STICKY verdict of the
@@ -4350,6 +4359,8 @@ export function buildBatchedGithub(
     /** How far AHEAD of expiry `warm()` refreshes: a warm on the TTL's own cadence must pass that cadence, or the
      *  cache expires between two warms and the next request walks GitHub on the serving thread. Omitted ⇒ 0. */
     prewarmLeadMs?: number;
+    /** W1-T4771: start in {@link GitHub.serveOffLoop} mode, so no child process is ever spawned on the calling thread. */
+    offLoop?: boolean;
   } = {},
 ): GitHub {
   const ttlMs = opts.ttlMs ?? 15_000;
@@ -4369,6 +4380,14 @@ export function buildBatchedGithub(
   const pacer = opts.pacer ?? (defaultGhCallPacer ??= createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {}));
   const now = opts.now ?? (() => Date.now());
   const log = opts.log ?? (() => {});
+  // W1-T4771: off-loop mode (serve). The pacer it runs under refuses rather than sleeping the thread, and a due
+  // read is only ever REQUESTED of the background walk, at most once per `warmRetryGapMs`, so a walk that keeps
+  // failing is not respawned by every board read.
+  let offLoop = opts.offLoop ?? false;
+  const offLoopPacer = createNonBlockingGhCallPacer();
+  const activePacer = (injected: boolean): GhCallPacer => (offLoop && !injected ? offLoopPacer : pacer);
+  const warmRetryGapMs = Math.min(ttlMs, 15_000);
+  let lastWarmRequestAt: number | undefined;
   /**
    * W1-T2323: PER HALF, because the halves attempt independently and a single pair of flags would let the
    * second attempt ERASE the first one's verdict — an open-half outage masked by a merged-half success is the
@@ -4530,12 +4549,16 @@ export function buildBatchedGithub(
     // W1-T2440: same guard as the row readers'. The fallback mirrors this function's own pre-first-fetch answer
     // (empty maps), never a new "no issues" fabrication.
     if (issuesWarmInFlight) return issueCache ?? { at: 0, byUrl: new Map(), byNum: new Map() };
+    if (offLoop && !opts.fetchAllIssues) {
+      if (!issueCache || now() - issueCache.at >= ttlMs) requestWarm();
+      return issueCache ?? { at: 0, byUrl: new Map(), byNum: new Map() };
+    }
     if (!issueCache || now() - issueCache.at >= ttlMs) {
       let all: BatchedIssue[];
       try {
         // W1-T468/W1-T1005: waits its turn on the shared pacer — an explicit `opts.pacer`, or the module-scoped
         // default — BEFORE the real call, and reports back whether it was rate-limited.
-        all = paceGhEntry(pacer, isGhRateLimitError, fetchAllIssues);
+        all = paceGhEntry(activePacer(opts.fetchAllIssues !== undefined), isGhRateLimitError, fetchAllIssues);
         lastIssueFetchFailed = false;
         lastIssueFetchFailureReason = undefined;
         log("board_gateway.issue_fetch_ok", { issueCount: all.length });
@@ -4614,7 +4637,7 @@ export function buildBatchedGithub(
       try {
         // W1-T468: same shared-pacer guard as the issue fetch above — one pacer instance across BOTH of this
         // gateway's reads, and run-task.ts's sweep enumeration, keeps three polite callers off second zero.
-        all = paceGhEntry(pacer, isGhRateLimitError, fetch);
+        all = paceGhEntry(activePacer(opts.fetchAll !== undefined), isGhRateLimitError, fetch);
         record({ failed: false, reason: undefined });
         log("board_gateway.fetch_ok", { prCount: all.length, channel });
       } catch (err) {
@@ -4650,6 +4673,10 @@ export function buildBatchedGithub(
     // beats a SECOND synchronous walk racing it on THIS thread. A caller needing to tell "no PRs" from "not
     // fetched yet" has `readState()`, which reports `"in_flight"` for the whole time this guard is taken.
     if (openWarmInFlight) return openHalf?.rows ?? [];
+    if (offLoop) {
+      if (!openHalf || now() - openHalf.at >= effectiveOpenTtlMs()) requestWarm();
+      return openHalf?.rows ?? [];
+    }
     if (!openHalf || now() - openHalf.at >= effectiveOpenTtlMs()) {
       const previouslyOpen = openHalf ? new Set(openHalf.rows.map((p) => p.number)) : undefined;
       const fetched = attemptFetch(() => restFetchHalf("open"), "open");
@@ -4683,6 +4710,10 @@ export function buildBatchedGithub(
     if (!splitHalves) return bothHalves().merged;
     // W1-T2440: same guard as `openRows` immediately above — the background worker owns this refresh.
     if (mergedWarmInFlight) return mergedHalf?.rows ?? [];
+    if (offLoop) {
+      if (!mergedHalf || now() - mergedHalf.at >= effectiveMergedTtlMs()) requestWarm();
+      return mergedHalf?.rows ?? [];
+    }
     if (!mergedHalf || now() - mergedHalf.at >= effectiveMergedTtlMs()) {
       const fetched = attemptFetch(() => restFetchHalf("closed"), "merged");
       // Verbatim, same reasoning as the open half — `mergedNewestFirst`'s own filter still decides merged-ness.
@@ -4794,7 +4825,7 @@ export function buildBatchedGithub(
    *  bodies for every absent id lets its gateway TTL expire mid-pass and restarts the same GitHub walk. */
   const mergedTrailerLookup = (): ((taskId: string) => PrRef | null) | null => {
     const idx = index();
-    if (lastFetchFailed()) return null;
+    if (unreadable()) return null;
     const byTask = new Map<string, PrRef>();
     for (const pr of idx.mergedNewestFirst) {
       for (const rawLine of (pr.body ?? "").split(/\r?\n/)) {
@@ -4838,7 +4869,8 @@ export function buildBatchedGithub(
       const stillOpen = new Set(outcome.rows.map((p) => p.number));
       for (const number of previouslyOpen) {
         if (!stillOpen.has(number)) {
-          mergedHalf = undefined;
+          // W1-T4771: off-loop keeps the held rows, marked due, so a read serves them stale rather than an empty half.
+          mergedHalf = offLoop && mergedHalf ? { ...mergedHalf, at: Number.MIN_SAFE_INTEGER } : undefined;
           break;
         }
       }
@@ -4936,8 +4968,16 @@ export function buildBatchedGithub(
       // this fix degrades to a blocking call on the request-serving thread, and even degraded it stays
       // binary-aware.
       finish();
-      console.error(`board gateway: prewarm worker spawn failed, falling back to a synchronous walk: ${err instanceof Error ? err.message : String(err)}`);
       const elapsedMs = Math.max(0, now() - startedAt);
+      if (offLoop) {
+        // W1-T4771: no synchronous fallback on serve's thread — the channels this call asked for are marked failed.
+        const failure = { ok: false as const, reason: "transport" as GhFailureReason, message: `prewarm worker spawn failed: ${err instanceof Error ? err.message : String(err)}` };
+        if (fetchOpen) applyOpenOutcome(failure, elapsedMs, previouslyOpen);
+        if (fetchMerged) applyMergedOutcome(failure, elapsedMs);
+        if (fetchIssues) applyIssuesOutcome(failure);
+        return;
+      }
+      console.error(`board gateway: prewarm worker spawn failed, falling back to a synchronous walk: ${err instanceof Error ? err.message : String(err)}`);
       const response = runPrewarmChannelsSync(req);
       if (response.open) applyOpenOutcome(response.open, elapsedMs, previouslyOpen);
       if (response.merged) applyMergedOutcome(response.merged, elapsedMs);
@@ -4993,6 +5033,16 @@ export function buildBatchedGithub(
     });
   };
 
+  // W1-T4771: hands a due read to the background walk. Never fetches here, and at most once per `warmRetryGapMs`.
+  const requestWarm = (): void => {
+    if (lastWarmRequestAt !== undefined && now() - lastWarmRequestAt < warmRetryGapMs) return;
+    lastWarmRequestAt = now();
+    runPrewarmWorker();
+  };
+  // W1-T4771: off-loop, a PR half never collected reads as a FAILED read, never as "GitHub holds zero PRs".
+  const notYetCollected = (): boolean => offLoop && splitHalves && (!openHalf || !mergedHalf);
+  const unreadable = (): boolean => lastFetchFailed() || notYetCollected();
+
   return {
     prByRef(ref) {
       const p = lookup(ref);
@@ -5004,14 +5054,14 @@ export function buildBatchedGithub(
       if (hit) return asRef(hit);
       // W1-T2387: THIS is the gateway `resolveAlreadySatisfied` actually builds, so the union has to live here
       // too or the fix ships unwired. Body first; a FAILED fetch still reports as a failure.
-      if (lastFetchFailed()) return null;
+      if (unreadable()) return null;
       return commitTrailerFallback(taskId)[0] ?? null;
     },
     findMergedByTrailerAll(taskId) {
       // W1-T441: NO ADDITIONAL FETCH — the merged index already carries every merged PR's body from the ONE
       // batched read, so this is a filter over data in hand. null on a fetch failure (W1-T119), never [].
       const anchored = new RegExp(`^Remudero-Task:\\s*${escapeRegExp(taskId)}\\s*$`, "m");
-      if (lastFetchFailed()) return null;
+      if (unreadable()) return null;
       const byBody = index().mergedNewestFirst.filter((p) => anchored.test(p.body ?? "")).map(asRef);
       // W1-T2387: union, body-first — see the sibling above.
       return byBody.length > 0 ? byBody : commitTrailerFallback(taskId);
@@ -5019,12 +5069,12 @@ export function buildBatchedGithub(
     findMergedByHeadBranch(taskId) {
       // W1-T257: client-side head-ref match from the SAME single fetch — zero extra calls, STRUCTURED ref only.
       const idx = index();
-      return lastFetchFailed() ? null : idx.mergedNewestFirst.filter((p) => ownsBranch(p.headRefName, taskId)).map(asRef);
+      return unreadable() ? null : idx.mergedNewestFirst.filter((p) => ownsBranch(p.headRefName, taskId)).map(asRef);
     },
     listMergedHeadBranches() {
       // W1-T257: every merged PR with its head ref, from the ONE fetch; projectPlan groups client-side.
       const idx = index();
-      return lastFetchFailed() ? null : idx.mergedNewestFirst.map(asRef);
+      return unreadable() ? null : idx.mergedNewestFirst.map(asRef);
     },
     mergedTrailerLookup,
     listOpenHeadBranches() {
@@ -5032,7 +5082,7 @@ export function buildBatchedGithub(
       // gateway answering this walked 26 REST requests over 22.2 s for 6 open rows; it now walks 1 request over
       // 432 ms. THE VALUE IS UNCHANGED: the rows come from GitHub's own open-state query.
       const open = openRows();
-      return lastFetchFailed()
+      return unreadable()
         ? null
         : open
             .filter((p) => p.state === "OPEN")
@@ -5058,7 +5108,7 @@ export function buildBatchedGithub(
       const cached = changedFilesByUrl.get(prUrl);
       if (cached !== undefined) return cached ?? undefined;
       const number = prUrl.match(/\/pull\/(\d+)/)?.[1];
-      if (!number) return undefined;
+      if (!number || offLoop) return undefined;
       let paths: string[] | undefined;
       try {
         const raw = run(["api", "--paginate", `repos/${owner}/${repo}/pulls/${number}/files`, "--jq", ".[].filename"]);
@@ -5089,6 +5139,10 @@ export function buildBatchedGithub(
       if (!headRef) return undefined; // open PR with no resolvable head ref -> undetermined
       const cached = reviewStateCache.get(prUrl);
       if (cached && (now() - cached.at < ttlMs || reviewsWarmInFlight.has(prUrl))) return cached.state;
+      if (offLoop) {
+        requestWarm();
+        return cached?.state;
+      }
       try {
         const state = reviewStateFromCombinedStatus(JSON.parse(run(combinedStatusRestArgs(owner, repo, headRef))));
         reviewStateCache.set(prUrl, { at: now(), state });
@@ -5107,7 +5161,7 @@ export function buildBatchedGithub(
     // W1-T2440: an INJECTED gateway keeps calling the index builders directly and SYNCHRONOUSLY, since a
     // `Worker` cannot receive a closure; the real, unconfigured default takes `runPrewarmWorker`.
     warm() {
-      if (opts.exec || opts.fetchAll || opts.fetchAllIssues) {
+      if (opts.fetchAll || opts.fetchAllIssues || (opts.exec && !offLoop)) {
         index();
         issueIndex();
         return;
@@ -5125,10 +5179,10 @@ export function buildBatchedGithub(
     // UNCHANGED; only a caller that asks FIRST changes, and it now gets the honest "not attempted" reading
     // rather than a forced, blocking fetch.
     readFailed() {
-      return lastFetchFailed();
+      return unreadable();
     },
     readFailureReason() {
-      return lastFetchFailureReason();
+      return lastFetchFailureReason() ?? (notYetCollected() ? "not_yet_collected" : undefined);
     },
     readState() {
       return fetchState();
@@ -5146,14 +5200,23 @@ export function buildBatchedGithub(
     },
     issueReadFailed() {
       issueIndex();
-      return lastIssueFetchFailed;
+      return lastIssueFetchFailed || (offLoop && !opts.fetchAllIssues && !issueCache);
     },
     // W1-T2219: closes rationale (2)(c) — the issue-channel failure reason was already classified and logged
     // but had no accessor, so it was reachable only by reading the ledger, never by a caller. Non-forcing, like
     // `readFailureReason()` above: a caller consults this only after `issueReadFailed()`, which already forces
     // the issue index, is `true`.
     issueReadFailureReason() {
-      return lastIssueFetchFailureReason;
+      return lastIssueFetchFailureReason ?? (offLoop && !opts.fetchAllIssues && !issueCache ? "not_yet_collected" : undefined);
+    },
+    serveOffLoop() {
+      offLoop = true;
+    },
+    factsAgeMs() {
+      return openHalf && mergedHalf ? Math.max(0, now() - Math.min(openHalf.at, mergedHalf.at)) : undefined;
+    },
+    factsStale() {
+      return !openHalf || !mergedHalf || now() - openHalf.at >= effectiveOpenTtlMs() || now() - mergedHalf.at >= effectiveMergedTtlMs();
     },
   };
 }

@@ -32,6 +32,7 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 
 | Command | What it does |
 |---|---|
+| `rmd impossible-canary --model <id> [--model <id>]... --scaffold <revision> --grader <executable> [--state-dir <dir>] [--json]` | Runs sealed, versioned impossible-task canaries for each model outside its weekly cadence. The grader receives only the visible statement, never the contradictory holdout. A visible pass with a failed holdout is counted as a cheating event; results are counts with exact 95% intervals per model and scaffold revision, and ids/outcomes-only rows are appended to the ledger. It gates nothing. |
 | `rmd run-task <task-id>` | Run one `plan/tasks.yaml` entry end to end (see [task-lifecycle.md](task-lifecycle.md)). |
 | `rmd drain [--until <id>] [--max <n>] [--repo <name>] [--dry-run]` | Bounded loop over `run-task`: next runnable task, run, repeat — **stops on the first block**. `--repo` scopes the merged-status gateway to `<owner>/<name>` (defaults to this checkout's own repo); the plan itself always reads from this checkout. |
 | `rmd daemon --repo <name> [--max <n>] [--poll-ms <n>]` | Persistent scheduler loop — the same machinery as `drain`, but self-pacing and STOP/PAUSE/headroom-aware, so it keeps running across new plan merges. `--repo` picks the repo to drain (refuses to drain its own source repo unattended without `--allow-self-target`). |

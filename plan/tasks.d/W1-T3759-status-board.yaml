@@ -14,6 +14,7 @@
   attempts: 0
   note: |
     reservation hand-off: unknown -> amend-t3755-scope
+    AMENDED 2026-09-30 (operator ruling): the former criterion `a genuinely stale install still reads stale` was a preservation invariant proved by a `grep:` on `rmd deploy`, text already present in src/lib/status-board.ts, so it could not fail at the merge base, and was dropped.
   rationale: |
     MEASURED 2026-09-18, before a recycle. The daemon had started that morning on a checkout ONE
     commit behind origin/main and was healthy. The board said:
@@ -64,8 +65,6 @@
       proof: "grep: unknown running head in src/lib/status-board.ts"
     - claim: "an unknown comparison names the missing input instead of prescribing a deploy that would skip"
       proof: "grep: cannot clear this in src/lib/status-board.ts"
-    - claim: "a genuinely stale install still reads stale and is still given the deploy remedy"
-      proof: "grep: rmd deploy in src/lib/status-board.ts"
   falsifier: |
     Suppress the next action for every state and the third assertion goes red — a real stale install
     must still be told what to do. Render unknown as `fresh` and the first passes while the board

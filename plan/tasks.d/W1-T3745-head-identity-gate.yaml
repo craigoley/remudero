@@ -14,6 +14,7 @@
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t3745-fix-lane-born-red
+    AMENDED 2026-09-30 (operator ruling): the former criterion `the four accepted shapes are unchanged` was a preservation invariant proved by a `grep:` on `run-unfiled-`, text already present in scripts/head-identity-gate.mjs, so it could not fail at the merge base, and was dropped.
   rationale: |
     MEASURED 2026-09-17 on the live board, two pull requests eight minutes apart:
 
@@ -66,8 +67,6 @@
       proof: "grep: refuses at push in scripts/head-identity-gate.mjs"
     - claim: "the refusal names the amend-a-trailer repair, because an open pull request's head ref cannot be renamed"
       proof: "grep: cannot be renamed in scripts/head-identity-gate.mjs"
-    - claim: "the four accepted shapes are unchanged — this adds no fifth"
-      proof: "grep: run-unfiled- in scripts/head-identity-gate.mjs"
   falsifier: |
     Add `fix-*` to the accepted shapes and the third assertion must go red — that is the change
     this task exists to refuse. Leave the message naming only the branch forms and the second goes
