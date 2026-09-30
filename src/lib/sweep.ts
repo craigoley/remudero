@@ -4627,8 +4627,8 @@ export function stalledRunReason(runs: readonly WorkflowRunObservation[] | undef
 }
 
 /** W1-T1278 — of the checks a fix rung believes are red, which are STILL red on a FRESH rollup read.
- *  A name is dropped ONLY for an observed `startedAt` with a currently NON-TERMINAL status —
- *  deliberately narrower than "no longer red", because one notch wider is "never fix a red PR". A
+ *  A name is dropped ONLY for an observed `startedAt` whose latest attempt is NON-TERMINAL or already
+ *  a REQUIRED_CHECK_OK conclusion — a latest attempt that is itself a failure stays red. A
  *  name absent from the fresh rollup is NEVER dropped: an unreadable rollup manufactures nothing. */
 export function stillRedRequiredNames(redNames: readonly string[], rollup: RollupCheckEntry[] | undefined): string[] {
   if (redNames.length === 0) return [];
@@ -4639,8 +4639,7 @@ export function stillRedRequiredNames(redNames: readonly string[], rollup: Rollu
     const fresh = byKey.get(name);
     if (!fresh || !fresh.startedAt) return true; // unreadable/absent — fail open, still red
     const s = (fresh.state ?? fresh.conclusion ?? fresh.status ?? "").toUpperCase();
-    const inFlight = !REQUIRED_CHECK_OK.has(s) && !REQUIRED_CHECK_FAIL.has(s);
-    return !inFlight; // an OBSERVED later attempt still running is the ONLY thing dropped
+    return REQUIRED_CHECK_FAIL.has(s);
   });
 }
 
