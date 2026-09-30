@@ -3291,7 +3291,7 @@ const CI_LEARNING_SLUG_MAX = 72;
 
 /** Render ONE draft as a single-element YAML task list — the shard file's whole contents.
  *  `origin:` carries the finding id, so it is both Rule 17 provenance and the idempotency key. */
-export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string): string {
+export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string, population?: readonly number[]): string {
   const q = (v: string) => JSON.stringify(v); // YAML accepts JSON scalars, so this escapes correctly
   return [
     `- id: ${taskId}`,
@@ -3300,7 +3300,7 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string)
     "  depends_on: []",
     "  type: implement",
     // Unjudged until the machine-filing judge rules (operator ruling 2026-09-29); LAW 5's mark rides it.
-    ...machineShardHeaderLines([CI_LEARNING_LESSONS_FILE], draft.prs.length),
+    ...machineShardHeaderLines([CI_LEARNING_LESSONS_FILE], draft.prs.length, population),
     `  origin: ${q(draft.findingId)}`,
     // W1-T3052 — THE WATERMARK, so the lesson can later be judged on its OUTCOME. The origin names
     // only the cluster's FIRST pull request; efficacy needs the HIGHEST, because "did this gate
@@ -3365,7 +3365,7 @@ export function fileCiLearningShards(
       continue;
     }
     const taskId = deps.mintTaskId();
-    const contents = ciLearningShardYaml(d, taskId);
+    const contents = ciLearningShardYaml(d, taskId, drafts.map((x) => x.prs.length));
 
     // VALIDATE BEFORE WRITING: a record this rung cannot get past the repo's own linter must never
     // reach the disk.

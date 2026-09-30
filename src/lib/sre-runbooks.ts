@@ -9,6 +9,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { defaultInContainer, writeAtomic } from "./fs-race-safe.js";
 import { ghExec } from "./github-transport.js";
 import { parseInflightLockInfo } from "./inflight-lock.js";
+import { classifyRollupSupersession } from "./sweep.js";
 import { isFastBurn, sreGovernorVerdict, verdictFor, governorIncidentFromLedgerRow, type IncidentEvidence, type SreGovernorControls, type SreGovernorIncident, type SreGovernorTier, type SreGovernorVerdict } from "./sre-governor.js";
 import { readLedgerLines } from "./status.js";
 
@@ -483,6 +484,7 @@ interface RollupCheck {
   name?: string;
   conclusion?: string;
   detailsUrl?: string;
+  startedAt?: string;
 }
 
 /** The real host: git in the managed checkout, `gh` against `owner/repo`, files under `root/state`.
@@ -497,7 +499,7 @@ export function daemonSreRunbookHost(opts: {
   const repoArg = `${opts.owner}/${opts.repo}`;
   const git = (args: string[]) => execFileSync("git", ["-C", opts.repoDir, ...args], { encoding: "utf8" }).trim();
   const gh = (args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-  const failed = (checks: RollupCheck[]) => checks.filter((c) => c.conclusion === "FAILURE");
+  const failed = (checks: RollupCheck[]) => classifyRollupSupersession(checks).latest.filter((c) => c.conclusion === "FAILURE");
   return {
     async failedCi(pr) {
       const view = JSON.parse(gh(["pr", "view", String(pr), "--repo", repoArg, "--json", "headRefOid,statusCheckRollup"])) as { headRefOid?: string; statusCheckRollup?: RollupCheck[] };

@@ -139,9 +139,38 @@ export function planOnlyRunBranchReceipt(ref: PushedRunRef, receipts: readonly P
 export function unmatchedRunRefsRemainBlocking(
   refs: readonly PushedRunRef[],
   receipts: readonly PlanOnlyRunBranchReceipt[],
+  orphan?: OrphanRunBranchEvidence,
 ): boolean {
   if (refs.length === 0) return false;
-  return refs.some((ref) => !planOnlyRunBranchReceipt(ref, receipts));
+  return refs.some((ref) => !planOnlyRunBranchReceipt(ref, receipts) && !orphanRunBranchReleased(ref, orphan));
+}
+
+/** Default grace before a no-PR run branch stops blocking: long past any single run's wall clock. */
+export const ORPHAN_RUN_BRANCH_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/** The evidence an ORPHANED run ref is released on, read once per pass by the caller. Every field
+ *  is data the caller already holds: the automatic branch reaper's persisted no-PR cache (branch
+ *  name to the tip sha it PROVED had no pull request), this pass's clock reading, and the task ids
+ *  holding a live in-flight lock. */
+export interface OrphanRunBranchEvidence {
+  noPrHeadShas: Readonly<Record<string, string>>;
+  nowMs: number;
+  liveTaskIds: ReadonlySet<string>;
+  graceMs?: number;
+}
+
+/** True when one pushed run ref is an ORPHAN that must stop blocking dispatch: its exact tip sha is
+ *  the one the reaper proved has no PR (a re-push changes the sha and loses the release), the epoch
+ *  its own name carries is older than the grace, and no live run holds the task's lock. Anything
+ *  unproven (no sha, no cache row, a non-numeric epoch, no evidence at all) keeps blocking. The
+ *  branch is never deleted, so its commits stay on origin; only the duplicate-build guard steps aside. */
+export function orphanRunBranchReleased(ref: PushedRunRef, orphan: OrphanRunBranchEvidence | undefined): boolean {
+  if (orphan === undefined || ref.sha === undefined) return false;
+  if (orphan.noPrHeadShas[ref.ref] !== ref.sha) return false;
+  if (orphan.liveTaskIds.has(ref.taskId)) return false;
+  const epoch = /-(\d{13})$/.exec(ref.ref);
+  if (!epoch) return false;
+  return orphan.nowMs - Number(epoch[1]) >= (orphan.graceMs ?? ORPHAN_RUN_BRANCH_GRACE_MS);
 }
 
 /** W1-T4002 — the ONE decision {@link runDrain}, {@link runDrainLanes} AND daemon.ts's own
@@ -156,11 +185,12 @@ export function stillBlockedByPushedRunBranch(
   closedUnmergedRunBranches: ReadonlySet<string> | undefined,
   pushedRunRefs: readonly PushedRunRef[],
   planOnlyReceipts: readonly PlanOnlyRunBranchReceipt[],
+  orphan?: OrphanRunBranchEvidence,
 ): boolean {
   if (pushedRunBranches === undefined || !pushedRunBranches.has(taskId)) return false;
   if (closedUnmergedRunBranches?.has(taskId)) return false;
   const refsForTask = pushedRunRefs.filter((r) => r.taskId === taskId);
-  return unmatchedRunRefsRemainBlocking(refsForTask, planOnlyReceipts);
+  return unmatchedRunRefsRemainBlocking(refsForTask, planOnlyReceipts, orphan);
 }
 
 /** W1-T4002 — ledgers the narrow released collision, once per matched ref, under a distinct
@@ -174,6 +204,7 @@ export function logPlanOnlyRunBranchException(
   taskId: string,
   refs: readonly PushedRunRef[],
   receipts: readonly PlanOnlyRunBranchReceipt[],
+  orphan?: OrphanRunBranchEvidence,
 ): void {
   for (const ref of refs) {
     const match = receipts.find((r) => r.ref === ref.ref && r.sha === ref.sha);
@@ -185,6 +216,8 @@ export function logPlanOnlyRunBranchException(
         sha: ref.sha,
         pr_number: match.prNumber,
       });
+    } else if (orphanRunBranchReleased(ref, orphan)) {
+      log("dispatch.run_branch_exception", { task: taskId, reason: "orphan-run-branch-no-pr", ref: ref.ref, sha: ref.sha });
     }
   }
 }
@@ -334,8 +367,9 @@ export interface NextRunnableOpts {
    *  drain TICK, so a PR opened, or a branch merely pushed ahead of its PR, is invisible to it. The
    *  two cover disjoint windows. Build the closure from ONE {@link runBranchTaskIds} sweep per pass:
    *  `sweep.has(id) && !closedUnmerged.has(id)`, subtracting {@link closedUnmergedRunBranchTaskIds}.
-   *  TRAP: this probe has no upper bound of its own and must not gain one (W1-T1207). Read the PR's
-   *  state; never guess when a leftover branch stopped mattering. */
+   *  W1-T1207 said this probe must gain no age bound; that stands for AGE ALONE. A ref is released
+   *  only on a PROVEN no-PR read at its exact sha plus age plus no live run
+   *  ({@link orphanRunBranchReleased}): 12 such orphans refused 372 dispatches in 23h (2026-09-30). */
   hasPushedRunBranch?: (taskId: string) => boolean;
   /** Called once per task excluded because its run branch is already on origin (W1-T534). The real
    *  wiring rides the existing `dispatch.skipped` row with a distinct reason, and no PR number is
@@ -1121,6 +1155,9 @@ export interface DrainDeps {
    *  WIRED (the plain `rmd drain` command runs no full sweep to draw one from) means every pushed run
    *  branch keeps blocking exactly as before this task — never a silently permissive default. */
   readPlanOnlyRunBranchReceipts?: () => readonly PlanOnlyRunBranchReceipt[];
+  /** The ORPHAN release's evidence ({@link orphanRunBranchReleased}), read with the branch sweep.
+   *  Absent means no ref is released as an orphan, exactly the behaviour before it existed. */
+  readOrphanRunBranchEvidence?: () => OrphanRunBranchEvidence | undefined;
   /** W1-T2286: the same {@link ObservedScopeByTask} threaded to {@link
    *  NextRunnableOpts.observedByTask} for the pack step AND to `partitionByFileOverlap`'s direct call
    *  in {@link runDrainLanes} — one dependency read twice, so the pack and the partition never
@@ -1278,6 +1315,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   // W1-T4002: the exception's own evidence, re-read alongside the branch sweep above so a receipt
   // never outlives the pass that proved it.
   let planOnlyReceipts: readonly PlanOnlyRunBranchReceipt[] = [];
+  let orphanEvidence: OrphanRunBranchEvidence | undefined;
   const refreshRunBranchState = (): void => {
     const raw = deps.readPushedRunBranches?.();
     pushedRunBranches = raw !== undefined ? runBranchTaskIds(raw) : undefined;
@@ -1286,6 +1324,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       ? closedUnmergedRunBranchTaskIds(deps.readClosedRunBranchPrs())
       : undefined;
     planOnlyReceipts = deps.readPlanOnlyRunBranchReceipts?.() ?? [];
+    orphanEvidence = deps.readOrphanRunBranchEvidence?.();
   };
   refreshRunBranchState();
   while (attempted.length < max) {
@@ -1378,6 +1417,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     const currentClosedUnmergedRunBranches = closedUnmergedRunBranches;
     const currentPushedRunRefs = pushedRunRefs;
     const currentPlanOnlyReceipts = planOnlyReceipts;
+    const currentOrphanEvidence = orphanEvidence;
     const skipOpts: NextRunnableOpts = {
       dispatchValueContext: deps.buildDispatchValueContext?.(plan, isMerged),
       // W1-T3216: the released set, resolved once per pass above — forwarded at BOTH skipOpts
@@ -1407,10 +1447,11 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
                 currentClosedUnmergedRunBranches,
                 currentPushedRunRefs,
                 currentPlanOnlyReceipts,
+                currentOrphanEvidence,
               );
               if (!stillBlocked) {
                 const refsForTask = currentPushedRunRefs.filter((r) => r.taskId === id);
-                if (refsForTask.length > 0) logPlanOnlyRunBranchException(log, id, refsForTask, currentPlanOnlyReceipts);
+                if (refsForTask.length > 0) logPlanOnlyRunBranchException(log, id, refsForTask, currentPlanOnlyReceipts, currentOrphanEvidence);
               }
               return stillBlocked;
             },
@@ -1634,6 +1675,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   // W1-T4002: the exception's own evidence, re-read alongside the branch sweep above so a receipt
   // never outlives the pass that proved it.
   let planOnlyReceipts: readonly PlanOnlyRunBranchReceipt[] = [];
+  let orphanEvidence: OrphanRunBranchEvidence | undefined;
   const refreshRunBranchState = (): void => {
     const raw = deps.readPushedRunBranches?.();
     pushedRunBranches = raw !== undefined ? runBranchTaskIds(raw) : undefined;
@@ -1642,6 +1684,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       ? closedUnmergedRunBranchTaskIds(deps.readClosedRunBranchPrs())
       : undefined;
     planOnlyReceipts = deps.readPlanOnlyRunBranchReceipts?.() ?? [];
+    orphanEvidence = deps.readOrphanRunBranchEvidence?.();
   };
   refreshRunBranchState();
   while (attempted.length < max) {
@@ -1738,6 +1781,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     const currentClosedUnmergedRunBranches = closedUnmergedRunBranches;
     const currentPushedRunRefs = pushedRunRefs;
     const currentPlanOnlyReceipts = planOnlyReceipts;
+    const currentOrphanEvidence = orphanEvidence;
     const skipOpts: NextRunnableOpts = {
       dispatchValueContext: deps.buildDispatchValueContext?.(plan, isMerged),
       // W1-T3216: the released set, resolved once per pass above — forwarded at BOTH skipOpts
@@ -1767,10 +1811,11 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
                 currentClosedUnmergedRunBranches,
                 currentPushedRunRefs,
                 currentPlanOnlyReceipts,
+                currentOrphanEvidence,
               );
               if (!stillBlocked) {
                 const refsForTask = currentPushedRunRefs.filter((r) => r.taskId === id);
-                if (refsForTask.length > 0) logPlanOnlyRunBranchException(log, id, refsForTask, currentPlanOnlyReceipts);
+                if (refsForTask.length > 0) logPlanOnlyRunBranchException(log, id, refsForTask, currentPlanOnlyReceipts, currentOrphanEvidence);
               }
               return stillBlocked;
             },

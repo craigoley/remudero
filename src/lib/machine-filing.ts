@@ -38,27 +38,38 @@ export function machineShardRisk(files: readonly string[]): TaskRisk {
   return files.some((f) => SENSITIVE_SURFACE.test(f)) ? "high" : "low";
 }
 
-/** Where released work with no measured cost dispatches (operator direction 2026-09-29). */
-export const UNPRICED_PRIORITY = 50;
+/** The operator's own priority band: machine work competes inside it, never behind it (2026-09-30:
+ *  a 1..90 cost scale sorted every priced release behind all operator work, which sits at 0–4). */
+export const MACHINE_PRIORITY_BAND = { top: 1, bottom: 4 } as const;
+
+/** Where released work with no measured cost dispatches: the middle of the band. */
+export const UNPRICED_PRIORITY = (MACHINE_PRIORITY_BAND.top + MACHINE_PRIORITY_BAND.bottom) / 2;
 
 /**
- * Dispatch priority from the cost a filer measured (lower dispatches sooner): 90 − 12·ln(1 + cost),
- * bounded to 1..90, so priority falls smoothly as cost grows and no cost is ever cut off. `cost` is
- * PR-minutes where the filer prices them, or occurrences where it counts them, one unit each; an
- * occurrence therefore ranks no higher than a minute. 27 units sits at {@link UNPRICED_PRIORITY}.
+ * Dispatch priority from the cost a filer measured, by its QUANTILE among the costs the same filer
+ * priced in the same pass (lower dispatches sooner): the costliest lands at the band's top, beside
+ * operator priority-1 work, the cheapest at its bottom, ties share a rank, and a finding with no
+ * peers to compare against sits mid-band. Relative, so no cost is a threshold and the scale follows
+ * whatever the filer measures, minutes or occurrences, without mixing the two.
  */
-export function costPriority(cost: number): number {
-  return Math.min(90, Math.max(1, Math.round(90 - 12 * Math.log(1 + Math.max(0, cost)))));
+export function costPriority(cost: number, population: readonly number[] = [cost]): number {
+  const n = population.length;
+  if (n < 2) return UNPRICED_PRIORITY;
+  const below = population.filter((c) => c < cost).length;
+  const ties = population.filter((c) => c === cost).length;
+  const q = Math.min(1, (below + Math.max(0, ties - 1) / 2) / (n - 1));
+  const { top, bottom } = MACHINE_PRIORITY_BAND;
+  return Math.round((bottom - (bottom - top) * q) * 100) / 100;
 }
 
 /** The header lines every machine filer renders, in the order the shard files already use. */
-export function machineShardHeaderLines(files: readonly string[], cost?: number): string[] {
+export function machineShardHeaderLines(files: readonly string[], cost?: number, population?: readonly number[]): string[] {
   const risk = machineShardRisk(files);
   return [
     "  verify: human",
     `  risk: ${risk}`,
     ...(risk === "high" ? ["  band_meaning: blast-radius"] : []),
-    ...(cost === undefined ? [] : [`  priority: ${costPriority(cost)}`]),
+    ...(cost === undefined ? [] : [`  priority: ${costPriority(cost, population)}`]),
     "  status: queued",
     "  attempts: 0",
     "  author_class: machine",
@@ -76,6 +87,8 @@ export interface MachineShardSpec {
   note?: string;
   /** The finding's measured cost (PR-minutes or occurrences), which sets its dispatch priority. */
   cost?: number;
+  /** Every cost the filer priced in the same pass, which ranks `cost` ({@link costPriority}). */
+  costPopulation?: readonly number[];
 }
 
 /**
@@ -90,7 +103,7 @@ export function renderMachineShard(spec: MachineShardSpec): { text: string; refu
     "  repo: remudero",
     "  depends_on: []",
     "  type: implement",
-    ...machineShardHeaderLines(spec.files, spec.cost),
+    ...machineShardHeaderLines(spec.files, spec.cost, spec.costPopulation),
     `  origin: ${q(spec.origin)}`,
     "  files:",
     ...spec.files.map((f) => `    - ${f}`),

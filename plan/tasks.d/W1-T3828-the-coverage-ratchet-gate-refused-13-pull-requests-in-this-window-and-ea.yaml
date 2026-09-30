@@ -4,7 +4,7 @@
   depends_on: []
   type: implement
   verify: auto
-  priority: 58
+  priority: 3.4
   risk: low
   status: queued
   attempts: 0
@@ -26,4 +26,4 @@
       - "Author_class is machine, and the change does not request any operator-only decision (priority, budget, or policy)."
       - "family_track_record shows no prior merged/declined ci-learning tasks to indicate drift risk, and the acceptance criterion is directly verifiable from the grep target shown."
     judged_at: "2026-09-29T14:14:46.129Z"
-    pin: "70dfaf649bccbe11e8c714766a1b260b9ddd1dd2cced863851b4ac08a0b4d5e9"
+    pin: "cf15d74f2915ba8991b3e94b240434f22f9a416ba327a339b5d5252810887d46"

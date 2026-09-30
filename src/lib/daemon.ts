@@ -49,6 +49,8 @@ import {
   runBranchTaskIds,
   parsePushedRunRefs,
   stillBlockedByPushedRunBranch,
+  logPlanOnlyRunBranchException,
+  type OrphanRunBranchEvidence,
   type PushedRunRef,
   type PlanOnlyRunBranchReceipt,
   type OpenPrCheck,
@@ -810,6 +812,8 @@ export interface DaemonDeps {
    *  for the same reason it is on `DrainDeps`: this module reads its world through deps, and the
    *  raw-output shape makes one sweep per tick the only form that type checks (W1-T916). */
   readPushedRunBranches?: () => string;
+  /** Same contract as `DrainDeps.readOrphanRunBranchEvidence`: read once per tick, absent releases nothing. */
+  readOrphanRunBranchEvidence?: () => OrphanRunBranchEvidence | undefined;
   /** The same {@link ObservedScopeByTask} `DrainDeps.observedByTask` takes, threaded to both the
    *  pack step and the partition call below so the two never disagree about a candidate's effective
    *  scope. Optional — omitted, both fall back to the empty union (W1-T2286). */
@@ -3883,6 +3887,7 @@ export async function runDaemon(
       // W1-T4002 — THIS TICK'S OWN full sweep already proved these, if it ran one; see
       // `SweepCycleOutcome.planOnlyRunBranchReceipts`'s doc for why no second GitHub read happens.
       const planOnlyReceiptsThisTick: readonly PlanOnlyRunBranchReceipt[] = sweepCycleOutcome?.planOnlyRunBranchReceipts ?? [];
+      const orphanEvidenceThisTick: OrphanRunBranchEvidence | undefined = deps.readOrphanRunBranchEvidence?.();
       const dispatchOpts: NextRunnableOpts = {
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
       isOpenPr: deps.isOpenPr,
@@ -3929,20 +3934,10 @@ export async function runDaemon(
                 undefined,
                 pushedRunRefs,
                 planOnlyReceiptsThisTick,
+                orphanEvidenceThisTick,
               );
               if (!stillBlocked && refsForTask.length > 0) {
-                for (const ref of refsForTask) {
-                  const receipt = planOnlyReceiptsThisTick.find((r) => r.ref === ref.ref && r.sha === ref.sha);
-                  if (receipt) {
-                    log("dispatch.run_branch_exception", {
-                      task: id,
-                      reason: "plan-filing-run-branch-exception",
-                      ref: ref.ref,
-                      sha: ref.sha,
-                      pr_number: receipt.prNumber,
-                    });
-                  }
-                }
+                logPlanOnlyRunBranchException(log, id, refsForTask, planOnlyReceiptsThisTick, orphanEvidenceThisTick);
               }
               return stillBlocked;
             },

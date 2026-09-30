@@ -4,7 +4,7 @@
   depends_on: []
   type: implement
   verify: auto
-  priority: 50
+  priority: 2.5
   risk: high
   status: queued
   attempts: 0
@@ -24,4 +24,4 @@
       - "The acceptance criterion is a grep check that the selector names test/serve-browser-teardown.test.ts. That makes the finding verifiable from what is shown, and the change looks additive and reversible."
       - "The family has no track record (0 merged, 0 declined, Beta mean 0.50). That is neutral, not concerning. The change still has to pass CI and review."
     judged_at: "2026-09-29T19:05:53.051Z"
-    pin: "fdbda7a57ceddad4ccdcd603f7c213f1fe08379b047c574d8e81fba8b297970d"
+    pin: "ce61d560d1e41269d2cf7dd9bf01905fd5286f8c6fea84d9edf37d8f6b443c92"

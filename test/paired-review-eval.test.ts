@@ -61,7 +61,8 @@ test("W1-T4905: paired replay is read-only and reports missingness", async () =>
   let calls = 0;
   const denied = await replayPairedReviews({ argv: [], idle: { liveness: { state: "up", quiet: true },
     headroom: { billingMode: "subscription", session: { percentUsed: 20 }, weekly: [{ label: "all", percentUsed: 40 }] } },
-    spendAllowed: false, pairs: [pair], corpus: [corpusItem], stack, seed: "seed", validateLabel, validatePair, admitReview,
+    stateDir: "/nonexistent-reviewer-pilot", pilotId: "pilot-fixture-1", phase: "aa",
+    pairs: [pair], corpus: [corpusItem], stack, seed: "seed", validateLabel, validatePair,
     review: async () => { calls++; return output("fail"); } });
   assert.equal(denied.state, "refused");
   assert.equal(calls, 0);
@@ -77,21 +78,17 @@ test("W1-T4905: paired replay is read-only and reports missingness", async () =>
   assert.equal(report.winnerClaim, "unsupported");
 });
 
-test("opted-in held-out replay invokes the paired evaluator only for admitted corpus items", async () => {
+test("an operator opt-in alone cannot turn an unactivated pilot into reviewer calls", async () => {
   const idle = { liveness: { state: "up" as const, quiet: true as const },
     headroom: { billingMode: "subscription" as const, session: { percentUsed: 20 }, weekly: [{ label: "all", percentUsed: 40 }] } };
   let calls = 0;
-  const run = await replayPairedReviews({ argv: ["--confirm-spend"], idle, spendAllowed: true,
+  const run = await replayPairedReviews({ argv: ["--confirm-spend"], idle,
+    stateDir: "/nonexistent-reviewer-pilot", pilotId: "pilot-fixture-1", phase: "aa",
     pairs: [pair, { ...pair, id: "not-in-corpus", corpusTaskId: "T-ABSENT" }], corpus: [corpusItem], stack, seed: "seed",
-    validateLabel, validatePair, admitReview, review: async () => { calls++; return output("pass"); },
+    validateLabel, validatePair, review: async () => { calls++; return output("pass"); },
     score: () => ({ mechanismMatched: false, lineMatched: false, remedyActionable: false }) });
-  assert.equal(run.state, "evaluated");
-  if (run.state !== "evaluated") return;
-  assert.equal(calls, 2);
-  assert.deepEqual(run.excludedPairIds, ["not-in-corpus"]);
-  assert.equal(run.report.totalPairs, 1);
-  assert.equal(run.report.gradedPairs, 1);
-  assert.equal(run.report.winnerClaim, "unsupported");
+  assert.equal(run.state, "refused");
+  assert.equal(calls, 0);
 });
 
 test("a scorer failure or unverified shared context never becomes a diagnosis", async () => {

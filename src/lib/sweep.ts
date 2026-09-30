@@ -4424,6 +4424,27 @@ export function dedupeRollupByLatestAttempt<T extends RollupCheckEntry>(rollup: 
   return [...latest.values()];
 }
 
+/** One failure a later attempt of the same check outranks; `pendingRerun` when that attempt is still running. */
+export interface SupersededRed<T extends RollupCheckEntry = RollupCheckEntry> {
+  entry: T;
+  supersededBy: T;
+  pendingRerun: boolean;
+}
+
+/** W1-T4908 — `latest` is exactly {@link dedupeRollupByLatestAttempt}'s output; `superseded` names each dropped failure. */
+export function classifyRollupSupersession<T extends RollupCheckEntry>(rollup: readonly T[]): { latest: T[]; superseded: SupersededRed<T>[] } {
+  const latest = dedupeRollupByLatestAttempt(rollup);
+  const keep = new Map(latest.map((c) => [c.name ?? c.context ?? "", c]));
+  const state = (c: T) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
+  const superseded = rollup.flatMap((entry) => {
+    const supersededBy = keep.get(entry.name ?? entry.context ?? "") as T;
+    if (supersededBy === entry || !REQUIRED_CHECK_FAIL.has(state(entry))) return [];
+    const s = state(supersededBy);
+    return [{ entry, supersededBy, pendingRerun: !REQUIRED_CHECK_OK.has(s) && !REQUIRED_CHECK_FAIL.has(s) }];
+  });
+  return { latest, superseded };
+}
+
 /** W1-T4105 — what a fix worker was sent against: the PR head and the check(s) it must fix. */
 export interface FixDispatchSnapshot {
   headSha: string;

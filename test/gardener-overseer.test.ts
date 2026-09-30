@@ -164,6 +164,23 @@ test("W1-T4802: a filing streak already escalated is not escalated again", () =>
   }
 });
 
+test("a scorecard written beside a failed filing does not hide the filing streak", () => {
+  const T = T0 + 10 * HOUR;
+  const h = harness(T);
+  try {
+    h.rows.push(...passes("beta", 5, T0, HOUR));
+    for (let i = 3; i >= 1; i--) {
+      h.rows.push(row("beta.garden_filing_failed", T - i * HOUR, { reason: "header-max-length" }));
+      h.rows.push(row("beta.scorecard", T - i * HOUR + 1, { pr_url: null, filing_failed: 4 - i }));
+    }
+    h.rows.push(row("beta.garden_filing_escalated", T - HOUR, { issue_url: "https://github.com/o/r/issues/9" }));
+    runGardenerOverseer(h.deps);
+    assert.equal(h.steps("gardener_overseer.deferred").length, 1, "the streak is still seen and left to gardener.ts");
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
 const demoSpec: GardenSpec<"draft" | "other", Record<string, never>, never, never> = {
   name: "demo",
   classes: ["draft", "other"],

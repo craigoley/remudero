@@ -15,7 +15,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { fixedClock } from "../src/lib/clock.js";
-import { runnableCandidates } from "../src/lib/drain.js";
+import { dispatchOrder, runnableCandidates } from "../src/lib/drain.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { costPriority, deterministicEscalation, machineShardHeaderLines, machineShardRisk, renderMachineShard, UNPRICED_PRIORITY } from "../src/lib/machine-filing.js";
 import { ciFrictionShardYaml } from "../src/lib/ci-friction-gardener.js";
@@ -670,14 +670,16 @@ test("the verify-human release refuses a ruling-shaped record", async () => {
 });
 
 test("released work dispatches costliest first and unpriced work mid-queue", async () => {
-  assert.ok(costPriority(465) < costPriority(81) && costPriority(81) < costPriority(15), "more cost dispatches sooner");
-  assert.equal(costPriority(0), 90);
-  assert.equal(costPriority(1e9), 1);
-  assert.equal(costPriority(27), UNPRICED_PRIORITY);
-  const friction = ciFrictionShardYaml({ cause: { kind: "check", name: "reviewer-unmet" }, minutes: 465.7, rounds: 40, prs: 30 } as never, "W1-T9200");
-  assert.match(friction, new RegExp(`^ {2}priority: ${costPriority(465.7)}$`, "m"), "ci-friction prices its PR minutes");
-  const lesson = ciLearningShardYaml({ findingId: "ci-learning:1:ci-gate", title: "t", gate: "ci-gate", pr: 1, prs: Array.from({ length: 36 }, (_, i) => i + 1), repairFiles: [], dominantRepairFiles: [], author_class: "machine", verify: "human", remedySurface: "learnings/*.yaml" }, "W1-T9201");
-  assert.match(lesson, new RegExp(`^ {2}priority: ${costPriority(36)}$`, "m"), "the CI-learning rung prices its occurrences");
+  const pop = [15, 81, 465];
+  assert.ok(costPriority(465, pop) < costPriority(81, pop) && costPriority(81, pop) < costPriority(15, pop), "more cost dispatches sooner");
+  assert.equal(costPriority(465, pop), 1);
+  assert.equal(costPriority(15, pop), 4);
+  assert.equal(costPriority(27), UNPRICED_PRIORITY, "a cost with no peers sits mid-band");
+  const reviewer = { cause: { kind: "check", name: "reviewer-unmet" }, minutes: 465.7, rounds: 40, prs: 30 } as never;
+  const friction = ciFrictionShardYaml(reviewer, "W1-T9200", [reviewer, { minutes: 33.9 } as never]);
+  assert.match(friction, new RegExp(`^ {2}priority: ${costPriority(465.7, [465.7, 33.9])}$`, "m"), "ci-friction prices its PR minutes");
+  const lesson = ciLearningShardYaml({ findingId: "ci-learning:1:ci-gate", title: "t", gate: "ci-gate", pr: 1, prs: Array.from({ length: 36 }, (_, i) => i + 1), repairFiles: [], dominantRepairFiles: [], author_class: "machine", verify: "human", remedySurface: "learnings/*.yaml" }, "W1-T9201", [36, 10]);
+  assert.match(lesson, new RegExp(`^ {2}priority: ${costPriority(36, [36, 10])}$`, "m"), "the CI-learning rung prices its occurrences");
 
   const root = planDir({
     "W1-T9200-x.yaml": friction,
@@ -706,4 +708,36 @@ test("shardRelPath names a shard by its plan directory and refuses the monolith,
   assert.equal(shardRelPath({ sourcePath: "/repo/plan/tasks.d/sub/W1-T1-x.yaml" }), undefined, "a nested path is not a shard");
   assert.equal(shardRelPath({ sourcePath: "/repo/plan/tasks.d/notes.txt" }), undefined, "a non-yaml file is not a shard");
   assert.equal(shardRelPath({}), undefined, "a record with no source is not a shard");
+});
+
+/** An operator record at an explicit priority, for the shared-band comparisons below. */
+const operatorAt = (id: string, priority: number) =>
+  operatorShard(id, { files: [`docs/${id}.md`] }).replace("  verify: human\n", `  verify: auto\n  priority: ${priority}\n`);
+
+test("the costliest released machine task sorts among operator priority-1 work", () => {
+  const costs = [465.7, 33.9, 12];
+  const top = machineShard("W1-T9400", { files: ["docs/w1-t9400.md"] }).replace("  verify: human\n", `  verify: auto\n  priority: ${costPriority(465.7, costs)}\n`);
+  const root = planDir({ "W1-T9400-x.yaml": top, "W1-T9401-x.yaml": operatorAt("W1-T9401", 1), "W1-T9402-x.yaml": operatorAt("W1-T9402", 2) });
+  try {
+    const order = dispatchOrder(readPlan(root).tasks).map((t) => t.id);
+    assert.equal(costPriority(465.7, costs), 1);
+    assert.ok(order.indexOf("W1-T9400") < order.indexOf("W1-T9402"), "ahead of operator priority-2 work");
+    assert.deepEqual(order.slice(0, 2).sort(), ["W1-T9400", "W1-T9401"], "in the priority-1 tier with the operator's own");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a cheap released machine task does not jump ahead of operator priority-1 work", () => {
+  const costs = [1880.7, 465.7, 33.9, 12];
+  const cheap = machineShard("W1-T9410", { files: ["docs/w1-t9410.md"] }).replace("  verify: human\n", `  verify: auto\n  priority: ${costPriority(12, costs)}\n`);
+  const root = planDir({ "W1-T9410-x.yaml": cheap, "W1-T9411-x.yaml": operatorAt("W1-T9411", 1), "W1-T9412-x.yaml": operatorAt("W1-T9412", 4) });
+  try {
+    const order = dispatchOrder(readPlan(root).tasks).map((t) => t.id);
+    assert.ok(costPriority(12, costs) > 1 && costPriority(12, costs) <= 4, "the cheapest stays inside the operator band");
+    assert.ok(order.indexOf("W1-T9411") < order.indexOf("W1-T9410"), "operator priority-1 work goes first");
+    assert.ok(costPriority(UNPRICED_PRIORITY) <= 4, "and unpriced released work is never pushed out of the band");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -510,6 +510,7 @@ import {
   type GhApiFetcher,
   type GhCallPacer,
   createPlanFilingFileCache,
+  createGhReadWarmer,
   PLAN_FILING_FILE_CACHE_MAX_ENTRIES,
   type PlanFilingFileCache,
   type PlanFilingFileObservation,
@@ -575,7 +576,7 @@ import {
 // renderTraceChain/traceForward/traceReverse: only traceCommand read them, and it moved to
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
-import { checkCommitMessage, defaultPreflightSpawn, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
+import { checkCommitMessage, defaultPreflightSpawn, fitConventionalTitle, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
 import {
   buildPreflightSummary,
   callerReachableSuites,
@@ -2393,6 +2394,7 @@ import {
 } from "./lib/github-app.js";
 import {
   automaticBranchReapStateFileName,
+  orphanRunBranchEvidenceReader,
   branchCitationPattern,
   branchNamesFingerprint,
   decideAutomaticBranchReap,
@@ -21115,6 +21117,9 @@ export function reapBranchesCommand(
     /** Heads proven to have no PR at this tip sha ({@link nextNoPrHeadCache}); same contract as above. */
     noPrHeadShaCache?: ReadonlyMap<string, string>;
     onNoPrHeadCacheUpdate?: (next: Readonly<Record<string, string>>) => void;
+    /** Names why a pass exits non-zero (drift, a refused or failed prune), so a caller's ledger row
+     *  reports the cause rather than only the code. */
+    onExitReason?: (reason: string) => void;
   } = {},
 ): number {
   const print = opts.quiet ? (..._args: unknown[]) => {} : console.log;
@@ -21410,6 +21415,7 @@ export function reapBranchesCommand(
         `rmd reap-branches: --prune refused — could not re-read the open pull requests, and an ` +
           `unread list is indistinguishable from "none open": ${why}`,
       );
+      opts.onExitReason?.("prune-refused: the open pull requests could not be re-read");
       return 1;
     }
     if (!opts.quiet) console.error(`rmd reap-branches: the active-branch screen could not read the open pull requests (${why}) — ` +
@@ -21463,7 +21469,10 @@ export function reapBranchesCommand(
         deleted_branches: outcome.deleted,
       });
     }
-    if (outcome.failed.length > 0) return 1;
+    if (outcome.failed.length > 0) {
+      opts.onExitReason?.(`prune-failed: ${outcome.failed.reduce((n, f) => n + f.names.length, 0)} branch(es) still on origin`);
+      return 1;
+    }
   }
 
   let drift = false;
@@ -21495,6 +21504,10 @@ export function reapBranchesCommand(
       `rmd reap-branches: ${deadDeclaredGuards.length} declared guard(s) name a branch absent from origin AND ` +
         `are not cited anywhere else — the branch is gone, remove the declaration: ${deadDeclaredGuards.join(", ")}`,
     );
+  }
+  if (drift) {
+    const counts = { undeclared_guards: plan.undeclaredGuards, dangling_citations: danglingCitations, orphan_declarations: orphanDeclarations, dead_declared_guards: deadDeclaredGuards };
+    opts.onExitReason?.(`guard-list drift: ${Object.entries(counts).filter(([, v]) => v.length > 0).map(([k, v]) => `${k}=${v.length}`).join(" ")}`);
   }
   return drift ? 1 : 0;
 }
@@ -21875,7 +21888,9 @@ export function boardCommand(rest: string[], deps: BoardCommandOptions = {}): nu
       const draft = pr.isDraft ? " [draft]" : "";
       const failing = pr.failingChecks.length > 0 ? `  failing=${pr.failingChecks.join(",")}` : "";
       const pending = pr.pendingChecks.length > 0 ? `  pending=${pr.pendingChecks.join(",")}` : "";
-      console.log(`    #${pr.number} ${pr.title}${draft} (${pr.headRefName})${failing}${pending}`);
+      const dropped = pr.supersededChecks ?? [];
+      const superseded = dropped.length > 0 ? `  superseded: ${dropped.join(",")}` : "";
+      console.log(`    #${pr.number} ${pr.title}${draft} (${pr.headRefName})${failing}${pending}${superseded}`);
     }
   }
   return 0;
@@ -32464,7 +32479,12 @@ export function gardenCheckout(opts: {
         execFileSync(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root, stdio: "pipe" });
         git("add", "--", "docs/docs-index.json");
       }
-      git("commit", "-q", "-m", `${title}\n\nTended by the ${opts.name} gardener.`);
+      // commitlint refuses a header over 100 characters, and a cause name makes a long title: fit
+      // the header (prefix kept, cut at a space or hyphen, since a cause is one hyphenated token)
+      // for both the commit and the PR, and carry the full title in each body.
+      const fitted = fitConventionalTitle(title);
+      const fullTitle = fitted.trimmed ? `Full title: ${title}\n\n` : "";
+      git("commit", "-q", "-m", `${fitted.header}\n\n${wrapBodyLines(`${fullTitle}Tended by the ${opts.name} gardener.`).join("\n")}`);
       // Both guards run BEFORE the push: a push that lands and a PR that is then refused leaves a
       // branch with no PR — 103 test-run plan-garden-* heads on origin by 2026-09-29.
       assertLiveWriteAllowed("git-push", `pushing the ${opts.name} garden branch ${branch}`);
@@ -32472,7 +32492,7 @@ export function gardenCheckout(opts: {
       git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
       const fetcher = opts.fetcher ?? ghJson;
       try {
-        return createPlanPrRest(fetcher, opts.owner, opts.repo, { title, body, head: branch, base: "main" }).prUrl;
+        return createPlanPrRest(fetcher, opts.owner, opts.repo, { title: fitted.header, body: fullTitle + body, head: branch, base: "main" }).prUrl;
       } catch (e) {
         retractGardenBranch({ branch, git, name: opts.name, owner: opts.owner, repo: opts.repo, fetcher, log: opts.log });
         throw e;
@@ -33301,6 +33321,11 @@ export async function daemonCommand(
         // EMPTY set, so no task is refused — precisely today's behaviour. The degraded outcome is
         // "no improvement", never "dispatch wrongly blocked".
         readPushedRunBranches: () => readPushedRunBranchesOutput(),
+        readOrphanRunBranchEvidence: orphanRunBranchEvidenceReader(
+          join(config.root, "state", automaticBranchReapStateFileName(target.repo)),
+          () => liveInflightRuns(inflightDir).map((r) => r.taskId),
+          systemClock,
+        ),
         // W1-T177: a fresh `gh pr view` re-read, consulted only when isOpenPr
         // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
         readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
@@ -40003,8 +40028,12 @@ export function runAutomaticBranchReapRung(
     repository: `${owner}/${repo}`,
   });
   let code = 1;
+  let exitReason = "unnamed non-zero exit";
   try {
     code = reapBranchesCommand(opts.prune === false ? [] : ["--prune"], {
+      onExitReason: (why) => {
+        exitReason = why;
+      },
       root: checkoutRoot,
       ownerRepo: { owner, repo },
       exec,
@@ -40041,10 +40070,13 @@ export function runAutomaticBranchReapRung(
       // Keep the pre-pass fingerprint; a later poll will retry because the remote cannot be proved current.
     }
   }
+  // `trigger` is why the pass RAN (the fleet pushes branches all day, so it is nearly always
+  // branch-set-changed); `reason` is why it ended as it did — never the trigger read as a failure.
   log("branch_reap.sweep.completed", {
     outcome: code === 0 ? "ok" : "completed_with_drift_or_failure",
     code,
-    reason: decision.reason,
+    trigger: decision.reason,
+    reason: code === 0 ? "clean" : exitReason,
     repository: `${owner}/${repo}`,
   });
 }
@@ -40351,6 +40383,7 @@ export function buildSweepHook(
   if (!github && snapshotCache) boardGithub.seedBoardSnapshot?.(snapshotCache);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
+  const openPrReads = createGhReadWarmer(ghJsonAsync);
   // W1-T4476 design (i): loaded ONCE, at daemon-start construction time — the same lifetime as
   // `boardGithub` above — from THIS repository's own file, so a restart with an unchanged branch
   // set and an unexpired interval reads "unchanged" instead of every boot re-judging every remote
@@ -40381,7 +40414,9 @@ export function buildSweepHook(
     // W1-T4002: this pass's own plan-only filing receipts feed dispatch options; no stale re-read.
     let thisPassPlanOnlyRunBranchReceipts: ReturnType<typeof planOnlyRunBranchReceipts> = [];
     try {
+      await openPrReads.warm();
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
+        fetch: openPrReads.fetcher(ghJson),
         pacer,
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
@@ -40722,12 +40757,15 @@ export function buildSweepLightHook(
     : readMainPlan;
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
+  const openPrReads = createGhReadWarmer(ghJsonAsync);
   return async (scope) => {
     // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
     // so `post-review` is the only lane left — the same restriction a working in-flight run imposes.
     const reviewOnly = scope?.reviewOnly === true;
     try {
+      await openPrReads.warm();
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
+        fetch: openPrReads.fetcher(ghJson),
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
         isMerged,

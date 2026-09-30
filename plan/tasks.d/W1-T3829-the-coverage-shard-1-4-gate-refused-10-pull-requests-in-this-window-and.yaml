@@ -4,7 +4,7 @@
   depends_on: []
   type: implement
   verify: auto
-  priority: 61
+  priority: 4
   risk: low
   status: queued
   attempts: 0
@@ -26,4 +26,4 @@
       - "Verify:auto with a concrete grep-checkable acceptance criterion; no operator-only decision requested."
       - "family_track_record shows 0 declined for this family, no signal of repeated failure to judge more strictly against."
     judged_at: "2026-09-29T14:14:51.106Z"
-    pin: "771f4996961d6cc4ee4f5a1dc9e54a3595c14dccd25ff278ee4d8490d0f8c28b"
+    pin: "8ab69670e6fdd2847ddd1d557d823ce30c1d52275502d1678810e338900daf34"

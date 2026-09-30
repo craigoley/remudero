@@ -4,7 +4,7 @@
   depends_on: []
   type: implement
   verify: auto
-  priority: 16
+  priority: 1.75
   risk: low
   status: queued
   attempts: 0
@@ -25,4 +25,4 @@
       - "The single acceptance criterion is a grep for a \"ci-friction:check:reviewer-unmet\" entry in that doc. That can be checked automatically and is easy to reverse."
       - "The family has no merge or decline history yet (Beta mean 0.80), so there is no track record of failure. The gates state shows nothing concerning, and the PR still goes through CI and review."
     judged_at: "2026-09-29T20:13:10.463Z"
-    pin: "26d8a9e62e65578edd217639620df7dd92a91fb023a1cc8d0af899752236d645"
+    pin: "ab6d39c6e877d22fd44ee393936f8fb580f713aaee327532ee2d5a067c0e4146"
