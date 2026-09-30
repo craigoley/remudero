@@ -97,9 +97,17 @@
   origin: recon#human-input-channel-census-2026-08-15
   plan_refs: ["W1-T435", "W1-T436", "W1-T110", "W1-T164", "W1-T336"]
   files: [src/lib/status.ts, src/lib/serve.ts, test/human-verify-queue-surfaces.test.ts]
-  status: queued
+  status: done
   attempts: 0
   note: |
+    DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #1886
+    (`feat(status): surface verify:human tasks on the needs-me queue (W1-T507)`, trailer + head
+    run-W1-T507-1786814588798, merge commit): verifyHumanPending in src/lib/status.ts, its render in src/lib/serve.ts,
+    and the four titled tests in test/human-verify-queue-surfaces.test.ts. The 2026-08-21 amendment below says the work
+    is NOT done; it postdates #1886 by six days and its ledger and board observations concern surfaces this record's
+    four criteria do not name. plan-reconcile cannot see a merge commit with no `(#N)` subject. Every acceptance
+    criterion holds on main and is PRESERVED UNCHANGED: this record is marked done, not re-proved.
+
     MEASUREMENT AMENDMENT, 2026-08-21 — THE FINDING STANDS AND THE MAGNITUDE HAS GROWN. Nothing else in
     this shard changes: not the title, not `files:`, not the acceptance block, not `status:`. The work is
     NOT done.

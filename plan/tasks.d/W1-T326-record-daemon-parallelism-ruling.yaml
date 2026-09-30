@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   principles: {tdd: strict}
   budget_usd: 40.00
   rationale: "RE-DERIVED AT a17d916. I searched DECISIONS.md, MASTER-PLAN.md, plan/tasks.yaml and every
@@ -66,9 +66,10 @@
   origin: oper#parallelism-filings-2026-08-04
   plan_refs: ["P19", "§4B"]
   files: [DECISIONS.md]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
-  note: "verify:auto - the whole deliverable is text at known paths, so grep proofs execute against it
+  note: "CLOSED 2026-09-30 (operator ruling) — THE RULING THIS TASK ASKED FOR IS RECORDED AND THE RECORD IS COMPLETE. Delivered by #1302 (`chore(plan): rule daemon parallelism stays at N=1 (W1-T326)`, trailer + head run-W1-T326-1785871128282): DECISIONS.md carries the 2026-08-04 ruling naming the keychain, plan-reload and deploy-idle-gate blockers and what reopens it (later amended in the same file). plan-reconcile cannot see it: `chore(plan)` subject, and the merge sits outside its 5000-commit subject window. Both criteria are `grep:` proofs against DECISIONS.md and hold. Closed rather than marked done, and set to verify: human, because lint-plan's [ruling-verify] blocks any changed record that declares DECISIONS.md at verify:auto. The acceptance criteria are PRESERVED UNCHANGED.\n\nverify:auto - the whole deliverable is text at known paths, so grep proofs execute against it
     directly and no operator need be present to judge them.
     risk:high - this writes a BINDING RULING on dispatch architecture: an entry that overstates its blockers would stop work that should happen, while one
     that understates them would licence a change with three unresolved hazards.
