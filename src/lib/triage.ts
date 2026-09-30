@@ -1,6 +1,7 @@
 import type { Escalation, EscalationOption } from "./escalate.js";
 import { grillChoiceError, parseGrillOptions, parseGrillRecommendation } from "./grill-choices.js";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { shapeCommitMessage } from "./commit-message.js";
 import { loadPlan } from "./plan.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
@@ -266,6 +267,75 @@ export function classifyTriageOutcome(text: string): TriageOutcome {
   return verdict === null ? { kind: "unparseable" } : { kind: "verdict", verdict };
 }
 
+// ── ALREADY_DECIDED citation resolution (W1-T4936) ───────────────────────────────────────────
+
+export interface CitationEvidence {
+  planIds: ReadonlySet<string>;
+  pathExists: (repoRelativePath: string) => boolean;
+}
+
+export interface CitationReferents {
+  resolved: string[];
+  unresolved: string[];
+  /** `#N` tokens: a shared namespace with issues and alerts, so advisory and never refusing. */
+  advisoryPrs: string[];
+}
+
+const CITED_PATH_EXT = /\.(?:md|yaml|yml|ts|mjs|json)$/;
+const CITED_PATH_ROOT = /^(?:plan|src|test|docs|doctrine|scripts|learnings|bin|hooks|settings)\//;
+
+/** Every plan task id and repo path a citation names, split by whether `evidence` has it. */
+export function unresolvedCitationReferents(citation: string, evidence: CitationEvidence): CitationReferents {
+  const resolved: string[] = [];
+  const unresolved: string[] = [];
+  const seen = new Set<string>();
+  const note = (referent: string, exists: boolean): void => {
+    if (seen.has(referent)) return;
+    seen.add(referent);
+    (exists ? resolved : unresolved).push(referent);
+  };
+  for (const m of citation.matchAll(/\bW\d+-T\d+\b/g)) note(m[0], evidence.planIds.has(m[0]));
+  for (const raw of citation.split(/\s+/)) {
+    const token = raw.replace(/^[`'"(\[<]+|[`'")\]>,;:.]+$/g, "");
+    if (token.includes("://")) continue;
+    if (CITED_PATH_EXT.test(token) || (token.includes("/") && CITED_PATH_ROOT.test(token))) note(token, evidence.pathExists(token));
+  }
+  const advisoryPrs = [...citation.matchAll(/(?<![\w&])#\d+\b/g)].map((m) => m[0]);
+  return { resolved, unresolved, advisoryPrs: [...new Set(advisoryPrs)] };
+}
+
+/** Evidence read from a triage worktree: its merged plan's ids and its files, never outside it. */
+export function worktreeCitationEvidence(worktreeRoot: string): CitationEvidence {
+  const planIds = new Set(loadPlan(join(worktreeRoot, "plan", "tasks.yaml")).byId.keys());
+  const root = resolve(worktreeRoot);
+  return {
+    planIds,
+    pathExists: (p) => {
+      const abs = resolve(root, p);
+      return abs.startsWith(root + sep) && existsSync(abs);
+    },
+  };
+}
+
+function unresolvedCitationGrill(citation: string, c: CitationReferents): Extract<TriageDecision, { action: "grill" }> {
+  const why =
+    c.unresolved.length > 0
+      ? `the citation names ${c.unresolved.join(", ")}, which does not exist in the plan or the repo`
+      : "the citation names no task id or path that can be checked";
+  return {
+    action: "grill",
+    status: "grilling",
+    detail: `ALREADY_DECIDED was claimed but ${why}: ${citation}`,
+    options: [
+      { label: "confirm-closure", detail: "Close the feedback as already decided, and name in this issue where the request is covered." },
+      { label: "file-as-task", detail: "The citation does not hold up; file the request as a new task." },
+    ],
+    recommendation: "file-as-task",
+    cause: "unresolved_citation",
+    unresolved: c.unresolved,
+  };
+}
+
 // ── Deterministic decision (pure) ────────────────────────────────────────────
 
 export interface DecideTriageInput {
@@ -276,6 +346,8 @@ export interface DecideTriageInput {
   /** How many attempts {@link runTriageWithRetry} spent before this call (W1-T2212). Undefined for
    *  a caller with no retry loop; otherwise folded into the error message alongside `verdict: null`. */
   attempts?: number;
+  /** The resolution of an ALREADY_DECIDED citation (W1-T4936). Undefined is today's behaviour. */
+  citation?: CitationReferents;
 }
 
 export type TriageDecision =
@@ -290,6 +362,9 @@ export type TriageDecision =
       options: EscalationOption[];
       /** Must exactly match one of `options[].label` — {@link decideTriage} enforces it. */
       recommendation: string;
+      /** Set only when the grill replaces an ALREADY_DECIDED closure (W1-T4936). */
+      cause?: "unresolved_citation";
+      unresolved?: string[];
     }
   | { action: "propose"; status: Extract<FeedbackStatus, "proposed">; detail: string; files: string[] }
   | {
@@ -340,6 +415,8 @@ export function decideTriage(input: DecideTriageInput): TriageDecision {
         cause: "inconsistent_verdict",
       };
     }
+    const c = input.citation;
+    if (c && (c.unresolved.length > 0 || c.resolved.length === 0)) return unresolvedCitationGrill(input.verdict.citation, c);
     return { action: "no_task", status: "rejected", detail: input.verdict.citation };
   }
   if (input.verdict.kind === "ambiguous") {
