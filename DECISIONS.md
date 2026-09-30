@@ -3392,3 +3392,23 @@ Each phase is measured against the 2026-09-29/30 baseline.
 - **Risk 4 escalates.** In the documented rotation rename sliver, the projector can hold a row that the ledger lost. When the consistency oracle finds that `extra` drift, it opens a needs-human issue: this is a real, if rare, ledger loss. The read model keeps the row, and nothing "fixes" it silently.
 
 **Rollback:** the read model stays additive until Phase 4, per #8010, and a kill switch in `state/read-model/switches.json` turns off the projector or any view. Moving the writer elsewhere later is safe because the lease already fences writers.
+
+## 2026-09-30 — OPERATOR RULING: serve keeps GitHub facts warm with no viewer, paced by quota headroom (amends W1-T154)
+
+*Operator-authored direction, given in chat on 2026-09-30 as "go with your recommendations", answering whether serve should keep its GitHub facts fresh when no console is reading. The operator session recorded it; it did not originate it.*
+
+**Amends W1-T154's zero-viewer gate.** Today serve's board gateway refreshes only while a console is subscribed or has read within one refresh cycle (`gatePrewarmOnClients`, serve.ts). That gate was added after 2026-07-28, when an unwatched serve spent about 62% of the hourly GraphQL budget on a `gh pr list` every 15 s. **That gate is superseded:** serve now refreshes with no viewer. The gate's purpose still holds, because the refresh is paced by quota headroom rather than by a fixed timer.
+
+**Evidence:**
+- On a long-running serve the GitHub facts were **40 minutes stale**. The host ledger for SERVE-1790786816102 shows the gateway fetched at 16:47Z, and nobody read until a probe at 17:27:19Z. The walk that the read started landed at 17:27:30Z. Nothing failed, and neither pacing nor a refusal was involved: the gate had simply stopped refreshing.
+- The first read then got the stale facts. #8126 now labels that read stale (`x-rmd-stale-source`), but a label does not make the facts fresh.
+- Phase 2's push (#8010) must send fresh facts to a console that has not yet read. A refresh that depends on a reader cannot supply them.
+
+**Ruled:**
+- **Serve keeps its GitHub facts within a target freshness when no one is reading.** The target is the gateway's TTL.
+- **The cadence adapts to the quota that remains, with no hard thresholds.** The pace comes from the headroom in the core and GraphQL buckets, each weighted by what one refresh costs from it, and from the transport's secondary-limit signals. As headroom falls the refresh slows, and near exhaustion it pauses until the reset. Active readers speed it up.
+- **The refresh never runs on the request loop.** The walk runs in the gateway's off-loop worker (#7998, W1-T4771).
+- **Each refresh's quota cost is recorded, and a ledger rollup counts it.** There is no row per call.
+- **The pacer is one reusable module.** At the Phase 1 cutover (Q3 of the Phase 1 rulings above), the read-model worker becomes the single GitHub fetcher and takes over the refresh with this same pacer. Until then, the off-loop gateway runs it.
+
+**Rollback:** re-gate the refresh on a reader. The pacer keeps its readers-active input, so this is a change to one call site in serve.
