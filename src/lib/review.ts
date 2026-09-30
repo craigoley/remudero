@@ -7425,6 +7425,26 @@ export function detectInstrumentEntanglement(
   };
 }
 
+/** W1-T4811 (operator ruling 2026-09-22, W1-T2982): the RENAME-ONLY predicate. `raw` is `git diff --raw --no-abbrev -M`
+ *  output. True ONLY when the diff is non-empty and EVERY line is an `R100` rename between two `plan/tasks.d/*.yaml`
+ *  paths whose blob ids AND modes are unchanged. It reads the blob ids rather than trusting the path names or the score
+ *  alone: a path-name-only reading admits a rename that also edits a byte. Anything else (M/A/D/C, R099, a mode change,
+ *  a rename leaving the directory, an unparseable line, empty input) returns `renameOnly: false` and the full matrix runs. */
+export function isRenameOnlyDiff(raw: string): { renameOnly: boolean; reason: string } {
+  const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+  if (lines.length === 0) return { renameOnly: false, reason: "the diff is empty" };
+  const shard = /^plan\/tasks\.d\/[^/\t]+\.yaml$/;
+  const row = /^:(\d{6}) (\d{6}) ([0-9a-f]{40,64}) ([0-9a-f]{40,64}) R100\t([^\t]+)\t([^\t]+)$/;
+  for (const line of lines) {
+    const m = row.exec(line);
+    if (m === null) return { renameOnly: false, reason: `not a pure rename: ${line}` };
+    const [, oldMode, newMode, oldBlob, newBlob, from, to] = m;
+    if (oldBlob !== newBlob || oldMode !== newMode) return { renameOnly: false, reason: `content or mode differs: ${to}` };
+    if (!shard.test(from!) || !shard.test(to!)) return { renameOnly: false, reason: `outside plan/tasks.d/*.yaml: ${from} -> ${to}` };
+  }
+  return { renameOnly: true, reason: `${lines.length} pure rename(s) under plan/tasks.d, no other path` };
+}
+
 /** True when a changed path is anywhere under a `docs/` directory. */
 function isDocsPath(path: string): boolean {
   return /(^|\/)docs\//.test(path);
