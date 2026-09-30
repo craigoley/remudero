@@ -2450,7 +2450,8 @@ export interface components {
       taskId: string;
       runId?: string;
       title: string;
-      verb: "merged" | "verdict" | "fix" | "escalated" | "spend" | "run-refused" | "run-started" | "worker";
+      /** `merged` is minted from a run's `verdict: merged` row or the sweep's `verdict.merged` credit, once per pull request. `started` is a `run.start` (detail: the run type), `review` a `review.posted` (detail: its state, verbatim), `automerge` an `automerge.armed`. A consumer must render an unknown verb, not drop it. */
+      verb: "merged" | "verdict" | "fix" | "escalated" | "spend" | "run-refused" | "run-started" | "worker" | "started" | "review" | "automerge";
       /** The originating ledger line's own `ts`. */
       ts: string;
       detail?: string;
@@ -2476,7 +2477,7 @@ export interface components {
       /** Present only when GitHub decoration was attempted and failed for this row. */
       githubUnavailable?: true;
     };
-    /** GET /v1/recent's body -- at most 20 entries, newest first. */
+    /** GET /v1/recent's body -- at most `limit` (default 20) entries, newest first. */
     RecentActivityResult: {
       entries: (RecentActivityEntry)[];
       staleness?: ConsoleResponseStaleness;
@@ -4205,6 +4206,7 @@ export interface paths {
       responses: {
           "200": RecentActivityResult;
           "304": undefined;
+          "400": Error;
           "401": Error;
           "403": Error;
         };
