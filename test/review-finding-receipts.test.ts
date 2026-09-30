@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { extractReviewFindings, recordReviewFindings } from "../src/lib/review-findings.js";
@@ -11,21 +9,20 @@ import { projectFlowRow } from "../src/lib/field-trials-flow.js";
 import { runReview } from "../src/run-task.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 async function fixture(fn: (root: string, sha: string) => Promise<void> | void): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), "rmd-review-findings-"));
+  const repo = gitRepo({ kind: "review-findings" });
+  const root = repo.dir;
   try {
-    execFileSync("git", ["init", "-q", root]);
-    execFileSync("git", ["-C", root, "config", "user.name", "Fixture"]);
-    execFileSync("git", ["-C", root, "config", "user.email", "fixture@example.invalid"]);
     mkdirSync(join(root, "src"));
     writeFileSync(join(root, "src", "changed.ts"), "export const changed = true;\n");
     writeFileSync(join(root, "src", "dependency.ts"), "export const dependent = changed;\n");
-    execFileSync("git", ["-C", root, "add", "."]);
-    execFileSync("git", ["-C", root, "commit", "-qm", "fixture"]);
-    await fn(root, execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim());
+    repo.git("add", ".");
+    repo.git("commit", "-qm", "fixture");
+    await fn(root, repo.git("rev-parse", "HEAD"));
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    repo.cleanup();
   }
 }
 
