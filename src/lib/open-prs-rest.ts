@@ -5,7 +5,6 @@
  * single `gh pr list --json …` call this replaced put the whole sweep critical path behind the
  * GraphQL point budget; when it emptied on 2026-07-28 the sweep went blind for 22 minutes while
  * the core budget sat healthy (CLAUDE.md, "CI and merging"; PR #794, PR #796).
- *
  * The module reproduces the existing value bit for bit over a different transport: no retry, no
  * alarming, no degraded mode, no escalation. The trade is 1 + 2N requests where GraphQL asked once
  * — 7-21 core a pass, from the budget that was never exhausted (docs/forensics/open-prs-rest.md).
@@ -54,7 +53,6 @@ export function singlePrRestArgs(owner: string, repo: string, prNumber: number):
 
 /** Fetch one `gh api …` argv and return its parsed JSON. Injected so every parser and both
  *  orchestrators are testable with no network; the real caller passes `ghJson`.
- *
  *  Trap: declared between two executed functions, not at the file head — the v8 coverage channel
  *  stamps `DA:<line>,0` across a module's leading and trailing source-line records, so a type-only
  *  declaration parked at either end reads to diff-coverage as uncovered code. `onRateLimit` restates
@@ -1025,6 +1023,57 @@ export function hydrateWorkflowRuns(
     }
   }
   return out;
+}
+
+/** W1-T4773: replays a pass's per-PR reads off the loop; the next pass takes each answer once. */
+export interface GhReadWarmer {
+  warm(): Promise<number>;
+  fetcher(inner: GhApiFetcher): GhApiFetcher;
+}
+
+export const GH_READ_WARM_CONCURRENCY = 4;
+
+export function createGhReadWarmer(
+  readAsync: (args: string[]) => Promise<unknown>,
+  concurrency: number = GH_READ_WARM_CONCURRENCY,
+): GhReadWarmer {
+  let recorded = new Map<string, string[]>();
+  let warmed = new Map<string, unknown>();
+  return {
+    async warm() {
+      const reads = [...recorded.values()];
+      recorded = new Map();
+      warmed = new Map();
+      const answers = new Map<string, unknown>();
+      let next = 0;
+      const lane = async (): Promise<void> => {
+        while (next < reads.length) {
+          const args = reads[next++]!;
+          try {
+            answers.set(JSON.stringify(args), await readAsync(args));
+          } catch {
+            // Not an erasure: the pass re-issues an unwarmed read synchronously and handles its failure.
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.max(1, concurrency) }, lane));
+      warmed = answers;
+      return answers.size;
+    },
+    fetcher(inner) {
+      return (args, onRateLimit) => {
+        if (onRateLimit) return inner(args, onRateLimit);
+        const key = JSON.stringify(args);
+        recorded.set(key, args);
+        if (warmed.has(key)) {
+          const answer = warmed.get(key);
+          warmed.delete(key);
+          return answer;
+        }
+        return inner(args);
+      };
+    },
+  };
 }
 
 /* ────────────────────────────────────────────────────────────────────────────────────────────

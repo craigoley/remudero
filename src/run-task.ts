@@ -510,6 +510,7 @@ import {
   type GhApiFetcher,
   type GhCallPacer,
   createPlanFilingFileCache,
+  createGhReadWarmer,
   PLAN_FILING_FILE_CACHE_MAX_ENTRIES,
   type PlanFilingFileCache,
   type PlanFilingFileObservation,
@@ -40358,6 +40359,7 @@ export function buildSweepHook(
   if (!github && snapshotCache) boardGithub.seedBoardSnapshot?.(snapshotCache);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
+  const openPrReads = createGhReadWarmer(ghJsonAsync);
   // W1-T4476 design (i): loaded ONCE, at daemon-start construction time — the same lifetime as
   // `boardGithub` above — from THIS repository's own file, so a restart with an unchanged branch
   // set and an unexpired interval reads "unchanged" instead of every boot re-judging every remote
@@ -40388,7 +40390,9 @@ export function buildSweepHook(
     // W1-T4002: this pass's own plan-only filing receipts feed dispatch options; no stale re-read.
     let thisPassPlanOnlyRunBranchReceipts: ReturnType<typeof planOnlyRunBranchReceipts> = [];
     try {
+      await openPrReads.warm();
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
+        fetch: openPrReads.fetcher(ghJson),
         pacer,
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
@@ -40729,12 +40733,15 @@ export function buildSweepLightHook(
     : readMainPlan;
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
+  const openPrReads = createGhReadWarmer(ghJsonAsync);
   return async (scope) => {
     // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
     // so `post-review` is the only lane left — the same restriction a working in-flight run imposes.
     const reviewOnly = scope?.reviewOnly === true;
     try {
+      await openPrReads.warm();
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
+        fetch: openPrReads.fetcher(ghJson),
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
         isMerged,
