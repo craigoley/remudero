@@ -15,6 +15,7 @@ import { DELEGATION_PROFILE_LEDGER_STEP } from "../src/lib/delegation-profile.js
 import { OPERATOR_AGENT_EXPERIMENT_STEP, settleOperatorAgentUnionLoads } from "../src/lib/operator-agent.js";
 import { builtProfile, READ_TOKEN, withDelegationService } from "./helpers/delegation-profile-fixture.js";
 import { writeLedger, type LedgerRotationFixture } from "./helpers/ledger-fixture.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const ARCHIVES = 80;
@@ -122,7 +123,7 @@ test("each operator-agent scan route answers a cold large corpus without holding
     await withDelegationService(join(dir, "ledger.ndjson"), async (base) => {
       const cold = await longestLoopStall(() => read(base, route.path));
       assert.deepEqual(route.answered(cold.value), route.expected, `${route.path} answers every archived row`);
-      assert.ok(cold.stallMs < LOOP_STALL_BUDGET_MS, `a cold ${route.path} read held the loop ${Math.round(cold.stallMs)} ms`);
+      assertWallClockBound(cold.stallMs, LOOP_STALL_BUDGET_MS, `a cold ${route.path} read held the loop ${Math.round(cold.stallMs)} ms`);
     });
   }
   await settleOperatorAgentUnionLoads();
@@ -135,8 +136,8 @@ test("after a rotation lands the emergency status answers within budget and sees
     writeLedger([], { dir: ledger.dir, rotations: [archive(ARCHIVES, [stopRow("stop-rotated")])] });
     const warm = await longestLoopStall(() => read(base, "/v1/operator-agent/emergency/status"));
     assert.deepEqual((warm.value.active as Array<{ id: string }>).map((s) => s.id), ["stop-rotated"], "the new rotation's stop is active");
-    assert.ok(warm.elapsedMs < WARM_ANSWER_BUDGET_MS, `the read after a rotation took ${Math.round(warm.elapsedMs)} ms`);
-    assert.ok(warm.stallMs < LOOP_STALL_BUDGET_MS, `the read after a rotation held the loop ${Math.round(warm.stallMs)} ms`);
+    assertWallClockBound(warm.elapsedMs, WARM_ANSWER_BUDGET_MS, `the read after a rotation took ${Math.round(warm.elapsedMs)} ms`);
+    assertWallClockBound(warm.stallMs, LOOP_STALL_BUDGET_MS, `the read after a rotation held the loop ${Math.round(warm.stallMs)} ms`);
   });
   await settleOperatorAgentUnionLoads();
 });
