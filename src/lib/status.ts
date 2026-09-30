@@ -907,7 +907,8 @@ export function readLedgerUnionBounded(
       order: "newest-first",
       rotationWindowMs: opts.windowMs ?? STATUS_BOARD_WINDOW_MS,
       minRotations: STATUS_BOARD_MIN_ROTATIONS,
-      dedupe: false,
+      // W1-T4820: every rotation that carries the retained core, and every row the live file shares with its
+      // archives, is one event read two or more times (1,042,796 rows, 676,741 distinct, 2026-09-29).
       readLiveRecords: () => live,
       satisfied: opts.satisfied,
       rotationRecords: opts.rotationRecords,

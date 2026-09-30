@@ -9,7 +9,7 @@
  * crash at any point resumes to exactly what a clean rebuild produces.
  */
 import { createHash } from "node:crypto";
-import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { systemClock, type Clock } from "./clock.js";
@@ -69,6 +69,8 @@ export interface LedgerProjectorOptions {
   chunkBytes?: number;
   /** Runs inside each transaction after its rows and before its checkpoint (the crash tests' seam). */
   beforeCheckpoint?: (source: string) => void;
+  /** Runs after an archive descriptor is opened and identified, before its contents are read. */
+  beforeArchiveRead?: (path: string) => void;
 }
 
 export interface ProjectorTickResult {
@@ -187,18 +189,23 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     let text: string;
     let ino: string;
     let size: number;
+    let fd: number | undefined;
     try {
-      const st = statSync(entry.path, { bigint: true });
+      fd = openSync(entry.path, "r");
+      const st = fstatSync(fd, { bigint: true });
       ino = String(st.ino);
       size = Number(st.size);
       const prev = known.get(name);
       if (prev && prev.ino === ino && prev.size === size) return true; // a rotation is immutable once named
-      const raw = readFileSync(entry.path);
+      opts.beforeArchiveRead?.(entry.path);
+      const raw = readFileSync(fd);
       text = (entry.form === "gzip" ? gunzipSync(raw) : raw).toString("utf8");
     } catch (error) {
       // Named in `unread` and retried next tick: a vanished or half-readable archive never wedges the tail.
       c.unread.push(`${name}: ${(error as Error).message}`);
       return false;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
     }
     commit(name, c, () => applyText(text.endsWith("\n") ? text : `${text}\n`, now, c), { ino, size, off: size, fp: null });
     c.archivesRead++;
@@ -229,7 +236,7 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       throw error;
     }
     try {
-      const st = statSync(path, { bigint: true });
+      const st = fstatSync(fd, { bigint: true });
       const ino = String(st.ino);
       const size = Number(st.size);
       const prev = known.get(LEDGER_FILENAME);
