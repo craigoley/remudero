@@ -1593,7 +1593,7 @@ export function describeDraftParseFailure(text: string): DraftParseFailure {
 export function parseDraftedCandidate(text: string): ParsedDraft | null {
   const stamps = [...text.matchAll(STAMP_RE)];
   // W1-T4864: a STRUCTURED fragment wins over a YAML one — its YAML is the harness's, so it cannot fail to parse.
-  const structured = [...text.matchAll(FRAGMENT_JSON_RE)];
+  const structured = [...text.matchAll(new RegExp(FRAGMENT_JSON_RE, "g"))];
   if (structured.length > 0 && stamps.length > 0) {
     return {
       fragmentYaml: fragmentJsonToYaml(structured[structured.length - 1][1]),
@@ -1614,7 +1614,8 @@ export function parseDraftedCandidate(text: string): ParsedDraft | null {
 // judgement failure. Asked for data instead, the model cannot mis-quote a `proof:` or mis-indent a list, and the
 // harness owns the one serializer, so a schema-valid draft is parseable by construction.
 
-const FRAGMENT_JSON_RE = /=== FRAGMENT JSON START ===\r?\n([\s\S]*?)\r?\n=== FRAGMENT JSON END ===/g;
+/** The structured-fragment block. Not global, so `.test` is stateless; the parser matches with a global copy. */
+export const FRAGMENT_JSON_RE = /=== FRAGMENT JSON START ===\r?\n([\s\S]*?)\r?\n=== FRAGMENT JSON END ===/;
 
 /** The JSON schema the draft's structured form is requested against (and {@link validateDraftFragmentData} enforces). */
 export const INBOX_DRAFT_FRAGMENT_SCHEMA = {

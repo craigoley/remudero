@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import {
+  FRAGMENT_JSON_RE,
   inboxDraftExampleFragmentYaml,
   lintDraftedFragment,
   parseDraftedCandidate,
@@ -141,4 +142,11 @@ test("W1-T4864: a schema-valid draft always renders to parseable YAML", () => {
   assert.ok(bad && lintDraftedFragment(bad.fragmentYaml, "P9", bad.stampLine).length > 0);
   const broken = parseDraftedCandidate(`=== FRAGMENT JSON START ===\n[{"id": \n=== FRAGMENT JSON END ===\nSTAMP: ${STAMP}`);
   assert.ok(broken && lintDraftedFragment(broken.fragmentYaml, "P9", broken.stampLine).some((v) => v.check === "draft-parse"));
+});
+
+test("W1-T4864: the structured-fragment marker matches a complete block and refuses an unterminated or YAML-marked one", () => {
+  assert.equal(FRAGMENT_JSON_RE.test("=== FRAGMENT JSON START ===\n[]\n=== FRAGMENT JSON END ==="), true);
+  assert.equal(FRAGMENT_JSON_RE.test("=== FRAGMENT JSON START ===\n[]"), false, "no end marker: not a block");
+  assert.equal(FRAGMENT_JSON_RE.test("=== FRAGMENT START ===\n- id: NEW-1\n=== FRAGMENT END ==="), false, "the YAML markers are not the JSON ones");
+  assert.equal(parseDraftedCandidate("=== FRAGMENT JSON START ===\n[]\nSTAMP: x"), null, "an unterminated block yields no candidate");
 });
