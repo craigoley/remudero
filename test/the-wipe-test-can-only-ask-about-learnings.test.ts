@@ -625,9 +625,19 @@ test("wipeTestCommand: --factor recon on a non-sandbox --repo without --allow-no
   assert.equal(dispatched, 0, "and before either arm ever dispatches");
 });
 
-test("main(): `rmd wipe-test <id> --factor recon --repo remudero` (no --allow-non-sandbox) dispatches to wipeTestCommand and exits 2", async () => {
+test("W1-T4944: wipe-test main dispatch uses a fixture ledger; main(): `rmd wipe-test <id> --factor recon --repo remudero` (no --allow-non-sandbox) dispatches to wipeTestCommand and exits 2", async (t) => {
   const savedArgv = process.argv;
   const savedExit = process.exit;
+  const savedHome = process.env.HOME;
+  const fixtureParent = join(tmpdir(), `cli-wipe-home-${process.pid}`);
+  mkdirSync(fixtureParent, { recursive: true });
+  t.after(() => rmSync(fixtureParent, { recursive: true, force: true }));
+  const home = mkdtempSync(join(fixtureParent, "home-"));
+  const root = join(home, "fixture-root");
+  const configDir = join(home, ".config", "remudero");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, "config.json"), JSON.stringify({ root, claudeBin: "/bin/true" }));
+  process.env.HOME = home;
   // W1-T2813: control the self-sync freshness guard for THIS window. `main()` reaches
   // `checkCliFreshness`, which refuses and exits 1 when the checkout is behind origin/main on a
   // branch that is not `main` -- so without this the assertion below measures how stale the
@@ -649,9 +659,12 @@ test("main(): `rmd wipe-test <id> --factor recon --repo remudero` (no --allow-no
     await main().catch((e) => {
       if (!(e instanceof Error) || e.message !== "__exit__") throw e;
     });
+    assert.match(readFileSync(join(root, "state", "ledger.ndjson"), "utf8"), /"step":"cli.invoked"/);
   } finally {
     process.argv = savedArgv;
     process.exit = savedExit;
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
     // Restore EXACTLY: delete when the key was absent, so a sibling test never observes a value
     // this one invented. Writing "" back would leave a defined-but-falsy key behind.
     if (savedGuard === undefined) delete process.env[SELF_SYNC_GUARD_ENV];

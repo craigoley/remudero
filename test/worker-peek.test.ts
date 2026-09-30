@@ -14,7 +14,7 @@
 // (6. "rmd peek" appears in docs/operator-guide.md's command table — grep proof, not here.)
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -407,7 +407,7 @@ class PeekProcessExitCalled extends Error {
   }
 }
 
-test("main(): `rmd peek` with no <runId> dispatches to peekCommand and exits 2 (fail loud, no config/fs work)", async (t) => {
+test("W1-T4944: peek main dispatch uses a fixture ledger; main(): `rmd peek` with no <runId> dispatches to peekCommand and exits 2 (fail loud, no command-specific filesystem work)", async (t) => {
   const exitMock = ((code?: number): never => {
     throw new PeekProcessExitCalled(code);
   }) as typeof process.exit;
@@ -416,6 +416,16 @@ test("main(): `rmd peek` with no <runId> dispatches to peekCommand and exits 2 (
   t.mock.method(console, "log", () => {});
 
   const originalArgv = process.argv;
+  const originalHome = process.env.HOME;
+  const fixtureParent = join(tmpdir(), `cli-peek-home-${process.pid}`);
+  mkdirSync(fixtureParent, { recursive: true });
+  t.after(() => rmSync(fixtureParent, { recursive: true, force: true }));
+  const home = mkdtempSync(join(fixtureParent, "home-"));
+  const root = join(home, "fixture-root");
+  const configDir = join(home, ".config", "remudero");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, "config.json"), JSON.stringify({ root, claudeBin: "/bin/true" }));
+  process.env.HOME = home;
   process.argv = ["node", "run-task.js", "peek"];
   const originalGuardEnv = process.env[SELF_SYNC_GUARD_ENV];
   process.env[SELF_SYNC_GUARD_ENV] = "1";
@@ -427,8 +437,11 @@ test("main(): `rmd peek` with no <runId> dispatches to peekCommand and exits 2 (
     assert.ok(caught instanceof PeekProcessExitCalled, "main() must reach process.exit via peekCommand's return value");
     assert.equal((caught as PeekProcessExitCalled).code, 2);
     assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /<runId> is required/);
+    assert.match(readFileSync(join(root, "state", "ledger.ndjson"), "utf8"), /"step":"cli.invoked"/);
   } finally {
     process.argv = originalArgv;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
     if (originalGuardEnv === undefined) {
       delete process.env[SELF_SYNC_GUARD_ENV];
     } else {
