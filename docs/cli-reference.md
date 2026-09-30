@@ -19,7 +19,7 @@ usage:
   rmd review <pr-number> [--repo <name>] [--override-capped-by <name> --override-capped-reason <text>]   # Post remudero-review on a hand-opened PR, materializing a worktree at its head.
   rmd merge-hold <engage|release> [--pr <n> [--task <id>]] --by <name> --reason <text> --confirm   # Engage or release an attributable, durable PR or fleet auto-merge hold.
   rmd feedback-reconcile --root <name>=<path> [--root <name>=<path> ...] [--checkout <path>] [--apply]   # Report (or repair) feedback records an enrolled root holds that origin/main lacks.
-  rmd dep-review <pr-number> [--repo <name>]   # Deterministic Dependabot-PR review lane: auto-arm minor/patch, escalate major.
+  rmd dep-review <pr-number> [--repo <name>]   # Deterministic Dependabot-PR review lane: auto-arm minor/patch or verified action SHA pin refresh.
   rmd lint-plan [--plan <path>] [--base <git-ref>] [--merge-base]   # Deterministic task linter: sizing, headless-fitness, proof-shape, provenance.
   rmd plan-reconcile [--plan <path>] [--write]   # Flip status: queued to merged on shards the credit projection reports merged.
   rmd proof-queue-audit [--plan <path>]   # Report every open task's acceptance proof that can never resolve, split by cause.
@@ -165,13 +165,13 @@ cross-root feedback reconciliation manifest and repair (W1-T3562): dry-run by de
 
 ### `rmd dep-review`
 
-Deterministic Dependabot-PR review lane: auto-arm minor/patch, escalate major.
+Deterministic Dependabot-PR review lane: auto-arm minor/patch or verified action SHA pin refresh.
 
 ```
 rmd dep-review <pr-number> [--repo <name>]
 ```
 
-deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse
+deterministic Dependabot-PR review lane (W1-T54): minor/patch or diff-verified GitHub Actions SHA-only refresh with unchanged release comments and green gates -> arm auto-merge; major or other unparseable bump -> escalate (needs-human, no auto-merge); source outside dependency files -> refuse
 
 ### `rmd lint-plan`
 

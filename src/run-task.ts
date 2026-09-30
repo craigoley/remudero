@@ -1308,6 +1308,7 @@ import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefect
 // receipt.js / ledger-replay.js: only receiptCommand/replayCommand read these, and both moved to
 // src/lib/report-commands.ts (W1-T2888), which imports them directly.
 import {
+  DEP_REVIEW_ENGINE_REVISION,
   DEPENDABOT_IGNORE_MAJOR_COMMAND,
   buildDepReviewArmUnreachableEscalation,
   buildDepReviewEscalation,
@@ -6151,7 +6152,7 @@ async function waitForCiGreen(
       }
     }
     if (i === 0 || i % 5 === 0) log("ci.polling", { ci: String(ci?.conclusion ?? ci?.status ?? "pending") });
-    if (stall.stalled) {
+    if (stall.stalled && !rollupHasRunningCheck(roll)) {
       log("ci.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW, sha });
       return { state: "timeout", sha, ...boundedCiGateChecks(stall.pending) };
     }
@@ -19377,7 +19378,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     statusCheckRollup?: RollupEntry[];
   };
   const diff = (deps.prDiff ?? ((u: string) => ghExec(["pr", "diff", u], { encoding: "utf8", maxBuffer: 1 << 26 })))(view.url);
-  const inputDigest = reviewInputDigest(view.headRefOid, view.body ?? "");
+  const inputDigest = reviewInputDigest(view.headRefOid, view.body ?? "", DEP_REVIEW_ENGINE_REVISION);
 
   const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
@@ -19508,14 +19509,14 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       repo,
       sha: view.headRefOid,
       state: "success",
-      description: `remudero-review: PASS — ${result.semverLevel} dependency bump, confined + gates green`,
+      description: `remudero-review: PASS — ${result.pinOnly ? "pin-only action SHA refresh" : `${result.semverLevel} dependency bump`}, confined + gates green`,
       taskId,
       evidence: "no_evidence",
       ledgerPath,
       runId,
       prUrl: view.url,
       reviewInputDigest: inputDigest,
-      reviewEngineRevision: REVIEW_ENGINE_REVISION,
+      reviewEngineRevision: DEP_REVIEW_ENGINE_REVISION,
       fetchLifecycle: () => fetchPrLifecycle(view.url),
     });
     if (!posted.posted) {
@@ -19533,7 +19534,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       head_sha: view.headRefOid,
       pr_url: view.url,
       review_input_digest: inputDigest,
-      review_engine_revision: REVIEW_ENGINE_REVISION,
+      review_engine_revision: DEP_REVIEW_ENGINE_REVISION,
       dep_review: true,
       proof_exec: [], // W1-T228: never executes a proof — explicit so lastPostedReviewStatusFromLedger reads "no_evidence"
     });
@@ -19595,7 +19596,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     runId,
     prUrl: view.url,
     reviewInputDigest: inputDigest,
-    reviewEngineRevision: REVIEW_ENGINE_REVISION,
+    reviewEngineRevision: DEP_REVIEW_ENGINE_REVISION,
     fetchLifecycle: () => fetchPrLifecycle(view.url),
   });
   if (postedFailure.posted) {
@@ -19608,7 +19609,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       head_sha: view.headRefOid,
       pr_url: view.url,
       review_input_digest: inputDigest,
-      review_engine_revision: REVIEW_ENGINE_REVISION,
+      review_engine_revision: DEP_REVIEW_ENGINE_REVISION,
       dep_review: true,
       proof_exec: [],
     });
@@ -47383,8 +47384,8 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "dep-review",
     syntax: "rmd dep-review <pr-number> [--repo <name>]",
-    summary: "Deterministic Dependabot-PR review lane: auto-arm minor/patch, escalate major.",
-    detail: "deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse",
+    summary: "Deterministic Dependabot-PR review lane: auto-arm minor/patch or verified action SHA pin refresh.",
+    detail: "deterministic Dependabot-PR review lane (W1-T54): minor/patch or diff-verified GitHub Actions SHA-only refresh with unchanged release comments and green gates -> arm auto-merge; major or other unparseable bump -> escalate (needs-human, no auto-merge); source outside dependency files -> refuse",
   },
   {
     name: "lint-plan",

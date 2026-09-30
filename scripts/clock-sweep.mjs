@@ -31,7 +31,8 @@
  * real money, ghost branches and PRs. A shifted clock does not make a paid spawn cheaper.
  */
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isMainModule } from "./lib/argv.mjs";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
@@ -200,15 +201,18 @@ export function classifySweep(
 // without spawning node once. That is not just for speed: every suite this script runs is a REAL
 // test file, so an un-injectable runner would make covering main() cost a full sweep.
 export function runSuite(suite, days, exec = execFileSync) {
+  const isolatedTmp = mkdtempSync(join(tmpdir(), "rmd-clock-sweep-"));
   try {
     exec(
       process.execPath,
       ["--test", "--import", "tsx", "--import", join(REPO, "scripts", "clock-shift.mjs"), join("test", `${suite}.test.ts`)],
-      { cwd: REPO, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, FK_SHIFT_DAYS: String(days) } },
+      { cwd: REPO, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, TMPDIR: isolatedTmp, FK_SHIFT_DAYS: String(days) } },
     );
     return { failed: false, output: "" };
   } catch (e) {
     return { failed: true, output: String(e.stdout ?? "") + String(e.stderr ?? "") };
+  } finally {
+    rmSync(isolatedTmp, { recursive: true, force: true });
   }
 }
 
