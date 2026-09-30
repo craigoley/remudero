@@ -11,7 +11,7 @@
   files: [test/clock-signature-census.test.ts, scripts/clock-signature-baseline.json]
   origin: "operator-session#W1-T3095-coverage-2026-09-11"
   plan_refs: ["W1-T2897", "W1-T1128", "W1-T171"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     MEASURED 2026-09-11 on origin/main (dad5531b6) by re-running the census's own three regexes

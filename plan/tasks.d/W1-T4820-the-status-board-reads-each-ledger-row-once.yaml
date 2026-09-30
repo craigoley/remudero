@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-followups-1790712493000 -> plan-followups-1790712493000"
   plan_refs: [W1-T2898]
   files: [src/lib/status.ts, src/lib/ledger-union.ts, src/lib/ledger.ts, scripts/expiring-fixture-census.mjs, test/the-status-board-reads-each-ledger-row-once.test.ts, test/expiring-fixture-census.test.ts, test/codex-reviewer-production-wiring.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-29 on the fleet corpus: readLedgerUnionBounded (dedupe: false since W1-T2898, #4552) returned

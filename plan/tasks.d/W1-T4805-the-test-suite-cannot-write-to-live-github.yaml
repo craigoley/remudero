@@ -17,7 +17,7 @@
     - src/lib/live-write-guard.ts
     - src/lib/github-transport.ts
     - test/live-write-guard.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-29: the test "daemonCommand: builds the real daemon deps … present STOP"

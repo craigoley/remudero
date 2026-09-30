@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-flow-improve-1790732974000 -> plan-flow-improve-1790732974000"
   plan_refs: [W1-T4025]
   files: [src/lib/idle-lane-accounting.ts, src/lib/daemon.ts, test/an-idle-lane-minute-names-its-cause.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 (fleet ledger union, deduplicated, 24 h to 01:40Z): 47 task runs started; mean build concurrency

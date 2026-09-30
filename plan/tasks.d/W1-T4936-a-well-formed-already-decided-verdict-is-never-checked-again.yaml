@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-30: research whether the triage lane's ALREADY_DECIDED citation is ever checked against reality (W1-T3547's rationale asserts it is not)"
   plan_refs: [W1-T3547, W1-T2212, W1-T963]
   files: [src/lib/triage.ts, src/run-task.ts, test/triage-already-decided-citation-resolves.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 at origin/main 76c9b670d (read-only; nothing was run against a live lane).

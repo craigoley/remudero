@@ -92,7 +92,7 @@
   origin: human
   plan_refs: [W1-T3732, W1-T3240, W1-T3596, W1-T3245]
   files: [src/lib/deployer.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t3733-every-supervisor-reads-cores-image
