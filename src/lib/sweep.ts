@@ -12595,6 +12595,9 @@ export interface CreditCandidate {
    *  it"), never from a second list. Why: #4461, a validated build, was closed against #3195, a
    *  `chore(plan)` touching one shard. */
   creditIsImplementation?: boolean;
+  /** W1-T4942 — did the crediting merge's changed PATHS touch something other than bookkeeping? Read by
+   *  the plan-reconcile WRITE only; undefined when no path list was read, and unknown never credits. */
+  creditHasBuildDiff?: boolean;
 }
 
 /** One task's credit-backfill outcome this pass. */
