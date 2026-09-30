@@ -28,12 +28,15 @@ function scripted(pollsBeforeGate: number) {
     },
     sleep: async () => {},
     requiredContexts: () => ["remudero-review", "ci-gate"],
+    pollCount: () => polls,
   };
 }
 
 test("a CI matrix still running before the required gate registers is waited on, not timed out", async () => {
-  const outcome = await waitForCiGreen(PR_URL, () => {}, 0, scripted(7) as never);
+  const deps = scripted(7);
+  const outcome = await waitForCiGreen(PR_URL, () => {}, 0, deps as never);
   assert.equal(ciGateState(outcome), "green");
+  assert.ok(deps.pollCount() >= 8, "the wait must survive all seven in-progress matrix polls before green registers");
 });
 
 test("a quiescent rollup with the required gate never registering still stalls", async () => {
