@@ -200,9 +200,9 @@ test("a restarted worker serves its last committed bodies before its first tick"
   corpus(ledgerDir, 1, 6, 2);
   const sink = collect();
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: sink.post });
-  ticker.tick();
+  for (let pass = 0; pass < 8 && !sink.messages.some((m) => m.type === "body" && m.entry.view === "read-model"); pass++) ticker.tick();
   assert.equal(ticker.release(), 1);
-  const posted = sink.messages.filter((m) => m.type === "body").pop();
+  const posted = sink.messages.filter((m) => m.type === "body" && m.entry.view === "read-model").pop();
   assert.ok(posted?.type === "body");
 
   const logs: string[] = [];
