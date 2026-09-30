@@ -858,7 +858,13 @@ import {
   runAutomatedRetroSubprocess,
 } from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
-import { filedTaskIdFromRunBranch, openPullRequestChecked, type OpenPullRequestProofRunner } from "./lib/pr-open.js";
+import {
+  filedTaskIdFromRunBranch,
+  openPullRequestChecked,
+  PrOpenRefusedError,
+  recordRefusedPrOpen,
+  type OpenPullRequestProofRunner,
+} from "./lib/pr-open.js";
 import {
   buildPlanPrBody,
   bodyNeedsAcceptanceRepair,
@@ -13605,6 +13611,8 @@ interface RunTaskBodyOptions {
   maskRules?: boolean;
   noMerge?: boolean;
   readHeadShaForProvenance?: (prUrl: string) => string;
+  /** Where a stale-proof PR-open refusal escalates; production files the task repo's own issue. */
+  prOpenRefusalIssues?: IssueGateway;
   spawnWallClockBoundMs?: number;
   workerRuleHeadlinesEnabled?: boolean;
   worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
@@ -14899,6 +14907,22 @@ export function endThrownRun(
     cause: runErrorCause(err),
     cost_usd: costUsd,
   }));
+}
+
+/** Best-effort worktree reclaim for a run that is ending: a failed remove is ledgered, never thrown over the verdict. */
+export function reclaimRunWorktree(
+  repoDir: string,
+  worktreePath: string,
+  on: string,
+  log: RunTaskContext["log"],
+  remove: (repoDir: string, worktreePath: string) => void = worktreeRemove,
+): void {
+  try {
+    remove(repoDir, worktreePath);
+    log("worktree.remove", { on });
+  } catch (e) {
+    log("worktree.remove.error", { on, error: String((e as Error)?.message ?? e) });
+  }
 }
 
 /** W1-T4708: a pre-worktree refusal that RETURNS gets the same one terminal row, carrying the verdict it returns. */
@@ -16852,7 +16876,33 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       gitPushRunBranch(worktreePath, { force: true });
     }
     if (!prUrl) {
-      const prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
+      let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
+      try {
+        prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
+      } catch (err) {
+        if (!(err instanceof PrOpenRefusedError)) throw err;
+        // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
+        const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+        const issues = opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo);
+        const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha }, log, { issues, ledgerPath, runId });
+        reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log);
+        log("verdict", {
+          verdict: "failed",
+          reason: boundedVerdictReason(err.message),
+          stage: "pr_open.refused",
+          cause: "base-proof-refused" satisfies RunErrorCause,
+          branch,
+          head_sha: headSha,
+          refusal_class: err.refusalClass,
+          ...(issueUrl ? { issue_url: issueUrl } : {}),
+          cost_usd: costUsd,
+          billing_mode: billingMode(impl.childEnvKeys),
+          account_label: impl.accountLabel,
+          ...terminalVerdictFields(impl),
+        });
+        say(`verdict: failed — PR open refused (${err.refusalClass}); branch ${branch} kept on origin at ${headSha}`);
+        return { taskId, runId, merged: false, costUsd, verdict: "failed" };
+      }
       prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
       // A worker may have opened this exact PR without reporting its URL. The generic-422
       // adoption above discovers it only here, after the earlier direct-PR normalization point.
