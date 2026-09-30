@@ -19517,7 +19517,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       prUrl: view.url,
       reviewInputDigest: inputDigest,
       reviewEngineRevision: DEP_REVIEW_ENGINE_REVISION,
-      fetchLifecycle: () => fetchPrLifecycle(view.url),
+      fetchLifecycle: () => fetchPrLifecycle(view.url, deps.gh ?? ghJson, DEP_REVIEW_ENGINE_REVISION),
     });
     if (!posted.posted) {
       console.log(`no remudero-review posted (refused: ${posted.reason}): ${view.url}`);
@@ -19597,7 +19597,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     prUrl: view.url,
     reviewInputDigest: inputDigest,
     reviewEngineRevision: DEP_REVIEW_ENGINE_REVISION,
-    fetchLifecycle: () => fetchPrLifecycle(view.url),
+    fetchLifecycle: () => fetchPrLifecycle(view.url, deps.gh ?? ghJson, DEP_REVIEW_ENGINE_REVISION),
   });
   if (postedFailure.posted) {
     // W1-T228: ledger this verdict too (the pre-existing code never did) — a
