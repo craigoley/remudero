@@ -67,18 +67,25 @@ test("a synchronous changed-paths reader decides at the same edge", () => {
   const skip = staleGate({ changedPaths: ["doctrine/a.md"] });
   void skip.gate.recheck();
   assert.deepEqual(skip.exits, []);
-  const restart = staleGate({ changedPaths: ["hooks/pre-commit"] });
+  const restart = staleGate({ changedPaths: ["settings/worker.json"] });
   void restart.gate.recheck();
   assert.deepEqual(restart.exits, [0]);
 });
 
 test("serve-only trees and the daemon's list are both relevant while docs are not", () => {
-  for (const path of ["src/x.ts", "bin/rmd", "package.json", "package-lock.json", "tsconfig.json", "hooks/a", "settings/b.json", "deploy/entrypoint.sh", ".remudero/managed-repos.json", "plan/policy.yaml"]) {
+  for (const path of ["src/x.ts", "bin/rmd", "package.json", "package-lock.json", "tsconfig.json", "settings/b.json", ".remudero/managed-repos.json", ".remudero/mounts.yaml", "plan/policy.yaml"]) {
     assert.equal(serveRestartRelevant(["docs/a.md", path]), true, path);
   }
   assert.equal(serveRestartRelevant(["docs/a.md", "test/b.test.ts", "learnings/c.yaml", "doctrine/d.md"]), false);
   assert.equal(serveRestartRelevant(undefined), true, "unreadable is relevant");
   assert.equal(serveRestartRelevant([]), true, "empty is relevant");
+});
+
+test("a hooks or deploy merge does not restart serve because serve loads neither tree", () => {
+  for (const path of ["hooks/pre-commit", "hooks/deny-floor.sh", "deploy/entrypoint.sh", "deploy/serve-container.sh", "deploy/Dockerfile"]) {
+    assert.equal(serveRestartRelevant(["test/a.test.ts", "docs/b.md", path]), false, path);
+  }
+  assert.equal(serveRestartRelevant(["hooks/pre-push", "src/lib/serve.ts"]), true, "a src path beside them still restarts");
 });
 
 test("changedPathsSince reads a real diff and reports an unreadable one", async () => {

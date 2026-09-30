@@ -107,6 +107,39 @@ function compact(row: Row): Row {
   return out;
 }
 
+type ProjectionDb = { prepare(sql: string): { run(...params: Array<string | number | bigint | null>): unknown } };
+
+const repoRowStatements = new WeakMap<object, { row: { run(...params: Array<string | number | bigint | null>): unknown }; beat: { run(...params: Array<string | number | bigint | null>): unknown } }>();
+
+/**
+ * The same rows as a read-model projection (Phase 1 P1-08): `repo_row` holds each kept row compacted as
+ * {@link createRepoLedgerIndex} keeps it, and `instance_heartbeat` the newest `daemon.*` stamp. The ledger
+ * projector applies it to each fresh line inside the transaction that checkpoints the line, so a row lands once.
+ */
+export const REPO_ROW_PROJECTION = {
+  name: "repo_row",
+  version: 1,
+  tables: ["repo_row", "instance_heartbeat"],
+  ddl: `CREATE TABLE IF NOT EXISTS repo_row(ts_ms INTEGER NOT NULL, h INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(ts_ms, h)) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS instance_heartbeat(k TEXT PRIMARY KEY, last_ms INTEGER NOT NULL) WITHOUT ROWID;`,
+  markers: [...KEPT_STEP_MARKERS, DAEMON_MARKER],
+  apply(db: ProjectionDb, line: string, id: { h: bigint }, parse: () => Row | undefined): void {
+    const row = parse();
+    const tsMs = Date.parse(typeof row?.ts === "string" ? row.ts : "");
+    if (row === undefined || !Number.isFinite(tsMs)) return;
+    let sql = repoRowStatements.get(db);
+    if (!sql) {
+      sql = {
+        row: db.prepare("INSERT OR IGNORE INTO repo_row(ts_ms, h, body) VALUES(?, ?, ?)"),
+        beat: db.prepare("INSERT INTO instance_heartbeat(k, last_ms) VALUES('daemon', ?) ON CONFLICT(k) DO UPDATE SET last_ms = max(last_ms, excluded.last_ms)"),
+      };
+      repoRowStatements.set(db, sql);
+    }
+    if (typeof row.step === "string" && row.step.startsWith("daemon.")) sql.beat.run(tsMs);
+    else if (KEPT_STEP_MARKERS.some((marker) => line.includes(marker))) sql.row.run(tsMs, id.h, JSON.stringify(compact(row)));
+  },
+};
+
 export interface RepoLedgerIndex {
   refresh(ledgerPath: string, nowMs: number): RepoLedgerIndexPass;
 }
