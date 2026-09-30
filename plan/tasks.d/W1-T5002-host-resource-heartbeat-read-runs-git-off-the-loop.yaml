@@ -1,0 +1,42 @@
+- id: W1-T5002
+  title: "THE HOST-RESOURCE GARDENER BLOCKS THE CORE DAEMON LOOP ON GIT — gitHeartbeatSource runs spawnSync git fetch plus one git show per heartbeat ref inside runHostResourcePass, part of the 5.4% the selector-shadow and host-resource gardeners took of loop busy time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  priority: 3
+  status: queued
+  attempts: 0
+  origin: "oper#core-daemon-loop-profile-2026-09-30"
+  files: [src/lib/host-resource-gardener.ts, test/host-resource-heartbeat-read-runs-git-off-the-loop.test.ts]
+  rationale: |
+    A live CPU profile of remudero-daemon on 2026-09-30 (SIGUSR1 + CDP, 1370 s over two daemon
+    processes, 815 s busy once the profiler's own exit hold is excluded) put stacks under
+    runSelectorShadowGardener and runHostResourcePass at 5.4% of busy time together, in
+    child_process execFileSync/spawnSync. The same profile filed W1-T4969 (config gardener, 11%)
+    and W1-T4970 (async gh cadence sleep, 2.2%); this cause was left unfiled.
+    - gitHeartbeatSource (host-resource-gardener.ts) is the production readHeartbeats port. Each
+      pass runs `git fetch origin +refs/heads/heartbeat-*` with a 60 s timeout, then
+      `git for-each-ref` and one `git show <ref>:heartbeat.txt` per host, all spawnSync, all on the
+      daemon loop. startHostResourceGardener ticks every min(interval, 5 min).
+    - The fetch is a network round trip, so its cost is the network's, not the CPU's: a slow
+      GitHub answer stalls every timer on the loop for its whole duration.
+    - fileConsumer lands a filing through gardenCheckout, which is synchronous git as well, but
+      only on a filing pass.
+    The raw 09-30 profile windows were not kept on the host, so the split between the two
+    gardeners is not recoverable; re-measure after the fix.
+  design: |
+    Make readHeartbeats asynchronous: run the fetch, for-each-ref and each show through an
+    awaited execFile (or one `git cat-file --batch` for all refs), and let runHostResourcePass
+    await it before its pure evaluation. The run-task.ts call site
+    (`readHeartbeats: gitHeartbeatSource(repoRoot)`) keeps its shape. startHostResourceGardener's `running` guard already keeps
+    one pass at a time. Sampling, evaluation, episodes and filing decisions do not change.
+  acceptance:
+    - claim: "a timer keeps firing while the heartbeat read waits on git"
+      proof: 'grep: test("W1-T5002: a timer keeps firing while the heartbeat read waits on git" in test/host-resource-heartbeat-read-runs-git-off-the-loop.test.ts'
+    - claim: "an async heartbeat read yields the same samples as the sync one"
+      proof: 'grep: test("W1-T5002: an async heartbeat read yields the same samples as the sync one" in test/host-resource-heartbeat-read-runs-git-off-the-loop.test.ts'
+  falsifier: |
+    Restore the spawnSync git fetch in gitHeartbeatSource and the timer-probe test counts zero
+    ticks while the (slowed) fetch runs.
