@@ -1657,7 +1657,13 @@ function argsWithCheckoutRunner(whitelisted: WhitelistedProof, args: readonly st
 /** Refresh a reviewer-owned checkout once after measured module-load failure. Worktrees link the
  * canonical install: invoke the package manager at that real root only when its installed hash
  * predates its own lockfile, never through the link (W1-T4933's freshness contract). */
-export function refreshProofToolchain(cwd: string, exec: typeof execFileSync = execFileSync): boolean {
+export function refreshProofToolchain(
+  cwd: string,
+  exec: typeof execFileSync = execFileSync,
+  ops: { rename?: typeof renameSync; remove?: typeof rmSync } = {},
+): boolean {
+  const rename = ops.rename ?? renameSync;
+  const remove = ops.remove ?? rmSync;
   if (!reviewerOwnedCheckouts.has(resolve(cwd))) return false;
   const modules = join(cwd, "node_modules");
   let installRoot = cwd;
@@ -1706,13 +1712,13 @@ export function refreshProofToolchain(cwd: string, exec: typeof execFileSync = e
     const liveModules = join(installRoot, "node_modules");
     const oldModules = join(backup, "node_modules");
     const hadOld = existsSync(liveModules);
-    if (hadOld) renameSync(liveModules, oldModules);
+    if (hadOld) rename(liveModules, oldModules);
     try {
-      renameSync(stagedModules, liveModules);
+      rename(stagedModules, liveModules);
     } catch (error) {
       console.error("review toolchain install swap failed", error);
       if (hadOld) {
-        try { renameSync(oldModules, liveModules); }
+        try { rename(oldModules, liveModules); }
         catch (restoreError) {
           console.error("review toolchain install rollback failed; old tree retained in staging backup", restoreError);
           preserveBackup = true;
@@ -1727,11 +1733,11 @@ export function refreshProofToolchain(cwd: string, exec: typeof execFileSync = e
     return false;
   } finally {
     if (stage) {
-      try { rmSync(stage, { recursive: true, force: true }); }
+      try { remove(stage, { recursive: true, force: true }); }
       catch (error) { console.error("review toolchain staging cleanup failed", error); }
     }
     if (backup && !preserveBackup) {
-      try { rmSync(backup, { recursive: true, force: true }); }
+      try { remove(backup, { recursive: true, force: true }); }
       catch (error) { console.error("review toolchain old-install cleanup failed", error); }
     }
   }

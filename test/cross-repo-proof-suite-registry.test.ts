@@ -277,3 +277,34 @@ test("W1-T3525: execWhitelistedProof routes a Vitest name-filtered proof through
     rmSync(checkout, { recursive: true, force: true });
   }
 });
+
+test("a missing Vitest root is a visible load error", () => {
+  const checkout = vitestCheckout();
+  try {
+    rmSync(join(checkout, "tests"), { recursive: true });
+    const proof = parseWhitelistedProof("unit test: alpha passes", REMUDERO_SITE);
+    assert.ok(proof);
+    assert.throws(
+      () => execWhitelistedProof(proof, checkout, 60_000, () => { throw new Error("must not spawn"); }, NO_BROWSER_PREFLIGHT),
+      /cannot inspect Vitest test root tests\//,
+    );
+  } finally {
+    rmSync(checkout, { recursive: true, force: true });
+  }
+});
+
+test("an unreadable Vitest candidate stays in scope so its loader can report the error", () => {
+  const checkout = vitestCheckout();
+  try {
+    mkdirSync(join(checkout, "tests", "broken.test.ts"));
+    const proof = parseWhitelistedProof("unit test: missing title", REMUDERO_SITE);
+    assert.ok(proof);
+    const spawn: ProofSpawner = (_command, args) => {
+      assert.deepEqual(args.filter((arg) => arg.startsWith("tests/")), ["tests/broken.test.ts"]);
+      return VITEST_TAP_SELECTED_LEAF_PASSES;
+    };
+    assert.equal(execWhitelistedProof(proof, checkout, 60_000, spawn, NO_BROWSER_PREFLIGHT), "pass");
+  } finally {
+    rmSync(checkout, { recursive: true, force: true });
+  }
+});

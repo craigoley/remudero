@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -149,6 +149,83 @@ test("a refresh uses the real canonical root behind a linked install", () => {
   } finally {
     rmSync(linked, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a refresh refuses a dangling shared link and an unreadable canonical marker", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-proof-marker-"));
+  const linked = mkdtempSync(join(tmpdir(), "rmd-proof-marker-link-"));
+  try {
+    registerReviewerCheckout(linked);
+    symlinkSync(join(root, "missing-modules"), join(linked, "node_modules"));
+    assert.equal(refreshProofToolchain(linked, (() => { throw new Error("must not install"); }) as never), false);
+    rmSync(join(linked, "node_modules"));
+    writeFileSync(join(root, "package.json"), "{}\n");
+    writeFileSync(join(root, "package-lock.json"), "{}\n");
+    mkdirSync(join(root, "node_modules", ".rmd-install-hash"), { recursive: true });
+    symlinkSync(join(root, "node_modules"), join(linked, "node_modules"));
+    assert.equal(refreshProofToolchain(linked, (() => { throw new Error("must not install"); }) as never), false);
+  } finally {
+    rmSync(linked, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed staged swap restores the live install, and a failed rollback preserves its backup", () => {
+  for (const rollbackFails of [false, true]) {
+    const root = mkdtempSync(join(tmpdir(), "rmd-proof-swap-"));
+    let backup: string | undefined;
+    try {
+      registerReviewerCheckout(root);
+      writeFileSync(join(root, "package.json"), "{}\n");
+      writeFileSync(join(root, "package-lock.json"), "{}\n");
+      mkdirSync(join(root, "node_modules"));
+      writeFileSync(join(root, "node_modules", "sentinel"), "old");
+      let calls = 0;
+      const renamed = ((from: string, to: string) => {
+        calls++;
+        if (calls === 1) backup = to;
+        if (calls === 2 || (rollbackFails && calls === 3)) throw new Error(`rename ${calls} refused`);
+        renameSync(from, to);
+      }) as typeof renameSync;
+      const installed = ((_command: string, _args: string[], options: { cwd: string }) => {
+        mkdirSync(join(options.cwd, "node_modules"));
+        writeFileSync(join(options.cwd, "node_modules", "sentinel"), "new");
+      }) as never;
+      assert.equal(refreshProofToolchain(root, installed, { rename: renamed }), false);
+      assert.equal(calls, 3);
+      assert.ok(backup);
+      assert.equal(readFileSync(join(rollbackFails ? backup : join(root, "node_modules"), "sentinel"), "utf8"), "old");
+    } finally {
+      if (backup) rmSync(join(backup, ".."), { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("staged refresh records cleanup errors after a successful swap", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-proof-cleanup-"));
+  try {
+    registerReviewerCheckout(root);
+    writeFileSync(join(root, "package.json"), "{}\n");
+    writeFileSync(join(root, "package-lock.json"), "{}\n");
+    mkdirSync(join(root, "node_modules"));
+    writeFileSync(join(root, "node_modules", "sentinel"), "old");
+    let cleanups = 0;
+    const remove = ((path: string, options: { recursive: boolean; force: boolean }) => {
+      rmSync(path, options);
+      cleanups++;
+      throw new Error("cleanup report");
+    }) as typeof rmSync;
+    const installed = ((_command: string, _args: string[], options: { cwd: string }) => {
+      mkdirSync(join(options.cwd, "node_modules"));
+      writeFileSync(join(options.cwd, "node_modules", "sentinel"), "new");
+    }) as never;
+    assert.equal(refreshProofToolchain(root, installed, { remove }), true);
+    assert.equal(cleanups, 2);
+    assert.equal(readFileSync(join(root, "node_modules", "sentinel"), "utf8"), "new");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
