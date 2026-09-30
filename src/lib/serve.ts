@@ -87,6 +87,7 @@ import { buildReadModelViewRoutes, type ViewBodySource } from "./views.js";
 import { navBadgeView, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
 import { NOW_VIEW_NAME } from "./now-view.js";
 import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
+import { withViewShadow } from "./view-shadow.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
@@ -2709,9 +2710,9 @@ function assembleServeRoutes(
       planPath: deps.panelGraph.planPath,
     }),
     buildRecentRoute(deps.board),
-    ...buildReadModelViewRoutes({ readModel: readModel && darkReadModelViews(readModel, ["nav-badge", "repositories", NOW_VIEW_NAME]),
+    ...buildReadModelViewRoutes(withViewShadow(readModel, { readModel: readModel && darkReadModelViews(readModel, ["nav-badge", "repositories", NOW_VIEW_NAME]),
       readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"] },
-      legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes })] }),
+      legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes })] })),
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),
     buildAccountUsageRoute(accountUsageDeps),

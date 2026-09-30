@@ -197,17 +197,17 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
         sources.push(summarySource(instanceId, current!));
         data.instances.push({ instanceId, ...(current!.summary ? { summary: current!.summary } : {}), ...(current!.reason ? { reason: current!.reason } : {}) });
       }
-      Object.assign(data, portfolio(published, data, registryFile));
+      Object.assign(data, repositoriesPortfolio(published, data, registryFile));
       return [{ key: "", data, sources }];
     },
   };
 }
 
 /** The registry core's summary route reads names each instance's project and repository. */
-function portfolio(
+export function repositoriesPortfolio(
   published: RepositoriesSources,
-  data: RepositoriesData,
-  registryFile: (path: string) => ReturnType<typeof readRegistry> | undefined,
+  data: Pick<RepositoriesData, "instances">,
+  registryFile: (path: string) => ReturnType<typeof readRegistry> | undefined = readOnMtimeChange(readRegistry),
 ): Pick<RepositoriesData, "projects" | "projectsReason"> {
   const path = published.instances.find((i) => i.options.repoRegistryPath)?.options.repoRegistryPath;
   const registry = path === undefined ? { reason: "no instance names a registry" } : registryFile(path) ?? { reason: `the instance registry ${path} is unreadable` };

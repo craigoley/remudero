@@ -114,6 +114,8 @@ export interface ReadModelViewRoutesOptions {
   /** Query parameters a read-model view's key cannot omit, by view: a request without one answers 400. */
   requiredParams?: Record<string, readonly string[]>;
   clock?: Clock;
+  /** Told of each request to a view switched `shadow`, once its response has finished (view-shadow.ts). */
+  shadow?: (view: string, key: string, params: URLSearchParams) => void;
 }
 
 /**
@@ -156,6 +158,8 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
         return;
       }
       const mode = opts.readModel?.switches().views[name] ?? "serve";
+      const shadow = opts.shadow;
+      if (mode === "shadow" && shadow) res.once("finish", () => shadow(name, viewKey(params), params));
       const entry = mode === "off" ? undefined : opts.readModel?.body(name, viewKey(params));
       const fallback = legacy.get(name);
       const rendered = entry && opts.readModel ? judged(opts.readModel, entry) : fallback ? renderView(fallback, clock, params) : undefined;

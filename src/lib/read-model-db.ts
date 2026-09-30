@@ -131,6 +131,12 @@ function connect(path: string, readOnly: boolean): DatabaseSync {
   }
 }
 
+/** An in-memory database behind the same surface, for a check that must recompute a projection without touching the store. */
+export function openScratchReadModel(): ReadModelDb {
+  const { DatabaseSync: Database } = require("node:sqlite") as typeof import("node:sqlite");
+  return wrap(new Database(":memory:"), ":memory:", 0, false, undefined);
+}
+
 /** Moves an unusable file (and its WAL and shared-memory siblings) aside, never deleting it. */
 function moveAside(path: string, clock: Clock): string {
   const corruptPath = `${path}.corrupt-${clock.now()}`;
