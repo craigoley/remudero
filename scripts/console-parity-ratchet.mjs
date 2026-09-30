@@ -190,6 +190,7 @@ export const CLI_ONLY = {
     "operator-shell-only: the alert-fix lane's act-vs-escalate policy decision runs against the " +
     "local alert queue `ops` populates; no console route triggers it",
   issues: "operator-shell-only: polls the GitHub issues API and writes into the local feedback inbox; no console route ingests issues",
+  "inbox-bakeoff": "operator-shell-only: replays draft candidates through paid local worker spawns and writes the measurement ledger; no console route launches a spend-bearing bake-off",
   audit: "operator-shell-only: grades a written audit against a checked-in fixture and prints the diff; no console route runs a grading pass",
   away: "sets or shows local operator-presence state used to batch escalations; no console route reads or writes it",
   "repair-ladder":

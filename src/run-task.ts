@@ -43062,7 +43062,12 @@ const INBOX_BAKEOFF_DEFAULT_SAMPLE = 8;
  * verb the operator runs and never a rung the daemon does. It writes `inbox.bakeoff` rows only; the production
  * `inbox.drafted` rows, the draft cache and routing are untouched, so the table cannot move the lead by itself.
  */
-export async function inboxBakeoffCommand(rest: string[]): Promise<number> {
+export async function inboxBakeoffCommand(
+  rest: string[],
+  rawSpawn: typeof spawnWorker = spawnWorker,
+  replay: typeof runInboxBakeoff = runInboxBakeoff,
+  repoClone: (args: string[]) => void = (args) => { ghExec(args, { stdio: "inherit" }); },
+): Promise<number> {
   const badArg = unknownArgError("inbox-bakeoff", rest, ["--sample"], []);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -43098,7 +43103,7 @@ export async function inboxBakeoffCommand(rest: string[]): Promise<number> {
   const repoDir = join(config.root, "repos", repo);
   if (!existsSync(repoDir)) {
     mkdirSync(dirname(repoDir), { recursive: true });
-    ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+    repoClone(["repo", "clone", `${owner}/${repo}`, repoDir]);
   }
   const baseMount = loadMounts(mountsPath(repoRoot)).synthesis.inbox_draft;
   const { branch, worktreePath } = createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
@@ -43116,14 +43121,14 @@ export async function inboxBakeoffCommand(rest: string[]): Promise<number> {
         mount: cash ? baseMount : { ...baseMount, model: "sonnet", provider: "claude" },
         disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
       });
-      return await spawnWorker({
+      return await rawSpawn({
         ...args,
         onSelectionAssignment: undefined,
         ...(cash ? { routingTrial: { id: "inbox-bakeoff", arm: "cash", reason: `bake-off candidate ${candidate.id}`, models: [candidate.model] } } : {}),
         ...(candidate.tools ? {} : { tools: [] }),
       });
     };
-    const rows = await runInboxBakeoff({ proposals, planText, spawnFor, log, runId });
+    const rows = await replay({ proposals, planText, spawnFor, log, runId });
     console.log(`inbox-bakeoff: ${proposals.length} proposals (${proposals.map((p) => p.id).join(", ")}) on branch ${branch}\n`);
     console.log(renderBakeoff(rows));
     return 0;

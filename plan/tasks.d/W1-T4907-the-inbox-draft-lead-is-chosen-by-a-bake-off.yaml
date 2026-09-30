@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-30: build what helps automated flow and self-improvement (inbox lane regression)"
   note: "reservation hand-off: plan-inbox-bakeoff-1790767768000 -> plan-inbox-bakeoff-1790767768000"
   plan_refs: [W1-T3570, W1-T4864]
-  files: [src/lib/inbox-bakeoff.ts, src/run-task.ts, test/the-inbox-draft-lead-is-chosen-by-a-bake-off.test.ts]
+  files: [src/lib/inbox-bakeoff.ts, src/run-task.ts, docs/cli-reference.md, docs/operator-guide.md, scripts/console-parity-ratchet.mjs, scripts/console-parity-baseline.json, test/the-inbox-draft-lead-is-chosen-by-a-bake-off.test.ts, test/help-renders-a-summary-not-a-paragraph.test.ts, test/inbox-bakeoff-command.test.ts, test/inbox-bakeoff-is-preregistered-as-cli-only.test.ts]
   status: queued
   attempts: 0
   rationale: |
