@@ -1955,7 +1955,7 @@ export function taskIdFromRunBranch(head: string | undefined): string | undefine
   // W1-T3042 — THE CAPTURE MUST LOOK LIKE A TASK ID, or this invents one.
   //
   // `(.+)` is greedy and the shape has no second anchor, so any extra hyphenated segment before the
-  // epoch is swallowed whole: `run-W1-T3030-build-1788796682000` yielded `W1-T3030-build`. That is
+  // epoch is swallowed whole: `run-W1-T3030-build-<epochMs>` yielded `W1-T3030-build`. That is
   // not a failure to credit — it is a CREDIT FOR A TASK THAT DOES NOT EXIST, which is worse,
   // because a phantom id enters the merged set while the real task stays uncredited and eligible
   // for re-dispatch.
@@ -2680,8 +2680,8 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     // The removed clause read `&& !ownsOwnRunBranch(head, task.id)`, justified as "a worker's own
     // run-branch PR is an implementation by construction". IT IS NOT: a worker dispatched on a task
     // opens its PR from `run-<id>-<epoch>`, and a lane that decides the right move is an AMENDMENT
-    // files one from that same branch. MEASURED: #3195 (head `run-W1-T2371-1787887882921`, whole
-    // diff `plan/tasks.d/W1-T2371-*.yaml`) and #3896 (head `run-W1-T2648-1788508326964`) are exactly
+    // files one from that same branch. MEASURED: #3195 (head `run-W1-T2371-<epochMs>`, whole
+    // diff `plan/tasks.d/W1-T2371-*.yaml`) and #3896 (head `run-W1-T2648-<epochMs>`) are exactly
     // that shape, and the ledger arm above cannot catch them either — so nothing did, and W1-T2794's
     // supersession rung closed the validated build in #4461 against #3195.
     //

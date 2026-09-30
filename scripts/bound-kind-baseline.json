@@ -2,7 +2,7 @@
   "_comment": "Grandfathering baseline for test/bound-kind-declared.test.ts (W1-T1266). Every entry is a bound-shaped exported constant under src/ (name contains MAX|CAP|LIMIT|CEIL|BOUND|TIMEOUT|THRESHOLD) whose declaration site does NOT say, in the literal upper-case text BACKSTOP or PRIMARY CONTROL, which kind of bound it is -- the defect CLAUDE.md already names: nothing distinguishes a mis-sized backstop from a primary control at the site where either would be spelled the same way. This list exists so the check bites only what is newly ADDED, not the corpus that predates it. A constant leaves this list either by acquiring a kind-declaring comment (moved out, never renumbered) or by being deleted; it must never be re-added once removed for having complied. Two constants this same sweep already finds compliant are deliberately absent because their existing prose already says BACKSTOP: src/lib/status.ts:DEFAULT_MAX_TASK_DISPATCHES and src/lib/worker-home.ts:DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS.",
   "capturedAt": "2026-08-23",
   "captureCommand": "the findBoundDeclarations()/boundKindViolations() scan embedded in test/bound-kind-declared.test.ts, run against this commit's src/ tree",
-  "capturedAgainst": "run-W1-T1266-1787515609072 @ b1fa1ddf",
+  "capturedAgainst": "W1-T1266 run branch @ b1fa1ddf",
   "grandfathered": [
     "src/lib/account-usage.ts:USAGE_CACHE_MAX_AGE_MS",
     "src/lib/board.ts:RECAP_ACK_HEADER",
