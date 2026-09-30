@@ -910,3 +910,18 @@ test("a blind slice is logged and waits out its back-off without failing the pro
   assert.equal(failed.length, 2, "retried after the back-off");
   assert.notDeepEqual(failed[1]?.window, failed[0]?.window, "the cursor moved past the blind slice");
 });
+
+test("a slice that cannot start is a tick failure of its instance and nothing is checked", (t) => {
+  const f = checkFixture(t);
+  f.ticker.tick();
+  f.ticker.tick();
+  // The lease is due for renewal as the slice starts, and its table is gone: the start throws.
+  f.advance(READ_MODEL_LEASE_RENEW_MS);
+  const other = openProjectorReadModel(f.stateDir, "core", f.clock);
+  t.after(() => other.close());
+  other.exec("DROP TABLE lease");
+  f.ticker.tick();
+  assert.match(String(f.c.logs("read_model.tick_failed")[0]?.error), /no such table: lease/);
+  assert.equal(checkWindows(f.stateDir).length, 0, "no slice ran");
+  assert.equal(lastState(f.c.messages).instances[0]?.checking, undefined, "and none is left marked as running");
+});

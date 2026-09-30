@@ -21,7 +21,10 @@ import {
   factColumns,
   nextOracleSlice,
   readIngestMark,
+  recordIngestMark,
   runConsistencyCheck,
+  settledIngestMark,
+  ORACLE_INGEST_SETTLE_MS,
   type ConsistencyCheckOptions,
   type OracleWindow,
 } from "../src/lib/read-model-consistency.js";
@@ -424,6 +427,15 @@ test("a slice reads only the archives whose recorded span meets its window", (t)
   reads.length = 0;
   check(f, { fs: counting, window: { t0: T0 + 4_200, t1: T0 + 11_000 } });
   assert.ok(reads.includes(gz), "the rewritten archive was read again");
+});
+
+test("unreadable ingest marks read as none and the next record starts afresh", (t) => {
+  const f = projected(t);
+  f.db.prepare("INSERT INTO meta(k, v) VALUES('oracle_ingest_marks', '{not json') ON CONFLICT(k) DO UPDATE SET v = excluded.v").run();
+  assert.equal(settledIngestMark(f.db, CHECK_AT), undefined);
+  assert.equal(recordIngestMark(f.db, f.lease, CHECK_AT), CHECK_AT, "a fresh mark is taken now");
+  assert.equal(settledIngestMark(f.db, CHECK_AT + ORACLE_INGEST_SETTLE_MS)?.atMs, CHECK_AT, "and settles a settle period later");
+  assert.equal(recordIngestMark(f.db, f.lease, CHECK_AT + 1), CHECK_AT, "no second mark inside half a settle period");
 });
 
 test("a late-arriving row never causes a false drift escalation", (t) => {
