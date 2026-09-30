@@ -348,6 +348,47 @@ test("assessInstallForDeploy: install root == operator checkout (today's product
   });
 });
 
+test("assessInstallForDeploy: explicit managed tick may invoke from the dedicated install checkout", () => {
+  withTmp("rmd-install-root-", (dir) => {
+    const { originDir } = buildOrigin(dir);
+    const stateRoot = join(dir, "state");
+    const installDir = join(stateRoot, "daemon-install");
+    cloneFrom(originDir, installDir);
+
+    const assessment = assessInstallForDeploy(installDir, {
+      operatorRepoRoot: installDir,
+      stateRoot,
+      allowManagedInstallInvoker: true,
+    });
+    assert.deepEqual(assessment, { ok: true, installRoot: installDir });
+  });
+});
+
+test("assessInstallForDeploy: managed tick never exempts a shared or misplaced operator checkout", () => {
+  withTmp("rmd-install-root-", (dir) => {
+    const { originDir } = buildOrigin(dir);
+    const stateRoot = join(dir, "state");
+    const installDir = join(stateRoot, "daemon-install");
+    cloneFrom(originDir, installDir);
+
+    for (const operatorRepoRoot of [stateRoot, dir]) {
+      const result = assessInstallForDeploy(installDir, {
+        operatorRepoRoot,
+        stateRoot,
+        allowManagedInstallInvoker: true,
+      });
+      assert.equal(result.ok, false);
+      assert.match(result.ok === false ? result.reason : "", /operator's own checkout/);
+    }
+    const misplaced = assessInstallForDeploy(installDir, {
+      operatorRepoRoot: installDir,
+      stateRoot: join(dir, "other-state"),
+      allowManagedInstallInvoker: true,
+    });
+    assert.equal(misplaced.ok, false);
+  });
+});
+
 test("assessInstallForDeploy: an ABSENT install root no-ops with a named reason — never falls back to the operator checkout", () => {
   withTmp("rmd-install-root-", (dir) => {
     const operatorDir = join(dir, "operator");

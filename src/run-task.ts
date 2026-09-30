@@ -34122,6 +34122,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
   const assessment = assessInstallForDeploy(installRoot, {
     operatorRepoRoot: repoRoot,
     stateRoot: effectiveConfig.root,
+    allowManagedInstallInvoker: stateRootOverride !== undefined,
   });
   if (!assessment.ok) {
     console.log(`### rmd deploy-run — no-op: ${assessment.reason}`);

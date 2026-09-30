@@ -27,7 +27,8 @@ SSE stream; the wire shape below is the contract those phases keep.
 | `stale` | any source is `stale` or `unavailable`; `sources[].reason` says why. |
 | `ETag` | weak, `W/"<view>.<version>.<hash of {version, stale, data}>"`. It ignores the times, so an unchanged view answers a matching `If-None-Match` with **304** and no body, even after a recompute. `Cache-Control: no-cache`. |
 
-An input that is cold makes its value **absent with a reason**, never a zero.
+An input that is cold makes its value **absent with a reason**, never a zero. A view's query
+parameters narrow it; an unusable one answers 400 `invalid_request` with a `detail`.
 
 ## Rules for a new view
 
@@ -39,8 +40,9 @@ An input that is cold makes its value **absent with a reason**, never a zero.
 
 ## `nav-badge` (version 1)
 
-`data.agent`: `{ count?, proposalIds, reason? }`.
-- This is the operator-agent sparkle badge.
+`data.agent`: `{ count? | atLeast?, proposalIds, instances[], reason? }`.
+- This is the operator-agent sparkle badge, summed over every daemon instance serve holds (core plus each registry instance). `?instances=a,b` narrows it.
+- `count` is present only when every instance was counted; otherwise `atLeast`, a floor. `instances[]` says which ones were counted and why not.
 - It is a port of the console's `generateProposals` plus `visibleProposals` (remudero-console b66762a). The port is `src/lib/nav-badge-view.ts`, over serve's analytics snapshot, operator-agent memory and settings.
 - `proposalIds` (at most 20) lets the console compare its own engine against core's until core is the only engine.
 
