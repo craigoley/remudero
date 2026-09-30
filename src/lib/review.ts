@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
@@ -1687,14 +1687,46 @@ export function refreshProofToolchain(cwd: string, exec: typeof execFileSync = e
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
     }
   }
+  // npm ci removes node_modules before installing. Reviewer worktrees share this canonical install
+  // with workers, so doing that in place can break running work. Install beside it, mark the new
+  // tree, then swap directories only after npm has succeeded (W1-T4933's safety boundary).
+  let stage: string | undefined;
+  let backup: string | undefined;
+  let preserveBackup = false;
   try {
-    exec("npm", ["ci"], { cwd: installRoot, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
-    mkdirSync(join(installRoot, "node_modules"), { recursive: true });
-    writeFileSync(marker, installHash);
+    stage = mkdtempSync(join(dirname(installRoot), ".rmd-review-stage-"));
+    copyFileSync(join(installRoot, "package.json"), join(stage, "package.json"));
+    copyFileSync(join(installRoot, "package-lock.json"), join(stage, "package-lock.json"));
+    exec("npm", ["ci"], { cwd: stage, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
+    const stagedModules = join(stage, "node_modules");
+    // npm ci for a package with no dependencies can succeed without creating this directory.
+    mkdirSync(stagedModules, { recursive: true });
+    writeFileSync(installHashMarkerPath(stage), installHash);
+    backup = mkdtempSync(join(dirname(installRoot), ".rmd-review-old-"));
+    const liveModules = join(installRoot, "node_modules");
+    const oldModules = join(backup, "node_modules");
+    const hadOld = existsSync(liveModules);
+    if (hadOld) renameSync(liveModules, oldModules);
+    try {
+      renameSync(stagedModules, liveModules);
+    } catch {
+      if (hadOld) {
+        try { renameSync(oldModules, liveModules); }
+        catch { preserveBackup = true; }
+      }
+      return false;
+    }
     return true;
-  } catch (error) {
-    // A failed refresh still permits the one retry, which will report cannot-evaluate if loading fails again.
+  } catch {
+    // A failed refresh leaves the old install serving and permits the one proof retry.
     return false;
+  } finally {
+    if (stage) {
+      try { rmSync(stage, { recursive: true, force: true }); } catch { /* best-effort staging cleanup */ }
+    }
+    if (backup && !preserveBackup) {
+      try { rmSync(backup, { recursive: true, force: true }); } catch { /* old tree is regenerable */ }
+    }
   }
 }
 

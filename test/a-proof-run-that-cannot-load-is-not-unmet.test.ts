@@ -127,6 +127,7 @@ test("a refresh uses the real canonical root behind a linked install", () => {
     writeFileSync(join(dir, "package.json"), "{}\n");
     writeFileSync(join(dir, "package-lock.json"), '{"name":"fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"fixture","version":"1.0.0"}}}\n');
     assert.equal(refreshProofToolchain(dir), true, "the default really runs the package manager in an isolated fixture");
+    writeFileSync(join(dir, "node_modules", "sentinel"), "old install");
     symlinkSync(join(dir, "node_modules"), join(linked, "node_modules"));
     writeFileSync(join(linked, "package-lock.json"), "{}\n");
     let attempts = 0;
@@ -134,11 +135,17 @@ test("a refresh uses the real canonical root behind a linked install", () => {
     assert.equal(attempts, 0);
     writeFileSync(join(dir, "package-lock.json"), '{"name":"fixture","version":"1.0.1","lockfileVersion":3,"packages":{"":{"name":"fixture","version":"1.0.1"}}}\n');
     assert.equal(refreshProofToolchain(linked, ((_command: string, _args: string[], options: { cwd: string }) => {
-      assert.equal(options.cwd, dir, "refresh the canonical checkout, never install through the symlink");
+      assert.notEqual(options.cwd, dir, "npm ci runs in a staging directory, not the live checkout");
+      assert.equal(readFileSync(join(dir, "node_modules", "sentinel"), "utf8"), "old install", "the shared install stays intact during npm ci");
+      assert.equal(readFileSync(join(options.cwd, "package-lock.json"), "utf8"), readFileSync(join(dir, "package-lock.json"), "utf8"));
+      mkdirSync(join(options.cwd, "node_modules"));
+      writeFileSync(join(options.cwd, "node_modules", "sentinel"), "new install");
       attempts++;
     }) as never), true);
     assert.equal(attempts, 1);
+    assert.equal(readFileSync(join(dir, "node_modules", "sentinel"), "utf8"), "new install");
     assert.equal(refreshProofToolchain(dir, (() => { throw new Error("install failed"); }) as never), false);
+    assert.equal(readFileSync(join(dir, "node_modules", "sentinel"), "utf8"), "new install", "a failed staged install leaves the live tree intact");
   } finally {
     rmSync(linked, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
