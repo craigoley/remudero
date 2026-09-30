@@ -27,6 +27,9 @@ export interface BlindedReviewInput {
   changedFileShapeDigest: string;
   stack: PinnedReviewStack;
   selectionPropensity: 0.5;
+  /** Set only by the paid operator adapter; no bug/benign label is exposed. */
+  requestedModel?: string;
+  requestedEffort?: string;
 }
 export interface ReplayFinding { id: string; anchorSupported: boolean; mechanism: string; remedy: string | null }
 export interface ReviewerReplayOutput {
@@ -35,6 +38,7 @@ export interface ReviewerReplayOutput {
   assignmentId?: string;
   requestedModel?: string;
   servedModel?: string;
+  servedEffort?: string;
   elapsedMs?: number;
   inputTokens?: number;
   outputTokens?: number;
