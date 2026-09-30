@@ -11,6 +11,7 @@
   origin: oper#reservation-namespace-unreadable-unwritable-2026-08-24
   plan_refs: ["W1-T1055", "W1-T1268", "W1-T1011", "#2668"]
   status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     ★ FILED `status: blocked` ON PURPOSE. Design (ii) weighs two remedies and DOES NOT PICK,
@@ -128,6 +129,7 @@
     - claim: "merge order remains the tiebreak for a collision, and nothing deletes a reservation automatically"
       proof: "unit test: test/reservation-namespace-visibility.test.ts"
   note: |
+    RETIRED 2026-09-30 (operator ruling): the premise is gone. The minter now reads the reservation namespace: src/lib/task-id-reservation.ts lists refs/rmd-id/* from origin in one ls-remote and walks past held ids, as each `rmd next-task-id` reports.
     RISK BAND — BOTH READINGS, BECAUSE THE BAND EXEMPTS THE CHECK RATHER THAN CLEARING IT.
     `sizingViolation` (`src/lib/task-linter.ts`) returns `undefined` at `risk: high`, so a `high`
     band means the span was NEVER SCORED, not that it was scored and found narrow. The `files:`

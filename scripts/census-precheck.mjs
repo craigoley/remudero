@@ -37,6 +37,7 @@ import {
   listMeasuredFiles,
   readBaseline as readCommentBaseline,
 } from "./comment-load-ratchet.mjs";
+import { HOUSE_LITERALS, houseLiteralCounts, listHouseLayoutSrcFiles } from "./house-layout-census.mjs";
 import {
   FIXTURE_COPY_CENSUS_FILENAME,
   FIXTURE_COPY_SIGNATURES,
@@ -149,6 +150,29 @@ function fixtureCopyViolations({ changed, readHead, readBase, testFiles }) {
   );
 }
 
+function houseLayoutViolations({ changed, readHead, readBase, srcFiles = [] }) {
+  const scoped = changed.filter((p) => CLOCK_SCOPE_RE.test(p));
+  if (scoped.length === 0) return [];
+  const headTexts = new Map();
+  for (const path of srcFiles) {
+    const text = readHead(path);
+    if (text !== null) headTexts.set(path, text);
+  }
+  const baseTexts = new Map(headTexts);
+  for (const path of scoped) {
+    const text = readBase(path);
+    if (text === null) baseTexts.delete(path);
+    else baseTexts.set(path, text);
+  }
+  const head = houseLiteralCounts(headTexts.values());
+  const base = houseLiteralCounts(baseTexts.values());
+  return HOUSE_LITERALS.filter((literal) => caused(head[literal], base[literal], base[literal], base[literal])).map(
+    (literal) =>
+      `house-layout: ${literal} now in ${head[literal]} non-test src files, up from ${base[literal]} at the ` +
+      "merge base — resolve it through resolveRepoLayout (src/lib/repo-layout.ts)",
+  );
+}
+
 /**
  * Every census violation this branch causes. Pure over its readers, so every arm is testable
  * without git: `readHead` and `readBase` return a repo-relative file's text on this tree and at
@@ -158,7 +182,12 @@ function fixtureCopyViolations({ changed, readHead, readBase, testFiles }) {
  *   measuredFiles: string[], testFiles: string[] }} input
  */
 export function evaluateCensusPrecheck(input) {
-  return [...clockViolations(input), ...commentLoadViolations(input), ...fixtureCopyViolations(input)];
+  return [
+    ...clockViolations(input),
+    ...commentLoadViolations(input),
+    ...fixtureCopyViolations(input),
+    ...houseLayoutViolations(input),
+  ];
 }
 
 function gitOut(root, args) {
@@ -193,6 +222,7 @@ export function main(argv) {
       },
       measuredFiles: listMeasuredFiles(root),
       testFiles: listFixtureCopyFiles(root),
+      srcFiles: listHouseLayoutSrcFiles(root),
     });
   } catch (e) {
     console.error(`census-precheck: could not measure — ${String(e.message ?? e)}`);

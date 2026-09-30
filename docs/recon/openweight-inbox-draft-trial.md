@@ -55,3 +55,23 @@ Haiku costs more than Sonnet here (a longer agentic run) and cleans fewer drafts
 on every axis: three times nano's clean drafts at lower cost, five times faster, and no contract errors. It now leads
 the lane. Sonnet 5.5 is the quality ceiling at about 60 times the cost. Routing only the drafts
 gpt-oss-120b leaves dirty to Sonnet 5.5 is the value play, filed as its own task.
+
+## Thinking-level sweep, 2026-09-30
+
+The same 8 proposals and the same production path, varying only the model's effort (reasoning) level. The
+bake-off above ran every candidate at the lane's configured `high`.
+
+| candidate @ effort | drafted | lint-clean | contract errors | cost | wall |
+|---|---|---|---|---|---|
+| claude-sonnet-5-5 @ medium | 8/8 | **8/8** | 0 | $2.08 notional | 1.1 min |
+| claude-sonnet-5-5 @ high | 8/8 | 7/8 | 0 | $2.83 notional | 2.5 min |
+| claude-sonnet-5-5 @ low | 8/8 | 6/8 | 0 | $1.58 notional | 0.8 min |
+| gpt-oss-120b @ medium | 8/8 | 3/8 | 0 | $0.042 | 0.6 min |
+| gpt-oss-120b @ high | 8/8 | 3/8 | 0 | $0.045 | 0.8 min |
+| gpt-oss-120b @ low | 7/8 | 3/8 | 1 | $0.034 | 3.0 min |
+| gpt-5-nano @ high | 5/8 | 1/8 | 3 | $0.051 | 4.0 min |
+| gpt-5-nano @ medium | 6/8 | 0/8 | 2 | $0.057 | 4.6 min |
+
+More thinking did not buy quality: Sonnet at medium matched or beat high for 27% less, and gpt-oss-120b cleaned 3/8
+at every level. With 8 proposals a one-draft gap is within noise. W1-T4916's Sonnet escalation runs at medium, and
+W1-T4926 makes a thinking-level sweep part of every new-model bake-off.
