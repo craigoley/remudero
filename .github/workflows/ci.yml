@@ -1436,7 +1436,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [coverage-ratchet]
     if: ${{ always() }}
-    timeout-minutes: 10
+    # PR #8080's eight shards passed, but merging their compact V8 reports ran past this job's
+    # former 10m cap and GitHub cancelled the required check. A prior merge took 7m; 20m bounds
+    # the measured tail while leaving room below ci-gate.yml's WAIT_CAP_SECONDS for the shard
+    # job AND this dependent aggregator. See test/workflow-job-timeouts.test.ts.
+    timeout-minutes: 20
     steps:
       - name: Require every coverage shard to produce an artifact
         env:
