@@ -20,7 +20,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -29,7 +31,9 @@ const BASELINE_PATH = fileURLToPath(new URL("../scripts/error-subclass-baseline.
 // Direct extension only ("class X extends Error") -- a class that extends another named
 // `*Error` subclass (indirect chain) is not counted here; it is already one hop closer to a
 // shared discriminant than a class hanging straight off the built-in.
-const DIRECT_ERROR_EXTENDS_PATTERN = "class \\w+ extends Error\\b";
+// git grep -E does not honor \w or \b on every host. Keep both the identifier and
+// the right boundary in POSIX ERE so a zero count means no direct subclasses.
+const DIRECT_ERROR_EXTENDS_PATTERN = "class [[:alpha:]_][[:alnum:]_]* extends Error([^[:alnum:]_]|$)";
 
 function countDirectErrorSubclasses(root: string): number {
   try {
@@ -53,6 +57,24 @@ function readBaseline(): { directErrorSubclassCount: number } {
   );
   return raw;
 }
+
+test("the direct Error subclass census sees tracked classes on this git grep engine", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-error-census-"));
+  try {
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    mkdirSync(join(root, "src", "lib"), { recursive: true });
+    writeFileSync(join(root, "src", "lib", "sample.ts"), [
+      "class DirectError extends Error { }",
+      "class IndirectError extends Errorish { }",
+      "class ChildError extends DirectError { }",
+      "",
+    ].join("\n"));
+    execFileSync("git", ["-C", root, "add", "src/lib/sample.ts"]);
+    assert.equal(countDirectErrorSubclasses(root), 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("the count of classes extending Error directly is recorded in scripts/error-subclass-baseline.json", () => {
   const baseline = readBaseline();
