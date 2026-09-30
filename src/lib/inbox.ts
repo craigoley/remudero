@@ -1725,6 +1725,8 @@ export interface DraftSpawnContext {
 
 export interface DraftRungDeps {
   spawn: DraftSpawn;
+  /** One optional subscription attempt after cash could not produce a lint-clean fragment. Undefined means reserve blocked it. */
+  escalate?: (proposal: Proposal, prompt: string) => Promise<WorkerResult | undefined>;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -1821,7 +1823,9 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       // W1-T4864: a dirty relint walks the LADDER instead of re-rolling the same model.
       const avoidModels: string[] = [];
       let dirty: { from: string | null; violations: string[] } | undefined;
+      let cashAttempts = 0;
       for (let attempt = 1; attempt <= MAX_DRAFT_LINT_ATTEMPTS; attempt++) {
+        cashAttempts = attempt;
         const worker = await deps.spawn(proposal, prompt, { attempt, avoidModels: [...avoidModels] });
         lastWorker = worker;
         if (dirty) {
@@ -1854,6 +1858,39 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           if (from !== null && !avoidModels.includes(from)) avoidModels.push(from);
           dirty = { from, violations: violations.map((v) => v.message) };
           prompt = inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations);
+        }
+      }
+      if (lastWorker && !lastWorker.usageRefusal && (!parsed || violations.length > 0) && deps.escalate) {
+        const reason = parsed ? "dirty-lint" : "fragment-contract";
+        const escalationPrompt = parsed
+          ? inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)
+          : `${prompt}\n\nThe cash draft missed the fragment contract. Re-emit the complete fragment and STAMP using the literal markers in the prompt.`;
+        try {
+          const escalated = await deps.escalate(proposal, escalationPrompt);
+          if (escalated) {
+            deps.log("inbox.draft_escalated", {
+              proposal_id: proposal.id,
+              from: draftWorkerModel(lastWorker),
+              to: escalated.servedModel ?? draftWorkerModel(escalated),
+              reason,
+            });
+            deps.log("inbox.draft_synthesized", {
+              proposal_id: proposal.id,
+              attempt: cashAttempts + 1,
+              session_id: escalated.sessionId,
+              cost_usd: escalated.costUsd,
+              subtype: escalated.subtype,
+              ...workerLedgerFields(escalated),
+            });
+            const candidate = parseDraftedCandidate([escalated.text, escalated.blocks.join("\n")].join("\n"));
+            if (candidate) {
+              parsed = candidate;
+              violations = lintDraftedFragment(candidate.fragmentYaml, proposal.id, candidate.stampLine);
+            }
+          }
+        } catch (error) {
+          // A failed subscription attempt cannot discard the cash fragment already produced.
+          deps.log("inbox.draft_escalation_error", { proposal_id: proposal.id, error: String((error as Error)?.message ?? error) });
         }
       }
       if (!parsed) {
