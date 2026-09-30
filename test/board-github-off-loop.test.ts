@@ -12,6 +12,7 @@ import { computeBoardSnapshot } from "../src/lib/board.js";
 import { createGhCallPacer, createNonBlockingGhCallPacer, GhPaceWouldBlockError, paceGhEntry } from "../src/lib/github-transport.js";
 import type { Plan } from "../src/lib/plan.js";
 import { buildBatchedGithub, type GitHub } from "../src/lib/status.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 const OPEN_PR_URL = "https://github.com/o/r/pull/7";
 
@@ -92,7 +93,7 @@ test("serve gh pacing waits without a blocking sleep", () => {
     GhPaceWouldBlockError,
     "a rate-limit backoff refuses instead of sleeping the thread",
   );
-  assert.ok(Date.now() - startedAt < 1_000, "neither refusal slept");
+  assertWallClockBound(Date.now() - startedAt, 1_000, "neither refusal slept");
 
   const blocking = createGhCallPacer({ minGapMs: 5_000, sleepSync: () => { throw new Error("slept"); } });
   blocking.wait();
@@ -104,8 +105,10 @@ test("a stale board github fact is served stale with its age", async () => {
   assert.equal(gh.factsAgeMs?.(), undefined, "no fact held yet, so no age");
   gh.warm?.();
   await settle(gh);
+  assert.equal(gh.factsStale?.(), false, "facts inside their TTL are not stale");
   clock.ms = 10_000;
   assert.equal(gh.factsAgeMs?.(), 10_000);
+  assert.equal(gh.factsStale?.(), true, "facts past their TTL are stale");
   const github: GitHub = { ...gh, factsAgeMs: () => gh.factsAgeMs?.() };
   const plan = { tasks: [], byId: new Map() } as unknown as Plan;
   const dir = mkdtempSync(join(tmpdir(), "rmd-off-loop-board-"));
@@ -113,6 +116,7 @@ test("a stale board github fact is served stale with its age", async () => {
   writeFileSync(ledgerPath, "");
   const snapshot = computeBoardSnapshot({ plan, ledgerPath, github });
   assert.equal(snapshot.github_facts_age_ms, 10_000);
+  assert.equal(snapshot.github_facts_status, "stale");
   assert.equal(snapshot.prQueue.rows.length, 1, "the stale open PR is still served");
   assert.deepEqual(syncCalls, []);
 });
@@ -126,6 +130,10 @@ test("a gateway without an age accessor leaves the snapshot field absent", () =>
   assert.equal("github_facts_age_ms" in computeBoardSnapshot({ plan, ledgerPath, github }), false);
   const throwing: GitHub = { ...github, factsAgeMs: () => { throw new Error("no clock"); } };
   assert.equal(computeBoardSnapshot({ plan, ledgerPath, github: throwing }).github_facts_age_ms, undefined);
+  const ageOnly: GitHub = { ...github, factsAgeMs: () => 5 };
+  assert.equal(computeBoardSnapshot({ plan, ledgerPath, github: ageOnly }).github_facts_status, "fresh", "an age with no stale verdict reads fresh");
+  const unknownVerdict: GitHub = { ...ageOnly, factsStale: () => { throw new Error("no clock"); } };
+  assert.equal(computeBoardSnapshot({ plan, ledgerPath, github: unknownVerdict }).github_facts_status, "stale", "an unreadable verdict is never fresh");
 });
 
 test("an off-loop gateway leaves a walk that keeps failing to one retry per gap", async () => {

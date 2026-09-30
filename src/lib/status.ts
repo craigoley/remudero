@@ -294,6 +294,8 @@ export interface GitHub {
   /** OPTIONAL (W1-T4771): how old the OLDEST held PR fact is, in ms, or `undefined` when none is held yet.
    *  Lets a caller serving a stale fact say how stale. */
   factsAgeMs?(): number | undefined;
+  /** OPTIONAL (W1-T4771): whether a held PR fact is past its TTL, so a caller never labels an overdue fact fresh. */
+  factsStale?(): boolean;
   seedBoardSnapshot?(cache: BoardSnapshotCache): void;
   /** A read this gateway attempted actually FAILED, as against succeeding empty, so it defers rather than
    *  reading as a confirmed not-merged (W1-T119). NEVER FORCES A FETCH (W1-T2219): the STICKY verdict of the
@@ -5211,6 +5213,9 @@ export function buildBatchedGithub(
     },
     factsAgeMs() {
       return openHalf && mergedHalf ? Math.max(0, now() - Math.min(openHalf.at, mergedHalf.at)) : undefined;
+    },
+    factsStale() {
+      return !openHalf || !mergedHalf || now() - openHalf.at >= effectiveOpenTtlMs() || now() - mergedHalf.at >= effectiveMergedTtlMs();
     },
   };
 }
