@@ -95,24 +95,54 @@ export async function serveOnePlanReload(
 
 if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === PLAN_RELOAD_WORKER_KIND) void serveOnePlanReload(workerData, parentPort);
 
+const workerFailures = new WeakSet<Error>();
+
+export const isPlanReloadWorkerFailure = (err: unknown): boolean => err instanceof Error && workerFailures.has(err);
+
+function workerFailure(reason: string): Error {
+  const failure = new Error(reason);
+  workerFailures.add(failure);
+  return failure;
+}
+
 /** {@link readServePlanAtRef} on a one-shot worker thread: git is async already, and the parse over
- *  every task no longer holds serve's event loop. A worker that dies rejects like a failed read. */
+ *  every task no longer holds serve's event loop. A worker that answers `ok: false` rejects as a failed
+ *  read; one that cannot start or dies first rejects with an error {@link isPlanReloadWorkerFailure} recognises. */
 export function readServePlanOffLoop(repoDir: string, ref: string, workerUrl: URL = new URL(import.meta.url)): Promise<PlanRead> {
   return new Promise((resolve, reject) => {
-    const worker = new Worker(workerUrl, { workerData: { kind: PLAN_RELOAD_WORKER_KIND, repoDir, ref }, execArgv: process.execArgv });
+    let worker: Worker;
+    try {
+      worker = new Worker(workerUrl, { workerData: { kind: PLAN_RELOAD_WORKER_KIND, repoDir, ref }, execArgv: process.execArgv });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      reject(workerFailure(reason));
+      return;
+    }
     worker.once("message", (message: ReloadMessage) => {
       void worker.terminate();
       if (message.ok) resolve(message.read);
       else reject(new Error(message.reason));
     });
-    worker.once("error", reject);
-    worker.once("exit", (code) => reject(new Error(`serve plan reload worker exited with code ${code}`)));
+    worker.once("error", (err) => reject(workerFailure(err.message)));
+    worker.once("exit", (code) => reject(workerFailure(`serve plan reload worker exited with code ${code}`)));
   });
+}
+
+/** The default read: off the loop, and inline when the worker itself could not do the job. */
+async function readServePlanPreferringWorker(repoDir: string, ref: string, options: ServePlanReloadOptions): Promise<PlanRead> {
+  try {
+    return await (options.offLoop ?? readServePlanOffLoop)(repoDir, ref);
+  } catch (err) {
+    if (!isPlanReloadWorkerFailure(err)) throw err;
+    options.log?.("serve.plan_reload_worker_failed", { ref, reason: (err as Error).message });
+    return readServePlanAtRef(repoDir, ref);
+  }
 }
 
 /** Seams for a hermetic test. */
 export interface ServePlanReloadOptions {
   read?: (repoDir: string, ref: string) => Promise<PlanRead>;
+  offLoop?: (repoDir: string, ref: string) => Promise<PlanRead>;
   clock?: Clock;
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
@@ -134,7 +164,7 @@ export async function reloadServePlan(
   const startedAt = clock.now();
   let read: PlanRead;
   try {
-    read = await (options.read ?? readServePlanOffLoop)(repoDir, ref);
+    read = await (options.read ?? ((dir, at) => readServePlanPreferringWorker(dir, at, options)))(repoDir, ref);
   } catch (err) {
     log("serve.plan_reload_failed", { ref, reason: err instanceof Error ? err.message : String(err) });
     return false;

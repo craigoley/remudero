@@ -13,7 +13,7 @@ import type { IssueCloser } from "../src/lib/panel-actions.js";
 import type { PanelGraphDeps } from "../src/lib/panel-graph.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
-import { readServePlanAtRef, readServePlanOffLoop, reloadServePlan, serveOnePlanReload } from "../src/lib/serve-plan-reload.js";
+import { isPlanReloadWorkerFailure, readServePlanAtRef, readServePlanOffLoop, reloadServePlan, serveOnePlanReload, type PlanRead } from "../src/lib/serve-plan-reload.js";
 import { createService, type SseSend } from "../src/lib/service.js";
 import { subscribeStatusStream } from "../src/lib/status-stream-publisher.js";
 import { feedbackOriginTag } from "../src/lib/trace.js";
@@ -158,4 +158,45 @@ test("the plan reload worker answers with the read or the reason it failed", asy
   assert.equal(sent.length, 2);
   const timed = await readServePlanAtRef(repo.dir, ref, fixedClock(1_000));
   assert.deepEqual([timed.gitMs, timed.parseMs], [0, 0]);
+});
+
+test("a plan reload worker that cannot do the job degrades to an inline read, never to a stale plan", async () => {
+  const repo = gitRepo({ kind: "serve-plan-reload-fallback" });
+  mkdirSync(join(repo.dir, "plan"), { recursive: true });
+  writeFileSync(join(repo.dir, "plan", "tasks.yaml"), record("W1-T1"));
+  repo.git("add", "plan");
+  repo.git("commit", "--quiet", "-m", "plan");
+  const ref = repo.git("rev-parse", "HEAD");
+  const logs: Array<[string, Record<string, unknown> | undefined]> = [];
+  const log = (step: string, extra?: Record<string, unknown>) => void logs.push([step, extra]);
+  const steps = () => logs.map(([step]) => step);
+
+  const missing = readServePlanOffLoop(repo.dir, ref, new URL("file:///nonexistent/serve-plan-reload-worker.mjs"));
+  await assert.rejects(missing, isPlanReloadWorkerFailure);
+  await assert.rejects(readServePlanOffLoop(repo.dir, ref, "relative-worker.js" as unknown as URL), isPlanReloadWorkerFailure);
+  assert.equal(isPlanReloadWorkerFailure(new Error("plain")), false);
+  assert.equal(isPlanReloadWorkerFailure("not an error"), false);
+
+  const board = { plan: planOf([]) };
+  const dead = (): Promise<PlanRead> => readServePlanOffLoop(repo.dir, ref, "relative-worker.js" as unknown as URL);
+  assert.equal(await reloadServePlan(board, repo.dir, ref, { offLoop: dead, log }), true);
+  assert.deepEqual(board.plan.tasks.map((t) => t.id), ["W1-T1"], "the plan still reloads, on the loop");
+  assert.deepEqual(steps(), ["serve.plan_reload_worker_failed", "serve.plan_reloaded"]);
+  assert.match(String(logs[0]?.[1]?.reason), /worker|path/i);
+  assert.equal(logs[0]?.[1]?.ref, ref);
+
+  logs.length = 0;
+  const failed = async (): Promise<PlanRead> => {
+    throw new Error("duplicate frontmatter");
+  };
+  const before = board.plan;
+  assert.equal(await reloadServePlan(board, repo.dir, ref, { offLoop: failed, log }), false);
+  assert.equal(board.plan, before, "a worker that ran and failed keeps the old plan serving");
+  assert.deepEqual(steps(), ["serve.plan_reload_failed"], "no inline retry of a read the worker already failed");
+
+  logs.length = 0;
+  const fresh = planOf([task("W1-T1"), task("W1-T2")]);
+  assert.equal(await reloadServePlan(board, repo.dir, ref, { offLoop: async () => ({ plan: fresh, quarantined: [] }), log }), true);
+  assert.equal(board.plan, fresh);
+  assert.deepEqual(steps(), ["serve.plan_reloaded"], "a working worker is used as is");
 });
