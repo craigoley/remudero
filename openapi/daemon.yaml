@@ -784,7 +784,7 @@ components:
         status: { type: string, enum: [completed] }
         actionId: { type: string }
         instance: { type: string }
-        repository: { type: string, description: "Server-owned registry identity when this is a non-core instance." }
+        repository: { type: string, description: "Server-owned repository identity, including core when configured." }
         action: { type: string, enum: [pause, resume, stop] }
         evidenceRef: { type: string, description: "The reused panel-action ledger row." }
         result:
@@ -799,6 +799,27 @@ components:
       required: [status, actionId, detail]
       properties:
         status: { type: string, enum: [unknown] }
+        actionId: { type: string }
+        detail: { type: string }
+
+    AssistantControlCapability:
+      type: object
+      description: Read-only served contract. Writable filesystem metadata cannot prove cross-process or cross-host sharing.
+      required: [contract, bootSha, instance, repository, admission, claimStore]
+      properties:
+        contract: { type: string, enum: [assistant-control-v2] }
+        bootSha: { type: string }
+        instance: { type: string }
+        repository: { type: string }
+        admission: { type: string, enum: [writable_unverified, uninitialized, unavailable] }
+        claimStore: { type: string, enum: [shared_root_configured_topology_unverified] }
+
+    AssistantControlLookup:
+      type: object
+      description: Nonterminal read-only lookup; completed actions return AssistantControlReceipt instead.
+      required: [status, actionId]
+      properties:
+        status: { type: string, enum: [claimed_unknown, not_found, conflict, unavailable] }
         actionId: { type: string }
         detail: { type: string }
 
@@ -8757,8 +8778,8 @@ paths:
     post:
       summary: Execute a reviewed assistant pause/resume/stop once per durable action ID on the core instance.
       description: >
-        MIDDLE-tier write. The host-shared claim store binds actionId to the exact instance,
-        action and reason before dispatch. Same-key retries return the first receipt or explicit
+        MIDDLE-tier write. The host-shared claim store binds actionId to the verified operator,
+        exact instance, repository, action and reason before dispatch. Same-key retries return the first receipt or explicit
         unknown; changed payload refuses. A 503 may mean a post-claim interruption and must
         never be interpreted as a failed side effect safe to retry with a new ID.
       security:
@@ -8785,13 +8806,73 @@ paths:
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "409": { description: "The action ID binds another payload or this route does not own the instance." }
+        "409": { description: "The action ID binds another operator, target, or payload, or this route does not own the instance." }
         "503":
           description: Durable admission or completion unavailable; the outcome must be reconciled before any new action ID.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/AssistantControlUnknown"
+
+  /v1/control/assistant-action/status:
+    get:
+      summary: Read the core assistant-control contract and served identity.
+      description: >
+        Requires a verified operator session. A configured claim root is not proof that
+        all writers share one atomic store; admission and topology remain unverified.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Contract version, boot SHA, target, and qualified admission status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlCapability" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/control/assistant-action/receipt:
+    get:
+      summary: Resolve one core assistant action without dispatching a side effect.
+      description: >
+        Requires the same verified operator and target as the original claim. An unreadable
+        claim or receipt is unavailable, never a successful or safely retryable action.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: actionId
+          in: query
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 128 }
+      responses:
+        "200":
+          description: Durable completion receipt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlReceipt" }
+        "202":
+          description: Claimed but outcome unknown.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlLookup" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No claim exists for this action ID.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlLookup" }
+        "409":
+          description: The action belongs to another operator or target.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlLookup" }
+        "503":
+          description: Claim or receipt unreadable or incomplete.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlLookup" }
 
   /v1/questions/answer:
     post:
@@ -9381,7 +9462,7 @@ paths:
       description: >
         MIDDLE-tier write. The instance in the JSON body must match this route parameter.
         Every mounted instance shares the core host's durable action-ID claim store, so an ID
-        cannot be retargeted across repositories or daemon roots. An unresolved claim is
+        cannot be retargeted across operators, repositories or daemon roots. An unresolved claim is
         unknown, never silently retried.
       security:
         - bearerWrite: []
@@ -9412,13 +9493,78 @@ paths:
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "409": { description: "The action ID binds another payload or this route does not own the instance." }
+        "409": { description: "The action ID binds another operator, target, or payload, or this route does not own the instance." }
         "503":
           description: Durable admission or completion unavailable; the outcome must be reconciled before any new action ID.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/AssistantControlUnknown"
+
+  /v1/i/{instance}/control/assistant-action/status:
+    get:
+      summary: Read this instance's assistant-control contract and served identity.
+      description: Requires a verified operator session; configured storage topology remains unverified.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Contract version, boot SHA, repository, instance, and qualified admission status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlCapability" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/i/{instance}/control/assistant-action/receipt:
+    get:
+      summary: Resolve one action of this instance without dispatching a side effect.
+      description: Requires the same verified operator and repository as the original claim.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+        - name: actionId
+          in: query
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 128 }
+      responses:
+        "200":
+          description: Durable completion receipt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlReceipt" }
+        "202":
+          description: Claimed but outcome unknown.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlLookup" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No claim exists for this action ID.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlLookup" }
+        "409":
+          description: The action belongs to another operator or target.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlLookup" }
+        "503":
+          description: Claim or receipt unreadable or incomplete.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantControlLookup" }
 
   /v1/i/{instance}/operator-agent/ask:
     post:

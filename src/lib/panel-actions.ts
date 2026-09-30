@@ -17,7 +17,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import { ghExec } from "./github-transport.js";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { access, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   consumeOptionLink,
@@ -382,6 +383,7 @@ export interface AssistantControlOptions extends Pick<PanelActionDeps, "root" | 
   claimRoot: string;
   instance: string;
   repository?: string;
+  bootSha?: string;
   afterClaim?: () => void;
   afterEffect?: () => void;
 }
@@ -420,7 +422,85 @@ function assistantControlPaths(deps: AssistantControlOptions, actionId: string) 
   return { dir, claim: join(dir, `${key}.claim.json`), receipt: join(dir, `${key}.receipt.json`) };
 }
 
-/** Return the real side effect and ledger row, never an inferred token outcome. */
+export const ASSISTANT_CONTROL_CONTRACT_VERSION = "assistant-control-v2";
+
+function assistantActorHash(actor: string): string {
+  return createHash("sha256").update(actor).digest("hex");
+}
+
+async function assistantClaimStoreState(root: string): Promise<"writable_unverified" | "uninitialized" | "unavailable"> {
+  try {
+    if (!(await stat(root)).isDirectory()) return "unavailable";
+  } catch {
+    // A missing or unreadable claim root is unavailable, not an empty claim store.
+    return "unavailable";
+  }
+  const dir = join(root, "state", "assistant-control-actions");
+  try {
+    if (!(await stat(dir)).isDirectory()) return "unavailable";
+    await access(dir, constants.R_OK | constants.W_OK);
+    return "writable_unverified";
+  } catch (error) {
+    // An unused store can be initialized by POST; other failures are unavailable.
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "uninitialized" : "unavailable";
+  }
+}
+
+export function buildAssistantControlCapabilityRoute(deps: AssistantControlOptions): Route {
+  return {
+    method: "GET", path: "/v1/control/assistant-action/status", scope: "read",
+    handler: async (req, res) => {
+      if (!verifiedActor(req)) return sendJson(res, 403, { error: "verified_operator_required" });
+      sendJson(res, 200, {
+        contract: ASSISTANT_CONTROL_CONTRACT_VERSION,
+        bootSha: deps.bootSha ?? "unknown",
+        instance: deps.instance,
+        repository: deps.repository ?? "unknown",
+        admission: await assistantClaimStoreState(deps.claimRoot),
+        claimStore: "shared_root_configured_topology_unverified",
+      });
+    },
+  };
+}
+
+export function buildAssistantControlReceiptRoute(deps: AssistantControlOptions): Route {
+  return {
+    method: "GET", path: "/v1/control/assistant-action/receipt", scope: "read",
+    handler: async (req, res) => {
+      const actor = verifiedActor(req);
+      if (!actor) return sendJson(res, 403, { error: "verified_operator_required" });
+      const actionId = new URL(req.url ?? "", "http://localhost").searchParams.get("actionId");
+      if (!actionId || !/^[A-Za-z0-9._:-]{8,128}$/.test(actionId)) return sendJson(res, 400, { error: "invalid_action_id" });
+      if (await assistantClaimStoreState(deps.claimRoot) === "unavailable") return sendJson(res, 503, { status: "unavailable", actionId, detail: "claim store is unavailable" });
+      const paths = assistantControlPaths(deps, actionId);
+      let claim: unknown;
+      try {
+        claim = JSON.parse(await readFile(paths.claim, "utf8"));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return sendJson(res, 404, { status: "not_found", actionId });
+        return sendJson(res, 503, { status: "unavailable", actionId, detail: "claim is unreadable" });
+      }
+      if (!isRecord(claim) || typeof claim.actorHash !== "string" || typeof claim.instance !== "string" || typeof claim.fingerprint !== "string") {
+        return sendJson(res, 503, { status: "unavailable", actionId, detail: "claim identity is incomplete" });
+      }
+      if (claim.actorHash !== assistantActorHash(actor) || claim.instance !== deps.instance || claim.repository !== (deps.repository ?? null)) {
+        return sendJson(res, 409, { status: "conflict", actionId });
+      }
+      let receipt: unknown;
+      try {
+        receipt = JSON.parse(await readFile(paths.receipt, "utf8"));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return sendJson(res, 202, { status: "claimed_unknown", actionId });
+        return sendJson(res, 503, { status: "unavailable", actionId, detail: "receipt is unreadable" });
+      }
+      if (!isRecord(receipt) || receipt.status !== "completed" || receipt.actionId !== actionId || receipt.instance !== deps.instance || receipt.repository !== (deps.repository ?? undefined)) {
+        return sendJson(res, 503, { status: "unavailable", actionId, detail: "receipt identity is incomplete" });
+      }
+      sendJson(res, 200, receipt);
+    },
+  };
+}
+
 function assistantControlReceipt(input: AssistantControlInput, deps: AssistantControlOptions, origin: string) {
   const tag = { assistant_action_id: input.actionId, assistant_instance: deps.instance };
   if (input.action === "pause") {
@@ -450,11 +530,12 @@ export function buildAssistantControlRoute(deps: AssistantControlOptions): Route
         return;
       }
       const paths = assistantControlPaths(deps, input.actionId);
-      const fingerprint = createHash("sha256").update(JSON.stringify({ instance: input.instance, repository: deps.repository ?? null, action: input.action, reason: input.reason ?? null })).digest("hex");
+      const actorHash = assistantActorHash(operator);
+      const fingerprint = createHash("sha256").update(JSON.stringify({ actorHash, instance: input.instance, repository: deps.repository ?? null, action: input.action, reason: input.reason ?? null })).digest("hex");
       let admitted = false;
       try {
         mkdirSync(paths.dir, { recursive: true });
-        writeExclusive(paths.claim, JSON.stringify({ fingerprint }));
+        writeExclusive(paths.claim, JSON.stringify({ fingerprint, actorHash, instance: deps.instance, repository: deps.repository ?? null }));
         syncDirectory(paths.dir);
         admitted = true;
       } catch (error) {

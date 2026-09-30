@@ -101,6 +101,8 @@ import {
   buildMergeHoldRoute,
   buildPauseRoute,
   buildAssistantControlRoute,
+  buildAssistantControlCapabilityRoute,
+  buildAssistantControlReceiptRoute,
   buildPrActionRoute,
   buildQuietHoursRoute,
   buildResumeRoute,
@@ -326,6 +328,8 @@ export interface ServeDeps {
   issues: IssueCloser;
   /** Fleet-control flag-file root — MUST equal the `config.root` `rmd daemon`/`rmd drain` check (see module header). */
   fleetControlRoot: string;
+  /** Core repository resolved from the serving checkout, for assistant-action target binding. */
+  assistantRepository?: string;
   /** `plan/questions.ndjson` root — MUST equal the `repoRoot` `appendQuestion` writes into (see module header). */
   questionsRoot: string;
   tokens: ServiceTokens;
@@ -2655,6 +2659,8 @@ function assembleServeRoutes(
     for (const event of outcome.events) appendLedger(deps.ledgerPath, ciIncidentEventLedgerLine(event, nowMs));
   };
   const readLadder = (nowMs: number): RepairLadderState => (deps.repairLadder?.read ?? readRepairLadderState)(deps.fleetControlRoot, nowMs);
+  const assistantControl = { ...fleetControlDeps, claimRoot: deps.fleetControlRoot,
+    instance: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, bootSha: consoleSha };
   const rawRoutes = [
     withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen), modelApprovals), readLadder),
     ...buildRepoDashboardRoutes({
@@ -2686,7 +2692,9 @@ function assembleServeRoutes(
     buildPauseRoute(fleetControlDeps),
     buildResumeRoute(fleetControlDeps),
     buildStopRoute(fleetControlDeps),
-    buildAssistantControlRoute({ ...fleetControlDeps, claimRoot: deps.fleetControlRoot, instance: deps.instances?.coreInstance ?? CORE_INSTANCE }),
+    buildAssistantControlRoute(assistantControl),
+    buildAssistantControlCapabilityRoute(assistantControl),
+    buildAssistantControlReceiptRoute(assistantControl),
     buildQuietHoursRoute(fleetControlDeps),
     buildAnswerQuestionRoute(questionDeps),
     buildApproveManualRoute(fleetControlDeps),
@@ -2857,6 +2865,7 @@ function assembleServeRoutes(
       }),
       ...deps.instances,
       assistantClaimRoot: deps.fleetControlRoot,
+      assistantBootSha: consoleSha,
       onAnalyticsCache: (cache) => instanceAnalyticsCaches.push(cache),
     }),
   );

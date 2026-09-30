@@ -3286,6 +3286,13 @@ DECISIONS.md). Ruling-shaped records stay on the W1-T3188 sweep, whose release a
 The judge's rule gains one escalation clause for these records: it asks for a decision only the
 operator can make (his priorities, budget, preference or policy).
 
+**RELEASED WORK DISPATCHES BY ITS MEASURED COST (operator answer, 2026-09-29).** A filer that prices its
+finding writes `priority: 90 − 12·ln(1 + cost)`, bounded to 1..90, so the most expensive released
+problems dispatch first (`costPriority`). The cost is PR-minutes for ci-friction (its recency-weighted
+pricing) and refused-PR occurrences for the CI-learning rung. A released machine record with no
+recorded cost gets the middle priority, 50, instead of sorting last. The priority sits inside the
+ruling's pin. An operator record's priority stays his.
+
 **`rmd approve` IS DURABLE.** The operator's release still writes its `ratify.approved` row, which
 takes effect at once. It is also kept in `state/operator-releases.json`, which rotation does not touch,
 and the judge's next pass pins it on the record as an `operator` ruling. That pass asks no model and

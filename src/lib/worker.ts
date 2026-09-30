@@ -66,6 +66,7 @@ import { loadMounts, mountsPath, resolveClaudeModelAlias, subscriptionOnlyModel,
 import {
   experimentDrawSeed,
   experimentIntentionToTreat,
+  experimentTaskIdentity,
   ROUTING_EXPERIMENTS,
   routingExperimentFor,
   type ExperimentIntentionToTreat,
@@ -1496,7 +1497,8 @@ export function workerSelectionAssignment(
   const model = input.model ?? selected?.model ?? args.model ?? DEFAULT_MODEL_LABEL;
   const recordedModel = input.provider === "claude" ? resolveClaudeModelAlias(model, input.capabilities) : model;
   const decision = routingDecision(args, recordedModel !== model ? { ...input, model: recordedModel } : input);
-  const experiment = decision.ab && args.taskId ? experimentIntentionToTreat(decision.ab, args.taskId, input.provider) : undefined;
+  const unit = experimentTaskIdentity(args.taskId);
+  const experiment = decision.ab && unit ? experimentIntentionToTreat(decision.ab, unit, input.provider) : undefined;
   return {
     version: 1,
     id: randomUUID(),
@@ -1572,7 +1574,7 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
     considered.push({ provider: input.provider, model: alternative, eligible: true, selected: false, reason: "ladder-alternative" });
   }
   const rule = routingRule(args, input);
-  const ab = rule === "headroom-auction"
+  const ab = rule === "headroom-auction" && experimentTaskIdentity(args.taskId) !== undefined
     ? routingExperimentFor({ capability: input.capability, effort: args.effort, considered })
     : undefined;
   return {
@@ -1621,7 +1623,8 @@ export function auctionDrawSeed(
   }));
   const id = policy.preference === "automatic" ? routingExperimentFor({ capability, effort: args.effort, considered }) : undefined;
   const experiment = ROUTING_EXPERIMENTS.find((candidate) => candidate.id === id);
-  if (experiment && args.taskId) return experimentDrawSeed(experiment, args.taskId);
+  const unit = experimentTaskIdentity(args.taskId);
+  if (experiment && unit) return experimentDrawSeed(experiment, unit);
   return { unit: "spawn", taskId: args.taskId ?? "no-task", attempt: args.runId ?? "no-run", point: spawnDecisionPoint(args) };
 }
 
