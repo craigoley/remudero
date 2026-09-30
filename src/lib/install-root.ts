@@ -77,6 +77,7 @@ export interface SeparationCheckInputs {
   stateRoot: string;
   /** The checkout the OPERATOR writes (today's `repoRoot`). */
   operatorRepoRoot: string;
+  allowManagedInstallInvoker?: boolean;
 }
 
 export type SeparationCheck = { ok: true } | { ok: false; reason: string };
@@ -85,8 +86,8 @@ export type SeparationCheck = { ok: true } | { ok: false; reason: string };
  * THE SEPARATION INVARIANT (design note iv) — the part a test can actually hold. Refuses when
  * the resolved state root sits INSIDE the install root (the install checkout must hold only the
  * daemon's own code, never runtime exhaust), or when the install root sits inside — or equals —
- * a checkout the operator writes (today's production configuration, `install root == repoRoot`,
- * is exactly the case this refuses). Only these two directions are checked, matching the design
+ * a checkout the operator writes. An explicit managed tick from the dedicated install root is
+ * exempt only when its state root is supplied. Only these two directions are checked, matching the design
  * note's own wording; the reverse (operator checkout nested inside the install root) is not part
  * of the stated invariant and is left alone.
  */
@@ -100,7 +101,11 @@ export function checkInstallSeparation(i: SeparationCheckInputs): SeparationChec
         `config.root/installRoot so the two never nest`,
     };
   }
-  if (isPathInside(i.operatorRepoRoot, i.installRoot)) {
+  const managedInstallInvoker =
+    i.allowManagedInstallInvoker === true &&
+    resolve(i.operatorRepoRoot) === resolve(i.installRoot) &&
+    resolve(i.installRoot) === resolve(i.stateRoot, "daemon-install");
+  if (isPathInside(i.operatorRepoRoot, i.installRoot) && !managedInstallInvoker) {
     return {
       ok: false,
       reason:
@@ -294,12 +299,13 @@ export type InstallAssessment = { ok: true; installRoot: string } | { ok: false;
  */
 export function assessInstallForDeploy(
   installRoot: string,
-  opts: { operatorRepoRoot: string; stateRoot: string; deps?: InstallRootDeps },
+  opts: { operatorRepoRoot: string; stateRoot: string; allowManagedInstallInvoker?: boolean; deps?: InstallRootDeps },
 ): InstallAssessment {
   const separation = checkInstallSeparation({
     installRoot,
     stateRoot: opts.stateRoot,
     operatorRepoRoot: opts.operatorRepoRoot,
+    allowManagedInstallInvoker: opts.allowManagedInstallInvoker,
   });
   if (!separation.ok) return { ok: false, reason: separation.reason };
 

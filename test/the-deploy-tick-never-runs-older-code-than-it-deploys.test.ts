@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -44,7 +44,7 @@ function stage(npmSucceeds: boolean): Stage {
   const seed = gitRepo({ kind: "deploy-code-seed" });
   mkdirSync(join(seed.dir, "deploy"), { recursive: true });
   mkdirSync(join(seed.dir, "bin"), { recursive: true });
-  executable(join(seed.dir, "bin", "rmd"), `#!/usr/bin/env bash\necho "$@" >> "${installLog}"\nexit 0\n`);
+  executable(join(seed.dir, "bin", "rmd"), `#!/usr/bin/env bash\necho "$PWD|$@" >> "${installLog}"\nexit 0\n`);
   executable(join(seed.dir, "deploy", "install-host-units.sh"), "#!/usr/bin/env bash\nexit 0\n");
   writeFileSync(join(seed.dir, "package-lock.json"), '{"lockfileVersion":3}\n');
   seed.addRemote("origin", origin.dir);
@@ -101,7 +101,26 @@ test("W1-T4844: the generated watchdog runs deploy-run from the install checkout
   const r = renderAndRun(s);
   assert.equal(r.status, 0, r.stderr);
   assert.match(read(s.installLog), /deploy-run --image-drift-only/, "the install checkout's rmd must take the deploy");
+  assert.equal(read(s.installLog).split("|")[0], s.installDir, "deploy-run must resolve repoRoot from the install checkout");
   assert.equal(read(s.daemonLog), "", "the daemon tree must not be asked once the install checkout can run");
+});
+
+test("W1-T4844: real deploy-run passes the install separation gate from the managed checkout", (t) => {
+  const s = stage(true);
+  t.after(() => rmSync(s.root, { recursive: true, force: true }));
+  const home = join(s.root, "home");
+  mkdirSync(home);
+  const result = spawnSync(join(process.cwd(), "node_modules", ".bin", "tsx"), [
+    join(process.cwd(), "src", "run-task.ts"), "deploy-run", "--dry-run", "--state-root", s.stateDir, "--repo-root", s.installDir,
+  ], {
+    cwd: s.installDir,
+    encoding: "utf8",
+    timeout: 30_000,
+    env: { ...process.env, HOME: home, GH_TOKEN: "test-token" },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stdout, /resolves INSIDE the operator's own checkout/);
+  assert.match(result.stdout, /### rmd deploy-run — no-op:/);
 });
 
 test("W1-T4844: convergence leaves the install checkout able to run rmd", (t) => {
@@ -123,4 +142,30 @@ test("W1-T4844: a failed install leaves deploy-run on the daemon tree and never 
   assert.match(read(s.daemonLog), /deploy-run --image-drift-only/, "the daemon tree remains the fallback");
   assert.equal(read(s.installLog), "");
   assert.match(r.stderr, /npm ci in the install checkout failed/);
+});
+
+test("a failed reinstall cannot select an old install runtime that still has tsx", (t) => {
+  const s = stage(true);
+  t.after(() => rmSync(s.root, { recursive: true, force: true }));
+  assert.equal(renderAndRun(s).status, 0);
+  writeFileSync(join(s.installDir, "node_modules", ".rmd-lock-blob"), "stale\n");
+  executable(join(s.stubDir, "npm"), "#!/usr/bin/env bash\nexit 1\n");
+  const r = renderAndRun(s);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(read(s.daemonLog), /deploy-run --image-drift-only/);
+  assert.match(r.stderr, /npm ci in the install checkout failed/);
+});
+
+test("the runtime installer leaves a shared node_modules symlink untouched", (t) => {
+  const s = stage(true);
+  t.after(() => rmSync(s.root, { recursive: true, force: true }));
+  const shared = join(s.root, "shared-modules");
+  mkdirSync(shared);
+  writeFileSync(join(shared, "sentinel"), "kept");
+  symlinkSync(shared, join(s.installDir, "node_modules"));
+  const r = renderAndRun(s);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(read(join(shared, "sentinel")), "kept");
+  assert.equal(read(s.npmLog), "");
+  assert.match(read(s.daemonLog), /deploy-run --image-drift-only/);
 });
