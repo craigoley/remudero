@@ -1,9 +1,7 @@
 // src/lib/refusal-amendment.ts — W1-T4838: A WORKER'S REASONED REFUSAL BECOMES A PLAN AMENDMENT.
 //
-// OBSERVED 2026-09-29: five tasks were stuck on reasons their own workers had stated (a rotted
-// premise, a contradicting precondition, files outside `files:`), each re-dispatched as a `no_pr`
-// failure until its breaker tripped and then fixed by hand. The worker's account was already in the
-// verdict row's `report_excerpt`. This module reads that account back:
+// A worker's categorized refusal used to be re-dispatched as a `no_pr` failure until the breaker
+// tripped; its account already sat in the verdict row's `report_excerpt`. This module reads it back:
 //
 //   (i)   {@link extractRefusal} parses the CATEGORIZED `REFUSED:` block (the one grammar review.ts's
 //         `parseCriterionRefusals` already defines — never a second dialect) from a `no_pr` row's
