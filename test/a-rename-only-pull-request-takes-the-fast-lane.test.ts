@@ -79,7 +79,8 @@ test("W1-T4811: ci.yml short-circuits the test matrix only on the predicate's ve
   assert.match(ci, /isRenameOnlyDiff\(readFileSync\("rename-raw\.txt"/, "the classify step must call the real predicate");
   assert.match(ci, /git diff --raw --no-abbrev -M "origin\/\$\{GITHUB_BASE_REF\}\.\.\.HEAD"/);
   assert.match(ci, /echo "rename_only=\$\{RENAME_ONLY\}" >> "\$GITHUB_OUTPUT"/);
-  assert.match(ci, /if \[ "\$\{\{ steps\.classify\.outputs\.rename_only \}\}" = "true" \]; then/);
+  assert.match(ci, /RENAME_ONLY: \$\{\{ steps\.classify\.outputs\.rename_only \}\}/);
+  assert.match(ci, /if \[ "\$\{RENAME_ONLY:-false\}" = "true" \]; then/);
   // The lint still runs: lint-plan is a step of commitlint, which has no rename_only skip.
   assert.doesNotMatch(ci.split("\n  commitlint:")[1]!.split("\n  leak-grep:")[0]!, /rename_only/);
 });

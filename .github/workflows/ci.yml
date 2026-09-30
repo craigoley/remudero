@@ -239,12 +239,14 @@ jobs:
         # identically to a complete one. The block below makes that legible without changing whether
         # the job is red; it needs `tee`, `set +e` and `PIPESTATUS` under Actions' `-eo pipefail`.
         # Why: measured on PR #3542 — docs/forensics/ci-yml.md.
+        env:
+          RENAME_ONLY: ${{ steps.classify.outputs.rename_only }}
         run: |
           CLASS="${{ steps.classify.outputs.class }}"
           # W1-T4811: a rename-only pull request (every path an R100 rename between plan/tasks.d shards, blobs
           # unchanged) merges on the plan lint alone; nothing it touches is reachable by a suite. The verdict is
           # computed by the classify step from git's blob ids, so a one-byte edit never reaches this branch.
-          if [ "${{ steps.classify.outputs.rename_only }}" = "true" ]; then
+          if [ "${RENAME_ONLY:-false}" = "true" ]; then
             echo "W1-T4811 fast-lane: rename-only pull request — the test matrix is short-circuited to success; lint-plan still runs."
             echo "- W1-T4811 fast-lane: rename-only pull request; shard ${{ matrix.shard }}/8 registered success without running a suite." >> "$GITHUB_STEP_SUMMARY"
             exit 0
