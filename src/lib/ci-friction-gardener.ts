@@ -359,7 +359,7 @@ export function ciFrictionGardenLogPath(stateDir: string): string {
 const CI_FRICTION_SLUG_MAX = 72;
 
 /** Render ONE draft as a single-element YAML task list — the shard file's whole contents. */
-export function ciFrictionShardYaml(price: CiFrictionCausePrice, taskId: string): string {
+export function ciFrictionShardYaml(price: CiFrictionCausePrice, taskId: string, priced: readonly CiFrictionCausePrice[] = [price]): string {
   const key = ciFrictionCauseKey(price.cause);
   const origin = ciFrictionOrigin(price.cause);
   // The shared machine-filing path (operator ruling 2026-09-29): the header, verify and risk are its.
@@ -369,6 +369,7 @@ export function ciFrictionShardYaml(price: CiFrictionCausePrice, taskId: string)
     origin,
     files: [CI_FRICTION_REMEDIES_FILE],
     cost: price.minutes,
+    costPopulation: priced.map((p) => p.minutes),
     acceptance: [{ claim: `the ${key} cause of PR friction has a recorded remedy`, proof: `grep: ${origin} in ${CI_FRICTION_REMEDIES_FILE}` }],
     note: `Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. ${key} priced at ${price.minutes} PR minute(s) across ${price.rounds} round(s) on ${price.prs} pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in ${CI_FRICTION_REMEDIES_FILE} naming "${origin}" once it lands.`,
   }).text;
@@ -414,6 +415,8 @@ export const CI_FRICTION_GARDEN_CLASSES: readonly CiFrictionGardenClass[] = ["dr
 export interface CiFrictionGardenAction extends GardenAction<CiFrictionGardenClass> {
   price: CiFrictionCausePrice;
   origin: string;
+  /** Every cause priced in the pass, which ranks this one's dispatch priority. */
+  priced?: CiFrictionCausePrice[];
 }
 
 export interface CiFrictionInventory {
@@ -441,6 +444,7 @@ function draftCandidates(inv: CiFrictionInventory): CiFrictionGardenAction[] {
       target: ciFrictionCauseKey(cause),
       origin: ciFrictionOrigin(cause),
       price: inv.untracked,
+      priced: inv.priced,
       reason: `${ciFrictionCauseKey(cause)} cost ${inv.untracked.minutes} PR minute(s) across ${inv.untracked.rounds} round(s) on ${inv.untracked.prs} pull request(s) — the costliest cause with no open task.`,
     },
   ];
@@ -502,7 +506,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       if (!action) return undefined;
       if (!ws.branch) throw new Error("ci-friction gardener: filing workspace has no branch for task-id reservation");
       const taskId = sources.mintTaskId(ws.branch);
-      const contents = ciFrictionShardYaml(action.price, taskId);
+      const contents = ciFrictionShardYaml(action.price, taskId, action.priced);
       const verdict = ciFrictionRecordVerdict(contents, `ci-friction:${taskId}`);
       if (!verdict.ok) throw new Error(`ci-friction gardener: drafted record failed lint (${verdict.reason})`);
       const stem = kebabSlug(ciFrictionCauseKey(action.price.cause), CI_FRICTION_SLUG_MAX).replace(/-+$/, "");
