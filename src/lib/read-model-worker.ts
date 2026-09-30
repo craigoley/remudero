@@ -750,6 +750,8 @@ export interface ReadModelWorkerHandle {
   stop(): boolean;
   /** Hands one sampled shadow request to the worker, which diffs it off serve's main thread. */
   shadow(request: ShadowRequest): void;
+  /** Calls `listener` with each body the worker posts, after it is stored; returns the unsubscribe. */
+  onBody(listener: (entry: ReadModelBodyEntry) => void): () => void;
 }
 
 export interface ReadModelWorkerOptions {
@@ -801,10 +803,13 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   let stopping = false;
   let deaths = 0;
   let respawnTimer: NodeJS.Timeout | undefined;
+  const bodyListeners = new Set<(entry: ReadModelBodyEntry) => void>();
 
   const onMessage = (msg: ReadModelWorkerMessage): void => {
-    if (msg.type === "body") bodies.set(readModelBodyKey(msg.entry.view, msg.entry.key), msg.entry);
-    else if (msg.type === "log") opts.log?.(msg.step, msg.extra);
+    if (msg.type === "body") {
+      bodies.set(readModelBodyKey(msg.entry.view, msg.entry.key), msg.entry);
+      for (const listener of bodyListeners) listener(msg.entry);
+    } else if (msg.type === "log") opts.log?.(msg.step, msg.extra);
     else {
       at = msg.at;
       switches = msg.switches;
@@ -847,6 +852,10 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     }),
     switches: () => mainSwitches,
     shadow: (request) => worker?.postMessage({ type: "shadow", ...request }),
+    onBody: (listener) => {
+      bodyListeners.add(listener);
+      return () => bodyListeners.delete(listener);
+    },
     start: () => {
       if (worker || stopping) return;
       spawn();

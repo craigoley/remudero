@@ -61,6 +61,7 @@ export const DECLARED_BRANCH_GUARDS: readonly string[] = [
   // the drift alarm below reported them on the live repo, which is the alarm working as intended.
   "diag/drain-concurrency",
   "diag/drain-sequential-await",
+  "diag/resume-spawn-enoent",
 ];
 
 export function isDeclaredBranchGuard(name: string, declaredGuards: readonly string[] = DECLARED_BRANCH_GUARDS): boolean {
@@ -467,7 +468,7 @@ export interface BranchManifestEntry {
  * FOR A DELETE IT IS NOT, because "no PR yet" and "no PR ever" are the same observation. A worker
  * that has just cut `run-<taskId>-<epochMs>` from main and pushed it to claim the id has a tip that
  * IS main's tip, no PR, and therefore lands in `deletable` — indistinguishable from a year-dead
- * probe ref. `probe-ref-perm-16166` sat in the live deletable set on exactly this route. The
+ * probe ref. A `probe-ref-perm-*` ref sat in the live deletable set on exactly this route. The
  * distinction those two need is TIME, which is why {@link withholdActiveBranches} age-gates these
  * two reasons and leaves the PR-decisive ones alone: a merged or closed PR is proof about the work,
  * whatever the branch's age, and gating it would withhold branches that are genuinely finished.

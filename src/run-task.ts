@@ -1381,6 +1381,7 @@ import {
   type GitHub,
   type GhFailureReason,
   preferImplementingPr,
+  isBookkeepingOnlyChangeset,
   type PrRef,
   type OpenSiblingBuild,
   type StatusProjection,
@@ -20978,7 +20979,7 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
  * REF may be deleted, and merged/closed are statements about PAST pull requests on that name while
  * `open` is a statement about the ref RIGHT NOW. MEASURED on the live repo: `claude/resolve-p27-
  * findings-rnvu61` carries ten merged PRs and one open (#4392, filed hours earlier), and
- * `claude/remudero-planning-clarify-142opb` the same shape (#4391) — under merged-leads both folded
+ * #4391's `claude/remudero-planning-clarify-*` head the same shape — under merged-leads both folded
  * to `merged`, landed in `plan.deletable`, and a prune would have deleted the head of two live PRs.
  * A stale branch whose old PR was never closed now HOLDS instead, which is the safe direction for a
  * decision that removes a ref.
@@ -24776,8 +24777,8 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
  * Exported as a PREDICATE rather than inlined so a test can drive all three values directly: the
  * function below reads config, a ledger and GitHub, and none of that is the rule under test.
  */
-export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementation?: boolean }): boolean {
-  return c.merged === true && c.creditIsImplementation === true;
+export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementation?: boolean; creditHasBuildDiff?: boolean }): boolean {
+  return c.merged === true && (c.creditIsImplementation === true || c.creditHasBuildDiff === true);
 }
 
 /** The default credit projection: the SAME `buildCreditCandidates` the sweep's credit rung uses,
@@ -37399,12 +37400,17 @@ export function creditCandidatesFromProjection(
   projections: Iterable<StatusProjection>,
   mergeSubjects: ReadonlyMap<number, string>,
   mergeBodies: ReadonlyMap<number, string> = new Map(),
+  mergedPaths: ReadonlyMap<number, readonly string[]> = new Map(),
 ): CreditCandidate[] {
   const candidates: CreditCandidate[] = [];
   for (const projection of projections) {
     if (!projection.merged || projection.prNumber === undefined || projection.prUrl === undefined) continue;
     const subjectCredit = creditSubjectIsImplementation(mergeSubjects.get(projection.prNumber));
     const prerequisiteOnly = prerequisiteOnlyMergeBody(mergeBodies.get(projection.prNumber), projection.taskId);
+    const paths = mergedPaths.get(projection.prNumber);
+    let creditHasBuildDiff: boolean | undefined;
+    if (prerequisiteOnly === true) creditHasBuildDiff = false;
+    else if (paths !== undefined && paths.length > 0) creditHasBuildDiff = !isBookkeepingOnlyChangeset(paths);
     candidates.push({
       taskId: projection.taskId,
       prNumber: projection.prNumber,
@@ -37414,6 +37420,7 @@ export function creditCandidatesFromProjection(
       // the squash commit carries the task trailer. Unreadable body evidence stays with the
       // subject result so this repair can only subtract the measured false credit.
       creditIsImplementation: prerequisiteOnly === true ? false : subjectCredit,
+      creditHasBuildDiff,
     });
   }
   return candidates;
@@ -37476,7 +37483,7 @@ export function buildCreditCandidates(
     const pr = baseGithub.prByRef(candidate.prUrl);
     if (pr?.body !== undefined) mergeBodies.set(candidate.prNumber, pr.body);
   }
-  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies);
+  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies, deps.mergedPathsByPr);
 }
 
 /**
