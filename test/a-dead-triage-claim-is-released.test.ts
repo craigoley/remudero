@@ -258,7 +258,7 @@ test("W1-T4769 WIRING: the default ledger read, the unresolvable-repo arm and a 
   mkdirSync(join(rootA, "state"), { recursive: true });
   try {
     const config = { root: rootA, claudeBin: "/bin/true" } as unknown as import("../src/lib/config.js").Config;
-    const reserver = fakeReserver({ [head]: { sha: "s", message: anchor(94, "h", 0).replace(iso(0), at(3 * 24 * HOUR)) } });
+    const reserver = fakeReserver({ [head]: { sha: "s", message: anchor(94, "h", 0).replace(iso(0), at(5 * HOUR)) } });
     const d = autoTriageCheck({ ...args, config, claimReserver: reserver });
     assert.deepEqual(reserver.drops, [], "an unobservable holder is not dropped on the default read");
     assert.notEqual(d.fire && d.feedbackId, head, "the held head is passed over");
