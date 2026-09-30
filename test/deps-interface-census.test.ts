@@ -4,15 +4,22 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SRC_ROOT = join(REPO_ROOT, "src");
 const BASELINE_PATH = join(REPO_ROOT, "scripts", "deps-interface-baseline.json");
 
-const DEPS_DECLARATION = /^(?:export\s+)?(?:interface|type)\s+([A-Za-z0-9_]+Deps)\b/gm;
-const SEAM_DECLARATION = /^(?:export\s+)?(?:interface|type)\s+([A-Za-z0-9_]+(?:Deps|Seams))\b/gm;
-const INLINE_SEAM = /\bdeps\??\s*:\s*\{/g;
+// The counters live in scripts/deps-interface-census.mjs so scripts/census-precheck.mjs counts through the
+// same module without starting this suite (`scripts/**` sits outside tsconfig's `include`).
+const { DEPS_DECLARATION, SEAM_DECLARATION, depsInterfaceNames, inlineAndAliasedSeams } = (await import(
+  pathToFileURL(join(REPO_ROOT, "scripts", "deps-interface-census.mjs")).href
+)) as {
+  DEPS_DECLARATION: RegExp;
+  SEAM_DECLARATION: RegExp;
+  depsInterfaceNames: (contents: Iterable<string>) => string[];
+  inlineAndAliasedSeams: (contents: Iterable<string>) => { inline: number; aliased: string[] };
+};
 
 function listTsFiles(dir: string): string[] {
   const out: string[] = [];
@@ -29,28 +36,17 @@ function toRepoRelative(path: string): string {
   return relative(REPO_ROOT, path).split(sep).join("/");
 }
 
+function srcTexts(): string[] {
+  return listTsFiles(SRC_ROOT).map((file) => readFileSync(file, "utf8"));
+}
+
 export function depsInterfaceDeclarations(): string[] {
-  const names = new Set<string>();
-  for (const file of listTsFiles(SRC_ROOT)) {
-    const text = readFileSync(file, "utf8");
-    for (const match of text.matchAll(DEPS_DECLARATION)) names.add(match[1]!);
-  }
-  return [...names].sort();
+  return depsInterfaceNames(srcTexts());
 }
 
 /** W1-T3744: count the two spellings which used to walk around the `*Deps` census. */
 export function countsInlineAndAliasedSeams(): { inline: number; aliased: string[] } {
-  let inline = 0;
-  const aliased = new Set<string>();
-  for (const file of listTsFiles(SRC_ROOT)) {
-    const text = readFileSync(file, "utf8");
-    inline += [...text.matchAll(INLINE_SEAM)].length;
-    for (const match of text.matchAll(SEAM_DECLARATION)) {
-      const name = match[1]!;
-      if (name.endsWith("Seams")) aliased.add(name);
-    }
-  }
-  return { inline, aliased: [...aliased].sort() };
+  return inlineAndAliasedSeams(srcTexts());
 }
 
 function declarationBodies(): Array<{ name: string; body: string }> {
