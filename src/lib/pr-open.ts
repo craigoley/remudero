@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
 import { loadPlan } from "./plan.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
@@ -67,8 +69,73 @@ export function defaultProofRunner(
   };
 }
 
-function reject(reason: string): never {
-  throw new Error(`openPullRequestChecked: ${reason}`);
+/** `stale-proof`: a filed proof already passes at the merge base, a plan defect only an operator amendment can
+ *  repair (Rule 15 bars the worker). `branch-gap`: anything else, which a later build of the task can close. */
+export type PrOpenRefusalClass = "stale-proof" | "branch-gap";
+
+export class PrOpenRefusedError extends RmdError {
+  constructor(
+    readonly refusalClass: PrOpenRefusalClass,
+    reason: string,
+  ) {
+    super("plan", GENERIC_EXIT_CODE, `openPullRequestChecked: ${reason}`, { refusalClass });
+    this.name = "PrOpenRefusedError";
+  }
+}
+
+function reject(reason: string, refusalClass: PrOpenRefusalClass = "branch-gap"): never {
+  throw new PrOpenRefusedError(refusalClass, reason);
+}
+
+/** Where a refused open leaves the branch: already pushed, so it is named in the ledger rather than stranded. */
+export interface RefusedPrOpenBranch {
+  taskId: string;
+  branch: string;
+  headSha: string;
+}
+
+/**
+ * The branch a refused open leaves behind is RECORDED, never stranded: both push paths land it on origin before the
+ * opener runs, so the refusal names the branch and head in `pr.open_refused`. A `stale-proof` refusal also escalates,
+ * since only an operator amendment can clear it; a `branch-gap` one is released for re-dispatch by the orphan-branch
+ * grace (#8145). Returns the escalation issue url, or null when none was raised or the raise failed.
+ */
+export function recordRefusedPrOpen(
+  err: PrOpenRefusedError,
+  at: RefusedPrOpenBranch,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  escalation: EscalateDeps,
+): string | null {
+  log("pr.open_refused", {
+    branch: at.branch,
+    head_sha: at.headSha,
+    refusal_class: err.refusalClass,
+    reason: err.message,
+  });
+  if (err.refusalClass !== "stale-proof") return null;
+  const blocked: Escalation = {
+    class: "BLOCKED",
+    taskId: at.taskId,
+    runId: escalation.runId,
+    headSha: at.headSha,
+    headDedup: "independent",
+    summary: `${at.taskId}: a filed proof already passes at the merge base, so branch ${at.branch} cannot open a PR`,
+    detail:
+      `The run pushed branch \`${at.branch}\` (head ${at.headSha}), then the PR opener refused it:\n\n${err.message}\n\n` +
+      "The branch is kept on origin. The worker cannot edit its own task's proof (Rule 15), so a rebuild would be refused the same way.",
+    options: [
+      {
+        label: "amend-proof",
+        detail: `amend ${at.taskId}'s proof in a plan-only PR so it fails at the merge base, then open a PR from ${at.branch}.`,
+      },
+      { label: "retire-task", detail: `retire ${at.taskId} if the proof shows the work is already on main.` },
+    ],
+    recommendation: "amend-proof",
+    consequence: `${at.branch} stays PR-less and ${at.taskId} is refused again on every rebuild.`,
+  };
+  const issueUrl = tryEscalate(blocked, escalation);
+  log("pr.open_refused.escalated", { branch: at.branch, issue_url: issueUrl });
+  return issueUrl;
 }
 
 function sameCriteria(
@@ -170,6 +237,7 @@ export function openPullRequestChecked(
       const detail = [result.error, result.stderr, result.stdout].filter(Boolean).join("\n").trim();
       return reject(
         `${taskId} proof did not pass against merge base (${proof})${detail ? `: ${detail}` : `: exit ${result.status ?? result.signal ?? "unknown"}`}`,
+        /\bexecuted_stale\b/.test(detail) ? "stale-proof" : "branch-gap",
       );
     }
   }
