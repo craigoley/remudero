@@ -125,7 +125,7 @@ import { buildRepoDashboardRoutes } from "./repo-dashboard-route.js";
 import { buildTaskCardRoute } from "./task-card.js";
 import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operator-notes.js";
 import { buildRecordJudgeLabelRoute, fileJudgeLabelStore } from "./judge-calibration.js";
-import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, type OperatorAgentMemorySource } from "./operator-agent.js";
+import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, prewarmOperatorAgentReads, type OperatorAgentMemorySource } from "./operator-agent.js";
 import { buildContextControlsRoutes } from "./context-controls.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import {
@@ -2662,6 +2662,7 @@ function assembleServeRoutes(
     ...(operatorAgentMemory ? { memory: operatorAgentMemory } : {}),
     goalBoard: () => ({ plan: deps.board.plan, snapshot: goalBoardCache.get(deps.board) }),
   });
+  prewarmOperatorAgentReads(deps.ledgerPath).catch((e) => deps.log?.("serve.operator_agent_prewarm_failed", { reason: String((e as Error)?.message ?? e) }));
   // W1-T3893: the operator self-service surface (inventory/forget/revoke/export) over the SAME
   // ledger-backed context-governance engine above — same ledgerPath, so a self-service forget and
   // a governance delete are the identical durable receipt, never a second memory store. Raw

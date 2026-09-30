@@ -15,9 +15,8 @@ import { clockFromMillisFn, fixedClock } from "./clock.js";
 import { EMERGENCY_STOP_CLEARED_LEDGER_STEP, EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "./ledger.js";
 import {
   createLedgerRotationMemo,
+  readLedgerUnionRecordsMemoized,
   readLedgerUnionRecordsSync,
-  realLedgerFs,
-  type LedgerGrepFsDeps,
   type LedgerRotationMemo,
   type LedgerUnionRecordRead,
   type LedgerUnionRecordReadOptions,
@@ -607,39 +606,52 @@ function validateContextRegistration(value: unknown): { error: string } | { cont
   return context ? { context } : { error: "context must be a complete bounded context-item-v1 envelope" };
 }
 
-/** W1-T4582: one rotation memo per state dir and step set. The operator-agent reads re-parsed every
- *  rotated archive on every request (W1-T4576's reach census named six of their routes). A rotation
- *  is written once: a COMPLETE pass answers from the memo, parsing only the live file. A pass that
- *  lacks a rotation reads it as EMPTY, so that request is answered by a full read instead, and the
- *  missing rotations load off the request for the next one. */
+/** W1-T4582: the operator-agent reads re-parsed every rotated archive per request. One memo per
+ *  state dir keeps every `panel.*` row of each rotation (a few thousand in the whole corpus), so every
+ *  operator-agent reader shares one parse. A sync read parses only a rotation it has not seen; a GET
+ *  awaits {@link readOperatorAgentUnionAsync}, which loads it off the loop. Re-reading the whole union
+ *  after each ~5 min rotation stalled serve 8–12 s per route (CPU profile, 2026-09-30). */
+const OPERATOR_AGENT_ROW = /"step":"panel\./;
 const operatorAgentUnionMemos = new Map<string, LedgerRotationMemo>();
-const operatorAgentUnionLoads = new Set<Promise<void>>();
+const operatorAgentUnionLoads = new Set<Promise<unknown>>();
 
-/** Resolves once every rotation load the operator-agent reads have started has finished. */
+/** Resolves once every off-loop operator-agent union load started so far has finished. */
 export async function settleOperatorAgentUnionLoads(): Promise<void> {
   while (operatorAgentUnionLoads.size > 0) await Promise.all([...operatorAgentUnionLoads]);
 }
 
-function readOperatorAgentUnion(
-  stateDir: string,
-  opts: LedgerUnionRecordReadOptions & { step: string | readonly string[] },
-): LedgerUnionRecordRead {
-  const steps = new Set<string>(typeof opts.step === "string" ? [opts.step] : opts.step);
-  const key = `${stateDir}\u0000${[...steps].sort().join(",")}`;
-  let memo = operatorAgentUnionMemos.get(key);
+/** The memo keeps `panel.*` rows only, so a reader of any other step would silently miss its archived rows. */
+type PanelUnionReadOptions = Omit<LedgerUnionRecordReadOptions, "step"> & { step: `panel.${string}` | readonly `panel.${string}`[] };
+
+function operatorAgentUnionMemo(stateDir: string): LedgerRotationMemo {
+  let memo = operatorAgentUnionMemos.get(stateDir);
   if (memo === undefined) {
-    memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.has(row.step)));
-    operatorAgentUnionMemos.set(key, memo);
+    memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && row.step.startsWith("panel.")), { pattern: OPERATOR_AGENT_ROW });
+    operatorAgentUnionMemos.set(stateDir, memo);
   }
-  const pass = memo.pass();
-  const read = readLedgerUnionRecordsSync(stateDir, { ...opts, rotationRecords: pass.rotationRecords });
-  if (pass.complete()) return read;
-  const loading: Promise<void> = memo
-    .load(pass.missing())
-    .catch(() => undefined /* deliberate: a failed load only means the next read is full too */)
-    .finally(() => operatorAgentUnionLoads.delete(loading));
-  operatorAgentUnionLoads.add(loading);
-  return readLedgerUnionRecordsSync(stateDir, opts);
+  return memo;
+}
+
+function readOperatorAgentUnion(stateDir: string, opts: PanelUnionReadOptions): LedgerUnionRecordRead {
+  const pass = operatorAgentUnionMemo(stateDir).pass({ parseMissing: true });
+  const read = readLedgerUnionRecordsSync(stateDir, { ...opts, pattern: OPERATOR_AGENT_ROW, rotationRecords: pass.rotationRecords });
+  pass.complete();
+  return read;
+}
+
+/** {@link readOperatorAgentUnion}'s rows, with a rotation the memo lacks loaded off the loop (async gunzip, sliced parse). */
+function readOperatorAgentUnionAsync(stateDir: string, opts: PanelUnionReadOptions): Promise<LedgerUnionRecordRead> {
+  const read = readLedgerUnionRecordsMemoized(stateDir, operatorAgentUnionMemo(stateDir), { ...opts, pattern: OPERATOR_AGENT_ROW });
+  const tracked: Promise<unknown> = read
+    .catch(() => undefined /* deliberate: the caller receives this rejection; tracking only waits for it */)
+    .finally(() => operatorAgentUnionLoads.delete(tracked));
+  operatorAgentUnionLoads.add(tracked);
+  return read;
+}
+
+/** Loads the operator-agent memo for `ledgerPath` off the loop, so serve's first GET after a start is warm. */
+export async function prewarmOperatorAgentReads(ledgerPath: string): Promise<void> {
+  await readOperatorAgentUnionAsync(dirname(ledgerPath), { step: EMERGENCY_STEPS });
 }
 
 function contextRows(ledgerPath: string): Array<Record<string, unknown>> {
@@ -1159,15 +1171,15 @@ function validateConsequenceDecisionInput(body: unknown): { error: string } | Co
   };
 }
 
+const EXPERIMENT_STEPS = [
+  OPERATOR_AGENT_EXPERIMENT_STEP,
+  OPERATOR_AGENT_EXPERIMENT_DECISION_STEP,
+  OPERATOR_AGENT_EXPERIMENT_OUTCOME_STEP,
+  OPERATOR_AGENT_EXPERIMENT_ROLLBACK_STEP,
+] as const;
+
 function readExperimentRows(ledgerPath: string): Array<Record<string, unknown>> {
-  return readOperatorAgentUnion(dirname(ledgerPath), {
-    step: [
-      OPERATOR_AGENT_EXPERIMENT_STEP,
-      OPERATOR_AGENT_EXPERIMENT_DECISION_STEP,
-      OPERATOR_AGENT_EXPERIMENT_OUTCOME_STEP,
-      OPERATOR_AGENT_EXPERIMENT_ROLLBACK_STEP,
-    ],
-  }).rows;
+  return readOperatorAgentUnion(dirname(ledgerPath), { step: EXPERIMENT_STEPS }).rows;
 }
 
 function readPromotionRows(ledgerPath: string): Array<Record<string, unknown>> {
@@ -1395,9 +1407,13 @@ function experimentRollbackFromRow(row: Record<string, unknown>): { experimentId
 }
 
 export function readOperatorAgentExperiments(deps: OperatorAgentRouteDependencies): OperatorAgentExperimentHistory[] {
+  return foldOperatorAgentExperiments(readExperimentRows(deps.ledgerPath));
+}
+
+function foldOperatorAgentExperiments(rows: readonly Record<string, unknown>[]): OperatorAgentExperimentHistory[] {
   const experiments = new Map<string, OperatorAgentExperiment>();
   const events = new Map<string, OperatorAgentExperimentEvent[]>();
-  for (const row of readExperimentRows(deps.ledgerPath)) {
+  for (const row of rows) {
     const experiment = experimentFromRow(row);
     if (experiment && !experiments.has(experiment.experimentId)) experiments.set(experiment.experimentId, experiment);
     const parsed = experimentDecisionFromRow(row) ?? experimentOutcomeFromRow(row) ?? experimentRollbackFromRow(row);
@@ -1789,7 +1805,10 @@ export function buildOperatorAgentExperimentReadRoute(deps: OperatorAgentRouteDe
     method: "GET",
     path: "/v1/operator-agent/experiments",
     scope: "read",
-    handler: (_req, res) => sendJson(res, 200, { experiments: readOperatorAgentExperiments(deps), source: "ledger" }),
+    handler: async (_req, res) => {
+      const { rows } = await readOperatorAgentUnionAsync(dirname(deps.ledgerPath), { step: EXPERIMENT_STEPS });
+      sendJson(res, 200, { experiments: foldOperatorAgentExperiments(rows), source: "ledger" });
+    },
   };
 }
 
@@ -2877,33 +2896,13 @@ function validateEmergencyStopClear(body: unknown): { error: string } | { stopId
   };
 }
 
-const EMERGENCY_STEPS = [EMERGENCY_STOP_ISSUED_LEDGER_STEP, EMERGENCY_STOP_CLEARED_LEDGER_STEP];
+const EMERGENCY_STEPS = [EMERGENCY_STOP_ISSUED_LEDGER_STEP, EMERGENCY_STOP_CLEARED_LEDGER_STEP] as const;
 
-/** W1-T4334: archive-derived emergency rows per state dir, keyed by the archive file names. A rotated
- *  archive never changes once written, so only a NEW name can change these rows. */
-const emergencyArchiveRows = new Map<string, { key: string; rows: Array<Record<string, unknown>> }>();
-
-/** W1-T4334 — the emergency rows in union order (archives, then live), parsing the archives once per
- *  archive set: re-reading 900+ files on every status read and admission check froze the gateway's
- *  event loop for 10-30 s under console load (CPU profile, 2026-09-23). */
-export function emergencyStopRows(ledgerPath: string, fsDeps: LedgerGrepFsDeps = realLedgerFs): Array<Record<string, unknown>> {
-  const stateDir = dirname(ledgerPath);
-  let names: string[];
-  try {
-    names = fsDeps.readdirSync(stateDir);
-  } catch {
-    // An unreadable state dir is an empty corpus, exactly as the union reader itself treats it.
-    names = [];
-  }
-  const key = names.filter((n) => n.startsWith("ledger.")).sort().join("\n");
-  let archived = emergencyArchiveRows.get(stateDir);
-  if (archived?.key !== key) {
-    const rows = readLedgerUnionRecordsSync(stateDir, { step: EMERGENCY_STEPS, readLiveRecords: () => [] }, fsDeps).rows;
-    archived = { key, rows };
-    emergencyArchiveRows.set(stateDir, archived);
-  }
-  const live = readLedgerUnionRecordsSync(stateDir, { step: EMERGENCY_STEPS }, { ...fsDeps, readdirSync: () => [] }).rows;
-  return [...archived.rows, ...live];
+/** W1-T4334 — the emergency rows in union order (archives, then live). They ride the shared operator-agent
+ *  memo, so a new rotation costs its own parse: keying on the archive-name set re-parsed all 380+
+ *  archives inside the request after every rotation (12.5 s on the fleet host, 2026-09-30). */
+export function emergencyStopRows(ledgerPath: string): Array<Record<string, unknown>> {
+  return readOperatorAgentUnion(dirname(ledgerPath), { step: EMERGENCY_STEPS }).rows;
 }
 
 interface EmergencyControlState {
@@ -2911,10 +2910,10 @@ interface EmergencyControlState {
   clearedIds: Set<string>;
 }
 
-function readEmergencyControlState(ledgerPath: string): EmergencyControlState {
+function readEmergencyControlState(rows: readonly Record<string, unknown>[]): EmergencyControlState {
   const stops = new Map<string, EmergencyStop>();
   const clearedIds = new Set<string>();
-  for (const row of emergencyStopRows(ledgerPath)) {
+  for (const row of rows) {
     if (row.step === EMERGENCY_STOP_ISSUED_LEDGER_STEP) {
       const stop = parseStoredEmergencyStop(row.stop);
       if (stop && !stops.has(stop.id)) stops.set(stop.id, stop);
@@ -2929,8 +2928,8 @@ function readEmergencyControlState(ledgerPath: string): EmergencyControlState {
 
 /** The currently ACTIVE stops — already filtered by {@link isEmergencyStopActive} — this task's
  *  admission call sites pass straight to {@link checkEmergencyStop}. */
-function activeEmergencyStops(deps: OperatorAgentRouteDependencies): EmergencyStop[] {
-  const { stops, clearedIds } = readEmergencyControlState(deps.ledgerPath);
+function activeEmergencyStops(deps: OperatorAgentRouteDependencies, rows = emergencyStopRows(deps.ledgerPath)): EmergencyStop[] {
+  const { stops, clearedIds } = readEmergencyControlState(rows);
   const now = deps.now?.() ?? Date.now();
   return [...stops.values()].filter((stop) => isEmergencyStopActive(stop, clearedIds, now));
 }
@@ -2969,7 +2968,7 @@ export function buildEmergencyStopClearRoute(deps: OperatorAgentRouteDependencie
     scope: "write",
     tier: "high",
     handler: jsonAction(validateEmergencyStopClear, (input, req, res) => {
-      const { stops, clearedIds } = readEmergencyControlState(deps.ledgerPath);
+      const { stops, clearedIds } = readEmergencyControlState(emergencyStopRows(deps.ledgerPath));
       const stop = stops.get(input.stopId);
       if (!stop) {
         sendJson(res, 404, { error: "not_found", detail: `no emergency stop ${JSON.stringify(input.stopId)}` });
@@ -2992,7 +2991,10 @@ export function buildEmergencyStopStatusRoute(deps: OperatorAgentRouteDependenci
     method: "GET",
     path: "/v1/operator-agent/emergency/status",
     scope: "read",
-    handler: (_req, res) => sendJson(res, 200, { active: activeEmergencyStops(deps), source: "ledger" }),
+    handler: async (_req, res) => {
+      const { rows } = await readOperatorAgentUnionAsync(dirname(deps.ledgerPath), { step: EMERGENCY_STEPS });
+      sendJson(res, 200, { active: activeEmergencyStops(deps, rows), source: "ledger" });
+    },
   };
 }
 
@@ -3562,11 +3564,10 @@ export function buildOperatorAgentActionRollbackRoute(deps: OperatorAgentRouteDe
 // ── W1-T3878: delegation-profile-v1 routes ───────────────────────────────────────────────────
 
 /** Every delegation profile's durable state, folded from the ledger union. */
+const DELEGATION_STEPS = [DELEGATION_PROFILE_LEDGER_STEP, DELEGATION_DECISION_LEDGER_STEP, OPERATOR_AGENT_ACTION_RECEIPT_STEP] as const;
+
 export function readDelegationProfiles(deps: OperatorAgentRouteDependencies): DelegationProfileState[] {
-  const rows = readOperatorAgentUnion(dirname(deps.ledgerPath), {
-    step: [DELEGATION_PROFILE_LEDGER_STEP, DELEGATION_DECISION_LEDGER_STEP, OPERATOR_AGENT_ACTION_RECEIPT_STEP],
-  }).rows;
-  return foldDelegationProfiles(rows, OPERATOR_AGENT_ACTION_RECEIPT_STEP);
+  return foldDelegationProfiles(readOperatorAgentUnion(dirname(deps.ledgerPath), { step: DELEGATION_STEPS }).rows, OPERATOR_AGENT_ACTION_RECEIPT_STEP);
 }
 
 function findDelegation(deps: OperatorAgentRouteDependencies, delegationId: string): DelegationProfileState | undefined {
@@ -3610,9 +3611,11 @@ export function buildOperatorAgentDelegationReadRoute(deps: OperatorAgentRouteDe
     method: "GET",
     path: "/v1/operator-agent/delegations",
     scope: "read",
-    handler: (_req, res) => {
+    handler: async (_req, res) => {
       const clock = clockFromMillisFn(deps.now);
-      sendJson(res, 200, { version: DELEGATION_PROFILE_VERSION, profiles: readDelegationProfiles(deps).map((state) => projectDelegationProfile(state, clock)), source: "ledger" });
+      const { rows } = await readOperatorAgentUnionAsync(dirname(deps.ledgerPath), { step: DELEGATION_STEPS });
+      const profiles = foldDelegationProfiles(rows, OPERATOR_AGENT_ACTION_RECEIPT_STEP).map((state) => projectDelegationProfile(state, clock));
+      sendJson(res, 200, { version: DELEGATION_PROFILE_VERSION, profiles, source: "ledger" });
     },
   };
 }
