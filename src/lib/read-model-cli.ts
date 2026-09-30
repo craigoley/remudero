@@ -104,7 +104,7 @@ function switchCommand(stateDir: string, args: string[], out: (l: string) => voi
   if (projector) switches.projector = mode as ProjectorSwitch;
   else switches.views[target] = mode as ViewSwitch;
   writeAtomic(readModelSwitchesPath(stateDir), `${JSON.stringify(switches, null, 2)}\n`);
-  appendLedger(join(stateDir, LEDGER_FILENAME), { run_id: "read-model-cli", task_id: "READ-MODEL", step: READ_MODEL_SWITCH_STEP, target, mode, previous });
+  appendLedger(join(stateDir, LEDGER_FILENAME), { run_id: "read-model-cli", task_id: "CLI", step: READ_MODEL_SWITCH_STEP, target, mode, previous });
   out(`read-model switch ${target}: ${previous} -> ${mode}`);
   return 0;
 }
@@ -301,7 +301,7 @@ function rebuildCommand(stateDir: string, clock: Clock, args: string[], out: (l:
     published = true;
     const displaced = fenceGeneration(stateDir, instance, previous, holder, clock);
     appendLedger(join(stateDir, LEDGER_FILENAME), {
-      run_id: "read-model-cli", task_id: "READ-MODEL", step: READ_MODEL_REBUILT_STEP, instance, generation, rows: tick.fresh, facts: tick.facts,
+      run_id: "read-model-cli", task_id: "CLI", step: READ_MODEL_REBUILT_STEP, instance, generation, rows: tick.fresh, facts: tick.facts,
       quarantined: tick.quarantined, checked_rows: run.ledgerRows, elapsed_ms: clock.now() - started, reaped,
       ...(displaced ? { displaced_lease: displaced } : {}),
     });
