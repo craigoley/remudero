@@ -30,6 +30,7 @@ import {
   type ReadModelDb,
   type ReadModelLease,
 } from "./read-model-db.js";
+import { createRepositoriesReadModelView } from "./repositories-view.js";
 import { oldestAsOf, viewEtag, type ViewBody, type ViewBodyEntry, type ViewSource } from "./views.js";
 
 const READ_MODEL_WORKER_KIND = "remudero-read-model" as const;
@@ -180,7 +181,7 @@ export const readModelStatusView: ReadModelView = {
 };
 
 /** Every view the worker materializes; later Phase 1 views register here. */
-export const READ_MODEL_VIEWS: readonly ReadModelView[] = [createNavBadgeReadModelView(ledgerSource), readModelStatusView];
+export const READ_MODEL_VIEWS: readonly ReadModelView[] = [createNavBadgeReadModelView(ledgerSource), createRepositoriesReadModelView(ledgerSource), readModelStatusView];
 
 export interface ReadModelTickerOptions {
   /** Core's state dir: every instance's DB lives under its `read-model/` (design §1.7). */

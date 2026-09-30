@@ -85,9 +85,10 @@ import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionR
 import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildReadModelViewRoutes, type ViewBodySource } from "./views.js";
 import { navBadgeView, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
+import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
-import { buildInstanceGatewayRoutes, CORE_INSTANCE, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
+import { buildInstanceGatewayRoutes, CORE_INSTANCE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
 import { createReadModelWorker, READ_MODEL_VIEWS, type ReadModelInstance, type ReadModelWorkerHandle, type ReadModelWorkerOptions } from "./read-model-worker.js";
 import { buildOperatorAgentAnswer, buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
 import { buildOperatorAgentActionHandoffRoutes } from "./operator-agent-action-handoff.js";
@@ -2707,7 +2708,7 @@ function assembleServeRoutes(
       planPath: deps.panelGraph.planPath,
     }),
     buildRecentRoute(deps.board),
-    ...buildReadModelViewRoutes({ readModel: readModel && darkReadModelViews(readModel, ["nav-badge"]), readModelViews: READ_MODEL_VIEWS.map((view) => view.name),
+    ...buildReadModelViewRoutes({ readModel: readModel && darkReadModelViews(readModel, ["nav-badge", "repositories"]), readModelViews: READ_MODEL_VIEWS.map((view) => view.name),
       legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes })] }),
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),
@@ -3123,6 +3124,9 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     server.once("listening", () => server.once("close", startNavBadgeSourcePublisher({
       stateDir: dirname(deps.ledgerPath), inboxStateDir: join(deps.fleetControlRoot, "state"), scopes: routeAssembly.navBadgeScopes, every: deps.readModel?.every, log: deps.log,
     })));
+    server.once("listening", () => server.once("close", startRepositoriesSourcePublisher({
+      stateDir: dirname(deps.ledgerPath), instances: () => repositoriesSources(deps), every: deps.readModel?.every, log: deps.log,
+    })));
   }
   server.on("close", staleExit.stop);
   server.on("close", prewarm.stop);
@@ -3148,6 +3152,23 @@ export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questio
   const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath) };
   const others = livenessInstances({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances });
   return [core, ...others.map((instance) => ({ name: instance.name, ledgerDir: instance.stateDir }))];
+}
+
+export function repositoriesSources(deps: ServeDeps): RepositoriesSources["instances"] {
+  const core = deps.instances?.coreInstance ?? CORE_INSTANCE;
+  return [
+    { instanceId: core, options: {
+      root: deps.questionsRoot, repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot), ownInstance: core,
+      controlRoot: deps.fleetControlRoot, incidentsDir: deps.incidents?.stateDir ?? dirname(deps.ledgerPath), ledgerPath: deps.ledgerPath, planPath: deps.panelGraph.planPath,
+    } },
+    ...livenessInstances({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances }).map((instance) => {
+      const root = instanceStateRoot({ name: instance.name, repo: instance.repo, project: "", live: true }, dirname(dirname(instance.stateDir)));
+      const [owner, repo] = instance.repo.split("/");
+      return { instanceId: instance.name, options: {
+        root: root.root, ledgerPath: root.ledgerPath, planPath: root.planPath, instanceRepository: { owner, repo }, controlRoot: root.root, incidentsDir: join(root.root, "state"),
+      } };
+    }),
+  ];
 }
 
 export function darkReadModelViews(source: ViewBodySource, dark: readonly string[]): ViewBodySource {

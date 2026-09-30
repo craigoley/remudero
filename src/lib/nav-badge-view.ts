@@ -360,16 +360,16 @@ export function createNavBadgeSourcePublisher(opts: { stateDir: string; inboxSta
   };
 }
 
-/** Publishes now and then every {@link NAV_BADGE_SOURCES_PUBLISH_MS}; returns the stop. */
-export function startNavBadgeSourcePublisher(
-  opts: Parameters<typeof createNavBadgeSourcePublisher>[0] & { every?: (run: () => void, ms: number) => () => void; log?: (step: string, extra?: Record<string, unknown>) => void },
-): () => void {
-  const publish = createNavBadgeSourcePublisher(opts);
+type PublisherTiming = { every?: (run: () => void, ms: number) => () => void; log?: (step: string, extra?: Record<string, unknown>) => void };
+
+/** Runs a read-model source publisher now and then every {@link NAV_BADGE_SOURCES_PUBLISH_MS}, logging a failed
+ *  write under `step` and trying again next time; returns the stop. */
+export function startSourcePublisher(publish: () => unknown, step: string, opts: PublisherTiming): () => void {
   const run = (): void => {
     try {
       publish();
     } catch (error) {
-      opts.log?.("read_model.nav_badge_sources_failed", { error: (error as Error).message });
+      opts.log?.(step, { error: (error as Error).message });
     }
   };
   run();
@@ -379,8 +379,12 @@ export function startNavBadgeSourcePublisher(
   return () => clearInterval(timer);
 }
 
+export function startNavBadgeSourcePublisher(opts: Parameters<typeof createNavBadgeSourcePublisher>[0] & PublisherTiming): () => void {
+  return startSourcePublisher(createNavBadgeSourcePublisher(opts), "read_model.nav_badge_sources_failed", opts);
+}
+
 /** A file read again only when its mtime moves. */
-function mtimeCached<T>(read: (path: string) => T): (path: string) => T | undefined {
+export function readOnMtimeChange<T>(read: (path: string) => T): (path: string) => T | undefined {
   let last: { path: string; mtimeMs: number; value: T } | undefined;
   return (path) => {
     let mtimeMs: number;
@@ -404,7 +408,8 @@ interface MemoryFold {
 /** Operator-agent rows from the fact store, folded incrementally past the last applied `seq`. */
 function operatorAgentFacts(folds: WeakMap<ReadModelDb, MemoryFold>, db: ReadModelDb): readonly OperatorAgentMemoryLedgerRow[] {
   let fold = folds.get(db);
-  if (!fold) folds.set(db, (fold = { seq: 0, rows: [] }));
+  // A projector that rebuilt this store in place restarts `seq`: fold again from the first row.
+  if (!fold || Number(db.prepare("SELECT coalesce(max(seq), 0) AS m FROM fact").get()?.m) < fold.seq) folds.set(db, (fold = { seq: 0, rows: [] }));
   const fresh = db.prepare(`SELECT seq, ts_ms, body FROM fact WHERE seq > ? AND step IN (${OPERATOR_AGENT_MEMORY_STEPS.map(() => "?").join(", ")}) ORDER BY seq`)
     .all(fold.seq, ...OPERATOR_AGENT_MEMORY_STEPS);
   for (const fact of fresh) {
@@ -429,8 +434,8 @@ export function createNavBadgeReadModelView<S extends { instance: string; ticked
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: NavBadgeData; sources: ViewSource[] }>;
 } {
   const folds = new WeakMap<ReadModelDb, MemoryFold>();
-  const sourcesFile = mtimeCached(readNavBadgeSources);
-  const classification = mtimeCached((path) => readClassificationSnapshot(dirname(path)));
+  const sourcesFile = readOnMtimeChange(readNavBadgeSources);
+  const classification = readOnMtimeChange((path) => readClassificationSnapshot(dirname(path)));
   return {
     name: "nav-badge",
     version: NAV_BADGE_VIEW_VERSION,

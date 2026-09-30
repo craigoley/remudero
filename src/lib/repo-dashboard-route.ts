@@ -20,7 +20,7 @@
  * holds a per-repo proof policy, pool size or alert threshold. `not_computed` says so per field.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
@@ -595,6 +595,16 @@ async function statStamp(path: string): Promise<string> {
   }
 }
 
+function statStampSync(path: string): string {
+  try {
+    const s = statSync(path);
+    return `${s.size}:${s.mtimeMs}`;
+  } catch (err) {
+    // An unstattable input is part of the key: the pass that reads it reports the read failure itself.
+    return `unstattable:${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
+  }
+}
+
 export interface RepoDashboardOptions {
   /** Repository root containing the managed-repos state file. */
   root: string;
@@ -621,6 +631,92 @@ export interface RepoDashboardOptions {
 }
 
 type Identity = { repo: ManagedRepo; source: RepoDashboardEntry["source"]; own: boolean };
+type RegistryRead = { state: "verified"; repos: Array<{ repo: ManagedRepo; name: string }> } | { state: "unavailable"; reason: string };
+type Resolved = { identities: Identity[]; registry?: { state: "verified" } | { state: "unavailable"; reason: string } };
+
+/** An unreadable registry (`text` undefined) or a malformed one is unavailable with a reason. */
+function parseRegistryRepos(text: string | undefined): RegistryRead {
+  if (text === undefined) return { state: "unavailable", reason: "unreadable" };
+  try {
+    const parsed = parseInstanceRegistry(text);
+    return {
+      state: "verified",
+      repos: parsed.instances.filter((instance) => instance.live).map((instance) => {
+        const [owner, repo] = instance.repo.split("/");
+        return { repo: { owner, repo }, name: instance.name };
+      }),
+    };
+  } catch (error) {
+    // Keep the known managed rows, but name the missing registry evidence. Never expose its
+    // host path in a browser response or pretend core is absent from the fleet.
+    return { state: "unavailable", reason: error instanceof InstanceRegistryError ? error.code : "unreadable" };
+  }
+}
+
+function resolveIdentities(deps: RepoDashboardOptions, read: RegistryRead | undefined): Resolved {
+  const managed = deps.instanceRepository ? [] : loadManagedRepos(deps.root);
+  const registry: RegistryRead | undefined = deps.instanceRepository ? { state: "verified", repos: [{ repo: deps.instanceRepository, name: "" }] } : read;
+  const byIdentity = new Map<string, Identity>();
+  if (registry?.state === "verified") {
+    for (const { repo, name } of registry.repos) {
+      const key = `${repo.owner}/${repo.repo}`.toLowerCase();
+      const own = deps.instanceRepository !== undefined || (deps.ownInstance !== undefined && name === deps.ownInstance);
+      if (!byIdentity.has(key) || own) byIdentity.set(key, { repo, source: "instance-registry", own });
+    }
+  }
+  for (const repo of managed) {
+    const key = `${repo.owner}/${repo.repo}`.toLowerCase();
+    if (!byIdentity.has(key)) byIdentity.set(key, { repo, source: "managed-repos", own: false });
+  }
+  return { identities: [...byIdentity.values()], ...(registry ? { registry: registry.state === "verified" ? { state: "verified" as const } : registry } : {}) };
+}
+
+function telemetryRequest(deps: RepoDashboardOptions, identities: Identity[], ledgerPath: string, planPath: string, planStamp: string, nowMs: number): RepoTelemetryRequest {
+  const ownIndex = identities.findIndex((i) => i.own);
+  return {
+    kind: REPO_TELEMETRY_WORKER_KIND, repos: identities.map((i) => i.repo), ledgerPath, planPath, nowMs, planStamp,
+    ...(ownIndex >= 0 ? { own: ownIndex } : {}),
+    ...(deps.controlRoot !== undefined ? { controlRoot: deps.controlRoot } : {}),
+    ...(deps.incidentsDir !== undefined ? { incidentsDir: deps.incidentsDir } : {}),
+  };
+}
+
+function dashboardResult(deps: RepoDashboardOptions, resolved: Resolved, outcome: RepoTelemetryOutcome | undefined, nowMs: number, onlyOwn: boolean): RepoDashboardResult {
+  const { identities, registry } = resolved;
+  const measured = outcome?.ok ? outcome : undefined;
+  const rows = identities.map((identity, i) =>
+    toDashboardEntry(identity.repo, measured?.telemetry[i] ?? UNKNOWN, identity.source, identity.own, identity.own ? measured?.signals : undefined, nowMs));
+  return {
+    generated_at: fixedClock(nowMs).iso(),
+    source: deps.instanceRepository ? "instance-registry" : registry?.state === "verified" ? "instance-registry+managed-repos" : "managed-repos",
+    ...(registry ? { registry } : {}),
+    repos: onlyOwn ? rows.filter((_row, i) => identities[i].own) : rows,
+  };
+}
+
+/**
+ * `GET /v1/repos/summary`'s body computed synchronously in the calling thread, with the same identities,
+ * telemetry and projection. The read-model worker calls it with `readLedger` over its `repo_row` table.
+ * A failed telemetry pass is `{ ok: false, reason }`, where the route answers its read-cache error.
+ */
+export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number): { ok: true; summary: RepoDashboardResult } | { ok: false; reason: string } {
+  const planPath = deps.planPath ?? join(deps.root, "plan", "tasks.yaml");
+  let text: string | undefined;
+  if (deps.repoRegistryPath !== undefined && !deps.instanceRepository) {
+    try {
+      text = readFileSync(deps.repoRegistryPath, "utf8");
+    } catch {
+      // deliberate: an unreadable registry is named `unreadable` by parseRegistryRepos, as the route names it.
+      text = undefined;
+    }
+  }
+  const resolved = resolveIdentities(deps, deps.repoRegistryPath !== undefined ? parseRegistryRepos(text) : undefined);
+  if (resolved.identities.length === 0 || deps.ledgerPath === undefined) return { ok: true, summary: dashboardResult(deps, resolved, undefined, nowMs, true) };
+  const planStamp = `${statStampSync(planPath)}|${statStampSync(join(dirname(planPath), "tasks.d"))}`;
+  const outcome = computeRepoTelemetrySync(telemetryRequest(deps, resolved.identities, deps.ledgerPath, planPath, planStamp, nowMs), { readLedger: deps.readLedger, readPlan: deps.readPlan });
+  if (!outcome.ok) return outcome;
+  return { ok: true, summary: dashboardResult(deps, resolved, outcome, nowMs, true) };
+}
 
 /**
  * GET /v1/repos — connected instances plus the independent issue-intake managed set — and
@@ -647,13 +743,7 @@ export function buildRepoDashboardRoutes(deps: RepoDashboardOptions): Route[] {
     if (cached && (ageMs < REPO_TELEMETRY_MIN_AGE_MS || (cached.key === key && ageMs < REPO_TELEMETRY_CACHE_TTL_MS))) return cached;
     if (inflight && inflight.key === key) return inflight.promise;
     const atMs = clock.now();
-    const req: RepoTelemetryRequest = {
-      kind: REPO_TELEMETRY_WORKER_KIND, repos, ledgerPath, planPath, nowMs: atMs, planStamp: `${stamps[1]}|${stamps[2]}`,
-      ...(ownIndex >= 0 ? { own: ownIndex } : {}),
-      ...(deps.controlRoot !== undefined ? { controlRoot: deps.controlRoot } : {}),
-      ...(deps.incidentsDir !== undefined ? { incidentsDir: deps.incidentsDir } : {}),
-    };
-    const promise = compute(req).then((outcome) => {
+    const promise = compute(telemetryRequest(deps, identities, ledgerPath, planPath, `${stamps[1]}|${stamps[2]}`, atMs)).then((outcome) => {
       cached = { key, atMs, outcome };
       return cached;
     });
@@ -662,55 +752,22 @@ export function buildRepoDashboardRoutes(deps: RepoDashboardOptions): Route[] {
       if (inflight?.promise === promise) inflight = undefined;
     });
   };
-  const resolve = async (): Promise<{ identities: Identity[]; registry?: { state: "verified" } | { state: "unavailable"; reason: string } }> => {
-    const managed = deps.instanceRepository ? [] : loadManagedRepos(deps.root);
-    let registry: { state: "verified"; repos: Array<{ repo: ManagedRepo; name: string }> } | { state: "unavailable"; reason: string } | undefined;
-    if (deps.instanceRepository) {
-      registry = { state: "verified", repos: [{ repo: deps.instanceRepository, name: "" }] };
-    } else if (deps.repoRegistryPath) {
-      try {
-        const parsed = parseInstanceRegistry(await readFile(deps.repoRegistryPath, "utf8"));
-        registry = {
-          state: "verified",
-          repos: parsed.instances.filter((instance) => instance.live).map((instance) => {
-            const [owner, repo] = instance.repo.split("/");
-            return { repo: { owner, repo }, name: instance.name };
-          }),
-        };
-      } catch (error) {
-        // Keep the known managed rows, but name the missing registry evidence. Never expose its
-        // host path in a browser response or pretend core is absent from the fleet.
-        registry = { state: "unavailable", reason: error instanceof InstanceRegistryError ? error.code : "unreadable" };
-      }
+  const resolve = async (): Promise<Resolved> => {
+    if (deps.instanceRepository || !deps.repoRegistryPath) return resolveIdentities(deps, undefined);
+    let text: string | undefined;
+    try {
+      text = await readFile(deps.repoRegistryPath, "utf8");
+    } catch {
+      // deliberate: an unreadable registry is named `unreadable` by parseRegistryRepos, beside a malformed one.
+      text = undefined;
     }
-    const byIdentity = new Map<string, Identity>();
-    if (registry?.state === "verified") {
-      for (const { repo, name } of registry.repos) {
-        const key = `${repo.owner}/${repo.repo}`.toLowerCase();
-        const own = deps.instanceRepository !== undefined || (deps.ownInstance !== undefined && name === deps.ownInstance);
-        if (!byIdentity.has(key) || own) byIdentity.set(key, { repo, source: "instance-registry", own });
-      }
-    }
-    for (const repo of managed) {
-      const key = `${repo.owner}/${repo.repo}`.toLowerCase();
-      if (!byIdentity.has(key)) byIdentity.set(key, { repo, source: "managed-repos", own: false });
-    }
-    return { identities: [...byIdentity.values()], ...(registry ? { registry: registry.state === "verified" ? { state: "verified" as const } : registry } : {}) };
+    return resolveIdentities(deps, parseRegistryRepos(text));
   };
   const project = async (onlyOwn: boolean): Promise<RepoDashboardResult> => {
-    const { identities, registry } = await resolve();
-    const measured = identities.length > 0 && deps.ledgerPath !== undefined ? await measure(identities, deps.ledgerPath) : undefined;
+    const resolved = await resolve();
+    const measured = resolved.identities.length > 0 && deps.ledgerPath !== undefined ? await measure(resolved.identities, deps.ledgerPath) : undefined;
     if (measured && !measured.outcome.ok) throw new RepoTelemetryUnavailableError(measured.outcome.reason);
-    const outcome = measured?.outcome.ok ? measured.outcome : undefined;
-    const nowMs = measured ? measured.atMs : clock.now();
-    const rows = identities.map((identity, i) =>
-      toDashboardEntry(identity.repo, outcome?.telemetry[i] ?? UNKNOWN, identity.source, identity.own, identity.own ? outcome?.signals : undefined, nowMs));
-    return {
-      generated_at: fixedClock(nowMs).iso(),
-      source: deps.instanceRepository ? "instance-registry" : registry?.state === "verified" ? "instance-registry+managed-repos" : "managed-repos",
-      ...(registry ? { registry } : {}),
-      repos: onlyOwn ? rows.filter((_row, i) => identities[i].own) : rows,
-    };
+    return dashboardResult(deps, resolved, measured?.outcome, measured ? measured.atMs : clock.now(), onlyOwn);
   };
   return [
     { method: "GET", path: "/v1/repos", scope: "read", handler: async (_req, res) => sendJson(res, 200, await project(false)) },

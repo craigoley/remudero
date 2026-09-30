@@ -33,6 +33,7 @@ import {
   type ReadModelWorkerMessage,
 } from "../src/lib/read-model-worker.js";
 import { buildServeServer, darkReadModelViews, type ServeDeps } from "../src/lib/serve.js";
+import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { buildReadModelViewRoutes, renderView, type ViewBody } from "../src/lib/views.js";
 
@@ -329,4 +330,19 @@ test("a dark view answers from its legacy computation in shadow mode and from th
   switches = { "nav-badge": "serve" };
   assert.equal(answer(), "read-model");
   assert.deepEqual(source.judge([{ name: "x", asOf: null, state: "fresh" }], 0), [{ name: "x", asOf: null, state: "fresh" }]);
+});
+
+test("a fact store that shrank under the fold is folded again from its first row", async (t) => {
+  const f = await fixture(t);
+  createNavBadgeSourcePublisher({ stateDir: f.stateDir, inboxStateDir: join(f.inboxRoot, "state"), scopes: () => f.scopes })();
+  tickBodies(f);
+  const db = openProjectorReadModel(f.stateDir, "core");
+  t.after(() => db.close());
+  const view = createNavBadgeReadModelView(ledgerSource);
+  const state = { instance: "core", generation: 1, lease: "held" as const, failures: 0, newestTs: null, tickedAt: NOW };
+  const count = (): number | undefined => (view.materialize({ now: NOW, instances: [{ state, db }] })[1].data as NavBadgeData).agent.count;
+  assert.equal(count(), 1, "the accepted token-burn proposal is hidden");
+  const decision = Number(db.prepare("SELECT min(seq) AS s FROM fact WHERE step = ?").get(OPERATOR_AGENT_DECISION_STEP)?.s);
+  db.exec(`DELETE FROM fact WHERE seq >= ${decision}`);
+  assert.equal(count(), 2, "without its decision the proposal is visible again");
 });
