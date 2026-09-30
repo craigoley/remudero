@@ -22,9 +22,12 @@
     ladder fall-through (W1-T4864) walks only cash deployments, so a proposal the cash ladder leaves dirty stays
     undrafted. Sending only that remainder to Sonnet should approach Sonnet's clean rate while paying Sonnet for
     about five proposals in eight rather than eight.
+    THINKING-LEVEL SWEEP, same 8 proposals: Sonnet 5.5 at medium drafted 8/8 clean for $2.08, at high 7/8 for $2.83
+    and at low 6/8 for $1.58, so the escalation runs at medium (better and 27% cheaper than high). gpt-oss-120b was
+    3/8 clean at low, medium and high alike.
   design: |
     After runDraftRung's cash attempts end without a lint-clean draft (a dirty relint limit or a fragment-contract
-    error), make ONE further attempt on subscription claude-sonnet-5-5 (the balanced Claude candidate), carrying the
+    error), make ONE further attempt on subscription claude-sonnet-5-5 AT EFFORT MEDIUM (the balanced Claude candidate), carrying the
     last fragment and its violations as the relint prompt when one exists. Record inbox.draft_escalated
     {proposal_id, from, to, reason}. The escalation respects subscription headroom: when Claude is below reserve it
     is skipped, and the proposal keeps today's outcome.

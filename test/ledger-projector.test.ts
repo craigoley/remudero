@@ -260,6 +260,27 @@ test("an unreadable archive is retried on the next tick even when the directory 
   assert.deepEqual([second.unread, second.archivesRead, second.fresh], [[], 1, 1]);
 });
 
+test("an archive read stays on its opened file when its name is replaced", (t) => {
+  const ledgerDir = scratch(t, "projector-ledger");
+  const archive = join(ledgerDir, `${archiveName(T0)}.gz`);
+  const openedContents = body([line(T0, "run.start", { task_id: "opened-file" })]);
+  const replacementContents = body([line(T0 + 1, "run.start", { task_id: "replacement-file" })]);
+  writeFileSync(archive, gzipSync(openedContents));
+
+  const s = store(t, ledgerDir, fixedClock(Date.now() + 60_000), {
+    beforeArchiveRead: (path) => {
+      assert.equal(path, archive);
+      renameSync(path, `${path}.opened`);
+      writeFileSync(path, gzipSync(replacementContents));
+    },
+  });
+  const r = s.tick();
+
+  assert.deepEqual(r.unread, []);
+  assert.equal(r.archivesRead, 1);
+  assert.deepEqual(s.db.prepare("SELECT task_id FROM fact ORDER BY seq").all().map((row) => row.task_id), ["opened-file"]);
+});
+
 test("a torn final line is applied only once its newline lands", (t) => {
   const ledgerDir = scratch(t, "projector-ledger");
   const livePath = join(ledgerDir, LIVE);
