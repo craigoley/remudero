@@ -196,7 +196,7 @@ test("W1-T4803: the costliest untracked hot file is filed plan-only with its rem
   const tracked = fixture("hot-file-tracked", ledger, () => assert.fail("nothing to land"), [hotFileOrigin("scripts/test-tier-manifest.json")]);
   assert.equal(tracked.spec.inventory().untracked?.file, "scripts/comment-load-baseline.json");
   assert.equal(hotFileRemedy("scripts/comment-load-baseline.json"), "split-per-entry");
-  assert.equal(hotFileRemedy("state/ci-friction-garden-log.md"), "append-only");
+  assert.equal(hotFileRemedy("docs/ci-friction-garden-log.md"), "append-only");
   assert.equal(hotFileRemedy(".gitignore"), "merge-driver");
   assert.deepEqual([...HOT_FILE_REMEDIES], ["generate-in-ci", "split-per-entry", "append-only", "merge-driver"]);
 });
