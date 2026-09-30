@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -439,6 +439,17 @@ test("the switch file keeps its last good reading and a view switched off is not
   ticker.tick();
   ticker.tick();
   assert.equal(sink.messages.filter((m) => m.type === "body").length, 1, "one body, and an unchanged body is not re-posted");
+});
+
+test("the switch reader does not follow a symlink to a different file", (t) => {
+  const root = scratch(t, "rmw-switch-symlink");
+  const path = join(root, "switches.json");
+  const target = join(root, "outside.json");
+  writeFileSync(target, JSON.stringify({ projector: "off" }));
+  symlinkSync(target, path);
+  const result = readReadModelSwitches(path);
+  assert.equal(result.ok, false);
+  assert.match(String((result as { reason: string }).reason), /unreadable/);
 });
 
 test("the ledger source reads stale when its projector is behind or has not ticked", () => {
