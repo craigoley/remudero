@@ -1369,9 +1369,15 @@ function latestLedgerTsMs(lines: ReadonlyArray<Record<string, unknown>>): number
   return max;
 }
 
+const MONITOR_WRITTEN_RUN_STEPS: ReadonlySet<string> = new Set([
+  "run.running_long", // the duration sentinel reports about a run that may already be dead
+  "cost.anomaly", // the cost sentinel reports about a run after the run has stopped
+  "worker.stalled", // the daemon's quiet-episode detector writes about the observed run
+]);
+
 /**
- * W1-T3523 — THE ORPHAN AS A FIRST-CLASS READING. Every `run_id` for `taskId` whose ONLY ledger row,
- * of ANY step, is its own `run.start` — MEASURED on the live ledger 2026-09-13: 97 of 203 dispatched
+ * W1-T3523 — THE ORPHAN AS A FIRST-CLASS READING. Every `run_id` for `taskId` whose ONLY run-produced
+ * ledger row is its own `run.start` — MEASURED on the live ledger 2026-09-13: 97 of 203 dispatched
  * runs (47%) carry no other row at all, the container-recycle shape (`deploy/recycle-container.sh`
  * `docker stop`s a worker whose liveness probe is process-only, so a killed worker never gets to
  * write anything past its own start). This needs no new writer and no schema change: every row this
@@ -1405,6 +1411,7 @@ export function orphanedRunIds(
   const counted = new Set<string>();
   for (const line of indexedTaskRows(lines, taskId, index)) {
     if (line.task_id !== taskId || typeof line.run_id !== "string") continue;
+    if (typeof line.step === "string" && MONITOR_WRITTEN_RUN_STEPS.has(line.step)) continue;
     // A rotation union replays retained rows once per archive; a replayed lone run.start is still an orphan.
     const key = `${line.run_id}|${String(line.step)}|${String(line.ts)}`;
     if (counted.has(key)) continue;
@@ -1417,7 +1424,7 @@ export function orphanedRunIds(
   const orphans = new Set<string>();
   if (nowMs === undefined) return orphans; // no notion of "now" anywhere in this ledger — unknown stays counted
   for (const [runId, ts] of startTsByRunId) {
-    if ((rowCountByRunId.get(runId) ?? 0) > 1) continue; // a later row exists for this run_id — not an orphan
+    if ((rowCountByRunId.get(runId) ?? 0) > 1) continue; // the run produced another row — not an orphan
     const startMs = Date.parse(ts);
     if (!Number.isFinite(startMs) || nowMs - startMs < livenessBoundMs) continue; // unknown age, or still live
     orphans.add(runId);
@@ -1435,7 +1442,7 @@ export function orphanedRunIds(
  * W1-T3523 WIDENS THE EXCLUSION ALONGSIDE W1-T2423's PREFLIGHT-REFUSAL ONE: a `run.start` whose run_id is
  * {@link orphanedRunIds} — infrastructure killed the worker before it wrote anything else — is likewise
  * excluded, because it is evidence about the HOST, not about the task, and an orphan must never cost the task
- * the same dispatch budget a real no-PR attempt does. A run.start with any other row is not an orphan; only
+ * the same dispatch budget a real no-PR attempt does. A run.start with any other run-produced row is not an orphan; only
  * the infrastructure refusal verdicts above can exclude such a run. An unrecognised failing verdict counts.
  *
  * W1-T4691: `dispatch.breaker_released` (`rmd release`) resets this streak exactly like `pr.opened` or a
