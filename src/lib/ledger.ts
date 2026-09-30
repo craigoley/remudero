@@ -24,6 +24,7 @@ import type { ExternalEffectResult } from "./action-reconciliation.js";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
+import { assertLedgerPathNotLive } from "./live-write-guard.js";
 import { rotationStampIso } from "./ledger-union.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
 import { WORKER_SCOPE_ENV } from "./worker-containment.js";
@@ -202,6 +203,7 @@ export function appendLedger(
   line: LedgerLine,
   opts: { ceilingBytes?: number; identity?: () => string; actor?: () => LedgerActor } = {},
 ): void {
+  assertLedgerPathNotLive(path);
   mkdirSync(dirname(path), { recursive: true });
   const record = {
     ts: new Date().toISOString(),
