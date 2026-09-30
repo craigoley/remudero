@@ -16,6 +16,7 @@ import { readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fixedClock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import { readOnMtimeChange, startSourcePublisher } from "./nav-badge-view.js";
 import { loadPlan, type Plan } from "./plan.js";
 import { READ_MODEL_DIRNAME, type ReadModelDb } from "./read-model-db.js";
@@ -42,9 +43,48 @@ export interface RepositoriesSources {
   instances: Array<{ instanceId: string; options: RepositoriesInstanceOptions }>;
 }
 
+/** The console's RepoHealthStatus: how far a repository's figures can be trusted, worst first in {@link REPOSITORY_STATE_RANK}. */
+export type RepositoryState = "verified" | "stale" | "unknown" | "unavailable";
+
+export const REPOSITORY_STATE_RANK: Record<RepositoryState, number> = { unavailable: 0, stale: 1, unknown: 2, verified: 3 };
+
+export interface RepositoriesProject {
+  project: string;
+  repos: Array<{ id: string; reponame: string; instanceId: string; state: RepositoryState }>;
+  /** The first repository holding the project's worst state: where the operator should look. */
+  worst: { state: RepositoryState; repoId: string; repoName: string };
+}
+
 export interface RepositoriesData {
   instances: Array<{ instanceId: string; summary?: RepoDashboardResult; reason?: string }>;
+  /** The console's groupRepoProjects, precomputed: registry projects in first-seen order. */
+  projects: RepositoriesProject[];
+  /** Why every repository is its own project: the registry naming projects could not be read. */
+  projectsReason?: string;
   reason?: string;
+}
+
+/** Groups repositories by project in first-seen order and names each project's worst, as the console's /repos page does. */
+export function groupRepositoryProjects(repos: ReadonlyArray<RepositoriesProject["repos"][number] & { project: string }>): RepositoriesProject[] {
+  const byProject = new Map<string, RepositoriesProject["repos"]>();
+  const seen = new Set<string>();
+  for (const { project, ...repo } of repos) {
+    if (seen.has(repo.id.toLowerCase())) continue;
+    seen.add(repo.id.toLowerCase());
+    byProject.set(project, [...(byProject.get(project) ?? []), repo]);
+  }
+  return [...byProject].map(([project, members]) => {
+    const worst = members.reduce((a, b) => (REPOSITORY_STATE_RANK[b.state] < REPOSITORY_STATE_RANK[a.state] ? b : a));
+    return { project, repos: members, worst: { state: worst.state, repoId: worst.id, repoName: worst.reponame } };
+  });
+}
+
+function readRegistry(path: string): { instances: RegistryInstance[] } | { reason: string } {
+  try {
+    return { instances: parseInstanceRegistry(readFileSync(path, "utf8")).instances.filter((i) => i.live) };
+  } catch (error) {
+    return { reason: `the instance registry could not be parsed: ${(error as Error).message}` };
+  }
 }
 
 export function repositoriesSourcesPath(stateDir: string): string {
@@ -124,6 +164,7 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: RepositoriesData; sources: ViewSource[] }>;
 } {
   const sourcesFile = readOnMtimeChange(readSources);
+  const registryFile = readOnMtimeChange(readRegistry);
   const computed = new Map<string, InstanceSummary>();
   const readPlan = planReader();
   return {
@@ -134,10 +175,10 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       if (dbPath === undefined) return [];
       const path = join(dirname(dbPath), REPOSITORIES_SOURCES_FILE);
       const published = sourcesFile(path);
-      if (published === undefined) return [{ key: "", data: { instances: [], reason: "serve has not published the repository sources yet" }, sources: [] }];
+      if (published === undefined) return [{ key: "", data: { instances: [], projects: [], reason: "serve has not published the repository sources yet" }, sources: [] }];
       const sourcesMtimeMs = statSync(path).mtimeMs;
       const sources: ViewSource[] = [];
-      const data: RepositoriesData = { instances: [] };
+      const data: RepositoriesData = { instances: [], projects: [] };
       for (const { instanceId, options } of published.instances) {
         const slot = instances.find((candidate) => candidate.state.instance === instanceId);
         if (slot) sources.push(ledgerSource(slot.state, now));
@@ -156,9 +197,33 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
         sources.push(summarySource(instanceId, current!));
         data.instances.push({ instanceId, ...(current!.summary ? { summary: current!.summary } : {}), ...(current!.reason ? { reason: current!.reason } : {}) });
       }
+      Object.assign(data, portfolio(published, data, registryFile));
       return [{ key: "", data, sources }];
     },
   };
+}
+
+/** The registry core's summary route reads names each instance's project and repository. */
+function portfolio(
+  published: RepositoriesSources,
+  data: RepositoriesData,
+  registryFile: (path: string) => ReturnType<typeof readRegistry> | undefined,
+): Pick<RepositoriesData, "projects" | "projectsReason"> {
+  const path = published.instances.find((i) => i.options.repoRegistryPath)?.options.repoRegistryPath;
+  const registry = path === undefined ? { reason: "no instance names a registry" } : registryFile(path) ?? { reason: `the instance registry ${path} is unreadable` };
+  const rows = "instances" in registry ? registry.instances : [];
+  const projectOf = new Map(rows.map((i) => [i.repo.toLowerCase(), i.project]));
+  const repoOf = new Map(rows.map((i) => [i.name, i.repo]));
+  const repos = data.instances.flatMap(({ instanceId, summary, reason }) => {
+    const entries = summary?.repos.map((r) => ({ id: r.id, reponame: r.reponame, instanceId,
+      state: (reason ? "stale" : r.health.status === "verified" ? "verified" : "unknown") as RepositoryState }));
+    if (entries && (entries.length > 0 || summary!.registry?.state !== "unavailable")) return entries;
+    const options = published.instances.find((i) => i.instanceId === instanceId)!.options;
+    const id = options.instanceRepository ? `${options.instanceRepository.owner}/${options.instanceRepository.repo}` : repoOf.get(instanceId) ?? instanceId;
+    return [{ id, reponame: id.split("/").pop()!, instanceId, state: "unavailable" as const }];
+  });
+  const projects = groupRepositoryProjects(repos.map((r) => ({ ...r, project: projectOf.get(r.id.toLowerCase()) ?? r.reponame })));
+  return { projects, ...("reason" in registry ? { projectsReason: registry.reason } : {}) };
 }
 
 function summarize(

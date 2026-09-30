@@ -21,6 +21,7 @@ import { buildRepoDashboardRoutes, type RepoDashboardResult } from "../src/lib/r
 import {
   createRepositoriesReadModelView,
   createRepositoriesSourcePublisher,
+  groupRepositoryProjects,
   readRepoRows,
   startRepositoriesSourcePublisher,
   type RepositoriesData,
@@ -255,7 +256,7 @@ test("an instance with no read model or no summary yet is absent with a reason",
   const view = createRepositoriesReadModelView(ledgerSource);
   assert.deepEqual(view.materialize({ now: NOW, instances: [] }), []);
   const run = ticker(f, { view });
-  assert.deepEqual(repositories(run.tick()), { instances: [], reason: "serve has not published the repository sources yet" });
+  assert.deepEqual(repositories(run.tick()), { instances: [], projects: [], reason: "serve has not published the repository sources yet" });
   run.release();
 
   createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => [...f.sources, { instanceId: "site", options: { root: f.root } }] })();
@@ -364,4 +365,55 @@ test("an unreadable registry or a half-written sources file is named and never g
   const torn = ticker(f, { holder: "serve-b" });
   assert.match(repositories(torn.tick()).reason ?? "", /not published/);
   torn.release();
+});
+
+test("the repositories view names the worst repository per project", (t) => {
+  const f = fixture(t);
+  writeFileSync(daemonInstanceRegistryPath(f.root), `${readFileSync(daemonInstanceRegistryPath(f.root), "utf8")}  site:\n    github_repo: craigoley/remudero-site\n    project: remudero\n  wiki:\n    github_repo: craigoley/wiki\n`);
+  const site = { instanceId: "site", options: { root: f.root, instanceRepository: { owner: "craigoley", repo: "remudero-site" } } };
+  const wiki = { instanceId: "wiki", options: { root: f.root } };
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => [...f.sources, site, wiki] })();
+  const view = createRepositoriesReadModelView(ledgerSource);
+  const first = ticker(f, { view });
+  const data = repositories(first.tick());
+  first.release();
+  assert.equal(data.projectsReason, undefined, "the registry was read");
+  assert.deepEqual(data.projects, [
+    {
+      project: "remudero",
+      repos: [
+        { id: "craigoley/remudero", reponame: "remudero", instanceId: "core", state: "verified" },
+        { id: "craigoley/remudero-console", reponame: "remudero-console", instanceId: "console", state: "verified" },
+        { id: "craigoley/remudero-site", reponame: "remudero-site", instanceId: "site", state: "unavailable" },
+      ],
+      worst: { state: "unavailable", repoId: "craigoley/remudero-site", repoName: "remudero-site" },
+    },
+    { project: "default", repos: [{ id: "craigoley/wiki", reponame: "wiki", instanceId: "wiki", state: "unavailable" }], worst: { state: "unavailable", repoId: "craigoley/wiki", repoName: "wiki" } },
+  ]);
+
+  // Console's recompute fails: its last summary stays, and its project's worst is the stale one, the first found.
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => f.sources })();
+  rmSync(f.sources[1].options.planPath!);
+  const later = ticker(f, { view, now: NOW + 61_000, holder: "serve-b" });
+  const stale = repositories(later.tick());
+  later.release();
+  assert.deepEqual(stale.projects.map((p) => [p.project, p.repos.map((r) => r.state), p.worst.repoName]), [["remudero", ["verified", "stale"], "remudero-console"]]);
+});
+
+test("an unreadable registry makes every repository its own project and says why", (t) => {
+  const f = fixture(t);
+  writeFileSync(daemonInstanceRegistryPath(f.root), "instances:\n  core:\n    project: remudero\n");
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => f.sources })();
+  const run = ticker(f);
+  const data = repositories(run.tick());
+  run.release();
+  assert.match(data.projectsReason ?? "", /could not be parsed: .*missing_repo/);
+  assert.deepEqual(data.projects.map((p) => [p.project, p.worst.state, p.worst.repoName]), [["core", "unavailable", "core"], ["remudero-console", "verified", "remudero-console"]],
+    "core resolves no repository without its registry, so it is listed unavailable under its instance name, never dropped");
+  assert.deepEqual(groupRepositoryProjects([]), [], "no repository is no project");
+  const bare = { ...f.sources[0], options: { ...f.sources[0].options, repoRegistryPath: undefined } };
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => [bare] })();
+  const again = ticker(f, { holder: "serve-b", now: NOW + 61_000 });
+  assert.equal(repositories(again.tick()).projectsReason, "no instance names a registry");
+  again.release();
 });

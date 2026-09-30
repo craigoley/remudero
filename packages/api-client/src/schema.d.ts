@@ -2604,6 +2604,174 @@ export interface components {
         })[];
       };
     };
+    /** GET /v1/views/repositories (docs/views.md, src/lib/repositories-view.ts): the repository portfolio across every instance serve holds, in one body. Each instance's `summary` IS its GET /v1/i/<instance>/repos/summary body, computed by the read-model worker from that instance's projected `repo_row` table; `projects` precomputes the console's grouping and its "worst is <repo>" line. Dark until state/read-model/switches.json sets `repositories` to `serve`. */
+    RepositoriesView: {
+      view: "repositories";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      /** A `ledger:<instance>` and a `repositories:<instance>` source per instance. */
+      sources: (ViewSource)[];
+      data: {
+        /** One entry per instance serve published, in its order; `summary` absent with a `reason` until its first recompute. */
+        instances: ({
+          instanceId: string;
+          summary?: RepoDashboardResult;
+          /** Why `summary` is absent, or (beside a summary) why the last recompute failed and the summary shown is older. */
+          reason?: string;
+        })[];
+        /** Registry projects in first-seen order. A repository the registry names no project for is its own project, named after the repository. */
+        projects: (RepositoriesProject)[];
+        /** Present when the registry could not be read, so every repository is its own project. */
+        projectsReason?: string;
+        /** Present with empty arrays before serve has published the repository sources. */
+        reason?: string;
+      };
+    };
+    /** One project of the repositories view, with the repository whose state is worst. */
+    RepositoriesProject: {
+      project: string;
+      /** References into `data.instances[].summary.repos` by `id`. */
+      repos: ({
+        /** Canonical owner/repo; the instance name when neither the registry nor serve names its repository. */
+        id: string;
+        reponame: string;
+        instanceId: string;
+        state: RepositoryState;
+      })[];
+      /** The FIRST repository holding the project's worst state (never an average). */
+      worst: {
+        state: RepositoryState;
+        repoId: string;
+        repoName: string;
+      };
+    };
+    /** How far a repository's figures can be trusted, worst first: `unavailable` (no summary), `stale` (the last recompute failed; the summary shown is older), `unknown` (computed, no ledger), `verified`. The console's RepoHealthStatus. */
+    RepositoryState: "unavailable" | "stale" | "unknown" | "verified";
+    /** GET /v1/views/now?instance=<id> (docs/views.md, src/lib/now-view.ts): everything the console's /now renders for ONE instance. The board is the legacy derivation over the read model's full fact history; `groups` precomputes the console's groupBoard; `actions` carries structured strikes; `health` is the selected instance's own host probe. Dark until state/read-model/switches.json sets `now` to `serve`. */
+    NowView: {
+      view: "now";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      /** `ledger:<i>`, `github:<i>` (the persisted open-PR snapshot), `plan:<i>` and `host-probe:<i>`. */
+      sources: (ViewSource)[];
+      data: {
+        instance: string;
+        board: {
+          generated_at: string;
+          counts: {
+            running: number;
+            queued: number;
+            blocked: number;
+          };
+          spendTodayUsd: number;
+          /** `tasks` carries every running, needs-you and blocked task and the newest `limit` queued ones; `groups` names them all. */
+          taskProjection: {
+            complete: boolean;
+            returned: number;
+            limit: number;
+            total: number;
+          };
+          tasks: (NowTask)[];
+          /** Task ids in the console's groupBoard order; each task is in exactly one group. */
+          groups: {
+            running: (string)[];
+            needsYou: (string)[];
+            blocked: (string)[];
+            queued: (string)[];
+          };
+        };
+        prQueue: {
+          complete: boolean;
+          unavailableReason?: string;
+          rows: ({
+            prNumber: number;
+            prUrl: string;
+            title: string;
+            taskId?: string;
+            disposition: string;
+            queueClass: "actionable" | "active" | "ready-held" | "waiting" | "unknown";
+            held: boolean;
+          })[];
+        };
+        /** Blocked PRs and merge holds, most urgent tone first. */
+        actions: (NowAction)[];
+        recent: {
+          entries: ({
+            ts: string;
+            /** A RecentActivityEntry verb; a consumer renders an unknown one. */
+            verb: string;
+            taskId: string;
+            title: string;
+            detail?: string;
+            costUsd?: number;
+            prUrl?: string;
+          })[];
+          /** Exact merges today (UTC), one per task and pull request, over full history. */
+          mergedToday: {
+            count: number;
+            day: string;
+          };
+        };
+        /** The selected instance's own host probe; a field it could not read is absent, named in `reasons`. */
+        health: {
+          sampledAt: string;
+          diskFreeBytes?: number;
+          rateLimitRemaining?: number;
+          lastPollAgeMs?: number;
+          reasons?: Record<string, string>;
+        };
+        /** Open feedback questions; core only, so another instance carries a `reason` instead. */
+        questions: ({
+          count: number;
+        }) | ({
+          reason: string;
+        });
+      };
+    };
+    /** One board row as /now renders it; other StatusProjection fields stay on GET /v1/status. */
+    NowTask: {
+      taskId: string;
+      title: string;
+      status: string;
+      risk: string;
+      lastActivityAt?: string;
+      prUrl?: string;
+      prNumber?: number;
+      phase?: string;
+      elapsedMs?: number;
+      startedAt?: string;
+      needsHuman?: true;
+      verifyHumanPending?: true;
+      escalation?: {
+        title?: string;
+        issueUrl?: string;
+        unverified?: true;
+        openedAt?: string;
+      };
+      worker?: {
+        servedModel?: string;
+        requestedModel?: string;
+      };
+    };
+    /** The console's actionQueueFromStatus, precomputed. `strike` is parsed once from the sweep's reason in every form it writes, replacing the console's regex; `sortAt` is the row's own time. */
+    NowAction: {
+      kind: "blocked_pr" | "merge_held";
+      taskId?: string;
+      prNumber?: number;
+      prUrl?: string;
+      disposition: string;
+      reason: string;
+      tone: "exhausted" | "held" | "blocked" | "unknown" | "repairing";
+      strike?: {
+        n: number;
+        of: number;
+      };
+      sortAt?: string;
+    };
     /** One RECENT feed row minted from a ledger line (src/lib/board.ts's `RecentActivityEntry`). */
     RecentActivityEntry: {
       taskId: string;
@@ -4367,6 +4535,29 @@ export interface paths {
       responses: {
           "200": ReadModelStatusView;
           "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/repositories": {
+    get: {
+      responses: {
+          "200": RepositoriesView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/now": {
+    get: {
+      responses: {
+          "200": NowView;
+          "304": undefined;
+          "400": Error;
           "401": Error;
           "403": Error;
           "404": undefined;

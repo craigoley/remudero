@@ -85,6 +85,7 @@ import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionR
 import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildReadModelViewRoutes, type ViewBodySource } from "./views.js";
 import { navBadgeView, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
+import { NOW_VIEW_NAME } from "./now-view.js";
 import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
@@ -2708,7 +2709,8 @@ function assembleServeRoutes(
       planPath: deps.panelGraph.planPath,
     }),
     buildRecentRoute(deps.board),
-    ...buildReadModelViewRoutes({ readModel: readModel && darkReadModelViews(readModel, ["nav-badge", "repositories"]), readModelViews: READ_MODEL_VIEWS.map((view) => view.name),
+    ...buildReadModelViewRoutes({ readModel: readModel && darkReadModelViews(readModel, ["nav-badge", "repositories", NOW_VIEW_NAME]),
+      readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"] },
       legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes })] }),
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),
