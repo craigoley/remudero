@@ -1206,6 +1206,7 @@ import {
 } from "./lib/learnings.js";
 import type { LearningEntry, LearningsIndex, RuleHeadline } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
+import { certainStaleProofs, isDialectGrepProof } from "./lib/proof-base-stale.js";
 import { loadOperatorNotesForTask, renderOperatorNotes, appendOperatorNote } from "./lib/operator-notes.js";
 import { applyOperatorMergeHold, parseOperatorMergeHoldArgs } from "./lib/operator-merge-hold.js";
 import {
@@ -25812,9 +25813,10 @@ export function runPreflightProofs(
     };
   }
 
-  const stale: string[] = [];
+  const stale: string[] = certainStaleProofs(executable, repoRoot, mergeBase).map((row) => row.proof);
   for (const c of executable) {
     const proof = (c.proof ?? "").trim();
+    if (isDialectGrepProof(proof)) continue;
     const run = spawn(
       process.execPath,
       ["--import", "tsx", "src/run-task.ts", "check-proof", proof, "--base", mergeBase],
