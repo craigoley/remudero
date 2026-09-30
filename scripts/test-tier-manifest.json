@@ -89,7 +89,7 @@
     "test/a-draft-failure-names-which-marker-was-missing.test.ts": 1665,
     "test/a-draft-nobody-files-is-a-report-nobody-reads.test.ts": 2676,
     "test/a-drafted-skill-is-selectable-for-its-own-task-type.test.ts": 1360,
-    "test/a-duplicate-task-id-never-takes-a-daemon-down.test.ts": 2730,
+    "test/a-duplicate-task-id-never-takes-a-daemon-down.test.ts": 5000,
     "test/a-durable-plan-filing-credit-is-revalidated.test.ts": 410,
     "test/a-fact-shows-its-freshness.test.ts": 498,
     "test/a-fail-summary-names-the-blocker-not-the-advisory.test.ts": 389,
