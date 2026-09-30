@@ -87,6 +87,7 @@ test("the count of classes extending Error directly is recorded in scripts/error
 test("the count of classes extending Error directly under tracked src/**/*.ts cannot grow past the recorded ceiling", () => {
   const baseline = readBaseline();
   const actual = countDirectErrorSubclasses(REPO_ROOT);
+  assert.ok(actual > 0, "the tracked source corpus must yield a positive control before a zero can pass the ceiling");
   assert.ok(
     actual <= baseline.directErrorSubclassCount,
     `direct-Error-subclass count grew from the recorded ceiling of ${baseline.directErrorSubclassCount} to ${actual}. ` +
