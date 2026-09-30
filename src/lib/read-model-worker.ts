@@ -13,7 +13,7 @@
  * where coverage is recorded.
  */
 import { randomUUID } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -77,12 +77,24 @@ export function readModelSwitchesPath(stateDir: string): string {
 export function readReadModelSwitches(path: string): { ok: true; switches: ReadModelSwitches; mtimeMs: number } | { ok: false; reason: string } {
   let text: string;
   let mtimeMs: number;
+  let fd: number | undefined;
   try {
-    mtimeMs = statSync(path).mtimeMs;
-    text = readFileSync(path, "utf8");
+    // Open once, then inspect and read that same file descriptor. A stat(path) followed by
+    // readFile(path) lets a path/symlink swap redirect the read after the metadata check.
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const before = fstatSync(fd, { bigint: true });
+    if (!before.isFile()) return { ok: false, reason: "switch file unreadable: not a regular file" };
+    text = readFileSync(fd, "utf8");
+    const after = fstatSync(fd, { bigint: true });
+    if (before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) {
+      return { ok: false, reason: "switch file changed while being read" };
+    }
+    mtimeMs = Number(before.mtimeNs) / 1_000_000;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, switches: DEFAULT_READ_MODEL_SWITCHES, mtimeMs: 0 };
     return { ok: false, reason: `switch file unreadable: ${(error as Error).message}` };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
   let raw: unknown;
   try {
