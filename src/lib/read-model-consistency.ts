@@ -275,11 +275,29 @@ function lostFingerprint(keys: string[]): string {
   return createHash("sha1").update([...keys].sort().join("\n")).digest("hex").slice(0, 16);
 }
 
-function history(db: ReadModelDb): Array<{ atMs: number; healed: number; lostFp: string | null }> {
+function history(db: ReadModelDb): Array<{ atMs: number; outcome: string; healed: number; lostFp: string | null }> {
   const exists = db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'consistency_run'").get();
   if (!exists) return [];
-  return db.prepare("SELECT at_ms, healed, lost_fp FROM consistency_run ORDER BY id").all()
-    .map((row) => ({ atMs: Number(row.at_ms), healed: Number(row.healed), lostFp: row.lost_fp === null ? null : String(row.lost_fp) }));
+  return db.prepare("SELECT at_ms, outcome, healed, lost_fp FROM consistency_run ORDER BY id").all()
+    .map((row) => ({ atMs: Number(row.at_ms), outcome: String(row.outcome), healed: Number(row.healed), lostFp: row.lost_fp === null ? null : String(row.lost_fp) }));
+}
+
+/** The schedule hook's two tiers: hourly after an agreement, sooner while the last run found anything. */
+export const ORACLE_AGREE_INTERVAL_MS = 60 * 60_000;
+export const ORACLE_DRIFT_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * WHERE THE ORACLE RUNS. Serve's read-model worker asks this after each tick, per instance, and
+ * runs {@link runConsistencyCheck} with its lease and the DEFAULT window when it answers true: a
+ * 30-day window cost 0.29 s on a copy of the core ledger, so a 7-day one fits in a worker tick. The
+ * full corpus (10.1 s, 730 MB RSS on the same copy) runs only by hand, as the check inside
+ * `rmd read-model rebuild --window-days <n>`. Due when no run is recorded, an hour after an
+ * agreement, and ten minutes after any other outcome, so a drift is rechecked sooner.
+ */
+export function consistencyCheckDue(db: ReadModelDb, now: number): boolean {
+  const last = history(db).at(-1);
+  if (!last) return true;
+  return now - last.atMs >= (last.outcome === "agree" ? ORACLE_AGREE_INTERVAL_MS : ORACLE_DRIFT_INTERVAL_MS);
 }
 
 function escalationFor(run: ConsistencyRun, detail: string[]): Escalation {

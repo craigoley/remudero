@@ -7,10 +7,10 @@
  * the writer lease whose fence is re-checked inside every write transaction.
  */
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, renameSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { createRequire } from "node:module";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
@@ -37,7 +37,7 @@ const BASE_DDL = `
     host TEXT NOT NULL, acquired_ms INTEGER NOT NULL, expires_ms INTEGER NOT NULL) WITHOUT ROWID;
 `;
 
-export type ReadModelErrorReason = "bad_instance" | "schema_mismatch" | "lease_lost";
+export type ReadModelErrorReason = "bad_instance" | "schema_mismatch" | "lease_lost" | "bad_pointer";
 
 export class ReadModelError extends RmdError {
   readonly reason: ReadModelErrorReason;
@@ -81,6 +81,9 @@ export interface ReadModelOpenOptions {
   ddl?: string;
   readOnly?: boolean;
   clock?: Clock;
+  /** Opens this generation's file instead of the one the pointer names (a rebuild's side file);
+   *  `null` opens the un-generationed file, the one in use before any rebuild published a pointer. */
+  generation?: string | null;
 }
 
 /** `<stateDir>/read-model/<instance>.v<schemaVersion>.sqlite` — a schema bump is a new file. */
@@ -89,6 +92,53 @@ export function readModelPath(stateDir: string, instance: string, schemaVersion:
     throw new ReadModelError("bad_instance", `instance name ${JSON.stringify(instance)} is not a safe file name`);
   }
   return join(stateDir, READ_MODEL_DIRNAME, `${instance}.v${schemaVersion}.sqlite`);
+}
+
+/** `<instance>.v<N>.g<generation>.sqlite`: a rebuild writes a NEW file and never renames over an open one. */
+export function readModelGenerationPath(stateDir: string, instance: string, schemaVersion: number, generation: string): string {
+  if (!/^\d{1,16}$/.test(generation)) throw new ReadModelError("bad_pointer", `generation ${JSON.stringify(generation)} is not a number`);
+  return join(dirname(readModelPath(stateDir, instance, schemaVersion)), `${instance}.v${schemaVersion}.g${generation}.sqlite`);
+}
+
+/** The pointer file naming the generation every reader and the worker open. */
+export function readModelPointerPath(stateDir: string, instance: string, schemaVersion: number): string {
+  return readModelPath(stateDir, instance, schemaVersion).replace(/\.sqlite$/, ".current");
+}
+
+/** The file the pointer names, or the un-generationed path when no rebuild has published one. */
+export function currentReadModelPath(stateDir: string, instance: string, schemaVersion: number): string {
+  const pointer = readModelPointerPath(stateDir, instance, schemaVersion);
+  if (!existsSync(pointer)) return readModelPath(stateDir, instance, schemaVersion);
+  const named = readFileSync(pointer, "utf8").trim();
+  const generation = new RegExp(`^${instance.replace(/\./g, "\\.")}\\.v${schemaVersion}\\.g(\\d{1,16})\\.sqlite$`).exec(named)?.[1];
+  if (generation === undefined) throw new ReadModelError("bad_pointer", `${pointer} names ${JSON.stringify(named.slice(0, 80))}, not a generation of ${instance} v${schemaVersion}`, { pointer });
+  return readModelGenerationPath(stateDir, instance, schemaVersion, generation);
+}
+
+/**
+ * Points every future open at `generation`: temp file, fsync, rename, directory fsync. The POINTER
+ * is what gets renamed; no database file is ever renamed over one another connection holds open,
+ * because its `-wal`/`-shm` siblings resolve by path and would be shared with the new file.
+ */
+export function publishReadModelGeneration(stateDir: string, instance: string, schemaVersion: number, generation: string): string {
+  const target = readModelGenerationPath(stateDir, instance, schemaVersion, generation);
+  const pointer = readModelPointerPath(stateDir, instance, schemaVersion);
+  const tmp = `${pointer}.tmp-${process.pid}`;
+  const fd = openSync(tmp, "w");
+  try {
+    writeSync(fd, `${basename(target)}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, pointer);
+  const dirFd = openSync(dirname(pointer), "r");
+  try {
+    fsyncSync(dirFd);
+  } finally {
+    closeSync(dirFd);
+  }
+  return target;
 }
 
 function sqliteErrcode(error: unknown): number | undefined {
@@ -148,7 +198,11 @@ function moveAside(path: string, clock: Clock): string {
 export function openReadModel(opts: ReadModelOpenOptions): ReadModelDb {
   const readOnly = opts.readOnly ?? false;
   const clock = opts.clock ?? systemClock;
-  const path = readModelPath(opts.stateDir, opts.instance, opts.schemaVersion);
+  const path = opts.generation === undefined
+    ? currentReadModelPath(opts.stateDir, opts.instance, opts.schemaVersion)
+    : opts.generation === null
+      ? readModelPath(opts.stateDir, opts.instance, opts.schemaVersion)
+      : readModelGenerationPath(opts.stateDir, opts.instance, opts.schemaVersion, opts.generation);
   let raw: DatabaseSync;
   let recoveredFrom: ReadModelDb["recoveredFrom"];
   if (readOnly) {
@@ -214,6 +268,18 @@ export function acquireLease(
         expires_ms = excluded.expires_ms`).run(lease.name, lease.holder, process.pid, hostname(), now, now + lease.ttlMs);
     return { ok: true, lease };
   });
+}
+
+/** Reads the named lease of any read-model file without joining its schema checks: the reaper asks
+ *  whether a superseded generation still has a live holder before it deletes the file. */
+export function peekLease(path: string, name: string = PROJECTOR_LEASE_NAME): { holder: string; expiresMs: number } | undefined {
+  const raw = connect(path, true);
+  try {
+    const row = raw.prepare("SELECT holder, expires_ms FROM lease WHERE name = ?").get(name);
+    return row ? { holder: String(row.holder), expiresMs: Number(row.expires_ms) } : undefined;
+  } finally {
+    raw.close();
+  }
 }
 
 /** Gives the lease up (serve's SIGTERM path) so a successor takes it at once. False if not ours. */

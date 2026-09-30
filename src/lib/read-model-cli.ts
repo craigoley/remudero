@@ -8,9 +8,9 @@
  * - status: per-instance checkpoint lag, row counts, quarantine count, DB size and lease holder.
  * - switch: writes `read-model/switches.json` atomically and appends a `read_model.switch` row.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { flagValue, unknownArgError } from "./cli-args.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { loadConfig } from "./config.js";
@@ -18,14 +18,18 @@ import { appendLedger } from "./ledger.js";
 import { LEDGER_FILENAME, ledgerPathFor } from "./ledger-path.js";
 import { LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel } from "./ledger-projector.js";
 import { ORACLE_DEFAULT_WINDOW_MS, ReadModelConsistencyError, runConsistencyCheck } from "./read-model-consistency.js";
-import { PROJECTOR_LEASE_NAME, READ_MODEL_DIRNAME, READ_MODEL_LEASE_TTL_MS, acquireLease, openReadModel, readModelPath, releaseLease, type ReadModelDb } from "./read-model-db.js";
+import {
+  PROJECTOR_LEASE_NAME, READ_MODEL_DIRNAME, READ_MODEL_LEASE_TTL_MS, acquireLease, currentReadModelPath, openReadModel, peekLease,
+  publishReadModelGeneration, readModelPointerPath, releaseLease,
+} from "./read-model-db.js";
 import { writeAtomic } from "./fs-race-safe.js";
 
 export const READ_MODEL_SWITCHES_FILENAME = "switches.json";
 export const READ_MODEL_SWITCH_STEP = "read_model.switch";
 export const READ_MODEL_REBUILT_STEP = "read_model.rebuilt";
 const VIEW_NAME = /^[a-z][a-z0-9-]{0,63}$/;
-const DB_FILE = /^(.+)\.v(\d+)\.sqlite$/;
+const DB_FILE = /^(.+)\.v(\d+)(?:\.g\d+)?\.sqlite$/;
+const POINTER_FILE = /^(.+)\.v(\d+)\.current$/;
 
 export type ProjectorSwitch = "on" | "off";
 export type ViewSwitch = "serve" | "shadow" | "off";
@@ -111,6 +115,9 @@ export interface InstanceStatus {
   /** False for a file built under another schema version: it is never read, only reported. */
   current: boolean;
   dbBytes: number;
+  /** The file the pointer names (or the un-generationed file), and any superseded generations beside it. */
+  file?: string;
+  superseded?: string[];
   rows?: { seen: number; fact: number; quarantine: number };
   generation?: number;
   newestAppliedTs?: string;
@@ -124,9 +131,15 @@ function fileBytes(path: string): number {
   return existsSync(path) ? statSync(path).size : 0;
 }
 
-function instanceStatus(stateDir: string, instance: string, version: number, now: number): InstanceStatus {
-  const path = readModelPath(stateDir, instance, version);
-  const status: InstanceStatus = { instance, schemaVersion: version, current: version === LEDGER_PROJECTOR_SCHEMA_VERSION, dbBytes: fileBytes(path) + fileBytes(`${path}-wal`) };
+function instanceStatus(stateDir: string, instance: string, version: number, files: string[], now: number): InstanceStatus {
+  const dir = join(stateDir, READ_MODEL_DIRNAME);
+  const bytes = (name: string): number => fileBytes(join(dir, name)) + fileBytes(join(dir, `${name}-wal`));
+  const status: InstanceStatus = { instance, schemaVersion: version, current: version === LEDGER_PROJECTOR_SCHEMA_VERSION, dbBytes: files.reduce((sum, f) => sum + bytes(f), 0) };
+  if (!status.current) return status;
+  const path = currentReadModelPath(stateDir, instance, version);
+  status.file = basename(path);
+  status.superseded = files.filter((f) => f !== status.file).sort();
+  status.dbBytes = bytes(status.file);
   if (!status.current) return status;
   const db = openReadModel({ stateDir, instance, schemaVersion: version, readOnly: true });
   try {
@@ -154,12 +167,17 @@ function instanceStatus(stateDir: string, instance: string, version: number, now
 
 export function readModelStatus(stateDir: string, clock: Clock = systemClock): InstanceStatus[] {
   const dir = join(stateDir, READ_MODEL_DIRNAME);
-  const names = existsSync(dir) ? readdirSync(dir) : [];
+  const groups = new Map<string, { instance: string; version: number; files: string[] }>();
+  for (const name of existsSync(dir) ? readdirSync(dir) : []) {
+    const m = DB_FILE.exec(name) ?? POINTER_FILE.exec(name);
+    if (!m) continue;
+    const key = `${m[1]}\u0000${m[2]}`;
+    const group = groups.get(key) ?? { instance: m[1]!, version: Number(m[2]), files: [] };
+    if (name.endsWith(".sqlite")) group.files.push(name);
+    groups.set(key, group);
+  }
   const now = clock.now();
-  return names.flatMap((name) => {
-    const m = DB_FILE.exec(name);
-    return m ? [instanceStatus(stateDir, m[1]!, Number(m[2]), now)] : [];
-  });
+  return [...groups.values()].map((g) => instanceStatus(stateDir, g.instance, g.version, g.files, now));
 }
 
 function statusCommand(stateDir: string, clock: Clock, json: boolean, out: (l: string) => void): number {
@@ -183,39 +201,61 @@ function statusCommand(stateDir: string, clock: Clock, json: boolean, out: (l: s
 }
 
 /**
- * Takes the live file's lease, from a running worker if need be. The fence makes that safe: the
- * old holder's next transaction finds another holder and rolls back with `lease_lost`.
+ * Takes the lease of the generation the worker is writing, from a running worker if need be. After
+ * the pointer flips, the fence makes the old holder's next transaction roll back with `lease_lost`,
+ * and its reopen resolves the pointer to the new generation. No database file is renamed or
+ * written over: the old generation stays intact for any connection still holding it.
  */
-function takeLease(db: ReadModelDb, holder: string, clock: Clock): string | undefined {
-  const got = acquireLease(db, { holder, clock });
-  if (got.ok) return undefined;
-  db.exec("BEGIN IMMEDIATE");
-  db.prepare("UPDATE lease SET holder = ?, pid = ?, host = ?, acquired_ms = ?, expires_ms = ? WHERE name = ?")
-    .run(holder, process.pid, hostname(), clock.now(), clock.now() + READ_MODEL_LEASE_TTL_MS, PROJECTOR_LEASE_NAME);
-  db.exec("COMMIT");
-  return got.heldBy;
+function fenceGeneration(stateDir: string, instance: string, path: string, holder: string, clock: Clock): string | undefined {
+  if (!existsSync(path)) return undefined;
+  const db = openProjectorReadModel(stateDir, instance, clock, generationOf(path));
+  try {
+    const got = acquireLease(db, { holder, clock });
+    if (got.ok) return undefined;
+    db.exec("BEGIN IMMEDIATE");
+    db.prepare("UPDATE lease SET holder = ?, pid = ?, host = ?, acquired_ms = ?, expires_ms = ? WHERE name = ?")
+      .run(holder, process.pid, hostname(), clock.now(), clock.now() + READ_MODEL_LEASE_TTL_MS, PROJECTOR_LEASE_NAME);
+    db.exec("COMMIT");
+    return got.heldBy;
+  } finally {
+    db.close();
+  }
 }
 
-/** Replaces the live file with the checked side file. Returns the lease holder it displaced. */
-function swapIn(stateDir: string, instance: string, sidePath: string, holder: string, clock: Clock): string | undefined {
-  const finalPath = readModelPath(stateDir, instance, LEDGER_PROJECTOR_SCHEMA_VERSION);
-  let displaced: string | undefined;
-  if (existsSync(finalPath)) {
-    const live = openProjectorReadModel(stateDir, instance, clock);
-    try {
-      displaced = takeLease(live, holder, clock);
-      // A TRUNCATE checkpoint leaves the WAL empty, so nothing of the old file can be replayed into the new one.
-      const ckpt = live.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
-      if (Number(ckpt?.busy) !== 0) {
-        live.prepare("DELETE FROM lease WHERE name = ? AND holder = ?").run(PROJECTOR_LEASE_NAME, holder);
-        throw new Error(`the live file ${finalPath} could not be checkpointed (a reader holds it), so its lease was handed back`);
-      }
-    } finally {
-      live.close();
-    }
+/** The generation number in a generation file's name; null for the un-generationed file. */
+function generationOf(path: string): string | null {
+  return /\.g(\d+)\.sqlite$/.exec(path)?.[1] ?? null;
+}
+
+/** How long a superseded generation outlives the pointer flip: readers reopen within a worker tick
+ *  and a lease TTL, so this only has to cover a stalled process. */
+export const READ_MODEL_GENERATION_GRACE_MS = 10 * 60_000;
+
+/**
+ * Deletes superseded generations of one instance once nothing can still be using them: the pointer
+ * flipped more than the grace ago, the file itself is older than the grace (a rebuild in progress
+ * writes a fresh one), and no live lease is recorded in it. Returns the removed file names.
+ */
+export function reapReadModelGenerations(stateDir: string, instance: string, clock: Clock = systemClock, graceMs = READ_MODEL_GENERATION_GRACE_MS): string[] {
+  const version = LEDGER_PROJECTOR_SCHEMA_VERSION;
+  const pointer = readModelPointerPath(stateDir, instance, version);
+  if (!existsSync(pointer)) return [];
+  const now = clock.now();
+  if (now - statSync(pointer).mtimeMs < graceMs) return [];
+  const dir = join(stateDir, READ_MODEL_DIRNAME);
+  const current = currentReadModelPath(stateDir, instance, version);
+  const removed: string[] = [];
+  for (const name of readdirSync(dir)) {
+    const path = join(dir, name);
+    const m = DB_FILE.exec(name);
+    if (!m || m[1] !== instance || Number(m[2]) !== version || path === current) continue;
+    if (now - statSync(path).mtimeMs < graceMs) continue;
+    const lease = peekLease(path);
+    if (lease && lease.expiresMs > now) continue;
+    for (const suffix of ["", "-wal", "-shm"]) rmSync(path + suffix, { force: true });
+    removed.push(name);
   }
-  renameSync(sidePath, finalPath);
-  return displaced;
+  return removed;
 }
 
 function rebuildCommand(stateDir: string, clock: Clock, args: string[], out: (l: string) => void, error: (l: string) => void): number {
@@ -227,22 +267,28 @@ function rebuildCommand(stateDir: string, clock: Clock, args: string[], out: (l:
     return 2;
   }
   const started = clock.now();
-  const sideRoot = join(stateDir, READ_MODEL_DIRNAME, `rebuild-${instance}-${started}`);
-  mkdirSync(sideRoot, { recursive: true });
+  const generation = String(started);
   const holder = `rebuild-${process.pid}-${started}`;
+  const reaped = reapReadModelGenerations(stateDir, instance, clock);
+  const previous = currentReadModelPath(stateDir, instance, LEDGER_PROJECTOR_SCHEMA_VERSION);
+  let sidePath: string | undefined;
+  let published = false;
   try {
-    const side = openProjectorReadModel(sideRoot, instance, clock);
-    const sidePath = side.path;
+    // A new generation file: nothing else names it until the pointer flips, so nothing else opens it.
+    const side = openProjectorReadModel(stateDir, instance, clock, generation);
+    sidePath = side.path;
     let run: ReturnType<typeof runConsistencyCheck>;
     let tick: ReturnType<ReturnType<typeof createLedgerProjector>["tick"]>;
     try {
       const got = acquireLease(side, { holder, clock });
-      if (!got.ok) throw new Error(`the side file ${sidePath} is already leased by ${got.heldBy}`);
+      if (!got.ok) throw new Error(`the new generation ${sidePath} is already leased by ${got.heldBy}`);
       tick = createLedgerProjector({ ledgerDir, db: side, lease: got.lease, clock }).tick();
       if (tick.unread.length > 0) throw new Error(`archives were unreadable: ${tick.unread.join("; ")}`);
       run = runConsistencyCheck({ db: side, ledgerDir, instance, metricLedgerPath: join(stateDir, LEDGER_FILENAME), clock, windowMs: days * 86_400_000 });
       releaseLease(side, got.lease);
-      side.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      // Finalize before the flip: every page in the main file, the WAL empty.
+      const ckpt = side.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+      if (Number(ckpt?.busy) !== 0) throw new Error(`the new generation ${sidePath} could not be checkpointed`);
     } finally {
       side.close();
     }
@@ -251,19 +297,23 @@ function rebuildCommand(stateDir: string, clock: Clock, args: string[], out: (l:
       for (const s of run.sample) error(`  ${s.slice(0, 200)}`);
       return 1;
     }
-    const displaced = swapIn(stateDir, instance, sidePath, holder, clock);
+    publishReadModelGeneration(stateDir, instance, LEDGER_PROJECTOR_SCHEMA_VERSION, generation);
+    published = true;
+    const displaced = fenceGeneration(stateDir, instance, previous, holder, clock);
     appendLedger(join(stateDir, LEDGER_FILENAME), {
-      run_id: "read-model-cli", task_id: "READ-MODEL", step: READ_MODEL_REBUILT_STEP, instance, rows: tick.fresh, facts: tick.facts,
-      quarantined: tick.quarantined, checked_rows: run.ledgerRows, elapsed_ms: clock.now() - started, ...(displaced ? { displaced_lease: displaced } : {}),
+      run_id: "read-model-cli", task_id: "READ-MODEL", step: READ_MODEL_REBUILT_STEP, instance, generation, rows: tick.fresh, facts: tick.facts,
+      quarantined: tick.quarantined, checked_rows: run.ledgerRows, elapsed_ms: clock.now() - started, reaped,
+      ...(displaced ? { displaced_lease: displaced } : {}),
     });
-    out(`rebuilt ${instance}: ${tick.fresh} rows (${tick.facts} facts, ${tick.quarantined} quarantined), consistency agreed over ${run.ledgerRows} rows, swapped in${displaced ? ` (took the lease from ${displaced})` : ""}`);
+    out(`rebuilt ${instance}: ${tick.fresh} rows (${tick.facts} facts, ${tick.quarantined} quarantined), consistency agreed over ${run.ledgerRows} rows, now serving generation ${generation}${displaced ? ` (fenced ${displaced} off the old one)` : ""}`);
     return 0;
   } catch (err) {
-    // Reported with exit 1: every refusal leaves the live file as it was, so there is nothing to undo.
+    // Reported with exit 1: before the flip every refusal leaves the live generation as it was.
     const blind = err instanceof ReadModelConsistencyError ? " (the oracle could not see its corpus; an idle instance needs a wider --window-days)" : "";
-    error(`rmd read-model rebuild: refused${blind}: ${(err as Error).message}; the live file was not touched`);
+    error(`rmd read-model rebuild: refused${blind}: ${(err as Error).message}${published ? "" : "; the live file was not touched"}`);
     return 1;
   } finally {
-    rmSync(sideRoot, { recursive: true, force: true });
+    // An unpublished generation is named by nothing, so no connection can hold it.
+    if (!published && sidePath) for (const suffix of ["", "-wal", "-shm"]) rmSync(sidePath + suffix, { force: true });
   }
 }
