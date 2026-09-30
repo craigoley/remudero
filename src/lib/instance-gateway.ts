@@ -91,7 +91,7 @@ export interface InstanceGatewayOptions {
   clock?: Clock;
   every?: (run: () => void, ms: number) => () => void;
   /** The serve lifecycle starts and stops each independent, instance-rooted projection. */
-  onAnalyticsCache?: (cache: AnalyticsSnapshotCache) => void;
+  onAnalyticsCache?: (cache: AnalyticsSnapshotCache, instance: { name: string; repo: string; ledgerPath: string }) => void;
 }
 
 export function instanceStateRoot(instance: RegistryInstance, stateBase: string): InstanceStateRoot {
@@ -238,7 +238,7 @@ export function buildInstanceGatewayRoutes(coreRoutes: readonly Route[], opts: I
           log: (step, extra) => opts.log?.(step, { ...extra, instance: instance.name, repository: instance.repo }),
         });
         currentAnalyticsSnapshot = cache.current;
-        opts.onAnalyticsCache?.(cache);
+        opts.onAnalyticsCache?.(cache, { name: instance.name, repo: instance.repo, ledgerPath: root.ledgerPath });
       } catch (error) {
         startupReason = `analytics projection for ${instance.name} could not be initialized: ${String((error as Error).message ?? error)}`;
         opts.log?.("serve.instance_unavailable", { instance: instance.name, reason: startupReason });

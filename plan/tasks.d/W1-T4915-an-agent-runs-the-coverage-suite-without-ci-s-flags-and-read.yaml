@@ -1,0 +1,62 @@
+- id: W1-T4915
+  title: "AN AGENT RUNS THE COVERAGE SUITE WITHOUT CI'S FLAGS AND READS A WRONG ANSWER — 6 of 41 diff-coverage runs in one session used a hand-rolled recipe with no --enable-source-maps, every one from a prompt that named neither the flag nor `npm run diff-coverage:local`; refuse that run at the deny floor and name the script that reproduces CI"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator-session#learning-loop-research-2026-09-30"
+  plan_refs: ["W1-T4082", "W1-T4084", "W1-T4106", "W1-T4797"]
+  files:
+    - hooks/deny-floor.sh
+    - test/a-raw-coverage-run-without-source-maps-is-refused.test.ts
+    - scripts/test-tier-manifest.json
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 over the 105 sub-agent transcripts of one operator session (2026-09-23 to
+    2026-09-29). 41 agents ran a diff-coverage measurement. 35 had read, before their first run, either
+    CI's `--enable-source-maps` or `npm run diff-coverage:local` (W1-T4084, which reads CI's exact
+    invocation out of ci.yml); none of the 35 ran the wrong recipe. The other 6 had read neither, ran
+    `node --experimental-test-coverage ...` by hand with no `--enable-source-maps`, and got `DA:` lines
+    located against the tsx-transpiled JS, so every changed line read uncovered. Positive control: the
+    same scan finds the 35 correct runs. Limit: one session, so what separates the arms is what each
+    agent was handed, not a randomized assignment.
+    The lesson works when it arrives. What fails is delivery: the prompt is hand-copied, the script is
+    named in no CLAUDE.md rule, doctrine body or doc, and the learnings entry that states the fact
+    (`diff-coverage-needs-cis-own-flags`) is injected only into an implement task whose files touch ci.yml
+    or scripts/diff-coverage.mjs. `hooks/deny-floor.sh` is the one surface every interactive lane and
+    every worker Bash call already passes through, and it feeds its refusal text straight back to the
+    model, so it is a reader by construction. W1-T4082 is the precedent: a rule written as guidance only,
+    observed twice, turned into a refusal that names the remedy.
+    W1-T4797 is the fleet's harness-side answer for the worker's own push; this is the hand-run half.
+  design: |
+    (i) In hooks/deny-floor.sh, per command segment (the way rules 1 and 11 split a line), refuse a
+    simple command whose program is `node` and whose arguments carry `--experimental-test-coverage`
+    when neither that segment nor a `NODE_OPTIONS=` assignment in it carries `--enable-source-maps`.
+    The message names `npm run diff-coverage:local -- <test files>`, which spawns CI's own invocation.
+    (ii) A command that only MENTIONS the flag (grep, pgrep, pkill, sed, cat, an echo, a heredoc that
+    writes a file) is never refused; match the program position, the way rule 12's tr_classify does,
+    looking through a `timeout <n>`, `time` or `env` wrapper: one of the six runs was `timeout 600 node ...`.
+    A replay over the 44 commands in that session that name the flag refused the hand-run ones and none
+    of the greps, pgreps or correct runs.
+    (iii) A segment that runs `npm run` or `node scripts/diff-coverage-local.mjs` is untouched: those
+    spawn the flags themselves.
+    (iv) No CLAUDE.md edit and no new learning: the refusal is the delivery. Do not widen the refusal to
+    any other `node --test` shape.
+  acceptance:
+    - claim: "a hand-run coverage suite without --enable-source-maps is refused, naming npm run diff-coverage:local"
+      proof: 'grep: test("W1-T4915: a coverage run without --enable-source-maps is refused with the local script named" in test/a-raw-coverage-run-without-source-maps-is-refused.test.ts'
+    - claim: "the same run carrying --enable-source-maps is allowed"
+      proof: 'grep: test("W1-T4915: the same run with --enable-source-maps is allowed" in test/a-raw-coverage-run-without-source-maps-is-refused.test.ts'
+    - claim: "a command that only names the flag as text is allowed"
+      proof: 'grep: test("W1-T4915: a command that only names the flag as text is allowed" in test/a-raw-coverage-run-without-source-maps-is-refused.test.ts'
+  falsifier: |
+    CLOSE IF hooks/deny-floor.sh already refuses a coverage run lacking --enable-source-maps, or if
+    W1-T4797's harness precheck makes a hand-run coverage suite obsolete for every lane. After the build,
+    re-run the transcript scan on the next fix agents: a raw run without source maps reaching a tool
+    result instead of a refusal means the rule is not load-bearing.

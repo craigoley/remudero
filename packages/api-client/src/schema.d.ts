@@ -154,6 +154,97 @@ export interface components {
       recap?: (RecapEvent)[];
       /** W1-T163: this token's marker value BEFORE this request advanced it -- the timestamp `recap` was computed as-of. Absent alongside `recap` for the same two reasons. */
       sinceCheckpoint?: string;
+      /** True iff the GitHub read backing merge state was unreachable this snapshot. */
+      github_unreachable?: boolean;
+      counts?: StatusCounts;
+      spend?: GlanceSpend;
+      /** PRs the sweep disposed into a non-progressing class (src/lib/status-board.ts's `BlockedPrBlocker`), re-derived against live merge state every render. */
+      blockedPrs?: (BlockedPrRow)[];
+      /** Set only when live GitHub state could not be checked; `blockedPrs` is then withheld (empty). */
+      blockedPrsUnverifiedReason?: string;
+      /** The standing operator merge holds (src/lib/status-board.ts's `MergeHeldRow`). */
+      mergeHeld?: (MergeHeldRow)[];
+      prQueue?: PrQueueSnapshot;
+      modelApprovals?: (ConsoleModelApproval)[];
+      taskProjection?: ConsoleStatusTaskProjection;
+      /** The provider repair ladder (src/lib/worker-provider.ts's `RepairLadderState`), spliced by src/lib/serve.ts's `withRepairLadder`. `running`, `unreadable` (with `reason`), or `stalled` (with the stall record's fields, which evolve with the ladder and are open here). */
+      repairLadder?: {
+        state: "running" | "stalled" | "unreadable";
+      };
+      staleness?: ConsoleResponseStaleness;
+    };
+    /** GET /v1/status's header counts (src/lib/board.ts's `CountSummary`), derived from the same `tasks`. */
+    StatusCounts: {
+      total: number;
+      running: number;
+      merged: number;
+      queued: number;
+      blocked: number;
+      /** False when merge state's GitHub read was unreachable -- render unknown, not 0 merged. */
+      merged_known: boolean;
+    };
+    /** The GLANCE strip totals (src/lib/glance.ts's `GlanceSpend`). */
+    GlanceSpend: {
+      mergedToday: number;
+      channel: "fleet";
+      spendTodayUsd: number;
+      spendWeekUsd: number;
+      /** Always null -- no ledger step records operator-session cost; null is unmeasured, never 0. */
+      sessionSpendUsd: null;
+    };
+    BlockedPrRow: {
+      kind: "blocked_pr";
+      taskId?: string;
+      prNumber: number;
+      prUrl?: string;
+      disposition: string;
+      reason: string;
+    };
+    /** An operator merge hold. `prNumber` and `taskId` are absent for a fleet-scoped hold. */
+    MergeHeldRow: {
+      prNumber?: number;
+      taskId?: string;
+      by: string;
+      reason: string;
+    };
+    /** Every current open PR (src/lib/board.ts's `PrQueueSnapshot`). An unreadable or partial index is `complete: false` with no rows and an `unavailableReason`, never stale rows. */
+    PrQueueSnapshot: {
+      complete: boolean;
+      rows: (PrQueueRow)[];
+      unavailableReason?: string;
+      /** The newest prior complete queue this route cache held; absent until observed. */
+      lastGoodAt?: string;
+    };
+    PrQueueRow: {
+      prNumber: number;
+      prUrl: string;
+      title: string;
+      headRefName?: string;
+      headSha?: string;
+      taskId?: string;
+      disposition: string;
+      reason: string;
+      reviewState: "success" | "failure" | "pending" | "none" | "unreadable" | "not-applicable";
+      queueClass: "actionable" | "active" | "ready-held" | "waiting" | "unknown";
+      held: boolean;
+      snapshotAt: string;
+      observedAt?: string;
+    };
+    ConsoleModelApproval: {
+      model: string;
+      approvedBy: string;
+      approvedAt: string;
+      expiresAt?: string;
+      expired: boolean;
+    };
+    /** How much of the plan `tasks` carries (src/lib/serve.ts's `ConsoleStatusTaskProjection`): a truncated list says so, so an omitted task never reads as "no worker". */
+    ConsoleStatusTaskProjection: {
+      complete: boolean;
+      total: number;
+      returned: number;
+      omitted: number;
+      limit: number;
+      reason: string;
     };
     /** Trailing seven-day run outcomes from the de-duplicated ledger. `succeeded` counts tasks that took merge credit (`verdict.merged`, or a `verdict` of merged, already_satisfied or awaiting_merge). `failed` counts runs whose verdict is blocked_ci, blocked_review, no_pr, blocked_budget, error_max_budget_usd, blocked_illformed or failed. `superseded` counts such a failure whose task later took merge credit; it is in neither term of `errorrate`. Held, transient and re-queued verdicts (blocked_transient, blocked_containment, handed_off, ...) are in no count. */
     RepoRunOutcomes: {
@@ -467,9 +558,45 @@ export interface components {
       /** GET /v1/feedback only (W1-T1257): true when `discharged` could not be determined because the merged-set read failed or was truncated -- a partial read, never mistaken for "not discharged". Mutually exclusive with `discharged`; a read-time decoration only, exactly like `unverified`. */
       dischargeUndecidable?: boolean;
     };
-    /** GET /v1/feedback's body -- every captured feedback entry, oldest first. Served through the console read cache (src/lib/serve.ts's `boundConsoleReadRoute`), so `rmd serve` also splices in `staleness`; a cold or stalled cache answers `{entries: [], staleness}`. */
+    /** GET /v1/feedback's body -- every captured feedback entry, oldest first. Served through the console read cache (src/lib/serve.ts's `boundConsoleReadRoute`), so `rmd serve` also splices in `staleness`; a cold or stalled cache answers `{entries: [], staleness}`. With `?limit=` or `?cursor=`, `entries` is one page and `page` says where the next one starts. */
     FeedbackInboxResult: {
       entries: (FeedbackEntry)[];
+      page?: ReadPage;
+      staleness?: ConsoleResponseStaleness;
+    };
+    /** One page of a list read (src/lib/read-page.ts). Pass `nextCursor` back as `?cursor=` for the next page; its absence means this page is the last. The cursor names the last item served and its position, so an item that leaves the list between two reads never restarts the walk. */
+    ReadPage: {
+      /** GET /v1/inbox only -- the lane this page is from. */
+      section?: string;
+      /** Items in the whole list at the time of this read. */
+      total: number;
+      limit: number;
+      nextCursor?: string;
+    };
+    /** Every GET /v1/inbox lane's length, including the lanes a `?section=` read leaves out, so a badge or a tab count needs no second read. */
+    InboxCounts: {
+      ready: number;
+      drafting: number;
+      notReady: number;
+      declined: number;
+      fleet: number;
+      needsYou: {
+        ready: number;
+        drafting: number;
+        notReady: number;
+        declined: number;
+      };
+    };
+    /** GET /v1/inbox?section=<name>'s body: that one lane under its own key, exactly as the whole body carries it (`needsYou` an object of four lanes, every other section one page of an array), plus `counts` and, for a list section, `page`. */
+    InboxSectionResult: {
+      ready?: (InboxReadyItem)[];
+      drafting?: (InboxDraftingItem)[];
+      notReady?: (InboxNotReadyItem)[];
+      declined?: (InboxDeclinedItem)[];
+      fleet?: (InboxFleetItem)[];
+      needsYou?: InboxNeedsYou;
+      counts: InboxCounts;
+      page?: ReadPage;
       staleness?: ConsoleResponseStaleness;
     };
     /** POST /v1/feedback's body -- submit feedback from the panel (ALWAYS captured with origin: ui, never taken from this body). `replyTo`, if given, must name an existing entry parked `grilling` -- this is "answer a grill" v1 (src/lib/panel-graph.ts's header explains why): the answer is captured as a fresh feedback entry that re-enters triage, rather than a second, parallel answer-delivery primitive ahead of the still-unbuilt W1-T42 grill mechanics. */
@@ -2432,8 +2559,18 @@ export interface components {
       data: {
         /** The operator-agent badge: proposals the console's engine would show (a port of its generateProposals and visibleProposals, src/lib/nav-badge-view.ts), with up to 20 of their ids for a parity check. */
         agent: {
+          /** Present only when every selected instance was counted. */
           count?: number;
+          /** Present instead of `count` when only some instances were counted -- a floor, never a total. */
+          atLeast?: number;
           proposalIds: (string)[];
+          /** One entry per selected instance; `count` absent with a `reason` when it could not be counted. */
+          instances: ({
+            instanceId: string;
+            repository?: string;
+            count?: number;
+            reason?: string;
+          })[];
           reason?: string;
         };
         /** Open inbox items by who must act, from the last GET /v1/inbox classification. */
@@ -2626,6 +2763,7 @@ export interface components {
       declined?: (InboxDeclinedItem)[];
       needsYou?: InboxNeedsYou;
       fleet?: (InboxFleetItem)[];
+      counts?: InboxCounts;
       staleness?: ConsoleResponseStaleness;
     };
     /** One stored daily digest (src/lib/serve.ts's `ConsoleInboxDigestEntry`). */
@@ -4196,6 +4334,7 @@ export interface paths {
       responses: {
           "200": NavBadgeView;
           "304": undefined;
+          "400": Error;
           "401": Error;
           "403": Error;
         };
@@ -4366,8 +4505,9 @@ export interface paths {
   "/v1/inbox": {
     get: {
       responses: {
-          "200": InboxResult;
+          "200": unknown;
           "304": undefined;
+          "400": Error;
           "401": Error;
           "403": Error;
         };

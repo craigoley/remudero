@@ -84,7 +84,7 @@ import {
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildViewRoutes } from "./views.js";
-import { navBadgeView } from "./nav-badge-view.js";
+import { navBadgeView, type NavBadgeScope } from "./nav-badge-view.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
@@ -2571,6 +2571,7 @@ function assembleServeRoutes(
   operatorAgentMemory?: OperatorAgentMemorySource,
 ): ServeRoutesAssembly {
   const instanceAnalyticsCaches: AnalyticsSnapshotCache[] = [];
+  const badgeScopes: NavBadgeScope[] = [];
   const modelApprovals = deps.modelApprovals ?? [];
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
@@ -2699,8 +2700,9 @@ function assembleServeRoutes(
       planPath: deps.panelGraph.planPath,
     }),
     buildRecentRoute(deps.board),
-    ...buildViewRoutes([navBadgeView({ analytics: currentAnalyticsSnapshot, memory: operatorAgentMemory, ledgerPath: deps.ledgerPath,
-      inboxRoot: deps.fleetControlRoot, repository: deps.assistantRepository, instanceId: deps.instances?.coreInstance ?? CORE_INSTANCE })]),
+    ...buildViewRoutes([navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: () => [
+      { instanceId: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, analytics: currentAnalyticsSnapshot, memory: operatorAgentMemory, ledgerPath: deps.ledgerPath },
+      ...badgeScopes] })]),
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),
     buildAccountUsageRoute(accountUsageDeps),
@@ -2887,7 +2889,7 @@ function assembleServeRoutes(
   routes.push(
     ...buildInstanceGatewayRoutes(routes, {
       registryPath: daemonInstanceRegistryPath(deps.questionsRoot),
-      github: (repo) => buildBatchedGithub(repo.split("/")[0], repo.split("/")[1], { ttlMs: DEFAULT_BOARD_POLL_TTL_MS, log: deps.log }),
+      github: (repo) => buildBatchedGithub(repo.split("/")[0], repo.split("/")[1], { ttlMs: DEFAULT_BOARD_POLL_TTL_MS, log: deps.log, offLoop: true }),
       issues: deps.issues,
       controlStatus: deps.controlStatus,
       log: deps.log,
@@ -2897,7 +2899,11 @@ function assembleServeRoutes(
       ...deps.instances,
       assistantClaimRoot: deps.fleetControlRoot,
       assistantBootSha: consoleSha,
-      onAnalyticsCache: (cache) => instanceAnalyticsCaches.push(cache),
+      onAnalyticsCache: (cache, instance) => {
+        instanceAnalyticsCaches.push(cache);
+        badgeScopes.push({ instanceId: instance.name, repository: instance.repo, analytics: cache.current, ledgerPath: instance.ledgerPath,
+          memory: createOperatorAgentMemorySource(() => cache.current().operatorAgentMemory) });
+      },
     }),
   );
   // W1-T404 design (iii): `ci-parity:drift`-shaped completeness, run inside the PRODUCT function
@@ -2983,6 +2989,7 @@ export function startIncidentInvariantsMonitor(
  * with a viewer still attached leaves no timer behind.
  */
 function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
+  deps.board.github.serveOffLoop?.();
   const prewarm = gatePrewarmOnClients(
     buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS),
     deps.board.github,

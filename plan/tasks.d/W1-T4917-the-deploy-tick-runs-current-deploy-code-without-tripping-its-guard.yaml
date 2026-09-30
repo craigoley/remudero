@@ -1,0 +1,37 @@
+- id: W1-T4917
+  title: "AN IDLE DAEMON'S DEPLOY TICK RUNS STALE DEPLOY CODE, AND THE FIRST FIX DISABLED RECYCLES — run deploy logic at least as new as the install checkout without running deploy-run from inside the checkout it deploys, which checkInstallSeparation rightly refuses"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: go ahead with follow ups (W1-T4844 reverted in #8050)"
+  note: "reservation hand-off: plan-deploy-code-1790773661000 -> plan-deploy-code-1790773661000"
+  plan_refs: [W1-T4844, W1-T3604]
+  files: [deploy/install-host-units.sh, src/lib/install-root.ts, test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-29: the site's 19:06Z deploy ran deploy code from its daemon tree (last booted 13:09Z), so a
+    deployer fix merged at 15:26Z never ran there. W1-T4844 (#8032) ran deploy-run from daemon-install instead, and
+    on 2026-09-30 every watchdog tick then no-opped: "install root (…/daemon-install) resolves INSIDE the operator's own
+    checkout" (src/lib/install-root.ts checkInstallSeparation). The guard protects an operator's own tree and is
+    correct; #8032's tests stubbed rmd and never met it. Reverted in #8050.
+  design: |
+    Keep deploy-run running outside the install checkout. Measure-first options, chosen in the PR: (a) the tick runs
+    the daemon tree's rmd but the daemon tree is fast-forwarded to origin/main before the tick when the daemon is
+    idle (the daemon's own freshness restart already does this on boot); or (b) a separate, launcher-owned code
+    checkout (not the install root) that convergence keeps at main and runnable, from which deploy-run acts on
+    daemon-install. Whichever is chosen, the proof runs the REAL rmd deploy-run --dry-run against a fixture install
+    root and asserts it is not the checkInstallSeparation no-op.
+  acceptance:
+    - claim: "the deploy tick's rmd is at least as new as the install checkout"
+      proof: 'grep: test("W1-T4917: the deploy tick runs deploy code at least as new as the install checkout" in test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts'
+    - claim: "the real deploy-run does not hit the install-separation no-op from the tick's invocation"
+      proof: 'grep: test("W1-T4917: the real deploy-run is not the install-separation no-op" in test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts'
+  falsifier: |
+    Run deploy-run from daemon-install again and the second test sees the no-op.

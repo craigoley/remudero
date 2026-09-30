@@ -308,6 +308,7 @@ UNITS_HEAP_MB=${MAX_OLD_SPACE_MB}
 INSTANCE_NAME=${INSTANCE_NAME:-}
 INSTANCE_REGISTRY=${REGISTRY_FILE:-}
 BOOT=0
+INSTALL_RUNTIME_READY=0
 [ "\${1:-}" = "--boot" ] && BOOT=1
 
 # W1-T3233 — THE REVIVAL LOG'S READER. The record below has been written since W1-T2877 and read by
@@ -456,12 +457,17 @@ converge_host_units() {
   fi
   # W1-T4844: keep the install checkout runnable (npm ci only when its committed lockfile changes).
   lock_blob=\$(git -C "\$CHECKOUT" rev-parse HEAD:package-lock.json 2>/dev/null || echo "")
-  if [ -n "\$lock_blob" ] && { [ ! -x "\$CHECKOUT/node_modules/.bin/tsx" ] || [ "\$(cat "\$CHECKOUT/node_modules/.rmd-lock-blob" 2>/dev/null)" != "\$lock_blob" ]; }; then
+  if [ -L "\$CHECKOUT/node_modules" ]; then
+    echo "rmd-relaunch: units -- node_modules is a symlink; leaving it untouched." >&2
+  elif [ -n "\$lock_blob" ] && { [ ! -x "\$CHECKOUT/node_modules/.bin/tsx" ] || [ "\$(cat "\$CHECKOUT/node_modules/.rmd-lock-blob" 2>/dev/null)" != "\$lock_blob" ]; }; then
     if (cd "\$CHECKOUT" && npm ci --no-audit --no-fund >/dev/null 2>&1); then
       printf '%s\n' "\$lock_blob" > "\$CHECKOUT/node_modules/.rmd-lock-blob"
     else
       echo "rmd-relaunch: units -- npm ci in the install checkout failed; deploy-run stays on the daemon tree." >&2
     fi
+  fi
+  if [ -n "\$lock_blob" ] && [ ! -L "\$CHECKOUT/node_modules" ] && [ -x "\$CHECKOUT/node_modules/.bin/tsx" ] && [ "\$(cat "\$CHECKOUT/node_modules/.rmd-lock-blob" 2>/dev/null)" = "\$lock_blob" ]; then
+    INSTALL_RUNTIME_READY=1
   fi
   INSTALLER_ENV=(RMD_NODE_MAX_OLD_SPACE_MB="\$UNITS_HEAP_MB")
   if [ -n "\$INSTANCE_NAME" ]; then
@@ -535,15 +541,18 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   [ "\$BOOT" -eq 0 ] && converge_host_units
   # W1-T4844: prefer the converged install checkout; the daemon tree is the fallback.
   DEPLOY_RMD="\$STATE_DIR/remudero/bin/rmd"
-  if [ -x "\$CHECKOUT/bin/rmd" ] && [ -x "\$CHECKOUT/node_modules/.bin/tsx" ]; then
+  DEPLOY_CWD="\$STATE_DIR/remudero"
+  if [ -x "\$CHECKOUT/bin/rmd" ] && [ "\$INSTALL_RUNTIME_READY" -eq 1 ]; then
     DEPLOY_RMD="\$CHECKOUT/bin/rmd"
+    DEPLOY_CWD="\$CHECKOUT"
   fi
   if [ "\$BOOT" -eq 0 ] && [ -x "\$DEPLOY_RMD" ]; then
     echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
     # W1-T4267: deploy-run reads resourcePolicyDrift for THIS container (named at install time --
     # the rendered launcher has no CONTAINER_NAME of its own) against the build policy it recycles with.
-    RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
-      "\$DEPLOY_RMD" deploy-run --image-drift-only --state-root "\$STATE_DIR" || \\
+    # The CLI resolves repoRoot before dispatch. Pin it to the same tree that supplies the code.
+    (cd "\$DEPLOY_CWD" && RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
+      "\$DEPLOY_RMD" deploy-run --image-drift-only --state-root "\$STATE_DIR" --repo-root "\$DEPLOY_CWD") || \\
       echo "rmd-relaunch: deploy-run reported a problem; the daemon is untouched and the next tick re-asks." >&2
   else
     echo "rmd-relaunch: ${CONTAINER_NAME} already running -- nothing to do."

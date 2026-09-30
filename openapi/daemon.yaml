@@ -399,6 +399,165 @@ components:
           description: >
             W1-T163: this token's marker value BEFORE this request advanced it -- the timestamp
             `recap` was computed as-of. Absent alongside `recap` for the same two reasons.
+        github_unreachable:
+          type: boolean
+          description: True iff the GitHub read backing merge state was unreachable this snapshot.
+        counts:
+          $ref: "#/components/schemas/StatusCounts"
+        spend:
+          $ref: "#/components/schemas/GlanceSpend"
+        blockedPrs:
+          type: array
+          description: >
+            PRs the sweep disposed into a non-progressing class (src/lib/status-board.ts's
+            `BlockedPrBlocker`), re-derived against live merge state every render.
+          items:
+            $ref: "#/components/schemas/BlockedPrRow"
+        blockedPrsUnverifiedReason:
+          type: string
+          description: Set only when live GitHub state could not be checked; `blockedPrs` is then withheld (empty).
+        mergeHeld:
+          type: array
+          description: The standing operator merge holds (src/lib/status-board.ts's `MergeHeldRow`).
+          items:
+            $ref: "#/components/schemas/MergeHeldRow"
+        prQueue:
+          $ref: "#/components/schemas/PrQueueSnapshot"
+        modelApprovals:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConsoleModelApproval"
+        taskProjection:
+          $ref: "#/components/schemas/ConsoleStatusTaskProjection"
+        repairLadder:
+          type: object
+          description: >
+            The provider repair ladder (src/lib/worker-provider.ts's `RepairLadderState`), spliced by
+            src/lib/serve.ts's `withRepairLadder`. `running`, `unreadable` (with `reason`), or
+            `stalled` (with the stall record's fields, which evolve with the ladder and are open here).
+          required: [state]
+          additionalProperties: true
+          properties:
+            state:
+              type: string
+              enum: [running, stalled, unreadable]
+        staleness:
+          $ref: "#/components/schemas/ConsoleResponseStaleness"
+
+    StatusCounts:
+      type: object
+      description: GET /v1/status's header counts (src/lib/board.ts's `CountSummary`), derived from the same `tasks`.
+      required: [total, running, merged, queued, blocked, merged_known]
+      properties:
+        total: {type: integer}
+        running: {type: integer}
+        merged: {type: integer}
+        queued: {type: integer}
+        blocked: {type: integer}
+        merged_known:
+          type: boolean
+          description: False when merge state's GitHub read was unreachable -- render unknown, not 0 merged.
+
+    GlanceSpend:
+      type: object
+      description: The GLANCE strip totals (src/lib/glance.ts's `GlanceSpend`).
+      required: [mergedToday, channel, spendTodayUsd, spendWeekUsd, sessionSpendUsd]
+      properties:
+        mergedToday: {type: integer}
+        channel:
+          type: string
+          enum: [fleet]
+        spendTodayUsd: {type: number}
+        spendWeekUsd: {type: number}
+        sessionSpendUsd:
+          type: "null"
+          description: Always null -- no ledger step records operator-session cost; null is unmeasured, never 0.
+
+    BlockedPrRow:
+      type: object
+      required: [kind, prNumber, disposition, reason]
+      properties:
+        kind:
+          type: string
+          enum: [blocked_pr]
+        taskId: {type: string}
+        prNumber: {type: integer}
+        prUrl: {type: string}
+        disposition: {type: string}
+        reason: {type: string}
+
+    MergeHeldRow:
+      type: object
+      description: An operator merge hold. `prNumber` and `taskId` are absent for a fleet-scoped hold.
+      required: [by, reason]
+      properties:
+        prNumber: {type: integer}
+        taskId: {type: string}
+        by: {type: string}
+        reason: {type: string}
+
+    PrQueueSnapshot:
+      type: object
+      description: >
+        Every current open PR (src/lib/board.ts's `PrQueueSnapshot`). An unreadable or partial index
+        is `complete: false` with no rows and an `unavailableReason`, never stale rows.
+      required: [complete, rows]
+      properties:
+        complete: {type: boolean}
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/PrQueueRow"
+        unavailableReason: {type: string}
+        lastGoodAt:
+          type: string
+          description: The newest prior complete queue this route cache held; absent until observed.
+
+    PrQueueRow:
+      type: object
+      required: [prNumber, prUrl, title, disposition, reason, reviewState, queueClass, held, snapshotAt]
+      properties:
+        prNumber: {type: integer}
+        prUrl: {type: string}
+        title: {type: string}
+        headRefName: {type: string}
+        headSha: {type: string}
+        taskId: {type: string}
+        disposition: {type: string}
+        reason: {type: string}
+        reviewState:
+          type: string
+          enum: [success, failure, pending, none, unreadable, not-applicable]
+        queueClass:
+          type: string
+          enum: [actionable, active, ready-held, waiting, unknown]
+        held: {type: boolean}
+        snapshotAt: {type: string}
+        observedAt: {type: string}
+
+    ConsoleModelApproval:
+      type: object
+      required: [model, approvedBy, approvedAt, expired]
+      properties:
+        model: {type: string}
+        approvedBy: {type: string}
+        approvedAt: {type: string}
+        expiresAt: {type: string}
+        expired: {type: boolean}
+
+    ConsoleStatusTaskProjection:
+      type: object
+      description: >
+        How much of the plan `tasks` carries (src/lib/serve.ts's `ConsoleStatusTaskProjection`): a
+        truncated list says so, so an omitted task never reads as "no worker".
+      required: [complete, total, returned, omitted, limit, reason]
+      properties:
+        complete: {type: boolean}
+        total: {type: integer}
+        returned: {type: integer}
+        omitted: {type: integer}
+        limit: {type: integer}
+        reason: {type: string}
 
     RepoRunOutcomes:
       type: object
@@ -1279,7 +1438,8 @@ components:
       description: >
         GET /v1/feedback's body -- every captured feedback entry, oldest first. Served through the
         console read cache (src/lib/serve.ts's `boundConsoleReadRoute`), so `rmd serve` also
-        splices in `staleness`; a cold or stalled cache answers `{entries: [], staleness}`.
+        splices in `staleness`; a cold or stalled cache answers `{entries: [], staleness}`. With
+        `?limit=` or `?cursor=`, `entries` is one page and `page` says where the next one starts.
       required:
         - entries
       properties:
@@ -1287,6 +1447,86 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/FeedbackEntry"
+        page:
+          $ref: "#/components/schemas/ReadPage"
+        staleness:
+          $ref: "#/components/schemas/ConsoleResponseStaleness"
+
+    ReadPage:
+      type: object
+      description: >
+        One page of a list read (src/lib/read-page.ts). Pass `nextCursor` back as `?cursor=` for
+        the next page; its absence means this page is the last. The cursor names the last item
+        served and its position, so an item that leaves the list between two reads never restarts
+        the walk.
+      required: [total, limit]
+      properties:
+        section:
+          type: string
+          description: GET /v1/inbox only -- the lane this page is from.
+        total:
+          type: integer
+          description: Items in the whole list at the time of this read.
+        limit:
+          type: integer
+        nextCursor:
+          type: string
+
+    InboxCounts:
+      type: object
+      description: >
+        Every GET /v1/inbox lane's length, including the lanes a `?section=` read leaves out, so a
+        badge or a tab count needs no second read.
+      required: [ready, drafting, notReady, declined, fleet, needsYou]
+      properties:
+        ready: {type: integer}
+        drafting: {type: integer}
+        notReady: {type: integer}
+        declined: {type: integer}
+        fleet: {type: integer}
+        needsYou:
+          type: object
+          required: [ready, drafting, notReady, declined]
+          properties:
+            ready: {type: integer}
+            drafting: {type: integer}
+            notReady: {type: integer}
+            declined: {type: integer}
+
+    InboxSectionResult:
+      type: object
+      description: >
+        GET /v1/inbox?section=<name>'s body: that one lane under its own key, exactly as the whole
+        body carries it (`needsYou` an object of four lanes, every other section one page of an
+        array), plus `counts` and, for a list section, `page`.
+      required: [counts]
+      properties:
+        ready:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxReadyItem"
+        drafting:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxDraftingItem"
+        notReady:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxNotReadyItem"
+        declined:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxDeclinedItem"
+        fleet:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxFleetItem"
+        needsYou:
+          $ref: "#/components/schemas/InboxNeedsYou"
+        counts:
+          $ref: "#/components/schemas/InboxCounts"
+        page:
+          $ref: "#/components/schemas/ReadPage"
         staleness:
           $ref: "#/components/schemas/ConsoleResponseStaleness"
 
@@ -6417,12 +6657,28 @@ components:
                 The operator-agent badge: proposals the console's engine would show (a port of its
                 generateProposals and visibleProposals, src/lib/nav-badge-view.ts), with up to 20
                 of their ids for a parity check.
-              required: [proposalIds]
+              required: [proposalIds, instances]
               properties:
-                count: {type: integer}
+                count:
+                  type: integer
+                  description: Present only when every selected instance was counted.
+                atLeast:
+                  type: integer
+                  description: Present instead of `count` when only some instances were counted -- a floor, never a total.
                 proposalIds:
                   type: array
                   items: {type: string}
+                instances:
+                  type: array
+                  description: One entry per selected instance; `count` absent with a `reason` when it could not be counted.
+                  items:
+                    type: object
+                    required: [instanceId]
+                    properties:
+                      instanceId: {type: string}
+                      repository: {type: string}
+                      count: {type: integer}
+                      reason: {type: string}
                 reason: {type: string}
             inbox:
               type: object
@@ -6922,6 +7178,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/InboxFleetItem"
+        counts:
+          $ref: "#/components/schemas/InboxCounts"
         staleness:
           $ref: "#/components/schemas/ConsoleResponseStaleness"
 
@@ -9190,9 +9448,30 @@ paths:
       summary: The feedback inbox -- every captured entry, oldest first.
       description: >
         `plan/feedback/` (MASTER-PLAN §7B, W1-T40), listed via src/lib/feedback.ts's
-        `listFeedback`. Optional `?status=` filters to one lifecycle status.
+        `listFeedback`. Optional `?status=` filters to one lifecycle status; `?limit=` and
+        `?cursor=` answer one page of the (filtered) list with a `page` envelope.
       security:
         - bearerRead: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Page size, 1 to 500. Default 100 once `cursor` is given alone.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - name: cursor
+          in: query
+          required: false
+          description: The previous page's `page.nextCursor`.
+          schema:
+            type: string
       responses:
         "200":
           description: The inbox.
@@ -11690,9 +11969,18 @@ paths:
         src/lib/nav-badge-view.ts over serve's own caches (analytics snapshot, operator-agent
         memory, the inbox classification). Replaces the console's ~12 upstream reads (~370 KB) per
         page view. A weak ETag hashes the view's version, stale flag and data, so an unchanged view
-        answers If-None-Match with 304 even after a recompute. See docs/views.md.
+        answers If-None-Match with 304 even after a recompute. The agent badge sums every daemon
+        instance serve holds (core and each registry instance); `?instances=` narrows it. See
+        docs/views.md.
       security:
         - bearerRead: []
+      parameters:
+        - name: instances
+          in: query
+          required: false
+          description: Comma-separated registry instance names to count; default every instance.
+          schema:
+            type: string
       responses:
         "200":
           description: The view.
@@ -11700,6 +11988,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NavBadgeView"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
         "304":
           description: The request's `If-None-Match` matched the view's ETag; no body.
         "401":
@@ -12351,16 +12641,46 @@ paths:
         Deferred-with-trigger, ratified and retired proposals are never returned. Served through
         the console's cached-read wrapper (src/lib/serve.ts's `boundConsoleReadRoute`): the body
         may be the previous snapshot while a recompute runs, says so in `staleness`, carries a
-        weak `etag`, and answers 304 to a matching `If-None-Match`.
+        weak `etag`, and answers 304 to a matching `If-None-Match`. A bare GET is the whole body
+        (1.99 MB on the fleet host, 2026-09-30); `?section=` answers one lane (InboxSectionResult),
+        and a list section pages by `limit` and `cursor`. Each distinct query is its own cache entry.
       security:
         - bearerRead: []
+      parameters:
+        - name: section
+          in: query
+          required: false
+          description: >
+            `needsYou` (the operator's four lanes, not paged), or one list lane: `ready`,
+            `drafting`, `notReady`, `declined`, `fleet`.
+          schema:
+            type: string
+            enum: [needsYou, ready, drafting, notReady, declined, fleet]
+        - name: limit
+          in: query
+          required: false
+          description: A list section's page size, 1 to 500. Default 100.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - name: cursor
+          in: query
+          required: false
+          description: The previous page's `page.nextCursor`.
+          schema:
+            type: string
       responses:
         "200":
-          description: The inbox, with the cache's staleness envelope.
+          description: The inbox, or one section of it, with the cache's staleness envelope.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/InboxResult"
+                anyOf:
+                  - $ref: "#/components/schemas/InboxResult"
+                  - $ref: "#/components/schemas/InboxSectionResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
         "304":
           description: The cached snapshot matches the request's `If-None-Match`; no body.
         "401":

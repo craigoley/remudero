@@ -826,7 +826,7 @@ export function codexCandidatesForCapability(
 // judgement favours gpt-oss 2.40x, since nano spends ~5x the completion tokens on reasoning.
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-oss-120b", "gpt-5-nano", "gpt-5.6-luna"],
-  balanced: ["gpt-6-luna", "gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna"],
+  balanced: ["gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna"],
   frontier: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.6-terra"],
 };
 

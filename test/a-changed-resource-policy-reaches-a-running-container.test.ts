@@ -186,12 +186,15 @@ test("the recycle reason names each drifted limit as expected and actual", () =>
     assert.match(d.reason, /CpuShares expected=512 actual=0/);
     assert.doesNotMatch(d.reason, /MemoryReservation/, "a field that matches is not named");
 
-    // The launcher names its own container and role; serve's policy is a reservation, no ceiling.
+    // The launcher names its own container and role; serve's policy is a reservation and, since the
+    // 2026-09-30 architecture ruling, a 5 GiB ceiling with 1 GiB of swap.
     const serve = withEnv({ RMD_RESOURCE_POLICY_CONTAINER: "remudero-core-daemon", RMD_RESOURCE_POLICY_ROLE: "serve" }, () =>
       shippedReader(root, execFile)(),
     );
     assert.equal(inspected[1]![1], "remudero-core-daemon");
     assert.deepEqual(serve, [
+      { field: "Memory", expected: 5120 * MIB, actual: 0 },
+      { field: "MemorySwap", expected: 6144 * MIB, actual: 0 },
       { field: "CpuShares", expected: 4096, actual: 0 },
       { field: "MemoryReservation", expected: 1536 * MIB, actual: 0 },
     ]);
