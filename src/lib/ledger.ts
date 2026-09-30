@@ -619,6 +619,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "dep-review.migrate.completed",
   "review.posted",
   "review.post_refused",
+  "review.cannot_evaluate_escalated",
   // W1-T913: `lastPendingReviewStatusFromLedger` (review.ts) reads this back for per-head
   // idempotence AND the staleness clock; dropping it makes a review stalled for hours read as fresh.
   "review.pending_posted",
