@@ -627,6 +627,7 @@ async function driveMigrationDepReview(opts: {
   body?: string;
   diff?: string;
   checks?: DepReviewCheck[];
+  checkLifecycle?: boolean;
   events?: string[];
   capture?: ReturnType<typeof migrationCaptureRecorder>;
   mutations?: ReturnType<typeof mutationRecorder>;
@@ -647,7 +648,10 @@ async function driveMigrationDepReview(opts: {
   try {
     code = await depReviewCommand(String(opts.prNumber ?? 3654), ["--repo", "remudero"], {
       config: { root: tmp, ledger: ledgerPath } as never,
-      gh: () => ({
+      gh: (args) => args[0] === "api" ? {
+        state: "open", merged: false, head: { sha: "feedface1234" }, body: opts.body ??
+          "Bumps [@types/node](https://github.com/DefinitelyTyped/DefinitelyTyped/tree/HEAD/types/node) from 22.20.1 to 26.4.0.",
+      } : ({
         number: opts.prNumber ?? 3654,
         url: `https://github.com/craigoley/remudero/pull/${opts.prNumber ?? 3654}`,
         title: opts.title ?? "build(deps-dev): bump @types/node from 22.20.1 to 26.4.0",
@@ -659,9 +663,13 @@ async function driveMigrationDepReview(opts: {
         statusCheckRollup: opts.checks ?? [{ name: "ci-shard 1", conclusion: "FAILURE" }],
       }),
       prDiff: () => opts.diff ?? PR81_DIFF,
-      postStatus: (async (args: { state: string; description?: string; reviewInputDigest?: string; reviewEngineRevision?: string }) => {
+      postStatus: (async (args: { state: string; description?: string; reviewInputDigest?: string; reviewEngineRevision?: string; fetchLifecycle?: () => { reviewInputDigest?: string } }) => {
         statusCalls.push("called");
         statusPosts.push(args);
+        if (opts.checkLifecycle) {
+          assert.equal(args.fetchLifecycle?.().reviewInputDigest, args.reviewInputDigest,
+            "the live REST read and the decision use the same lane revision for this exact head and body");
+        }
         return { posted: true };
       }) as never,
       arm: () => {
@@ -712,6 +720,25 @@ test("depReviewCommand posts verified pin-only status with a lane-specific decis
   assert.equal(posted?.review_engine_revision, DEP_REVIEW_ENGINE_REVISION);
   assert.equal(posted?.review_input_digest, digest);
   rmSync(r.tmp, { recursive: true, force: true });
+});
+
+test("depReviewCommand compares its guarded status with a live digest from the same dependency-review revision", async () => {
+  for (const [body, state] of [
+    [OSV_SCANNER_PIN_BODY, "success"],
+    [OSV_SCANNER_PIN_BODY.replace(OSV_PIN_NEW_SHA, OSV_PIN_OLD_SHA), "failure"],
+  ] as const) {
+    const r = await driveMigrationDepReview({
+      prNumber: 8020,
+      title: "chore(deps): bump OSV scanner action pin",
+      body,
+      diff: OSV_SCANNER_PIN_DIFF,
+      checks: GREEN_CHECKS,
+      checkLifecycle: true,
+    });
+    assert.deepEqual(r.statusCalls, ["called"]);
+    assert.equal(r.statusPosts[0]?.state, state);
+    rmSync(r.tmp, { recursive: true, force: true });
+  }
 });
 
 test("depReviewCommand migrate: capture completes before exact Dependabot ignore and close, with no status or arm", async () => {
