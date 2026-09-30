@@ -3373,3 +3373,22 @@ Each phase is measured against the 2026-09-29/30 baseline.
 - W1-T3332 (acceptance rewrite).
 - W1-T2635's five unclear records.
 - W1-T4532 (tag ruleset, by hand).
+
+## 2026-09-30 — OPERATOR RULING: Phase 1 read-model design choices
+
+*Operator-authored direction, given in chat on 2026-09-30: the operator approved the Phase 1 design with every recommendation. The design is `~/Remudero/.session-scratch/arch-phase1-design.md` (operator session), and its §6 lists the questions ruled here.*
+
+**Amends:**
+- The 2026-09-30 ruling above (#8010), which adopted the architecture but left open where the projector runs.
+- The 2026-09-27 W1-T4568 entry, whose recommended store was "written by the daemon, read by serve" (W1-T4568's design note). **That note is superseded:** the daemon does not write the read model.
+
+**Ruled:**
+- **Q1, board horizon.** The `now` view derives from the full fact history. It does not emulate the legacy board's live-file horizon, which rotation retention bounds. Where the two disagree during shadow because retention shed rows, the difference is classified `legacy_horizon`. It is not a view defect.
+- **Q2, the process.** The projector runs in a serve `worker_thread`, one per serve process. A SQLite writer lease with in-transaction fencing guards it, so two serve processes (Phase 3's overlap, or the daemon and serve containers on one mount) can never both commit. It runs in neither the daemon nor a new container. Measured: a full rebuild in the worker moves serve's main-loop lag p99 by under 1 ms, and the daemon loop lags 14.5 s at p50.
+- **Q3, GitHub facts for `now`.** During shadow, the worker reads the legacy gateway's persisted board snapshot, so there is no second fetcher against GitHub's secondary limit. At cutover the worker becomes the single fetcher, and `/v1/status` reads its snapshot.
+- **Q4, retention.** Phase 1 keeps every row identity (about 1.7 MB/day for core) and facts only for the steps a view declares. Pruning comes later and is tiered, with no hard ceiling.
+- **Q5, future-dated rows.** The projector quarantines a row stamped more than 5 minutes after ingest and counts it. The test that wrote five 2027-10-14 `cli.invoked` rows into the live core ledger is found and fixed as its own task, W1-T4923.
+- **Q6, Node 22's experimental `node:sqlite`.** Accepted behind one adapter module with its own contract test. The Node 24 upgrade is not a Phase 1 dependency.
+- **Risk 4 escalates.** In the documented rotation rename sliver, the projector can hold a row that the ledger lost. When the consistency oracle finds that `extra` drift, it opens a needs-human issue: this is a real, if rare, ledger loss. The read model keeps the row, and nothing "fixes" it silently.
+
+**Rollback:** the read model stays additive until Phase 4, per #8010, and a kill switch in `state/read-model/switches.json` turns off the projector or any view. Moving the writer elsewhere later is safe because the lease already fences writers.

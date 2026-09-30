@@ -1,0 +1,42 @@
+- id: W1-T4884
+  title: "Retire a stale verify-human Inbox ask when the current plan explicitly changes its task to verify:auto"
+  repo: remudero
+  depends_on: [W1-T4853]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high
+  origin: "operator Inbox gardener audit 2026-09-30; live core attention census found 24 stale verify-human asks for verify:auto tasks"
+  note: "reservation hand-off: unknown -> file/inbox-gardener-stale-auto-20260930"
+  plan_refs: [W1-T4738, W1-T4742, W1-T4853]
+  files: [src/lib/inbox.ts, src/lib/inbox-responder.ts, test/a-released-human-ask-leaves-the-inbox.test.ts, test/operator-attention-census.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    A retained verify-human proposal can still be classified as a live operator decision
+    after its current plan task is verify:auto and has no dispatch hold. The 2026-09-30
+    live core census exposed 24 such rows. They are not evidence of 24 outstanding human
+    judgments. The registry and thread must remain auditable; a read-side classification
+    change is safer than deleting records or fabricating a release receipt.
+  design: |
+    In classifyProposal, retire only an exact verify-human:<taskId> proposal when the
+    current loaded plan contains that task, verify is auto, and dispatch_hold is not true.
+    Give a plan-qualified retirement reason. A missing/unreadable plan task, verify:human,
+    or an explicit dispatch hold must never trigger this rule. Keep the existing release,
+    merged-credit, and explicit-retirement routes intact. In the attention census, retain
+    a derived history item for this retired ask with classification and plan source facts;
+    do not write a decline/release row, erase the proposal/thread, or claim that partial
+    evidence is a verified zero. No machine action or dispatch change is authorized.
+  acceptance:
+    - claim: "a current verify:auto task with no hold retires only its stale human ask without deleting its record"
+      proof: 'grep: test("W1-T4884: verify-auto retires only its stale human ask without erasing the registry" in test/a-released-human-ask-leaves-the-inbox.test.ts'
+    - claim: "a hold, missing task, or verify:human task cannot be dismissed by the gardener"
+      proof: 'grep: test("W1-T4884: a held or unverified task keeps its human ask" in test/a-released-human-ask-leaves-the-inbox.test.ts'
+    - claim: "the retired ask remains source-qualified history rather than a decision count"
+      proof: 'grep: test("W1-T4884: a stale verify-human ask remains in source-qualified history" in test/operator-attention-census.test.ts'
+  falsifier: |
+    Seed two verify-human proposals; the first task is now verify:auto without a hold,
+    the second remains verify:human or dispatch-held. Only the first loses its live Inbox
+    decision label and appears in census history with a plan reason. Remove the first
+    task from the plan and its ask becomes visible again, not silently retired.

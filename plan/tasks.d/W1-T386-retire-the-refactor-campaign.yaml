@@ -94,6 +94,7 @@
   plan_refs: ["W2-T3", "W1-T294", "§3A", "§5"]
   files: [scripts/refactor-campaign.mjs, plan/campaigns/refactor.yaml, docs/refactor-campaign.md, scripts/complexity-baseline.json, scripts/dup-baseline.json, scripts/cve-baseline.json, scripts/fitness-baseline.json, .github/workflows/ci.yml, .github/workflows/ci-gate.yml, .gitignore, src/lib/ci-parity.ts, test/refactor-campaign.test.ts, test/ci-gate-required-format.test.ts, test/ci-parity-contract.test.ts, test/awareness-surface-ratchet.test.ts]
   status: blocked
+  retirement: retired
   attempts: 0
   note: "RETIREMENT RECORD, 2026-08-07 — THIS WORK IS DONE, and the shard is retired because it is
     finished rather than because it was wrong. Everything below is preserved verbatim so a future

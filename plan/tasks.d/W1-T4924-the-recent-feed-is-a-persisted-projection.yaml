@@ -1,0 +1,73 @@
+- id: W1-T4924
+  title: "THE RECENT FEED FORGETS ON EVERY ROTATION — /v1/recent rebuilds its entries from the live file's retained rows, so history resets each time the core ledger rotates (about every 5 min); project classifyLine at ingestion into a persisted recent_entry table in the Phase 1 read model"
+  repo: remudero
+  depends_on: []
+  dispatch_hold: true
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-30 core-console architecture Phase 1 design (P1-09); operator ruling 2026-09-30"
+  plan_refs: ["W1-T4568", "W1-T3196", "W1-T4820"]
+  files:
+    - src/lib/recent-projection.ts
+    - test/recent-projection.test.ts
+    - src/lib/board.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 (P0-CORE, Phase 0): `/v1/recent`'s history is live-file only. Its entries
+    are rebuilt from retained rows, so every rotation resets them, and the core ledger rotates
+    about every 5 minutes because its carried core sits at about 97% of the 4 MiB ceiling.
+    #8012 made classifyLine see verdict.merged, run.start and review.posted, and added
+    `?verb=`/`?limit=`, but a "merged today" count is still a floor bounded by the live file.
+    The Phase 1 design (operator-approved 2026-09-30) adds a ledger projector that tails every
+    rotation form into a node:sqlite read model, deduped by exact-line identity. A recent feed
+    projected there survives rotation and restart.
+  design: |
+    (i) ONE CLASSIFIER FOR BOTH FEEDS. Move board.ts `classifyLine` into
+    src/lib/recent-projection.ts as the exported `recentEntryFromLine` (move, do not port or copy
+    its logic), and have board.ts's live-file recent feed call it. The legacy feed and the
+    projection then classify every row identically by construction, which is what makes the
+    Phase 1 shadow comparison of /v1/recent meaningful.
+    (ii) An ingestion materializer, exported as `projectRecentEntry`, that the ledger projector
+    calls for each fresh row inside its own transaction. It upserts a `recent_entry(instance, ts,
+    seq, verb, task_id, run_id, pr_url, cost_usd, detail)` row from `recentEntryFromLine`, capped
+    at RECENT_ACTIVITY_HISTORY_CAP per instance by pruning the oldest. Projections are
+    order-independent: a replayed or out-of-order row changes nothing (the projector's identity
+    table already drops duplicates).
+    (iii) A read function returning the same entry shape /v1/recent sends today, with the `verb`
+    and `limit` filters, and an exact merged-today count.
+    (iv) The projector's call to `projectRecentEntry` lands with the release amendment (see the
+    note). Serving /v1/recent from the read model is wired where serve reads view bodies (Phase
+    1's views task), not here.
+  acceptance:
+    - claim: "recent history survives a ledger rotation and a restart of the reader"
+      proof: "unit test: recent history survives a ledger rotation and a serve restart"
+    - claim: "merged today is an exact count read from the projection"
+      proof: "unit test: merged today is an exact count from the recent projection"
+    - claim: "the live-file recent feed and the projection share one classifier"
+      proof: "grep: recentEntryFromLine( in src/lib/board.ts"
+  falsifier: |
+    Rebuild the entries from the live file instead of the table: rotating the fixture ledger
+    empties the history and the first proof fails. Count merges from the retained rows: a
+    merge shed by rotation drops out of the count and the second proof fails. Leave a copy of
+    classifyLine in board.ts: the grep reads 0 and the two feeds can drift.
+  note: |
+    DISPATCH HOLD: waits for the ledger projector (run-unfiled PR). The projector (Phase 1
+    P1-01/P1-02, `src/lib/read-model-db.ts` and `src/lib/ledger-projector.ts` in the design) is
+    being hand-built on run-unfiled branches and has no plan id, so `depends_on` cannot name it
+    (loadPlan refuses an unknown id), and a NEW `status: blocked` record is refused without a
+    retirement value. RELEASE (one plan amendment, once the projector PR merges): delete
+    `dispatch_hold`, add the projector module to `files:`, and add the criterion
+    `grep: projectRecentEntry( in <the projector module>`. Both are left out now only because the
+    module does not exist yet, and the call-site and proof-scope lints refuse a proof in a file
+    the task would create or does not declare.
+    Design: ~/Remudero/.session-scratch/arch-phase1-design.md §3.5 and §7 (operator session).
+    Reserved from the operator checkout for branch file/phase1-fleet-tasks-1790777336775.
+    Scope-time checks 2026-09-30: no run-W1-T4924-* branch; no main commit names the id. No plan
+    record on origin/main or on any open head's added shards matches recent_entry or a recent
+    projection.
