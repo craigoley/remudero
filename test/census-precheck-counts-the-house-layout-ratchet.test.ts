@@ -94,6 +94,7 @@ function installHook(dir: string): void {
     "comment-load-ratchet.mjs",
     "fixture-copy-census.mjs",
     "house-layout-census.mjs",
+    "deps-interface-census.mjs",
   ]) {
     copyFileSync(join(REPO_ROOT, "scripts", script), join(dir, "scripts", script));
   }

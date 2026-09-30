@@ -4627,8 +4627,8 @@ export function stalledRunReason(runs: readonly WorkflowRunObservation[] | undef
 }
 
 /** W1-T1278 — of the checks a fix rung believes are red, which are STILL red on a FRESH rollup read.
- *  A name is dropped ONLY for an observed `startedAt` with a currently NON-TERMINAL status —
- *  deliberately narrower than "no longer red", because one notch wider is "never fix a red PR". A
+ *  A name is dropped ONLY for an observed `startedAt` whose latest attempt is NON-TERMINAL or already
+ *  a REQUIRED_CHECK_OK conclusion — a latest attempt that is itself a failure stays red. A
  *  name absent from the fresh rollup is NEVER dropped: an unreadable rollup manufactures nothing. */
 export function stillRedRequiredNames(redNames: readonly string[], rollup: RollupCheckEntry[] | undefined): string[] {
   if (redNames.length === 0) return [];
@@ -4639,8 +4639,7 @@ export function stillRedRequiredNames(redNames: readonly string[], rollup: Rollu
     const fresh = byKey.get(name);
     if (!fresh || !fresh.startedAt) return true; // unreadable/absent — fail open, still red
     const s = (fresh.state ?? fresh.conclusion ?? fresh.status ?? "").toUpperCase();
-    const inFlight = !REQUIRED_CHECK_OK.has(s) && !REQUIRED_CHECK_FAIL.has(s);
-    return !inFlight; // an OBSERVED later attempt still running is the ONLY thing dropped
+    return REQUIRED_CHECK_FAIL.has(s);
   });
 }
 
@@ -9426,6 +9425,26 @@ export function withFullSweepRepairAdmission(deps: SweepDeps): SweepDeps {
   return { ...deps, detachFixWait: true, repairAdmissionSurface: "full" };
 }
 
+export function stackParentHoldReason(check: StackPrerequisiteCheck): string | undefined {
+  const open = check.openParentNumbers ?? [];
+  if (check.state !== "blocked" || open.length === 0) return undefined;
+  return `declared stack parent(s) ${open.map((n) => `#${n}`).join(", ")} still open — fix round held until they merge or close`;
+}
+
+function stackParentHold(deps: SweepDeps, pr: OpenPrView): { reason?: string; fields?: Record<string, unknown> } {
+  if (!deps.stackPrerequisite) return {};
+  let check: StackPrerequisiteCheck;
+  try {
+    check = deps.stackPrerequisite(pr);
+  } catch {
+    // A failed read is not evidence of an unstacked PR: no hold, but recorded so it is never silent.
+    return { fields: { stack_parent_read: "unreadable" } };
+  }
+  if (check.state === "unreadable") return { fields: { stack_parent_read: "unreadable" } };
+  const reason = stackParentHoldReason(check);
+  return reason ? { reason, fields: { stack_parent_hold: check.openParentNumbers } } : {};
+}
+
 function workerAdmissionHoldReason(deps: SweepDeps): string | undefined {
   if (!deps.workerAdmissionHold) return undefined;
   try {
@@ -10948,6 +10967,13 @@ export async function runSweep(
                 standDownReason = workerHold;
                 break;
               }
+              const stackHold = stackParentHold(deps, pr);
+              if (stackHold.fields) extraDisposedFields = { ...extraDisposedFields, ...stackHold.fields };
+              if (stackHold.reason) {
+                acted = false;
+                standDownReason = stackHold.reason;
+                break;
+              }
               const ratchetScripts =
                 policy.recordableRatchetRepairEnabled === true && deps.repairRecordableRatchet
                   ? ratifiedBaselineRatchetRepairFor(pr)
@@ -11055,6 +11081,13 @@ export async function runSweep(
               if (workerHold) {
                 acted = false;
                 standDownReason = workerHold;
+                break;
+              }
+              const stackHold = stackParentHold(deps, pr);
+              if (stackHold.fields) extraDisposedFields = { ...extraDisposedFields, ...stackHold.fields };
+              if (stackHold.reason) {
+                acted = false;
+                standDownReason = stackHold.reason;
                 break;
               }
               const conflictedFixClaim = claimFixDispatch(pr);

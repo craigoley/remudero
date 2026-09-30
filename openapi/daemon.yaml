@@ -6689,6 +6689,52 @@ components:
                 fleet: {type: integer}
                 reason: {type: string}
 
+    ReadModelStatusView:
+      type: object
+      description: >
+        GET /v1/views/read-model (docs/views.md): the Phase 1 read model's own status, one body per
+        serve, materialized by the read-model worker (src/lib/read-model-worker.ts). Each instance's
+        `ledger:<instance>` source is re-judged at request time, so a stalled projector reads stale.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [read-model]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [instances]
+          properties:
+            instances:
+              type: array
+              items:
+                type: object
+                required: [instance, generation, lease, quarantined]
+                properties:
+                  instance: {type: string}
+                  generation:
+                    type: integer
+                    description: The instance DB's committed projector transaction count.
+                  lease:
+                    type: string
+                    enum: [held, elsewhere, none]
+                  heldBy:
+                    type: string
+                    description: pid@host of another serve holding the writer lease.
+                  quarantined:
+                    type: integer
+                    description: Rows stamped more than five minutes past their ingest time.
+                  reason: {type: string}
+
     RecentActivityEntry:
       type: object
       description: One RECENT feed row minted from a ledger line (src/lib/board.ts's `RecentActivityEntry`).
@@ -11996,6 +12042,33 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /v1/views/read-model:
+    get:
+      summary: The Phase 1 read model's status, served from the read-model worker's in-memory body.
+      description: >
+        The first view served from the read model (P1-06). No request reads a file or SQLite. The
+        per-view switch in state/read-model/switches.json can set it `off`, which answers 404
+        `view_disabled`; before the worker's first body it answers 404 `view_not_ready`. A body
+        loaded at boot answers at once, stale until its instance ticks. Same ETag and 304 rules as
+        every view. See docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadModelStatusView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is switched off (`view_disabled`) or has no body yet (`view_not_ready`).
 
   /v1/recent:
     get:

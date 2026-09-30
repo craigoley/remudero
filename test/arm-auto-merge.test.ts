@@ -135,6 +135,7 @@ test("W1-T4581 REST reader requires every parent merged and fails closed on unre
     state: "blocked",
     parentNumbers: [1765, 1764],
     pendingParentNumbers: [1764],
+    openParentNumbers: [1764],
     detail: "declared parent(s) #1764 are not merged",
   });
   assert.deepEqual(calls, [

@@ -1,0 +1,33 @@
+- id: W1-T4947
+  title: "A BETTER DRAFTER NEVER SEES THE PROPOSALS A WORSE ONE FAILED — 942 proposals, 320 with a clean cached draft; the rest were attempted (2,015 attempt keys) mostly by gpt-5-nano at 25% clean, and draftAttemptKey records only the cause, so after the lead moved to gpt-oss-120b they stay attempted and undrafted until something about the proposal changes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator ask 2026-09-30: go with the follow-ups and fixes (inbox lane barely drafting after #8045)"
+  note: "reservation hand-off: plan-redraft-on-lead-change-1790788093000 -> plan-redraft-on-lead-change-1790788093000"
+  plan_refs: [W1-T3570, W1-T4916, W1-T4907]
+  files: [src/lib/inbox.ts, test/a-better-drafter-retries-the-proposals-a-worse-one-failed.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-30 (fleet state): inbox-proposals 942, inbox-drafts 320 cached (clean), inbox-draft-attempts 2,015
+    keys. The lane moved from gpt-5-nano (25% clean) to gpt-oss-120b (#8045, 13:18Z; live 13:53Z) and then synthesized
+    only 2 drafts in three hours, because draftAttemptKey (`anchorFingerprint::reframes`, src/lib/inbox.ts) is unchanged
+    for every already-attempted proposal. The drafts the better model could produce never get requested.
+  design: |
+    Include the drafting lane's identity in the attempt key: the resolved lead deployment and effort of
+    synthesis.inbox_draft (and the W1-T4916 escalation target when it lands). A change of lead or effort makes every
+    proposal WITHOUT a clean cached draft due again once; proposals with a clean draft are untouched. The daemon's existing
+    per-poll draft rung paces the re-drafting, so the change never bursts.
+  acceptance:
+    - claim: "a lead change makes a proposal with no clean draft due again"
+      proof: 'grep: test("W1-T4947: a lead change makes a proposal with no clean draft due again" in test/a-better-drafter-retries-the-proposals-a-worse-one-failed.test.ts'
+    - claim: "a proposal with a clean cached draft is not redrafted on a lead change"
+      proof: 'grep: test("W1-T4947: a proposal with a clean cached draft is not redrafted on a lead change" in test/a-better-drafter-retries-the-proposals-a-worse-one-failed.test.ts'
+  falsifier: |
+    Leave the lane out of the key and the first test sees the proposal still marked attempted.
