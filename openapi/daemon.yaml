@@ -6734,6 +6734,38 @@ components:
                     type: integer
                     description: Rows stamped more than five minutes past their ingest time.
                   reason: {type: string}
+            shadow:
+              type: array
+              description: Each shadowed view's diff counters and cutover readiness (src/lib/view-shadow.ts); absent before the first sample.
+              items:
+                $ref: "#/components/schemas/ViewShadowReadiness"
+
+    ViewShadowReadiness:
+      type: object
+      description: >
+        One view's shadow comparator counters. `ready` needs zero `real` diffs sustained over a day of
+        measured traffic and at least 3 x requests-per-day samples (the rule of three).
+      required: [view, requests, firstRequestMs, samples, diffs, streakSamples, streakSinceMs, lastRealMs, requestsPerDay, requiredSamples, ready, reason]
+      properties:
+        view: {type: string}
+        requests: {type: integer}
+        firstRequestMs: {type: [integer, "null"]}
+        samples: {type: integer}
+        diffs:
+          type: object
+          required: [legacy_horizon, timing, dedupe, real]
+          properties:
+            legacy_horizon: {type: integer}
+            timing: {type: integer}
+            dedupe: {type: integer}
+            real: {type: integer}
+        streakSamples: {type: integer}
+        streakSinceMs: {type: [integer, "null"]}
+        lastRealMs: {type: [integer, "null"]}
+        requestsPerDay: {type: [integer, "null"]}
+        requiredSamples: {type: [integer, "null"]}
+        ready: {type: boolean}
+        reason: {type: string}
 
     RepositoriesView:
       type: object

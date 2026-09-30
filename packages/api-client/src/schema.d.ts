@@ -2602,7 +2602,29 @@ export interface components {
           quarantined: number;
           reason?: string;
         })[];
+        /** Each shadowed view's diff counters and cutover readiness (src/lib/view-shadow.ts); absent before the first sample. */
+        shadow?: (ViewShadowReadiness)[];
       };
+    };
+    /** One view's shadow comparator counters. `ready` needs zero `real` diffs sustained over a day of measured traffic and at least 3 x requests-per-day samples (the rule of three). */
+    ViewShadowReadiness: {
+      view: string;
+      requests: number;
+      firstRequestMs: number | null;
+      samples: number;
+      diffs: {
+        legacy_horizon: number;
+        timing: number;
+        dedupe: number;
+        real: number;
+      };
+      streakSamples: number;
+      streakSinceMs: number | null;
+      lastRealMs: number | null;
+      requestsPerDay: number | null;
+      requiredSamples: number | null;
+      ready: boolean;
+      reason: string;
     };
     /** GET /v1/views/repositories (docs/views.md, src/lib/repositories-view.ts): the repository portfolio across every instance serve holds, in one body. Each instance's `summary` IS its GET /v1/i/<instance>/repos/summary body, computed by the read-model worker from that instance's projected `repo_row` table; `projects` precomputes the console's grouping and its "worst is <repo>" line. Dark until state/read-model/switches.json sets `repositories` to `serve`. */
     RepositoriesView: {

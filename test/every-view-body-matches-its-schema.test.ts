@@ -103,6 +103,9 @@ function materializeAll(root: string, stateDir: string, deps: ServeDeps): void {
   });
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now], clock, holder: "schema-test", post: () => {} });
   ticker.tick();
+  // A shadow sample, so the read-model status body carries the comparator's readiness too.
+  assert.equal(ticker.shadow({ view: "now", key: "instance=core", requests: 1 }), true);
+  ticker.tick();
   ticker.release();
 }
 
@@ -138,6 +141,7 @@ test("every registered view body validates against its declared schema", async (
   }
 
   // CONTROL: the bodies are populated, so optional fields were really validated, not skipped.
+  assert.equal(((bodies.get("read-model")!.data as { shadow?: unknown[] }).shadow ?? []).length, 1, "the status body carries shadow readiness");
   const now = bodies.get("now")!.data as NowViewData;
   assert.ok(now.board.tasks.length >= 3 && now.recent.entries.length > 0 && now.recent.mergedToday.count === 1, JSON.stringify(now));
   assert.equal(now.health.rateLimitRemaining, 4321);
