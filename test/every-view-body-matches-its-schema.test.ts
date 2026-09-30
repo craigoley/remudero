@@ -161,11 +161,40 @@ test("every registered view body validates against its declared schema", async (
 
 test("the strict view validator refuses an undeclared field and a wrong enum in a view body", () => {
   const schema = declaredBody("/v1/views/repositories", "GET", 200);
-  const body = { view: "repositories", version: 1, generatedAt: iso(0), asOf: null, stale: false, sources: [],
+  const body = { view: "repositories", version: 2, generatedAt: iso(0), asOf: null, stale: false, sources: [],
     data: { instances: [], projects: [{ project: "p", repos: [{ id: "o/r", reponame: "r", instanceId: "i", state: "stale" }], worst: { state: "stale", repoId: "o/r", repoName: "r" } }] } };
   assert.deepEqual(violations(body, schema), []);
   assert.equal(violations({ ...body, data: { ...body.data, surprise: 1 } }, schema).length, 1, "an undeclared data field fails");
   assert.equal(violations({ ...body, data: { ...body.data, projects: [{ ...body.data.projects[0], worst: { ...body.data.projects[0].worst, state: "grim" } }] } }, schema).length, 1);
+});
+
+test("a version 2 view body refuses every clock stamp version 1 carried in data", async (t) => {
+  const { root, stateDir, deps, runs } = fixture(t);
+  materializeAll(root, stateDir, deps);
+  const url = await listen(t, buildServeServer(deps));
+  for (const each of runs) each();
+  const read = async (path: string): Promise<{ version: number; data: Record<string, unknown> }> => (await (await fetch(`${url}${path}`, { headers: READ })).json()) as { version: number; data: Record<string, unknown> };
+  const now = await read("/v1/views/now?instance=core");
+  const repos = await read("/v1/views/repositories");
+  assert.deepEqual([now.version, repos.version], [2, 2]);
+  const nowSchema = declaredBody("/v1/views/now", "GET", 200);
+  const reposSchema = declaredBody("/v1/views/repositories", "GET", 200);
+  // CONTROL: the served bodies pass, so each refusal below is the stamp's alone.
+  assert.deepEqual(violations(now, nowSchema), []);
+  assert.deepEqual(violations(repos, reposSchema), []);
+  const board = now.data.board as Record<string, unknown>;
+  const health = now.data.health as Record<string, unknown>;
+  const task = (board.tasks as Array<Record<string, unknown>>)[0]!;
+  const stamped = [
+    { ...now, data: { ...now.data, board: { ...board, generated_at: iso(0) } } },
+    { ...now, data: { ...now.data, health: { ...health, sampledAt: iso(0) } } },
+    { ...now, data: { ...now.data, health: { ...health, lastPollAgeMs: 1000 } } },
+    { ...now, data: { ...now.data, board: { ...board, tasks: [{ ...task, elapsedMs: 1000 }] } } },
+  ];
+  assert.deepEqual(stamped.map((body) => violations(body, nowSchema).length), [1, 1, 1, 1]);
+  const instances = repos.data.instances as Array<Record<string, unknown>>;
+  const summary = instances[0]!.summary as Record<string, unknown>;
+  assert.equal(violations({ ...repos, data: { ...repos.data, instances: [{ ...instances[0], summary: { ...summary, generated_at: iso(0) } }] } }, reposSchema).length, 1);
 });
 
 test("a now action of every kind and a missing instance query match what the now route declares", async (t) => {
