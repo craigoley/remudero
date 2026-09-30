@@ -125,6 +125,7 @@ test("W1-T3843: the canonical ci-learning shard is allowed to remain parked for 
 test("parked selector and CI friction proposals file without becoming auto-runnable", () => {
   for (const [origin, file] of [
     ["selector-shadow:abc123:narrow:test/a.test.ts", "src/lib/affected-suites.ts"],
+    ["selector-shadow-miss:test/a.test.ts", "src/lib/affected-suites.ts"],
     ["ci-friction:coverage-ratchet", "docs/ci-friction-remedies.md"],
   ]) {
     const filed = task({ author_class: "machine", origin, files: [file] });
