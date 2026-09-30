@@ -117,3 +117,19 @@
   assertion: 'grep -q "splitInheritedViolations" scripts/lib/inherited-violation.mjs'
   src: measured 2026-09-07 — source-size-ratchet BLOCKED on origin/main across six unrelated open PRs
   cited: "2026-09-07"
+
+- id: commitlint-pr-title-lane
+  subsystem: ci
+  lifecycle: active
+  files: [plan/tasks.d/**, src/lib/plan-pr-emitter.ts, src/run-task.ts, .github/workflows/ci.yml]
+  fact: >-
+    The commitlint gate checks the LIVE PR TITLE, which becomes the squash-merge subject, not the
+    branch's commit history. Before spending another CI cycle, make the title `type(scope): subject`
+    with an allowed lower-case type, lower-case subject, no final period, and at most 100 characters;
+    after correcting a title, rerun commitlint so it reads the current title.
+  evidence: >-
+    The commitlint job reads `gh pr view --json title` at job time, and `commitlint.config.mjs`
+    extends `@commitlint/config-conventional`. CI history includes 42 repaired commitlint refusals
+    in the window recorded as ci-learning:7204:commitlint.
+  src: "ci-learning:7204:commitlint"
+  cited: "2026-09-30"
