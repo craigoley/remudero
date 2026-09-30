@@ -1027,6 +1027,63 @@ export function hydrateWorkflowRuns(
   return out;
 }
 
+/** W1-T4773 — the open-PR view build, with its per-PR reads taken OFF the event loop. A pass's
+ *  `fetcher` records every read it makes; the next `warm` re-issues those reads through an async
+ *  transport, and the pass after it takes each warmed answer once. A head that did not move asks
+ *  for the same argv, so its reads arrive warm; a moved head or a new PR misses and reads
+ *  synchronously, exactly as before. A read given `onRateLimit` (the list call, which arms the
+ *  pacer floor) is never recorded or warmed. */
+export interface GhReadWarmer {
+  warm(): Promise<number>;
+  fetcher(inner: GhApiFetcher): GhApiFetcher;
+}
+
+export const GH_READ_WARM_CONCURRENCY = 4;
+
+export function createGhReadWarmer(
+  readAsync: (args: string[]) => Promise<unknown>,
+  concurrency: number = GH_READ_WARM_CONCURRENCY,
+): GhReadWarmer {
+  let recorded = new Map<string, string[]>();
+  let warmed = new Map<string, unknown>();
+  return {
+    async warm() {
+      const reads = [...recorded.values()];
+      recorded = new Map();
+      warmed = new Map();
+      const answers = new Map<string, unknown>();
+      let next = 0;
+      const lane = async (): Promise<void> => {
+        while (next < reads.length) {
+          const args = reads[next++]!;
+          try {
+            answers.set(JSON.stringify(args), await readAsync(args));
+          } catch {
+            // Not an erasure: an unwarmed read is re-issued synchronously by the pass, which keeps
+            // its own failure handling, so the reason surfaces there.
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.max(1, concurrency) }, lane));
+      warmed = answers;
+      return answers.size;
+    },
+    fetcher(inner) {
+      return (args, onRateLimit) => {
+        if (onRateLimit) return inner(args, onRateLimit);
+        const key = JSON.stringify(args);
+        recorded.set(key, args);
+        if (warmed.has(key)) {
+          const answer = warmed.get(key);
+          warmed.delete(key);
+          return answer;
+        }
+        return inner(args);
+      };
+    },
+  };
+}
+
 /* ────────────────────────────────────────────────────────────────────────────────────────────
  * Conflict evidence (W1-T984) — the `mergeConflict` producer `OpenPrView` (lib/sweep.ts) has lacked
  * since W1-T106 declared the field. `isPureConcurrentAddition` opens with `files.length > 0`, so an
