@@ -109,8 +109,13 @@ export function readModelPointerPath(stateDir: string, instance: string, schemaV
 export function currentReadModelPath(stateDir: string, instance: string, schemaVersion: number): string {
   const pointer = readModelPointerPath(stateDir, instance, schemaVersion);
   if (!existsSync(pointer)) return readModelPath(stateDir, instance, schemaVersion);
-  const named = readFileSync(pointer, "utf8").trim();
-  const generation = new RegExp(`^${instance.replace(/\./g, "\\.")}\\.v${schemaVersion}\\.g(\\d{1,16})\\.sqlite$`).exec(named)?.[1];
+ const named = readFileSync(pointer, "utf8").trim();
+  const prefix = `${instance}.v${schemaVersion}.g`;
+  const suffix = ".sqlite";
+  const candidate = named.startsWith(prefix) && named.endsWith(suffix)
+    ? named.slice(prefix.length, -suffix.length)
+    : undefined;
+  const generation = candidate !== undefined && /^\d{1,16}$/.test(candidate) ? candidate : undefined;
   if (generation === undefined) throw new ReadModelError("bad_pointer", `${pointer} names ${JSON.stringify(named.slice(0, 80))}, not a generation of ${instance} v${schemaVersion}`, { pointer });
   return readModelGenerationPath(stateDir, instance, schemaVersion, generation);
 }

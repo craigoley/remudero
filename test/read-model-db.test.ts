@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { copyFileSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fixedClock, type Clock } from "../src/lib/clock.js";
@@ -218,4 +218,17 @@ test("a pointer names the generation every open resolves and a foreign pointer i
   assert.throws(() => readModelGenerationPath(dir, "core", 1, "../x"), (e: unknown) => e instanceof ReadModelError && e.reason === "bad_pointer");
   writeFileSync(readModelPointerPath(dir, "core", 1), "site.v1.g42.sqlite\n");
   assert.throws(() => openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1 }), (e: unknown) => e instanceof ReadModelError && e.reason === "bad_pointer");
+});
+
+test("a pointer generation is parsed against the exact instance and schema prefix", (t) => {
+  const dir = makeTempDir("read-model-dotted-instance-pointer");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, READ_MODEL_DIRNAME), { recursive: true });
+  writeFileSync(readModelPointerPath(dir, "core.prod", 1), "core.prod.v1.g42.sqlite\n");
+  assert.equal(currentReadModelPath(dir, "core.prod", 1), readModelGenerationPath(dir, "core.prod", 1, "42"));
+  writeFileSync(readModelPointerPath(dir, "core.prod", 1), "coreXprod.v1.g42.sqlite\n");
+  assert.throws(
+    () => currentReadModelPath(dir, "core.prod", 1),
+    (error: unknown) => error instanceof ReadModelError && error.reason === "bad_pointer",
+  );
 });
