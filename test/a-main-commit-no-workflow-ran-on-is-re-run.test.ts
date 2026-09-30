@@ -14,7 +14,7 @@ import {
   type MainCommitRef,
   type MainRunGapDispatch,
 } from "../src/lib/main-run-gaps.js";
-import { DEFAULT_SWEEP_POLICY, runSweep } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, buildSweepEffects, runSweep } from "../src/lib/sweep.js";
 
 // ── W1-T4817: a main commit NO workflow ran on ─────────────────────────────────────────────
 //
@@ -243,6 +243,134 @@ test("W1-T4817: runSweep hands the effect the ledger's history and records what 
   await pass();
   assert.deepEqual(seenComplete[1], ["gap"], "the second pass is handed the first pass's row");
   assert.equal(ledger.filter((l) => l.step === MAIN_RUN_GAP_STEP).length, 1, "nothing recorded twice");
+});
+
+// ── the real effect, driven through buildSweepEffects with fake gh seams ─────────────────────
+
+interface EffectWorld {
+  list?: unknown;
+  listThrows?: boolean;
+  runs?: Record<string, unknown>;
+  runsThrow?: boolean;
+  files?: unknown;
+  filesThrow?: boolean;
+  repoRoot?: string;
+}
+
+async function driveMainRunGapEffect(world: EffectWorld) {
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const posts: string[][] = [];
+  const reads: string[] = [];
+  const effects = buildSweepEffects({
+    owner: "acme",
+    repo: "widgets",
+    config: { root: REPO_ROOT } as never,
+    repoRoot: world.repoRoot ?? REPO_ROOT,
+    ledgerPath: "/dev/null/ledger.ndjson",
+    runId: "t4817-effect",
+    plan: { tasks: [], byId: new Map() } as never,
+    log: (step, extra) => void logs.push({ step, extra }),
+    policy: DEFAULT_SWEEP_POLICY,
+    readJsonImpl: async (args) => {
+      const path = String(args[1]);
+      reads.push(path);
+      if (path.includes("/actions/runs?")) {
+        if (world.runsThrow) throw new Error("runs 500");
+        const sha = path.split("head_sha=")[1]!.split("&")[0]!;
+        const count = world.runs?.[sha];
+        return count === "absent" ? {} : { total_count: count };
+      }
+      if (path.includes("/commits?sha=main")) {
+        if (world.listThrows) throw new Error("list 500");
+        return world.list;
+      }
+      if (world.filesThrow) throw new Error("files 500");
+      return world.files;
+    },
+    ghRunImpl: (_file, args) => {
+      posts.push([...args]);
+    },
+  });
+  const done = await effects.reconcileMainRunGaps!(mainRunGapHistoryFromLedger([]));
+  return { done, logs, posts, reads };
+}
+
+const LINEAR_LIST = [
+  { sha: "head", parents: [{ sha: "gap" }] },
+  { sha: "gap", parents: [{ sha: "older" }] },
+  { sha: "older", parents: [] },
+  { parents: [] },
+];
+
+test("W1-T4817: the sweep effect finds the gap through the REST reads and dispatches at main", async () => {
+  const { done, posts, reads } = await driveMainRunGapEffect({
+    list: LINEAR_LIST,
+    runs: { head: 2, gap: 0, older: 1 },
+    files: { files: [{ filename: "src/lib/x.ts" }, {}] },
+  });
+  assert.equal(done.length, 1);
+  assert.equal(done[0]!.commit, "gap");
+  assert.equal(done[0]!.head, "head");
+  assert.ok(done[0]!.workflows.includes("ci.yml"));
+  assert.ok(reads.some((r) => r.includes("/commits/gap")), "the gap's changed files were read");
+  assert.ok(posts.length >= 2 && posts.every((p) => p.includes("ref=main") && p.includes("POST")));
+  assert.ok(posts.some((p) => p.some((a) => a.endsWith("/workflows/ci.yml/dispatches"))));
+});
+
+test("W1-T4817: a listing that is not an array, or has no commits, finds no gap", async () => {
+  assert.deepEqual((await driveMainRunGapEffect({ list: { message: "nope" } })).done, []);
+  assert.deepEqual((await driveMainRunGapEffect({ list: [] })).done, []);
+});
+
+test("W1-T4817: a failed commit listing degrades to no gap and is logged", async () => {
+  const { done, logs, posts } = await driveMainRunGapEffect({ listThrows: true });
+  assert.deepEqual(done, []);
+  assert.equal(posts.length, 0);
+  assert.equal(logs.find((l) => l.step === "sweep.main_run_gap.error")?.extra?.phase, "list_commits");
+});
+
+test("W1-T4817: an unreadable run count is never a gap, and is logged", async () => {
+  const thrown = await driveMainRunGapEffect({ list: LINEAR_LIST, runsThrow: true });
+  assert.deepEqual(thrown.done, []);
+  assert.ok(thrown.logs.some((l) => l.extra?.phase === "count_runs"));
+  const malformed = await driveMainRunGapEffect({ list: LINEAR_LIST, runs: { head: "absent", gap: "absent", older: "absent" } });
+  assert.deepEqual(malformed.done, []);
+  assert.equal(malformed.posts.length, 0);
+});
+
+test("W1-T4817: unreadable changed files leave the gap for a later pass, and are logged", async () => {
+  const runs = { head: 2, gap: 0, older: 1 };
+  const thrown = await driveMainRunGapEffect({ list: LINEAR_LIST, runs, filesThrow: true });
+  assert.deepEqual(thrown.done, []);
+  assert.equal(thrown.posts.length, 0);
+  assert.ok(thrown.logs.some((l) => l.extra?.phase === "changed_files" && l.extra?.commit === "gap"));
+  // A body with no `files` is a readable commit that touched nothing this repo's filters match.
+  const empty = await driveMainRunGapEffect({ list: LINEAR_LIST, runs, files: {} });
+  assert.equal(empty.done.length, 1);
+  assert.deepEqual(empty.done[0]!.workflows.includes("acr-build.yml"), false);
+});
+
+test("W1-T4817: unreadable workflow files degrade to no dispatch and are logged", async () => {
+  const { done, logs } = await driveMainRunGapEffect({
+    list: LINEAR_LIST,
+    runs: { head: 2, gap: 0, older: 1 },
+    repoRoot: join(REPO_ROOT, "no-such-checkout"),
+  });
+  assert.deepEqual(done, []);
+  assert.ok(logs.some((l) => l.extra?.phase === "read_workflows"));
+});
+
+test("W1-T4817: list-form and string-form `on:` triggers are read", () => {
+  const listed = parseWorkflowPushTrigger("l.yml", "on: [push, workflow_dispatch]\njobs: {}\n");
+  assert.equal(listed.dispatchable, true);
+  assert.deepEqual(listed.push, {});
+  const noPush = parseWorkflowPushTrigger("m.yml", "on: [pull_request]\njobs: {}\n");
+  assert.equal(noPush.dispatchable, false);
+  assert.equal(noPush.push, undefined);
+  assert.deepEqual(workflowsForPaths([listed, noPush], ["x"]), ["l.yml"]);
+  const single = parseWorkflowPushTrigger("s.yml", "on: push\njobs: {}\n");
+  assert.equal(single.dispatchable, false);
+  assert.deepEqual(single.push, {});
 });
 
 test("W1-T4817: a throwing effect never fails the pass", async () => {
