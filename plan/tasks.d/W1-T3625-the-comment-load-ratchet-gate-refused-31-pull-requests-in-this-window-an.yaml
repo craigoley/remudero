@@ -4,7 +4,7 @@
   depends_on: []
   type: implement
   verify: auto
-  priority: 48
+  priority: 1.6
   risk: low
   status: queued
   attempts: 0
@@ -28,4 +28,4 @@
       - "No deletion of data/branches/history, no irreversible action, and no operator-only decision (priority/budget/preference) is implicated by the description or files."
       - "Family track record (0 merged/0 declined) shows no prior failure pattern to judge more strictly against."
     judged_at: "2026-09-29T14:14:34.847Z"
-    pin: "a5c6efebb61b654d0bd458ba20b0df47a2f73f96f5ac7f994959e45327e381d1"
+    pin: "6a69142bc0d4ef17fbca04af765143a943583a61dbfec9acedb1db6e4002cfc3"

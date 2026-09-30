@@ -4,7 +4,7 @@
   depends_on: []
   type: implement
   verify: auto
-  priority: 58
+  priority: 2.8
   risk: low
   status: queued
   attempts: 0
@@ -27,4 +27,4 @@
       - "Acceptance criterion is a grep-verifiable check (ci-learning:5433:squash-trailer-gate in learnings/ci.yaml), so the finding is verifiable from what is shown."
       - "Family track record shows 0 declined, not a family with a pattern of failure, despite being new/unproven."
     judged_at: "2026-09-29T14:14:29.427Z"
-    pin: "0c110fb887a0a1ee7c03909dcd03aeba97b4f0552ae5f0a5249ba9a4206ef907"
+    pin: "e06986e39bbb3550b76fe40625f0907f6c356c0c339e7fff4780ee17d4a76807"

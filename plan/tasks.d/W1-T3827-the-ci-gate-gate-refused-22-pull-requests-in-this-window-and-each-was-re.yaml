@@ -4,7 +4,7 @@
   depends_on: []
   type: implement
   verify: auto
-  priority: 52
+  priority: 2.2
   risk: low
   status: queued
   attempts: 0
@@ -26,4 +26,4 @@
       - "Acceptance criterion is a grep-verifiable string match (ci-learning:6058:ci-gate) in the declared file, so the finding is verifiable from what is shown."
       - "Family track record shows no prior merged/declined tasks (0/0), which is neutral rather than a pattern of failure, and gates state contains no other concerning signals."
     judged_at: "2026-09-29T14:14:40.909Z"
-    pin: "107215386dfcfda4a7dcf71e065d7c1ea337def5d2742ac5ea6c9c6578456804"
+    pin: "1d04fdeaef9c88954ec217bb92228a36fff127602d8f0073573979797e65bb90"
