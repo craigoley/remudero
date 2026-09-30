@@ -14,7 +14,7 @@ const RELEASED = "verify-human:W1-T217";
 const UNRELEASED = "verify-human:W1-T216";
 const RULING = "ruling:operator-choice";
 
-function fixture(corruptArchive = false) {
+function fixture(corruptArchive = false, heldTaskId?: string) {
   const root = mkdtempSync(join(tmpdir(), "rmd-archive-release-inbox-"));
   mkdirSync(join(root, "plan"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
@@ -26,6 +26,7 @@ function fixture(corruptArchive = false) {
   depends_on: []
   type: implement
   verify: human
+  ${id === heldTaskId ? "dispatch_hold: true" : ""}
   risk: high
   status: queued
   attempts: 0
@@ -42,7 +43,8 @@ function fixture(corruptArchive = false) {
   writeFileSync(ledgerPath, "");
   writeFileSync(join(root, "state", "ledger.2026-09-27T00-00-00-000Z.ndjson"),
     JSON.stringify({ step: "ratify.approved", task_id: "W1-T217", released: "verify-human",
-      run_id: "RELEASE-217", ts: "2026-09-27T00:00:00.000Z" }) + "\n");
+      run_id: "RELEASE-217", ts: "2026-09-27T00:00:00.000Z",
+      ...(heldTaskId ? { author_class: "machine" } : {}) }) + "\n");
   if (corruptArchive) writeFileSync(join(root, "state", "ledger.2026-09-26T00-00-00-000Z.ndjson.gz"), "not a gzip archive");
   const approved: string[] = [];
   const deps: PanelGraphDeps = {
@@ -121,6 +123,25 @@ test("W1-T4768: archive gap preserves unproven ask", async (t) => {
     };
     assert.equal(census.sources.archiveLedger, "unavailable");
     assert.equal(census.items.find((item) => item.proposalId === RELEASED)?.attention, "decision");
+  });
+});
+
+test("an archived release does not hide a task with an explicit dispatch hold", async (t) => {
+  const world = fixture(false, "W1-T217");
+  t.after(() => rmSync(world.root, { recursive: true, force: true }));
+  await withServer(world.deps, async (base) => {
+    const inbox = await get(base, "/v1/inbox") as { notReady: Array<{ proposalId: string }> };
+    assert.ok(inbox.notReady.some((item) => item.proposalId === RELEASED));
+    const census = await get(base, "/v1/inbox/attention-census") as {
+      discrepancy?: string;
+      items: Array<{ proposalId: string; attention: string; whyMe: string; sourceFacts: Array<{ detail: string }> }>;
+    };
+    const row = census.items.find((item) => item.proposalId === RELEASED);
+    assert.equal(row?.attention, "decision");
+    assert.match(row?.whyMe ?? "", /dispatch hold/i);
+    assert.ok(row?.sourceFacts.some((fact) => fact.detail.includes("RELEASE-217")));
+    assert.ok(row?.sourceFacts.some((fact) => fact.detail.includes("machine-authored")));
+    assert.equal(census.discrepancy, "active_human_ask_has_release_receipt");
   });
 });
 

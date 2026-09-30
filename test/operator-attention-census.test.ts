@@ -43,6 +43,23 @@ test("W1-T4742: census counts attention rather than the last speaker", () => {
   assert.equal(result.items.filter((row) => row.waitingOn === "operator").length, 2);
 });
 
+test("decision attention distinguishes a ready approval from an ask still awaiting preparation", () => {
+  const result = buildAttentionCensus(input({
+    views: [view("verify-human:W1-T216", "decision"), view("verify-human:W1-T217", "decision"), view("ruling:unreadable", "decision")],
+    classifications: [
+      { proposalId: "verify-human:W1-T216", state: "not_ready", reasons: [] },
+      { proposalId: "verify-human:W1-T217", state: "ready", reasons: [] },
+    ],
+    taskFacts: new Map([
+      ["W1-T216", { verify: "human", repo: "remudero", title: "Held drill" }],
+      ["W1-T217", { verify: "human", repo: "remudero", title: "Prepared decision" }],
+    ]),
+  }));
+  assert.equal(result.counts.decision, 3);
+  assert.deepEqual(result.decisionReadiness, { ready: 1, needsPreparation: 1, unknown: 1 });
+  assert.equal(result.state, "partial", "the missing classification prevents a complete census");
+});
+
 test("W1-T4742: why-me evidence names the task and source fact", () => {
   const result = buildAttentionCensus(input({
     judgeByTask: new Map([["W1-T216", { decision: "needs_operator", reason: "A security drill requires a bounded target." }]]),
@@ -52,6 +69,20 @@ test("W1-T4742: why-me evidence names the task and source fact", () => {
   assert.match(row?.whyMe ?? "", /W1-T216/);
   assert.ok(row?.sourceFacts.some((fact) => fact.source === "plan" && fact.detail.includes("verify: human")));
   assert.ok(row?.sourceFacts.some((fact) => fact.source === "judge" && fact.detail.includes("needs_operator")));
+});
+
+test("a held security drill explains why a machine release did not settle the ask", () => {
+  const result = buildAttentionCensus(input({
+    taskFacts: new Map([["W1-T216", { verify: "human", repo: "remudero", title: "Controlled drill", dispatchHold: true, risk: "high" }]]),
+    releasedTaskIds: new Set(["W1-T216"]),
+    releaseReceipts: new Map([["W1-T216", "W1-T216 machine release receipt"]]),
+  }));
+  const row = result.items[0];
+  assert.equal(row?.attention, "decision");
+  assert.match(row?.whyMe ?? "", /dispatch hold/i);
+  assert.ok(row?.sourceFacts.some((fact) => fact.source === "plan-lifecycle" && fact.detail.includes("dispatch_hold")));
+  assert.ok(row?.sourceFacts.some((fact) => fact.source === "ledger" && fact.detail.includes("machine release")));
+  assert.equal(result.discrepancy, "active_human_ask_has_release_receipt");
 });
 
 test("an alphanumeric task id still joins its plan and judge evidence", () => {

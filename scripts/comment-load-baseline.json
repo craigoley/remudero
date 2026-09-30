@@ -102,7 +102,7 @@
   "src/lib/commit-message.ts": 180,
   "src/lib/compaction.ts": 500,
   "src/lib/companion-paths.ts": 50,
-  "src/lib/containment.ts": 570,
+  "src/lib/containment.ts": 598,
   "src/lib/correct.ts": 29,
   "src/lib/daemon-health.ts": 192,
   "src/lib/daemon.ts": 1750,

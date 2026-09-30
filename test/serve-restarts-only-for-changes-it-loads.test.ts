@@ -73,7 +73,7 @@ test("a synchronous changed-paths reader decides at the same edge", () => {
 });
 
 test("serve-only trees and the daemon's list are both relevant while docs are not", () => {
-  for (const path of ["src/x.ts", "bin/rmd", "package.json", "package-lock.json", "tsconfig.json", "hooks/a", "settings/b.json", "deploy/entrypoint.sh", ".remudero/managed-repos.json", "plan/tasks.d/W1-T1.yaml"]) {
+  for (const path of ["src/x.ts", "bin/rmd", "package.json", "package-lock.json", "tsconfig.json", "hooks/a", "settings/b.json", "deploy/entrypoint.sh", ".remudero/managed-repos.json", "plan/policy.yaml"]) {
     assert.equal(serveRestartRelevant(["docs/a.md", path]), true, path);
   }
   assert.equal(serveRestartRelevant(["docs/a.md", "test/b.test.ts", "learnings/c.yaml", "doctrine/d.md"]), false);
