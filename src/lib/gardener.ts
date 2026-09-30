@@ -391,6 +391,9 @@ export function runGarden<C extends string, I, A extends GardenAction<C>, W exte
       if (failures.count === GARDEN_FILING_ESCALATE_AT && deps.escalate) {
         deps.log(`${spec.name}.garden_filing_escalated`, { attempt: failures.count, issue_url: deps.escalate(gardenFilingEscalation(spec.name, failures)) });
       }
+      // The measurement stands whether or not its PR opened: a filing that keeps failing must not
+      // also silence the scorecard (the ci-friction rows stopped for a day behind one bad title).
+      deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: null, awaiting: state.pending?.prUrl ?? null, filing_failed: failures.count });
       return { ran: true, plan, scorecard };
     }
   }

@@ -575,7 +575,7 @@ import {
 // renderTraceChain/traceForward/traceReverse: only traceCommand read them, and it moved to
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
-import { checkCommitMessage, defaultPreflightSpawn, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
+import { checkCommitMessage, defaultPreflightSpawn, fitConventionalTitle, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
 import {
   buildPreflightSummary,
   callerReachableSuites,
@@ -32464,7 +32464,12 @@ export function gardenCheckout(opts: {
         execFileSync(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root, stdio: "pipe" });
         git("add", "--", "docs/docs-index.json");
       }
-      git("commit", "-q", "-m", `${title}\n\nTended by the ${opts.name} gardener.`);
+      // commitlint refuses a header over 100 characters, and a cause name makes a long title: fit
+      // the header (prefix kept, cut at a space or hyphen, since a cause is one hyphenated token)
+      // for both the commit and the PR, and carry the full title in each body.
+      const fitted = fitConventionalTitle(title);
+      const fullTitle = fitted.trimmed ? `Full title: ${title}\n\n` : "";
+      git("commit", "-q", "-m", `${fitted.header}\n\n${wrapBodyLines(`${fullTitle}Tended by the ${opts.name} gardener.`).join("\n")}`);
       // Both guards run BEFORE the push: a push that lands and a PR that is then refused leaves a
       // branch with no PR — 103 test-run plan-garden-* heads on origin by 2026-09-29.
       assertLiveWriteAllowed("git-push", `pushing the ${opts.name} garden branch ${branch}`);
@@ -32472,7 +32477,7 @@ export function gardenCheckout(opts: {
       git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
       const fetcher = opts.fetcher ?? ghJson;
       try {
-        return createPlanPrRest(fetcher, opts.owner, opts.repo, { title, body, head: branch, base: "main" }).prUrl;
+        return createPlanPrRest(fetcher, opts.owner, opts.repo, { title: fitted.header, body: fullTitle + body, head: branch, base: "main" }).prUrl;
       } catch (e) {
         retractGardenBranch({ branch, git, name: opts.name, owner: opts.owner, repo: opts.repo, fetcher, log: opts.log });
         throw e;

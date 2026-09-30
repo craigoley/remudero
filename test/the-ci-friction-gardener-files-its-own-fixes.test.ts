@@ -574,3 +574,16 @@ test("coverage-shard checks from different CI matrix sizes price as one shard fa
   assert.equal(ciCheckFamily("ci-shard (1/4)"), "ci-shard");
   assert.equal(ciCheckFamily("commitlint"), "commitlint");
 });
+
+test("a failed ci-friction filing still writes its scorecard row", () => {
+  const fx = frictionFixture("ci-friction-scorecard-on-failure", () => {
+    throw new Error("header must not be longer than 100 characters, current length is 112 [header-max-length]");
+  });
+  const pass = runGarden(fx.spec, fx.deps);
+  assert.equal(pass.prUrl, undefined);
+  const card = fx.events.find((e) => e.step === "ci-friction.scorecard");
+  assert.ok(card, `the measurement is ledgered despite the refused filing: ${fx.events.map((e) => e.step).join(",")}`);
+  assert.equal(card.extra?.filing_failed, 1);
+  assert.equal(card.extra?.pr_url, null);
+  assert.equal(card.extra?.untracked, "check:reviewer-unmet");
+});
