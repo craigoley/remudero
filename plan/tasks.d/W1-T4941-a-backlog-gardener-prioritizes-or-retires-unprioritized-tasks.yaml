@@ -1,0 +1,42 @@
+- id: W1-T4941
+  title: "TWO THIRDS OF THE QUEUE HAS NO PRIORITY AND SORTS LAST FOREVER — 176 of 266 queued tasks carry no priority, 64 are over two weeks old, and a hand review found about half of an old cohort already done or overtaken. A backlog gardener judges each unprioritized task and proposes a priority or a retirement with evidence"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: start building what helps automated flow and self-improvement (queue hygiene)"
+  note: "reservation hand-off: plan-backlog-gardener-1790785261000 -> plan-backlog-gardener-1790785261000"
+  plan_refs: [W1-T4111, W1-T4861, W1-T4095]
+  files: [src/lib/backlog-gardener.ts, src/lib/daemon.ts, test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30: 266 queued tasks, 176 with no `priority:` (absent priority sorts LAST in the drain, so
+    they are effectively never reached); by age 76 under 2 days, 51 at 2-7, 75 at 7-14, 39 at 14-30 and 25 over 30
+    days. The queue grew from 225 to 266 in a day while 32 task builds merged. A hand review of 18 queued verify-human
+    tasks the same day found about half already done, ruled or overtaken (W1-T2615, W1-T3102, W1-T3103, W1-T3887,
+    W1-T971, W1-T433, W1-T2203, W1-T417, W1-T3332), each checked against main. The plan gardener retires a task only
+    when its proofs hold on main; nothing judges relevance or assigns priority.
+  design: |
+    A gardener pass (same cadence and PR shape as the plan gardener, one plan-only PR per pass, no blocking) takes
+    unprioritized queued tasks oldest-first, a bounded batch per pass. For each, an LLM judge reads the shard plus
+    evidence it gathers read-only (the files and symbols named, later tasks citing it, merged PRs) and proposes one
+    of: `priority: N` with a one-line reason, `retirement: closed|withdrawn` with the evidence (overtaken, already
+    done, premise gone), or no change. Every proposal cites its evidence in the PR body, and the ordinary review and
+    auto-merge path decides; a closed PR is the decline signal, as with the plan gardener.
+  acceptance:
+    - claim: "an unprioritized task still valid is proposed a priority with its reason"
+      proof: 'grep: test("W1-T4941: an unprioritized task still valid is proposed a priority with its reason" in test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts'
+    - claim: "an overtaken task is proposed for retirement with cited evidence"
+      proof: 'grep: test("W1-T4941: an overtaken task is proposed for retirement with cited evidence" in test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts'
+    - claim: "a pass is bounded and produces at most one plan-only PR"
+      proof: 'grep: test("W1-T4941: a pass is bounded and produces at most one plan-only PR" in test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts'
+    - claim: "the daemon runs the gardener"
+      proof: 'grep: runBacklogGardener( in src/lib/daemon.ts'
+  falsifier: |
+    Let the judge write routing or status without citing evidence and the second test finds an uncited retirement.

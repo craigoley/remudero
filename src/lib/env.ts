@@ -15,6 +15,7 @@
 
 import { join } from "node:path";
 import { ENV_REGISTRY, type EnvRegistryEntry } from "./config-schema.js";
+import { LIVE_LEDGER_DENY_ROOT_ENV } from "./live-write-guard.js";
 
 // Why: why USER/CLAUDE_CODE_OAUTH_TOKEN/GH_TOKEN are each safe to copy, and the container-parity
 // incident behind GH_TOKEN — docs/forensics/env.md#allowlist (W1-T236, W1-T258).
@@ -76,6 +77,8 @@ export function buildWorkerEnv(
   for (const [key, val] of Object.entries(extra)) {
     child[key] = val;
   }
+  const liveDenyRoot = parent[LIVE_LEDGER_DENY_ROOT_ENV];
+  if (typeof liveDenyRoot === "string" && liveDenyRoot.length > 0) child[LIVE_LEDGER_DENY_ROOT_ENV] = liveDenyRoot;
 
   // Grants the HOME redirection (unless the caller set HOME via `extra`), overriding whatever the
   // allowlist copied from the parent's real HOME — the W1-T18 mechanism that makes isolation hold

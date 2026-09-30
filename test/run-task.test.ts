@@ -7280,6 +7280,26 @@ class OnboardProcessExitCalled extends Error {
   }
 }
 
+/** main() logs cli.invoked before dispatch; give these real-dispatch tests their own config root. */
+async function withCliFixtureHome<T>(run: () => Promise<T>): Promise<T> {
+  const home = mkdtempSync(join(tmpdir(), "rmd-cli-dispatch-home-"));
+  const root = join(home, "fixture-root");
+  const configDir = join(home, ".config", "remudero");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, "config.json"), JSON.stringify({ root, claudeBin: "/bin/true" }));
+  const previous = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const result = await run();
+    assert.match(readFileSync(join(root, "state", "ledger.ndjson"), "utf8"), /"step":"cli.invoked"/);
+    return result;
+  }
+  finally {
+    if (previous === undefined) delete process.env.HOME;
+    else process.env.HOME = previous;
+  }
+}
+
 test("main(): `rmd onboard` with no target-dir dispatches to onboardCommand and exits 2 (fail loud, no fs/gh work)", async (t) => {
   const exitMock = ((code?: number): never => {
     throw new OnboardProcessExitCalled(code);
@@ -7294,9 +7314,7 @@ test("main(): `rmd onboard` with no target-dir dispatches to onboardCommand and 
   process.env[SELF_SYNC_GUARD_ENV] = "1";
   try {
     let caught: unknown;
-    await main().catch((e) => {
-      caught = e;
-    });
+    await withCliFixtureHome(async () => { await main().catch((e) => { caught = e; }); });
     assert.ok(caught instanceof OnboardProcessExitCalled, "main() must reach process.exit via onboardCommand's return value");
     assert.equal((caught as OnboardProcessExitCalled).code, 2);
     assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /<target-dir> is required/);
@@ -7583,9 +7601,7 @@ test("main(): `rmd alert-fix` with an unknown flag dispatches to alertFixCommand
   process.env[SELF_SYNC_GUARD_ENV] = "1";
   try {
     let caught: unknown;
-    await main().catch((e) => {
-      caught = e;
-    });
+    await withCliFixtureHome(async () => { await main().catch((e) => { caught = e; }); });
     assert.ok(caught instanceof AlertFixProcessExitCalled, "main() must reach process.exit via alertFixCommand's return value");
     assert.equal((caught as AlertFixProcessExitCalled).code, 2);
     assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /--bogus/);
@@ -8250,9 +8266,7 @@ test("main(): a SERVICE command (daemon) runs the freshness GATE — never the i
   process.env[SELF_SYNC_GUARD_ENV] = "1";
   try {
     let caught: unknown;
-    await main().catch((e) => {
-      caught = e;
-    });
+    await withCliFixtureHome(async () => { await main().catch((e) => { caught = e; }); });
     assert.ok(caught instanceof OnboardProcessExitCalled, "main() reached process.exit via daemonCommand — the service path never refused on tree state");
     assert.equal((caught as OnboardProcessExitCalled).code, 2, "a bad daemon flag exits 2 (daemonCommand fail-loud), reached only AFTER the service freshness gate ran");
   } finally {

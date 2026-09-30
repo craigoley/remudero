@@ -13,7 +13,9 @@
   note: "OPERATOR DIRECTION 2026-09-30: no new rule may refuse or strand a PR. The first build (#8009) added a hard lint refusal and was closed; this task now routes a record task away from workers and only warns. reservation hand-off: plan-followups-1790712493000 -> plan-followups-1790712493000"
   plan_refs: [W1-T2982, W1-T1258]
   files: [src/lib/drain.ts, src/lib/task-linter.ts, test/a-record-task-is-never-dispatched-to-a-worker.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4818 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     OBSERVED 2026-09-29: W1-T1258 and W1-T2982 each carried only acceptance proofs of the form `grep: <phrase> in

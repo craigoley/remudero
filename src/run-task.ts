@@ -3,6 +3,7 @@
 // classifyWorktreeBase, MemInfo, WorktreeBaseRow, readNvmrcVersion) moved with doctorCommand to
 // src/lib/report-commands.ts (W1-T2888); it imports them from lib/doctor.js directly. The symbols
 // below have SECOND callers outside doctorCommand and stay imported here too.
+import { retryWhileLockBusy } from "./lib/lock-busy-retry.js";
 import {
   appendCaptureSurfaceFireHistory,
   judgeDiskHeadroom,
@@ -47,6 +48,7 @@ import {
 import { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs } from "./lib/ledger-path.js";
 export { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs };
 import { ledgerCompactCommand, type LedgerCompactCommandDeps } from "./lib/ledger-compact.js";
+import { readModelCommand } from "./lib/read-model-cli.js";
 export { ledgerCompactCommand } from "./lib/ledger-compact.js";
 import {
   decideLedgerCompaction,
@@ -8261,7 +8263,7 @@ async function fixRungStandDownReason(
       return {
         reason:
           `the only red required check(s) this strike would target (${redCheckSupersession.redNames.join(", ")}) ` +
-          `now show a later attempt already in flight on this head — standing down rather than spending a ` +
+          `now show a later attempt already in flight or green on this head — standing down rather than spending a ` +
           `strike on an already-superseded reading`,
       };
     }
@@ -13666,6 +13668,10 @@ export class ManagedCheckoutRefreshRefusedError extends RmdError {
   }
 }
 
+export function isManagedCheckoutLockBusy(error: unknown): boolean {
+  return error instanceof ManagedCheckoutRefreshRefusedError && error.reason.startsWith("another dispatch holds ");
+}
+
 /** W1-T4356: W1-T4193's refusal, naming why the checkout whose install it would borrow was left behind. */
 class ManagedCheckoutNotRefreshedError extends WorktreeNodeModulesRefusedError {
   constructor(refused: WorktreeNodeModulesRefusedError, readonly notRefreshed: string) {
@@ -15597,8 +15603,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // W1-T4193 below. A refusal here is that same deferral, raised before a worktree exists.
   let checkoutRefresh: ManagedCheckoutRefresh;
   try {
-    checkoutRefresh = refreshManagedCheckout(
-      repoDir, join(config.root, "state", `managed-checkout-${task.repo}.lock`), log, opts.managedCheckoutInstall,
+    checkoutRefresh = await retryWhileLockBusy(
+      () => refreshManagedCheckout(repoDir, join(config.root, "state", `managed-checkout-${task.repo}.lock`), log, opts.managedCheckoutInstall),
+      isManagedCheckoutLockBusy,
+      { log },
     );
   } catch (e) {
     log("managed_checkout.refresh_refused", { reason: String((e as Error)?.message ?? e) });
@@ -47407,6 +47415,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "operator-only archive compaction over the existing compactRotations primitive: selects the oldest rotations strictly older than --older-than (default 7 days) or --older-than-hours, taking ordinary rotations before any archive a previous pass wrote (W1-T4262), refuses a --max-sources value above the 50-source memory ceiling, preserves every distinct row, atomically writes one gzip replacement per UTC day of its rows, then removes only the source files those replacements cover. --dry-run executes the same reads and exact dedupe to print sourceCount, rowsWritten, duplicatesCollapsed and archiveName while writing nothing. It never touches the live ledger, is never a rotateLedger dependency (so a compaction fault can never block a write), and refuses to overwrite an unselected archive if a row timestamp would collide with its name. W1-T3368 RETIRED THE 'no daemon cadence' HALF of this contract: operator-only was right for a new primitive and wrong as a steady state for a corpus growing ~240 archives a day, which cost an eight-hour fleet outage whose cure had already merged. The daemon now fires ONE bounded pass when archive PRESSURE crosses a threshold (src/lib/ledger-compaction-rung.ts); this verb remains the operator's hand-run path.",
   },
   {
+    name: "read-model",
+    syntax: "rmd read-model rebuild [--instance <id>] [--ledger-dir <dir>] [--window-days <n>] | status [--json] | switch <projector|<view>> <mode>",
+    summary: "Rebuild, inspect or switch the serve read model projected from the ledger.",
+    detail: "Phase 1 read model (the projector's per-instance node:sqlite store under <state>/read-model/). `rebuild` projects every rotation form of the instance's ledger (core's by default; another instance needs --ledger-dir) into a new generation file (<inst>.v<N>.g<gen>.sqlite), runs the consistency oracle over a closed window of --window-days (default 7) against the ledger union, checkpoints and closes the file, and only when the oracle agrees flips the <inst>.v<N>.current pointer (temp file, fsync, rename); no database file is ever renamed over one a connection holds open. It then fences the old generation's writer lease so a running worker reopens onto the new one, and deletes superseded generations only after a 10-minute grace with no live lease. A refused rebuild deletes its unpublished generation and leaves the pointer untouched. `status` prints each instance's current file and superseded generations, row counts (seen, fact, quarantine), generation, DB size, the lag of its newest applied row, core's live-file bytes behind, the lease holder and the last consistency outcome; --json for the raw shape. `switch projector on|off` or `switch <view> serve|shadow|off` writes <state>/read-model/switches.json atomically and appends a read_model.switch ledger row.",
+  },
+  {
     name: "hand-runs",
     syntax: "rmd hand-runs",
     summary: "Print which verb sequence the operator keeps hand-running, on demand.",
@@ -48369,6 +48383,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     { pairedReport: pairedPilotReportView })],
   ["memory-lint", (rest) => memoryLintCommand(rest)],
   ["ledger-compact", (rest) => ledgerCompactCommand(rest)],
+  ["read-model", (rest) => readModelCommand(rest)],
   ["hand-runs", (rest) => handRunsCommand(rest)],
   ["field-trials", async (rest) => await fieldTrialsCommand(rest, (input) => buildFieldTrialsFlowSnapshot(input))],
   ["ci-failures", (rest) => ciFailuresCommand(rest)],

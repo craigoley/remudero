@@ -39,6 +39,7 @@ usage:
   rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>]   # Report an A/A integrity trial: two labels, one pinned stack, and no winner.
   rmd benchmark-paid-pilot activate --request <request.json> --aa-report <aa-report.json> [--state-dir <dir>] [--json] | report --pilot <id> [--case-files <snapshot.json>] [--out <report.json>] [--state-dir <dir>] [--json] | pause|resume --pilot <id> [--note <text>] [--state-dir <dir>]   # Activate, report, pause or resume the approved $100/7-day paid pilot; only its paid arm pauses.
   rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sources <n>] [--dry-run]   # Compact one bounded window of old ledger rotations without losing a distinct row.
+  rmd read-model rebuild [--instance <id>] [--ledger-dir <dir>] [--window-days <n>] | status [--json] | switch <projector|<view>> <mode>   # Rebuild, inspect or switch the serve read model projected from the ledger.
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
   rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--json]   # Join the ledger union and GitHub history into observational field-trials aggregates.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
@@ -360,6 +361,16 @@ rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sou
 ```
 
 operator-only archive compaction over the existing compactRotations primitive: selects the oldest rotations strictly older than --older-than (default 7 days) or --older-than-hours, taking ordinary rotations before any archive a previous pass wrote (W1-T4262), refuses a --max-sources value above the 50-source memory ceiling, preserves every distinct row, atomically writes one gzip replacement per UTC day of its rows, then removes only the source files those replacements cover. --dry-run executes the same reads and exact dedupe to print sourceCount, rowsWritten, duplicatesCollapsed and archiveName while writing nothing. It never touches the live ledger, is never a rotateLedger dependency (so a compaction fault can never block a write), and refuses to overwrite an unselected archive if a row timestamp would collide with its name. W1-T3368 RETIRED THE 'no daemon cadence' HALF of this contract: operator-only was right for a new primitive and wrong as a steady state for a corpus growing ~240 archives a day, which cost an eight-hour fleet outage whose cure had already merged. The daemon now fires ONE bounded pass when archive PRESSURE crosses a threshold (src/lib/ledger-compaction-rung.ts); this verb remains the operator's hand-run path.
+
+### `rmd read-model`
+
+Rebuild, inspect or switch the serve read model projected from the ledger.
+
+```
+rmd read-model rebuild [--instance <id>] [--ledger-dir <dir>] [--window-days <n>] | status [--json] | switch <projector|<view>> <mode>
+```
+
+Phase 1 read model (the projector's per-instance node:sqlite store under <state>/read-model/). `rebuild` projects every rotation form of the instance's ledger (core's by default; another instance needs --ledger-dir) into a new generation file (<inst>.v<N>.g<gen>.sqlite), runs the consistency oracle over a closed window of --window-days (default 7) against the ledger union, checkpoints and closes the file, and only when the oracle agrees flips the <inst>.v<N>.current pointer (temp file, fsync, rename); no database file is ever renamed over one a connection holds open. It then fences the old generation's writer lease so a running worker reopens onto the new one, and deletes superseded generations only after a 10-minute grace with no live lease. A refused rebuild deletes its unpublished generation and leaves the pointer untouched. `status` prints each instance's current file and superseded generations, row counts (seen, fact, quarantine), generation, DB size, the lag of its newest applied row, core's live-file bytes behind, the lease holder and the last consistency outcome; --json for the raw shape. `switch projector on|off` or `switch <view> serve|shadow|off` writes <state>/read-model/switches.json atomically and appends a read_model.switch ledger row.
 
 ### `rmd hand-runs`
 
