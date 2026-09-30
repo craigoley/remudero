@@ -30,6 +30,7 @@ import {
   type ReadModelDb,
   type ReadModelLease,
 } from "./read-model-db.js";
+import { createNowView } from "./now-view.js";
 import { oldestAsOf, viewEtag, type ViewBody, type ViewBodyEntry, type ViewSource } from "./views.js";
 
 const READ_MODEL_WORKER_KIND = "remudero-read-model" as const;
@@ -54,6 +55,10 @@ export interface ReadModelInstance {
   name: string;
   /** The instance's state dir: the one holding its live ledger and rotation archives. */
   ledgerDir: string;
+  /** `owner/name`, the plan path and core's feedback root: the now view's inputs (now-view.ts). */
+  repo?: string;
+  planPath?: string;
+  feedbackRoot?: string;
 }
 
 export type ReadModelViewMode = "serve" | "shadow" | "off";
@@ -138,6 +143,7 @@ export type ReadModelWorkerMessage =
 export interface ReadModelViewContext {
   now: number;
   instances: ReadonlyArray<{ state: ReadModelInstanceState; db?: ReadModelDb }>;
+  switches?: ReadModelSwitches;
 }
 
 /** A view the worker materializes. `materialize` returns one body per key (`""` when unkeyed). */
@@ -339,7 +345,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   function materialize(now: number): void {
-    const ctx: ReadModelViewContext = { now, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}) })) };
+    const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}) })) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
     for (const view of views) {
       if (switches.views[view.name] === "off") continue;
@@ -408,7 +414,9 @@ export function runReadModelWorker(
 ): void {
   const signal = new Int32Array(data.signal);
   const stopRequested = (): boolean => Atomics.load(signal, 0) === 1;
-  const ticker = createReadModelTicker({ stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, stopRequested, post: (m) => port.postMessage(m) });
+  const post = (m: ReadModelWorkerMessage): void => port.postMessage(m);
+  const now = createNowView({ instances: data.instances, ledgerSource, clock, log: (step, extra) => post({ type: "log", step, extra }) });
+  const ticker = createReadModelTicker({ stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, stopRequested, post, views: [...READ_MODEL_VIEWS, now] });
   let timer: NodeJS.Timeout | undefined;
   let finished = false;
   const finish = (): void => {

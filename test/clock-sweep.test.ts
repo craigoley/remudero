@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { test } from "node:test";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -38,7 +40,7 @@ const mod = (await import(SWEEP_URL)) as {
   runSuite: (
     suite: string,
     days: number,
-    exec?: (file: string, args: string[], opts: { env: Record<string, string> }) => string,
+    exec?: (file: string, args: string[], opts: { cwd: string; env: Record<string, string> }) => string,
   ) => { failed: boolean; output: string };
   bisectFuse: (
     suite: string,
@@ -378,6 +380,79 @@ test("runSuite passes the shift for whatever rung it is asked about, not a hardc
   });
   assert.deepEqual(days, ["7"]);
 });
+
+function withClockSandbox<T>(run: (sandbox: string) => T): T {
+  const sandbox = mkdtempSync(join(tmpdir(), "rmd-clock-parent-"));
+  const previous = process.env.TMPDIR;
+  process.env.TMPDIR = sandbox;
+  try {
+    return run(sandbox);
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previous;
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
+test("W1-T4948: each shifted suite gets a private temp root", () => withClockSandbox((sandbox) => {
+  const roots: string[] = [];
+  for (const suite of ["emissions", "recap"]) {
+    const result = runSuite(suite, 400, (_file, _args, opts) => {
+      const root = opts.env.TMPDIR;
+      assert.notEqual(root, sandbox);
+      assert.equal(dirname(root), sandbox);
+      assert.equal(existsSync(root), true);
+      assert.equal(opts.env.FK_SHIFT_DAYS, "400");
+      roots.push(root);
+      return "";
+    });
+    assert.equal(result.failed, false);
+    assert.equal(existsSync(roots.at(-1)!), false, "the private root is removed after the suite exits");
+  }
+  assert.notEqual(roots[0], roots[1], "a second suite must not reuse the first one's temp root");
+}));
+
+test("W1-T4948: failed sweep cleans only its own temp root", () => withClockSandbox((sandbox) => {
+  const sibling = join(sandbox, "rmd-sibling");
+  mkdirSync(sibling);
+  let privateRoot = "";
+  const result = runSuite("emissions", 400, (_file, _args, opts) => {
+    privateRoot = opts.env.TMPDIR;
+    const error = new Error("deliberate child failure") as Error & { stdout: string; stderr: string };
+    error.stdout = "not ok 1 - deliberate\n";
+    error.stderr = "deliberate failure\n";
+    throw error;
+  });
+  assert.equal(result.failed, true);
+  assert.match(result.output, /not ok 1 - deliberate/);
+  assert.equal(existsSync(privateRoot), false);
+  assert.equal(existsSync(sibling), true, "cleanup must not delete the shared parent or sibling");
+}));
+
+test("W1-T4948: real shifted sweep cannot reap a sibling sentinel", () => withClockSandbox((sandbox) => {
+  const sibling = join(sandbox, "rmd-sibling-sentinel");
+  mkdirSync(sibling);
+  const tmpModule = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "tmp.ts")).href;
+  const shiftModule = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "clock-shift.mjs");
+  let privateRoot = "";
+  let sweptPrivateVictim = false;
+  const result = runSuite("emissions", 400, (file, _args, opts) => {
+    privateRoot = opts.env.TMPDIR;
+    const victim = join(privateRoot, "rmd-private-victim");
+    mkdirSync(victim);
+    const code = `import { sweepStaleTempDirs } from ${JSON.stringify(tmpModule)}; sweepStaleTempDirs();`;
+    execFileSync(file, ["--import", "tsx", "--import", shiftModule, "--input-type=module", "-e", code], {
+      cwd: opts.cwd, env: opts.env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    });
+    sweptPrivateVictim = !existsSync(victim);
+    assert.equal(existsSync(sibling), true, "the real shifted sweep must not see a sibling of its private TMPDIR");
+    return "";
+  });
+  assert.equal(result.failed, false);
+  assert.equal(sweptPrivateVictim, true, "the shifted sweep must actually run and reap a private victim");
+  assert.equal(existsSync(privateRoot), false);
+  assert.equal(existsSync(sibling), true);
+}));
 
 test("bisectFuse returns the SMALLEST rung that already fails, not the first tried", () => {
   // Fails from +30 onward: the operator needs the tightest bound, or the fuse reads longer than it is.

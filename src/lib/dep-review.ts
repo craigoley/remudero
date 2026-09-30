@@ -21,18 +21,19 @@ import { REVIEW_CONTEXT } from "./review.js";
  *     the manifest/lockfile allowlist (a "dependency bump" that also edits source
  *     is not a dependency bump — refuse rather than rubber-stamp it). No status is
  *     posted: identical to today's silence, but now a DELIBERATE outcome.
- *   - ARM      — a confined minor/patch bump with every required gate green: post
- *     remudero-review=success and arm auto-merge.
+ *   - ARM      — a confined minor/patch bump, or a diff-proven GitHub Actions SHA-only
+ *     pin refresh with unchanged release annotations, with every required gate green:
+ *     post remudero-review=success and arm auto-merge.
  *   - MIGRATE  — a parseable MAJOR bump. Capture a durable feedback entry for
  *     the migration, then tell Dependabot to ignore this major proposal and close
  *     the PR without deleting its branch. No status is posted and no auto-merge is armed.
- *   - ESCALATE — an unparseable bump, or a major whose dependency identity cannot
- *     be safely extracted. Fail closed via the existing MANUAL escalation path.
+ *   - ESCALATE — an unparseable bump that is not a diff-proven action pin refresh,
+ *     or a major whose dependency identity cannot be safely extracted. Fail closed
+ *     via the existing MANUAL escalation path.
  *
- * HOLD covers an otherwise-good minor/patch PR whose required checks are not
- * yet green (still running, or genuinely red): nothing is posted and the caller
- * tries again later — mirrors run-task.ts's waitForCiGreen/pollToGate, where
- * pending is never treated as pass.
+ * HOLD covers an otherwise-good minor/patch or verified pin-only PR whose required
+ * checks are not yet green (still running, or genuinely red): nothing is posted and
+ * the caller tries again later — pending is never treated as pass.
  */
 
 // ── Author ───────────────────────────────────────────────────────────────
@@ -59,6 +60,9 @@ export function isDependabotAuthor(author: DepReviewAuthor): boolean {
 // ── Semver level, parsed from the PR title/body ─────────────────────────
 
 export type SemverLevel = "major" | "minor" | "patch" | "unknown";
+
+/** Bumped when this lane's decision contract changes, independently of task-review semantics. */
+export const DEP_REVIEW_ENGINE_REVISION = "dep-review-action-sha-pin-v1";
 
 function parseVersion(v: string): [number, number, number] | null {
   const m = v.trim().match(/^v?(\d+)\.(\d+)(?:\.(\d+))?/);
@@ -355,6 +359,101 @@ export function changedFilesInDiff(diff: string): string[] {
   return [...files];
 }
 
+export const ACTION_SHA_PIN_CHANGE_RE = /^([+-])\s*uses:\s*([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+)@([a-f0-9]{40})\s+#\s*(v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)\s*$/i;
+const ACTION_SHA_SUMMARY = String.raw`([a-f0-9]{40})\s+to\s+([a-f0-9]{40})`;
+
+interface ActionShaPinTransition {
+  action: string;
+  fromSha: string;
+  toSha: string;
+  release: string;
+}
+
+function actionShaPinTransitions(diff: string): ActionShaPinTransition[] | undefined {
+  const files = changedFilesInDiff(diff);
+  if (files.length === 0 || files.some((file) => !/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(file))) return undefined;
+
+  let changedRun: string[] = [];
+  let valid = true;
+  const transitions: ActionShaPinTransition[] = [];
+  const flush = () => {
+    if (changedRun.length === 0) return;
+    const removed = changedRun.filter((line) => line.startsWith("-"));
+    const added = changedRun.filter((line) => line.startsWith("+"));
+    if (removed.length === 0 || removed.length !== added.length) {
+      valid = false;
+      changedRun = [];
+      return;
+    }
+    for (let i = 0; i < removed.length; i++) {
+      const before = ACTION_SHA_PIN_CHANGE_RE.exec(removed[i]);
+      const after = ACTION_SHA_PIN_CHANGE_RE.exec(added[i]);
+      if (
+        !before || !after || before[2] !== after[2] || before[4] !== after[4] ||
+        before[3].toLowerCase() === after[3].toLowerCase()
+      ) {
+        valid = false;
+        continue;
+      }
+      transitions.push({ action: before[2], fromSha: before[3], toSha: after[3], release: before[4] });
+    }
+    changedRun = [];
+  };
+
+  for (const line of diff.split("\n")) {
+    if (
+      line.startsWith("diff --git ") || line.startsWith("index ") || line.startsWith("@@") ||
+      line.startsWith("--- ") || line.startsWith("+++ ") || line.startsWith("new file mode ") ||
+      line.startsWith("deleted file mode ") || line.startsWith("rename from ") || line.startsWith("rename to ")
+    ) {
+      flush();
+      continue;
+    }
+    if (line.startsWith("\\ No newline at end of file")) continue;
+    if (line.startsWith("+") || line.startsWith("-")) changedRun.push(line);
+    else flush();
+  }
+  flush();
+  return valid && transitions.length > 0 ? transitions : undefined;
+}
+
+function actionShaPinSummary(line: string): Omit<ActionShaPinTransition, "release"> | undefined {
+  const text = line.replace(CONVENTIONAL_TITLE_PREFIX_RE, "").trim();
+  const patterns = [
+    new RegExp(String.raw`^Bumps?\s+\[([^\]]+)\]\([^)]+\)\s+from\s+${ACTION_SHA_SUMMARY}\b`, "i"),
+    new RegExp(String.raw`^Updates\s+\x60([^\x60]+)\x60\s+from\s+${ACTION_SHA_SUMMARY}\b`, "i"),
+    new RegExp(String.raw`^Bumps?\s+\x60([^\x60]+)\x60\s+from\s+${ACTION_SHA_SUMMARY}\b`, "i"),
+    new RegExp(String.raw`^Bumps?\s+([^\s,]+)\s+from\s+${ACTION_SHA_SUMMARY}\b`, "i"),
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(text);
+    if (match) return { action: match[1].trim(), fromSha: match[2], toSha: match[3] };
+  }
+  return undefined;
+}
+
+/**
+ * True only when a unified diff changes one or more GitHub Actions refs from one full SHA to
+ * another while keeping the exact action identity and trailing release-version annotation fixed.
+ * Every changed content line must be one side of such a replacement; the Dependabot summary must
+ * also name the exact action and old/new SHAs. A claim alone cannot turn an unknown update into a pass.
+ */
+export function isActionShaPinOnlyDiff(diff: string): boolean {
+  return actionShaPinTransitions(diff) !== undefined;
+}
+
+/** The Dependabot summary must name and hash-match every action transition in the diff. */
+export function isActionShaPinOnlyProposal(title: string, body: string, diff: string): boolean {
+  const changes = actionShaPinTransitions(diff);
+  if (!changes) return false;
+  const changeKeys = new Set(changes.map((change) => `${change.action.toLowerCase()}\0${change.fromSha.toLowerCase()}\0${change.toSha.toLowerCase()}`));
+  const summaries = [title, ...body.split("\n").filter((line) => DEPENDABOT_SUMMARY_LINE_RE.test(line))]
+    .flatMap((line) => actionShaPinSummary(line) ?? [])
+    .map((summary) => `${summary.action.toLowerCase()}\0${summary.fromSha.toLowerCase()}\0${summary.toSha.toLowerCase()}`);
+  const summaryKeys = new Set(summaries);
+  return changeKeys.size === summaryKeys.size && [...changeKeys].every((key) => summaryKeys.has(key));
+}
+
 /** Changed files that fall OUTSIDE the manifest/lockfile allowlist. `[]` ⇒ confined. */
 export function offendingFiles(
   diff: string,
@@ -433,6 +532,8 @@ export interface DepReviewInput {
 export interface DepReviewResult {
   decision: DepReviewDecision;
   semverLevel: SemverLevel;
+  /** The semver is unknown, but the Dependabot summary and diff prove an unchanged-version action SHA refresh. */
+  pinOnly: boolean;
   offendingFiles: string[];
   redChecks: string[];
   migrationBumps: DepReviewBumpFact[];
@@ -451,11 +552,15 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
   const offending = offendingFiles(input.diff);
   const red = redChecks(input.checks);
   const migrationBumps = majorMigrationBumps(input.title, input.body);
+  const dependabot = isDependabotAuthor(input.author);
+  const pinOnly = dependabot && offending.length === 0 && semverLevel === "unknown" &&
+    isActionShaPinOnlyProposal(input.title, input.body, input.diff);
 
-  if (!isDependabotAuthor(input.author)) {
+  if (!dependabot) {
     return {
       decision: "refuse",
       semverLevel,
+      pinOnly,
       offendingFiles: offending,
       redChecks: red,
       migrationBumps,
@@ -466,6 +571,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
     return {
       decision: "refuse",
       semverLevel,
+      pinOnly,
       offendingFiles: offending,
       redChecks: red,
       migrationBumps,
@@ -476,6 +582,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
     return {
       decision: "migrate",
       semverLevel,
+      pinOnly,
       offendingFiles: offending,
       redChecks: red,
       migrationBumps,
@@ -484,10 +591,11 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
         .join(", ")}`,
     };
   }
-  if (semverLevel === "major" || semverLevel === "unknown") {
+  if (semverLevel === "major" || (semverLevel === "unknown" && !pinOnly)) {
     return {
       decision: "escalate",
       semverLevel,
+      pinOnly,
       offendingFiles: offending,
       redChecks: red,
       migrationBumps,
@@ -501,6 +609,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
     return {
       decision: "hold",
       semverLevel,
+      pinOnly,
       offendingFiles: offending,
       redChecks: red,
       migrationBumps,
@@ -510,10 +619,13 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
   return {
     decision: "arm",
     semverLevel,
+    pinOnly,
     offendingFiles: offending,
     redChecks: red,
     migrationBumps,
-    reason: `${semverLevel} bump, confined to manifests, gates green — safe to auto-merge`,
+    reason: pinOnly
+      ? "pin-only GitHub Actions SHA refresh, release annotations unchanged, gates green — safe to auto-merge"
+      : `${semverLevel} bump, confined to manifests, gates green — safe to auto-merge`,
   };
 }
 
@@ -561,7 +673,7 @@ export function buildDepReviewArmUnreachableEscalation(args: {
     headSha: args.headSha,
     summary: `Dependabot PR passed review but auto-merge did not arm (${args.outcome}): ${args.title}`,
     detail: [
-      `${args.prUrl} was judged a minor/patch bump with green gates, and remudero-review was posted`,
+      `${args.prUrl} was judged safe by deterministic dependency review with green gates, and remudero-review was posted`,
       `as success — but arming auto-merge returned "${args.outcome}", so the PR is NOT armed.`,
       ``,
       `This needs a human because NOTHING ELSE WILL ARM IT. The sweep routes Dependabot PRs to the`,
