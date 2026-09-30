@@ -17,6 +17,7 @@ import { createReadModelTicker, READ_MODEL_VIEWS, readModelSwitchesPath } from "
 import { createRepositoriesSourcePublisher, type RepositoriesData } from "../src/lib/repositories-view.js";
 import { buildServeRoutes, buildServeServer, repositoriesSources, type ServeDeps } from "../src/lib/serve.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { VIEW_EVENTS_PATH, VIEW_VERSIONS_PATH } from "../src/lib/view-events.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { declaredBody, resolve, violations, type Schema } from "./helpers/openapi-strict.js";
 
@@ -124,7 +125,8 @@ const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repos
 test("every registered view body validates against its declared schema", async (t) => {
   const { root, stateDir, deps, runs } = fixture(t);
   materializeAll(root, stateDir, deps);
-  const routed = buildServeRoutes(deps).filter((r) => r.path.startsWith("/v1/views/")).map((r) => r.path.slice("/v1/views/".length)).sort();
+  const routed = buildServeRoutes(deps).filter((r) => r.path.startsWith("/v1/views/") && r.path !== VIEW_EVENTS_PATH && r.path !== VIEW_VERSIONS_PATH)
+    .map((r) => r.path.slice("/v1/views/".length)).sort();
   // CORPUS CONTROL: a view routed with no query here would pass by never being read.
   assert.deepEqual(routed, Object.keys(QUERY).sort(), "every routed view is read below, and nothing else");
 
@@ -148,6 +150,11 @@ test("every registered view body validates against its declared schema", async (
   const repos = bodies.get("repositories")!.data as RepositoriesData;
   assert.equal(repos.instances[0]?.summary?.repos.length, 1, JSON.stringify(repos));
   assert.deepEqual(repos.projects.map((p) => [p.project, p.worst.repoName]), [["remudero", "remudero"]]);
+
+  // P2-03: the versions map (the events stream's hello and fallback poll) names every served body.
+  const versions = (await (await fetch(`${url}${VIEW_VERSIONS_PATH}`, { headers: READ })).json()) as { views: Record<string, unknown> };
+  assert.deepEqual(violations(versions, declaredBody(VIEW_VERSIONS_PATH, "GET", 200)), [], JSON.stringify(versions));
+  assert.deepEqual(Object.keys(versions.views).sort(), routed, "the versions body matches its declared schema with every view in it");
 
   // The kill switch: nav-badge `off` answers its Phase 0 computation, which must match the same schema.
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "off" } }));
