@@ -134,6 +134,31 @@ test("W1-T3216: an ALREADY-released task returns 0 and writes no second row — 
   assert.equal(written.length, 0);
 });
 
+test("the final release writer refuses held tasks and machine high-risk releases", () => {
+  const attempts: Array<{ task: ReturnType<typeof parked>; provenance: Record<string, unknown> }> = [
+    { task: parked("W1-T216", { dispatch_hold: true, risk: "high" }), provenance: { author_class: "machine", released_by: "verify-human-judge" } },
+    { task: parked("W1-T217", { risk: "high" }), provenance: { author_class: "machine", released_by: "verify-human-judge" } },
+    { task: parked("W1-T218", { risk: "high" }), provenance: { released_by: "verify-human-judge" } },
+  ];
+  for (const { task, provenance } of attempts) {
+    const written: unknown[] = [];
+    const out = approveParkedTask(task.id, {
+      plan: planOf([task]), ledgerPath: "/x", runId: "R", ledgerLines: [],
+      provenance,
+      append: (() => void written.push(1)) as never,
+    });
+    assert.equal(out.code, 2, task.id);
+    assert.equal(written.length, 0, "the refusal must write no release receipt");
+  }
+  const humanHighRisk: unknown[] = [];
+  const human = approveParkedTask("W1-T217", {
+    plan: planOf([parked("W1-T217", { risk: "high" })]), ledgerPath: "/x", runId: "R", ledgerLines: [],
+    append: (() => void humanHighRisk.push(1)) as never,
+  });
+  assert.equal(human.code, 0, "the plan risk does not erase the operator's authority");
+  assert.equal(humanHighRisk.length, 1);
+});
+
 test("W1-T3216: the branch is chosen by SHAPE, so a proposal id still reaches the proposal path", () => {
   assert.equal(namesATask("W1-T1041"), true);
   assert.equal(namesATask("W2-T3a"), true);
