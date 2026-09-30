@@ -3326,6 +3326,48 @@ literal header; records already pinned stay valid, and reverting any one to `ver
 - W1-T971: overtaken by W1-T2766, and one fact it would pin is now false.
 - W1-T433: the multi-instance design already runs on Azure (core, console, site); launchd on the mini is obsolete. Whether the fleet should drive wild-trails is a separate, open operator question.
 
+
+## 2026-09-30 — OPERATOR RULING: the core↔console read path becomes a materialized, pushed read model (W1-T4568 released)
+
+*Operator-authored direction, given in chat on 2026-09-30, answering the architecture review of the console's data path: "I like the plan that you've put together … We're going to proceed through with all phases." This SUPERSEDES the same day's earlier item "W1-T4568: stays DEFERRED" (#7966).*
+
+**Why the deferral no longer holds.** The 2026-09-27 release trigger "a cold first read over 5 s" has fired in production. The measurements from 2026-09-29/30 are in the tracker named under **Tracked in**:
+
+| Measurement | Value |
+|---|---|
+| `/v1/status` under a slow `gh` | 22.4 s, labelled `fresh` |
+| cold `/v1/operator-activity` prewarm | 40 s p50, 74 s max |
+| cold `/v1/repos` | 23.6 s, serving a 7.5 h-old snapshot |
+| requests over the console's 5 s timeout | 7.4% of 1,210 |
+| serve recycles | 142 in 25 h, each coming back cold |
+
+W1-T4820's duplicate rows cost real time, and they are fixed on the way (Phase 0). But they are not the whole cause. Serve recomputes views on request on ONE event loop. Its six cache layers are each polled and none is fed by writes. Keep-warm runs only while a route is being read. And every recycle starts cold.
+
+**The architecture.** The ledger stays authoritative and the read model is rebuildable, per W1-T3196 (2026-09-08).
+1. **A projector and read model.** A single projector, in a worker thread, tails every ledger rotation form. It dedupes by row identity at ingestion and maintains one `node:sqlite` (WAL) table per console view, persisted under the state dir. This is the store the 2026-09-27 entry already chose.
+2. **Views.** Core serves one precomputed `/v1/views/<page>` per page, versioned with an ETag, and the console renders it. The #1861 field-contract test covers every view.
+3. **Push.** The projector emits view-version changes on one SSE stream, and the console mounts the (generalized) CONSOLE-T70 live client on every page.
+4. **Warm handoff.** A new serve process takes over only once its read model is loaded.
+5. **Non-blocking reads.** `gh` and projection run off the request loop; heavy reads are paginated; GETs never write state; serve has a memory limit.
+
+**Rejected:**
+- Hosted Postgres: another service, and no gain at 125 MB.
+- An edge replica: it buys outage survival only, and the operator ruled that unnecessary.
+- More caches: they caused today's uncoordinated layers.
+
+**Phases:**
+- 0: quick wins, including W1-T4771, W1-T4481, W1-T4820, inbox pagination, a nav-badge view, the console fetch layer and a serve memory limit.
+- 1: the read model and the first views.
+- 2: push.
+- 3: warm handoff.
+- 4: migrate every page and retire the old caches.
+
+Each phase is measured against the 2026-09-29/30 baseline.
+
+**Rollback:** the read model is additive until Phase 4. Each view keeps its legacy route until its replacement has been measured.
+
+**Tracked in:** `~/Remudero/.session-scratch/arch-plan.md` (operator session).
+
 **Pending the operator:**
 - W1-T1258 (Law N vocabulary).
 - W1-T3332 (acceptance rewrite).
