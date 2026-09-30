@@ -64,21 +64,32 @@ esac
     let codexTmpDir: string | undefined;
     let reviewerError: string | undefined;
     const reviewerSpawnWorker = async (spawnArgs: SpawnWorkerArgs): Promise<WorkerResult> => {
-      observedSpawn = spawnArgs;
-      observedTools = spawnArgs.tools;
-      try {
-        reviewerCwdWasGit = execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
-          cwd: spawnArgs.cwd,
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-        }).trim() === "true";
-        reviewerHead = execFileSync("git", ["rev-parse", "HEAD"], {
-          cwd: spawnArgs.cwd,
-          encoding: "utf8",
-        }).trim();
-        reviewerNodeModulesLink = readlinkSync(join(spawnArgs.cwd, "node_modules"));
-      } catch {
-        reviewerCwdWasGit = false;
+      // A sampled shadow judge uses this same injection seam with a deliberately
+      // smaller tool set. Keep the primary semantic reviewer observation instead
+      // of letting a later advisory spawn overwrite the production-call evidence.
+      const isPrimaryReviewer = spawnArgs.tools?.includes("Bash") === true;
+      if (isPrimaryReviewer && observedSpawn === undefined) {
+        observedSpawn = {
+          ...spawnArgs,
+          ...(spawnArgs.tools === undefined ? {} : { tools: [...spawnArgs.tools] }),
+          ...(spawnArgs.cashTools === undefined ? {} : { cashTools: [...spawnArgs.cashTools] }),
+          ...(spawnArgs.sandboxReadRoots === undefined ? {} : { sandboxReadRoots: [...spawnArgs.sandboxReadRoots] }),
+        };
+        observedTools = spawnArgs.tools === undefined ? undefined : [...spawnArgs.tools];
+        try {
+          reviewerCwdWasGit = execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
+            cwd: spawnArgs.cwd,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "ignore"],
+          }).trim() === "true";
+          reviewerHead = execFileSync("git", ["rev-parse", "HEAD"], {
+            cwd: spawnArgs.cwd,
+            encoding: "utf8",
+          }).trim();
+          reviewerNodeModulesLink = readlinkSync(join(spawnArgs.cwd, "node_modules"));
+        } catch {
+          reviewerCwdWasGit = false;
+        }
       }
 
       const stdin = new PassThrough();
@@ -99,8 +110,10 @@ esac
           workerHome,
           containment: {
             spawn: (options) => {
-              codexArgs = options.args;
-              codexTmpDir = options.env.TMPDIR;
+              if (isPrimaryReviewer) {
+                codexArgs = [...options.args];
+                codexTmpDir = options.env.TMPDIR;
+              }
               return { process: proc as never, pid: 28_290 };
             },
             teardown: () => {},
