@@ -16,7 +16,7 @@
     - src/lib/gardener.ts
     - src/run-task.ts
     - test/gardener-overseer.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-29 (core ledger on the Azure host, state/*-gardener.json, origin/main 43a9a0361):

@@ -14,7 +14,7 @@
   files:
     - scripts/clock-sweep.mjs
     - test/clock-sweep.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: clock-sweep.mjs runSuite() starts a test subprocess with

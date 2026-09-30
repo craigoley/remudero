@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-memory-1790600000"
   plan_refs: []
   files: [src/lib/containment.ts, test/every-edit-is-type-checked-before-ci.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: containment.ts has a PreToolUse deny hook but no PostToolUse feedback hook. SWE-agent's ablations: lint on

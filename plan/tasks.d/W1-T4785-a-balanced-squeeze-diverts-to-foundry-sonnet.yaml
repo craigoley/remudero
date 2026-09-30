@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-cash-sonnet-1790686071000 -> plan-cash-sonnet-1790686071000"
   plan_refs: [W1-T4079, W1-T3614]
   files: [src/lib/worker-provider.ts, src/lib/worker.ts, test/a-balanced-squeeze-diverts-to-foundry-sonnet.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-29: synthwatch-foundry now serves claude-sonnet-5-5 (GlobalStandard, version 2). A live

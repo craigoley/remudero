@@ -19,7 +19,7 @@
     - test/feedback-triage-claim.test.ts
     - test/auto-triage-rung.test.ts
     - test/auto-triage-wiring.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED (operator, 2026-09-29): refs/rmd-triage/fb-1789237820690-d3ce67 was claimed on

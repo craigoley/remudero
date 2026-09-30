@@ -1,0 +1,11 @@
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 1111111..2222222 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -9,0 +10,6 @@
++- id: commitlint-pr-title-lane
++  subsystem: ci
++  lifecycle: active
++  files: ["plan/tasks.d/**", src/run-task.ts]
++  fact: The commitlint gate checks the live PR title.
++  src: "ci-learning:7204:commitlint"

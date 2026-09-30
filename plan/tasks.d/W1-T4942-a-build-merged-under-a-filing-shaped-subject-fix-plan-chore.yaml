@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-30: why do built-and-merged tasks still read queued when plan-reconcile cannot credit them (15 real src/test implementations refused only on their merge subject)"
   plan_refs: [W1-T3063, W1-T3067, W1-T3084, W1-T4078, W1-T3970, W1-T3961, W1-T77, W1-T78, W1-T100, W1-T150, W1-T168, W1-T4902]
   files: [src/lib/sweep.ts, src/run-task.ts, test/a-build-under-a-filing-shaped-subject-earns-reconcile-credit.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 at origin/main 75bb6ed64. THE REFUSAL IS UPSTREAM OF THE WRITE, AND IT IS THE WRONG DISCRIMINATOR.

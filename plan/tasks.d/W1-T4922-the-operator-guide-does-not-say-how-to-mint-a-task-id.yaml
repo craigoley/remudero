@@ -12,7 +12,7 @@
   origin: "operator session 2026-09-30: an operator minting ids for twelve filings was given three wrong sets of commands"
   plan_refs: ["W1-T509", "W1-T1055", "W1-T2608"]
   files: [docs/operator-guide.md]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 at origin/main 76c9b670d, from the guide's own text.

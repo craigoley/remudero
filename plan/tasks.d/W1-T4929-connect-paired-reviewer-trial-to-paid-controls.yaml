@@ -12,7 +12,7 @@
   origin: "operator-approved CodeRabbit and Field Trials follow-ups, 2026-09-30"
   plan_refs: [W1-T4575, W1-T4603, W1-T4619, W1-T4625, W1-T4647, W1-T4905]
   files: [src/lib/paired-review-eval.ts, src/lib/replay-harness.ts, src/lib/benchmark-paid-pilot.ts, test/paired-review-paid-pilot.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-30: W1-T4905 adds a blinded evaluator and requires an

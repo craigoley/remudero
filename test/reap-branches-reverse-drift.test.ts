@@ -17,6 +17,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { DECLARED_BRANCH_GUARDS_FILE } from "../src/lib/branch-reaper.js";
 import {
   DECLARED_BRANCH_GUARDS,
   planReverseBranchDrift,
@@ -217,4 +218,44 @@ test("the set of branches deleted and the set withheld are unchanged by the adde
     holdLine(withDangling.out),
     "the held bucket is identical too — this task changes what is REPORTED, never what is deleted or withheld",
   );
+});
+
+// ── The span is read from the file that really declares the guards ─────────────────────────────
+
+test("a declared guard cited only inside its own declaration block is reported as an orphan", () => {
+  const orphan = "heartbeat-mini";
+  // The declaring file's text, as the reaper reads it: the guard's only citation is its own line 3.
+  const declaringText = ["// fixture", "export const DECLARED_BRANCH_GUARDS: readonly string[] = [", `  "${orphan}",`, "];", ""].join("\n");
+  const readFile = (path: string): string => {
+    if (path.endsWith(DECLARED_BRANCH_GUARDS_FILE)) return declaringText;
+    throw new Error(`ENOENT: the guards are not declared in ${path}`);
+  };
+  const citations = [
+    ...DECLARED_BRANCH_GUARDS.filter((n) => n !== orphan).map((n) => `src/lib/elsewhere.ts:1:${n}`),
+    `${DECLARED_BRANCH_GUARDS_FILE}:3:${orphan}`,
+  ].join("\n");
+  const exec = (cmd: string, args: string[]): string => {
+    if (args[0] === "ls-remote") return DECLARED_BRANCH_GUARDS.map((n, i) => `a${i}\trefs/heads/${n}`).join("\n") + "\n";
+    if (args[0] === "merge-base") return "";
+    if (args[0] === "rev-parse") return "a1a1a1\n";
+    if (args[0] === "grep" && args.includes("-o")) return citations;
+    if (args[0] === "grep") throw new Error("exit 1: no match");
+    if (cmd === "gh") return "[]";
+    return "";
+  };
+  const errors: string[] = [];
+  const realLog = console.log;
+  const realErr = console.error;
+  console.log = () => {};
+  console.error = (...a: unknown[]) => void errors.push(a.map(String).join(" "));
+  let code: number;
+  try {
+    code = reapBranchesCommand([], { exec, readFile });
+  } finally {
+    console.log = realLog;
+    console.error = realErr;
+  }
+  assert.equal(code, 1, "an orphan declaration fails the run");
+  const orphanLine = errors.find((l) => l.includes("no longer cited anywhere outside"));
+  assert.ok(orphanLine?.includes(orphan), `the orphan is named: ${errors.join(" | ")}`);
 });
