@@ -5,7 +5,7 @@
 # for weeks while logging success; root reached 99% and ENOSPC'd a `docker exec`. This script sweeps
 # what actually fills /: temp scratch roots, finished agent worktrees under ~/*/.claude/worktrees,
 # big idle scratch files, and agent transcripts (ARCHIVED to /mnt/rmd, never deleted).
-#
+
 # !! PROVENANCE — READ BEFORE `install-host-units.sh --install` !!
 # This file was written from the task record's account of the host's script (W1-T4770 rationale),
 # NOT copied byte-for-byte from the host: the host copy was not reachable when this was authored.
@@ -13,7 +13,7 @@
 # is an assumption that an operator must reconcile with `ssh remudero cat ~/rmd-host-cleanup.sh`
 # (diff it against this file) before installing, or the installer will replace the operator's
 # chosen values. The installer saves the file it replaces as <path>.pre-t4770 for that reason.
-#
+
 # THE SAFETY RULES (each is pinned by test/host-root-disk-janitor.test.ts)
 #   1. idle      — nothing under a path written within IDLE_MINUTES is touched (is_idle)
 #   2. not open  — no process holds the path (is_open, ONE `lsof -Fn` snapshot per pass)
@@ -23,14 +23,14 @@
 #   4. archive   — transcripts are moved, never deleted; refused when the archive root shares a
 #                  filesystem with /; only the archive itself ages out, after ARCHIVE_DAYS
 #   5. DRY_RUN=1 changes nothing; a pass that leaves / at or above HIGH_WATER exits non-zero
-#
+
 # Every decision is logged: `KEEP <path>: <reason>` / `REMOVE <path>` / `ARCHIVE <path>` /
 # `REFUSE <what>: <reason>`, then a summary `rmd-host-cleanup: / 57% -> 57% (-4 MB reclaimed this
 # pass)` that scripts/fleet-heartbeat.sh-style readers parse.
-#
+
 # CRON. The schedule and log path live in ONE place: deploy/install-host-units.sh
 # (CLEANUP_CRON_SCHEDULE / RMD_CLEANUP_LOG). Nothing here schedules itself.
-#
+
 # OVERRIDES. Thresholds: IDLE_MINUTES HIGH_WATER ARCHIVE_DAYS DRY_RUN. Roots and probes, so a test
 # drives a fixture tree instead of the real /tmp and /mnt/rmd, on Linux or macOS:
 #   RMD_CLEANUP_HOME            the home whose ~/*/.claude/{worktrees,projects} are swept
