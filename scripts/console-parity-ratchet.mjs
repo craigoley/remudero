@@ -111,6 +111,9 @@ export const CLI_ONLY = {
       "reap-branches",
       "ledger-compact",
       "ledger-grep",
+      // Phase 1 P1-04: rebuilds and swaps a host-local SQLite file and writes the kill-switch file on
+      // the daemon host; the console reads the views it feeds, never the store itself.
+      "read-model",
       // 2026-09-24 ruling: an operator report over the ledger union on the daemon host; the console
       // reads the same experiment through routing.decision on each worker.assignment row.
       "routing-ab",

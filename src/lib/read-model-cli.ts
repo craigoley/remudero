@@ -92,6 +92,7 @@ function switchCommand(stateDir: string, args: string[], out: (l: string) => voi
   try {
     switches = readReadModelSwitches(stateDir);
   } catch (err) {
+    // Reported and refused: overwriting a malformed file would silently drop the switches in it.
     error(`rmd read-model switch: ${readModelSwitchesPath(stateDir)} is unreadable (${(err as Error).message}); fix or delete it first`);
     return 1;
   }
@@ -258,6 +259,7 @@ function rebuildCommand(stateDir: string, clock: Clock, args: string[], out: (l:
     out(`rebuilt ${instance}: ${tick.fresh} rows (${tick.facts} facts, ${tick.quarantined} quarantined), consistency agreed over ${run.ledgerRows} rows, swapped in${displaced ? ` (took the lease from ${displaced})` : ""}`);
     return 0;
   } catch (err) {
+    // Reported with exit 1: every refusal leaves the live file as it was, so there is nothing to undo.
     const blind = err instanceof ReadModelConsistencyError ? " (the oracle could not see its corpus; an idle instance needs a wider --window-days)" : "";
     error(`rmd read-model rebuild: refused${blind}: ${(err as Error).message}; the live file was not touched`);
     return 1;
