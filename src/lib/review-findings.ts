@@ -72,7 +72,7 @@ function fileLine(root: string, path: string, line: number): string | undefined 
     const rel = relative(base, target);
     if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || statSync(target).size > MAX_FILE_BYTES) return undefined;
     return readFileSync(target, "utf8").split("\n")[line - 1];
-  } catch { return undefined; }
+  } catch { /* Unreadable or missing anchor file: no anchor text, so the finding stays unverified. */ return undefined; }
 }
 
 export function extractReviewFindings(input: {
@@ -98,7 +98,7 @@ export function extractReviewFindings(input: {
     if (findings.length >= MAX_FINDINGS) { droppedCount++; continue; }
     let parsed: unknown;
     try { parsed = JSON.parse(row.replace(/^\s*REVIEW_FINDING\s+/, "")); }
-    catch { invalidCount++; continue; }
+    catch { /* Malformed JSON row: counted in invalidCount, never surfaced as a finding. */ invalidCount++; continue; }
     const item = candidate(parsed, input.criteriaCount);
     if (!item) { invalidCount++; continue; }
     const anchorText = fileLine(input.root, item.anchor.path, item.anchor.line);
