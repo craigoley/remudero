@@ -210,7 +210,7 @@ test("a restarted worker serves its last committed bodies before its first tick"
   const warm = restarted.bodies.get(readModelBodyKey("read-model"));
   assert.deepEqual(warm, posted.entry, "the committed body is served as the worker posted it");
   assert.equal(restarted.state().at, undefined, "no tick has run");
-  assert.deepEqual(logs, ["read_model.warm_boot"]);
+  assert.deepEqual(logs, ["read_model.warm_boot", "read_model.switch_absent"], "no switch file: every view dark, and the reason ledgered");
   assert.equal(restarted.stop(), false, "a never-started worker has nothing to confirm");
 
   const cold = loadCommittedViewBodies(scratch(t, "rmw-cold"), "core");
@@ -408,7 +408,7 @@ test("the switch file keeps its last good reading and a view switched off is not
   const ledgerDir = scratch(t, "rmw-switch-ledger");
   corpus(ledgerDir, 0, 0, 1);
   const path = readModelSwitchesPath(stateDir);
-  assert.deepEqual(readReadModelSwitches(path), { ok: true, switches: { projector: "on", views: {} }, mtimeMs: 0 });
+  assert.deepEqual(readReadModelSwitches(path), { ok: true, switches: { projector: "on", views: {} }, mtimeMs: 0, absent: `no switch file at ${path}` });
   mkdirSync(path, { recursive: true });
   assert.match(String((readReadModelSwitches(path) as { reason: string }).reason), /unreadable/);
   rmSync(path, { recursive: true });
