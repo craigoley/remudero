@@ -58,6 +58,7 @@ export type LintCheck =
   | "proof-engine-divergence"
   | "proof-scope"
   | "proof-self-path"
+  | "record-only-auto"
   | "proof-name-resolution"
   | "proof-unit-test-unresolvable"
   | "credited-test-path"
@@ -1381,6 +1382,28 @@ export function proofSelfPathViolations(task: Task, opts: LintOpts = {}): LintVi
     });
   });
   return violations;
+}
+
+/** Block queued auto tasks whose only proofs grep their own immutable plan shard. */
+export function recordOnlyAutoViolations(task: Task): LintViolation[] {
+  if (task.verify !== "auto" || task.status !== "queued") return [];
+  const source = task.sourcePath?.replaceAll("\\", "/");
+  const ownRecord = source && /(?:^|\/)(plan\/(?:tasks\.yaml|tasks\.d\/[^/]+\.ya?ml))$/.exec(source)?.[1];
+  if (!ownRecord || task.acceptance === undefined || task.acceptance.length === 0) return [];
+  const onlyOwnGrepProofs = task.acceptance.every((criterion) => {
+    if (criterion.satisfied_by) return false;
+    const parsed = parseWhitelistedProof(criterion.proof ?? "");
+    return parsed?.kind === "grep" && proofScopePath(parsed) === ownRecord;
+  });
+  if (!onlyOwnGrepProofs) return [];
+  return [{
+    check: "record-only-auto",
+    severity: "block",
+    message:
+      `task ${task.id} is verify: auto but every acceptance proof greps its own plan record ${ownRecord}; ` +
+      "a worker cannot change that record under Rule 15. Use verify: human for a ruling or record, " +
+      "or give the implementation real proofs outside its own shard.",
+  }];
 }
 
 function proofTestPath(w: WhitelistedProof): string | undefined {
@@ -3568,6 +3591,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofGrepSafetyViolations(task, opts));
   violations.push(...proofScopeViolations(task, opts));
   violations.push(...proofSelfPathViolations(task, opts));
+  violations.push(...recordOnlyAutoViolations(task));
   violations.push(...proofNameResolutionViolations(task, opts));
   violations.push(...proofUnitTestUnresolvableViolations(task, opts));
   violations.push(...creditedTestPathViolations(task, opts));

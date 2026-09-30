@@ -1174,7 +1174,7 @@ test("W1-T1070: every self-path criterion on a shard is reported", () => {
   assert.match(violations[2]!.message, /criterion 3/);
 });
 
-test("W1-T1070: the check warns by default at pre-dispatch", () => {
+test("W1-T1070: the self-path check warns while a record-only task is refused at pre-dispatch", () => {
   const t = task({
     id: "W1-T9001",
     sourcePath: SELF_SHARD_PATH,
@@ -1186,7 +1186,8 @@ test("W1-T1070: the check warns by default at pre-dispatch", () => {
   const v = res.violations.find((x) => x.check === "proof-self-path");
   assert.ok(v, "lintTask must surface the check without any opt being passed");
   assert.equal(v?.severity, "warn");
-  assert.equal(res.ok, true, "a WARN must never refuse a queued task at dispatch");
+  assert.equal(res.violations.find((x) => x.check === "record-only-auto")?.severity, "block");
+  assert.equal(res.ok, false, "the record-only conjunction must refuse dispatch");
 });
 
 test("W1-T1070: the changed-tasks pass raises the check to blocking", () => {
