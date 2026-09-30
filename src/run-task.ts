@@ -156,7 +156,7 @@ import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { startGarden, type GardenCheckout, type GardenerDeps } from "./lib/gardener.js";
-import { productionGardenerOverseerDeps, startGardenerOverseer } from "./lib/gardener-overseer.js";
+import { productionGardenerOverseerPorts, startGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "./lib/config-gardener.js";
@@ -33542,7 +33542,7 @@ export async function daemonCommand(
                 // W1-T4802: the overseer watches every gardener -- liveness, the effect of merged changes and
                 // churn -- and folds effect back into each class's Beta record. Off: state/GARDENER_OVERSEER_OFF.
                 (intervalMs: number) => startGardenerOverseer(
-                  productionGardenerOverseerDeps({ stateDir: join(config.root, "state"), repoRoot, owner: self.owner, repo: self.repo, fetch: ghJson, log, escalate: raiseDuplicate }),
+                  productionGardenerOverseerPorts({ stateDir: join(config.root, "state"), repoRoot, owner: self.owner, repo: self.repo, fetch: ghJson, log, escalate: raiseDuplicate }),
                   intervalMs,
                 ),
                 // Operator ruling 2026-09-29: the LLM judge in the middle of machine-filed work.

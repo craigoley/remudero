@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { ciFrictionCauseKey, ciFrictionOrigin, CI_FRICTION_REMEDIES_FILE, type CiFrictionCause } from "./ci-friction-gardener.js";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { gardenEffectsPath, gardenStatePath, readGardenEffects, writeGardenEffects, type GardenEffect, type PrState } from "./gardener.js";
@@ -45,7 +45,6 @@ const KEEP_MS = 30 * DAY_MS;
 export const OVERSEER_LEDGER_WINDOW_MS = 14 * DAY_MS;
 export const OVERSEER_MIN_INTERVAL_MS = HOUR_MS;
 
-const STEP_RE = /^(.+)\.(scorecard|gardener_failed|garden_filing_failed|garden_filing_escalated|gardener_judged)$/;
 /** The ledger lines the overseer reads — a raw-line prefilter, so the union is not parsed whole. */
 export const OVERSEER_STEP_PATTERN = /"step":"[^"]*(\.(scorecard|gardener_failed|garden_filing_failed|garden_filing_escalated|gardener_judged)|evidence_coverage\.pass)"/;
 
@@ -69,9 +68,11 @@ export function classifyGardenerStep(step: unknown): { name: string; kind: Event
   if (typeof step !== "string") return undefined;
   // evidence-coverage names its pass row `.pass`, not `.scorecard`.
   if (step === "evidence_coverage.pass") return { name: "evidence_coverage", kind: "pass" };
-  const m = STEP_RE.exec(step);
-  if (!m || m[1] === OVERSEER_NAME) return undefined;
-  return { name: m[1]!, kind: KIND_BY_SUFFIX[m[2]!]! };
+  const dot = step.lastIndexOf(".");
+  const name = step.slice(0, dot);
+  const suffix = step.slice(dot + 1);
+  const kind = dot > 0 && Object.hasOwn(KIND_BY_SUFFIX, suffix) ? KIND_BY_SUFFIX[suffix] : undefined;
+  return kind && name !== OVERSEER_NAME ? { name, kind } : undefined;
 }
 
 /** A gardener PR read from GitHub: where it stands and what it changed. */
@@ -98,7 +99,7 @@ export interface TrackedGardenerPr {
   info?: GardenerPrInfo;
 }
 
-export interface GardenerOverseerDeps {
+export interface GardenerOverseerPorts {
   stateDir: string;
   /** Every gardener ledger row in the look-back window, read through the ledger union. */
   readRows: () => Row[];
@@ -348,7 +349,7 @@ export interface OverseerPass {
 }
 
 /** One pass of the overseer. */
-export function runGardenerOverseer(deps: GardenerOverseerDeps): OverseerPass {
+export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
   if (existsSync(join(deps.stateDir, GARDENER_OVERSEER_OFF))) return { ran: false, gardeners: [] };
   const clock = deps.clock ?? systemClock;
   const nowMs = clock.now();
@@ -414,7 +415,7 @@ export function runGardenerOverseer(deps: GardenerOverseerDeps): OverseerPass {
       const url = e.row.pr_url;
       if (e.kind !== "pass" || typeof url !== "string" || state.prs[url]) continue;
       const acting = Array.isArray(e.row.acting) ? e.row.acting[0] : undefined;
-      state.prs[url] = { gardener: name, actionClass: typeof acting === "string" ? acting : "", url, openedAt: new Date(e.at).toISOString() };
+      state.prs[url] = { gardener: name, actionClass: typeof acting === "string" ? acting : "", url, openedAt: fixedClock(e.at).iso() };
     }
   }
   for (const [url, pr] of Object.entries(state.prs)) {
@@ -502,7 +503,7 @@ export function runGardenerOverseer(deps: GardenerOverseerDeps): OverseerPass {
 /** The overseer on its own timer beside the other gardens: never two passes at once, a catch that ledgers.
  *  It reads the ledger union, so it never runs more often than {@link OVERSEER_MIN_INTERVAL_MS} however
  *  fast the daemon polls (the ledger-reading gardens measured 57 s of every 300 s on the event loop). */
-export function startGardenerOverseer(deps: GardenerOverseerDeps, intervalMs: number): { stop: () => void } {
+export function startGardenerOverseer(deps: GardenerOverseerPorts, intervalMs: number): { stop: () => void } {
   let running = false;
   const tick = () => {
     if (running) return;
@@ -548,16 +549,16 @@ export function ciFrictionEffectReading(
 }
 
 /** The production wiring: the ledger union, GitHub REST for PRs, and the ci-friction remedies file. */
-export function productionGardenerOverseerDeps(opts: {
+export function productionGardenerOverseerPorts(opts: {
   stateDir: string;
   repoRoot: string;
   owner: string;
   repo: string;
   fetch: (args: string[]) => unknown;
-  log: GardenerOverseerDeps["log"];
-  escalate?: GardenerOverseerDeps["escalate"];
+  log: GardenerOverseerPorts["log"];
+  escalate?: GardenerOverseerPorts["escalate"];
   clock?: Clock;
-}): GardenerOverseerDeps {
+}): GardenerOverseerPorts {
   const clock = opts.clock ?? systemClock;
   const remedyLanded = (origin: string): boolean => {
     const path = join(opts.repoRoot, CI_FRICTION_REMEDIES_FILE);
@@ -569,7 +570,7 @@ export function productionGardenerOverseerDeps(opts: {
     escalate: opts.escalate,
     clock,
     readRows: () => {
-      const since = new Date(clock.now() - OVERSEER_LEDGER_WINDOW_MS).toISOString();
+      const since = fixedClock(clock.now() - OVERSEER_LEDGER_WINDOW_MS).iso();
       return readLedgerUnionRecordsSync(opts.stateDir, { since, pattern: OVERSEER_STEP_PATTERN, rotationWindowMs: OVERSEER_LEDGER_WINDOW_MS, minRotations: 2 }).rows;
     },
     prInfo: (url) => {

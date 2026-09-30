@@ -13,7 +13,7 @@ import {
   ciFrictionEffectReading,
   classifyGardenerStep,
   runGardenerOverseer,
-  type GardenerOverseerDeps,
+  type GardenerOverseerPorts,
   type GardenerPrInfo,
 } from "../src/lib/gardener-overseer.js";
 
@@ -40,11 +40,11 @@ interface Harness {
   rows: Record<string, unknown>[];
   logs: Array<{ step: string; extra?: Record<string, unknown> }>;
   escalations: Escalation[];
-  deps: GardenerOverseerDeps;
+  deps: GardenerOverseerPorts;
   steps: (step: string) => Array<Record<string, unknown> | undefined>;
 }
 
-function harness(now: number, over: Partial<GardenerOverseerDeps> = {}): Harness {
+function harness(now: number, over: Partial<GardenerOverseerPorts> = {}): Harness {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gardener-overseer-`));
   const clock = makeClock(now);
   const h: Harness = {
@@ -53,7 +53,7 @@ function harness(now: number, over: Partial<GardenerOverseerDeps> = {}): Harness
     rows: [],
     logs: [],
     escalations: [],
-    deps: undefined as unknown as GardenerOverseerDeps,
+    deps: undefined as unknown as GardenerOverseerPorts,
     steps: (step) => h.logs.filter((l) => l.step === step).map((l) => l.extra),
   };
   h.deps = {
