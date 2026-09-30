@@ -6625,6 +6625,67 @@ components:
           enum: [fresh, stale, unavailable]
         reason: {type: string}
 
+    ViewVersions:
+      type: object
+      description: >
+        GET /v1/views/versions and the `hello` event on GET /v1/views/events (docs/views.md): the
+        version of every served view body, which is its ETag, by view name and key. A view whose
+        switch is not `serve` has no versions and is listed in `disabled`.
+      required: [views, disabled]
+      properties:
+        views:
+          type: object
+          description: View name to (key to ETag). An unkeyed view has the empty key.
+          additionalProperties:
+            type: object
+            additionalProperties: {type: string}
+        disabled:
+          type: array
+          items: {type: string}
+
+    ViewHello:
+      type: object
+      description: >
+        The first event on every GET /v1/views/events connection (`event: hello`): ViewVersions
+        flattened (this generator's subset has no allOf) plus the process's `bootId` (each event id is
+        `<bootId>:<seq>`) and `serverNow`.
+      required: [bootId, serverNow, views, disabled]
+      properties:
+        bootId: {type: string}
+        serverNow: {type: string, format: date-time}
+        views:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: {type: string}
+        disabled:
+          type: array
+          items: {type: string}
+
+    ViewEvent:
+      type: object
+      description: A `view` event on GET /v1/views/events. The served body of (view, key) now has this ETag.
+      required: [view, key, etag, stale, emittedAt, asOf, cause]
+      properties:
+        view: {type: string}
+        key: {type: string}
+        etag: {type: string}
+        stale: {type: boolean}
+        emittedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        cause:
+          type: string
+          enum: [body, judge]
+          description: "`body`: the read-model worker posted a new body. `judge`: re-judging the sources flipped `stale`."
+
+    ViewHandover:
+      type: object
+      description: The last event on a GET /v1/views/events stream that serve ends (a drain, or a subscriber stalled too long).
+      required: [reason, retryMs]
+      properties:
+        reason: {type: string, description: "`recycle` on a drain, `slow_consumer` for a stalled subscriber."}
+        retryMs: {type: integer}
+
     NavBadgeView:
       type: object
       description: >
@@ -12495,6 +12556,62 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: The view is dark (`view_disabled`), shadowed with the console's legacy primary (`view_shadow`), or not served yet for that instance (`view_not_ready`).
+
+  /v1/views/events:
+    get:
+      summary: SSE stream of view versions -- a `hello` map on connect, then one `view` event per changed ETag.
+      description: >
+        Arch plan Phase 2 (src/lib/view-events.ts). The stream carries versions, never bodies: the
+        version is the view's ETag, so the client refetches GET /v1/views/<name> with If-None-Match only
+        for what changed. Every connect starts with `hello` (components.schemas.ViewHello) and the
+        client diffs it against what it holds; Last-Event-ID is only logged. `view` events
+        (components.schemas.ViewEvent) come from a new worker body (`cause: body`) or from a 1 s re-judge
+        of each body's sources (`cause: judge`, a stalled projector). A `: hb` comment every 25 s. A
+        backed-up subscriber keeps only the latest event per view key, and one backed up for 60 s, like
+        every stream when serve drains, ends with `handover` (components.schemas.ViewHandover). Only views
+        switched `serve` emit. An open stream is not read attention for serve's recycle patience.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: views
+          in: query
+          required: false
+          description: Comma-separated view names to receive; default every view.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: >
+            An open text/event-stream connection (`cache-control: no-cache, no-transform`). Event framing
+            is outside this OpenAPI subset's response-body modeling -- see the schemas named above.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Serve runs no read-model worker (`read_model_absent`).
+
+  /v1/views/versions:
+    get:
+      summary: The version (ETag) of every served view body -- the events stream's fallback poll.
+      description: >
+        The same map as the events stream's `hello`, for a client whose stream is down. Its own weak
+        ETag hashes the map, so an unchanged fleet answers If-None-Match with 304. See docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The versions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ViewVersions"
+        "304":
+          description: The request's `If-None-Match` matched the versions ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/recent:
     get:
