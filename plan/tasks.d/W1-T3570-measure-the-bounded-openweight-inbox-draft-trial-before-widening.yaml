@@ -12,7 +12,7 @@
     - docs/recon/openweight-inbox-draft-trial.md
   origin: "operator-session#open-weight-resequence-2026-09-14"
   plan_refs: ["W1-T3545", "W1-T3569", "W1-T3558", "W1-T3094"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: chore/file-openweight-output-contract-1789389121907 -> chore/file-openweight-resequence-1789389121907

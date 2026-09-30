@@ -17,7 +17,7 @@
     - src/lib/ledger.ts
     - test/run-task.test.ts
     - test/live-write-guard.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-30 by the Phase 1 design pass on a copy of the fleet host's core ledger: five

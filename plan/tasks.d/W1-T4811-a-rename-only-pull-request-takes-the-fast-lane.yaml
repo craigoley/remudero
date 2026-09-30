@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-rename-fast-lane-1790710441000 -> plan-rename-fast-lane-1790710441000"
   plan_refs: [W1-T2982]
   files: [src/lib/review.ts, .github/workflows/ci.yml, test/a-rename-only-pull-request-takes-the-fast-lane.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T2982 recorded why a task-id renumber has no home (#4298 carried four id moves because main was unloadable

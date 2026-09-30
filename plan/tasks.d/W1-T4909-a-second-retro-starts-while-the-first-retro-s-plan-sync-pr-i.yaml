@@ -15,7 +15,7 @@
     - src/lib/retro-open-pr-guard.ts
     - src/run-task.ts
     - test/retro-open-pr-guard.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-29. #7865 (head run-RETRO-1790692269243, opened 14:49) and #7872 (head

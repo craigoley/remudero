@@ -12,7 +12,7 @@
   origin: "operator research request 2026-09-29: CodeRabbit inspiration for the PR reviewer"
   plan_refs: [W1-T230, W1-T58, W1-T65, W1-T72, W1-T4015, W1-T4620, W1-T4628, W1-T4615]
   files: [src/lib/review-findings.ts, src/lib/review.ts, src/run-task.ts, test/review-finding-receipts.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at origin/main a2be69a28: buildReviewPrompt asks the fresh reviewer for

@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-flow-improve-1790732974000 -> plan-flow-improve-1790732974000"
   plan_refs: [W1-T4818, W1-T1258, W1-T2982, W1-T3342, W1-T4081, W1-T3332]
   files: [src/lib/refusal-amendment.ts, src/lib/sweep.ts, test/a-worker-refusal-becomes-a-plan-amendment.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-29: five tasks were stuck on reasons their own workers had stated. W1-T3342 "[premise-rotted] No

@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-defects-1790600000"
   plan_refs: [W1-T4338]
   files: [src/run-task.ts, test/rmd-approve-reports-a-hand-off-honestly.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-24: `rmd approve skill-draft:8aa4458eb462b9a1` opened PR #7090 then printed 'ci timeout — PR left OPEN'

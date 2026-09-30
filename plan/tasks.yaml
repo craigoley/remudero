@@ -451,7 +451,7 @@
   risk: high
   origin: feedback#fb-1784814274946-83303d
   files: [src/run-task.ts, src/lib/plan.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED 2026-07-23 from feedback fb-1784814274946-83303d, root cause verified at source before
     filing (src/run-task.ts:361-371: single-blob `git show origin/main:<relPath>` into tmpDir/tasks.yaml,
@@ -527,7 +527,7 @@
   origin: architect
   plan_refs: ["§5C"]
   files: [src/lib/task-linter.ts, src/run-task.ts, test/task-linter.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED 2026-07-23 (fable-analyzed) from the W1-T79/PR #662 dead-proof-floor incident; cross-refs
     moratorium finding 9 (#271), W1-T181, #123/#125. risk:high because it adds a BLOCKING check to the plan
@@ -2322,7 +2322,7 @@
   origin: architect
   plan_refs: ["§4", "§5C"]
   files: [src/lib/review.ts, src/run-task.ts, test/review.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "DISTINCT from W1-T177 (terminal-state check at every spending site) though both come from the SAME #388
     trace: T177 stops spending on a PR that no longer exists, this stops a coin-flip verdict from burning the
@@ -4993,7 +4993,7 @@
   origin: architect
   plan_refs: ["§7", "§9"]
   files: [src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
 
 - id: W1-T144
@@ -5040,7 +5040,7 @@
   origin: architect
   plan_refs: ["§7B", "§7"]
   files: [src/lib/digest.ts, src/lib/escalate.ts, src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "PUSH counterpart to the PULL console (W1-T139 console, W1-T140 preview, W1-T141 rundown pull-view,
     W1-T110/T111 inbox). Reuses W1-T112's digest channel as the transport; installed-PWA web push deferred to polish
@@ -5500,7 +5500,7 @@
   origin: architect
   plan_refs: ["P12", "§Self-improvement"]
   files: [src/lib/wipe-test.ts, src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "Live experiment (Rule 18): operator schedules pairs on the sandbox; the aggregate report is the
     publishable learning-utility number (the WS-12 receipts thesis applied to memory)."
@@ -6674,7 +6674,7 @@
   origin: architect
   plan_refs: ["§4B"]
   files: [src/lib/daemon.ts, src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "Split from W1-T12 (DIAGNOSIS.md, Rule 16). The daemon's PURE LOGIC — the scheduler loop over the
     DAG, honoring W1-T11 Pause/Resume/STOP, the HeadroomTracker, and the drain+inflight locks — provable
@@ -7105,7 +7105,7 @@
   origin: feedback#plan-health
   plan_refs: ["§5C"]
   files: [src/lib/task-linter.ts, src/run-task.ts, test/task-linter.test.ts, test/task-linter-wiring.test.ts]
-  status: queued
+  status: merged
   pr: 134                     # merged implementation PR; #133 was superseded by the behavioral-test correction
   attempts: 0
   note: "The CI-check side integrates with the W1-T29 plan-claims / W1-T30 docs-rubric CI family — a
@@ -7357,7 +7357,7 @@
   origin: architect
   plan_refs: ["§5"]
   files: [scripts/coverage-ratchet.mjs, .github/workflows/ci.yml]
-  status: queued
+  status: merged
   pr: 170
   attempts: 0
   note: "Decomposed 2026-07-17 from the four-gate W1-T25 (coverage ratchet · mutation baseline · jscpd ·
@@ -7389,7 +7389,7 @@
   origin: architect
   plan_refs: ["§5"]
   files: [.github/workflows/ci-gate.yml, .github/workflows/ci.yml, .gitignore, package-lock.json, package.json, scripts/mutation-baseline.json, scripts/mutation-ratchet.mjs, stryker.conf.json, test/fixtures/mutation-ratchet/above-baseline.json, test/fixtures/mutation-ratchet/at-baseline.json, test/fixtures/mutation-ratchet/baseline-no-metrics.json, test/fixtures/mutation-ratchet/baseline.json, test/fixtures/mutation-ratchet/below-baseline.json, test/fixtures/mutation-ratchet/file-missing-mutants.json, test/fixtures/mutation-ratchet/no-files-key.json, test/fixtures/mutation-ratchet/no-valid-mutants.json, test/mutation-ratchet.test.ts]
-  status: queued
+  status: merged
   pr: 187
   attempts: 0
   note: "Decomposed 2026-07-17 from the four-gate W1-T25 (the #161/$13 blocked_ci lesson) — one gate per
@@ -8906,7 +8906,7 @@
   origin: retro#1784058021334
   plan_refs: ["§5"]
   files: [src/run-task.ts, src/lib/review.ts]
-  status: queued
+  status: merged
   attempts: 0
 
 # Item 2 — FILE the P1 spiral golden, explicitly DEPRIORITIZED (0 blocked_budget in 22 runs; P6 outranks).
@@ -9276,7 +9276,7 @@
   origin: architect
   plan_refs: ["§5", "§4B"]
   files: [src/lib/review.ts, src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "Ratifies P15 (Architect-captured #101, not retro-mined — REPORT if plan convention differs).
     Live confirmation — a real floor-observed verdict on a genuine PR — is the next real run's
@@ -11018,7 +11018,7 @@
   origin: architect
   plan_refs: ["§9", "§4B"]
   files: [src/lib/daemon.ts, src/lib/status.ts, src/lib/tmp.ts, src/run-task.ts, test/daemon.test.ts, test/tmp.test.ts]
-  status: queued
+  status: merged
   pr: 279
   attempts: 0
 
@@ -12169,7 +12169,7 @@
   origin: architect
   plan_refs: ["§9", "§5C"]
   files: [src/lib/daemon.ts, src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "Makes the retro a LOOP (trigger-fired, not operator-run). Depends on W1-T136 (retro emits a mergeable PR
     unattended — the hard precondition). The integrity gate is fail-closed INSIDE the automated path: the R8-class
