@@ -6,6 +6,7 @@ import {
   BOARD_CLOCK_REDERIVE_MS,
   BOARD_DERIVE_DEBOUNCE_MS,
   BOARD_ORACLE_INTERVAL_MS,
+  BOARD_ORACLE_RECURRENCE_MS,
   boardDirtForRow,
   canonicalProjection,
   classifyBoardShadowDiffs,
@@ -15,6 +16,7 @@ import {
   type BoardProjection,
 } from "../src/lib/board-projection.js";
 import type { Clock } from "../src/lib/clock.js";
+import type { IssueGateway } from "../src/lib/escalate.js";
 import { createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "../src/lib/ledger-projector.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { acquireLease, type ReadModelDb, type ReadModelLease } from "../src/lib/read-model-db.js";
@@ -360,4 +362,88 @@ test("a comparison ignores key order and the clock-read elapsed time", () => {
   assert.equal(canonicalProjection(a as never), canonicalProjection(b as never));
   assert.equal(canonicalProjection(undefined), "absent");
   assert.notEqual(canonicalProjection(a as never), canonicalProjection({ ...a, status: "queued" } as never));
+});
+
+function fakeIssues(): IssueGateway & { titles: string[] } {
+  const titles: string[] = [];
+  return {
+    titles,
+    create: (title) => {
+      titles.push(title);
+      return `https://github.com/craigoley/remudero/issues/${9000 + titles.length}`;
+    },
+  };
+}
+
+function tamper(r: Rig, board: BoardProjection): void {
+  const held = board.projections().get("W1-T1")!;
+  r.db.prepare("UPDATE task_projection SET json = ? WHERE task_id = 'W1-T1'").run(JSON.stringify({ ...held, status: "queued", independentFailureBlocked: undefined }));
+}
+
+test("a board drift that recurs within 24 h of a self-heal escalates through tryEscalate", (t) => {
+  const r = rig(t);
+  r.append(blockRow("W1-T1"));
+  const issues = fakeIssues();
+  const escalation = { issues, ledgerPath: join(r.dir, "ledger.ndjson"), runId: "board-oracle" };
+  const withEscalation = (): BoardProjection => createBoardProjection({
+    db: r.db, lease: r.lease, ledgerPath: join(r.dir, "ledger.ndjson"), clock: r.clock, readPlan: () => planOf([task("W1-T1"), task("W1-T2")]),
+    github: fakeGithub(), githubGeneration: () => "g1", readCreditStore: () => ({}), readCreditOverrideFile: () => "", escalation, instance: "console",
+  });
+  const first = withEscalation();
+  first.update();
+  assert.equal(first.oracle().outcome, "agree");
+  tamper(r, first);
+  const healed = withEscalation().oracle();
+  assert.equal(healed.outcome, "healed");
+  assert.equal(issues.titles.length, 0, "the first drift heals without asking anyone");
+  r.clock.set(T0 + 3_600_000);
+  tamper(r, first);
+  const again = withEscalation().oracle();
+  assert.equal(again.outcome, "escalated", "the heal is remembered across a restart");
+  assert.match(again.escalationReasons.join(), /within 24 h of an earlier self-heal/);
+  assert.equal(again.issueUrl, "https://github.com/craigoley/remudero/issues/9001");
+  assert.match(issues.titles[0]!, /read model console: the board projection drifted/);
+  r.clock.set(T0 + 3_600_000 + BOARD_ORACLE_RECURRENCE_MS + 1);
+  tamper(r, first);
+  assert.equal(withEscalation().oracle().outcome, "healed", "a drift a day after the last heal starts over");
+  assert.equal(issues.titles.length, 1);
+  const runs = r.db.prepare("SELECT outcome, issue_url FROM board_oracle_run ORDER BY at_ms").all().map((row) => `${String(row.outcome)} ${String(row.issue_url)}`);
+  assert.deepEqual(runs, ["healed null", "escalated https://github.com/craigoley/remudero/issues/9001", "healed null"]);
+});
+
+test("a board drift that survives its heal escalates and a transient one does not", (t) => {
+  const r = rig(t);
+  r.append({ step: "escalation.issue_opened", task_id: "W1-T1", issue_url: "https://github.com/o/r/issues/5", class: "MANUAL" });
+  const states: string[] = [];
+  const github = fakeGithub({ issueByUrl: () => ({ state: states.shift() ?? "OPEN", title: "stuck" }) });
+  const issues = fakeIssues();
+  const logged: Array<Record<string, unknown>> = [];
+  const board = createBoardProjection({
+    db: r.db, lease: r.lease, ledgerPath: join(r.dir, "ledger.ndjson"), clock: r.clock, readPlan: () => planOf([task("W1-T1")]),
+    github, githubGeneration: () => "g1", readCreditStore: () => ({}), readCreditOverrideFile: () => "",
+    escalation: { issues, ledgerPath: join(r.dir, "ledger.ndjson"), runId: "board-oracle" }, log: (step, extra) => logged.push({ step, ...extra }),
+  });
+  states.push("OPEN");
+  board.update();
+  assert.equal(board.projections().get("W1-T1")?.needsHuman, true);
+  states.push("CLOSED", "OPEN");
+  assert.equal(board.oracle().outcome, "transient", "a mismatch gone on the recheck is not healed");
+  assert.equal(board.projections().get("W1-T1")?.needsHuman, true);
+  states.push("CLOSED", "CLOSED", "OPEN");
+  const survived = board.oracle();
+  assert.equal(survived.outcome, "escalated");
+  assert.match(survived.escalationReasons.join(), /still differ after the heal \(W1-T1\)/);
+  assert.equal(issues.titles.length, 1);
+  assert.equal(logged.at(-1)?.issue_url, survived.issueUrl);
+  const quiet = createBoardProjection({
+    db: r.db, ledgerPath: join(r.dir, "ledger.ndjson"), clock: r.clock, readPlan: () => planOf([task("W1-T1")]),
+    github: fakeGithub({ issueByUrl: () => ({ state: states.shift() ?? "CLOSED", title: "stuck" }) }), githubGeneration: () => "g1",
+    readCreditStore: () => ({}), readCreditOverrideFile: () => "",
+  });
+  assert.equal(quiet.projections().get("W1-T1")?.needsHuman, undefined, "it restarts on the healed projection");
+  states.push("OPEN", "OPEN", "CLOSED");
+  const unescalated = quiet.oracle();
+  assert.equal(unescalated.outcome, "escalated", "the tier is reached without an escalation path");
+  assert.equal(unescalated.issueUrl, null, "and nothing is filed");
+  assert.equal(issues.titles.length, 1);
 });

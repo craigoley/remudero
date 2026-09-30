@@ -23,6 +23,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { projectionAgesWithTheClock } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
+import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
 import type { Plan, Task } from "./plan.js";
 import { withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
 import {
@@ -42,6 +43,8 @@ export const BOARD_PROJECTION_VERSION = 1;
 export const BOARD_CLOCK_REDERIVE_MS = 30_000;
 export const BOARD_ORACLE_INTERVAL_MS = 10 * 60_000;
 export const BOARD_DERIVE_DEBOUNCE_MS = 500;
+/** A drift found again this soon after a self-heal is a projection bug, not a blip: it escalates (as #8075's oracle). */
+export const BOARD_ORACLE_RECURRENCE_MS = 24 * 60 * 60_000;
 /** Steps some task's derivation reads across the whole ledger, whatever task they name. */
 export const BOARD_CROSS_TASK_STEPS: ReadonlySet<string> = new Set(["daemon.boot"]);
 /** Fact steps no reader on the projection path (status.ts, board.ts, status-board.ts) names: 60% of the
@@ -51,7 +54,9 @@ export const BOARD_UNREAD_STEPS: ReadonlySet<string> = new Set(["sweep.pass", "s
 const LATEST_TS_META = "board.latest_ts_ms";
 
 export const BOARD_PROJECTION_DDL = `CREATE TABLE IF NOT EXISTS task_projection(task_id TEXT PRIMARY KEY,
-  stamp TEXT NOT NULL, json TEXT NOT NULL) WITHOUT ROWID;`;
+  stamp TEXT NOT NULL, json TEXT NOT NULL) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS board_oracle_run(at_ms INTEGER NOT NULL, outcome TEXT NOT NULL, mismatches INTEGER NOT NULL,
+  healed INTEGER NOT NULL, issue_url TEXT);`;
 
 export type Row = Record<string, unknown>;
 
@@ -128,11 +133,22 @@ export interface BoardProjectionOptions {
   deriveDeps?: Partial<DeriveDeps>;
   rules?: Partial<BoardDirtRules>;
   log?: (step: string, extra: Record<string, unknown>) => void;
+  /** Names the escalation's task (`READ-MODEL-<INSTANCE>`, as the consistency oracle's). Omitted ⇒ `core`. */
+  instance?: string;
+  /** The oracle's last tier; without it a drift is healed and logged but never escalated. */
+  escalation?: EscalateDeps;
 }
+
+/** `agree`; `transient` (gone on the recheck); `healed`; `escalated` (survived the heal, or recurred within 24 h). */
+export type BoardOracleOutcome = "agree" | "transient" | "healed" | "escalated";
 
 export interface BoardOracleResult {
   compared: number;
   mismatches: Array<{ taskId: string; fields: string[] }>;
+  outcome: BoardOracleOutcome;
+  escalationReasons: string[];
+  /** The issue URL, null when nothing escalated, the escalation failed, or no path was supplied. */
+  issueUrl: string | null;
 }
 
 export interface BoardUpdate {
@@ -297,24 +313,80 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     return { plan, credit, overrides, stampOf };
   }
 
-  function oracleWith(plan: Plan, credit: CreditStore, overrides: string, stampOf: (id: string, task?: Task) => string): BoardOracleResult {
-    const fresh = project(plan, credit, overrides);
+  // Heals the oracle recorded, newest last: persisted with the lease, so a recurrence is seen across a restart.
+  const heals: number[] = db.prepare("SELECT at_ms FROM board_oracle_run WHERE healed > 0 ORDER BY at_ms").all().map((r) => Number(r.at_ms));
+
+  function diffAgainstHeld(fresh: ReadonlyMap<string, StatusProjection>): BoardOracleResult["mismatches"] {
     const mismatches: BoardOracleResult["mismatches"] = [];
-    const healed: Array<[string, Held]> = [];
     for (const id of new Set([...fresh.keys(), ...held.keys()])) {
       const want = fresh.get(id);
       const have = held.get(id)?.projection;
-      if (canonicalProjection(want) === canonicalProjection(have)) continue;
-      mismatches.push({ taskId: id, fields: differingFields(want, have) });
-      if (want) healed.push([id, { stamp: stampOf(id, plan.byId.get(id)), projection: want }]);
+      if (canonicalProjection(want) !== canonicalProjection(have)) mismatches.push({ taskId: id, fields: differingFields(want, have) });
     }
-    const removed = mismatches.filter((m) => !fresh.has(m.taskId)).map((m) => m.taskId);
-    for (const [id, h] of healed) held.set(id, h);
-    for (const id of removed) held.delete(id);
-    persist(healed, removed);
-    lastOracleAt = clock.now();
-    const result = { compared: fresh.size, mismatches: mismatches.sort((a, b) => a.taskId.localeCompare(b.taskId)) };
-    log("read_model.board_oracle", { compared: result.compared, mismatches: result.mismatches.length, sample: result.mismatches.slice(0, 5) });
+    return mismatches.sort((a, b) => a.taskId.localeCompare(b.taskId));
+  }
+
+  function escalationFor(result: BoardOracleResult): Escalation {
+    const name = opts.instance ?? "core";
+    const sample = result.mismatches.slice(0, 10).map((m) => `- ${m.taskId}: ${m.fields.join(", ")}`);
+    return {
+      class: "MANUAL",
+      taskId: `READ-MODEL-${name.toUpperCase()}`,
+      summary: `read model ${name}: the board projection drifted from a no-reuse derive`,
+      detail: [`${result.escalationReasons.join("; ")}.`, `Tasks whose reused projection differed (${result.mismatches.length}):`, ...sample].join("\n\n"),
+      options: [
+        { label: "find the missing dirty-set rule", detail: "A reused projection went stale: some input the stamp does not cover moved. The fields name what the reuse missed.", kind: { type: "operator-only" } },
+        { label: "rebuild the read model", detail: "Run `rmd read-model rebuild`; the views keep serving until the new file passes its own check.", kind: { type: "operator-only" } },
+      ],
+      recommendation: "find the missing dirty-set rule",
+      consequence: "The now view keeps healing the same drift every oracle pass, and serves it stale in between.",
+    };
+  }
+
+  /** Tiers, as the consistency oracle's: recheck, heal, then escalate if the drift survives the heal or recurs within 24 h. */
+  function oracleWith(plan: Plan, credit: CreditStore, overrides: string, stampOf: (id: string, task?: Task) => string): BoardOracleResult {
+    const now = clock.now();
+    let fresh = project(plan, credit, overrides);
+    let mismatches = diffAgainstHeld(fresh);
+    let outcome: BoardOracleOutcome = "agree";
+    const reasons: string[] = [];
+    let healedCount = 0;
+    if (mismatches.length > 0) {
+      fresh = project(plan, credit, overrides);
+      mismatches = diffAgainstHeld(fresh);
+      outcome = mismatches.length > 0 ? "healed" : "transient";
+    }
+    if (outcome === "healed") {
+      const healed: Array<[string, Held]> = [];
+      for (const m of mismatches) {
+        const want = fresh.get(m.taskId);
+        if (want) healed.push([m.taskId, { stamp: stampOf(m.taskId, plan.byId.get(m.taskId)), projection: want }]);
+      }
+      const removed = mismatches.filter((m) => !fresh.has(m.taskId)).map((m) => m.taskId);
+      for (const [id, h] of healed) held.set(id, h);
+      for (const id of removed) held.delete(id);
+      persist(healed, removed);
+      healedCount = mismatches.length;
+      const survived = diffAgainstHeld(project(plan, credit, overrides));
+      if (survived.length > 0) reasons.push(`${survived.length} task(s) still differ after the heal (${survived.slice(0, 5).map((m) => m.taskId).join(", ")})`);
+      const prior = heals.filter((at) => at >= now - BOARD_ORACLE_RECURRENCE_MS);
+      if (prior.length > 0) reasons.push(`the board drifted again within 24 h of an earlier self-heal (${prior.length} heal(s) in the window)`);
+      heals.push(now);
+    }
+    if (reasons.length > 0) outcome = "escalated";
+    lastOracleAt = now;
+    const result: BoardOracleResult = { compared: fresh.size, mismatches, outcome, escalationReasons: reasons, issueUrl: null };
+    if (reasons.length > 0 && opts.escalation) result.issueUrl = tryEscalate(escalationFor(result), opts.escalation);
+    if (lease && outcome !== "agree") {
+      withWriteTransaction(db, lease, () => {
+        db.prepare("INSERT INTO board_oracle_run(at_ms, outcome, mismatches, healed, issue_url) VALUES(?, ?, ?, ?, ?)")
+          .run(now, outcome, mismatches.length, healedCount, result.issueUrl);
+      });
+    }
+    log("read_model.board_oracle", {
+      outcome, compared: result.compared, mismatches: mismatches.length, sample: mismatches.slice(0, 5),
+      ...(reasons.length > 0 ? { reasons } : {}), ...(result.issueUrl ? { issue_url: result.issueUrl } : {}),
+    });
     return result;
   }
 
@@ -383,6 +455,17 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
 
 export type BoardShadowClassification = "legacy_horizon" | "bug";
 
+/** Every task a row older than `horizonTsMs` names, in `task_id` or `task`: what the legacy live-file board cannot see. */
+export function rowsNamingTasksBefore(rows: ReadonlyArray<Row>, horizonTsMs: number): Set<string> {
+  const older = new Set<string>();
+  for (const row of rows) {
+    const ms = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+    if (!(ms < horizonTsMs)) continue;
+    for (const id of [row.task_id, row.task]) if (typeof id === "string") older.add(id);
+  }
+  return older;
+}
+
 /**
  * Operator ruling Q1: the full-history board is the correct answer. A task that differs from the
  * legacy board (live file only) is `legacy_horizon` when a row older than the legacy horizon names
@@ -394,12 +477,7 @@ export function classifyBoardShadowDiffs(
   rows: ReadonlyArray<Row>,
   legacyHorizonTsMs: number,
 ): Array<{ taskId: string; fields: string[]; classification: BoardShadowClassification }> {
-  const older = new Set<string>();
-  for (const row of rows) {
-    const ms = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
-    if (!(ms < legacyHorizonTsMs)) continue;
-    for (const id of [row.task_id, row.task]) if (typeof id === "string") older.add(id);
-  }
+  const older = rowsNamingTasksBefore(rows, legacyHorizonTsMs);
   const out: Array<{ taskId: string; fields: string[]; classification: BoardShadowClassification }> = [];
   for (const id of [...new Set([...fullHistory.keys(), ...legacy.keys()])].sort()) {
     const a = fullHistory.get(id);

@@ -578,7 +578,10 @@ test("rmd serve starts the read-model worker for every registry instance and sto
     instances: { stateBase },
     readModel: { tickMs: 20 },
   };
-  assert.deepEqual(readModelInstances(deps), [{ name: "core", ledgerDir: stateDir }, { name: "site", ledgerDir: join(stateBase, "site", "state") }]);
+  assert.deepEqual(readModelInstances(deps), [
+    { name: "core", ledgerDir: stateDir, feedbackRoot: root, planPath },
+    { name: "site", ledgerDir: join(stateBase, "site", "state"), repo: "craigoley/remudero-site" },
+  ]);
   const server = buildServeServer(deps);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => {

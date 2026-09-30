@@ -21,6 +21,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghIssueGateway, type EscalateDeps } from "./escalate.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "./ledger-projector.js";
+import { createNowView } from "./now-view.js";
 import {
   ORACLE_DEFAULT_WINDOW_MS,
   ORACLE_DRIFT_INTERVAL_MS,
@@ -42,7 +43,7 @@ import {
   type ReadModelDb,
   type ReadModelLease,
 } from "./read-model-db.js";
-import { oldestAsOf, viewEtag, type ViewBody, type ViewSource } from "./views.js";
+import { oldestAsOf, viewEtag, type ViewBody, type ViewBodyEntry, type ViewSource } from "./views.js";
 
 const READ_MODEL_WORKER_KIND = "remudero-read-model" as const;
 /** The SSE publisher's cadence (design §1.1). */
@@ -68,6 +69,10 @@ export interface ReadModelInstance {
   name: string;
   /** The instance's state dir: the one holding its live ledger and rotation archives. */
   ledgerDir: string;
+  /** Inputs for the per-instance now view. */
+  repo?: string;
+  planPath?: string;
+  feedbackRoot?: string;
 }
 
 export type ReadModelViewMode = "serve" | "shadow" | "off";
@@ -142,14 +147,7 @@ export interface ReadModelInstanceState {
   newestTs: string | null;
 }
 
-export interface ReadModelBodyEntry {
-  view: string;
-  key: string;
-  version: number;
-  generation: number;
-  etag: string;
-  body: ViewBody;
-}
+export type ReadModelBodyEntry = ViewBodyEntry;
 
 export type ReadModelWorkerMessage =
   | { type: "body"; entry: ReadModelBodyEntry }
@@ -159,6 +157,7 @@ export type ReadModelWorkerMessage =
 export interface ReadModelViewContext {
   now: number;
   instances: ReadonlyArray<{ state: ReadModelInstanceState; db?: ReadModelDb }>;
+  switches?: ReadModelSwitches;
 }
 
 /** A view the worker materializes. `materialize` returns one body per key (`""` when unkeyed). */
@@ -170,7 +169,7 @@ export interface ReadModelView {
 
 /** The `ledger:<i>` source every read-model view carries: stale while its projector is behind. */
 export function ledgerSource(state: ReadModelInstanceState, now: number, staleMs: number = READ_MODEL_LEDGER_STALE_MS): ViewSource {
-  const name = `ledger:${state.instance}`;
+  const name = `${LEDGER_SOURCE_PREFIX}${state.instance}`;
   if (state.tickedAt === undefined) return { name, asOf: state.newestTs, state: "stale", reason: state.reason ?? "projector has not ticked yet" };
   const behindMs = now - state.tickedAt;
   if (behindMs > staleMs) return { name, asOf: state.newestTs, state: "stale", reason: `projector ${Math.round(behindMs / 1000)} s behind${state.reason ? `: ${state.reason}` : ""}` };
@@ -200,6 +199,8 @@ export const readModelStatusView: ReadModelView = {
 
 /** Every view the worker materializes; later Phase 1 views register here. */
 export const READ_MODEL_VIEWS: readonly ReadModelView[] = [readModelStatusView];
+
+const LEDGER_SOURCE_PREFIX = "ledger:";
 
 export interface ReadModelTickerOptions {
   /** Core's state dir: every instance's DB lives under its `read-model/` (design §1.7). */
@@ -435,7 +436,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   function materialize(now: number): void {
-    const ctx: ReadModelViewContext = { now, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}) })) };
+    const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}) })) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
     for (const view of views) {
       if (switches.views[view.name] === "off") continue;
@@ -511,8 +512,10 @@ export function runReadModelWorker(
   const stopRequested = (): boolean => Atomics.load(signal, 0) === 1;
   const [owner, repo] = data.escalationRepository?.split("/") ?? [];
   const escalation = owner && repo ? { issues: ghIssueGateway(owner, repo), ledgerPath: join(data.stateDir, LEDGER_FILENAME), runId: READ_MODEL_WORKER_KIND } : undefined;
+  const post = (m: ReadModelWorkerMessage): void => port.postMessage(m);
+  const now = createNowView({ instances: data.instances, ledgerSource, clock, log: (step, extra) => post({ type: "log", step, extra }) });
   const ticker = createReadModelTicker({
-    stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, stopRequested, post: (m) => port.postMessage(m), ...(escalation ? { escalation } : {}),
+    stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, stopRequested, post, views: [...READ_MODEL_VIEWS, now], ...(escalation ? { escalation } : {}),
   });
   let timer: NodeJS.Timeout | undefined;
   let finished = false;
@@ -572,6 +575,11 @@ export interface ReadModelWorkerHandle {
   readonly bodies: ReadonlyMap<string, ReadModelBodyEntry>;
   /** Each instance's last posted state, and the switches the worker last read. */
   state(): { at?: number; instances: ReadonlyMap<string, ReadModelInstanceState>; switches: ReadModelSwitches; warmBoot?: string };
+  body(view: string, key?: string): ReadModelBodyEntry | undefined;
+  /** Re-judge persisted sources against the latest worker state. */
+  judge(sources: readonly ViewSource[], now: number): ViewSource[];
+  /** The switch file as the main thread last read it. */
+  switches(): ReadModelSwitches;
   start(): void;
   /** Asks the worker to release its leases and waits, bounded, for it. True when it confirmed. */
   stop(): boolean;
@@ -585,6 +593,13 @@ export interface ReadModelWorkerOptions {
   workerUrl?: URL;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   escalationRepository?: string;
+  every?: (run: () => void, ms: number) => () => void;
+}
+
+function everyUnref(run: () => void, ms: number): () => void {
+  const timer = setInterval(run, ms);
+  timer.unref();
+  return () => clearInterval(timer);
 }
 
 export function readModelBodyKey(view: string, key = ""): string {
@@ -601,6 +616,15 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   const warm = loadCommittedViewBodies(opts.stateDir, home);
   for (const entry of warm.bodies) bodies.set(readModelBodyKey(entry.view, entry.key), entry);
   opts.log?.("read_model.warm_boot", { bodies: warm.bodies.length, ...(warm.reason ? { reason: warm.reason } : {}) });
+  const switchesPath = readModelSwitchesPath(opts.stateDir);
+  let mainSwitches = DEFAULT_READ_MODEL_SWITCHES;
+  const refreshSwitches = (): void => {
+    const read = readReadModelSwitches(switchesPath);
+    if (read.ok) mainSwitches = read.switches;
+    else opts.log?.("read_model.switch_unreadable", { reason: read.reason, kept: mainSwitches });
+  };
+  refreshSwitches();
+  let stopSwitchWatch: () => void = () => {};
 
   let worker: Worker | undefined;
   let signal: Int32Array | undefined;
@@ -645,11 +669,21 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   return {
     bodies,
     state: () => ({ ...(at === undefined ? {} : { at }), instances, switches, ...(warm.reason ? { warmBoot: warm.reason } : {}) }),
+    body: (view, key = "") => bodies.get(readModelBodyKey(view, key)),
+    judge: (sources, now) => sources.map((source) => {
+      if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return source;
+      const state = instances.get(source.name.slice(LEDGER_SOURCE_PREFIX.length));
+      return state ? ledgerSource(state, now) : { ...source, state: "stale", reason: "read model warming: this body was committed before serve started" };
+    }),
+    switches: () => mainSwitches,
     start: () => {
-      if (!worker && !stopping) spawn();
+      if (worker || stopping) return;
+      spawn();
+      stopSwitchWatch = (opts.every ?? everyUnref)(refreshSwitches, READ_MODEL_SWITCH_RECHECK_MS);
     },
     stop: () => {
       stopping = true;
+      stopSwitchWatch();
       clearTimeout(respawnTimer);
       const running = worker;
       worker = undefined;

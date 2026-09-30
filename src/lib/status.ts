@@ -4494,6 +4494,7 @@ export function buildBatchedGithub(
       // reach here, so a third arm would be dead code no fixture could exercise.
       if (half === "open") lastOpenTruncated = fetched.truncated;
       else lastClosedTruncated = fetched.truncated;
+      if (half === "open" && !fetched.truncated) snapshotCache?.commitOpen?.(fetched.rows, now());
       // W1-T181: log the payload size on every SUCCESSFUL fetch, so the next approach to whatever ceiling is
       // set above is observable in advance instead of arriving as a silent outage. Call count and mode are
       // W1-T265 additions — that change's whole claim is the count, so it is measured here.
@@ -4868,6 +4869,7 @@ export function buildBatchedGithub(
     openHalf = { at: now(), rows: outcome.rows };
     openEpoch += 1;
     lastOpenTruncated = outcome.truncated;
+    if (!outcome.truncated) snapshotCache?.commitOpen?.(outcome.rows, now());
     log("board_gateway.fetch_ok", { prCount: outcome.rows.length, channel: "open" });
     log("board_gateway.fetch_bytes", { bytes: outcome.bytes, restCalls: outcome.calls, mode: outcome.mode, truncated: outcome.truncated, half: "open" });
     // W1-T2323's own cross-half invalidation, replayed here verbatim for the async path — see `openRows`'s doc

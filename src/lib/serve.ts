@@ -83,12 +83,12 @@ import {
 } from "./ci-incidents.js";
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
-import { buildViewRoutes } from "./views.js";
+import { buildReadModelViewRoutes } from "./views.js";
 import { navBadgeView, type NavBadgeScope } from "./nav-badge-view.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
-import { createReadModelWorker, type ReadModelInstance, type ReadModelWorkerHandle, type ReadModelWorkerOptions } from "./read-model-worker.js";
+import { createReadModelWorker, READ_MODEL_VIEWS, type ReadModelInstance, type ReadModelWorkerHandle, type ReadModelWorkerOptions } from "./read-model-worker.js";
 import { buildOperatorAgentAnswer, buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
 import { buildOperatorAgentActionHandoffRoutes } from "./operator-agent-action-handoff.js";
 import {
@@ -282,7 +282,7 @@ export const DEFAULT_SERVE_PORT = 4317;
 
 export interface ServeDeps {
   projectionWorker?: ConsoleProjectionWorker;
-  readModel?: Pick<ReadModelWorkerOptions, "tickMs" | "stopWaitMs" | "workerUrl">;
+  readModel?: Pick<ReadModelWorkerOptions, "tickMs" | "stopWaitMs" | "workerUrl" | "every">;
   consoleSnapshots?: { dir: string; prewarmPaths?: readonly string[] };
   /** Injectable ONLY so a unit test can pin the captured sha; real callers omit it and get
    *  {@link resolveConsoleSha}, resolved once at server start. */
@@ -2571,6 +2571,7 @@ function assembleServeRoutes(
   deps: ServeDeps,
   currentAnalyticsSnapshot: () => AnalyticsSnapshot = coldAnalyticsSnapshot,
   operatorAgentMemory?: OperatorAgentMemorySource,
+  readModel?: ReadModelWorkerHandle,
 ): ServeRoutesAssembly {
   const instanceAnalyticsCaches: AnalyticsSnapshotCache[] = [];
   const badgeScopes: NavBadgeScope[] = [];
@@ -2702,9 +2703,9 @@ function assembleServeRoutes(
       planPath: deps.panelGraph.planPath,
     }),
     buildRecentRoute(deps.board),
-    ...buildViewRoutes([navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: () => [
+    ...buildReadModelViewRoutes({ readModel, readModelViews: READ_MODEL_VIEWS.map((view) => view.name), legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: () => [
       { instanceId: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, analytics: currentAnalyticsSnapshot, memory: operatorAgentMemory, ledgerPath: deps.ledgerPath },
-      ...badgeScopes] })]),
+      ...badgeScopes] })] }),
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),
     buildAccountUsageRoute(accountUsageDeps),
@@ -3070,6 +3071,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     },
     analyticsCache.current,
     operatorAgentMemory,
+    readModel,
   );
   const routes = routeAssembly.routes.map((route) =>
     // rationale (7): HIGH-tier IS the write-consequence set this task must respect — the same
@@ -3136,10 +3138,11 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
 
 const serveReadModels = new WeakMap<Server, ReadModelWorkerHandle>();
 
-export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questionsRoot" | "instances">): ReadModelInstance[] {
-  const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath) };
+export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questionsRoot" | "instances" | "assistantRepository"> & { panelGraph?: Pick<ServeDeps["panelGraph"], "planPath"> }): ReadModelInstance[] {
+  const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath), feedbackRoot: deps.questionsRoot,
+    ...(deps.assistantRepository ? { repo: deps.assistantRepository } : {}), ...(deps.panelGraph?.planPath ? { planPath: deps.panelGraph.planPath } : {}) };
   const others = livenessInstances({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances });
-  return [core, ...others.map((instance) => ({ name: instance.name, ledgerDir: instance.stateDir }))];
+  return [core, ...others.map((instance) => ({ name: instance.name, ledgerDir: instance.stateDir, repo: instance.repo }))];
 }
 
 export function stopServeReadModel(server: Server): boolean {
