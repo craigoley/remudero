@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { Escalation } from "./escalate.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -126,7 +126,7 @@ export function sampleFromPayload(host: string, payload: Record<string, string>)
   const freed = parseSizeKb(payload["janitor_last_freed"]);
   return {
     host,
-    beatTs: new Date(tsMs).toISOString(),
+    beatTs: fixedClock(tsMs).iso(),
     tsMs,
     values,
     consumers,
@@ -647,7 +647,7 @@ function judgeFiled(state: GardenState, all: readonly HostSample[], nowMs: numbe
     if (!fit) continue;
     const before = rec.growthKbPerHourAtFiling;
     const verdict = fit.slope <= 0 ? "stopped" : fit.slope < before / 2 ? "slowed" : "unchanged";
-    rec.judgedAt = new Date(nowMs).toISOString();
+    rec.judgedAt = fixedClock(nowMs).iso();
     ports.log(`${HOST_RESOURCE}.consumer_judged`, { origin, growth_before_kb_per_hour: Math.round(before), growth_after_kb_per_hour: Math.round(fit.slope), verdict });
   }
 }
