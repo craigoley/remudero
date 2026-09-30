@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  DEP_REVIEW_ENGINE_REVISION,
   DEPENDABOT_IGNORE_MAJOR_COMMAND,
   buildDepReviewEscalation,
   changedFilesInDiff,
   decideDepReview,
   depReviewMigrationSubmissionKey,
   isDependabotAuthor,
+  isActionShaPinOnlyDiff,
   isDependencyDeclarationPath,
   isManifestPath,
   majorMigrationBumps,
@@ -23,6 +25,7 @@ import {
   type DepReviewCheck,
   CONVENTIONAL_TITLE_PREFIX_RE,
 } from "../src/lib/dep-review.js";
+import { reviewInputDigest } from "../src/lib/review.js";
 
 // ── Recorded fixtures (acceptance #1, the FALSIFIER) ────────────────────────
 // These are RECORDED, not invented: live Dependabot PRs #80 (patch, grouped) and
@@ -95,6 +98,32 @@ index 1234567..89abcde 100644
    "devDependencies": {
 -    "@types/node": "^22.20.1"
 +    "@types/node": "^26.1.1"
+`;
+
+// Recorded from Dependabot PRs #8020/#8021: GitHub Action refs move from one full SHA to another,
+// while the exact action identity and upstream release comment remain v2.6.0.
+const OSV_PIN_OLD_SHA = "7f58dd6750d78fc29a900ba64b1a0f946f62fba4";
+const OSV_PIN_NEW_SHA = "8ac9e5ce44cc7178e0e04229a91bdcc003166e57";
+const OSV_SCANNER_PIN_BODY = `Bumps [google/osv-scanner-action/osv-scanner-action](https://github.com/google/osv-scanner-action) from ${OSV_PIN_OLD_SHA} to ${OSV_PIN_NEW_SHA}.`;
+const OSV_REPORTER_PIN_BODY = `Bumps [google/osv-scanner-action/osv-reporter-action](https://github.com/google/osv-scanner-action) from ${OSV_PIN_OLD_SHA} to ${OSV_PIN_NEW_SHA}.`;
+const OSV_SCANNER_PIN_DIFF = `diff --git a/.github/workflows/osv-scanner-pr.yml b/.github/workflows/osv-scanner-pr.yml
+index a6d6ef417..14ce34b4d 100644
+--- a/.github/workflows/osv-scanner-pr.yml
++++ b/.github/workflows/osv-scanner-pr.yml
+@@ -41,7 +41,7 @@ jobs:
+-        uses: google/osv-scanner-action/osv-scanner-action@${OSV_PIN_OLD_SHA} # v2.6.0
++        uses: google/osv-scanner-action/osv-scanner-action@${OSV_PIN_NEW_SHA} # v2.6.0
+@@ -59,7 +59,7 @@ jobs:
+-        uses: google/osv-scanner-action/osv-scanner-action@${OSV_PIN_OLD_SHA} # v2.6.0
++        uses: google/osv-scanner-action/osv-scanner-action@${OSV_PIN_NEW_SHA} # v2.6.0
+`;
+const OSV_REPORTER_PIN_DIFF = `diff --git a/.github/workflows/osv-scanner-pr.yml b/.github/workflows/osv-scanner-pr.yml
+index a6d6ef417..0950adae5 100644
+--- a/.github/workflows/osv-scanner-pr.yml
++++ b/.github/workflows/osv-scanner-pr.yml
+@@ -81,7 +81,7 @@ jobs:
+-        uses: google/osv-scanner-action/osv-reporter-action@${OSV_PIN_OLD_SHA} # v2.6.0
++        uses: google/osv-scanner-action/osv-reporter-action@${OSV_PIN_NEW_SHA} # v2.6.0
 `;
 
 const GREEN_CHECKS: DepReviewCheck[] = [
@@ -229,6 +258,87 @@ test("decideDepReview: PR #80 (patch, grouped, confined, gates green) -> ARM", (
   assert.equal(r.semverLevel, "patch");
   assert.deepEqual(r.offendingFiles, []);
   assert.deepEqual(r.redChecks, []);
+});
+
+test("decideDepReview: recorded #8020/#8021 action SHA refreshes arm as pin-only, not as semver patches", () => {
+  const cases = [
+    [8020, "chore(deps): bump OSV scanner action pin", OSV_SCANNER_PIN_BODY, OSV_SCANNER_PIN_DIFF],
+    [8021, "chore(deps): bump OSV reporter action pin", OSV_REPORTER_PIN_BODY, OSV_REPORTER_PIN_DIFF],
+  ] as const;
+  for (const [number, title, body, diff] of cases) {
+    assert.equal(isActionShaPinOnlyDiff(diff), true, `PR #${number}'s diff must prove a SHA-only refresh`);
+    const r = decideDepReview({ author: DEPENDABOT_GRAPHQL_AUTHOR, title, body, diff, checks: GREEN_CHECKS });
+    assert.equal(r.decision, "arm", `PR #${number} should pass only the pin-only classification`);
+    assert.equal(r.semverLevel, "unknown", "a pin refresh is not mislabeled as a semver patch");
+    assert.equal(r.pinOnly, true);
+    assert.deepEqual(r.offendingFiles, []);
+    assert.deepEqual(r.redChecks, []);
+    assert.match(r.reason, /pin-only GitHub Actions SHA refresh/);
+  }
+});
+
+test("a pin-only candidate with any non-pin edit, changed release annotation, or changed action identity still escalates", () => {
+  const changedReleaseAnnotation = OSV_SCANNER_PIN_DIFF.replace(/(^\+.*# )v2\.6\.0$/gm, "$1v2.7.0");
+  const changedActionIdentity = OSV_SCANNER_PIN_DIFF.replace(/^\+.*osv-scanner-action@/gm, (line) => line.replace("osv-scanner-action@", "other-action@"));
+  const mismatchedShaSummary = OSV_SCANNER_PIN_BODY.replace(OSV_PIN_NEW_SHA, OSV_PIN_OLD_SHA);
+  const nonPinEdit = `${OSV_SCANNER_PIN_DIFF}@@ -90,1 +90,1 @@\n-timeout-minutes: 5\n+timeout-minutes: 6\n`;
+  for (const diff of [changedReleaseAnnotation, changedActionIdentity, nonPinEdit]) {
+    assert.equal(isActionShaPinOnlyDiff(diff), false);
+    const r = decideDepReview({
+      author: DEPENDABOT_GRAPHQL_AUTHOR,
+      title: "chore(deps): bump OSV scanner action pin",
+      body: OSV_SCANNER_PIN_BODY,
+      diff,
+      checks: GREEN_CHECKS,
+    });
+    assert.equal(r.decision, "escalate");
+    assert.equal(r.semverLevel, "unknown");
+    assert.equal(r.pinOnly, false);
+  }
+  const mismatchedSummary = decideDepReview({
+    author: DEPENDABOT_GRAPHQL_AUTHOR,
+    title: "chore(deps): bump OSV scanner action pin",
+    body: OSV_REPORTER_PIN_BODY,
+    diff: OSV_SCANNER_PIN_DIFF,
+    checks: GREEN_CHECKS,
+  });
+  assert.equal(mismatchedSummary.decision, "escalate", "the bot summary must name the action and SHA pair changed by the diff");
+  assert.equal(mismatchedSummary.pinOnly, false);
+  const mismatchedSha = decideDepReview({
+    author: DEPENDABOT_GRAPHQL_AUTHOR,
+    title: "chore(deps): bump OSV scanner action pin",
+    body: mismatchedShaSummary,
+    diff: OSV_SCANNER_PIN_DIFF,
+    checks: GREEN_CHECKS,
+  });
+  assert.equal(mismatchedSha.decision, "escalate", "the bot summary's old/new SHAs must match the workflow diff");
+  assert.equal(mismatchedSha.pinOnly, false);
+});
+
+test("a parseable semver major still wins over a pin-shaped workflow diff", () => {
+  const r = decideDepReview({
+    author: DEPENDABOT_GRAPHQL_AUTHOR,
+    title: "chore(deps): bump google/osv-scanner-action/osv-scanner-action from 2.6.0 to 3.0.0",
+    body: "Bumps [google/osv-scanner-action/osv-scanner-action](https://github.com/google/osv-scanner-action) from 2.6.0 to 3.0.0.",
+    diff: OSV_SCANNER_PIN_DIFF,
+    checks: GREEN_CHECKS,
+  });
+  assert.equal(r.decision, "migrate");
+  assert.equal(r.semverLevel, "major");
+  assert.equal(r.pinOnly, false);
+});
+
+test("verified pin-only updates still HOLD when any required check is red", () => {
+  const r = decideDepReview({
+    author: DEPENDABOT_GRAPHQL_AUTHOR,
+    title: "chore(deps): bump OSV scanner action pin",
+    body: OSV_SCANNER_PIN_BODY,
+    diff: OSV_SCANNER_PIN_DIFF,
+    checks: [{ name: "ci-gate", conclusion: "FAILURE" }],
+  });
+  assert.equal(r.decision, "hold");
+  assert.equal(r.pinOnly, true);
+  assert.deepEqual(r.redChecks, ["ci-gate"]);
 });
 
 test("decideDepReview: PR #81 (major, confined, gates green) -> MIGRATE, no auto-merge", () => {
@@ -506,6 +616,7 @@ async function driveMigrationDepReview(opts: {
   prNumber?: number;
   title?: string;
   body?: string;
+  diff?: string;
   checks?: DepReviewCheck[];
   events?: string[];
   capture?: ReturnType<typeof migrationCaptureRecorder>;
@@ -518,6 +629,7 @@ async function driveMigrationDepReview(opts: {
   const capture = opts.capture ?? migrationCaptureRecorder(events);
   const mutations = opts.mutations ?? mutationRecorder(events);
   const statusCalls: string[] = [];
+  const statusPosts: Array<{ state: string; description?: string; reviewInputDigest?: string; reviewEngineRevision?: string }> = [];
   const armCalls: string[] = [];
   const printed: string[] = [];
   const realLog = console.log;
@@ -537,9 +649,10 @@ async function driveMigrationDepReview(opts: {
         author: { login: "app/dependabot" },
         statusCheckRollup: opts.checks ?? [{ name: "ci-shard 1", conclusion: "FAILURE" }],
       }),
-      prDiff: () => PR81_DIFF,
-      postStatus: (async () => {
+      prDiff: () => opts.diff ?? PR81_DIFF,
+      postStatus: (async (args: { state: string; description?: string; reviewInputDigest?: string; reviewEngineRevision?: string }) => {
         statusCalls.push("called");
+        statusPosts.push(args);
         return { posted: true };
       }) as never,
       arm: () => {
@@ -559,6 +672,7 @@ async function driveMigrationDepReview(opts: {
     capture,
     mutations,
     statusCalls,
+    statusPosts,
     armCalls,
     printed,
     ledgerPath,
@@ -566,6 +680,30 @@ async function driveMigrationDepReview(opts: {
     tmp,
   };
 }
+
+test("depReviewCommand posts verified pin-only status with a lane-specific decision revision", async () => {
+  const r = await driveMigrationDepReview({
+    prNumber: 8020,
+    title: "chore(deps): bump OSV scanner action pin",
+    body: OSV_SCANNER_PIN_BODY,
+    diff: OSV_SCANNER_PIN_DIFF,
+    checks: GREEN_CHECKS,
+  });
+  assert.equal(r.code, 0);
+  assert.deepEqual(r.statusCalls, ["called"]);
+  assert.deepEqual(r.armCalls, ["called"]);
+  assert.match(r.printed.join("\n"), /pin-only GitHub Actions SHA refresh/);
+  const digest = reviewInputDigest("feedface1234", OSV_SCANNER_PIN_BODY, DEP_REVIEW_ENGINE_REVISION);
+  const statusPost = r.statusPosts[0];
+  assert.equal(statusPost?.state, "success");
+  assert.equal(statusPost?.description, "remudero-review: PASS — pin-only action SHA refresh, confined + gates green");
+  assert.equal(statusPost?.reviewInputDigest, digest);
+  assert.equal(statusPost?.reviewEngineRevision, DEP_REVIEW_ENGINE_REVISION);
+  const posted = r.ledger.find((line) => line.step === "review.posted");
+  assert.equal(posted?.review_engine_revision, DEP_REVIEW_ENGINE_REVISION);
+  assert.equal(posted?.review_input_digest, digest);
+  rmSync(r.tmp, { recursive: true, force: true });
+});
 
 test("depReviewCommand migrate: capture completes before exact Dependabot ignore and close, with no status or arm", async () => {
   const r = await driveMigrationDepReview({});
