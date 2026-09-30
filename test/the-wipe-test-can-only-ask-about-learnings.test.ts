@@ -625,7 +625,7 @@ test("wipeTestCommand: --factor recon on a non-sandbox --repo without --allow-no
   assert.equal(dispatched, 0, "and before either arm ever dispatches");
 });
 
-test("W1-T4944: wipe-test main dispatch uses a fixture ledger; main(): `rmd wipe-test <id> --factor recon --repo remudero` (no --allow-non-sandbox) dispatches to wipeTestCommand and exits 2", async (t) => {
+test("W1-T4944: wipe-test main dispatch uses a fixture ledger", async (t) => {
   const savedArgv = process.argv;
   const savedExit = process.exit;
   const savedHome = process.env.HOME;

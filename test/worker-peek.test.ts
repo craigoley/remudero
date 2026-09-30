@@ -407,7 +407,7 @@ class PeekProcessExitCalled extends Error {
   }
 }
 
-test("W1-T4944: peek main dispatch uses a fixture ledger; main(): `rmd peek` with no <runId> dispatches to peekCommand and exits 2 (fail loud, no command-specific filesystem work)", async (t) => {
+test("W1-T4944: peek main dispatch uses a fixture ledger", async (t) => {
   const exitMock = ((code?: number): never => {
     throw new PeekProcessExitCalled(code);
   }) as typeof process.exit;
