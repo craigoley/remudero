@@ -34,3 +34,24 @@ answered in prose instead of the fragment contract", ~269-character replies) and
 adapter forces tool-enabled Luna to `reasoning_effort: none`, which plausibly drops the fragment contract.
 #8017 reverts the lead to nano as an interim, and a measured bake-off of nano, gpt-oss-120b, Luna without
 tools and Sonnet 5.5 on real inbox prompts decides the next lead.
+
+## Bake-off, 2026-09-30
+
+The same 8 real proposals (adoption, followup, proof-debt, verify-human, ruling, feedback, skill-draft,
+codeql-quality) went through the production `draftProposalBatch`: the real prompt, fragment parser, plan lint and
+bounded relint loop. Only the answering model changed.
+
+| candidate | drafted | lint-clean | contract errors | syntheses | cost | wall |
+|---|---|---|---|---|---|---|
+| subscription claude-sonnet-5-5 | 8/8 | **7/8** | 0 | 21 | $2.83 notional | 2.5 min |
+| subscription claude-haiku-4-5 | 8/8 | 5/8 | 0 | 20 | $2.90 notional | 9.9 min |
+| cash gpt-oss-120b | 8/8 | 3/8 | 0 | 24 | **$0.045** | 0.8 min |
+| cash gpt-5-nano | 5/8 | 1/8 | 3 | 20 | $0.051 | 4.0 min |
+| cash gpt-6-luna (tools) | 0/8 | 0/8 | 8 | 8 | $0.012 | 0.2 min |
+| cash gpt-6-luna (no tools) | 0/8 | 0/8 | 8 | 9 | $0.002 | 0.2 min |
+
+Luna fails the fragment contract with or without tools, so the reasoning_effort theory does not explain it.
+Haiku costs more than Sonnet here (a longer agentic run) and cleans fewer drafts. Among cash lanes, gpt-oss-120b wins
+on every axis: three times nano's clean drafts at lower cost, five times faster, and no contract errors. It now leads
+the lane. Sonnet 5.5 is the quality ceiling at about 60 times the cost. Routing only the drafts
+gpt-oss-120b leaves dirty to Sonnet 5.5 is the value play, filed as its own task.
