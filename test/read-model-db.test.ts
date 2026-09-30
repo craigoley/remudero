@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { copyFileSync, existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fixedClock, type Clock } from "../src/lib/clock.js";
@@ -9,8 +9,13 @@ import {
   READ_MODEL_JOURNAL_SIZE_LIMIT_BYTES,
   ReadModelError,
   acquireLease,
+  currentReadModelPath,
   openReadModel,
+  peekLease,
+  publishReadModelGeneration,
+  readModelGenerationPath,
   readModelPath,
+  readModelPointerPath,
   releaseLease,
   withWriteTransaction,
 } from "../src/lib/read-model-db.js";
@@ -188,4 +193,42 @@ test("a write transaction that throws rolls back its rows", (t) => {
   const big = db.prepare("SELECT 9007199254740993 AS h", { bigInts: true }).get();
   assert.equal(big?.h, 9007199254740993n, "64-bit identity hashes read back exactly");
   assert.equal([...db.prepare("SELECT 1 AS one").iterate()].length, 1);
+});
+
+test("a pointer names the generation every open resolves and a foreign pointer is refused", (t) => {
+  const dir = makeTempDir("read-model-pointer");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const base = openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1, ddl: DDL });
+  base.close();
+  assert.equal(currentReadModelPath(dir, "core", 1), readModelPath(dir, "core", 1), "no pointer: the un-generationed file");
+  const gen = openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1, ddl: DDL, generation: "42" });
+  assert.equal(gen.path, readModelGenerationPath(dir, "core", 1, "42"));
+  assert.equal(peekLease(gen.path), undefined);
+  assert.ok(acquireLease(gen, { holder: "h" }).ok);
+  assert.equal(peekLease(gen.path)?.holder, "h");
+  gen.close();
+  publishReadModelGeneration(dir, "core", 1, "42");
+  assert.equal(readFileSync(readModelPointerPath(dir, "core", 1), "utf8"), "core.v1.g42.sqlite\n");
+  const current = openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1 });
+  assert.equal(current.path, gen.path);
+  current.close();
+  const legacy = openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1, generation: null });
+  assert.equal(legacy.path, readModelPath(dir, "core", 1));
+  legacy.close();
+  assert.throws(() => readModelGenerationPath(dir, "core", 1, "../x"), (e: unknown) => e instanceof ReadModelError && e.reason === "bad_pointer");
+  writeFileSync(readModelPointerPath(dir, "core", 1), "site.v1.g42.sqlite\n");
+  assert.throws(() => openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1 }), (e: unknown) => e instanceof ReadModelError && e.reason === "bad_pointer");
+});
+
+test("a pointer generation is parsed against the exact instance and schema prefix", (t) => {
+  const dir = makeTempDir("read-model-dotted-instance-pointer");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, READ_MODEL_DIRNAME), { recursive: true });
+  writeFileSync(readModelPointerPath(dir, "core.prod", 1), "core.prod.v1.g42.sqlite\n");
+  assert.equal(currentReadModelPath(dir, "core.prod", 1), readModelGenerationPath(dir, "core.prod", 1, "42"));
+  writeFileSync(readModelPointerPath(dir, "core.prod", 1), "coreXprod.v1.g42.sqlite\n");
+  assert.throws(
+    () => currentReadModelPath(dir, "core.prod", 1),
+    (error: unknown) => error instanceof ReadModelError && error.reason === "bad_pointer",
+  );
 });
