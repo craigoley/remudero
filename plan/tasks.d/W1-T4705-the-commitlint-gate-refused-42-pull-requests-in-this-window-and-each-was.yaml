@@ -4,7 +4,7 @@
   depends_on: []
   type: implement
   verify: auto
-  priority: 45
+  priority: 1
   risk: low
   status: queued
   attempts: 0
@@ -26,4 +26,4 @@
       - "acceptance criterion is a grep-verifiable string check, so the finding is verifiable from what is shown."
       - "task type is \"implement\" with verify: auto, consistent with routine machine-authored learnings maintenance rather than an operator-only decision."
     judged_at: "2026-09-29T14:14:57.066Z"
-    pin: "5bcc9494e297eada0c5439684dcee8655fbf8643845465c598a2e04b5ac051e2"
+    pin: "62bebb67184a7ff236ce5fc68c4d368edf33043cf7c46836bb7e4135ec5759ff"
