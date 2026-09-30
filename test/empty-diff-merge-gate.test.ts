@@ -150,6 +150,7 @@ test("W1-T963: end-to-end — a sibling's landed fix closes an already-done tria
   // full clone), so this fixture needs one too now that triage's propose-path commit routes
   // through the same shared function `rmd plan` does.
   writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
+  writeFileSync(join(seed, "plan", "alert-policy.yaml"), "act_severities: []\n", "utf8");
   writeFileSync(
     join(seed, "plan", "tasks.yaml"),
     ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join(

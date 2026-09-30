@@ -655,6 +655,8 @@ import { assertProposedPlanLoads,
   triageCommitMessage,
   triageDeclaredScope,
   triageEmptyScopeDisposition,
+  unresolvedCitationReferents,
+  worktreeCitationEvidence,
   feedbackEntryBlock,
   triagePrompt,
 } from "./lib/triage.js";
@@ -42242,7 +42244,8 @@ async function triageCommandLocked(
         // Ground truth: what did the worker ACTUALLY touch (before the harness's own status write)?
         const changedFiles = worktreeChangedFiles(worktreePath);
         const verdict = parseTriageVerdict(workerTranscript(worker));
-        return { decision: decideTriage({ verdict, changedFiles }), changedFiles };
+        const citation = verdict?.kind === "already_decided" ? unresolvedCitationReferents(verdict.citation, worktreeCitationEvidence(worktreePath)) : undefined;
+        return { decision: decideTriage({ verdict, changedFiles, citation }), changedFiles };
       },
       filed: (r) => r.decision.action === "propose",
       lint: () =>
@@ -42311,7 +42314,7 @@ async function triageCommandLocked(
         runId,
         ...summarizeDeps,
       });
-      log("triage.grill_opened", { issue_url: grillIssueUrl, options: decision.options.length, recommendation: decision.recommendation });
+      log("triage.grill_opened", { issue_url: grillIssueUrl, options: decision.options.length, recommendation: decision.recommendation, cause: decision.cause, unresolved: decision.unresolved });
       say(`grill opened (needs-human, ${decision.options.length} options + a recommendation): ${grillIssueUrl}`);
     }
 
