@@ -335,6 +335,82 @@ EOF_TR
   fi
 fi
 
+# 13) A HAND-RUN COVERAGE SUITE WITHOUT CI'S `--enable-source-maps` (W1-T4915). MEASURED 2026-09-30: 6
+#    of 41 diff-coverage runs in one session ran `node --experimental-test-coverage ...` by hand with no
+#    `--enable-source-maps`, got `DA:` lines located against the tsx-transpiled JS, and read every changed
+#    line as uncovered; the 35 that had read the flag or `npm run diff-coverage:local` never did. Judged
+#    per command segment at the PROGRAM position (through env assignments, `timeout <n>`, `time`, `env`,
+#    `nice`), so a grep, pgrep, echo, commit message or heredoc body that only NAMES the flag is never
+#    refused. `npm run` and `node scripts/diff-coverage-local.mjs` never carry the flag themselves.
+cov_segments() {  # stdin: a command -> one simple command per line; heredoc bodies and comments dropped
+  awk '
+    function flush() { print seg; seg = "" }
+    BEGIN { q = ""; seg = ""; hd = 0 }
+    {
+      if (hd) { line = $0; if (hdtab) sub(/^\t+/, "", line); if (line == hdword) hd = 0; next }
+      n = length($0); cont = 0; pend = 0
+      for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (q == "\047") { if (c == "\047") q = ""; seg = seg c; continue }
+        if (c == "\\") { if (i == n) { cont = 1; seg = seg " " } else { seg = seg c substr($0, i + 1, 1) }; i++; continue }
+        if (q == "\"") { if (c == "\"") q = ""; seg = seg c; continue }
+        if (c == "\047" || c == "\"") { q = c; seg = seg c; continue }
+        if (c == "#" && (seg == "" || seg ~ /[ \t]$/)) break
+        if (c == "<" && substr($0, i, 2) == "<<" && substr($0, i, 3) != "<<<") {
+          j = i + 2; tab = 0
+          if (substr($0, j, 1) == "-") { tab = 1; j++ }
+          while (substr($0, j, 1) == " ") j++
+          d = substr($0, j, 1)
+          if (d ~ /[A-Za-z_\047"\\]/) {
+            while (substr($0, j, 1) ~ /[\047"\\]/) j++
+            w = ""
+            while (j <= n && substr($0, j, 1) !~ /[\047" \t;&|()<>\\]/) { w = w substr($0, j, 1); j++ }
+            hdword = w; hdtab = tab; pend = 1; i = j - 1; continue
+          }
+        }
+        if (c == ";" || c == "&" || c == "|" || c == "(" || c == ")" || c == "`") { flush(); continue }
+        seg = seg c
+      }
+      if (q != "") seg = seg " "
+      else if (!cont) flush()
+      if (pend) hd = 1
+    }
+    END { flush() }'
+}
+case "$cmd" in *--experimental-test-coverage*) cov_scan=1 ;; *) cov_scan=0 ;; esac
+if [ "$cov_scan" -eq 1 ]; then
+  cov_sm=0
+  while IFS= read -r cov_seg; do
+    case "$cov_seg" in *NODE_OPTIONS=*--enable-source-maps*) cov_sm=1 ;; esac
+    cov_state=pre cov_skip=0 cov_dur=0 cov_flag=0
+    set -f
+    for cov_tok in $cov_seg; do
+      if [ "$cov_state" = pre ]; then
+        if [ "$cov_skip" -gt 0 ]; then cov_skip=$((cov_skip - 1)); continue; fi
+        if [ "$cov_dur" -eq 1 ]; then
+          case "$cov_tok" in -k|-s|--signal|--kill-after) cov_skip=1; continue ;; -*) continue ;; esac
+          cov_dur=0; continue
+        fi
+        case "$cov_tok" in
+          [A-Za-z_]*=*|do|then|else|elif|if|while|until|"!"|"{"|time|nohup|exec|command|env|nice) continue ;;
+          timeout) cov_dur=1 ;;
+          -n|-u|-C|-S) cov_skip=1 ;;
+          -*) ;;
+          node|*/node|nodejs) cov_state=node ;;
+          *) break ;;
+        esac
+      elif [ "$cov_tok" = "--experimental-test-coverage" ]; then
+        cov_flag=1
+      fi
+    done
+    set +f
+    [ "$cov_state" = node ] && [ "$cov_flag" -eq 1 ] || continue
+    case "$cov_seg" in *--enable-source-maps*) continue ;; esac
+    [ "$cov_sm" -eq 1 ] && continue
+    deny "a coverage run without --enable-source-maps (W1-T4915) — its \`DA:\` lines are located against the tsx-transpiled JS, so every changed line reads uncovered. Run \`npm run diff-coverage:local -- <test files>\`, which spawns CI's own invocation (flags read out of ci.yml)"
+  done < <(printf '%s\n' "$cmd" | cov_segments)
+fi
+
 # 10) READ-SHAPED `gh` CALLS, TOO CLOSE TOGETHER (W1-T3275 — THE SECONDARY LIMIT COUNTS CADENCE).
 #    Rule 6 refuses the SHAPE of a poll — loop keyword + wait + `gh`. That is not how the budget
 #    gets burned. MEASURED 2026-09-09: a session tripped the secondary limit TWICE with no loop
