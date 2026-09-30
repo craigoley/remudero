@@ -109,12 +109,18 @@ function stackedParentNumbersFromBody(
  * open/closed-unmerged parent never becomes permission to arm. Injected `fetch` keeps this seam
  * deterministic in tests; the production caller uses ghJson.
  */
-export function stackPrerequisiteFromRest(prUrl: string, fetch: GhApiFetcher = ghJson): StackPrerequisiteCheck {
+export function stackPrerequisiteFromRest(
+  prUrl: string,
+  fetch: GhApiFetcher = ghJson,
+  listedBody?: string,
+): StackPrerequisiteCheck {
   const target = parsePrUrl(prUrl);
   if (!target) return { state: "unreadable", parentNumbers: [], detail: `cannot resolve pull-request URL: ${prUrl}` };
   let raw: unknown;
   try {
-    raw = fetch(singlePrRestArgs(target.owner, target.repo, target.number));
+    // A sweep passes the body its open-PR list read this pass: no synchronous re-read per PR.
+    raw =
+      listedBody !== undefined ? { body: listedBody } : fetch(singlePrRestArgs(target.owner, target.repo, target.number));
   } catch (e) {
     // An unreadable PR body is not evidence that the PR is unstacked; preserve the failure reason.
     return {

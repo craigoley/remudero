@@ -1962,7 +1962,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     },
 
     // W1-T4581 — a pre-existing GitHub auto-merge request can land without another arm attempt.
-    stackPrerequisite: (pr) => stackPrerequisiteFromRest(pr.prUrl, ghJsonForBuild),
+    stackPrerequisite: (pr) => stackPrerequisiteFromRest(pr.prUrl, ghJsonForBuild, pr.body),
     withdrawStackAutoMerge: (pr) => disarmImpl(pr.prUrl),
 
     repairMissingTaskTrailer: async (pr, repair) => {
