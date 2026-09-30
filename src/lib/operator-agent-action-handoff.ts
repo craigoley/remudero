@@ -208,7 +208,8 @@ export function prepareActionHandoff(deps: ActionHandoffDeps, actor: string, inp
   try {
     return existing();
   } catch (error) {
-    if (errno(error) !== "ENOENT") return refusal(503, "store_unavailable", `the handoff store is unreadable: ${(error as Error).message}`);
+    const reason = `the handoff store is unreadable: ${(error as Error).message}`;
+    if (errno(error) !== "ENOENT") return refusal(503, "store_unavailable", reason);
   }
   const state = observeTarget(deps);
   const expiresAtMs = nowMs + (deps.ttlMs ?? DEFAULT_TTL_MS);
@@ -217,7 +218,8 @@ export function prepareActionHandoff(deps: ActionHandoffDeps, actor: string, inp
   try {
     preview = delegate(deps, actor, automationAction(deps, { confirmationId }, input.verb, verb.entry, deps.repository, nowMs, expiresAtMs), nowMs, true);
   } catch (error) {
-    return refusal(503, "policy_unavailable", `the ${verb.entry.capability} policy could not be evaluated: ${(error as Error).message}`);
+    const reason = `the ${verb.entry.capability} policy could not be evaluated: ${(error as Error).message}`;
+    return refusal(503, "policy_unavailable", reason);
   }
   // The dry run precedes the confirmation, so a pending approval is the one finding a preview expects.
   const findings = (preview.preflight?.findings ?? []).filter((finding) => finding.code !== "approval-pending");
@@ -247,7 +249,8 @@ export function prepareActionHandoff(deps: ActionHandoffDeps, actor: string, inp
       throw error;
     }
   } catch (error) {
-    return refusal(503, "store_unavailable", `the preview could not be stored: ${(error as Error).message}`);
+    const reason = `the preview could not be stored: ${(error as Error).message}`;
+    return refusal(503, "store_unavailable", reason);
   }
   return { status: 201, body };
 }
@@ -257,8 +260,8 @@ function replayed(paths: ReturnType<typeof actionHandoffPaths>, confirmationId: 
     const receipt = JSON.parse(readFileSync(paths.receipt, "utf8")) as ActionHandoffReceipt;
     return { status: 409, body: { version: ACTION_HANDOFF_VERSION, outcome: "refused", code: "replayed", detail: "this confirmation was already used", receipt } };
   } catch (error) {
-    return { status: 409, body: { version: ACTION_HANDOFF_VERSION, outcome: "unresolved", code: "replayed", confirmationId,
-      detail: `the confirmation was claimed without a readable receipt (${errno(error) ?? "unreadable"}); reconcile before any new intent` } };
+    const reason = `the confirmation was claimed without a readable receipt (${errno(error) ?? "unreadable"}); reconcile before any new intent`;
+    return { status: 409, body: { version: ACTION_HANDOFF_VERSION, outcome: "unresolved", code: "replayed", confirmationId, detail: reason } };
   }
 }
 
@@ -269,9 +272,10 @@ export function executeActionHandoff(deps: ActionHandoffDeps, actor: string, inp
   try {
     prepared = readPrepared(paths.prepared);
   } catch (error) {
+    const reason = `the preparation is unreadable: ${(error as Error).message}`;
     return errno(error) === "ENOENT"
       ? refusal(404, "unknown_handoff", "no prepared action has this confirmation identity")
-      : refusal(503, "store_unavailable", `the preparation is unreadable: ${(error as Error).message}`);
+      : refusal(503, "store_unavailable", reason);
   }
   const actorHash = sha(actor);
   if (prepared.actorHash !== actorHash) return refusal(403, "actor_mismatch", "only the operator who prepared this action may confirm it");
@@ -279,8 +283,9 @@ export function executeActionHandoff(deps: ActionHandoffDeps, actor: string, inp
   try {
     writeExclusive(paths.claim, JSON.stringify({ at: fixedClock(nowMs).iso(), actorHash }));
   } catch (error) {
+    const reason = `durable single-use claim unavailable: ${(error as Error).message}`;
     if (errno(error) === "EEXIST") return replayed(paths, input.confirmationId);
-    return refusal(503, "claim_unavailable", `durable single-use claim unavailable: ${(error as Error).message}`);
+    return refusal(503, "claim_unavailable", reason);
   }
   const preview = prepared.preview as { verb: string; capability: string; target: { instance: string; repository: string } };
   const base = { version: ACTION_HANDOFF_VERSION, receiptId: randomUUID(), confirmationId: input.confirmationId, intentId: prepared.intentId,
@@ -311,7 +316,8 @@ export function executeActionHandoff(deps: ActionHandoffDeps, actor: string, inp
   try {
     run = delegate(deps, actor, automationAction(deps, prepared, preview.verb, verb.entry, preview.target.repository, nowMs, prepared.expiresAtMs), nowMs, false);
   } catch (error) {
-    return finish("unresolved", "outcome_unknown", `the delegated verb did not report an outcome: ${(error as Error).message}`);
+    const reason = `the delegated verb did not report an outcome: ${(error as Error).message}`;
+    return finish("unresolved", "outcome_unknown", reason);
   }
   const link = { automationReceiptId: run.receipt.receiptId, ...(run.receipt.evidenceRef ? { evidenceRef: run.receipt.evidenceRef } : {}) };
   if (run.disposition === "completed" && run.receipt.outcome === "succeeded") return finish("succeeded", "executed", run.receipt.reason, link);
