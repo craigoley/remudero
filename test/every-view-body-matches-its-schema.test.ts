@@ -16,8 +16,8 @@ import type { Plan } from "../src/lib/plan.js";
 import { createReadModelTicker, READ_MODEL_VIEWS, readModelSwitchesPath } from "../src/lib/read-model-worker.js";
 import { createRepositoriesSourcePublisher, type RepositoriesData } from "../src/lib/repositories-view.js";
 import { buildServeRoutes, buildServeServer, repositoriesSources, type ServeDeps } from "../src/lib/serve.js";
-import type { GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 import { declaredBody, resolve, violations, type Schema } from "./helpers/openapi-strict.js";
 
 const NOW = Date.parse("2026-09-30T12:00:00.000Z");
@@ -47,13 +47,6 @@ const PLAN_YAML = ["W1-T1", "W1-T2", "W1-T3"].map((id) => `- id: ${id}
 function plan(): Plan {
   const tasks = ["W1-T1", "W1-T2", "W1-T3"].map((id) => ({ id, title: `task ${id}`, repo: "craigoley/remudero", depends_on: [], type: "implement", risk: "medium", verify: "auto", status: "queued", attempts: 0 }) as Plan["tasks"][number]);
   return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
-}
-
-function stubGithub(): GitHub {
-  return {
-    readFailed: () => false, prByRef: () => null, findMergedByTrailer: () => null, findMergedByHeadBranch: () => [], listMergedHeadBranches: () => [],
-    listOpenHeadBranches: () => [], headRefName: () => undefined, prBody: () => undefined, issueByUrl: () => ({ state: "OPEN", title: "stuck" }),
-  } as unknown as GitHub;
 }
 
 /** Core with a week of work: a merge, a running task, spend and a heartbeat, in a registry naming its project. */
@@ -105,7 +98,7 @@ function materializeAll(root: string, stateDir: string, deps: ServeDeps): void {
   createRepositoriesSourcePublisher({ stateDir, instances: () => repositoriesSources(deps) })();
   const now = createNowView({
     instances: [{ name: "core", ledgerDir: stateDir, repo: "craigoley/remudero", feedbackRoot: root }],
-    clock, readPlan: plan, github: () => ({ github: stubGithub(), generation: "g", source: { asOf: iso(0), state: "fresh" } }),
+    clock, readPlan: plan, github: () => ({ github: fakeGitHub(), generation: "g", source: { asOf: iso(0), state: "fresh" } }),
     hostProbe: { rateLimit: () => 4321, diskFree: () => 10_000 },
   });
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now], clock, holder: "schema-test", post: () => {} });
