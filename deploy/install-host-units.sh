@@ -454,15 +454,6 @@ converge_host_units() {
     echo "rmd-relaunch: units -- checkout is not at origin/main (\$head_sha vs \$main_sha); not converging."
     return 0
   fi
-  # W1-T4844: keep the install checkout runnable (npm ci only when its committed lockfile changes).
-  lock_blob=\$(git -C "\$CHECKOUT" rev-parse HEAD:package-lock.json 2>/dev/null || echo "")
-  if [ -n "\$lock_blob" ] && { [ ! -x "\$CHECKOUT/node_modules/.bin/tsx" ] || [ "\$(cat "\$CHECKOUT/node_modules/.rmd-lock-blob" 2>/dev/null)" != "\$lock_blob" ]; }; then
-    if (cd "\$CHECKOUT" && npm ci --no-audit --no-fund >/dev/null 2>&1); then
-      printf '%s\n' "\$lock_blob" > "\$CHECKOUT/node_modules/.rmd-lock-blob"
-    else
-      echo "rmd-relaunch: units -- npm ci in the install checkout failed; deploy-run stays on the daemon tree." >&2
-    fi
-  fi
   INSTALLER_ENV=(RMD_NODE_MAX_OLD_SPACE_MB="\$UNITS_HEAP_MB")
   if [ -n "\$INSTANCE_NAME" ]; then
     INSTALLER_ENV=(RMD_INSTANCE_REGISTRY="\$INSTANCE_REGISTRY")
@@ -533,17 +524,12 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # here runs before the revive decision; boot is excluded because a host coming up is the worst
   # moment to rewrite its units -- the rule W1-T3245 applied to the recycle decision.
   [ "\$BOOT" -eq 0 ] && converge_host_units
-  # W1-T4844: prefer the converged install checkout; the daemon tree is the fallback.
-  DEPLOY_RMD="\$STATE_DIR/remudero/bin/rmd"
-  if [ -x "\$CHECKOUT/bin/rmd" ] && [ -x "\$CHECKOUT/node_modules/.bin/tsx" ]; then
-    DEPLOY_RMD="\$CHECKOUT/bin/rmd"
-  fi
-  if [ "\$BOOT" -eq 0 ] && [ -x "\$DEPLOY_RMD" ]; then
+  if [ "\$BOOT" -eq 0 ] && [ -x "\$STATE_DIR/remudero/bin/rmd" ]; then
     echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
     # W1-T4267: deploy-run reads resourcePolicyDrift for THIS container (named at install time --
     # the rendered launcher has no CONTAINER_NAME of its own) against the build policy it recycles with.
     RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
-      "\$DEPLOY_RMD" deploy-run --image-drift-only --state-root "\$STATE_DIR" || \\
+      "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR" || \\
       echo "rmd-relaunch: deploy-run reported a problem; the daemon is untouched and the next tick re-asks." >&2
   else
     echo "rmd-relaunch: ${CONTAINER_NAME} already running -- nothing to do."
