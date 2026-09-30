@@ -26,3 +26,11 @@
   acceptance:
     - claim: "only the fleet App can create or delete release, ring and revoked tags"
       proof: "demonstration: operator shows the ruleset's target patterns and bypass list, and a manual tag push to refs/tags/release/test being refused"
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it deletes data, branches, archives or ledgers (\"delete release, ring and revoked tags\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-09-30T21:42:01.797Z"
+    pin: "6ce8742df25149e82fd4ba9ea0c39bcc73bda81236ebe64c73e03603966c9686"
