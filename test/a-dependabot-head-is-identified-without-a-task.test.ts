@@ -268,3 +268,18 @@ test("an unreadable diff and a manifest diff reach OPPOSITE gate verdicts", () =
   });
   assert.equal(admitted.ok, true, "a manifest-only diff must be admitted");
 });
+
+// MEASURED 2026-09-30: #7956 and #7957 were stuck on head-identity-gate — Dependabot chose a
+// `build(deps)` subject, and the fleet's branch update left a merge of main as the head commit.
+
+test("a build(deps) bump and its branch-update merge are admitted", () => {
+  const ref = "dependabot/npm_and_yarn/ip-address-10.7.2";
+  assert.equal(isDependencyBumpHead({ headRef: ref, subject: "build(deps): bump ip-address from 10.7.0 to 10.7.2", changedPaths: MANIFESTS }), true);
+  assert.equal(isDependencyBumpHead({ headRef: ref, subject: `Merge branch 'main' into ${ref}`, changedPaths: MANIFESTS }), true);
+});
+
+test("a merge into a different branch, or one that touches src, is still refused", () => {
+  const ref = "dependabot/npm_and_yarn/ip-address-10.7.2";
+  assert.equal(isDependencyBumpHead({ headRef: ref, subject: "Merge branch 'main' into dependabot/npm_and_yarn/other", changedPaths: MANIFESTS }), false);
+  assert.equal(isDependencyBumpHead({ headRef: ref, subject: `Merge branch 'main' into ${ref}`, changedPaths: ["package-lock.json", "src/lib/review.ts"] }), false);
+});
