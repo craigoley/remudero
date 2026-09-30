@@ -92,11 +92,11 @@ export function readModelSwitchesPath(stateDir: string): string {
 }
 
 /**
- * Reads the kill-switch file. An absent file is the defaults. A file that exists but does not
- * parse is `{ ok: false }` with its reason, so the caller keeps the switches it last read: an
- * operator's half-written "off" must never read as "on".
+ * Reads the kill-switch file. An absent file is the defaults, every view dark, with `absent` saying
+ * so. A file that exists but does not parse is `{ ok: false }` with its reason: the worker keeps the
+ * projector switch it last read, and serve's routes go dark, so a half-written "off" never reads as "on".
  */
-export function readReadModelSwitches(path: string): { ok: true; switches: ReadModelSwitches; mtimeMs: number } | { ok: false; reason: string } {
+export function readReadModelSwitches(path: string): { ok: true; switches: ReadModelSwitches; mtimeMs: number; absent?: string } | { ok: false; reason: string } {
   let text: string;
   let mtimeMs: number;
   let fd: number | undefined;
@@ -113,7 +113,7 @@ export function readReadModelSwitches(path: string): { ok: true; switches: ReadM
     }
     mtimeMs = Number(before.mtimeNs) / 1_000_000;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, switches: DEFAULT_READ_MODEL_SWITCHES, mtimeMs: 0 };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, switches: DEFAULT_READ_MODEL_SWITCHES, mtimeMs: 0, absent: `no switch file at ${path}` };
     return { ok: false, reason: `switch file unreadable: ${(error as Error).message}` };
   } finally {
     if (fd !== undefined) closeSync(fd);
@@ -350,9 +350,11 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const got = acquireLease(slot.db, { holder, clock });
     if (!got.ok) {
       slot.lease = undefined;
+      if (slot.state.heldBy !== `${got.pid}@${got.host}`) log("read_model.lease_elsewhere", { instance: slot.instance.name, heldBy: got.heldBy, pid: got.pid, host: got.host, expiresMs: got.expiresMs });
       Object.assign(slot.state, { lease: "elsewhere", heldBy: `${got.pid}@${got.host}`, reason: `lease held by pid ${got.pid} on ${got.host}` });
       return false;
     }
+    if (slot.state.lease !== "held") log("read_model.lease_acquired", { instance: slot.instance.name, holder, was: slot.state.lease });
     if (!slot.projector) {
       const db = slot.db;
       withWriteTransaction(db, got.lease, () => db.exec(VIEW_BODY_DDL));
@@ -376,7 +378,12 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       const result = slot.projector!.tick();
       const db = slot.db!;
       const newest = db.prepare("SELECT max(ts_ms) AS m FROM seen WHERE ts_ms > 0 AND ts_ms <= ?").get(now + FUTURE_ROW_TOLERANCE_MS)?.m;
-      Object.assign(slot.state, { tickedAt: now, generation: Number(db.meta("generation")), failures: 0, newestTs: newest == null ? null : fixedClock(Number(newest)).iso() });
+      // Stamped when the tick COMPLETED: a catch-up tick is judged from its end, not from its start.
+      const tickedAt = clock.now();
+      if (tickedAt - now > READ_MODEL_LEDGER_STALE_MS) {
+        log("read_model.slow_tick", { instance: slot.instance.name, ms: tickedAt - now, transactions: result.transactions, archivesRead: result.archivesRead, liveRestarted: result.liveRestarted });
+      }
+      Object.assign(slot.state, { tickedAt, generation: Number(db.meta("generation")), failures: 0, newestTs: newest == null ? null : fixedClock(Number(newest)).iso() });
       delete slot.state.reason;
       if (result.unread.length > 0) slot.state.reason = `unread archives: ${result.unread.join("; ")}`;
       slot.backoffUntil = 0;
@@ -661,10 +668,13 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   opts.log?.("read_model.warm_boot", { bodies: warm.bodies.length, ...(warm.reason ? { reason: warm.reason } : {}) });
   const switchesPath = readModelSwitchesPath(opts.stateDir);
   let mainSwitches = DEFAULT_READ_MODEL_SWITCHES;
+  let darkReason: string | undefined;
   const refreshSwitches = (): void => {
     const read = readReadModelSwitches(switchesPath);
-    if (read.ok) mainSwitches = read.switches;
-    else opts.log?.("read_model.switch_unreadable", { reason: read.reason, kept: mainSwitches });
+    mainSwitches = read.ok ? read.switches : { projector: mainSwitches.projector, views: {} };
+    const reason = read.ok ? read.absent : read.reason;
+    if (reason !== undefined && reason !== darkReason) opts.log?.(read.ok ? "read_model.switch_absent" : "read_model.switch_unreadable", { reason, views: "dark" });
+    darkReason = reason;
   };
   refreshSwitches();
   let stopSwitchWatch: () => void = () => {};
