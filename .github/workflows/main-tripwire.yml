@@ -28,6 +28,10 @@ name: main-tripwire
 on:
   push:
     branches: [main]
+  # W1-T4817: the sweep dispatches this at main's head for a commit GitHub fired no push event for.
+  # A dispatch carries no `github.event.before`, so the range step below falls back to
+  # `${AFTER}^..${AFTER}` — the head commit's own diff, the same best-effort subset.
+  workflow_dispatch:
 
 permissions:
   contents: read

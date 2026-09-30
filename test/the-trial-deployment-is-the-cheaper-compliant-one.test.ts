@@ -41,6 +41,7 @@ const MOUNTS = join(REPO_ROOT, ".remudero", "mounts.yaml");
 const NANO = "gpt-5-nano";
 const OSS = "gpt-oss-120b";
 const LUNA = "gpt-5.6-luna";
+const LUNA6 = "gpt-6-luna";
 const TERRA = "gpt-5.6-terra";
 
 function ladder(): Record<string, Record<string, string[]>> {
@@ -66,14 +67,15 @@ test("the openweight ladder leads each row with the deployment measured cheaper 
   const rows = ladder();
 
   // W1-T3614: the LEAD differs by capability because the winner differs by input:output ratio.
-  // economy = short-prompt, high-volume (the zero-tool judges); balanced = large-context lanes.
-  const leadFor = { economy: OSS, balanced: NANO } as const;
+  // economy = short-prompt, high-volume (the zero-tool judges). W1-T3570 (2026-09-30): balanced is led
+  // by gpt-6-luna on draft QUALITY — nano's slim-prompt drafts were lint-clean 25% — and nano trails.
+  const leadFor = { economy: OSS, balanced: LUNA6 } as const;
 
   for (const capability of ["economy", "balanced"] as const) {
     for (const effort of ["low", "medium", "high"] as const) {
       const row = rows[capability]?.[effort];
       const lead = leadFor[capability];
-      const trail = lead === NANO ? OSS : NANO;
+      const trail = NANO; // nano trails the lead in both rows: behind gpt-oss (economy) and gpt-6-luna (balanced)
       assert.ok(Array.isArray(row), `${capability}.${effort} must be an ordered candidate list`);
       assert.equal(row[0], lead, `${capability}.${effort} must LEAD with the deployment measured cheaper for its prompt shape`);
       // THE FALLBACK ARMS. Without these, deleting a trailing deployment would pass — and that is
@@ -101,7 +103,7 @@ test("the openweight ladder leads each row with the deployment measured cheaper 
   // about YAML that nothing reads.
   const capabilities = { openweight: rows } as never;
   assert.equal(openWeightCandidatesForCapability(capabilities, "economy", "low")[0], OSS);
-  assert.equal(openWeightCandidatesForCapability(capabilities, "balanced", "high")[0], NANO);
+  assert.equal(openWeightCandidatesForCapability(capabilities, "balanced", "high")[0], LUNA6);
   assert.deepEqual(openWeightCandidatesForCapability(capabilities, "frontier", "medium"), ["gpt-6-luna", LUNA, TERRA]);
 });
 
@@ -198,7 +200,7 @@ test("the code fallback and the mounts ladder name one leading deployment", () =
 
   // The divergence this guards is DIRECTIONAL: if they disagreed, the tableless checkout would route
   // the DEARER deployment while the configured fleet routed the cheaper, and nothing would say so.
-  // W1-T3614: economy's lead is gpt-oss (short prompts), balanced's is nano (large context). Both
+  // W1-T3614: economy's lead is gpt-oss (short prompts); W1-T3570: balanced's is gpt-6-luna (draft quality). Both
   // are pinned here so a tableless checkout cannot quietly adopt a single lead for every capability.
   // frontier's lead is gpt-5.6-luna, which replaced gpt-5-mini outright (cheaper on both
   // axes, 0 reasoning tokens where mini spent 64 of 76). gpt-5.6-terra is the ESCALATION behind it,
@@ -206,6 +208,6 @@ test("the code fallback and the mounts ladder name one leading deployment", () =
   assert.equal(openWeightCandidatesForCapability(undefined, "economy", "low")[0], OSS);
   assert.ok(openWeightCandidatesForCapability(undefined, "economy", "low").includes(NANO), "the fallback keeps gpt-5-nano reachable too");
   assert.ok(openWeightCandidatesForCapability(undefined, "economy", "low").includes(LUNA), "the fallback keeps Luna reachable for a cash squeeze too");
-  assert.equal(openWeightCandidatesForCapability(undefined, "balanced", "high")[0], NANO);
+  assert.equal(openWeightCandidatesForCapability(undefined, "balanced", "high")[0], LUNA6);
   assert.deepEqual(openWeightCandidatesForCapability(undefined, "frontier", "high"), ["gpt-6-luna", LUNA, TERRA]);
 });

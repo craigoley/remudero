@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 70.00
   rationale: "OPERATOR RULING on state/recon-production-path-proofs.md, 2026-08-05: adopt the NARROW
@@ -84,7 +84,7 @@
   files: [MASTER-PLAN.md, src/lib/reachability.ts, src/lib/review.ts, test/ships-unwired-floor.test.ts]
   status: queued
   attempts: 0
-  note: "verify:human REQUIRED BY W1-T353, not chosen for convenience: this task's deliverable is a
+  note: "OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, 'the verify-human queue, cleared'): CONFIRMED — build the gate as an answerable refusal that reuses the existing SHIPS-UNWIRED: / WIRED-AT: markers, never an unanswerable block. verify:human REQUIRED BY W1-T353, not chosen for convenience: this task's deliverable is a
     RULING — an amendment to a standing rule — and W1-T353's linter refuses a ruling-shaped task that
     is not verify:human. The gate half is machine-checkable; the rule half is a judgement about what
     the fleet is permitted to accept as proof, and that is the operator's to confirm.

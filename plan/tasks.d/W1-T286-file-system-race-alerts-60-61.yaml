@@ -79,6 +79,7 @@
   origin: feedback#fb-alert-craigoley-remudero-code-scanning-61
   plan_refs: ["§5", "§5D", "§7B"]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   note: "WITHDRAWN AS FILED — see rationale. Refused at drain.ts:127 before the dependency check, and
     assertRunnable (plan.ts:386) throws quoting this note, so a console Run refuses loudly.

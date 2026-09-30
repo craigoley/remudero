@@ -79,6 +79,9 @@ export interface RawAlert {
   ruleId?: string;
   toolName?: string;
   ruleTags?: string[];
+  /** Code-scanning's most recent instance; absent when GitHub supplies no file path. */
+  location?: { path: string; startLine?: number; endLine?: number };
+  instanceMessage?: string;
 }
 
 /** `${source}-${id}` — the escalation taskId AND the dedup key ({@link alertTaskId}). */
@@ -108,7 +111,17 @@ export function alertFeedbackId(owner: string, repo: string, alert: Pick<RawAler
 
 /** One `plan/feedback/<id>.yaml` `raw` body per alert (mirrors issues-intake.ts's `renderIssueRaw`). */
 export function renderAlertRaw(owner: string, repo: string, alert: RawAlert): string {
-  return `${owner}/${repo} ${alert.source} alert #${alert.id} [${alert.severity}]: ${alert.summary}\n\n${alert.url}`.trim();
+  const base = `${owner}/${repo} ${alert.source} alert #${alert.id} [${alert.severity}]: ${alert.summary}\n\n${alert.url}`.trim();
+  const location = alert.location;
+  const path = location?.path;
+  const lineSuffix = location?.startLine !== undefined
+    ? `:${location.startLine}${location.endLine === undefined ? "" : `-${location.endLine}`}`
+    : location?.endLine !== undefined ? ` (end line ${location.endLine})` : "";
+  const lines = path === undefined ? [] : [
+    `${path}${lineSuffix}`,
+  ];
+  if (alert.instanceMessage !== undefined) lines.push(alert.instanceMessage);
+  return lines.length === 0 ? base : `${base}\n\n${lines.join("\n")}`;
 }
 
 // ── Normalizers: GitHub's three alert-list response shapes → RawAlert ──────
@@ -120,6 +133,10 @@ export interface GhCodeScanningAlertJson {
   html_url?: string;
   rule?: { id?: string; description?: string; security_severity_level?: string; severity?: string; tags?: string[] };
   tool?: { name?: string };
+  most_recent_instance?: {
+    location?: { path?: string; start_line?: number; end_line?: number };
+    message?: { text?: string };
+  };
 }
 
 /**
@@ -141,6 +158,11 @@ export function normalizeCodeScanningAlert(raw: GhCodeScanningAlertJson): RawAle
           : raw.rule?.severity === "note" || raw.rule?.severity === "recommendation"
             ? "low"
             : "unknown";
+  const instance = raw.most_recent_instance;
+  const location = instance?.location;
+  const path = location?.path;
+  const startLine = location?.start_line;
+  const endLine = location?.end_line;
   return {
     source: "code-scanning",
     id: String(raw.number ?? "?"),
@@ -152,6 +174,12 @@ export function normalizeCodeScanningAlert(raw: GhCodeScanningAlertJson): RawAle
     ruleId: raw.rule?.id,
     toolName: raw.tool?.name,
     ruleTags: raw.rule?.tags,
+    ...(typeof path === "string" && path.length > 0 ? { location: {
+      path,
+      ...(typeof startLine === "number" && Number.isSafeInteger(startLine) && startLine > 0 ? { startLine } : {}),
+      ...(typeof endLine === "number" && Number.isSafeInteger(endLine) && endLine > 0 ? { endLine } : {}),
+    } } : {}),
+    ...(typeof instance?.message?.text === "string" ? { instanceMessage: instance.message.text } : {}),
   };
 }
 

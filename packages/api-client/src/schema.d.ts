@@ -26,6 +26,65 @@ export interface components {
         reason: string;
       })[];
     };
+    /** action-handoff-v1 preview (W1-T4559). Non-mutating; names the exact target, write tier, consequence, expiry, and recovery verb. The confirmationId is single-use and bound to the verified operator who prepared it. */
+    OperatorAgentActionHandoffPreview: {
+      version: "action-handoff-v1";
+      confirmationId: string;
+      intentId: string;
+      verb: "fleet.pause" | "fleet.resume";
+      capability: string;
+      target: {
+        kind: "fleet-control";
+        instance: string;
+        repository: string;
+        state: {
+          paused: boolean;
+          stopped: boolean;
+        };
+      };
+      tier: "low" | "middle";
+      consequence: {
+        risk: "low" | "medium";
+        reversible: boolean;
+        summary: string;
+      };
+      recovery: {
+        verb: string;
+        capability: string;
+        plan: string;
+      };
+      preparedAt: string;
+      expiresAt: string;
+      mutated: boolean;
+      confirmation: "explicit-operator-confirmation-required";
+      existing?: boolean;
+    };
+    /** The one attributable receipt for a claimed confirmation. `unresolved` means the external outcome is not certified; it is never a success and never an invitation to retry. */
+    OperatorAgentActionHandoffReceipt: {
+      version: "action-handoff-v1";
+      receiptId: string;
+      confirmationId: string;
+      intentId: string;
+      verb: string;
+      capability: string;
+      instance: string;
+      repository: string;
+      actorHash: string;
+      outcome: "succeeded" | "refused" | "unresolved";
+      code: string;
+      reason: string;
+      at: string;
+      automationReceiptId?: string;
+      evidenceRef?: string;
+    };
+    /** A typed refusal; no target was written. A replay names the one stored receipt. */
+    OperatorAgentActionHandoffRefusal: {
+      version: "action-handoff-v1";
+      outcome: "refused" | "unresolved";
+      code: string;
+      detail?: string;
+      receipt?: OperatorAgentActionHandoffReceipt;
+    };
     InstanceUnavailable: {
       error: "instance_unavailable";
       status: "unavailable";
@@ -3478,6 +3537,33 @@ export interface paths {
           "400": Error;
           "401": Error;
           "403": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/action-handoff/prepare": {
+    post: {
+      responses: {
+          "200": OperatorAgentActionHandoffPreview;
+          "201": OperatorAgentActionHandoffPreview;
+          "400": OperatorAgentActionHandoffRefusal;
+          "401": Error;
+          "403": OperatorAgentActionHandoffRefusal;
+          "409": OperatorAgentActionHandoffRefusal;
+          "503": OperatorAgentActionHandoffRefusal;
+        };
+    };
+  };
+  "/v1/operator-agent/action-handoff/execute": {
+    post: {
+      responses: {
+          "200": OperatorAgentActionHandoffReceipt;
+          "202": OperatorAgentActionHandoffReceipt;
+          "400": OperatorAgentActionHandoffRefusal;
+          "401": Error;
+          "403": OperatorAgentActionHandoffRefusal;
+          "404": OperatorAgentActionHandoffRefusal;
+          "409": OperatorAgentActionHandoffRefusal;
+          "503": OperatorAgentActionHandoffRefusal;
         };
     };
   };
