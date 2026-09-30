@@ -349,3 +349,19 @@ test("the repositories source publisher writes only on change and logs a failed 
   stop();
   assert.deepEqual(logs, ["read_model.repositories_sources_failed"]);
 });
+
+test("an unreadable registry or a half-written sources file is named and never guessed", async (t) => {
+  const f = fixture(t);
+  const missing = { ...f.sources[0], options: { ...f.sources[0].options, repoRegistryPath: join(f.root, "no-registry.yaml") } };
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => [missing] })();
+  const run = ticker(f);
+  const core = repositories(run.tick()).instances[0].summary!;
+  run.release();
+  assert.deepEqual(core.registry, { state: "unavailable", reason: "unreadable" });
+  assert.deepEqual(core, await legacySummary(missing.options), "the route names the same reason");
+
+  writeFileSync(join(f.stateDir, "read-model", "repositories-sources.json"), "{\"instances\": [");
+  const torn = ticker(f, { holder: "serve-b" });
+  assert.match(repositories(torn.tick()).reason ?? "", /not published/);
+  torn.release();
+});
