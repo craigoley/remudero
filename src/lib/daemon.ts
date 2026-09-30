@@ -81,6 +81,7 @@ import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
 import {
   trackStaleReviewerSkipRecurrence,
   renderHeldReviewQueueBlocker,
+  type StaleReviewerRecurrenceAction,
   type StaleReviewerRecurrenceState,
   type StaleReviewerSkipObservation,
 } from "./sweep.js";
@@ -1557,11 +1558,18 @@ interface InFlightTickerOwner {
   generation: number;
   phase: "dispatch" | "retro" | "sweep";
   headroomSampler?: { lastSampleMs: number; clock: Clock; policy: HeadroomPolicy; enforced: boolean };
+  /** Read per tick, so a dispatch taking over a background sweep's runner also takes its retrigger (W1-T4998). */
+  sweepRetrigger?: SweepRetrigger;
+  /** W1-T4998: a background sweep still holding the runner a dispatch took over. Whichever of the two
+   *  stops first leaves it to the other, so a pass that outlives the dispatch keeps its heartbeat. */
+  sweepHold?: Pick<InFlightTickerOwner, "generation" | "headroomSampler" | "sweepRetrigger">;
   ticker?: Promise<void>;
   stop(generation: number): Promise<void>;
 }
 
 let inFlightTickerOwner: InFlightTickerOwner | undefined;
+/** Process-wide, so a generation handed back to a sweep's hold is never issued to a later holder. */
+let inFlightTickerGenerations = 0;
 
 /** The most stale the account-headroom reading may be before the in-flight ticker takes its own. The
  * governor sampled on the loop whose duration it was meant to bound: the reading is written once per
@@ -1586,21 +1594,43 @@ function startInFlightTicker(
 ): { stop: () => Promise<void> } {
   // W1-T3181: dispatch takes over a same-tick retro's ONE runner. Incrementing the generation makes
   // the retro's eventual stop inert, so it cannot turn off the dispatch clock after the handoff.
+  // W1-T4998: the same takeover applies to a background full sweep's runner.
   if (inFlightTickerOwner) {
-    if (phase !== "dispatch" || inFlightTickerOwner.phase !== "retro") return { stop: async () => {} };
+    if (phase !== "dispatch" || inFlightTickerOwner.phase === "dispatch") return { stop: async () => {} };
+    if (inFlightTickerOwner.phase === "sweep") {
+      const { generation: held, headroomSampler: heldSampler, sweepRetrigger: heldRetrigger } = inFlightTickerOwner;
+      inFlightTickerOwner.sweepHold = { generation: held, headroomSampler: heldSampler, sweepRetrigger: heldRetrigger };
+    }
     inFlightTickerOwner.phase = "dispatch";
     inFlightTickerOwner.headroomSampler = headroomSampler;
-    const generation = ++inFlightTickerOwner.generation;
+    inFlightTickerOwner.sweepRetrigger = sweepRetrigger;
+    const generation = (inFlightTickerOwner.generation = ++inFlightTickerGenerations);
     const owner = inFlightTickerOwner;
     return { stop: () => owner.stop(generation) };
   }
   const owner: InFlightTickerOwner = {
     active: true,
-    generation: 0,
+    generation: ++inFlightTickerGenerations,
     phase,
     headroomSampler,
+    sweepRetrigger,
     stop: async (generation) => {
-      if (inFlightTickerOwner !== owner || owner.generation !== generation) return;
+      if (inFlightTickerOwner !== owner) return;
+      const hold = owner.sweepHold;
+      if (hold && generation === hold.generation && generation !== owner.generation) {
+        owner.sweepHold = undefined; // the pass settled first: the dispatch's stop now ends the runner
+        return;
+      }
+      if (owner.generation !== generation) return;
+      if (hold) {
+        // The dispatch ended first: the runner returns to the pass still running, with its own stop.
+        owner.sweepHold = undefined;
+        owner.phase = "sweep";
+        owner.generation = hold.generation;
+        owner.headroomSampler = hold.headroomSampler;
+        owner.sweepRetrigger = hold.sweepRetrigger;
+        return;
+      }
       owner.active = false;
       // Release the global slot THE INSTANT this stop is accepted, never deferred until the
       // ticker's own loop notices `active = false` and its outstanding iteration finishes. A
@@ -1639,7 +1669,7 @@ function startInFlightTicker(
           // when the ticker owns the retrigger. The nested ticker inside a full pass stays on the ordinary
           // clock, so an event arriving then remains pending for one later accepted pass (W1-T2568).
           const tickDueAtMs = daemonClock.now() + pollIntervalMs;
-          const waitResult = await (sweepRetrigger ? (deps.sleepUntilSweepWake ?? deps.sleep) : deps.sleep)(pollIntervalMs);
+          const waitResult = await (owner.sweepRetrigger ? (deps.sleepUntilSweepWake ?? deps.sleep) : deps.sleep)(pollIntervalMs);
           reportLoopLag(
             { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: daemonClock.now(), intervalMs: pollIntervalMs },
             log,
@@ -1737,6 +1767,7 @@ function startInFlightTicker(
           // of 38.5 minutes got one full pass for that whole span (W1-T1272). Holds are read here on every
           // tick, so an operator's halt withholds a new pass but can never abort the phase's own running work;
           // the elapsed budget keeps accruing while held (W1-T2519). Forensics: docs/forensics/daemon.md.
+          const sweepRetrigger = owner.sweepRetrigger;
           if (sweepRetrigger && deps.sweep) {
             const nowMs = daemonClock.now();
             const last = sweepRetrigger.state.lastRunAtMs;
@@ -2304,6 +2335,13 @@ export async function runDaemon(
   // the first pass of this process's life runs unconditionally (W1-T1272). One liveness flag for this daemon's whole
   // life, shared by every route; per-process scope is the correct scope (W1-T2582).
   const sweepLiveness: SweepLiveness = { inFlight: false };
+  // W1-T4998 — the tick's full pass runs in the BACKGROUND, so admission never waits behind it (a pass
+  // measured 12.5 min on 2026-09-30). `backgroundSweep` is the outstanding `runGatedSweep` call, cleared
+  // the moment it returns; each completed pass is queued once and consumed, in order, by the next tick.
+  let backgroundSweep: Promise<void> | undefined;
+  const completedSweeps: Array<{ outcome: SweepCycleOutcome | undefined; durationMs: number }> = [];
+  let latestSweepOutcome: SweepCycleOutcome | undefined;
+  let staleReviewerAction: StaleReviewerRecurrenceAction = { kind: "silent" };
   const sweepRetriggerState: { lastRunAtMs: number | undefined } = { lastRunAtMs: undefined };
   const sweepRetrigger: SweepRetrigger = {
     sweepWallClockBoundMs,
@@ -2606,7 +2644,10 @@ export async function runDaemon(
     }
     // Every stale exit reaches the same bounded full-pass gate before returning. The restart is never
     // suppressed by the pass, and no second implementation is introduced (W1-T1272).
-    if (deps.sweep) {
+    // W1-T4998: a background pass still running IS that pass; its call returns within the same bound.
+    if (backgroundSweep) {
+      await backgroundSweep;
+    } else if (deps.sweep) {
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
       await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
     }
@@ -2912,6 +2953,7 @@ export async function runDaemon(
     // daemon stayed alive, and the freshness judges read a false FAIL. Placed as literally the first statement
     // of the loop body so no branch below can skip it (W1-T1274).
     log("daemon.tick", { poll_interval_ms: pollIntervalMs });
+    const tickStartedAtMs = daemonClock.now();
     idleLaneTickCause = undefined;
 
     if (opts.max !== undefined && attempted.length >= opts.max) {
@@ -3088,87 +3130,100 @@ export async function runDaemon(
     // and take its gated action, alongside dispatch rather than instead of it (W1-T77, ratifies P22).
     // Best-effort in code, not just prose: this loop's only try/catch wraps the dispatch below, so an
     // unreachable GitHub used to propagate out of the process (W1-T513). Forensics: docs/forensics/daemon.md.
-    // W1-T3618: captured so a mid-pass reviewer-code freshness discovery reaches the pre-admission
-    // re-check below — see that check's own comment for why THIS tick's sweep is the only one read.
-    let sweepCycleOutcome: SweepCycleOutcome | undefined;
-    if (deps.sweep) {
+    // W1-T4998: STARTED here and never awaited; a call still outstanding from an earlier tick is left
+    // to finish, and a pass abandoned by its bound is declined by the gate's own liveness check. The
+    // turn first lets a call already returning (an abandonment mid-`finally`) clear itself.
+    if (deps.sweep) await new Promise<void>((resolve) => setImmediate(resolve));
+    if (deps.sweep && !backgroundSweep) {
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
-      sweepCycleOutcome = await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
+      const passStartedAtMs = daemonClock.now();
+      const pass = runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness)
+        .then((outcome) => {
+          completedSweeps.push({ outcome, durationMs: Math.max(0, daemonClock.now() - passStartedAtMs) });
+          if (backgroundSweep === pass) backgroundSweep = undefined;
+        });
+      backgroundSweep = pass;
     }
-
-    // W1-T3691 — this pass's own recurrence verdict, computed ONCE per tick and consulted by both
-    // the idle branch and the pre-admission re-check below, so the two can never disagree about
-    // whether THIS tick's reading is a first sighting, a held repeat, a sustained recurrence
-    // asking for a restart, or a returned-on-the-same-sha needing a human. Does NOT itself commit
-    // `restartRequested` — see `requestStaleReviewerRestart` below for why that commit is deferred
-    // to the point a restart is genuinely acted on, never merely decided.
-    const staleReviewerObservation: StaleReviewerSkipObservation | undefined = sweepCycleOutcome?.reviewerCodeStale
-      ? { codeSha: sweepCycleOutcome.reviewerCodeStale.oldSha, originMainSha: sweepCycleOutcome.reviewerCodeStale.newSha }
-      : undefined;
-    const staleReviewerVerdict = trackStaleReviewerSkipRecurrence(staleReviewerObservation, staleReviewerRecurrence);
-    staleReviewerRecurrence = staleReviewerVerdict.state;
-    const staleReviewerAction = staleReviewerVerdict.action;
-    if (staleReviewerAction.kind === "held") {
-      // (design iii) visible before it is acted on: a repeat below the restart streak still
-      // renders, so the operator can read the cause without tailing the ledger.
-      log("review.stale_reviewer_held", {
-        code_sha: staleReviewerAction.codeSha,
-        origin_main_sha: staleReviewerAction.originMainSha,
-        streak: staleReviewerAction.streak,
-        description: renderHeldReviewQueueBlocker({
-          kind: "held_review_queue",
-          codeSha: staleReviewerAction.codeSha,
-          originMainSha: staleReviewerAction.originMainSha,
-          prNumbers: staleReviewerObservation?.prNumbers ?? [],
+    // One scheduler turn, so a pass that settles at once is read by the tick that started it.
+    if (deps.sweep) await new Promise<void>((resolve) => setImmediate(resolve));
+    // W1-T3618: the MOST RECENT COMPLETED pass feeds the pre-admission re-check below. W1-T3691: its
+    // recurrence verdict is computed once per completed pass — never once per tick, which would count one
+    // stale reading as a streak — and consulted by both the idle branch and that re-check, so the two can
+    // never disagree. Does NOT itself commit `restartRequested`; see `requestStaleReviewerRestart`.
+    const passesThisTick = deps.sweep ? completedSweeps.splice(0) : [{ outcome: undefined, durationMs: 0 }];
+    let sweepMsThisTick: number | null = null;
+    for (const completed of passesThisTick) {
+      if (deps.sweep) sweepMsThisTick = completed.durationMs;
+      latestSweepOutcome = completed.outcome;
+      const staleReviewerObservation: StaleReviewerSkipObservation | undefined = completed.outcome?.reviewerCodeStale
+        ? { codeSha: completed.outcome.reviewerCodeStale.oldSha, originMainSha: completed.outcome.reviewerCodeStale.newSha }
+        : undefined;
+      const staleReviewerVerdict = trackStaleReviewerSkipRecurrence(staleReviewerObservation, staleReviewerRecurrence);
+      staleReviewerRecurrence = staleReviewerVerdict.state;
+      staleReviewerAction = staleReviewerVerdict.action;
+      if (staleReviewerAction.kind === "held") {
+        // (design iii) visible before it is acted on: a repeat below the restart streak still
+        // renders, so the operator can read the cause without tailing the ledger.
+        log("review.stale_reviewer_held", {
+          code_sha: staleReviewerAction.codeSha,
+          origin_main_sha: staleReviewerAction.originMainSha,
           streak: staleReviewerAction.streak,
-        }),
-      });
-    } else if (staleReviewerAction.kind === "needs_human" && staleReviewerNeedsHumanSha !== staleReviewerAction.codeSha) {
-      staleReviewerNeedsHumanSha = staleReviewerAction.codeSha;
-      log("review.stale_reviewer_needs_human", {
-        code_sha: staleReviewerAction.codeSha,
-        origin_main_sha: staleReviewerAction.originMainSha,
-        reason: staleReviewerAction.reason,
-      });
-      // Same backstop discipline as `onStarvation`'s own catch: a failed notification costs one
-      // logged line, never the daemon's liveness.
-      try {
-        await deps.onStaleReviewerNeedsHuman?.({
-          codeSha: staleReviewerAction.codeSha,
-          originMainSha: staleReviewerAction.originMainSha,
+          description: renderHeldReviewQueueBlocker({
+            kind: "held_review_queue",
+            codeSha: staleReviewerAction.codeSha,
+            originMainSha: staleReviewerAction.originMainSha,
+            prNumbers: staleReviewerObservation?.prNumbers ?? [],
+            streak: staleReviewerAction.streak,
+          }),
+        });
+      } else if (staleReviewerAction.kind === "needs_human" && staleReviewerNeedsHumanSha !== staleReviewerAction.codeSha) {
+        staleReviewerNeedsHumanSha = staleReviewerAction.codeSha;
+        log("review.stale_reviewer_needs_human", {
+          code_sha: staleReviewerAction.codeSha,
+          origin_main_sha: staleReviewerAction.originMainSha,
           reason: staleReviewerAction.reason,
         });
-      } catch (e) {
-        log("daemon.escalation.failed", { task: "daemon", error: String((e as Error)?.message ?? e) });
+        // Same backstop discipline as `onStarvation`'s own catch: a failed notification costs one
+        // logged line, never the daemon's liveness.
+        try {
+          await deps.onStaleReviewerNeedsHuman?.({
+            codeSha: staleReviewerAction.codeSha,
+            originMainSha: staleReviewerAction.originMainSha,
+            reason: staleReviewerAction.reason,
+          });
+        } catch (e) {
+          log("daemon.escalation.failed", { task: "daemon", error: String((e as Error)?.message ?? e) });
+        }
       }
     }
+    const sweepCycleOutcome = latestSweepOutcome;
+    const tickStaleReviewerAction = staleReviewerAction;
     // Marks `restartRequested` and ledgers `review.stale_reviewer_restart_requested` — the marker
     // `priorStaleReviewerRecurrenceState` reads back at a future boot — ONLY when a caller below
     // actually reaches this, i.e. only when the restart is genuinely about to be requested. Calling
     // this to merely COMPUTE whether this tick is stale (as opposed to acting on it) would mark a
     // restart that never happened, corrupting the very falsifier design (v) exists to hold.
     const requestStaleReviewerRestart = (): Extract<DaemonFreshness, { stale: true }> | undefined => {
-      if (staleReviewerAction.kind !== "restart") return undefined;
+      if (tickStaleReviewerAction.kind !== "restart") return undefined;
       staleReviewerRecurrence = staleReviewerRecurrence
         ? { ...staleReviewerRecurrence, restartRequested: true }
         : staleReviewerRecurrence;
       log("review.stale_reviewer_restart_requested", {
-        code_sha: staleReviewerAction.codeSha,
-        origin_main_sha: staleReviewerAction.originMainSha,
-        streak: staleReviewerAction.streak,
+        code_sha: tickStaleReviewerAction.codeSha,
+        origin_main_sha: tickStaleReviewerAction.originMainSha,
+        streak: tickStaleReviewerAction.streak,
       });
-      return { stale: true, oldSha: staleReviewerAction.codeSha, newSha: staleReviewerAction.originMainSha };
+      return { stale: true, oldSha: tickStaleReviewerAction.codeSha, newSha: tickStaleReviewerAction.originMainSha };
     };
 
-    // The clock that spans the former gap. The full pass above owns its own ticker, so this starts only
-    // after that await returns and the two restricted passes never overlap by construction. It stays
-    // live across the reconciliation rungs below and is stopped before a phase ticker or an idle wait
-    // takes ownership of the clock (W1-T2852).
-    let interphaseReviewClock: InterphaseReviewClock | undefined = startInterphaseReviewClock(
-      deps,
-      pollIntervalMs,
-      log,
-    );
+    // The clock that spans the former gap. It stays live across the reconciliation rungs below and is
+    // stopped before a phase ticker or an idle wait takes ownership of the clock (W1-T2852). W1-T4998: a
+    // background pass's own ticker already runs the light pass, so the clock starts only when no such
+    // runner holds the slot, and the two restricted passes still never overlap.
+    const backgroundSweepOwnsTheTicker = (): boolean => inFlightTickerOwner?.phase === "sweep";
+    let interphaseReviewClock: InterphaseReviewClock | undefined = backgroundSweepOwnsTheTicker()
+      ? undefined
+      : startInterphaseReviewClock(deps, pollIntervalMs, log);
     let interphaseEventWakeSeen = false;
     const stopInterphaseReviewClock = async (): Promise<boolean> => {
       const clock = interphaseReviewClock;
@@ -3180,11 +3235,12 @@ export async function runDaemon(
       return interphaseEventWakeSeen;
     };
     const restartInterphaseReviewClock = (): void => {
-      if (!interphaseReviewClock) {
+      if (!interphaseReviewClock && !backgroundSweepOwnsTheTicker()) {
         interphaseReviewClock = startInterphaseReviewClock(deps, pollIntervalMs, log);
       }
     };
 
+    const cadencesStartedAtMs = daemonClock.now();
     // Orphan sweep, on the same once-per-iteration cadence as the reconciler above; boot already runs it
     // once. Best-effort: a process-listing hiccup costs one logged tick (W1-T117 part ii).
     if (deps.sweepOrphans) {
@@ -3474,6 +3530,16 @@ export async function runDaemon(
         log("board_review.skipped", { reason: boardDecision.reason, retiredProposalIds: boardDecision.retiredProposalIds ?? [] });
       }
     }
+    const msInCadences = Math.max(0, daemonClock.now() - cadencesStartedAtMs);
+    // W1-T4998: one row per tick that reaches the admission decision, so its latency reads off the ledger.
+    const logTickPhases = (): void => {
+      log("daemon.tick_phases", {
+        ms_to_admission: Math.max(0, daemonClock.now() - tickStartedAtMs),
+        ms_in_sweep: sweepMsThisTick,
+        ms_in_cadences: msInCadences,
+        sweep_in_flight: sweepLiveness.inFlight,
+      });
+    };
 
     // Headroom: never hammer a nearly-exhausted pool. An at-or-near-limit reading gates new spawns
     // without halting the loop, because a supervisor restart-loops on any exit and exiting here would
@@ -3673,6 +3739,7 @@ export async function runDaemon(
     // immediately before the dispatch below (W1-T342). Forensics: docs/forensics/daemon.md.
     const tickGovernor = checkDispatchGovernors(deps, dailyCostCeilingUsd);
     if (tickGovernor) {
+      logTickPhases();
       ticks++;
       logDispatchGovernorDefer(tickGovernor, ticks);
       if (await stopInterphaseReviewClock()) continue;
@@ -3884,7 +3951,7 @@ export async function runDaemon(
       const pushedRunBranchesRaw = deps.readPushedRunBranches?.();
       const pushedRunBranches = pushedRunBranchesRaw !== undefined ? runBranchTaskIds(pushedRunBranchesRaw) : undefined;
       const pushedRunRefs: readonly PushedRunRef[] = pushedRunBranchesRaw !== undefined ? parsePushedRunRefs(pushedRunBranchesRaw) : [];
-      // W1-T4002 — THIS TICK'S OWN full sweep already proved these, if it ran one; see
+      // W1-T4002 — the most recent completed full sweep already proved these (W1-T4998); see
       // `SweepCycleOutcome.planOnlyRunBranchReceipts`'s doc for why no second GitHub read happens.
       const planOnlyReceiptsThisTick: readonly PlanOnlyRunBranchReceipt[] = sweepCycleOutcome?.planOnlyRunBranchReceipts ?? [];
       const orphanEvidenceThisTick: OrphanRunBranchEvidence | undefined = deps.readOrphanRunBranchEvidence?.();
@@ -4054,6 +4121,7 @@ export async function runDaemon(
       laneBudget = budget;
       dispatchSet = partition.dispatch;
     }
+    logTickPhases();
 
     // The auto-triage rung runs BEFORE the idle branch (operator ruling, reversing W1-T469). The starved
     // state is the idle state, and the gate W1-T469 served was circular: a deferral needs two eligible tasks
@@ -4350,7 +4418,7 @@ export async function runDaemon(
     // `daemon.freshness_deferred` log below, which IS reached) reads it.
     const selfFreshness = deps.checkFreshness?.();
     logNotStaleFreshness(selfFreshness);
-    const reviewerCodeStale = staleReviewerAction.kind === "restart" ? sweepCycleOutcome?.reviewerCodeStale : undefined;
+    const reviewerCodeStale = tickStaleReviewerAction.kind === "restart" ? sweepCycleOutcome?.reviewerCodeStale : undefined;
     const refetchedFreshness: DaemonFreshness | undefined =
       selfFreshness?.stale || !reviewerCodeStale
         ? selfFreshness
