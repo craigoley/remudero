@@ -1,0 +1,6 @@
+- id: commitlint-pr-title-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", src/run-task.ts]
+  fact: The commitlint gate checks the live PR title.
+  src: "ci-learning:7204:commitlint"
