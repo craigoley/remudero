@@ -36,7 +36,6 @@ import {
   type OperatorAgentSettings,
 } from "./operator-agent.js";
 import { READ_MODEL_DIRNAME, type ReadModelDb } from "./read-model-db.js";
-import type { ReadModelInstanceState, ReadModelView } from "./read-model-worker.js";
 import type { ViewDefinition, ViewSource } from "./views.js";
 
 export const NAV_BADGE_VIEW_VERSION = 1;
@@ -422,9 +421,13 @@ function operatorAgentFacts(folds: WeakMap<ReadModelDb, MemoryFold>, db: ReadMod
  * {@link navBadgeView}, with each instance's operator-agent history folded from its own read
  * model's `panel.*` facts, and its analytics from the slice serve persisted. One body for every
  * instance, and one per `?instances=<one>`. `ledgerSource` is the worker's own, passed in so this
- * module never imports the worker at runtime.
+ * module never imports the worker.
  */
-export function createNavBadgeReadModelView(ledgerSource: (state: ReadModelInstanceState, now: number) => ViewSource): ReadModelView {
+export function createNavBadgeReadModelView<S extends { instance: string; tickedAt?: number }>(ledgerSource: (state: S, now: number) => ViewSource): {
+  name: string;
+  version: number;
+  materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: NavBadgeData; sources: ViewSource[] }>;
+} {
   const folds = new WeakMap<ReadModelDb, MemoryFold>();
   const sourcesFile = mtimeCached(readNavBadgeSources);
   const classification = mtimeCached((path) => readClassificationSnapshot(dirname(path)));
@@ -439,7 +442,7 @@ export function createNavBadgeReadModelView(ledgerSource: (state: ReadModelInsta
         ...scope,
         memory: () => {
           const slot = instances.find((candidate) => candidate.state.instance === scope.instanceId);
-          if (!slot?.db) return { reason: "the read model does not project this instance" };
+          if (slot === undefined || slot.db === undefined) return { reason: "the read model does not project this instance" };
           if (slot.state.tickedAt === undefined) return { reason: "the read model has not projected this instance's ledger yet" };
           return { rows: operatorAgentFacts(folds, slot.db) };
         },
