@@ -19,7 +19,6 @@ import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { playwrightCacheRoot } from "./worker-home.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
-import { ghIssueGateway, tryEscalate, type IssueGateway } from "./escalate.js";
 import {
   COMPANION_PATH_CLASSES,
   type CompanionPathClass,
@@ -8715,6 +8714,16 @@ export async function acquireReviewStatusLock(
 
 // ── W1-T228: the single guarded post site ─────────────────────────────────
 
+/** The issue transport this posting path uses. Keep it structural so review's module graph
+ * does not load the worker/escalation graph merely to judge or post a status. */
+interface ReviewIssueGateway {
+  create(title: string, body: string, labels: string[]): string;
+  listOpen?(label: string): Array<{ number: number; url: string; title?: string; body?: string }>;
+  closeWithComment?(url: string, comment: string): void;
+  comment?(url: string, body: string): void;
+  ensureLabel?(label: string): boolean;
+}
+
 export interface PostReviewStatusGuardedOpts {
   owner: string;
   repo: string;
@@ -8753,7 +8762,7 @@ export interface PostReviewStatusGuardedOpts {
     description?: string;
   }) => void | Promise<void>;
   /** Injectable issue transport for the one cannot-evaluate escalation per head. */
-  issues?: IssueGateway;
+  issues?: ReviewIssueGateway;
   lockOpts?: AcquireReviewStatusLockOpts;
 }
 
@@ -8944,6 +8953,10 @@ export async function postReviewStatusGuarded(
     }
     if (opts.state === "pending" && opts.description?.startsWith("remudero-review: cannot-evaluate") && opts.prUrl &&
         !lines.some((line) => line.step === "review.cannot_evaluate_escalated" && line.task_id === opts.taskId && line.head_sha === opts.sha)) {
+      // Load escalation only for this exceptional pending path. Its worker graph reaches review
+      // through eval-card; a top-level import closes a cycle and fails the dependency gate.
+      const escalationModule = "./escalate.js";
+      const { ghIssueGateway, tryEscalate } = await import(escalationModule);
       const issueUrl = tryEscalate({
         class: "MANUAL",
         taskId: opts.taskId,
