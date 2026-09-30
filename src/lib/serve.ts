@@ -139,6 +139,7 @@ import {
   type IncidentInvariantRow,
 } from "./incident-invariants.js";
 import { checkServiceFreshness } from "./self-sync.js";
+import { reloadServePlan, touchesReloadablePlan } from "./serve-plan-reload.js";
 import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
@@ -1308,6 +1309,7 @@ export interface GatewayCheckoutAssessment {
   state: GatewayCheckoutState;
   /** Behind AND clean: the entrypoint fast-forwards only a clean tree on boot. */
   restartDue: boolean;
+  reloadPlanAt?: string;
 }
 
 /** {@link assessGatewayCheckout}'s seams; every git call is injectable so a test stays hermetic. */
@@ -1403,7 +1405,9 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
     checkedAt: clock.iso(),
   };
   // NEVER DIRTY: the entrypoint refuses to sync it, so the restart would loop on the same sha.
-  return { state, restartDue: !svc.dirty && svc.behind !== null && behindBy !== 0 && serveRestartRelevant(svc.behind.changedPaths) };
+  const relevant = svc.behind !== null && behindBy !== 0 && serveRestartRelevant(svc.behind.changedPaths);
+  const reloadPlanAt = svc.behind !== null && behindBy !== 0 && !relevant && touchesReloadablePlan(svc.behind.changedPaths) ? svc.behind.newSha : undefined;
+  return { state, restartDue: !svc.dirty && relevant, ...(reloadPlanAt === undefined ? {} : { reloadPlanAt }) };
 }
 
 /** W1-T4229 BACKSTOP: fires only on a connection that never ends by itself (SSE, a hung client). */
@@ -1479,6 +1483,7 @@ export interface StaleCodeExitDeps {
   /** W1-T4229: {@link drainServer}; absent, the exit is immediate as before. */
   drain?: () => Promise<void>;
   changedPathsSince?: ChangedPathsReader;
+  reloadPlan?: (ref: string) => Promise<boolean>;
 }
 /** What {@link gateStaleCodeExit} hands back — a wrapper for the console's ONE SSE route and a
  *  wrapper for each HIGH-tier write route, both feeding the SAME internal decision. */
@@ -1562,9 +1567,24 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   let dirtyReported: string | undefined;
   const readChangedPaths = deps.changedPathsSince ?? ((boot, target) => changedPathsSince(boot, target, serveRepoDir()));
   const relevance = new Map<string, boolean | "pending">();
+  let headPlanRef: string | undefined;
+  let originPlanRef: string | undefined;
+  let planLoadedRef: string | undefined;
+  let planReloading = false;
+  const syncPlan = (): void => {
+    const ref = originPlanRef ?? headPlanRef;
+    if (!deps.reloadPlan || ref === undefined || ref === planLoadedRef || planReloading || exiting) return;
+    planReloading = true;
+    deps.reloadPlan(ref).then(
+      (ok) => { if (ok) planLoadedRef = ref; },
+      (err: unknown) => log("serve.plan_reload_failed", { ref, reason: err instanceof Error ? err.message : String(err) }),
+    ).finally(() => { planReloading = false; });
+  };
   const settleRelevance = (currentSha: string, read: ChangedPathsRead): void => {
     const relevant = serveRestartRelevant(read.diffUnreadable === undefined ? read.changedPaths : undefined);
     relevance.set(currentSha, relevant);
+    if (!relevant && touchesReloadablePlan(read.changedPaths)) headPlanRef = currentSha;
+    syncPlan();
     if (!relevant) log("serve.stale_code_not_loaded", { bootSha: deps.bootSha, currentSha, changedPaths: read.changedPaths });
     else if (read.diffUnreadable !== undefined) log("serve.restart_diff_unreadable", { bootSha: deps.bootSha, currentSha, reason: read.diffUnreadable });
   };
@@ -1586,6 +1606,7 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
 
   const maybeExit = (): void => {
     if (exiting) return;
+    syncPlan();
     // NEVER NEGOTIABLE: an exit mid-write drops the request, and a drain's bound could cut one.
     if (inFlightWrites !== 0) return;
     const currentSha = resolveCurrentSha();
@@ -1634,6 +1655,8 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   };
   const noteCheckout = (next: GatewayCheckoutAssessment): void => {
     checkout = next;
+    originPlanRef = next.reloadPlanAt;
+    syncPlan();
     const { state } = next;
     if (state.dirty !== true || typeof state.behindBy !== "number" || state.behindBy === 0) return;
     // NEVER OVERWRITTEN; reported once per distinct head and path set, not once a minute.
@@ -3005,6 +3028,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     lastReadAt: () => lastReadAt,
     assessCheckout: deps.gatewayCheckout ?? (() => assessGatewayCheckout({ repoDir: serveRepoDir() })),
     drain: () => (drainTarget ? drainServer(drainTarget) : Promise.resolve()),
+    reloadPlan: (ref) => reloadServePlan(deps.board, serveRepoDir(), ref, { log: deps.log }),
     ...deps.staleExitSeams,
   });
   // THE CLOCK PORT, never the legacy signature. clock-signature-census ratchets that shape per

@@ -1,0 +1,54 @@
+- id: W1-T4853
+  title: "Keep held security asks visible and distinguish prepared Inbox decisions from unprepared asks"
+  repo: remudero
+  depends_on: [W1-T4768]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  origin: "operator Inbox gardener issue #7708 and live 2026-09-29 W1-T216 release audit"
+  plan_refs: [W1-T216, W1-T4738, W1-T4742, W1-T4768]
+  files: [src/lib/inbox-responder.ts, src/lib/panel-graph.ts, src/lib/verify-human-release.ts, src/run-task.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/a-released-human-ask-leaves-the-inbox.test.ts, test/an-automate-verdict-releases-when-the-risk-judge-proceeds.test.ts, test/an-operator-verdict-releases-a-parked-task.test.ts, test/archive-release-inbox-reconciliation.test.ts, test/operator-attention-census.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    The live core census has 39 observed decision-labelled threads, but 36 are not ready
+    for approval and retained archive coverage is partial. A mobile count cannot certify
+    that 39 separate human decisions are due. More seriously, W1-T216 remains an explicit
+    dispatch-held high-risk security drill in the current plan, while a 2026-09-27 machine
+    judge wrote ratify.approved with a low risk verdict. The present Inbox retires its ask
+    solely from that release row. Dispatch currently still refuses it because the hold is
+    checked separately; hiding the ask gives a false impression that the hold was resolved.
+    The same low-verdict route could write new machine releases for tasks filed risk: high.
+  design: |
+    Preserve the plan's explicit hold in Inbox classification even when a live or retained
+    machine release exists. Show both the hold and exact release receipt as a discrepancy,
+    including whether a receipt identifies a machine author. Keep registry, history, and
+    thread intact. Block new machine releases when the plan carries dispatch_hold or risk:
+    high, at both the cadence helper and final release writer; a low model verdict cannot
+    downgrade either. A human may still release an unheld high-risk task. Refuse any release
+    while its explicit dispatch hold remains, including an idempotent already-released path.
+    Add a source-qualified decision-readiness breakdown to the read-only census: ready,
+    needsPreparation, unknown; these sum to observed decision labels. Do not equate ready
+    with a verified need for the operator, auto-dismiss unprepared work, or turn partial
+    archive coverage into a verified zero. Declare the extension in OpenAPI and regenerate
+    the API-client schema. This slice does not retroactively authorize or revoke old
+    machine releases after a hold is removed; that historical-provenance ruling is separate.
+  acceptance:
+    - claim: "a held security ask remains visible when a live machine release exists"
+      proof: 'grep: test("a machine release cannot retire an explicitly held security ask" in test/a-released-human-ask-leaves-the-inbox.test.ts'
+    - claim: "a retained archive release does not hide the held ask and names the contradiction"
+      proof: 'grep: test("an archived release does not hide a task with an explicit dispatch hold" in test/archive-release-inbox-reconciliation.test.ts'
+    - claim: "neither machine release entry point can override a hold or high plan risk"
+      proof: 'grep: test("an explicit dispatch hold or high plan risk cannot be downgraded by a machine judge" in test/an-automate-verdict-releases-when-the-risk-judge-proceeds.test.ts'
+    - claim: "the final release writer refuses held or high-risk machine attempts while preserving human authority"
+      proof: 'grep: test("the final release writer refuses held tasks and machine high-risk releases" in test/an-operator-verdict-releases-a-parked-task.test.ts'
+    - claim: "decision readiness accounts for observed decision labels without certifying actionability"
+      proof: 'grep: test("decision attention distinguishes a ready approval from an ask still awaiting preparation" in test/operator-attention-census.test.ts'
+  falsifier: |
+    Seed a W1-T216-like held high-risk task, a machine release in a retained archive,
+    and a separate unheld human-released task. The held ask remains visible with a named
+    contradiction; the other retires. A low machine risk verdict cannot write another
+    release, while a human can release an unheld high-risk task. Under partial archives,
+    readiness is observational, never a fabricated verified reduction.

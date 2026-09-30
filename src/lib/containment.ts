@@ -1,6 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join, relative, resolve } from "node:path";
 // `configPath()` resolves `<homedir()>/.config/remudero/config.json` through the same reader the
 // config file itself is read by. Called from the orchestrator's own process, before any worker's
 // HOME is redirected, so it reads the operator's REAL home, never a worker's scratch one.
@@ -1401,4 +1403,109 @@ export function hostClassOf(
   if (exists("/etc/rmd-build-sha")) return "azure-container";
   if (platform === "darwin") return "mini";
   return `unknown-${platform}`;
+}
+
+/**
+ * LINT-ON-EDIT (W1-T4686). A worker's type error otherwise first appears in CI and costs a repair
+ * round. This is the decision core of a `PostToolUse` hook on Write/Edit/MultiEdit: given the
+ * hook's stdin JSON it runs ONE bounded type-check and returns the errors in the file just edited
+ * that were not already present, in the hook-output shape Claude Code feeds back in the same turn.
+ * FAIL OPEN: a timeout, a missing compiler or a non-TypeScript file yields `null` — this hook is
+ * advice, and a slow check must never stall a worker. Error identity is `code + message`, never
+ * the position: an insertion above an old error shifts its line and must not make it look new.
+ * The effect is UNMEASURED; the A/B through the routing experiment arms is a separate step.
+ * Kind: BACKSTOP — the timeout fires only when the compiler is already too slow; a healthy
+ * incremental check finishes well inside it, and the hook then fails open.
+ */
+export const EDIT_TYPECHECK_TIMEOUT_MS = 20_000;
+/** Cap on errors returned so one broken edit cannot flood the worker's context.
+ *  Kind: BACKSTOP — only a badly broken edit reaches it; a normal edit reports far fewer errors. */
+export const EDIT_TYPECHECK_MAX_ERRORS = 20;
+const TYPECHECKED_EXTENSION = /\.(?:[cm]?ts|tsx)$/;
+
+export interface TscDiagnostic {
+  file: string;
+  line: number;
+  column: number;
+  code: string;
+  message: string;
+}
+
+export interface EditTypeCheckRun {
+  output: string;
+  timedOut: boolean;
+}
+
+/** Runs the bounded type-check in `cwd` and returns raw compiler output. Injected in tests. */
+export type TypeCheckRunner = (cwd: string, timeoutMs: number) => EditTypeCheckRun;
+
+/** Parses `tsc --pretty false` output: `path(line,col): error TSnnnn: message`. */
+export function parseTscDiagnostics(output: string): TscDiagnostic[] {
+  const out: TscDiagnostic[] = [];
+  for (const line of output.split("\n")) {
+    const m = /^(.+?)\((\d+),(\d+)\): error (TS\d+): (.*)$/.exec(line.trimEnd());
+    if (m) out.push({ file: m[1]!, line: Number(m[2]), column: Number(m[3]), code: m[4]!, message: m[5]! });
+  }
+  return out;
+}
+
+/** Position-free identity of a diagnostic (see the block comment above). */
+export function diagnosticKey(d: Pick<TscDiagnostic, "file" | "code" | "message">): string {
+  return `${d.file}\u0000${d.code}\u0000${d.message}`;
+}
+
+/** The default runner: the repo's own `tsc --noEmit`, incremental, killed at the timeout. */
+export function defaultTypeCheckRunner(cwd: string, timeoutMs: number): EditTypeCheckRun {
+  const tsc = join(cwd, "node_modules", ".bin", "tsc");
+  if (!existsSync(tsc)) return { output: "", timedOut: false };
+  const buildInfo = join(tmpdir(), `rmd-edit-typecheck-${createHash("sha1").update(cwd).digest("hex").slice(0, 12)}.tsbuildinfo`);
+  try {
+    const stdout = execFileSync(
+      tsc,
+      ["--noEmit", "--pretty", "false", "--incremental", "--tsBuildInfoFile", buildInfo, "-p", "tsconfig.json"],
+      { cwd, timeout: timeoutMs, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 16 * 1024 * 1024 },
+    );
+    return { output: stdout, timedOut: false };
+  } catch (err) {
+    // tsc exits non-zero WHENEVER it reports errors — that is the signal, not a failure. Only a
+    // kill by our timeout is a failed check, and it is reported as such rather than as "clean".
+    const e = err as { stdout?: unknown; code?: unknown; signal?: unknown };
+    const timedOut = e.code === "ETIMEDOUT" || e.signal === "SIGTERM";
+    return { output: typeof e.stdout === "string" ? e.stdout : "", timedOut };
+  }
+}
+
+export interface EditTypeCheckInput {
+  /** The PostToolUse hook's stdin JSON. */
+  hookInput: { tool_name?: unknown; tool_input?: { file_path?: unknown } | null; cwd?: unknown };
+  /** Keys (`diagnosticKey`) of errors already present before the edit; these are not returned. */
+  baseline?: ReadonlySet<string>;
+  run?: TypeCheckRunner;
+  timeoutMs?: number;
+}
+
+/** New type errors in the edited file for the worker, or `null` when there is nothing to say. */
+export function editTypeCheckFeedback(input: EditTypeCheckInput): string | null {
+  const filePath = input.hookInput.tool_input?.file_path;
+  const cwd = input.hookInput.cwd;
+  if (typeof filePath !== "string" || typeof cwd !== "string") return null;
+  if (!TYPECHECKED_EXTENSION.test(filePath)) return null;
+  const rel = relative(cwd, resolve(cwd, filePath));
+  const run = (input.run ?? defaultTypeCheckRunner)(cwd, input.timeoutMs ?? EDIT_TYPECHECK_TIMEOUT_MS);
+  if (run.timedOut) return null;
+  const baseline = input.baseline ?? new Set<string>();
+  const fresh = parseTscDiagnostics(run.output).filter(
+    (d) => d.file === rel && !baseline.has(diagnosticKey(d)),
+  );
+  if (fresh.length === 0) return null;
+  const shown = fresh.slice(0, EDIT_TYPECHECK_MAX_ERRORS);
+  const lines = shown.map((d) => `${d.file}(${d.line},${d.column}): ${d.code}: ${d.message}`);
+  const more = fresh.length > shown.length ? `\n…and ${fresh.length - shown.length} more` : "";
+  return `Type errors introduced by your edit to ${rel} — fix them before moving on:\n${lines.join("\n")}${more}`;
+}
+
+/** Claude Code's PostToolUse hook stdout for `feedback`, or `""` (print nothing) when null. */
+export function postToolUseHookOutput(feedback: string | null): string {
+  if (feedback === null) return "";
+  return JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: feedback } });
 }

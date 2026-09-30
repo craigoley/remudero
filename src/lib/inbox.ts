@@ -28,7 +28,7 @@ import { parseInstanceRegistry } from "./instance-registry.js";
 import { loadManagedRepos } from "./managed-repos.js";
 import { workerLedgerFields, type WorkerResult } from "./worker.js";
 import type { InterpretReplyResult } from "./reply-interpreter.js";
-import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument } from "yaml";
+import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
 import { RmdError } from "./errors.js";
 
 /**
@@ -1474,6 +1474,12 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "(no ```yaml or ``` line before or after it); the harness parses the fragment as YAML",
     "verbatim, and a fence around it fails that parse.",
     "",
+    // W1-T4864: the structured route — the harness renders the YAML, so it cannot fail to parse.
+    "PREFERRED — emit the SAME tasks as DATA: a JSON array between `=== FRAGMENT JSON START ===` and",
+    "`=== FRAGMENT JSON END ===` (instead of the YAML FRAGMENT markers), then the STAMP line. The harness",
+    "validates it against this JSON schema and renders the YAML itself, so quoting and indentation cannot fail:",
+    JSON.stringify(INBOX_DRAFT_FRAGMENT_SCHEMA),
+    "",
     `Valid \`type:\` values (a closed enum — anything else is rejected): ${TASK_TYPES.join(", ")}.`,
     "`acceptance:` is a LIST of mappings, never a string and never a bare list of strings. Each",
     "item has a `claim:` (what becomes true) AND a `proof:` (how a reviewer checks it), both",
@@ -1585,13 +1591,113 @@ export function describeDraftParseFailure(text: string): DraftParseFailure {
  *  `null` when either marker is missing — a malformed draft is never silently treated as a candidate. The fragment
  *  runs through {@link stripMarkdownFence} first; a malformed fence throws, which {@link runDraftRung} isolates. */
 export function parseDraftedCandidate(text: string): ParsedDraft | null {
-  const fragments = [...text.matchAll(FRAGMENT_RE)];
   const stamps = [...text.matchAll(STAMP_RE)];
+  // W1-T4864: a STRUCTURED fragment wins over a YAML one — its YAML is the harness's, so it cannot fail to parse.
+  const structured = [...text.matchAll(new RegExp(FRAGMENT_JSON_RE, "g"))];
+  if (structured.length > 0 && stamps.length > 0) {
+    return {
+      fragmentYaml: fragmentJsonToYaml(structured[structured.length - 1][1]),
+      stampLine: stamps[stamps.length - 1][1].trim(),
+    };
+  }
+  const fragments = [...text.matchAll(FRAGMENT_RE)];
   if (fragments.length === 0 || stamps.length === 0) return null;
   return {
     fragmentYaml: stripMarkdownFence(fragments[fragments.length - 1][1].trim()),
     stampLine: stamps[stamps.length - 1][1].trim(),
   };
+}
+
+// ── W1-T4864: the draft as schema-checked DATA, rendered to YAML by the harness ────────────────
+//
+// 46 of the 200 terminal nano drafts were YAML that failed to PARSE — a formatting failure of the model's, not a
+// judgement failure. Asked for data instead, the model cannot mis-quote a `proof:` or mis-indent a list, and the
+// harness owns the one serializer, so a schema-valid draft is parseable by construction.
+
+/** The structured-fragment block. Not global, so `.test` is stateless; the parser matches with a global copy. */
+export const FRAGMENT_JSON_RE = /=== FRAGMENT JSON START ===\r?\n([\s\S]*?)\r?\n=== FRAGMENT JSON END ===/;
+
+/** The JSON schema the draft's structured form is requested against (and {@link validateDraftFragmentData} enforces). */
+export const INBOX_DRAFT_FRAGMENT_SCHEMA = {
+  type: "array",
+  minItems: 1,
+  items: {
+    type: "object",
+    required: ["id", "title", "repo", "depends_on", "type", "verify", "risk", "status", "attempts", "files", "acceptance", "origin"],
+    properties: {
+      id: { type: "string", minLength: 1 },
+      title: { type: "string", minLength: 1 },
+      repo: { type: "string", minLength: 1 },
+      depends_on: { type: "array", items: { type: "string" } },
+      type: { enum: [...TASK_TYPES] },
+      verify: { type: "string", minLength: 1 },
+      risk: { type: "string", minLength: 1 },
+      status: { type: "string", minLength: 1 },
+      attempts: { type: "integer", minimum: 0 },
+      files: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
+      acceptance: {
+        type: "array",
+        minItems: 1,
+        items: { type: "object", required: ["claim", "proof"], properties: { claim: { type: "string", minLength: 1 }, proof: { type: "string", minLength: 1 } } },
+      },
+      origin: { type: "string", minLength: 1 },
+    },
+  },
+} as const;
+
+const isNonEmptyString = (v: unknown): v is string => typeof v === "string" && v.length > 0;
+
+/** Every way `data` departs from {@link INBOX_DRAFT_FRAGMENT_SCHEMA}; empty means schema-valid. Extra fields are allowed. */
+export function validateDraftFragmentData(data: unknown): string[] {
+  if (!Array.isArray(data)) return ["the fragment must be a JSON array of task objects"];
+  if (data.length === 0) return ["the fragment must carry at least one task"];
+  const errors: string[] = [];
+  data.forEach((task, i) => {
+    const at = `task[${i}]`;
+    if (typeof task !== "object" || task === null || Array.isArray(task)) {
+      errors.push(`${at} must be an object`);
+      return;
+    }
+    const t = task as Record<string, unknown>;
+    for (const key of ["id", "title", "repo", "verify", "risk", "status", "origin"]) {
+      if (!isNonEmptyString(t[key])) errors.push(`${at}.${key} must be a non-empty string`);
+    }
+    if (!(TASK_TYPES as readonly unknown[]).includes(t.type)) errors.push(`${at}.type must be one of ${TASK_TYPES.join("|")}`);
+    if (!Number.isInteger(t.attempts) || (t.attempts as number) < 0) errors.push(`${at}.attempts must be a non-negative integer`);
+    if (!Array.isArray(t.depends_on) || !t.depends_on.every((d) => typeof d === "string")) errors.push(`${at}.depends_on must be an array of strings`);
+    if (!Array.isArray(t.files) || t.files.length === 0 || !t.files.every(isNonEmptyString)) errors.push(`${at}.files must be a non-empty array of non-empty strings`);
+    if (!Array.isArray(t.acceptance) || t.acceptance.length === 0) {
+      errors.push(`${at}.acceptance must be a non-empty array of {claim, proof}`);
+    } else {
+      t.acceptance.forEach((c, j) => {
+        const rec = typeof c === "object" && c !== null ? (c as Record<string, unknown>) : undefined;
+        if (!rec || !isNonEmptyString(rec.claim) || !isNonEmptyString(rec.proof)) errors.push(`${at}.acceptance[${j}] must carry a non-empty string claim and proof`);
+      });
+    }
+  });
+  return errors;
+}
+
+/** Render schema-valid fragment data to the YAML the plan parser reads. THROWS on data that is not schema-valid: the
+ *  guarantee is "valid in, parseable out", never a best-effort dump of something the schema refused. */
+export function renderDraftFragmentYaml(data: unknown): string {
+  const errors = validateDraftFragmentData(data);
+  if (errors.length > 0) throw new PlanError(`draft fragment data is not schema-valid: ${errors.join("; ")}`);
+  return stringifyYaml(data, { lineWidth: 0 }).trimEnd();
+}
+
+/** A structured block's text as fragment YAML. Data that is not schema-valid is NOT rendered: its raw text is returned
+ *  (JSON is itself YAML), so the ordinary lint reports the real problem and the relint prompt carries it back. */
+function fragmentJsonToYaml(raw: string): string {
+  const text = raw.trim();
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch (_err) {
+    // Deliberate: unparseable JSON is handed on as-is; `lintDraftedFragment` turns it into a `draft-parse` violation.
+    return text;
+  }
+  return validateDraftFragmentData(data).length === 0 ? renderDraftFragmentYaml(data) : text;
 }
 
 // ── The draft rung's INJECTABLE orchestration core (W1-T192) ─────────────────────────────
@@ -1602,7 +1708,20 @@ export function parseDraftedCandidate(text: string): ParsedDraft | null {
 
 /** One Architect worker call for one proposal's draft prompt; tests inject a fake. Returns the full {@link
  *  WorkerResult} so {@link runDraftRung} logs the same `workerLedgerFields` as every spawn. */
-export type DraftSpawn = (proposal: Proposal, prompt: string) => Promise<WorkerResult>;
+export type DraftSpawn = (proposal: Proposal, prompt: string, ctx?: DraftSpawnContext) => Promise<WorkerResult>;
+
+/**
+ * W1-T4864: what a redraft tells the spawn about the models that already failed THIS proposal's lint. A dirty
+ * draft is evidence about the MODEL, not about the dice: 3,311 syntheses bought 200 terminal drafts on one model
+ * because every relint re-rolled the same one. `avoidModels` names the ladder candidates whose draft came back dirty;
+ * a spawn that resolves a ladder (run-task.ts) walks to the next candidate that is not in it. Empty on the first call.
+ */
+export interface DraftSpawnContext {
+  /** 1-based synthesis attempt within this proposal's bounded self-lint. */
+  attempt: number;
+  /** The models whose draft for this proposal failed lint, in the order they were tried. */
+  avoidModels: readonly string[];
+}
 
 export interface DraftRungDeps {
   spawn: DraftSpawn;
@@ -1682,6 +1801,11 @@ export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string,
   ].join("\n");
 }
 
+/** The model a draft's worker ran on: the routed deployment when the provider resolved one, else the configured model. */
+function draftWorkerModel(worker: WorkerResult): string | null {
+  return worker.routedModel ?? worker.model ?? null;
+}
+
 /** Draft EVERY proposal in `toDraft`. Independent proposals run concurrently up to {@link DAEMON_DRAFT_BATCH_CAP};
  *  one proposal's self-lint retries stay serial. NEVER THROWS — each spawn and parse is isolated in its OWN try/catch
  *  (W1-T192's fail-soft requirement), which is what makes this safe on an unattended poll. */
@@ -1694,9 +1818,24 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       // cc71f2 SELF-LINT: draft, lint, and on a blocking violation redraft with the failures in hand, bounded, so a
       // fired proposal reaches READY without an operator cleanup pass.
       let lastWorker: Awaited<ReturnType<DraftRungDeps["spawn"]>> | undefined;
+      // W1-T4864: a dirty relint walks the LADDER instead of re-rolling the same model.
+      const avoidModels: string[] = [];
+      let dirty: { from: string | null; violations: string[] } | undefined;
       for (let attempt = 1; attempt <= MAX_DRAFT_LINT_ATTEMPTS; attempt++) {
-        const worker = await deps.spawn(proposal, prompt);
+        const worker = await deps.spawn(proposal, prompt, { attempt, avoidModels: [...avoidModels] });
         lastWorker = worker;
+        if (dirty) {
+          // NAME THE FALL-THROUGH, with the model that actually answered — a spawn that ignored `avoidModels` shows up
+          // here as from === to, which is the record a retried-same-model regression must leave.
+          deps.log("inbox.draft_fellthrough", {
+            proposal_id: proposal.id,
+            attempt,
+            from: dirty.from,
+            to: draftWorkerModel(worker),
+            violations: dirty.violations,
+          });
+          dirty = undefined;
+        }
         deps.log("inbox.draft_synthesized", {
           proposal_id: proposal.id,
           attempt,
@@ -1711,6 +1850,9 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         if (violations.length === 0) break; // lint-clean — cache it
         if (attempt < MAX_DRAFT_LINT_ATTEMPTS) {
           deps.log("inbox.draft_relint", { proposal_id: proposal.id, attempt, violations: violations.map((v) => v.message) });
+          const from = draftWorkerModel(worker);
+          if (from !== null && !avoidModels.includes(from)) avoidModels.push(from);
+          dirty = { from, violations: violations.map((v) => v.message) };
           prompt = inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations);
         }
       }
