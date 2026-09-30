@@ -9,7 +9,7 @@
   files: [plan/tasks.d/W1-T2399-one-unreadable-protection-read-escalates-every-green-pr.yaml, plan/tasks.d/W1-T2416-a-rejected-recurrence-refiles-every-window.yaml, plan/tasks.d/W1-T2457-two-rule-namespaces-share-one-integer-range.yaml]
   origin: architect
   plan_refs: ["W1-T2457", "§12", "§5C"]
-  status: queued
+  status: done
   attempts: 0
   rationale: |
     HALF ONE OF A SPLIT FILING. The follow-up W1-T2457 harvested one finding; the linter refused it as
@@ -132,6 +132,7 @@
     - claim: "W1-T2457's live boundary citation uses the DR-19 namespace form, while its separate backticked historical excerpt remains untouched for the follow-up corpus guard"
       proof: "grep: means DR-19 in plan/tasks.d/W1-T2457-two-rule-namespaces-share-one-integer-range.yaml"
   note: |
+    OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, "the verify-human queue, cleared"): DONE — already applied in a0f56cae8 (2026-09-23); every acceptance grep holds.
     FILED as the ratification of the follow-up W1-T2457's own run harvested:
     `followup:W1-T2457-1788020906446:2026-08-29T16:47:03.560Z:1` (run W1-T2457-1788020906446, PR #3272).
     TWO of that harvest's framing claims are corrected here by measurement at head, not inherited: the

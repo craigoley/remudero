@@ -278,7 +278,7 @@ test("a cash-arm decision moves the spawn onto the trial models and a control ke
 test("the cash ladder restricted to the trial models never reaches nano", () => {
   const ladder = loadMounts(mountsPath(REPO_ROOT)).capabilities;
   const ready = () => true;
-  assert.equal(selectOpenWeightModel(ladder, "sonnet", "high", undefined, { ready }).model, "gpt-5-nano", "the balanced row leads nano");
+  assert.equal(selectOpenWeightModel(ladder, "sonnet", "high", undefined, { ready }).model, "gpt-6-luna", "the balanced row leads Luna (W1-T3570)");
   assert.equal(selectOpenWeightModel(ladder, "sonnet", "high", undefined, { ready, only: ["gpt-oss-120b"] }).model, "gpt-oss-120b");
   assert.throws(() => selectOpenWeightModel(ladder, "sonnet", "high", undefined, { ready, only: ["nonexistent"] }), /no safe deployment/);
 });

@@ -1,9 +1,9 @@
 - id: W1-T239
   title: "reconcile the worker-home symlink family against its documented allowlist intent, and drill each remaining link as load-bearing"
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T4348]
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 60.00
   rationale: "The redirected worker HOME is meant to grant back ONLY named real-HOME paths, each with a recorded
@@ -34,18 +34,18 @@
     human-verified drill as W1-T12e.
   acceptance:
     - claim: "the actual worker-home symlink/file set is reconciled against WORKER_HOME_SYMLINKS with any drift recorded"
-      proof: "unit test: test/worker-home.test.ts"
-    - claim: "each remaining symlink has a dated load-bearing verdict from a live drill, replacing the 'unverified live' reason strings"
-      proof: "unit test: test/worker-home.test.ts"
+      proof: 'grep: test("W1-T239: the worker-home link set is reconciled against WORKER_HOME_SYMLINKS with drift recorded" in test/worker-home.test.ts'
+    - claim: "each remaining symlink has a dated verdict taken from what the fleet records per host (linked or absent), replacing the 'unverified live' reason strings, with the keychain link marked macOS-only"
+      proof: 'grep: test("W1-T239: each remaining link carries a dated verdict from fleet-recorded observation" in test/worker-home.test.ts'
     - claim: "if W1-T235 retires the keychain symlink, this audit records that retirement rather than re-granting it"
-      proof: "unit test: test/worker-home.test.ts"
+      proof: 'grep: test("W1-T239: a retired keychain link is recorded, never re-granted" in test/worker-home.test.ts'
   risk: low
   origin: architect
   plan_refs: ["§4A", "§12", "WS-7"]
-  files: [src/lib/worker-home.ts]
+  files: [src/lib/worker-home.ts, test/worker-home.test.ts]
   status: queued
   attempts: 0
-  note: "FILED 2026-07-21, unpromoted - this is a hygiene/audit task and should not displace the spawn-path fix
+  note: "OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, 'the verify-human queue, cleared'): NO DESTRUCTIVE LIVE DRILL. Each link's verdict comes from what the fleet already records per host. The keychain link is macOS-only and not needed on the Linux fleet. Sequenced after W1-T4348, which changes the .claude link. FILED 2026-07-21, unpromoted - this is a hygiene/audit task and should not displace the spawn-path fix
     (W1-T235) or the gate-integrity ladder. Citation verified at origin/main 2d33735: worker-home.ts:72-83
     documents the allowlist intent and carries the two 'unverified live' reason strings (.claude and the
     keychain); LEARNINGS.md:18 records the never-run W1-T12e drill.

@@ -15,7 +15,7 @@ import { flagValue, unknownArgError } from "./cli-args.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { loadConfig } from "./config.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { compactRotations, type LedgerCompactionResult } from "./ledger.js";
+import { compactRotations, compactedArchiveName, type LedgerCompactionResult } from "./ledger.js";
 import { ledgerRotationEntries, rotationStampIso, type LedgerCorpusEntry } from "./ledger-union.js";
 import { ledgerPathFor } from "./ledger-path.js";
 
@@ -23,6 +23,13 @@ const DAY_MS = 24 * 60 * 60 * 1_000;
 export const LEDGER_COMPACT_DEFAULT_OLDER_THAN_DAYS = 7;
 // PRIMARY CONTROL: bounds the exact-row Set and gzip inputs held by one operator invocation.
 export const LEDGER_COMPACT_MAX_SOURCES = 50;
+/**
+ * PRIMARY CONTROL: bound one archive's decompressed rows to 64 MiB. In the 2026-09-23 synthetic million-row
+ * measurement, ten-way partitioning put each archive near 87 MiB and held peak RSS to 205-231 MiB;
+ * one whole-million-row archive reached 752 MiB. Staying below one measured partition leaves room
+ * for the reader's row objects under a 256 MiB per-read budget.
+ */
+export const LEDGER_COMPACT_MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 const LEDGER_COMPACT_MAX_OLDER_THAN_DAYS = 36_500;
 const LEDGER_COMPACT_VALUE_FLAGS = ["--older-than", "--older-than-hours", "--max-sources"];
 /** An archive this many times the typical rotation's size is a previous pass's output (one pass
@@ -43,7 +50,7 @@ export interface LedgerCompactFs {
   writeAtomic: (path: string, content: Buffer) => boolean;
   rmSync: (path: string) => void;
   gzipSync: (content: Buffer) => Buffer;
-  gunzipSync: (content: Buffer) => Buffer;
+  gunzipSync: (content: Buffer, options?: { maxOutputLength?: number }) => Buffer;
   /** Bytes on disk. Absent, every archive is treated alike, as before W1-T4262. */
   sizeOf?: (path: string) => number;
   /** Cold storage: a merged source is MOVED, never deleted, until its retention lapses. */
@@ -67,6 +74,8 @@ export interface LedgerCompactCommandDeps {
    *  src/lib/clock.ts is what that port exists for, and a new module has no legacy shape to keep. */
   clock?: Clock;
   fs?: LedgerCompactFs;
+  /** Test seam may lower the production ceiling, never raise it. */
+  maxArchiveBytes?: number;
   out?: (line: string) => void;
   error?: (line: string) => void;
 }
@@ -75,6 +84,8 @@ export interface LedgerCompactSelection {
   sources: LedgerCorpusEntry[];
   eligibleCount: number;
   unparseableAge: string[];
+  /** Eligible source files withheld from this pass because the decompressed-byte budget was reached. */
+  sizeSkippedCount?: number;
 }
 
 const realFs: LedgerCompactFs = {
@@ -84,7 +95,7 @@ const realFs: LedgerCompactFs = {
   writeAtomic: (path, content) => writeAtomic(path, content, { tmpTag: "ledger-compact-tmp" }),
   rmSync: (path) => rmSync(path),
   gzipSync: (content) => gzipSync(content),
-  gunzipSync: (content) => gunzipSync(content),
+  gunzipSync: (content, options) => gunzipSync(content, options),
   sizeOf: (path) => statSync(path).size,
   mkdirSync: (dir) => mkdirSync(dir, { recursive: true }),
   renameSync: (from, to) => renameSync(from, to),
@@ -96,7 +107,9 @@ const realFs: LedgerCompactFs = {
  * ceiling bounds `compactRotations`' exact-row Set even when an operator supplies a larger flag. */
 export function selectLedgerCompactionSources(
   names: string[], stateDir: string, olderThanDays: number, maxSources: number, now: Date,
-  sizeOf?: (path: string) => number): LedgerCompactSelection {
+  sizeOf?: (path: string) => number,
+  decompressedSizeOf?: (entry: LedgerCorpusEntry, maxArchiveBytes: number) => number,
+  maxArchiveBytes = LEDGER_COMPACT_MAX_ARCHIVE_BYTES): LedgerCompactSelection {
   // This signature stays on two lines so type erasure cannot mark a parameter-only line uncovered.
   // Selection uses filename time only to avoid opening an unbounded candidate set before the cap.
   // A name with no trustworthy time is reported separately rather than guessed old or recent.
@@ -104,7 +117,7 @@ export function selectLedgerCompactionSources(
   const [eligible, unparseableAge]: [LedgerCorpusEntry[], string[]] = [[], []];
   // Keep skipped names so a partial age classification is always visible in the command report.
   for (const entry of ledgerRotationEntries(names, stateDir)) {
-    const stamp = rotationStampIso(basename(entry.path));
+    const stamp = compactionStamp(basename(entry.path));
     const stampMs = stamp === undefined ? Number.NaN : Date.parse(stamp);
     // Unparseable names cannot safely enter an age-based operator action.
     // Parseable names still must be strictly before the cutoff, never equal to it.
@@ -123,8 +136,60 @@ export function selectLedgerCompactionSources(
   // rotations go first; outputs merge with each other, two at a time, only once none are left.
   const merged = mergedArchives(ledgerRotationEntries(names, stateDir), sizeOf);
   const rotations = eligible.filter((e) => !merged.has(e.path));
-  const sources = rotations.length > 0 ? rotations.slice(0, cap) : eligible.slice(0, Math.min(cap, 2));
-  return { sources, eligibleCount: eligible.length, unparseableAge };
+  const measured = new Map<string, number>();
+  const measure = (entry: LedgerCorpusEntry): number => {
+    const cached = measured.get(entry.path);
+    if (cached !== undefined) return cached;
+    const bytes = decompressedSizeOf!(entry, maxArchiveBytes);
+    if (!Number.isSafeInteger(bytes) || bytes < 0) {
+      throw new Error(`invalid decompressed size for ${entry.path}: ${bytes}`);
+    }
+    measured.set(entry.path, bytes);
+    return bytes;
+  };
+  // Repair a legacy oversized merged output before steady new rotations can starve it forever.
+  // The probe is bounded to one archive's ceiling plus one byte at a time. Once repaired, its
+  // smaller pieces no longer qualify and normal rotation-first scheduling resumes.
+  const repair = decompressedSizeOf
+    ? eligible.find((entry) => merged.has(entry.path) && measure(entry) > maxArchiveBytes)
+    : undefined;
+  const candidates = repair ? [repair, ...eligible.filter((entry) => entry.path !== repair.path)]
+    : rotations.length > 0 ? rotations : eligible;
+  const sourceLimit = repair ? Math.min(cap, 2) : rotations.length > 0 ? cap : Math.min(cap, 2);
+  const window = candidates.slice(0, sourceLimit);
+  if (!decompressedSizeOf) return { sources: window, eligibleCount: eligible.length, unparseableAge };
+
+  const sources: LedgerCorpusEntry[] = [];
+  let selectedBytes = 0;
+  let sizeSkippedCount = 0;
+  let oversizedOnlySource = false;
+  for (let index = 0; index < window.length; index += 1) {
+    const entry = window[index]!;
+    const bytes = measure(entry);
+    if (sources.length === 0 && bytes > maxArchiveBytes) {
+      // A legacy oversized archive is admitted alone so this pass can re-split it; it is never
+      // combined with another source, and the write boundary below still caps every replacement.
+      sources.push(entry);
+      oversizedOnlySource = true;
+      sizeSkippedCount = repair ? eligible.length - 1 : window.length - index - 1;
+      break;
+    }
+    if (selectedBytes + bytes > maxArchiveBytes) {
+      // Preserve oldest-first prefix selection. The remaining candidates are deferred, not silently
+      // merged into an output whose next read would exceed the measured budget.
+      sizeSkippedCount = window.length - index;
+      break;
+    }
+    sources.push(entry);
+    selectedBytes += bytes;
+  }
+  if (sizeSkippedCount > 0 && !oversizedOnlySource && sources.length === 1 && isArchivePart(sources[0]!.path)) {
+    // A part emitted below is already deduped and under the ceiling. If its sibling cannot fit in
+    // this pass, re-reading/re-writing this lone part cannot make progress; defer the whole prefix.
+    sources.length = 0;
+    sizeSkippedCount += 1;
+  }
+  return { sources, eligibleCount: eligible.length, unparseableAge, sizeSkippedCount };
 }
 
 /** Archives far larger than the median rotation: earlier passes' outputs. */
@@ -143,7 +208,15 @@ function mergedArchives(entries: LedgerCorpusEntry[], sizeOf: ((path: string) =>
   const median = sorted[Math.floor(sorted.length / 2)]!;
   return new Set(sizes.filter((x) => x.size > MERGED_ARCHIVE_SIZE_FACTOR * median).map((x) => x.path));
 }
-function reportFor(mode: "dry-run" | "apply", olderThanDays: number, maxSources: number, eligibleCount: number, unparseableAgeCount: number, result: LedgerCompactionResult): string {
+function reportFor(
+  mode: "dry-run" | "apply",
+  olderThanDays: number,
+  maxSources: number,
+  eligibleCount: number,
+  unparseableAgeCount: number,
+  result: LedgerCompactionResult,
+  sizeSkippedCount?: number,
+): string {
   // These fields are the preview/apply audit contract.
   // The row counts come from exact compaction, never estimated bytes.
   // The archive name lets the operator verify the replacement before a real run.
@@ -152,7 +225,74 @@ function reportFor(mode: "dry-run" | "apply", olderThanDays: number, maxSources:
     sourceCount: result.sourceCount,
     rowsWritten: result.rowsWritten, duplicatesCollapsed: result.duplicatesCollapsed, archiveName: result.archiveName,
     archiveNames: result.archiveNames,
+    ...(sizeSkippedCount && sizeSkippedCount > 0 ? { sizeSkippedCount } : {}),
   });
+}
+
+function decompressedSizeOf(fs: LedgerCompactFs, entry: LedgerCorpusEntry, maxArchiveBytes: number): number {
+  try {
+    if (entry.form === "plain") {
+      return fs.sizeOf ? fs.sizeOf(entry.path) : fs.readFileSync(entry.path).byteLength;
+    }
+    const compressed = fs.readFileSync(entry.path);
+    try {
+      return fs.gunzipSync(compressed, { maxOutputLength: maxArchiveBytes + 1 }).byteLength;
+    } catch (err) {
+      if ((err as { code?: unknown })?.code === "ERR_BUFFER_TOO_LARGE") return maxArchiveBytes + 1;
+      throw err;
+    }
+  } catch (err) {
+    throw new Error(`cannot read the selected window — ${(err as Error)?.message ?? String(err)} (${entry.path})`);
+  }
+}
+
+function splitArchiveBody(body: string, maxArchiveBytes: number): string[] {
+  const rows = body.endsWith("\n") ? body.slice(0, -1).split("\n") : body.split("\n");
+  if (rows.length === 1 && rows[0] === "") return [];
+  const parts: string[] = [];
+  let current: string[] = [];
+  let currentBytes = 0;
+  for (const row of rows) {
+    const rowBytes = Buffer.byteLength(row, "utf8") + 1;
+    if (rowBytes > maxArchiveBytes) {
+      throw new Error(`one ledger row is ${rowBytes} bytes, over the ${maxArchiveBytes}-byte archive ceiling`);
+    }
+    if (current.length > 0 && currentBytes + rowBytes > maxArchiveBytes) {
+      parts.push(`${current.join("\n")}\n`);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(row);
+    currentBytes += rowBytes;
+  }
+  if (current.length > 0) parts.push(`${current.join("\n")}\n`);
+  return parts;
+}
+
+function archivePartName(name: string, part: number): string {
+  const suffix = `-part-${String(part).padStart(6, "0")}`;
+  return name.replace(/\.ndjson(?:\.gz)?$/, `${suffix}.ndjson.gz`);
+}
+
+function archiveNameForChunk(baseName: string, body: string): string | undefined {
+  const baseStamp = rotationStampIso(baseName);
+  if (!baseStamp) return undefined;
+  const baseMs = Date.parse(baseStamp);
+  let newestMs = Number.NEGATIVE_INFINITY;
+  for (const line of body.split("\n")) {
+    const match = /"ts":"([^"]+)"/.exec(line);
+    const parsed = match ? Date.parse(match[1]!) : Number.NaN;
+    if (Number.isFinite(parsed)) newestMs = Math.max(newestMs, Math.min(parsed, baseMs));
+  }
+  return compactedArchiveName(fixedClock(Number.isFinite(newestMs) ? newestMs : baseMs).iso());
+}
+
+function compactionStamp(name: string): string | undefined {
+  return rotationStampIso(name.replace(/-part-\d+(?=\.ndjson(?:\.gz)?$)/, ""));
+}
+
+function isArchivePart(path: string): boolean {
+  return /-part-\d+\.ndjson(?:\.gz)?$/.test(path);
 }
 
 /** `rmd ledger-compact`: bounded and exact in both preview and apply modes. */
@@ -188,6 +328,10 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
   }
 
   const fs = deps.fs ?? realFs;
+  const maxArchiveBytes =
+    deps.maxArchiveBytes !== undefined && Number.isSafeInteger(deps.maxArchiveBytes) && deps.maxArchiveBytes > 0
+      ? Math.min(deps.maxArchiveBytes, LEDGER_COMPACT_MAX_ARCHIVE_BYTES)
+      : LEDGER_COMPACT_MAX_ARCHIVE_BYTES;
   let stateDir: string;
   try {
     stateDir = deps.stateDir ?? dirname(ledgerPathFor(loadConfig()));
@@ -206,14 +350,18 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
       maxSources,
       now,
       fs.sizeOf,
+      (entry, limit) => decompressedSizeOf(fs, entry, limit),
+      maxArchiveBytes,
     );
   } catch (err) {
-    log(`rmd ledger-compact: cannot list ${stateDir} — ${(err as Error)?.message ?? String(err)}`);
+    log(`rmd ledger-compact: cannot list or size eligible archives in ${stateDir} — ${(err as Error)?.message ?? String(err)}`);
     return 1;
   }
 
   const entryByPath = new Map<string, LedgerCorpusEntry>();
   for (const entry of selection.sources) entryByPath.set(entry.path, entry);
+  const selectedPaths = new Set(selection.sources.map((entry) => entry.path));
+  const stagedPaths = new Set<string>();
   const staged: { name: string; body: string }[] = [];
   const removals: string[] = [];
   let result: LedgerCompactionResult;
@@ -227,7 +375,33 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
         return body.toString("utf8").split("\n");
       },
       write: (name, body) => {
-        staged.push({ name, body });
+        const parts = splitArchiveBody(body, maxArchiveBytes);
+        const basePath = join(stateDir, name);
+        parts.forEach((partBody, index) => {
+          const isSplit = parts.length > 1;
+          const isLast = index === parts.length - 1;
+          const canUseBase =
+            isSplit && isLast && (!fs.existsSync(basePath) || selectedPaths.has(basePath)) && !stagedPaths.has(basePath);
+          let outputName = !isSplit || canUseBase ? name : "";
+          if (outputName === "") {
+            const timedName = archiveNameForChunk(name, partBody);
+            const timedPath = timedName ? join(stateDir, timedName) : "";
+            if (
+              timedName && timedPath !== basePath && !stagedPaths.has(timedPath) &&
+              (!fs.existsSync(timedPath) || selectedPaths.has(timedPath))
+            ) {
+              outputName = timedName;
+            } else {
+              let part = index + 1;
+              do {
+                outputName = archivePartName(name, part++);
+              } while (fs.existsSync(join(stateDir, outputName)) || stagedPaths.has(join(stateDir, outputName)));
+            }
+          }
+          const outputPath = join(stateDir, outputName);
+          stagedPaths.add(outputPath);
+          staged.push({ name: outputName, body: partBody });
+        });
       },
       remove: (path) => removals.push(path),
       clock: fixedClock(now.getTime()),
@@ -235,6 +409,11 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
   } catch (err) {
     log(`rmd ledger-compact: cannot read the selected window — ${(err as Error)?.message ?? String(err)}`);
     return 1;
+  }
+  if (staged.length > 0) {
+    // Report the actual per-day pieces (including collision-safe part names), not compactRotations'
+    // unsplit base names.
+    result = { ...result, archiveName: staged.at(-1)!.name, archiveNames: staged.map((entry) => entry.name) };
   }
 
   const mode = rest.includes("--dry-run") ? "dry-run" : "apply";
@@ -245,10 +424,16 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
     selection.eligibleCount,
     selection.unparseableAge.length,
     result,
+    selection.sizeSkippedCount,
   );
   if (selection.unparseableAge.length > 0) {
     log(
       `rmd ledger-compact: skipped ${selection.unparseableAge.length} rotation(s) whose filename age is unreadable`,
+    );
+  }
+  if (selection.sizeSkippedCount && selection.sizeSkippedCount > 0) {
+    log(
+      `rmd ledger-compact: deferred ${selection.sizeSkippedCount} eligible rotation(s) at the ${maxArchiveBytes}-byte decompressed archive ceiling`,
     );
   }
   if (staged.length === 0) {
@@ -257,7 +442,6 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
   }
 
   // Every day's output is checked before ANY is written, so a refusal leaves the corpus untouched.
-  const selectedPaths = new Set(selection.sources.map((entry) => entry.path));
   for (const { name } of staged) {
     const targetPath = join(stateDir, name);
     if (fs.existsSync(targetPath) && !selectedPaths.has(targetPath)) {
