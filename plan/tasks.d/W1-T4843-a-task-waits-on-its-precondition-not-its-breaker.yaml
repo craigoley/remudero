@@ -1,0 +1,33 @@
+- id: W1-T4843
+  title: "A TASK THAT CANNOT START YET IS DISPATCHED UNTIL ITS BREAKER TRIPS — W1-T4081 needs seven days of gpt-6-luna traffic, its worker correctly refused, and the fleet kept dispatching. Give a task a checked precondition the dispatcher waits on"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: go with all of these recommended follow ups (throughput, automated flow, self improvement)"
+  note: "reservation hand-off: plan-flow-improve-1790732974000 -> plan-flow-improve-1790732974000"
+  plan_refs: [W1-T4081, W1-T80]
+  files: [src/lib/plan.ts, src/lib/drain.ts, test/a-task-waits-on-its-precondition-not-its-breaker.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-29: W1-T4081's worker refused with "[contradicts-another-criterion] Removing the predecessor
+    rows now would violate criterion 2's seven-day wait"; the plan has no deferral field (only status, retirement),
+    so the task ran into its breaker and now waits on a hand-kept reminder to release it around 2026-10-01.
+    It shares drain.ts and plan.ts with W1-T80, which keeps a task with an open PR from being dispatched twice; this
+    task adds a time or state precondition, a different gate on the same selection path.
+  design: |
+    A task may declare `not_before:` (a date) or `precondition:` (an rmd read with an expected result). The drain
+    skips such a task with dispatch.precondition_unmet until it holds, costing no worker and no breaker budget.
+  acceptance:
+    - claim: "a task before its not_before date is skipped without a dispatch"
+      proof: 'grep: test("W1-T4843: a task before its not_before date is skipped without a dispatch" in test/a-task-waits-on-its-precondition-not-its-breaker.test.ts'
+    - claim: "a task whose precondition holds is dispatched"
+      proof: 'grep: test("W1-T4843: a task whose precondition holds is dispatched" in test/a-task-waits-on-its-precondition-not-its-breaker.test.ts'
+  falsifier: |
+    Ignore the field and the first test dispatches the task.

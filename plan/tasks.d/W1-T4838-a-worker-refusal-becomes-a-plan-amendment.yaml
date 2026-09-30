@@ -1,0 +1,39 @@
+- id: W1-T4838
+  title: "A WORKER'S REASONED REFUSAL IS SCORED AS A FAILED ATTEMPT — workers write REFUSED: [premise-rotted | contradicts-another-criterion | out-of-scope] with evidence, and the harness re-dispatches until the breaker trips. Turn a categorized refusal into a drafted plan amendment instead"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: go with all of these recommended follow ups (throughput, automated flow, self improvement)"
+  note: "reservation hand-off: plan-flow-improve-1790732974000 -> plan-flow-improve-1790732974000"
+  plan_refs: [W1-T4818, W1-T1258, W1-T2982, W1-T3342, W1-T4081, W1-T3332]
+  files: [src/lib/refusal-amendment.ts, src/lib/sweep.ts, test/a-worker-refusal-becomes-a-plan-amendment.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-29: five tasks were stuck on reasons their own workers had stated. W1-T3342 "[premise-rotted] No
+    headline at this checkout meets the task record's required condition"; W1-T4081 "[contradicts-another-criterion]"
+    (a seven-day precondition); W1-T2982 "I can't make the implementation within the task record's declared scope";
+    W1-T1258 edits outside its files:; W1-T3332 rewrote its own acceptance. Each was re-dispatched as a no_pr failure
+    until its breaker tripped, then fixed by hand (#7905, #7908). The worker's account is already in the verdict row's
+    report_excerpt.
+  design: |
+    (i) extractRefusal (new module) parses the categorized REFUSED lines from a no_pr verdict's report_excerpt.
+    (ii) The sweep holds the task from further dispatch and opens ONE plan-only amendment PR per task that proposes the
+    change the category implies (close unbuilt, widen files:, add a precondition, re-scope criteria), quoting the
+    worker's evidence. The amendment goes through the ordinary review and LLM judge; nothing is merged unreviewed.
+    (iii) An uncategorized no_pr keeps today's retry path.
+  acceptance:
+    - claim: "a categorized refusal holds the task and drafts one amendment"
+      proof: 'grep: test("W1-T4838: a categorized refusal holds the task and drafts one amendment" in test/a-worker-refusal-becomes-a-plan-amendment.test.ts'
+    - claim: "an uncategorized no_pr keeps the retry path"
+      proof: 'grep: test("W1-T4838: an uncategorized no_pr keeps the retry path" in test/a-worker-refusal-becomes-a-plan-amendment.test.ts'
+    - claim: "the new module is called from its owner"
+      proof: 'grep: extractRefusal( in src/lib/sweep.ts'
+  falsifier: |
+    Treat every no_pr as a refusal and the second test drafts an amendment for an ordinary failure.
