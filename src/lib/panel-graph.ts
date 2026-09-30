@@ -1556,7 +1556,10 @@ function prepareInboxPass(
       openProposalIds: { has: (id) => id !== proposal.id && allIds.has(id) },
       isRatified: verdicts.isRatified,
       isDeclined: verdicts.isDeclined,
-      isReleasedHumanTask: (taskId) => releasedHumanTasks.has(taskId) || archiveReleases.has(taskId),
+      // A release moves a task into the fleet only if the plan itself allows dispatch. A held
+      // task can carry an old machine release row, but that row must not hide its human ask.
+      isReleasedHumanTask: (taskId) => plan.byId.get(taskId)?.dispatch_hold !== true &&
+        (releasedHumanTasks.has(taskId) || archiveReleases.has(taskId)),
       // W1-T3518: the record is read ONCE per pass above and this predicate closes over it.
       // An absent or unparseable record reads as undefined, so NO proposal retires — the
       // direction a missing measurement must always fail.
@@ -1869,7 +1872,9 @@ function humanReleaseReceipt(row: Record<string, unknown>): string {
   const identity = typeof row.run_id === "string" && row.run_id
     ? row.run_id : `sha256:${createHash("sha256").update(JSON.stringify(row)).digest("hex")}`;
   const when = typeof row.ts === "string" ? ` at ${row.ts}` : "";
-  return `${row.task_id}: ratify.approved released verify-human (run ${identity}${when})`;
+  const author = row.author_class === "machine" ? "; machine-authored" :
+    row.author_class === "operator" ? "; operator-authored" : "; author unspecified";
+  return `${row.task_id}: ratify.approved released verify-human (run ${identity}${when}${author})`;
 }
 
 /** Only positive, fully readable retained evidence can retire an ask. The live file is already
@@ -1931,7 +1936,7 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
         views: listThreadViews(operatorThreadItems(deps, readPlanSnapshot, classified), threads,
           readReadMarks(readMarksPath(join(deps.inboxRoot, "state")))),
         classifications: classified.classifications,
-        taskFacts: new Map(plan.tasks.map((task) => [task.id, { verify: task.verify, repo: task.repo, title: task.title, status: task.status, retirement: task.retirement }])),
+        taskFacts: new Map(plan.tasks.map((task) => [task.id, { verify: task.verify, repo: task.repo, title: task.title, status: task.status, retirement: task.retirement, dispatchHold: task.dispatch_hold, risk: task.risk }])),
         releasedTaskIds, releaseReceipts, judgeByTask,
         mergedTaskIds: new Set([...classified.projection].filter(([, value]) => value.merged).map(([id]) => id)),
         sources: {

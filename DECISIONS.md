@@ -3300,3 +3300,76 @@ runs no backstop, because the operator's bit is the decision.
 
 Rollback: remove the `machine-judge` garden from the daemon's gardens and revert the filers to the
 literal header; records already pinned stay valid, and reverting any one to `verify: human` parks it.
+
+## 2026-09-30 — OPERATOR RULINGS: the verify-human queue, cleared
+
+**Operator-authored direction:** each ruling below is the operator's own, given in chat on 2026-09-30 in answer to per-task recommendations. The operator session recorded them; it did not originate them. Every task was first re-checked against main and the fleet ledger, and each entry states the evidence.
+
+- **W1-T3570: STOP nano as the inbox-draft lead.** On the slim prompt, nano drafts were lint-clean 49/200 (25%), and only 48 of 199 proposals ever drafted clean. Claude lanes were 100%, and nano itself was 12/12 on the full prompt. The lead moves to cash `gpt-6-luna` (#7963), with nano and gpt-oss-120b as fallbacks. Report: `docs/recon/openweight-inbox-draft-trial.md` (#7965).
+- **W1-T2927: take route (a).** The host sweep pulls the `mutation-verdict-ledger` artifact that `ci.yml` already uploads, using its own read identity, and appends only `run_id`s it has not recorded. Route (b) is declined because it would put a write credential in a public repo's CI. Route (c) is declined because it turns typed data into prose.
+- **W1-T3801: FIRST GATE-POSTURE PILOT = `coverage-ratchet`.** It was the most frequent real first-head failure (3 of 7 in 50 PRs, 2026-09-29/30).
+  - The finding is deterministic: coverage fell below its ratchet.
+  - The judge chooses only the consequence: STOP, or PROCEED with one coverage-improvement debt task filed idempotently through `coverage-improvement.ts`.
+  - Excluded from the pilot: security, credentials, CI-red, merge-authority and tenant gates.
+  - A judge outage restores today's behaviour.
+- **W1-T4354: release the BM25 learnings lane as a randomized arm.** It uses a small seeded propensity and fills only the budget the glob/symbol/error match leaves empty. 743 of 2,599 tasks (29%) match zero learnings. The outcome fold (W1-T4241/W1-T4243), not hand labels, decides whether it stays.
+- **W1-T365: confirm the rule-13 amendment text.** A passing test does not prove wiring. Build the gate as an answerable refusal that reuses the existing `SHIPS-UNWIRED:` / `WIRED-AT:` markers, never an unanswerable block.
+- **W1-T926: drop the live launchd half.** The fleet restarts through `deploy/recycle-container.sh`, so launchd is obsolete here. Retarget the headless dirt-shape drill at the container instance checkout and launcher convergence, where an untracked file still silently blocks convergence.
+- **W1-T239: no destructive live drill.** Take each worker-home link's verdict from what the fleet already records per host: linked or absent. The keychain link is macOS-only and not needed on the Linux fleet. Sequence after W1-T4348, which changes the `.claude` link.
+- **W1-T4568: stays DEFERRED.** None of the 2026-09-27 release triggers has fired. The ~4 s cold board read comes from replayed ledger rows, which W1-T4820 fixes, not from the lack of a store. Re-measure the cold read after W1-T4820 merges; over 5 s fires the trigger, and node:sqlite remains the store.
+- **W1-T2259: approve as verify: auto.** Delete the orphan `scripts/shell-screenshot.mjs`, its two stale PNGs, and its allowlist and comment-load baseline entries.
+
+**Closed without a new ruling, on evidence:**
+- W1-T2615: already applied in `a0f56cae8`.
+- W1-T3102 and W1-T3103: ruled 2026-09-22 (#6561) and credited, but still read as queued.
+- W1-T3887: the site already pins core `2ccb1710c`, merged via site #119.
+- W1-T971: overtaken by W1-T2766, and one fact it would pin is now false.
+- W1-T433: the multi-instance design already runs on Azure (core, console, site); launchd on the mini is obsolete. Whether the fleet should drive wild-trails is a separate, open operator question.
+
+
+## 2026-09-30 — OPERATOR RULING: the core↔console read path becomes a materialized, pushed read model (W1-T4568 released)
+
+*Operator-authored direction, given in chat on 2026-09-30, answering the architecture review of the console's data path: "I like the plan that you've put together … We're going to proceed through with all phases." This SUPERSEDES the same day's earlier item "W1-T4568: stays DEFERRED" (#7966).*
+
+**Why the deferral no longer holds.** The 2026-09-27 release trigger "a cold first read over 5 s" has fired in production. The measurements from 2026-09-29/30 are in the tracker named under **Tracked in**:
+
+| Measurement | Value |
+|---|---|
+| `/v1/status` under a slow `gh` | 22.4 s, labelled `fresh` |
+| cold `/v1/operator-activity` prewarm | 40 s p50, 74 s max |
+| cold `/v1/repos` | 23.6 s, serving a 7.5 h-old snapshot |
+| requests over the console's 5 s timeout | 7.4% of 1,210 |
+| serve recycles | 142 in 25 h, each coming back cold |
+
+W1-T4820's duplicate rows cost real time, and they are fixed on the way (Phase 0). But they are not the whole cause. Serve recomputes views on request on ONE event loop. Its six cache layers are each polled and none is fed by writes. Keep-warm runs only while a route is being read. And every recycle starts cold.
+
+**The architecture.** The ledger stays authoritative and the read model is rebuildable, per W1-T3196 (2026-09-08).
+1. **A projector and read model.** A single projector, in a worker thread, tails every ledger rotation form. It dedupes by row identity at ingestion and maintains one `node:sqlite` (WAL) table per console view, persisted under the state dir. This is the store the 2026-09-27 entry already chose.
+2. **Views.** Core serves one precomputed `/v1/views/<page>` per page, versioned with an ETag, and the console renders it. The #1861 field-contract test covers every view.
+3. **Push.** The projector emits view-version changes on one SSE stream, and the console mounts the (generalized) CONSOLE-T70 live client on every page.
+4. **Warm handoff.** A new serve process takes over only once its read model is loaded.
+5. **Non-blocking reads.** `gh` and projection run off the request loop; heavy reads are paginated; GETs never write state; serve has a memory limit.
+
+**Rejected:**
+- Hosted Postgres: another service, and no gain at 125 MB.
+- An edge replica: it buys outage survival only, and the operator ruled that unnecessary.
+- More caches: they caused today's uncoordinated layers.
+
+**Phases:**
+- 0: quick wins, including W1-T4771, W1-T4481, W1-T4820, inbox pagination, a nav-badge view, the console fetch layer and a serve memory limit.
+- 1: the read model and the first views.
+- 2: push.
+- 3: warm handoff.
+- 4: migrate every page and retire the old caches.
+
+Each phase is measured against the 2026-09-29/30 baseline.
+
+**Rollback:** the read model is additive until Phase 4. Each view keeps its legacy route until its replacement has been measured.
+
+**Tracked in:** `~/Remudero/.session-scratch/arch-plan.md` (operator session).
+
+**Pending the operator:**
+- W1-T1258 (Law N vocabulary).
+- W1-T3332 (acceptance rewrite).
+- W1-T2635's five unclear records.
+- W1-T4532 (tag ruleset, by hand).
