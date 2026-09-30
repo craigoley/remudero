@@ -1,3 +1,6 @@
+import { existsSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+
 /**
  * lib/live-write-guard.ts — refuse OUTWARD writes to the live repo while running
  * under the node test runner (operator ruling 2026-07-30, recon-AQ option 2).
@@ -91,7 +94,9 @@ export function isTestRunner(env: NodeJS.ProcessEnv = process.env): boolean {
  *  verdict was posted against the old one), so it belongs behind this boundary exactly like
  *  the merge and push writes beside it. Reusing one of those four would have mislabelled the
  *  refusal in the error a blocked test reads. */
-export type LiveWriteBoundary = "gh-transport" | "git-push" | "gh-pr-create" | "gh-pr-merge" | "gh-issue-create" | "gh-pr-update-branch";
+export type LiveWriteBoundary = "gh-transport" | "git-push" | "gh-pr-create" | "gh-pr-merge" | "gh-issue-create" | "gh-pr-update-branch" | "ledger-append";
+
+export const TEST_LIVE_STATE_ROOT_ENV = "TEST_RUNNER_LIVE_STATE_ROOT";
 
 /** Thrown at a boundary rather than returning silently: a swallowed refusal would
  * read as "the effect did not happen for some other reason", which is the same
@@ -103,15 +108,42 @@ export class LiveWriteBlockedError extends Error {
     public readonly detail: string,
   ) {
     super(
-      `live-write-guard: REFUSED ${boundary} under the node test runner — ${detail}. ` +
-        `A test must never push, open a PR, merge, or file an issue against the live repo ` +
-        `(recon-AQ: 6 branches, 5 PRs, 3 issues, one auto-merge armed). ` +
-        `If this test drives the boundary DELIBERATELY against its own containment (a PATH-stubbed ` +
-        `gh, an injected gateway, or a bare TMPDIR origin), wrap just that section in ` +
-        `withLiveWritesAllowed(() => …) from src/lib/live-write-guard.ts — a stub alone is not enough, ` +
-        `because this guard checks the CALL, not the DESTINATION. Set ${LIVE_WRITE_OVERRIDE_ENV}=1 only ` +
-        `to exempt a whole process.`,
+      `live-write-guard: REFUSED ${boundary} under test containment — ${detail}. ` +
+        (boundary === "ledger-append"
+          ? `W1-T4923: use a fixture state root. Set ${LIVE_WRITE_OVERRIDE_ENV}=1 only to exempt a whole process.`
+          : `A test must never push, open a PR, merge, or file an issue against the live repo ` +
+            `(recon-AQ: 6 branches, 5 PRs, 3 issues, one auto-merge armed). ` +
+            `If this test drives the boundary DELIBERATELY against its own containment (a PATH-stubbed ` +
+            `gh, an injected gateway, or a bare TMPDIR origin), wrap just that section in ` +
+            `withLiveWritesAllowed(() => …) from src/lib/live-write-guard.ts — a stub alone is not enough, ` +
+            `because this guard checks the CALL, not the DESTINATION. Set ${LIVE_WRITE_OVERRIDE_ENV}=1 only ` +
+            `to exempt a whole process.`),
     );
+  }
+}
+
+function canonicalDestination(path: string): string {
+  let ancestor = resolve(path);
+  const missing: string[] = [];
+  while (!existsSync(ancestor)) {
+    const parent = dirname(ancestor);
+    if (parent === ancestor) break;
+    missing.unshift(basename(ancestor));
+    ancestor = parent;
+  }
+  return join(realpathSync(ancestor), ...missing);
+}
+
+export function assertLiveLedgerPathAllowed(path: string, env: NodeJS.ProcessEnv = process.env): void {
+  if (env[LIVE_WRITE_OVERRIDE_ENV] === "1") return;
+  const deniedRoot = env[TEST_LIVE_STATE_ROOT_ENV];
+  if (!deniedRoot) return;
+  const inside = (candidate: string, base: string): boolean => {
+    const part = relative(base, candidate);
+    return part === "" || (part !== ".." && !part.startsWith(`..${sep}`) && !isAbsolute(part));
+  };
+  if (inside(resolve(path), resolve(deniedRoot)) || inside(canonicalDestination(path), canonicalDestination(deniedRoot))) {
+    throw new LiveWriteBlockedError("ledger-append", `W1-T4923 denied ledger path ${path} under ${deniedRoot}`);
   }
 }
 

@@ -6,19 +6,27 @@
 // shut under the test runner, and lock them OPEN everywhere else so the daemon is unaffected.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
+import { loadConfig } from "../src/lib/config.js";
+import { appendLedger } from "../src/lib/ledger.js";
+import { ledgerPathFor } from "../src/lib/ledger-path.js";
+import { main } from "../src/run-task.js";
 import { ghExec, ghExecFile, ghJson } from "../src/lib/github-transport.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ghRefusalCount } from "./setup/tmp-hygiene.js";
+import { installNoLiveRemote } from "./setup/no-live-remote.js";
 import {
   assertLiveWriteAllowed,
   isTestRunner,
   LiveWriteBlockedError,
   LIVE_WRITE_OVERRIDE_ENV,
   LIVE_WRITE_SENTINEL_TOKEN,
+  TEST_LIVE_STATE_ROOT_ENV,
   liveWritesExempt,
   withLiveWritesAllowed,
   type LiveWriteBoundary,
@@ -295,4 +303,96 @@ test("W1-T4805: a spawned child inherits the sentinel and no app key", () => {
   assert.equal(out.inst, null);
   assert.ok(out.cfg !== null && out.cfg.includes("rmd-test-gh-config-"), "GH_CONFIG_DIR must be the empty per-process dir");
   assert.deepEqual(readdirSync(out.cfg), [], "the gh config dir must be empty — no keyring login reachable");
+});
+
+test("the cli test harness never resolves the live ledger path", async (t) => {
+  const liveRoot = process.env[TEST_LIVE_STATE_ROOT_ENV];
+  assert.ok(liveRoot, "the shared setup must remember the original live root");
+  const fixturePath = ledgerPathFor(loadConfig());
+  assert.notEqual(fixturePath, join(liveRoot, "state", "ledger.ndjson"));
+  const sentinelRoot = mkdtempSync(join(tmpdir(), "rmd-test-original-ledger-"));
+  const sentinelPath = join(sentinelRoot, "state", "ledger.ndjson");
+  mkdirSync(join(sentinelRoot, "state"));
+  writeFileSync(sentinelPath, "sentinel\n");
+
+  const originalArgv = process.argv;
+  process.env[TEST_LIVE_STATE_ROOT_ENV] = sentinelRoot;
+  process.argv = ["node", "run-task.js", "help"];
+  t.mock.method(process, "exit", ((code?: number) => { throw new Error(`exit ${code}`); }) as typeof process.exit);
+  t.mock.method(console, "log", () => {});
+  try {
+    await assert.rejects(main(), /exit 0/);
+  } finally {
+    process.argv = originalArgv;
+    process.env[TEST_LIVE_STATE_ROOT_ENV] = liveRoot;
+  }
+  const rows = readFileSync(fixturePath, "utf8").trim().split("\n").map((row) => JSON.parse(row) as { step: string; verb: string });
+  assert.ok(rows.some((row) => row.step === "cli.invoked" && row.verb === "help"));
+  assert.equal(readFileSync(sentinelPath, "utf8"), "sentinel\n", "the original ledger keeps every byte");
+});
+
+test("the test preload reads the original config without creating or changing it", () => {
+  for (const source of ["absent", "configured", "malformed"] as const) {
+    const home = mkdtempSync(join(tmpdir(), `rmd-test-original-home-${source}-`));
+    const configPath = join(home, ".config", "remudero", "config.json");
+    const customRoot = join(home, "custom-root");
+    const original = source === "configured" ? JSON.stringify({ root: customRoot }) : "{broken";
+    if (source !== "absent") {
+      mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+      writeFileSync(configPath, original);
+    }
+    const env: NodeJS.ProcessEnv = { HOME: home, NODE_TEST_CONTEXT: "child-v8" };
+    const installed = installNoLiveRemote(env);
+    try {
+      assert.equal(env[TEST_LIVE_STATE_ROOT_ENV], source === "configured" ? customRoot : join(home, "Remudero"));
+      assert.ok(env.HOME !== home && installed.fixtureHome === env.HOME);
+      assert.equal(existsSync(configPath), source !== "absent");
+      if (source !== "absent") assert.equal(readFileSync(configPath, "utf8"), original);
+      assert.ok(existsSync(join(env.HOME!, ".config", "remudero", "config.json")));
+    } finally {
+      if (installed.fixtureHome) rmSync(installed.fixtureHome, { recursive: true, force: true });
+      if (installed.ghConfigDir) rmSync(installed.ghConfigDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("an append under the live state root from the suite is refused before writing", () => {
+  const deniedRoot = mkdtempSync(join(tmpdir(), "rmd-test-ledger-deny-"));
+  const path = join(deniedRoot, "state", "nested", "ledger.ndjson");
+  const alias = join(mkdtempSync(join(tmpdir(), "rmd-test-ledger-alias-")), "alias");
+  symlinkSync(deniedRoot, alias, "dir");
+  const prior = process.env[TEST_LIVE_STATE_ROOT_ENV];
+  process.env[TEST_LIVE_STATE_ROOT_ENV] = deniedRoot;
+  try {
+    assert.throws(
+      () => appendLedger(path, { run_id: "canary", task_id: "CLI", step: "cli.invoked" }),
+      (error: unknown) => error instanceof LiveWriteBlockedError && error.boundary === "ledger-append" && /W1-T4923/.test(error.message),
+    );
+    assert.equal(existsSync(path), false, "the refusal must precede mkdir and open");
+    assert.throws(
+      () => appendLedger(join(alias, "state", "ledger.ndjson"), { run_id: "alias", task_id: "CLI", step: "cli.invoked" }),
+      (error: unknown) => error instanceof LiveWriteBlockedError && error.boundary === "ledger-append",
+      "a symlink alias must not bypass the denied root",
+    );
+  } finally {
+    if (prior === undefined) delete process.env[TEST_LIVE_STATE_ROOT_ENV];
+    else process.env[TEST_LIVE_STATE_ROOT_ENV] = prior;
+  }
+});
+
+test("a spawned child inherits the live ledger deny root", () => {
+  const deniedRoot = mkdtempSync(join(tmpdir(), "rmd-test-child-ledger-deny-"));
+  const path = join(deniedRoot, "state", "ledger.ndjson");
+  const ledgerUrl = pathToFileURL(join(process.cwd(), "src", "lib", "ledger.ts")).href;
+  const probe = `import { appendLedger } from ${JSON.stringify(ledgerUrl)};\n` +
+    `try { appendLedger(${JSON.stringify(path)}, { run_id: "child", task_id: "CLI", step: "cli.invoked" }); console.log("wrote"); }\n` +
+    `catch (error) { console.log(error.name + ":" + error.message); }`;
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, [TEST_LIVE_STATE_ROOT_ENV]: deniedRoot };
+  delete childEnv.NODE_TEST_CONTEXT;
+  const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", probe], {
+    encoding: "utf8",
+    env: childEnv,
+  });
+  assert.match(output, /LiveWriteBlockedError:.*W1-T4923/);
+  assert.equal(existsSync(path), false);
 });

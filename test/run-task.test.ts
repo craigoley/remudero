@@ -1,3 +1,5 @@
+// clock-sweep runs this file without tmp-hygiene; install the same containment there too.
+import "./setup/no-live-remote.js";
 import assert from "node:assert/strict";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { ghShim } from "./helpers/gh-shim.js";
@@ -109,8 +111,8 @@ import {
 } from "../src/lib/onboard/synthesize.js";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import type { recordDecision } from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { Config } from "../src/lib/config.js";
+import { TEST_LIVE_STATE_ROOT_ENV, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { loadConfig, type Config } from "../src/lib/config.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import { judgeReview, reviewInputDigest } from "../src/lib/review.js";
@@ -7274,6 +7276,16 @@ test("synthesizeCommand: a complete-answers fixture with an already-clean draft 
 // without ever running main()). Same throwing-process.exit-mock shape wipe-test.test.ts's
 // callMain() uses, duplicated locally rather than imported so this file doesn't reach into
 // another test file's helper.
+function cliFixtureHome(): { home: string; ledgerPath: string } {
+  const home = mkdtempSync(join(tmpdir(), "rmd-test-cli-home-"));
+  const root = join(home, "root");
+  const configDir = join(home, ".config", "remudero");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, "config.json"), JSON.stringify({ root, claudeBin: process.execPath }));
+  utimesSync(home, new Date(), new Date()); // main() sweeps old temp homes under clock-sweep's shifted Date
+  return { home, ledgerPath: join(root, "state", "ledger.ndjson") };
+}
+
 class OnboardProcessExitCalled extends Error {
   constructor(public code: number | undefined) {
     super(`process.exit(${code})`);
@@ -7281,6 +7293,7 @@ class OnboardProcessExitCalled extends Error {
 }
 
 test("main(): `rmd onboard` with no target-dir dispatches to onboardCommand and exits 2 (fail loud, no fs/gh work)", async (t) => {
+  assert.ok(process.env[TEST_LIVE_STATE_ROOT_ENV], "clock-sweep and the normal suite both install filesystem containment");
   const exitMock = ((code?: number): never => {
     throw new OnboardProcessExitCalled(code);
   }) as typeof process.exit;
@@ -7289,6 +7302,10 @@ test("main(): `rmd onboard` with no target-dir dispatches to onboardCommand and 
   t.mock.method(console, "log", () => {});
 
   const originalArgv = process.argv;
+  const originalHome = process.env.HOME;
+  const fixture = cliFixtureHome();
+  process.env.HOME = fixture.home;
+  assert.equal(loadConfig().root, join(fixture.home, "root"));
   process.argv = ["node", "run-task.js", "onboard"];
   const originalGuardEnv = process.env[SELF_SYNC_GUARD_ENV];
   process.env[SELF_SYNC_GUARD_ENV] = "1";
@@ -7300,8 +7317,11 @@ test("main(): `rmd onboard` with no target-dir dispatches to onboardCommand and 
     assert.ok(caught instanceof OnboardProcessExitCalled, "main() must reach process.exit via onboardCommand's return value");
     assert.equal((caught as OnboardProcessExitCalled).code, 2);
     assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /<target-dir> is required/);
+    assert.match(readFileSync(fixture.ledgerPath, "utf8"), /"step":"cli.invoked","verb":"onboard"/);
   } finally {
     process.argv = originalArgv;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
     if (originalGuardEnv === undefined) {
       delete process.env[SELF_SYNC_GUARD_ENV];
     } else {
@@ -7570,6 +7590,7 @@ class AlertFixProcessExitCalled extends Error {
 }
 
 test("main(): `rmd alert-fix` with an unknown flag dispatches to alertFixCommand and exits 2 (fail loud, no fs/gh work)", async (t) => {
+  assert.ok(process.env[TEST_LIVE_STATE_ROOT_ENV], "clock-sweep and the normal suite both install filesystem containment");
   const exitMock = ((code?: number): never => {
     throw new AlertFixProcessExitCalled(code);
   }) as typeof process.exit;
@@ -7578,6 +7599,10 @@ test("main(): `rmd alert-fix` with an unknown flag dispatches to alertFixCommand
   t.mock.method(console, "log", () => {});
 
   const originalArgv = process.argv;
+  const originalHome = process.env.HOME;
+  const fixture = cliFixtureHome();
+  process.env.HOME = fixture.home;
+  assert.equal(loadConfig().root, join(fixture.home, "root"));
   process.argv = ["node", "run-task.js", "alert-fix", "--bogus"];
   const originalGuardEnv = process.env[SELF_SYNC_GUARD_ENV];
   process.env[SELF_SYNC_GUARD_ENV] = "1";
@@ -7589,8 +7614,11 @@ test("main(): `rmd alert-fix` with an unknown flag dispatches to alertFixCommand
     assert.ok(caught instanceof AlertFixProcessExitCalled, "main() must reach process.exit via alertFixCommand's return value");
     assert.equal((caught as AlertFixProcessExitCalled).code, 2);
     assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /--bogus/);
+    assert.match(readFileSync(fixture.ledgerPath, "utf8"), /"step":"cli.invoked","verb":"alert-fix"/);
   } finally {
     process.argv = originalArgv;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
     if (originalGuardEnv === undefined) {
       delete process.env[SELF_SYNC_GUARD_ENV];
     } else {
