@@ -29,7 +29,7 @@ import {
   type ReadModelDb,
   type ReadModelLease,
 } from "./read-model-db.js";
-import { oldestAsOf, viewEtag, type ViewBody, type ViewSource } from "./views.js";
+import { oldestAsOf, viewEtag, type ViewBody, type ViewBodyEntry, type ViewSource } from "./views.js";
 
 const READ_MODEL_WORKER_KIND = "remudero-read-model" as const;
 /** The SSE publisher's cadence (design §1.1). */
@@ -115,14 +115,7 @@ export interface ReadModelInstanceState {
   newestTs: string | null;
 }
 
-export interface ReadModelBodyEntry {
-  view: string;
-  key: string;
-  version: number;
-  generation: number;
-  etag: string;
-  body: ViewBody;
-}
+export type ReadModelBodyEntry = ViewBodyEntry;
 
 export type ReadModelWorkerMessage =
   | { type: "body"; entry: ReadModelBodyEntry }

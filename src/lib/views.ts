@@ -22,7 +22,6 @@ import { createHash } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import { systemClock, type Clock } from "./clock.js";
 import { ifNoneMatchHits } from "./console-snapshot-cache.js";
-import type { ReadModelBodyEntry, ReadModelWorkerHandle } from "./read-model-worker.js";
 import type { Route } from "./service.js";
 
 export interface ViewSource {
@@ -89,12 +88,29 @@ export function viewKey(params: URLSearchParams): string {
     .join("&");
 }
 
+/** One materialized body as the read-model worker stores and posts it. */
+export interface ViewBodyEntry {
+  view: string;
+  key: string;
+  version: number;
+  generation: number;
+  etag: string;
+  body: ViewBody;
+}
+
+/** What the routes need from the read-model worker's handle (src/lib/read-model-worker.ts). */
+export interface ViewBodySource {
+  body(view: string, key?: string): ViewBodyEntry | undefined;
+  judge(sources: readonly ViewSource[], now: number): ViewSource[];
+  switches(): { views: Record<string, "serve" | "shadow" | "off"> };
+}
+
 export interface ReadModelViewRoutesOptions {
   /** The Phase 0 in-process computations; a view switched off, or with no body yet, answers from these. */
   legacy: readonly ViewDefinition[];
   /** Every view the read-model worker materializes; each is routed even while the worker is absent. */
   readModelViews?: readonly string[];
-  readModel?: Pick<ReadModelWorkerHandle, "body" | "judge" | "switches">;
+  readModel?: ViewBodySource;
   clock?: Clock;
 }
 
@@ -114,8 +130,8 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
   const clock = opts.clock ?? systemClock;
   const legacy = new Map(opts.legacy.map((view) => [view.name, view]));
   const names = [...new Set([...legacy.keys(), ...(opts.readModelViews ?? [])])];
-  const flippedEtags = new WeakMap<ReadModelBodyEntry, string>();
-  const judged = (readModel: NonNullable<ReadModelViewRoutesOptions["readModel"]>, entry: ReadModelBodyEntry): { body: ViewBody; etag: string } => {
+  const flippedEtags = new WeakMap<ViewBodyEntry, string>();
+  const judged = (readModel: ViewBodySource, entry: ViewBodyEntry): { body: ViewBody; etag: string } => {
     const sources = readModel.judge(entry.body.sources, clock.now());
     const stale = sources.some((source) => source.state !== "fresh");
     let etag = entry.etag;
