@@ -6,6 +6,7 @@ import { dirname, join as joinPath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 
+// @source-text-subject — this suite tests a census whose subject is source-code text.
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a STATIC import of the .mjs is a TS7016 and
 // fails typecheck — the same reason test/a-source-file-cannot-outgrow-its-baseline.test.ts reaches
 // its script this way. A dynamic specifier is not statically resolved, so this loads the REAL
