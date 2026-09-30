@@ -7,12 +7,16 @@ import { test } from "node:test";
 import type { Clock } from "../src/lib/clock.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { Escalation } from "../src/lib/escalate.js";
-import { gardenEffectsPath, gardenStatePath, runGarden, type GardenSpec } from "../src/lib/gardener.js";
+import { CI_FRICTION_REMEDIES_FILE } from "../src/lib/ci-friction-gardener.js";
+import { gardenEffectsPath, gardenStatePath, readGardenEffects, runGarden, type GardenSpec } from "../src/lib/gardener.js";
 import {
   GARDENER_OVERSEER_OFF,
   ciFrictionEffectReading,
   classifyGardenerStep,
+  healGardener,
+  productionGardenerOverseerPorts,
   runGardenerOverseer,
+  startGardenerOverseer,
   type GardenerOverseerPorts,
   type GardenerPrInfo,
 } from "../src/lib/gardener-overseer.js";
@@ -330,6 +334,78 @@ test("W1-T4802: the overseer's own rows are never mistaken for a gardener", () =
   assert.deepEqual(classifyGardenerStep("ci-friction.garden_filing_failed"), { name: "ci-friction", kind: "filing_failed" });
   assert.deepEqual(classifyGardenerStep("evidence_coverage.pass"), { name: "evidence_coverage", kind: "pass" });
   assert.equal(classifyGardenerStep("sweep.escalation_reconcile.summary"), undefined);
+});
+
+test("W1-T4802: unreadable records degrade to empty instead of throwing", () => {
+  const h = harness(T0 + 10 * HOUR);
+  try {
+    writeFileSync(join(h.dir, "gardener-overseer.json"), "{not json");
+    writeFileSync(gardenEffectsPath(h.dir, "junk"), "{not json");
+    writeFileSync(gardenStatePath(h.dir, "junk"), "{not json");
+    assert.deepEqual(readGardenEffects(gardenEffectsPath(h.dir, "junk")), [], "an unreadable effects file holds no verdicts");
+    const healed = healGardener(h.dir, "junk");
+    assert.deepEqual(healed.cleared, []);
+    assert.match(healed.unreadable ?? "", /JSON/);
+    assert.deepEqual(healGardener(h.dir, "absent"), { cleared: [] });
+    assert.equal(runGardenerOverseer(h.deps).ran, true, "a corrupt overseer record restarts, it does not stop the pass");
+    assert.equal(h.steps("gardener_overseer.scorecard").length, 1);
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4802: a throwing pass is ledgered by the timer and never escapes", () => {
+  const h = harness(T0, { readRows: () => { throw new Error("ledger unreadable"); } });
+  try {
+    const timer = startGardenerOverseer(h.deps, 1000);
+    timer.stop();
+    const failed = h.steps("gardener_overseer.overseer_failed");
+    assert.equal(failed.length, 1);
+    assert.equal(failed[0]?.error, "ledger unreadable");
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4802: the production ports read a PR from GitHub and the remedies file from disk", () => {
+  const h = harness(T0);
+  try {
+    const calls: string[] = [];
+    const fetchPr = (args: string[]): unknown => {
+      const url = args[1]!;
+      calls.push(url);
+      if (url.endsWith("/pulls/1")) return { merged: true, state: "closed", title: "chore: a", merged_at: "2026-09-20T01:00:00Z" };
+      if (url.endsWith("/pulls/1/files?per_page=100")) return [{ filename: "a.ts" }, {}, { filename: "b.ts" }];
+      if (url.endsWith("/pulls/2")) return { merged: false, state: "closed", title: "chore: b" };
+      if (url.endsWith("/pulls/2/files?per_page=100")) return [];
+      if (url.endsWith("/pulls/3")) return { merged: false, state: "open" };
+      throw new Error("HTTP 502");
+    };
+    const ports = productionGardenerOverseerPorts({ stateDir: h.dir, repoRoot: h.dir, owner: "o", repo: "r", fetch: fetchPr, log: h.deps.log });
+    assert.deepEqual(ports.prInfo?.("https://github.com/o/r/pull/1"), { state: "merged", title: "chore: a", paths: ["a.ts", "b.ts"], mergedAt: "2026-09-20T01:00:00Z" });
+    assert.deepEqual(ports.prInfo?.("https://github.com/o/r/pull/2"), { state: "closed", title: "chore: b", paths: [] });
+    assert.deepEqual(ports.prInfo?.("https://github.com/o/r/pull/3"), { state: "open", title: "", paths: [] });
+    assert.equal(calls.filter((c) => c.endsWith("/pulls/3/files?per_page=100")).length, 0, "an open PR's files are not fetched");
+    assert.equal(ports.prInfo?.("not a pr url"), undefined);
+    assert.equal(ports.prInfo?.("https://github.com/o/r/pull/4"), undefined);
+    assert.equal(h.steps("gardener_overseer.pr_unreadable")[0]?.error, "HTTP 502");
+
+    const cause = { kind: "check", name: "test" };
+    const priced = (minutes: number) => [{ cause, minutes, rounds: 4 }];
+    const rows = [
+      row("ci-friction.scorecard", T0, { pr_url: "https://github.com/o/r/pull/3", untracked: "check:test", priced: priced(80) }),
+      row("ci-friction.scorecard", T0 + 5 * HOUR, { untracked: null, priced: priced(20) }),
+    ];
+    const tracked = { gardener: "ci-friction", actionClass: "draft", url: "https://github.com/o/r/pull/3", openedAt: new Date(T0).toISOString(), mergedAt: new Date(T0 + HOUR).toISOString() };
+    assert.equal(ports.effectReading?.(tracked, rows), undefined, "no remedies file: unmeasured");
+    mkdirSync(join(h.dir, "docs"), { recursive: true });
+    writeFileSync(join(h.dir, CI_FRICTION_REMEDIES_FILE), "unrelated\n");
+    assert.equal(ports.effectReading?.(tracked, rows), undefined, "a remedies file that does not name the cause: unmeasured");
+    writeFileSync(join(h.dir, CI_FRICTION_REMEDIES_FILE), "## ci-friction:check:test\n");
+    assert.deepEqual(ports.effectReading?.(tracked, rows), { before: 80, after: 20, se: 40 });
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
 });
 
 test("W1-T4802: state/GARDENER_OVERSEER_OFF stops the pass", () => {
