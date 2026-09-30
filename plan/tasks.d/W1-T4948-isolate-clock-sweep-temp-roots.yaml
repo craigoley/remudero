@@ -1,0 +1,59 @@
+- id: W1-T4948
+  title: "Give every future-clock sweep a private temp root before it starts"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-30 W1-T4944 shifted-test safety finding"
+  plan_refs: ["W1-T4923", "W1-T4944", "W1-T3065"]
+  files:
+    - scripts/clock-sweep.mjs
+    - test/clock-sweep.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: clock-sweep.mjs runSuite() starts a test subprocess with
+    FK_SHIFT_DAYS=400 but inherits its parent's TMPDIR. Its preload shifts
+    Date.now() and new Date(), not filesystem mtimes. src/run-task.ts main()
+    calls sweepStaleTempDirs() before logging the CLI invocation. That sweep
+    deletes direct rmd-prefixed temp directories older than 24 hours according
+    to Date.now(). Under +400 days, even a just-created fixture reads as stale.
+    A local reproduction of the two residual CLI tests with the shared temp
+    root lost their fixture directories and failed ENOENT; rerunning each with
+    an isolated TMPDIR and a nested fixture home passed. Other active rmd-* temp
+    dirs on a shared host could be removed by an unisolated shifted process.
+    The exact 2026-09-09 invocation behind the five archived 2027-10-14 rows
+    remains unproven; the public Actions run that day ended before their
+    inferred real-time minute. Do not call that run the source.
+  design: |
+    Before every shifted runSuite call, allocate a unique directory under the
+    parent process's temp root and pass it as the child's TMPDIR. The child may
+    sweep only its own temp root; no shifted test may scan the shared parent.
+    Clean up only that exact generated directory in a finally block after the
+    child exits, including failed and thrown runs. Preserve the existing
+    success/failure and fuse-bisection semantics. Test the real runSuite
+    command and env shape with an injected exec, plus a bounded real process
+    that invokes the temp sweep under +400 days while a sibling sentinel temp
+    directory remains untouched. A failed clock diagnostic must not alter PR
+    routing, reviews or merge.
+  acceptance:
+    - claim: "each shifted suite receives a unique private TMPDIR, never the shared parent"
+      proof: 'grep: test("W1-T4948: each shifted suite gets a private temp root" in test/clock-sweep.test.ts'
+    - claim: "cleanup runs after a failed suite without deleting a sibling directory"
+      proof: 'grep: test("W1-T4948: failed sweep cleans only its own temp root" in test/clock-sweep.test.ts'
+    - claim: "a real shifted temp sweep leaves a sibling sentinel untouched"
+      proof: 'grep: test("W1-T4948: real shifted sweep cannot reap a sibling sentinel" in test/clock-sweep.test.ts'
+  falsifier: |
+    Drop TMPDIR from runSuite's child env: the first and real-process canaries
+    fail. Point cleanup at the parent rather than the generated child root: the
+    sibling sentinel fails. Skip cleanup on throw: the second test sees debris.
+  note: |
+    Reserved by the operator session on branch codex/clock-sweep-ledger-fixtures-20260930.
+    This is a safety repair to the diagnostic harness, not a clock-model score
+    or a reason to block ordinary PRs. No open plan subject matched this
+    shifted-temp-root mechanism at filing time.
