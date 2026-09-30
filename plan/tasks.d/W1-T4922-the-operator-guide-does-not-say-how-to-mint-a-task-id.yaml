@@ -1,0 +1,62 @@
+- id: W1-T4922
+  title: "THE OPERATOR GUIDE'S next-task-id ROW DESCRIBES A MINT THAT NO LONGER EXISTS AND NOTHING SAYS HOW TO RESERVE AN ID — it lists only --plan and --offline, never --branch or the refs/rmd-id claim, and the only nearby host advice is a docker exec form the operator rejected for a mint on 2026-09-30, so three sets of commands were given before the right one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-09-30: an operator minting ids for twelve filings was given three wrong sets of commands"
+  plan_refs: ["W1-T509", "W1-T1055", "W1-T2608"]
+  files: [docs/operator-guide.md]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 at origin/main 76c9b670d, from the guide's own text.
+
+    (1) THE ROW IS STALE. docs/operator-guide.md line 78 documents `rmd next-task-id [--plan <path>] [--offline]` and
+    says it prints an id. The verb's real usage (docs/cli-reference.md, generated from the registry) also takes
+    --no-reserve, --audit, --audit-age-days, --prefix/--repo and --branch, and by default CLAIMS the id by pushing
+    refs/rmd-id/<id> to origin (W1-T509, W1-T1055). The guide mentions none of it: grep counts on the guide are
+    `next-task-id --branch` 0, `refs/rmd-id` 0, `throwaway worktree` 0.
+
+    (2) THE WRONG RECIPE WAS FOUND WHERE AN AGENT WOULD LOOK. The guide's only host-side rmd advice near this
+    is the `docker exec -w /home/node/Remudero/remudero remudero-daemon ./bin/rmd <verb>` note (about line 538). An
+    agent working from it produced a mint command the operator rejected. The next set was run on the
+    operator's own checkout and failed: a detached, self-sync-refused tree 2,117 commits behind main, whose rmd did not know
+    `--branch`.
+
+    (3) WHAT WORKED, RECORDED HERE SO IT CAN BE DOCUMENTED. On the Azure host, in a throwaway worktree of current
+    origin/main with `npm ci`, and `RMD_SELF_SYNC_DONE=1` exported: `./bin/rmd next-task-id --branch <BR>` reserved
+    W1-T4898..T4904, T4908, T4909, T4914, T4915, T4921 and T4922, each printing `RESERVED <id> on origin
+    (refs/rmd-id/<id>)`. A web session cannot do this: it
+    has no gh, and the proxy refuses a push of refs/rmd-id/*.
+
+    (4) THE FILING PR MUST USE THE SAME BRANCH. The reservation records its holder branch, so the filing PR's head
+    must be the `--branch` value it was minted with; the guide should say so.
+  design: |
+    Edit docs/operator-guide.md only. (i) Bring the `next-task-id` row into line with the registry usage: name --branch and
+    the default claim, and point at docs/cli-reference.md for the full flag list rather than copying it. Read
+    test/claude-md-rules-reach-their-scope.test.ts and any test that reads the guide's verb table BEFORE editing the
+    row, and keep it green. (ii) Add a short "Minting a task id" subsection under the host-side guidance: use a
+    throwaway worktree of current origin/main with `npm ci`, export RMD_SELF_SYNC_DONE=1, run
+    `rmd next-task-id --branch <BR>` once per id, keep the same branch name for the filing PR, remove the worktree
+    afterwards; say it needs gh, so it is a host step and not a web-session step. (iii) Qualify the docker exec note:
+    that form runs verbs against the live daemon tree and is not the mint path. Do not restate the flag list, the rmd
+    self-sync doctrine or the dispatch rules; link to them.
+  acceptance:
+    - claim: "the guide documents the --branch reservation form of next-task-id"
+      proof: "grep: next-task-id --branch in docs/operator-guide.md"
+    - claim: "the guide names the refs/rmd-id claim the verb makes on origin"
+      proof: "grep: refs/rmd-id in docs/operator-guide.md"
+    - claim: "the guide names the throwaway-worktree procedure for minting"
+      proof: "grep: throwaway worktree in docs/operator-guide.md"
+    - claim: "the docker exec note says it is not the mint path"
+      proof: "grep: is not the mint path in docs/operator-guide.md"
+  falsifier: |
+    Revert the guide to the pre-change text and each of the four greps must return nothing, so the acceptance fails. Keep
+    the old `[--plan <path>] [--offline]` row unchanged while adding the subsection and the row-consistency test
+    (or the reviewer's diff check of the row against docs/cli-reference.md) must fail.

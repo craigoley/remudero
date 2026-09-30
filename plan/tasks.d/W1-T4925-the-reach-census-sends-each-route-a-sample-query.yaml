@@ -1,0 +1,57 @@
+- id: W1-T4925
+  title: "THE REACH CENSUS NEVER SENDS A QUERY — W1-T4576's census GETs each read route's bare path, so /v1/replay answers 400 before reading and /v1/self-measurement never sees ?detail=; the two routes that do a synchronous full-union read pass with an empty baseline"
+  repo: remudero
+  depends_on: ["W1-T4576"]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-30 core-console architecture Phase 1 design (P1-13); serve read-side review"
+  plan_refs: ["W1-T4576", "W1-T4567", "W1-T4568"]
+  files:
+    - test/every-get-read-route-is-bounded-by-reach.test.ts
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-30 (serve read-side review). W1-T4576's census
+    (test/every-get-read-route-is-bounded-by-reach.test.ts) warms each GET read route with its bare
+    path and counts ledger-archive opens on a second request. `CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE`
+    is empty. Two routes pass only because the census never sends the query that makes them read:
+    - `/v1/replay` (serve.ts buildReplayRoute, ledger-replay.ts resolveReplayLedgerLines) answers 400
+      without `since`/`until`, before reading; with them it does a synchronous full-union read
+      (readLedgerUnionRecordsSync), about 1.2 GB of raw gunzip per request on the host.
+    - `/v1/self-measurement?detail=` goes to measurement-cadence.ts latestMeasurementDetail, a
+      synchronous union read with a newest-first early stop, up to O(union).
+    The 2026-09-27 W1-T4568 deferral cited the empty baseline as met; it was met vacuously.
+  design: |
+    (i) The census keeps a table of sample queries keyed by `GET <path>`: at least
+    `/v1/replay?since=…&until=…` spanning the fixture's archives, and `/v1/self-measurement?detail=…`.
+    Sweep serve's GET read routes for query parameters they read, and add a sample for each route
+    whose behaviour a query changes. The census warms and charges each route with its sample
+    query as well as its bare path.
+    (ii) A route that re-opens archives on a warm request with its sample query goes into
+    `CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE` with a reason, as data in the baseline, not as a
+    comment (serve.ts is over its comment-load ceiling: add zero net comment lines). Fixing those
+    routes is out of scope; the Phase 1 read model retires them.
+    (iii) Keep the census honest: a sample query that answers 4xx is a failure, not a pass, so a
+    malformed sample cannot hide a route again.
+  acceptance:
+    - claim: "the census exercises each route's declared sample query"
+      proof: "unit test: the reach census exercises each route's declared sample query"
+    - claim: "the replay route is charged when since and until are sent"
+      proof: "unit test: the reach census charges the replay route when since and until are sent"
+    - claim: "a sample query that answers 4xx fails the census"
+      proof: "unit test: a sample query that answers 4xx fails the reach census"
+  falsifier: |
+    Drop the sample-query pass: /v1/replay answers 400 again, opens no archive, and the charge
+    proof fails. Accept a 4xx answer: a deliberately malformed sample passes and the third proof
+    fails.
+  note: |
+    Reserved from the operator checkout for branch file/phase1-fleet-tasks-1790777336775.
+    Scope-time checks 2026-09-30: no run-W1-T4925-* branch; no main commit names the id. No plan
+    record on origin/main or on any open head's added shards matches the census sample-query
+    subject. Design: ~/Remudero/.session-scratch/arch-phase1-design.md §7 (P1-13).

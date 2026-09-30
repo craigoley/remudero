@@ -1,72 +1,68 @@
 - id: W1-T3547
-  title: "ROUTE ONLY SYNTHESIS.TRIAGE TO GPT-OSS-120B AFTER THE MEASURED INBOX-DRAFT TRIAL — the WebSearch bridge remains deferred until the already tool-compatible 45%-of-spend lane proves accepted outputs per dollar"
+  title: "MEASURE THE TRIAGE LANE PER PROVIDER AND ROUTE NOTHING — no cash model has yet drafted a machine-checked output reliably, so the route waits on a per-provider outcome fold over the rows triage already writes"
   repo: remudero
-  depends_on: [W1-T3546, W1-T3549, W1-T3558]
+  depends_on: []
   type: implement
   verify: auto
   principles: {tdd: strict}
   risk: high
-  band_meaning: blast-radius
-  budget_usd: 20.00
+  band_meaning: span
+  budget_usd: 12.00
   files:
-    - .remudero/mounts.yaml
-    - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
+    - src/lib/triage-lane-outcomes.ts
+    - src/run-task.ts
+    - docs/cli-reference.md
+    - test/triage-lane-outcomes.test.ts
   origin: "operator-session#open-weight-research-2026-09-13"
-  plan_refs: ["W1-T3545", "W1-T3546", "W1-T3094"]
+  plan_refs: ["W1-T3545", "W1-T3546", "W1-T3549", "W1-T3558", "W1-T3570", "W1-T3749", "W1-T4907"]
   status: queued
   attempts: 0
   note: |
-    RESEQUENCED 2026-09-14: W1-T3558 now depends on W1-T3570, so this
-    triage route cannot dispatch before the measured inbox-draft trial. The old
-    smallest-lane-first premise was superseded by the observed tool surfaces:
-    triage requires WebSearch, while inbox draft requires only Read/Grep/Glob and
-    is already adapter-compatible. This task remains the triage-only route if the
-    trial's verdict says to widen; it must not re-route inbox draft or bypass the
-    bridge's consent/cash boundary.
-
-    THIS IS PHASE THREE AND THE ONLY ROUTED LANE IS `synthesis.triage`. The 2026-09-13 probe
-    classified five exact cases correctly, including a branch-name credit error, but five samples
-    are not a production rate. Triage is the smallest suitable proving lane: 176 measured runs,
-    machine-checked plan-diff behavior, and the bounded adapter from W1-T3546. W1-T3549 must
-    first establish an honest `WebSearch` authority: triage declares that tool, while the Phase Two
-    Chat Completions bridge deliberately refuses unsupported declared tools rather than silently
-    dropping them.
-
-    Do not route inbox draft or any other lane in this task. At least 20 real triage runs must be
-    measured after rollout. The PR body reports accepted-output-per-dollar, acceptance pass rate,
-    relint count, and the stated recommendation to proceed to inbox draft or stop. Tokens-per-dollar
-    is not the decision metric.
+    REWRITTEN 2026-09-30 (operator ruling): the original scope, a static mount flip of `synthesis.triage`
+    to cash, is withdrawn. Its premises are gone or false: W1-T3570's verdict was STOP (cash gpt-5-nano drafted
+    lint-clean 25%, and #8017 reverted the Luna lead after 38 of 39 fragment-contract errors); the ladder for a
+    sonnet/low mount leads with gpt-5-nano, never the gpt-oss-120b the old title named; the WebSearch bridge the
+    old dependency edge waited for already exists (#5804, cash-web-bridge.ts) and W1-T3749 ruled WebSearch stays
+    off the cash surface because triage reads untrusted inbound text; and a `provider: cash` triage mount without a
+    `tools:` change throws on every run, because the spawn still declares WebSearch.
+    This task changes NO mount, NO provider, NO config and NO spawn. A later routing task is filed only from
+    this report's numbers.
   rationale: |
-    The openweight endpoint is cash-billed and subscription headroom is scarce. A cheap token that
-    causes a retry or a rejected plan artifact is not a cheap accepted output. The deterministic
-    triage gates make the first outcome observable without changing architect, judge, retro,
-    implement source, reviewer, diagnose, or fix mounts; all remain on Claude.
-
-    The `.remudero/mounts.yaml` and regression-test overlap with W1-T3546 is intentional and
-    sequenced, not duplicate work. W1-T3546 supplies the inert adapter and does not change a mount;
-    this task makes the one measured mount declaration only after that adapter and W1-T3549's
-    complete-tool finding are both merged. The dependency edges prevent concurrent dispatch.
+    Triage's deterministic gates (`decideTriage`, `runRelintLoop`, `assertProposedPlanLoads`) refuse a malformed
+    or self-contradicting output; they cannot tell a wrong ALREADY_DECIDED from a right one, and a green plan-only
+    triage PR is armed for auto-merge. So the only honest evidence that a weaker model is safe here is a
+    per-provider count of terminal outcomes, attempts and relints beside the Claude baseline over the SAME window,
+    with unknown cost reported as unknown. The lane already writes every row this needs: `triage.start`,
+    `triage.synthesized` (provider, model, total_cost_usd, billing_mode per attempt), `triage.relint`,
+    `triage.relint_refused`, `triage.error`, `triage.grill_opened` and `pr.opened`. A blocked-auction divert
+    already runs triage on cash without WebSearch (TRIAGE_CASH_TOOLS, W1-T3749), so cash rows may exist today.
   design: |
-    After W1-T3549 proves the complete declared-tool surface, set only the `synthesis.triage`
-    worker mount's provider to `openweight` using the Phase One affinity seam. W1-T3558 must
-    first land the bounded Azure Responses-API bridge that converts a real provider search result
-    into triage's declared WebSearch tool result; W1-T3549's negative result for gpt-oss itself
-    remains true and is not a substitute. Add a regression
-    test that loads the real mounts table and proves triage alone receives the new provider among
-    the listed machine-checked candidates. After merge, read the production ledger through its
-    three-form rotation union until at least 20 terminal triage runs have an explicit
-    provider-selection path and deterministic acceptance outcome. Compare the resulting
-    accepted-output-per-dollar to the recorded Claude baseline in the PR body; do not widen routing
-    until this measurement is complete.
+    Add `foldTriageLaneOutcomes(rows)` in a new module: join the rows above by run_id, group by provider and
+    model, and report per group the runs, terminal outcomes (propose, no_task, grill, error, relint_refused),
+    attempts per run, relints, and cost with api-billed cash and subscription notional kept apart and a missing
+    cost reported as unknown, never zero. A run with no terminal row is censored, never scored. A group with fewer
+    than 20 terminal runs reads as an insufficient sample and never yields a verdict. Read the three-form ledger
+    union with `refuseIncomplete: true`, as cash-trial.ts does. Register `rmd triage-outcomes [--json]`,
+    read-only, and regenerate docs/cli-reference.md. It never declares a winner and changes no routing.
+    The report is observational, not randomized: a squeeze divert lands on whatever feedback arrives while both
+    subscriptions are blocked, so it names that confound instead of hiding it.
   acceptance:
-    - claim: "only synthesis.triage declares openweight; architect, judge, retro, implement source, reviewer, diagnose and fix remain on Claude"
-      proof: "unit test: only synthesis triage routes to the open-weight provider"
-    - claim: "the routed mount carries an explicit openweight declaration, so its provider choice is auditable rather than inferred from capacity"
-      proof: "grep: provider: openweight in .remudero/mounts.yaml"
+    - claim: "a cash triage run is counted apart from a Claude one, so a per-provider outcome exists at all"
+      proof: 'grep: test("W1-T3547: a cash triage run is counted apart from a Claude one" in test/triage-lane-outcomes.test.ts'
+    - claim: "a triage run with no terminal row is censored, never scored accepted or failed"
+      proof: 'grep: test("W1-T3547: a triage run with no terminal row is censored, never scored" in test/triage-lane-outcomes.test.ts'
+    - claim: "a missing cost reads unknown, never zero, and cash cost stays apart from subscription notional"
+      proof: 'grep: test("W1-T3547: a missing cost is unknown, never zero" in test/triage-lane-outcomes.test.ts'
+    - claim: "fewer than twenty terminal runs on a provider is an insufficient sample, never a verdict"
+      proof: 'grep: test("W1-T3547: fewer than 20 terminal runs is an insufficient sample, never a verdict" in test/triage-lane-outcomes.test.ts'
+    - claim: "the ledger is read through the three-form union and refuses an incomplete read rather than counting a partial corpus"
+      proof: "grep: refuseIncomplete: true in src/lib/triage-lane-outcomes.ts"
+    - claim: "the fold is reachable as an operator verb"
+      proof: "grep: foldTriageLaneOutcomes( in src/run-task.ts"
+    - claim: "the verb is registered and documented"
+      proof: "grep: rmd triage-outcomes in docs/cli-reference.md"
   falsifier: |
-    Remove the triage provider declaration and require the real-mount regression to fail. Declare
-    openweight on any non-triage mount and require that same regression to fail. Before recommending
-    expansion, take the ledger union with positive controls for plain rotations, compressed
-    rotations and live ledger. Fewer than 20 terminal runs, missing deterministic acceptance
-    outcomes, a missing `WebSearch` authority, or a pass rate that exceeds the lane's retry budget
-    means stop rather than route inbox draft.
+    Score a run that has no terminal row as failed and the censored test must go red. Report a missing cost as 0
+    and the unknown-cost test must go red. Return a verdict for 19 terminal runs and the insufficient-sample test
+    must go red. Any diff to `.remudero/mounts.yaml`, `TRIAGE_WORKER_TOOLS`, or a `mountProvider` argument at the
+    triage spawn is a boundary violation even if every test passes.
