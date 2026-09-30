@@ -76,7 +76,7 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd coverage-improve [--lcov <path>]` | Tier two of the absolute coverage gate (W1-T470): when this run's branch coverage (read from `--lcov`, default `coverage/lcov.info`) sits in the 85–90% pass-with-debt band, ranks the `src/` files owning the most uncovered branches (a **count**, never a percentage — computed fresh every run, `lib/coverage-improvement.ts`) and files **one** `plan/feedback/` entry naming them via `captureFeedback`, never a shard written straight into `plan/tasks.d/` (no such minter exists) and never one entry per file. Dedupes against the ledger union (`lib/ledger-grep.ts`, never the live file alone) keyed on the exact set of files currently owning the debt — an unchanged debt profile is skipped; a shifted one files again. ≥90% (healthy) and <85% (tier three, a separate remediation loop) are both no-ops here. Inert until wired into the coverage CI job's own step, a deliberately separate PR (Rule 25). |
 | `rmd verdict-calibration` | The correctness join (W1-T424): joins every armed merge's ledgered review verdict (`lib/verdict-calibration.ts`'s `mineVerdictRows`, over the ledger union, never the live file alone) to post-merge git reality, and reports per verdict class (full PASS / keyword floor / degraded arm) the revert rate and follow-up-fix rate over a stated window, each denominator **named** (n of N armed merges) with an UNMEASURABLE arm for rows whose merge sha or verdict class could not be recovered — never a rate over a silently shrunken denominator. Below a minimum population floor a class prints its count and refuses the rate. The attribution window + overlap rule (`ATTRIBUTION_POLICY`) print alongside the figures, so the metric travels with its rule. Host-side only: the ledger lives on the daemon host. Read-only: files nothing, proposes nothing in v1. |
 | `rmd autonomy-rate` | The **quantity** figure beside `verdict-calibration`'s correctness join (W1-T437): the zero-touch merge rate over every `Remudero-Task:`-trailer-bearing merge on the read git history (`lib/autonomy.ts`'s `zeroTouchMergeRate`, over the ledger union, never the live file alone). Each merge is classified zero-touch or human-touched, and every touch that fired is **named** on its own row — not auto-armed, fix-rung strikes, reframe, operator note, capped override, fix-rung human evidence — then split by verdict class (full PASS / keyword floor / degraded arm / unclassified) so the class split shows where the next ratchet notch is safe. Prints the current `decideAutoMergeArm` arming posture beside the measured rate and proposes no policy change. Zero archive files under the state dir reports the window UNMEASURED, naming the reason, never a rate from the live ledger alone. Host-side only: the ledger lives on the daemon host. Read-only: files nothing, proposes nothing. |
-| `rmd next-task-id [--plan <path>] [--offline]` | Print the next free `W1-T<n>`, derived from the max across `plan/tasks.yaml`, **every** `plan/tasks.d/*.yaml` shard, and the ids **open plan PRs** have already minted — the three places an id can be taken. Prints its provenance; exits 1 when a source could not be read (the id is then a floor). `--offline` skips the open-PR read. |
+| `rmd next-task-id --branch <filing-branch>` | Reserve the next free `W1-T<n>` on origin as `refs/rmd-id/<id>` and record the branch that will file it. A normal invocation claims the id; `--offline` and `--no-reserve` do not. An unreadable source refuses the reservation. See [the CLI reference](cli-reference.md#rmd-next-task-id) for all flags and [minting a task id](#minting-a-task-id) for the host procedure. |
 | `rmd note <id> <text...>` | Record an operator guidance note against a task or proposal, into `plan/operator-notes.ndjson` — the weekly feedback docket's fifth capture surface, gathered across **all** tasks (the task scoping applies to prompt injection only). The text is **positional**: `rmd reframe`'s required `--feedback` flag is why that surface reads zero. Also available as `rmd approve <id> --note "<text>"`, which chains this exact write **after** the ratification lands. State-side only: no git, no gh, no PR. |
 | `rmd retro [--dry-run]` | Sync the plan from the ledger (the Architect retro's deterministic gather half). `--dry-run` prints the gather + calibration table only. |
 | `rmd correct <task-id> --pr <n> [--reason <text>]` | Sanctioned operator correction: records the task's TRUE merged PR when derived status disagrees, supreme over every other status rung. |
@@ -541,6 +541,7 @@ reproduce here, that is said rather than repeated.
   frozen at image build time and a verb that shipped hours ago is simply absent. **The live
   checkout is `/home/node/Remudero/remudero`; pass `-w`:**
   `docker exec -w /home/node/Remudero/remudero remudero-daemon ./bin/rmd <verb>`.
+  This runs against the live daemon tree and is not the mint path.
 
 - **That checkout is deliberately detached, so it sits behind main between deploys.**
   `deploy/entrypoint.sh` runs `git -C "$TREE" checkout --detach "$TARGET"` on every boot, so
@@ -610,6 +611,28 @@ reproduce here, that is said rather than repeated.
   where `grep -o … | wc -l` answers **2** — both measured here 2026-08-23 on a two-line fixture.
   Together they undercount a table without ever failing. **Count occurrences with
   `grep -o … | wc -l`, and let a zero be a zero** rather than substituting one after the fact.
+
+### Minting a task id
+
+Mint on the host, in a throwaway worktree at current `origin/main`. The web session has no `gh`,
+and its proxy cannot push `refs/rmd-id/*`. Use a host checkout whose `origin` points to the task's
+repository; keep the filing branch name for the PR that will add the task shard.
+
+```sh
+git -C <host-checkout> fetch origin main
+git -C <host-checkout> worktree add --detach <throwaway-worktree> origin/main
+cd <throwaway-worktree>
+npm ci
+RMD_SELF_SYNC_DONE=1 ./bin/rmd next-task-id --branch <filing-branch>
+# Repeat the reservation command once per id, then leave the worktree.
+cd - >/dev/null
+git -C <host-checkout> worktree remove <throwaway-worktree>
+```
+
+The command must print `RESERVED <id> on origin (refs/rmd-id/<id>)`. Use the same
+`<filing-branch>` as the filing PR's head; a different head fails the reservation check. Remove
+the throwaway worktree only after leaving it, and never delete a contested reservation. For the
+checkout placement and cleanup rules, see [Where to cut a worktree](#where-to-cut-a-worktree-and-why-it-matters).
 
 
 ## Operating this host (migrated from CLAUDE.md, W1-T2507)
