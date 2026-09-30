@@ -344,8 +344,8 @@ test("the shadow comparator adds no work to the request path", async (t) => {
     events.push("handler returned");
   });
   const { body } = await fetchBody(port, "/v1/views/nav-badge");
-  assert.equal(JSON.parse(body).data.count, 2, "the request is answered from the read model");
-  assert.deepEqual(events, ["handler returned", "response finished", "shadow noted"], "the legacy side is not computed on the request");
+  assert.equal(JSON.parse(body).data.count, 1, "shadow is legacy primary: the request is answered by the legacy computation");
+  assert.deepEqual(events, ["legacy computed", "handler returned", "response finished", "shadow noted"], "the comparison's legacy side is not computed on the request");
   queue.splice(0).forEach((run) => run());
   assert.deepEqual(events.at(-1), "legacy computed");
   assert.deepEqual(posted, [{ view: "nav-badge", key: "", requests: 1, legacy: { data: { count: 1 }, asOfMs: T0 } }]);

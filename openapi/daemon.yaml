@@ -12397,8 +12397,8 @@ paths:
       description: >
         P1-08/P1-12. Each instance's GET /v1/i/<instance>/repos/summary body, computed by the
         read-model worker, plus the portfolio grouped by registry project with each project's worst
-        repository. DARK: it answers 404 `view_not_ready` until state/read-model/switches.json sets
-        `repositories` to `serve`, and `off` answers 404 `view_disabled`; the console then reads the
+        repository. DARK: it answers 404 `view_disabled` until state/read-model/switches.json sets
+        `repositories` to `serve`, and `shadow` answers 404 `view_shadow`; the console then reads the
         per-instance repos/summary routes as before. Same ETag and 304 rules as every view. See
         docs/views.md.
       security:
@@ -12417,15 +12417,15 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          description: The view is switched off (`view_disabled`) or not served yet (`view_not_ready`).
+          description: The view is dark (`view_disabled`), shadowed with the console's legacy primary (`view_shadow`), or has no body yet (`view_not_ready`).
 
   /v1/views/now:
     get:
       summary: Everything the console's /now renders for one instance, served from the read model.
       description: >
         P1-11/P1-12. One body per instance, keyed by `?instance=`. DARK: it answers 404
-        `view_not_ready` until state/read-model/switches.json sets `now` to `serve` (the worker
-        materializes it under `shadow` too), and `off` answers 404 `view_disabled`; the console then
+        `view_disabled` until state/read-model/switches.json sets `now` to `serve` (the worker
+        materializes and compares it under `shadow`, which answers 404 `view_shadow`); the console then
         reads GET /v1/status and /v1/recent as before. An instance serve does not project also
         answers 404 `view_not_ready`. Same ETag and 304 rules as every view. See docs/views.md.
       security:
@@ -12453,7 +12453,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          description: The view is switched off (`view_disabled`) or not served yet for that instance (`view_not_ready`).
+          description: The view is dark (`view_disabled`), shadowed with the console's legacy primary (`view_shadow`), or not served yet for that instance (`view_not_ready`).
 
   /v1/recent:
     get:

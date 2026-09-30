@@ -45,10 +45,25 @@ reads no file and no SQLite.
   says which. A re-judged `stale` changes the ETag.
 - **Keys.** The query string, sorted by parameter name, selects the body (`?instance=console`); an
   unkeyed view has the empty key.
-- **Kill switch.** `state/read-model/switches.json` holds `{"projector": "on"|"off", "views": {"<name>":
-  "serve"|"shadow"|"off"}}`, and serve re-reads it every 5 s off the request path. A view set to `off`
-  answers from its Phase 0 computation where one exists (nav-badge), otherwise **404 `view_disabled`**.
-  A view with no body yet answers from that computation, or **404 `view_not_ready`**.
+- **Switches: dark by default.** `state/read-model/switches.json` holds `{"projector": "on"|"off", "views":
+  {"<name>": "serve"|"shadow"|"off"}}`, and serve re-reads it every 5 s off the request path. A view
+  with no entry, or no file at all, is **dark**: it answers as `off`. Only the `read-model` status view
+  serves without an entry. An absent file writes one `read_model.switch_absent` row and an unreadable
+  one a `read_model.switch_unreadable` row (once per distinct reason); an unreadable file turns every
+  view back to its default, so a half-written `off` never reads as `serve`.
+  - `off`: the view's Phase 0 computation in core answers where one exists (nav-badge), otherwise
+    **404 `view_disabled`**, and the console reads its own legacy routes.
+  - `shadow`: **legacy primary**. The Phase 0 computation answers where one exists (nav-badge),
+    otherwise **404 `view_shadow`** so the console falls back (now, repositories). After every
+    response, a sample (at most one a minute per key) goes to the worker's comparator
+    (`src/lib/view-shadow.ts`), which diffs the view body against the legacy side: serve's rendered
+    legacy body for nav-badge, and for now and repositories the core computation the worker's legacy
+    providers produce. The HTTP answer being a 404 does not stop the comparison.
+  - `serve`: the read-model body answers. A view with no body yet answers from its Phase 0
+    computation, or **404 `view_not_ready`**.
+- **Worker diagnostics.** The worker ledgers `read_model.lease_acquired` and `read_model.lease_elsewhere`
+  when an instance's lease changes hands, and `read_model.slow_tick` when one projector tick takes longer
+  than the 10 s stale bound. A source's staleness is judged from when its tick completed.
 
 ## `read-model` (version 1)
 
@@ -79,8 +94,8 @@ writer lease, and how many future-dated rows were quarantined.
 
 ## `repositories` (version 1)
 
-Dark until `switches.json` sets `repositories` to `serve`; until then it answers 404 and the console
-reads each instance's `repos/summary` as before. Schema: `RepositoriesView` in `openapi/daemon.yaml`.
+Dark until `switches.json` sets `repositories` to `serve`; until then it answers 404 (`view_disabled`,
+or `view_shadow` under `shadow`) and the console reads each instance's `repos/summary` as before. Schema: `RepositoriesView` in `openapi/daemon.yaml`.
 
 `data.instances[]`: `{ instanceId, summary?, reason? }`, one per instance serve holds.
 - `summary` IS that instance's `GET /v1/i/<instance>/repos/summary` body (`RepoDashboardResult`),
@@ -103,8 +118,9 @@ reads each instance's `repos/summary` as before. Schema: `RepositoriesView` in `
 `NowView` in `openapi/daemon.yaml`.
 - A request without `instance` answers 400 `invalid_request`.
 - An instance the worker does not project answers 404 `view_not_ready`.
-- The worker materializes it only while `now` is `shadow` or `serve`, and serve answers only under
-  `serve`. Otherwise it answers 404, and the console reads `/v1/status` and `/v1/recent` as before.
+- The worker materializes it unless `now` is `off`, and serve answers only under `serve`. Otherwise it
+  answers 404 (`view_disabled`, or `view_shadow` under `shadow`), and the console reads `/v1/status` and
+  `/v1/recent` as before.
 
 `data`: `{ instance, board{ generated_at, counts, spendTodayUsd, taskProjection, tasks[], groups{ running,
 needsYou, blocked, queued } }, prQueue, actions[], recent{ entries[], mergedToday{ count, day } }, health,

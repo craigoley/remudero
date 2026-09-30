@@ -75,6 +75,9 @@ export function oldestAsOf(sources: readonly ViewSource[]): string | null {
   return sources.flatMap((source) => (source.asOf === null ? [] : [source.asOf])).sort()[0] ?? null;
 }
 
+/** The 404 a view answers when neither its body nor a legacy computation may answer, by switch mode. */
+const NOT_SERVED = { serve: "view_not_ready", shadow: "view_shadow", off: "view_disabled" } as const;
+
 /** One read-scoped route per view, at `/v1/views/<name>`. */
 export function buildViewRoutes(views: readonly ViewDefinition[], clock: Clock = systemClock): Route[] {
   return buildReadModelViewRoutes({ legacy: views, clock });
@@ -116,15 +119,21 @@ export interface ReadModelViewRoutesOptions {
   clock?: Clock;
   /** Told of each request to a view switched `shadow`, once its response has finished (view-shadow.ts). */
   shadow?: (view: string, key: string, params: URLSearchParams) => void;
+  /** Views that serve their body with no switch entry; every other view defaults to `off`. */
+  servedByDefault?: readonly string[];
 }
 
 /**
  * `/v1/views/<name>` served from the read-model worker's in-memory bodies (Phase 1 P1-06).
  *
- * - The per-view switch `serve` or `shadow` (the default) answers with the worker's body. Its sources
- *   are re-judged at request time, so a stalled projector or a body loaded at boot reads stale and
- *   says which source and why. A view with no body yet answers from its legacy computation, else 404
- *   `view_not_ready`.
+ * A view is DARK unless its switch says otherwise: with no entry in the switch file (or no file) it
+ * answers as `off`. Only {@link ReadModelViewRoutesOptions.servedByDefault} (the read model's own
+ * status) serves without one.
+ * - `serve` answers with the worker's body. Its sources are re-judged at request time, so a stalled
+ *   projector or a body loaded at boot reads stale and says which source and why. A view with no body
+ *   yet answers from its legacy computation, else 404 `view_not_ready`.
+ * - `shadow` keeps LEGACY PRIMARY: the legacy computation answers, else 404 `view_shadow` so the console
+ *   reads its own legacy routes; every request is offered to the shadow comparator after it finished.
  * - `off` answers from the legacy computation, else 404 `view_disabled`: the console's fallback path.
  *
  * A request reads memory only. The bodies, the instance states and the switches all arrive off the
@@ -157,15 +166,15 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
         res.end(JSON.stringify({ error: "invalid_request", detail: `the ${name} view needs ?${missing}=` }));
         return;
       }
-      const mode = opts.readModel?.switches().views[name] ?? "serve";
+      const mode = opts.readModel?.switches().views[name] ?? (opts.servedByDefault?.includes(name) ? "serve" : "off");
       const shadow = opts.shadow;
       if (mode === "shadow" && shadow) res.once("finish", () => shadow(name, viewKey(params), params));
-      const entry = mode === "off" ? undefined : opts.readModel?.body(name, viewKey(params));
+      const entry = mode === "serve" ? opts.readModel?.body(name, viewKey(params)) : undefined;
       const fallback = legacy.get(name);
       const rendered = entry && opts.readModel ? judged(opts.readModel, entry) : fallback ? renderView(fallback, clock, params) : undefined;
       if (rendered === undefined) {
         res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ error: mode === "off" ? "view_disabled" : "view_not_ready", view: name }));
+        res.end(JSON.stringify({ error: NOT_SERVED[mode], view: name }));
         return;
       }
       if ("error" in rendered) {
