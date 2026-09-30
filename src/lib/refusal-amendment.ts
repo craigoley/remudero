@@ -24,7 +24,8 @@
 // an Architect amends the task — never on a timer, and never on the comment-only amendment itself.
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
+import { resolveRepoLayout } from "./repo-layout.js";
 import {
   preDispatchContractRevision,
   readPriorRefusal,
@@ -299,19 +300,24 @@ export async function draftRefusalAmendment(
   }
 }
 
-/** Read `plan/tasks.d/<taskId>-*.yaml` (or the monolith) from `repoDir` — the disk half of io.readShard. */
+/** Read the task's shard file (or the monolith) from `repoDir`, both located through
+ *  resolveRepoLayout rather than an inline house path — the disk half of io.readShard. */
 export function readTaskShard(repoDir: string, taskId: string): { relPath: string; text: string } | undefined {
+  const layout = resolveRepoLayout(repoDir);
+  const shardDir = join(layout.planDir, "tasks.d");
   let shardRel: string | undefined;
   try {
-    shardRel = readdirSync(join(repoDir, "plan", "tasks.d"))
+    shardRel = readdirSync(shardDir)
       .filter((f) => f.startsWith(`${taskId}-`) && /\.ya?ml$/.test(f))
-      .map((f) => join("plan", "tasks.d", f))[0];
+      .map((f) => relative(repoDir, join(shardDir, f)).split(sep).join("/"))[0];
   } catch {
     /* the shard directory is unreadable — fall through to the monolith */
   }
   if (!shardRel) {
-    const monolith = join(repoDir, "plan", "tasks.yaml");
-    if (existsSync(monolith) && readFileSync(monolith, "utf8").includes(`id: ${taskId}\n`)) shardRel = "plan/tasks.yaml";
+    const monolith = layout.planMonolith;
+    if (existsSync(monolith) && readFileSync(monolith, "utf8").includes(`id: ${taskId}\n`)) {
+      shardRel = relative(repoDir, monolith).split(sep).join("/");
+    }
   }
   if (!shardRel) return undefined;
   return { relPath: shardRel, text: readFileSync(join(repoDir, shardRel), "utf8") };
