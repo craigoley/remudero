@@ -25,7 +25,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isLandingRef } from "./feedback-landing.js";
 import type { Clock } from "./clock.js";
-import type { OrphanRunBranchEvidence } from "./drain.js";
 
 /**
  * The declared guard list (W1-T447) — branches the fleet must never delete, DECLARED so the
@@ -527,7 +526,7 @@ export function orphanRunBranchEvidenceReader(
   statePath: string,
   liveTaskIds: () => Iterable<string>,
   clock: Pick<Clock, "now">,
-): () => OrphanRunBranchEvidence | undefined {
+): () => { noPrHeadShas: Record<string, string>; nowMs: number; liveTaskIds: ReadonlySet<string> } | undefined {
   return () => {
     try {
       const noPrHeadShas = readAutomaticBranchReapState(statePath).noPrHeadShas ?? {};
