@@ -1417,9 +1417,13 @@ export function hostClassOf(
  * a slow check must never stall a worker. Error identity is `code + message`, never the position:
  * an unrelated insertion above an old error shifts its line and must not make it look new.
  * The effect is UNMEASURED; the A/B through the routing experiment arms is a separate step.
+ *
+ * Kind: BACKSTOP — the timeout fires only when the compiler is already too slow; a healthy
+ * incremental check finishes well inside it, and the hook then fails open.
  */
 export const EDIT_TYPECHECK_TIMEOUT_MS = 20_000;
-/** Cap on errors returned so one broken edit cannot flood the worker's context. */
+/** Cap on errors returned so one broken edit cannot flood the worker's context.
+ *  Kind: BACKSTOP — only a badly broken edit reaches it; a normal edit reports far fewer errors. */
 export const EDIT_TYPECHECK_MAX_ERRORS = 20;
 const TYPECHECKED_EXTENSION = /\.(?:[cm]?ts|tsx)$/;
 
