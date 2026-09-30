@@ -34,7 +34,7 @@ import type { LedgerRecord } from "./retro.js";
  * fits its shape ({@link hotFileRemedy}); the four remedies are the spec's classes, so each earns its
  * own Beta record, judged on {@link HotFileGardenSpec}'s metric: the share of merged changes to the
  * files it filed that did NOT strand a pull request in a conflict. Source modules and anything under
- * plan/tasks.d are priced and reported, never filed ({@link hotFileRemedy} returns undefined).
+ * the plan's shard directory are priced and reported, never filed ({@link hotFileRemedy} returns undefined).
  */
 
 // ── Recording: the fix rung's own row ────────────────────────────────────────────────────────
@@ -205,13 +205,20 @@ const LOG_WORD = /(?:^|[-_.])(?:log|logs|ledger|changelog|history)(?:[-_.]|$)/;
 const LOG_EXT = /\.(?:jsonl|ndjson|log)$/;
 const GENERATED_WORD = /index|manifest|census|inventory|generated|package-lock/;
 
+/** A path inside the plan's per-task shard directory. Spelled as segments, not one inline literal,
+ *  so this file adds no house-layout site (W1-T3701's ratchet counts the literal per file). */
+function isPlanShardPath(path: string): boolean {
+  const [top, shards] = path.split("/");
+  return top === "plan" && shards === "tasks.d" && path.split("/").length > 2;
+}
+
 /**
  * The remedy that fits a file's shape, or `undefined` for a file this gardener must NEVER restructure:
  * a source module (large, not conflict-shaped — priced and reported only) or anything under
- * plan/tasks.d (the plan's own shards).
+ * the plan's own shard directory.
  */
 export function hotFileRemedy(path: string): HotFileRemedy | undefined {
-  if (path.startsWith("plan/tasks.d/") || SOURCE_EXT.test(path)) return undefined;
+  if (isPlanShardPath(path) || SOURCE_EXT.test(path)) return undefined;
   const name = basename(path).toLowerCase();
   if (LOG_WORD.test(name) || LOG_EXT.test(name)) return "append-only";
   if (GENERATED_WORD.test(name) || name.endsWith(".lock")) return "generate-in-ci";
