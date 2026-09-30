@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -28,6 +28,15 @@ const { evaluateCommentLoadRatchet } = (await import(
     removed: string[];
     nextBaseline: Record<string, number>;
   };
+};
+
+// The counters live in scripts/house-layout-census.mjs so scripts/census-precheck.mjs counts through the
+// same module without starting this suite (`scripts/**` sits outside tsconfig's `include`, as above).
+const { houseLiteralCounts, listHouseLayoutSrcFiles } = (await import(
+  pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "house-layout-census.mjs")).href
+)) as {
+  houseLiteralCounts: (contents: Iterable<string>) => Record<string, number>;
+  listHouseLayoutSrcFiles: (root: string) => string[];
 };
 
 /**
@@ -196,32 +205,6 @@ test("resolveRepoLayout: a non-string override value fails loud", () => {
 
 // ── The house-literal ratchet (see the @source-text-subject note above) ─────────────────────────
 
-function listSrcFiles(root: string): string[] {
-  const out: string[] = [];
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (entry.isFile() && entry.name.endsWith(".ts")) out.push(full);
-    }
-  };
-  walk(join(root, "src"));
-  return out;
-}
-
-const HOUSE_LITERALS = ["plan/tasks.d", "MASTER-PLAN.md", ".remudero/", "learnings/"] as const;
-
-/** Per-literal file-presence counts over a fixed set of already-read file contents (never re-reads
- *  anything — the caller decides whether that content came from the working tree or a git ref). */
-function houseLiteralCounts(contents: readonly string[]): Record<string, number> {
-  const counts: Record<string, number> = {};
-  for (const literal of HOUSE_LITERALS) counts[literal] = 0;
-  for (const content of contents) {
-    for (const literal of HOUSE_LITERALS) if (content.includes(literal)) counts[literal] += 1;
-  }
-  return counts;
-}
-
 /** The merge base's own commit, resolved fresh every run — never a stored number (design note i).
  *  Mirrors scripts/comment-load-ratchet.mjs's `readBaseDiff`: a non-hex result means git could not
  *  name a commit for `baseRef`, which must fail loud rather than silently comparing against "". */
@@ -255,7 +238,9 @@ function readFileAtRef(root: string, ref: string, relPath: string): string | und
 }
 
 test("W1-T3701 ratchet: non-test src's house-layout literal count is judged against the merge base's own count, never a frozen ceiling", () => {
-  const currentCounts = houseLiteralCounts(listSrcFiles(REPO_ROOT).map((f) => readFileSync(f, "utf8")));
+  const currentCounts = houseLiteralCounts(
+    listHouseLayoutSrcFiles(REPO_ROOT).map((f) => readFileSync(join(REPO_ROOT, f), "utf8")),
+  );
 
   const base = resolveMergeBase(REPO_ROOT);
   const baseContents = listSrcFilesAtRef(REPO_ROOT, base)
