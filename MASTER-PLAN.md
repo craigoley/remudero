@@ -188,11 +188,11 @@ this block — a generator has no authority over WHY.
 - **ci-gate REQUIRED checks**: 27 — ci, lint-plan, depcruise, containment-probe, coverage-ratchet, mutation-ratchet, jscpd-gate, claims, learnings-budget-ratchet, commitlint, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, scan-pr / osv-scan, License Review, leak-grep, assertion-discrimination, task-id-existence, acceptance-author-gate, head-identity-gate, proof-discrimination, unwired-gate, comment-load-ratchet, source-size, coverage-session-blanking, baseline-monotonic, test-slow — source: `REQUIRED` (.github/workflows/ci-gate.yml, job `ci-gate`)
 <!-- CAPABILITY SNAPSHOT:END -->
 
-★ **CURRENT R89 (RETRO-1790709888903, 2026-09-29): 4 OBSERVED RUNS, 1 LEDGER `merged`, THREE OWNERSHIP-ASSERTED SHIPS, ALL NEW.** The verdict census reads `incomplete`×3 and `merged`×1. The three ships are **W1-T4550** [#7882](https://github.com/craigoley/remudero/pull/7882), R88's own plan-sync [#7879](https://github.com/craigoley/remudero/pull/7879) and triage close [#7899](https://github.com/craigoley/remudero/pull/7899). None appears in R88's entry, so **P70 reads 0 repeats of 3**. That is a small window, not a repaired credit row: no commit to the writer is named (DR-18(i)). W1-T4550's single run is `merged` in the verdict census and `failed` in the discrepancy list. One run carries two verdicts in one gather, so the census and the discrepancy list do not agree (**P73**). **One trailer is refused.** TRIAGE-fb-1789259749891-f16610's run names #7859, and #7859's head is an earlier dispatch of the same id (**P74**). **No retro run is refused.** R88 is credited to its own #7879 (**P69**'s lever is unchanged). **No guard fired**, so MAST reads infrastructure 0 (−4). The only unmapped class is `incomplete`×1, the refused triage run. W1-T4550 is not in `failed` because the census reads it as `merged`, not because the mapping learned a new row (DEBT item 1, **P42**). No procedural, degraded-success, failed-review or skill-draft pattern cleared its floor.
+★ **CURRENT R90 (RETRO-1790729726803, 2026-09-30): 7 OBSERVED RUNS, THREE OWNERSHIP-ASSERTED SHIPS, ALL NEW.** The verdict census reads `failed`×2, `handed_off`×1, `incomplete`×3 and `merged`×1. The three ships are **W1-T4785** [#7925](https://github.com/craigoley/remudero/pull/7925), R89's own plan-sync [#7913](https://github.com/craigoley/remudero/pull/7913) and a triage close, [#7919](https://github.com/craigoley/remudero/pull/7919). None appears in R89's entry, so **P70 reads 0 repeats of 3**. As in R89, that is a small window, not a repaired credit row (DR-18(i)). W1-T4785 is credited from the ledger's own `verdict.merged` row, while the discrepancy list calls its run `failed`. That is the same one-run-two-verdicts shape as R89's W1-T4550, **a second consecutive cycle** (**P73**). **Three trailers are refused.** TRIAGE-fb-1789261381180-c02132's run 1790709739092 names #7899, which R89 already logged. #7899's head is that id's earlier dispatch, so the id was dispatched again **after it had shipped** (**P74**). W1-T4769's two runs both name #7789, whose head is the filing branch `file/triage-claim-cash-trial-janitor`. That refusal is correct: the ownership assert did its job. **No retro run is refused.** R89 is credited to its own #7913 (**P69**'s lever is unchanged). **No guard fired**, so MAST reads infrastructure 0. The unmapped classes are `failed`×2, `handed_off`×1 and `incomplete`×1 (DEBT item 1, **P42**). No procedural, degraded-success, failed-review or skill-draft pattern cleared its floor.
 
-★ **CURRENT NET STATE:** WS-0 and WS-1 are shipped, and the plan-health sweep finds no violations. **Plan coherence reports 37 disagreements across 2,321 shards and 269 monolith records.** That is nine more shards than R88 and the same 37 lowercase `w1-t47xx-selector-shadow-miss.yaml` names, so P83's kill trigger does not fire. One asserted-unbuilt id remains unmerged, and SHIPS-UNWIRED names no unreached claim. The golden replay suite did not run. Mutation verdict history remains **N=0**, and CI-side emission is still unwired. LEARNINGS has **80 entries, +0**. The promotion judge proposes three `user-overall` candidates again. `a-rigged-probe-measures-nothing` is at 0.92 (from 0.88) and `an-error-names-its-cause-not-its-check` at 0.87 (from 0.78). `a-roster-error-needs-a-second-derivation`, which R88 read declined at 0.70, is now proposed at 0.83. None of the entries changed (**P38**), and none is written until a PR ratifies it. Ratification reads **30 approved / 0 reframed** over a 145,947-row window, down from 164,580 rows because the window rolled (**P54**). G-17's **historical, notional API-equivalent** share is 629 Architect-lane rows / $59.48, which is **28.1%** of 785 rows / $211.45 (from 28.3%). The retro lane is 32 `claude-opus-5-5` rows / $57.75. This measures only G-17's capability half; ratification authority, `assertArchitectAboveWorker` and mounts do not change. **Two of R88's harvest items were closed on `main`, outside the run lane (P65).** #7890 lands the missing `docs/ci-friction-remedies.md`, with an admission test against the real checkout (the P83-routed item). #7862 anchors the `ci-log` fix excerpt on the failing test and drops the exit line and runner notices, which is **P82**'s kill trigger (P82 retired below). This worktree's `git log` shows 40 trunk commits since the marker, and the union credits 3 of them. The harvest lists 3 candidates. The #7882 run's `[task]` asks whether the `unit test:` proof dialect its rewrite adopted is actually executed by the review proof executor (**P78**, DEBT item 8). Two DAEMON rounds on #7857 again could not run `comment-load-signal`, `source-size-ratchet`, `census-membership` or the machine-filing-judge suite (**P77**). This rung files none of them.
+★ **CURRENT NET STATE:** WS-0 and WS-1 are shipped, and the plan-health sweep finds no violations. **Plan coherence reports 37 disagreements across 2,330 shards and 269 monolith records.** That is nine more shards than R89 and the same 37 lowercase `w1-t47xx-selector-shadow-miss.yaml` names, so P83's kill trigger does not fire. One asserted-unbuilt id remains unmerged, and SHIPS-UNWIRED names no unreached claim. The golden replay suite did not run. Mutation verdict history remains **N=0**, and CI-side emission is still unwired. LEARNINGS reads **80 entries, +0**. That count predates #7910 (merged 00:49:15Z, 24 seconds after the gather's newest row), which marks `proc-environ-is-an-exec-time-snapshot` and `scan-both-quote-styles` as `superseded`. R91 should read 78 unless something else moves. Ratification reads **29 approved / 0 reframed** over a 138,763-row window, down from 30 over 145,947 because the window rolled (**P54**). G-17's **historical, notional API-equivalent** share is 565 Architect-lane rows / $53.91, which is **26.6%** of 712 rows / $202.98 (from 28.1%). The retro lane is 28 `claude-opus-5-5` rows / $52.22. This measures only G-17's capability half; ratification authority, `assertArchitectAboveWorker` and mounts do not change. **`git log --since` on the marker shows 41 trunk commits, and the union credits 3 (P65).** One of those commits, #7895, stops a garden branch from reaching origin without its PR. W1-T4805's harvest separately counts 111 leaked local `plan-garden-*` refs, and nothing deletes them. The harvest lists 21 candidates. #7910's knowledge gardener was blocked for three DAEMON rounds by `prompt-surface-gate`, whose remedy (a `test/fixtures/golden-verdicts/**` case) was outside its declared scope. The merged diff carries that fixture, so the deadlock was cleared by hand (**P63**). W1-T4805 ($4.484 / 167 turns, PR #7942 open) could not finish the baseline suite in its sandbox, and a DAEMON round on #7857 again could not run `comment-load-signal` or `source-size-ratchet` (**P77**). This rung files none of them.
 
-★ **CURRENT CALIBRATION:** the observed table below prices 1 implement, 1 retro and 2 triage runs, with 1 merged verdict. The implement total ($0.547) equals its only member and the one credited pair, so the **P73** invariants hold only trivially at n=1. **P65's changed-files classifier has not shipped**, so the mount freeze still holds. The class table has only `retro` and `triage` rows, and the #7882 run has none, so it covers 3 of 4 runs. Its turns/merge and tokens/merge columns are stamped 0% coverage (**P72**). Closure counts #7882 under `plan-lint`, 1 of 30 at $0.547/merge. `src` reads 0 of 620, down from 5 of 639 because the window rolled and no `src` merge landed in it. `docs` reads 0 of 69 and `design` 0 of 8. `retro` and `triage` are refused at population 1, below the floor of 5 (P48). Closure dates #7882's merge at 16:39:00Z, the trunk commit is 19:08:33Z, and the credit row is 19:18:55Z. That is three clocks for one merge (**P70**'s mechanism). Weekly-limit burn reads opus **2,810 turns / 85.5%** (69 runs) and sonnet **446 / 13.6%** (12 runs), identical for a **fourth** cycle. Haiku reads 3 runs / 31 turns, where it had 2 runs / 0 turns. The +31 equals the #7882 run's 31 turns, and G-17 names one `claude-haiku-4-5` implement row. Unresolved reads 63 runs / 0 turns (from 60). So only haiku and unresolved moved (**P72**). The $ figure is context only, not the objective. No tier or mount row moves.
+★ **CURRENT CALIBRATION:** the observed table below prices 4 implement, 1 retro and 2 triage runs, with 1 merged implement verdict. The implement total ($6.278) is larger than its largest member (the `src` class's single run at $4.484) and than its one credited pair (#7925 at $1.573), so the **P73** invariants hold. **P65's changed-files classifier has not shipped**, so the mount freeze still holds. The class table has only one `src`, one `retro` and two `triage` rows, so it covers 4 of 7 runs. Three implement runs have no class row, and the two zero-turn lanes are stamped 0% coverage (**P72**). Closure reads `src` 1 of 627 at $6.278/merge, which divides every implement dollar, including the unmerged $4.484 run, by the single credited #7925. `plan-lint` reads 0 of 29 (from 1 of 30; #7882 rolled out of the window), `docs` 0 of 72 and `design` 0 of 8. `retro` and `triage` are refused at population 1, below the floor of 5 (P48). Weekly-limit burn reads opus **3,015 turns / 86.3%** (73 runs), up from 2,810 / 85.5% (69). The +205 turns equal the two priced implement runs (167 + 38), so this is the first opus movement in five cycles. Sonnet reads **446 / 12.8%** (12 runs), identical in turns for a **fifth** cycle. Haiku is unchanged at 3 runs / 31 turns. Unresolved reads 66 runs / 0 turns (from 63) (**P72**). The $ figure is context only, not the objective. No tier or mount row moves.
 
 ★ **WS-1 COMPLETE + L2 LIVE (2026-07-15).** `rmd daemon` drained SBX-T1/T2/T3 unattended
 (#6/#7/#8); the bounded kill-9/restart drill had no duplicate run (W1-T12d, operator-attested).
@@ -427,14 +427,16 @@ hides: the repair is filed by whoever is blocked, not by whoever broke it.
 Shipped arcs, keyed by Remudero-Task (Standing rule 13: the proof is a MERGED PR, not prose).
 Newest first. Cost/turns from the run ledger.
 
-### RETRO-1790709888903 (2026-09-29, R89) — three new ships from four runs: one task, R88's plan-sync and a triage close
+### RETRO-1790729726803 (2026-09-30, R90) — three new ships from seven runs: one task, R89's plan-sync and a triage close
 
 The union lists 3 ships, and **none was already logged** (**P70**, 0 repeats of 3).
-- **W1-T4550** [#7882](https://github.com/craigoley/remudero/pull/7882) $0.547·31t splits W1-T3529's four whole-file `grep:` proofs into per-test `unit test:` proofs. It is a ledger-credit rescue, and the observed verdict is `failed`. #7894 then dropped its fifth criterion, a grep on text unchanged at the merge base.
-- **RETRO-1790696756582** [#7879](https://github.com/craigoley/remudero/pull/7879) $1.806 is R88's plan-sync [gate-side; run ended `incomplete`]. No retro run is refused on it (**P69**).
-- **TRIAGE-fb-1789261381180-c02132** [#7899](https://github.com/craigoley/remudero/pull/7899) $0.087 is an "already decided, no task" close [gate-side; `incomplete`]. A sibling id, TRIAGE-fb-1789259749891-f16610, is refused on #7859, its own earlier dispatch's PR (**P74**).
+- **W1-T4785** [#7925](https://github.com/craigoley/remudero/pull/7925) $1.573·38t sends a squeezed balanced task to Foundry Sonnet 5.5. It is a ledger-credit rescue (`verdictSource=ledger-credit`), and the observed verdict is `failed` (**P73**).
+- **RETRO-1790709888903** [#7913](https://github.com/craigoley/remudero/pull/7913) $1.945 is R89's plan-sync [gate-side; run ended `incomplete`]. No retro run is refused on it (**P69**).
+- **TRIAGE-fb-1789282068794-2f0b7d** [#7919](https://github.com/craigoley/remudero/pull/7919) $0.086 is an "already decided, no task" close [gate-side; `incomplete`]. A run of R89's already-shipped TRIAGE-fb-1789261381180-c02132 is refused on #7899, its own earlier dispatch's PR (**P74**).
 
-### RETRO-1790696756582 … RETRO-1790196348012 (2026-09-23 → 09-29, R88 + R87 … R70) — eighty-one new task ships, eighteen plan-syncs and two triage closes — ★ NINETEEN ENTRIES FOLDED INTO ONE BY R73–R89
+### RETRO-1790709888903 … RETRO-1790196348012 (2026-09-23 → 09-29, R89 + R88 … R70) — eighty-two new task ships, nineteen plan-syncs and three triage closes — ★ TWENTY ENTRIES FOLDED INTO ONE BY R73–R90
+
+R89 logged three new ships out of four runs (0 repeats, **P70**): **W1-T4550** [#7882](https://github.com/craigoley/remudero/pull/7882) $0.547·31t split W1-T3529's four whole-file `grep:` proofs into per-test `unit test:` proofs [ledger-credit; `failed`], and #7894 dropped its fifth criterion. R88's plan-sync **RETRO-1790696756582** [#7879](https://github.com/craigoley/remudero/pull/7879) $1.806 [gate-side; `incomplete`] and **TRIAGE-fb-1789261381180-c02132** [#7899](https://github.com/craigoley/remudero/pull/7899) $0.087, a "no task" close [gate-side; a sibling run was refused on #7859, **P74**], complete the set.
 
 R88 logged one new ship out of seven (6 repeats of R86 and R87, **P70**): R87's plan-sync **RETRO-1790694205979** [#7872](https://github.com/craigoley/remudero/pull/7872) $2.174 [gate-side; `incomplete`]. Three retro runs were refused on it, including R86's RETRO-1790688912142, which R87 had credited to #7852 (**P69**).
 
@@ -1263,20 +1265,20 @@ i.e. the plan's OLDEST entries were its most verbose. Ids/PRs/costs/turns preser
 - **THE FIRST GREEN LOOP — 3 tasks** (WS-0 spike/#1 $0.86, 7/7 verdicts GREEN, ground truth in FIELD
   FINDING 10 · SB-HELLO/sandbox#2 $0.41 · CI-GREEN-PROBE/#5 $0.44)
 
-## Calibration (observed — current R89 first; prior-cycle evidence follows)
+## Calibration (observed — current R90 first; prior-cycle evidence follows)
 
-**RETRO-1790709888903 (2026-09-29, R89) — observed task-type calibration.** Dollars are notional API-equivalent cost, not billed spend. W1-T5 needs this row, but P65's mount freeze still forbids re-basing on it. The window is 4 runs, so no per-run figure below is a central value (**P54**). The $0.547 implement total equals its only member and its only credited pair, so **P73** holds trivially. The `merged` column counts W1-T4550, whose run the discrepancy list calls `failed` (**P47**).
+**RETRO-1790729726803 (2026-09-30, R90) — observed task-type calibration.** Dollars are notional API-equivalent cost, not billed spend. W1-T5 needs this row, but P65's mount freeze still forbids re-basing on it. The window is 7 runs, so no per-run figure below is a central value (**P54**). The $6.278 implement total is at least its largest member ($4.484) and its one credited pair ($1.573), so **P73** holds. The `merged` column counts W1-T4785, whose run the discrepancy list calls `failed` (**P47**).
 
 | task_type | runs | merged | avg $ | avg turns | total $ |
 |---|---|---|---|---|---|
-| implement | 1 | 1 | $0.547 | 31 | $0.547 |
-| retro | 1 | 0 | $1.806 | 0 | $1.806 |
-| triage | 2 | 0 | $0.043 | 0 | $0.087 |
+| implement | 4 | 1 | $1.569 | 51.25 | $6.278 |
+| retro | 1 | 0 | $1.945 | 0 | $1.945 |
+| triage | 2 | 0 | $0.043 | 0 | $0.086 |
 
-**R80–R88 folded:** 27 / 40 / 40 / 40 / 40 / 40 / 40 / 40 / 32 runs. Implement read 20 / 6 / $1.671 / 67.55 turns, then 26 / 1 / $0.041 / 16.5 turns, then 27 / 0 / $0.000 / 3 turns, then 31 / 2 / $0.000 / 0.903 turns (DARK), then 23 / 4 / $0.493 / 56.696 turns, then 20 / 5 / $0.744 / 42.65 turns, then 20 / 1 / $0.135 / 13.95 turns, then 24 / 11 / $1.874 / 44.625 turns, then 21 / 5 / $1.488 / 43.095 turns. The detail remains in git history.
+**R80–R89 folded:** 27 / 40 / 40 / 40 / 40 / 40 / 40 / 40 / 32 / 4 runs. Implement read 20 / 6 / $1.671 / 67.55 turns, then 26 / 1 / $0.041 / 16.5 turns, then 27 / 0 / $0.000 / 3 turns, then 31 / 2 / $0.000 / 0.903 turns (DARK), then 23 / 4 / $0.493 / 56.696 turns, then 20 / 5 / $0.744 / 42.65 turns, then 20 / 1 / $0.135 / 13.95 turns, then 24 / 11 / $1.874 / 44.625 turns, then 21 / 5 / $1.488 / 43.095 turns, then 1 / 1 / $0.547 / 31 turns. The detail remains in git history.
 
 **Prior cycles (FOLDED — trend only; ledger-merged first, real ships in parentheses):** **R58–R78 FOLDED** (implement endpoints still quoted: R59 $0.916, R65 $0.030,
-R66 $0.041, R67 $0.390, R68 $2.927, R69 $3.137, R70 $1.102, R71 $1.105, R72 $0.187 per run, R73 DARK at $0.000, then R74 $0.683, R75 $4.580, R76 $1.043, R77 $1.285, R78 $2.554, R79 $1.289, R80 $1.671, R81 $0.041, R82 $0.000, R83 DARK again at $0.000, R84 $0.493, R85 $0.744, R86 $0.135, R87 $1.874, R88 $1.488 and R89 $0.547 (n=1) with no change to the calibration writer between — two orders of magnitude, no central value; P54) · **R44–R57 FOLDED**
+R66 $0.041, R67 $0.390, R68 $2.927, R69 $3.137, R70 $1.102, R71 $1.105, R72 $0.187 per run, R73 DARK at $0.000, then R74 $0.683, R75 $4.580, R76 $1.043, R77 $1.285, R78 $2.554, R79 $1.289, R80 $1.671, R81 $0.041, R82 $0.000, R83 DARK again at $0.000, R84 $0.493, R85 $0.744, R86 $0.135, R87 $1.874, R88 $1.488, R89 $0.547 (n=1) and R90 $1.569 (n=4) with no change to the calibration writer between — two orders of magnitude, no central value; P54) · **R44–R57 FOLDED**
 (7–40 runs / 2–30 merged (5–146 union pairs), $0.145–$9.929/run, coverage stamp 20% → 0% → full → full
 → full → 29% ⚠ → NONE → 27% on `src` → 0% on `triage` → NONE → NONE → **NONE A THIRD TIME** — the "full"
 readings were WINDOW coverage, never a repaired writer (DR-18(i)), and across twelve points the stamp has
@@ -1321,42 +1323,43 @@ paragraph has published last cycle twice.)*
   still be describing nothing**; **nor count a window's ships until you have subtracted the previous
   window's — a feed without an idempotency key reports history as news** (R70's); **nor count a verdict class as failure until its merge-state join reads every source the credit feed reads** (R71's); **nor divide a window's price by credits paid for in earlier windows** (R72's); **nor publish an all-zero row without checking it against a table that prices the same lane** (R73's); **nor treat a sensor's return as recovery until you name the commit that changed its source** (R74's, P73); **nor publish a model-class share that no per-lane table reproduces** (R77's, P72).
   **P29(iii)** (annotate credit-rejected runs before they reach the mount table) is still unbuilt, and
-  R89 adds 1 credit-rejected run (TRIAGE-fb-1789259749891-f16610 on #7859), so the entry stays EXERCISED.
+  R90 adds 3 credit-rejected runs (TRIAGE-fb-1789261381180-c02132 on #7899, W1-T4769 twice on #7789), so the entry stays EXERCISED.
 
 ## Retro proposals (PROPOSALS ONLY; NOT yet in plan/tasks.yaml)
 
 **★ THE LIVE RANKING IS RETIRED (R53-4's arm, fired 2026-09-15; its account was DELETED BY R58, and R80 folds this note to one sentence).** This section publishes no ORDER over its open proposals; the DEBT line below names each one-file remedy with its AGE IN CYCLES, and rank language inside older entries is historical record only.
 
-**★ R89 RETRO PROPOSALS — FAILURE MINING (PROPOSALS ONLY; nothing filed). No new proposal minted this cycle; the highest existing header is P83.** There is no `blocked_*` verdict this cycle. The census is `incomplete`×3 and `merged`×1, and two of the three `incomplete` runs merged gate-side (#7879, #7899). Every remaining finding routes to an open proposal.
-- **P74, proposed credit golden:** TRIAGE-fb-1789259749891-f16610's run 1790706206730 carries a trailer naming #7859. #7859's head is `run-TRIAGE-fb-1789259749891-f16610-1790691943339`, an earlier dispatch of the same id. Assert that a re-dispatched run of one id resolves to that id's merged PR and is not refused as foreign.
-- **P73, proposed invariant golden:** W1-T4550-1790699832894 reads `merged` in the verdict census and `failed` in the discrepancy list of the same gather. Assert that every run has exactly one verdict across all sections of one gather.
-- **P78, DEBT item 8, proposed proof golden:** W1-T4550 rewrote W1-T3529's four whole-file `grep:` proofs as `unit test:` proofs. Its own harvest asks whether the review proof executor parses and runs that dialect. Assert that a `unit test:` title naming no real test fails the proof, not passes it.
-- **Routed, not minted:** the two DAEMON rounds on #7857 that could not run `comment-load-signal`, `source-size-ratchet`, `census-membership` or the machine-filing-judge suite go to **P77**. The class table's 3-of-4 run coverage and the fourth identical opus/sonnet burn reading go to **P72**. The 40 trunk commits since the marker against 3 union credits, including #7862 and #7890, go to **P65**.
+**★ R90 RETRO PROPOSALS — FAILURE MINING (PROPOSALS ONLY; nothing filed). No new proposal minted this cycle; the highest existing header is P83.** No `blocked_*` verdict appears this cycle. The census is `failed`×2, `handed_off`×1, `incomplete`×3 and `merged`×1. Two of the three `incomplete` runs merged gate-side (#7913, #7919). Every remaining finding routes to an open proposal.
+- **P74, proposed credit golden:** TRIAGE-fb-1789261381180-c02132's run 1790709739092 names #7899. #7899's head is `run-TRIAGE-fb-1789261381180-c02132-1790708147828`, the same id's earlier dispatch, and R89 had already logged it as a ship. Assert that a re-dispatched run of one id resolves to that id's merged PR and is not refused as foreign. Also assert that an id whose PR has merged is not dispatched again.
+- **P73, proposed invariant golden:** W1-T4785-1790712250719 reads `merged` via the ledger's own credit row and `failed` in the discrepancy list of the same gather. R89 showed the same thing on W1-T4550, so this is two cycles running. Assert that every run has exactly one verdict across all sections of one gather.
+- **P72, proposed coverage golden:** the class table has rows for 4 of 7 runs, and three implement runs have none. Assert that the class table's run total equals the type table's run total, or that the difference is printed.
+- **Routed, not minted:** #7910's three DAEMON rounds blocked by `prompt-surface-gate`, whose golden-verdict remedy was outside the gardener's scope, go to **P63**. W1-T4805's unfinishable sandbox baseline and #7857's unrun `comment-load-signal`/`source-size-ratchet` go to **P77**. The 41 trunk commits since the marker against 3 union credits, including #7895, go to **P65**.
+- **Noted, not routed:** W1-T4769's two refusals on its filing PR #7789 are correct refusals, not a defect. W1-T4785's harvest names a baseline-red test (`the-overflow-valve-is-reachable-from-a-blocked-auction`) and a hard-coded `claude-sonnet-5-5` with no mount row. Neither recurs across tasks, and a routing that has to be invented is a mint in disguise.
 
-**R89 COMPRESSION:** **P82's 51-line canonical entry is replaced by a three-line tombstone**, because #7862 is its kill-trigger artifact, and DEBT item 12 is struck. R88's SHIPPED entry is folded into the R70–R87 fold, with every PR link kept. R88's calibration row joins the R80–R87 fold. The R88 failure-mining and compression blocks are replaced, not appended to. The three CURRENT NET STATE paragraphs are rewritten in place. Replay and mutation remain unmeasured.
+**R90 COMPRESSION:** **P74's 48-line canonical entry is cut to 12 lines.** The R51–R54 per-cycle readings, the six-PR ground-truth list and the "why this is not an existing entry" argument are dropped; git holds them. The mechanism, bar, falsifier, golden, task and kill trigger stay. R89's SHIPPED entry is folded into the R70–R88 fold, with every PR link kept. R89's calibration row joins the R80–R88 fold. The R89 failure-mining and compression blocks are replaced, not appended to. The three CURRENT NET STATE paragraphs are rewritten in place. Replay and mutation remain unmeasured.
 
 **(j) THE STANDING DEBT LINE — EACH ENTRY WITH ITS AGE IN CYCLES (R51-5's arm, still firing; since the
 ranking's deletion this is the ONLY ordering-shaped artifact this section publishes).** This rung has
 PROPOSED the same corrective tasks every cycle and filed none, because it is forbidden to touch
 `plan/tasks.yaml` and no downstream rung reads this section:
 **(1)** `plan/mast-mapping.yaml` (untouched since #1270) needs `incomplete`, `blocked_transient` and
-`failed` rows, and its merge-state join must exclude ledger-credit rescues — **AGE: 53 cycles; R89 leaves `incomplete`×1 unmapped, and a `failed`-observed ledger-credited run escapes only because the census calls it `merged`**.
+`failed` rows, and its merge-state join must exclude ledger-credit rescues — **AGE: 54 cycles; R90 leaves `failed`×2, `handed_off`×1 and `incomplete`×1 unmapped**.
 **(2)** struck by R69 (W1-T49 retired, #6254). **(3)** the credit row needs an idempotency key (P70) —
-**AGE: 31 cycles; R89 re-reports 0 of 3, a small window and not a repair**. **(4)** the retro
-lane needs a per-run key (P69) — **AGE: 33 cycles; R89 refuses no retro run**. **(5)** the ownership
-assert must resolve across all runs of a task id (P74) — **AGE: 28 cycles; R89 refuses one re-dispatched triage run on #7859**. **(6)** `blocked_budget`
-rows must carry the limit that fired and the reading it fired at (P44) — **AGE: 26 cycles**. **(7)** the
+**AGE: 32 cycles; R90 re-reports 0 of 3 again, a small window and not a repair**. **(4)** the retro
+lane needs a per-run key (P69) — **AGE: 34 cycles; R90 refuses no retro run**. **(5)** the ownership
+assert must resolve across all runs of a task id (P74) — **AGE: 29 cycles; R90 refuses a triage run dispatched after its own #7899 had merged**. **(6)** `blocked_budget`
+rows must carry the limit that fired and the reading it fired at (P44) — **AGE: 27 cycles**. **(7)** the
 id reservation must record a real branch, admit a self-hand-off, AND survive a mid-session credential
-expiry, **and a PR-body defect must reach a rung holding `gh pr edit`** (P77) — **AGE: 25 cycles**. **(8)** the acceptance dialect needs a non-regression proof form, a
+expiry, **and a PR-body defect must reach a rung holding `gh pr edit`** (P77) — **AGE: 26 cycles; W1-T4805 could not finish its sandbox baseline**. **(8)** the acceptance dialect needs a non-regression proof form, a
 `grep:` proof aimed inside the task's own `files:` list, AND a check that a `unit test:` bare title can
-resolve to a real test (P78) — **AGE: 24 cycles; W1-T4550's own harvest asks the `unit test:` question**. **(9)** the expiring-fixture/shared-counter census
-must warn-and-file rather than block unrelated PRs (P79) — **AGE: 23 cycles**. **(10)** the `gh` cadence
-floor must stamp its clock on the ALLOWED call only and count its refusals (P80) — **AGE: 22 cycles**.
+resolve to a real test (P78) — **AGE: 25 cycles**. **(9)** the expiring-fixture/shared-counter census
+must warn-and-file rather than block unrelated PRs (P79) — **AGE: 24 cycles**. **(10)** the `gh` cadence
+floor must stamp its clock on the ALLOWED call only and count its refusals (P80) — **AGE: 23 cycles**.
 **(11)** a record whose falsifier can close a criterion the same record asserts must be refused at
-filing time, or the reviewer's input must carry the falsifier (P81) — **AGE: 21 cycles**. **(12)** struck by R89 (P82 retired on #7862). **(13)** the selector-shadow gardener must file under the id convention and dedupe per edge,
-not per head (P83) — **AGE: 6 cycles; still 37 shards. The CI-friction gardener's missing file landed in #7890, which is not this item's remedy**.
-**Eleven entries are open, with a combined dwell of 292 cycles** (**P71**). **Routed with no DEBT line:**
-the ratification reading (30/0) goes to **P48**, and LEARNINGS at 80 (+0) goes to the DARK roster's `learningDuplicateViolation` line
+filing time, or the reviewer's input must carry the falsifier (P81) — **AGE: 22 cycles**. **(12)** struck by R89 (P82 retired on #7862). **(13)** the selector-shadow gardener must file under the id convention and dedupe per edge,
+not per head (P83) — **AGE: 7 cycles; still 37 shards of 2,330**.
+**Eleven entries are open, with a combined dwell of 303 cycles** (**P71**). **Routed with no DEBT line:**
+the ratification reading (29/0) goes to **P48**, and LEARNINGS at 80 (+0, predating #7910's two retirements) goes to the DARK roster's `learningDuplicateViolation` line
 (T420/#1610).
 
 **P17 LEFT THE RANKING 2026-08-20 — W1-T71 SHIPPED (#2182)**. **P29 LEFT THE RANKING 2026-08-07** —
@@ -1373,7 +1376,7 @@ own `P<N>` headers for the maximum and take the NEXT UNUSED number — the same 
 `rmd next-task-id` applies to W1-T### ids, and the #125/#118 P21 collision is what it exists to prevent.
 **A finding earns an id only when no existing entry's MECHANISM covers it**; otherwise it is ROUTED, and
 the routing is stated in that cycle's mining block so the refusal is auditable. **R84 minted P83 (the highest prior was P82, minted by R70
-and read by R71–R83); R85–R89 minted nothing and read P83 as the highest.** ★ R58 exercised the discipline's converse six times: the
+and read by R71–R83); R85–R90 minted nothing and read P83 as the highest.** ★ R58 exercised the discipline's converse six times: the
 `unit test:` bare-title dialect was ROUTED to **P78** (the same proof-resolution mechanism, a second
 half), W1-T3693's missing `test/` path in `files:` to **P63**, the cross-PR fixture-census ratchet to
 **P79**, the zero-gap two-rate publication to **P73**, `triage`'s eighth $0.000 and the two `step` keys
@@ -2761,54 +2764,11 @@ and is maintained IN PLACE).
   the only proof that it stays closed through evidence that does not. The reading lives on **R56-2**,
   whose retirement now requires a column DECLARED authoritative — the artifact P75 closed without.
 
-- **★★★ P74 (credit + golden; R51's mint; rank language now HISTORICAL — the ranking was deleted by
-  R53-4's fired arm. ★ **R54's reading: `triage` grew 11 → 20 runs, 0 merged, still priced at EXACTLY
-  $0.000, while `triage.synthesized` prices the SAME 9 rows at the SAME $3.23 for a FOURTH consecutive
-  cycle — the population nearly doubled and neither number moved a cent**; ★ R53's reading: `triage`
-  11 runs / 0 merged / **$0.000**, against
-  `triage.synthesized` at **$3.23 over the same 9 rows for a THIRD cycle, unchanged to the cent**, and NO
-  `TRIAGE-fb-*` PR merged this window, so the RE-DISPATCH shape gained no member and the entry holds on
-  unchanged ground truth; ★ R52 SCORED ITS BAR (R51-1): HIT, both
-  0-merged lanes classified with all four figures, and the falsifier did NOT fire, so the entry does not
-  collapse into P69. THIS CYCLE: `triage` 16 runs / 9 rows / $3.23 / SIX union PRs / RE-DISPATCH) — A
-  SECOND WHOLE LANE IS UNCREDITABLE, BY RE-DISPATCH RATHER THAN BY A CONSTANT KEY, SO FIXING THE FIRST
-  LANE FIXES HALF A DEFECT AND HIDES THE OTHER HALF.** ★ **AND P75 NOW BOUNDS ITS COST:** the closure
-  table in this same gather credits **5** of those six merges, so the type table's zero is partly a JOIN
-  failure and not only a keying one. GROUND TRUTH (mechanical, from the R51 gather, no network read):
-  `BY TASK TYPE` prices **`triage` at 13 runs / 0 merged / $0.000**; G-17 prices `triage.synthesized` at
-  **$3.23 across 9 rows** (`sonnet×9`); and the W1-T51 union names **SIX merged `TRIAGE-fb-*` PRs** —
-  [#5382](https://github.com/craigoley/remudero/pull/5382), [#5401](https://github.com/craigoley/remudero/pull/5401),
-  [#5416](https://github.com/craigoley/remudero/pull/5416), [#5417](https://github.com/craigoley/remudero/pull/5417),
-  [#5426](https://github.com/craigoley/remudero/pull/5426), [#5492](https://github.com/craigoley/remudero/pull/5492)
-  — every one a gate-side merge on a run the ledger ended `incomplete`. **MECHANISM, and it is NOT
-  P69's:** triage ids are unique per task (`TRIAGE-fb-<epoch>-<hash>`), so no constant string collides.
-  The four triage Discrepancy rejections all read *"GitHub trailer names …/pull/N but its head branch
-  (`run-<sameId>-<laterEpoch>`) is not this run's own branch (`run-<sameId>-<earlierEpoch>`)"* — **the
-  task was RE-DISPATCHED, the later run shipped, and the earlier run's ownership assert rejects its own
-  task's PR as foreign.** The later run's verdict never reaches `merged` either, so the pair is credited
-  NOWHERE. **CONSEQUENCE, and it is the rank argument:** P69 sits at rank 2 and its remedy is a per-run
-  key for the retro lane. **That remedy does not touch this lane at all**, so a reader who ships it and
-  re-reads the type table sees one 0-merged lane where there were two and concludes the class is
-  closing. **WHY THIS IS NOT AN EXISTING ENTRY:** **P69** is a CONSTANT key across runs — here the keys
-  are distinct and the collision is across TIME; **P62/P64** describe the re-dispatch rejection as a
-  per-run event — P74 is the claim that it consumes a WHOLE LANE's credit, because that lane is
-  re-dispatched as a matter of routine; **P60** is the picker taking one candidate rather than filtering
-  — P74 names which lane the picker is systematically wrong for; **P47** is a verdict disagreeing with a
-  credit row, which is the SYMPTOM this produces. **THE HONEST COUNTER-ARGUMENT, STATED:** n=13 over a
-  ~30-hour window could be one unlucky batch of re-dispatches — **which is exactly why the bar is
-  registered on the CLASSIFICATION and not on the count**, and why a cycle with no 0-merged lane scores
-  UNRESOLVABLE rather than a pass. **PROPOSED BAR, REGISTERED VERBATIM AS R51-1:** *for every lane the
-  type table prices at 0 merged, state its run count, its `*.synthesized` row count and notional $ from
-  G-17, and the number of that lane's PRs the SHIPPED union names; then classify the loss as
-  CONSTANT-KEY or RE-DISPATCH from the Discrepancies section's own wording.* **FALSIFIER:** if every
-  0-merged lane in a cycle classifies as CONSTANT-KEY, P74 collapses into P69 and **RETIRES**.
-  **PROPOSED GOLDEN (plan + test, NOT FILED):** a fixture with two runs of one task id where the LATER
-  run merges a PR, asserting the credit resolver credits the TASK exactly once and never rejects the
-  earlier run's trailer as foreign. **PROPOSED TASK:** the ownership assert resolves a trailer against
-  **every run of the task id**, not against the asserting run's own branch; and `buildGather` prints a
-  per-lane `credited / shipped` pair beside every 0-merged row so a keying defect cannot render as
-  idleness. **KILL TRIGGER:** two consecutive cycles in which no lane reads 0 merged while its PRs
-  appear in the union — the credit path reaches every lane and the entry closes.
+- **★★★ P74 (credit + golden; R51's mint; rank language HISTORICAL — ★ COMPRESSED BY R90 from 48 lines; git holds the R51–R54 readings and the six-PR ground truth) — A LANE THAT IS RE-DISPATCHED AS ROUTINE IS UNCREDITABLE BY RE-DISPATCH, NOT BY A CONSTANT KEY, SO FIXING P69 FIXES HALF A DEFECT AND HIDES THE OTHER HALF.**
+  **MECHANISM:** triage ids are unique per task (`TRIAGE-fb-<epoch>-<hash>`), so no constant string collides (that is **P69**). The Discrepancy rejections read *"trailer names …/pull/N but its head branch (`run-<sameId>-<otherEpoch>`) is not this run's own branch"*. The task was dispatched again, one run shipped, and every other run's ownership assert rejects its own task's PR as foreign. **P62/P64** describe that rejection as a per-run event; P74 is the claim that it consumes a whole lane. **P47** is the symptom it produces.
+  **EVIDENCE, newest first:** **R90**: TRIAGE-fb-1789261381180-c02132 was dispatched again (run 1790709739092) **after** its #7899 had merged and been logged by R89, and that run was refused on #7899. This is the first member dispatched after its own ship, so the picker also re-selects closed ids (**P60**'s surface). **R89**: TRIAGE-fb-1789259749891-f16610 was refused on #7859. **R87**: 17 runs were refused on #7843. **R51–R54**: `triage` was priced at 11–20 runs / 0 merged / $0.000, while `triage.synthesized` stayed at $3.23 and six `TRIAGE-fb-*` PRs merged gate-side.
+  **BAR (R51-1, verbatim):** *for every lane the type table prices at 0 merged, state its run count, its `*.synthesized` row count and notional $ from G-17, and the number of that lane's PRs the SHIPPED union names; then classify the loss as CONSTANT-KEY or RE-DISPATCH from the Discrepancies section's own wording.* **FALSIFIER:** if every 0-merged lane in a cycle classifies as CONSTANT-KEY, P74 collapses into P69 and **RETIRES**.
+  **PROPOSED GOLDEN (NOT FILED):** two runs of one task id where one run merges a PR. The credit resolver credits the TASK exactly once, never rejects the other run's trailer as foreign, and the picker does not dispatch the id again once its PR is merged. **PROPOSED TASK:** the ownership assert resolves a trailer against **every run of the task id**, not only the asserting run's own branch. `buildGather` prints a per-lane `credited / shipped` pair beside every 0-merged row. **KILL TRIGGER:** two consecutive cycles in which no lane reads 0 merged while its PRs appear in the union.
 
 - **★★★ P73 (instrument + golden; R50's mint, rank 11 — ★ R51 SCORES ITS BAR (R50-1): HIT, and the
   scoring cuts against the entry — the aggregate CONTAINED its largest in-window member ($39.030 ≥
