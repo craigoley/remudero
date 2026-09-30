@@ -49,6 +49,7 @@
 #   RMD_STATE_DIR RMD_IMAGE RMD_SERVICE_USER RMD_NODE_MAX_OLD_SPACE_MB
 #   RMD_GH_APP_ID RMD_GH_APP_INSTALLATION_ID RMD_GH_APP_PRIVATE_KEY_PATH
 #   RMD_UNIT_DIR RMD_BIN_DIR RMD_LAUNCHER_PATH RMD_REVIVAL_LOG
+#   RMD_CLEANUP_PATH RMD_CLEANUP_LOG RMD_CRONTAB_CMD   (W1-T4770: the root-disk janitor + its cron)
 set -euo pipefail
 
 MODE="check"
@@ -789,6 +790,77 @@ for row in $UNITS; do
     echo "install-host-units: wrote   $path"
   fi
 done
+
+# W1-T4770 — the root-disk janitor and its crontab entry. Not a unit: a script COPIED from this repo
+# plus one crontab line, so it sits outside the UNITS table and is compared byte for byte. The cron
+# entry is REPLACED, never appended: every line running the script's path is dropped and one written.
+# Managed only where real: default host layout (core instance) or an explicit RMD_CLEANUP_PATH, so
+# test temp trees never touch a real home or crontab.
+CLEANUP_CRON_SCHEDULE='7 */6 * * *'
+CLEANUP_SRC="${SCRIPT_DIR}/rmd-host-cleanup.sh"
+CLEANUP_PATH="${RMD_CLEANUP_PATH-}"
+if [ -z "$CLEANUP_PATH" ] && [ "$UNIT_DIR" = "/etc/systemd/system" ] && { [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; }; then
+  CLEANUP_PATH="/home/${SERVICE_USER}/rmd-host-cleanup.sh"
+fi
+if [ -n "$CLEANUP_PATH" ]; then
+  require_abs_path "RMD_CLEANUP_PATH" "$CLEANUP_PATH"
+  CLEANUP_LOG="${RMD_CLEANUP_LOG:-$(dirname "$CLEANUP_PATH")/host-cleanup.log}"
+  CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
+  CRONTAB_CMD="${RMD_CRONTAB_CMD-crontab}"
+
+  crontab_read() {
+    if [ -z "${RMD_CRONTAB_CMD+x}" ] && [ "$(id -u)" = 0 ]; then "$CRONTAB_CMD" -u "$SERVICE_USER" -l 2>/dev/null || true
+    else "$CRONTAB_CMD" -l 2>/dev/null || true; fi
+  }
+  crontab_write() {
+    if [ -z "${RMD_CRONTAB_CMD+x}" ] && [ "$(id -u)" = 0 ]; then "$CRONTAB_CMD" -u "$SERVICE_USER" -
+    else "$CRONTAB_CMD" -; fi
+  }
+  cron_lines_for_janitor() { printf '%s\n' "$1" | grep -F -- "$CLEANUP_PATH" || true; }
+  cron_without_janitor() { printf '%s\n' "$1" | grep -F -v -- "$CLEANUP_PATH" || true; }
+
+  if [ ! -r "$CLEANUP_SRC" ]; then
+    echo "install-host-units: FATAL -- ${CLEANUP_SRC} is missing; the janitor cannot be installed." >&2
+    exit 2
+  fi
+  current_cron="$(crontab_read)"
+  janitor_cron="$(cron_lines_for_janitor "$current_cron")"
+  if [ "$MODE" = "check" ]; then
+    if [ ! -e "$CLEANUP_PATH" ]; then
+      echo "install-host-units: MISSING $CLEANUP_PATH"; drift=$(( drift + 1 ))
+    elif ! cmp -s "$CLEANUP_SRC" "$CLEANUP_PATH"; then
+      echo "install-host-units: DRIFTED $CLEANUP_PATH (differs from deploy/rmd-host-cleanup.sh)"; drift=$(( drift + 1 ))
+    else
+      echo "install-host-units: ok      $CLEANUP_PATH"
+    fi
+    if [ -z "$janitor_cron" ]; then
+      echo "install-host-units: MISSING crontab entry for $CLEANUP_PATH"; drift=$(( drift + 1 ))
+    elif [ "$janitor_cron" != "$CLEANUP_CRON_LINE" ]; then
+      echo "install-host-units: DRIFTED crontab entry for $CLEANUP_PATH (want exactly: $CLEANUP_CRON_LINE)"; drift=$(( drift + 1 ))
+    else
+      echo "install-host-units: ok      crontab entry for $CLEANUP_PATH"
+    fi
+  else
+    mkdir -p "$(dirname "$CLEANUP_PATH")"
+    # keep the differing hand-installed host copy once: adoption must not destroy its values
+    if [ -e "$CLEANUP_PATH" ] && ! cmp -s "$CLEANUP_SRC" "$CLEANUP_PATH" && [ ! -e "${CLEANUP_PATH}.pre-t4770" ]; then
+      cp -p "$CLEANUP_PATH" "${CLEANUP_PATH}.pre-t4770"
+      echo "install-host-units: saved   ${CLEANUP_PATH}.pre-t4770 (the previous host copy)"
+    fi
+    tmp="${CLEANUP_PATH}.tmp.$$"
+    cp "$CLEANUP_SRC" "$tmp"
+    chmod 0755 "$tmp"
+    mv -f "$tmp" "$CLEANUP_PATH"
+    echo "install-host-units: wrote   $CLEANUP_PATH"
+    rest_cron="$(cron_without_janitor "$current_cron")"
+    if [ -n "$rest_cron" ]; then
+      printf '%s\n%s\n' "$rest_cron" "$CLEANUP_CRON_LINE" | crontab_write
+    else
+      printf '%s\n' "$CLEANUP_CRON_LINE" | crontab_write
+    fi
+    echo "install-host-units: wrote   crontab entry: $CLEANUP_CRON_LINE"
+  fi
+fi
 
 if [ "$MODE" = "check" ]; then
   if [ "$drift" -gt 0 ]; then
