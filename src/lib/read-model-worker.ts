@@ -141,9 +141,11 @@ export interface ReadModelView {
   materialize(ctx: ReadModelViewContext): Array<{ key: string; data: unknown; sources: ViewSource[] }>;
 }
 
+const LEDGER_SOURCE_PREFIX = "ledger:";
+
 /** The `ledger:<i>` source every read-model view carries: stale while its projector is behind. */
 export function ledgerSource(state: ReadModelInstanceState, now: number, staleMs: number = READ_MODEL_LEDGER_STALE_MS): ViewSource {
-  const name = `ledger:${state.instance}`;
+  const name = `${LEDGER_SOURCE_PREFIX}${state.instance}`;
   if (state.tickedAt === undefined) return { name, asOf: state.newestTs, state: "stale", reason: state.reason ?? "projector has not ticked yet" };
   const behindMs = now - state.tickedAt;
   if (behindMs > staleMs) return { name, asOf: state.newestTs, state: "stale", reason: `projector ${Math.round(behindMs / 1000)} s behind${state.reason ? `: ${state.reason}` : ""}` };
@@ -431,6 +433,12 @@ export interface ReadModelWorkerHandle {
   readonly bodies: ReadonlyMap<string, ReadModelBodyEntry>;
   /** Each instance's last posted state, and the switches the worker last read. */
   state(): { at?: number; instances: ReadonlyMap<string, ReadModelInstanceState>; switches: ReadModelSwitches; warmBoot?: string };
+  body(view: string, key?: string): ReadModelBodyEntry | undefined;
+  /** A body's sources re-judged against the latest instance states: a stalled worker cannot
+   *  keep a stored "fresh", and a body loaded at boot is stale until its instance ticks. */
+  judge(sources: readonly ViewSource[], now: number): ViewSource[];
+  /** The switch file as the MAIN thread last read it, so the kill switch works with the worker down. */
+  switches(): ReadModelSwitches;
   start(): void;
   /** Asks the worker to release its leases and waits, bounded, for it. True when it confirmed. */
   stop(): boolean;
@@ -443,6 +451,14 @@ export interface ReadModelWorkerOptions {
   stopWaitMs?: number;
   workerUrl?: URL;
   log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** Runs the switch re-read on a cadence and returns its stop; defaults to an unref'd interval. */
+  every?: (run: () => void, ms: number) => () => void;
+}
+
+function everyUnref(run: () => void, ms: number): () => void {
+  const timer = setInterval(run, ms);
+  timer.unref();
+  return () => clearInterval(timer);
 }
 
 export function readModelBodyKey(view: string, key = ""): string {
@@ -459,6 +475,15 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   const warm = loadCommittedViewBodies(opts.stateDir, home);
   for (const entry of warm.bodies) bodies.set(readModelBodyKey(entry.view, entry.key), entry);
   opts.log?.("read_model.warm_boot", { bodies: warm.bodies.length, ...(warm.reason ? { reason: warm.reason } : {}) });
+  const switchesPath = readModelSwitchesPath(opts.stateDir);
+  let mainSwitches = DEFAULT_READ_MODEL_SWITCHES;
+  const refreshSwitches = (): void => {
+    const read = readReadModelSwitches(switchesPath);
+    if (read.ok) mainSwitches = read.switches;
+    else opts.log?.("read_model.switch_unreadable", { reason: read.reason, kept: mainSwitches });
+  };
+  refreshSwitches();
+  let stopSwitchWatch: () => void = () => {};
 
   let worker: Worker | undefined;
   let signal: Int32Array | undefined;
@@ -500,11 +525,21 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   return {
     bodies,
     state: () => ({ ...(at === undefined ? {} : { at }), instances, switches, ...(warm.reason ? { warmBoot: warm.reason } : {}) }),
+    body: (view, key = "") => bodies.get(readModelBodyKey(view, key)),
+    judge: (sources, now) => sources.map((source) => {
+      if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return source;
+      const state = instances.get(source.name.slice(LEDGER_SOURCE_PREFIX.length));
+      return state ? ledgerSource(state, now) : { ...source, state: "stale", reason: "read model warming: this body was committed before serve started" };
+    }),
+    switches: () => mainSwitches,
     start: () => {
-      if (!worker && !stopping) spawn();
+      if (worker || stopping) return;
+      spawn();
+      stopSwitchWatch = (opts.every ?? everyUnref)(refreshSwitches, READ_MODEL_SWITCH_RECHECK_MS);
     },
     stop: () => {
       stopping = true;
+      stopSwitchWatch();
       clearTimeout(respawnTimer);
       const running = worker;
       worker = undefined;
