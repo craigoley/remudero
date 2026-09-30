@@ -19,7 +19,7 @@
     - src/lib/pr-board.ts
     - src/lib/sre-runbooks.ts
     - src/lib/report-commands.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30. Four readers judge a head's checks; every other fleet reader goes through

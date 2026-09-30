@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-image-build-heal-1790708371000 -> plan-image-build-heal-1790708371000"
   plan_refs: [W1-T3240, W1-T3245, W1-T4589]
   files: [src/lib/deployer.ts, test/an-image-recycle-never-waits-on-a-build-nothing-started.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-29: #7823 (Codex CLI 0.159.0, a deploy/ change) merged at 15:06:0x as 30f3c7b58, and the fleet

@@ -10,7 +10,7 @@
   origin: "operator Inbox gardener issue #7708 and live 2026-09-29 W1-T216 release audit"
   plan_refs: [W1-T216, W1-T4738, W1-T4742, W1-T4768]
   files: [src/lib/inbox-responder.ts, src/lib/panel-graph.ts, src/lib/verify-human-release.ts, src/run-task.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/a-released-human-ask-leaves-the-inbox.test.ts, test/an-automate-verdict-releases-when-the-risk-judge-proceeds.test.ts, test/an-operator-verdict-releases-a-parked-task.test.ts, test/archive-release-inbox-reconciliation.test.ts, test/operator-attention-census.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The live core census has 39 observed decision-labelled threads, but 36 are not ready

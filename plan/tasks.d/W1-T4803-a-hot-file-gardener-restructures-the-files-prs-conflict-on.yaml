@@ -15,7 +15,7 @@
     - src/lib/hot-file-gardener.ts
     - src/run-task.ts
     - test/hot-file-gardener.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-29: the ci-friction gardener prices `merge-conflict` at about 340

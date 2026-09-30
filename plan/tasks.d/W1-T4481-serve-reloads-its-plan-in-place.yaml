@@ -17,7 +17,7 @@
     - src/lib/serve.ts
     - src/lib/board.ts
     - src/run-task.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-24 over the last 24 h of main: of 139 merges, W1-T4463 (#7076, run-W1-T4463-1790286341114)

@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-inbox-cascade-1790772603000 -> plan-inbox-cascade-1790772603000"
   plan_refs: [W1-T3570, W1-T4864, W1-T4907]
   files: [src/lib/inbox.ts, src/run-task.ts, test/a-dirty-cash-draft-escalates-once-to-sonnet.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 (docs/recon/openweight-inbox-draft-trial.md, "Bake-off"): the same 8 real proposals through

@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-flow-improve-1790732974000 -> plan-flow-improve-1790732974000"
   plan_refs: []
   files: [src/lib/selector-shadow-gardener.ts, test/the-selector-gardener-files-a-missed-test-once.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30: selector-shadow-garden opened 27 of the 189 PRs merged on 2026-09-29. Merged filings since

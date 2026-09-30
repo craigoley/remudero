@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-28: recommended follow-ups 1-6 and 8 — automated flow, no stuck PRs, no false alarms"
   plan_refs: [W1-T319]
   files: [src/lib/block-reason.ts, src/lib/daemon.ts, test/a-task-already-merged-is-done-not-transient.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-28 (rmd ledger-grep daemon.block.transient_retry, 2026-09-24..28): 11 rows carry verdict

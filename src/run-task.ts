@@ -861,7 +861,13 @@ import {
   runAutomatedRetroSubprocess,
 } from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
-import { filedTaskIdFromRunBranch, openPullRequestChecked, type OpenPullRequestProofRunner } from "./lib/pr-open.js";
+import {
+  filedTaskIdFromRunBranch,
+  openPullRequestChecked,
+  PrOpenRefusedError,
+  recordRefusedPrOpen,
+  type OpenPullRequestProofRunner,
+} from "./lib/pr-open.js";
 import {
   buildPlanPrBody,
   bodyNeedsAcceptanceRepair,
@@ -1384,6 +1390,7 @@ import {
   type GitHub,
   type GhFailureReason,
   preferImplementingPr,
+  isBookkeepingOnlyChangeset,
   type PrRef,
   type OpenSiblingBuild,
   type StatusProjection,
@@ -13609,6 +13616,8 @@ interface RunTaskBodyOptions {
   readHeadShaForProvenance?: (prUrl: string) => string;
   /** W1-T4797: test seam for the pre-push diff-coverage precheck; production reads the real ones. */
   coveragePrecheckPorts?: CoveragePrecheckPorts;
+  /** Where a stale-proof PR-open refusal escalates; production files the task repo's own issue. */
+  prOpenRefusalIssues?: IssueGateway;
   spawnWallClockBoundMs?: number;
   workerRuleHeadlinesEnabled?: boolean;
   worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
@@ -14905,6 +14914,22 @@ export function endThrownRun(
     cause: runErrorCause(err),
     cost_usd: costUsd,
   }));
+}
+
+/** Best-effort worktree reclaim for a run that is ending: a failed remove is ledgered, never thrown over the verdict. */
+export function reclaimRunWorktree(
+  repoDir: string,
+  worktreePath: string,
+  on: string,
+  log: RunTaskContext["log"],
+  remove: (repoDir: string, worktreePath: string) => void = worktreeRemove,
+): void {
+  try {
+    remove(repoDir, worktreePath);
+    log("worktree.remove", { on });
+  } catch (e) {
+    log("worktree.remove.error", { on, error: String((e as Error)?.message ?? e) });
+  }
 }
 
 /** W1-T4708: a pre-worktree refusal that RETURNS gets the same one terminal row, carrying the verdict it returns. */
@@ -17006,7 +17031,33 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       gitPushRunBranch(worktreePath, { force: true });
     }
     if (!prUrl) {
-      const prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
+      let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
+      try {
+        prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
+      } catch (err) {
+        if (!(err instanceof PrOpenRefusedError)) throw err;
+        // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
+        const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+        const issues = opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo);
+        const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha }, log, { issues, ledgerPath, runId });
+        reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log);
+        log("verdict", {
+          verdict: "failed",
+          reason: boundedVerdictReason(err.message),
+          stage: "pr_open.refused",
+          cause: "base-proof-refused" satisfies RunErrorCause,
+          branch,
+          head_sha: headSha,
+          refusal_class: err.refusalClass,
+          ...(issueUrl ? { issue_url: issueUrl } : {}),
+          cost_usd: costUsd,
+          billing_mode: billingMode(impl.childEnvKeys),
+          account_label: impl.accountLabel,
+          ...terminalVerdictFields(impl),
+        });
+        say(`verdict: failed — PR open refused (${err.refusalClass}); branch ${branch} kept on origin at ${headSha}`);
+        return { taskId, runId, merged: false, costUsd, verdict: "failed" };
+      }
       prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
       // A worker may have opened this exact PR without reporting its URL. The generic-422
       // adoption above discovers it only here, after the earlier direct-PR normalization point.
@@ -21133,7 +21184,7 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
  * REF may be deleted, and merged/closed are statements about PAST pull requests on that name while
  * `open` is a statement about the ref RIGHT NOW. MEASURED on the live repo: `claude/resolve-p27-
  * findings-rnvu61` carries ten merged PRs and one open (#4392, filed hours earlier), and
- * `claude/remudero-planning-clarify-142opb` the same shape (#4391) — under merged-leads both folded
+ * #4391's `claude/remudero-planning-clarify-*` head the same shape — under merged-leads both folded
  * to `merged`, landed in `plan.deletable`, and a prune would have deleted the head of two live PRs.
  * A stale branch whose old PR was never closed now HOLDS instead, which is the safe direction for a
  * decision that removes a ref.
@@ -24931,8 +24982,8 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
  * Exported as a PREDICATE rather than inlined so a test can drive all three values directly: the
  * function below reads config, a ledger and GitHub, and none of that is the rule under test.
  */
-export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementation?: boolean }): boolean {
-  return c.merged === true && c.creditIsImplementation === true;
+export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementation?: boolean; creditHasBuildDiff?: boolean }): boolean {
+  return c.merged === true && (c.creditIsImplementation === true || c.creditHasBuildDiff === true);
 }
 
 /** The default credit projection: the SAME `buildCreditCandidates` the sweep's credit rung uses,
@@ -37554,12 +37605,17 @@ export function creditCandidatesFromProjection(
   projections: Iterable<StatusProjection>,
   mergeSubjects: ReadonlyMap<number, string>,
   mergeBodies: ReadonlyMap<number, string> = new Map(),
+  mergedPaths: ReadonlyMap<number, readonly string[]> = new Map(),
 ): CreditCandidate[] {
   const candidates: CreditCandidate[] = [];
   for (const projection of projections) {
     if (!projection.merged || projection.prNumber === undefined || projection.prUrl === undefined) continue;
     const subjectCredit = creditSubjectIsImplementation(mergeSubjects.get(projection.prNumber));
     const prerequisiteOnly = prerequisiteOnlyMergeBody(mergeBodies.get(projection.prNumber), projection.taskId);
+    const paths = mergedPaths.get(projection.prNumber);
+    let creditHasBuildDiff: boolean | undefined;
+    if (prerequisiteOnly === true) creditHasBuildDiff = false;
+    else if (paths !== undefined && paths.length > 0) creditHasBuildDiff = !isBookkeepingOnlyChangeset(paths);
     candidates.push({
       taskId: projection.taskId,
       prNumber: projection.prNumber,
@@ -37569,6 +37625,7 @@ export function creditCandidatesFromProjection(
       // the squash commit carries the task trailer. Unreadable body evidence stays with the
       // subject result so this repair can only subtract the measured false credit.
       creditIsImplementation: prerequisiteOnly === true ? false : subjectCredit,
+      creditHasBuildDiff,
     });
   }
   return candidates;
@@ -37631,7 +37688,7 @@ export function buildCreditCandidates(
     const pr = baseGithub.prByRef(candidate.prUrl);
     if (pr?.body !== undefined) mergeBodies.set(candidate.prNumber, pr.body);
   }
-  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies);
+  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies, deps.mergedPathsByPr);
 }
 
 /**

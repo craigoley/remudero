@@ -12,7 +12,7 @@
   origin: "operator research request 2026-09-29: CodeRabbit inspiration and model field trials"
   plan_refs: [W1-T4015, W1-T424, W1-T4575, W1-T4620, W1-T4628, W1-T4848]
   files: [src/lib/review-finding-outcomes.ts, src/lib/field-trials-flow.ts, test/review-finding-outcomes.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at origin/main a2be69a28: review.posted can say which criterion failed,

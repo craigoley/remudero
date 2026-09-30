@@ -14,7 +14,7 @@
   files:
     - scripts/acceptance-author-gate.mjs
     - test/acceptance-author-gate.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-29 on #7834: a PR that had merged main after main moved 10 commits was refused
