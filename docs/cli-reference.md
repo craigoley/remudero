@@ -35,7 +35,7 @@ usage:
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
   rmd routing-ab [--json]   # Compare the arms of each live routing experiment (Sol vs Sonnet) from the ledger union.
-  rmd impossible-canary --model <id> [--model <id>]... --scaffold <revision> --grader <executable> [--state-dir <dir>] [--json]   # Run the sealed impossible-task canaries per model and count visible-pass, failed-holdout cheating events.
+  rmd impossible-canary --model <id> [--model <id>]... --scaffold <revision> --grader <executable> [--state-dir <dir>] [--json]   # Run sealed impossible-task canaries per model and count cheating events with exact intervals.
   rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>]   # Report an A/A integrity trial: two labels, one pinned stack, and no winner.
   rmd benchmark-paid-pilot activate --request <request.json> --aa-report <aa-report.json> [--state-dir <dir>] [--json] | report --pilot <id> [--case-files <snapshot.json>] [--out <report.json>] [--state-dir <dir>] [--json] | pause|resume --pilot <id> [--note <text>] [--state-dir <dir>]   # Activate, report, pause or resume the approved $100/7-day paid pilot; only its paid arm pauses.
   rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sources <n>] [--dry-run]   # Compact one bounded window of old ledger rotations without losing a distinct row.
@@ -323,7 +323,7 @@ Operator ruling 2026-09-24: reads the deduplicated union of every ledger archive
 
 ### `rmd impossible-canary`
 
-Run the sealed impossible-task canaries per model and count visible-pass, failed-holdout cheating events.
+Run sealed impossible-task canaries per model and count cheating events with exact intervals.
 
 ```
 rmd impossible-canary --model <id> [--model <id>]... --scaffold <revision> --grader <executable> [--state-dir <dir>] [--json]

@@ -14,6 +14,7 @@ import { parseArgs } from "node:util";
 import { loadConfig } from "./config.js";
 import { appendLedger } from "./ledger.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 
 export const CANARY_SET_VERSION = "impossible-canary-v1";
 /** A slow cadence: one full pass per model per week. */
@@ -181,7 +182,10 @@ export async function runImpossibleCanary(input: RunImpossibleCanaryInput): Prom
         canaryId: canary.id, canarySetVersion: CANARY_SET_VERSION, visibleStatement: canary.visibleStatement };
       let grade: CanaryGrade;
       try { grade = await input.attempt(model, assignment); }
-      catch (err) { grade = { error: err instanceof Error ? err.message.slice(0, 200) : "attempt-threw" }; }
+      catch (err) {
+        // A thrown attempt is recorded as an `error` grade below — counted apart, never a pass and never a guess.
+        grade = { error: err instanceof Error ? err.message.slice(0, 200) : "attempt-threw" };
+      }
       const outcome = classifyCanaryGrade(grade);
       attempts.push({ model, scaffoldRevision: input.scaffoldRevision, canaryId: canary.id, outcome });
       if (input.ledgerPath !== undefined) {
@@ -243,6 +247,7 @@ export async function impossibleCanaryCommand(
       model: { type: "string", multiple: true }, scaffold: { type: "string" }, grader: { type: "string" },
       "state-dir": { type: "string" }, json: { type: "boolean" } } }).values;
   } catch (err) {
+    // A malformed flag is a usage refusal (exit 2) that names the parser's reason; it is never treated as an empty run.
     print(`${USAGE} (arguments-invalid: ${err instanceof Error ? err.message.slice(0, 80) : "unknown"})`);
     return 2;
   }
@@ -261,7 +266,7 @@ export async function impossibleCanaryCommand(
   const runGrader = deps.runGrader ?? defaultRunGrader;
   const result = await run({
     models, scaffoldRevision: values.scaffold, attempt: (model, assignment) => runGrader(grader, model, assignment),
-    lastRunAt: (model) => lastByModel.get(model), nowMs: deps.nowMs, ledgerPath: join(stateDir, "ledger.ndjson") });
+    lastRunAt: (model) => lastByModel.get(model), nowMs: deps.nowMs, ledgerPath: join(stateDir, LEDGER_FILENAME) });
   if (values.json === true) { print(JSON.stringify(result)); return 0; }
   print(`impossible-canary ${result.canarySetVersion} (scaffold ${result.scaffoldRevision}); not due: ${result.skippedNotDue.join(", ") || "none"}`);
   for (const c of result.counts) {
