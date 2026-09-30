@@ -26888,6 +26888,9 @@ export function autoTriageCheck(
     claimReserver?: TriageClaimReserver;
     /** W1-T4769: injected ledger-union read for the liveness verdict; `undefined` = unreadable. */
     readClaimLivenessRows?: (sinceIso: string) => Array<Record<string, unknown>> | undefined;
+    /** W1-T4769: injected owner/repo resolver for the real reserver's clone path; production uses
+     *  {@link resolveOwnerRepo}. */
+    resolveClaimRepo?: () => { repo: string };
   } = {},
 ): AutoTriageDecision {
   const config = opts.config ?? loadConfig();
@@ -26947,6 +26950,7 @@ function triageClaimSweepForPass(
   opts: {
     claimReserver?: TriageClaimReserver;
     readClaimLivenessRows?: (sinceIso: string) => Array<Record<string, unknown>> | undefined;
+    resolveClaimRepo?: () => { repo: string };
   },
 ): readonly string[] | undefined {
   const ledgerPath = ledgerPathFor(config);
@@ -26964,7 +26968,7 @@ function triageClaimSweepForPass(
     // The SAME clone the triage lane claims on (`repoDir`): a claim is only visible on its own origin.
     let repoDir: string;
     try {
-      repoDir = join(config.root, "repos", resolveOwnerRepo().repo);
+      repoDir = join(config.root, "repos", (opts.resolveClaimRepo ?? resolveOwnerRepo)().repo);
     } catch (e) {
       log("triage.claim_sweep_unavailable", { reason: `cannot resolve the repo: ${String((e as Error)?.message ?? e)}` });
       return undefined;

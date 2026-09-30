@@ -237,6 +237,65 @@ test("W1-T4769 REAL GIT: the reserver lists claims in one ls-remote and reads th
 
 // ── THE WIRING — autoTriageCheck itself, not just the pure halves ────────────────────────────
 
+test("W1-T4769 WIRING: the default ledger read, the unresolvable-repo arm and a failing ledger write", async () => {
+  const { autoTriageCheck } = await import("../src/run-task.js");
+  const { loadPolicy, policyPath } = await import("../src/lib/policy.js");
+  const { newFeedbackIdsOldestFirst } = await import("../src/lib/auto-triage.js");
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const candidates = newFeedbackIdsOldestFirst(repo);
+  if (candidates.length < 1) return; // nothing `status: new` in this checkout: the sweep is never reached
+  const shipped = loadPolicy(policyPath(repo));
+  const policy = { ...shipped, values: { ...shipped.values, autoTriage: { enabled: true, minIntervalMinutes: 1, maxPerDay: 50 } } };
+  const now = new Date();
+  const at = (agoMs: number): string => new Date(now.getTime() - agoMs).toISOString();
+  const [head] = candidates;
+  const args = { policy, now, deferralPending: true, dispatchCount: 1, laneBudget: 1 } as const;
+
+  // (1) DEFAULT LEDGER READ: no injected reader, so the real union read over an empty state dir runs.
+  // The holder's host has no rows there, so it is unobservable — held, never dropped as dead.
+  const rootA = mkdtempSync(join(tmpdir(), "rmd-liveness-default-read-"));
+  mkdirSync(join(rootA, "state"), { recursive: true });
+  try {
+    const config = { root: rootA, claudeBin: "/bin/true" } as unknown as import("../src/lib/config.js").Config;
+    const reserver = fakeReserver({ [head]: { sha: "s", message: anchor(94, "h", 0).replace(iso(0), at(3 * 24 * HOUR)) } });
+    const d = autoTriageCheck({ ...args, config, claimReserver: reserver });
+    assert.deepEqual(reserver.drops, [], "an unobservable holder is not dropped on the default read");
+    assert.notEqual(d.fire && d.feedbackId, head, "the held head is passed over");
+  } finally {
+    rmSync(rootA, { recursive: true, force: true });
+  }
+
+  // (2) UNRESOLVABLE REPO + (3) FAILING LEDGER WRITE: `state` is a plain file, so the unavailable-sweep
+  // row cannot be written; the pass still decides (today's behaviour: oldest candidate).
+  const rootB = mkdtempSync(join(tmpdir(), "rmd-liveness-unresolvable-"));
+  writeFileSync(join(rootB, "state"), "not a directory");
+  const errs: string[] = [];
+  const realWrite = process.stderr.write.bind(process.stderr);
+  (process.stderr as { write: unknown }).write = (chunk: unknown): boolean => {
+    errs.push(String(chunk));
+    return true;
+  };
+  try {
+    const config = { root: rootB, claudeBin: "/bin/true" } as unknown as import("../src/lib/config.js").Config;
+    const d = autoTriageCheck({
+      ...args,
+      config,
+      resolveClaimRepo: () => {
+        throw new Error("no origin remote");
+      },
+    });
+    assert.equal(d.fire && d.feedbackId, head, "an unreadable claim namespace keeps the oldest candidate");
+  } finally {
+    (process.stderr as { write: unknown }).write = realWrite;
+    rmSync(rootB, { recursive: true, force: true });
+  }
+  assert.ok(
+    errs.some((e) => /could not ledger triage\.claim_sweep_unavailable/.test(e)),
+    "the lost ledger row is carried on stderr, not silent",
+  );
+});
+
 test("W1-T4769 WIRING: autoTriageCheck skips a held head and releases a dead holder before deciding", async () => {
   const { autoTriageCheck } = await import("../src/run-task.js");
   const { loadPolicy, policyPath } = await import("../src/lib/policy.js");
