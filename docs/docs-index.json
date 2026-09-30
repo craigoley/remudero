@@ -768,6 +768,12 @@
       "title": "Troubleshooting",
       "summary": "Symptom → cause → fix for the operator-visible failures the fleet has already paid to",
       "grepHint": "Troubleshooting"
+    },
+    {
+      "path": "docs/views.md",
+      "title": "Console views: `GET /v1/views/<name>`",
+      "summary": "A view is one read per console surface, computed in core. The console renders it; it does not",
+      "grepHint": "Console views: `GET /v1/views/<name>`"
     }
   ]
 }

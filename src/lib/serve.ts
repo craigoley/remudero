@@ -83,6 +83,8 @@ import {
 } from "./ci-incidents.js";
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
+import { buildViewRoutes } from "./views.js";
+import { navBadgeView } from "./nav-badge-view.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
@@ -2697,6 +2699,8 @@ function assembleServeRoutes(
       planPath: deps.panelGraph.planPath,
     }),
     buildRecentRoute(deps.board),
+    ...buildViewRoutes([navBadgeView({ analytics: currentAnalyticsSnapshot, memory: operatorAgentMemory, ledgerPath: deps.ledgerPath,
+      inboxRoot: deps.fleetControlRoot, repository: deps.assistantRepository, instanceId: deps.instances?.coreInstance ?? CORE_INSTANCE })]),
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),
     buildAccountUsageRoute(accountUsageDeps),

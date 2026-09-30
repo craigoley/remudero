@@ -6371,6 +6371,68 @@ components:
         preferenceBypass:
           $ref: "#/components/schemas/ProviderRoutingPreferenceBypass"
 
+    ViewSource:
+      type: object
+      description: One input a view was computed from (src/lib/views.ts's `ViewSource`).
+      required: [name, asOf, state]
+      properties:
+        name: {type: string}
+        asOf:
+          type: [string, "null"]
+          description: The input's own as-of time; null when it has none yet.
+        state:
+          type: string
+          enum: [fresh, stale, unavailable]
+        reason: {type: string}
+
+    NavBadgeView:
+      type: object
+      description: >
+        GET /v1/views/nav-badge (docs/views.md). The view envelope every /v1/views/<name> route
+        answers: `version` is `data`'s schema version, `asOf` the oldest source's as-of, `stale` true
+        when any source is stale or unavailable. A cold input makes its count absent with a
+        `reason`, never a zero.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [nav-badge]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [agent, inbox]
+          properties:
+            agent:
+              type: object
+              description: >
+                The operator-agent badge: proposals the console's engine would show (a port of its
+                generateProposals and visibleProposals, src/lib/nav-badge-view.ts), with up to 20
+                of their ids for a parity check.
+              required: [proposalIds]
+              properties:
+                count: {type: integer}
+                proposalIds:
+                  type: array
+                  items: {type: string}
+                reason: {type: string}
+            inbox:
+              type: object
+              description: Open inbox items by who must act, from the last GET /v1/inbox classification.
+              properties:
+                ready: {type: integer}
+                needsYou: {type: integer}
+                fleet: {type: integer}
+                reason: {type: string}
+
     RecentActivityEntry:
       type: object
       description: One RECENT feed row minted from a ledger line (src/lib/board.ts's `RecentActivityEntry`).
@@ -11611,6 +11673,30 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/VersionResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/views/nav-badge:
+    get:
+      summary: The console sidebar's counts in one small read -- the first /v1/views view.
+      description: >
+        src/lib/nav-badge-view.ts over serve's own caches (analytics snapshot, operator-agent
+        memory, the inbox classification). Replaces the console's ~12 upstream reads (~370 KB) per
+        page view. A weak ETag hashes the view's version, stale flag and data, so an unchanged view
+        answers If-None-Match with 304 even after a recompute. See docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NavBadgeView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
