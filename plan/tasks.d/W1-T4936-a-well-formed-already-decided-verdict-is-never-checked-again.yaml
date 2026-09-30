@@ -1,0 +1,92 @@
+- id: W1-T4936
+  title: "A WELL-FORMED ALREADY_DECIDED VERDICT IS NEVER CHECKED AGAINST THE PLAN IT CITES, SO A CITATION OF A TASK THAT DOES NOT EXIST CLOSES THE FEEDBACK AS rejected AND THE PLAN-ONLY PR IS ARMED — parseTriageVerdict keeps the citation as free text and decideTriage reads only the verdict kind and the changed-file list; 1 of the 97 merged already-decided closures on origin/main cites a shard that appears in no diff on the branch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: research whether the triage lane's ALREADY_DECIDED citation is ever checked against reality (W1-T3547's rationale asserts it is not)"
+  plan_refs: [W1-T3547, W1-T2212, W1-T963]
+  files: [src/lib/triage.ts, src/run-task.ts, test/triage-already-decided-citation-resolves.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 at origin/main 76c9b670d (read-only; nothing was run against a live lane).
+
+    (1) THE VERDICT SHAPES. `parseTriageVerdict` (src/lib/triage.ts) returns `already_decided {citation}`, `ambiguous {question,
+    options, recommendation}`, `proposed {summary}` or null. Only `already_decided` is a CLOSURE: `decideTriage` maps it to
+    `{action: "no_task", status: "rejected", detail: citation}` and the citation is a bare `(.+)` capture, so `ALREADY_DECIDED: yes`
+    parses.
+
+    (2) WHAT EVERY GATE READS. `decideTriage` checks that no non-plan file changed and that an ALREADY_DECIDED run changed NO file. It never
+    reads `citation`. `runRelintLoop` (src/lib/relint.ts) is skipped for a closure (`filed: r.decision.action === "propose"`, so stop is
+    `not-filed`). `assertProposedPlanLoads` runs only when `decision.action === "propose"`. `nonPlanFilesInDiff` and `diffCitesFeedback`
+    (the latter only for propose) read the diff, which for a closure is one line: `status: new` -> `status: rejected` in
+    plan/feedback/<id>.yaml. `triageEmptyScopeDisposition` closes the PR only when a SIBLING triage PR already landed the same flip. The
+    PR's own acceptance proof is `triageAcceptanceProof` = `grep: status: rejected in plan/feedback/<id>.yaml`, derived from the status the
+    same function just wrote, so the diff satisfies it by construction. NONE of these asks whether a cited task id is in plan/, whether a
+    cited path exists, or whether a cited PR is merged.
+
+    (3) WHAT A WRONG CLOSURE DOES. It does not merge a task. It merges a plan-only PR (`chore(triage): feedback#<id> — already decided, no task`)
+    that flips the entry to the terminal `rejected` and files nothing: `triageCommandLocked` runs `setFeedbackStatus(..., decision.status)`,
+    then `reviewCommand` and `armAndLogOutcome` on a green PR, the same arm every other Architect lane uses. The citation is written ONLY into
+    the commit body (`triageCommitMessage`); `setFeedbackStatus` stores status, proposal_pr, summary and answered_by, so the entry itself
+    records no reason. `feedback-record-merge` refuses to move a record backward in the lifecycle, and `partitionCodeqlQualityAlerts` drops an
+    alert whose entry is `rejected` from CodeQL proposals. The cost is a silently dropped real request, not a bad merge.
+
+    (4) HOW OFTEN, MEASURED AS FAR AS IT CAN BE. `git log origin/main --grep='already decided, no task'` returns 97 merged closures. Parsing the
+    citation out of each commit body: 94 name a W1-T id; 93 of those ids exist in plan/tasks.yaml or a plan/tasks.d shard at head. The one that does
+    not is b7f8451d3 (2026-08-27, #3141, feedback#fb-repair-stale-2955): it cites
+    `plan/tasks.d/W1-T2404-repair-filing-drops-the-task-id-it-already-has.yaml`, and `git log origin/main -S"W1-T2404"` returns nothing, so no
+    diff on main ever carried that id. It merged and the entry is `rejected`. 56 citations name a `#N`; 4 of those do not match a merged-PR subject
+    `(#N)`, but `#N` is a shared namespace with issues and code-scanning alerts (one of the four is alert #17, one is issue #5319) and I did not classify the
+    rest, so PR numbers are NOT scored here and the design makes them advisory. WHAT I DID NOT MEASURE: whether a cited task that EXISTS actually
+    covers the feedback. That is a semantic judgment no deterministic gate can make, and this task does not claim to. It closes only the existence
+    half, which is cheap and 1-in-97 observed; the semantic half stays with the Architect and the operator.
+
+    (5) NO EARLIER TASK COVERS IT. W1-T3547 (queued, measure-only) STATES the gap as a premise ("they cannot tell a wrong ALREADY_DECIDED from a
+    right one, and a green plan-only triage PR is armed") and files only an outcome fold. W1-T2212 (merged, #2730) covers an UNPARSEABLE verdict, not a
+    well-formed one. W1-T963 (merged, #2204) covers a sibling-landed duplicate. W1-T4212 (queued) widens the task-id existence scan to plan/, and the
+    citation is never written to plan/, so it would not see this even once merged. Status derived from `Remudero-Task:` trailers on origin/main.
+  design: |
+    (i) src/lib/triage.ts exports `unresolvedCitationReferents(citation, evidence)`: extract every plan task id (`W\d+-T\d+`) and every
+    repo path (a token containing `/` or ending `.md`/`.yaml`/`.ts`) from the citation, and return `{ resolved: string[], unresolved: string[] }` against
+    `evidence = { planIds: ReadonlySet<string>, pathExists: (p: string) => boolean }`. A `#N` is extracted into `advisoryPrs` and never
+    refuses (shared namespace with issues and alerts).
+    (ii) `decideTriage` takes an optional `citationEvidence`. On `already_decided`: any `unresolved` referent, or ZERO `resolved` referents,
+    returns `{ action: "grill", cause: "unresolved_citation", reason }` naming each unresolved referent: the lane opens a human question with two
+    harness-authored options (confirm the closure and name where the request is covered, or file it as a new task) instead of writing `rejected`.
+    `cause` gains that member. With no evidence passed the behaviour is byte-identical to today, so every existing caller and test is unchanged.
+    (iii) src/run-task.ts's triage `run` callback builds the evidence from the WORKTREE (`loadPlan` ids, `existsSync` under `worktreePath`), the same tree
+    `assertProposedPlanLoads` reads, and calls `unresolvedCitationReferents` for an already_decided verdict before `decideTriage`. The lane writes
+    NO `rejected` status and opens NO closure PR; it takes the same path an `ambiguous` verdict already takes to open a grill, and ledgers `triage.grill_opened` with the
+    unresolved list. A grill leaves the entry with a human, so auto-triage cannot re-pick it and re-spend.
+    (iv) A cited id that is real but only QUEUED is still a resolved citation: a queued task covering the request is a legitimate closure.
+    (v) DECIDED BY THE OPERATOR 2026-09-30: demote to `grill`, not `error`. An `error` leaves the entry at `new` and auto-triage may re-pick it and
+    re-spend; a grill parks it with a human. The builder reads how an `ambiguous` verdict opens a grill and reuses that path; it adds no new grill
+    machinery and no retry loop.
+  acceptance:
+    - claim: "a citation naming a task id that is absent from the plan is routed to a grill, not closed as rejected"
+      proof: 'grep: test("W1-T4936: an already-decided verdict citing a task id absent from the plan is routed to a grill" in test/triage-already-decided-citation-resolves.test.ts'
+    - claim: "a citation naming a task id that IS in the plan still closes the feedback"
+      proof: 'grep: test("W1-T4936: an already-decided verdict citing a task id in the plan still closes the feedback" in test/triage-already-decided-citation-resolves.test.ts'
+    - claim: "a citation naming no task id, no path and no PR is routed to a grill"
+      proof: 'grep: test("W1-T4936: an already-decided citation naming nothing checkable is routed to a grill" in test/triage-already-decided-citation-resolves.test.ts'
+    - claim: "a cited PR number is advisory and never refuses on its own"
+      proof: 'grep: test("W1-T4936: a cited PR number that matches no merged PR never refuses on its own" in test/triage-already-decided-citation-resolves.test.ts'
+    - claim: "the lane resolves the citation against a real loadPlan of the worktree, not only an injected fake"
+      proof: 'grep: test("W1-T4936: the lane resolves a cited id against the worktree plan" in test/triage-already-decided-citation-resolves.test.ts'
+    - claim: "the resolver has a production call site in the triage lane"
+      proof: "grep: unresolvedCitationReferents( in src/run-task.ts"
+  falsifier: |
+    Make `decideTriage` ignore `citationEvidence` and the first and third tests must go red. Delete the `unresolvedCitationReferents(` call in
+    src/run-task.ts's triage `run` callback and the lane test (a spawn returning `ALREADY_DECIDED: W1-T9999 already covers this` against a worktree
+    whose plan has no W1-T9999) must go red because a `rejected` status is written and a PR opened. Make the resolver treat a queued task as unresolved
+    and the second test must go red, which is the over-refusal this task must not add.
+  note: |
+    Filed under the operator's approval 2026-09-30, with the grill choice ruled in design (v): this is a new arm on an intake lane. It does not change any mount,
+    provider or tool surface, and it does not touch W1-T3547's fold.

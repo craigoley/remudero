@@ -1,0 +1,95 @@
+- id: W1-T4937
+  title: "THE SATISFIED-TASK CENSUS SHIPPED IN #6432 AND NOTHING RUNS IT, SO A QUEUED TASK WHOSE EVERY PROOF ALREADY PASSES AT MAIN AND CARRIES NO MERGE CREDIT STAYS DISPATCHABLE — W1-T3558 sat queued after #5804 shipped its bridge without a Remudero-Task trailer, the census names it in 4 seconds, and rmd proof-queue-audit lists it only as `resolved-fully`, a title that exists, not a proof that passes; have the audit call the census and print the tasks it finds"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: is there any tool that reports EXISTING queued tasks whose every proof already passes at origin/main (W1-T3558 sat queued and dispatchable after its three unit test proofs resolved)"
+  plan_refs: [W1-T3961, W1-T1053, W1-T2477, W1-T4111, W1-T4861, W1-T4904, W1-T3558]
+  files: [src/run-task.ts, docs/cli-reference.md, test/proof-queue-audit-names-a-task-whose-proofs-pass.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 at origin/main 76c9b670d. THE DETECTOR EXISTS; THE GAP IS THAT NOTHING CALLS IT.
+
+    (1) THE CASE. W1-T3558 (queued, verify: auto, three `unit test: <title>` proofs) had every proof resolve and pass at
+    main after #5804 shipped its bridge with no `Remudero-Task:` trailer. Replayed on its pre-closure record (76c9b670d^):
+    `scripts/satisfied-task-census.mjs` (W1-T3961, merged in #6432) reports it in 4.3 s, three `pass` rows;
+    `rmd proof-queue-audit` lists it under `resolved-fully`; the plan gardener (src/lib/plan-gardener.ts
+    `retirementCandidates`) does not see it, because `grepProofHolds` matches only `grep: <pattern> in <path>` and a
+    `unit test:` proof returns false; `isDispatchEligible` (src/lib/drain.ts) reads no proof at all. Closing it took
+    a hand-written plan PR (#8058).
+
+    (2) THE CENSUS HAS NO CALLER. `censusSatisfiedTasks` is named in scripts/satisfied-task-census.mjs and
+    test/satisfied-task-census.test.ts and nowhere else: no package.json script, no ci.yml job, no rmd verb, no cadence rung,
+    no doc. It is the repo's recurring defect, a detector shipped and never run (W1-T2732, W1-T2473, W1-T2225 are its siblings).
+    `resolvedFully` in src/lib/proof-queue-audit.ts is the only production reader of a similar signal and
+    is print-only; its own RESOLVED_FULLY_CAVEAT says "resolves is not passes".
+
+    (3) THE POPULATION, my own script over origin/main plan/tasks.d (queued = `status: queued` and no `retirement:`):
+    506 tasks are `queued` with no `retirement:` (492 `verify: auto`, 14 human). The audit's own credit split
+    (`classifyFailingMergeEvidence` over the origin/main log) leaves 230 with no merge evidence. `censusSatisfiedTasks` over
+    those 230 returns 33 tasks whose every proof passes at main, in 44 s: W1-T1014, W1-T1097, W1-T2313, W1-T2611, W1-T2648,
+    W1-T326, W1-T3336, W1-T3344, W1-T3362, W1-T3376, W1-T3397, W1-T3510, W1-T3730, W1-T3743, W1-T3761, W1-T3763, W1-T3764,
+    W1-T3765, W1-T3849, W1-T3938, W1-T3941, W1-T3981, W1-T3992, W1-T4084, W1-T4097, W1-T426, W1-T4432, W1-T4442, W1-T4676,
+    W1-T4683, W1-T4853, W1-T507, W1-T518. 17 of them carry a `unit test:` title proof (W1-T3558's shape); 6 grep only plan text
+    (W1-T1014 its own shard, W1-T2611, W1-T2648, W1-T3941, W1-T3981, W1-T426), which is weaker evidence. The census over
+    the whole plan returns 75; the other 42 have merge evidence and are the reconcile lane's. `resolved-fully` at the same
+    tree names 46: 26 are in the 33, 20 are not (whole-file `unit test:` paths that merely exist), and 7 census hits are absent from
+    it. A pass at main is where to look, not a verdict: 33 is an upper bound on tasks that are shipped in substance.
+
+    (4) THE POSITIVE CONTROLS. Of the 1,473 `status: merged` tasks carrying a body `Remudero-Task:` trailer, the 551 whose
+    proofs are all title or grep shaped resolve at 515 (93.5%), so the script can see a shipped task. The unbuilt W1-T4921,
+    W1-T4904, W1-T4914 and W1-T4917 each report every proof as path-absent or unmatched, so it does not invent one. On the
+    pre-closure tree W1-T3558 reports three title-resolved proofs, and the census script independently reports three `pass`.
+
+    (5) WHAT COVERS THE REST, AND WHERE IT STOPS. The plan gardener proposes `retirement: closed` for a queued task whose every
+    `grep:` proof holds and did not at filing (#7902 and several earlier PRs). Replayed offline against this population it proposes
+    W1-T326, W1-T3763, W1-T3992, W1-T4432, W1-T4849 and W1-T4853 today, all grep-only; whether those are already open or were
+    declined I could not read (`gh` refused on the cadence floor). W1-T4861 (queued) extends the gardener to propose `done`,
+    and reads the same `grep:` shape, so a `unit test:` title proof, W1-T3558's shape, stays outside both. This task is the
+    observe-only half for that shape; it retires and moves nothing.
+  design: |
+    (i) `proofQueueAuditCommand` (src/run-task.ts), default path only, calls `censusSatisfiedTasks(population)` from
+    scripts/satisfied-task-census.mjs on the same open-and-unmerged `population` it already builds, so the credit filter is the
+    audit's own and ONE predicate decides "every proof is discriminating and passes" (no second copy, `jscpd`). src/lib/plan-index.ts
+    already imports a scripts/*.mjs module, so the import direction is not new.
+    (ii) It prints a new block after `resolved-fully`: `passes-at-main  N task(s): ids`, with one `pass:` row per proof for the first
+    ten and `+N more`, and the caveat line: a pass at main is where to LOOK, not a verdict that the task is done; it may be a
+    proof that does not discriminate (W1-T4904) or work shipped under another task. The census's own rule is kept: a whole-file
+    `unit test:` path or a prose criterion keeps a task out, so W1-T3961's protection against flagging most of the backlog holds.
+    (iii) COST. The census runs one `node --test` per title proof, and its `.map` executes every proof before testing them all, so
+    a task with a failing first proof still pays for the rest. Measured 2026-09-30: 44 s over the audit's 230-task population, against the audit's own 15 s; the same census over all 2,634
+    records took 5 min 15 s, so the population filter is what keeps it usable. The audit is an operator verb and stays one; the added 44 s is
+    accepted on the default path and the `resolved-fully` block prints unchanged. Do not add a cadence rung, a gate or a dispatch filter here.
+    (iv) `docs/cli-reference.md` is regenerated from the COMMANDS registry (`npm run cli-reference`); the `proof-queue-audit` line
+    names the new block.
+    NOT IN SCOPE: `--credited` (a different population, already reported as `resolved-fully-credited`), the plan gardener
+    (W1-T4861 owns it; extending its `grepProofHolds` to a title proof belongs there), lint-plan (W1-T4904), any retirement or
+    status write, and executing the census from the daemon.
+  acceptance:
+    - claim: "a queued task whose every discriminating proof passes is named by the audit as passing at main"
+      proof: 'grep: test("W1-T4937: a queued task whose every discriminating proof passes is named" in test/proof-queue-audit-names-a-task-whose-proofs-pass.test.ts'
+    - claim: "a task with one failing proof is not named"
+      proof: 'grep: test("W1-T4937: a task with one failing proof is not named" in test/proof-queue-audit-names-a-task-whose-proofs-pass.test.ts'
+    - claim: "a whole-file or prose criterion keeps the task off the list"
+      proof: 'grep: test("W1-T4937: a whole-file or prose criterion keeps the task off the list" in test/proof-queue-audit-names-a-task-whose-proofs-pass.test.ts'
+    - claim: "the audit still exits 0 while naming a passing task"
+      proof: 'grep: test("W1-T4937: the audit exits 0 while naming a passing task" in test/proof-queue-audit-names-a-task-whose-proofs-pass.test.ts'
+    - claim: "the census has a production call site in the audit verb"
+      proof: "grep: censusSatisfiedTasks( in src/run-task.ts"
+  falsifier: |
+    Remove the `censusSatisfiedTasks` call from `proofQueueAuditCommand` and the first test sees no `passes-at-main` block for a
+    fixture reproducing W1-T3558 (three name-filtered proofs, all passing): it fails. Make the audit exit non-zero on a hit and
+    the fourth test fails.
+  note: |
+    OVERLAP TO RESOLVE BEFORE BUILD: W1-T4861 (queued) owns `src/lib/plan-gardener.ts`; this task touches only src/run-task.ts,
+    the generated CLI reference and its own test, so they do not collide, but an operator who takes W1-T4861 should decide
+    whether its `done` proposal also reads `unit test:` proofs, which would make this report's population the gardener's input.
+    THE PROOF FORM: `grep: test("..." in <test file>` for the same reason W1-T4904's record gives (W1-T3730 still open); the
+    builder writes the test titles with DOUBLE quotes, verbatim.
