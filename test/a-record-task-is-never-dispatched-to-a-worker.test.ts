@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseTasksFromYaml, type Plan, type Task } from "../src/lib/plan.js";
-import { nextRunnable, recordTaskRoutedLogger, runnableCandidates, type MergedSet } from "../src/lib/drain.js";
+import { nextRunnable, recordTaskRoutedLogger, runDrain, runnableCandidates, type MergedSet } from "../src/lib/drain.js";
 import { isRecordTask, lintTask } from "../src/lib/task-linter.js";
 
 // W1-T4818 — a task whose EVERY acceptance proof greps its own plan/tasks.d shard has nothing for a
@@ -51,6 +51,24 @@ test("W1-T4818: the routing ledger line is written once per task per drain run",
   hook(record);
   assert.deepEqual(lines, [{ event: "dispatch.record_task_routed", detail: { task: "W1-T9001" } }]);
   assert.deepEqual([...seen], ["W1-T9001"]);
+});
+
+test("W1-T4818: both drain loops wire the record-task ledger callback without dispatching the task", async () => {
+  const record = taskFrom(shard("W1-T9001", SHARD, SELF_PROOFS), SHARD);
+  for (const laneCount of [1, 2]) {
+    const lines: Array<{ event: string; detail: Record<string, unknown> }> = [];
+    const summary = await runDrain(planOf(record), {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async () => { throw new Error("a record task must never be dispatched"); },
+      log: (event: string, detail: Record<string, unknown>) => lines.push({ event, detail }),
+    } as never, { max: 1, laneCount, headroomEnabled: false });
+    assert.equal(summary.stopReason, "no_runnable");
+    assert.deepEqual(
+      lines.filter((line) => line.event === "dispatch.record_task_routed"),
+      [{ event: "dispatch.record_task_routed", detail: { task: "W1-T9001" } }],
+      `laneCount=${laneCount} must report the routed record exactly once`,
+    );
+  }
 });
 
 test("W1-T4818: the plan lint warns on that shape and never refuses it", () => {
