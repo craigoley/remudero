@@ -1,0 +1,486 @@
+import assert from "node:assert/strict";
+import { appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import type { AddressInfo } from "node:net";
+import { join } from "node:path";
+import { test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
+import { gzipSync } from "node:zlib";
+import type { Clock } from "../src/lib/clock.js";
+import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
+import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
+import { acquireLease } from "../src/lib/read-model-db.js";
+import {
+  READ_MODEL_LEASE_RENEW_MS,
+  READ_MODEL_SWITCH_RECHECK_MS,
+  createReadModelTicker,
+  createReadModelWorker,
+  ledgerSource,
+  loadCommittedViewBodies,
+  readModelBodyKey,
+  readModelSwitchesPath,
+  readReadModelSwitches,
+  runReadModelWorker,
+  type ReadModelView,
+  type ReadModelWorkerMessage,
+} from "../src/lib/read-model-worker.js";
+import { buildServeServer, readModelInstances, stopServeReadModel, type ServeDeps } from "../src/lib/serve.js";
+import { makeTempDir } from "../src/lib/tmp.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+
+const T0 = Date.parse("2026-09-30T12:00:00.000Z");
+const LIVE = "ledger.ndjson";
+
+type TestCtx = { after: (fn: () => void) => void };
+
+function scratch(t: TestCtx, kind: string): string {
+  const dir = makeTempDir(kind);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+function steppedClock(start = T0): { clock: Clock; advance: (ms: number) => void } {
+  let ms = start;
+  return {
+    clock: { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() },
+    advance: (by) => void (ms += by),
+  };
+}
+
+/** `n` rows from `startMs`, one millisecond apart; every other row is a fact step. */
+function rows(n: number, startMs: number, tag = "r"): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const step = i % 2 === 0 ? "run.start" : "worker.activity";
+    out.push(JSON.stringify({ ts: new Date(startMs + i).toISOString(), step, task_id: `T${i % 500}`, run_id: `${tag}-${i}`, note: "x".repeat(120) }));
+  }
+  return out;
+}
+
+function text(lines: string[]): string {
+  return lines.length > 0 ? `${lines.join("\n")}\n` : "";
+}
+
+function archiveName(ms: number): string {
+  return `ledger.${new Date(ms).toISOString().replace(/[:.]/g, "-")}.ndjson.gz`;
+}
+
+/** A ledger dir of `archives` gzip rotations of `perArchive` rows each, plus a live file. */
+function corpus(dir: string, archives: number, perArchive: number, live: number): { total: number; newestTs: string } {
+  mkdirSync(dir, { recursive: true });
+  let at = T0 - 86_400_000;
+  for (let a = 0; a < archives; a++) {
+    writeFileSync(join(dir, archiveName(at + perArchive)), gzipSync(text(rows(perArchive, at, `a${a}`))));
+    at += perArchive;
+  }
+  const liveRows = rows(live, at, "live");
+  writeFileSync(join(dir, LIVE), text(liveRows));
+  return { total: archives * perArchive + live, newestTs: new Date(at + live - 1).toISOString() };
+}
+
+function collect(): { messages: ReadModelWorkerMessage[]; post: (m: ReadModelWorkerMessage) => void; logs: (step: string) => Array<Record<string, unknown>> } {
+  const messages: ReadModelWorkerMessage[] = [];
+  return {
+    messages,
+    post: (m) => void messages.push(m),
+    logs: (step) => messages.flatMap((m) => (m.type === "log" && m.step === step ? [m.extra] : [])),
+  };
+}
+
+function lastState(messages: ReadModelWorkerMessage[]) {
+  const states = messages.filter((m) => m.type === "state");
+  const last = states[states.length - 1];
+  assert.ok(last && last.type === "state", "the ticker posted a state");
+  return last;
+}
+
+function tableCount(stateDir: string, instance: string, table: string): number {
+  const db = openProjectorReadModel(stateDir, instance);
+  try {
+    return Number(db.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.n);
+  } finally {
+    db.close();
+  }
+}
+
+const PROBE_MS = 5;
+
+/** Samples the main loop every {@link PROBE_MS}: each sample is how late its timer fired. Unlike
+ *  monitorEventLoopDelay, a stall that begins in the same turn as the probe is still counted. */
+function loopProbe(): { stop: () => { samples: number; p99Ms: number; maxMs: number } } {
+  const lags: number[] = [];
+  let last = performance.now();
+  const timer = setInterval(() => {
+    const now = performance.now();
+    lags.push(Math.max(0, now - last - PROBE_MS));
+    last = now;
+  }, PROBE_MS);
+  return {
+    stop: () => {
+      clearInterval(timer);
+      lags.push(Math.max(0, performance.now() - last - PROBE_MS));
+      const sorted = [...lags].sort((a, b) => a - b);
+      return { samples: lags.length, p99Ms: sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99))] ?? 0, maxMs: sorted[sorted.length - 1] ?? 0 };
+    },
+  };
+}
+
+test("serve's main loop lag stays under 50 ms while the worker rebuilds", async (t) => {
+  const ledgerDir = scratch(t, "rmw-lag-ledger");
+  const { total, newestTs } = corpus(ledgerDir, 6, 20_000, 5_000);
+
+  // Positive control: the same rebuild run on the main thread holds the loop, so the probe can see a stall.
+  const inlineState = scratch(t, "rmw-lag-inline");
+  const inline = createReadModelTicker({ stateDir: inlineState, instances: [{ name: "core", ledgerDir }], post: () => {} });
+  const control = loopProbe();
+  inline.tick();
+  const inlineLag = control.stop();
+  inline.release();
+  assert.ok(inlineLag.maxMs >= 50, `the control must stall the loop it measures; the inline rebuild held it only ${inlineLag.maxMs.toFixed(1)} ms`);
+  assert.equal(tableCount(inlineState, "core", "seen"), total, "the control rebuilt every row");
+
+  const stateDir = scratch(t, "rmw-lag-state");
+  const handle = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir }], tickMs: 50 });
+  t.after(() => handle.stop());
+  const probe = loopProbe();
+  const started = performance.now();
+  handle.start();
+  const deadline = started + 120_000;
+  while (handle.state().instances.get("core")?.newestTs !== newestTs && performance.now() < deadline) await sleep(20);
+  const elapsedMs = performance.now() - started;
+  const lag = probe.stop();
+  assert.equal(handle.state().instances.get("core")?.newestTs, newestTs, "the worker finished the rebuild");
+  const facts = `over a ${elapsedMs.toFixed(0)} ms worker rebuild of ${total} rows (${lag.samples} samples); inline the same rebuild held the loop ${inlineLag.maxMs.toFixed(0)} ms`;
+  t.diagnostic(`main-loop lag p99 ${lag.p99Ms.toFixed(1)} ms, max ${lag.maxMs.toFixed(1)} ms ${facts}`);
+  assertWallClockBound(lag.maxMs, 250, `main-loop lag max ${lag.maxMs.toFixed(1)} ms ${facts}: one stall as long as the inline rebuild hides inside a p99`);
+  assertWallClockBound(lag.p99Ms, 50, `main-loop lag p99 ${lag.p99Ms.toFixed(1)} ms ${facts}`);
+  assert.ok(lag.samples >= elapsedMs / (PROBE_MS * 4), `the probe must have sampled the loop throughout the rebuild; it took ${lag.samples} samples in ${elapsedMs.toFixed(0)} ms`);
+  assert.equal(handle.stop(), true, "the worker confirmed its stop");
+  assert.equal(tableCount(stateDir, "core", "seen"), total, "the worker rebuilt every row");
+});
+
+test("the worker writes nothing while the projector switch reads off", (t) => {
+  const ledgerDir = scratch(t, "rmw-off-ledger");
+  const stateDir = scratch(t, "rmw-off-state");
+  corpus(ledgerDir, 1, 10, 4);
+  const { clock, advance } = steppedClock();
+  const sink = collect();
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock, post: sink.post });
+  t.after(() => ticker.release());
+  ticker.tick();
+  const before = { seen: tableCount(stateDir, "core", "seen"), bodies: tableCount(stateDir, "core", "view_body"), generation: lastState(sink.messages).instances[0]?.generation };
+  assert.equal(before.seen, 14);
+
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ projector: "off" }));
+  appendFileSync(join(ledgerDir, LIVE), text(rows(5, T0, "after")));
+  advance(READ_MODEL_SWITCH_RECHECK_MS);
+  ticker.tick();
+  const off = lastState(sink.messages);
+  assert.equal(off.switches.projector, "off");
+  assert.equal(off.instances[0]?.reason, "projector switched off");
+  assert.equal(off.instances[0]?.generation, before.generation, "no transaction ran");
+  assert.equal(tableCount(stateDir, "core", "seen"), before.seen, "no row was applied while off");
+  assert.equal(tableCount(stateDir, "core", "view_body"), before.bodies, "no body was persisted while off");
+  const lastBody = sink.messages.filter((m) => m.type === "body").pop();
+  assert.ok(lastBody?.type === "body" && lastBody.entry.body.stale, "the views keep serving, marked stale");
+
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ projector: "on" }));
+  advance(READ_MODEL_SWITCH_RECHECK_MS);
+  ticker.tick();
+  assert.equal(tableCount(stateDir, "core", "seen"), before.seen + 5, "switching back on applies the held rows");
+});
+
+test("a restarted worker serves its last committed bodies before its first tick", (t) => {
+  const ledgerDir = scratch(t, "rmw-warm-ledger");
+  const stateDir = scratch(t, "rmw-warm-state");
+  corpus(ledgerDir, 1, 6, 2);
+  const sink = collect();
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: sink.post });
+  ticker.tick();
+  assert.equal(ticker.release(), 1);
+  const posted = sink.messages.filter((m) => m.type === "body").pop();
+  assert.ok(posted?.type === "body");
+
+  const logs: string[] = [];
+  const restarted = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir }], log: (step) => void logs.push(step) });
+  const warm = restarted.bodies.get(readModelBodyKey("read-model"));
+  assert.deepEqual(warm, posted.entry, "the committed body is served as the worker posted it");
+  assert.equal(restarted.state().at, undefined, "no tick has run");
+  assert.deepEqual(logs, ["read_model.warm_boot"]);
+  assert.equal(restarted.stop(), false, "a never-started worker has nothing to confirm");
+
+  const cold = loadCommittedViewBodies(scratch(t, "rmw-cold"), "core");
+  assert.deepEqual(cold.bodies, []);
+  assert.match(cold.reason ?? "", /no committed view bodies/);
+});
+
+test("the worker releases its leases when serve stops", async (t) => {
+  const ledgerDir = scratch(t, "rmw-release-ledger");
+  const stateDir = scratch(t, "rmw-release-state");
+  corpus(ledgerDir, 1, 4, 1);
+  const logs: Array<[string, Record<string, unknown> | undefined]> = [];
+  const handle = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir }], tickMs: 20, log: (step, extra) => void logs.push([step, extra]) });
+  handle.start();
+  handle.start();
+  const deadline = Date.now() + 30_000;
+  while (handle.state().instances.get("core")?.lease !== "held" && Date.now() < deadline) await sleep(20);
+  assert.equal(handle.state().instances.get("core")?.lease, "held");
+  const db = openProjectorReadModel(stateDir, "core");
+  t.after(() => db.close());
+  assert.equal(acquireLease(db, { holder: "successor" }).ok, false, "while the worker runs, a successor is refused");
+  assert.equal(handle.stop(), true);
+  assert.equal(acquireLease(db, { holder: "successor" }).ok, true, "after the stop, a successor takes the lease at once");
+  assert.ok(logs.some(([step, extra]) => step === "read_model.stop" && extra?.confirmed === true));
+  await sleep(50);
+  assert.ok(logs.some(([step, extra]) => step === "read_model.stopped" && extra?.released === 1), JSON.stringify(logs));
+  handle.start();
+  assert.equal(handle.stop(), false, "a stopped handle does not respawn");
+});
+
+test("a projector error is logged and the instance backs off while the others keep ticking", (t) => {
+  const good = scratch(t, "rmw-err-good");
+  const stateDir = scratch(t, "rmw-err-state");
+  const missing = join(scratch(t, "rmw-err-base"), "not-yet");
+  corpus(good, 0, 0, 3);
+  const { clock, advance } = steppedClock();
+  const sink = collect();
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: good }, { name: "site", ledgerDir: missing }], clock, tickMs: 100, post: sink.post });
+  t.after(() => ticker.release());
+  ticker.tick();
+  let state = lastState(sink.messages);
+  assert.equal(state.instances[0]?.reason, undefined);
+  assert.equal(state.instances[0]?.generation, 1, "core ticked");
+  assert.equal(state.instances[1]?.failures, 1);
+  assert.match(state.instances[1]?.reason ?? "", /tick failed/);
+  assert.deepEqual(sink.logs("read_model.tick_failed").map((l) => [l.instance, l.failures, l.backoffMs]), [["site", 1, 200]]);
+
+  ticker.tick();
+  assert.equal(sink.logs("read_model.tick_failed").length, 1, "inside its back-off the failing instance is not retried");
+  advance(200);
+  ticker.tick();
+  assert.deepEqual(sink.logs("read_model.tick_failed").map((l) => l.backoffMs), [200, 400], "the back-off doubles");
+
+  corpus(missing, 0, 0, 2);
+  advance(400);
+  ticker.tick();
+  state = lastState(sink.messages);
+  assert.equal(state.instances[1]?.failures, 0, "a good tick resets the back-off");
+  assert.equal(state.instances[1]?.reason, undefined);
+  assert.equal(state.instances[1]?.newestTs, new Date(T0 - 86_400_000 + 1).toISOString());
+});
+
+test("a lease held by another serve keeps this worker from writing and a stolen lease is retaken", (t) => {
+  const ledgerDir = scratch(t, "rmw-lease-ledger");
+  const stateDir = scratch(t, "rmw-lease-state");
+  corpus(ledgerDir, 0, 0, 2);
+  const { clock, advance } = steppedClock();
+  const other = openProjectorReadModel(stateDir, "core", clock);
+  t.after(() => other.close());
+  assert.ok(acquireLease(other, { holder: "other-serve", clock }).ok);
+  const sink = collect();
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock, holder: "me", post: sink.post });
+  t.after(() => ticker.release());
+  ticker.tick();
+  let state = lastState(sink.messages).instances[0];
+  assert.equal(state?.lease, "elsewhere");
+  assert.match(state?.reason ?? "", /lease held by pid/);
+  assert.equal(state?.generation, 0, "nothing was projected");
+
+  advance(21_000);
+  ticker.tick();
+  state = lastState(sink.messages).instances[0];
+  assert.equal(state?.lease, "held", "an expired lease passes to this worker");
+  assert.equal(state?.heldBy, undefined);
+
+  other.prepare("UPDATE lease SET holder = 'thief'").run();
+  appendFileSync(join(ledgerDir, LIVE), text(rows(2, T0, "late")));
+  advance(READ_MODEL_LEASE_RENEW_MS - 1);
+  ticker.tick();
+  state = lastState(sink.messages).instances[0];
+  assert.equal(state?.lease, "none", "the fence refused the write and the lease is dropped");
+  assert.match(String(sink.logs("read_model.tick_failed")[0]?.error), /lease_lost/);
+
+  advance(READ_MODEL_LEASE_RENEW_MS);
+  other.prepare("UPDATE lease SET expires_ms = 0").run();
+  ticker.tick();
+  assert.equal(lastState(sink.messages).instances[0]?.lease, "held");
+  other.exec("DROP TABLE lease");
+  assert.equal(ticker.release(), 0, "a release that fails is counted out");
+  assert.match(String(sink.logs("read_model.release_failed")[0]?.error), /no such table/);
+});
+
+test("a stop requested mid-rebuild rolls back the open transaction without a failure", (t) => {
+  const ledgerDir = scratch(t, "rmw-stop-ledger");
+  const stateDir = scratch(t, "rmw-stop-state");
+  corpus(ledgerDir, 2, 5, 0);
+  let calls = 0;
+  const sink = collect();
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }, { name: "site", ledgerDir }], post: sink.post, stopRequested: () => ++calls > 2 });
+  ticker.tick();
+  assert.equal(sink.logs("read_model.tick_failed").length, 0);
+  assert.equal(sink.messages.some((m) => m.type === "state"), false, "a stopping tick posts nothing further");
+  assert.equal(ticker.release(), 1);
+  assert.equal(tableCount(stateDir, "core", "seen"), 5, "the first archive committed and the second rolled back");
+});
+
+test("the switch file keeps its last good reading and a view switched off is not materialized", (t) => {
+  const stateDir = scratch(t, "rmw-switch-state");
+  const ledgerDir = scratch(t, "rmw-switch-ledger");
+  corpus(ledgerDir, 0, 0, 1);
+  const path = readModelSwitchesPath(stateDir);
+  assert.deepEqual(readReadModelSwitches(path), { ok: true, switches: { projector: "on", views: {} }, mtimeMs: 0 });
+  mkdirSync(path, { recursive: true });
+  assert.match(String((readReadModelSwitches(path) as { reason: string }).reason), /unreadable/);
+  rmSync(path, { recursive: true });
+  writeFileSync(path, "{ not json");
+  assert.match(String((readReadModelSwitches(path) as { reason: string }).reason), /not JSON/);
+  writeFileSync(path, JSON.stringify({ views: { "read-model": "sideways" } }));
+  assert.match(String((readReadModelSwitches(path) as { reason: string }).reason), /mode "sideways"/);
+  writeFileSync(path, JSON.stringify({ projector: "maybe" }));
+  assert.match(String((readReadModelSwitches(path) as { reason: string }).reason), /projector has mode/);
+  writeFileSync(path, "null");
+  assert.equal(readReadModelSwitches(path).ok, true);
+
+  const { clock, advance } = steppedClock();
+  const sink = collect();
+  const throws: ReadModelView = { name: "broken", version: 1, materialize: () => { throw new Error("boom"); } };
+  const counted: ReadModelView = { name: "counted", version: 1, materialize: () => [{ key: "", data: { n: 1 }, sources: [] }] };
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock, views: [throws, counted], post: sink.post });
+  t.after(() => ticker.release());
+  writeFileSync(path, JSON.stringify({ views: { counted: "off" } }));
+  ticker.tick();
+  assert.deepEqual(sink.messages.filter((m) => m.type === "body"), [], "a view switched off is not materialized");
+  assert.deepEqual(sink.logs("read_model.materialize_failed"), [{ view: "broken", error: "boom" }]);
+
+  writeFileSync(path, "{ half written");
+  advance(READ_MODEL_SWITCH_RECHECK_MS);
+  ticker.tick();
+  assert.equal(sink.logs("read_model.switch_unreadable").length, 1);
+  assert.deepEqual(lastState(sink.messages).switches.views, { counted: "off" }, "an unreadable file keeps the last good switches");
+  assert.equal(sink.messages.filter((m) => m.type === "body").length, 0);
+
+  writeFileSync(path, JSON.stringify({ views: { counted: "serve" } }));
+  advance(READ_MODEL_SWITCH_RECHECK_MS);
+  ticker.tick();
+  ticker.tick();
+  assert.equal(sink.messages.filter((m) => m.type === "body").length, 1, "one body, and an unchanged body is not re-posted");
+});
+
+test("the ledger source reads stale when its projector is behind or has not ticked", () => {
+  const base = { instance: "core", generation: 3, lease: "held" as const, failures: 0, newestTs: "2026-09-30T11:59:00.000Z" };
+  assert.deepEqual(ledgerSource({ ...base, tickedAt: T0 }, T0 + 1_000), { name: "ledger:core", asOf: base.newestTs, state: "fresh" });
+  assert.equal(ledgerSource({ ...base, tickedAt: T0 }, T0 + 12_000).reason, "projector 12 s behind");
+  assert.equal(ledgerSource({ ...base, tickedAt: T0, reason: "tick failed: x" }, T0 + 12_000).reason, "projector 12 s behind: tick failed: x");
+  assert.equal(ledgerSource({ ...base, tickedAt: T0, reason: "unread archives: a" }, T0).state, "stale");
+  assert.equal(ledgerSource(base, T0).reason, "projector has not ticked yet");
+  assert.equal(ledgerSource({ ...base, reason: "lease held by pid 1 on h" }, T0).reason, "lease held by pid 1 on h");
+});
+
+test("the worker branch ticks until a stop message and then signals its release", async (t) => {
+  const ledgerDir = scratch(t, "rmw-branch-ledger");
+  const stateDir = scratch(t, "rmw-branch-state");
+  corpus(ledgerDir, 0, 0, 2);
+  const signal = new SharedArrayBuffer(8);
+  const posted: ReadModelWorkerMessage[] = [];
+  let onMessage: ((msg: { type?: string }) => void) | undefined;
+  let closed = 0;
+  let failOnce = true;
+  const port = {
+    on: (_event: "message", run: (msg: { type?: string }) => void) => void (onMessage = run),
+    postMessage: (m: unknown) => {
+      const message = m as ReadModelWorkerMessage;
+      if (message.type === "state" && failOnce) {
+        failOnce = false;
+        throw new Error("port closed");
+      }
+      posted.push(message);
+    },
+    close: () => void closed++,
+  };
+  runReadModelWorker(port, { kind: "remudero-read-model", stateDir, instances: [{ name: "core", ledgerDir }], tickMs: 5, signal });
+  const deadline = Date.now() + 10_000;
+  while (!posted.some((m) => m.type === "state") && Date.now() < deadline) await sleep(5);
+  assert.ok(posted.some((m) => m.type === "log" && m.step === "read_model.tick_failed" && m.extra.error === "port closed"), "a failing tick is logged and the loop goes on");
+  onMessage?.({ type: "noise" });
+  onMessage?.({ type: "stop" });
+  onMessage?.({ type: "stop" });
+  const flags = new Int32Array(signal);
+  assert.deepEqual([flags[0], flags[1], closed], [1, 1, 1]);
+  assert.ok(posted.some((m) => m.type === "log" && m.step === "read_model.stopped" && m.extra.released === 1));
+
+  const second = new SharedArrayBuffer(8);
+  const quiet = { on: () => undefined, postMessage: () => undefined, close: () => void closed++ };
+  runReadModelWorker(quiet, { kind: "remudero-read-model", stateDir, instances: [{ name: "core", ledgerDir }], tickMs: 5, signal: second });
+  Atomics.store(new Int32Array(second), 0, 1);
+  const until = Date.now() + 10_000;
+  while (Atomics.load(new Int32Array(second), 1) !== 1 && Date.now() < until) await sleep(5);
+  assert.equal(Atomics.load(new Int32Array(second), 1), 1, "a stop flag alone ends the loop");
+});
+
+test("a worker that dies is respawned with a doubling back-off and a silent one times out its stop", async (t) => {
+  const stateDir = scratch(t, "rmw-respawn-state");
+  const logs: Array<[string, Record<string, unknown> | undefined]> = [];
+  const dying = createReadModelWorker({
+    stateDir, instances: [{ name: "core", ledgerDir: stateDir }], tickMs: 10,
+    workerUrl: new URL("data:text/javascript,throw new Error('worker boom')"),
+    log: (step, extra) => void logs.push([step, extra]),
+  });
+  dying.start();
+  const deadline = Date.now() + 20_000;
+  while (logs.filter(([step]) => step === "read_model.worker_exited").length < 2 && Date.now() < deadline) await sleep(10);
+  dying.stop();
+  const exits = logs.filter(([step]) => step === "read_model.worker_exited").map(([, extra]) => [extra?.deaths, extra?.respawnInMs]);
+  assert.deepEqual(exits.slice(0, 2), [[1, 20], [2, 40]]);
+  assert.ok(logs.some(([step, extra]) => step === "read_model.worker_failed" && /worker boom/.test(String(extra?.error))));
+
+  const silent = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], stopWaitMs: 50, workerUrl: new URL("data:text/javascript,setInterval(() => {}, 1000)") });
+  silent.start();
+  await sleep(100);
+  assert.equal(silent.stop(), false, "an unconfirmed stop is reported, bounded");
+});
+
+test("rmd serve starts the read-model worker for every registry instance and stops it on shutdown", async (t) => {
+  const root = scratch(t, "rmw-serve");
+  const stateDir = join(root, "state");
+  const stateBase = join(root, "instances");
+  mkdirSync(stateDir, { recursive: true });
+  corpus(stateDir, 0, 0, 3);
+  corpus(join(stateBase, "site", "state"), 0, 0, 2);
+  mkdirSync(join(root, ".remudero"), { recursive: true });
+  const row = (name: string, repo: string) => [`  ${name}:`, `    repo: ${repo}`, "    project: remudero", `    github_repo: craigoley/${repo}`, `    state_dir: /host/${name}-state`].join("\n");
+  writeFileSync(daemonInstanceRegistryPath(root), ["instances:", row("core", "remudero"), row("site", "remudero-site"), ""].join("\n"));
+  const ledgerPath = join(stateDir, LIVE);
+  const planPath = join(root, "plan.yaml");
+  writeFileSync(planPath, "[]\n");
+  const github = { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
+  const deps: ServeDeps = {
+    board: { plan: { tasks: [], byId: new Map() }, ledgerPath, github },
+    panelGraph: { root, planPath, ledgerPath, github: { prView: () => null }, statusGithub: github, ratify: { approve: () => {}, reframe: () => {} } },
+    ledgerPath,
+    issues: { close: () => {} },
+    fleetControlRoot: root,
+    questionsRoot: root,
+    tokens: { read: "read-token", write: "write-token" },
+    consoleSha: "aaaaaaaa",
+    resolveCurrentSha: () => "aaaaaaaa",
+    gatewayCheckout: async () => ({ state: "clean" }) as never,
+    githubAppRefresh: { start: () => ({ armed: false, stop() {} }) as never },
+    instances: { stateBase },
+    readModel: { tickMs: 20 },
+  };
+  assert.deepEqual(readModelInstances(deps), [{ name: "core", ledgerDir: stateDir }, { name: "site", ledgerDir: join(stateBase, "site", "state") }]);
+  const server = buildServeServer(deps);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+  assert.ok((server.address() as AddressInfo).port > 0);
+  const siteDb = join(stateDir, "read-model", "site.v1.sqlite");
+  const deadline = Date.now() + 30_000;
+  while (!existsSync(siteDb) && Date.now() < deadline) await sleep(20);
+  await sleep(200);
+  assert.equal(stopServeReadModel(server), true, "the SIGTERM path releases the worker's leases");
+  assert.equal(tableCount(stateDir, "site", "seen"), 2, "the site instance was projected into its own DB under core's state");
+  assert.equal(tableCount(stateDir, "core", "seen"), 3);
+  assert.equal(stopServeReadModel(buildServeServer({ ...deps, readModel: undefined })), false, "no worker runs unless serve asks for one");
+});

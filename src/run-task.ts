@@ -636,6 +636,7 @@ import {
   resolveServiceTokens,
   SERVE_EXPECTED_BRANCH,
   serviceTokensPath,
+  stopServeReadModel,
   defaultIsListening,
 } from "./lib/serve.js";
 import { consoleProjectionWorker } from "./lib/console-snapshot-cache.js";
@@ -35253,6 +35254,7 @@ export async function serveCommand(
     log,
     consoleSnapshots: { dir: join(config.root, "state", "console-snapshots"), prewarmPaths: ["/v1/operator-activity", "/v1/action-results"] },
     projectionWorker: consoleProjectionWorker(),
+    readModel: {},
     // W1-T945: GET /v1/peek's root (config.root, the SAME root buildWorkerStateSensor resolves
     // state/runs/<runId>.tail against) + its liveness predicate, a closure over the REAL
     // liveInflightRuns over the REAL `<config.root>/state/inflight` lock directory — the exact
@@ -35372,6 +35374,7 @@ export async function serveCommand(
   await new Promise<void>((resolve) => {
     const shutdown = () => {
       log("serve.stop", {});
+      stopServeReadModel(server);
       server.close(() => resolve());
     };
     process.once("SIGINT", shutdown);

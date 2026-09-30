@@ -58,12 +58,21 @@ export function renderView<T>(
   if ("error" in computed) return computed;
   const { data, sources } = computed;
   const stale = sources.some((source) => source.state !== "fresh");
-  const times = sources.flatMap((source) => (source.asOf === null ? [] : [source.asOf])).sort();
-  const hash = createHash("sha1").update(JSON.stringify({ version: view.version, stale, data })).digest("base64url");
   return {
-    body: { view: view.name, version: view.version, generatedAt: clock.iso(), asOf: times[0] ?? null, stale, sources, data },
-    etag: `W/"${view.name}.${view.version}.${hash}"`,
+    body: { view: view.name, version: view.version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data },
+    etag: viewEtag(view.name, view.version, stale, data),
   };
+}
+
+/** The weak entity tag over `{version, stale, data}`: the times never change it. */
+export function viewEtag(name: string, version: number, stale: boolean, data: unknown): string {
+  const hash = createHash("sha1").update(JSON.stringify({ version, stale, data })).digest("base64url");
+  return `W/"${name}.${version}.${hash}"`;
+}
+
+/** The oldest input's as-of time, which is how old the view's facts are. */
+export function oldestAsOf(sources: readonly ViewSource[]): string | null {
+  return sources.flatMap((source) => (source.asOf === null ? [] : [source.asOf])).sort()[0] ?? null;
 }
 
 /** One read-scoped route per view, at `/v1/views/<name>`. */
