@@ -16,6 +16,7 @@ const {
   AGED_FIELDS,
   EXEMPT_MARKER,
   MARGIN_DAYS,
+  KNOWN_UNCOVERED_CLOCK_FIELDS,
   assertFieldListComplete,
   assertFieldsStillAged,
   censusExpiringFixtures,
@@ -30,6 +31,7 @@ const {
     AGED_FIELDS: ReadonlyArray<{ field: string; threshold: string; source: string; evidence: string[] }>;
     EXEMPT_MARKER: string;
     MARGIN_DAYS: number;
+    KNOWN_UNCOVERED_CLOCK_FIELDS: ReadonlyArray<{ field: string; source: string }>;
     assertFieldListComplete: (o: { files: string[]; readFile: (p: string) => string; agedFields?: ReadonlyArray<{ field: string }> }) => unknown;
     isBlocked: (o: { reported: Array<{ inherited?: boolean }>; populationDrop?: Array<unknown> }) => boolean;
     assertFieldsStillAged: (readFile?: (p: string) => string) => void;
@@ -110,6 +112,23 @@ test("W1-T3838: an unlisted clock-aged field fails the census", () => {
   assert.throws(
     () => assertFieldListComplete({ files: ["src/lib/operator-agent.ts"], readFile: () => reverseComparison, agedFields: [] }),
     /INCOMPLETE TABLE.*expiresAt/s,
+  );
+});
+
+test("W1-T4820: the generated ledger rotation-lock timestamp is accounted for", () => {
+  const source = readFileSync(joinPath(REPO_ROOT, "src/lib/ledger.ts"), "utf8");
+  const discovered = discoverClockAgedFields({ files: ["src/lib/ledger.ts"], readFile: () => source });
+
+  assert.ok(discovered.some((row) => row.field === "startedAt" && row.source === "src/lib/ledger.ts"));
+  assert.ok(
+    KNOWN_UNCOVERED_CLOCK_FIELDS.some((row) => row.field === "startedAt" && row.source === "src/lib/ledger.ts"),
+  );
+  assert.doesNotThrow(() =>
+    assertFieldListComplete({
+      files: ["src/lib/ledger.ts"],
+      readFile: () => source,
+      agedFields: [...AGED_FIELDS, ...KNOWN_UNCOVERED_CLOCK_FIELDS],
+    }),
   );
 });
 

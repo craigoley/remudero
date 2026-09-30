@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-29: go with all of those follow ups (general union dedupe)"
   note: "reservation hand-off: plan-followups-1790712493000 -> plan-followups-1790712493000"
   plan_refs: [W1-T2898]
-  files: [src/lib/status.ts, src/lib/ledger-union.ts, src/lib/ledger.ts, test/the-status-board-reads-each-ledger-row-once.test.ts]
+  files: [src/lib/status.ts, src/lib/ledger-union.ts, src/lib/ledger.ts, scripts/expiring-fixture-census.mjs, test/the-status-board-reads-each-ledger-row-once.test.ts, test/expiring-fixture-census.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -22,6 +22,9 @@
     measured and rejected: full-line dedupe in the reader is correct and halves retained heap (688 to 352 MB) but took
     this Mac's bounded read from about 665 ms to 958 ms against its 1,000 ms bound; the per-step window
     (dedupeWindowPerStep: 200) missed 170,711 replays in the board's newest-first order (102,676 sweep.disposed).
+    The selected rotation-lock design also introduces a generated startedAt timestamp that is compared with the
+    clock for cross-container lease staleness. Record it as runtime coordination state in the fixture census and
+    test that accounting; it is not a hardcoded fixture timestamp.
   design: |
     Choose on measurement, recorded in the PR: (a) producer-side — rotateLedger stops re-archiving rows an earlier
     rotation already holds, so archives are disjoint and no reader needs dedupe going forward (existing archives age
