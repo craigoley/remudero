@@ -13,7 +13,7 @@
  * where coverage is recorded.
  */
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readdirSync, readFileSync, statSync, type BigIntStats } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -88,10 +88,7 @@ export function readModelSwitchesPath(stateDir: string): string {
  * parse is `{ ok: false }` with its reason, so the caller keeps the switches it last read: an
  * operator's half-written "off" must never read as "on".
  */
-export function readReadModelSwitches(
-  path: string,
-  statFd: (fd: number) => BigIntStats = (fd) => fstatSync(fd, { bigint: true }),
-): { ok: true; switches: ReadModelSwitches; mtimeMs: number } | { ok: false; reason: string } {
+export function readReadModelSwitches(path: string): { ok: true; switches: ReadModelSwitches; mtimeMs: number } | { ok: false; reason: string } {
   let text: string;
   let mtimeMs: number;
   let fd: number | undefined;
@@ -99,10 +96,10 @@ export function readReadModelSwitches(
     // Open once, then inspect and read that same file descriptor. A stat(path) followed by
     // readFile(path) lets a path/symlink swap redirect the read after the metadata check.
     fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-    const before = statFd(fd);
+    const before = fstatSync(fd, { bigint: true });
     if (!before.isFile()) return { ok: false, reason: "switch file unreadable: not a regular file" };
     text = readFileSync(fd, "utf8");
-    const after = statFd(fd);
+    const after = fstatSync(fd, { bigint: true });
     if (before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) {
       return { ok: false, reason: "switch file changed while being read" };
     }

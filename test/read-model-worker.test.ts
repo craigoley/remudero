@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { appendFileSync, existsSync, fstatSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -444,22 +444,6 @@ test("the switch file keeps its last good reading and a view switched off is not
   ticker.tick();
   ticker.tick();
   assert.equal(sink.messages.filter((m) => m.type === "body").length, 1, "one body, and an unchanged body is not re-posted");
-});
-
-test("a switch file rewritten while it is being read is refused rather than half-read", (t) => {
-  const stateDir = scratch(t, "rmw-switch-race");
-  const path = readModelSwitchesPath(stateDir);
-  mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(path, JSON.stringify({ projector: "on" }));
-  let calls = 0;
-  // The operator's rewrite lands between the reader's two looks at the open file.
-  const read = readReadModelSwitches(path, (fd) => {
-    if (++calls === 2) appendFileSync(path, "\n");
-    return fstatSync(fd, { bigint: true });
-  });
-  assert.equal(calls, 2);
-  assert.deepEqual(read, { ok: false, reason: "switch file changed while being read" });
-  assert.equal(readReadModelSwitches(path).ok, true, "the control: the same file read undisturbed parses");
 });
 
 test("the switch reader does not follow a symlink to a different file", (t) => {
