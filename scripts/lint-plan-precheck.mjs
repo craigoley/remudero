@@ -68,30 +68,29 @@ export function lintPlanPrecheckVerdict({ changedFiles, subjects, lint }) {
   return { exit: blocking ? 1 : 0, lines };
 }
 
-function main() {
-  const argv = process.argv.slice(2);
+/** The whole run, in-process: git and the lint are read from `cwd`, and every line goes to `log` / `warn`, so a test can
+ *  drive it against a fixture repo. Returns the exit code; the two lines at the bottom are the only process glue. */
+export function runLintPlanPrecheck({ argv = [], cwd = process.cwd(), log = console.log, warn = console.error } = {}) {
   const fallbackBase = argv.includes("--base") ? argv[argv.indexOf("--base") + 1] : "origin/main";
   try {
-    const root = gitOrThrow(["rev-parse", "--show-toplevel"]);
+    const root = gitOrThrow(["rev-parse", "--show-toplevel"], { cwd });
     const lintArgv = lintArgvFromPackage(readFileSync(join(root, "package.json"), "utf8"));
     if (lintArgv === undefined) throw new Error(`package.json has no plain \`node ...\` ${SCRIPT} script`);
-    const base = lintArgv.base ?? fallbackBase;
-    const forkPoint = gitOrThrow(["merge-base", "HEAD", base]);
+    const forkPoint = gitOrThrow(["merge-base", "HEAD", lintArgv.base ?? fallbackBase], { cwd: root });
     const verdict = lintPlanPrecheckVerdict({
-      changedFiles: gitOrThrow(["diff", "--name-only", `${forkPoint}...HEAD`]).split("\n").filter(Boolean),
-      subjects: gitOrThrow(["log", "--format=%s", `${forkPoint}..HEAD`]).split("\n").filter(Boolean),
+      changedFiles: gitOrThrow(["diff", "--name-only", `${forkPoint}...HEAD`], { cwd: root }).split("\n").filter(Boolean),
+      subjects: gitOrThrow(["log", "--format=%s", `${forkPoint}..HEAD`], { cwd: root }).split("\n").filter(Boolean),
       lint: () => {
         const r = spawnSync(process.execPath, lintArgv.args, { cwd: root, encoding: "utf8", maxBuffer: 1 << 26 });
-        if (r.error) throw r.error;
         return { status: r.status, output: `${r.stdout}\n${r.stderr}` };
       },
     });
-    for (const line of verdict.lines) (verdict.exit === 0 && verdict.lines.length === 1 ? console.log : console.error)(line);
+    for (const line of verdict.lines) (verdict.exit === 0 && verdict.lines.length === 1 ? log : warn)(line);
     return verdict.exit;
   } catch (e) {
-    console.error(`lint-plan-precheck: could not run (${e.message}) -- NOT reporting clean`);
+    warn(`lint-plan-precheck: could not run (${e.message}) -- NOT reporting clean`);
     return 2;
   }
 }
 
-if (isMainModule(import.meta.url)) process.exit(main());
+if (isMainModule(import.meta.url)) process.exit(runLintPlanPrecheck({ argv: process.argv.slice(2) }));

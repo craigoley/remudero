@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-expect-error -- test executes the untyped executable module directly.
-import { lintArgvFromPackage, lintPlanPrecheckVerdict } from "../scripts/lint-plan-precheck.mjs";
+import { lintArgvFromPackage, lintPlanPrecheckVerdict, runLintPlanPrecheck } from "../scripts/lint-plan-precheck.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HOOK = join(REPO_ROOT, "hooks", "pre-push");
@@ -179,4 +179,54 @@ test("the precheck takes its lint argv from the lint-plan:fast script and reads 
   assert.equal(lintArgvFromPackage(JSON.stringify({ scripts: { "lint-plan:fast": "node scripts/x.mjs" } })).base, undefined);
   assert.equal(lintArgvFromPackage(JSON.stringify({ scripts: { "lint-plan:fast": "npx tsx scripts/x.mjs" } })), undefined);
   assert.equal(lintArgvFromPackage(JSON.stringify({ scripts: {} })), undefined);
+});
+
+test("the squash-merge abstain names the merged subject and the git fetch remedy, and never runs the lint", () => {
+  const verdict = lintPlanPrecheckVerdict({
+    changedFiles: ["plan/tasks.d/W9-T1-shard.yaml"],
+    subjects: ["file a shard", "feat: merged elsewhere (#4242)"],
+    lint: () => assert.fail("a stale local origin/main must not reach the lint"),
+  });
+  assert.deepEqual(verdict, {
+    exit: 0,
+    lines: [
+      'lint-plan-precheck: SKIP -- the local origin/main is behind this branch\'s fork point ("feat: merged elsewhere (#4242)" is already merged)',
+      "  run `git fetch origin` and push again: against a stale ref the lint would judge other PRs' tasks, and a refusal there is not this branch's",
+    ],
+  });
+});
+
+/** The in-process entry: the same git and lint reads the hook's child makes, driven from a fixture's cwd so coverage
+ *  attributes the run to scripts/lint-plan-precheck.mjs itself and not to the copy a hook fixture executes. */
+function runIn(dir: string) {
+  const out: string[] = [];
+  const err: string[] = [];
+  const exit = runLintPlanPrecheck({ argv: ["--base", "origin/main"], cwd: dir, log: (l: string) => out.push(l), warn: (l: string) => err.push(l) });
+  return { exit, out, err };
+}
+
+test("run in-process: a shard that fails the lint exits 1 naming the rule, a clean one exits 0", (t) => {
+  const f = fixture(t);
+  f.writeShard(BARE_TITLE_SHARD);
+  f.commit("file a shard with a bare-title proof", ["plan"]);
+  const refused = runIn(f.work.dir);
+  assert.equal(refused.exit, 1);
+  assert.match(refused.err.join("\n"), /REFUSES it \[proof-dialect\]/);
+  assert.deepEqual(refused.out, []);
+
+  f.writeShard(CLEAN_SHARD);
+  f.commit("repair the shard", ["plan"]);
+  assert.deepEqual(runIn(f.work.dir), { exit: 0, out: ["lint-plan-precheck: OK -- the plan lint passes on this diff"], err: [] });
+});
+
+test("run in-process: a diff with no plan path skips, and a checkout with no lint script could not run", (t) => {
+  const f = fixture(t);
+  writeFileSync(join(f.work.dir, "docs", "b.md"), "no plan here\n");
+  f.commit("docs only", ["docs"]);
+  assert.deepEqual(runIn(f.work.dir), { exit: 0, out: ["lint-plan-precheck: SKIP -- no plan/ path in this diff"], err: [] });
+
+  const bare = fixture(t, { lintScript: "" });
+  const result = runIn(bare.work.dir);
+  assert.equal(result.exit, 2);
+  assert.match(result.err.join("\n"), /could not run \(package\.json has no plain `node \.\.\.` lint-plan:fast script\)/);
 });
