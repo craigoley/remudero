@@ -290,7 +290,8 @@ test("a pin-only candidate with any non-pin edit, changed release annotation, or
   const changedActionIdentity = OSV_SCANNER_PIN_DIFF.replace(/^\+.*osv-scanner-action@/gm, (line) => line.replace("osv-scanner-action@", "other-action@"));
   const mismatchedShaSummary = OSV_SCANNER_PIN_BODY.replace(OSV_PIN_NEW_SHA, OSV_PIN_OLD_SHA);
   const nonPinEdit = `${OSV_SCANNER_PIN_DIFF}@@ -90,1 +90,1 @@\n-timeout-minutes: 5\n+timeout-minutes: 6\n`;
-  for (const diff of [changedReleaseAnnotation, changedActionIdentity, nonPinEdit]) {
+  const unpairedEdit = `${OSV_SCANNER_PIN_DIFF}@@ -90,0 +90,1 @@\n+timeout-minutes: 6\n`;
+  for (const diff of [changedReleaseAnnotation, changedActionIdentity, nonPinEdit, unpairedEdit]) {
     assert.equal(isActionShaPinOnlyDiff(diff), false);
     const r = decideDepReview({
       author: DEPENDABOT_GRAPHQL_AUTHOR,
