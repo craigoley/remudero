@@ -19,6 +19,7 @@ import {
   diffViewData,
   legacyRepositories,
   legacyViewSampler,
+  memberDelta,
   readShadowEvidence,
   shadowReadiness,
   sqliteShadowStore,
@@ -109,7 +110,7 @@ test("a diff about a task a row between the two sources' ages names is timing", 
   const olderTask = readShadowEvidence([db], { ids: old!.ids, legacyAsOfMs: T0 - HOUR, viewAsOfMs: T0 });
   assert.equal(classifyShadowDiff(old!, olderTask).classification, "real", "a busy gap does not explain a task no gap row names");
   assert.equal(classifyShadowDiff({ path: "health.lastPollAgeMs", legacy: 1, view: 2, ids: [] }, { ...NONE, legacyAsOfMs: T0 - 1 }).classification, "timing");
-  assert.equal(classifyShadowDiff({ path: "counts.running", legacy: 1, view: 2, ids: [] }, { ...NONE, legacyAsOfMs: T0 - 1, rowsInGap: 3 }).classification, "timing");
+  assert.equal(classifyShadowDiff({ path: "counts.running", legacy: 1, view: 2, ids: [] }, { ...NONE, legacyAsOfMs: T0 - 1, rowsInGap: 3 }).classification, "real", "a busy gap does not explain a count no member names");
 });
 
 test("a diff where legacy counted duplicate rows is dedupe", (t) => {
@@ -120,8 +121,55 @@ test("a diff where legacy counted duplicate rows is dedupe", (t) => {
   const ev = readShadowEvidence([db], { ids: count!.ids, legacyAsOfMs: T0, viewAsOfMs: T0, duplicates: { rows: 2, ids: ["W1-T3"] } });
   assert.equal(classifyShadowDiff(count!, ev).classification, "dedupe");
   assert.equal(classifyShadowDiff(count!, readShadowEvidence([db], { ids: count!.ids, legacyAsOfMs: T0, viewAsOfMs: T0 })).classification, "real");
-  assert.equal(classifyShadowDiff({ path: "count", legacy: 5, view: 3, ids: [] }, { ...NONE, duplicateRows: 2 }).classification, "dedupe");
-  assert.equal(classifyShadowDiff({ path: "count", legacy: 5, view: 3, ids: [] }, { ...NONE, duplicateRows: 1 }).classification, "real", "fewer duplicates than the excess explain nothing");
+  assert.equal(classifyShadowDiff({ path: "count", legacy: 5, view: 3, ids: [] }, { ...NONE, duplicateRows: 2 }).classification, "real", "duplicates legacy read elsewhere do not explain a count with no members");
+});
+
+/** Classifies one count diff the way `compare` does: its members attached and their differing ids looked up. */
+function countClass(db: ReadModelDb, legacy: string[], view: string[], extra: { legacyAsOfMs?: number; legacyHorizonMs?: number } = {}): { classification: string; reason: string } {
+  const [diff] = diffViewData({ counts: { queued: legacy.length } }, { counts: { queued: view.length } });
+  const members = { legacy, view };
+  const ev = readShadowEvidence([db], { ids: memberDelta(members), legacyAsOfMs: extra.legacyAsOfMs ?? T0, viewAsOfMs: T0, legacyHorizonMs: extra.legacyHorizonMs ?? T0 - DAY });
+  return classifyShadowDiff({ ...diff!, members }, ev);
+}
+
+test("a count diff whose differing members only pre-horizon rows name is legacy_horizon", (t) => {
+  const db = evidenceDb(t);
+  const got = countClass(db, ["W1-T2"], ["W1-T2", "W1-T1", "W1-T3"]);
+  assert.equal(got.classification, "legacy_horizon", got.reason);
+  assert.match(got.reason, /2 legacy_horizon/);
+  assert.equal(countClass(db, ["W1-T1", "W1-T2"], ["W1-T2"]).classification, "legacy_horizon", "legacy counting a task it cannot see the end of");
+  assert.equal(countClass(db, [], ["W1-T1"], { legacyHorizonMs: T0 - 40 * DAY }).classification, "real", "a member legacy could see is not a horizon effect");
+  const gap = countClass(db, [], ["W1-T2"], { legacyAsOfMs: T0 - HOUR });
+  assert.equal(gap.classification, "timing", gap.reason);
+});
+
+test("a count diff whose extra members legacy counted twice is dedupe", (t) => {
+  const db = evidenceDb(t);
+  const got = countClass(db, ["W1-T9", "W1-T9", "W1-T8", "W1-T8", "W1-T8"], ["W1-T9", "W1-T8"]);
+  assert.equal(got.classification, "dedupe", got.reason);
+  assert.match(got.reason, /3 dedupe/);
+  assert.equal(countClass(db, ["W1-T9"], ["W1-T9", "W1-T9"]).classification, "real", "the view counting a task twice is a view bug");
+});
+
+test("a count diff with an unexplained member is real even when part of it is explained", (t) => {
+  const db = evidenceDb(t);
+  const got = countClass(db, ["W1-T8", "W1-T8"], ["W1-T8", "W1-T1", "W1-T9"]);
+  assert.equal(got.classification, "real", got.reason);
+  assert.match(got.reason, /no measured row explains W1-T9 \(1 legacy_horizon, 1 dedupe, 1 real\)/);
+  const [diff] = diffViewData({ n: 2 }, { n: 3 });
+  const short = classifyShadowDiff({ ...diff!, members: { legacy: ["W1-T1"], view: ["W1-T1", "W1-T3"] } }, NONE);
+  assert.equal(short.classification, "real");
+  assert.match(short.reason, /do not account for 2 vs 3/);
+});
+
+test("compare attaches the legacy side's members to a count diff", (t) => {
+  const db = evidenceDb(t);
+  const shadow = createViewShadow({ clock: fixedClock(T0), log: () => {}, evidence: (input) => readShadowEvidence([db], input) });
+  const legacy = { data: { counts: { queued: 1 } }, asOfMs: T0, horizonMs: T0 - DAY, members: { "counts.queued": { legacy: ["W1-T2"], view: ["W1-T2", "W1-T1"] } } };
+  const result = shadow.compare({ view: "now", key: "", requests: 1, legacy, body: { data: { counts: { queued: 2 } }, asOf: new Date(T0).toISOString() } });
+  assert.deepEqual(result.diffs.map((d) => [d.path, d.classification]), [["counts.queued", "legacy_horizon"]]);
+  const bare = shadow.compare({ view: "now", key: "", requests: 1, legacy: { ...legacy, members: {} }, body: { data: { counts: { queued: 2 } }, asOf: new Date(T0).toISOString() } });
+  assert.deepEqual(bare.diffs.map((d) => d.classification), ["real"], "the same count without members stays real");
 });
 
 test("a structural diff matches array items by id and ignores build stamps", () => {

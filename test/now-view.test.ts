@@ -437,6 +437,7 @@ test("a now shadow sample is diffed against the legacy live-file board and each 
   writeFileSync(join(ledgerDir, "ledger.2026-09-30T09-00-00-000Z.ndjson.gz"), gzipSync([
     line({ ts: new Date(T0 - 3 * 3_600_000).toISOString(), step: "run.start", run_id: "r1", task_id: "W1-T1" }),
     line({ ts: new Date(T0 - 2 * 3_600_000).toISOString(), step: "verdict", run_id: "r1", task_id: "W1-T1", verdict: "merged" }),
+    line({ ts: new Date(T0 - 2 * 3_600_000).toISOString(), step: "dispatch.blocked_independent", run_id: "r3", task_id: "W1-T3", verdict: "failed" }),
   ].join("")));
   writeFileSync(join(ledgerDir, "ledger.ndjson"), line({ ts: new Date(T0 - 60_000).toISOString(), step: "run.start", run_id: "r2", task_id: "W1-T2" }));
   writeFileSync(readModelSwitchesPath(ledgerDir), JSON.stringify({ views: { now: "shadow" } }));
@@ -459,5 +460,9 @@ test("a now shadow sample is diffed against the legacy live-file board and each 
   const merged = diffs.find((d) => d.path.startsWith("board.tasks[taskId=W1-T1]"));
   assert.equal(merged?.classification, "legacy_horizon", JSON.stringify(diffs));
   assert.ok(diffs.every((d) => (SHADOW_CLASSIFICATIONS as readonly string[]).includes(d.classification)));
+  const counts = diffs.filter((d) => d.path.startsWith("board.counts"));
+  assert.deepEqual(counts.map((d) => [d.path, d.classification]), [["board.counts.blocked", "legacy_horizon"], ["board.counts.queued", "legacy_horizon"]],
+    "W1-T3's archived block moves it between two counts: measured horizon rows name it");
+  assert.equal(diffs.filter((d) => d.classification === "real").length, 0, JSON.stringify(diffs));
   assert.equal(diffs.some((d) => d.path.startsWith("health") || d.path.startsWith("prQueue") || d.path.startsWith("recent")), false, "the probes and the PR queue agree");
 });

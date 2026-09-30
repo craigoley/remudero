@@ -9,6 +9,10 @@
  *   horizon names the entity;
  * - `real`: nothing above explains it, so it is a bug. A diff no evidence explains is never waved through.
  *
+ * A count carries no ids of its own, so the legacy side names its MEMBERS: the entity each side counted,
+ * one entry per counted row. Each id the two sides count differently is judged on its own measured rows,
+ * and one id nothing explains makes the whole count `real`. A count with no members is `real`.
+ *
  * Every sample with a diff writes one `view.shadow_diff` ledger row naming each path and its class. Each
  * view keeps a persisted counter and a cutover-readiness summary, shown by the `read-model` status view.
  *
@@ -45,6 +49,14 @@ export interface ShadowFieldDiff {
   view: unknown;
   /** The entity ids the path passes through, plus the elements two id lists disagree on. */
   ids: string[];
+  /** A count's members, when the legacy side measured them for this path. */
+  members?: ShadowMembers;
+}
+
+/** The entity ids each side counted at one aggregate path, one entry per counted row. */
+export interface ShadowMembers {
+  legacy: readonly string[];
+  view: readonly string[];
 }
 
 export interface ShadowEvidence {
@@ -137,25 +149,73 @@ function uniqueInOrder(values: readonly unknown[]): unknown[] {
   return values.filter((v) => !seen.has(canonical(v)) && Boolean(seen.add(canonical(v))));
 }
 
+function tally(ids: readonly string[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const id of ids) out.set(id, (out.get(id) ?? 0) + 1);
+  return out;
+}
+
+/** The ids the two sides counted a different number of times. */
+export function memberDelta(members: ShadowMembers): string[] {
+  const l = tally(members.legacy);
+  const v = tally(members.view);
+  return [...new Set([...l.keys(), ...v.keys()])].filter((id) => (l.get(id) ?? 0) !== (v.get(id) ?? 0)).sort();
+}
+
+/**
+ * A count diff, explained id by id from its measured members: legacy's extra counts of one id are
+ * `dedupe`; an id only one side counts is `timing` when a row between the two ages names it, else
+ * `legacy_horizon` when a row older than the horizon names it. Any unexplained id makes it `real`.
+ */
+function classifyAggregate(legacy: number, view: number, members: ShadowMembers, ev: ShadowEvidence): { classification: ShadowClassification; reason: string } {
+  if (members.legacy.length !== legacy || members.view.length !== view) {
+    return { classification: "real", reason: `the measured members (${members.legacy.length} legacy, ${members.view.length} view) do not account for ${legacy} vs ${view}` };
+  }
+  const l = tally(members.legacy);
+  const v = tally(members.view);
+  const units: Record<ShadowClassification, number> = { dedupe: 0, timing: 0, legacy_horizon: 0, real: 0 };
+  const unexplained: string[] = [];
+  for (const id of memberDelta(members)) {
+    const dl = l.get(id) ?? 0;
+    const dv = v.get(id) ?? 0;
+    if (dv > 1) {
+      units.real += Math.abs(dv - dl);
+      unexplained.push(id);
+      continue;
+    }
+    units.dedupe += Math.max(0, dl - 1);
+    if (Math.min(dl, 1) === dv) continue;
+    const cls: ShadowClassification = ev.namedInGap.has(id) ? "timing"
+      : ev.legacyHorizonMs !== undefined && ev.namedBeforeHorizon.has(id) ? "legacy_horizon" : "real";
+    units[cls]++;
+    if (cls === "real") unexplained.push(id);
+  }
+  const breakdown = SHADOW_CLASSIFICATIONS.filter((c) => units[c] > 0).map((c) => `${units[c]} ${c}`).join(", ");
+  if (units.real > 0) return { classification: "real", reason: `no measured row explains ${unexplained.join(" ")} (${breakdown})` };
+  const top = (["dedupe", "timing", "legacy_horizon"] as const).reduce((a, b) => (units[b] > units[a] ? b : a));
+  return { classification: top, reason: `every counted row differing is explained (${breakdown})` };
+}
+
 /**
  * Classifies one differing path. Checked in order, each on its own evidence: `dedupe`, then `timing`,
- * then `legacy_horizon`; anything left is `real`. An id-bearing diff is judged on its own ids only, so a
- * busy ledger cannot explain away a diff about an entity no recent row names.
+ * then `legacy_horizon`; anything left is `real`. A diff is judged on its own ids or members only, so a
+ * busy ledger or a duplicate elsewhere cannot explain away a diff no measured row names.
  */
 export function classifyShadowDiff(diff: ShadowFieldDiff, ev: ShadowEvidence): { classification: ShadowClassification; reason: string } {
   const ids = diff.ids.filter((id) => ev.named.has(id));
   const any = (set: ReadonlySet<string>): boolean => ids.some((id) => set.has(id));
   const { legacy, view } = diff;
+  if (diff.members && typeof legacy === "number" && typeof view === "number") return classifyAggregate(legacy, view, diff.members, ev);
   if (Array.isArray(legacy) && Array.isArray(view) && hasDuplicates(legacy) && canonical(uniqueInOrder(legacy)) === canonical(view)) {
     return { classification: "dedupe", reason: `legacy lists ${legacy.length - view.length} duplicate element(s)` };
   }
   if (typeof legacy === "number" && typeof view === "number" && legacy > view
-    && (ids.length > 0 ? any(ev.duplicateIds) : ev.duplicateRows >= legacy - view)) {
+    && any(ev.duplicateIds)) {
     return { classification: "dedupe", reason: `legacy counted ${legacy - view} more; it read ${ev.duplicateRows} duplicate row(s)` };
   }
   const agesDiffer = ev.legacyAsOfMs !== null && ev.viewAsOfMs !== null && ev.legacyAsOfMs !== ev.viewAsOfMs;
   const leaf = diff.path.split(/[.[]/).at(-1) ?? "";
-  if (agesDiffer && (TIME_LEAF.test(leaf) || (ids.length > 0 ? any(ev.namedInGap) : ev.rowsInGap > 0))) {
+  if (agesDiffer && (TIME_LEAF.test(leaf) || any(ev.namedInGap))) {
     return { classification: "timing", reason: `sources ${Math.abs(ev.legacyAsOfMs! - ev.viewAsOfMs!)} ms apart; ${ev.rowsInGap} row(s) landed between` };
   }
   if (ev.legacyHorizonMs !== undefined && any(ev.namedBeforeHorizon)) {
@@ -209,6 +269,8 @@ export interface ShadowLegacy {
   /** The oldest row legacy's read could see (its retention horizon), when it has one. */
   horizonMs?: number;
   duplicates?: { rows: number; ids: readonly string[] };
+  /** Per aggregate path, what each side counted there; a count diff without them is `real`. */
+  members?: Readonly<Record<string, ShadowMembers>>;
 }
 
 export interface ViewShadowState {
@@ -300,10 +362,13 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
       state.firstRequestMs ??= now;
       state.samples++;
       state.streakSinceMs ??= now;
-      const raw = diffViewData(legacy.data, body.data);
+      const raw = diffViewData(legacy.data, body.data).map((d) => {
+        const members = legacy.members?.[d.path];
+        return members ? { ...d, members } : d;
+      });
       const viewAsOf = body.asOf === null ? null : Date.parse(body.asOf);
       const ev = opts.evidence({
-        view, ids: raw.flatMap((d) => d.ids), legacyAsOfMs: legacy.asOfMs, viewAsOfMs: Number.isFinite(viewAsOf) ? viewAsOf : null,
+        view, ids: raw.flatMap((d) => [...d.ids, ...(d.members ? memberDelta(d.members) : [])]), legacyAsOfMs: legacy.asOfMs, viewAsOfMs: Number.isFinite(viewAsOf) ? viewAsOf : null,
         ...(legacy.horizonMs !== undefined ? { legacyHorizonMs: legacy.horizonMs } : {}), ...(legacy.duplicates ? { duplicates: legacy.duplicates } : {}),
       });
       const diffs = raw.map((d) => ({ path: d.path, ...classifyShadowDiff(d, ev) }));
