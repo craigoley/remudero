@@ -155,6 +155,8 @@ export interface ReadModelView {
   name: string;
   version: number;
   materialize(ctx: ReadModelViewContext): Array<{ key: string; data: unknown; sources: ViewSource[] }>;
+  /** The shadow comparator's legacy side for one key, computed in the worker beside the view's body. */
+  legacy?(key: string, now: number, data: unknown): ShadowLegacy | undefined;
 }
 
 const LEDGER_SOURCE_PREFIX = "ledger:";
@@ -411,7 +413,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     shadow(request: ShadowRequest): boolean {
       const body = latest.get(`${request.view}\u0000${request.key}`);
       try {
-        const legacy = request.legacy ?? workerLegacy[request.view]?.(clock.now());
+        const legacy = request.legacy ?? workerLegacy[request.view]?.(clock.now())
+          ?? (body ? views.find((view) => view.name === request.view)?.legacy?.(request.key, clock.now(), body.data) : undefined);
         const shadow = body && legacy ? viewShadow() : undefined;
         if (!body || !legacy || !shadow) return false;
         shadow.compare({ view: request.view, key: request.key, requests: request.requests, legacy, body });

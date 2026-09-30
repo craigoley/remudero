@@ -113,3 +113,7 @@ questions }`.
 - `actions[].strike` is `{ n, of }`, parsed once from the sweep's reason.
 - `health` is the selected instance's own host probe. A field it could not read is absent and named in `health.reasons`.
 - `questions` is `{ count }` for core and `{ reason }` for any other instance.
+- Under `shadow`, the comparator (`src/lib/view-shadow.ts`) diffs a sampled body against `/now`'s legacy
+  sources. Those are GET /v1/status's board and PR queue over the instance's live file only, plus a fresh
+  host probe of that instance, computed in the worker (`createNowView`'s `legacy`).
+- Probe gauges come from the view whenever both probes read them, so two samples moments apart are not a diff.

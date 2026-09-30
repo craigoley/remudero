@@ -404,8 +404,21 @@ interface Held {
   healthAt: number;
 }
 
+/** The legacy side of one shadow sample (view-shadow.ts): what /now shows today, in the view's shape. */
+export interface NowShadowLegacy {
+  data: NowViewData;
+  asOfMs: number;
+  /** The live file's oldest row: GET /v1/status sees nothing older (ruling Q1's legacy horizon). */
+  horizonMs?: number;
+}
+
 /** The `now` view as the read-model worker materializes it: one body per instance, keyed `instance=<name>`. */
-export function createNowView(opts: NowViewOptions): { name: string; version: number; materialize(ctx: NowViewContext): Array<{ key: string; data: NowViewData; sources: ViewSource[] }> } {
+export function createNowView(opts: NowViewOptions): {
+  name: string;
+  version: number;
+  materialize(ctx: NowViewContext): Array<{ key: string; data: NowViewData; sources: ViewSource[] }>;
+  legacy(key: string, now: number, view: unknown): NowShadowLegacy | undefined;
+} {
   const clock = opts.clock ?? systemClock;
   const log = opts.log ?? (() => {});
   const core = opts.coreInstance ?? opts.instances[0]?.name;
@@ -478,6 +491,35 @@ export function createNowView(opts: NowViewOptions): { name: string; version: nu
   return {
     name: NOW_VIEW_NAME,
     version: NOW_VIEW_VERSION,
+    /**
+     * The shadow comparator's legacy side for one key: GET /v1/status's board and PR queue over the
+     * instance's LIVE FILE only, plus a fresh host probe of that instance. The probe's gauges are taken
+     * from the view when both probes read them, because two samples moments apart always differ; a gauge
+     * one side could not read, or a different reason, still diffs. Actions, recent and questions have
+     * no separate legacy computation and are carried from the view.
+     */
+    legacy(key, now, view) {
+      const name = decodeURIComponent(key.replace(/^instance=/, ""));
+      const instance = byName.get(name);
+      const h = held.get(name);
+      if (!instance || !h || !key.startsWith("instance=")) return undefined;
+      const mine = view as NowViewData;
+      const ledgerPath = join(instance.ledgerDir, LEDGER_FILENAME);
+      const rows = readLedgerLines(ledgerPath);
+      const deps = { plan: h.plan, ledgerPath, github: h.gateway.github, readLedger: () => rows, now: () => now };
+      const snapshot = computeBoardSnapshot(deps);
+      const legacy = assembleNowView({ instance: name, snapshot, rows, plan: h.plan, recent: [], health: mine.health, questions: mine.questions, nowMs: now });
+      const probe = probeHost(instance, name === core);
+      const gauge = (field: "diskFreeBytes" | "rateLimitRemaining" | "lastPollAgeMs"): Partial<NowHealth> =>
+        probe[field] === undefined ? {} : { [field]: mine.health[field] ?? probe[field] };
+      const health: NowHealth = { sampledAt: mine.health.sampledAt, ...gauge("diskFreeBytes"), ...gauge("rateLimitRemaining"), ...gauge("lastPollAgeMs"), ...(probe.reasons ? { reasons: probe.reasons } : {}) };
+      const oldest = rows.map((row) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN)).filter(Number.isFinite).sort((a, b) => a - b)[0];
+      return {
+        data: { ...mine, board: legacy.board, prQueue: legacy.prQueue, health },
+        asOfMs: now,
+        ...(oldest !== undefined ? { horizonMs: oldest } : {}),
+      };
+    },
     materialize(ctx) {
       const mode = ctx.switches?.views[NOW_VIEW_NAME];
       if (mode !== "shadow" && mode !== "serve") return [];
