@@ -1,0 +1,64 @@
+- id: W1-T4899
+  title: "THE PRE-PUSH CENSUS PRECHECK MODELS THREE CENSUSES AND A FOURTH WENT RED IN CI FOUR TIMES ON 2026-09-29 — test/repo-layout.test.ts's house-layout literal ratchet ('plan/tasks.d' in 25 non-test src files vs 24 at the merge base, #7830 #7851 #7855 #7857) runs only in a CI coverage shard; count it in scripts/census-precheck.mjs with no test runner, from the same module the suite counts with"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 15.00
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: "research 2026-09-30: pre-push census gap (four PRs red on one census the local gates do not run)"
+  plan_refs: ["W1-T2969", "W1-T3225", "W1-T3701", "W1-T4656"]
+  files:
+    - scripts/census-precheck.mjs
+    - scripts/house-layout-census.mjs
+    - test/repo-layout.test.ts
+    - test/census-precheck-counts-the-house-layout-ratchet.test.ts
+  rationale: |
+    MEASURED 2026-09-30 on a clean tree at origin/main fd24b4428 with a positive control. Adding one
+    new src/lib file that names 'plan/tasks.d' makes `node --test test/repo-layout.test.ts` fail with
+    "'plan/tasks.d' now appears in 25 non-test src files, up from 24 at the merge base", while
+    `node scripts/census-precheck.mjs --base origin/main` prints OK and exits 0 on the SAME tree.
+    That is the exact CI failure of #7830, #7851, #7855 and #7857 (the machine-filing-judge stack).
+    The suite runs only in CI's coverage shards: it is not a FAST_GATE_STEPS entry, not a
+    PREFLIGHT_CI_CHECKS entry (src/run-task.ts), and hooks/pre-push may not spawn a test runner
+    (W1-T3225, enforced by test/the-hook-spawns-no-test-suite.test.ts). The one route that reaches
+    both an operator session and a fleet worker is scripts/census-precheck.mjs, which W1-T4656
+    already routes into the fix rung when it refuses. A `git grep -lF` count of the four literals
+    over src/ at the merge base and a read of the head files takes about half a second, spawns no
+    runner and built no fixture (prototype: 0 findings on a clean main, 1 finding on the control).
+    The counters live INSIDE test/repo-layout.test.ts (houseLiteralCounts, HOUSE_LITERALS), so the
+    precheck cannot import them today; a second hand copy would drift from the suite silently.
+  design: |
+    (i) Move HOUSE_LITERALS and the per-literal file-presence count out of test/repo-layout.test.ts
+    into scripts/house-layout-census.mjs, exported; the suite imports them, its assertion unchanged.
+    (ii) scripts/census-precheck.mjs gains houseLayoutViolations beside clockViolations,
+    commentLoadViolations and fixtureCopyViolations, evaluated by evaluateCensusPrecheck. It runs only
+    when the diff changes a src/**/*.ts file. The head count reads this tree's src files; the base
+    count is this tree with each changed src file read at the merge base instead (the fixture-copy
+    arm's own trick), so unchanged files are read once.
+    (iii) It refuses only growth THIS branch causes: a literal whose head count exceeds the base
+    count, using the census-precheck `caused` split the file already has. A count main already
+    carries, a removal, and a diff with no src file report nothing. The row is shaped
+    `house-layout: <literal> now in <n> non-test src files, up from <m> at the merge base — resolve
+    it through resolveRepoLayout (src/lib/repo-layout.ts)` so censusPushRefusal (src/run-task.ts)
+    parses it as a row with no offered baseline and the fix rung repairs it.
+    (iv) NO test runner is spawned and hooks/pre-push is not edited: the arm rides the existing
+    census-precheck call, so the W1-T3225 structural test keeps passing.
+  acceptance:
+    - claim: "a branch that adds a src file naming a house-layout literal past the merge base's count is refused by the census precheck, naming the literal and both counts"
+      proof: "unit test: test/census-precheck-counts-the-house-layout-ratchet.test.ts"
+    - claim: "growth main already carries, a removal, and a diff that changes no src file all report nothing"
+      proof: 'grep: test("a house-layout count at or below the merge base is not a finding" in test/census-precheck-counts-the-house-layout-ratchet.test.ts'
+    - claim: "a real git push of such a branch through the hook is refused, so the fleet's own push path sees it"
+      proof: 'grep: test("a real git push that adds a house-layout site is refused by the hook" in test/census-precheck-counts-the-house-layout-ratchet.test.ts'
+    - claim: "the suite and the precheck count the literals through one module"
+      proof: "grep: house-layout-census in test/repo-layout.test.ts"
+  falsifier: |
+    Remove the houseLayoutViolations call from evaluateCensusPrecheck: the first and third proofs go
+    red while the second stays green, which is what keeps the second from being a vacuous zero. CLOSE
+    the task if test/repo-layout.test.ts no longer asserts a merge-base-relative count.

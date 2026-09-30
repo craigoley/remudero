@@ -101,7 +101,7 @@
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "yaml": "^2.9.1",
-    "zod": "^4.6.1"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
@@ -113,7 +113,7 @@
     "commit-and-tag-version": "^13.2.1",
     "dependency-cruiser": "^18.4.0",
     "fast-check": "^4.10.2",
-    "jscpd": "^5.3.0"
+    "jscpd": "^5.3.2"
   },
   "_dependencyRationale": {
     "@swc/core": "Required by .dependency-cruiser.cjs parser: \"swc\"; src never imports it, but depcruise loads it for TypeScript 7 extraction.",
