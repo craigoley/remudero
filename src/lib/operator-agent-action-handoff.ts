@@ -14,7 +14,7 @@
  * standing grant, and nothing a model writes (an answer, a URL, a token) is read as authority.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ACTION_CATALOGUE, executeCatalogueAction, type CatalogueEntry, type CatalogueExecution } from "./action-executor.js";
 import { AUTOMATION_ACTION_VERSION, automationRedactionViolation, type AutomationAction, type DelegationRiskTier } from "./automation-action.js";
@@ -241,14 +241,18 @@ export function prepareActionHandoff(deps: ActionHandoffConfig, actor: string, i
     mkdirSync(paths.dir, { recursive: true });
     const record: Prepared = { confirmationId, intentId: input.intentId, actorHash, fingerprint, targetDigest: targetDigest(input.verb, deps.instance, deps.repository, state), expiresAtMs, preview: body };
     writeExclusive(paths.prepared, JSON.stringify(record));
-    try {
-      writeExclusive(intentPath, JSON.stringify({ confirmationId }));
-    } catch (error) {
-      unlinkSync(paths.prepared);
-      if (errno(error) === "EEXIST") return existing();
-      throw error;
-    }
+    writeExclusive(intentPath, JSON.stringify({ confirmationId }));
   } catch (error) {
+    // Drop this attempt's preparation (a no-op when it was never written) so no orphan outlives it.
+    rmSync(paths.prepared, { force: true });
+    if (errno(error) === "EEXIST" && existsSync(intentPath)) {
+      // A concurrent request with this intent stored first: its preview is the one action.
+      try {
+        return existing();
+      } catch (raced) {
+        return refusal(503, "store_unavailable", `the concurrent preview is unreadable: ${(raced as Error).message}`);
+      }
+    }
     const reason = `the preview could not be stored: ${(error as Error).message}`;
     return refusal(503, "store_unavailable", reason);
   }

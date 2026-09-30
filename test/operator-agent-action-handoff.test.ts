@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+
+import { executeCatalogueAction } from "../src/lib/action-executor.js";
 
 import {
   ACTION_HANDOFF_VERSION,
@@ -147,6 +150,78 @@ test("ambiguous external outcomes remain unresolved, never success-shaped", () =
     assert.equal(crashed.status, 409);
     assert.equal((crashed.body as Record<string, unknown>).outcome, "unresolved");
     assert.equal((crashed.body as Record<string, unknown>).code, "replayed");
+  } finally {
+    done();
+  }
+});
+
+const sha = (value: string): string => createHash("sha256").update(value).digest("hex");
+const intentFile = (deps: ActionHandoffConfig, intentId: string): string =>
+  join(actionHandoffPaths(deps, "").dir, `${sha(`${sha(ACTOR)}:${intentId}`)}.intent.json`);
+const preparedFiles = (deps: ActionHandoffConfig): string[] => readdirSync(actionHandoffPaths(deps, "").dir).filter((name) => name.endsWith(".prepared.json"));
+/** A dry-run policy check that lets the store race happen between the intent lookup and the write. */
+const racing = (deps: ActionHandoffConfig, race: () => void): ActionHandoffConfig =>
+  ({ ...deps, execute: (request) => { if (request.dryRun) race(); return executeCatalogueAction(request); } });
+
+test("a concurrent prepare of the same intent resolves to the first preview and leaves no orphan preparation", () => {
+  const { deps, done } = fixture();
+  try {
+    const first = prepareActionHandoff(deps, ACTOR, intent("intent-race-a01"));
+    const firstId = (first.body as Record<string, string>).confirmationId;
+    const loser = prepareActionHandoff(racing(deps, () => writeFileSync(intentFile(deps, "intent-race-b01"), JSON.stringify({ confirmationId: firstId }))), ACTOR, intent("intent-race-b01"));
+    assert.equal(loser.status, 200);
+    assert.equal((loser.body as Record<string, unknown>).confirmationId, firstId, "the loser is handed the winner's preview");
+    assert.equal((loser.body as Record<string, unknown>).existing, true);
+    assert.equal(preparedFiles(deps).length, 1, "the losing attempt's preparation is removed");
+  } finally {
+    done();
+  }
+});
+
+test("a concurrent prepare whose winning intent record is unreadable is refused, not thrown", () => {
+  const { deps, done } = fixture();
+  try {
+    prepareActionHandoff(deps, ACTOR, intent("intent-race-a02"));
+    const loser = prepareActionHandoff(racing(deps, () => writeFileSync(intentFile(deps, "intent-race-b02"), "{not json")), ACTOR, intent("intent-race-b02"));
+    assert.equal(loser.status, 503);
+    assert.equal((loser.body as Record<string, unknown>).outcome, "refused");
+    assert.equal((loser.body as Record<string, unknown>).code, "store_unavailable");
+    assert.match(String((loser.body as Record<string, unknown>).detail), /concurrent preview is unreadable/);
+    assert.equal(preparedFiles(deps).length, 1, "the losing attempt's preparation is removed");
+  } finally {
+    done();
+  }
+});
+
+test("a preview that cannot be stored is refused with store_unavailable and never handed out", () => {
+  const { deps, done } = fixture();
+  try {
+    const blocked = prepareActionHandoff(racing(deps, () => writeFileSync(actionHandoffPaths(deps, "").dir, "not a directory")), ACTOR, intent("intent-store-01"));
+    assert.equal(blocked.status, 503);
+    assert.equal((blocked.body as Record<string, unknown>).outcome, "refused");
+    assert.equal((blocked.body as Record<string, unknown>).code, "store_unavailable");
+    assert.match(String((blocked.body as Record<string, unknown>).detail), /preview could not be stored/);
+    assert.equal((blocked.body as Record<string, unknown>).confirmationId, undefined);
+  } finally {
+    done();
+  }
+});
+
+test("a receipt that cannot be made durable is reported unresolved, never success-shaped", () => {
+  const { deps, root, done } = fixture();
+  try {
+    const prepared = prepareActionHandoff(deps, ACTOR, intent("intent-receipt-01"));
+    const confirmationId = (prepared.body as Record<string, string>).confirmationId;
+    const lostReceipt: ActionHandoffConfig = { ...deps, execute: (request) => {
+      if (!request.dryRun) mkdirSync(actionHandoffPaths(deps, confirmationId).receipt);
+      return executeCatalogueAction(request);
+    } };
+    const result = executeActionHandoff(lostReceipt, ACTOR, { confirmationId, confirm: true, verb: "fleet.pause", instance: "core", repository: "owner/repo" });
+    assert.equal(result.status, 503);
+    assert.equal((result.body as Record<string, unknown>).outcome, "unresolved");
+    assert.match(String((result.body as Record<string, unknown>).detail), /receipt not durable/);
+    assert.ok(isPaused(root), "the governed verb ran; the lost receipt is reported honestly rather than as success");
+    assert.equal(appendedRows(deps.ledgerPath).filter((row) => row.step === "operator_agent.action_handoff_receipt").length, 0);
   } finally {
     done();
   }
