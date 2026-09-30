@@ -55,6 +55,7 @@ export type LintCheck =
   | "proof-grep-safety"
   | "proof-grep-unmatchable"
   | "proof-grep-self-certifying"
+  | "proof-grep-already-true"
   | "proof-engine-divergence"
   | "proof-scope"
   | "proof-self-path"
@@ -1096,6 +1097,38 @@ export function proofGrepSelfCertifyingViolations(task: Task, opts: LintOpts = {
         "record it lives in matches ITSELF and pins nothing the record actually says. Re-anchor on a " +
         "phrase from the rationale, design or note prose, then confirm it still reads a hit with the " +
         "acceptance block deleted.",
+    });
+  });
+  return violations;
+}
+
+export function proofGrepAlreadyTrueViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const { readGrepProofFile, baseAcceptance } = opts;
+  if (!readGrepProofFile || !baseAcceptance || task.verify !== "auto") return [];
+  const current = task.acceptance ?? [];
+  const judged = new Set([
+    ...criteriaAdded(baseAcceptance, current),
+    ...criteriaProofChanged(baseAcceptance, current).map((pair) => pair.current),
+  ]);
+  const violations: LintViolation[] = [];
+  current.forEach((c, i) => {
+    if (!judged.has(c) || c.satisfied_by || (c as { kind?: unknown }).kind === "guard") return;
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    const target = whitelisted && proofGrepPatternAndPath(whitelisted);
+    if (!target) return;
+    const rawFileText = readGrepProofFile(target.path);
+    if (rawFileText === undefined) return;
+    const fileText = ownPlanRecordOutsideAcceptance(task.id, target.path, rawFileText) ?? rawFileText;
+    if (classifyGrepZeroHit(target.pattern, fileText) !== "matched") return;
+    violations.push({
+      check: "proof-grep-already-true",
+      severity: "warn",
+      message:
+        `criterion ${i + 1} ("${(c.claim ?? "").slice(0, 60)}") \`grep:\` pattern "${target.pattern.slice(0, 70)}" ` +
+        `ALREADY MATCHES in ${target.path} on this tree, so proof-discrimination (a proof must fail at ` +
+        "the merge base and pass at head) grades it executed_stale and the build can never go green. " +
+        "Re-anchor the pattern on text the build ADDS, or declare `kind: guard` on the criterion when " +
+        "preservation of existing text is the point.",
     });
   });
   return violations;
@@ -3329,6 +3362,7 @@ export const PLAN_ONLY_NEW_TASK_DIAGNOSTIC_CHECKS: ReadonlySet<LintCheck> = new 
   "call-site",
   "proof-scope",
   "shard-shape",
+  "proof-grep-already-true",
 ]);
 
 /** W1-T4700 (#7608): verify in the enum, a known repo, criteria unless human. WARN; promoted above when introduced. */
@@ -3453,6 +3487,7 @@ export interface LintOpts {
    *  "block": path-presence at base is a HEURISTIC for "the proof passes at base", so a repair whose
    *  target test is RED at base discriminates correctly and a blocking arm would refuse it wrongly. */
   proofBaseDiscrimination?: LintSeverity;
+  baseAcceptance?: AcceptanceCriterion[];
   /** The reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to a real checkout, so
    *  lint and review cannot disagree. Absent ⇒ {@link proofNameResolutionViolations}, {@link
    *  proofUnitTestUnresolvableViolations} (W1-T3639, the block-severity sibling that also
@@ -3538,6 +3573,7 @@ const BUILD_VERIFICATION_CHECKS = new Set<LintCheck>([
   "proof-grep-safety",
   "proof-grep-unmatchable",
   "proof-grep-self-certifying",
+  "proof-grep-already-true",
   "proof-engine-divergence",
   "proof-scope",
   "proof-self-path",
@@ -3604,6 +3640,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...sharedProofViolations(task));
   violations.push(...unboundCriterionViolations(task, opts));
   violations.push(...proofBaseDiscriminationViolations(task, opts));
+  violations.push(...proofGrepAlreadyTrueViolations(task, opts));
   violations.push(...proofUnitTestBaseWrapperViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...blockedDispositionViolations(task, opts));

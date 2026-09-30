@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { gzipSync } from "node:zlib";
 import { computeBoardSnapshot, type BoardSnapshot } from "../src/lib/board.js";
 import {
   OPEN_SNAPSHOT_RESAVE_MS,
@@ -34,8 +35,10 @@ import {
 import type { BoardPrRest } from "../src/lib/open-prs-rest.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { acquireLease, type ReadModelDb } from "../src/lib/read-model-db.js";
+import { createReadModelTicker, readModelSwitchesPath, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { buildBatchedGithub, DEFAULT_LIVENESS_BOUND_MS, readLedgerLines, type GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { SHADOW_CLASSIFICATIONS, VIEW_SHADOW_DIFF_STEP } from "../src/lib/view-shadow.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };
@@ -423,4 +426,43 @@ test("a large plan carries every id in its groups and bounds its queued rows", (
   const groups = groupNowBoard([...tasks, { taskId: "W1-TX", title: "x", risk: "low", status: "mystery", merged: false, source: "none" }] as never);
   assert.equal(groups.queued.length, NOW_QUEUED_ROWS + 6, "an unknown status still lands in queued");
   assert.equal(NOW_HOST_PROBE_MS > NOW_REFRESH_MS, true);
+});
+
+test("a now shadow sample is diffed against the legacy live-file board and each diff is classified", (t) => {
+  const root = scratch(t);
+  const ledgerDir = join(root, "core", "state");
+  mkdirSync(join(ledgerDir, "read-model"), { recursive: true });
+  const line = (r: Record<string, unknown>): string => `${JSON.stringify({ host: "h1", ...r })}\n`;
+  // W1-T1 merged in a rotated archive: the view (full history) sees it, legacy's live-file board never does.
+  writeFileSync(join(ledgerDir, "ledger.2026-09-30T09-00-00-000Z.ndjson.gz"), gzipSync([
+    line({ ts: new Date(T0 - 3 * 3_600_000).toISOString(), step: "run.start", run_id: "r1", task_id: "W1-T1" }),
+    line({ ts: new Date(T0 - 2 * 3_600_000).toISOString(), step: "verdict", run_id: "r1", task_id: "W1-T1", verdict: "merged" }),
+    line({ ts: new Date(T0 - 2 * 3_600_000).toISOString(), step: "dispatch.blocked_independent", run_id: "r3", task_id: "W1-T3", verdict: "failed" }),
+  ].join("")));
+  writeFileSync(join(ledgerDir, "ledger.ndjson"), line({ ts: new Date(T0 - 60_000).toISOString(), step: "run.start", run_id: "r2", task_id: "W1-T2" }));
+  writeFileSync(readModelSwitchesPath(ledgerDir), JSON.stringify({ views: { now: "shadow" } }));
+  const clock = stepped();
+  let free = 1_000;
+  // Every probe reads a different free-disk figure, as two samples moments apart do.
+  const view = viewOf(clock, [{ name: "core", ledgerDir }], { countQuestions: () => 0, hostProbe: { rateLimit: () => 4321, diskFree: () => (free += 7) } });
+  const posted: ReadModelWorkerMessage[] = [];
+  const ticker = createReadModelTicker({ stateDir: ledgerDir, instances: [{ name: "core", ledgerDir }], views: [view], clock, holder: "shadow-now", post: (m) => void posted.push(m) });
+  t.after(() => ticker.release());
+  ticker.tick();
+  const body = posted.find((m) => m.type === "body" && m.entry.view === "now");
+  assert.ok(body && body.type === "body", "the view materialized under shadow");
+  assert.equal(view.legacy("instance=elsewhere", T0, body.entry.body.data), undefined, "an instance the view never held has no legacy side");
+
+  assert.equal(ticker.shadow({ view: "now", key: "instance=core", requests: 1 }), true, "the worker computed the legacy side and compared");
+  const row = posted.find((m) => m.type === "log" && m.step === VIEW_SHADOW_DIFF_STEP);
+  assert.ok(row && row.type === "log", "a view.shadow_diff row was written");
+  const diffs = row.extra.diffs as Array<{ path: string; classification: string }>;
+  const merged = diffs.find((d) => d.path.startsWith("board.tasks[taskId=W1-T1]"));
+  assert.equal(merged?.classification, "legacy_horizon", JSON.stringify(diffs));
+  assert.ok(diffs.every((d) => (SHADOW_CLASSIFICATIONS as readonly string[]).includes(d.classification)));
+  const counts = diffs.filter((d) => d.path.startsWith("board.counts"));
+  assert.deepEqual(counts.map((d) => [d.path, d.classification]), [["board.counts.blocked", "legacy_horizon"], ["board.counts.queued", "legacy_horizon"]],
+    "W1-T3's archived block moves it between two counts: measured horizon rows name it");
+  assert.equal(diffs.filter((d) => d.classification === "real").length, 0, JSON.stringify(diffs));
+  assert.equal(diffs.some((d) => d.path.startsWith("health") || d.path.startsWith("prQueue") || d.path.startsWith("recent")), false, "the probes and the PR queue agree");
 });

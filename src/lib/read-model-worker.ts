@@ -19,6 +19,7 @@ import { isMainThread, parentPort, Worker, workerData } from "node:worker_thread
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "./ledger-projector.js";
+import { createNavBadgeReadModelView } from "./nav-badge-view.js";
 import {
   READ_MODEL_DIRNAME,
   ReadModelError,
@@ -30,6 +31,8 @@ import {
   type ReadModelLease,
 } from "./read-model-db.js";
 import { createNowView } from "./now-view.js";
+import { createRepositoriesReadModelView } from "./repositories-view.js";
+import { createViewShadow, readShadowEvidence, sqliteShadowStore, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ViewShadow } from "./view-shadow.js";
 import { oldestAsOf, viewEtag, type ViewBody, type ViewBodyEntry, type ViewSource } from "./views.js";
 
 const READ_MODEL_WORKER_KIND = "remudero-read-model" as const;
@@ -143,6 +146,8 @@ export interface ReadModelViewContext {
   now: number;
   instances: ReadonlyArray<{ state: ReadModelInstanceState; db?: ReadModelDb }>;
   switches?: ReadModelSwitches;
+  /** Each shadowed view's diff counters and cutover readiness (view-shadow.ts). */
+  shadow?: ShadowReadiness[];
 }
 
 /** A view the worker materializes. `materialize` returns one body per key (`""` when unkeyed). */
@@ -150,6 +155,8 @@ export interface ReadModelView {
   name: string;
   version: number;
   materialize(ctx: ReadModelViewContext): Array<{ key: string; data: unknown; sources: ViewSource[] }>;
+  /** The shadow comparator's legacy side for one key, computed in the worker beside the view's body. */
+  legacy?(key: string, now: number, data: unknown): ShadowLegacy | undefined;
 }
 
 const LEDGER_SOURCE_PREFIX = "ledger:";
@@ -168,7 +175,7 @@ export function ledgerSource(state: ReadModelInstanceState, now: number, staleMs
 export const readModelStatusView: ReadModelView = {
   name: "read-model",
   version: 1,
-  materialize: ({ now, instances }) => [{
+  materialize: ({ now, instances, shadow }) => [{
     key: "",
     data: {
       instances: instances.map(({ state, db }) => ({
@@ -179,13 +186,14 @@ export const readModelStatusView: ReadModelView = {
         quarantined: db ? Number(db.prepare("SELECT count(*) AS n FROM quarantine").get()?.n ?? 0) : 0,
         ...(state.reason ? { reason: state.reason } : {}),
       })),
+      ...(shadow && shadow.length > 0 ? { shadow } : {}),
     },
     sources: instances.map(({ state }) => ledgerSource(state, now)),
   }],
 };
 
 /** Every view the worker materializes; later Phase 1 views register here. */
-export const READ_MODEL_VIEWS: readonly ReadModelView[] = [readModelStatusView];
+export const READ_MODEL_VIEWS: readonly ReadModelView[] = [createNavBadgeReadModelView(ledgerSource), createRepositoriesReadModelView(ledgerSource), readModelStatusView];
 
 export interface ReadModelTickerOptions {
   /** Core's state dir: every instance's DB lives under its `read-model/` (design §1.7). */
@@ -203,6 +211,8 @@ export interface ReadModelTickerOptions {
 
 export interface ReadModelTicker {
   tick(): void;
+  /** Compares one sampled shadow request against the latest body; false when there was nothing to compare. */
+  shadow(request: ShadowRequest): boolean;
   /** Releases every held lease and closes every DB; returns how many leases were released. */
   release(): number;
 }
@@ -249,6 +259,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     backoffUntil: 0,
   }));
   const lastEtag = new Map<string, string>();
+  const latest = new Map<string, ViewBody>();
+  let comparator: { db: ReadModelDb; shadow: ViewShadow } | undefined;
   let switches = DEFAULT_READ_MODEL_SWITCHES;
   let switchesMtimeMs = -1;
   let switchesCheckedAt = Number.NEGATIVE_INFINITY;
@@ -343,8 +355,21 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       .run(entry.view, entry.key, entry.version, entry.generation, entry.etag, JSON.stringify(entry.body)));
   }
 
+  function viewShadow(): ViewShadow | undefined {
+    const home = slots[0];
+    if (home?.db === undefined || home.lease === undefined) return undefined;
+    if (comparator?.db !== home.db) {
+      comparator = { db: home.db, shadow: createViewShadow({
+        clock, log, store: sqliteShadowStore(home.db, home.lease),
+        evidence: (input) => readShadowEvidence(slots.flatMap((slot) => (slot.db ? [slot.db] : [])), input),
+      }) };
+    }
+    return comparator.shadow;
+  }
+
   function materialize(now: number): void {
-    const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}) })) };
+    const shadow = comparator?.shadow.readiness();
+    const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
     for (const view of views) {
       if (switches.views[view.name] === "off") continue;
@@ -358,6 +383,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
           const entry: ReadModelBodyEntry = { view: view.name, key, version: view.version, generation, etag, body };
           if (switches.projector === "on") persist(entry);
           lastEtag.set(id, etag);
+          latest.set(id, body);
           opts.post({ type: "body", entry });
         }
       } catch (error) {
@@ -380,6 +406,20 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       }
       materialize(now);
       opts.post({ type: "state", at: now, instances: slots.map((slot) => ({ ...slot.state })), switches });
+    },
+    shadow(request: ShadowRequest): boolean {
+      const body = latest.get(`${request.view}\u0000${request.key}`);
+      try {
+        const legacy = request.legacy
+          ?? (body ? views.find((view) => view.name === request.view)?.legacy?.(request.key, clock.now(), body.data) : undefined);
+        const shadow = body && legacy ? viewShadow() : undefined;
+        if (!body || !legacy || !shadow) return false;
+        shadow.compare({ view: request.view, key: request.key, requests: request.requests, legacy, body });
+        return true;
+      } catch (error) {
+        log("view.shadow_failed", { view: request.view, key: request.key, error: (error as Error).message });
+        return false;
+      }
     },
     release(): number {
       let released = 0;
@@ -440,6 +480,7 @@ export function runReadModelWorker(
     timer = setTimeout(loop, data.tickMs);
   };
   port.on("message", (msg) => {
+    if (msg.type === "shadow") return void ticker.shadow(msg as unknown as ShadowRequest);
     if (msg.type !== "stop") return;
     Atomics.store(signal, 0, 1);
     finish();
@@ -483,6 +524,8 @@ export interface ReadModelWorkerHandle {
   start(): void;
   /** Asks the worker to release its leases and waits, bounded, for it. True when it confirmed. */
   stop(): boolean;
+  /** Hands one sampled shadow request to the worker, which diffs it off serve's main thread. */
+  shadow(request: ShadowRequest): void;
 }
 
 export interface ReadModelWorkerOptions {
@@ -573,6 +616,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       return state ? ledgerSource(state, now) : { ...source, state: "stale", reason: "read model warming: this body was committed before serve started" };
     }),
     switches: () => mainSwitches,
+    shadow: (request) => worker?.postMessage({ type: "shadow", ...request }),
     start: () => {
       if (worker || stopping) return;
       spawn();

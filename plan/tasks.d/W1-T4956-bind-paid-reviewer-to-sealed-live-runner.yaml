@@ -1,0 +1,60 @@
+- id: W1-T4956
+  title: "Bind the guarded paired-review pilot to a sealed, real reviewer runner and independent case evidence"
+  repo: remudero
+  depends_on: [W1-T4928, W1-T4929]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator-approved paid reviewer build follow-up, 2026-09-30"
+  plan_refs: [W1-T4619, W1-T4848, W1-T4905, W1-T4928, W1-T4929]
+  files: [src/lib/replay-harness.ts, src/lib/paired-review-eval.ts, src/lib/review-finding-evidence.ts, src/lib/benchmark-paid-pilot.ts, src/run-task.ts, test/paired-review-live-runner.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: W1-T4929's guarded library adapter is opened as PR 8131, not a
+    launched pilot. It accepts a trusted injected reviewer function and injected
+    pair/label/scorer verifiers; there is no operator CLI that supplies a real
+    provider, exact-head read-only checkout or independent source-case verifier.
+    Passing fixture A/A tests is not a real A/A result or a model benchmark.
+    W1-T4928's independently trusted finding labels remain separate work.
+  design: |
+    Add one explicit operator-only replay command and trusted composition root.
+    Resolve each approved reviewer pair from the activated private protocol and
+    dated held-out corpus, then verify exact repo/base/bug/benign SHAs against
+    the source and independently recheck both labels and mechanism evidence.
+    Materialize each arm in a fresh disposable read-only reviewer surface with
+    no writable Git remote, PR token, status-posting capability or cross-arm
+    state. Bind the requested model, effort, prompt, tool, harness, scorer and
+    environment to the protocol; record actual served values and deviations.
+    The runner must use W1-T4929's per-call reserve and three-form spend union,
+    never a caller-supplied spend boolean. A/A runs first on real held-out pairs;
+    only a fresh integrity-clean receipt admits a descriptive model comparison.
+    Unknown outcomes, missing cash, failed cleanup or unverifiable labels stay
+    named and withheld, not zero or a winner. Keep the approved $100 total / 7-day
+    envelope dormant until an operator explicitly activates it. This command
+    cannot post a review status, route a live task, require human PR approval or
+    hold an ordinary PR. Report private results for review; public export remains
+    a separate revocable release decision.
+  acceptance:
+    - claim: "a real operator command refuses without an activated, reviewer-scoped protocol and independent labels"
+      proof: 'grep: test("W1-T4956: operator replay refuses unactivated or unverified cases" in test/paired-review-live-runner.test.ts'
+    - claim: "the actual reviewer sees only an exact-head isolated snapshot with no GitHub write capability"
+      proof: 'grep: test("W1-T4956: sealed reviewer materializes exact heads without a writable remote" in test/paired-review-live-runner.test.ts'
+    - claim: "the real runner reads cash admission before every paid call and records a receipt or an explicit unknown"
+      proof: 'grep: test("W1-T4956: paid provider failure keeps its reserve and normal PR flow continues" in test/paired-review-live-runner.test.ts'
+    - claim: "the production operator command invokes the guarded replay adapter, not a fixture-only callback"
+      proof: 'grep: replayPairedReviews( in src/run-task.ts'
+  falsifier: |
+    Replace a case's benign head with an unverified SHA: no provider call occurs.
+    Hide the ledger rotation holding the first paid receipt: the second call is
+    refused, while ordinary review/merge remains unaffected. Remove the real
+    command-to-adapter call and the fourth proof fails. A returned checkout that
+    exposes a writable Git remote is an isolation failure, not a graded result.
+  note: |
+    refs/rmd-id/W1-T4956 is reserved by branch
+    codex/reviewer-live-runner-followup-20260930. This filing is a launch
+    prerequisite, not authorization to spend or publish benchmark scores.

@@ -23,6 +23,8 @@ import {
   computeRecentActivity,
   createRecentActivityCache,
   type BoardRow,
+  isBlockedRow,
+  isRunningRow,
   type BoardSnapshot,
   type RecentActivityCache,
 } from "./board.js";
@@ -136,6 +138,17 @@ function byRecency(tasks: readonly BoardRow[]): BoardRow[] {
     return Number.isFinite(ms) ? ms : Number.NEGATIVE_INFINITY;
   };
   return [...tasks].sort((a, b) => at(b) - at(a));
+}
+
+/** Which tasks each header count counted, by the same predicates as `summarizeCounts`: a count diff's members. */
+export function nowCountMembers(tasks: readonly BoardRow[]): Record<string, string[]> {
+  const ids = (predicate: (t: BoardRow) => boolean): string[] => tasks.filter(predicate).map((t) => t.taskId);
+  return {
+    "board.counts.running": ids(isRunningRow),
+    "board.counts.queued": ids((t) => t.status === "queued"),
+    "board.counts.blocked": ids(isBlockedRow),
+    "board.taskProjection.total": ids(() => true),
+  };
 }
 
 /** The console's `groupBoard` (app/board.tsx), precomputed: each task lands in exactly one group, in priority order. */
@@ -402,10 +415,25 @@ interface Held {
   at: number;
   health?: NowHealth;
   healthAt: number;
+  members: Record<string, string[]>;
+}
+
+/** The legacy side of one shadow sample (view-shadow.ts): what /now shows today, in the view's shape. */
+export interface NowShadowLegacy {
+  data: NowViewData;
+  asOfMs: number;
+  /** The live file's oldest row: GET /v1/status sees nothing older (ruling Q1's legacy horizon). */
+  horizonMs?: number;
+  members: Record<string, { legacy: string[]; view: string[] }>;
 }
 
 /** The `now` view as the read-model worker materializes it: one body per instance, keyed `instance=<name>`. */
-export function createNowView(opts: NowViewOptions): { name: string; version: number; materialize(ctx: NowViewContext): Array<{ key: string; data: NowViewData; sources: ViewSource[] }> } {
+export function createNowView(opts: NowViewOptions): {
+  name: string;
+  version: number;
+  materialize(ctx: NowViewContext): Array<{ key: string; data: NowViewData; sources: ViewSource[] }>;
+  legacy(key: string, now: number, view: unknown): NowShadowLegacy | undefined;
+} {
   const clock = opts.clock ?? systemClock;
   const log = opts.log ?? (() => {});
   const core = opts.coreInstance ?? opts.instances[0]?.name;
@@ -450,7 +478,7 @@ export function createNowView(opts: NowViewOptions): { name: string; version: nu
         db, ledgerPath, readPlan: () => planCache.get(instance.name)!.plan, github: gateway.github, githubGeneration: () => gk, clock, instance: instance.name,
         log: (step, extra) => log(step, { instance: instance.name, ...extra }),
       });
-      h = { db, board, recent: createRecentActivityCache(), generation: -1, planKey: pk, plan, githubKey: gk, gateway, at: now, healthAt: Number.NEGATIVE_INFINITY };
+      h = { db, board, recent: createRecentActivityCache(), generation: -1, planKey: pk, plan, githubKey: gk, gateway, at: now, healthAt: Number.NEGATIVE_INFINITY, members: {} };
       held.set(instance.name, h);
     }
     h.board.update({ force: true });
@@ -465,7 +493,7 @@ export function createNowView(opts: NowViewOptions): { name: string; version: nu
     }
     const questions = isCore && instance.feedbackRoot ? { count: countQuestions(instance) } : { reason: isCore ? "no feedback root is configured" : "feedback questions live in core only" };
     const data = assembleNowView({ instance: instance.name, snapshot, rows, plan, recent: computeRecentActivity(deps, h.recent, 20), health: h.health, questions, nowMs: now });
-    Object.assign(h, { generation: state.generation, planKey: pk, plan, at: now });
+    Object.assign(h, { generation: state.generation, planKey: pk, plan, at: now, members: nowCountMembers(snapshot.tasks) });
     const sources: ViewSource[] = [
       ...(opts.ledgerSource ? [opts.ledgerSource(state, now)] : []),
       { name: `github:${instance.name}`, ...gateway.source },
@@ -478,6 +506,37 @@ export function createNowView(opts: NowViewOptions): { name: string; version: nu
   return {
     name: NOW_VIEW_NAME,
     version: NOW_VIEW_VERSION,
+    /**
+     * The shadow comparator's legacy side for one key: GET /v1/status's board and PR queue over the
+     * instance's LIVE FILE only, plus a fresh host probe of that instance. The probe's gauges are taken
+     * from the view when both probes read them, because two samples moments apart always differ; a gauge
+     * one side could not read, or a different reason, still diffs. Actions, recent and questions have
+     * no separate legacy computation and are carried from the view.
+     */
+    legacy(key, now, view) {
+      const name = decodeURIComponent(key.replace(/^instance=/, ""));
+      const instance = byName.get(name);
+      const h = held.get(name);
+      if (!instance || !h || !key.startsWith("instance=")) return undefined;
+      const mine = view as NowViewData;
+      const ledgerPath = join(instance.ledgerDir, LEDGER_FILENAME);
+      const rows = readLedgerLines(ledgerPath);
+      const deps = { plan: h.plan, ledgerPath, github: h.gateway.github, readLedger: () => rows, now: () => now };
+      const snapshot = computeBoardSnapshot(deps);
+      const legacy = assembleNowView({ instance: name, snapshot, rows, plan: h.plan, recent: [], health: mine.health, questions: mine.questions, nowMs: now });
+      const probe = probeHost(instance, name === core);
+      const gauge = (field: "diskFreeBytes" | "rateLimitRemaining" | "lastPollAgeMs"): Partial<NowHealth> =>
+        probe[field] === undefined ? {} : { [field]: mine.health[field] ?? probe[field] };
+      const health: NowHealth = { sampledAt: mine.health.sampledAt, ...gauge("diskFreeBytes"), ...gauge("rateLimitRemaining"), ...gauge("lastPollAgeMs"), ...(probe.reasons ? { reasons: probe.reasons } : {}) };
+      const oldest = rows.map((row) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN)).filter(Number.isFinite).sort((a, b) => a - b)[0];
+      const theirs = nowCountMembers(snapshot.tasks);
+      return {
+        data: { ...mine, board: legacy.board, prQueue: legacy.prQueue, health },
+        asOfMs: now,
+        members: Object.fromEntries(Object.entries(theirs).map(([path, ids]) => [path, { legacy: ids, view: h.members[path] ?? [] }])),
+        ...(oldest !== undefined ? { horizonMs: oldest } : {}),
+      };
+    },
     materialize(ctx) {
       const mode = ctx.switches?.views[NOW_VIEW_NAME];
       if (mode !== "shadow" && mode !== "serve") return [];
