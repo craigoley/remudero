@@ -4,6 +4,7 @@
   depends_on: []
   type: implement
   verify: auto
+  priority: 1
   risk: low
   status: queued
   attempts: 0
@@ -24,4 +25,4 @@
       - "The single acceptance criterion is a grep check for a remedy entry in that doc. It can be verified automatically (verify: auto) and is reversible."
       - "The gates state is clean: filingTime is true and the author is a machine-class member of the ci-friction family. That family has no merged or declined tasks yet (Beta mean 0.80), so there is no negative track record. The change still goes through CI and review."
     judged_at: "2026-09-29T20:17:35.861Z"
-    pin: "2de5d5a767cd9da305251b93bde7918bc6b054c98e9c2d6e0d46670f3be4cffd"
+    pin: "0be1fee28c02ab09d181c1cd97b0f2d78d067ac2a84dd430d50ddd10c8f11531"

@@ -4,6 +4,7 @@
   depends_on: []
   type: implement
   verify: auto
+  priority: 1
   risk: medium
   status: queued
   attempts: 0
