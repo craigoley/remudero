@@ -6112,9 +6112,7 @@ test("buildSweepEffects.arm: a SUCCESSFUL sweep arm writes automerge.armed with 
   const root = mkdtempSync(join(tmpdir(), "sweep-arm-attrib-"));
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const armImplFake = (): ArmOutcome => "armed";
-  // Driven THROUGH the returned adapter (effects.arm), never armAndLogOutcome directly —
-  // the seam that matters is buildSweepEffects's own `arm` member, wired to armAutoMerge
-  // bare before this task.
+  // Drive the returned effects.arm adapter, where buildSweepEffects wires the arm seam.
   const effects = buildSweepEffects({
     owner: "craigoley",
     repo: "remudero",
