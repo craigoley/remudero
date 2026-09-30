@@ -12,6 +12,7 @@ import {
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { ghExec, ghJsonAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
+import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
@@ -6597,6 +6598,7 @@ async function runReview(args: {
   const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
   let reviewerSubtype: string | undefined;
   let reviewerSpawnFailed = false;
+  let reviewerFindingText: string | undefined;
   if (planOnlySkip) {
     // The ledger must say WHICH PATH RAN. Without this row a skipped review and a completed one
     // differ only by the ABSENCE of `review.reviewer`, which is not something a query can count.
@@ -6678,6 +6680,7 @@ async function runReview(args: {
         const candidateSemantic = reviewerSemanticVerdicts(reviewer, criteria.length);
         assertReviewerSnapshotIntegrity(snapshot.cwd, headSha);
         semantic = candidateSemantic;
+        reviewerFindingText = workerTranscript(reviewer);
         reviewerSubtype = reviewer.subtype;
         const reviewerFields = workerLedgerFields(reviewer);
         evaluatorProvenance = {
@@ -6756,6 +6759,15 @@ async function runReview(args: {
     // this outcome exists to prevent.
     planOnlySkip: planOnlySkip && !attemptReviewer,
   });
+  // A missing envelope is UNKNOWN, not a measured zero. Parse is bounded and purely
+  // advisory; a filesystem/telemetry problem cannot become a review failure.
+  let findingCapture: FindingCapture = { state: "unavailable", findings: [], verifiedCount: 0, invalidCount: 0, droppedCount: 0 };
+  if (reviewerFindingText !== undefined && args.headCheckoutDir) {
+    try {
+      findingCapture = extractReviewFindings({ owner, repo, prUrl, headSha, root: args.headCheckoutDir, diff,
+        criteriaCount: criteria.length, text: reviewerFindingText });
+    } catch { /* The existing reviewer verdict and status still proceed. */ }
+  }
 
   // BINDING deterministic verdict; the orchestrator is the authoritative poster.
   // W1-T65 (ratifies P15): headCheckoutDir wires the FLOOR's whitelisted-proof
@@ -7011,6 +7023,11 @@ async function runReview(args: {
     // W1-T63/P10-a: makes a floor-only PASS LEGIBLE — never byte-identical to a
     // review the LLM reviewer actually completed.
     reviewer_outcome: outcome,
+    finding_capture_state: findingCapture.state,
+    finding_verified_count: findingCapture.verifiedCount,
+    finding_unverified_count: findingCapture.findings.length - findingCapture.verifiedCount,
+    finding_invalid_count: findingCapture.invalidCount,
+    finding_dropped_count: findingCapture.droppedCount,
     // W1-T65/P15: per-criterion proof_exec, index-aligned to verdict.criteria.
     proof_exec: proofExec,
     // W1-T72 (W1-T65 follow-up): LOUD legibility — true when execution fell
@@ -7112,6 +7129,10 @@ async function runReview(args: {
   // (!posted.posted)` branch above already returned.
   const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log };
   armIfVerdictPermits(verdict, armCtx, { arm: args.arm });
+  // Record after both authoritative posting and auto-merge eligibility. The recorder
+  // swallows telemetry write failures; replay returns above before reaching this call.
+  recordReviewFindings(findingCapture, { taskId: task.id, prUrl, headSha, decisionDigest,
+    provenance: evaluatorProvenance, log });
   if (verdict.capped) {
     // W1-T1085: the annotation gets the SAME `planOnly` fact the status three-ways on, so one run
     // stops emitting two contradictory sentences about one verdict. No decision changes here.
