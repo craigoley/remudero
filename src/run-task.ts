@@ -167,7 +167,8 @@ import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGa
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, selectorShadowFlakeLedger, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener, startEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
-import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
+import { daemonSreLaneInput, openIncidentFeedbackOrigins, startSreLane } from "./lib/sre-lane.js";
+import { fileConsumerVia, gitHeartbeatSource, startHostResourceGardener } from "./lib/host-resource-gardener.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
@@ -252,7 +253,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -33636,6 +33637,25 @@ export async function daemonCommand(
                     fileExists: (file) => existsSync(join(repoRoot, file)),
                   };
                   return startGarden(hotFileGardenSpec(hotFileGarden, hotFileSources), hotFileGarden, intervalMs);
+                },
+                // W1-T4804: host disk, swap and inodes are projected to full from the heartbeat history and
+                // answered in tiers against each host's own janitor cadence. Off: state/HOST_RESOURCE_OFF.
+                (intervalMs: number) => {
+                  const stateDir = join(config.root, "state");
+                  const mintTaskId = ciLearningTaskIdMinter(repoRoot);
+                  return startHostResourceGardener(
+                    {
+                      stateDir,
+                      log,
+                      readHeartbeats: gitHeartbeatSource(repoRoot),
+                      handoff: (h) => void captureFeedback(repoRoot, { id: h.id, raw: h.raw, origin: h.origin as FeedbackOrigin }),
+                      openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot),
+                      escalate: raiseDuplicate,
+                      planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+                      fileConsumer: fileConsumerVia(() => gardenCheckout({ name: "host-resource", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }), mintTaskId),
+                    },
+                    intervalMs,
+                  );
                 },
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
                 // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE

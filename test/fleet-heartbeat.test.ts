@@ -1113,3 +1113,85 @@ test("W1-T3367 (falsifier): an EMPTY ledger falls back to the unscoped delivery 
     `the fallback must still file something: ${JSON.stringify(calls)}`,
   );
 });
+
+// ── W1-T4804: swap, inodes, total size and the janitor's last result ───────────────────────────
+// Every value is a number or `unknown` — an unreadable swap must never read as "0 used".
+
+function w1t4804Scratch(files: Record<string, string>): { dir: string; path: (name: string) => string } {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}fleet-heartbeat-w1t4804-`));
+  for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body, { mode: 0o755 });
+  return { dir, path: (name) => join(dir, name) };
+}
+
+test("W1-T4804: the heartbeat publishes swap inode and janitor fields or unknown", () => {
+  const scratch = w1t4804Scratch({
+    "meminfo": "MemTotal: 8000000 kB\nSwapTotal: 29360120 kB\nSwapFree: 28500000 kB\n",
+    "host-cleanup.log": [
+      "rmd-host-cleanup: / 55% -> 57% (-1 MB reclaimed this pass)",
+      "rmd-host-cleanup: / 57% -> 57% (-4 MB reclaimed this pass)",
+      "rmd-host-cleanup: WATCH: /home/x/thread_history_1.sqlite 2398 MB",
+      "",
+    ].join("\n"),
+    "dfstub": [
+      "#!/usr/bin/env bash",
+      'case "$*" in',
+      '  *-Pi*) printf "Filesystem Inodes IUsed IFree IUse%% Mounted on\\n/dev/root 1000000 100000 900000 10%% /\\n" ;;',
+      '  *) printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/root 30000000 1000 400000 58%% /\\n" ;;',
+      "esac",
+      "",
+    ].join("\n"),
+  });
+  try {
+    const beat = runBeat({
+      dfStub: readFileSync(scratch.path("dfstub"), "utf8"),
+      env: { RMD_MEMINFO: scratch.path("meminfo"), RMD_JANITOR_LOGS: scratch.path("host-cleanup.log") },
+    });
+    assert.equal(beat.status, 0, beat.stderr);
+    assert.equal(field(beat.published, "swap_total_kb"), "29360120");
+    assert.equal(field(beat.published, "swap_used_kb"), String(29360120 - 28500000));
+    assert.equal(field(beat.published, "root_fs_total_kb"), "30000000");
+    assert.equal(field(beat.published, "root_fs_inodes_free"), "900000");
+    assert.equal(field(beat.published, "janitor_log"), scratch.path("host-cleanup.log"));
+    assert.equal(field(beat.published, "janitor_last_before"), "57%");
+    assert.equal(field(beat.published, "janitor_last_after"), "57%");
+    assert.equal(field(beat.published, "janitor_last_freed"), "4MB", "the WATCH line is not the janitor's result");
+    assert.match(String(field(beat.published, "janitor_last_ts")), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+    assert.match(String(field(beat.published, "consumer_state_kb")), /^[0-9]+$/, "a readable consumer is sized");
+
+    // The macOS shapes: `sysctl vm.swapusage` for swap and the Mac janitor's own line.
+    const mac = w1t4804Scratch({
+      "sysctl": '#!/usr/bin/env bash\nprintf "total = 7168.00M  used = 5427.25M  free = 1740.75M  (encrypted)\\n"\n',
+      "remudero-janitor-mini.log": "janitor (mini): freed ~0 GB; free space 25 GB -> 10 GB\n",
+    });
+    try {
+      const macBeat = runBeat({
+        env: { RMD_MEMINFO: join(mac.dir, "absent"), RMD_SYSCTL: mac.path("sysctl"), RMD_JANITOR_LOGS: join(mac.dir, "remudero-janitor-*.log") },
+      });
+      assert.equal(macBeat.status, 0, macBeat.stderr);
+      assert.equal(field(macBeat.published, "swap_total_kb"), String(7168 * 1024));
+      assert.equal(field(macBeat.published, "swap_used_kb"), String(Math.round(5427.25 * 1024)));
+      assert.equal(field(macBeat.published, "janitor_last_before"), "25GB");
+      assert.equal(field(macBeat.published, "janitor_last_after"), "10GB");
+      assert.equal(field(macBeat.published, "janitor_last_freed"), "0GB", "a real zero is published as measured");
+    } finally {
+      rmSync(mac.dir, { recursive: true, force: true });
+    }
+
+    // Unreadable everywhere: `unknown`, never a reassuring 0, and an unparseable janitor line too.
+    const junk = w1t4804Scratch({ "host-cleanup.log": "rmd-host-cleanup: something -> else entirely\n" });
+    try {
+      const blind = runBeat({
+        dfStub: "#!/usr/bin/env bash\nexit 1\n",
+        env: { RMD_MEMINFO: join(junk.dir, "absent"), RMD_SYSCTL: join(junk.dir, "no-sysctl"), RMD_JANITOR_LOGS: join(junk.dir, "host-cleanup.log") },
+      });
+      assert.equal(blind.status, 0, blind.stderr);
+      for (const key of ["swap_used_kb", "swap_total_kb", "root_fs_total_kb", "root_fs_inodes_free", "janitor_last_ts", "janitor_last_before", "janitor_last_after", "janitor_last_freed"]) {
+        assert.equal(field(blind.published, key), "unknown", `${key} must be unknown, not invented`);
+      }
+    } finally {
+      rmSync(junk.dir, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(scratch.dir, { recursive: true, force: true });
+  }
+});
