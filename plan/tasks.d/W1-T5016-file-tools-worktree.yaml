@@ -27,4 +27,3 @@
       proof: 'grep: test("W1-T5016: file tools refuse paths outside the assigned worktree" in test/deny-floor.test.ts'
     - claim: "a symlink cannot turn an apparent in-worktree target into an outside target"
       proof: 'grep: test("W1-T5016: file tool confinement resolves symlink parents" in test/deny-floor.test.ts'
-  note: "reservation hand-off: run-W1-T5016-1790813900000 -> file/plan-5016-5025-1790815200000"

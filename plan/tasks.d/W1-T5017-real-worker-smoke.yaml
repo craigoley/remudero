@@ -24,4 +24,3 @@
   acceptance:
     - claim: "recycle invokes one real worker smoke and rolls back on a failed verdict"
       proof: 'grep: test("W1-T5017: recycle refuses a replacement image whose real worker smoke fails" in test/worker-smoke.test.ts'
-  note: "reservation hand-off: run-W1-T5017-1790813900000 -> file/plan-5016-5025-1790815200000"
