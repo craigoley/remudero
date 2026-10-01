@@ -2964,7 +2964,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             });
             return;
           }
-          ({ task, synthetic } = atHead);
+          task = atHead.task;
         }
 
         const mountsTable = loadMounts(mountsPath(repoRoot));
