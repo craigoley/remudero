@@ -3157,7 +3157,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     server.on("close", watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances }));
     server.on("close", startIncidentInvariantsMonitor(deps.ledgerPath, { ...deps.incidentInvariants, log: deps.log }));
   };
-  if (deps.generation) server.once("listening", startLedgerWriters);
+  if (deps.generation) server.setMaxListeners(server.getMaxListeners() + 1).once("listening", startLedgerWriters);
   else startLedgerWriters();
   const githubAuth = { settled: routeAssembly.githubAppReady === undefined };
   void routeAssembly.githubAppReady?.then(() => (githubAuth.settled = true));

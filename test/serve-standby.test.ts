@@ -63,13 +63,14 @@ test("standby serve does not listen on the public port before promote", { timeou
   console.log = () => {};
   console.error = () => {};
 
+  let warms = 0;
   const sent: GenerationMessage[] = [];
   const listeners: Array<(m: GenerationMessage) => void> = [];
   let releaseBoard: () => void = () => {};
   const boardGated = new Promise<void>((resolve) => (releaseBoard = resolve));
   const running = serveCommand([], {
     branch: () => "main",
-    buildBatchedGithub: () => fakeGitHub(BOARD_BRANCH_LISTS),
+    buildBatchedGithub: () => ({ ...fakeGitHub(BOARD_BRANCH_LISTS), warm: () => void (warms += 1) }),
     buildInitialBoardSnapshot: () => boardGated,
     generation: { send: (m) => void sent.push(m), onMessage: (l) => void listeners.push(l) },
   });
@@ -94,6 +95,7 @@ test("standby serve does not listen on the public port before promote", { timeou
   assert.deepEqual(report.criteria.map((c) => c.name), ["plan_loaded", "github_auth_settled", "gateway_primed", "read_model_warm", "board_computed"]);
   assert.equal(report.criteria.find((c) => c.name === "board_computed")?.ok, false);
   assert.equal(await refused(port), true, "the public port is not bound by a standby");
+  assert.equal(warms, 1, "the standby warms its gateway once, since keep-warm only starts after promotion");
 
   releaseBoard();
   await sleep(50);

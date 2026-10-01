@@ -35623,6 +35623,8 @@ export async function serveCommand(
     const generation = serveGeneration(server);
     onDrainRequest(channel, (reason) => void generation?.handover(reason));
     await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardGate.isReady)], tokens.read);
+    // One warm, so the gateway is primed before promotion; keep-warm itself starts only once listening.
+    boardGithub.warm?.();
     void precomputeBoard();
     log("serve.standby", { socket: supervised.socketPath });
     await awaitPromotion(channel);
