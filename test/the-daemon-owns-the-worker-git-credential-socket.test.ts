@@ -160,7 +160,7 @@ type DaemonObservation = {
 };
 
 /** Drive the real `daemonCommand` once. `armed` false is an App-unconfigured host. */
-async function driveDaemon(armed: boolean): Promise<DaemonObservation> {
+async function driveDaemon(armed: boolean, closeFailure = false): Promise<DaemonObservation> {
   const { home, root, planPath } = daemonHome();
   const oldHome = process.env.HOME;
   process.env.HOME = home;
@@ -191,6 +191,10 @@ async function driveDaemon(armed: boolean): Promise<DaemonObservation> {
       runDaemon: runDaemonStub as never,
       startGithubAppRefresh: () => (armed ? { armed: true, ready } : { armed: false }),
       gitCredentialMint: mint,
+      ...(closeFailure ? { startGitCredentialSocket: async () => ({
+        socketPath,
+        close: async () => { throw new Error("fixture close failed"); },
+      }) } : {}),
       runTask: (async (_taskId: string, opts: Record<string, unknown>) => {
         observation.taskOpts = opts;
         return { taskId: "T-GIT-CRED", runId: "r", merged: false, costUsd: 0, verdict: "blocked" };
@@ -204,6 +208,13 @@ async function driveDaemon(armed: boolean): Promise<DaemonObservation> {
     observation.existedBeforeReady = existsSync(socketPath);
     settle();
     observation.code = await run;
+    if (closeFailure) {
+      const ledger = filesUnder(join(root, "state"))
+        .filter((path) => path.endsWith(".ndjson"))
+        .map((path) => readFileSync(path, "utf8"))
+        .join("\n");
+      assert.match(ledger, /git credential socket did not close: Error: fixture close failed/);
+    }
     return observation;
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
@@ -549,4 +560,90 @@ test("the daemon git credential socket is removed on shutdown", async () => {
   await socket.close();
   assert.equal(existsSync(stale), false);
   rmSync(stateDir, { recursive: true, force: true });
+});
+
+test("a daemon socket close failure is ledgered without changing its stop result", async () => {
+  const seen = await driveDaemon(true, true);
+  assert.equal(seen.code, 0);
+  assert.equal(seen.taskOpts?.gitCredentialSocketPath, seen.socketPath);
+});
+
+test("the full sweep hook wires the daemon socket into fix worker effects", async () => {
+  const root = scratchDir("sweep-hook");
+  mkdirSync(join(root, "state"), { recursive: true });
+  const shim = ghShim([{ when: "", stdout: "[]" }], { kind: "git-cred-sweep" });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${oldPath}`;
+  const logs: string[] = [];
+  try {
+    const hook = buildSweepHook(
+      "acme", "widgets", { root, claudeBin: "/bin/true" } as Config,
+      join(root, "state", "ledger.ndjson"), "GIT-CRED-SWEEP", { tasks: [], byId: new Map() },
+      (step) => logs.push(step),
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, join(root, "helper.sock"),
+    );
+    await hook();
+    assert.equal(logs.includes("sweep.error"), false, "the empty offline sweep reaches its fix effects");
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(shim.dir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("socket startup reports a failed thread and a failed cleanup", async () => {
+  const scratch = scratchDir("start-failures");
+  const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  const log = (step: string, fields: Record<string, unknown>) => rows.push({ step, fields });
+  const threadUrl = new URL('data:text/javascript,' + encodeURIComponent(
+    'import { parentPort } from "node:worker_threads";\nparentPort.postMessage({ type: "failed", reason: "fixture bind failed" });\n'));
+  try {
+    assert.equal(await startDaemonGitCredentialSocket({
+      ready: Promise.resolve(), stateDir: join(scratch, "thread"), log, threadUrl,
+    }), undefined);
+    assert.ok(rows.some((row) => String(row.fields.reason).includes("fixture bind failed")));
+
+    const stateDir = join(scratch, "cleanup");
+    assert.equal(await startDaemonGitCredentialSocket({
+      ready: Promise.resolve(), stateDir, log,
+      startSocket: async (socketPath) => ({
+        socketPath,
+        close: async () => { throw new Error("fixture cleanup failed"); },
+      }),
+    }), undefined, "a socket without an owner-only path is never handed to a worker");
+    assert.ok(rows.some((row) => String(row.fields.reason).includes("socket did not close: Error: fixture cleanup failed")));
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("the production socket thread mints a scoped token and survives a ledger failure", async () => {
+  const scratch = scratchDir("thread-mint");
+  const keyPath = join(scratch, "app.pem");
+  writeFileSync(keyPath, generateKeyPairSync("rsa", { modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs1", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey);
+  const boundaryUrl = new URL("../src/lib/secret-boundary.ts", import.meta.url).href;
+  const threadUrl = new URL('data:text/javascript,' + encodeURIComponent(`process.env.GH_APP_ID = "app-fixture";
+process.env.GH_APP_INSTALLATION_ID = "installation-fixture";
+process.env.GH_APP_PRIVATE_KEY_PATH = ${JSON.stringify(keyPath)};
+globalThis.fetch = async () => new Response(JSON.stringify({
+    token: "fixture-scoped-token", expires_at: new Date(Date.now() + 3600000).toISOString()
+  }), { status: 201 });\nawait import(${JSON.stringify(boundaryUrl)});\n`));
+  let socket: Awaited<ReturnType<typeof startDaemonGitCredentialSocket>>;
+  try {
+    socket = await startDaemonGitCredentialSocket({
+      ready: Promise.resolve(), stateDir: join(scratch, "state"), threadUrl,
+      log: () => { throw new Error("fixture ledger unavailable"); },
+    });
+    assert.ok(socket);
+    const reply = await socketRoundTrip(socket.socketPath, "protocol=https\nhost=github.com\npath=acme/widgets.git\n\n");
+    assert.match(reply, /^password=fixture-scoped-token$/m);
+    assert.match(await socketRoundTrip(socket.socketPath, "protocol=https\nhost=github.com\npath=acme/widgets.git\n\n"), /^password=fixture-scoped-token$/m,
+      "a failed ledger write does not kill the socket thread");
+  } finally {
+    await socket?.close();
+    rmSync(scratch, { recursive: true, force: true });
+  }
 });

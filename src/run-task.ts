@@ -33397,6 +33397,7 @@ export async function daemonCommand(
      *  its own thread minting through `mintScopedToken`. */
     startGithubAppRefresh?: typeof startInstallationTokenRefresh;
     gitCredentialMint?: ScopedTokenMint;
+    startGitCredentialSocket?: typeof startDaemonGitCredentialSocket;
   } = {},
 ): Promise<number> {
   // W1-T2697: mark THIS process as the daemon BEFORE anything below can append a ledger row —
@@ -34116,7 +34117,7 @@ export async function daemonCommand(
   // W1-T5115: the daemon's ONE git credential socket, started only on an App-configured host and
   // only once the first App mint above has settled. Its path reaches every task worker (`runOne`)
   // and every sweep fix worker (`sweep:`) below; `undefined` leaves both on the ambient helper.
-  const gitCredentialSocket = await startDaemonGitCredentialSocket({
+  const gitCredentialSocket = await (deps.startGitCredentialSocket ?? startDaemonGitCredentialSocket)({
     ready: githubAppRefresh.ready,
     stateDir: join(config.root, "state"),
     log,

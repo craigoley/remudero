@@ -452,6 +452,8 @@ export async function startDaemonGitCredentialSocket(opts: {
   log: DaemonLog;
   mint?: ScopedTokenMint;
   threadUrl?: URL;
+  /** Test seam for a socket whose startup or cleanup fails after binding. */
+  startSocket?: (socketPath: string) => Promise<CredentialHelperSocketHandle>;
 }): Promise<CredentialHelperSocketHandle | undefined> {
   if (!opts.ready) return undefined;
   await opts.ready;
@@ -465,9 +467,11 @@ export async function startDaemonGitCredentialSocket(opts: {
   try {
     mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
     chmodSync(dirname(socketPath), 0o700);
-    handle = opts.mint
-      ? await startCredentialHelperSocket({ socketPath, mint: opts.mint, log: ledgerRow })
-      : await startSocketThread(socketPath, opts.log, opts.threadUrl ?? new URL(import.meta.url));
+    handle = opts.startSocket
+      ? await opts.startSocket(socketPath)
+      : opts.mint
+        ? await startCredentialHelperSocket({ socketPath, mint: opts.mint, log: ledgerRow })
+        : await startSocketThread(socketPath, opts.log, opts.threadUrl ?? new URL(import.meta.url));
     chmodSync(socketPath, 0o600);
   } catch (err) {
     ledgerRow(boundaryLedgerRow("github.com", "refuse", "error", `git credential socket did not start: ${String(err)}`));
