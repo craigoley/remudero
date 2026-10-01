@@ -16,7 +16,9 @@
     reservation hand-off: run-W1-T4527-1790294141611 -> plan-file-W1-T4527-1790294141611
   plan_refs: ["W1-T4527", "W1-T4528", "W1-T4529"]
   files: [src/lib/release-tags.ts, src/lib/deployer.ts, src/run-task.ts, test/every-instance-converges-to-the-fleet-release.test.ts]
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=0690a86ca33589dc
   attempts: 0
   rationale: |
     READ 2026-09-24 at origin/main 9aa0dd61. Names are symbols; re-verify at your head.

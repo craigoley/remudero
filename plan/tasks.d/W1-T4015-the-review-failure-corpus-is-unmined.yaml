@@ -10,7 +10,9 @@
   files: [src/lib/ci-failure-corpus.ts]
   origin: oper#fleet-health-2026-09-22
   plan_refs: ["W1-T2957", "W1-T4014"]
+  priority: 3
   status: queued
+  # backlog gardener: band=3 evidence=e0000e864b623afd
   attempts: 0
   rationale: |
     `ci-failure-corpus.ts` opens by naming why a red GATE is minable:

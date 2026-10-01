@@ -10,7 +10,9 @@
   origin: "session: 2026-09-23 W1-T4260 build review"
   plan_refs: ["W1-T4260", "W1-T4193", "W1-T3266"]
   files: [src/lib/worker.ts, test/a-satellite-install-never-blocks-the-daemon.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=300d89992d2d9d7c
   attempts: 0
   rationale: |
     READ 2026-09-23 on the W1-T4260 build (PR #6840). Names are symbols; re-verify at your head.

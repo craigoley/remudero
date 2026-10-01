@@ -13,7 +13,9 @@
   files:
     - src/run-task.ts
     - test/the-retro-writes-proposal-records.test.ts
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=4c304404d1aadca8
   attempts: 0
   rationale: |
     THE CONTRADICTION, READ FROM SOURCE AT 855dcb0b6. retroPrompt's instruction 4 reads: "Mine

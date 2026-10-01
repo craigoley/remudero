@@ -10,7 +10,9 @@
   files: [src/lib/review.ts, test/portal-vitest-proof-runner.test.ts]
   origin: "feedback#fb-1789259749891-f16610"
   plan_refs: ["W1-T3525", "W1-T3178", "W1-T72", "W1-T3073"]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=25af6ad0e1a02818
   attempts: 0
   rationale: |
     W1-T3525 introduced the owner/repo-keyed suite registry, yet private portal PR #8 (PORTAL-T1) has

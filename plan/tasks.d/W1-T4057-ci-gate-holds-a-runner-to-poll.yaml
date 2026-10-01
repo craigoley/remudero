@@ -11,7 +11,9 @@
   origin: "oper#ci-efficiency-research-2026-09-22"
   plan_refs: [W1-T24]
   files: [.github/workflows/ci-gate.yml, .github/workflows/ci.yml, test/ci-gate-concludes-from-events.test.ts, scripts/test-tier-manifest.json]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=91e8edbbb9c08c27
   attempts: 0
   rationale: |
     MEASURED 2026-09-22 FROM ALL 25,189 WORKFLOW RUNS SINCE 2026-09-19 (~3.8 days, 408 merges to main):

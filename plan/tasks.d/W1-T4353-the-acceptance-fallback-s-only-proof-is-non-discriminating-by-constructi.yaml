@@ -11,7 +11,9 @@
   origin: "retro#1789341105445"
   plan_refs: ["§5", "W1-T1060", "W1-T3508"]
   files: [src/run-task.ts, scripts/acceptance-author-gate.mjs, test/a-fallback-acceptance-proof-must-not-be-diff-blind.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=72adc709ee11eba4
   attempts: 0
   rationale: |
     OBSERVED on run RETRO-1789341105445's own plan-sync PR (#5455, run DAEMON-1789343790915): a

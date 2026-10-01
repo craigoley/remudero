@@ -78,7 +78,9 @@
   origin: oper#ruling-production-path-proofs-2026-08-05
   plan_refs: ["§12", "W1-T322", "W1-T352", "W1-T353"]
   files: [MASTER-PLAN.md]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=f5722c30a0341e5b
   attempts: 0
   note: "OPERATOR DIRECTION 2026-09-30: no new rule may refuse or strand a PR. Only the rule-13 text amendment is built. The review gate stays as it is: the existing SHIPS-UNWIRED floor is already advisory (review.ts), and no refusal is added. OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, 'the verify-human queue, cleared'): CONFIRMED — build the gate as an answerable refusal that reuses the existing SHIPS-UNWIRED: / WIRED-AT: markers, never an unanswerable block. verify:human REQUIRED BY W1-T353, not chosen for convenience: this task's deliverable is a
     RULING — an amendment to a standing rule — and W1-T353's linter refuses a ruling-shaped task that

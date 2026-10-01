@@ -11,7 +11,9 @@
   origin: "oper#serve-staleness-2026-09-22"
   plan_refs: [W1-T2964, W1-T4024]
   files: [src/run-task.ts, src/lib/serve.ts, test/serve-restarts-onto-fresh-code.test.ts, scripts/test-tier-manifest.json]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=00d3b2b882af2428
   attempts: 0
   rationale: |
     OBSERVED 2026-09-22 ON THE AZURE HOST.
