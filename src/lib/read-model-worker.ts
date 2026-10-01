@@ -1085,8 +1085,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   const onMessage = (msg: ReadModelWorkerMessage): void => {
     heardAt = clock.now();
     silenceLogged = false;
-    if (msg.type === "progress") phase = { instance: msg.instance, phase: msg.phase };
-    else if (msg.type !== "log") phase = undefined;
+    phase = msg.type === "progress" ? { instance: msg.instance, phase: msg.phase } : undefined;
     if (msg.type === "body") {
       bodies.set(readModelBodyKey(msg.entry.view, msg.entry.key), msg.entry);
       for (const listener of bodyListeners) listener(msg.entry);
