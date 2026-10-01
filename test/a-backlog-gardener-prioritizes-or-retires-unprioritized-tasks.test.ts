@@ -80,7 +80,7 @@ test("W1-T4941: a retirement proposal proves its new decision on the shard", (t)
   assert.match(f.read(item.id), /retirement: withdrawn/);
 });
 
-test("W1-T4941: a pass is bounded and produces at most one plan-only PR", (t) => {
+test("W1-T4941: a bounded pass writes exact decision proofs in one plan-only PR", (t) => {
   const items = [task("W1-T12"), task("W1-T2"), task("W1-T7")];
   const f = fixture(t, items, { merges: 2 });
   const inv = backlogInventory(f.sources);
