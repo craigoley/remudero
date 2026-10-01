@@ -900,7 +900,7 @@ import {
   MAX_RETAINED_LINES_PER_STEP,
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
-import { clockFromDateFn, systemClock, type Clock } from "./lib/clock.js";
+import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
 import {
   VERIFY_HUMAN_JUDGED_STEP,
   judgeVerifyHumanShard,
@@ -33261,12 +33261,12 @@ export async function daemonCommand(
     }
     throw e;
   }
-  const bootClaimLockMs = deps.now?.() ?? systemClock.now();
+  const bootClaimLock = fixedClock(clockFromMillisFn(deps.now).now());
   try {
     const swept = releaseReplacedContainerClaims(deps.bootClaimReserver ?? dispatchClaimReserverFor(join(config.root, "repos", target.repo)), {
       localHost: hostname(),
-      lockHeldSinceMs: bootClaimLockMs,
-      lockHeldSinceIso: new Date(bootClaimLockMs).toISOString(),
+      lockHeldSinceMs: bootClaimLock.now(),
+      lockHeldSinceIso: bootClaimLock.iso(),
       findMintRow: (taskId, anchor) => findClaimMintRow(dirname(ledgerPath), taskId, anchor),
     });
     for (const claim of swept) {
