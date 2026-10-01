@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { NEEDS_HUMAN_LABEL } from "../src/lib/escalate.js";
 import {
+  BOARD_MAX_PAGES,
   boardIssuesRestArgs,
   type BoardIssueRest,
   type BoardPrRest,
@@ -31,8 +32,6 @@ import { buildBatchedGithub } from "../src/lib/status.js";
  * INSIDE its TTL from memory, with ZERO further REST calls, rather than re-walking anything.
  */
 
-const BOARD_MAX_PAGES = 50; // mirrors open-prs-rest.ts's runaway-guard internal (not exported —
-// same local-pin discipline test/board-gateway-truncation.test.ts already uses for this constant).
 
 function prRow(n: number, state: "open" | "closed", updatedAt: string, over: Partial<RestPullRow> = {}): RestPullRow {
   return {

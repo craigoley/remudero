@@ -406,8 +406,8 @@ const BOARD_FULL_PAGE_SIZE = 100;
  *  it already holds — row 1 or 2 in practice, where a 100-row page moves ~2.2 MB to learn nothing
  *  happened. Page size must be constant within a run, so a second delta page pays 30 again. */
 const BOARD_DELTA_PAGE_SIZE = 30;
-/** Runaway guard: 50 pages is 5,000 PRs at the full size. Reported, never silent. */
-const BOARD_MAX_PAGES = 50;
+/** Runaway guard: 200 pages is 20,000 PRs at the full size, past this repo's ~6,700 closed PRs (50 truncated every cold read). Reported, never silent. */
+export const BOARD_MAX_PAGES = 200;
 
 /** What a board fetch cost, for the ledger — the point of the exercise is that this stays small. */
 export interface BoardFetchResult {
