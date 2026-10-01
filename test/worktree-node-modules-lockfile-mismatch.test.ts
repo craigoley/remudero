@@ -390,6 +390,7 @@ async function runT4193(
     spawnReturns?: boolean;
     readRemoteHead?: (repoDir: string, ref: string) => string;
     managedCheckoutInstall?: (repoDir: string) => void;
+    installFailureIssues?: { create: (title: string, body: string, labels: string[]) => string; listOpen: () => [] };
   } = {},
 ): Promise<T4193Run> {
   const planPath = join(root, "tasks.yaml");
@@ -423,6 +424,7 @@ async function runT4193(
         claimReserver: reserver,
         ...(opts.readRemoteHead ? { worktreeBaseDeps: { readRemoteHead: opts.readRemoteHead } } : {}),
         managedCheckoutInstall: opts.managedCheckoutInstall,
+        prOpenRefusalIssues: opts.installFailureIssues,
       }),
     );
   } catch (e) {
@@ -682,6 +684,27 @@ test("W1-T4356: an install that fails after the fast-forward is reverted and ref
     assert.ok(r.reserver.calls.includes(`drop:${T4193_TASK}:t4193-anchor`), "the claim is released");
     assert.equal(r.ledger.find((l) => l.step === "worktree.add"), undefined, "no worktree is cut");
     assert.equal(existsSync(join(root, "state", "managed-checkout-remudero.lock")), false, "the checkout lock is released");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4933: default staged install failure reaches the dispatch escalation gateway once", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4933-escalate-`));
+  try {
+    const { repoDir } = t4193Fixture(root, { "package.json": pkgJson("t4193-core", { a: "^1.0.0" }) });
+    mkdirSync(join(repoDir, "node_modules"));
+    const created: string[] = [];
+    const r = await runT4193(root, { installFailureIssues: {
+      listOpen: () => [],
+      create: (title) => {
+        created.push(title);
+        return "https://example.invalid/issues/install-failure";
+      },
+    } });
+    assert.ok(r.ledger.some((row) => row.step === "managed_checkout.install_failed"), "the real npm ci default failed on the absent lockfile");
+    assert.equal(created.length, 1, "the dispatch callback delivered one escalation through the offline gateway");
+    assert.match(created[0] ?? "", /staged install|install failed|lockfile/i);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

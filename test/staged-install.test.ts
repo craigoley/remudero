@@ -206,6 +206,69 @@ test("W1-T4933: workspace package.json files are staged so npm ci sees the same 
   });
 });
 
+test("W1-T4933: absent workspace parents and literal workspace paths do not hide staged manifests", () => {
+  withRoot((root) => {
+    const repoDir = lockfileDriftTree(root);
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({
+      name: "core", workspaces: ["missing/*", "packages/api-client"], dependencies: {},
+    }));
+    mkdirSync(join(repoDir, "packages", "api-client"), { recursive: true });
+    writeFileSync(join(repoDir, "packages", "api-client", "package.json"), '{"name":"@x/api-client"}');
+    stagedInstall(repoDir, {
+      runInstall: (stage) => {
+        assert.ok(existsSync(join(stage, "packages", "api-client", "package.json")));
+        installsAll(stage);
+      },
+    });
+  });
+});
+
+test("W1-T4933: the real npm ci default reports a broken lockfile and preserves the old tree", () => {
+  withRoot((root) => {
+    const repoDir = lockfileDriftTree(root);
+    assert.throws(() => stagedInstall(repoDir), StagedInstallFailedError);
+    assert.ok(existsSync(join(repoDir, "node_modules", "old-tree.txt")));
+  });
+});
+
+test("W1-T4933: an absent live tree can be installed without a previous-tree rename", () => {
+  withRoot((root) => {
+    const repoDir = lockfileDriftTree(root);
+    rmSync(join(repoDir, "node_modules"), { recursive: true });
+    assert.equal(stagedInstall(repoDir, { runInstall: installsAll }), "refreshed");
+    assert.ok(existsSync(join(repoDir, "node_modules", "new-tree.txt")));
+  });
+});
+
+test("W1-T4933: a failed second rename restores the live tree", () => {
+  withRoot((root) => {
+    const repoDir = lockfileDriftTree(root);
+    assert.throws(() => stagedInstall(repoDir, {
+      runInstall: () => {},
+      verify: () => [],
+    }), StagedInstallFailedError);
+    assert.ok(existsSync(join(repoDir, "node_modules", "old-tree.txt")), "rollback restored the old tree");
+    assert.equal(existsSync(join(repoDir, "node_modules", "new-tree.txt")), false);
+  });
+});
+
+test("W1-T4933: failed marker and escalation delivery are recorded without masking the install failure", () => {
+  withRoot((root) => {
+    const repoDir = lockfileDriftTree(root);
+    const marker = join(repoDir, "node_modules", ".rmd-install-escalated");
+    mkdirSync(marker);
+    const steps: string[] = [];
+    assert.throws(() => stagedInstall(repoDir, {
+      runInstall: () => { throw new Error("npm ci failed first"); },
+      log: (step) => void steps.push(step),
+      escalate: () => { throw new Error("issue gateway failed second"); },
+    }), (e: unknown) => e instanceof StagedInstallFailedError && /npm ci failed first/.test(e.message));
+    assert.ok(steps.includes("managed_checkout.install_escalation_unmarked"));
+    assert.ok(steps.includes("managed_checkout.install_escalation_failed"));
+    assert.ok(existsSync(join(repoDir, "node_modules", "old-tree.txt")));
+  });
+});
+
 test("W1-T4933: a symlinked node_modules is never swapped", () => {
   withRoot((root) => {
     const repoDir = join(root, "repos", "console");

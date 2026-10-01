@@ -13702,7 +13702,7 @@ interface RunTaskBodyOptions {
   readHeadShaForProvenance?: (prUrl: string) => string;
   /** W1-T4797: test seam for the pre-push diff-coverage precheck; production reads the real ones. */
   coveragePrecheckPorts?: CoveragePrecheckPorts;
-  /** Where a stale-proof PR-open refusal escalates; production files the task repo's own issue. */
+  /** Where a stale-proof PR-open refusal or managed-checkout install failure escalates; production files the task repo's own issue. */
   prOpenRefusalIssues?: IssueGateway;
   spawnWallClockBoundMs?: number;
   workerRuleHeadlinesEnabled?: boolean;
@@ -14612,6 +14612,8 @@ async function runTask(
     worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
     /** W1-T4356/W1-T4933: refreshes a managed checkout whose lockfile hash moved; default {@link stagedInstall}. */
     managedCheckoutInstall?: (repoDir: string) => void;
+    /** Test gateway for checkout install escalation; production uses the task repo's issue gateway. */
+    prOpenRefusalIssues?: IssueGateway;
     instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
     pairedTrial?: Partial<PairedTrialInput>;
     pairedTrialHost?: "daemon";
@@ -15928,7 +15930,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   try {
     checkoutRefresh = await retryWhileLockBusy(
       () => refreshManagedCheckout(repoDir, join(config.root, "state", `managed-checkout-${task.repo}.lock`), log, opts.managedCheckoutInstall, (failure) => {
-        void tryEscalate(managedCheckoutInstallEscalation(failure, task.id, runId), { issues: ghIssueGateway(owner, task.repo), ledgerPath, runId });
+        void tryEscalate(managedCheckoutInstallEscalation(failure, task.id, runId), { issues: opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo), ledgerPath, runId });
       }),
       isManagedCheckoutLockBusy,
       { log },
