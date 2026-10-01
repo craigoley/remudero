@@ -23,6 +23,7 @@ import {
   type PanelGraphDeps,
   type RatifyCliGateway,
 } from "../src/lib/panel-graph.js";
+import { refreshInboxClassification } from "../src/lib/inbox-view.js";
 import { plainTemplate } from "../src/lib/inbox-plain.js";
 import { bearerTokenId } from "../src/lib/panel-actions.js";
 import {
@@ -1317,7 +1318,7 @@ test("W1-T3408: a RATIFIED proposal still appears in NO array — surfacing decl
   });
 });
 
-test("GET /v1/inbox: a P19-shaped drifted registry entry is CORRECTED on disk, not merely worked around in the response — one request heals state/inbox-proposals.json so any OTHER consumer of that file also sees the ratified proposal gone (acceptance 1: DETECTED and corrected, not trusted)", async () => {
+test("the inbox slow lane: a P19-shaped drifted registry entry is CORRECTED on disk, not merely worked around in the response — one refresh heals state/inbox-proposals.json so any OTHER consumer of that file also sees the ratified proposal gone, and GET /v1/inbox itself writes nothing (acceptance 1: DETECTED and corrected, not trusted)", async () => {
   const root = tmpRoot();
   const planPath = emptyPlanPath(root);
   mkdirSync(join(root, "state"), { recursive: true });
@@ -1339,10 +1340,13 @@ test("GET /v1/inbox: a P19-shaped drifted registry entry is CORRECTED on disk, n
     branch: "run-APPROVE-P19-1",
   });
 
+  const before = readFileSync(registryPath, "utf8");
   await withService(depsFor(root, planPath), async (base) => {
     const res = await get(base, "/v1/inbox", READ_TOKEN);
     assert.equal(res.status, 200);
   });
+  assert.equal(readFileSync(registryPath, "utf8"), before, "a read leaves the registry as it found it");
+  await refreshInboxClassification(depsFor(root, planPath), {});
 
   const healed = JSON.parse(readFileSync(registryPath, "utf8")) as { proposals: Array<{ id: string }> };
   assert.deepEqual(

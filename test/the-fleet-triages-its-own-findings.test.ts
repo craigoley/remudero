@@ -27,6 +27,7 @@ import {
   type FleetLaneDeps,
 } from "../src/lib/fleet-lane.js";
 import { machineTokens } from "../src/lib/inbox-plain.js";
+import { refreshInboxClassification } from "../src/lib/inbox-view.js";
 import { buildPanelGraphRoutes, fleetLaneStoreForDisplay } from "../src/lib/panel-graph.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { createService } from "../src/lib/service.js";
@@ -133,13 +134,14 @@ test("W1-T4089: two findings with the same subject become one task", () => {
   const pass = triageFleetLane(f.deps(5));
   assert.deepEqual(pass.merged, ["followup:W1-T3999:ci"]);
   assert.deepEqual(pass.filed, ["followup:W1-T3999:research"]);
-  assert.deepEqual(triageFleetLane(f.deps(5)), { filed: [], merged: [], room: 5 - 1 }, "a second pass decides nothing twice");
+  const { classificationAgeMs: _age, ...second } = triageFleetLane(f.deps(5));
+  assert.deepEqual(second, { filed: [], merged: [], room: 5 - 1 }, "a second pass decides nothing twice");
 });
 
 test("W1-T4089: a finding whose evidence no longer holds is retired", () => {
   // The inbox classification owns retirement; the lane reads it and never files or folds a retired one.
   const f = fx({ [P1]: "retired", [P2]: "ratified", [F1]: "declined" }, [P1, P2, F1]);
-  const pass = triageFleetLane(f.deps(10));
+  const { classificationAgeMs: _age, ...pass } = triageFleetLane(f.deps(10));
   assert.deepEqual(pass, { filed: [], merged: [], room: 10 });
   assert.deepEqual(f.approved, []);
   // No snapshot at all: nothing is done on a guess.
@@ -213,36 +215,36 @@ test("W1-T4089: the merge rate comes from main's history, and an unanswerable re
   assert.equal(typeof mergedInLastDay(process.cwd()), "number", "the real git read runs");
 });
 
-test("W1-T4089: the inbox writes the classification snapshot and shows each fleet finding's decision", async () => {
+test("W1-T4089: the inbox slow lane writes the classification snapshot and the inbox shows each fleet finding's decision", async () => {
   const f = fx({ [A1]: "ready" }, []);
   const root = join(f.stateDir, "..");
   mkdirSync(join(root, "plan"), { recursive: true });
   writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
   writeFileSync(classificationSnapshotPath(f.stateDir), "");
   writeFileSync(f.ledgerPath, JSON.stringify({ step: "fleet_lane.decided", task_id: A1, decision: "merge", reason: "Folded." }) + "\n" + JSON.stringify({ step: "fleet_lane.decided", task_id: A1, decision: "other" }) + "\n");
-  const server = createService({
-    tokens: { read: "r", write: "w" },
-    routes: buildPanelGraphRoutes({
-      root,
-      inboxRoot: root,
-      planPath: join(root, "plan", "tasks.yaml"),
-      ledgerPath: f.ledgerPath,
-      github: { prView: () => null },
-      statusGithub: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
-      ratify: { approve: () => {}, reframe: () => {} },
-    }),
-  });
+  const inboxDeps = {
+    root,
+    inboxRoot: root,
+    planPath: join(root, "plan", "tasks.yaml"),
+    ledgerPath: f.ledgerPath,
+    github: { prView: () => null },
+    statusGithub: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
+    ratify: { approve: () => {}, reframe: () => {} },
+  };
+  const server = createService({ tokens: { read: "r", write: "w" }, routes: buildPanelGraphRoutes(inboxDeps) });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/inbox`, { headers: { authorization: "Bearer r" } });
     const body = (await res.json()) as { fleet: Array<{ proposalId: string; decision?: string; reason?: string }> };
     assert.equal(body.fleet[0]!.decision, "merge");
     assert.equal(body.fleet[0]!.reason, "Folded.");
-    const snap = JSON.parse(readFileSync(classificationSnapshotPath(f.stateDir), "utf8")) as { states: Record<string, string> };
-    assert.equal(snap.states[A1], "not_ready", "the route recorded what it classified");
+    assert.equal(readFileSync(classificationSnapshotPath(f.stateDir), "utf8"), "", "the route writes nothing");
   } finally {
     server.close();
   }
+  await refreshInboxClassification(inboxDeps, {});
+  const snap = JSON.parse(readFileSync(classificationSnapshotPath(f.stateDir), "utf8")) as { states: Record<string, string> };
+  assert.equal(snap.states[A1], "not_ready", "the slow lane records what the inbox classifies");
   assert.equal(fleetLaneDecisions([{ step: "fleet_lane.decided", task_id: P1, decision: "file" }]).get(P1)?.reason, "The fleet turned this finding into planned work.");
 });
 

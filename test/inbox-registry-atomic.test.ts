@@ -349,7 +349,7 @@ test("W1-T240 claim 2: releasing the lock in `finally` is idempotent -- somethin
 // writeFileSync(registryPath -- which would silently reopen the exact race this task closes.
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
-const panelGraphSrc = readFileSync(fileURLToPath(new URL("../src/lib/panel-graph.ts", import.meta.url)), "utf8");
+const inboxViewSrc = readFileSync(fileURLToPath(new URL("../src/lib/inbox-view.ts", import.meta.url)), "utf8");
 
 /** Extract one top-level function/`export function` declaration's source text, from its
  *  signature to the start of the NEXT top-level function declaration (or EOF) -- good
@@ -381,20 +381,20 @@ for (const [label, signature] of [
   });
 }
 
-test("W1-T240 claim 3: the serve daemon's GET /v1/inbox heal (lib/panel-graph.ts's buildInboxRoute) reaches updateProposalRegistry, never a bare writeFileSync(registryPath -- this is the writer that runs INSIDE the long-lived daemon, making the multi-writer race genuine rather than theoretical", () => {
-  const body = extractFunctionBody(panelGraphSrc, "export function buildInboxRoute(");
-  assert.match(body, /updateProposalRegistry\(/, "buildInboxRoute must route its heal write through updateProposalRegistry");
-  assert.doesNotMatch(body, /writeFileSync\(registryPath/, "buildInboxRoute must not retain a bare writeFileSync on the registry path");
+test("W1-T240 claim 3: the serve slow lane's inbox heal (lib/inbox-view.ts's refreshInboxClassification) reaches updateProposalRegistry, never a bare writeFileSync(registryPath -- this is the writer that runs INSIDE the long-lived daemon, making the multi-writer race genuine rather than theoretical", () => {
+  const body = extractFunctionBody(inboxViewSrc, "export async function refreshInboxClassification(");
+  assert.match(body, /updateProposalRegistry\(/, "refreshInboxClassification must route its heal write through updateProposalRegistry");
+  assert.doesNotMatch(body, /writeFileSync\(registryPath/, "refreshInboxClassification must not retain a bare writeFileSync on the registry path");
 });
 
-test("W1-T240 claim 3: updateProposalRegistry is imported from lib/inbox.ts by BOTH run-task.ts and panel-graph.ts -- one shared helper, never two divergent re-implementations", () => {
+test("W1-T240 claim 3: updateProposalRegistry is imported from lib/inbox.ts by BOTH run-task.ts and inbox-view.ts -- one shared helper, never two divergent re-implementations", () => {
   const runTaskImportBlock = runTaskSrc.match(/import \{([\s\S]*?)\} from "\.\/lib\/inbox\.js";/);
   assert.ok(runTaskImportBlock, "run-task.ts must import from ./lib/inbox.js");
   assert.match(runTaskImportBlock![1], /\bupdateProposalRegistry\b/, "run-task.ts must import the shared helper from lib/inbox.js");
 
-  const panelGraphImportBlock = panelGraphSrc.match(/import \{([\s\S]*?)\} from "\.\/inbox\.js";/);
-  assert.ok(panelGraphImportBlock, "panel-graph.ts must import from ./inbox.js");
-  assert.match(panelGraphImportBlock![1], /\bupdateProposalRegistry\b/, "panel-graph.ts must import the SAME shared helper from ./inbox.js");
+  const inboxViewImportBlock = inboxViewSrc.match(/import \{([\s\S]*?)\} from "\.\/inbox\.js";/);
+  assert.ok(inboxViewImportBlock, "inbox-view.ts must import from ./inbox.js");
+  assert.match(inboxViewImportBlock![1], /\bupdateProposalRegistry\b/, "inbox-view.ts must import the SAME shared helper from ./inbox.js");
 });
 
 // ── Claim 4: the REAL dispatch path -- not just a source grep -- actually reaches the new
