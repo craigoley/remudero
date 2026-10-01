@@ -140,7 +140,10 @@
   origin: feedback#fb-1784919210522-5ac4ca
   plan_refs: ["§7", "§5D"]
   files: [src/lib/status-board.ts, src/run-task.ts, test/status-board.test.ts, docs/operator-guide.md]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FILED 2026-08-01 from feedback fb-1784919210522-5ac4ca, DECOMPOSED into two tasks under standing rule
     19 (the entry names seven sections across two very different data provenances; one task shipping all seven
@@ -216,7 +219,10 @@
   origin: feedback#fb-1784919210522-5ac4ca
   plan_refs: ["§7", "§5D"]
   files: [src/lib/status-board.ts, src/run-task.ts, test/status-board.test.ts, docs/operator-guide.md]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FILED 2026-08-01 from feedback fb-1784919210522-5ac4ca (second of the two-task decomposition; see
     W1-T279's note for the split rationale). depends_on W1-T279 because it appends to that task's read model.
@@ -288,7 +294,10 @@
   origin: architect
   plan_refs: ["§5C", "P22"]
   files: [src/lib/daemon.ts, src/lib/sweep.ts, src/run-task.ts, test/sweep.test.ts, test/daemon.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FILED 2026-07-24 (fable-analyzed) from PR #707's 'looks green but won't merge' stall (armed the OLD
     head 7774b13 at 13:12, beb92f7 push invalidated the SHA-pinned remudero-review, ZERO daemon sweeps saw
@@ -381,7 +390,10 @@
   origin: feedback#fb-1784818107548-b32f2b
   plan_refs: ["§5C", "§12"]
   files: [scripts/test-with-retry.mjs, package.json, .github/workflows/ci.yml, test/test-with-retry.test.ts, test/setup/open-shell.ts, test/serve.shell-ux.test.ts, test/serve.live-state.test.ts, test/serve.first-paint.test.ts, test/serve.find.test.ts, test/serve.detail-journey.test.ts, test/serve.density-ia.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FILED 2026-07-24 from feedback fb-1784818107548-b32f2b, platform facts re-verified at source before
     filing: package.json:30 (`npm test`, no retry), ci.yml:47 and ci.yml:140-145 (the two runs of the same
@@ -591,7 +603,10 @@
   origin: feedback#fb-1784770185732-e025c1
   plan_refs: ["§7B", "§7"]
   files: [src/lib/panel-graph.ts, src/lib/feedback.ts, src/lib/serve.ts, test/panel-graph.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FILED 2026-07-24 from feedback fb-1784770185732-e025c1, source-verified before filing: serve.ts:1272
     /1325 (the proposed decision card), panel-graph.ts:129/88 (listFeedback off the local repo root, not a
@@ -664,7 +679,10 @@
   origin: architect
   plan_refs: ["§5C", "§12", "P22"]
   files: [src/run-task.ts, src/lib/review.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FILED 2026-07-21 after a read-only arm-path recon. Citations verified at origin/main a18fdeb rather
     than assumed, and the recon corrected two things a reader would otherwise get wrong: there are SEVEN arm
@@ -725,7 +743,10 @@
   origin: architect
   plan_refs: ["§5C", "§12"]
   files: [src/lib/review.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FILED 2026-07-21 from the verdict-oscillation incident. Fixtures: PR 449 head 833561d (seven writes,
     CAPPED-over-executed at 18:02:31 to 18:10:42, post-merge write at 18:16:20), PRs 452 and 479 (same-SHA
@@ -782,7 +803,10 @@
   origin: architect
   plan_refs: ["§5C"]
   files: [src/lib/review.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FILED 2026-07-21. Measurements taken by hand on a scratch clone of origin/main a9ef3b9, not estimated:
     0.2s narrowed, 1.51s and 4.72s whole-file, against a 30s cap.
@@ -902,7 +926,10 @@
   origin: architect
   plan_refs: ["§4A", "§5C"]
   files: [src/lib/review.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FILED 2026-07-21, last of the post-W1-T203 set. Precondition verified from source rather than assumed:
     the judge's verdict travels by report and no leg depends on the worker POST, so the instruction can be
@@ -1013,7 +1040,10 @@
   origin: architect
   plan_refs: ["§4", "§9"]
   files: [src/lib/daemon.ts, test/daemon.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "AMENDED at recon intake, 2026-07-21. Task is QUEUED - verified that zero merged PRs carry its
     Remudero-Task trailer - so standing rule 21 does not apply.
@@ -1103,7 +1133,10 @@
   origin: architect
   plan_refs: ["§5C"]
   files: [src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FILED 2026-07-21 from a hand-reproduced failure, not from a report. The collision was reproduced
     verbatim against a live PR branch and the two-step shape read at source.
@@ -1156,7 +1189,10 @@
   origin: architect
   plan_refs: ["§5C", "§12"]
   files: [src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FILED 2026-07-21. The leak count of 39 is OBSERVED from a worktree census taken the same day, not
     inferred: 41 registered worktrees before the sweep, 2 after, with all 39 review-PR* entries verified
@@ -1417,7 +1453,10 @@
   origin: architect
   plan_refs: ["§7", "§9"]
   files: [src/lib/status.ts, src/lib/board.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "DATA half of the live-state layer (layer 1). Prerequisite for W1-T153's NOW section — added to W1-T153's
     depends_on so the DAG orders it first. Sibling W1-T156 (UI+trust half). Preserves the board-fix O(1) invariant."
@@ -1460,7 +1499,10 @@
   origin: architect
   plan_refs: ["P25", "§7", "§2"]
   files: [src/lib/inbox.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T111
@@ -1500,7 +1542,10 @@
   origin: architect
   plan_refs: ["P25", "§7", "§4"]
   files: [src/lib/inbox.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Named consumers already filed: W1-T105's follow-up candidates and the retro's minted proposals
     flow here. P26's issue-reaction transport is the roadmapped upgrade."
@@ -1660,7 +1705,10 @@
   origin: architect
   plan_refs: ["§7", "§9"]
   files: [src/run-task.ts, src/lib/launchd.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "AMENDED 2026-07-28 (third amendment — CITATION FIX + BODY RECONCILIATION ONLY; no criterion's
     requirement changed). (i) The freshness criterion cited task id W1-T255, which is WRONG: W1-T255 is the
@@ -1857,7 +1905,10 @@
   origin: architect
   plan_refs: ["§7", "§9"]
   files: [src/lib/status.ts, test/status.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "LIVE OUTAGE at filing time — the operator console reports merged 0/160 and every task queued, and has done
     since the repo's PR JSON crossed 1 MiB. Placed at the drain front ahead of W1-T128 because it is small,
@@ -2119,7 +2170,10 @@
   origin: architect
   plan_refs: ["§4", "§9"]
   files: [src/run-task.ts, src/lib/sweep.ts, src/lib/drain.ts, test/run-task.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "UPGRADED at filing time from a fix-rung-only merged-check to a TERMINAL-STATE INVARIANT AT EVERY SPENDING
     SITE, because the #388 forensics showed the same missing check firing at four independent sites within seven
@@ -2221,7 +2275,10 @@
   origin: architect
   plan_refs: ["§7"]
   files: [src/lib/status.ts, src/lib/board.ts, test/status.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "LIVE OUTAGE at filing, second operator report. Placed at the drain front by the same severity logic as
     W1-T181: an operator-facing outage outranks queued work, and every task behind it is being developed against
@@ -2431,7 +2488,10 @@
   origin: architect
   plan_refs: ["§5C", "§6A"]
   files: [src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "GENERALIZED 2026-07-20 from retro-only to ALL machine plan-PR emitters after the class fired a SECOND time.
     Fixtures: #287 (retro — plan-index stale + non-conventional type, two hand-fixes) and #387 (the inaugural rmd
@@ -2512,7 +2572,10 @@
   origin: architect
   plan_refs: ["§7", "§9"]
   files: [src/lib/status.ts, test/status.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Both acceptance criteria are carried VERBATIM from W1-T155 (added there by PR #374 at 17:35:20Z, after
     PR #365 credited the task at 15:50:08Z). Rule 16: no criterion dropped or weakened, only redistributed.
@@ -2622,7 +2685,10 @@
   origin: architect
   plan_refs: ["§7", "§7B"]
   files: [src/lib/status.ts, test/status.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Fixture is an operator screenshot of console v2, 2026-07-20 ~21:30: ~44 escalated rows each with an
     Approve button, against 0 OPEN needs-human issues (30 total, all closed). Two independent defects in one
@@ -2798,7 +2864,10 @@
   origin: architect
   plan_refs: ["§7B", "§12"]
   files: [src/lib/inbox.ts, test/inbox.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FILED 2026-07-20 from a second operator report. Filed rather than confirmed: there was no existing
     inbox state-sync task — the nearest matches (W1-T110 inbox core, W1-T173 draft fences) cover different ground.
@@ -2886,7 +2955,10 @@
   origin: architect
   plan_refs: ["§5C", "§12"]
   files: [scripts/coverage-ratchet.mjs]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "PULLED TO THE IMMEDIATE DRAIN HEAD 2026-07-21 by operator ruling, ahead of W1-T203 and therefore
     ahead of the entire gate-integrity and write-atomicity block. The reasoning is not that this defect is
@@ -3035,7 +3107,10 @@
   origin: architect
   plan_refs: ["§12", "P29"]
   files: [src/lib/ledger.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "INTAKE FIXTURE #1 (docs/audits/recon-2026-07-21.md), findings R-8 and R-16. Evidence spot-verified at
     file:line during intake rather than taken from the report - the report's PIPE_BUF framing was WRONG and
@@ -3090,7 +3165,10 @@
   origin: architect
   plan_refs: ["§12", "P22"]
   files: [src/lib/status.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "INTAKE FIXTURE #1, finding R-17. Line numbers corrected during intake: the writer is status.ts:906-912
     and the four callers are run-task.ts:1832/:3131/:3565/:3802, not the stale values in the report.
@@ -3145,7 +3223,10 @@
   origin: architect
   plan_refs: ["§12"]
   files: [src/lib/worker.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "INTAKE FIXTURE #1, finding R-18. The recon's zero-grace trigger was REFUTED at source during intake
     (DEFAULT_PRUNE_GRACE_MS 120_000, overridden at all six production call sites, and the grace branch gated
@@ -3208,7 +3289,10 @@
   origin: feedback#fb-1784732500436-728bc1
   plan_refs: ["§12"]
   files: [src/lib/inbox.ts, src/lib/panel-graph.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FOURTH WRITE-TARGET of the WRITE-SIDE ATOMICITY family (standing rule 23), from feedback
     fb-1784732500436-728bc1 — the family's recon fixtures stopped at ledger/status.json/run.lock and no
@@ -3266,7 +3350,10 @@
   origin: feedback#fb-1784732500436-728bc1
   plan_refs: ["§12"]
   files: [src/run-task.ts, src/lib/inbox.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FIFTH WRITE-TARGET of the WRITE-SIDE ATOMICITY family (standing rule 23), from feedback
     fb-1784732500436-728bc1. W1-T173 touches state/inbox-drafts.json for fence-stripping and W1-T192 for
@@ -3319,7 +3406,10 @@
   origin: feedback#fb-1784732500436-728bc1
   plan_refs: ["§12"]
   files: [src/run-task.ts, src/lib/retro.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "SIXTH WRITE-TARGET of the WRITE-SIDE ATOMICITY family (standing rule 23), from feedback
     fb-1784732500436-728bc1. W1-T201 owns the cadence TRIGGER that reads this marker, not the marker's
@@ -3396,7 +3486,10 @@
   origin: feedback#fb-1784734427694-703ff7
   plan_refs: ["§7B", "§2"]
   files: [src/lib/feedback.ts, src/run-task.ts, src/lib/ops.ts, src/lib/issues-intake.ts, src/lib/panel-graph.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FILED 2026-07-22 from feedback fb-1784734427694-703ff7, verified at source during triage: no git
     call exists in src/lib/feedback.ts; run-task.ts:5906/:5915/:5918 confirm triage reads a fresh
@@ -3461,7 +3554,10 @@
   origin: architect
   plan_refs: ["§5C", "P22"]
   files: [src/lib/review.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "OPERATOR RIDER, 2026-07-21, recorded verbatim and BINDING on this task and on any future floor-raising
     work: 'plan-only PRs structurally have zero executable proofs - they are ALWAYS capped. Any floor of the
@@ -3678,7 +3774,10 @@
   origin: architect
   plan_refs: ["§5C", "P22"]
   files: [src/lib/review.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "INTAKE FIXTURE #1, findings R-13 and R-14. FILED AS A FOLLOW-UP, NOT AN AMENDMENT: the intake brief
     proposed amending the W1-T185 family, but W1-T185 is DONE - verified by a merged PR carrying its
@@ -3806,7 +3905,10 @@
   origin: architect
   plan_refs: ["§5C"]
   files: [src/lib/review.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "INTAKE FIXTURE #1, findings R-12 and R-15, recon T9. Both claimed line refs verified exact.
     R-10 (the mutation ratchet covering only src/lib/classify.ts, stryker.conf.json:8) is REAL and verified,
@@ -3860,7 +3962,10 @@
   origin: architect
   plan_refs: ["§12", "P29"]
   files: [src/lib/ledger.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "INTAKE FIXTURE #1, finding R-9 coupled to R-16, recon T5. Size measured at intake: 9,455,694 bytes.
     The recon's own framing is right that this must be breaker-safe, and that is the whole difficulty - a
@@ -3915,7 +4020,10 @@
   origin: feedback#fb-1784769525147-13afc6
   plan_refs: ["§12", "P29"]
   files: [src/lib/ledger.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Filed from feedback fb-1784769525147-13afc6 (cli, 2026-07-23). W1-T209's acceptance required the
     decision-relevant set be derived from consumers, but neither it nor anything else in the plan stated the
@@ -3968,7 +4076,10 @@
   origin: architect
   plan_refs: ["§4A"]
   files: [src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "INTAKE FIXTURE #1, finding R-19. Line numbers corrected at intake: the interpolation is
     run-task.ts:1013 and the fetch is :4183-4187, not the report's 995-1011 and 1064 (1064 is unrelated).
@@ -4021,7 +4132,10 @@
   origin: architect
   plan_refs: ["§5C"]
   files: [.github/workflows/ci-gate.yml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "INTAKE FIXTURE #1, finding R-11, recon T8. Both claimed line refs verified exact; REQUIRED spans
     ci-gate.yml:97-98 rather than 97 alone. The Dependabot exemption (osv-scanner-pr.yml:21) was found during
@@ -4134,7 +4248,10 @@
   origin: architect
   plan_refs: ["§9"]
   files: [src/lib/daemon.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "INTAKE FIXTURE #1, recon T2-AC2. The sibling criterion T2-AC3 (cross-boot escalation dedup) is
     DELIBERATELY NOT FILED - it already existed as ledger-derived dedup and its ordering defect was fixed in
@@ -4182,7 +4299,10 @@
   origin: architect
   plan_refs: ["§10"]
   files: [src/lib/ledger.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "INTAKE FIXTURE #1, finding R-25. Split out of W1-T217 at intake after the plan linter flagged the
     combined runbook-plus-rotation task as spanning two concerns. Log sizes measured at intake rather than
@@ -4240,7 +4360,10 @@
   origin: architect
   plan_refs: ["§10"]
   files: [plan/claims.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "INTAKE FIXTURE #1, findings R-30 and R-25, recon T10. Every R-30 sub-claim verified at intake;
     CONTRIBUTING's offending line is 3-6 rather than the reported 5, and the missing-verb count is twelve
@@ -4291,7 +4414,10 @@
   origin: architect
   plan_refs: ["§10"]
   files: [docs/operator-guide.md]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "INTAKE FIXTURE #1, finding R-25 plus the runbook half of R-30. SPLIT FROM W1-T213 at intake: the
     linter flagged that combination as spanning claims, daemon and launchd, and flagged a criterion naming
@@ -4384,7 +4510,10 @@
   origin: architect
   plan_refs: ["§5C", "§4"]
   files: [src/lib/review.ts, src/run-task.ts, test/review.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "SUCCESSOR to W1-T128 (merged #414), not a duplicate: T128 made proofs EXECUTABLE and demonstrably worked
     (executed proofs went from 1-in-135 to 4-in-15 after it merged). This makes the VERDICT depend on whether
@@ -4467,7 +4596,10 @@
   origin: architect
   plan_refs: ["§7B", "§4"]
   files: [src/run-task.ts, test/run-task.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FILED 2026-07-21 from the operator question 'why do I need to run the inbox command?'. The answer,
     verified from source, is that the draft rung has exactly one caller and it is the CLI — daemon.ts references
@@ -5199,7 +5331,10 @@
   origin: architect
   plan_refs: ["§7", "§12"]
   files: [test/serve.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "RULE 21 FOLLOW-UP to the merged W1-T154 — filed rather than amended, for the reason rule 21 exists.
     Depends on W1-T187 because the 49s measurement is dominated by that task's O(tasks x ledger) projection
@@ -5538,7 +5673,10 @@
   origin: architect
   plan_refs: ["§6", "§7"]
   files: [src/lib/learnings.ts, src/lib/config.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "P32 first task (schema + homes). Extends W1-T33/T34/T38 (the project layer). Transport DEFERRED to §6
     (Tier 3 stateless shape, DECISIONS.md). Sibling W1-T146 adds the promotion judge + scrub gate."
@@ -5576,7 +5714,10 @@
   origin: architect
   plan_refs: ["§6", "§7"]
   files: [src/lib/learnings.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "P32 second task (promotion judge + scrub gate + per-layer budget). REQUIRED planted probes: project-specific
     does-not-promote (judge), secret-bearing blocked-at-scrub (scrub), provenance-survives-redacted. Extends W1-T38."
@@ -5704,7 +5845,10 @@
   origin: architect
   plan_refs: ["§7B", "§7"]
   files: [src/lib/panel-actions.ts, src/lib/drain.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Pull-view sibling of W1-T112 (digest push). Feeds the learning limb W1-T86/T87/T88 the labeled human signal
     they consume. Third leg of the operator-console arc (front door W1-T139, preview W1-T140, inbox W1-T110/T111).
@@ -5827,7 +5971,10 @@
   origin: architect
   plan_refs: ["§5C", "§4B"]
   files: [src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Filed from the open-PR sweep. Follow-up to W1-T94 (defined the ci-log mode; its SELECTOR mis-routes CI-only
     blocks) and W1-T137 (the commitlint-header cap ci-log should invoke). Evidence: #303/#305/#292/#315 all
@@ -5866,7 +6013,10 @@
   origin: architect
   plan_refs: ["§9", "§5C"]
   files: [src/lib/status.ts, src/lib/sweep.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Ratifies P29 (the top R8 item). Sibling of W1-T150 (P30 credit backfill, which reuses this ownership rule).
     Fixtures: W1-T1 ~130 re-dispatches (5h post-merge), W1-T29 x10. A fail-closed integrity guard needs a liveness
@@ -5902,7 +6052,10 @@
   origin: architect
   plan_refs: ["§9", "§5C"]
   files: [src/lib/sweep.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Ratifies P30. Reuses W1-T149's (P29(i)) ownership rule. Fixture: 0/195 ledgered-merge on a 28-merge day.
     Level-triggered credit is P22's doctrine applied to the merge EVENT — edge-triggered crediting at run-end is the
@@ -6085,7 +6238,10 @@
       proof: "unit test: test/containment.test.ts"
   risk: high
   origin: architect
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 # ── SPLIT of the mis-specified W1-T3 (plan PR, Architect correction). W1-T3's eight criteria spanned FOUR
@@ -6313,7 +6469,10 @@
       proof: "grep: no window arithmetic references total_cost_usd"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T5
@@ -6901,7 +7060,10 @@
       proof: "grep §13 of MASTER-PLAN.md shows a link/reference to the plan-sync doc"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T17
@@ -7136,7 +7298,10 @@
   origin: feedback#plan-health
   plan_refs: ["§5C"]
   files: [src/lib/retro.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T21
@@ -7415,7 +7580,10 @@
   origin: architect
   plan_refs: ["§5"]
   files: [.jscpd.json, .github/workflows/ci.yml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Decomposed 2026-07-17 from the four-gate W1-T25 (the #161/$13 blocked_ci lesson) — one gate per
     task; decomposition changes SIZE, never strength. LIVE CONFIRMATION (Rule 18, operator-observed, NOT
@@ -7439,7 +7607,10 @@
   origin: architect
   plan_refs: ["§5"]
   files: [scripts/strict-probe.ts, .github/workflows/ci.yml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Decomposed 2026-07-17 from the four-gate W1-T25 (the #161/$13 blocked_ci lesson) — one gate per
     task; decomposition changes SIZE, never strength. LIVE CONFIRMATION (Rule 18, operator-observed, NOT
@@ -7519,7 +7690,10 @@
       proof: "grep the CI workflow: the containment job is a needs: of the ci-gate aggregator and is triggered on diffs touching sandbox/hooks/env/deny-floor paths"
   risk: high
   origin: architect
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Headless-fitness rewrite 2026-07-16 (W1-T25-vintage tier arc): live 'paste the failing check + blocked state, then revert' proof converted to a falsifier fixture over the containment settings check; the guarantee (the misplaced-allowedDomains typo is caught) survives. LIVE CONFIRMATION (Rule 18, operator-observed, NOT auto-verify): a real branch moving allowedDomains to the sandbox root makes the containment check FAIL and the PR non-mergeable (paste the failing check + blocked state, then revert) — operator-attested."
 
@@ -7811,7 +7985,10 @@
       proof: "reverting one assertion's premise (or breaking its command) makes the job exit non-zero and print the failing claim id/text — paste the red run, then revert"
   risk: high
   origin: architect
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T30
@@ -7838,7 +8015,10 @@
       proof: "fixture test: a planted diff that changes a CLI/gate/verdict surface with NO docs/ change and no stated reason -> the awareness rubric item fails; the same diff WITH a doc update or a stated reason -> passes"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T31
@@ -7863,7 +8043,10 @@
       proof: "a PR whose commit violates Conventional Commits goes CI-red on the commitlint job — paste the red check, then fix"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T32
@@ -7889,7 +8072,10 @@
       proof: "the same trivial auto-choice appears as a decision.autochoose ledger line even though it is absent from DECISIONS.md"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 # ── KNOWLEDGE ARCHITECTURE & CONTEXT ECONOMY (MASTER-PLAN §8A/§8B). W1-T19 shipped the READ side, which
@@ -7919,7 +8105,10 @@
       proof: "the entry claiming 'ZDOTDIR isolates worker shells' is marked lifecycle=superseded; a worker touching env.ts receives ONLY the CLAUDE_CODE_SHELL entry and NEVER the superseded ZDOTDIR one (fixture test over the rendered prompt)"
   risk: high
   origin: architect
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T34
@@ -7945,7 +8134,10 @@
       proof: "fixture test: an entry whose assertion fails is excluded from the injected learnings for a matching task, even though its files: glob matches"
   risk: high
   origin: architect
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T35
@@ -8072,7 +8264,10 @@
       proof: "unit test: marking an entry superseded reduces the counted size; the same bytes as an active entry would exceed the cap"
   risk: high
   origin: architect
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T39
@@ -8097,7 +8292,10 @@
       proof: "a retro run updates docs/ORIENTATION.md in its plan-only PR; the diff shows the refreshed state/next-task — paste the retro's ORIENTATION diff"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 # ── §7B FEEDBACK INTAKE — the Architect's front door. Feedback is an ARTIFACT, not a command; captured to
@@ -8184,7 +8382,10 @@
       proof: "a seeded ambiguous feedback yields options/questions (AskUserQuestion interactively OR a needs-human issue with options + recommendation) and NO proposal PR until answered — paste the questions/issue"
     - claim: "a NEEDLESS grill on an unambiguous item is a FAILURE (test both directions)"
       proof: "a seeded unambiguous feedback proceeds straight to propose with NO questions asked; the fixture asserts zero grill events on the clear case"
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T43
@@ -8295,7 +8496,10 @@
       proof: "--mode=clarify on an ambiguous plan yields grill questions; --mode=expand proposes new tasks each citing a research source; --mode=create scaffolds a fresh plan — paste one run of each"
     - claim: "all three modes share ONE code path (no duplicated ground/research/grill logic)"
       proof: "grep proof: the ground/research/grill functions have a SINGLE definition invoked by all three modes; no per-mode copy — paste the grep"
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W2-T3
@@ -8413,7 +8617,10 @@
       proof: "a seeded genuine blocker (a task its dependents transitively need) halts the drain and files a needs-human escalation; no dependent runs — paste the escalation + the halt"
     - claim: "a seeded INDEPENDENT failure skips ONLY its own dependent subtree and continues the rest"
       proof: "a self-contained failure whose dependents do not need it skips exactly its dependent subtree (flagged) while unrelated runnable tasks still run — paste the subtree skipped + the others merged"
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 # ── §12A DOCUMENTATION GUARANTEE. Docs are a gated artifact: Tier A generated (drift=CI-red) from ONE
@@ -8443,7 +8650,10 @@
       proof: "adding a new dispatched command with no registry entry turns the help-coverage job RED and names the undocumented command — paste the red run, then add the entry"
     - claim: "help output is GENERATED from the registry, not hand-written in the command files"
       proof: "grep proof: rmd --help and rmd <cmd> --help render from the registry; there are no hand-written help/usage strings in the command modules — paste the grep + a rendered help"
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T48
@@ -8469,7 +8679,10 @@
       proof: "the drift-gate CI job regenerates the reference and diffs it; on a clean tree it is byte-identical (green) — paste the job output"
     - claim: "a stale reference (edit a command, do NOT regenerate) turns CI RED and names the drifted command"
       proof: "changing a command's registry entry without regenerating docs/cli-reference.md fails the drift gate with the drifted command named — paste the red diff, then regenerate"
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T49
@@ -8516,7 +8729,10 @@
     - claim: "a new failure learning WITHOUT a troubleshooting entry is flagged by the docs rubric"
       proof: "unit test: test/learnings.test.ts"
   files: [docs/troubleshooting.md, test/learnings.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 # ══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -8643,7 +8859,10 @@
   origin: retro#1784133446353
   plan_refs: ["§8A"]
   files: [src/lib/retro.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Gather spec HARDENED by P9 (retro#1784155126258): ownership-assert + correction-awareness added so the GitHub-union cannot re-inherit the false #80 trailer — build W1-T51 only with these in place."
 
@@ -8670,7 +8889,10 @@
   risk: medium
   origin: retro#1784133446353
   plan_refs: ["§4"]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 # Item 9 — rmd drain --repo parameterization (drain's gateway is hardcoded; daemon's is not).
@@ -8763,7 +8985,10 @@
   origin: feedback#fleet-ops
   plan_refs: ["§5D"]
   files: [src/lib/dep-review.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 # W1-T54 SPLIT (plan/t54-live-split, T24/T24b bootstrap class — THIRD instance): the machine half (W1-T54 —
@@ -8803,7 +9028,10 @@
   origin: architect
   plan_refs: ["§5D"]
   files: [src/lib/dep-review.ts, test/dep-review.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 # Item 6 v0 — alert intake (surface): scanner alerts land in the digest; new critical/high escalates.
@@ -8829,7 +9057,10 @@
   origin: feedback#fleet-ops
   plan_refs: ["§5D"]
   files: [src/lib/ops.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 # Item 6 v1 — alerts become §7B feedback artifacts, triaged into corrective tasks.
@@ -8852,7 +9083,10 @@
   risk: medium
   origin: feedback#fleet-ops
   plan_refs: ["§5D", "§7B"]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 # Item 7 — issues intake for MANAGED repos (remudero's OWN public issues stay OFF until WS-4, §5D/G-6).
@@ -8877,7 +9111,10 @@
   risk: medium
   origin: feedback#fleet-ops
   plan_refs: ["§5D"]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 # ══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -9005,7 +9242,10 @@
   risk: high
   origin: architect
   plan_refs: ["§5"]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Acceptance = W1-T24's THREE ORIGINAL criteria moved VERBATIM (rule 16 — nothing dropped, only
     redistributed across the bootstrap boundary). The RED-sub-check criterion is the P4 golden ratification
@@ -9048,7 +9288,10 @@
   origin: human
   plan_refs: ["§2", "§4A"]
   files: [src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 # SECURITY.md shed from W1-T23 (plan/security-policy-task, origin: human — the operator's original ask
@@ -9147,7 +9390,10 @@
   origin: architect
   plan_refs: ["§2", "§4"]
   files: [src/lib/worker.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "RETRO PROVENANCE — the SHIPPED ledger/verdict for run W1-T54b-1784151420811 falsely names PR #80
     (Dependabot's). The run's REAL PR is #91 (docs/dep-review.md). The next retro (or the W1-T51 build that
@@ -9185,7 +9431,10 @@
   origin: retro#1784155126258
   plan_refs: ["§9", "§4B", "§5"]
   files: [.remudero/mounts.yaml, src/run-task.ts, src/lib/containment.ts, MASTER-PLAN.md, test/mounts.test.ts, test/review.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Ratifies P10 + P10-a. Blocker for safe autonomy: reviewer walls every substantive PR (3 ledgered instances), so the merge gate is floor-only for code today. Live 'reviewer no longer walls' confirmation is the next real run's review.reviewer subtype (operator-observed), Rule 18."
 
@@ -9213,7 +9462,10 @@
   origin: retro#session-2026-07-16
   plan_refs: ["§8", "§9"]
   files: [src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Sibling of W1-T63 — same hardcoded-turn-cap class, on the retro/architect spawn W1-T63 didn't cover. Unblocks the self-improvement loop (retro can't currently open its own PR)."
 
@@ -9308,7 +9560,10 @@
   origin: architect
   plan_refs: ["§5", "§5D"]
   files: [.github/workflows/codeql.yml, .github/workflows/semgrep.yml, .github/workflows/osv-scanner.yml, .github/workflows/osv-scanner-pr.yml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Alert backlog triage 2026-07-16 (operator-enumerated): code-scanning alerts #2-#8. Fix closes the alerts on next Scorecard run — do not dismiss them by hand."
 
@@ -9336,7 +9591,10 @@
   origin: architect
   plan_refs: ["§5"]
   files: [src/lib/config.ts, src/lib/init.ts, test/config.test.ts, test/init.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   pr: 324
   attempts: 0
   note: "Alert backlog triage 2026-07-16: code-scanning alerts #15/#16 (both HIGH). The race is live today only in narrow windows, but WS-2 concurrency widens every window — fix before N-concurrent, not after."
@@ -9427,7 +9685,10 @@
   origin: architect
   plan_refs: ["§2", "§4"]
   files: [src/lib/status.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Ratifies P16 (captured #101). Canonical fixture is the 2026-07-16 reproduction: dry-run listed
     W1-T20d runnable / W1-T20c absent-unbuilt. Live confirmation post-merge is operator-observed (Rule 18):
@@ -9475,7 +9736,10 @@
   origin: architect
   plan_refs: ["§2", "§5"]
   files: [src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Filed from the #119 worker's flag. Resolves it structurally — once anchored, report authors
     need no quoting discipline; the parser enforces the contract instead of trusting prose."
@@ -9533,7 +9797,10 @@
   origin: feedback#fb-1784732687221-3be743
   plan_refs: ["§8A", "§2"]
   files: [src/lib/receipt.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Ratifies P17 (captured #108). First rung = the deterministic generator + byte-equal golden;
     Sigstore signing + the WS-12 schema publish are DEFERRED v2 rungs. Live 'a receipt is posted on every
@@ -9591,7 +9858,10 @@
   origin: architect
   plan_refs: ["§5"]
   files: [src/lib/review.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Relayed from the operator's second Architect thread 2026-07-16; canonical fixtures are the live
     0/2 (#123) and 0/6 (#125) verdict lines. proof_exec is ALREADY ledgered (verified from source) — this
@@ -9629,7 +9899,10 @@
   origin: architect
   plan_refs: ["§Self-improvement", "§5"]
   files: [src/lib/retro.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Independent of W1-T72 (mines the existing proof_exec field); W1-T72's floor_degraded flag becomes
     a second table row when it lands. Relayed 2026-07-16."
@@ -9677,7 +9950,10 @@
   origin: feedback#fb-1784732687221-3be743
   plan_refs: ["§Self-improvement", "§12"]
   files: [src/run-task.ts, test/plan-proposals.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Filed from the #128 worker's root-cause flag. The uniqueness test is the gate; the template line
     is courtesy — a colliding retro PR now goes RED at its own ci instead of merging ambiguity.
@@ -9798,7 +10074,10 @@
   origin: architect
   plan_refs: ["§3", "§5"]
   files: [src/run-task.ts, src/lib/worker.ts, src/lib/status.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "P21 absorbed verbatim (invariant + golden). status.ts is COMMENT-ONLY in this task (the
     assert-stays-strict note); any behavioral status.ts change is out of scope. Reviewer reasons ->
@@ -9847,7 +10126,10 @@
   origin: architect
   plan_refs: ["§5D", "§4B"]
   files: [src/lib/sweep.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Ratifies P22 with its capture ADDENDUM's corrections honored (arm-not-serialize today; HUNG deferred)."
 
@@ -9882,7 +10164,10 @@
   origin: architect
   plan_refs: ["§2", "§7", "§7B"]
   files: [src/lib/sweep.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Interim route (plain W1-T8 escalate) ships in W1-T77; this upgrades it. Question quality is the
     §7B grill primitive pointed at blocks. RISK raised medium->high per the §5C linter's own sizing
@@ -9931,7 +10216,10 @@
   origin: architect
   plan_refs: ["§2", "§4B"]
   files: [src/run-task.ts, src/lib/self-sync.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Operator-requested verbatim 2026-07-16. Completes the W1-T60 pair: plan freshness (shipped) +
     code freshness (this). The refuse path exists so rmd never destroys local state to help. RISK raised
@@ -9976,7 +10264,10 @@
   origin: architect
   plan_refs: ["§4B", "§2"]
   files: [src/lib/drain.ts, src/lib/plan.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Filed from the 2026-07-16 duplicate-build incident (#143 orphaned by #145, $3.32 duplicate spend).
     Complements W1-T77's MERGEABLE disposition: the sweep handles the open PR's next action; this guard
@@ -10015,7 +10306,10 @@
   origin: architect
   plan_refs: ["§5C"]
   files: [src/lib/task-linter.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Filed from the #146 worker's finding. Until this lands, whole-plan lint counts carry known noise;
     --base (CI mode) remains trustworthy for new/changed tasks written post-linter."
@@ -10049,7 +10343,10 @@
   origin: architect
   plan_refs: ["P24", "§5A"]
   files: [src/lib/onboard/inventory.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T83
@@ -10083,7 +10380,10 @@
   origin: architect
   plan_refs: ["P24", "§5A"]
   files: [src/lib/onboard/recon.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T84
@@ -10117,7 +10417,10 @@
   origin: architect
   plan_refs: ["P24", "§2", "§7B"]
   files: [src/lib/onboard/session.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T85
@@ -10154,7 +10457,10 @@
   origin: architect
   plan_refs: ["P24", "§5C", "§5A"]
   files: [src/lib/onboard/synthesize.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Live confirmation (Rule 18): the first real onboarding target is operator-chosen; the fleet
     dry-run (W2-T2) is the natural candidate — onboard it, ratify its drafted plan, drain it."
@@ -10189,7 +10495,10 @@
   origin: architect
   plan_refs: ["P13", "§Self-improvement"]
   files: [src/lib/retro.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T88
@@ -10222,7 +10531,10 @@
   origin: architect
   plan_refs: ["P14", "§Self-improvement"]
   files: [src/lib/retro.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T89
@@ -10257,7 +10569,10 @@
   origin: architect
   plan_refs: ["P18", "§Self-improvement"]
   files: [src/lib/retro.ts, plan/mast-mapping.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Rank before the next retro so the gather lands coded from its first cycle. [research:
     mast-neurips2025, mas-error-amplification-2026] carried from P18's capture. Risk raised medium->high
@@ -10298,7 +10613,10 @@
   origin: architect
   plan_refs: ["P20", "§5D"]
   files: [src/lib/alert-lane.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Dispatch-gated on W1-T55 (the poller) by depends_on — files now, builds when the surface exists.
     OOTB: lane + policy ship in the WS-4 scaffold per P20."
@@ -10341,7 +10659,10 @@
   origin: architect
   plan_refs: ["P23", "§4A", "P18"]
   files: [src/run-task.ts, src/lib/retro.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "risk high per the 2-subsystem precedent (W1-T78/T79/T89). If W1-T89 is unbuilt at build time,
     the mapping row lands in the same plan/mast-mapping.yaml W1-T89 will read — file-level composition,
@@ -10377,7 +10698,10 @@
   origin: architect
   plan_refs: ["§5C"]
   files: [src/lib/task-linter.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Filed from the #153 worker's flag; companion to W1-T81 (recall+negation) — together they make
     whole-plan lint counts trustworthy."
@@ -10416,7 +10740,10 @@
   origin: architect
   plan_refs: ["P22", "§5D"]
   files: [src/lib/sweep.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Operator holds the live sweep until this lands (their call, correct). The dry-run's
     'mergeable 1' on #161 is the canonical fixture."
@@ -10461,7 +10788,10 @@
   origin: architect
   plan_refs: ["P22", "§3"]
   files: [src/run-task.ts, src/lib/worker.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T95
@@ -10493,7 +10823,10 @@
   origin: architect
   plan_refs: ["P22", "§3"]
   files: [src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T99
@@ -10530,7 +10863,10 @@
   origin: architect
   plan_refs: ["P22", "§4"]
   files: [src/lib/escalate.ts, src/lib/sweep.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T100
@@ -10567,7 +10903,10 @@
   origin: architect
   plan_refs: ["P22", "§3"]
   files: [src/lib/sweep.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "CORRECTED 2026-07-17: the original note claimed rmd fix (W1-T95) bridges blocked_ci — FALSIFIED
     live the same day, verbatim: 'rmd fix — PR #170 is not fixable: ... (no block evidence to drive the
@@ -10609,7 +10948,10 @@
   origin: architect
   plan_refs: ["§5C"]
   files: [src/lib/task-linter.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Third precision companion: W1-T81 (recall/negation), W1-T92 (data-file sizing), this
     (proof-resolvability). Together: the birth gate makes the observing floor's coverage grow instead
@@ -10646,7 +10988,10 @@
   origin: architect
   plan_refs: ["P22", "§3"]
   files: [src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T103
@@ -10680,7 +11025,10 @@
   origin: architect
   plan_refs: ["P22", "§5D"]
   files: [src/lib/status.ts, src/lib/sweep.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T104
@@ -10712,7 +11060,10 @@
   origin: architect
   plan_refs: ["§4", "P22"]
   files: [src/lib/escalate.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T105
@@ -10752,7 +11103,10 @@
   origin: architect
   plan_refs: ["§2", "§Self-improvement", "P25"]
   files: [src/run-task.ts, src/lib/retro.ts, test/followup-harvest-corpus.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "The automation of the Architect-harvest role this session performed by hand. Composes with
     W1-T87 (success mining) and W1-T73 (degraded-success mining) as the third retro intake; the P25
@@ -10795,7 +11149,10 @@
   origin: architect
   plan_refs: ["P22", "§3", "§5D"]
   files: [src/lib/sweep.ts, src/lib/status.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Completes the disposition inputs: checks (T93), review (T77), required-contexts green (T103),
     in-flight (T80), and now merge state. The #170 hand-resolution is the mode's canonical procedure. A CONFLICTING PR registers ZERO pull_request runs -- no merge ref means no checks at all, which is indistinguishable from \"still queued.\" When GitHub cannot compute a PR's merge ref it does not produce a red check; it produces NO check, and the PR silently stops being gated. Observed on #242: after #274 merged, two pushes and a close/reopen produced zero workflow runs before the mergeability state (CONFLICTING/DIRTY) explained it; resolving a purely additive .gitignore collision restored CI instantly. Re-confirmed 2026-07-19 across #232/#220/#238/#240, each sitting CONFLICTING with zero check runs on its head until the merge was resolved. The ZERO-CHECKS-WITH-NONZERO-HISTORY signature -- a PR whose head has no check-runs while earlier heads on the same branch do -- is therefore a DETECTION INPUT for the CONFLICTED disposition, and a cheaper one than parsing mergeStateStatus, because it is visible from the same check-run read the sweep already performs. This strengthens the premise rather than adding a case: the rationale says conflict state is invisible to every disposition rule because it is not an OpenPrView input; the sharper statement is that a conflicted PR is invisible TO CI ITSELF, so a disposition rule waiting on checks waits forever."
@@ -10827,7 +11184,10 @@
   origin: architect
   plan_refs: ["§5C"]
   files: [.github/workflows/ci-gate.yml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T108
@@ -10867,7 +11227,10 @@
   origin: architect
   plan_refs: ["§5C", "§5A"]
   files: [.github/workflows/ci.yml, scripts/mutation-ratchet.mjs]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Harvested by hand from the #193 worker's merge note — the W1-T105 class, once more before it
     builds. Ceiling-raising rejected: it would slacken the fast-gate discipline for every check to
@@ -10902,7 +11265,10 @@
   origin: architect
   plan_refs: ["§9", "§4B"]
   files: [src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T113
@@ -10944,7 +11310,10 @@
   origin: architect
   plan_refs: ["§9", "§4B", "P23"]
   files: [src/lib/worker.ts, src/lib/daemon.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Third toolchain-drift incident this week (2.1.214 pkill wrapper; the CLI-behind-main class W1-T79
     tracks; now the install location itself). The pattern: the harness's substrate self-updates beneath
@@ -10983,7 +11352,10 @@
   origin: architect
   plan_refs: ["§3", "P22", "W1-T93"]
   files: [src/lib/sweep.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T115
@@ -11089,7 +11461,10 @@
   origin: architect
   plan_refs: ["§3", "W1-T75", "P9"]
   files: [src/lib/status.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T117
@@ -11142,7 +11517,10 @@
   origin: architect
   plan_refs: ["§9", "§4B", "P23"]
   files: [src/lib/worker.ts, src/lib/daemon.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Acceptance deliberately states termination as an OBSERVABLE (process.kill(pid, 0) throws
     ESRCH) rather than as the verb 'killed', which the Rule 18 headless lexicon blocks on an
@@ -11214,7 +11592,10 @@
   origin: architect
   plan_refs: ["§5C"]
   files: [src/lib/task-linter.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: |
     Filed from the #268 finding, drafted by the filing agent rather than harvested from a worker.
@@ -11804,7 +12185,10 @@
   origin: architect
   plan_refs: ["§5"]
   files: [src/lib/review.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Filed from the closeout chain. This gate has been under-reading every task-less plan/doc PR (mine
     included) all session — the fix's own falsifier is the planted-false-second-claim test (W1-T98 shape)."
@@ -11839,7 +12223,10 @@
   origin: architect
   plan_refs: ["§5", "§4B"]
   files: [src/lib/review.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Filed from the closeout chain; root cause of escalation #283. Companion to W1-T99/W1-T104 (transport
     resilience in escalate()) and the W1-T113 degrade-don't-die class, applied here at the review-post site."
@@ -11883,7 +12270,10 @@
   origin: architect
   plan_refs: ["§5", "MASTER-PLAN#11"]
   files: [.github/workflows/mutation-nightly.yml, stryker.conf.json, scripts/mutation-ratchet.mjs]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Filed from the post-retro mutation-ratchet economics audit (measured). Companion to D-10 (the lifetime
     kill/survive accountability question) and W1-T108 (the PR-gate latency fix this builds on, already live)."
@@ -11944,7 +12334,10 @@
   origin: architect
   plan_refs: ["§5C", "§6A"]
   files: [src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Filed while unsticking #303 (header 108) / #305 (header 114). Sibling of W1-T136 (the retro's version of
     this same PR-emission/commitlint-compliance class). Also surfaced that a commit-message/CI failure is outside
@@ -11984,7 +12377,10 @@
   origin: architect
   plan_refs: ["§5C", "§4B"]
   files: [src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Filed from the open-PR-sweep near-miss (documented in memory squash-phantom-revert-trap). Sibling of the
     other worker-push-hygiene guards W1-T137 (commit header cap) and W1-T80 (in-flight dispatch). The failure mode is
@@ -12024,7 +12420,10 @@
   origin: architect
   plan_refs: ["§9", "§7"]
   files: [src/lib/daemon.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Filed from the open-PR sweep: the daemon is alive and correct (merged PRs, escalated blocks) but INVISIBLE —
     out/err logs empty (non-TTY buffering) and the ledger at ~/Remudero/state/ledger.ndjson (config.root = repo
@@ -12098,7 +12497,10 @@
   origin: architect
   plan_refs: ["§9", "§5C"]
   files: [src/lib/drain.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Fixture = the $206/60-run W1-T1 incident. Budget-polarity dual of W1-T130 (cannot-observe->WAIT). Drainage
     NEVER throttles — only new DISPATCH defers; the falsifier is a governor that strands in-flight work."
@@ -12134,7 +12536,10 @@
   origin: architect
   plan_refs: ["§9", "§5A"]
   files: [src/run-task.ts, src/lib/daemon.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Fixture = the workspace conversion that broke operator builds while CI stayed green (CI installs fresh).
     Extends W1-T126 (daemon self-freshness) with INSTALL-freshness. Cheap detection = hash package-lock.json at
@@ -12218,7 +12623,10 @@
   origin: architect
   plan_refs: ["§5", "§5C"]
   files: [src/lib/review.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Filed from #349's stuck state (W1-T149): correct code, false review block, no self-heal — a human had to
     re-review. Refines W1-T72's nameFiltered guard: keep it catching test theater (named non-existent test = fail),
@@ -12257,7 +12665,10 @@
   origin: architect
   plan_refs: ["§5C", "§4B"]
   files: [src/lib/sweep.ts, src/lib/escalate.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Extends the sweep's level-triggered reconciliation (W1-T77 / P22) from PRs to escalation ISSUES. Evidence:
     11 closed by hand, 6 re-accrued in a day. Falsifier: a live-referent escalation must not close. Companion to
@@ -12330,7 +12741,10 @@
   origin: architect
   plan_refs: ["§5A", "§9"]
   files: [src/lib/replay.ts, src/lib/retro.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "The missing Self-Harness leg. remudero-sandbox is the proven replay venue (W1-T12d). Start minimal (replay +
     3 goldens spanning classes); grow from production failures. Falsifier: a degraded prompt/review change must FAIL
@@ -12376,7 +12790,10 @@
   origin: architect
   plan_refs: ["§5", "§5C"]
   files: [src/lib/plan.ts, src/run-task.ts, src/lib/review.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "The SpecBench reward-hacking finding. holdout:true criteria are reviewer-visible but worker-hidden (prompt
     assembly filters them); the review judges both; the gap is ledgered (feeds D-10 calibration). Falsifiers: a
@@ -12451,7 +12868,10 @@
   origin: architect
   plan_refs: ["§5C", "§4B"]
   files: [src/run-task.ts, src/lib/sweep.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "TWICE stuck (#349, #360): correct code, false review-block, fix-rung strikes-to-exhaustion, human
     re-reviews (the floor passed each time). Companion to W1-T161 (the REVIEWER side — don't manufacture a false
@@ -12508,7 +12928,10 @@
   origin: architect
   plan_refs: ["§7", "§9"]
   files: [src/run-task.ts, src/lib/launchd.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "AMENDED 2026-07-21 by operator ruling. Task verified QUEUED first - zero merged PRs carry its
     Remudero-Task trailer - so standing rule 21 does not apply.
@@ -12599,7 +13022,10 @@
   origin: architect
   plan_refs: ["P19", "§4A"]
   files: [src/lib/worker-home.ts, src/lib/worker.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Ratifies the WS-2 per-worker-HOME constraint as P19's first rung. The LIVE confirmation — two REAL
     concurrent workers both authenticating against the one shared login.keychain-db without serializing on
@@ -12652,7 +13078,10 @@
   origin: architect
   plan_refs: ["P19", "§4B"]
   files: [src/lib/dispatch-overlap.ts, src/lib/drain.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "risk:high is deliberate and not sizing-driven (the W1-T119 precedent): this is a fail-closed guard on
     the path that GATES DISPATCH, so a defect here either stalls the drain or admits the collisions it exists
@@ -12713,7 +13142,10 @@
   origin: architect
   plan_refs: ["P19", "§4B"]
   files: [src/lib/drain.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "Ratifies P19's dispatch half; W1-T171 ratifies its overlap-check half and W1-T170 supplies the WS-2
     per-worker-HOME prerequisite. START AT N=2 and do not raise it here: the WS-2 concurrent-keychain question
@@ -12882,7 +13314,10 @@
   origin: architect
   plan_refs: ["P34", "§4B", "§9", "P28"]
   files: [src/lib/risk-judge.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "P34 clause (b), ratified 2026-07-23 per round-3 envelope + round-ii judge ruling. Presence×risk dispatch
     matrix from rounds 1-2 is DEAD — this judge is the dispatch-path control, not a presence gate. Built reusable
@@ -12937,7 +13372,10 @@
   origin: feedback#fb-1784894405468-a4153e
   plan_refs: ["P34", "§9", "§4B"]
   files: [src/lib/daemon.ts, src/run-task.ts, test/headroom-reserve.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "P34 clause (c), ratified 2026-07-23. Originally origin:architect; re-stamped
     origin:feedback#fb-1784894405468-a4153e when that ruling amended this task (architect remains the filer).
@@ -13037,7 +13475,10 @@
   origin: architect
   plan_refs: ["P34", "§7B", "§4"]
   files: [src/lib/escalate.ts, src/lib/digest.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "P34 clause (e) + clause (a) enforcement, ratified 2026-07-23. risk:high (touches the escalation delivery
     path and the presence signal; round 6 names the away-mode delivery task risk:high). Presence keys ONLY
@@ -13102,7 +13543,10 @@
   origin: architect
   plan_refs: ["P37", "P34", "§5C", "§9"]
   files: [plan/policy.yaml, src/lib/policy.ts, test/policy.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "P37 substrate, ratified 2026-07-23 per the operator ruling (rounds 1-4, all corrections in force verbatim:
     proof timeout 60000 lifted / 30000 rejected as a stale predating regression; launchd ThrottleInterval net-new,
@@ -13156,7 +13600,10 @@
   origin: architect
   plan_refs: ["P37", "P34", "§9", "§5C"]
   files: [src/lib/review.ts, src/lib/worker.ts, src/lib/daemon.ts, src/lib/sweep.ts, src/lib/drain.ts, src/lib/launchd.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "P37 consumers, ratified 2026-07-23. risk:high per the Rule 19 atomic-coupling exit (one invariant across
     six sites, unsatisfiable piecewise), NOT a per-site decomposition. depends_on W1-T252 (the substrate). All
@@ -13212,7 +13659,10 @@
   origin: feedback#pr-754-stall
   plan_refs: ["§3", "W1-T76", "W1-T94"]
   files: [src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
 
 - id: W1-T261
@@ -13279,7 +13729,10 @@
   origin: feedback#fb-1784917146019-88250d
   plan_refs: ["§5", "W1-T123"]
   files: [.github/workflows/ci-gate.yml, docs/review-gate.md]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "SIBLING of W1-T123 (what ci-gate reads) — this is WHEN it reads. Hard dependency, both
     directions of uselessness: dedupe without a re-read never recomputes the stale aggregate; a re-read

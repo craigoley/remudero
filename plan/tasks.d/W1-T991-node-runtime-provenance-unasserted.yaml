@@ -76,7 +76,10 @@
   origin: feedback#fb-1785784424838-179bcf
   plan_refs: ["§4A", "WS-7"]
   files: [src/lib/env.ts, src/lib/daemon.ts, test/node-runtime-provenance.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "FILED 2026-08-18 from fb-1785784424838-179bcf. Citations verified in this worktree: bin/rmd:20
     (exec of node_modules/.bin/tsx, a shebang script), launchd.ts:70 DEFAULT_LAUNCHD_PATH (no nvm entry) and

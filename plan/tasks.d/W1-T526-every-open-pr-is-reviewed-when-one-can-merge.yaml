@@ -97,7 +97,10 @@
   origin: recon#strict-turns-concurrent-review-into-waste-2026-08-15
   plan_refs: ["W1-T513", "W1-T520", "W1-T511", "W1-T522", "W1-T523"]
   files: [src/lib/sweep.ts, test/sweep-review-admission.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and independently
     warranted: this changes which PRs get reviewed at all, so a wrong admission rule does not fail

@@ -109,7 +109,10 @@
   origin: recon#empty-frontier-2026-08-10
   plan_refs: ["W1-T69", "W1-T119", "W1-T256"]
   files: [src/lib/status.ts, test/trailer-credit-plan-only.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   note: "verify:auto — every claim is decidable in-process against an injected `GitHub` fixture. No
     network, nothing spawned, no operator present: `deriveStatus`'s gateway is already an interface
