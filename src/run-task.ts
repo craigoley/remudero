@@ -5,6 +5,7 @@
 // below have SECOND callers outside doctorCommand and stay imported here too.
 import { retryWhileLockBusy } from "./lib/lock-busy-retry.js";
 import { retryPollRead } from "./lib/poll-read-retry.js";
+import { decideFreshnessRestart } from "./lib/deploy-judge.js";
 import {
   appendCaptureSurfaceFireHistory,
   judgeDiskHeadroom,
@@ -5748,6 +5749,19 @@ export interface PollDeps {
   */
   requiredContexts?: (owner: string, repo: string) => string[] | undefined;
   externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+}
+
+export function ciWaitFreshness(
+  read: () => DaemonFreshness,
+  clock: Clock = systemClock,
+): () => Extract<DaemonFreshness, { stale: true }> | undefined {
+  return () => {
+    const freshness = read();
+    if (!freshness.stale) return undefined;
+    const nowMs = clock.now();
+    const decision = decideFreshnessRestart({ changes: freshness.changes, busy: true, staleSinceMs: nowMs, nowMs, state: { total: 0, scoredShas: [] } });
+    return decision.action === "restart" ? freshness : undefined;
+  };
 }
 
 // EXPORTED INLINE, not on the tail export list its sibling `waitForCiGreen` rides: that list is the
@@ -33674,10 +33688,7 @@ export async function daemonCommand(
             // W1-T3793: only the daemon offers the cooperative external-CI-wait handoff. The
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
-            externalWaitFreshness: () => {
-              const freshness = daemonFreshnessFromService(checkServiceFreshness(effectiveRepoRoot, process.env));
-              return freshness.stale ? freshness : undefined;
-            },
+            externalWaitFreshness: ciWaitFreshness(() => daemonFreshnessFromService(checkServiceFreshness(effectiveRepoRoot, process.env))),
           }),
         readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
