@@ -113,12 +113,12 @@ test("W1-T4941: an operator-set priority is never changed", (t) => {
   assert.doesNotMatch(f.read(operator.id), /backlog gardener/);
 });
 
-test("W1-T4941: a stopped symptom is cited as retirement evidence", (t) => {
+test("W1-T4941: a quiet day cannot retire an unproven task", (t) => {
   const item = task("W1-T6", { rationale: "Observed dispatch.value.refused in the ledger." });
   const f = fixture(t, [item], { rows: [{ step: "dispatch.value.refused", ts: "2026-09-29T12:00:00.000Z" }] });
   const inv = backlogInventory(f.sources);
-  assert.deepEqual(inv.candidates[0]?.disposition, { kind: "retire", retirement: "withdrawn" });
-  assert.match(inv.candidates[0]!.reason, /dispatch.value.refused \(1 earlier, 0 recent\)/);
+  assert.deepEqual(inv.candidates[0]?.disposition, { kind: "band", band: 4 });
+  assert.match(inv.candidates[0]!.reason, /task remains valid/);
   assert.equal(inv.candidates[0]!.evidence.symptoms[0]?.earlier, 1);
 });
 

@@ -107,12 +107,10 @@ export function backlogEvidence(
   return { ...facts, signature: evidenceHash(facts) };
 }
 
-/** Retirement requires positive evidence. A missing recent row alone is never enough. */
+/** Retirement requires proof or a merged replacement, not an unexplained quiet period. */
 export function judgeBacklog(e: BacklogEvidence): { disposition: BacklogDisposition; reason: string } {
   if (e.proofsHold) return { disposition: { kind: "retire", retirement: "closed" }, reason: "Acceptance proofs now hold on main and did not at filing." };
   if (e.overtaken) return { disposition: { kind: "retire", retirement: "withdrawn" }, reason: `Merged commit ${e.overtaken.sha} covered its declared surface: ${e.overtaken.files.join(", ")}.` };
-  const stopped = e.symptoms.filter((s) => s.earlier > 0 && s.recent === 0);
-  if (stopped.length > 0 && e.fanout === 0) return { disposition: { kind: "retire", retirement: "withdrawn" }, reason: `Previously observed symptom stopped in the trailing day: ${stopped.map((s) => `${s.step} (${s.earlier} earlier, 0 recent)`).join(", ")}.` };
   if (e.fanout > 0 || e.symptoms.some((s) => s.recent > s.previousDay && s.recent > 0)) return { disposition: { kind: "band", band: 2 }, reason: e.fanout > 0 ? `Unblocks ${e.fanout} open dependent(s).` : "Its cited symptom is growing against the previous day." };
   if (e.symptoms.some((s) => s.recent > 0)) return { disposition: { kind: "band", band: 3 }, reason: "Its cited symptom remains live." };
   return { disposition: { kind: "band", band: 4 }, reason: "No observed live symptom or open dependent; the task remains valid." };
