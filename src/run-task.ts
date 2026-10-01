@@ -24884,6 +24884,7 @@ export interface PlanReconcileDeps {
    *  `buildCreditCandidates` — the SAME projection the sweep's credit rung already trusts, never a
    *  second derivation that could disagree with it. Throwing here ABORTS the verb (see below). */
   creditedMergedIds?: () => Set<string>;
+  creditedProjection?: () => { ids: Set<string>; unknownReason?: string };
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -24939,7 +24940,14 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
 
   let credited: Set<string>;
   try {
-    credited = (deps.creditedMergedIds ?? (() => defaultCreditedMergedIds()))();
+    const projection: NonNullable<PlanReconcileDeps["creditedProjection"]> = deps.creditedProjection ?? (deps.creditedMergedIds ? () => ({ ids: deps.creditedMergedIds!() }) : () => creditProjectionWithReadState());
+    const read = projection();
+    credited = read.ids;
+    if (read.unknownReason !== undefined) {
+      console.error(`### rmd plan-reconcile: UNKNOWN — the merged-PR read did not complete (${read.unknownReason}); no reconcile count can be derived from it and nothing was written`);
+      (deps.log ?? (() => {}))("plan.reconcile.unknown", { reason: read.unknownReason });
+      return 2;
+    }
   } catch (e) {
     console.error(
       `### rmd plan-reconcile: the credit projection is unreadable (${String((e as Error)?.message ?? e)}) — ` +
@@ -24991,22 +24999,29 @@ export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementati
 }
 
 /** The default credit projection: the SAME `buildCreditCandidates` the sweep's credit rung uses,
- *  now under the SAME filter too — see {@link creditIsReconcilable}. */
-export function defaultCreditedMergedIds(
+ *  now under the SAME filter too — see {@link creditIsReconcilable}. `unknownReason` (W1-T5029) is the gateway's own marked failed/truncated read. */
+export function creditProjectionWithReadState(
   configOverride?: Config,
   checkoutRoot = repoRoot,
   creditBuilder: typeof buildCreditCandidates = buildCreditCandidates,
-): Set<string> {
+  github?: GitHub,
+): { ids: Set<string>; unknownReason?: string } {
   const config = configOverride ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   // No ledger means no positive merge-credit evidence. Return an empty projection rather than
   // reaching for the GitHub gateway from an isolated or not-yet-initialized checkout.
-  if (!existsSync(ledgerPath)) return new Set();
+  if (!existsSync(ledgerPath)) return { ids: new Set() };
   const self = resolveOwnerRepo();
   const plan = loadPlan(join(checkoutRoot, "plan", "tasks.yaml"));
-  return new Set(
-    creditBuilder(self.owner, self.repo, plan, ledgerPath).filter(creditIsReconcilable).map((c) => c.taskId),
-  );
+  const gateway = github ?? buildBatchedGithub(self.owner, self.repo);
+  const ids = new Set(creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway).filter(creditIsReconcilable).map((c) => c.taskId));
+  const state = gateway.readState?.();
+  const unknownReason = state === "failed" ? (gateway.readFailureReason?.() ?? "unknown") : state === "ok" && gateway.readTruncated?.() ? "truncated" : undefined;
+  return unknownReason === undefined ? { ids } : { ids, unknownReason };
+}
+
+export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot = repoRoot, creditBuilder: typeof buildCreditCandidates = buildCreditCandidates): Set<string> {
+  return creditProjectionWithReadState(configOverride, checkoutRoot, creditBuilder).ids;
 }
 
 /** W1-T3970: production's adapter keeps the cadence map testable without running the rest of the
