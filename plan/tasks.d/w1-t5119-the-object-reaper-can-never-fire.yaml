@@ -1,0 +1,53 @@
+- id: W1-T5119
+  title: "THE ARMED OBJECT REAPER CAN NEVER FIRE — it runs only inside runTask, after the run's own inflight lock is taken, and it refuses on ANY inflight lock file and ANY registered worktree (live or leftover), so it has refused 296 times in a row since 2026-09-24 while the managed checkout grew to 85,464 loose objects (2.08 GiB) and every git operation on it slowed to minutes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-10-01: trace the managed-checkout lock hold behind W1-T4933 and the stale-base refusals"
+  note: "reservation hand-off: plan-objstore-and-stale-base-1790853121000 -> plan-objstore-and-stale-base-1790853121000"
+  plan_refs: [W1-T3092, W1-T4022, W1-T3090, W1-T2529, W1-T3116, W1-T4356]
+  files: [src/lib/object-reaper.ts, src/run-task.ts, test/the-object-reaper-counts-only-active-workers.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-01 (core host, repos/remudero): 85,464 loose objects (2.08 GiB; 56,481 older than 7 days),
+    98 packs (oldest 09-07), and a .git/gc.log from 09-06. `git prune -n --expire=24.hours.ago` alone took 455 s and
+    named 50,382 prunable objects. The managed-checkout lock section (refresh + worktreeAddAsync) took p50 291 s,
+    p90 585 s and max 1048 s (W1-T4939 at 08:14-08:31Z). That one hold made W1-T4933 exhaust #8094's lock waits
+    (08:29 refresh_refused) and let main advance under W1-T4939 (stale base). Ledger 09-28..10-01: 48
+    managed_checkout.refresh_refused and 10 worktree.stale_base runs.
+    objectReap is ARMED (plan/policy.yaml, operator 2026-09-08), but run.disk_reclaim.objects_declined has a
+    consecutive streak of 296 since 2026-09-24T15:14Z ("2 inflight lock(s) held", "1 worktree(s) registered"). The
+    cause is structural: logDiskReclaimRung runs inside runTaskBody (src/run-task.ts ~15831) AFTER
+    acquireInflightLock (~14864), so the calling run's own lock is always present. objectReapRefusal counts every
+    lock FILE (no pid liveness) and every REGISTERED worktree, including leftovers such as sweep-W1-T4419 (kept
+    since 09-24). The quiet predicate therefore cannot be satisfied by construction.
+    OPERATOR NOTE: on 2026-10-01 an operator session ran `git prune --expire=24.hours.ago` once by hand on
+    repos/remudero while worker worktrees were registered, which breaks the standing rule this rung encodes (no
+    prune/gc while a worker worktree is active). It cut loose objects from 85,464 to 35,348 with no object errors
+    observed; it is recorded here, not repeated.
+  design: |
+    Keep the operator's standing rule exactly: no prune while an ACTIVE worker is using the store. Measure
+    "active" correctly. No new bound; LOOSE_OBJECT_FLOOR and OBJECT_PRUNE_EXPIRY are unchanged.
+    1. The inflight condition excludes the calling run's OWN lock (passed by the caller) and counts only locks
+       whose holder pid is alive (the liveness inflight-lock.ts already reads for daemon.inflight_sweep).
+    2. The worktree condition counts only worktrees whose run lock is live (readRunLock + pid alive, the borrower
+       test refreshManagedCheckout already uses). Leftover registrations do not count.
+    3. The open-handle probe and the two-ended quiesced window are unchanged.
+    The rung then fires whenever the calling run is the only active one, which is the operator's rule, not an
+    approximation of it.
+  acceptance:
+    - claim: "the calling run's own inflight lock does not refuse the reap"
+      proof: 'grep: test("W1-T5119: the calling run own inflight lock does not refuse the reap" in test/the-object-reaper-counts-only-active-workers.test.ts'
+    - claim: "a leftover worktree with no live run lock does not refuse the reap"
+      proof: 'grep: test("W1-T5119: a leftover worktree with no live run lock does not refuse the reap" in test/the-object-reaper-counts-only-active-workers.test.ts'
+    - claim: "a live worker worktree still refuses the reap"
+      proof: 'grep: test("W1-T5119: a live worker worktree still refuses the reap" in test/the-object-reaper-counts-only-active-workers.test.ts'
+  falsifier: |
+    Count every lock file and every registered worktree again and the first two tests see the reap refused.

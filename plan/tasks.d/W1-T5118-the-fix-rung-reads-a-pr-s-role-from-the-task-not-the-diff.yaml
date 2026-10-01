@@ -1,0 +1,85 @@
+- id: W1-T5118
+  title: "THE FIX RUNG READS A PR'S ROLE FROM THE TASK'S FILES, NOT FROM THE PR'S DIFF — on a plan-only filing for an implement task, the scope gate treats the task's future src/test paths as in scope and flags the shard itself as out of scope, so a repair worker may turn a filing into a Rule-15 mixture it cannot recover from"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "re-filed 2026-10-01 from the never-filed W1-T2954 shard (branch run-W1-T2954-1788690142168, 2026-09-06), re-verified against origin/main 1247a5663; operator ruling 2026-10-01 (verify, file real ones)"
+  plan_refs: ["W1-T1227", "W1-T2607", "W1-T2653", "W1-T2713"]
+  files:
+    - src/run-task.ts
+    - src/lib/prompt-render.ts
+    - test/the-fix-rung-keeps-a-plan-filing-plan-only.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    THE INCIDENT (2026-09-06, from the original shard). PR #4236 opened as a one-file plan-only
+    filing for W1-T2949, whose shard declared the FUTURE implementation files
+    `src/lib/worker-provider.ts` and `test/worker-provider.test.ts`. A stale review marked the
+    not-yet-built criteria unmet, and the sweep dispatched a `reviewer-unmet` fix worker. That
+    worker added both future files beside the shard. Standing Rule 15 then correctly refused the
+    mixture, and the PR was unmergeable on branch composition alone.
+
+    REPRODUCED at origin/main 1247a5663 on 2026-10-01, calling the real exports with #4236's shape
+    (baseline diff = the shard only; the worker adds the two declared src/test paths):
+      - `fixRungScopeStandDownReason(current, baseline, declared)` returns `undefined`. The
+        pre-strike guard does NOT stand down.
+      - `outOfDeclaredScopeFiles([shard, src, test], declared)` returns `[shard]`. The scope
+        predicate calls the SHARD out of scope and the src/test additions in scope: exactly
+        inverted for a filing.
+    THE CAUSE is one predicate, read in three places: `declaredFiles.every(isInPlanScope)` in
+    `fixRungScopeStandDownReason` (src/run-task.ts), in `outOfDeclaredScopeFiles`, and in
+    `renderFixPrompt`'s scope block (src/lib/prompt-render.ts). It asks whether the TASK will
+    eventually touch only plan paths. It never asks whether the PR being repaired is a filing. The
+    captured `baselineDiffFiles`, which already reaches both the guard and the prompt (W1-T2607),
+    answers that question and is ignored for it.
+
+    WHY IT STILL MATTERS after W1-T2713. Plan-only reviews now pass deterministically, so a stale
+    unmet verdict is rarer. But any wrong upstream verdict (stale, misrouted, or a future reviewer
+    bug) still gives a fix worker licence to change the role of the PR it is repairing, and the
+    harness commit stages declared files, which here are the future src/test paths.
+  design: |
+    ONE CONCERN: the fix rung preserves the role of the PR it inherited.
+
+    Classify the PR as a plan-only FILING from the captured, non-empty `baselineDiffFiles`: every
+    path `isInPlanScope`. Feed that ONE classification to both `renderFixPrompt` and
+    `fixRungScopeStandDownReason` (and so `outOfDeclaredScopeFiles`), so the instruction and the
+    guard cannot disagree. Never infer it from a title, branch name or task type.
+      - Observed filing: the prompt limits the repair to plan scope even when the shard declares
+        future src/test files. The guard stands down when the worker adds any non-plan path. A
+        repair to the shard itself stays allowed.
+      - Implementation baseline: keep today's exact declared-files regime and W1-T2653's remedy
+        widening.
+      - A task whose declared files are ALL plan-scoped: unchanged.
+      - Absent, failed or empty baseline: never promoted to "filing" by guess. Keep today's
+        fail-open posture.
+    Do not weaken Rule 15, change review scoring, add a strike, edit a PR body or task record, or
+    auto-close or auto-merge anything.
+  acceptance:
+    - claim: "a non-empty plan-only baseline is classified as a filing even when the task declares future src and test files"
+      proof: "unit test: a plan-only baseline is a filing even when the task declares src files"
+    - claim: "the fix prompt for that filing allows a shard repair and refuses adding the declared future src or test paths"
+      proof: "unit test: the fix prompt for a plan filing refuses the task's future src paths"
+    - claim: "when a worker adds a non-plan path to a filing the pre-strike guard stands down and names the plan-scope violation"
+      proof: "unit test: the scope guard stands down when a fix worker adds src to a plan filing"
+    - claim: "an implementation baseline keeps the exact declared-file scope so ordinary red-PR repairs are unchanged"
+      proof: "unit test: an implementation baseline keeps the declared-file fix scope"
+    - claim: "an absent or empty baseline never invents a filing role"
+      proof: "unit test: an empty fix baseline never invents a plan filing role"
+  falsifier: |
+    Replay #4236's shape against the real exports: baseline `[plan/tasks.d/<shard>.yaml]`, declared
+    `[src/lib/worker-provider.ts, test/worker-provider.test.ts]`, current = baseline plus both
+    declared paths. At filing, `fixRungScopeStandDownReason` returns undefined and
+    `outOfDeclaredScopeFiles` returns the shard. If main already stands down here, close this task
+    without implementation. Mutation: revert the regime selection to
+    `declaredFiles.every(isInPlanScope)`; the stand-down assertion must fail.
+  note: |
+    ID PROVENANCE: reserved fresh with `rmd next-task-id --branch` from the operator checkout. The
+    old id W1-T2954 was never filed on main; it is not reused. The old branch is kept.
+    PRIORITY 3: the trigger needs a wrong upstream verdict on a filing, which W1-T2713 made rarer.
+    The damage is one unmergeable filing PR, recoverable by hand.
