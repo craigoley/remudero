@@ -69,6 +69,8 @@ export interface ViewEventsOptions {
   highWaterBytes?: number;
   stallMs?: number;
   inlineBytes?: number;
+  /** Told of each subscriber change with the count after it: an open, a client close, or a handover and its reason. */
+  onSubscribers?: (change: "open" | "close" | "handover", subscribers: number, reason?: string) => void;
 }
 
 export interface ViewEvents {
@@ -159,6 +161,7 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
   const end = (sub: Subscriber, reason: string): void => {
     subs.delete(sub);
     if (subs.size === 0) stopRunning?.();
+    opts.onSubscribers?.("handover", subs.size, reason);
     if (sub.res.writableEnded) return;
     sub.res.end(frame("handover", { reason, retryMs: 0 }));
     opts.log?.("view_events.handover", { reason, pending: sub.pending.size });
@@ -269,8 +272,11 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
       res.write(frame("hello", { bootId, serverNow: clock.iso(), ...versions(now, views) }, `${bootId}:${seq}`));
       res.on("drain", () => flush(sub));
       req.on("close", () => {
-        if (subs.delete(sub) && subs.size === 0) stopRunning?.();
+        if (!subs.delete(sub)) return;
+        opts.onSubscribers?.("close", subs.size);
+        if (subs.size === 0) stopRunning?.();
       });
+      opts.onSubscribers?.("open", subs.size);
       opts.log?.("view_events.open", { subscribers: subs.size, ...(req.headers["last-event-id"] ? { lastEventId: String(req.headers["last-event-id"]) } : {}) });
     },
   };

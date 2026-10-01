@@ -169,7 +169,7 @@ import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, startTestGarden, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
-import { ciFailureSignature, startCiFrictionGardener, readCiFrictionLedgerRecords, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
+import { ciFailureSignature, startCiFrictionGardener, readCiFrictionLedgerRecords, readGateFireRateReport, freshCiFrictionPlanOrigins, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, selectorShadowFlakeLedger, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
@@ -19199,6 +19199,13 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // fields, so nothing downstream of `body` can tell which transport served it.
   const args = reviewViewArgs(owner, repo, prArg);
   const raw = fetchView(args);
+  // The sweep's open-PR snapshot can age while earlier reviews run. The numeric arm already
+  // fetched the live REST row, so decline a closed PR before fetching its head or building a
+  // worktree. The guarded poster still makes the final lifecycle check for an in-flight close.
+  if (reviewPrNumber(prArg) !== undefined && (raw as RestPullRow).state === "closed") {
+    console.log(`rmd review: PR #${prArg} closed before review; no verdict posted`);
+    return 2;
+  }
   const view = (reviewPrNumber(prArg) !== undefined ? mapRestPr(raw as RestPullRow) : raw) as {
     headRefOid: string;
     headRefName: string;
@@ -33980,7 +33987,7 @@ export async function daemonCommand(
                   const sources: CiFrictionGardenSources = {
                     ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
                     gateFireRates: () => readGateFireRateReport(stateDir),
-                    planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+                    planOrigins: () => freshCiFrictionPlanOrigins(repoRoot),
                     mintTaskId: ciLearningTaskIdMinter(repoRoot),
                   };
                   return startCiFrictionGardener(ciFrictionGarden, sources, intervalMs);

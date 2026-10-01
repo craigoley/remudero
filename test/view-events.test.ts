@@ -11,6 +11,7 @@ import { createService } from "../src/lib/service.js";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readReadModelSwitches } from "../src/lib/read-model-worker.js";
+import { createRouteReadRollup } from "../src/lib/route-read-rollup.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { createViewEvents, VIEW_EVENTS_PATH, VIEW_VERSIONS_PATH, type ViewEventsOptions } from "../src/lib/view-events.js";
 import { viewEtag, type ViewBodyEntry, type ViewSource } from "../src/lib/views.js";
@@ -391,4 +392,27 @@ test("the switch file's push mode is parsed and a bad one refuses the whole file
   const absent = read({ views: {} });
   assert.ok(absent.ok && absent.switches.push === undefined, "absent stays absent, which reads as off");
   assert.deepEqual(read({ push: "yes" }), { ok: false, reason: 'push has mode "yes"' });
+});
+
+test("the push stream tells the rollup each open close and handover with the subscriber count", async () => {
+  const rm = fakeReadModel({ now: "serve" });
+  let now = T0;
+  const steppedClock: Clock = { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() };
+  const clockTimers = timers();
+  const rollup = createRouteReadRollup({ clock: steppedClock });
+  rollup.start();
+  const events = createViewEvents({ names: ["now"], readModel: rm, clock: steppedClock, every: clockTimers.every, highWaterBytes: 1_000, stallMs: 60_000,
+    onSubscribers: (change, n, reason) => rollup.stream("views", change, n, reason) });
+  const [a, b, c] = [fakeSocket(), fakeSocket(), fakeSocket()];
+  for (const sub of [a, b, c]) await events.routes[0]!.handler(sub.req, sub.res, { params: {} });
+  b.req.emit("close");
+  b.req.emit("close");
+  c.res.backlog = 5_000;
+  rm.post(entry("now", "instance=core", { a: 1 }));
+  now += 60_001;
+  clockTimers.fire(1_000);
+  assert.deepEqual(rollup.summary().streams.views, { opened: 3, closed: 1, peak: 3, handovers: { slow_consumer: 1 }, subscribers: 1 }, "a dropped slow consumer is a handover");
+  events.handover("recycle");
+  a.req.emit("close");
+  assert.deepEqual(rollup.summary().streams.views, { opened: 3, closed: 1, peak: 3, handovers: { slow_consumer: 1, recycle: 1 }, subscribers: 0 }, "a close after a handover is not a second close");
 });

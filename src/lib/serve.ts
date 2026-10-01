@@ -2560,8 +2560,9 @@ function assembleServeRoutes(
     { instanceId: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, analytics: currentAnalyticsSnapshot, memory: operatorAgentMemory, ledgerPath: deps.ledgerPath },
     ...badgeScopes];
   const modelApprovals = deps.modelApprovals ?? [];
+  const routeReads = deps.routeReadRollup ?? createRouteReadRollup();
   const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME], servedByDefault: [readModelStatusView.name],
-    ...(readModel ? { readModel } : {}), every: deps.readModel?.every, log: deps.log });
+    ...(readModel ? { readModel } : {}), every: deps.readModel?.every, log: deps.log, onSubscribers: (change, n, reason) => routeReads.stream("views", change, n, reason) });
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
   // ever re-resolves it. See resolveConsoleSha for why re-reading per request would be worse
@@ -2691,7 +2692,7 @@ function assembleServeRoutes(
       planPath: deps.panelGraph.planPath,
     }),
     buildRecentRoute(deps.board),
-    ...buildReadModelViewRoutes(withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name],
+    ...buildReadModelViewRoutes(withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
       readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"] },
       legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes }), inboxLegacyView(panelGraphDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan)] })),
     ...viewEvents.routes,
@@ -2807,7 +2808,7 @@ function assembleServeRoutes(
     // 2026-09-16 and 2026-09-26). It says what this surface is and where to go instead.
     buildGatewayIndexRoute(),
     buildVersionRoute(consoleSha),
-    buildRouteReadsRoute(deps.routeReadRollup ?? createRouteReadRollup()),
+    buildRouteReadsRoute(routeReads),
     // W1-T4227: the fleet's one registry, read-only — see buildRegistryRoute's own doc.
     buildRegistryRoute({
       ...deps.registry,
@@ -3106,7 +3107,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     // W1-T4244: the signed-in operator, consulted BEFORE the bearer token the console also sends.
     operatorSession: operatorSessionProvider(deps.operatorIdentity ?? operatorIdentityConfig(loadConfig, { log: deps.log }), { ...deps.operatorIdentityIo, log: deps.log }),
     routes,
-    sse: [serveDrain.wrapSse(staleExit.wrapSse(prewarm.route))],
+    sse: [serveDrain.wrapSse(staleExit.wrapSse(routeReads.wrapSse("status", prewarm.route)))],
     log: deps.log,
     confirmNonces,
     // W1-T404 design (iii), turned on LAST (design iii, this task): a no-op until now for want of
