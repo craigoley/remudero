@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,11 +13,14 @@ import { ghShim } from "./helpers/gh-shim.js";
 const REVIEWER_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
 const SOURCE_TEXT_SUBJECT_MARKER = "@source-text-subject";
 
-async function reviewSiteProof(): Promise<Awaited<ReturnType<typeof runReview>>> {
+async function reviewSiteProof(options: { delayProofMs?: number; onProofTicks?: (ticks: number) => void } = {}): Promise<Awaited<ReturnType<typeof runReview>>> {
   const root = mkdtempSync(join(tmpdir(), "rmd-run-review-target-root-"));
   const checkout = mkdtempSync(join(tmpdir(), "rmd-run-review-site-head-"));
   const oldPath = process.env.PATH;
   const oldHome = process.env.HOME;
+  const proofStarted = join(checkout, "proof-started");
+  let proofTicks = 0;
+  let timer: ReturnType<typeof setInterval> | undefined;
   const diff = [
     "diff --git a/tests/site-target.test.ts b/tests/site-target.test.ts",
     "+++ b/tests/site-target.test.ts",
@@ -43,7 +46,9 @@ async function reviewSiteProof(): Promise<Awaited<ReturnType<typeof runReview>>>
     mkdirSync(join(checkout, "node_modules", "vitest"), { recursive: true });
     writeFileSync(
       join(checkout, "node_modules", "vitest", "vitest.mjs"),
-      'process.stdout.write("TAP version 13\\n1..1\\nok 1 - site registered suite proof reaches vitest\\n");\n',
+      options.delayProofMs
+        ? `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(proofStarted)}, "started"); setTimeout(() => process.stdout.write("TAP version 13\\n1..1\\nok 1 - site registered suite proof reaches vitest\\n"), ${options.delayProofMs});\n`
+        : 'process.stdout.write("TAP version 13\\n1..1\\nok 1 - site registered suite proof reaches vitest\\n");\n',
       "utf8",
     );
     writeFileSync(
@@ -58,6 +63,7 @@ async function reviewSiteProof(): Promise<Awaited<ReturnType<typeof runReview>>>
     );
     process.env.PATH = `${gh.dir}:${oldPath}`;
     process.env.HOME = root;
+    if (options.onProofTicks) timer = setInterval(() => { if (existsSync(proofStarted)) proofTicks++; }, 20);
 
     return await runReview({
       owner: "craigoley",
@@ -88,6 +94,8 @@ async function reviewSiteProof(): Promise<Awaited<ReturnType<typeof runReview>>>
       arm: () => "armed" as const,
     });
   } finally {
+    if (timer) clearInterval(timer);
+    options.onProofTicks?.(proofTicks);
     process.env.PATH = oldPath;
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
@@ -104,13 +112,20 @@ test("W1-T3529: runReview passes its owner/repo target through to judgeReview ev
   assert.match(verdict.criteria[0]?.reason ?? "", /tests\/site-target\.test\.ts/);
 });
 
+test("W1-T4772: runReview keeps the timer firing while its production proof runs", async () => {
+  let ticks = 0;
+  const verdict = await reviewSiteProof({ delayProofMs: 300, onProofTicks: (count) => { ticks = count; } });
+  assert.equal(verdict.criteria[0]?.proof_exec, "executed_pass");
+  assert.ok(ticks >= 5, `the review loop fired only ${ticks} timer ticks after the proof child started`);
+});
+
 test("W1-T3529: runReview does not re-derive the target from a bare repo name", () => {
   assert.equal(SOURCE_TEXT_SUBJECT_MARKER, "@source-text-subject");
   const src = readRunTaskSource();
   const runReviewStart = src.indexOf("async function runReview(args:");
   assert.notEqual(runReviewStart, -1, "runReview must still be present");
-  const judgeCall = src.indexOf("const computed = judgeReview(criteria, {", runReviewStart);
-  assert.notEqual(judgeCall, -1, "runReview must still call judgeReview");
+  const judgeCall = src.indexOf("const computed = await judgeReviewAsync(criteria, {", runReviewStart);
+  assert.notEqual(judgeCall, -1, "runReview must still await judgeReviewAsync");
   const evidence = src.slice(judgeCall, src.indexOf("});", judgeCall));
   assert.match(evidence, /target: \{ owner, repo \},/);
   assert.doesNotMatch(evidence, /repo\.split|prUrl|parseOwnerRepo/, "runReview must not reconstruct target from another string");
@@ -129,7 +144,7 @@ test("W1-T3529: the fix-rung path still relies on its existing runReview owner/r
 test("W1-T3529: every pre-existing judgeReview evidence field remains in the runReview call", () => {
   const src = readRunTaskSource();
   const runReviewStart = src.indexOf("async function runReview(args:");
-  const judgeCall = src.indexOf("const computed = judgeReview(criteria, {", runReviewStart);
+  const judgeCall = src.indexOf("const computed = await judgeReviewAsync(criteria, {", runReviewStart);
   const evidence = src.slice(judgeCall, src.indexOf("});", judgeCall));
   for (const field of [
     "diff",
