@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.42
   status: queued
@@ -16,3 +16,12 @@
     - claim: "the conflict:merge-conflict cause of PR friction has a recorded remedy"
       proof: "grep: ci-friction:conflict:merge-conflict in docs/ci-friction-remedies.md"
   note: "Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. conflict:merge-conflict priced at 206.7 PR minute(s) across 47 round(s) on 42 pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in docs/ci-friction-remedies.md naming \"ci-friction:conflict:merge-conflict\" once it lands."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed task records a remedy for a named CI friction cause in one declared documentation file. Its acceptance criterion checks for that record."
+      - "The supplied gates state shows filingTime true and no concerning gate result. No actual change view was supplied."
+    judged_at: "2026-10-01T12:41:42.803Z"
+    pin: "37a1fd73dd406434254679439689183871a5e970f9df68e31ca6cdc19b9e763c"
