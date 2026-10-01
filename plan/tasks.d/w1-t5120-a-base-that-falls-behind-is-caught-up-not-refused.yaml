@@ -1,0 +1,37 @@
+- id: W1-T5120
+  title: "A BUILD WHOSE BASE FELL BEHIND WHILE ITS WORKTREE WAS BEING CUT IS REFUSED, NOT CAUGHT UP — assertWorktreeBaseCurrent refuses when main advanced between the fetch and the ls-remote, which a slow worktree add widens to minutes: 10 build runs ended worktree.stale_base 2026-09-28..10-01 (W1-T4939: fetched b1329af, main 2994dd9, behind 2, after a 17-minute locked section)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 10.00
+  risk: medium
+  origin: "operator ask 2026-10-01: trace the stale-base refusals"
+  note: "reservation hand-off: plan-objstore-and-stale-base-1790853121000 -> plan-objstore-and-stale-base-1790853121000"
+  plan_refs: [W1-T405, W1-T2621, W1-T5119]
+  files: [src/lib/worker.ts, test/a-base-that-falls-behind-is-caught-up-not-refused.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED (core ledger 2026-09-28..10-01): 10 runs logged worktree.stale_base and ended `failed` before any work
+    ran (W1-T405 moved this refusal to dispatch so a stale base would not surface later as a forged merge-base). In
+    worktreeAddAsync (src/lib/worker.ts) the sequence is fetch, `worktree add` (a full checkout of about 6,180
+    files), then `ls-remote`. On the core host that sequence took minutes (W1-T5119), and main advances many times
+    an hour, so the remote head often moves inside the window. The worktree is brand new and holds no work, so
+    catching it up to the remote head is exactly as safe as cutting it there in the first place.
+  design: |
+    When the freshly created worktree's base is behind the remote head it just read, re-fetch and fast-forward the
+    NEW branch (`merge --ff-only origin/<ref>` in the worktree, which is safe because it has no commits of its own),
+    record the new base, and re-check. Repeat while the remote keeps moving, up to a few attempts with the same
+    growing backoff #8094 uses. Only a base still behind after those attempts, or one that cannot fast-forward, is
+    refused, with the existing WorktreeBaseStaleError and ledger row. A `worktree.base_caught_up {from, to,
+    attempts}` row records each catch-up. The sync worktreeAdd (#8343) is untouched.
+  acceptance:
+    - claim: "a base that fell behind while the worktree was cut is caught up to the remote head"
+      proof: 'grep: test("W1-T5120: a base that fell behind while the worktree was cut is caught up" in test/a-base-that-falls-behind-is-caught-up-not-refused.test.ts'
+    - claim: "a base that cannot catch up is still refused"
+      proof: 'grep: test("W1-T5120: a base that cannot catch up is still refused" in test/a-base-that-falls-behind-is-caught-up-not-refused.test.ts'
+  falsifier: |
+    Remove the catch-up and the first test sees WorktreeBaseStaleError on a base one commit behind.

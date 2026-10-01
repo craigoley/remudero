@@ -223,6 +223,29 @@ function circuitTrippedLedger(taskId: string, n: number = DEFAULT_MAX_TASK_DISPA
   return Array.from({ length: n }, (_, i) => ({ ts: new Date(i).toISOString(), run_id: `${taskId}-run-${i}`, task_id: taskId, step: "run.start" }));
 }
 
+test("cold operator activity classifies every candidate without disjoint lane packing", () => {
+  const yaml = Array.from({ length: 24 }, (_, i) => [
+    `- id: C${i}`, `  title: candidate ${i}`, "  repo: remudero", "  type: implement", "  depends_on: []",
+  ].join("\n")).join("\n") + "\n";
+  const plan = fixturePlan(tmpRoot(), yaml);
+  let scopeReads = 0;
+  for (const task of plan.tasks) {
+    Object.defineProperty(task, "files", { configurable: true, get: () => {
+      scopeReads++;
+      return [`src/${task.id}.ts`];
+    } });
+  }
+  const frontier = buildPlanFrontier(plan, NONE_MERGED, plan.tasks.length, []);
+  const frontierScopeReads = scopeReads;
+  scopeReads = 0;
+  const packed = runnableCandidates(plan, NONE_MERGED, plan.tasks.length);
+  const packedScopeReads = scopeReads;
+  assert.deepEqual(new Set(frontier.filter((row) => row.runnable).map((row) => row.id)), new Set(packed.map((task) => task.id)));
+  assert.equal(frontier.length, plan.tasks.length);
+  assert.ok(frontierScopeReads < packedScopeReads,
+    `frontier membership must avoid lane packing (${frontierScopeReads} scope reads versus ${packedScopeReads} for the actual pack)`);
+});
+
 test("buildPlanFrontier: the RUNNABLE rows are in the EXACT SAME order runnableCandidates itself returns -- binding the existing selector, never a second ordering", () => {
   const root = tmpRoot();
   const plan = fixturePlan(root, FRONTIER_YAML);

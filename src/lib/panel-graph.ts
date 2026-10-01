@@ -50,7 +50,7 @@ import {
   type LedgerLines,
   type StatusProjection,
 } from "./status.js";
-import { buildDrainPreview, dispatchOrder, runnableCandidates, type DrainOpts, type DispatchFilterReason, type MergedSet } from "./drain.js";
+import { buildDrainPreview, dispatchOrder, runnableCandidateIds, type DrainOpts, type DispatchFilterReason, type MergedSet } from "./drain.js";
 import {
   captureFeedback,
   expandFeedbackDraft,
@@ -786,7 +786,7 @@ export const DEFAULT_FRONTIER_LIMIT = 8;
 
 /**
  * The next `limit` frontier rows in the same order the dispatcher would take them: binds
- * `runnableCandidates` for both ordering and eligibility, never re-deriving either. A runnable
+ * the dispatcher's eligibility predicate for membership, never re-deriving it. A runnable
  * row names its file-order rank; a row held for a temporary reason still renders, never omitted.
  * Done tasks and permanently-parked `verify:human` tasks are excluded from the row budget
  * entirely — see {@link frontierFilterReason}. A task named by no filter reason is skipped, never
@@ -807,9 +807,10 @@ export function buildPlanFrontier(
   // while this frontier evaluates every candidate, instead of repeatedly scanning the same ledger.
   const index = buildLedgerIndex(ledgerLines);
   const isCircuitTripped = (id: string) => isDispatchBreakerTripped(ledgerLines, id, maxDispatches, index);
-  // A large limit, never the caller's: this one call must classify every non-merged task so the
-  // dispatchOrder walk below finds each verdict, however many held rows precede the runnable ones.
-  const eligible = runnableCandidates(plan, isMerged, plan.tasks.length, {
+  // Classify every non-merged task with the dispatcher's own predicate. This view consumes only
+  // membership, not a disjoint lane pack; packing all N candidates was quadratic and blocked
+  // serve's event loop for the entire cold operator-activity prewarm.
+  const eligibleIds = runnableCandidateIds(plan, isMerged, {
     isCreditIndeterminate,
     onFiltered: (task, reason) => {
       const r = frontierFilterReason(plan, task, reason, isMerged);
@@ -824,8 +825,6 @@ export function buildPlanFrontier(
       });
     },
   });
-  const eligibleIds = new Set(eligible.map((t) => t.id));
-
   const rows: FrontierRow[] = [];
   let rank = 0;
   for (const task of dispatchOrder(plan.tasks)) {

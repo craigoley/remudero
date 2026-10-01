@@ -1,0 +1,46 @@
+- id: W1-T5122
+  title: "THE ARCHITECT LOSES ITS OWN PROPOSAL TO COMMITLINT AND IGNORES ITS MODEL ROW — planCommitMessage writes the brief as a `Brief: …` line that commitlint reads as a footer, so any brief line over 100 characters fails footer-max-line-length and the PROPOSED plan PR is never opened (2026-10-01 operator trial, $0.93 spent, nothing filed); and planCommand calls architectModel(config) without the mounts, so the `architect:` row (claude-opus-5-5, effort high) is ignored for the hard-coded 'opus'"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 10.00
+  risk: high
+  band_meaning: span
+  origin: "operator-approved Architect trial 2026-10-01 (rmd plan --mode=expand over a ledger-evidence brief)"
+  note: "reservation hand-off: plan-architect-harness-1790853551000 -> plan-architect-harness-1790853551000"
+  plan_refs: [W1-T45, W1-T136, W1-T3243, W1-T4111]
+  files: [src/lib/plan-architect.ts, src/run-task.ts, test/the-architect-proposal-survives-commitlint-and-uses-its-mount.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-01: the operator-approved trial (`rmd plan --mode=expand` with a 4.5 KB ledger-evidence brief)
+    reached `plan.verdict` PROPOSED (W1-T5104) and then died in gitAddAndCommitWithRollback. commit-msg rejected the
+    message with "footer's lines must not be longer than 100 characters [footer-max-line-length]". planCommitMessage
+    (src/lib/plan-architect.ts) puts `Brief: <brief>` in the body; commitlint parses a `Token: value` paragraph as a
+    footer, and the brief's long lines break the footer limit. A harness-generated evidence brief, which is the
+    recommended production use, will always be long, so every such proposal is lost after the spend. Separately,
+    planCommand logs `architect opus` because it calls architectModel(config) without the mounts argument, so the
+    `.remudero/mounts.yaml` `architect:` row (model claude-opus-5-5, effort high) never applies on this path. The
+    first trial attempt also died in worktreeAdd's fetch on a ref-lock race; #8343 fixes that.
+  design: |
+    No new bound, no new refusal.
+    1. The commit message never carries the brief verbatim. It carries a one-line summary of the brief (its first
+       sentence, capped by shapeCommitMessage's existing header logic) under a label commitlint cannot read as a
+       footer token (e.g. `Operator brief (summary) —`). The full brief is already on the `plan.start` ledger row
+       and goes in the PR body, never the commit.
+    2. Every body line the harness writes is wrapped to commitlint's limits, and an unbreakable token (a URL) gets a
+       line of its own in the body, never in a footer paragraph. Assert the produced message with the repo's own
+       checkCommitMessage before committing; on failure, fall back to the header plus summary rather than losing
+       the proposal.
+    3. planCommand resolves the Architect through the mounts row (architectModel(config, loadMounts(...))) so the
+       `architect:` model and effort apply, and logs the resolved model on plan.start.
+  acceptance:
+    - claim: "a proposal over a long multi-line brief commits and passes commitlint"
+      proof: 'grep: test("W1-T5122: a proposal over a long multi-line brief commits and passes commitlint" in test/the-architect-proposal-survives-commitlint-and-uses-its-mount.test.ts'
+    - claim: "the Architect resolves its model from the mounts architect row"
+      proof: 'grep: test("W1-T5122: the Architect resolves its model from the mounts architect row" in test/the-architect-proposal-survives-commitlint-and-uses-its-mount.test.ts'
+  falsifier: |
+    Restore the verbatim `Brief:` body and the first test's commit is refused by the commit-msg hook.

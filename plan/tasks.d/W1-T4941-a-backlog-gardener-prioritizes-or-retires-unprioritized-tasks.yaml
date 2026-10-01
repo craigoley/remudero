@@ -5,14 +5,14 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  priority: 2
+  priority: 1
   budget_usd: 30.00
   risk: high
   band_meaning: span
   origin: "operator ask 2026-09-30: start building what helps automated flow and self-improvement (queue hygiene)"
   note: "reservation hand-off: plan-backlog-gardener-1790785261000 -> plan-backlog-gardener-1790785261000"
-  plan_refs: [W1-T4111, W1-T4861, W1-T4095]
-  files: [src/lib/backlog-gardener.ts, src/lib/daemon.ts, test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts]
+  plan_refs: [W1-T4111, W1-T4861, W1-T4095, W1-T5112, W1-T5114, W1-T3412]
+  files: [src/lib/backlog-gardener.ts, src/lib/daemon.ts, src/lib/plan-gardener.ts, test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -23,12 +23,40 @@
     W1-T971, W1-T433, W1-T2203, W1-T417, W1-T3332), each checked against main. The plan gardener retires a task only
     when its proofs hold on main; nothing judges relevance or assigns priority.
   design: |
-    A gardener pass (same cadence and PR shape as the plan gardener, one plan-only PR per pass, no blocking) takes
-    unprioritized queued tasks oldest-first, a bounded batch per pass. For each, an LLM judge reads the shard plus
-    evidence it gathers read-only (the files and symbols named, later tasks citing it, merged PRs) and proposes one
-    of: `priority: N` with a one-line reason, `retirement: closed|withdrawn` with the evidence (overtaken, already
-    done, premise gone), or no change. Every proposal cites its evidence in the PR body, and the ordinary review and
-    auto-merge path decides; a closed PR is the decline signal, as with the plan gardener.
+    AMENDED 2026-10-01 at the operator's request ("look at how to do this in the smartest way possible"). Measured
+    context: the dispatch value calibration (W1-T3412) has never activated: 178 dispatch.value.refused in 3 days,
+    and one unmeasurable class refuses the whole calibration (W1-T5112 fixes it). The plan gardener omits
+    REPRIORITIZE on the false premise that dispatch-value already orders the queue. So NOTHING ranks the ~235
+    unprioritized tasks today, and released or rescued tasks sit behind every prioritized one indefinitely.
+    THE JOB IS PLACEMENT, NOT ORDERING. The gardener puts an unprioritized task into a coarse band. Ordering inside a
+    band belongs to W1-T5112's per-class value score and the open-dependent fanout tie-break.
+    1. SCOPE: only queued tasks with no `priority:`. An operator- or session-set priority is never changed.
+    2. DETERMINISTIC EVIDENCE FIRST, gathered read-only and cited in the PR body for every proposal:
+       a. open-dependent fanout (openDependentFanout, src/lib/dispatch-value.ts): what this task unblocks;
+       b. LIVE SYMPTOM: whether the ledger rows the rationale cites (step names, reasons, measured counts) still
+          occur in the trailing window of the ledger union. A symptom that stopped is retirement evidence; a
+          symptom that grew is urgency evidence;
+       c. PREMISE: whether the files and symbols the shard names still exist on main;
+       d. OVERTAKEN: whether a merged task in the trailing window shares its surface (the duplicate-surface lint
+          already computes this) or its proofs already hold on main (the plan gardener's own check);
+       e. CLASS VALUE: W1-T5112's `dispatch.value.calibrated` class mean and attempts, when present. Its absence is
+          not a reason to wait.
+    3. THE JUDGE SYNTHESIZES, IT DOES NOT GUESS. It reads the shard plus (2), and answers with one of: band 2
+       (live, growing symptom or unblocks dependents), band 3 (valid, no urgency), band 4 (cold: valid but no
+       symptom and no dependents), or a retirement (closed|withdrawn) citing which of (2b-2d) shows it is done,
+       overtaken or premise-gone. It never proposes priority 1: band 1 stays the operator's and the sessions' range.
+       That is the gardener's own output space, not a refusal of anything.
+    4. SELF-PACED, NO FIXED BATCH: each pass examines as many tasks as the fleet merged in the trailing day, oldest
+       first, so placement keeps up with drainage without flooding review.
+    5. RE-EXAMINE ON CHANGED EVIDENCE: a task this gardener banded is looked at again only when its evidence (2)
+       changes, for example its symptom stops or a dependent merges, never on a timer.
+    6. Same PR shape as the plan gardener: one plan-only PR per pass, ordinary review and auto-merge, a closed PR is
+       the decline signal. It registers through the garden registry and runs off the daemon loop once W1-T5114
+       lands.
+    7. Correct plan-gardener.ts's REPRIORITIZE comment so it points at this task and W1-T5112, not at a calibration
+       that never activated.
+    MEASURE AFTER MERGE: unprioritized share of the queue (176 of 266 on 2026-09-30), time from filing to first
+    dispatch for gardener-banded tasks, and retirements merged against reverted or reopened.
   acceptance:
     - claim: "an unprioritized task still valid is proposed a priority with its reason"
       proof: 'grep: test("W1-T4941: an unprioritized task still valid is proposed a priority with its reason" in test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts'
@@ -36,6 +64,10 @@
       proof: 'grep: test("W1-T4941: an overtaken task is proposed for retirement with cited evidence" in test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts'
     - claim: "a pass is bounded and produces at most one plan-only PR"
       proof: 'grep: test("W1-T4941: a pass is bounded and produces at most one plan-only PR" in test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts'
+    - claim: "an operator-set priority is never changed"
+      proof: 'grep: test("W1-T4941: an operator-set priority is never changed" in test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts'
+    - claim: "a stopped symptom is cited as retirement evidence"
+      proof: 'grep: test("W1-T4941: a stopped symptom is cited as retirement evidence" in test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts'
     - claim: "the daemon runs the gardener"
       proof: 'grep: runBacklogGardener( in src/lib/daemon.ts'
   falsifier: |
