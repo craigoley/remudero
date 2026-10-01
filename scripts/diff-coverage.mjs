@@ -215,26 +215,33 @@ export function changedSourceFiles(diffText) {
  * and a pure type module was wrongly getting the first verdict. TRANSPILED, NEVER TEXT-SCANNED, a
  * distinction load-bearing enough that a text-scan first draft misjudged a real module type-only.
  * FAILS CLOSED on any read or transpile error, so a broken check can only under-exempt.
- * AND IT SAYS SO, via the optional `onUndecidable` collector — because "can only under-exempt" is
- * the safe direction, not a harmless one. MEASURED 2026-09-09 on #4872: this guard answered TRUE for
- * `src/lib/merge-state.ts` locally and the gate BLOCKED on that same file, on that same head, in
- * CI — twice, deterministically. Feeding a always-throwing guard the same diff reproduces CI's
- * output exactly, so the guard is failing in the runner; WHICH of read/require/transpile fails is
- * not knowable from a verdict that is a bare `false`. A type-only module is then reported as a
- * vacuous-coverage hazard, which is a confident and wrong diagnosis, and the remedy it implies —
- * "write a test that exercises this file" — is IMPOSSIBLE for a module that compiles to nothing.
+ * AND IT SAYS SO, via the optional `onUndecidable` collector, because "can only under-exempt" is the
+ * safe direction, not a harmless one. MEASURED 2026-09-09 on #4872: TRUE locally, BLOCKED in CI on
+ * the same head, and a bare `false` cannot say which of read/transpile failed. A type-only module
+ * is then called a vacuous-coverage hazard whose remedy, "write a test", is IMPOSSIBLE for it.
  * Falsifier: test/a-module-that-compiles-to-nothing-is-not-a-coverage-gap.test.ts.
  * Why: docs/forensics/diff-coverage.md#istypeonlymodule.
  */
 export function isTypeOnlyModule(file, readSource = (f) => readFileSync(f, 'utf8'), onUndecidable) {
+  const v = classifyTypeOnlyModule(file, readSource);
+  if (v.verdict === 'undecidable') {
+    // Fails closed, but reported: the run can say the exemption never got a chance to apply.
+    onUndecidable?.({ file, stage: v.stage, message: v.message });
+  }
+  return v.verdict === 'type-only';
+}
+
+/**
+ * The three-valued verdict behind {@link isTypeOnlyModule} (W1-T3305): `type-only`, `emits-code`, or
+ * `undecidable` (the check could not run; carries `stage` and `message`). A boolean collapsed the last
+ * two, and only `emits-code` is a measured gap a test can fix.
+ */
+export function classifyTypeOnlyModule(file, readSource = (f) => readFileSync(f, 'utf8')) {
   let source;
   try {
     source = readSource(file);
   } catch (err) {
-    // FAILING CLOSED IS CORRECT AND STILL SILENT WITHOUT THIS. Reported, never rethrown: the verdict
-    // is unchanged, only now the run can say the exemption did not get a chance to apply.
-    onUndecidable?.({ file, stage: 'read', message: err?.message ?? String(err) });
-    return false; // unreadable ⇒ not exempt
+    return { verdict: 'undecidable', stage: 'read', message: err?.message ?? String(err) };
   }
   // NODE'S OWN STRIPPER, NOT esbuild, AND THE REASON IS THE JOB THIS RUNS IN. `coverage-ratchet`
   // installs NOTHING -- W1-T3207 asserts it in test/workflow-single-suite-run.test.ts ("the artifact
@@ -260,13 +267,12 @@ export function isTypeOnlyModule(file, readSource = (f) => readFileSync(f, 'utf8
   try {
     stripped = stripTypeScriptTypes(source, { mode: 'strip' });
   } catch (err) {
-    // `enum` and `namespace` EMIT code and the stripper refuses them in this mode, so a throw is the
-    // correct "not type-only" answer. Still reported, because an unexpected throw is worth seeing.
-    onUndecidable?.({ file, stage: 'transpile', message: err?.message ?? String(err) });
-    return false; // cannot transpile ⇒ not exempt
+    // `enum`/`namespace` emit code and the stripper refuses them: that is an answer. Any other throw is not.
+    if (err?.code === 'ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX') return { verdict: 'emits-code' };
+    return { verdict: 'undecidable', stage: 'transpile', message: err?.message ?? String(err) };
   }
   const code = stripped.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
-  return code.trim().length === 0;
+  return { verdict: code.trim().length === 0 ? 'type-only' : 'emits-code' };
 }
 
 /** Changed source files absent from the merged LCOV surface, excluding type-only ones ({@link isTypeOnlyModule}). */
@@ -276,6 +282,23 @@ export function findMissingSourceCoverage(diffText, lcov, isTypeOnly = isTypeOnl
   return changedSourceFiles(diffText).filter(
     (file) => !hits.has(file) && !isTypeOnly(file, undefined, onUndecidable),
   );
+}
+
+/**
+ * {@link findMissingSourceCoverage} with the third value kept apart (W1-T3305): `gaps` provably emit
+ * code and have no `SF:` record; `undecidable` could not be decided. Neither is waved through.
+ */
+export function classifyMissingSourceCoverage(diffText, lcov, classify = (f) => classifyTypeOnlyModule(f)) {
+  const hits = lcov.hits ?? lcov;
+  const gaps = [];
+  const undecidable = [];
+  for (const file of changedSourceFiles(diffText)) {
+    if (hits.has(file)) continue;
+    const v = classify(file);
+    if (v.verdict === 'emits-code') gaps.push(file);
+    else if (v.verdict === 'undecidable') undecidable.push({ file, stage: v.stage, message: v.message });
+  }
+  return { gaps, undecidable };
 }
 
 /**
@@ -839,25 +862,32 @@ function main(argv) {
   const lcovText = readFileSync(values.lcov, 'utf8');
   const diffText = values.diff ? readFileSync(values.diff, 'utf8') : readFileSync(0, 'utf8');
   const lcovHits = parseLcovHitsByFile(lcovText);
-  const undecidable = [];
-  const missingSourceFiles = findMissingSourceCoverage(diffText, lcovHits, isTypeOnlyModule, (d) =>
-    undecidable.push(d));
-  if (missingSourceFiles.length > 0) {
+  const { gaps: missingSourceFiles, undecidable } = classifyMissingSourceCoverage(diffText, lcovHits);
+  if (missingSourceFiles.length > 0 || undecidable.length > 0) {
+    // W1-T3305: a measured gap and an undecidable module get separate headlines. POLICY: undecidable
+    // still BLOCKS (an exemption never widens on an error) but is not reported as a gap, since no test
+    // fixes it. Its headline omits the phrase run-task's COVERAGE_MISSING_SF matches, so no widening.
     const headline =
       'BLOCKED -- changed source file(s) have no SF record in the coverage report; ' +
       'coverage would otherwise pass vacuously:';
-    // THE TYPE-ONLY EXEMPTION MAY SIMPLY NOT HAVE RUN, and without this the two causes of a blocked
-    // file are indistinguishable in the log. Named here rather than left to a re-run: a re-run
-    // reproduces it identically and teaches nothing.
-    const detail = undecidable.map(
-      (d) => `  ! ${d.file}: the type-only exemption could not be decided (${d.stage}: ${d.message})`,
-    );
-    console.error(`diff-coverage: ${headline}`);
-    for (const file of missingSourceFiles) console.error(`  - ${file}`);
-    for (const line of detail) console.error(line);
+    const undecidableHeadline =
+      'BLOCKED -- the type-only exemption could not be decided for changed source file(s) with no SF ' +
+      'record; these are NOT measured coverage gaps, and no test is their remedy until the check can run:';
+    const detail = undecidable.map((d) => `  ! ${d.file}: (${d.stage}: ${d.message})`);
+    if (missingSourceFiles.length > 0) {
+      console.error(`diff-coverage: ${headline}`);
+      for (const file of missingSourceFiles) console.error(`  - ${file}`);
+    }
+    if (detail.length > 0) {
+      console.error(`diff-coverage: ${undecidableHeadline}`);
+      for (const line of detail) console.error(line);
+    }
+    const reported = [];
+    if (missingSourceFiles.length > 0) reported.push(headline);
+    if (detail.length > 0) reported.push(undecidableHeadline);
     emitCiReport(
       'diff-coverage',
-      formatCiReport('diff-coverage', headline, [...missingSourceFiles, ...detail]),
+      formatCiReport('diff-coverage', reported.join('\n'), [...missingSourceFiles, ...detail]),
       { blocked: true },
     );
     process.exitCode = 1;

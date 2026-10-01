@@ -8,6 +8,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { fixedClock, type Clock } from "../src/lib/clock.js";
 import { compactRotations, rotateLedger } from "../src/lib/ledger.js";
 import {
+  ACTIVITY_RING_ROWS,
   FUTURE_ROW_TOLERANCE_MS,
   createLedgerProjector,
   isFactStep,
@@ -380,4 +381,49 @@ test("a compacted day archive adds no row", (t) => {
   assert.equal(r.fresh, 0);
   assert.equal(r.duplicates, 9);
   assert.deepEqual(s.db.prepare("SELECT name FROM source_file ORDER BY name").all().map((row) => row.name), [...compacted.archiveNames].sort());
+});
+
+test("an external effect reconciled row is kept in the fact store", (t) => {
+  assert.equal(isFactStep("external_effect.reconciled"), true);
+  const ledgerDir = scratch(t, "projector-ledger");
+  writeFileSync(join(ledgerDir, LIVE), body([line(T0, "external_effect.reconciled", { task_id: "W1-T7" }), line(T0 + 1, "worker.activity")]));
+  const s = store(t, ledgerDir, fixedClock(T0));
+  s.tick();
+  assert.deepEqual(s.db.prepare("SELECT step, task_id FROM fact").all().map((row) => ({ ...row })), [{ step: "external_effect.reconciled", task_id: "W1-T7" }]);
+});
+
+test("a store built before the fact set bump is re-read in place and gains its new facts", (t) => {
+  const ledgerDir = scratch(t, "projector-ledger");
+  writeFileSync(join(ledgerDir, LIVE), body([line(T0, "run.start"), line(T0 + 1, "external_effect.reconciled")]));
+  const clock = fixedClock(T0);
+  const db = openProjectorReadModel(scratch(t, "projector-state"), "core", clock);
+  t.after(() => db.close());
+  const got = acquireLease(db, { clock });
+  assert.ok(got.ok);
+  createLedgerProjector({ ledgerDir, db, lease: got.lease, clock, factStep: (step) => step === "run.start" }).tick();
+  db.exec("UPDATE meta SET v = '1' WHERE k = 'projection:fact'");
+  assert.equal(count(db, "fact"), 1, "the old store never kept the reconciled row");
+  const reread = createLedgerProjector({ ledgerDir, db, lease: got.lease, clock }).tick();
+  assert.equal(reread.fresh, 2, "every row is read again");
+  assert.deepEqual(db.prepare("SELECT step FROM fact ORDER BY ts_ms").all().map((row) => row.step), ["run.start", "external_effect.reconciled"]);
+  assert.equal(createLedgerProjector({ ledgerDir, db, lease: got.lease, clock }).tick().fresh, 0, "a built fact set is not re-read");
+});
+
+test("the activity ring keeps the newest rows of any step and drops the oldest", (t) => {
+  const ledgerDir = scratch(t, "projector-ledger");
+  const total = ACTIVITY_RING_ROWS + 100;
+  const rows = Array.from({ length: total }, (_, i) => line(T0 + i * 1_000, i % 2 === 0 ? "worker.activity" : "run.start", { n: i }));
+  writeFileSync(join(ledgerDir, archiveName(T0 - 1_000)), body(rows.slice(0, 300)));
+  writeFileSync(join(ledgerDir, LIVE), body(rows.slice(300, 450)));
+  const clock = fixedClock(T0 + total * 1_000);
+  const s = store(t, ledgerDir, clock);
+  s.tick();
+  appendFileSync(join(ledgerDir, LIVE), body(rows.slice(450)));
+  s.tick();
+  const ring = (db: ReadModelDb) => db.prepare("SELECT body FROM activity_ring ORDER BY ts_ms, h").all().map((row) => String(row.body));
+  assert.deepEqual(ring(s.db), rows.slice(total - ACTIVITY_RING_ROWS), "the newest rows of every step are kept and the oldest dropped");
+  assert.ok(ring(s.db).some((row) => row.includes('"worker.activity"')), "a step the fact store skips is still in the ring");
+  const clean = store(t, ledgerDir, clock);
+  clean.tick();
+  assert.deepEqual(ring(clean.db), ring(s.db), "a clean rebuild keeps the same ring");
 });

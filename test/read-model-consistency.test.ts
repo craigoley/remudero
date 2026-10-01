@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { fixedClock, type Clock } from "../src/lib/clock.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
-import { createLedgerProjector, openProjectorReadModel, readModelDigest } from "../src/lib/ledger-projector.js";
+import { ACTIVITY_RING_ROWS, createLedgerProjector, openProjectorReadModel, readModelDigest } from "../src/lib/ledger-projector.js";
 import { readLedgerUnionRawLinesSync, realLedgerFs, type LedgerGrepFsDeps } from "../src/lib/ledger-union.js";
 import {
   ORACLE_AGREE_INTERVAL_MS,
@@ -492,4 +492,26 @@ test("a slice window retains only its own rows from the union read", (t) => {
   const kept = readLedgerUnionRawLinesSync(f.rowsDir, { keep: (line) => line.includes('"W1-T3"') }).rawLines;
   assert.ok(all > 1);
   assert.deepEqual(kept, [f.lines[3]], "the union reader retains only the lines its caller keeps");
+});
+
+test("the oracle agrees with an activity ring that dropped its oldest rows and heals a newest row it lost", (t) => {
+  const rowsDir = scratch(t, "oracle-rows");
+  writeFileSync(join(rowsDir, LIVE), text(Array.from({ length: ACTIVITY_RING_ROWS + 20 }, (_, i) => row(T0 + i * 1_000, "worker.activity", { n: i }))));
+  const clock = fixedClock(CHECK_AT);
+  const db = openProjectorReadModel(scratch(t, "oracle-state"), "core", clock);
+  t.after(() => db.close());
+  const got = acquireLease(db, { clock });
+  if (!got.ok) throw new Error("lease");
+  createLedgerProjector({ ledgerDir: rowsDir, db, lease: got.lease, clock }).tick();
+  const f: Fixture = { rowsDir, metricPath: join(scratch(t, "oracle-metric"), LIVE), db, lease: got.lease, lines: [] };
+  const ring = () => db.prepare("SELECT ts_ms, body FROM activity_ring ORDER BY ts_ms").all().map((r) => `${r.ts_ms} ${r.body}`);
+  const clean = ring();
+  assert.equal(clean.length, ACTIVITY_RING_ROWS, "positive control: the ring is full and dropped the oldest rows");
+  assert.equal(check(f).outcome, "agree", "rows the ring dropped are not missing");
+  assert.equal(check(f, { window: { t0: T0, t1: T0 + 30_000 } }).outcome, "agree", "a slice older than the ring expects none of its rows there");
+  db.exec("DELETE FROM activity_ring WHERE ts_ms = (SELECT max(ts_ms) FROM activity_ring)");
+  const run = check(f, {}, fixedClock(CHECK_AT + 60_000));
+  assert.equal(run.outcome, "healed");
+  assert.equal(run.mismatches.projectionMissing, 1, "only the lost newest row");
+  assert.deepEqual(ring(), clean, "the healed ring equals a clean projection");
 });
