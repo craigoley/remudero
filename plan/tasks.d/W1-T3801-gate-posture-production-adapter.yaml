@@ -7,9 +7,11 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 45.00
-  status: queued
+  status: blocked
+  retirement: closed
   note: |
     OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, "the verify-human queue, cleared"): FIRST PILOT = coverage-ratchet. Its finding (coverage below the ratchet) is deterministic; the judge chooses only STOP or PROCEED with one idempotent coverage-improvement debt task. The live demonstration criterion becomes a unit test of that run through the adapter.
+    CLOSED 2026-10-01 (operator session): this record derives as merged from the ruling PR #7966, so the fleet never dispatches it. Its implementation criteria were never built and are carried, unchanged in substance, by W1-T5134. Closed, not re-proved.
   attempts: 0
   files:
     - src/lib/gate-posture.ts
