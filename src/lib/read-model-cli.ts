@@ -32,7 +32,7 @@ const DB_FILE = /^(.+)\.v(\d+)(?:\.g\d+)?\.sqlite$/;
 const POINTER_FILE = /^(.+)\.v(\d+)\.current$/;
 
 export type ProjectorSwitch = "on" | "off";
-export type ViewSwitch = "serve" | "shadow" | "off";
+export type ViewSwitch = "serve" | "shadow" | "off" | "auto";
 
 /** The kill-switch file serve re-reads on mtime change (design §5). */
 export interface ReadModelSwitches {
@@ -87,9 +87,9 @@ export function readModelCommand(rest: string[], opts: ReadModelCliOptions = {})
 function switchCommand(stateDir: string, args: string[], out: (l: string) => void, error: (l: string) => void): number {
   const [target = "", mode = ""] = args;
   const projector = target === "projector" && (mode === "on" || mode === "off");
-  const view = target !== "projector" && VIEW_NAME.test(target) && (mode === "serve" || mode === "shadow" || mode === "off");
+  const view = target !== "projector" && VIEW_NAME.test(target) && (mode === "serve" || mode === "shadow" || mode === "off" || mode === "auto");
   if (!projector && !view) {
-    error(`rmd read-model switch: ${JSON.stringify(target)} ${JSON.stringify(mode)} is not a switch; projector takes on|off, a view takes serve|shadow|off`);
+    error(`rmd read-model switch: ${JSON.stringify(target)} ${JSON.stringify(mode)} is not a switch; projector takes on|off, a view takes serve|shadow|off|auto`);
     return 2;
   }
   let switches: ReadModelSwitches;

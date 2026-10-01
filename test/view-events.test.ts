@@ -35,6 +35,7 @@ function fakeReadModel(views: Record<string, "serve" | "shadow" | "off">) {
     bodies,
     listeners,
     judge: (sources: readonly ViewSource[]) => sources.map((s) => (state.stalled ? { ...s, state: "stale" as const, reason: "projector stalled" } : s)),
+    body: (view: string, key = "") => bodies.get(`${view}\u0000${key}`),
     switches: () => ({ projector: "on" as const, views, ...(state.push ? { push: state.push } : {}) }),
     onBody: (listener: (e: ViewBodyEntry) => void) => {
       listeners.add(listener);

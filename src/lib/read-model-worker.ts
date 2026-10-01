@@ -59,7 +59,7 @@ import { threadSlowLane, type SlowLane, type SlowLaneBodies, type SlowLaneConfig
 import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
 import { createViewShadow, readShadowEvidence, sqliteShadowStore, storedShadowReadiness, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ViewShadow } from "./view-shadow.js";
-import { oldestAsOf, viewEtag, type ViewBody, type ViewBodyEntry, type ViewSource } from "./views.js";
+import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
 import { describeSource, judgeSource, type SourcePhase } from "./view-freshness.js";
 
 const READ_MODEL_WORKER_KIND = "remudero-read-model" as const;
@@ -117,7 +117,7 @@ export interface ReadModelInstance {
   feedbackRoot?: string;
 }
 
-export type ReadModelViewMode = "serve" | "shadow" | "off";
+export type ReadModelViewMode = ViewSwitchMode;
 
 export interface ReadModelSwitches {
   projector: "on" | "off";
@@ -125,6 +125,10 @@ export interface ReadModelSwitches {
   /** GET /v1/views/events' kill switch (view-events.ts); absent reads `off`, so push is dark until switched on. */
   push?: "on" | "off";
 }
+
+/** An `auto` view's effective mode moved: to served on readiness, or back to legacy on a real diff or unknown readiness. */
+export const VIEW_AUTO_PROMOTED_STEP = "view.auto_promoted";
+export const VIEW_AUTO_DEMOTED_STEP = "view.auto_demoted";
 
 export const DEFAULT_READ_MODEL_SWITCHES: ReadModelSwitches = { projector: "on", views: {} };
 
@@ -168,7 +172,7 @@ export function readReadModelSwitches(path: string): { ok: true; switches: ReadM
   const obj = (raw ?? {}) as { projector?: unknown; views?: unknown; push?: unknown };
   const views: Record<string, ReadModelViewMode> = {};
   for (const [name, mode] of Object.entries(typeof obj.views === "object" && obj.views !== null ? obj.views : {})) {
-    if (mode !== "serve" && mode !== "shadow" && mode !== "off") return { ok: false, reason: `view ${name} has mode ${JSON.stringify(mode)}` };
+    if (mode !== "serve" && mode !== "shadow" && mode !== "off" && mode !== "auto") return { ok: false, reason: `view ${name} has mode ${JSON.stringify(mode)}` };
     views[name] = mode;
   }
   const projector = obj.projector ?? "on";
@@ -255,7 +259,7 @@ export function ledgerSource(state: ReadModelInstanceState, now: number, staleMs
 
 /** The read model's own status, one body per serve: what each projector has applied and who holds it. */
 export const readModelStatusView: ReadModelView = {
-  name: "read-model",
+  name: READ_MODEL_STATUS_VIEW,
   version: 1,
   materialize: ({ now, instances, shadow }) => [{
     key: "",
@@ -1075,7 +1079,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       }
     },
     accept(built: SlowLaneBodies): void {
-      const mode = switches.views[built.view];
+      // An auto view is built in either effective mode, so its readiness does not matter here.
+      const mode = effectiveViewMode(switches.views[built.view], undefined);
       if (mode !== "shadow" && mode !== "serve") return;
       const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
       try {
@@ -1416,7 +1421,7 @@ export interface ReadModelWorkerHandle {
   reload(): number;
   /** Hands one sampled shadow request to the worker, which diffs it off serve's main thread. */
   shadow(request: ShadowRequest): void;
-  /** While started, offers `sample` every key of each view switched `shadow` on each switch recheck; its throttle keeps one per sample period. */
+  /** While started, offers `sample` every key of each view switched `shadow` or `auto` on each switch recheck; its throttle keeps one per sample period. */
   driveShadow(sample: ShadowSample): void;
   /** Calls `listener` with each body the worker posts, after it is stored; returns the unsubscribe. */
   onBody(listener: (entry: ReadModelBodyEntry) => void): () => void;
@@ -1478,6 +1483,19 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   refreshSwitches();
   let stopSwitchWatch: () => void = () => {};
   let driven: ShadowSample | undefined;
+  /** Each `auto` view's effective mode as last ledgered; one entering auto starts as legacy (`shadow`). */
+  const autoModes = new Map<string, EffectiveViewMode>();
+  const noteAutoModes = (): void => {
+    for (const view of autoModes.keys()) if (mainSwitches.views[view] !== "auto") autoModes.delete(view);
+    for (const [view, mode] of Object.entries(mainSwitches.views)) {
+      if (mode !== "auto") continue;
+      const readiness = shownReadiness({ body: (name) => bodies.get(readModelBodyKey(name)) }, view);
+      const effective = effectiveViewMode(mode, readiness)!;
+      const was = autoModes.get(view) ?? "shadow";
+      autoModes.set(view, effective);
+      if (effective !== was) opts.log?.(effective === "serve" ? VIEW_AUTO_PROMOTED_STEP : VIEW_AUTO_DEMOTED_STEP, { view, reason: readiness.reason, samples: readiness.samples, lastRealMs: readiness.lastRealMs });
+    }
+  };
 
   let worker: Worker | undefined;
   let signal: Int32Array | undefined;
@@ -1611,7 +1629,8 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       stopSwitchWatch = (opts.every ?? everyUnref)(() => {
         refreshSwitches();
         watchWorker();
-        for (const entry of bodies.values()) if (mainSwitches.views[entry.view] === "shadow") driven?.(entry.view, entry.key, new URLSearchParams(entry.key), true);
+        noteAutoModes();
+        for (const entry of bodies.values()) if (shadowSampled(mainSwitches.views[entry.view])) driven?.(entry.view, entry.key, new URLSearchParams(entry.key), true);
       }, READ_MODEL_SWITCH_RECHECK_MS);
     },
     stop: () => {
